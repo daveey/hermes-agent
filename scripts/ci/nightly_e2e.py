@@ -18,6 +18,14 @@ Reporting (``report``), always within ``DEADLINE_HOURS`` of the dispatch:
                  with the error. If the board itself fails, the run stays pending and ``report`` exits 1, so the cron
                  run shows the error; a run is never dropped without a card.
 
+Alert intent: titles name the tested ref ("RED on <ref>"). Cards of a non-main ref, and of any run given
+``--acceptance-marker LABEL --acceptance-owner-task t_...`` (dispatch, or report to label already-pending runs),
+say "acceptance fixture; do not repair main" / "not a current main incident" and request no repair; the owner is
+recorded as creator_task_id so the owner's cleanup can archive them. Each intent (main, ref, acceptance marker)
+keeps its own cards: production main alerts are unchanged (default assignee, "Fix main" instruction). Dedupe is the
+exact sorted failing-test-ID set within an intent; a subset or superset is a different fingerprint and a new card by
+design, not a dedupe defect.
+
 Both commands hold an exclusive flock on ``<state>.lock`` from loading the state to saving it, so the 02:00 dispatch
 and a report tick that overlap cannot overwrite each other's ``pending`` (hub-only, so fcntl is enough).
 
@@ -159,6 +167,7 @@ class NightlyBoard(CliBoard):
         *,
         distinct_from: list[str] | None = None,
         distinct_reason: str | None = None,
+        creator_task_id: str | None = None,
     ) -> str:
         override: list[str] = []
         for card_id in distinct_from or []:
@@ -168,6 +177,9 @@ class NightlyBoard(CliBoard):
                 "--distinct-reason",
                 distinct_reason or "a separate nightly e2e finding",
             ]
+        # `hermes kanban create` records creator_task_id from HERMES_KANBAN_TASK (the supported attribution path).
+        # Only an explicit acceptance run sets it; production cards keep creator_task_id None.
+        extra_env = {"HERMES_KANBAN_TASK": creator_task_id} if creator_task_id else None
         out = self._run(
             "create",
             title,
@@ -182,6 +194,7 @@ class NightlyBoard(CliBoard):
             "--json",
             *override,
             stdin=body,
+            extra_env=extra_env,
         )
         data = json.loads(out)
         return str(data.get("id") or data.get("task_id") or data["task"]["id"])
@@ -241,6 +254,7 @@ def dispatch(
     now: float,
     sleep=time.sleep,
     lookup_seconds: float = 120.0,
+    acceptance: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
     """Dispatch nightly-e2e.yml at ``ref`` and record the run it starts (or an unmatched dispatch to be timed out)."""
     sha = gh.resolve(ref)
@@ -253,6 +267,8 @@ def dispatch(
         "run_id": None,
         "url": None,
     }
+    if acceptance:
+        entry["acceptance_marker"], entry["acceptance_owner"] = acceptance
     deadline = time.time() + lookup_seconds
     while True:
         # The dispatch API returns no run id: the first not-yet-recorded run created since the call is ours.
@@ -271,7 +287,56 @@ def dispatch(
     return entry
 
 
+def scope_of(entry: dict[str, Any]) -> str:
+    """Alert intent: ``main`` (production), ``ref:<ref>`` (a historical/other ref) or ``acceptance:<marker>``.
+
+    Only production ``main`` cards are repair work. Each scope has its own cards, so a fixture or historical-ref
+    run never comments on, or is deduped into, a production card. Within a scope the dedupe is unchanged: the
+    sorted failing-test-ID set. A subset/superset of those IDs is a different fingerprint and files a new card.
+    """
+    if entry.get("acceptance_marker"):
+        return f"acceptance:{entry['acceptance_marker']}"
+    return "main" if entry["ref"] == "main" else f"ref:{entry['ref']}"
+
+
+def _scoped_key(entry: dict[str, Any], key: str) -> str:
+    scope = scope_of(entry)
+    return key if scope == "main" else f"{scope}|{key}"
+
+
+def _title(entry: dict[str, Any], failed_ids: list[str] | None, base: str) -> str:
+    tag = f" ACCEPTANCE[{entry['acceptance_marker']}]" if entry.get("acceptance_marker") else ""
+    if failed_ids is not None:
+        return (
+            f"Nightly e2e{tag} RED on {entry['ref']}: {len(failed_ids)} failing test(s), "
+            f"first {failed_ids[0].split('::')[0]}"
+        )
+    return f"Nightly e2e{tag} {base} (ref {entry['ref']})"
+
+
+def _scope_note(entry: dict[str, Any]) -> str:
+    if entry.get("acceptance_marker"):
+        return (
+            f"ACCEPTANCE [{entry['acceptance_marker']}]: acceptance fixture; do not repair main. "
+            "This alert exists to test the nightly reporter, not to report a production incident."
+        )
+    if entry["ref"] != "main":
+        return (
+            f"Tested ref `{entry['ref']}` is not `main`: this result does not establish a current main incident. "
+            "Do not repair main for it."
+        )
+    return ""
+
+
 def _card_body(kind: str, entry: dict[str, Any], ids: list[str], summary: str) -> str:
+    note = _scope_note(entry)
+    prefix = note + "\n\n" if note else ""
+    return prefix + _card_body_main(kind, entry, ids, summary, production=not note)
+
+
+def _card_body_main(
+    kind: str, entry: dict[str, Any], ids: list[str], summary: str, *, production: bool
+) -> str:
     url = entry.get("url") or "(no run was created)"
     head = f"ref `{entry['ref']}` = `{entry['sha']}`, dispatched {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(entry['dispatched_at']))}"
     if kind == "failed":
@@ -279,12 +344,24 @@ def _card_body(kind: str, entry: dict[str, Any], ids: list[str], summary: str) -
         tests = "\n".join(f"- `{t}`" for t in listed)
         if len(ids) > len(listed):
             tests += f"\n- … and {len(ids) - len(listed)} more (see the run log)"
-        return (
-            f"The nightly e2e (the same `e2e` job the upstream-sync gate runs) is RED.\n\n"
-            f"Run: {url}\n{head}\n\n{summary}\n\nFailing tests ({len(ids)}):\n{tests}\n\n"
+        action = (
             "Fix main (or the test) through a PR on daveey/hermes; until e2e is green on main the upstream-sync "
-            "gate refuses every sync. Later failing nightlies with these same tests are added to this card as "
-            "comments; a green run is commented here too. Filed by scripts/ci/nightly_e2e.py on hermes-hub."
+            "gate refuses every sync. "
+            if production
+            else "No repair is requested by this card. "
+        )
+        return (
+            f"The nightly e2e (the same `e2e` job the upstream-sync gate runs) is RED at `{entry['ref']}`.\n\n"
+            f"Run: {url}\n{head}\n\n{summary}\n\nFailing tests ({len(ids)}):\n{tests}\n\n"
+            f"{action}Later failing nightlies of the same scope with these exact tests are added to this card as "
+            "comments (a different set of failing tests, even a subset, is a separate fingerprint and card by "
+            "design); a green run is commented here too. Filed by scripts/ci/nightly_e2e.py on hermes-hub."
+        )
+    if not production:
+        return (
+            f"The nightly e2e did NOT run to completion within {DEADLINE_HOURS:g} h for ref `{entry['ref']}`.\n\n"
+            f"Run: {url}\n{head}\n\n{summary}\n\nNo repair is requested by this card. "
+            "Filed by scripts/ci/nightly_e2e.py on hermes-hub."
         )
     return (
         f"The nightly e2e did NOT run to completion within {DEADLINE_HOURS:g} h, so main's e2e state is unknown.\n\n"
@@ -294,16 +371,28 @@ def _card_body(kind: str, entry: dict[str, Any], ids: list[str], summary: str) -
 
 
 def _file_or_update(
-    board: Any, state: dict[str, Any], key: str, title: str, body: str, comment: str
+    board: Any,
+    state: dict[str, Any],
+    entry: dict[str, Any],
+    key: str,
+    title: str,
+    body: str,
+    comment: str,
 ) -> str:
-    """Comment on this key's open card, else file a new one. Returns what happened, with the card id."""
+    """Comment on this scope+key's open card, else file a new one. Returns what happened, with the card id."""
+    key = _scoped_key(entry, key)
+    note = _scope_note(entry)
+    if note:
+        comment = f"{note}\n{comment}"
+    owner = entry.get("acceptance_owner")
+    extra = {"creator_task_id": owner} if owner else {}
     rec = state["cards"].get(key)
     if rec and board.status(rec["id"]) in OPEN:
         board.comment(rec["id"], comment)
         return f"updated {rec['id']} ({key})"
     n = (rec or {}).get("n", 0) + 1
     try:
-        card_id = board.create(title, body, f"nightly-e2e:{key}:{n}")
+        card_id = board.create(title, body, f"nightly-e2e:{key}:{n}", **extra)
     except CreateRefused as refused:
         card_id = board.create(
             title,
@@ -311,8 +400,9 @@ def _file_or_update(
             f"nightly-e2e:{key}:{n}",
             distinct_from=[str(m.get("id")) for m in refused.matches if m.get("id")],
             distinct_reason="the nightly e2e finding for this exact set of failing tests",
+            **extra,
         )
-    state["cards"][key] = {"id": card_id, "n": n}
+    state["cards"][key] = {"id": card_id, "n": n, "scope": scope_of(entry)}
     return f"filed {card_id} ({key})"
 
 
@@ -346,8 +436,9 @@ def _settle(
             return True, "did-not-run: " + _file_or_update(
                 board,
                 state,
+                entry,
                 "did-not-run",
-                "Nightly e2e did not run (no workflow run was created)",
+                _title(entry, None, "did not run (no workflow run was created)"),
                 _card_body(
                     "did-not-run", entry, [], "GitHub created no run for the dispatch."
                 ),
@@ -363,8 +454,9 @@ def _settle(
         return True, "did-not-run: " + _file_or_update(
             board,
             state,
+            entry,
             "did-not-run",
-            "Nightly e2e did not finish in time",
+            _title(entry, None, "did not finish in time"),
             _card_body(
                 "did-not-run",
                 entry,
@@ -378,11 +470,13 @@ def _settle(
     job_conclusion = (job or {}).get("conclusion") or conclusion
     if job_conclusion == "success":
         notes = []
+        note = _scope_note(entry)
         for key, rec in sorted(state["cards"].items()):
-            if board.status(rec["id"]) in OPEN:
+            if rec.get("scope", "main") == scope_of(entry) and board.status(rec["id"]) in OPEN:
                 board.comment(
                     rec["id"],
-                    f"Nightly e2e is GREEN: {url} (`{entry['ref']}` = `{entry['sha']}`). "
+                    (f"{note}\n" if note else "")
+                    + f"Nightly e2e is GREEN: {url} (`{entry['ref']}` = `{entry['sha']}`). "
                     "Close this card if the cause is fixed.",
                 )
                 notes.append(rec["id"])
@@ -400,8 +494,9 @@ def _settle(
         return True, "failed: " + _file_or_update(
             board,
             state,
+            entry,
             key,
-            f"Nightly e2e RED on main: {len(ids)} failing test(s), first {ids[0].split('::')[0]}",
+            _title(entry, ids, ""),
             _card_body("failed", entry, ids, summary),
             f"Nightly e2e failed again with the same {len(ids)} test(s): {url} "
             f"(`{entry['ref']}` = `{entry['sha']}`).\n{summary}",
@@ -409,8 +504,9 @@ def _settle(
     return True, f"{job_conclusion or conclusion}: " + _file_or_update(
         board,
         state,
+        entry,
         "did-not-run",
-        "Nightly e2e did not run to completion",
+        _title(entry, None, "did not run to completion"),
         _card_body(
             "did-not-run",
             entry,
@@ -433,8 +529,9 @@ def _settle_error(
         return True, "did-not-run after errors: " + _file_or_update(
             board,
             state,
+            entry,
             "did-not-run",
-            "Nightly e2e result unknown (settling the run kept failing)",
+            _title(entry, None, "result unknown (settling the run kept failing)"),
             _card_body(
                 "did-not-run",
                 entry,
@@ -448,10 +545,19 @@ def _settle_error(
         return False, f"{BOARD_FAILED}, kept pending: settle error {err!r}; filing the card: {board_err!r}"
 
 
-def report(gh: GitHub, board: Any, state: dict[str, Any], *, now: float) -> list[str]:
+def report(
+    gh: GitHub,
+    board: Any,
+    state: dict[str, Any],
+    *,
+    now: float,
+    acceptance: tuple[str, str] | None = None,
+) -> list[str]:
     out: list[str] = []
     still: list[dict[str, Any]] = []
     for entry in list(state["pending"]):
+        if acceptance and not entry.get("acceptance_marker"):  # label runs recorded before the flag existed
+            entry["acceptance_marker"], entry["acceptance_owner"] = acceptance
         try:
             done, msg = _settle(gh, board, state, entry, now=now)
         except SETTLE_ERRORS as err:
@@ -470,6 +576,20 @@ def _token() -> str:
     return tok
 
 
+def _acceptance(ap: argparse.ArgumentParser, args: argparse.Namespace) -> tuple[str, str] | None:
+    marker, owner = args.acceptance_marker, args.acceptance_owner_task
+    if not marker and not owner:
+        return None
+    if not (marker and owner):
+        ap.error("--acceptance-marker and --acceptance-owner-task must be given together")
+    if not re.fullmatch(r"[\w.-]{1,40}", marker) or not re.fullmatch(r"t_[0-9a-f]{8,}", owner):
+        ap.error("invalid --acceptance-marker (word chars, .- only) or --acceptance-owner-task (t_<hex>)")
+    running = os.environ.get("HERMES_KANBAN_TASK")
+    if running and running != owner:
+        ap.error(f"--acceptance-owner-task must be the running task {running}, not a foreign owner")
+    return marker, owner
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -486,17 +606,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--state", type=Path, default=DEFAULT_STATE)
     ap.add_argument("--hermes", default="hermes")
+    ap.add_argument(
+        "--acceptance-marker",
+        help="mark every card for these runs as an acceptance fixture (not a production incident); "
+        "needs --acceptance-owner-task. report: also labels pending runs dispatched without a marker",
+    )
+    ap.add_argument(
+        "--acceptance-owner-task",
+        help="the existing task that owns this acceptance run; recorded as creator_task_id of its cards",
+    )
     args = ap.parse_args(argv)
+    acceptance = _acceptance(ap, args)
+    board = NightlyBoard(args.hermes)
+    if acceptance and not board.card(acceptance[1]):
+        ap.error(f"--acceptance-owner-task {acceptance[1]} is not an existing task")
     gh = RestGitHub(_token(), args.repo, args.workflow_ref)
     with locked_state(args.state) as state:
         now = time.time()  # after the lock: a dispatch that waited on a report tick records when it really ran
         if args.command == "dispatch":
-            entry = dispatch(gh, state, args.ref, now=now)
+            entry = dispatch(gh, state, args.ref, now=now, acceptance=acceptance)
             print(
                 f"nightly-e2e: dispatched {entry['ref']} = {entry['sha']}: {entry['url'] or 'run not visible yet'}"
             )
             return 0
-        lines = report(gh, NightlyBoard(args.hermes), state, now=now)
+        lines = report(gh, board, state, now=now, acceptance=acceptance)
     if lines:  # silent when nothing is pending: a no-agent cron job with empty stdout stays quiet
         print("nightly-e2e:\n" + "\n".join(lines))
     return 1 if any(BOARD_FAILED in line for line in lines) else 0

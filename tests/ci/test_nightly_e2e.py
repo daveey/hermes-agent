@@ -83,14 +83,21 @@ class FakeGitHub:
         return self.logs[job_id]
 
 
+OWNER = "t_0123456789abcdef"
+
+
 class FakeBoard:
     def __init__(self):
         self.cards: dict[str, dict] = {}
         self.created: list[tuple] = []
 
-    def create(self, title, body, key, *, distinct_from=None, distinct_reason=None):
+    def card(self, cid):
+        return {"id": cid} if cid == OWNER else None
+
+    def create(self, title, body, key, *, distinct_from=None, distinct_reason=None, creator_task_id=None):
         cid = f"t_{len(self.cards) + 1}"
         self.cards[cid] = {
+            "creator_task_id": creator_task_id,
             "status": "ready",
             "title": title,
             "body": body,
@@ -184,6 +191,84 @@ def test_failed_run_files_one_card_with_run_and_tests(env):
         "tests/e2e/z.py::t"
     )
     assert "29953696677a" in card["body"]
+
+
+@pytest.mark.parametrize("ref,marker", [("main", ""), ("29953696677a", ""), ("main", "intent-check"), ("29953696677a", "intent-check")])
+def test_alert_intent_survives_dispatch_and_report_cli(tmp_path, monkeypatch, ref, marker):
+    gh, board, path = FakeGitHub(), FakeBoard(), tmp_path / "state.json"
+    monkeypatch.setenv("GH_TOKEN", "x")
+    monkeypatch.setattr(ne, "RestGitHub", lambda *a: gh)
+    monkeypatch.setattr(ne, "NightlyBoard", lambda *a: board)
+    opts = ["--state", str(path)]
+    if marker:
+        opts += ["--acceptance-marker", marker, "--acceptance-owner-task", OWNER]
+    assert ne.main(["dispatch", "--ref", ref, *opts]) == 0
+    gh.finish(100, "failure", _log("tests/e2e/a.py::t"))
+    # No report flag: intent must survive in the persisted pending entry.
+    assert ne.main(["report", "--state", str(path)]) == 0
+    card = board.cards["t_1"]
+    assert f"RED on {ref}:" in card["title"]
+    assert card["creator_task_id"] == (OWNER if marker else None)
+    if marker:
+        assert "ACCEPTANCE" in card["title"] and marker in card["body"]
+        assert "acceptance fixture; do not repair main" in card["body"]
+        assert "Fix main" not in card["body"]
+    elif ref == "main":
+        assert "ACCEPTANCE" not in card["title"] and "Fix main" in card["body"]
+    else:
+        assert "RED on main" not in card["title"]
+        assert "Fix main" not in card["body"]
+        assert "does not establish a current main incident" in card["body"]
+
+
+@pytest.mark.parametrize("outcome", ["failure", "cancelled", "timeout", "error", "missing"])
+def test_report_marker_labels_legacy_pending_acceptance(tmp_path, monkeypatch, outcome):
+    gh, board, path = FakeGitHub(), FakeBoard(), tmp_path / "state.json"
+    gh.auto_create = outcome != "missing"
+    _seed(path, gh, time.time() - 5 * 3600)
+    if outcome in ("failure", "cancelled"):
+        gh.finish(100, outcome, _log("tests/e2e/a.py::t"))
+    elif outcome == "error":
+        gh.run = _raise(OSError("HTTP 503"))
+    monkeypatch.setenv("GH_TOKEN", "x")
+    monkeypatch.setattr(ne, "RestGitHub", lambda *a: gh)
+    monkeypatch.setattr(ne, "NightlyBoard", lambda *a: board)
+    assert ne.main(["report", "--state", str(path), "--acceptance-marker", "legacy-check", "--acceptance-owner-task", OWNER]) == 0
+    card = board.cards["t_1"]
+    assert "ACCEPTANCE" in card["title"] and "main" in card["title"]
+    assert "legacy-check" in card["body"]
+    assert "acceptance fixture; do not repair main" in card["body"]
+    assert "Fix main" not in card["body"]
+
+
+def test_acceptance_and_historical_runs_do_not_update_production_cards(env):
+    gh, board, state = env
+    for i, (ref, marker) in enumerate([("main", ""), ("29953696677a", ""), ("main", "scope-check")]):
+        entry = _dispatch(gh, state, ref=ref, now=T0 + i * 60)
+        if marker:
+            entry["acceptance_marker"], entry["acceptance_owner"] = marker, OWNER
+        gh.finish(100 + i, "failure", _log("tests/e2e/a.py::t"))
+        ne.report(gh, board, state, now=T0 + i * 60 + 10)
+    assert len(board.cards) == 3
+    assert all(not c["comments"] for c in board.cards.values())
+    entry = _dispatch(gh, state, now=T0 + 200)
+    entry["acceptance_marker"], entry["acceptance_owner"] = "scope-check", OWNER
+    gh.finish(103, "success")
+    ne.report(gh, board, state, now=T0 + 210)
+    assert not board.cards["t_1"]["comments"] and not board.cards["t_2"]["comments"]
+    assert "acceptance fixture; do not repair main" in board.cards["t_3"]["comments"][0]
+
+
+def test_nightly_board_keeps_auto_assigned_production_routing(monkeypatch):
+    calls = []
+    board = ne.NightlyBoard("hermes")
+    def run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return '{"id":"t_production"}'
+    monkeypatch.setattr(board, "_run", run)
+    assert board.create("Nightly e2e RED on main", "Fix main", "key") == "t_production"
+    args, _ = calls[0]
+    assert args[args.index("--assignee") + 1] == "default"
 
 
 def test_second_failure_with_same_tests_updates_the_card(env):
@@ -441,3 +526,49 @@ def test_python_input_defaults_on_and_gates_only_the_python_lanes():
     assert tests["jobs"]["test"]["if"] == "inputs.python"
     assert tests["jobs"]["termux-assembly-permissions"]["if"] == "inputs.python"
     assert tests["jobs"]["e2e"]["if"] == "inputs.e2e"
+
+
+def test_subset_of_failing_tests_is_a_separate_fingerprint_and_card(env):
+    gh, board, state = env
+    for i, ids in enumerate([["tests/e2e/a.py::t", "tests/e2e/b.py::t"], ["tests/e2e/a.py::t"]]):
+        _dispatch(gh, state, now=T0 + i * 60)
+        gh.finish(100 + i, "failure", _log(*ids))
+        ne.report(gh, board, state, now=T0 + i * 60 + 10)
+    assert len(board.cards) == 2
+    assert not any(c["comments"] for c in board.cards.values())
+
+
+@pytest.mark.parametrize(
+    "opts",
+    [
+        ["--acceptance-marker", "m"],
+        ["--acceptance-owner-task", OWNER],
+        ["--acceptance-marker", "m", "--acceptance-owner-task", "t_00000000ffffffff"],
+        ["--acceptance-marker", "bad marker!", "--acceptance-owner-task", OWNER],
+    ],
+)
+def test_acceptance_flags_are_validated_together(tmp_path, monkeypatch, opts):
+    monkeypatch.setenv("GH_TOKEN", "x")
+    monkeypatch.setattr(ne, "RestGitHub", lambda *a: FakeGitHub())
+    monkeypatch.setattr(ne, "NightlyBoard", lambda *a: FakeBoard())
+    with pytest.raises(SystemExit):
+        ne.main(["dispatch", "--state", str(tmp_path / "s.json"), *opts])
+
+
+def test_acceptance_owner_must_be_the_running_worker_task(tmp_path, monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "x")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_ffffffffffffffff")
+    monkeypatch.setattr(ne, "RestGitHub", lambda *a: FakeGitHub())
+    monkeypatch.setattr(ne, "NightlyBoard", lambda *a: FakeBoard())
+    with pytest.raises(SystemExit):
+        ne.main(["dispatch", "--state", str(tmp_path / "s.json"),
+                 "--acceptance-marker", "m", "--acceptance-owner-task", OWNER])
+
+
+def test_nightly_board_stamps_creator_only_for_acceptance(monkeypatch):
+    envs = []
+    board = ne.NightlyBoard("hermes")
+    monkeypatch.setattr(board, "_run", lambda *a, **k: envs.append(k.get("extra_env")) or '{"id":"t_x"}')
+    board.create("t", "b", "k")
+    board.create("t", "b", "k", creator_task_id=OWNER)
+    assert envs == [None, {"HERMES_KANBAN_TASK": OWNER}]

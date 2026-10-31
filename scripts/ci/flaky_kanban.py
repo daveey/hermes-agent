@@ -83,10 +83,12 @@ class CliBoard:
         self.hermes = [hermes] if isinstance(hermes, str) else list(hermes)
         self.assignee = assignee
 
-    def _run(self, *args: str, stdin: str | None = None, board: str | None = None) -> str:
+    def _run(self, *args: str, stdin: str | None = None, board: str | None = None,
+             extra_env: dict[str, str] | None = None) -> str:
         scope = ["--board", board] if board else []
+        env = {**os.environ, **extra_env} if extra_env else None
         proc = subprocess.run([*self.hermes, "kanban", *scope, *args], input=stdin, capture_output=True,
-                              text=True, timeout=120, check=False)
+                              text=True, timeout=120, check=False, env=env)
         if proc.returncode == 2 and args[0] == "create":
             try:
                 ref = json.loads(proc.stdout)
