@@ -270,6 +270,8 @@ def test_state_round_trips_and_rejects_unknown_report_versions(tmp_path):
 
 @pytest.mark.platforms("posix")
 def test_cli_board_skips_a_job_a_done_card_already_cites(tmp_path, monkeypatch):
+    # These shell out to `hermes kanban`, which needs the repo env; a bare `uv run --with pytest` lacks python-dotenv.
+    pytest.importorskip("dotenv", reason="needs the repo environment (hermes_cli imports python-dotenv)")
     """CliBoard.list_cards/comments on a real isolated board (through `hermes kanban`, not its DB)."""
     home = tmp_path / "hermes-home"
     home.mkdir()
@@ -307,6 +309,8 @@ def test_cli_board_skips_a_job_a_done_card_already_cites(tmp_path, monkeypatch):
 
 @pytest.mark.platforms("posix")
 def test_flaky_test_passes_and_files_a_card_while_a_hard_failure_stays_red(tmp_path, monkeypatch):
+    # These shell out to `hermes kanban`, which needs the repo env; a bare `uv run --with pytest` lacks python-dotenv.
+    pytest.importorskip("dotenv", reason="needs the repo environment (hermes_cli imports python-dotenv)")
     # Real runner: copy it the way tests/scripts/test_run_tests_parallel.py does.
     root = tmp_path / "runner-root"
     (root / "scripts" / "ci").mkdir(parents=True)

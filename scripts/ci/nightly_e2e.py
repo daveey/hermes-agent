@@ -182,12 +182,28 @@ class NightlyBoard(CliBoard):
         # The CLI drops a TASK identity that has no live RUN_ID, so pair them from the owner's live run.
         extra_env = None
         if creator_task_id:
+            shown = self._show(creator_task_id)
+            if shown is None:
+                raise RuntimeError(f"acceptance owner {creator_task_id} could not be read (kanban show failed)")
             live = [
-                r for r in ((self._show(creator_task_id) or {}).get("runs") or [])
+                r for r in (shown.get("runs") or [])
                 if r.get("status") == "running" and not r.get("ended_at")
             ]
             if not live:
                 raise RuntimeError(f"acceptance owner {creator_task_id} has no live run to attribute cards to")
+            # The CLI accepts only the task's current run; take it from the same payload as the run list.
+            current = (shown.get("task") or {}).get("current_run_id")
+            if current is not None:
+                match = [r for r in live if str(r.get("id")) == str(current)]
+                if not match:
+                    raise RuntimeError(
+                        f"acceptance owner {creator_task_id} current run {current} is not a live run"
+                    )
+                live = match
+            elif len(live) > 1:
+                raise RuntimeError(
+                    f"acceptance owner {creator_task_id} has {len(live)} running runs and no current_run_id"
+                )
             extra_env = {"HERMES_KANBAN_TASK": creator_task_id, "HERMES_KANBAN_RUN_ID": str(live[-1]["id"])}
         out = self._run(
             "create",

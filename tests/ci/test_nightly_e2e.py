@@ -594,6 +594,51 @@ def test_nightly_board_stamps_creator_only_for_acceptance(monkeypatch):
         board.create("t", "b", "k", creator_task_id=OWNER)
 
 
+def _acceptance_board(monkeypatch, shown):
+    board = ne.NightlyBoard("hermes")
+    envs = []
+    monkeypatch.setattr(board, "_show", lambda *a, **k: shown)
+    monkeypatch.setattr(board, "_run", lambda *a, **k: envs.append(k.get("extra_env")) or '{"id":"t_new"}')
+    return board, envs
+
+
+def test_acceptance_create_uses_current_run_id_from_show_payload(monkeypatch):
+    shown = {
+        "task": {"current_run_id": 8},
+        "runs": [
+            {"id": 7, "status": "running", "ended_at": None},
+            {"id": 8, "status": "running", "ended_at": None},
+            {"id": 9, "status": "running", "ended_at": None},
+        ],
+    }
+    board, envs = _acceptance_board(monkeypatch, shown)
+    board.create("t", "b", "k", creator_task_id=OWNER)
+    assert envs == [{"HERMES_KANBAN_TASK": OWNER, "HERMES_KANBAN_RUN_ID": "8"}]
+
+
+def test_acceptance_create_rejects_current_run_that_is_not_live(monkeypatch):
+    shown = {"task": {"current_run_id": 5}, "runs": [{"id": 7, "status": "running", "ended_at": None}]}
+    board, envs = _acceptance_board(monkeypatch, shown)
+    with pytest.raises(RuntimeError, match="current run 5 is not a live run"):
+        board.create("t", "b", "k", creator_task_id=OWNER)
+    assert envs == []
+
+
+def test_acceptance_create_refuses_to_guess_among_several_runs(monkeypatch):
+    shown = {"runs": [{"id": 7, "status": "running", "ended_at": None}, {"id": 8, "status": "running", "ended_at": None}]}
+    board, envs = _acceptance_board(monkeypatch, shown)
+    with pytest.raises(RuntimeError, match="2 running runs and no current_run_id"):
+        board.create("t", "b", "k", creator_task_id=OWNER)
+    assert envs == []
+
+
+def test_acceptance_create_clear_error_when_show_returns_none(monkeypatch):
+    board, envs = _acceptance_board(monkeypatch, None)
+    with pytest.raises(RuntimeError, match="could not be read"):
+        board.create("t", "b", "k", creator_task_id=OWNER)
+    assert envs == []
+
+
 def test_cli_create_env_only_carries_worker_task_in_acceptance(monkeypatch):
     seen = []
 
