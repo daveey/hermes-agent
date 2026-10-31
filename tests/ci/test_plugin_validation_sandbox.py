@@ -169,6 +169,63 @@ def test_a_bwrap_that_skips_the_namespaces_is_caught_by_the_inner_self_check(wor
     assert not marker.exists()
 
 
+def _deep_dir(base: Path) -> Path:
+    """A real directory whose proxy.sock path is far past sun_path's 108 bytes,
+    like the CI runner's pytest TMPDIR (/var/tmp/hermes-pytest-…/pytest-of-…/…)."""
+    deep = base / ("d" * 60) / ("e" * 60)
+    deep.mkdir(parents=True, mode=0o700)
+    assert len(str(deep / "plugin-sandbox-xxxxxxxx" / "proxy.sock")) > 120
+    return deep
+
+
+def test_the_proxy_binds_and_serves_under_a_deep_runner_temp(work):
+    """Regression: a deep $RUNNER_TEMP/$TMPDIR made the wrapper die with 'AF_UNIX
+    path too long' before bwrap ran. A fake bwrap stands in so this runs without
+    namespaces: it gets the real host socket from `--bind <src> INNER_SOCKET`,
+    checks it is 0600, and speaks CONNECT to it (the policy must still answer)."""
+    deep = _deep_dir(work)
+    result = work / "result.json"
+    fake = work / "fake-bwrap"
+    fake.write_text(textwrap.dedent(f"""\
+        #!{sys.executable}
+        import json, os, socket, stat, sys
+        argv = sys.argv[1:]
+        src = next(argv[i - 1] for i, a in enumerate(argv) if a == {sandbox.INNER_SOCKET!r})
+        d = os.open(os.path.dirname(src), os.O_PATH | os.O_DIRECTORY)
+        s = socket.socket(socket.AF_UNIX)
+        s.connect(f"/proc/self/fd/{{d}}/{{os.path.basename(src)}}")
+        s.sendall(b"CONNECT 169.254.169.254:443 HTTP/1.1\\r\\n\\r\\n")
+        reply = s.recv(64).split(b"\\r\\n")[0].decode()
+        st = os.stat(src)
+        json.dump({{"src": src, "mode": oct(stat.S_IMODE(st.st_mode)),
+                    "is_socket": stat.S_ISSOCK(st.st_mode), "reply": reply}},
+                  open({str(result)!r}, "w"))
+        """))
+    fake.chmod(0o755)
+    r = run("--bwrap", str(fake), "--", "true", env={"RUNNER_TEMP": str(deep)})
+    assert "AF_UNIX" not in r.stderr, r.stderr
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    seen = json.loads(result.read_text())
+    assert seen["src"].startswith(str(deep) + "/plugin-sandbox-"), seen   # in its private scratch, not a shared dir
+    assert seen["is_socket"] and seen["mode"] == "0o600", seen
+    assert seen["reply"].startswith("HTTP/1.1 403"), seen
+    assert "denied CONNECT 169.254.169.254:443" in r.stderr
+    assert not list(deep.glob("plugin-sandbox-*")), "scratch left behind"
+
+
+def test_the_proxy_socket_is_never_bound_through_a_symlinked_dir(work):
+    """The short fd-relative bind opens the scratch dir O_NOFOLLOW: a symlink in
+    its place is refused rather than followed to wherever it points."""
+    deep = _deep_dir(work)
+    target = work / "elsewhere"
+    target.mkdir()
+    link = deep / "scratch"
+    link.symlink_to(target)
+    with pytest.raises(OSError):
+        sandbox.EgressProxy(str(link / "proxy.sock"), sandbox.EgressPolicy({443}, []))
+    assert not (target / "proxy.sock").exists()
+
+
 @pytest.mark.parametrize("name", ["GH_TOKEN", "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "AWS_SECRET_ACCESS_KEY",
                                   "SSH_AUTH_SOCK", "RUNNER_TEMP", "NPM_TOKEN", "HTTPS_PROXY"])
 def test_credential_env_names_are_refused_even_when_requested(work, name):

@@ -316,6 +316,26 @@ class EgressPolicy:
         return addrs
 
 
+def _bind_unix(sock: socket.socket, path: str) -> None:
+    """Bind ``sock`` at ``path`` (mode 0600) however deep ``path`` is.
+
+    sun_path holds 108 bytes, and the scratch dir lives under ``$RUNNER_TEMP`` /
+    ``$TMPDIR``, which can be arbitrarily deep. Instead of moving the socket to a
+    shared short directory, bind through ``/proc/self/fd/<dirfd>/<name>``: the
+    kernel resolves the magic link to the very directory we opened (our private
+    0700 mkdtemp dir, opened O_NOFOLLOW so a swapped-in symlink is refused), so
+    the socket lands at ``path`` with a short address. One code path for every
+    depth, so the tests exercise exactly what CI runs.
+    """
+    parent, name = os.path.split(path)
+    dfd = os.open(parent, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        sock.bind(f"/proc/self/fd/{dfd}/{name}")
+        os.chmod(f"/proc/self/fd/{dfd}/{name}", 0o600)
+    finally:
+        os.close(dfd)
+
+
 class EgressProxy:
     """CONNECT-only proxy on a Unix socket; one thread per tunnel."""
 
@@ -327,8 +347,7 @@ class EgressProxy:
         self.idle = idle
         self.slots = threading.BoundedSemaphore(self.MAX_TUNNELS)
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.bind(path)
-        os.chmod(path, 0o600)
+        _bind_unix(self.sock, path)
         self.sock.listen(64)
         self.closed = False
         threading.Thread(target=self._serve, daemon=True).start()
