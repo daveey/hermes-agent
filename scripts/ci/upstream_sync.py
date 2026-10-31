@@ -22,7 +22,8 @@ Each call also lands any earlier staged candidate that went green (hosts that me
 different times converge on one tested sync), keeps at most one candidate in CI, and stops staging
 for RED_BACKOFF_S after a red run so a broken upstream does not loop full suites. Last, every call closes
 open sync PRs whose head's parents main already contains (scripts/ci/upstream_sync_superseded.py), with
-a comment naming that main; a fault there is printed and never changes the exit code.
+a comment naming that main, and lease-deletes superseded staging branches without open PRs.
+This call's staged/landing candidates are protected; cleanup faults never change the exit code.
 
 Exit codes: 0 landed (or already on main), 1 refused (red, conflict, protection refusal, error),
 2 not yet (staged, pending, throttled, landing PR waiting for its required check): run it again
@@ -262,7 +263,7 @@ def required_check(gh_repo, sha, request) -> tuple[str, str]:
     return "red", f'"{REQUIRED_CHECK}" concluded {run.get("conclusion")} on {sha[:10]} {where}'.rstrip()
 
 
-def land(repo, cand: Candidate, *, gh_repo: str, request=github_pages, gh=gh_cli) -> int:
+def land(repo, cand: Candidate, *, gh_repo: str, request=github_pages, gh=gh_cli, protected=None) -> int:
     """Put the tested head on main through its PR, merged once the required check is green on exactly it."""
     main = _fetch_main(repo)
     if _parents_on_main(repo, cand.head, main):
@@ -277,6 +278,8 @@ def land(repo, cand: Candidate, *, gh_repo: str, request=github_pages, gh=gh_cli
         if tree.returncode or not (tree.stdout or "").split("\n", 1)[0].strip():
             print(f"REFUSED: tested sync {cand.head[:10]} conflicts with main {main[:10]}; stage a new candidate")
             return REFUSED
+    if protected is not None:
+        protected.add(cand.head)
     pr = _land_pr(repo, cand, gh_repo, request, gh)
     where = f"PR #{pr['number']} {pr.get('html_url', '')}".rstrip()
     verdict, detail = required_check(gh_repo, cand.head, request)
@@ -307,11 +310,11 @@ def land(repo, cand: Candidate, *, gh_repo: str, request=github_pages, gh=gh_cli
     return LANDED
 
 
-def _land_other_greens(repo, found, head, main, *, gh_repo, request, gh) -> bool:
+def _land_other_greens(repo, found, head, main, *, gh_repo, request, gh, protected=None) -> bool:
     landed = False
     for cand in found.values():
         if cand.status == "green" and cand.head != head and not _is_ancestor(repo, cand.head, main):
-            landed = land(repo, cand, gh_repo=gh_repo, request=request, gh=gh) == LANDED or landed
+            landed = land(repo, cand, gh_repo=gh_repo, request=request, gh=gh, protected=protected) == LANDED or landed
     return landed
 
 
@@ -354,7 +357,7 @@ def _explain_red(repo, cand: Candidate, main: str, gh_repo: str, request, gh) ->
         print(f"  diagnostics unavailable: {exc!r}")
 
 
-def _close_superseded(repo, gh_repo, request, gh) -> None:
+def _close_superseded(repo, gh_repo, request, gh, protected=()) -> None:
     """Close open sync PRs a landed sync made redundant (upstream_sync_superseded). Never changes the verdict."""
     try:
         if __package__:  # imported as scripts.ci.upstream_sync (tests)
@@ -362,7 +365,8 @@ def _close_superseded(repo, gh_repo, request, gh) -> None:
         else:  # run as a script: scripts/ci is sys.path[0]
             import upstream_sync_superseded as superseded
 
-        superseded.close_superseded(repo, gh_repo, request, gh, run=_run, env=_gate_env("stage"), prefix=BRANCH_PREFIX)
+        superseded.close_superseded(repo, gh_repo, request, gh, run=_run, env=_gate_env("stage"),
+                                    prefix=BRANCH_PREFIX, protected=protected)
     except Exception as exc:  # health: allow BLE001 -- housekeeping only: any fault is printed, the verdict stands
         print(f"  superseded sync PRs: cleanup failed: {exc!r}")
 
@@ -372,18 +376,20 @@ def advance(repo: Path, head: str | None, *, gh_repo: str, request=github_pages,
 
     Every call then closes open sync PRs whose parents main already holds, including any this call's landing
     made redundant."""
-    verdict = _advance(repo, head, gh_repo=gh_repo, request=request, gh=gh, now=now)
-    _close_superseded(repo, gh_repo, request, gh)
+    protected = set()
+    verdict = _advance(repo, head, gh_repo=gh_repo, request=request, gh=gh, now=now, protected=protected)
+    _close_superseded(repo, gh_repo, request, gh, protected)
     return verdict
 
 
-def _advance(repo: Path, head: str | None, *, gh_repo: str, request, gh, now) -> int:
+def _advance(repo: Path, head: str | None, *, gh_repo: str, request, gh, now, protected) -> int:
     now = time.time() if now is None else now
     try:
         if head is not None:
             head = git(repo, "rev-parse", "--verify", f"{head}^{{commit}}")
         found = candidates(gh_repo, request)
-        landed_other = _land_other_greens(repo, found, head, _fetch_main(repo), gh_repo=gh_repo, request=request, gh=gh)
+        landed_other = _land_other_greens(repo, found, head, _fetch_main(repo), gh_repo=gh_repo, request=request,
+                                         gh=gh, protected=protected)
         if head is None:
             return LANDED if landed_other else NOT_YET
         main = _fetch_main(repo)
@@ -395,9 +401,10 @@ def _advance(repo: Path, head: str | None, *, gh_repo: str, request, gh, now) ->
             return LANDED
         cand = found.get(head)
         if cand is None:
+            protected.add(head)
             return _stage_or_wait(repo, head, found, now)
         if cand.status == "green":
-            return land(repo, cand, gh_repo=gh_repo, request=request, gh=gh)
+            return land(repo, cand, gh_repo=gh_repo, request=request, gh=gh, protected=protected)
         if cand.status == "red":
             print(f"REFUSED: the full suite failed on {head[:10]}: {cand.url}")
             _explain_red(repo, cand, main, gh_repo, request, gh)

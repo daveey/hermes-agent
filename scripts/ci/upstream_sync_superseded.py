@@ -1,4 +1,4 @@
-"""Close open sync PRs that a landed sync made redundant (scripts/ci/upstream_sync.py housekeeping).
+"""Clean superseded sync PRs and orphan staging refs (upstream_sync.py housekeeping).
 
 An open PR main <- sync/upstream-<X> from this repo is superseded once a freshly fetched origin/main
 contains every parent of X (X is a merge). This is the gate's supersession policy, not tree equality.
@@ -6,6 +6,8 @@ Such a PR is
 commented (naming the main sha that holds the parents), closed, and its branch deleted only if it
 still points at X. Anything else (forks, other branches, single-parent heads, a parent main lacks,
 a moved branch) stays open. Every fault is printed and skipped: this never changes the gate's verdict.
+Orphan sync refs need no open PR (on any base) and all head parents on main. Delete with a lease
+on the listed SHA; exclude this invocation's staged/landing candidates and refs handled as PRs.
 """
 from __future__ import annotations
 
@@ -66,7 +68,45 @@ def _close(repo, pr, parents, gh_repo, main, gh, run, env) -> bool:
     return True
 
 
-def close_superseded(repo, gh_repo, request, gh, *, run, env, prefix) -> None:
+def _delete_orphans(repo, gh_repo, request, main, *, run, env, prefix, protected, excluded):
+    # Any open PR, including one targeting a release branch, vetoes orphan cleanup.
+    pages = request(f"repos/{gh_repo}/pulls?state=open&per_page=100")
+    open_refs = {str((pr.get("head") or {}).get("ref") or "")
+                 for page in pages for pr in page if isinstance(pr, dict)}
+    open_refs.update(excluded)  # Do not retry a failed PR deletion against a newly moved head.
+    open_refs.update(prefix + sha for sha in protected)  # Protect the ref even if its head moved before listing.
+    listed = run(repo, "ls-remote", "--heads", "origin", f"refs/heads/{prefix}*")
+    if listed.returncode:
+        raise RuntimeError(f"could not list origin sync branches: {listed.stderr}")
+    deleted = failed = checked = 0
+    for line in listed.stdout.splitlines():
+        sha, ref = line.split()
+        if not SHA.fullmatch(sha) or not ref.startswith(f"refs/heads/{prefix}"):
+            continue
+        if ref.removeprefix("refs/heads/") in open_refs or sha in protected:
+            continue
+        checked += 1
+        try:
+            if run(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode:
+                run(repo, "fetch", "-q", "origin", ref)
+            ancestry = run(repo, "rev-list", "--parents", "-n1", sha)
+            if ancestry.returncode:
+                raise RuntimeError(f"could not read listed head {sha}: {ancestry.stderr}")
+            parents = ancestry.stdout.split()[1:]
+            if not parents or any(run(repo, "merge-base", "--is-ancestor", p, main).returncode for p in parents):
+                continue
+            result = run(repo, "push", "-q", f"--force-with-lease={ref}:{sha}", "origin", f":{ref}", env=env)
+            if result.returncode:
+                raise RuntimeError((result.stderr or result.stdout).strip()[-300:])
+            deleted += 1
+            print(f"DELETED superseded sync branch {ref} at {sha}: main {main} contains every parent")
+        except Exception as exc:  # health: allow BLE001 -- one branch cannot stop housekeeping or change the verdict
+            failed += 1
+            print(f"  superseded sync branch {ref} at {sha}: branch kept: {exc}")
+    print(f"superseded sync branches: {deleted} deleted, {failed} failed ({checked} orphan(s) checked)")
+
+
+def close_superseded(repo, gh_repo, request, gh, *, run, env, prefix, protected=()) -> None:
     try:
         pulls = _open_sync_prs(gh_repo, request, prefix)
     except Exception as exc:  # health: allow BLE001 -- housekeeping only: any fault is printed, the gate goes on
@@ -80,6 +120,8 @@ def close_superseded(repo, gh_repo, request, gh, *, run, env, prefix) -> None:
     failed = 0
     for pr in pulls:
         try:
+            if (pr.get("head") or {}).get("sha") in protected:
+                continue
             why, parents = _kept_because(repo, pr, gh_repo, main, run, prefix)
             if why:
                 print(f"  sync PR #{pr.get('number')} stays open: {why}")
@@ -95,3 +137,5 @@ def close_superseded(repo, gh_repo, request, gh, *, run, env, prefix) -> None:
         print(f"superseded sync PRs: cleanup incomplete ({closed} closed, {failed} failed)")
     elif not closed:
         print(f"superseded sync PRs: none superseded ({len(pulls)} open sync PR(s) checked against main {main[:10]})")
+    _delete_orphans(repo, gh_repo, request, main, run=run, env=env, prefix=prefix, protected=protected,
+                    excluded={str((pr.get("head") or {}).get("ref") or "") for pr in pulls})
