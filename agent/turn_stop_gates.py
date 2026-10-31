@@ -62,7 +62,17 @@ def _verify_on_stop_nudge(agent) -> Optional[str]:
 
 def _pre_verify_nudge(agent, final_response, attempt: int) -> Optional[str]:
     """After code edits (or on every text stop with ``agent.pre_verify_every_turn``) a registered
-    ``pre_verify`` hook may keep the agent going one more turn; no default continuation cost."""
+    ``pre_verify`` hook may keep the agent going one more turn; no default continuation cost.
+
+    Detached forks (background review, side questions: ``_turn_origin`` / ``_persist_disabled``) share the
+    parent's session_id but their text never reaches the user, so the hook is not consulted for them,
+    matching ``post_llm_call`` in turn_finalizer. Otherwise a reply check judges the fork's summary
+    against the user's last question and spends a continuation inside the fork."""
+    _origin = getattr(agent, "_turn_origin", None)
+    if _origin or getattr(agent, "_persist_disabled", False):
+        logger.info("pre_verify skipped for fork turn origin=%s session=%s",
+                    _origin or "persist_disabled", getattr(agent, "session_id", None) or "")
+        return None
     _edited = sorted(getattr(agent, "_turn_file_mutation_paths", set()) or [])
     try:
         from agent.verify_hooks import max_verify_nudges, pre_verify_every_turn

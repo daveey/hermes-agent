@@ -97,3 +97,46 @@ class TestPreVerifyGateWithoutEdits:
     def test_edits_still_call_hook_when_off(self, monkeypatch):
         msg, calls = self._run(monkeypatch, every_turn=False, edited=["a.py"])
         assert msg == "keep going" and calls[0]["changed_paths"] == ["a.py"]
+
+
+class TestPreVerifySkipsForkTurns:
+    """Detached forks (background skill/memory review, side questions) share the parent's session_id but
+    their text never reaches the user. post_llm_call already skips them (turn_finalizer ``_persist_disabled``);
+    pre_verify must too, or a reply-check plugin judges the fork's summary against the user's question
+    (coach defect agent-77325213e1)."""
+
+    def _run(self, monkeypatch, **marks):
+        from types import SimpleNamespace
+        from agent import turn_stop_gates
+        from hermes_cli import lifecycle
+        from hermes_cli import plugins
+
+        calls = []
+        monkeypatch.setattr(lifecycle, "has_hook", lambda name: name == "pre_verify")
+        monkeypatch.setattr(verify_hooks, "pre_verify_every_turn", lambda config=None: True)
+        monkeypatch.setattr(verify_hooks, "max_verify_nudges", lambda config=None: 3)
+
+        def fake(**kw):
+            calls.append(kw)
+            return "report only: fix it"
+
+        monkeypatch.setattr(plugins, "get_pre_verify_continue_message", fake)
+        agent = SimpleNamespace(_turn_file_mutation_paths={"a.py"}, session_id="parent-session",
+                                platform="cli", model="m", _resolved_is_coding=False, **marks)
+        return turn_stop_gates._pre_verify_nudge(agent, "I added one thing to the skill library.", 0), calls
+
+    def test_background_review_fork_never_calls_hook(self, monkeypatch):
+        msg, calls = self._run(monkeypatch, _turn_origin="background_review", _persist_disabled=True)
+        assert msg is None and calls == []
+
+    def test_turn_origin_alone_skips_hook(self, monkeypatch):
+        msg, calls = self._run(monkeypatch, _turn_origin="side_question")
+        assert msg is None and calls == []
+
+    def test_persist_disabled_alone_skips_hook(self, monkeypatch):
+        msg, calls = self._run(monkeypatch, _persist_disabled=True)
+        assert msg is None and calls == []
+
+    def test_live_turn_still_calls_hook(self, monkeypatch):
+        msg, calls = self._run(monkeypatch, _turn_origin=None, _persist_disabled=False)
+        assert msg == "report only: fix it" and calls[0]["session_id"] == "parent-session"
