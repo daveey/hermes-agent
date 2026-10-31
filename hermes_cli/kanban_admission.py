@@ -22,20 +22,35 @@ def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, even
     )
     if cur.rowcount != 1:
         return None
-    kb._sync.stage_claim(conn, task_id, gate)
+    run_uid = kb._sync.stage_claim(conn, task_id, gate)
     trow = conn.execute(
         "SELECT assignee, max_runtime_seconds, current_step_key FROM tasks WHERE id = ?", (task_id,),
     ).fetchone()
-    run_cur = conn.execute(
-        """
-        INSERT INTO task_runs (
-            task_id, profile, step_key, status, claim_lock, claim_expires, max_runtime_seconds, started_at
-        ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
-        """,
-        (task_id, trow["assignee"] if trow else None, trow["current_step_key"] if trow else None,
-         lock, expires, trow["max_runtime_seconds"] if trow else None, now),
-    )
-    run_id = run_cur.lastrowid
+    fields = (trow["assignee"] if trow else None, trow["current_step_key"] if trow else None,
+              lock, expires, trow["max_runtime_seconds"] if trow else None, now)
+    # The lease's run uid goes into the row itself, so the run is the one the Board granted even when no
+    # capture trigger is installed (see ``stage_claim``). A Board echo of this claim pulled before this txn left
+    # a ``pending_sync`` placeholder with that uid: that row becomes the run, never a second one. [daveey]
+    placeholder = conn.execute(
+        "SELECT id FROM task_runs WHERE uid = ? AND task_id = ? AND status = 'pending_sync'", (run_uid, task_id),
+    ).fetchone() if run_uid else None
+    if placeholder is not None:
+        run_id = placeholder[0]
+        conn.execute(
+            "UPDATE task_runs SET profile = ?, step_key = ?, status = 'running', claim_lock = ?, claim_expires = ?, "
+            "max_runtime_seconds = ?, started_at = ? WHERE id = ?", (*fields, run_id),
+        )
+    else:
+        uid_col, uid_val = (", uid", (run_uid,)) if run_uid else ("", ())
+        run_cur = conn.execute(
+            f"""
+            INSERT INTO task_runs (
+                task_id, profile, step_key, status, claim_lock, claim_expires, max_runtime_seconds, started_at{uid_col}
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?{', ?' if run_uid else ''})
+            """,
+            (task_id, *fields, *uid_val),
+        )
+        run_id = run_cur.lastrowid
     conn.execute("UPDATE tasks SET current_run_id = ? WHERE id = ?", (run_id, task_id))
     kb._append_event(
         conn, task_id, "claimed",

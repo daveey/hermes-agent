@@ -361,6 +361,15 @@ def install_or_remove(conn: sqlite3.Connection, db_path: str) -> None:
         _SYNCED_PATHS.discard(db_path)
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'trigger' "
                         "AND name LIKE 'kanban_sync_%' LIMIT 1").fetchone():
+            if _attached(conn) and not _explicitly_off(db_path):
+                # [daveey] A process whose kanban home has no sync setting (a probe with a temp HERMES_HOME that
+                # inherited a worker's HERMES_KANBAN_DB) must not detach a board the Board service owns: the gap it
+                # opened left a claim's run uid uncaptured, so the Board's echo made a second run row and the next
+                # local run insert failed UNIQUE(task_runs.uid). Detaching takes `kanban.sync.enabled: false` (or a
+                # `boards` list without this board) in that home, or `set_mode(conn, "off")`.
+                _log.warning("kanban sync: %s is attached to the Board service but this process's kanban home "
+                             "(%s) does not enable sync; leaving its capture triggers in place", db_path, _home_hint())
+                return
             drop_triggers(conn)
         return
     conn.executescript(SYNC_SCHEMA_SQL)
@@ -397,6 +406,32 @@ def install_or_remove(conn: sqlite3.Connection, db_path: str) -> None:
             if fixed:
                 _log.warning("kanban sync: %d millisecond timestamp(s) rewritten to seconds", fixed)
     _SYNCED_PATHS.add(db_path)
+
+
+def _attached(conn: sqlite3.Connection) -> bool:
+    """The file is bound to a Board-service board (not a ``local:`` id) and not detached to ``off``."""
+    try:
+        row = conn.execute("SELECT board_id, mode FROM kanban_sync_state LIMIT 1").fetchone()
+    except sqlite3.Error:
+        return False
+    return bool(row) and not str(row[0]).startswith("local:") and row[1] != "off"
+
+
+def _explicitly_off(db_path: str) -> bool:
+    """The kanban home's config says sync is off for this board, as opposed to saying nothing (no config, no
+    ``kanban.sync``, unreadable)."""
+    cfg = sync_config()
+    if "enabled" in cfg and not cfg.get("enabled"):
+        return True
+    return bool(cfg.get("enabled")) and not board_selected(db_path)
+
+
+def _home_hint() -> str:
+    try:
+        from hermes_cli import kanban_db
+        return str(kanban_db.kanban_home())
+    except Exception:  # health: allow BLE001 -- log hint only
+        return "?"
 
 
 def _queue_rows(conn: sqlite3.Connection, table: str, ids: list[int]) -> None:
@@ -732,17 +767,23 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
     return ClaimGate(min(expires, deadline), lease=lease, ids=ids)
 
 
-def stage_claim(conn: sqlite3.Connection, task_id: str, gate: Optional[ClaimGate]) -> None:
+def stage_claim(conn: sqlite3.Connection, task_id: str, gate: Optional[ClaimGate]) -> Optional[str]:
     """Inside the claim txn, after the CAS won: mirror the lease onto the task
-    and reserve its run uid for the run row the caller inserts next."""
+    and return its run uid for the run row the caller inserts next.
+
+    [daveey] The caller writes that uid into the run row itself. Handing it over through
+    ``kanban_sync_state.pending_run_uid`` (consumed by the insert trigger) failed whenever the trigger was missing:
+    the uid stayed pending, the Board's echo of the claim made a second run row with it, and the next local run
+    insert, on any card, failed UNIQUE(task_runs.uid). A stale pending uid is cleared here as well."""
     if gate is None or gate.lease is None:
-        return
+        return None
     lease = gate.lease
-    conn.execute("UPDATE kanban_sync_state SET pending_run_uid = ?", (lease.run_uid,))
+    conn.execute("UPDATE kanban_sync_state SET pending_run_uid = NULL WHERE pending_run_uid IS NOT NULL")
     conn.execute("UPDATE tasks SET lease_holder = ?, lease_expires = ?, "
                  "lease_version = COALESCE(?, lease_version) WHERE id = ?",
                  (gate._ids[1], lease.expires_ms, lease.version, task_id))
     gate.consumed = True
+    return lease.run_uid
 
 
 def _renewal_due(task_id: str, lease_expires_ms: int, ttl_s: int) -> bool:

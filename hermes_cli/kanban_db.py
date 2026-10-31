@@ -2796,9 +2796,7 @@ def complete_task(
                    SET status       = 'done',
                        result       = ?,
                        completed_at = ?,
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL,
+                       claim_lock   = NULL, claim_expires = NULL, worker_pid = NULL,
                        block_kind   = NULL,
                        human_request = NULL,
                        block_recurrences = 0
@@ -2806,6 +2804,8 @@ def complete_task(
                    AND status IN ('running', 'ready', 'blocked', 'review')
                 """
         params: tuple = (result, now, task_id)
+        if force:  # [daveey] --force also closes a parked (e.g. placement-forwarded) card; its copy is archived below
+            sql = sql.replace("'review')", "'review', 'scheduled')")
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
             params = (*params, int(expected_run_id))

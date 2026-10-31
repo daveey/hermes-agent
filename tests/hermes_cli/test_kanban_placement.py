@@ -1497,11 +1497,43 @@ def test_refused_and_plain_completion_do_not_forward(mac, monkeypatch):
     from hermes_cli import kanban_db_connect as kbc
     with kbc.connect_closing() as conn:
         child = _forwarded_card(mac, monkeypatch, conn)
-        assert not kb.complete_task(conn, child, summary="Still scheduled", force=True)
+        assert not kb.complete_task(conn, child, summary="Still scheduled")  # parked: only --force closes it
         plain = kb.create_task(conn, title="plain", assignee="default")
         kb.recompute_ready(conn)
         assert kb.complete_task(conn, plain, summary="Local only", force=True)
         assert mac["calls"] == []
+
+
+def _cli(*argv: str) -> int:
+    import argparse
+    from hermes_cli import kanban as kc
+    top = argparse.ArgumentParser()
+    kc.build_parser(top.add_subparsers(dest="cmd"))
+    return kc.kanban_command(top.parse_args(["kanban", *argv]))
+
+
+@pytest.mark.parametrize("unblock_first", [False, True])
+def test_cli_force_complete_of_parked_forwarded_card_archives_its_copy(mac, monkeypatch, capsys, unblock_first):
+    """The real deferred-placement lifecycle (claim -> placement_forwarded with remote_task_id -> scheduled),
+    then the operator's `hermes kanban complete --force`, from where the card sits (scheduled) or after an
+    unblock (ready)."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_placement_forward as kpf
+    with kbc.connect_closing() as conn:
+        child = _forwarded_card(mac, monkeypatch, conn)
+        assert kb.get_task(conn, child).status == "scheduled"
+        assert kpf.state(conn, child)["remote_task_id"] == HUB_TID
+        if unblock_first:
+            assert kb.unblock_task(conn, child)
+    assert _cli("complete", child, "--force", "--summary", "Finished by hand") == 0, capsys.readouterr()
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, child).status == "done"
+        kinds = [r[0] for r in conn.execute("SELECT kind FROM task_events WHERE task_id = ?", (child,))]
+        assert "placement_archive_forwarded" in kinds, kinds
+        assert kpf.archive_forward_view(conn, child)["status"] == "pending"
+    assert [a[1:6] for a in _archive_requests(mac)] == [["request", "hub", "tasks", f"default/default/{HUB_TID}",
+                                                          "archive"]]
 
 
 def test_archiving_a_forwarded_card_archives_the_remote_copy(mac, monkeypatch):
