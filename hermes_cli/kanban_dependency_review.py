@@ -93,20 +93,47 @@ def _exact_head(data) -> bool:
     )
 
 
-def _reviewed_pr(conn, parent_id, parked_at, owner_run_id):
-    """Repair evidence: changes_required plus reviewed_sha and the PR URL."""
+_CHANGES_VERDICTS = frozenset({"changes_required", "request_changes", "requested_changes", "changes_requested"})
+_SUMMARY_VERDICT = re.compile(r"\bVERDICT:\s*(REQUEST(?:ED)?[_ -]CHANGES|CHANGES[_ -](?:REQUIRED|REQUESTED))\b", re.IGNORECASE)
+_SUMMARY_PR_NUM = re.compile(r"\bPR\s*#(\d+)", re.IGNORECASE)
+
+
+def _requests_changes(row, data) -> bool:
+    """True when the completed review's verdict is a change request.
+
+    Reviewers write ``verdict: REQUEST_CHANGES`` (or only ``approved: false`` plus a
+    ``VERDICT: REQUEST_CHANGES`` summary line), not the literal ``changes_required``.
+    """
+    verdict = data.get("verdict")
+    if isinstance(verdict, str) and verdict.strip():
+        return re.sub(r"[\s-]+", "_", verdict.strip().lower()) in _CHANGES_VERDICTS
+    if data.get("approved") is not False:
+        return False
+    return bool(_SUMMARY_VERDICT.search(row["summary"] or ""))
+
+
+def _reviewed_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) -> set[str]:
+    """Repair evidence: a change request at an exact head, bound to one PR.
+
+    A named ``pr`` is the only PR covered. With none, the authenticated checkpoint
+    is the binding, unless the summary names ``PR #N`` that matches none of it.
+    """
     from hermes_cli import kanban_db as kb
 
     row = _completed_review_run(conn, parent_id, parked_at, owner_run_id)
     if row is None:
-        return None
+        return set()
     data = kb._json_dict(row["metadata"])
     sha = data.get("reviewed_sha")
-    pr = _named_pr(data)
-    if (data.get("verdict") != "changes_required" or not isinstance(sha, str)
-            or not _SHA.fullmatch(sha) or pr is None):
-        return None
-    return pr
+    if not isinstance(sha, str) or not _SHA.fullmatch(sha) or not _requests_changes(row, data):
+        return set()
+    named = _named_pr(data)
+    if named is not None:
+        return {named}
+    nums = set(_SUMMARY_PR_NUM.findall(row["summary"] or ""))
+    if nums:
+        return {u for u in captured if u.rsplit("/", 1)[-1] in nums}
+    return set(captured)
 
 
 def _approval_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) -> set[str]:
@@ -161,10 +188,10 @@ def resumes_review(conn, task_id, pr_urls):
     parked_at = kb._to_epoch(row["created_at"])
     if parked_at is None:
         return False
-    reviewed = {_reviewed_pr(conn, p, parked_at, row["id"]) for p in parents}
+    captured_set = {u.rstrip("/").lower() for u in captured}
+    reviewed = set().union(*(_reviewed_prs(conn, p, parked_at, row["id"], captured_set) for p in parents))
     if urls.issubset(reviewed):
         return True
-    captured_set = {u.rstrip("/").lower() for u in captured}
     # Every parent must authorize. One exact-head approval does not cover a
     # sibling that never reviewed, and a named unrelated PR does not cover
     # the checkpoint set.

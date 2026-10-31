@@ -119,3 +119,46 @@ def test_new_pr_after_exact_head_approval_stays_held(board):
     finish_reviews(board, reviews, metadata={"verdict": "APPROVE", "head": HEAD})
     worker_comment(board, task, "dev", "Opened a new head " + PR + "9")
     assert dispatch.check_respawn_guard(board, task) == "active_pr"
+
+
+SHA = "c" * 40
+
+
+def _finish(board, reviews, metadata, summary):
+    for review in reviews:
+        kb.claim_task(board, review)
+        run = kb.get_task(board, review).current_run_id
+        assert kb.complete_task(board, review, summary=summary, expected_run_id=run, metadata=metadata)
+    kb.recompute_ready(board)
+
+
+@pytest.mark.parametrize("metadata,summary", [
+    ({"verdict": "REQUEST_CHANGES", "reviewed_sha": SHA, "approved": False}, "VERDICT: REQUEST_CHANGES on PR #10"),
+    ({"verdict": "request-changes", "reviewed_sha": SHA, "pr": PR}, "Review complete"),
+    ({"approved": False, "reviewed_sha": SHA}, "VERDICT: REQUEST_CHANGES on PR #10 at " + SHA),
+])
+def test_review_request_changes_hands_pr_back_to_author(board, metadata, summary):
+    """Production shape: reviewers write REQUEST_CHANGES, not changes_required, and no ``pr``.
+    The author's own later PR comment must not re-arm the hold; one continuation only."""
+    task, reviews = parked(board)
+    _finish(board, reviews, metadata, summary)
+    worker_comment(board, task, "dev", "Waiting on review of " + PR)
+    assert dispatch.check_respawn_guard(board, task) is None
+    assert kb.claim_task(board, task) is not None
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+    assert kb.reclaim_task(board, task, reason="Worker died", signal_fn=lambda *_: None)
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
+
+
+@pytest.mark.parametrize("metadata,summary", [
+    ({"verdict": "REQUEST_CHANGES", "reviewed_sha": SHA, "pr": PR + "1"}, "x"),
+    ({"verdict": "REQUEST_CHANGES", "reviewed_sha": SHA}, "VERDICT: REQUEST_CHANGES on PR #99"),
+    ({"verdict": "REQUEST_CHANGES"}, "no exact head"),
+    ({"verdict": "approved", "reviewed_sha": "short"}, "VERDICT: REQUEST_CHANGES"),
+    ({"approved": False}, "Looks fine, nothing about a verdict"),
+])
+def test_review_request_changes_for_other_pr_or_without_head_stays_held(board, metadata, summary):
+    task, reviews = parked(board)
+    _finish(board, reviews, metadata, summary)
+    worker_comment(board, task, "dev", "Waiting on review of " + PR)
+    assert dispatch.check_respawn_guard(board, task) == "active_pr"
