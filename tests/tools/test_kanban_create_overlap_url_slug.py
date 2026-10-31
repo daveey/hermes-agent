@@ -554,6 +554,11 @@ def test_pinned_board_db_is_read_once_under_its_own_board_name(home, monkeypatch
     ("Deploy babybear 1a2b3c4 to the hub", "Deploy babybear 5d6e7f8 to the hub and disable old flag", False),
     ("Verify MBP hermes-mods has da19695 (Inbox OWNER_ASK_KEYS removal)",
      "Verify MacBook runs hermes-mods a2dadd6 (inbox ask_contract RETRY_SHAPE + OWNER_ASK_KEYS)", True),
+    # Delta review of e6ac0831dd: a port glued to a hostname, one host spelled two ways and GPU indices on one
+    # machine are not different targets.
+    ("hermes-gateway:8642 returns 502", "hermes-gateway:8643 returns 502", False),
+    ("metta3 still critically low on disk", "metta-3 still critically low on disk", False),
+    ("gpu0 ECC errors after driver update", "gpu2 ECC errors after driver update", False),
 ])
 def test_distinct_target_classes(a, b, distinct):
     from hermes_cli.kanban_overlap import distinct_target
@@ -570,6 +575,15 @@ def test_repos_named_only_in_both_bodies_do_not_make_a_duplicate_distinct(new_bo
     assert distinct_target(title, title, new_body=new_body, card_body=card_body) is None
 
 
+def test_a_single_passing_repo_mention_in_the_other_body_does_not_make_a_duplicate_distinct():
+    """Delta review of e6ac0831dd: a body names its own repo more than once (BB_CI: the run URL and the PR flow);
+    one "see Metta-AI/metta" aside is not what the card is about."""
+    from hermes_cli.kanban_overlap import distinct_target
+    assert distinct_target("Repair main CI hub suite red on daveey/babybear", "Repair main CI hub suite red",
+                           card_body="Prior art: see Metta-AI/metta.") is None
+    assert distinct_target("Fix red main CI: daveey/hermes (since a8ff96df)", BB_CI[1], card_body=BB_CI[2])
+
+
 @pytest.mark.parametrize(("text", "waits"), [
     ("SCRATCH waiter (parks on macbook t_01a18d2db718c3d1)", True),
     ("Blocked on hub/t_01a18d2db718c3d1 finishing", True),
@@ -579,6 +593,8 @@ def test_repos_named_only_in_both_bodies_do_not_make_a_duplicate_distinct(new_bo
     ("Same producer as t_01a18d2db718c3d1: redo", False),
     ("Second producer, replaces producer t_01a18d2db718c3d1", False),
     ("Its parent t_01a18d2db718c3d1 never finished", False),
+    ("This should not be blocked on t_01a18d2db718c3d1; redo it", False),
+    ("It need not stay waiting on t_01a18d2db718c3d1", False),
 ])
 def test_waits_on_needs_an_unnegated_wait_on_that_card(text, waits):
     from hermes_cli.kanban_overlap import waits_on

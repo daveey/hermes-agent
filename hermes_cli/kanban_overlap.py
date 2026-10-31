@@ -147,10 +147,12 @@ _HOST_ALIASES = {
 }
 # Bare "hub" is not a host here: it is also the BB hub (on the mini) and "for hub t_..." quotes a card. A host is a
 # whole token: "mini-batch" or a device "sx-heart-room-mini" names no machine, and worker-N is a lane, not a host.
-_HOST_PATTERN = re.compile(r"(?:metta|gpu|bb-linux)-?\d+")
+# gpuN is a device index on one machine, not a machine. ``metta-3`` is ``metta3``.
+_HOST_PATTERN = re.compile(r"(metta|bb-linux)-?(\d+)")
 _TASK_REF = re.compile(r"(?:\b[a-z][\w.-]{0,40}[/ ](?:[\w-]{1,40}/)?)?\bt_[0-9a-f]{8,16}\b")
-# A process lifetime: ``gateway 78233``, ``pid 1722`` (a port after the number is not a process).
-_PROCESS = re.compile(r"\b(?:gateway|pid)[\s=:#]*(?:pid[\s=:#]*)?(\d{3,})\b(?![\s:]*port)")
+# A process lifetime: ``gateway 78233``, ``pid 1722``. A port is not a process: ``gateway 8080 port`` nor
+# ``hermes-gateway:8642`` (a number glued to the word by a colon is an address).
+_PROCESS = re.compile(r"\b(?:gateway\s+(?:pid[\s=:#]*)?|pid[\s=:#]*)(\d{3,})\b(?![\s:]*port)")
 _REVISION = re.compile(r"\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b")
 # A newer revision of the same check is the same owner's work, so a differing sha alone never makes cards
 # distinct. It does when one title inverts the other's acceptance (da19695 "OWNER_ASK_KEYS removal"; the
@@ -165,7 +167,7 @@ _ARTICLES = frozenset({"the", "a", "an"})
 _BODY_SCAN = 20000  # bodies can be huge; a repo named past this is not what the card is about
 _WAIT = re.compile(r"\b(?:park(?:s|ed|ing)?|wait(?:s|ed|ing)?|blocked|depend(?:s|ing)?)\s+on\s+"
                    r"(?:[a-z][\w@-]{0,40}[ /]){0,2}(t_[0-9a-f]{8,16})\b", re.IGNORECASE)
-_NEGATED = re.compile(r"(?:\bnot|n't|\bnever|\bno longer)\s+$", re.IGNORECASE)
+_NEGATED = re.compile(r"(?:\bnot|n't|\bnever|\bno longer)\s+(?:(?:be|been|get|stay|keep)\s+)?$", re.IGNORECASE)
 
 
 def target_identity(title: str, gateways: Iterable[str] = ()) -> dict[str, frozenset[str]]:
@@ -176,8 +178,10 @@ def target_identity(title: str, gateways: Iterable[str] = ()) -> dict[str, froze
     for tok in re.findall(r"[a-z0-9][a-z0-9.-]*[a-z0-9]|[a-z0-9]", low):
         if tok in _HOST_ALIASES:
             hosts.add(_HOST_ALIASES[tok])
-        elif tok in dynamic or _HOST_PATTERN.fullmatch(tok):
+        elif tok in dynamic:
             hosts.add(tok)
+        elif m := _HOST_PATTERN.fullmatch(tok):
+            hosts.add(m.group(1) + m.group(2))
     return {"host": frozenset(hosts), "process": frozenset(_PROCESS.findall(low)),
             "revision": frozenset(_REVISION.findall(low))}
 
@@ -188,14 +192,15 @@ def repos(text: str) -> frozenset[str]:
 
 
 def _repo_of(title: str, body: str) -> tuple[frozenset[str], bool]:
-    """A card's repo and whether its title names it: the title's slugs, else the body's when it names exactly one
-    (the bb_bridge card "Main CI red since effa0d25f: repair the hub suite on main" names daveey/babybear only in
-    its body)."""
+    """A card's repo and whether its title names it: the title's slugs, else the body's when it names exactly one,
+    at least twice (the bb_bridge card "Main CI red since effa0d25f: repair the hub suite on main" names
+    daveey/babybear in its run URL and its PR flow). One "see Metta-AI/metta" aside is not the card's repo."""
     named = repos(title)
     if named:
         return named, True
-    in_body = repos(body)
-    return (in_body, False) if len(in_body) == 1 else (frozenset(), False)
+    found = _REPO.findall((body or "")[:_BODY_SCAN].lower())
+    in_body = frozenset(found)
+    return (in_body, False) if len(in_body) == 1 and len(found) >= 2 else (frozenset(), False)
 
 
 def _inverts(title: str, other: str) -> bool:
