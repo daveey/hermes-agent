@@ -114,7 +114,15 @@ def _on_post_tool_call(tool_name: str = "", args: Optional[dict[str, Any]] = Non
         except Exception:
             continue
         category = dg.guess_category(p) if created else None
-        if category is not None and dg.track(str(p), category, silent=True) and category == "test":
+        if category is None:
+            continue
+        try:
+            newly = dg.track(str(p), category, silent=True)
+        except Exception as exc:  # best-effort hook: never raise into the tool loop, but leave a trace
+            dg._log(f"ERROR: track failed for {p}: {type(exc).__name__}: {exc}")
+            logger.warning("disk-cleanup: track failed for %s: %s", p, exc, exc_info=True)
+            continue
+        if newly and category == "test":
             with _lock:
                 _recent_test_tracks.setdefault(_owner(task_id, session_id), set()).add(str(p))
 

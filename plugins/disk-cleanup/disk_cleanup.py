@@ -13,11 +13,18 @@ import functools
 import json
 import logging
 import shutil
+import threading
 from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from hermes_constants import get_hermes_home
+from utils import atomic_json_write
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — non-POSIX: the in-process lock still serialises threads
+    fcntl = None
 
 logger = logging.getLogger(__name__)
 
@@ -88,15 +95,46 @@ def load_tracked() -> list[dict[str, Any]]:
         return []
 
 
+# tracked.json is shared by parallel tool calls in one process and by every Hermes process on the
+# host. Every read-change-write runs under _tracked_lock(): a process-wide RLock for threads plus an
+# flock on ``disk-cleanup/tracked.lock`` for other processes (the kernel frees it if a holder dies).
+_tracked_rlock = threading.RLock()
+_tracked_depth = threading.local()
+
+
+@contextlib.contextmanager
+def _tracked_lock() -> Iterator[None]:
+    """Serialise tracked.json read-change-write across threads and processes. Re-entrant per thread:
+    only the outermost holder takes the flock (a second flock on a new fd would self-deadlock)."""
+    with _tracked_rlock:
+        depth = getattr(_tracked_depth, "n", 0)
+        _tracked_depth.n = depth + 1
+        try:
+            if depth or fcntl is None:
+                yield
+                return
+            lock_path = _state_file("tracked.lock")
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(lock_path, "a+", encoding="utf-8") as fh:  # windows-footgun: ok (append mode, lock file only)
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    with contextlib.suppress(OSError):
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            _tracked_depth.n = depth
+
+
 def save_tracked(tracked: list[dict[str, Any]]) -> None:
-    """Atomic write: ``.tmp`` → backup old → rename."""
+    """Back up the old file to ``.bak``, then write atomically through a unique temp file: two
+    writers never share a temp name, so neither can rename the other's away."""
     tf = _state_file("tracked.json")
     tf.parent.mkdir(parents=True, exist_ok=True)
-    tmp = tf.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(tracked, indent=2), encoding="utf-8")
-    if tf.exists():
-        shutil.copy2(tf, tf.with_suffix(".json.bak"))
-    tmp.replace(tf)
+    with _tracked_lock():
+        if tf.exists():
+            shutil.copy2(tf, tf.with_suffix(".json.bak"))
+        atomic_json_write(tf, tracked, indent=2)
 
 
 ALLOWED_CATEGORIES = {
@@ -186,12 +224,13 @@ def track(path_str: str, category: str, silent: bool = False) -> bool:
         _log(f"REJECT: {path} (outside HERMES_HOME)")
         return False
     size = path.stat().st_size if path.is_file() else 0
-    tracked = load_tracked()
-    if any(item["path"] == str(path) for item in tracked):
-        return False
-    tracked.append({"path": str(path), "timestamp": datetime.now(UTC).isoformat(),
-                    "category": category, "size": size})
-    save_tracked(tracked)
+    with _tracked_lock():
+        tracked = load_tracked()
+        if any(item["path"] == str(path) for item in tracked):
+            return False
+        tracked.append({"path": str(path), "timestamp": datetime.now(UTC).isoformat(),
+                        "category": category, "size": size})
+        save_tracked(tracked)
     _log(f"TRACKED: {path} ({category}, {fmt_size(size)})")
     if not silent:
         print(f"Tracked: {path} ({category}, {fmt_size(size)})")
@@ -201,12 +240,13 @@ def track(path_str: str, category: str, silent: bool = False) -> bool:
 def forget(path_str: str) -> int:
     """Remove a path from tracking without deleting the file."""
     p = Path(path_str).resolve()
-    tracked = load_tracked()
-    kept = [i for i in tracked if Path(i["path"]).resolve() != p]
-    removed = len(tracked) - len(kept)
-    if removed:
-        save_tracked(kept)
-        _log(f"FORGOT: {p} ({removed} entries)")
+    with _tracked_lock():
+        tracked = load_tracked()
+        kept = [i for i in tracked if Path(i["path"]).resolve() != p]
+        removed = len(tracked) - len(kept)
+        if removed:
+            save_tracked(kept)
+            _log(f"FORGOT: {p} ({removed} entries)")
     return removed
 
 
@@ -274,31 +314,33 @@ def quick() -> dict[str, Any]:
     deleted = freed = 0
     new_tracked: list[dict] = []
     errors: list[str] = []
-    for item, p, age in _live_items(load_tracked(), datetime.now(UTC), log_stale=True):
-        cat = item["category"]
-        if cat in _STALE_SKIP_NOTE and (re_cat := guess_category(p)) != cat:
-            # Misclassified stale entry — drop it rather than delete the file.
-            _log(f"SKIP stale {cat} entry: {p} (re-classified as {re_cat!r}{_STALE_SKIP_NOTE[cat]})")
-            continue
-        # Hard safety net even if re-validation above somehow let it through.
-        if _is_protected_cron_path(p):
-            _log(f"SKIP protected cron path: {p}")
-            continue
-        if _is_protected_dir(p):
-            _log(f"SKIPPED: {p} (protected top-level dir)")
-            continue
-        if not _is_auto_delete(cat, age):
-            new_tracked.append(item)
-            continue
-        err = _delete_item(item)
-        if err is None:
-            freed += item["size"]
-            deleted += 1
-        else:
-            errors.append(err)
-            new_tracked.append(item)
+    with _tracked_lock():  # a track() racing this read-change-write would otherwise be dropped
+        for item, p, age in _live_items(load_tracked(), datetime.now(UTC), log_stale=True):
+            cat = item["category"]
+            if cat in _STALE_SKIP_NOTE and (re_cat := guess_category(p)) != cat:
+                # Misclassified stale entry — drop it rather than delete the file.
+                _log(f"SKIP stale {cat} entry: {p} (re-classified as {re_cat!r}{_STALE_SKIP_NOTE[cat]})")
+                continue
+            # Hard safety net even if re-validation above somehow let it through.
+            if _is_protected_cron_path(p):
+                _log(f"SKIP protected cron path: {p}")
+                continue
+            if _is_protected_dir(p):
+                _log(f"SKIPPED: {p} (protected top-level dir)")
+                continue
+            if not _is_auto_delete(cat, age):
+                new_tracked.append(item)
+                continue
+            err = _delete_item(item)
+            if err is None:
+                freed += item["size"]
+                deleted += 1
+            else:
+                errors.append(err)
+                new_tracked.append(item)
+        save_tracked(new_tracked)
+    # The empty-dir sweep touches no tracked state; run it outside the lock (it can be slow).
     empty_removed = _sweep_empty_dirs(get_hermes_home())
-    save_tracked(new_tracked)
     _log(f"QUICK_SUMMARY: {deleted} files, {empty_removed} dirs, {fmt_size(freed)}")
     return {"deleted": deleted, "empty_dirs": empty_removed, "freed": freed, "errors": errors}
 

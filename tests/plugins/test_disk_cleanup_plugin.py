@@ -710,3 +710,100 @@ class TestBundledDiscovery:
         mgr.discover_and_load()
         assert "memory" not in mgr._plugins
         assert "context_engine" not in mgr._plugins
+
+
+# ---------------------------------------------------------------------------
+# Concurrent writers (self-heal plugin-129c2f2518)
+# ---------------------------------------------------------------------------
+
+_WRITER_SCRIPT = """
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("dc_writer", sys.argv[1])
+dg = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(dg)
+errors = 0
+for path in sys.argv[2:]:
+    try:
+        dg.track(path, "temp", silent=True)
+    except Exception as exc:
+        errors += 1
+        print(f"ERR {type(exc).__name__}: {exc}", file=sys.stderr)
+sys.exit(1 if errors else 0)
+"""
+
+
+class TestConcurrentTrackedWriters:
+    """tracked.json is shared by parallel tool calls in one process and by every Hermes process
+    on the host. Each read-change-write must be serialized, and the temp file must be unique, or
+    writers rename each other's temp file away (FileNotFoundError) and drop entries."""
+
+    @staticmethod
+    def _files(home, prefix, n):
+        out = []
+        for i in range(n):
+            p = home / "scratch" / f"{prefix}_{i}.txt"
+            p.parent.mkdir(exist_ok=True)
+            p.write_text("x")
+            out.append(str(p.resolve()))
+        return out
+
+    def test_threads_keep_every_entry_without_error(self, _isolate_env):
+        import threading
+        dg = _load_lib()
+        batches = [self._files(_isolate_env, f"t{t}", 25) for t in range(8)]
+        barrier = threading.Barrier(len(batches))
+        errors = []
+
+        def worker(paths):
+            barrier.wait()
+            for p in paths:
+                try:
+                    dg.track(p, "temp", silent=True)
+                except Exception as exc:
+                    errors.append(repr(exc))
+
+        threads = [threading.Thread(target=worker, args=(b,)) for b in batches]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(60)
+        assert errors == []
+        tracked = {i["path"] for i in dg.load_tracked()}
+        assert tracked == {p for b in batches for p in b}
+
+    def test_processes_keep_every_entry_without_error(self, _isolate_env):
+        import subprocess
+        repo_root = Path(__file__).resolve().parents[2]
+        lib = repo_root / "plugins" / "disk-cleanup" / "disk_cleanup.py"
+        batches = [self._files(_isolate_env, f"p{n}", 25) for n in range(4)]
+        env = {**os.environ, "HERMES_HOME": str(_isolate_env),
+               "PYTHONPATH": os.pathsep.join(filter(None, [str(repo_root), os.environ.get("PYTHONPATH")]))}
+        procs = [subprocess.Popen([sys.executable, "-c", _WRITER_SCRIPT, str(lib), *b], env=env,
+                                  stderr=subprocess.PIPE, text=True) for b in batches]
+        results = [(p.wait(120), p.stderr.read()) for p in procs]
+        assert [r for r in results if r[0] != 0] == []
+        dg = _load_lib()
+        tracked = {i["path"] for i in dg.load_tracked()}
+        assert tracked == {p for b in batches for p in b}
+
+    def test_save_tracked_leaves_no_shared_tmp_file(self, _isolate_env):
+        dg = _load_lib()
+        dg.save_tracked([{"path": "a", "timestamp": "2026-01-01T00:00:00+00:00", "category": "temp", "size": 0}])
+        dg.save_tracked([])
+        state = _isolate_env / "disk-cleanup"
+        assert not (state / "tracked.json.tmp").exists()
+        assert json.loads((state / "tracked.json").read_text()) == []
+        assert (state / "tracked.json.bak").exists()
+
+    def test_post_tool_call_logs_track_failure_instead_of_raising(self, _isolate_env, monkeypatch):
+        pi = _load_plugin_init()
+
+        def boom(*_a, **_k):
+            raise FileNotFoundError("tracked.json.tmp -> tracked.json")
+
+        monkeypatch.setattr(pi.dg, "track", boom)
+        target = _isolate_env / "test_created.py"
+        _run_tool(pi, "write_file", {"path": str(target)}, create=lambda: target.write_text("x"),
+                  task_id="t1")
+        log = (_isolate_env / "disk-cleanup" / "cleanup.log").read_text()
+        assert "ERROR: track failed" in log and "tracked.json.tmp" in log
