@@ -179,7 +179,16 @@ class NightlyBoard(CliBoard):
             ]
         # `hermes kanban create` records creator_task_id from HERMES_KANBAN_TASK (the supported attribution path).
         # Only an explicit acceptance run sets it; production cards keep creator_task_id None.
-        extra_env = {"HERMES_KANBAN_TASK": creator_task_id} if creator_task_id else None
+        # The CLI drops a TASK identity that has no live RUN_ID, so pair them from the owner's live run.
+        extra_env = None
+        if creator_task_id:
+            live = [
+                r for r in ((self._show(creator_task_id) or {}).get("runs") or [])
+                if r.get("status") == "running" and not r.get("ended_at")
+            ]
+            if not live:
+                raise RuntimeError(f"acceptance owner {creator_task_id} has no live run to attribute cards to")
+            extra_env = {"HERMES_KANBAN_TASK": creator_task_id, "HERMES_KANBAN_RUN_ID": str(live[-1]["id"])}
         out = self._run(
             "create",
             title,

@@ -582,9 +582,14 @@ def test_nightly_board_stamps_creator_only_for_acceptance(monkeypatch):
     envs = []
     board = ne.NightlyBoard("hermes")
     monkeypatch.setattr(board, "_run", lambda *a, **k: envs.append(k.get("extra_env")) or '{"id":"t_x"}')
+    live = {"runs": [{"id": 6, "status": "ended", "ended_at": 1}, {"id": 7, "status": "running", "ended_at": None}]}
+    monkeypatch.setattr(board, "_show", lambda *a, **k: live)
     board.create("t", "b", "k")
     board.create("t", "b", "k", creator_task_id=OWNER)
-    assert envs == [None, {"HERMES_KANBAN_TASK": OWNER}]
+    assert envs == [None, {"HERMES_KANBAN_TASK": OWNER, "HERMES_KANBAN_RUN_ID": "7"}]
+    live["runs"].pop()
+    with pytest.raises(RuntimeError, match="no live run"):
+        board.create("t", "b", "k", creator_task_id=OWNER)
 
 
 def test_cli_create_env_only_carries_worker_task_in_acceptance(monkeypatch):
@@ -595,9 +600,11 @@ def test_cli_create_env_only_carries_worker_task_in_acceptance(monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, '{"id":"t_x"}', "")
 
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_ffffffffffffffff")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "99")
     monkeypatch.setattr(subprocess, "run", fake_run)
     board = ne.NightlyBoard("hermes")
+    monkeypatch.setattr(board, "_show", lambda *a, **k: {"runs": [{"id": 7, "status": "running", "ended_at": None}]})
     board.create("t", "b", "k")
     board.create("t", "b", "k", creator_task_id=OWNER)
-    assert "HERMES_KANBAN_TASK" not in seen[0]
-    assert seen[1]["HERMES_KANBAN_TASK"] == OWNER
+    assert "HERMES_KANBAN_TASK" not in seen[0] and "HERMES_KANBAN_RUN_ID" not in seen[0]
+    assert seen[1]["HERMES_KANBAN_TASK"] == OWNER and seen[1]["HERMES_KANBAN_RUN_ID"] == "7"
