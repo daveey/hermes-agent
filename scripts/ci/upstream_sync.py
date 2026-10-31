@@ -177,6 +177,13 @@ def _fetch_main(repo) -> str:
     return git(repo, "rev-parse", "refs/remotes/origin/main")
 
 
+def _parents_on_main(repo, head, main) -> bool:
+    """A merge whose parents already landed is superseded, even with unique resolution content."""
+    result = _run(repo, "rev-list", "--parents", "-n1", head)
+    parents = result.stdout.split()[1:]
+    return result.returncode == 0 and len(parents) >= 2 and all(_is_ancestor(repo, p, main) for p in parents)
+
+
 def _adds_nothing(repo, head, main) -> bool:
     """Merging ``head`` into ``main`` changes no file (a twin of a sync that already landed)."""
     tree = _run(repo, "merge-tree", "--write-tree", "--no-messages", main, head)
@@ -258,6 +265,9 @@ def required_check(gh_repo, sha, request) -> tuple[str, str]:
 def land(repo, cand: Candidate, *, gh_repo: str, request=github_pages, gh=gh_cli) -> int:
     """Put the tested head on main through its PR, merged once the required check is green on exactly it."""
     main = _fetch_main(repo)
+    if _parents_on_main(repo, cand.head, main):
+        print(f"LANDED: sync {cand.head[:10]} is superseded; main {main} contains every parent")
+        return LANDED
     if _is_ancestor(repo, cand.head, main):
         return LANDED
     if not _is_ancestor(repo, main, cand.head):
@@ -377,6 +387,9 @@ def _advance(repo: Path, head: str | None, *, gh_repo: str, request, gh, now) ->
         if head is None:
             return LANDED if landed_other else NOT_YET
         main = _fetch_main(repo)
+        if _parents_on_main(repo, head, main):
+            print(f"LANDED: sync {head[:10]} is superseded; main {main} contains every parent")
+            return LANDED
         if _is_ancestor(repo, head, main) or _adds_nothing(repo, head, main):
             print(f"LANDED: main already has everything {head[:10]} brings")
             return LANDED

@@ -1,7 +1,8 @@
 """Close open sync PRs that a landed sync made redundant (scripts/ci/upstream_sync.py housekeeping).
 
 An open PR main <- sync/upstream-<X> from this repo is superseded once a freshly fetched origin/main
-contains every parent of X (X is a merge): landing X would bring nothing main lacks. Such a PR is
+contains every parent of X (X is a merge). This is the gate's supersession policy, not tree equality.
+Such a PR is
 commented (naming the main sha that holds the parents), closed, and its branch deleted only if it
 still points at X. Anything else (forks, other branches, single-parent heads, a parent main lacks,
 a moved branch) stays open. Every fault is printed and skipped: this never changes the gate's verdict.
@@ -49,7 +50,7 @@ def _kept_because(repo, pr, gh_repo, main, run, prefix) -> tuple[str, list[str]]
 def _close(repo, pr, parents, gh_repo, main, gh, run, env) -> bool:
     number, sha, ref = str(pr["number"]), pr["head"]["sha"], pr["head"]["ref"]
     body = (f"Superseded: main {main} already contains every parent of this sync's head {sha} "
-            f"({', '.join(parents)}), so landing it would bring nothing new. Closed by scripts/ci/upstream_sync.py.")
+            f"({', '.join(parents)}). Closed by scripts/ci/upstream_sync.py under the all-parent supersession policy.")
     for verb, extra in (("comment", ("--body", body)), ("close", ())):
         done = gh("pr", verb, number, "-R", gh_repo, *extra, reason=f"upstream sync gate: {verb} a superseded sync PR")
         if done.returncode:

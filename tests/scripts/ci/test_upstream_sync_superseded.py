@@ -159,3 +159,42 @@ def test_github_failures_are_logged_and_the_gate_continues(world, capsys):
     assert first["state"] == second["state"] == "closed"
     assert branch(root, first["head"]["ref"]) == branch(root, second["head"]["ref"]) == moved_to
     assert "branch kept" in out
+
+
+def test_superseded_resolution_is_not_reopened_or_landed(world):
+    root, checkout, main0, up, actions = landed_elsewhere(world)
+    candidate = other_merge(root, main0, up, "different resolution")
+    clone = host(root)
+    git(clone, "checkout", "-q", "--detach", candidate)
+    (clone / "resolution.txt").write_text("unique resolution\n")
+    git(clone, "add", "resolution.txt")
+    git(clone, "commit", "-q", "--amend", "--no-edit")
+    candidate = git(clone, "rev-parse", "HEAD")
+    pr = open_pr(root, actions, candidate)
+    git(checkout, "fetch", "-q", "origin", pr["head"]["ref"])
+    before = main_of(root)
+    assert not sync._adds_nothing(checkout, candidate, before)
+    actions.ci()
+    assert actions.runs[0]["conclusion"] == "success"
+    actions.aggregate = None
+    for head in (None, None, candidate):
+        assert gate(checkout, head, actions) == sync.LANDED
+        assert_closed(root, pr)
+        assert len(actions.pulls) == 1 and main_of(root) == before
+    actions.aggregate = ("completed", "success")
+    assert gate(checkout, None, actions) == sync.LANDED
+    assert len(actions.pulls) == 1 and main_of(root) == before
+    actions.runs.clear()  # explicit --head with no recorded CI must not re-stage either
+    assert gate(checkout, candidate, actions) == sync.LANDED
+    assert not staged(root, candidate)
+
+
+def test_missing_fork_parent_keeps_sync_open(world):
+    root, checkout, main0, up, actions = landed_elsewhere(world)
+    clone = host(root)
+    git(clone, "checkout", "-q", "--detach", main0)
+    fork = commit(clone, {"fork-only.txt": "not on main\n"}, "unlanded fork work")
+    candidate = other_merge(root, fork, up, "sync with unlanded fork parent")
+    pr = open_pr(root, actions, candidate)
+    assert gate(checkout, None, actions) == sync.NOT_YET
+    assert pr["state"] == "open" and pr["comments"] == [] and staged(root, candidate)
