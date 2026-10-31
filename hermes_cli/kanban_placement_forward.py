@@ -356,9 +356,12 @@ def sweep_unresolved_archives(conn: sqlite3.Connection, *, now: Optional[float] 
             elif expired:  # one last try failed too
                 _give_up(conn, task_id, payload, gw, f"sending the archive to {gw} kept failing ({n + 1} times)")
             continue
-        if forward_archive(conn, task_id, runner=runner, await_budget=0, record_unresolved=False) is not None:
+        view = forward_archive(conn, task_id, runner=runner, await_budget=0, record_unresolved=False)
+        if _sent(view):
             sent.append(task_id)
             continue
+        if view is not None:
+            continue  # the id arrived but the send failed: recorded ``failed``, the backoff path retries it
         if expired:
             _give_up(conn, task_id, payload, gw,
                      f"{gw} never made the card for request {payload.get('request_id') or '?'}")

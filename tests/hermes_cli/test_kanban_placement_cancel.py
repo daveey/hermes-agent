@@ -338,3 +338,24 @@ def test_crash_gap_gives_up_after_seven_days_when_every_try_fails(mac, monkeypat
         assert _statuses(conn, child) == ["failed", "failed", "expired"]
         assert kpf.sweep_unresolved_archives(conn, now=far + 30 * 86400) == []
         assert len(_statuses(conn, child)) == 3
+
+
+def test_unresolved_archive_whose_late_send_fails_is_not_reported_sent(mac, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_placement_forward as kpf
+    with kbc.connect_closing() as conn:
+        child, rid = _unresolved_forwarded_card(mac, monkeypatch, conn)
+        assert kb.archive_task(conn, child)
+        assert _statuses(conn, child) == ["unresolved"]
+        mac["hub"].execute("UPDATE sent SET state='done', result=? WHERE id=?",
+                           (json.dumps({"ok": True, "task_id": "t_hub0001", "status": "ready"}), rid))
+        mac["hub"].commit()
+        mac["result"]["rc"] = 1
+        t0 = time.time()
+        assert kpf.sweep_unresolved_archives(conn, now=t0) == []  # failed: not reported sent
+        assert _statuses(conn, child) == ["unresolved", "failed"]
+        mac["result"]["rc"] = 0
+        assert kpf.sweep_unresolved_archives(conn, now=t0 + kpf.FAILED_RETRY_BASE + 1) == [child]
+        assert _statuses(conn, child) == ["unresolved", "failed", "pending"]
+    assert len(_archive_requests(mac)) == 2
