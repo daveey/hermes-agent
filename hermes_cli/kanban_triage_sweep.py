@@ -103,7 +103,7 @@ def sweep_stale_triage(
     "specify or park with a probe" brief. A card is eligible once per triage entry: never swept, or a
     ``TRIAGE_ENTRY_EVENTS`` event newer than its last ``triage_swept``. Past ``TRIAGE_SWEEP_CAP`` sweeps
     in ``TRIAGE_SWEEP_CAP_WINDOW`` it is capped instead (see :func:`_cap`). Cards with an open human
-    request are left alone. Returns swept task ids."""
+    request, or an open kernel recovery card for their current park, are left alone. Returns swept task ids."""
     now = int(now if now is not None else time.time())
     cutoff = now - older_than
     swept: list[str] = []
@@ -118,9 +118,10 @@ def sweep_stale_triage(
         f"AND c.id > COALESCE((SELECT MAX(n.id) FROM task_events n WHERE n.task_id = t.id AND n.kind IN ({_MARKS})), 0))",
         (cutoff, *TRIAGE_ENTRY_EVENTS, *TRIAGE_ENTRY_EVENTS),
     ).fetchall()
+    from hermes_cli.kanban_resume_requester import open_recovery_card
     for row in rows:
-        if row["human_request"]:
-            continue
+        if row["human_request"] or open_recovery_card(conn, row["id"]):
+            continue  # a human owns it, or its kernel recovery card is its producer
         recent = conn.execute(
             "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'triage_swept' AND created_at > ?",
             (row["id"], now - TRIAGE_SWEEP_CAP_WINDOW),

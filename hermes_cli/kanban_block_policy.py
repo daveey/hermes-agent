@@ -334,10 +334,13 @@ def sweep_standing_asks(conn: sqlite3.Connection) -> list[str]:
 
 
 def sweep_blocked_cards(conn: sqlite3.Connection, result) -> None:
-    """Dispatcher-tick entry for both blocked-card sweeps; each is isolated so one failing never skips the other."""
+    """Dispatcher-tick entry for the parked-card sweeps; each is isolated so one failing never skips the others.
+    The third gives each continuation_exhausted park its resume requester (``kanban_resume_requester``)."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_resume_requester import ensure_recovery_cards
     for name, sweep, out in (("agent-owned block", sweep_agent_owned_blocks, result.agent_block_escalated),
-                             ("standing-ask recheck", sweep_standing_asks, result.ask_rechecked)):
+                             ("standing-ask recheck", sweep_standing_asks, result.ask_rechecked),
+                             ("resume requester", ensure_recovery_cards, [])):
         try:
             out.extend(sweep(conn))
         except sqlite3.Error:
