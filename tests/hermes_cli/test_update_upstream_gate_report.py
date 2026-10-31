@@ -41,3 +41,17 @@ def test_report_is_capped():
     shown = update_cmd_git._gate_report("\n".join(lines))
     assert shown[0] == "REFUSED: red" and len(shown) == update_cmd_git._GATE_REPORT_LINES + 1
     assert shown[-1] == f"… {101 - update_cmd_git._GATE_REPORT_LINES} more line(s)"
+
+
+def test_over_the_cap_test_id_listings_go_before_evidence_lines():
+    """Two 20-id listings (the diagnostics' per-job cap) still leave attribution and the owner visible."""
+    listing = [f"      - tests/e2e/test_{n}.py::test_x" for n in range(20)] + ["      … and 5 more"]
+    lines = ["REFUSED: the full suite failed on aaaaaaaaaa: https://ci.example/run/20",
+             "  required job failure: Full suite / e2e https://ci.example/job/21 — 25 failing test(s)", *listing,
+             "  main baseline: bbbbbbbbbb (the sync's first parent, on main)",
+             "  e2e: main-baseline failure: 25 failing test(s) also fail on main bbbbbbbbbb", *listing,
+             "  nightly-e2e owner for this exact failing set: t_owner (running)"]
+    shown = update_cmd_git._gate_report("\n".join(lines))
+    assert shown[0].startswith("REFUSED:") and "  nightly-e2e owner for this exact failing set: t_owner (running)" in shown
+    assert "  e2e: main-baseline failure: 25 failing test(s) also fail on main bbbbbbbbbb" in shown
+    assert shown[-1] == "… 42 test id line(s) omitted"

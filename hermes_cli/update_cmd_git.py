@@ -370,8 +370,12 @@ def _gate_report(output: str) -> list[str]:
     start = len(lines) - 4
     if verdicts and verdicts[-1] < start:
         start = verdicts[-1]
-    shown = lines[max(start, 0):][:_GATE_REPORT_LINES]
-    hidden = len(lines) - max(start, 0) - len(shown)
+    tail = lines[max(start, 0):]
+    if len(tail) > _GATE_REPORT_LINES:  # drop the per-test id listings first: the evidence/owner lines matter more
+        kept = [line for line in tail if not line.startswith(("      - ", "      … "))]
+        tail = kept + [f"… {len(tail) - len(kept)} test id line(s) omitted"] if len(kept) < len(tail) else tail
+    shown = tail[:_GATE_REPORT_LINES]
+    hidden = len(tail) - len(shown)
     return shown + ([f"… {hidden} more line(s)"] if hidden > 0 else [])
 
 
