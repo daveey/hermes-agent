@@ -105,6 +105,54 @@ def test_lane_test_failing_for_another_reason_stays_a_failure(tmp_path):
     assert p.returncode == 1 and "skipped" not in p.stdout, p.stdout
 
 
+def test_lane_name_in_source_does_not_hide_an_unrelated_failure(tmp_path):
+    p = _run(tmp_path, {"test_update_ci_routing.py": f"""
+        def {LANE_TEST}():
+            lanes = ['tests-os']
+            assert 1 == 2
+    """})
+    assert p.returncode == 1 and "skipped" not in p.stdout, p.stdout
+
+
+def test_allowlisted_test_printing_needs_but_checking_js_stays_a_failure(tmp_path):
+    p = _run(tmp_path, {"test_update_ci_routing.py": _NEEDS + f"""
+        def {LANE_TEST}():
+            needs = [n for n in NEEDS if n != 'js-tests']
+            assert 'js-tests' in needs
+    """})
+    assert p.returncode == 1 and "skipped" not in p.stdout, p.stdout
+
+
+@pytest.mark.parametrize("container", ["['tests-os']", "{'tests-os': {'enabled': False}}", "{'tests-os', 'lint'}"])
+def test_allowlisted_test_printing_containers_but_checking_js_stays_a_failure(tmp_path, container):
+    p = _run(tmp_path, {"test_update_ci_routing.py": f"""
+        def {LANE_TEST}():
+            needs = {container}
+            assert 'js-tests' in needs
+    """})
+    assert p.returncode == 1 and "skipped" not in p.stdout, p.stdout
+
+
+@pytest.mark.parametrize("linux_ok,expected", [(True, 0), (False, 1)])
+def test_consumer_map_only_skips_when_the_os_consumer_is_the_only_failure(tmp_path, linux_ok, expected):
+    p = _run(tmp_path, {"test_update_ci_routing.py": f"""
+        def test_every_set_lane_reaches_its_consumer_whatever_the_other_lanes_say():
+            consumers = {{'tests/e2e': {linux_ok!r}, 'tests-os/e2e-windows': False}}
+            assert all(consumers.values()), consumers
+    """})
+    assert p.returncode == expected, p.stdout
+    assert ("skipped" in p.stdout) == (expected == 0), p.stdout
+
+
+def test_failure_printing_a_set_naming_tests_os_stays_a_failure(tmp_path):
+    p = _run(tmp_path, {"test_gate.py": """
+        def test_jobs():
+            jobs = {'tests-os', 'lint'}
+            assert 'js-tests' in jobs
+    """})
+    assert p.returncode == 1 and "skipped" not in p.stdout, p.stdout
+
+
 def test_parametrized_lane_test_still_becomes_a_skip(tmp_path):
     p = _run(tmp_path, {"test_update_ci_routing.py": _NEEDS + f"""
         import pytest

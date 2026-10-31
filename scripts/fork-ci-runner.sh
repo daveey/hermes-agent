@@ -167,6 +167,7 @@ PY
 cat >> tests/ci/conftest.py <<'PY'
 # [daveey] fork-ci-runner: tests-os is off on the fork (no macOS/Windows runner,
 # hosts/hermes-hub/gh-runner/README.md). Written by scripts/fork-ci-runner.sh.
+import ast as _fork_ast
 import pathlib as _fork_pathlib
 import re as _fork_re
 
@@ -197,6 +198,46 @@ _FORK_OS_LANE_TESTS = frozenset({
 })
 
 
+
+def _fork_os_lane_failure(item, rep):
+    """Inspect the crash, never the source/locals printed around it.
+
+    The allowlist remains the outer bound. Its mixed parameter cases and
+    consumer dictionaries need proof that the disabled OS lane is the failure,
+    not merely a lane mentioned alongside a broken Linux consumer.
+    """
+    message = str(getattr(getattr(rep.longrepr, "reprcrash", None), "message", ""))
+    params = getattr(getattr(item, "callspec", None), "params", {})
+    name = item.originalname or item.name
+    if name == "test_real_update_suites_gate_the_merge_when_their_lane_fires":
+        return (params.get("job") == "tests-os" and message ==
+                "TypeError: unsupported operand type(s) for +: 'bool' and 'str'")
+    if name == "test_selected_update_consumers_must_succeed":
+        if params.get("jobs") == ("tests-os",) and params.get("result") in ("absent", "skipped"):
+            return message.startswith("AssertionError: assert True is (")
+    # The routing tests print a flat consumer->bool map. Keep their known OS-only
+    # mismatch, but a False Linux consumer is a real regression even beside it.
+    if name not in {"test_pull_requests_and_main_pushes_never_run_e2e"}:
+        for raw in _fork_re.findall(r"\{[^{}]*\}", message):
+            try:
+                values = _fork_ast.literal_eval(raw)
+            except (ValueError, SyntaxError):
+                continue
+            if (isinstance(values, dict) and values and
+                    all(isinstance(k, str) and isinstance(v, bool) for k, v in values.items())):
+                failed = [k for k, v in values.items() if not v]
+                if failed and all(k.startswith("tests-os/") or k == "desktop_updater" for k in failed):
+                    return True
+    # Remove container reprs, recursively, before looking for an OS-lane subject.
+    # This also strips nested jobs dicts: incidental lists/dicts/sets cannot grant a skip.
+    while True:
+        stripped = _fork_re.sub(r"\[[^\[\]{}]*\]|\{[^\[\]{}]*\}", "", message)
+        if stripped == message:
+            break
+        message = stripped
+    return bool(_FORK_OS_LANE_RE.search(message))
+
+
 @_fork_pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
@@ -204,7 +245,7 @@ def pytest_runtest_makereport(item, call):
     # A fork_guard test asserts the fork's own wiring: its failure is real even when it names tests-os.
     if (_FORK_NO_OS_LANE and rep.when == "call" and rep.failed and not item.get_closest_marker("fork_guard")
             and item.nodeid.split("[")[0] in _FORK_OS_LANE_TESTS
-            and _FORK_OS_LANE_RE.search(str(rep.longrepr))):
+            and _fork_os_lane_failure(item, rep)):
         rep.outcome = "skipped"
         rep.longrepr = (str(item.path), item.location[1] or 0, "fork: asserts the macOS/Windows tests-os lane, which is off on daveey/hermes")
 PY

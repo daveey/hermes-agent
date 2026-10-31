@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.fork_guard
+
 _REPO = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location("classify_changes", _REPO / "scripts/ci/classify_changes.py")
 assert _spec and _spec.loader

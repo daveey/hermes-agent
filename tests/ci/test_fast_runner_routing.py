@@ -14,6 +14,8 @@ import subprocess
 import pytest
 from ruamel.yaml import YAML
 
+pytestmark = pytest.mark.fork_guard
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 FAST = {
