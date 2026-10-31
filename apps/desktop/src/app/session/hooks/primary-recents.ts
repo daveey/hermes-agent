@@ -1,4 +1,22 @@
+import type { DesktopConnectionsRegistry } from '@/global'
 import type { SessionInfo, SidebarSessionsResponse } from '@/hermes'
+
+/**
+ * [daveey] Which connection holds "this Mac's own chats": the registry primary, falling back to the window's primary
+ * socket only without a registry. Switching the window to another gateway re-homes its primary SOCKET there, so
+ * `primaryGatewayConnectionId()` then names that gateway too: it matched the window's connection, no local row was
+ * listed, and pinned local rows lived on as frozen keep-set copies (a stale `turn_live` blanked a parked chat's
+ * grey waiting stripe). A local-kind target is read passively: an absent local backend is no reason to spawn one.
+ */
+export function ownRecentsConnection(
+  registry: DesktopConnectionsRegistry | null | undefined,
+  windowPrimary: string
+): { connectionId: string; passive: boolean } {
+  const connectionId = registry?.primary?.trim() || windowPrimary
+  const kind = registry?.connections?.find(entry => entry.id === connectionId)?.kind
+
+  return { connectionId, passive: kind === 'local' || (!kind && connectionId === 'local') }
+}
 
 /**
  * [daveey] The sidebar list follows the window's connection. While the window is on another gateway (the hub), that

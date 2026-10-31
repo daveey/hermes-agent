@@ -230,6 +230,8 @@ export interface SidebarSessionsRequest {
   messagingExclude: string[]
   /** [daveey] Ask this connection instead of the window's (the primary's own recents while the window is remote). */
   connectionId?: string
+  /** [daveey] Never spawn the target backend for this read (this device's list while the window is remote). */
+  passive?: boolean
 }
 
 // The batched /sidebar endpoint shipped later than the per-slice route, so a
@@ -336,6 +338,7 @@ export async function listSidebarSessions(req: SidebarSessionsRequest): Promise<
   try {
     result = await hermesApi<SidebarSessionsResponse>({
       ...(req.connectionId ? { connectionId: req.connectionId } : profileScoped()),
+      ...(req.passive ? { passive: true } : {}),
       path: `/api/profiles/sessions/sidebar?${params.toString()}`,
       timeoutMs: SESSION_LIST_REQUEST_TIMEOUT_MS
     })

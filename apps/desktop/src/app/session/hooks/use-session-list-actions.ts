@@ -9,6 +9,7 @@ import {
   SIDEBAR_EXCLUDED_SOURCES
 } from '@/lib/session-source'
 import { markSidebarLive } from '@/store/boot-snapshot'
+import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { gatewayActivationEpoch, pinnedPrimaryGatewayConnectionId, primaryGatewayConnectionId } from '@/store/gateway'
 import {
   $pinnedSessionIds,
@@ -61,7 +62,7 @@ import { $sessionTiles, $workingSessionIds, getRecentlySettledSessionIds } from 
 
 import { refreshCronJobs as refreshCronJobsStore } from '../../cron/cron-actions'
 
-import { withPrimaryRecents } from './primary-recents'
+import { ownRecentsConnection, withPrimaryRecents } from './primary-recents'
 import { refreshRetainedKanban, withKanbanEvidence } from './refresh-retained-kanban'
 
 /** [daveey] Backoff for re-listing while a failed list leaves owners stale (last value repeats). */
@@ -407,10 +408,10 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
 
         // [daveey] A window on another gateway still lists this Mac's own chats live (see primary-recents.ts).
         const fetchPage = () => {
-          const primary = primaryGatewayConnectionId()
+          const own = ownRecentsConnection($connectionsRegistry.get(), primaryGatewayConnectionId())
 
-          return withPrimaryRecents(listSidebarSessions(pageRequest), requestConnection, primary, () =>
-            listSidebarSessions({ ...pageRequest, connectionId: primary })
+          return withPrimaryRecents(listSidebarSessions(pageRequest), requestConnection, own.connectionId, () =>
+            listSidebarSessions({ ...pageRequest, connectionId: own.connectionId, passive: own.passive })
           )
         }
 

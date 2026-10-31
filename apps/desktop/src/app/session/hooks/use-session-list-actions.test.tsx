@@ -3,9 +3,12 @@ import { act, cleanup, render, renderHook } from '@testing-library/react'
 import { Suspense } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { DesktopConnectionsRegistry } from '@/global'
 import { type SessionInfo, setApiRequestConnection, type SidebarSessionsResponse } from '@/hermes'
 import hubSyncPlugin from '@/plugins/hub-sync/plugin'
+import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $cronJobs, setCronJobs } from '@/store/cron'
+import { setPrimaryGatewayConnectionId } from '@/store/gateway'
 import {
   beginGatewaySwitch,
   endGatewaySwitch,
@@ -238,6 +241,71 @@ describe("this Mac's own chats while the window is on another gateway", () => {
     expect(painted).toHaveLength(1)
     expect(painted[0]).toMatchObject({ cron_active: true })
     expect(painted[0].offline_synced_at).toBeUndefined()
+  })
+
+  // [daveey] Switching the window to the hub re-homes its primary SOCKET there, so primaryGatewayConnectionId()
+  // named the hub, the window and "primary" matched and no local row was listed. Pinned local rows then survived
+  // only through the keep set as frozen copies (a stale `turn_live` from an ended turn kept a parked chat from
+  // painting its grey waiting stripe; audit 2026-10-30, 20261026_170127_f07c32). This Mac is the registry primary.
+  it("lists the registry primary's recents when the window's primary socket moved to the hub", async () => {
+    setApiRequestConnection('hermes-hub')
+    setPrimaryGatewayConnectionId('hermes-hub', 'remote')
+    $connectionsRegistry.set({
+      connections: [
+        { id: 'local', kind: 'local', label: 'This device' },
+        { id: 'hermes-hub', kind: 'ssh', label: 'Hub' }
+      ],
+      primary: 'local',
+      version: 1
+    } as DesktopConnectionsRegistry)
+    listSidebarSessions.mockImplementation((req: { connectionId?: string }) =>
+      Promise.resolve(
+        req.connectionId === 'local'
+          ? sidebar({ sessions: [row('parked-chat', { pinned: true })] })
+          : sidebar({ sessions: [row('h1', { connection_id: 'hermes-hub' })] })
+      )
+    )
+    $sessions.set([row('parked-chat', { connection_id: 'local', pinned: true, turn_live: true })])
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    try {
+      await act(async () => {
+        await result.current.refreshSessions()
+      })
+
+      expect(listSidebarSessions).toHaveBeenCalledTimes(2)
+      // This device is observational here: an absent local backend is no reason to spawn one.
+      expect(listSidebarSessions.mock.calls[1][0]).toMatchObject({ connectionId: 'local', passive: true })
+      const parked = $sessions.get().find(s => s.id === 'parked-chat')
+      expect(parked).toMatchObject({ connection_id: 'local' })
+      expect(parked?.turn_live).toBeUndefined()
+    } finally {
+      setPrimaryGatewayConnectionId(null)
+      $connectionsRegistry.set(null)
+    }
+  })
+
+  it('asks once when the registry primary is the window connection', async () => {
+    setApiRequestConnection('hermes-hub')
+    setPrimaryGatewayConnectionId('hermes-hub', 'remote')
+    $connectionsRegistry.set({
+      connections: [{ id: 'hermes-hub', kind: 'ssh', label: 'Hub' }],
+      primary: 'hermes-hub',
+      version: 1
+    } as DesktopConnectionsRegistry)
+    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('h1', { connection_id: 'hermes-hub' })] }))
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    try {
+      await act(async () => {
+        await result.current.refreshSessions()
+      })
+
+      expect(listSidebarSessions).toHaveBeenCalledTimes(1)
+    } finally {
+      setPrimaryGatewayConnectionId(null)
+      $connectionsRegistry.set(null)
+    }
   })
 
   it('keeps the hub page when the primary list fails', async () => {

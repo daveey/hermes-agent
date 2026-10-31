@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import type { DesktopConnectionsRegistry } from '@/global'
 import type { SessionInfo, SidebarSessionsResponse } from '@/hermes'
 
-import { mergePrimaryRecents, withPrimaryRecents } from './primary-recents'
+import { mergePrimaryRecents, ownRecentsConnection, withPrimaryRecents } from './primary-recents'
 
 const row = (id: string, over: Partial<SessionInfo> = {}): SessionInfo =>
   ({ id, message_count: 3, profile: 'default', title: id, ...over }) as SessionInfo
@@ -60,5 +61,23 @@ describe('withPrimaryRecents', () => {
       ['h1', 'hermes-hub'],
       ['h1', 'local']
     ])
+  })
+})
+
+describe('ownRecentsConnection', () => {
+  const registry = (primary: string, kind: 'local' | 'ssh'): DesktopConnectionsRegistry =>
+    ({ connections: [{ id: primary, kind, label: primary }], primary, version: 1 }) as DesktopConnectionsRegistry
+
+  it('names the registry primary, not the window primary socket that moved to the hub', () => {
+    expect(ownRecentsConnection(registry('local', 'local'), 'hermes-hub')).toEqual({ connectionId: 'local', passive: true })
+  })
+
+  it('reads a remote registry primary actively', () => {
+    expect(ownRecentsConnection(registry('mini', 'ssh'), 'hermes-hub')).toEqual({ connectionId: 'mini', passive: false })
+  })
+
+  it('falls back to the window primary without a registry (legacy topology)', () => {
+    expect(ownRecentsConnection(null, 'local')).toEqual({ connectionId: 'local', passive: true })
+    expect(ownRecentsConnection(null, 'hermes-hub')).toEqual({ connectionId: 'hermes-hub', passive: false })
   })
 })
