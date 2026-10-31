@@ -12,8 +12,11 @@ landed through a pull request from that same branch. main is protected for admin
 refuses any direct push whose exact sha lacks a green "All required checks pass (v2)" (ci.yaml).
 The gate opens (or reuses) the PR, waits across calls until that check is green on exactly X, then
 runs ``gh pr merge --merge --match-head-commit X`` (never --admin). Nothing is ever force-pushed.
-Red, pending or unreadable evidence is a refusal. A protected-branch refusal is reported as REFUSED
-with GitHub's own message, never as "main moved".
+Red, pending or unreadable evidence is a refusal. A protection refusal is reported as REFUSED
+with GitHub's own message, never as "main moved". A red full suite's REFUSED line is followed by
+evidence lines (scripts/ci/upstream_sync_diagnostics.py): each failed job, its failing test ids,
+whether main at the sync's fork point already fails them, and the matching nightly-e2e card. They
+never change the verdict.
 
 Each call also lands any earlier staged candidate that went green (hosts that merged upstream at
 different times converge on one tested sync), keeps at most one candidate in CI, and stops staging
@@ -129,6 +132,7 @@ class Candidate:
     status: str  # green | red | pending
     url: str
     updated_at: float
+    run_id: int = 0  # the run the verdict came from: diagnostics read its jobs
 
 
 def _ts(value) -> float:
@@ -161,7 +165,8 @@ def candidates(gh_repo, request) -> dict[str, Candidate]:
             continue  # never reached a verdict: neither evidence nor a failure
         else:
             status = "red"
-        found[head] = Candidate(head, status, run["html_url"], _ts(run.get("updated_at") or run.get("created_at")))
+        found[head] = Candidate(head, status, run["html_url"], _ts(run.get("updated_at") or run.get("created_at")),
+                                run["id"])
     return found
 
 
@@ -323,6 +328,20 @@ def _stage_or_wait(repo, head, found, now) -> int:
     return NOT_YET
 
 
+def _explain_red(repo, cand: Candidate, main: str, gh_repo: str, request, gh) -> None:
+    """Which jobs/tests failed and whether main already fails them (upstream_sync_diagnostics). Evidence only:
+    the verdict is already REFUSED, so a diagnostic fault is printed and never changes it."""
+    try:
+        if __package__:  # imported as scripts.ci.upstream_sync (tests): the same module object they patch
+            from . import upstream_sync_diagnostics as diagnostics
+        else:  # run as a script: scripts/ci is sys.path[0]
+            import upstream_sync_diagnostics as diagnostics
+
+        diagnostics.explain(repo, cand, main, gh_repo, request, gh, required=REQUIRED_JOBS, git=git)
+    except Exception as exc:  # health: allow BLE001 -- evidence only: any fault is printed, REFUSED stands
+        print(f"  diagnostics unavailable: {exc!r}")
+
+
 def advance(repo: Path, head: str | None, *, gh_repo: str, request=github_pages, gh=gh_cli, now=None) -> int:
     """Land green candidates, then report ``head``'s state or stage it (module doc, exit codes)."""
     now = time.time() if now is None else now
@@ -344,6 +363,7 @@ def advance(repo: Path, head: str | None, *, gh_repo: str, request=github_pages,
             return land(repo, cand, gh_repo=gh_repo, request=request, gh=gh)
         if cand.status == "red":
             print(f"REFUSED: the full suite failed on {head[:10]}: {cand.url}")
+            _explain_red(repo, cand, main, gh_repo, request, gh)
             return REFUSED
         print(f"NOT YET: the full suite is still running on {head[:10]}: {cand.url}")
         return NOT_YET
