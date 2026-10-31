@@ -176,8 +176,6 @@ import pytest as _fork_pytest
 _FORK_NO_OS_LANE = "# fork: no macOS/Windows runner" in (
     _fork_pathlib.Path(__file__).resolve().parents[2] / ".github/workflows/ci.yaml"
 ).read_text(encoding="utf-8")
-# desktop_updater's only consumer is tests-os[windows].
-_FORK_OS_LANE_RE = _fork_re.compile(r"tests-os|e2e-windows|_windows_desktop_updater|os-tests\[|'desktop_updater': False")
 # Only these upstream tests (node id without the parametrize suffix) have the tests-os lane as their
 # subject, so only they may become skips. A failure is never a skip just because its report prints the
 # lane name (e.g. the `all-checks-pass.needs` list): every other test, including every fork-authored
@@ -222,10 +220,11 @@ def _fork_os_lane_failure(item, rep):
         "test_update_path_change_selects_every_suite_that_exercises_it",
         "test_update_path_change_reaches_the_suites_that_consume_it",
     }:
-        return bool(_fork_re.search(
+        if _fork_re.search(
             r"desktop_updater never reaches its tests\nassert False\n \+  where False = _windows_desktop_updater_tests_selected\(",
             message,
-        ))
+        ):
+            return True
     if name == "test_pull_requests_and_main_pushes_never_run_e2e":
         # This predicate checks lane membership, not the values printed inside run.
         while True:
@@ -233,11 +232,11 @@ def _fork_os_lane_failure(item, rep):
             if stripped == message:
                 break
             message = stripped
-        return (message == "AssertionError: assert ('tests' in  and 'tests-os' in )" or
+        return (bool(_fork_re.fullmatch(r"AssertionError: assert \('tests' in [\s},.]* and 'tests-os' in [\s},.]*\)", message)) or
                 bool(_fork_re.search(r"(?:^|\n|AssertionError: )assert 'tests-os' (?:not )?in *$", message)))
     # Remaining allowlisted predicates are all(consumer_map.values()). Equality
     # diffs and membership failures aren't this assertion, even if they name OS.
-    if not _fork_re.search(r"(?:^|\n)assert False\n \+  where False = all\(dict_values\(", message):
+    if not _fork_re.search(r"(?:^AssertionError: |\n)assert False\n \+  where False = all\(dict_values\(", message):
         return False
     maps = []
     for raw in _fork_re.findall(r"\{[^{}]*\}", message):
