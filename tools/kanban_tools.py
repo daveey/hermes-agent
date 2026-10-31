@@ -1221,7 +1221,7 @@ def _handle_block(args: dict, **kw) -> str:
                            blocker_id=blocker_id, wake_check=wake[0], check_every=wake[1], awaiting=awaiting,
                            clock_only=wake[2], human_request=kb.redact_review_value(args.get("human_request")),
                            clear_blocker=clear_blocker)
-        _check(ok, f"could not block {tid} (unknown id or not in running/ready)")
+        _check(ok, f"could not block {tid} (unknown id or not in running/ready/triage)")
         escalated = _escalated(kb, conn, tid)
         if escalated:
             return escalated
@@ -1280,7 +1280,7 @@ def _handle_schedule(args: dict, **kw) -> str:
             wake_check=wake[0], check_every=wake[1], clock_only=wake[2], awaiting=awaiting,
             clear_blocker=clear_blocker)
         _check(ok, "" if ok else krc.human_answer_refusal(conn, tid, "schedule")
-               or f"could not schedule {tid} (unknown id, or not in todo/ready/running/blocked)")
+               or f"could not schedule {tid} (unknown id, or not in todo/ready/running/blocked/triage)")
         escalated = _escalated(kb, conn, tid)
         if escalated:
             return escalated

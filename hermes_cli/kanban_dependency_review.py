@@ -53,9 +53,11 @@ def apply_block_update(conn, task_id, expected_run_id, kind, new_status, set_sql
     sql = f"""
         UPDATE tasks
            SET status = '{new_status}', claim_lock = NULL, claim_expires = NULL,
+               consecutive_failures = CASE WHEN status = 'triage' THEN 0 ELSE consecutive_failures END,
+               last_failure_error = CASE WHEN status = 'triage' THEN NULL ELSE last_failure_error END,
                worker_pid = NULL, {set_sql}
          WHERE id = ?
-           AND (status IN ('running', 'ready') OR (status = 'review' AND ? = 'assignment'))
+           AND (status IN ('running', 'ready', 'triage') OR (status = 'review' AND ? = 'assignment'))
     """
     params = (*params, task_id, kind)
     if expected_run_id is not None:

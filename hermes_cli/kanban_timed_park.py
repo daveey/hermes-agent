@@ -139,7 +139,7 @@ def park(
     awaiting=None, blocker_id: Optional[str] = None, run_metadata: Optional[dict] = None,
     blocker_wake: bool = False, probe_host: Optional[str] = None,
 ) -> bool:
-    """``running``/``ready`` -> ``scheduled`` with a wake time. Caller holds the write txn.
+    """``running``/``ready``/``triage`` -> ``scheduled`` with a wake. Caller holds the write txn.
     ``from_untyped_block``: an untyped ``blocked`` card with no live run (classify-in-place) instead.
     ``awaiting`` names the producer (``kanban_awaiting.gate``: refused or escalated otherwise).
 
@@ -158,7 +158,7 @@ def park(
     else:
         wake_at = scheduled_until(reason, now=now) or now + DEFAULT_WAKE_SECONDS
     guard = ("status = 'blocked' AND block_kind IS NULL AND current_run_id IS NULL" if from_untyped_block
-             else "status IN ('running', 'ready')")
+             else "status IN ('running', 'ready', 'triage')")
     if blocker_wake:
         record = {"kind": "clock", "inferred": True, "shared_blocker": blocker_id}
     else:
@@ -172,6 +172,8 @@ def park(
     wake_check, check_every = kwc.validate_park(
         wake_at=wake_at, wake_check=wake_check, check_every=check_every, clock_only=clock_only)
     sql = ("UPDATE tasks SET status = 'scheduled', human_request = NULL, claim_lock = NULL, claim_expires = NULL, "
+           "consecutive_failures = CASE WHEN status = 'triage' THEN 0 ELSE consecutive_failures END, "
+           "last_failure_error = CASE WHEN status = 'triage' THEN NULL ELSE last_failure_error END, "
            f"worker_pid = NULL WHERE id = ? AND {guard}")
     params: tuple = (task_id,)
     if expected_run_id is not None:

@@ -24,7 +24,9 @@ def schedule_task(
     ``AwaitingError``, and a third park on one premise escalates to an owner card instead.
 
     ``comment`` (``(author, body)``) is written in the same txn and only when the park lands
-    (``kanban_reason_comment``); ``human_answer_refusal`` explains the human-answer refusal."""
+    (``kanban_reason_comment``); ``human_answer_refusal`` explains the human-answer refusal.
+    Triage parks reset the dispatcher failure streak without an intermediate dispatchable
+    status; block-loop recurrence evidence is retained, as on unblock."""
     from hermes_cli.kanban_reason_comment import reason_comment
     with _kb.write_txn(conn), reason_comment(conn, task_id, comment) as noted:
         if _kb._awaiting_human_answer(conn, task_id):
@@ -50,12 +52,14 @@ def schedule_task(
         sql = """
             UPDATE tasks
                SET status       = 'scheduled',
+                   consecutive_failures = CASE WHEN status = 'triage' THEN 0 ELSE consecutive_failures END,
+                   last_failure_error = CASE WHEN status = 'triage' THEN NULL ELSE last_failure_error END,
                    human_request = NULL,
                    claim_lock   = NULL,
                    claim_expires= NULL,
                    worker_pid   = NULL
              WHERE id = ?
-               AND status IN ('todo', 'ready', 'running', 'blocked')
+               AND status IN ('todo', 'ready', 'running', 'blocked', 'triage')
         """
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
