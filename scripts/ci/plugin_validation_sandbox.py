@@ -66,6 +66,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 EXIT_SETUP = 125
@@ -571,6 +572,67 @@ def remove_tree(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
+def _ppid(pid: str) -> int | None:
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            return int(f.read().rpartition(b")")[2].split()[1])  # comm may hold spaces and ')'
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _child_pidfds(parent: int) -> list[int]:
+    """pidfds of ``parent``'s children: bwrap's one child is the sandbox's PID 1.
+
+    Taken while bwrap is still alive. ``pidfd_open`` pins the pid; the ppid read
+    after it proves the pid was not reaped and reused in between (an exited child
+    is kept: its pidfd only ever reports that it exited).
+    """
+    out = []
+    for pid in (p for p in os.listdir("/proc") if p.isdigit() and _ppid(p) == parent):
+        try:
+            fd = os.pidfd_open(int(pid))
+        except OSError:
+            continue  # already reaped
+        if _ppid(pid) in (parent, None):
+            out.append(fd)
+        else:
+            os.close(fd)
+    return out
+
+
+def _kill_and_wait(pidfds: list[int], timeout: float) -> bool:
+    """SIGKILL each sandbox PID 1 and wait for it to exit; False if one outlives ``timeout``.
+
+    Reaping bwrap does not mean the sandbox is gone: its PID 1 gets SIGKILL (from
+    --die-with-parent) only as bwrap exits, and the kernel then kills the rest of
+    the PID namespace asynchronously, so a sandboxed process can still be writing
+    into the overlay copy after ``proc.wait()`` returns. PID 1 only finishes exiting
+    once every other process in its namespace has exited and been reaped, so its
+    pidfd turning readable is the point after which nothing writes into scratch.
+    """
+    poller = select.poll()
+    for fd in pidfds:
+        try:
+            signal.pidfd_send_signal(fd, signal.SIGKILL)  # windows-footgun: ok — Linux-only script, main() refuses other platforms
+        except ProcessLookupError:
+            pass  # already exited; its pidfd is readable
+        except OSError as exc:  # e.g. EPERM: still wait, bounded, for --die-with-parent's kill
+            _log(f"could not SIGKILL a sandboxed process: {exc}")
+        poller.register(fd, select.POLLIN)
+    pending = set(pidfds)
+    end = time.monotonic() + timeout
+    while pending:
+        left = end - time.monotonic()
+        if left <= 0:
+            break
+        for fd, _ in poller.poll(left * 1000):
+            poller.unregister(fd)
+            pending.discard(fd)
+    for fd in pidfds:
+        os.close(fd)
+    return not pending
+
+
 def run_host(args) -> int:
     env = dict(os.environ)
     if not args.command:
@@ -592,7 +654,14 @@ def run_host(args) -> int:
     proxy = None
     proc = None
 
+    def _quiet() -> None:
+        # `timeout` signals the wrapper twice (it, then its process group): a second
+        # SystemExit raised inside the finally below would skip the cleanup.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+
     def _terminate(signum, _frame):
+        _quiet()
         raise SystemExit(128 + signum)
 
     signal.signal(signal.SIGTERM, _terminate)
@@ -609,16 +678,26 @@ def run_host(args) -> int:
         # bwrap itself gets no inherited secrets either (it does not need any).
         # bwrap's own setup failures exit 1 like a failing command; either way the
         # caller sees a nonzero status and the entry fails.
-        proc = subprocess.Popen(argv, env={"PATH": "/usr/bin:/bin"}, close_fds=True)
+        # Own session: `timeout 600` signals its whole process group, and a group
+        # SIGTERM that also reached bwrap killed it before the wrapper could take
+        # pidfds of the sandbox, so the cleanup below never stopped the sandbox.
+        # Now only the wrapper is signalled, and it tears bwrap down below.
+        # detached-spawn: ok — --die-with-parent kills bwrap with the wrapper; the session only keeps group signals off it
+        proc = subprocess.Popen(argv, env={"PATH": "/usr/bin:/bin"}, close_fds=True, start_new_session=True)
         # health: allow HX006 -- this wait IS the sandboxed command's runtime; the caller bounds it (the job's `timeout 600`) and SIGTERM/SIGINT tear the namespace down below
         return proc.wait()
     finally:
+        _quiet()
         if proc is not None and proc.poll() is None:
+            inits = _child_pidfds(proc.pid)
             proc.kill()  # bwrap's PID namespace (every sandboxed process) dies with it
             try:
-                proc.wait(timeout=30)  # reaped before its scratch (the overlay copy) is removed
+                proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 pass
+            # Scratch (the overlay copy) is removed only once nothing in the sandbox can write to it.
+            if not _kill_and_wait(inits, timeout=30):
+                _log("sandboxed processes outlived 30s; scratch removal may be incomplete")
         if proxy:
             proxy.close()
         remove_tree(scratch)

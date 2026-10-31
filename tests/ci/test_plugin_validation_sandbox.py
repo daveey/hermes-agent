@@ -526,6 +526,108 @@ def test_the_jobs_timeout_kills_the_whole_sandbox(work):
     assert list(home.iterdir()) == []
 
 
+def _dead(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_bytes()
+    except OSError:
+        return True
+    return stat.rpartition(b")")[2].split()[0] == b"Z"
+
+
+@pytest.mark.parametrize("launch", ["wrapper", "timeout"])
+def test_scratch_is_removed_only_after_every_sandboxed_process_exits(work, launch):
+    """Regression (CI job 124558089350): reaping bwrap does not mean the sandbox is
+    gone. The kernel kills the rest of its PID namespace only after bwrap exits, so
+    the overlay copy was removed while a sandboxed process still wrote into it and a
+    plugin-sandbox-* dir survived the job's timeout. A fake bwrap makes that window
+    as wide as it gets: its one child (the sandbox's PID 1) keeps writing into the
+    copy and is not killed with it. The wrapper must stop that child before it
+    exits and leave no scratch behind.
+
+    ``wrapper`` sends SIGTERM to the wrapper alone. ``timeout`` is the job's shape:
+    GNU ``timeout`` signals the wrapper and then its whole process group, which
+    used to reach bwrap too and kill it before the wrapper could find the
+    sandbox's PID 1. The child ignores SIGTERM as a PID-namespace init does for
+    signals from outside its namespace."""
+    if launch == "timeout" and not shutil.which("timeout"):
+        pytest.skip("GNU timeout not installed")
+    home = work / "pm-home"
+    home.mkdir()
+    ready, stop = work / "writer.pid", work / "writer.stop"
+    fake = work / "fake-bwrap"
+    fake.write_text(textwrap.dedent(f"""\
+        #!{sys.executable}
+        import os, signal, sys, time
+        argv = sys.argv[1:]
+        copy = next(argv[i + 1] for i, a in enumerate(argv) if a == "--bind" and argv[i + 2] == {str(home)!r})
+        child = os.fork()
+        if child == 0:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            end, i = time.monotonic() + 60, 0
+            while time.monotonic() < end and not os.path.exists({str(stop)!r}):
+                i += 1
+                os.makedirs(f"{{copy}}/w/{{i}}", exist_ok=True)
+                if i == 1:
+                    with open({str(ready)!r} + ".tmp", "w") as f:
+                        f.write(str(os.getpid()))
+                    os.rename({str(ready)!r} + ".tmp", {str(ready)!r})
+            os._exit(0)
+        os.waitpid(child, 0)
+        """))
+    fake.chmod(0o755)
+    cmd = [sys.executable, "-I", str(SCRIPT), "--bwrap", str(fake), "--no-network",
+           "--overlay", str(home), "--overlay-mode", "copy", "--", "true"]
+    if launch == "timeout":
+        # SIGTERM to `timeout` runs the same handler as its expiry (signal the
+        # child, then the group); a long duration keeps the test off the clock.
+        cmd = ["timeout", "3600", *cmd]
+    proc = subprocess.Popen(cmd, env={**os.environ, "RUNNER_TEMP": str(work)}, stdin=subprocess.DEVNULL)
+    try:
+        wait_until(ready.exists, timeout=20, what="the sandboxed writer starting")
+        writer = int(ready.read_text())
+        proc.send_signal(15)
+        assert proc.wait(timeout=60) == 128 + 15
+        assert _dead(writer), "the wrapper exited while a sandboxed process still ran"
+        assert not list(work.glob("plugin-sandbox-*"))
+        assert list(home.iterdir()) == []
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        stop.touch()  # a writer that outlived a broken wrapper is no longer ours to signal
+
+
+@pytest.mark.parametrize("error, exits", [(PermissionError(1, "Operation not permitted"), False),
+                                          (PermissionError(1, "Operation not permitted"), True),
+                                          (ProcessLookupError(3, "No such process"), True)],
+                         ids=["eperm-still-running", "eperm-then-exits", "esrch"])
+def test_cleanup_survives_a_failed_sigkill(monkeypatch, capsys, error, exits):
+    """A pidfd_send_signal failure must not escape the wrapper's cleanup (which
+    would skip removing scratch): ESRCH means the process already exited; any
+    other error is logged and the wait for the process still runs, bounded."""
+    child = subprocess.Popen(["sleep", "60"])
+    fd = os.pidfd_open(child.pid)
+
+    def fail(_fd, _sig):
+        if exits:
+            child.kill()  # it dies anyway (bwrap's --die-with-parent / already gone)
+        raise error
+
+    monkeypatch.setattr(sandbox.signal, "pidfd_send_signal", fail)
+    try:
+        start = time.monotonic()
+        assert sandbox._kill_and_wait([fd], timeout=2) is exits
+        if not exits:
+            assert time.monotonic() - start >= 2
+        with pytest.raises(OSError):
+            os.fstat(fd)  # closed either way
+        logged = "could not SIGKILL" in capsys.readouterr().err
+        assert logged is isinstance(error, PermissionError)
+    finally:
+        child.kill()
+        child.wait()
+
+
 def _kernel_overlay() -> bool:
     bwrap = shutil.which("bwrap")
     return bool(bwrap) and sandbox.overlay_mode(bwrap, "auto") == "kernel"
