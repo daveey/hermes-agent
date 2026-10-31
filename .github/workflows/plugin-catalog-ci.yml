@@ -9,6 +9,23 @@ name: Plugin Catalog CI
 #                            reachable in the entry's repo, and the plugin
 #                            at that exact commit must pass
 #                            `hermes plugins validate`.
+#
+# Trusted base, untrusted data. A PR's catalog files are the only thing either
+# job takes from the PR, and only as bytes: each job reads them out of the PR
+# merge commit's tree into $RUNNER_TEMP as regular files, deletes the PR
+# checkout, and checks out the merge commit's first parent (the base branch tip
+# GitHub merged into) in its place. Everything the gate executes after that
+# (the structural validator, the setup-pm and retry actions, the PM-built
+# hermes, the sandbox wrapper, the payload scanner) is the base's, so a PR can
+# neither rewrite the validator that judges its own entries nor run its own
+# scanner, action or core outside the sandbox. Limit: this workflow file itself
+# runs from the PR (pull_request event), so a PR editing it is stopped only by
+# review of the workflow, not by anything here.
+#
+# Bootstrap: each job's "Confirm the trusted checkout" lists the tools it will
+# run and fails if the base lacks one, never falling back to the PR's copy. A
+# PR that adds a tool (the sandbox wrapper, say) changes no entry, so neither
+# job runs that tool for it; entry PRs need a base that already has it.
 
 on:
   pull_request:
@@ -27,7 +44,86 @@ jobs:
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
+          # The merge commit and its first parent, the trusted base.
+          fetch-depth: 2
           persist-credentials: false # this job is read-only
+
+      - name: Export the PR's catalog data
+        id: data
+        run: |
+          set -euo pipefail
+          if ! git rev-parse -q --verify 'HEAD^2' >/dev/null; then
+            echo "::error::expected the pull_request merge commit as HEAD"
+            exit 1
+          fi
+          # Every file under plugin-catalog/ in the merged tree, read from the
+          # tree (never the worktree) and written as a regular file. A symlink
+          # or submodule there would have the validator read something other
+          # than the bytes that land, so it fails here instead.
+          DATA="${RUNNER_TEMP:?}/catalog-data"
+          rm -rf -- "$DATA"
+          mkdir -p -- "$DATA/plugin-catalog"
+          LIST=$(mktemp)
+          git ls-tree -r -z --full-tree \
+            --format='%(objectmode) %(objecttype) %(objectname)%x09%(path)' HEAD -- plugin-catalog/ > "$LIST"
+          BAD=0
+          while IFS= read -r -d '' rec; do
+            meta=${rec%%$'\t'*} path=${rec#*$'\t'}
+            case "/$path/" in */../*|*/./*|*//*) BAD=1; continue ;; esac
+            case "$meta" in
+              "100644 blob "*|"100755 blob "*)
+                mkdir -p -- "$DATA/$(dirname -- "$path")"
+                git cat-file blob "${meta##* }" > "$DATA/$path" ;;
+              *) BAD=1 ;;
+            esac
+          done < "$LIST"
+          rm -f -- "$LIST"
+          if [ "$BAD" -ne 0 ]; then
+            echo "::error::plugin-catalog/ may only hold regular files"
+            exit 1
+          fi
+          {
+            echo "base=$(git rev-parse 'HEAD^1')"
+            echo "dir=$DATA/plugin-catalog"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Drop the PR checkout
+        run: |
+          set -euo pipefail
+          # Nothing of the PR may stay where the gate executes from; its catalog
+          # bytes were exported above.
+          find "${GITHUB_WORKSPACE:?}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+
+      - name: Check out the trusted base
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
+        with:
+          ref: ${{ steps.data.outputs.base }}
+          persist-credentials: false
+
+      - name: Confirm the trusted checkout
+        env:
+          TRUSTED_BASE: ${{ steps.data.outputs.base }}
+          # Every workspace file this job executes.
+          TRUSTED_TOOLS: scripts/validate_plugin_catalog.py .github/actions/retry/action.yml
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse HEAD)" != "${TRUSTED_BASE:?}" ] \
+              || [ -n "$(git status --porcelain --ignored --untracked-files=all)" ]; then
+            echo "::error::the workspace is not exactly the trusted base $TRUSTED_BASE"
+            exit 1
+          fi
+          # Bootstrap: a base from before a tool was added cannot run it, and
+          # the PR's copy is never a fallback. The PR that adds a tool changes
+          # no entry, so it never reaches the step that runs it; an entry PR on
+          # an older base fails here and passes once rebased.
+          MISSING=""
+          for tool in ${TRUSTED_TOOLS:?}; do
+            if [ -L "$tool" ] || [ ! -f "$tool" ]; then MISSING="$MISSING $tool"; fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::the trusted base $TRUSTED_BASE predates this gate (missing:$MISSING); rebase the PR onto its base branch"
+            exit 1
+          fi
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -39,22 +135,29 @@ jobs:
           command: pip install ruamel.yaml==0.18.17
 
       - name: Validate catalog files (structural)
+        env:
+          CATALOG_DATA: ${{ steps.data.outputs.dir }}
         run: |
           set -euo pipefail
-          # Validating the whole directory is simpler than diffing and keeps
-          # the invariant that EVERYTHING in plugin-catalog/ stays valid.
-          python3 scripts/validate_plugin_catalog.py plugin-catalog/
+          # The base's validator over the PR's exported catalog. Validating the
+          # whole directory keeps the invariant that EVERYTHING in
+          # plugin-catalog/ stays valid.
+          python3 -I scripts/validate_plugin_catalog.py "${CATALOG_DATA:?}/"
 
   pinned-source-validate:
+    # [daveey] Plugin code runs only inside bubblewrap (see the validate step).
+    # hermes-hub is served only by the tfgar-hub group: one throwaway VM per job
+    # from the runner AMI, whose provision.sh (hosts/hermes-ci-runners/packer)
+    # installs bubblewrap, persists kernel.apparmor_restrict_unprivileged_userns=0
+    # and fails the image build unless the runner user can start bwrap. The
+    # sandbox step below proves it on every run and fails closed if not.
     runs-on: [self-hosted, hermes-hub]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
-          # Full commit graph + tags, blobs on demand: the diff below needs the
-          # merge commit's first parent, and Hermes resolves its own version
-          # from the release tags merged into HEAD. A shallow checkout reports
-          # "unknown", which plugins checking the host version reject (omh).
+          # Full commit graph, blobs on demand: the admission check below needs
+          # the merge commit's first parent and its upstream merge-bases.
           fetch-depth: 0
           filter: blob:none
           # `hermes plugins validate` below runs pinned-repo code; keep the
@@ -92,36 +195,70 @@ jobs:
           CHANGED=$(printf '%s' "$CHANGED" | grep -v '/removed\.yaml$' || true)
 
           if [ -n "$CHANGED" ]; then
-            # Admission PRs must be data-only: the gate's own enforcement code
-            # (this workflow, the validator, the composite actions, the built
-            # hermes) resolves from the PR checkout, so an entry PR that also
-            # touches tooling could neuter the gate vetting it. Contributor
-            # email maps are data the gate never executes; README/policy/CI PRs
-            # with no entry change skip this check. Without renames, both the
-            # old and the new path of a moved file count here.
-            ALL=$(git diff --no-renames --name-only 'HEAD^1' HEAD)
-            OUTSIDE=$(printf '%s' "$ALL" | grep -vE '^(plugin-catalog|contributors/emails)/' || true)
+            # Entry PRs are data-only: an entry PR that also changes anything
+            # outside the data dirs is refused, unless it is an upstream sync.
+            # The gate never executes the PR's other files (every tool below
+            # runs from the trusted base), so this keeps review of an entry PR
+            # to its entries, not the gate's integrity. Contributor email maps
+            # are data; README/policy/CI PRs with no entry change skip this.
+            # Without renames, both the old and the new path of a moved file
+            # count here. Paths are read NUL-delimited: git quotes an unusual
+            # name in line output.
+            PATHS_Z=$(mktemp)
+            git diff -z --no-renames --name-only 'HEAD^1' HEAD > "$PATHS_Z"
+            OUTSIDE=$(while IFS= read -r -d '' f; do
+                case "$f" in plugin-catalog/*|contributors/emails/*) ;; *) printf '%s\n' "$f" ;; esac
+              done < "$PATHS_Z")
+            rm -f -- "$PATHS_Z"
             if [ -n "$OUTSIDE" ]; then
               # (fork) An upstream sync lands upstream's catalog entries together
-              # with upstream's core in one merge. Such a PR passes only if EVERY
-              # changed entry is identical (mode and blob) to the newest upstream
-              # commit it contains, its merge-base with upstream main, which
-              # upstream's own catalog gate admitted. Provenance is the content,
-              # never the branch name: a single entry of the PR's own (new,
-              # re-pinned or edited) keeps the data-only rule, and an unreachable
-              # upstream fails closed. Every entry is still validated below.
-              UNTRUSTED="$CHANGED"
-              if git fetch --quiet --no-tags --filter=blob:none "$UPSTREAM_REPO" \
-                    '+refs/heads/main:refs/catalog-gate/upstream' </dev/null \
-                  && UPSTREAM_BASE=$(git merge-base HEAD refs/catalog-gate/upstream); then
+              # with upstream's core in one merge. OLD_UP is the base's (HEAD^1)
+              # merge-base with upstream main, NEW_UP the merge commit's, and the
+              # PR must advance it. Every changed ENTRY must then be upstream's
+              # own OLD_UP..NEW_UP change to an entry the fork had not modified
+              # (base == OLD_UP, result == NEW_UP, NEW_UP != OLD_UP), so a sync
+              # can neither restore a fork-deleted entry, overwrite or revert a
+              # fork-local pin, nor slip in an entry of its own. The rest of the
+              # merge (core, actions, scanners, conflict resolutions) is not
+              # checked here: none of it is executed by this gate. Trees alone
+              # answer (mode + object id), so the blobless checkout needs no
+              # credential, and anything unresolvable fails closed. Every
+              # admitted entry is still validated below.
+              tree_entry() {
+                local out
+                out=$(git --literal-pathspecs ls-tree -z --format='%(objectmode) %(objectname)' \
+                        "$1" -- "$2" | tr -d '\0') || return 1
+                printf '%s' "$out"
+              }
+              upstream_entry() {
+                local head new base old
+                head=$(tree_entry HEAD "$1") && new=$(tree_entry "$NEW_UP" "$1") \
+                  && base=$(tree_entry 'HEAD^1' "$1") && old=$(tree_entry "$OLD_UP" "$1") || return 1
+                [ -n "$head" ] && [ "$head" = "$new" ] && [ "$base" = "$old" ] && [ "$new" != "$old" ]
+              }
+              one_base() {
+                local bases
+                bases=$(git merge-base --all "$1" refs/catalog-gate/upstream) || return 1
+                [ -n "$bases" ] && [ "$(printf '%s\n' "$bases" | wc -l)" -eq 1 ] || return 1
+                printf '%s' "$bases"
+              }
+              ADMIT_REASON="" OLD_UP="" NEW_UP=""
+              if ! git fetch --quiet --no-tags --filter=blob:none "$UPSTREAM_REPO" \
+                    '+refs/heads/main:refs/catalog-gate/upstream' </dev/null; then
+                ADMIT_REASON="could not resolve upstream main"
+              elif ! OLD_UP=$(one_base 'HEAD^1') || ! NEW_UP=$(one_base HEAD); then
+                ADMIT_REASON="no single merge-base with upstream main"
+              elif [ "$OLD_UP" = "$NEW_UP" ] || ! git merge-base --is-ancestor "$OLD_UP" "$NEW_UP"; then
+                ADMIT_REASON="the PR does not advance the base's upstream merge-base $OLD_UP"
+              fi
+              if [ -n "$ADMIT_REASON" ]; then
+                echo "::warning::$ADMIT_REASON; not an upstream sync"
+                UNTRUSTED="$CHANGED"
+              else
                 UNTRUSTED=$(printf '%s\n' "$CHANGED" | while IFS= read -r f; do
                     [ -z "$f" ] && continue
-                    ours=$(git ls-tree HEAD -- "$f" | cut -f1)
-                    theirs=$(git ls-tree "$UPSTREAM_BASE" -- "$f" | cut -f1)
-                    if [ -z "$ours" ] || [ "$ours" != "$theirs" ]; then printf '%s\n' "$f"; fi
+                    upstream_entry "$f" || printf '%s\n' "$f"
                   done)
-              else
-                echo "::warning::could not resolve upstream main; no entry counts as upstream-admitted"
               fi
               if [ -n "$UNTRUSTED" ]; then
                 echo "::error::catalog entry PRs may only touch plugin-catalog/** and contributors/emails/**, found:"
@@ -129,44 +266,137 @@ jobs:
                 # workflow command into the log.
                 printf '%s' "$OUTSIDE" | tr '\0\n' ' '
                 echo
-                echo "Entries not identical to upstream main's merge-base:"
+                echo "Entries that are not upstream's change to a fork-unmodified entry:"
                 printf '%s' "$UNTRUSTED" | tr '\0\n' ' '
                 echo
                 exit 1
               fi
-              echo "Upstream sync: every changed entry matches upstream $UPSTREAM_BASE; non-catalog changes allowed."
+              echo "Upstream sync: every changed entry is upstream $OLD_UP..$NEW_UP verbatim on a fork-unmodified entry."
             fi
+
+            # The candidates, as the only bytes the validation below takes from
+            # the PR: each entry's blob from the merge commit's tree, written as
+            # a regular file outside the workspace (which is about to become the
+            # base). A non-regular entry (symlink, submodule) is not exported and
+            # fails validation as "not a regular file".
+            # No credential needed: these are HEAD's blobs, which actions/checkout
+            # fetched for the worktree while its token was still configured. Any
+            # other blob would be a lazy fetch from the private fork without a
+            # token, which fails the step (closed), never prompts.
+            CAND="${RUNNER_TEMP:?}/catalog-candidates"
+            rm -rf -- "$CAND"
+            mkdir -p -- "$CAND"
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              case "/$f/" in */../*|*/./*|*//*) continue ;; esac
+              rec=$(git --literal-pathspecs ls-tree -z --format='%(objectmode) %(objecttype) %(objectname)' \
+                      HEAD -- "$f" | tr -d '\0')
+              case "$rec" in
+                "100644 blob "*|"100755 blob "*)
+                  mkdir -p -- "$CAND/$(dirname -- "$f")"
+                  git cat-file blob "${rec##* }" > "$CAND/$f" ;;
+              esac
+            done <<< "$CHANGED"
+            echo "candidates=$CAND" >> "$GITHUB_OUTPUT"
           fi
 
           echo "Changed catalog entries:"
           echo "${CHANGED:-<none>}"
           {
+            echo "base=$(git rev-parse 'HEAD^1')"
             echo 'files<<__EOF__'
             echo "$CHANGED"
             echo '__EOF__'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Prepare Hermes from the PR's own checkout
+      - name: Drop the PR checkout
+        if: steps.changed.outputs.files != ''
+        run: |
+          set -euo pipefail
+          # Nothing of the PR may stay where the gate executes from: its
+          # candidate entries were exported above, its other files are never run.
+          find "${GITHUB_WORKSPACE:?}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+
+      - name: Check out the trusted base
+        if: steps.changed.outputs.files != ''
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
+        with:
+          ref: ${{ steps.changed.outputs.base }}
+          # Full commit graph + tags, blobs on demand: Hermes resolves its own
+          # version from the release tags merged into HEAD. A shallow checkout
+          # reports "unknown", which plugins checking the host version reject (omh).
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Confirm the trusted checkout
+        if: steps.changed.outputs.files != ''
+        env:
+          TRUSTED_BASE: ${{ steps.changed.outputs.base }}
+          # Every workspace file this job executes.
+          TRUSTED_TOOLS: >-
+            scripts/ci/plugin_validation_sandbox.py scripts/scan_plugin_payloads.py
+            .github/actions/setup-pm/action.yml
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse HEAD)" != "${TRUSTED_BASE:?}" ] \
+              || [ -n "$(git status --porcelain --ignored --untracked-files=all)" ]; then
+            echo "::error::the workspace is not exactly the trusted base $TRUSTED_BASE"
+            exit 1
+          fi
+          # Bootstrap, as in the structural job: never the PR's copy of a tool.
+          MISSING=""
+          for tool in ${TRUSTED_TOOLS:?}; do
+            if [ -L "$tool" ] || [ ! -f "$tool" ]; then MISSING="$MISSING $tool"; fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::the trusted base $TRUSTED_BASE predates this gate (missing:$MISSING); rebase the PR onto its base branch"
+            exit 1
+          fi
+
+      - name: Prepare Hermes from the trusted base
         if: steps.changed.outputs.files != ''
         uses: ./.github/actions/setup-pm
         with:
           toolchain: python
           extras: '[]'
 
+      - name: Prove the plugin validation sandbox
+        if: steps.changed.outputs.files != ''
+        run: |
+          set -euo pipefail
+          # The runner AMI ships bubblewrap with unprivileged user namespaces
+          # allowed (see runs-on); nothing is installed or reconfigured here. A
+          # runner without them fails this step: the exact wrapper the validate
+          # step uses never runs a command it could not isolate (exit 125 setup,
+          # 126 self-check, bwrap's own 1), so a broken host fails once, here.
+          echo "kernel.apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
+          python3 -I scripts/ci/plugin_validation_sandbox.py --no-network -- /bin/true
+          echo "plugin sandbox ok ($(bwrap --version))"
+
       - name: Clone each entry at its pinned sha and validate
         if: steps.changed.outputs.files != ''
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.files }}
+          # The PR's entry bytes, exported from its tree before the checkout
+          # became the trusted base. The workspace holds no PR file.
+          CATALOG_CANDIDATES: ${{ steps.changed.outputs.candidates }}
           # A hostile repo URL must never block the job on a credential prompt.
           GIT_TERMINAL_PROMPT: "0"
           # `gh attestation verify` (README rule 17) reads the attestation from
-          # GitHub and needs a token. Read-only default token; the step runs
-          # pinned-repo code, so nothing broader is exposed here.
+          # GitHub and needs a token. Read-only default token. Plugin code
+          # (`hermes plugins validate --install-deps`) runs only inside
+          # scripts/ci/plugin_validation_sandbox.py: a cleared environment and
+          # its own user/PID/mount/net namespaces, so neither this shell's
+          # environment nor any host process or credential file is visible to
+          # it, and nothing it starts outlives it. The token stays out here for
+          # the attestation check, which reads the read-only clone afterwards.
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           FAILED=0
           WORKROOT=$(realpath "$(mktemp -d)")
+          CAND_ROOT=$(realpath -e -- "${CATALOG_CANDIDATES:?}")
           # Entries arrive on fd 3, not stdin: `hermes plugins validate` executes
           # plugin-declared install code that could otherwise read stdin and
           # silently drain the remaining entry list.
@@ -174,8 +404,12 @@ jobs:
             [ -z "$entry" ] && continue
             echo "::group::validate $entry"
 
-            # A symlinked or missing entry file is not a catalog entry.
-            if [ -L "$entry" ] || [ ! -f "$entry" ]; then
+            # A symlinked, missing or out-of-tree entry file is not a catalog
+            # entry. The export writes regular files only; this re-checks the
+            # bytes the parsers below read.
+            ENTRY_FILE="$CAND_ROOT/$entry"
+            case "/$entry/" in */../*|*/./*|*//*) ENTRY_FILE="" ;; esac
+            if [ -z "$ENTRY_FILE" ] || [ -L "$ENTRY_FILE" ] || [ ! -f "$ENTRY_FILE" ]; then
               echo "::error file=$entry::catalog entry must be a regular file"
               FAILED=1; echo "::endgroup::"; continue
             fi
@@ -184,10 +418,10 @@ jobs:
             # PR-controlled, so the entry is rejected here before anything uses
             # them -- the clone must be remote-only and the subdir a plain
             # relative path, or the pinned sha ends up validating files outside
-            # the pinned commit. `python3 -I` keeps the PR checkout's own
-            # modules off sys.path (cwd is the PR tree) so it cannot shadow the
-            # parser's imports; ruamel.yaml comes from installed packages.
-            PARSED=$(python3 -I - "$entry" <<'PYEOF'
+            # the pinned commit. `python3 -I` keeps the cwd's modules off
+            # sys.path so nothing there can shadow the parser's imports;
+            # ruamel.yaml comes from installed packages.
+            PARSED=$(python3 -I - "$ENTRY_FILE" <<'PYEOF'
           import re
           import shlex
           import sys
@@ -295,8 +529,18 @@ jobs:
               FAILED=1; echo "::endgroup::"; continue
             fi
 
-            # Manifest schema + declared-vs-registered capability check.
-            if ! timeout 600 hermes plugins validate --install-deps "$PLUGIN_DIR" </dev/null; then
+            # Manifest schema + declared-vs-registered capability check. This
+            # runs the plugin's own code, so only in the sandbox: the checkout
+            # and the clone read-only, the PM home writable but discarded on
+            # exit (nothing can poison the hermes later entries use), only the
+            # PM variables forwarded, egress only to public HTTPS via the
+            # wrapper's proxy. A sandbox that cannot be built fails the entry.
+            if ! timeout 600 python3 -I "$GITHUB_WORKSPACE/scripts/ci/plugin_validation_sandbox.py" \
+                --ro "$GITHUB_WORKSPACE" --ro "$CLONE_DIR" --overlay "${HERMES_HOME:?setup-pm exports HERMES_HOME}" \
+                --env PATH --env HERMES_HOME --env HERMES_RUNTIME_DIR --env HERMES_PYTHON \
+                --env VIRTUAL_ENV --env PYTHONPATH --env PYTHONUTF8 \
+                --chdir "$GITHUB_WORKSPACE" \
+                -- hermes plugins validate --install-deps "$PLUGIN_DIR" </dev/null; then
               echo "::error file=$entry::hermes plugins validate failed"
               FAILED=1; echo "::endgroup::"; continue
             fi
@@ -309,7 +553,7 @@ jobs:
             # GitHub build-provenance attestation tying it to this repo's own
             # workflow at the pinned source digest; those paths are exempted here
             # and verified below. No stdin: the parser must not drain the entry fd.
-            ATTESTED=$(python3 -I - "$entry" <<'PYEOF' </dev/null
+            ATTESTED=$(python3 -I - "$ENTRY_FILE" <<'PYEOF' </dev/null
           import re, shlex, sys
           from ruamel.yaml import YAML
           try:
@@ -366,7 +610,7 @@ jobs:
             if [ "$ATT_OK" -ne 1 ]; then
               FAILED=1; echo "::endgroup::"; continue
             fi
-            if ! PAYLOAD=$(python3 "$GITHUB_WORKSPACE/scripts/scan_plugin_payloads.py" "$PLUGIN_DIR" </dev/null); then
+            if ! PAYLOAD=$(python3 -I "$GITHUB_WORKSPACE/scripts/scan_plugin_payloads.py" "$PLUGIN_DIR" </dev/null); then
               # Filenames are repo-controlled: strip newlines so none can forge a
               # workflow command in the log.
               echo "::error file=$entry::unscannable executable payload (README rule 17): $(printf '%s' "$PAYLOAD" | tr '\n' ';')"

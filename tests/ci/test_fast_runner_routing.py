@@ -171,6 +171,27 @@ def test_e2e_upgrade_runs_only_on_bwrap_capable_slots():
                 assert (wf, name) == ("tests.yml", "e2e-upgrade")
 
 
+def test_plugin_catalog_sandbox_runs_on_the_runner_ami_without_host_setup():
+    # Plugin code in pinned-source-validate runs only inside bubblewrap. Its lane
+    # (hermes-hub, now only tfgar-hub VMs) boots the runner AMI, so the AMI's own
+    # build must keep proving bwrap for the runner user; the job installs and
+    # reconfigures nothing and fails closed through the wrapper's own proof.
+    job = _workflows()["plugin-catalog-ci.yml"]["jobs"]["pinned-source-validate"]
+    assert _labels(job) == ["self-hosted", "hermes-hub"]
+    provision = (ROOT / "hosts/hermes-ci-runners/packer/provision.sh").read_text(encoding="utf-8")
+    assert "apt-get install -y bubblewrap" in provision
+    assert "echo 'kernel.apparmor_restrict_unprivileged_userns = 0' > /etc/sysctl.d/" in provision
+    assert "sudo -u ubuntu bwrap --ro-bind / / --unshare-user --unshare-net true ||" in provision
+    names = [s.get("name") for s in job["steps"]]
+    proof = job["steps"][names.index("Prove the plugin validation sandbox")]
+    assert names.index("Prove the plugin validation sandbox") < names.index("Clone each entry at its pinned sha and validate")
+    assert proof["if"] == "steps.changed.outputs.files != ''"
+    assert "python3 -I scripts/ci/plugin_validation_sandbox.py --no-network -- /bin/true" in proof["run"]
+    assert "set -euo pipefail" in proof["run"] and "|| true" not in proof["run"]
+    for step in job["steps"]:
+        assert not re.search(r"\b(sudo|sysctl -w|apt-get)\b", step.get("run", "")), step.get("name")
+
+
 def test_e2e_upgrade_has_release_tags_for_n_minus_1():
     # N-1 = `git describe --tags --abbrev=0 --match 'v20[0-9][0-9].*' HEAD~1`. The fork
     # carries no release tags, so without upstream's the git/core shards fail
