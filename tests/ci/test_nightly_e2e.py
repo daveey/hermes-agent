@@ -225,7 +225,7 @@ def test_alert_intent_survives_dispatch_and_report_cli(tmp_path, monkeypatch, re
 def test_report_marker_labels_legacy_pending_acceptance(tmp_path, monkeypatch, outcome):
     gh, board, path = FakeGitHub(), FakeBoard(), tmp_path / "state.json"
     gh.auto_create = outcome != "missing"
-    _seed(path, gh, time.time() - 5 * 3600)
+    _seed(path, gh, time.time() - 5 * 3600, ref="29953696677a")
     if outcome in ("failure", "cancelled"):
         gh.finish(100, outcome, _log("tests/e2e/a.py::t"))
     elif outcome == "error":
@@ -235,10 +235,23 @@ def test_report_marker_labels_legacy_pending_acceptance(tmp_path, monkeypatch, o
     monkeypatch.setattr(ne, "NightlyBoard", lambda *a: board)
     assert ne.main(["report", "--state", str(path), "--acceptance-marker", "legacy-check", "--acceptance-owner-task", OWNER]) == 0
     card = board.cards["t_1"]
-    assert "ACCEPTANCE" in card["title"] and "main" in card["title"]
+    assert "ACCEPTANCE" in card["title"] and "29953696677a" in card["title"]
     assert "legacy-check" in card["body"]
     assert "acceptance fixture; do not repair main" in card["body"]
     assert "Fix main" not in card["body"]
+
+
+def test_report_marker_never_relabels_pending_production_main(tmp_path, monkeypatch):
+    gh, board, path = FakeGitHub(), FakeBoard(), tmp_path / "state.json"
+    _seed(path, gh, time.time() - 5 * 3600)
+    gh.finish(100, "failure", _log("tests/e2e/a.py::t"))
+    monkeypatch.setenv("GH_TOKEN", "x")
+    monkeypatch.setattr(ne, "RestGitHub", lambda *a: gh)
+    monkeypatch.setattr(ne, "NightlyBoard", lambda *a: board)
+    assert ne.main(["report", "--state", str(path), "--acceptance-marker", "m", "--acceptance-owner-task", OWNER]) == 0
+    card = board.cards["t_1"]
+    assert "ACCEPTANCE" not in card["title"] and "Fix main" in card["body"]
+    assert card["creator_task_id"] is None
 
 
 def test_acceptance_and_historical_runs_do_not_update_production_cards(env):
@@ -418,9 +431,9 @@ def test_board_failure_past_deadline_keeps_run_pending_and_says_so(env):
     assert state["pending"] == [] and len(board.cards) == 1
 
 
-def _seed(path, gh, dispatched_at):
+def _seed(path, gh, dispatched_at, ref="main"):
     with ne.locked_state(path) as state:
-        _dispatch(gh, state, now=dispatched_at)
+        _dispatch(gh, state, ref=ref, now=dispatched_at)
 
 
 @pytest.mark.platforms("posix")
@@ -572,3 +585,19 @@ def test_nightly_board_stamps_creator_only_for_acceptance(monkeypatch):
     board.create("t", "b", "k")
     board.create("t", "b", "k", creator_task_id=OWNER)
     assert envs == [None, {"HERMES_KANBAN_TASK": OWNER}]
+
+
+def test_cli_create_env_only_carries_worker_task_in_acceptance(monkeypatch):
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append(kw["env"])
+        return subprocess.CompletedProcess(cmd, 0, '{"id":"t_x"}', "")
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_ffffffffffffffff")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    board = ne.NightlyBoard("hermes")
+    board.create("t", "b", "k")
+    board.create("t", "b", "k", creator_task_id=OWNER)
+    assert "HERMES_KANBAN_TASK" not in seen[0]
+    assert seen[1]["HERMES_KANBAN_TASK"] == OWNER

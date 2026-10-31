@@ -87,6 +87,9 @@ class CliBoard:
              extra_env: dict[str, str] | None = None) -> str:
         scope = ["--board", board] if board else []
         env = {**os.environ, **extra_env} if extra_env else None
+        if args[:1] == ("create",) and not (extra_env and "HERMES_KANBAN_TASK" in extra_env):
+            # A production create must not inherit a running worker's task as creator_task_id.
+            env = {k: v for k, v in (env or os.environ).items() if k != "HERMES_KANBAN_TASK"}
         proc = subprocess.run([*self.hermes, "kanban", *scope, *args], input=stdin, capture_output=True,
                               text=True, timeout=120, check=False, env=env)
         if proc.returncode == 2 and args[0] == "create":

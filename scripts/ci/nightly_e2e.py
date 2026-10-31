@@ -556,7 +556,8 @@ def report(
     out: list[str] = []
     still: list[dict[str, Any]] = []
     for entry in list(state["pending"]):
-        if acceptance and not entry.get("acceptance_marker"):  # label runs recorded before the flag existed
+        # Label runs recorded before the flag existed, but never a production-main run: that incident stays real.
+        if acceptance and not entry.get("acceptance_marker") and entry.get("ref") != "main":
             entry["acceptance_marker"], entry["acceptance_owner"] = acceptance
         try:
             done, msg = _settle(gh, board, state, entry, now=now)
@@ -609,7 +610,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--acceptance-marker",
         help="mark every card for these runs as an acceptance fixture (not a production incident); "
-        "needs --acceptance-owner-task. report: also labels pending runs dispatched without a marker",
+        "needs --acceptance-owner-task. report: also labels pending non-main-ref runs dispatched without a marker",
     )
     ap.add_argument(
         "--acceptance-owner-task",
