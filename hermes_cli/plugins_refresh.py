@@ -8,7 +8,7 @@ guards enabled on the hub on 10-30 stayed out of all ten per-profile backends.
 
 :func:`refresh_if_inputs_changed` closes that gap where it is safe to: when a long-lived process
 builds the agent for a NEW session (``tui_gateway`` ``_make_agent``, the gateway's
-``_build_fresh_agent``), never mid-turn. It compares the discovery inputs against those the last
+``_resolve_turn_agent`` before a fresh build), never mid-turn. It compares the discovery inputs against those the last
 sweep read and, only when they differ, runs the same forced pass ``load_and_go_live`` runs, under
 the same ``_GO_LIVE_LOCK`` + ``_discovery_lock``. Cost when nothing changed: one
 ``plugins_snapshot.precheck`` (stat of config.yaml, .env and each top-level plugin dir); the full

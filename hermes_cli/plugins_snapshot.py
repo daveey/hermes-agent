@@ -110,8 +110,18 @@ def _site_entry(path: Path, label: str) -> list:
     return [label, [_stat_entry(path / n, n) for n in names]]
 
 
+def _root_is_empty(root: Path) -> bool:
+    """True when ``root`` is missing or holds nothing but skipped dirs: discovery loads the same
+    (nothing) from either, so a process creating an empty ``<home>/plugins`` after boot must not
+    read as a changed input."""
+    try:
+        return not any(n not in _SKIP_DIRS for n in os.listdir(root))
+    except OSError:
+        return True
+
+
 def _walk_root(root: Path, label: str, out: list) -> None:
-    if not root.is_dir():
+    if not root.is_dir() or _root_is_empty(root):
         out.append([label, "absent"])
         return
     seen: set[tuple[int, int]] = set()
@@ -192,8 +202,10 @@ def precheck(home: Optional[Path] = None) -> Optional[str]:
         for root in roots:
             try:
                 names = sorted(n for n in os.listdir(root) if n not in _SKIP_DIRS)
-            except OSError as exc:
-                parts.append([str(root), "missing", exc.errno])
+            except OSError:
+                names = []
+            if not names:  # missing and empty load the same (nothing): see _root_is_empty
+                parts.append([str(root), "absent"])
                 continue
             parts.append(_stat_entry(root, str(root)))
             for name in names:

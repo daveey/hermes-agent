@@ -158,10 +158,6 @@ class GatewaySessionAgentMixin:
         from gateway.session_policy import policy_for_source
         from gateway.session_worker_construct import session_prefill
         policy = policy_for_source(runner, src)
-        # [daveey] A plugin enabled after the gateway booted loads before a fresh agent snapshots its
-        # tools (this session's home is bound here); a no-op stat check when nothing changed.
-        from hermes_cli.plugins_refresh import refresh_plugins_for_new_session
-        refresh_plugins_for_new_session()
         return ctx.AIAgent(
             model=turn_route["model"], **turn_route["runtime"], **_checkpoint_agent_kwargs(ctx.user_config),
             max_iterations=max_iterations, quiet_mode=not bool(policy and policy.verbose), verbose_logging=False,
@@ -225,6 +221,19 @@ class GatewaySessionAgentMixin:
         if found.evicted is not None:
             self._release_evicted_agent(found.evicted)
         if agent is None:
+            # [daveey] A plugin enabled after the gateway booted loads before a fresh agent snapshots its
+            # tools (this session's home is bound here); a no-op stat check when nothing changed. A pass
+            # that ran can change what the signature reads (plugin toolsets), so recompute it: caching the
+            # new agent under the pre-pass signature made the very next turn miss and rebuild it.
+            from hermes_cli.plugins_refresh import refresh_plugins_for_new_session
+            if refresh_plugins_for_new_session():
+                sig = runner._agent_config_signature(
+                    turn_route["model"], turn_route["runtime"], ctx.enabled_toolsets, combined_ephemeral,
+                    cache_keys=runner._extract_cache_busting_config(ctx.user_config),
+                    user_id=getattr(ctx.source, "user_id", None),
+                    user_id_alt=getattr(ctx.source, "user_id_alt", None),
+                    skip_context_files=skip_context_files,
+                )
             from tools.delegate_tool_config import gateway_delegation_inline, gateway_delegation_inline_scope
             # delegation.gateway_mode from this turn's own (profile-scoped) config and the chat's resolved interim
             # setting (never muted for a heartbeat turn, which shares the user's session and its cached agent);

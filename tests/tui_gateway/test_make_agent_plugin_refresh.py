@@ -4,7 +4,7 @@
 enable`` nudges only the host-level serve backend and the gateway socket: a per-profile ``hermes serve
 --isolated`` backend that booted before the enable never registered the plugin's hooks until it
 restarted (nine every-host guards stayed out of ten hub backends on 10-30). ``_make_agent`` (serve /
-TUI) and the gateway's ``_build_fresh_agent`` now call ``refresh_plugins_for_new_session`` first, which
+TUI) and the gateway's ``_resolve_turn_agent`` fresh-build branch now call ``refresh_plugins_for_new_session`` first, which
 re-runs the forced pass only when the discovery inputs changed since the last sweep.
 """
 
@@ -86,16 +86,39 @@ def _build_tui_agent(monkeypatch):
     server._make_agent("sid", "session-key")
 
 
-def _build_gateway_agent():
+def _gateway_turn(manager, cache: dict, builds: list):
+    """A gateway turn whose agent-cache signature reads the loaded plugin set, as a plugin toolset in
+    ``enabled_toolsets`` does, so a pass that loads a plugin changes the signature."""
+    import threading
+
     from gateway.session_execution import GatewaySessionAgentMixin
     turn = GatewaySessionAgentMixin.__new__(GatewaySessionAgentMixin)
+
+    def sig(*_a, **_kw):
+        return tuple(sorted(manager._plugins))
+
+    def agent(**kw):
+        builds.append(kw)
+        return SimpleNamespace(max_iterations=kw.get("max_iterations"))
+
     turn._runner = SimpleNamespace(session_authority=None, _prefill_messages=None, _service_tier=None,
-                                   _session_db=None, _refresh_fallback_model=lambda: None, config=None)
+                                   _session_db=None, _refresh_fallback_model=lambda: None, config=None,
+                                   _agent_config_signature=sig, _extract_cache_busting_config=lambda _c: {},
+                                   _agent_cache=cache, _agent_cache_lock=threading.Lock(),
+                                   _enforce_agent_cache_cap=lambda: None,
+                                   _init_cached_agent_for_turn=lambda *_a: None,
+                                   _apply_fallback_chain_to_agent=lambda *_a: None)
     source = SimpleNamespace(chat_id="c", user_id="u", user_id_alt=None, user_name=None, chat_name=None,
                              chat_type="dm", thread_id=None, platform=None)
     turn._ctx = SimpleNamespace(source=source, user_config={}, enabled_toolsets=[], disabled_toolsets=None,
-                                session_id="c", session_key="k", AIAgent=lambda **kw: kw)
-    turn._build_fresh_agent({"model": "m", "runtime": {}}, "local", None, 1, None, {}, False)
+                                session_id="c", session_key="k", AIAgent=agent, _interrupt_depth=0,
+                                interim_assistant_messages_enabled=False)
+    return turn
+
+
+def _gateway_turn_agent(manager, cache: dict, builds: list):
+    turn = _gateway_turn(manager, cache, builds)
+    return turn._resolve_turn_agent({"model": "m", "runtime": {}}, "local", None, 1, None, {})
 
 
 def test_new_session_build_loads_a_plugin_enabled_after_boot(sweeps, home, monkeypatch):
@@ -123,15 +146,44 @@ def test_gateway_fresh_agent_build_loads_a_plugin_enabled_after_boot(sweeps, hom
     from gateway import session_policy
     monkeypatch.setattr(session_policy, "policy_for_source", lambda runner, source: None)
     manager, count = sweeps
-    _build_gateway_agent()
+    builds: list = []
+    _gateway_turn_agent(manager, {}, builds)
     assert count["n"] == 0  # unchanged inputs: no pass
     _add_enabled_plugin(home, "gateway_probe_guard")
 
-    _build_gateway_agent()
-    _build_gateway_agent()  # the second build sees the inputs the first one swept
-
-    assert count["n"] == 1
+    cache: dict = {}
+    first, reused = _gateway_turn_agent(manager, cache, builds)
+    assert not reused and count["n"] == 1
     assert any("gateway_probe_guard" in owner for owner in _hook_owners(manager, "pre_tool_call"))
+
+    # The pass changed the signature; the new agent is cached under the post-pass one, so the
+    # session's next turn reuses it instead of rebuilding (the identity daemon tests saw a rebuild).
+    second, reused = _gateway_turn_agent(manager, cache, builds)
+    assert reused and second is first
+    assert count["n"] == 1 and len(builds) == 2
+
+
+def test_an_empty_plugin_dir_created_after_boot_runs_no_pass(tmp_path, monkeypatch):
+    """A process creating an empty ``<home>/plugins`` after boot discovery (the gateway does) loads
+    nothing new, so it must not force a pass: on CI that pass made the first turn's agent miss the
+    cache on the next turn."""
+    home = tmp_path / "profile"
+    home.mkdir()
+    (home / "config.yaml").write_text(yaml.safe_dump({"plugins": {"enabled": []}}), encoding="utf-8")
+    bundled = tmp_path / "bundled"
+    bundled.mkdir()
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+    monkeypatch.delenv("HERMES_SAFE_MODE", raising=False)
+    plugins_mod._reset_plugin_managers_for_tests()
+    token = set_hermes_home_override(home)
+    try:
+        manager = plugins_mod.get_plugin_manager()
+        manager.discover_and_load()
+        (home / "plugins" / "__pycache__").mkdir(parents=True)
+        assert manager.refresh_if_inputs_changed() is False
+    finally:
+        reset_hermes_home_override(token)
+        plugins_mod._reset_plugin_managers_for_tests()
 
 
 def test_an_undiscovered_manager_is_left_to_lazy_discovery(home):
