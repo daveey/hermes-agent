@@ -19,6 +19,15 @@ CAPABILITY = {"version": 1, "supported": SUPPORTED, "scope": "installation-root"
 HOLD_MESSAGE = "Hermes update admission is paused or busy; retry shortly (or after the update completes)."
 
 
+class AdmissionBusy(TimeoutError):
+    """admission.lock is held by another process past the caller's timeout; no hold is implied.
+
+    [daveey] Ordinary holders (hermes-sync's state read, its hold write with fsyncs, a Kanban claim
+    through its commit) can keep the lock past 50 ms on a loaded Mac. Callers that may wait retry on
+    this type (backend_retirement); it subclasses TimeoutError, so an ``except TimeoutError`` still
+    fails closed."""
+
+
 @contextmanager
 def admission_lock(home, *, timeout=10.0):
     import fcntl
@@ -34,7 +43,7 @@ def admission_lock(home, *, timeout=10.0):
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise TimeoutError("Hermes update admission lock is busy") from None
+                    raise AdmissionBusy("Hermes update admission lock is busy") from None
                 time.sleep(0.01)
         yield root
     finally:

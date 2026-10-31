@@ -805,7 +805,8 @@ def _lock_in_submit_turn(
     fields = {}
     with _session_turn_admission(session) as admitted:
         if not admitted:
-            return _err(rid, 5035, "backend is retiring or update admission is paused; retry after the update"), fields
+            from hermes_cli.backend_retirement import refusal_text
+            return _err(rid, 5035, refusal_text()), fields
         if session.get("running"):
             return _err(rid, 4009, "session busy", {"reason": "turn_claim_busy"}), fields
         # A watch session's run lives in the PARENT turn (own running flag False); typing
@@ -1505,7 +1506,8 @@ def _spawn_side_agent(
             _clear_session_context(session_tokens)
 
     if _start_session_work(run, name=f"side-agent-{task_id}", home=session.get("profile_home")) is None:
-        return _err(rid, 5035, "backend is retiring or update admission is paused; retry after the update")
+        from hermes_cli.backend_retirement import refusal_text
+        return _err(rid, 5035, refusal_text())
     return _ok(rid, {"task_id": task_id})
 
 

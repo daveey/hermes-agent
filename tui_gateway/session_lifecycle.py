@@ -13,17 +13,17 @@ from .method_ctx import bind_module
 
 
 @contextlib.contextmanager
-def _session_turn_admission(session: dict):
+def _session_turn_admission(session: dict, *, busy_wait_s=None):
     """Retain admission from the running claim through terminal cleanup."""
     from tui_gateway.turn_admission import admission
-    with admission(session) as admitted:
+    with admission(session, busy_wait_s=busy_wait_s) as admitted:
         yield admitted
 
 
-def _start_session_work(target, *, name: str, session: dict | None = None, home=None):
+def _start_session_work(target, *, name: str, session: dict | None = None, home=None, busy_wait_s=None):
     """Adopt accepted admission, or reserve fresh work, through worker cleanup."""
     from tui_gateway.turn_admission import start_work
-    return start_work(target, name=name, session=session, home=home)
+    return start_work(target, name=name, session=session, home=home, busy_wait_s=busy_wait_s)
 
 
 def _notify_session_boundary(event_type: str, session_id: str | None, platform: str | None = None) -> list[str]:

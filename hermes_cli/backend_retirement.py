@@ -5,10 +5,74 @@ close the check/use race: every source of new work must reserve admission before
 """
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 import logging
 import secrets
 import threading
 import time
+
+# [daveey] A busy admission.lock is not an update hold (agent-6f2f71c662): hermes-sync's state read,
+# its hold write and Kanban claims hold it past one 50 ms try on a loaded Mac, and every such refusal
+# dropped a typed message, notification or goal turn. Turn sources retry a busy lock (50 ms tries) for up
+# to BUSY_WAIT_S; a real hold or a retiring backend still refuses at once. The one caller that reserves
+# under the session resume lock (prompt.admit) passes busy_wait_s=0 and keeps a single try.
+BUSY_WAIT_S = 0.5
+_refusal: ContextVar = ContextVar("update_admission_refusal", default=None)
+_busy_wait_override: ContextVar = ContextVar("update_admission_busy_wait", default=None)
+_log = logging.getLogger(__name__)
+
+
+@contextmanager
+def single_lock_try():
+    """Reservations made inside (this context only) take one short lock try, no busy-lock retry.
+
+    For code that reserves while holding the session resume lock without owning the call site's
+    signature (warm session.resume scheduling auto-continue)."""
+    token = _busy_wait_override.set(0.0)
+    try:
+        yield
+    finally:
+        _busy_wait_override.reset(token)
+
+
+def last_refusal():
+    """Why this context's latest ``reservation`` refused: "retiring", "held", "busy", "unavailable", or None."""
+    return _refusal.get()
+
+
+def refusal_text():
+    """The 5035 text for the latest refusal in this context."""
+    if _refusal.get() == "busy":
+        return "update admission is briefly busy (another Hermes process holds the update lock); retry"
+    return "backend is retiring or update admission is paused; retry after the update"
+
+
+def _reserve(root, busy_wait_s, what):
+    """``admission_fence.reserve`` that rides out a briefly busy lock. Returns (reservation | None, reason).
+
+    Each try keeps reserve's own 50 ms lock cap, so a caller never blocks longer than busy_wait_s + 50 ms.
+    A hold returns (None, "held") at once; any other fence error fails closed with its traceback."""
+    from hermes_cli import admission_fence
+
+    started = time.monotonic()
+    tries = 0
+    while True:
+        tries += 1
+        try:
+            pending = admission_fence.reserve(root)
+        except admission_fence.AdmissionBusy:
+            waited = time.monotonic() - started
+            if waited >= busy_wait_s:
+                _log.warning("%s unavailable: update admission lock busy for %.1fs (no update hold)", what, waited)
+                return None, "busy"
+            continue
+        except (OSError, TimeoutError):
+            _log.warning("%s unavailable", what, exc_info=True)
+            return None, "unavailable"
+        if tries > 1:
+            _log.debug("update admission lock was busy for %.2fs; %s after %d tries",
+                       time.monotonic() - started, "admitted" if pending is not None else "held", tries)
+        return pending, (None if pending is not None else "held")
 
 # [daveey] Background reviews (the post-turn memory/skill review fork) run on a daemon thread with
 # no session turn lease and no admission reservation, so the idle proof read a backend mid-review
@@ -81,15 +145,12 @@ class RetirementFence:
         if the call outlasts the window, the window expires rather than killing it.
         """
         from hermes_constants import get_default_hermes_root, get_hermes_home
-        from hermes_cli.admission_fence import reserve, SUPPORTED
+        from hermes_cli.admission_fence import SUPPORTED
 
         pending = None
         if SUPPORTED:
-            try:
-                pending = reserve(get_default_hermes_root(home=get_hermes_home()))
-            except (OSError, TimeoutError):
-                logging.getLogger(__name__).warning("Review update admission unavailable", exc_info=True)
-                return None
+            pending, _reason = _reserve(get_default_hermes_root(home=get_hermes_home()), BUSY_WAIT_S,
+                                        "Review update admission")
             if pending is None:
                 return None
         with self._lock:
@@ -131,30 +192,38 @@ class RetirementFence:
                 self.release()
 
     @contextmanager
-    def reservation(self, home=None):
+    def reservation(self, home=None, *, busy_wait_s=None):
         """Compose process retirement with the cross-process update reservation.
 
         Neither lock is held while acquiring the other, or while callers hold
         session locks. The pending reservation remains visible until publication.
+        A briefly busy admission.lock is retried for ``busy_wait_s`` (default
+        BUSY_WAIT_S; 0 = one 50 ms try, for callers holding the session resume
+        lock, also forced by ``single_lock_try()``); the refusal reason is
+        readable afterwards through ``last_refusal()``.
         """
         from hermes_constants import get_default_hermes_root, get_hermes_home
-        from hermes_cli.admission_fence import reserve, HOLD_MESSAGE, SUPPORTED
+        from hermes_cli.admission_fence import HOLD_MESSAGE, SUPPORTED
 
+        if busy_wait_s is None:
+            override = _busy_wait_override.get()
+            busy_wait_s = BUSY_WAIT_S if override is None else override
         if not SUPPORTED:
             with self.work() as admitted:
+                _refusal.set(None if admitted else "retiring")
                 yield admitted
             return
 
         admitted = self.acquire()
         pending = None
         try:
+            reason = "retiring"
             if admitted:
-                try:
-                    pending = reserve(get_default_hermes_root(home=home or get_hermes_home()))
-                except (OSError, TimeoutError):
-                    logging.getLogger(__name__).warning("Update admission unavailable", exc_info=True)
-                if pending is None:
-                    logging.getLogger(__name__).info(HOLD_MESSAGE)
+                pending, reason = _reserve(get_default_hermes_root(home=home or get_hermes_home()),
+                                           busy_wait_s, "Update admission")
+                if reason == "held":
+                    _log.info(HOLD_MESSAGE)
+            _refusal.set(reason)
             yield admitted and pending is not None
         finally:
             try:

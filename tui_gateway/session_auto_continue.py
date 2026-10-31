@@ -36,7 +36,11 @@ def _resume_reuse_live_locked(ctx, sid: str, session: dict) -> dict:
     if not ctx.lazy and not session.get("running") and not session.get("resume_hydrating"):
         from tui_gateway.update_pause import _detect_skew
         if _detect_skew() is None:
-            if (continuation := _maybe_schedule_auto_continue(sid, session, ctx.target)) is not None:
+            # Caller holds _session_resume_lock: one short update-lock try, never the busy-lock retry.
+            from hermes_cli.backend_retirement import single_lock_try
+            with single_lock_try():
+                continuation = _maybe_schedule_auto_continue(sid, session, ctx.target)
+            if continuation is not None:
                 payload["auto_continue"] = continuation
     if ctx.defer_history:
         payload.update(messages=[], hydrating=bool(session.get("resume_hydrating")),

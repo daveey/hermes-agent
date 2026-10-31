@@ -157,7 +157,8 @@ def submit_admission(rid, params):
                 return _reply(server, rid, params, prior)
             with server._session_resume_lock:
                 sid, session = _live_owner(server, params, home)
-                with server._session_turn_admission(session) as admitted:
+                # busy_wait_s=0: never wait out a busy update lock while holding the resume lock.
+                with server._session_turn_admission(session, busy_wait_s=0) as admitted:
                     if not admitted:
                         return server._err(rid, 5035, "backend is retiring")
                     _live_owner(server, params, home)

@@ -30,6 +30,150 @@ def _lock_child(home, ready, finish):
         finish.wait(20)
 
 
+def _timed_lock_child(home, ready, hold_s):
+    import time
+    with af.admission_lock(home):
+        ready.set()
+        time.sleep(hold_s)  # health: allow HX013 -- how long another process holds the lock IS the contention under test
+
+
+def _spawn_lock_holder(home, hold_s):
+    ctx = multiprocessing.get_context("spawn")
+    ready = ctx.Event()
+    child = ctx.Process(target=_timed_lock_child, args=(home, ready, hold_s))
+    child.start()
+    assert ready.wait(20)
+    return child
+
+
+def _reap(child):
+    if child.is_alive():
+        child.kill()
+    child.join(10)
+
+
+def _busy_records(caplog):
+    return [r for r in caplog.records if r.name == "hermes_cli.backend_retirement" and r.levelno >= 30]
+
+
+def test_reservation_survives_lock_briefly_busy_without_hold(tmp_path, caplog):
+    """[daveey] Another process holding admission.lock for 200 ms (no update hold) must not refuse a
+    turn: hermes-sync's state read and Kanban claims hold it that long on a loaded Mac (agent-6f2f71c662)."""
+    import logging
+    caplog.set_level(logging.DEBUG, logger="hermes_cli.backend_retirement")
+    child = _spawn_lock_holder(tmp_path, 0.2)
+    try:
+        fence = RetirementFence()
+        with fence.reservation(tmp_path) as admitted:
+            assert admitted
+            assert not child.is_alive() or af.state(tmp_path)["reservations"] == 1
+        assert not _busy_records(caplog)
+    finally:
+        _reap(child)
+    assert af.state(tmp_path)["reservations"] == 0
+
+
+def test_reservation_refuses_long_busy_lock_with_one_warning(tmp_path, caplog):
+    import logging
+    import time
+    caplog.set_level(logging.DEBUG, logger="hermes_cli.backend_retirement")
+    child = _spawn_lock_holder(tmp_path, 2.0)
+    try:
+        fence = RetirementFence()
+        started = time.monotonic()
+        with fence.reservation(tmp_path) as admitted:
+            elapsed = time.monotonic() - started
+            assert not admitted
+        assert 0.45 <= elapsed < 1.5
+        records = _busy_records(caplog)
+        assert len(records) == 1, [r.getMessage() for r in records]
+        message = records[0].getMessage()
+        assert "update admission lock busy for" in message and "no update hold" in message
+        assert records[0].exc_info is None
+        from hermes_cli.backend_retirement import last_refusal
+        assert last_refusal() == "busy"
+        assert fence.active_count() == 0
+    finally:
+        _reap(child)
+
+
+def test_hold_refuses_at_once_without_busy_retry(tmp_path, caplog):
+    import logging
+    import time
+    caplog.set_level(logging.DEBUG, logger="hermes_cli.backend_retirement")
+    af.set_hold(tmp_path)
+    fence = RetirementFence()
+    started = time.monotonic()
+    with fence.reservation(tmp_path, busy_wait_s=5.0) as admitted:
+        assert not admitted
+    assert time.monotonic() - started < 0.3
+    assert not _busy_records(caplog)
+    from hermes_cli.backend_retirement import last_refusal
+    assert last_refusal() == "held"
+
+
+def test_zero_busy_wait_makes_one_short_try(tmp_path):
+    """The prompt-admission path holds the session resume lock: it keeps a single 50 ms try."""
+    import time
+    child = _spawn_lock_holder(tmp_path, 2.0)
+    try:
+        fence = RetirementFence()
+        started = time.monotonic()
+        with fence.reservation(tmp_path, busy_wait_s=0) as admitted:
+            assert not admitted
+        assert time.monotonic() - started < 0.3
+        session = {"history_lock": threading.RLock(), "profile_home": str(tmp_path)}
+        from hermes_cli import backend_retirement
+        real = backend_retirement.retirement
+        backend_retirement.retirement = fence
+        try:
+            started = time.monotonic()
+            with server._session_turn_admission(session, busy_wait_s=0) as admitted:
+                assert not admitted
+            assert time.monotonic() - started < 0.3
+        finally:
+            backend_retirement.retirement = real
+        from hermes_cli.backend_retirement import single_lock_try
+        started = time.monotonic()
+        with single_lock_try():
+            with fence.reservation(tmp_path) as admitted:
+                assert not admitted
+        assert time.monotonic() - started < 0.3
+    finally:
+        _reap(child)
+
+
+def test_busy_refusal_text_says_briefly_busy(tmp_path, monkeypatch):
+    """prompt.submit's 5035 names a busy lock as briefly busy, not as a paused update."""
+    from hermes_cli import backend_retirement
+    fence = RetirementFence()
+    monkeypatch.setattr(backend_retirement, "retirement", fence)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    session = {"history_lock": threading.RLock(), "profile_home": str(tmp_path), "session_key": "k"}
+    child = _spawn_lock_holder(tmp_path, 2.0)
+    try:
+        error, _ = server._lock_in_submit_turn("r", "s", session, "hi", {}, False, None, None, None)
+    finally:
+        _reap(child)
+    assert error["error"]["code"] == 5035
+    assert "briefly busy" in error["error"]["message"]
+    af.set_hold(tmp_path)
+    error, _ = server._lock_in_submit_turn("r", "s", session, "hi", {}, False, None, None, None)
+    assert "update admission is paused" in error["error"]["message"]
+
+
+def test_background_review_survives_briefly_busy_lock(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    child = _spawn_lock_holder(tmp_path, 0.2)
+    try:
+        fence = RetirementFence()
+        hold = fence.begin_background_review()
+        assert hold is not None
+        fence.end_background_review(hold)
+    finally:
+        _reap(child)
+
+
 def test_hold_refuses_and_existing_reservation_survives(tmp_path):
     reservation = af.reserve(tmp_path)
     assert af.state(tmp_path)["reservations"] == 1

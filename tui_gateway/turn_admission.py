@@ -32,9 +32,11 @@ class TurnAdmission:
                 self.reservation.__exit__(None, None, None)
 
 
-def acquire(home=None):
+def acquire(home=None, *, busy_wait_s=None):
     from hermes_cli.backend_retirement import retirement
-    reservation = retirement.reservation(home)
+    # busy_wait_s=None keeps the fence's default busy-lock retry; 0 is one short try (resume-lock callers).
+    reservation = (retirement.reservation(home) if busy_wait_s is None
+                   else retirement.reservation(home, busy_wait_s=busy_wait_s))
     if not reservation.__enter__():
         reservation.__exit__(None, None, None)
         return None
@@ -64,8 +66,8 @@ def settle(session):
 
 
 @contextmanager
-def admission(session):
-    token = acquire(session.get("profile_home"))
+def admission(session, *, busy_wait_s=None):
+    token = acquire(session.get("profile_home"), busy_wait_s=busy_wait_s)
     with session["history_lock"]:
         claimed = token is not None and not session.get("running")
         if claimed:
@@ -188,7 +190,7 @@ def start_build_work(session, target, *, delay=None):
         raise
 
 
-def start_work(target, *, name, session=None, home=None):
+def start_work(target, *, name, session=None, home=None, busy_wait_s=None):
     from agent.memory_provider import spawn_context_thread
     if session is not None:
         with session["history_lock"]:
@@ -201,7 +203,7 @@ def start_work(target, *, name, session=None, home=None):
     else:
         token = None
     if token is None:
-        token = acquire(home or (session or {}).get("profile_home"))
+        token = acquire(home or (session or {}).get("profile_home"), busy_wait_s=busy_wait_s)
         if token is not None and session is not None:
             with session["history_lock"]:
                 existing = session.get(_KEY)

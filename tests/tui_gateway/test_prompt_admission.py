@@ -125,6 +125,23 @@ def test_turn_adopts_admission_row_without_duplicate_and_limits_recovery_to_no_t
     assert [m["role"] for m in db.get_messages(params["stored_session_id"])] == ["user", "assistant"]
 
 
+def test_admission_under_resume_lock_makes_one_short_lock_try(owner, monkeypatch):
+    """[daveey] prompt.admit reserves while holding the session resume lock, so it must not take the
+    busy-lock retry other turn sources get (agent-6f2f71c662): busy_wait_s=0 on that path only."""
+    from hermes_cli import backend_retirement
+    _, _session, params, _ = owner
+    seen = []
+    real = backend_retirement.retirement.reservation
+
+    def recording(home=None, **kwargs):
+        seen.append(kwargs.get("busy_wait_s", "default"))
+        return real(home, **kwargs)
+
+    monkeypatch.setattr(backend_retirement.retirement, "reservation", recording)
+    assert "result" in call("prompt.admit", params)
+    assert seen and seen[0] == 0
+
+
 def test_normal_submit_claim_cannot_overwrite_admitted_turn(owner):
     _, session, params, _ = owner
     assert "result" in call("prompt.admit", params)
