@@ -38,6 +38,11 @@ def _cgroup_path(pid):
     return None
 
 
+def _own_cgroup():
+    """This process's unified-hierarchy cgroup (where a Popen child starts), or None."""
+    return _cgroup_path(os.getpid())
+
+
 def resolve_run_scope(policy):
     """The existing cgroup directory of this attempt's run scope, or None when none is claimed.
 
@@ -80,6 +85,11 @@ def resolve_run_scope(policy):
     if match is None:
         return None  # submitter not in a per-run scope (no systemd-run): unchanged
     if (match['task'], int(match['run'])) != (task_id, run_id):
+        if path == _own_cgroup():
+            # The submitter inherited an enclosing run's scope that this gateway shares (a dispatcher
+            # run unsupervised inside another Kanban worker, e.g. a test from a worker shell). The
+            # child is born in that same cgroup, so it stays under that scope's limit: unchanged.
+            return None
         raise ScopePlacementError('kanban_scope_mismatch')
     target = CGROUP_ROOT / path.lstrip('/')
     if not (target / 'cgroup.procs').is_file():

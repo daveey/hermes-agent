@@ -135,13 +135,64 @@ def test_submitter_in_other_runs_scope_fails_closed(run_scope):
     assert scope_mod.resolve_run_scope(run_scope.policy) is None
     ctx = dict(run_scope.ctx, run_id=7)
     other = Path(run_scope.unit.replace('-run-7', '-run-9'))
-    real = scope_mod._cgroup_path
+    real, real_own = scope_mod._cgroup_path, scope_mod._own_cgroup
     scope_mod._cgroup_path = lambda pid: '/x/' + other.name
+    scope_mod._own_cgroup = lambda: '/x/gateway.service'  # the gateway lives elsewhere
     try:
         with pytest.raises(scope_mod.ScopePlacementError, match='mismatch'):
             scope_mod.resolve_run_scope(SimpleNamespace(kanban_json=json.dumps(ctx)))
     finally:
-        scope_mod._cgroup_path = real
+        scope_mod._cgroup_path, scope_mod._own_cgroup = real, real_own
+
+
+# Run inside a foreign run scope: point run 7's submitter at a pid in that scope, then resolve.
+_FOREIGN_RESOLVE = """
+import json, os, sqlite3, sys
+from types import SimpleNamespace
+from gateway import session_kanban_scope as scope_mod
+ctx, submitter = json.loads(sys.argv[1]), int(sys.argv[2]) or os.getpid()
+with sqlite3.connect(ctx['db']) as conn:
+    conn.execute('UPDATE task_runs SET worker_pid=?', (submitter,))
+try:
+    print(json.dumps({'target': str(scope_mod.resolve_run_scope(SimpleNamespace(kanban_json=json.dumps(ctx))))}))
+except scope_mod.ScopePlacementError as exc:
+    print(json.dumps({'error': str(exc)}))
+"""
+
+
+@pytest.mark.parametrize('gateway_in_foreign_scope', [True, False])
+def test_submitter_inheriting_enclosing_run_scope(run_scope, gateway_in_foreign_scope):
+    """A dispatcher run unsupervised inside another worker's scope (a test from a worker shell)
+    gives its submitter that enclosing scope. When the gateway shares it, the child is born there
+    (no escape): unchanged. A submitter in another run's scope the gateway does not share fails closed."""
+    foreign = run_scope.unit.replace('-run-7', '-run-9')
+    runtime = f'/run/user/{os.getuid()}'
+    env = dict(os.environ, XDG_RUNTIME_DIR=runtime, DBUS_SESSION_BUS_ADDRESS=f'unix:path={runtime}/bus',
+               PYTHONPATH=str(Path(__file__).resolve().parents[2]))
+    holder = None
+    try:
+        if gateway_in_foreign_scope:
+            argv = [sys.executable, '-c', _FOREIGN_RESOLVE, json.dumps(run_scope.ctx), '0']
+        else:
+            holder = subprocess.Popen(['systemd-run', '--user', '--scope', '--quiet', '--collect', '-u', foreign,
+                                       'sleep', '120'], env=env, stderr=subprocess.DEVNULL)
+            deadline = time.time() + 10
+            while time.time() < deadline and not (_cgroup(holder.pid) or '').endswith(foreign):
+                time.sleep(0.05)
+            assert (_cgroup(holder.pid) or '').endswith(foreign)
+            argv = [sys.executable, '-c', _FOREIGN_RESOLVE, json.dumps(run_scope.ctx), str(holder.pid)]
+            foreign = foreign.replace('-run-9', '-run-11')  # the resolver itself runs in yet another run scope
+        out = subprocess.run(['systemd-run', '--user', '--scope', '--quiet', '--collect', '-u', foreign, *argv],
+                             env=env, capture_output=True, text=True, timeout=60, check=True)
+        verdict = json.loads(out.stdout.strip().splitlines()[-1])
+    finally:
+        if holder is not None:
+            holder.kill()
+            holder.wait()
+    if gateway_in_foreign_scope:
+        assert verdict == {'target': 'None'}, out.stderr
+    else:
+        assert verdict == {'error': 'kanban_scope_mismatch'}, out.stderr
 
 
 def test_migration_failure_kills_and_reaps_child(run_scope, monkeypatch):
