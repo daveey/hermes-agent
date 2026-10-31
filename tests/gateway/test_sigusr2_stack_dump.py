@@ -46,6 +46,10 @@ go = threading.Event()  # start all threads idle, then release them: starting 15
 
 def gen(n):
     for i in range(n):
+        # Yield the CPU with the recursive/generator frames still live, then pop and
+        # rebuild them. 150 unbounded GIL contenders otherwise starve the signal/
+        # control thread on throttled runners; GIL fairness is not under test.
+        time.sleep(0)
         yield i
 
 def recurse(n):
@@ -141,6 +145,7 @@ def test_sigusr2_storm_against_frame_churning_threads_never_crashes(tmp_path):
     missing = [name for name in live if f'"{name}"' not in last]
     assert not missing, f"dump lacks threads: {missing[:10]}"
     assert "--- end SIGUSR2 stack dump ---" in last
+    assert 'in recurse' in last and 'in gen' in last, "dump missed the live churn frames"
 
 
 def test_two_sigusr2_one_ms_apart_produce_one_dump(tmp_path):
