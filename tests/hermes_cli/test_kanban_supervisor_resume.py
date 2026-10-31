@@ -184,6 +184,20 @@ def test_creator_chain_two_hops_is_in_scope(board, monkeypatch):
         assert _tick(conn) == [(out["request_id"], "done")]
 
 
+def test_card_the_requester_created_is_in_scope_even_if_parked_after_creation(board, monkeypatch):
+    """The requester owns a card it created: no created-after-park check applies to it."""
+    with kbc.connect() as conn:
+        own = kb.create_task(conn, title="sub-work", assignee="default", creator_task_id=board["recovery"])
+        _exhaust(conn, own)
+        assert rx.refusal(conn, board["recovery"], own) is None
+    out = _tool(_resume(own))
+    assert out["ok"], out
+    _as_executor(monkeypatch)
+    with kbc.connect() as conn:
+        assert _tick(conn) == [(out["request_id"], "done")]
+        assert kb.get_task(conn, own).status == "ready"
+
+
 # --- refusals: scope, human gate, stale, duplicates -------------------------------------------
 
 def test_wrong_scope_is_refused_and_nothing_moves(board):
