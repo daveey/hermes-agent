@@ -1953,11 +1953,13 @@ class CheckpointManager:
         pruner = Pruner(_run_git, store, working_dir, _GIT_TIMEOUT, _dir_size_bytes, _REFS_PREFIX)
         try:
             pruner.trim(ref, self.max_snapshots)
-            if pruner.drop_one_round(self.max_total_size_mb * 1024 * 1024):
-                logger.info("Checkpoint store exceeded %d MB — dropped the oldest snapshot per project; "
-                            "space is reclaimed by the next prune", self.max_total_size_mb)
+            if pruner.drop_oldest_once(ref, self.max_total_size_mb * 1024 * 1024):
+                logger.info("Checkpoint store exceeded %d MB — dropped the oldest snapshot of %s; "
+                            "space is reclaimed by the next prune", self.max_total_size_mb, working_dir)
         except (PruneError, OSError) as exc:
             logger.warning("Checkpoint pruning stopped: %s", exc)
+        if notice := pruner.stale_gc_notice():
+            logger.warning(notice)
 
 
 def format_checkpoint_list(checkpoints: list[dict], directory: str) -> str:

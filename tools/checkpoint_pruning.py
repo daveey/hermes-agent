@@ -13,6 +13,8 @@ class PruneError(RuntimeError):
 
 
 GC_PENDING_NAME = ".gc-pending"
+GC_STALE_AFTER_S = 48 * 3600
+GC_STALE_REPORTED: set[str] = set()  # stores already warned about, once per process
 
 
 def store_lock_path(base: Path) -> Path:
@@ -67,11 +69,38 @@ class Pruner:
     def gc_pending(self) -> bool:
         return (self.store / GC_PENDING_NAME).exists()
 
-    def _mark_gc_pending(self) -> None:
+    def gc_pending_age(self) -> float | None:
+        """Seconds since a take-path rewrite first deferred its gc, or None when none is pending."""
+        import time
+
         try:
-            (self.store / GC_PENDING_NAME).touch()
+            return max(0.0, time.time() - (self.store / GC_PENDING_NAME).stat().st_mtime)
+        except OSError:
+            return None
+
+    def stale_gc_notice(self) -> str | None:
+        """One warning per store per process when the deferred gc has waited past two default
+        prune intervals: only the periodic prune reclaims, so it is not running (auto_prune off),
+        the store keeps its size and, over the cap, no further snapshot is dropped until it does."""
+        age = self.gc_pending_age()
+        if age is None or age <= GC_STALE_AFTER_S or str(self.store) in GC_STALE_REPORTED:
+            return None
+        GC_STALE_REPORTED.add(str(self.store))
+        return (f"Checkpoint store {self.store} has waited {age / 3600:.0f} h for a gc that only the "
+                "periodic prune runs (is checkpoints.auto_prune off?); run `hermes checkpoints prune` "
+                "to reclaim it")
+
+    def _mark_gc_pending(self) -> None:
+        # O_CREAT without utime: the mtime keeps the FIRST deferral, so its age says how long the
+        # store has waited for a reclaim (touch() would reset it on every rewrite).
+        try:
+            os.close(os.open(self.store / GC_PENDING_NAME, os.O_CREAT | os.O_WRONLY, 0o644))
         except OSError:
             pass
+
+    def _count_at_most(self, ref: str, limit: int) -> int:
+        """Commits on ``ref``, counted only up to ``limit``: bounded whatever the history length."""
+        return len(self._git(["rev-list", f"--max-count={max(1, limit)}", ref]).splitlines())
 
     def _commits(self, ref: str) -> list[str]:
         commits = self._git(["rev-list", "--reverse", ref]).splitlines()
@@ -103,25 +132,31 @@ class Pruner:
             self._mark_gc_pending()
 
     def trim(self, ref: str, keep_count: int) -> None:
-        """Snapshot-count budget on the checkpoint-take path: rewrites the ref, defers the gc."""
-        commits = self._commits(ref)
+        """Snapshot-count budget on the checkpoint-take path: rewrites the ref, defers the gc.
+        A bounded probe first, so a ref within budget costs one short ``rev-list``."""
         keep_count = max(1, keep_count)
+        if self._count_at_most(ref, keep_count + 1) <= keep_count:
+            return
+        commits = self._commits(ref)
         if len(commits) > keep_count:
             self._rewrite(ref, commits, commits[-keep_count:], gc=False)
 
-    def drop_one_round(self, cap_bytes: int) -> bool:
-        """Over the cap on the take path: drop the oldest snapshot of every project once and
-        defer the gc. One round per checkpoint converges over turns; the full loop measured
-        against an unchanging pack once flattened every project to a single snapshot."""
-        if cap_bytes <= 0 or self.dir_size(self.store) <= cap_bytes:
+    def drop_oldest_once(self, ref: str, cap_bytes: int) -> bool:
+        """Over the cap on the take path: drop the oldest snapshot of THIS project only, and only
+        when no earlier drop still awaits its gc. Until the periodic prune reclaims, the store's
+        size cannot move, so re-measuring it every turn and dropping again only erased history
+        (a laptop store ended with 778 of 779 projects at one snapshot and still 14 GB), and a
+        round over every project's ref ran one ``rev-list`` per project inside the tool call.
+        Store-wide round-robin with a gc per round stays in ``enforce_size``."""
+        if cap_bytes <= 0 or self.gc_pending():
             return False
-        changed = False
-        for ref in self._git(["for-each-ref", "--format=%(refname)", self.refs_prefix]).splitlines():
-            commits = self._commits(ref)
-            if len(commits) > 1:
-                self._rewrite(ref, commits, commits[1:], gc=False)
-                changed = True
-        return changed
+        if self._count_at_most(ref, 2) < 2 or self.dir_size(self.store) <= cap_bytes:
+            return False
+        commits = self._commits(ref)
+        if len(commits) < 2:
+            return False
+        self._rewrite(ref, commits, commits[1:], gc=False)
+        return True
 
     def enforce_size(self, cap_bytes: int) -> bool:
         """Periodic prune: gc per round (the measurement only moves after a repack) until the

@@ -1,6 +1,7 @@
 """Real history retention and failure propagation at the public pruning callers."""
 from __future__ import annotations
 
+import contextlib
 import os
 
 import pytest
@@ -72,6 +73,92 @@ def test_snapshot_over_cap_drops_one_round_and_leaves_the_gc_to_the_prune(histor
     assert not (store / GC_PENDING_NAME).exists()
     assert checkpoints._dir_size_bytes(store) <= 1024 * 1024
     assert (project / "small.txt").read_text(encoding="utf-8") == "4"
+
+
+@contextlib.contextmanager
+def _recording_git():
+    calls = []
+    original = checkpoints._run_git
+
+    def record(args, *rest, **kwargs):
+        calls.append(list(args))
+        return original(args, *rest, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(checkpoints, "_run_git", record)
+        yield calls
+
+
+def test_snapshot_over_cap_never_reads_or_rewrites_another_projects_history(history):
+    """A take over the cap costs O(1) Git calls: it never walks every project's ref. A store with
+    hundreds of projects ran one ``rev-list`` per ref inside the tool call (30 s timeouts on a loaded
+    laptop) and, turn after turn, flattened every project to a single snapshot."""
+    _, first, manager = history
+    other = next(first.parent / name for name in ("project-a", "project-b") if first.name != name)
+    other.mkdir()
+    for index in range(3):
+        (other / "small.txt").write_text(str(index), encoding="utf-8")
+        manager.new_turn()
+        assert manager.ensure_checkpoint(str(other), f"other-{index}")
+    before = manager.list_checkpoints(str(other))
+    other_ref = checkpoints._ref_name(checkpoints._project_hash(str(other)))
+
+    manager.max_total_size_mb = 1
+    (first / "new.txt").write_text("new snapshot", encoding="utf-8")
+    manager.new_turn()
+    with _recording_git() as calls:
+        assert manager.ensure_checkpoint(str(first), "newest")
+
+    assert not [c for c in calls if c[0] == "for-each-ref"], calls
+    assert not [c for c in calls if other_ref in c], calls
+    assert manager.list_checkpoints(str(other)) == before
+
+
+def test_snapshot_does_not_drop_again_while_the_last_drop_awaits_its_gc(history):
+    """Until a gc reclaims the last drop the store size cannot move, so a second over-cap take
+    must not drop another snapshot: re-measuring an unchanged store every turn erased history."""
+    _, project, manager = history
+    manager.max_total_size_mb = 1
+    for index in range(3):
+        (project / "new.txt").write_text(f"new {index}", encoding="utf-8")
+        manager.new_turn()
+        assert manager.ensure_checkpoint(str(project), f"newest-{index}")
+    reasons = [row["reason"] for row in manager.list_checkpoints(str(project))]
+    # One drop (the large oldest) for the whole gc cycle; every later snapshot is kept.
+    assert reasons == [f"newest-{i}" for i in reversed(range(3))] + [f"small-{i}" for i in reversed(range(5))]
+
+    (project / "new.txt").write_text("again", encoding="utf-8")
+    manager.new_turn()
+    with _recording_git() as calls:
+        assert manager.ensure_checkpoint(str(project), "again")
+    assert not [c for c in calls if c[0] == "for-each-ref"], calls
+    # Only the bounded count probe of this project's own ref; no full history walk.
+    assert all(any(a.startswith("--max-count=") for a in c) for c in calls if c[0] == "rev-list"), calls
+    assert len([c for c in calls if c[0] == "update-ref"]) == 1  # the new snapshot only
+    assert len(manager.list_checkpoints(str(project))) == 9
+
+
+def test_gc_pending_for_days_is_reported_once(history, caplog):
+    """A store whose deferred gc never runs (checkpoints.auto_prune off) says so, once per process."""
+    import logging
+    import time as _time
+    from tools.checkpoint_pruning import GC_PENDING_NAME, GC_STALE_REPORTED
+
+    base, project, manager = history
+    store = checkpoints._store_path(base)
+    marker = store / GC_PENDING_NAME
+    marker.touch()
+    old = _time.time() - 3 * 86400
+    os.utime(marker, (old, old))
+    GC_STALE_REPORTED.clear()
+    caplog.set_level(logging.WARNING, logger="tools.checkpoint_manager")
+    for index in range(2):
+        (project / "new.txt").write_text(f"n{index}", encoding="utf-8")
+        manager.new_turn()
+        assert manager.ensure_checkpoint(str(project), f"n{index}")
+    hits = [r for r in caplog.records if "hermes checkpoints prune" in r.getMessage()]
+    assert len(hits) == 1, [r.getMessage() for r in caplog.records]
+    assert str(store) in hits[0].getMessage()
 
 
 def test_reclaim_stops_before_touching_another_projects_history(history):
