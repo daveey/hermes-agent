@@ -148,6 +148,25 @@ def test_a_real_chat_link_lost_from_live_stays_a_reported_mismatch(live, svc, ka
     assert _diff(live)["child_mismatch"] == {"task_chat_links": 1}
 
 
+@pytest.mark.parametrize("creator", ["custom-placeholder", {"macbook": "custom-placeholder"}])
+def test_configured_placeholder_retires_after_config_change(live, svc, kanban_home, monkeypatch, creator):
+    from hermes_cli import kanban_placement
+    monkeypatch.setattr(kanban_placement, "config", dict)
+    tid = kb.create_task(live, title="configured", assignee="worker")
+    custom = _insert_link(live, tid, "custom-placeholder")
+    real = _insert_link(live, tid, "real-chat")
+    _settle(kanban_home, svc)
+    _uncaptured_delete(live, custom)
+    _uncaptured_delete(live, real)
+    _settle(kanban_home, svc)
+    assert _board_live(svc, custom) and _board_live(svc, real)
+    monkeypatch.setattr(kanban_placement, "config", lambda: {"creator_session": creator})
+    _settle(kanban_home, svc)
+    assert not _board_live(svc, custom)
+    assert _board_live(svc, real)
+    assert _diff(live)["child_mismatch"] == {"task_chat_links": 1}
+
+
 def test_a_delete_under_applying_is_not_captured(live):
     assert "kanban_sync_task_chat_links_del" in sync.wanted_triggers(live)
     tid = kb.create_task(live, title="copy", assignee="worker")

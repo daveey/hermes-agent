@@ -1119,10 +1119,11 @@ def retire_lost_placeholder_links(live: sqlite3.Connection, shadow: sqlite3.Conn
     good: a shadow-only ``task_chat_links`` mismatch at pending=0 (238 rows on the hub, 2026-10-30). Real chat links
     missing from live are left alone, so the diff keeps reporting them. Returns the number of deletes queued."""
     from hermes_cli.kanban_db_connect import write_txn
-    from hermes_cli.kanban_placement import is_placeholder_session
+    from hermes_cli.kanban_placement import config, is_placeholder_session
+    placement_config = config()
     lost = [(u, s) for u, s in shadow.execute(
         "SELECT uid, chat_session FROM task_chat_links WHERE chat_gateway = ? AND uid IS NOT NULL", (gateway,))
-        if is_placeholder_session(s)]
+        if is_placeholder_session(s, placement_config=placement_config)]
     if not lost:
         return 0
     queued = 0

@@ -263,12 +263,15 @@ def config() -> dict:
         return {}
 
 
-def is_placeholder_session(value: str) -> bool:
-    """Placement attribution IDs must never become notification destinations."""
+def is_placeholder_session(value: str, *, placement_config: Optional[dict] = None) -> bool:
+    """Placement attribution IDs must never become notification destinations.
+
+    Batch callers may supply a per-pass snapshot to avoid reloading configuration per row.
+    """
     session = str(value or "").rsplit("/", 1)[-1]
     if session.startswith(DEFAULT_CREATOR_SESSION):
         return True
-    configured = config().get("creator_session")
+    configured = (config() if placement_config is None else placement_config).get("creator_session")
     values = configured.values() if isinstance(configured, dict) else (configured,)
     return bool(session) and session in values
 
