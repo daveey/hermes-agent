@@ -42,6 +42,10 @@ CHECK_EVERY = 300
 AWAIT_BUDGET = 45.0
 ARCHIVE_AWAIT_BUDGET = 5.0     # archive: wait this long for the target's card id before recording ``unresolved``
 ARCHIVE_SWEEP_GIVE_UP = 7 * 86400  # the dispatcher sweep stops retrying an ``unresolved`` archive after this
+CANCEL_INTENT = "placement_cancel_intent"  # written in the terminal txn: the placed copy must be cancelled
+INTENT_GRACE = 60.0            # an intent with no forward event this long after it = the forward never ran (crash)
+FAILED_RETRY_BASE = 300.0      # a ``failed`` archive send is retried after 300 s, 600 s, ... capped at FAILED_RETRY_MAX
+FAILED_RETRY_MAX = 6 * 3600.0
 UNTIL = ("done", "archived")
 MODULE = "hermes_cli.kanban_placement_forward"
 
@@ -119,6 +123,26 @@ def _archive_events(conn: sqlite3.Connection, task_id: str) -> list:
         except ValueError:
             continue
     return out
+
+
+def record_cancel_intent(conn: sqlite3.Connection, task_id: str, reason: str, *, settled: bool = False) -> None:
+    """Inside the caller's terminal write txn (archive / manual completion): record that the placed copy of
+    ``task_id`` must be cancelled. Committed atomically with the status flip, so a crash before the forward runs
+    leaves the intent for :func:`sweep_unresolved_archives` to replay. No-op for a card never forwarded, and for
+    ``settled`` (the forwarder completed it because the copy there is done: nothing to cancel). Never
+    raises: a broken placement record must not roll back the archive/completion it rides on."""
+    if settled:
+        return
+    try:
+        st = state(conn, task_id)
+        if not st or not (st.get("request_id") or st.get("remote_task_id")):
+            return
+        from hermes_cli import kanban_db as kb
+        kb._append_event(conn, task_id, CANCEL_INTENT, {
+            "reason": reason, "gateway": st.get("target"), "request_id": st.get("request_id"),
+            "remote_task_id": st.get("remote_task_id")})
+    except Exception as exc:  # health: allow BLE001 -- the post-commit forward still runs
+        print(f"placement cancel intent for {task_id} not recorded: {exc!r}", file=sys.stderr)
 
 
 def archive_forward_view(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
@@ -206,54 +230,152 @@ def forward_archive(conn: sqlite3.Connection, task_id: str, *, runner: Optional[
         return archive_forward_view(conn, task_id)
     except Exception as exc:  # health: allow BLE001 -- an archive must never fail on the courtesy forward
         print(f"placement archive forward failed: {exc!r}", file=sys.stderr)
+        _record_failure(conn, task_id, exc)
         return None
+
+
+def _record_failure(conn: sqlite3.Connection, task_id: str, exc: BaseException) -> None:
+    """Best effort: a send that raised is ``failed`` (retried by the sweep with backoff), not silently lost."""
+    try:
+        st = state(conn, task_id)
+        if not st:
+            return
+        from hermes_cli import kanban_db as kb
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, ARCHIVE_FORWARDED, {
+                "gateway": st.get("target"), "request_id": None, "remote_task_id": st.get("remote_task_id"),
+                "status": "failed", "error": repr(exc)[-300:]})
+    except Exception as exc2:  # health: allow BLE001 -- the cancel intent still drives the sweep's replay
+        print(f"placement archive forward: recording the failure failed: {exc2!r}", file=sys.stderr)
+
+
+def _last_event(conn: sqlite3.Connection, task_id: str, kind: str) -> Optional[tuple]:
+    """``(event id, payload, created_at)`` of the newest ``kind`` event of ``task_id``, else None."""
+    row = conn.execute("SELECT id, payload, created_at FROM task_events WHERE task_id = ? AND kind = ? "
+                       "ORDER BY id DESC LIMIT 1", (task_id, kind)).fetchone()
+    if not row:
+        return None
+    try:
+        payload = json.loads(row[1] or "{}")
+    except ValueError:
+        payload = {}
+    return int(row[0]), payload if isinstance(payload, dict) else {}, float(row[2] or 0)
+
+
+def _first_event_ts(conn: sqlite3.Connection, task_id: str, kind: str) -> float:
+    row = conn.execute("SELECT MIN(created_at) FROM task_events WHERE task_id = ? AND kind = ?",
+                       (task_id, kind)).fetchone()
+    return float(row[0] or 0) if row else 0.0
+
+
+def _failures_since(conn: sqlite3.Connection, task_id: str, after_id: int) -> int:
+    n = 0
+    for (raw,) in conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ? AND id > ?",
+                               (task_id, ARCHIVE_FORWARDED, after_id)).fetchall():
+        try:
+            n += json.loads(raw or "{}").get("status") == "failed"
+        except (ValueError, AttributeError):
+            continue
+    return n
+
+
+def _give_up(conn: sqlite3.Connection, task_id: str, payload: dict, gw: str, why: str) -> None:
+    from hermes_cli import kanban_db as kb
+    days = ARCHIVE_SWEEP_GIVE_UP // 86400
+    with kb.write_txn(conn):
+        kb._append_event(conn, task_id, ARCHIVE_FORWARDED, {
+            **payload, "gateway": gw, "status": "expired",
+            "note": f"{why} for {days} days; stopped retrying the archive."})
+    kb.add_comment(conn, task_id, "placement",
+                   f"Placement archive forward gave up: {why} for {days} days after this card was closed, so no "
+                   f"copy was archived there. If one appears later, archive it with `hermes-hub tasks --gw {gw}`.")
+
+
+def _sent(view: Optional[dict]) -> bool:
+    return bool(view) and view.get("status") in ("pending", "archived")
 
 
 def sweep_unresolved_archives(conn: sqlite3.Connection, *, now: Optional[float] = None,
                               runner: Optional[Callable] = None) -> list[str]:
-    """Dispatcher tick: send the archive for each archived/done card whose last ``placement_archive_forwarded`` is
-    ``unresolved`` once the target's card id reached this gateway's hub replica (no waiting here: the tick reads
-    the replica only). A card still unresolved after :data:`ARCHIVE_SWEEP_GIVE_UP` gets an ``expired`` event and
-    a comment, and is not swept again. Returns the ids whose archive request was sent."""
+    """Dispatcher tick: drive the cancellation of every archived/done card's placed copy to a closed state.
+
+    * ``unresolved`` (the target had not made the card): send the archive once the target's card id reached this
+      gateway's hub replica (no waiting here: the tick reads the replica only).
+    * ``failed`` (the send was refused or raised): resend after :data:`FAILED_RETRY_BASE` seconds, doubling per
+      failure up to :data:`FAILED_RETRY_MAX`.
+    * a :data:`CANCEL_INTENT` with no forward event after it, older than :data:`INTENT_GRACE`: the process died
+      between the terminal commit and the forward. Replay it: an archive forwards the archive, a manual completion
+      reruns :func:`forward_completion` (a copy already done/archived there is left alone).
+
+    ``pending``/``archived``/``expired``/``skipped`` are closed. An open cancellation that still fails one more
+    try :data:`ARCHIVE_SWEEP_GIVE_UP` after its intent (legacy cards without one: after their first forward event)
+    gets an ``expired`` event and a comment, and is not swept again. Resends reuse the card's hub request id
+    (:func:`_archive_request_id`), so a replay racing the original forward is applied once. Returns the ids whose
+    archive request was sent."""
     now = time.time() if now is None else now
     rows = conn.execute(
         "SELECT t.id FROM tasks t WHERE t.status IN ('archived', 'done') AND EXISTS "
-        "(SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind = ?)", (ARCHIVE_FORWARDED,)).fetchall()
+        "(SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind IN (?, ?))",
+        (ARCHIVE_FORWARDED, CANCEL_INTENT)).fetchall()
     sent: list[str] = []
     for (task_id,) in rows:
-        last = conn.execute("SELECT payload, created_at FROM task_events WHERE task_id = ? AND kind = ? "
-                            "ORDER BY id DESC LIMIT 1", (task_id, ARCHIVE_FORWARDED)).fetchone()
-        try:
-            payload = json.loads(last[0] or "{}")
-        except ValueError:
+        intent = _last_event(conn, task_id, CANCEL_INTENT)
+        last = _last_event(conn, task_id, ARCHIVE_FORWARDED)
+        status = last[1].get("status") if last else None
+        if status in ("pending", "archived", "expired"):
+            continue  # closed; one archive request per card covers a later intent too
+        if intent and (last is None or last[0] < intent[0]):
+            # Crash gap: the terminal txn committed, the forward recorded nothing after it. Always try first: a
+            # dispatcher that was down past the give-up still sends once it is back.
+            age = now - intent[2]
+            if age < INTENT_GRACE:
+                continue  # the closing process may still be forwarding
+            if intent[1].get("reason") == "completed":
+                view = forward_completion(conn, task_id, runner=runner)
+            else:
+                view = forward_archive(conn, task_id, runner=runner, await_budget=0)
+            if _sent(view):
+                sent.append(task_id)
+            elif age >= ARCHIVE_SWEEP_GIVE_UP and _last_event(conn, task_id, ARCHIVE_FORWARDED) == last:
+                gw = intent[1].get("gateway") or "the target"
+                _give_up(conn, task_id, {}, gw, f"the cancellation of the copy on {gw} never ran")
             continue
-        if payload.get("status") != "unresolved":
+        if last is None or status not in ("unresolved", "failed"):
+            continue  # ``skipped``: the copy there was already terminal
+        payload = last[1]
+        gw = payload.get("gateway") or "the target"
+        # The clock never moves with retries: the intent, else (legacy) the first forward event.
+        clock = intent[2] if intent else _first_event_ts(conn, task_id, ARCHIVE_FORWARDED)
+        expired = now - clock >= ARCHIVE_SWEEP_GIVE_UP
+        if status == "failed":
+            n = _failures_since(conn, task_id, intent[0] if intent else 0)
+            if not expired and now - last[2] < min(FAILED_RETRY_BASE * 2 ** max(n - 1, 0), FAILED_RETRY_MAX):
+                continue
+            if _sent(forward_archive(conn, task_id, runner=runner, await_budget=0)):
+                sent.append(task_id)
+            elif expired:  # one last try failed too
+                _give_up(conn, task_id, payload, gw, f"sending the archive to {gw} kept failing ({n + 1} times)")
             continue
         if forward_archive(conn, task_id, runner=runner, await_budget=0, record_unresolved=False) is not None:
             sent.append(task_id)
             continue
-        if now - float(last[1] or 0) < ARCHIVE_SWEEP_GIVE_UP:
-            continue
-        from hermes_cli import kanban_db as kb
-        gw = payload.get("gateway") or "the target"
-        days = ARCHIVE_SWEEP_GIVE_UP // 86400
-        with kb.write_txn(conn):
-            kb._append_event(conn, task_id, ARCHIVE_FORWARDED, {
-                **payload, "status": "expired",
-                "note": f"{gw} never made the card for this request in {days} days; stopped retrying the archive."})
-        kb.add_comment(conn, task_id, "placement",
-                       f"Placement archive forward gave up: {gw} still had no card for request "
-                       f"{payload.get('request_id') or '?'} {days} days after this card was archived, so no copy "
-                       f"was archived there. If one appears later, archive it with `hermes-hub tasks --gw {gw}`.")
+        if expired:
+            _give_up(conn, task_id, payload, gw,
+                     f"{gw} never made the card for request {payload.get('request_id') or '?'}")
     return sent
 
 
-def forward_completion(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+def forward_completion(conn: sqlite3.Connection, task_id: str, *, runner: Optional[Callable] = None,
+                       settled: bool = False) -> Optional[dict]:
     """Manual origin completion cancels outstanding placed work, never completes it as successful.
 
     Reuse archive's durable queue and audit event. Unknown/offline observations still send;
-    only a confirmed terminal copy is left untouched. Called after local completion commits.
+    only a confirmed terminal copy is left untouched (recorded ``skipped``, which closes the
+    completion's cancel intent). Called after local completion commits, and by the sweep's replay.
+    ``settled`` (the forwarder's own completion: the copy there is done) forwards nothing.
     """
+    if settled:
+        return None
     try:
         st = state(conn, task_id)
         if not st or not (st.get("request_id") or st.get("remote_task_id")):
@@ -267,12 +389,18 @@ def forward_completion(conn: sqlite3.Connection, task_id: str) -> Optional[dict]
                 rc, out = replica.check(st["target"], rtid, until=UNTIL)
                 words = (out or "").split()
                 if rc == 0 and len(words) >= 2 and words[0] == rtid and words[1] in UNTIL:
+                    from hermes_cli import kanban_db as kb
+                    with kb.write_txn(conn):  # closes the cancel intent: nothing to cancel there
+                        kb._append_event(conn, task_id, ARCHIVE_FORWARDED, {
+                            "gateway": st["target"], "request_id": None, "remote_task_id": rtid,
+                            "status": "skipped", "note": f"{rtid} was already {words[1]} on {st['target']}"})
                     return None
             except Exception as exc:  # health: allow BLE001 -- unavailable observation must not prevent durable cancellation
                 print(f"placement completion observation failed; forwarding archive: {exc!r}", file=sys.stderr)
-        return forward_archive(conn, task_id, await_budget=0)
+        return forward_archive(conn, task_id, runner=runner, await_budget=0)
     except Exception as exc:  # health: allow BLE001 -- courtesy forwarding must not undo a committed completion
         print(f"placement completion forward failed: {exc!r}", file=sys.stderr)
+        _record_failure(conn, task_id, exc)
         return None
 
 

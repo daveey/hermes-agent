@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from hermes_cli import kanban_db_sync as _sync
+from hermes_cli import kanban_placement_forward as _placement_fwd  # stdlib-only at import: no cycle
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
 from hermes_cli.kanban_admission import admission_hold_set, claim_transaction, claim_and_open_run
 from hermes_cli.kanban_workflow import DEFAULT_STATUSES as VALID_STATUSES
@@ -2845,10 +2846,9 @@ def complete_task(
             conn, task_id, "completed", completion_payload,
             run_id=run_id,
         )
+        _placement_fwd.record_cancel_intent(conn, task_id, "completed", settled=placement_settled)  # [daveey]
     _flag_phantom_prose_refs(conn, task_id, run_id, summary, result, verified_cards)
-    if not placement_settled:
-        from hermes_cli.kanban_placement_forward import forward_completion
-        forward_completion(conn, task_id)
+    _placement_fwd.forward_completion(conn, task_id, settled=placement_settled)
     # Success wipes the breaker counter (history stays on the event log).
     _clear_failure_counter(conn, task_id)
     recompute_ready(conn)  # separate txn so children see ``done``

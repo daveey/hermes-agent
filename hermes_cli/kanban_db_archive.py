@@ -45,6 +45,10 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via:
         # [daveey] via: archived outside the creator scope; event_extra: e.g. a forwarded run (kanban_owner_archive_relay)
         payload = {"source_status": row["status"], **({"via": via} if via else {}), **(event_extra or {})}
         kb._append_event(conn, task_id, "archived", payload, run_id=run_id)
+        # [daveey] Same txn as the flip: a crash before forward_archive below still leaves the cancellation
+        # for the dispatcher sweep (kanban_placement_forward.sweep_unresolved_archives).
+        from hermes_cli.kanban_placement_forward import record_cancel_intent
+        record_cancel_intent(conn, task_id, "archived")
     if was_running:
         termination = kb._terminate_reclaimed_worker(prev_pid, prev_lock, signal_fn=signal_fn, started_at=prev_started)
         with kb.write_txn(conn):
