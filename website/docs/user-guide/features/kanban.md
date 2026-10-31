@@ -55,6 +55,10 @@ when the proposed work is genuinely separate. Set `kanban.create_overlap_check` 
 `false` to disable this check. Missing or unreadable replicas are skipped and logged;
 the check cannot guarantee uniqueness against unavailable boards.
 
+Every refusal is recorded with each match's `why`: as a `create_overlap` event on the
+creator's card or the best local match, or, when every match is on another gateway, as a
+line in `<kanban home>/logs/create_overlap.jsonl` (rotated to `.1` at 1 MiB).
+
 ## PR completion contracts
 
 Declare PR work at creation with `--completion-contract OWNER/REPO` (or an exact

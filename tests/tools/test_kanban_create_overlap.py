@@ -286,3 +286,109 @@ def test_rest_alarm_create_is_not_refused_for_a_plain_word_board_slug(home):
     assert r.status_code != 409, r.text
     assert r.status_code == 200, r.text
     assert "create_overlap" not in r.text
+
+
+# --- durable refusal record: `why` in the event payload, a JSONL line when no board can hold the event ---
+
+def _overlap_events(board, task_id):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect_closing(board=board) as conn:
+        return [e.payload for e in kb.list_events(conn, task_id) if e.kind == "create_overlap"]
+
+
+def _log_lines():
+    from hermes_cli import kanban_overlap
+    path = kanban_overlap.log_path()
+    return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+
+
+def _remote_only(home, tmp_path, monkeypatch):
+    """Self is the macbook; the only matching card lives on the hub replica."""
+    from hermes_cli import kanban_capability_registry as reg
+    monkeypatch.setattr(reg, "self_gateway", lambda: "macbook")
+    _fake_replica(tmp_path / "hub-state" / "hub.db", [
+        ("hub", {"id": "t_b1", "board": "unconventional-collab", "title": B1_TITLE, "status": "scheduled",
+                 "gateway": "hub", "sessions": [{"session": "20261026_154948_ea6cfd"}]})])
+
+
+def _cli_create(monkeypatch):
+    import argparse
+    from hermes_cli import kanban as kc
+    monkeypatch.setattr(kc, "_check_dispatcher_presence", lambda **kw: (True, ""))
+    root = argparse.ArgumentParser(prog="hermes")
+    kc.build_parser(root.add_subparsers())
+    return kc._cmd_create(root.parse_args(["kanban", "create", DUP_TITLE, "--body", DUP_BODY,
+                                           "--assignee", "default", "--json"]))
+
+
+def _rest_create():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from plugins.kanban.dashboard.plugin_api import router
+    app = FastAPI()
+    app.include_router(router)
+    with TestClient(app) as client:
+        return client.post("/tasks", json={"title": DUP_TITLE, "body": DUP_BODY, "assignee": "default"})
+
+
+def _assert_local_event_has_why(b1):
+    [payload] = _overlap_events("unconventional-collab", b1)
+    assert payload["outcome"] == "refused"
+    [m] = payload["matches"]
+    assert m["id"] == b1 and "the new card names board 'unconventional-collab'" in m["why"], m
+    assert _log_lines() == []  # a DB event exists, so no second record
+
+
+def _assert_remote_line_has_why():
+    [line] = _log_lines()
+    assert line["outcome"] == "refused" and line["title"] == DUP_TITLE and line["ts"] > 0
+    [m] = line["matches"]
+    assert (m["gateway"], m["id"]) == ("hub", "t_b1") and "unconventional-collab" in m["why"], m
+
+
+def test_tool_local_refusal_event_carries_why(home):
+    b1 = _board_with_b1()
+    assert _create().get("code") == "create_overlap"
+    _assert_local_event_has_why(b1)
+
+
+def test_tool_all_remote_refusal_is_recorded_durably(home, tmp_path, monkeypatch):
+    _remote_only(home, tmp_path, monkeypatch)
+    assert _create().get("code") == "create_overlap"
+    _assert_remote_line_has_why()
+
+
+def test_cli_local_refusal_event_carries_why(home, monkeypatch, capsys):
+    b1 = _board_with_b1()
+    assert _cli_create(monkeypatch) == 2
+    _assert_local_event_has_why(b1)
+
+
+def test_cli_all_remote_refusal_is_recorded_durably(home, tmp_path, monkeypatch, capsys):
+    _remote_only(home, tmp_path, monkeypatch)
+    assert _cli_create(monkeypatch) == 2
+    _assert_remote_line_has_why()
+
+
+def test_rest_local_refusal_event_carries_why(home):
+    b1 = _board_with_b1()
+    assert _rest_create().status_code == 409
+    _assert_local_event_has_why(b1)
+
+
+def test_rest_all_remote_refusal_is_recorded_durably(home, tmp_path, monkeypatch):
+    _remote_only(home, tmp_path, monkeypatch)
+    assert _rest_create().status_code == 409
+    _assert_remote_line_has_why()
+
+
+def test_why_is_bounded_and_the_log_rotates(home, monkeypatch):
+    from hermes_cli import kanban_overlap as ko
+    monkeypatch.setattr(ko, "LOG_MAX_BYTES", 400)
+    match = {"id": "t_x", "board": "b", "gateway": "hub", "status": "ready", "why": "w" * 5000, "_local": False}
+    for _ in range(4):
+        ko.record(None, None, outcome="refused", title="t", matches=[match])
+    assert all(len(m["why"]) == ko.MAX_WHY for line in _log_lines() for m in line["matches"])
+    rotated = ko.log_path().with_name(ko.LOG_NAME + ".1")
+    assert rotated.exists() and ko.log_path().stat().st_size < 2000

@@ -39,6 +39,9 @@ _log = logging.getLogger(__name__)
 EVENT = "create_overlap"
 OPEN = ("todo", "ready", "running", "scheduled", "blocked", "review", "triage")
 MAX_SHOWN = 8
+MAX_WHY = 300
+LOG_NAME = "create_overlap.jsonl"
+LOG_MAX_BYTES = 1024 * 1024
 MIN_SHARED = 3
 PLAIN_BOARD_SCORE = 0.25
 _STOP = frozenset("""
@@ -295,6 +298,24 @@ def covered(matches: list[dict], distinct_from: list[str], reason: str) -> bool:
     return bool(reason.strip()) and all(m["id"] in distinct_from for m in matches[:MAX_SHOWN])
 
 
+def log_path():
+    from hermes_cli import kanban_db as kb
+    return kb.kanban_home() / "logs" / LOG_NAME
+
+
+def _append_log(payload: dict) -> None:
+    """One JSON line for a refusal that has no board to hold an event (every match is on another gateway).
+    Past ``LOG_MAX_BYTES`` the file is renamed to ``.1`` (one generation kept), so the record is bounded."""
+    import time
+    path = log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size >= LOG_MAX_BYTES:
+        path.replace(path.with_name(path.name + ".1"))
+    line = json.dumps({"ts": time.time(), **payload}, ensure_ascii=False)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+
+
 def record(conn: Optional[sqlite3.Connection], task_id: Optional[str], *, outcome: str, title: str,
            matches: list[dict], reason: str = "", session_id: Optional[str] = None) -> None:
     """``create_overlap`` event (the detection signal): on the new card for an override; for a refusal on the
@@ -302,10 +323,8 @@ def record(conn: Optional[sqlite3.Connection], task_id: Optional[str], *, outcom
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     payload = {"outcome": outcome, "title": title, "reason": reason or None, "session_id": session_id,
-               "matches": [{"id": m["id"], "board": m["board"], "gateway": m["gateway"], "status": m["status"]}
-                           for m in public(matches)]}
-    # The matched cards ride in the log line: a refusal whose matches are all on other gateways records no
-    # event anywhere, so this line is the only trace an audit can read (hub t_01a189b2d186a986).
+               "matches": [{"id": m["id"], "board": m["board"], "gateway": m["gateway"], "status": m["status"],
+                            "why": (m.get("why") or "")[:MAX_WHY]} for m in public(matches)]}
     _log.info("kanban create overlap: %s %r (%d matches: %s)", outcome, title, len(matches),
               ", ".join(f"{m['gateway']}/{m['board']}/{m['id']} ({m['why']})" for m in matches[:MAX_SHOWN]))
     try:
@@ -315,6 +334,7 @@ def record(conn: Optional[sqlite3.Connection], task_id: Optional[str], *, outcom
             return
         local = next((m for m in matches if m["_local"]), None)
         if local is None:
+            _append_log(payload)
             return
         with kbc.connect_closing(board=local["board"]) as other, kb.write_txn(other):
             kb._append_event(other, local["id"], EVENT, payload)
