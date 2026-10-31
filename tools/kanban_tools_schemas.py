@@ -955,20 +955,24 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
         "(continuation_exhausted triage block) and nothing else: never a card waiting on a human "
         "(needs_input/capability/human_request), never more than twice per card. It runs the ordinary "
         "unblock, so parent gating applies (ready, or todo while a parent is open); the result reads back "
-        "the target's status. A request carries only resume ops."
+        "the target's status. A request carries only resume ops. "
+        "Op retry_limit {task_id, max_retries 1-10} asks the executor to set the retry breaker on a card "
+        "THIS task created (never this card itself); a request carries only retry_limit ops."
     ),
     {
         "ops": {
             "type": "array",
-            "description": "Edge edits applied in order, reconcile_notify ops, or resume ops (max 20).",
+            "description": "Edge edits applied in order, reconcile_notify ops, resume ops, or retry_limit ops (max 20).",
             "items": {
                 "type": "object",
                 "properties": {
-                    "op": {"type": "string", "enum": ["link", "unlink", "reconcile_notify", "resume"]},
+                    "op": {"type": "string", "enum": ["link", "unlink", "reconcile_notify", "resume", "retry_limit"]},
                     "parent_id": {"type": "string"},
                     "child_id": {"type": "string"},
                     "task_id": {"type": "string", "description": "reconcile_notify: the subscribed task; "
-                                                                 "resume: the card to requeue."},
+                                                                 "resume: the card to requeue; "
+                                                                 "retry_limit: the card to edit."},
+                    "max_retries": {"type": "integer", "description": "retry_limit: the new breaker, 1-10."},
                     "chat_id": {"type": "string", "description": "reconcile_notify: the tui row's chat (session id)."},
                     "thread_id": {"type": "string", "description": "reconcile_notify: the row's thread, if any."},
                 },

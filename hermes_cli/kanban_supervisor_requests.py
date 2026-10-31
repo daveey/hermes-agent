@@ -28,6 +28,8 @@ This module is the narrow contract between the two:
 * **resume** ops (``kanban_resume_exec``) requeue the card that spawned the requester when the
   continuation budget parked it (``continuation_exhausted``), through ``kanban_db.unblock_task``.
   Never a human-gated card; scope is the requester's creator chain; capped per target.
+* **retry_limit** ops (``kanban_retry_limit_exec``) set ``max_retries`` (1-10) on a card the requester
+  created, never its own, through ``kanban_db_operator.edit_operator_fields``.
 * **Receipt**: every transition appends a ``supervisor_request_*`` event, and the
   terminal one a comment, on the requester's card. A requester parked ``scheduled`` is
   woken, also when it parks only after the result landed. A result never completes, unblocks or releases the requester; a rejected or
@@ -50,10 +52,11 @@ MAX_OPS = 20
 MAX_ATTEMPTS = 5
 LEASE_SECONDS = 120
 EXECUTOR_FRESH_SECONDS = 300
-OPS = ("link", "unlink", "reconcile_notify", "resume")  # link: preview only (dry_run); a request carries unlink ops
+OPS = ("link", "unlink", "reconcile_notify", "resume", "retry_limit")  # link: preview only (dry_run); a request carries unlink ops
 # reconcile_notify: retire a wrong-local refused-send tui subscription on owner-read receipts
 # (hermes_cli/kanban_notify_reconcile_exec.py). A request carries only those, or only edge ops.
 # resume: requeue a continuation_exhausted card in the requester's creator chain (kanban_resume_exec.py).
+# retry_limit: set max_retries on a card the requester created (kanban_retry_limit_exec.py).
 ACTIVE = ("pending", "accepted")
 TERMINAL = ("done", "rejected", "failed")
 COMMENT_AUTHOR = "kanban-supervisor"
@@ -125,6 +128,10 @@ def normalize_ops(ops: Any) -> list[dict]:
             from hermes_cli import kanban_resume_exec as rx
             out.append(rx.normalize_op(i, op))
             continue
+        if kind == "retry_limit":
+            from hermes_cli import kanban_retry_limit_exec as rlx
+            out.append(rlx.normalize_op(i, op))
+            continue
         parent = str(op.get("parent_id") or "").strip()
         child = str(op.get("child_id") or "").strip()
         if kind not in OPS:
@@ -134,16 +141,24 @@ def normalize_ops(ops: Any) -> list[dict]:
         out.append({"op": kind, "parent_id": parent, "child_id": child})
     if len({_family(o) for o in out}) > 1:
         raise SupervisorRequestError(
-            "invalid_ops", "a request carries only reconcile_notify ops, only resume ops, or only edge ops")
+            "invalid_ops", "a request carries only reconcile_notify ops, only resume ops, only retry_limit ops, "
+            "or only edge ops")
     return out
 
 
+_OWN_FAMILIES = ("reconcile_notify", "resume", "retry_limit")
+
+
 def _family(op: dict) -> str:
-    return op["op"] if op.get("op") in ("reconcile_notify", "resume") else "edge"
+    return op["op"] if op.get("op") in _OWN_FAMILIES else "edge"
 
 
 def _is_resume(ops: list[dict]) -> bool:
     return bool(ops) and ops[0].get("op") == "resume"
+
+
+def _is_retry_limit(ops: list[dict]) -> bool:
+    return bool(ops) and ops[0].get("op") == "retry_limit"
 
 
 def _is_reconcile(ops: list[dict]) -> bool:
@@ -154,6 +169,9 @@ def op_label(op: dict) -> str:
     if op.get("op") == "resume":
         from hermes_cli import kanban_resume_exec as rx
         return rx.label(op)
+    if op.get("op") == "retry_limit":
+        from hermes_cli import kanban_retry_limit_exec as rlx
+        return rlx.label(op)
     from hermes_cli import kanban_notify_reconcile_exec as nrx
     return nrx.label(op)
 
@@ -230,6 +248,9 @@ def preflight(conn: sqlite3.Connection, requester: str, ops: list[dict]) -> list
     if _is_resume(ops):
         from hermes_cli import kanban_resume_exec as rx
         return [rx.preflight_op(conn, requester, op) for op in ops]
+    if _is_retry_limit(ops):
+        from hermes_cli import kanban_retry_limit_exec as rlx
+        return [rlx.preflight_op(conn, requester, op) for op in ops]
     edges = _edges(conn)
     verdicts = []
     for op in ops:
@@ -538,6 +559,9 @@ def _execute(conn: sqlite3.Connection, req: dict, executor: str, board: Optional
     if _is_resume(ops):
         from hermes_cli import kanban_resume_exec as rx
         return rx.execute(conn, req, executor)
+    if _is_retry_limit(ops):
+        from hermes_cli import kanban_retry_limit_exec as rlx
+        return rlx.execute(conn, req, executor)
     # Scope is re-checked against the board as it is now, not as it was at submit time.
     gone = requester_refusal(conn, requester)
     verdicts = preflight(conn, requester, ops)
