@@ -29,7 +29,8 @@ IPC, UTS and cgroup namespaces:
   IPv6 forms that carry an IPv4 address (NAT64 ``64:ff9b::/96``, IPv4-mapped
   and -compatible) are judged by that IPv4 address, and a dial that lands on
   one of the host's own addresses (src == dst) is dropped;
-* ``--die-with-parent`` + PID namespace: no background child outlives the run.
+* a dedicated subreaper waits for the whole PID namespace to exit before removing
+  scratch, on success and cancellation; missing quiescence proof retains scratch.
 
 Fail closed: if bwrap is missing or cannot create the namespaces, or the
 process inside cannot prove its namespaces differ from the host's, the command
@@ -633,6 +634,93 @@ def _kill_and_wait(pidfds: list[int], timeout: float) -> bool:
     return not pending
 
 
+def _reap_sandbox_children(timeout: float = 30) -> bool:
+    """Drain this dedicated subreaper, including children adopted during teardown."""
+    end = time.monotonic() + timeout
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return True  # ECHILD, not an empty procfs snapshot, proves quiescence.
+        if pid:
+            continue
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            return False
+        if not _kill_and_wait(_child_pidfds(os.getpid()), remaining):
+            return False
+
+
+def run_supervisor(done_fd: int, parent: int, argv: list[str]) -> int:
+    """Own only this bwrap tree; never make an importing caller a subreaper.
+
+    Reaping the monitor completes adoption of its orphaned namespace init. Reap
+    until ECHILD before acknowledging cleanup, even on normal command exit.
+    """
+    import ctypes
+
+    proc = None
+    cancelled = 0
+
+    def cancel(signum, _frame):
+        nonlocal cancelled
+        cancelled = 128 + signum
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+
+    signal.signal(signal.SIGTERM, cancel)
+    signal.signal(signal.SIGINT, cancel)
+    libc = ctypes.CDLL(None, use_errno=True)
+    # Child-subreaper adoption and parent-death cleanup are Linux kernel contracts.
+    for option, value in ((36, 1), (1, signal.SIGTERM)):  # PR_SET_CHILD_SUBREAPER, PR_SET_PDEATHSIG
+        if libc.prctl(option, value, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "cannot establish sandbox supervisor")
+    if os.getppid() != parent:
+        cancelled = 143  # parent died before PR_SET_PDEATHSIG was installed
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM, signal.SIGINT})
+    try:
+        if cancelled:
+            return cancelled
+        # No lifecycle pipe reaches bwrap or any untrusted payload.
+        proc = subprocess.Popen(argv, close_fds=True)
+        if cancelled:  # a signal during Popen, before proc was assigned
+            proc.kill()
+        # health: allow HX006 -- sandbox runtime; parent timeout signals this supervisor
+        status = proc.wait()
+        return cancelled or (status if status >= 0 else 128 - status)
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            # health: allow HX006 -- parent bounds supervisor teardown and retains scratch on timeout
+            proc.wait()
+        if _reap_sandbox_children():
+            try:
+                os.write(done_fd, b"Q")
+            except BrokenPipeError:
+                pass  # wrapper died; descendants are still fully reaped
+        os.close(done_fd)
+
+
+def _finish_supervisor(proc, done_fd: int) -> bool:
+    """Only an authenticated-by-inheritance quiescence byte permits deletion."""
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=35)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                return False
+    try:
+        return os.read(done_fd, 1) == b"Q"
+    except BlockingIOError:
+        return False
+
+
 def run_host(args) -> int:
     env = dict(os.environ)
     if not args.command:
@@ -653,6 +741,7 @@ def run_host(args) -> int:
     scratch = Path(tempfile.mkdtemp(prefix="plugin-sandbox-", dir=base))
     proxy = None
     proc = None
+    done_r = done_w = None
 
     def _quiet() -> None:
         # `timeout` signals the wrapper twice (it, then its process group): a second
@@ -675,32 +764,37 @@ def run_host(args) -> int:
         except (SetupError, OSError) as exc:
             print(f"plugin-sandbox: {exc}", file=sys.stderr)
             return EXIT_SETUP
-        # bwrap itself gets no inherited secrets either (it does not need any).
-        # bwrap's own setup failures exit 1 like a failing command; either way the
-        # caller sees a nonzero status and the entry fails.
-        # Own session: `timeout 600` signals its whole process group, and a group
-        # SIGTERM that also reached bwrap killed it before the wrapper could take
-        # pidfds of the sandbox, so the cleanup below never stopped the sandbox.
-        # Now only the wrapper is signalled, and it tears bwrap down below.
-        # detached-spawn: ok — --die-with-parent kills bwrap with the wrapper; the session only keeps group signals off it
-        proc = subprocess.Popen(argv, env={"PATH": "/usr/bin:/bin"}, close_fds=True, start_new_session=True)
-        # health: allow HX006 -- this wait IS the sandboxed command's runtime; the caller bounds it (the job's `timeout 600`) and SIGTERM/SIGINT tear the namespace down below
-        return proc.wait()
+        # A separate subreaper owns this one sandbox tree. It gets no secrets;
+        # its completion pipe is closed before bwrap execs. Block cancellation
+        # across Popen assignment so finally cannot lose a newly spawned child.
+        done_r, done_w = os.pipe2(os.O_CLOEXEC)
+        os.set_blocking(done_r, False)
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
+        try:
+            supervisor = [sys.executable, "-I", "-S", os.path.realpath(__file__),
+                          "--supervise", str(done_w), str(os.getpid()), *argv]
+            # detached-spawn: ok — supervisor handles parent death and owns/reaps its entire bwrap tree
+            proc = subprocess.Popen(supervisor, env={"PATH": "/usr/bin:/bin"},
+                                    pass_fds=(done_w,), start_new_session=True)
+            os.close(done_w)
+            done_w = None
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        # health: allow HX006 -- sandbox runtime; the job timeout signals the wrapper, whose finally stops the supervisor
+        status = proc.wait()
     finally:
         _quiet()
-        if proc is not None and proc.poll() is None:
-            inits = _child_pidfds(proc.pid)
-            proc.kill()  # bwrap's PID namespace (every sandboxed process) dies with it
-            try:
-                proc.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                pass
-            # Scratch (the overlay copy) is removed only once nothing in the sandbox can write to it.
-            if not _kill_and_wait(inits, timeout=30):
-                _log("sandboxed processes outlived 30s; scratch removal may be incomplete")
+        safe = proc is None or (done_r is not None and _finish_supervisor(proc, done_r))
+        for fd in (done_r, done_w):
+            if fd is not None:
+                os.close(fd)
         if proxy:
             proxy.close()
-        remove_tree(scratch)
+        if safe:
+            remove_tree(scratch)
+        else:
+            _log(f"sandbox quiescence not confirmed; retaining scratch: {scratch}")
+    return status if safe else EXIT_SETUP
 
 
 # ─── inside the sandbox ─────────────────────────────────────────────────────────
@@ -803,6 +897,8 @@ def main(argv: list[str] | None = None) -> int:
     if sys.platform != "linux":
         print("plugin-sandbox: Linux only", file=sys.stderr)
         return EXIT_SETUP
+    if argv[:1] == ["--supervise"]:
+        return run_supervisor(int(argv[1]), int(argv[2]), argv[3:])
     return run_host(parse_host_args(argv))
 
 
