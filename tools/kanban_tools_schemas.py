@@ -945,19 +945,26 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
         "wrong-local platform='tui' send_refused notify subscription for a chat another gateway owns "
         "(a phantom 'unseen' count): the executor asks the owner gateway itself which notices it holds and "
         "removes the row only on its receipt, else keeps it. Pass no evidence; a request carries only "
-        "reconcile_notify ops or only edge ops."
+        "reconcile_notify ops or only edge ops. "
+        "Op resume {task_id} asks the executor to requeue the card that spawned this one (its creator "
+        "chain) or a card this one created, ONLY when the continuation budget parked it "
+        "(continuation_exhausted triage block) and nothing else: never a card waiting on a human "
+        "(needs_input/capability/human_request), never more than twice per card. It runs the ordinary "
+        "unblock, so parent gating applies (ready, or todo while a parent is open); the result reads back "
+        "the target's status. A request carries only resume ops."
     ),
     {
         "ops": {
             "type": "array",
-            "description": "Edge edits applied in order, or reconcile_notify ops (max 20).",
+            "description": "Edge edits applied in order, reconcile_notify ops, or resume ops (max 20).",
             "items": {
                 "type": "object",
                 "properties": {
-                    "op": {"type": "string", "enum": ["link", "unlink", "reconcile_notify"]},
+                    "op": {"type": "string", "enum": ["link", "unlink", "reconcile_notify", "resume"]},
                     "parent_id": {"type": "string"},
                     "child_id": {"type": "string"},
-                    "task_id": {"type": "string", "description": "reconcile_notify: the subscribed task."},
+                    "task_id": {"type": "string", "description": "reconcile_notify: the subscribed task; "
+                                                                 "resume: the card to requeue."},
                     "chat_id": {"type": "string", "description": "reconcile_notify: the tui row's chat (session id)."},
                     "thread_id": {"type": "string", "description": "reconcile_notify: the row's thread, if any."},
                 },

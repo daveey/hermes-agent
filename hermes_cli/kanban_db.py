@@ -3735,12 +3735,14 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str, *, comment: Optional[tuple[str, str]] = None) -> bool:
+def unblock_task(conn: sqlite3.Connection, task_id: str, *, comment: Optional[tuple[str, str]] = None,
+                 event_extra: Optional[dict] = None) -> bool:
     """``blocked``/``scheduled``/``triage`` -> its resumable phase (parent
     re-gated; ``review`` when that is where it left off), closing any leaked run
     first. ``triage`` is accepted so a card a block loop escalated can go back
     to work without the specifier/decomposer rewriting it. ``comment`` is written in the same
-    txn and only when the unblock lands (``kanban_reason_comment``). [daveey]"""
+    txn and only when the unblock lands (``kanban_reason_comment``). ``event_extra`` is merged
+    into the ``unblocked`` event in that txn (audit provenance, e.g. a supervisor request). [daveey]"""
     from hermes_cli.kanban_reason_comment import reason_comment
     now = int(time.time())
     with write_txn(conn), reason_comment(conn, task_id, comment) as noted:
@@ -3772,14 +3774,14 @@ def unblock_task(conn: sqlite3.Connection, task_id: str, *, comment: Optional[tu
         )
         if cur.rowcount != 1:
             return False
-        _append_event(
-            conn, task_id, "unblocked",
-            (
-                {"status": new_status, "resume_status": resume_status}
-                if new_status != "ready" or resume_status != "ready"
-                else None
-            ),
+        payload = (
+            {"status": new_status, "resume_status": resume_status}
+            if new_status != "ready" or resume_status != "ready"
+            else None
         )
+        if event_extra:
+            payload = {**(payload or {}), **event_extra}
+        _append_event(conn, task_id, "unblocked", payload)
         return noted.keep(True)
 
 

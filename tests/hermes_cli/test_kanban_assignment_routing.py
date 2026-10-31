@@ -343,3 +343,80 @@ def test_stale_run_does_not_create_supervisor(board):
     tid = task_with_drift(board)
     assert not kb.block_task(conn, tid, kind='capability', reason='No terminal', expected_run_id=9999)
     assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
+
+
+# --- execution authority is not a profile mismatch [daveey] ---------------------------------
+
+_AUTHORITY_REASON = (
+    'Operational recovery cannot be completed from a worker: kanban unblock for t_01a19084a3b36956 '
+    '(triage, continuation_exhausted) is fenced for worker-descended shells and no kanban_* worker '
+    'tool unblocks. Route to a non-worker supervisor.')
+
+
+@pytest.mark.parametrize('reason', [
+    _AUTHORITY_REASON,
+    'Need someone to requeue t_0123456789abcdef after the fix',
+    'Please reset the continuation budget so the work can resume',
+])
+def test_execution_authority_ask_is_refused_not_reassigned(board, reason):
+    """Reproduction (t_01a191a2b59741ef): an assignment block asking for another card's unblock got an
+    assignment repair that only swapped profiles; every profile's worker has the same fence."""
+    from hermes_cli import kanban_assignment_routing as ar
+    conn, _ = board
+    tid = kb.create_task(conn, title='Recover owner', assignee='worker', created_by='creator')
+    with pytest.raises(ar.ExecutionAuthorityMismatch, match='execution_authority_mismatch') as err:
+        kb.block_task(conn, tid, kind='assignment', reason=reason)
+    assert 'kanban_supervisor_request' in str(err.value) and '"resume"' in str(err.value)
+    task = kb.get_task(conn, tid)
+    assert (task.status, task.assignee, task.block_kind) == ('ready', 'worker', None)
+    assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1  # no repair card
+    assert not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind IN ('blocked','assigned')",
+                            (tid,)).fetchone()
+
+
+@pytest.mark.parametrize('reason', ['Worker lacks terminal tools', 'Wrong worker', 'Profile mismatch',
+                                    'Need the repo checkout that t_0123456789abcdef pushed'])
+def test_profile_mismatch_still_routes_and_names_no_authority(board, reason):
+    from hermes_cli import kanban_assignment_routing as ar
+    conn, _ = board
+    tid = task_with_drift(board)
+    assert ar.execution_authority_need(tid, reason) == []
+    assert kb.block_task(conn, tid, kind='assignment', reason=reason)
+    assert payload(conn, tid)['supervisor_task_id']
+
+
+def test_own_card_id_is_not_another_cards_transition(board):
+    from hermes_cli import kanban_assignment_routing as ar
+    assert ar.execution_authority_need('t_0123456789abcdef', 'unblock t_0123456789abcdef later') == []
+
+
+def test_legacy_authority_repair_cannot_complete_on_profile_existence_alone(board, monkeypatch):
+    """A repair filed before the route refused such asks must not read as recovered: the
+    supervisor profile exists and validates, yet the original asked for an unblock."""
+    from hermes_cli import kanban_assignment_routing as ar
+    conn, _ = board
+    other = kb.create_task(conn, title='Control', assignee='worker', created_by='creator', requires=['terminal'])
+    tid = task_with_drift(board)
+    with monkeypatch.context() as m:
+        m.setattr(ar, 'execution_authority_need', lambda *a: [])  # the pre-fix route
+        assert kb.block_task(conn, tid, kind='assignment', reason=_AUTHORITY_REASON)
+    repair_id = payload(conn, tid)['supervisor_task_id']
+    with pytest.raises(ar.ExecutionAuthorityMismatch):
+        kb.complete_task(conn, repair_id, result='Verified profile supervisor exists')
+    assert kb.get_task(conn, repair_id).status != 'done'
+    # Control: a real profile-mismatch repair still completes once its profile verifies.
+    assert kb.block_task(conn, other, kind='assignment', reason='Wrong worker')
+    assert kb.complete_task(conn, payload(conn, other)['supervisor_task_id'], result='Verified')
+
+
+def test_authority_refusal_has_typed_tool_error(board, monkeypatch):
+    from tools import kanban_tools as tools
+    from tools.registry import registry
+    conn, _ = board
+    tid = kb.create_task(conn, title='Recover owner', assignee='worker', created_by='creator')
+    monkeypatch.setattr(tools, '_worker_guard', lambda *args: tid)
+    monkeypatch.setattr(tools, '_worker_run_id', lambda *args: None)
+    result = json.loads(registry.dispatch('kanban_block', {
+        'task_id': tid, 'kind': 'assignment', 'reason': _AUTHORITY_REASON}))
+    assert result['code'] == 'execution_authority_mismatch', result
+    assert kb.get_task(conn, tid).status == 'ready'

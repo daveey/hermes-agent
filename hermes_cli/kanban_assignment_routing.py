@@ -35,6 +35,44 @@ class AssignmentRoutingError(ValueError):
     code = 'no_capable_supervisor'
 
 
+class ExecutionAuthorityMismatch(AssignmentRoutingError):
+    """The block asks for a board transition on another card, which no profile change grants."""
+
+    code = 'execution_authority_mismatch'
+
+
+# A worker of ANY profile is fenced from moving another card through its lifecycle, so a block
+# asking for that is an execution-authority gap, not a profile mismatch: reassigning cannot fix it.
+_OTHER_CARD_TRANSITION = re.compile(
+    r'\b(?:unblock\w*|re-?queue\w*|promot\w*|resum\w*)\b[^.;\n]{0,120}?\b(t_[0-9a-f]{8,16})\b'
+    r'|\b(t_[0-9a-f]{8,16})\b[^.;\n]{0,120}?\b(?:unblock\w*|re-?queue\w*|promot\w*)\b',
+    re.IGNORECASE,
+)
+_BUDGET_RESET = re.compile(r'\breset\w*\b[^.;\n]{0,40}\bcontinuation (?:budget|limit|streak)\b', re.IGNORECASE)
+
+
+def execution_authority_need(task_id, reason):
+    """The other card ids a block asks to move through its lifecycle (or ``['<budget>']`` for a
+    continuation-budget reset), else ``[]``. Profile mismatches return ``[]``."""
+    text = reason or ''
+    ids = [a or b for a, b in _OTHER_CARD_TRANSITION.findall(text)]
+    ids = [i for i in dict.fromkeys(ids) if i != task_id]
+    if not ids and _BUDGET_RESET.search(text):
+        ids = ['<budget>']
+    return ids
+
+
+def _authority_error(task_id, needs):
+    return ExecutionAuthorityMismatch(
+        f'execution_authority_mismatch: task {task_id} asks to move another card '
+        f'({", ".join(needs)}) through its lifecycle. That is fenced for every worker profile, so an '
+        'assignment repair cannot fix it and none was recorded. For a card the continuation budget '
+        'parked, file kanban_supervisor_request ops=[{"op": "resume", "task_id": "<id>"}] (the '
+        'non-worker executor re-checks scope and refuses human-gated cards); a card waiting on a '
+        'human stays with that human.'
+    )
+
+
 def classify(task, kind, reason, *, human_request=None):
     """Use explicit request evidence, never auth vocabulary, to stop assignment repair."""
     # Routing grants no execution authorization. Prose may describe denied or
@@ -94,6 +132,19 @@ def validate_repair_completion(conn, task_id):
     original = kb.get_task(conn, key.removeprefix(_SUPERVISOR_PREFIX))
     if original is None or original.assignee is None:
         raise AssignmentRoutingError('Assignment repair has no assigned original task')
+    # A verified profile is not a recovery when the original asked for authority no profile has.
+    import json
+    for (raw,) in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='blocked' "
+                               "ORDER BY id DESC", (original.id,)).fetchall():
+        try:
+            data = json.loads(raw) if raw else {}
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get('supervisor_task_id') == task_id:
+            needs = execution_authority_need(original.id, data.get('reason'))
+            if needs:
+                raise _authority_error(original.id, needs)
+            break
     validate_assignment(original.assignee, requires=original.requires,
                         workspace_kind=original.workspace_kind,
                         workspace_path=original.workspace_path, skills=original.skills)
@@ -106,6 +157,9 @@ def route(conn, task, payload):
     from hermes_cli import kanban_db as kb
 
     key = _SUPERVISOR_PREFIX + task.id
+    needs = execution_authority_need(task.id, payload.get('reason'))
+    if needs:
+        raise _authority_error(task.id, needs)
     own_key = conn.execute('SELECT idempotency_key FROM tasks WHERE id=?', (task.id,)).fetchone()[0]
     previous = conn.execute('SELECT id FROM tasks WHERE idempotency_key=?', (key,)).fetchone()
     if (own_key or '').startswith(_SUPERVISOR_PREFIX) or previous:
