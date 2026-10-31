@@ -717,3 +717,72 @@ def test_every_delivered_ack_has_a_transcript_row_after_a_stale_settle(tmp_path)
     # Settled for every reader: the ledger skip used by the sweep and collect treats it as done.
     with contextlib.closing(krn._ledger(ledger)) as c:
         assert krn._ledger_settled(c, (CHAT,), f"hub/{moved['key']}", state)
+
+
+def _adopted(card, origin_session, *, gateway="macbook", shepherd=False):
+    """``card`` re-shaped as an adopted card: its chat is named only by an ``origin_bindings`` marker."""
+    task = card["task"]
+    task["origin_bindings"] = [{"binding_id": "binding-x", "version": 1, "task_record_key": card["key"],
+                                "origin": {"gateway": gateway, "profile": "default", "session": origin_session},
+                                "owner": {"board": "default", "gateway": "hub", "profile": "default",
+                                          "task_id": task["id"]}}]
+    if not shepherd:
+        task["sessions"] = [{"gw": "macbook", "profile": "default", "session": OTHER, "rel": "shepherd"}]
+    return card
+
+
+def test_sweep_notifies_the_origin_chat_of_an_adopted_card(tmp_path):
+    """[daveey] An adopted card's origin chat gets the done notice although no shepherd link names it
+    (hub t_a989e5e0 reached five unrelated shepherds and never chat 20261026_110445_20914b)."""
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = time.time()
+    replica = _hub(tmp_path, [_adopted(_card("t_adopted", CHAT, status="done", at=now - 4), CHAT)])
+    krn._reset_for_tests()
+    with SessionDB(tmp_path / "state.db") as db:
+        for sid in (CHAT, OTHER):
+            db.create_session(sid, "desktop")
+
+        @contextlib.contextmanager
+        def opener(profile, sid):
+            yield db, sid
+
+        got = sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener,
+                                   ledger=tmp_path / "ledger.db", now=now)
+        assert sorted(d["session_id"] for d in got) == sorted([CHAT, OTHER])
+        assert [m["display_kind"] for m in db.get_messages(CHAT)] == ["kanban_notice"]
+        assert "t_adopted" in db.get_messages(CHAT)[0]["content"]
+
+
+def test_poller_collect_returns_the_adopted_cards_notice_to_its_origin_chat(tmp_path):
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = time.time()
+    replica = _hub(tmp_path, [_adopted(_card("t_adopted_poll", CHAT, status="done", at=now - 4), CHAT)])
+    krn._reset_for_tests()
+    got = krn.collect(CHAT, "default", hub_db=replica, ledger=tmp_path / "ledger.db", now=now)
+    assert [g["ref"].rsplit("/", 1)[-1] for g in got] == ["t_adopted_poll"]
+
+
+def test_origin_that_is_also_a_shepherd_gets_one_notice_and_foreign_origins_none(tmp_path):
+    from tui_gateway import kanban_remote_notices as krn
+
+    now = time.time()
+    both = _adopted(_card("t_both", CHAT, status="done", at=now - 4), CHAT, shepherd=True)
+    foreign = _adopted(_card("t_foreign", OTHER, status="done", at=now - 4), CHAT, gateway="mini")
+    foreign["task"]["sessions"] = []
+    replica = _hub(tmp_path, [both, foreign])
+    krn._reset_for_tests()
+    with SessionDB(tmp_path / "state.db") as db:
+        db.create_session(CHAT, "desktop")
+
+        @contextlib.contextmanager
+        def opener(profile, sid):
+            yield db, sid
+
+        got = sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener,
+                                   ledger=tmp_path / "ledger.db", now=now)
+        assert [(d["session_id"], d["task_id"]) for d in got] == [(CHAT, "t_both")]
+        assert len(db.get_messages(CHAT)) == 1
+    assert [g["ref"].rsplit("/", 1)[-1] for g in krn.collect(CHAT, "default", hub_db=replica,
+                                                               ledger=tmp_path / "ledger2.db", now=now)] == ["t_both"]

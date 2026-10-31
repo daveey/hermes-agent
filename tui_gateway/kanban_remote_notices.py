@@ -139,14 +139,33 @@ def _index(path: Path) -> tuple[str, dict]:
             continue
         if not isinstance(task, dict) or task.get("status") not in _TERMINAL or not task.get("id"):
             continue
-        links = task.get("sessions") if isinstance(task.get("sessions"), list) else []
-        for link in links:
-            if (isinstance(link, dict) and link.get("gw") == me and link.get("rel") in LINK_RELS
-                    and link.get("session") and not _released(link)):
-                index.setdefault((str(link.get("profile") or "default"), str(link["session"])), []).append(
-                    {"gw": str(gw), "key": str(key), "task": task})
+        for chat in _linked_chats(task, me):
+            index.setdefault(chat, []).append({"gw": str(gw), "key": str(key), "task": task})
     _index_memo = (str(path), sig, me, index)
     return me, index
+
+
+def _linked_chats(task: dict, me: str) -> list[tuple[str, str]]:
+    """``(profile, session)`` of this gateway's chats a remote card notifies: its unreleased shepherd links, and
+    the origin chat of every origin binding (``kanban_origin_adopt``) naming this gateway. [daveey]
+
+    An adopted card carries its origin only as an ``origin_bindings`` marker; the owner publishes no shepherd link
+    for it unless a hub subscription happens to exist. Reading only ``sessions`` left that origin chat with no
+    done notice at all, so it never summarised the finished work and its outcome stayed ``unresolved{no_summary}``
+    (hub card t_a989e5e0 -> MacBook chat 20261026_110445_20914b, 2026-10-31: the notice reached five unrelated
+    shepherd transcripts and not the chat that asked for the work)."""
+    out: list[tuple[str, str]] = []
+    links = task.get("sessions")
+    for link in links if isinstance(links, list) else ():
+        if (isinstance(link, dict) and link.get("gw") == me and link.get("rel") in LINK_RELS
+                and link.get("session") and not _released(link)):
+            out.append((str(link.get("profile") or "default"), str(link["session"])))
+    bindings = task.get("origin_bindings")
+    for binding in bindings if isinstance(bindings, list) else ():
+        origin = binding.get("origin") if isinstance(binding, dict) else None
+        if isinstance(origin, dict) and origin.get("gateway") == me and origin.get("session"):
+            out.append((str(origin.get("profile") or "default"), str(origin["session"])))
+    return list(dict.fromkeys(out))  # one notice per chat even when a chat is both origin and shepherd
 
 
 def _released(link: dict) -> bool:
@@ -807,8 +826,7 @@ def _sweep_cards(rows: list[tuple], me: str):
         done = task.get("status") == "done" and isinstance(notice, dict) and "event_id" in notice
         if not done and task.get("status") != "blocked":
             continue
-        links = [link for link in task.get("sessions") or [] if isinstance(link, dict)
-                 and link.get("rel") == "shepherd" and link.get("gw") == me and not _released(link)]
+        links = [{"profile": profile, "session": sid} for profile, sid in _linked_chats(task, me)]
         if not links:
             continue
         yield owner, key, task, links
