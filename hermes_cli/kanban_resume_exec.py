@@ -202,7 +202,8 @@ def _readback(conn: sqlite3.Connection, target: str) -> dict:
 def _safe_readback(conn: sqlite3.Connection, target: str) -> dict:
     try:
         return _readback(conn, target)
-    except Exception as exc:  # the write already committed; a readback fault must not hide it
+    except (sqlite3.Error, AttributeError, TypeError, ValueError) as exc:
+        # the write already committed; a readback fault must not hide it
         return {"readback_error": f"{type(exc).__name__}: {exc}"}
 
 

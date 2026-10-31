@@ -3738,35 +3738,26 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
 def unblock_task(conn: sqlite3.Connection, task_id: str, *, comment: Optional[tuple[str, str]] = None,
                  event_extra: Optional[dict] = None,
                  precondition: Optional[Callable[[sqlite3.Connection], Optional[str]]] = None) -> bool:
-    """``blocked``/``scheduled``/``triage`` -> its resumable phase (parent
-    re-gated; ``review`` when that is where it left off), closing any leaked run
-    first. ``triage`` is accepted so a card a block loop escalated can go back
-    to work without the specifier/decomposer rewriting it. ``comment`` is written in the same
-    txn and only when the unblock lands (``kanban_reason_comment``). ``event_extra`` is merged
-    into the ``unblocked`` event in that txn (audit provenance, e.g. a supervisor request).
-    ``precondition`` runs first inside the write txn; a returned refusal string aborts with
-    ``False`` and no change, so a caller's checks cannot go stale before the write. [daveey]"""
+    """``blocked``/``scheduled``/``triage`` -> its resumable phase (parent re-gated; ``review`` when
+    that is where it left off), closing any leaked run first. ``triage`` is accepted so a card a block
+    loop escalated can go back to work without the specifier/decomposer rewriting it. ``comment`` is
+    written in the same txn and only when the unblock lands (``kanban_reason_comment``); ``event_extra``
+    is merged into the ``unblocked`` event (audit provenance). ``precondition`` runs first inside the
+    write txn; a returned refusal aborts with ``False`` and no change. [daveey]"""
     from hermes_cli.kanban_reason_comment import reason_comment
     now = int(time.time())
     with write_txn(conn), reason_comment(conn, task_id, comment) as noted:
         if precondition is not None and precondition(conn):
             return False
-        resume_status = (
-            _resume_status_from_events(conn, task_id)
-            if _task_status(conn, task_id) in ("blocked", "triage")
-            else "ready"
-        )
+        resume_status = (_resume_status_from_events(conn, task_id)
+                         if _task_status(conn, task_id) in ("blocked", "triage") else "ready")
         _reclaim_dangling_run(
             conn, task_id, statuses=("blocked", "scheduled", "triage"), now=now,
             note="invariant recovery on unblock",
         )
         # Re-gate on parent completion before restoring the source phase.
         landing_status = _landing_status_after_parents(conn, task_id)
-        new_status = (
-            "review"
-            if landing_status == "ready" and resume_status == "review"
-            else landing_status
-        )
+        new_status = "review" if landing_status == "ready" and resume_status == "review" else landing_status
         # ``block_kind``/``block_recurrences`` deliberately survive the unblock:
         # resetting them is the amnesia that let cron-unblock <-> re-block loop
         # unbounded; only complete_task clears them. ``consecutive_failures``
