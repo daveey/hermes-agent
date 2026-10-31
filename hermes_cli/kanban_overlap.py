@@ -22,7 +22,10 @@ equals a board slug does not count.
 Never matched: closed cards (a replica's stale legacy ``<board>/<id>`` row never outvotes its qualified
 ``<profile>/<board>/<id>`` twin), the creator's own card, the new card's parents, cards the same chat or the same
 worker created (fan-out), the waiting card a capability-owner create quotes, and another capability-owner
-card for that same waiting card. A missing or unreadable replica is skipped and logged, never a block.
+card for that same waiting card, a card the new one parks/waits on or names as its producer or parent, and a
+card that names a different target (:func:`distinct_target`: another repo, host, process or ticket, or an
+inverted check at another revision; a newer sha alone is not a different target). Each card counts once per
+gateway. A missing or unreadable replica is skipped and logged, never a block.
 ``kanban.create_overlap_check: false`` turns the check off.
 """
 
@@ -30,8 +33,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sqlite3
+from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 _log = logging.getLogger(__name__)
@@ -128,20 +133,136 @@ def _reasons(card: dict, new_words: set[str], title: str, body: str, target_boar
     return reasons, score
 
 
-def _local_cards(self_gw: Optional[str]) -> Iterable[dict]:
+# Target identity (overlap audit t_01a189c70884fa59). Shared title words say two cards are the same KIND of work;
+# they do not say it is the same target. 108 refusals in 24 h matched on boilerplate while each title named a
+# different machine, process or ticket: ``David-MBP: gateway 78233 may run stale hermes-mods plugins`` vs
+# ``daveey-mini: gateway 16839 may run stale hermes-mods plugins``, a mini probe leg vs its MacBook leg,
+# ``BB-1155 ... mini`` vs ``BB-1197, BB-1202, BB-1205 ... metta3``. A class only decides when BOTH titles carry it.
+_HOST_ALIASES = {
+    "macbook": "macbook", "mbp": "macbook", "david-mbp": "macbook", "test-key-gen": "macbook",
+    "mini": "mini", "daveey-mini": "mini", "mac-mini": "mini", "davids-mac-mini-1": "mini",
+    "hermes-hub": "hub",
+}
+# Bare "hub" is not a host here: it is also the BB hub (on the mini) and "for hub t_..." quotes a card.
+_HOST_PART_ALIASES = {"mbp": "macbook", "macbook": "macbook", "mini": "mini"}
+_HOST_PATTERN = re.compile(r"(?:metta|worker|gpu|bb-linux)-?\d+")
+_TASK_REF = re.compile(r"(?:\b[a-z][\w.-]*[/ ](?:[\w-]+/)?)?\bt_[0-9a-f]{8,16}\b")
+_PROCESS = re.compile(r"\b(?:gateway|pid|process|backend|serve|worker)[\s=:#]*(\d{2,})\b")
+_TICKET = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
+_ISSUE = re.compile(r"(?<!\brun )(?<!\bjob )(?<!\bbuild )(?<!\battempt )#(\d+)\b")
+_REVISION = re.compile(r"\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b")
+# A newer revision of the same check is the same owner's work, so a differing sha alone never makes cards
+# distinct. It does when one title inverts the other's acceptance (da19695 removes OWNER_ASK_KEYS; the
+# a2dadd6 probe expects it present).
+_REPO_OWNERS = ("daveey", "metta-ai", "nousresearch", "softmax-ai")
+_REPO = re.compile(r"(?<![\w./~@-])(?:https?://)?(?:github\.com/)?((?:" + "|".join(_REPO_OWNERS)
+                   + r")/[a-z0-9][\w.-]*?)(?=[.,;:)'`\"]*(?:\s|$)|/(?:actions|pull|issues|commit|tree|blob)\b)")
+_INVERTS = frozenset(
+    "remove removes removed removal removing revert reverts reverted drop drops dropped delete deletes deleted "
+    "deletion without disable disables disabled rollback".split())
+
+
+def target_identity(title: str, gateways: Iterable[str] = ()) -> dict[str, frozenset[str]]:
+    """The targets a title names, by class: ``host``, ``process``, ``ticket``, ``revision``."""
+    raw = title or ""
+    low = _TASK_REF.sub(" ", raw.lower())
+    hosts = set()
+    dynamic = {g.lower() for g in gateways if g and g.lower() not in {"hub", "local"}}
+    for tok in re.findall(r"[a-z0-9][a-z0-9.-]*[a-z0-9]|[a-z0-9]", low):
+        if tok in _HOST_ALIASES:
+            hosts.add(_HOST_ALIASES[tok])
+        elif tok in dynamic or _HOST_PATTERN.fullmatch(tok):
+            hosts.add(tok)
+        else:
+            hosts.update(_HOST_PART_ALIASES[p] for p in tok.split("-") if p in _HOST_PART_ALIASES)
+    tickets = set(_TICKET.findall(_TASK_REF.sub(" ", raw))) | {f"#{n}" for n in _ISSUE.findall(low)}
+    return {"host": frozenset(hosts), "process": frozenset(_PROCESS.findall(low)),
+            "ticket": frozenset(t.upper() for t in tickets), "revision": frozenset(_REVISION.findall(low))}
+
+
+def repos(text: str) -> frozenset[str]:
+    """GitHub ``owner/repo`` slugs, bare or in a URL (``daveey/hermes-mods`` is not ``daveey/hermes``)."""
+    return frozenset(_REPO.findall((text or "").lower()))
+
+
+def _repo_of(title: str, body: str) -> frozenset[str]:
+    """A card's repo: the title's slugs, else the body's when it names exactly one (the bb_bridge card
+    "Main CI red since effa0d25f: repair the hub suite on main" names daveey/babybear only in its body)."""
+    named = repos(title)
+    if named:
+        return named
+    in_body = repos(body)
+    return in_body if len(in_body) == 1 else frozenset()
+
+
+def waits_on(card_id: str, title: str, body: str) -> bool:
+    """The new card names ``card_id`` as what it parks or waits on, or as its producer or parent: a waiter is
+    not a duplicate of its producer (hub 10-30 14:19:41Z, overridden 4 s later)."""
+    cid = re.escape(card_id or "")
+    if not cid:
+        return False
+    pat = (rf"\b(?:park(?:s|ed|ing)?|wait(?:s|ed|ing)?|blocked|depend(?:s|ing)?)\s+on\s+(?:[\w.@-]+[ /]){{0,3}}"
+           rf"{cid}\b|\b(?:producer|parent)\b[^.\n]{{0,40}}\b{cid}\b")
+    return bool(re.search(pat, f"{title or ''}\n{body or ''}", re.IGNORECASE))
+
+
+def distinct_target(new_title: str, card_title: str, gateways: Iterable[str] = (), *, new_body: str = "",
+                    card_body: str = "") -> Optional[str]:
+    """Why two cards name different targets (a repo, a machine, a process lifetime, a ticket, an inverted
+    check at another revision), else None. Same-target pairs, and pairs where either side names no target in
+    a class, are left to the word-overlap rules."""
+    a, b = target_identity(new_title, gateways), target_identity(card_title, gateways)
+    ra, rb = _repo_of(new_title, new_body), _repo_of(card_title, card_body)
+    if ra and rb and not ra & rb:
+        return f"repo {'/'.join(sorted(ra))} != {'/'.join(sorted(rb))}"
+    for cls in ("host", "process", "ticket"):
+        if a[cls] and b[cls] and not a[cls] & b[cls]:
+            return f"{cls} {'/'.join(sorted(a[cls]))} != {'/'.join(sorted(b[cls]))}"
+    if a["revision"] and b["revision"] and not a["revision"] & b["revision"]:
+        if bool(words(new_title) & _INVERTS) != bool(words(card_title) & _INVERTS):
+            return f"revision {'/'.join(sorted(a['revision']))} inverts {'/'.join(sorted(b['revision']))}"
+    return None
+
+
+def _board_files() -> Iterable[tuple[str, Path]]:
+    """``(board, db file)`` for each board, each file once, named after the board that owns it.
+
+    Board paths resolve through ``kanban_db_path``, so a fenced worker stays on its ``HERMES_KANBAN_DB`` pin
+    (workers do not read other boards). Under that pin every slug resolves to the one pinned file: read once
+    per board, its cards came back once per board, each copy labelled with another board's slug (hub 10-30
+    08:04:58Z and 12:05:05Z: one default card listed 7 times, as default/askeve/bb/runners/...)."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_boards import list_boards
+
+    def real(path: Path) -> Path:
+        try:
+            return path.resolve()
+        except OSError:
+            return path
+
+    slugs = [meta.get("slug") or kb.DEFAULT_BOARD for meta in list_boards(include_archived=False)]
+    owner = {real(kb.board_own_db_path(slug)): slug for slug in slugs}
+    pinned = os.environ.get("HERMES_KANBAN_BOARD", "").strip() or kb.DEFAULT_BOARD
+    read: set[Path] = set()
+    for slug in slugs:
+        path = kb.kanban_db_path(board=slug)
+        key = real(path)
+        if key in read:
+            continue
+        read.add(key)
+        yield owner.get(key) or (pinned if key != real(kb.board_own_db_path(slug)) else slug), path
+
+
+def _local_cards(self_gw: Optional[str]) -> Iterable[dict]:
     from hermes_cli.kanban_session_activity import cached_ro
     marks = ",".join("?" * len(OPEN))
-    for meta in list_boards(include_archived=False):
-        slug = meta.get("slug") or kb.DEFAULT_BOARD
-        path = kb.kanban_db_path(board=slug)
+    for slug, path in _board_files():
         if not path.exists():
             continue
         try:
             with cached_ro(path) as c:
                 rows = c.execute(
-                    "SELECT t.id, t.title, t.status, t.session_id, (SELECT json_extract(e.payload, "
+                    "SELECT t.id, t.title, t.body, t.status, t.session_id, (SELECT json_extract(e.payload, "
                     "'$.creator_task_id') FROM task_events e WHERE e.task_id = t.id AND e.kind = 'created' "
                     f"LIMIT 1), t.idempotency_key FROM tasks t WHERE t.status IN ({marks})", OPEN).fetchall()
                 try:
@@ -155,8 +276,9 @@ def _local_cards(self_gw: Optional[str]) -> Iterable[dict]:
         chats: dict[str, set[str]] = {}
         for tid, sess in links:
             chats.setdefault(tid, set()).add(sess)
-        for tid, title, status, sess, creator, key in rows:
+        for tid, title, body, status, sess, creator, key in rows:
             yield {"id": tid, "board": slug, "gateway": self_gw or "local", "status": status, "title": title,
+                   "body": body or "",
                    "session_id": sess, "creator_task_id": creator, "local": True, "key_family": key_family(key),
                    "chats": sorted(chats.get(tid, set()) | ({sess} if sess else set()))}
 
@@ -196,7 +318,8 @@ def _replica_cards(self_gw: Optional[str]) -> Iterable[dict]:
         seen.add(key)
         sessions = [s for s in (t.get("sessions") or []) if isinstance(s, dict)]
         yield {"id": t["id"], "board": t.get("board") or "default", "gateway": t.get("gateway") or gw,
-               "status": t.get("status"), "title": t.get("title") or "", "local": False,
+               "status": t.get("status"), "title": t.get("title") or "", "body": t.get("body") or "",
+               "local": False,
                "session_id": next((s.get("session") for s in sessions if s.get("rel") == "created"), None),
                "creator_task_id": None, "key_family": None,
                "chats": sorted({str(s["session"]) for s in sessions if s.get("session")})}
@@ -244,7 +367,7 @@ def find(*, title: str, body: str, target_board: str, session_id: Optional[str],
         skip = set(parents) | ({self_tid} if self_tid else set())
         waiting = capability_owner_waiting_id(title, body)
         new_words = words(title)
-        out = []
+        out, seen = [], set()
         cards = [*_local_cards(self_gw), *_replica_cards(self_gw)]
         gateways = {g for g in (self_gw, *(c["gateway"] for c in cards)) if g}
         if gateways & {"hub", "hermes-hub"}:
@@ -254,8 +377,13 @@ def find(*, title: str, body: str, target_board: str, session_id: Optional[str],
                     or (waiting and _sibling_owner(card.get("title") or "", waiting))
                     or (session_id and card["session_id"] == session_id)
                     or (self_tid and card["creator_task_id"] == self_tid)
-                    or (family and card.get("key_family") == family)):
+                    or (family and card.get("key_family") == family)
+                    or (card["gateway"], card["id"]) in seen
+                    or waits_on(card["id"], title, body)
+                    or distinct_target(title, card.get("title") or "", gateways,
+                                       new_body=body, card_body=card.get("body") or "")):
                 continue
+            seen.add((card["gateway"], card["id"]))
             reasons, score = _reasons(card, new_words, title, body, target_board, gateways)
             if reasons:
                 out.append({**{k: card[k] for k in ("id", "board", "gateway", "status", "title", "chats")},
