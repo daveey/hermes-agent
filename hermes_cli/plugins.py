@@ -1091,6 +1091,10 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self.home_path = Path(self.scope_key)
         self._discovery_lock = threading.RLock()
         self._discovered: bool = False
+        # [daveey] Inputs the last completed sweep read (``plugins_snapshot.fingerprint`` / ``precheck``,
+        # taken pre-sweep): ``refresh_if_inputs_changed`` compares against them at a session boundary.
+        self._swept_fingerprint: Optional[str] = None
+        self._swept_precheck: Optional[str] = None
         # True once a discovery re-applied plugin secret sources for this home: the per-home snapshot and
         # the installed scope may then hold plugin-supplied names, and a later discovery that finds NO
         # enabled plugin source (plugin removed / disabled) must still reconcile once to drop them.
@@ -1232,6 +1236,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
                 self._discovered = True
                 return
             hook_stamp = plugins_snapshot.fingerprint(self.home_path)  # [daveey] pre-sweep, for record_hooks
+            precheck_stamp = plugins_snapshot.precheck(self.home_path)
             # Flag set up front as a re-entrancy guard (register() can trigger discovery again) but
             # reset on failure so a failed scan is NOT cached as "discovered with an empty registry"
             # — callers swallow the exception and would be stranded on the early return above.
@@ -1257,9 +1262,18 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
             except BaseException:
                 self._discovered = False
                 raise
+            self._swept_fingerprint, self._swept_precheck = hook_stamp, precheck_stamp
             plugins_snapshot.record_hooks(hook_stamp, self, self.home_path)  # best-effort, never raises
         # Outside the lock: a listener (the gateway's re-wire) may read the registry from another thread.
         self._notify_plugin_loaded(loaded_before)
+
+    def refresh_if_inputs_changed(self) -> bool:
+        """[daveey] At a NEW-session agent build in a long-lived process (serve, gateway): rerun discovery
+        (forced, like ``load_and_go_live``) when its inputs changed since the last sweep, so a plugin
+        enabled after boot loads without a restart. True when a pass ran. Never call it mid-turn.
+        See :mod:`hermes_cli.plugins_refresh`."""
+        from hermes_cli.plugins_refresh import refresh_if_inputs_changed
+        return refresh_if_inputs_changed(self)
 
     def _re_register_config_hooks_after_force(self) -> None:
         """Restore config-owned shell hooks/outbound webhooks after a force clear; each guarded
@@ -2101,6 +2115,19 @@ def get_plugin_error_classification(
         logger.warning("transform_api_error_classification: skipped %d valid classification(s) after the "
                        "first result in registration order won (run-all-then-pick-first)", len(valid) - 1)
     return winner
+
+
+def refresh_plugins_for_new_session() -> bool:
+    """[daveey] :meth:`PluginManager.refresh_if_inputs_changed` for the active home's manager; never
+    raises (an agent build must not fail on it)."""
+    try:
+        from agent.safe_worker_policy import safe_worker_enabled
+        if safe_worker_enabled():
+            return False
+        return get_plugin_manager().refresh_if_inputs_changed()
+    except Exception:
+        logger.warning("plugin refresh before a new-session agent build failed", exc_info=True)
+        return False
 
 
 def _ensure_plugins_discovered(force: bool = False) -> PluginManager:

@@ -172,6 +172,41 @@ def fingerprint(home: Optional[Path] = None) -> Optional[str]:
         return None
 
 
+def precheck(home: Optional[Path] = None) -> Optional[str]:
+    """[daveey] A cheap subset of :func:`fingerprint`'s inputs (~1 ms against ~15-20 ms on the hub's real
+    plugin tree): the discovery env flags, config.yaml and .env (``hermes plugins enable`` writes
+    ``plugins.enabled``), the user plugin root's entries and each top-level plugin dir's manifest and
+    ``__init__.py``. Unchanged means a long-lived process skips the full fingerprint at a session
+    boundary; a deep in-place edit of a plugin module is the one input it misses. None when it cannot
+    be computed (callers then compute the full fingerprint)."""
+    try:
+        from hermes_cli import plugins as _plugins
+
+        home = Path(home) if home is not None else get_hermes_home()
+        parts: list = [str(home), [[name, os.environ.get(name)] for name in _ENV_INPUTS]]
+        for name in ("config.yaml", ".env"):
+            parts.append(_stat_entry(home / name, name))
+        roots = [Path(_plugins.get_bundled_plugins_dir()), home / "plugins"]
+        if _plugins._env_enabled("HERMES_ENABLE_PROJECT_PLUGINS"):
+            roots.append(Path.cwd() / ".hermes" / "plugins")
+        for root in roots:
+            try:
+                names = sorted(n for n in os.listdir(root) if n not in _SKIP_DIRS)
+            except OSError as exc:
+                parts.append([str(root), "missing", exc.errno])
+                continue
+            parts.append(_stat_entry(root, str(root)))
+            for name in names:
+                entry = root / name
+                parts.append(_stat_entry(entry, name))  # follows a symlinked plugin to its directory
+                for leaf in ("plugin.yaml", "plugin.yml", "__init__.py"):
+                    parts.append(_stat_entry(entry / leaf, f"{name}/{leaf}"))
+        return hashlib.sha256(json.dumps(parts, default=str).encode()).hexdigest()
+    except Exception:
+        logger.debug("plugin discovery precheck failed", exc_info=True)
+        return None
+
+
 def builtin_collision() -> Optional[str]:
     """Why the live (discovered) plugin set may change built-in toolset membership, or None."""
     import toolsets

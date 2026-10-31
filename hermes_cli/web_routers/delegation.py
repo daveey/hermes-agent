@@ -64,7 +64,8 @@ def _registered_backends() -> list[dict[str, Any]]:
     from agent.delegation_registry import DEFAULT_BACKEND as builtin
     from hermes_cli.plugins import discover_plugins
 
-    discover_plugins()  # idempotent; a plugin enabled after boot loads on the next scan
+    discover_plugins()  # idempotent: once discovered it never rescans; a plugin enabled after boot
+    # loads at the next new-session agent build (refresh_plugins_for_new_session) or an activation nudge
     # ``description`` is the provider's ``summary``: the one line a backend picker shows for it.
     return [{**asdict(b), "builtin": b.name == builtin} for b in list_backends()]
 

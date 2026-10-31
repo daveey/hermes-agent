@@ -642,6 +642,11 @@ def _make_agent(
     for _mod in ("hermes_cli.mcp_startup", "tui_gateway.entry"):
         with contextlib.suppress(Exception):
             importlib.import_module(_mod).wait_for_mcp_discovery()
+    # [daveey] A plugin enabled after this process booted (hermes plugins enable reaches neither a
+    # per-profile ``serve --isolated`` backend nor ``_discovered``'s early return) loads here, at a
+    # session boundary, before the agent snapshots its tools; a no-op stat check when nothing changed.
+    from hermes_cli.plugins import refresh_plugins_for_new_session
+    refresh_plugins_for_new_session()
     cfg = _load_cfg()
     # Load hooks alongside the same profile config used to construct this agent.
     from agent.shell_hooks import register_from_config
