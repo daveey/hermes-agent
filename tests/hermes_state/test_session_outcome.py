@@ -86,6 +86,62 @@ def test_2_live_turn_is_running(db):
     assert so.derive_outcome("chat", db=db)["kind"] == "done"
 
 
+def _gateway_turn(db, tmp_path, *, started_at=None, token: str | None = "tok", sid="chat"):
+    from datetime import UTC, datetime
+
+    started = datetime.now(UTC) if started_at is None else started_at
+    entry = {"session_id": sid, "active_turn_token": token, "active_turn_started_at": started.isoformat()}
+    db.save_gateway_routing_entry(f"agent:main:local:dm:{sid}", json.dumps(entry),
+                                  scope=str(tmp_path / "gwhome" / "sessions"))
+
+
+def test_2_gateway_run_turn_is_running(db, tmp_path, monkeypatch):
+    """A turn the messaging gateway runs (Desktop ``local`` platform too) writes no TUI marker, only the
+    routing entry's active-turn token: mid-turn it ends on a user/tool row and must read running, not
+    unresolved{interrupted}."""
+    homes = []
+    monkeypatch.setattr(so, "_gateway_running", lambda home: homes.append(home) or True)
+    say(db, "user", "what's left?")
+    assert so.derive_outcome("chat", db=db).get("reason") == "interrupted"
+    _gateway_turn(db, tmp_path)
+    assert so.refresh_outcome("chat", "manual", db=db)["kind"] == "running"
+    assert homes[-1] == tmp_path / "gwhome"
+    assert so.derive_outcome("chat", db=db, ignore_live_turn=True)["reason"] == "interrupted"
+
+
+def test_2_gateway_turn_token_of_a_dead_gateway_is_not_running(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(so, "_gateway_running", lambda home: False)
+    say(db, "user", "what's left?")
+    _gateway_turn(db, tmp_path)
+    out = so.derive_outcome("chat", db=db)
+    assert (out["kind"], out.get("reason")) == ("unresolved", "interrupted")
+
+
+def test_2_gateway_turn_token_cleared_or_stale_or_other_chat_is_not_running(db, tmp_path, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    monkeypatch.setattr(so, "_gateway_running", lambda home: True)
+    say(db, "user", "what's left?")
+    _gateway_turn(db, tmp_path, token=None)
+    assert so.derive_outcome("chat", db=db)["kind"] == "unresolved"
+    _gateway_turn(db, tmp_path, started_at=datetime.now(UTC) - timedelta(hours=7))
+    assert so.derive_outcome("chat", db=db)["kind"] == "unresolved"
+    _gateway_turn(db, tmp_path, sid="other")
+    assert so.derive_outcome("chat", db=db)["kind"] == "unresolved"
+
+
+def test_2_gateway_running_reads_that_homes_pid_record(tmp_path, monkeypatch):
+    import gateway.status as gs
+
+    seen = []
+    monkeypatch.setattr(gs, "get_running_pid", lambda path, cleanup_stale=True: seen.append(
+        (path, cleanup_stale)) or 4242)
+    assert so._gateway_running(tmp_path) is True
+    assert seen == [(tmp_path / "gateway.pid", False)]
+    monkeypatch.setattr(gs, "get_running_pid", lambda path, cleanup_stale=True: None)
+    assert so._gateway_running(tmp_path) is False
+
+
 def test_3_blocked_human_card_is_a_decision_with_its_choices(db, board):
     add_card(board, "t_ask", "chat", "blocked", HUMAN_REQUEST)
     add_card(board, "t_run", "chat", "running")

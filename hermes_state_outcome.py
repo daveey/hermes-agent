@@ -228,12 +228,60 @@ def _text(content: Any) -> str:
 
 
 def _live_turn(db: Any, sid: str) -> bool:
-    """A turn is live while its interrupted-turn marker exists and the process that wrote it is alive."""
+    """A turn is live while its interrupted-turn marker exists and the process that wrote it is alive, or
+    while a running messaging gateway holds the chat's durable active-turn token (gateway-run turns, the
+    Desktop ``local`` platform included, never write the TUI marker)."""
     from tui_gateway.turn_marker import marker_writer_state, read_turn_marker
 
     home = Path(db.db_path).parent
     marker = read_turn_marker(home, sid)
-    return bool(marker) and marker_writer_state(marker) == "alive"
+    if marker and marker_writer_state(marker) == "alive":
+        return True
+    return _guarded("gateway turn", sid, lambda: _gateway_turn_live(db, sid), False)
+
+
+# [daveey] A gateway turn token older than this is a leaked marker (its CAS clear failed), not a live turn.
+_GATEWAY_TURN_MAX_AGE_S = 6 * 3600.0
+
+
+def _gateway_turn_live(db: Any, sid: str) -> bool:
+    """[daveey] A gateway routing entry for ``sid`` carries ``active_turn_token`` (``mark_turn_active`` at
+    turn start, CAS-cleared at its end) and the gateway owning that routing scope is running. A crashed
+    gateway leaves the token behind until its next start recovers it, so a dead gateway reads not-live."""
+    rows = db._read_all(
+        "SELECT scope, entry_json FROM gateway_routing WHERE json_extract(entry_json, '$.session_id') = ?"
+        " AND json_extract(entry_json, '$.active_turn_token') IS NOT NULL", (sid,))
+    now = time.time()
+    for row in rows:
+        try:
+            entry = json.loads(row["entry_json"] or "{}")
+        except ValueError:
+            continue
+        started = _iso_epoch(entry.get("active_turn_started_at"))
+        if started is None or now - started > _GATEWAY_TURN_MAX_AGE_S:
+            continue
+        scope = str(row["scope"] or "")
+        gateway_home = Path(scope).parent if scope else Path(db.db_path).parent
+        if _gateway_running(gateway_home):
+            return True
+    return False
+
+
+def _iso_epoch(value: Any) -> Optional[float]:
+    from datetime import datetime
+
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except ValueError:
+        return None
+
+
+def _gateway_running(home: Path) -> bool:
+    from gateway.status import get_running_pid
+
+    return get_running_pid(home / "gateway.pid", cleanup_stale=False) is not None
 
 
 def _card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
