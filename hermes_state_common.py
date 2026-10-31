@@ -935,6 +935,13 @@ CREATE INDEX IF NOT EXISTS idx_sessions_local_created_started
 """
 
 
+# Store the exact marker expressions used by list/count predicates, not a TTL projection.
+# Unrelated writes and heartbeats do not re-parse model_config; marker writes update the index.
+DEFERRED_INDEX_SQL += (
+    "CREATE INDEX IF NOT EXISTS idx_sessions_list_markers ON sessions(archived, hidden, "
+    + ", ".join(_sql_json_extract('model_config', f'$.{marker}')
+                for marker in ('_delegate_from', '_branched_from', '_reset_from')) + ");\n")
+
 # ── Deferred FTS rebuild bookkeeping (schema v23) ──
 # While a background index rebuild is pending, two state_meta keys define
 # which message rows are currently IN the FTS indexes:

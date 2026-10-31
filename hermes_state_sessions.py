@@ -1372,18 +1372,18 @@ class SessionSessionsMixin:
             # Unless a search needs every row's chain (it matches a row's own id and
             # title through it), only rows that HAVE a child seed the walk. A
             # childless row's chain is itself alone, so its MAX is just its own
-            # last_active, which the outer COALESCE reads directly. Seeding every
-            # admitted row made the CTE + GROUP BY materialise the whole table on
-            # every page: ~12s of a 13s list on a 25k-session store where 1 row had
-            # a child, at LIMIT 1 or 200.
+            # last_active, which the outer COALESCE reads directly.
+            # Drive from distinct parent ids via idx_sessions_parent, then look up each seed by PK.
+            # A correlated EXISTS still parsed every childless row's JSON before rejecting it.
             id_needle = (id_query or "").strip().lower()
             search_needle = (search_query or "").strip().lower()
-            seed_where = where_sql if (id_needle or search_needle) else _where_sql(where_clauses + [
-                "EXISTS (SELECT 1 FROM sessions _seed_c WHERE _seed_c.parent_session_id = s.id)"])
+            seed_from = "sessions s" if (id_needle or search_needle) else (
+                "(SELECT DISTINCT parent_session_id FROM sessions WHERE parent_session_id IS NOT NULL) roots "
+                "CROSS JOIN sessions s ON s.id = roots.parent_session_id")
             outer_where, id_params = self._chain_search_where(where_sql, id_needle, search_needle)
             query = f"""
                 WITH RECURSIVE chain(root_id, cur_id) AS (
-                    SELECT s.id, s.id FROM sessions s {seed_where}
+                    SELECT s.id, s.id FROM {seed_from} {where_sql}
                     UNION ALL
                     SELECT c.root_id, child.id
                     FROM chain c
