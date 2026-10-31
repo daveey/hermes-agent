@@ -63,6 +63,34 @@ def test_sigterm_mid_copy_removes_the_staging_copy(tmp_path):
     assert _staging(home) == []
 
 
+@pytest.mark.platforms("posix")
+def test_a_sigterm_swallowed_by_a_weakref_callback_still_stops_the_copy(tmp_path):
+    """Python runs the signal handler between arbitrary bytecodes, and a SystemExit raised inside a
+    weakref callback or __del__ is printed as "Exception ignored" and dropped. The handler must
+    therefore also leave a flag the copy loop polls, or the pre-flight outlives its deadline."""
+    home = _home_with_db(tmp_path, 10, journal_mode="DELETE")
+    driver = (
+        "import runpy, signal, sys, weakref\n"
+        "ns = runpy.run_path(sys.argv[1], run_name='not_main')\n"
+        "class Box: pass\n"
+        "def swallowed(_ref):\n"
+        "    ns['_on_sigterm'](signal.SIGTERM, None)  # the handler firing inside a weakref callback\n"
+        "box = Box(); ref = weakref.ref(box, swallowed); del box\n"
+        "assert ns['_on_sigterm'].__globals__['_terminate_signal'] == signal.SIGTERM\n"
+        "ns['preflight_state_db'](__import__('pathlib').Path(sys.argv[2]), busy_timeout_seconds=600)\n")
+    holder = sqlite3.connect(home / "state.db", isolation_level=None)
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-S", "-c", driver, str(SCRIPT), str(home)],
+                              capture_output=True, timeout=60, check=False)
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    # The swallowed SystemExit is reported, not raised; the copy must still stop on its own.
+    assert proc.returncode == 128 + signal.SIGTERM, proc.stderr
+    assert _staging(home) == []
+
+
 def _staged_bytes(home: Path) -> int:
     return sum(p.stat().st_size for p in home.glob("state.db.pre-update-emergency-*.partial") if p.exists())
 

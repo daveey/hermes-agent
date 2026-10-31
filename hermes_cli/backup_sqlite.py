@@ -19,6 +19,24 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+# Set by the SIGTERM handler. A Python signal handler runs between arbitrary bytecodes, including
+# inside a weakref callback or __del__ (import machinery, GC), where the SystemExit it raises is
+# reported as "Exception ignored" and swallowed -- the pre-flight would then run on past the
+# deadline. Every long loop therefore also polls this flag and raises from a normal frame.
+_terminate_signal: Optional[int] = None
+
+
+def _on_sigterm(signum: int, _frame) -> None:
+    global _terminate_signal
+    _terminate_signal = signum
+    sys.exit(128 + signum)
+
+
+def _raise_if_terminated() -> None:
+    if _terminate_signal is not None:
+        raise SystemExit(128 + _terminate_signal)
+
+
 class _SQLiteBackupTimeout(RuntimeError):
     """Raised when a SQLite snapshot remains busy past its deadline."""
 
@@ -131,6 +149,7 @@ class _OffThreadCopy:
     def run(self) -> None:
         self.thread.start()
         while self.thread.is_alive():
+            _raise_if_terminated()
             self.thread.join(0.05)
         if self._error is not None:
             raise self._error
@@ -175,9 +194,11 @@ def _safe_copy_db(src: Path, dst: Path, *, timeout_seconds: float = 10.0) -> boo
                               check_same_thread=False)
         backup_conn = sqlite3.connect(str(dst), check_same_thread=False)
         busy_deadline = time.monotonic() + max(0.0, timeout_seconds)
+        _raise_if_terminated()
 
         def _check_backup_progress(status: int, _remaining: int, _total: int) -> None:
             nonlocal busy_deadline
+            _raise_if_terminated()
             now = time.monotonic()
             if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
                 if now >= busy_deadline:
@@ -265,7 +286,7 @@ def preflight_state_db(home: Path, *, busy_timeout_seconds: float = 10.0) -> dic
 if __name__ == "__main__":
     # The Desktop stops a pre-flight past its deadline with SIGTERM; exit through
     # the staging cleanup instead of dying with a full-size .partial left behind.
-    signal.signal(signal.SIGTERM, lambda signum, _frame: sys.exit(128 + signum))
+    signal.signal(signal.SIGTERM, _on_sigterm)
     # Optional argv[2]: tests hold the source locked as a barrier and need the lock wait to outlast a starved runner.
     _busy = float(sys.argv[2]) if len(sys.argv) > 2 else 10.0
     print(json.dumps(preflight_state_db(Path(sys.argv[1]), busy_timeout_seconds=_busy)))
