@@ -843,10 +843,13 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
 
 def _row_fields(conn: sqlite3.Connection, table: str, row: sqlite3.Row) -> dict:
     out: dict[str, Any] = {}
-    for column in sync.captured_columns(conn, table):
-        if column not in sync.SYNCED_COLUMNS[table]:
+    # Every caller already materialized SELECT *: the row carries its schema.
+    # Re-reading table_info here issued thousands of PRAGMAs per idle repair round.
+    skip = sync.LOCAL_COLUMNS[table] | sync.KEY_COLUMNS[table] | sync.SERVER_COLUMNS.get(table, frozenset())
+    allowed = sync.SYNCED_COLUMNS[table] - skip
+    for column, value in zip(row.keys(), row):
+        if column not in allowed:
             continue
-        value = row[column]
         if (table, column) in sync.REF_COLUMNS:
             ref = conn.execute("SELECT uid FROM task_runs WHERE id = ?", (value,)).fetchone() if value is not None else None
             value = ref[0] if ref else None
