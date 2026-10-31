@@ -144,6 +144,20 @@ def test_consumer_map_only_skips_when_the_os_consumer_is_the_only_failure(tmp_pa
     assert ("skipped" in p.stdout) == (expected == 0), p.stdout
 
 
+@pytest.mark.parametrize("body", [
+    "assert 'js-tests' in ('tests-os', 'lint')",
+    "assert 'js-tests' in 'tests-os,lint'",
+    "assert ['lint', 'tests-os'] == ['lint', 'js-tests']",
+    "assert {'lint', 'tests-os'} == {'lint', 'js-tests'}",
+    "a = {'tests/e2e': False}; b = {'tests-os/e2e-windows': False}; assert all(a.values()) and all(b.values()), (a, b)",
+    "assert {'tests/e2e': False, 'tests-os/w': False} == {'tests/e2e': True, 'tests-os/w': True}",
+])
+def test_other_predicates_cannot_borrow_an_os_diagnostic(tmp_path, body):
+    p = _run(tmp_path, {"test_update_ci_routing.py":
+        "def test_every_set_lane_reaches_its_consumer_whatever_the_other_lanes_say():\n    " + body + "\n"})
+    assert p.returncode == 1 and "skipped" not in p.stdout, p.stdout
+
+
 def test_failure_printing_a_set_naming_tests_os_stays_a_failure(tmp_path):
     p = _run(tmp_path, {"test_gate.py": """
         def test_jobs():

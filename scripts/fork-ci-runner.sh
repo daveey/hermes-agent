@@ -200,11 +200,11 @@ _FORK_OS_LANE_TESTS = frozenset({
 
 
 def _fork_os_lane_failure(item, rep):
-    """Inspect the crash, never the source/locals printed around it.
+    """Recognize only the allowlisted upstream assertions' OS-only mismatch.
 
-    The allowlist remains the outer bound. Its mixed parameter cases and
-    consumer dictionaries need proof that the disabled OS lane is the failure,
-    not merely a lane mentioned alongside a broken Linux consumer.
+    Source, locals and arbitrary diagnostic mentions never grant a skip. Match
+    the known failed predicate, and for a composite consumer predicate require
+    every reported non-OS consumer to have succeeded.
     """
     message = str(getattr(getattr(rep.longrepr, "reprcrash", None), "message", ""))
     params = getattr(getattr(item, "callspec", None), "params", {})
@@ -215,27 +215,44 @@ def _fork_os_lane_failure(item, rep):
     if name == "test_selected_update_consumers_must_succeed":
         if params.get("jobs") == ("tests-os",) and params.get("result") in ("absent", "skipped"):
             return message.startswith("AssertionError: assert True is (")
-    # The routing tests print a flat consumer->bool map. Keep their known OS-only
-    # mismatch, but a False Linux consumer is a real regression even beside it.
-    if name not in {"test_pull_requests_and_main_pushes_never_run_e2e"}:
-        for raw in _fork_re.findall(r"\{[^{}]*\}", message):
-            try:
-                values = _fork_ast.literal_eval(raw)
-            except (ValueError, SyntaxError):
-                continue
-            if (isinstance(values, dict) and values and
-                    all(isinstance(k, str) and isinstance(v, bool) for k, v in values.items())):
-                failed = [k for k, v in values.items() if not v]
-                if failed and all(k.startswith("tests-os/") or k == "desktop_updater" for k in failed):
-                    return True
-    # Remove container reprs, recursively, before looking for an OS-lane subject.
-    # This also strips nested jobs dicts: incidental lists/dicts/sets cannot grant a skip.
-    while True:
-        stripped = _fork_re.sub(r"\[[^\[\]{}]*\]|\{[^\[\]{}]*\}", "", message)
-        if stripped == message:
-            break
-        message = stripped
-    return bool(_FORK_OS_LANE_RE.search(message))
+        return message.startswith("AssertionError: assert ['tests'] == ['tests', 'tests-os']\n")
+    if name == "test_strict_acceptance_dispatch_reaches_every_e2e_suite":
+        return message == "AssertionError: tests-os/e2e-windows did not run\nassert None is not None"
+    if name in {
+        "test_update_path_change_selects_every_suite_that_exercises_it",
+        "test_update_path_change_reaches_the_suites_that_consume_it",
+    }:
+        return bool(_fork_re.search(
+            r"desktop_updater never reaches its tests\nassert False\n \+  where False = _windows_desktop_updater_tests_selected\(",
+            message,
+        ))
+    if name == "test_pull_requests_and_main_pushes_never_run_e2e":
+        # This predicate checks lane membership, not the values printed inside run.
+        while True:
+            stripped = _fork_re.sub(r"\[[^\[\]{}]*\]|\{[^\[\]{}]*\}", "", message)
+            if stripped == message:
+                break
+            message = stripped
+        return (message == "AssertionError: assert ('tests' in  and 'tests-os' in )" or
+                bool(_fork_re.search(r"(?:^|\n|AssertionError: )assert 'tests-os' (?:not )?in *$", message)))
+    # Remaining allowlisted predicates are all(consumer_map.values()). Equality
+    # diffs and membership failures aren't this assertion, even if they name OS.
+    if not _fork_re.search(r"(?:^|\n)assert False\n \+  where False = all\(dict_values\(", message):
+        return False
+    maps = []
+    for raw in _fork_re.findall(r"\{[^{}]*\}", message):
+        try:
+            values = _fork_ast.literal_eval(raw)
+        except (ValueError, SyntaxError):
+            continue
+        if (isinstance(values, dict) and values and
+                all(isinstance(k, str) and isinstance(v, bool) for k, v in values.items()) and
+                all(k.startswith(("tests/", "tests-os/")) or k in
+                    {"python", "rust", "frontend", "desktop_updater"} for k in values)):
+            maps.append(values)
+    # Do not accept one OS-only map while a different map reports a Linux failure.
+    failed = [k for values in maps for k, value in values.items() if not value]
+    return bool(failed) and all(k.startswith("tests-os/") or k == "desktop_updater" for k in failed)
 
 
 @_fork_pytest.hookimpl(hookwrapper=True)
