@@ -64,7 +64,7 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:test
           load: true
           cache-from: type=gha,scope=sandbox-${{ matrix.arch }}
-          cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope=sandbox-{0}', matrix.arch) || '' }}
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,ignore-error=true,scope=sandbox-{0}', matrix.arch) || '' }}
 
       # The contract: the launcher, cua-driver and a headed Chromium work as `pn`.
       - name: Smoke

@@ -39,6 +39,23 @@ def test_every_artifact_upload_is_continue_on_error():
     assert not blocking, f"upload-artifact steps that can fail their job on the artifact quota: {blocking}"
 
 
+def test_buildkit_cache_exports_are_advisory_without_ignoring_build_failures():
+    exporters = [
+        (f"{name}:{job_name}:{step.get('name', step.get('uses'))}", step)
+        for name, workflow in _loaded().items()
+        for job_name, job in (workflow.get("jobs") or {}).items()
+        for step in _steps(job)
+        if "type=gha" in str((step.get("with") or {}).get("cache-to", ""))
+    ]
+    assert exporters, "no GitHub Actions cache exporters exercised"
+    for name, step in exporters:
+        cache_to = step["with"]["cache-to"]
+        assert "ignore-error=true" in cache_to, f"optional cache export can fail the build: {name}"
+        assert str(step.get("continue-on-error", "false")).lower() == "false", (
+            f"real image build/push failures must remain fatal: {name}"
+        )
+
+
 def _required_jobs(workflows):
     """Every job the required gate waits on, following local reusable-workflow calls."""
     jobs = workflows["ci.yaml"]["jobs"]
