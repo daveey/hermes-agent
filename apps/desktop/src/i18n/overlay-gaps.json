@@ -2019,7 +2019,6 @@
   "sidebar.projects.reorder": ["ja","zh-hant"],
   "sidebar.projects.staleBackend": ["ar"],
   "sidebar.projects.toggle": ["ja","zh-hant"],
-  "sidebar.row.continuationOrigin": ["ja","ru","zh-hant"],
   "sidebar.row.hideTabBar": ["ja","zh-hant"],
   "sidebar.row.kanbanTasks": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "sidebar.row.kanbanAttention": ["ar","de","es","fr","ja","ru","zh","zh-hant"],

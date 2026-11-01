@@ -34,6 +34,29 @@ def test_missing_current_anchor_does_not_authenticate_history(monkeypatch):
     assert captured[0]['canonical_user_content'] is None
 
 
+def test_veto_keeps_canonical_provenance(monkeypatch):
+    import hermes_cli.lifecycle
+
+    captured = []
+
+    def hook(name, **kwargs):
+        captured.append(kwargs)
+        return [{'action': 'block', 'message': 'Policy veto'}]
+
+    monkeypatch.setattr(hermes_cli.lifecycle, 'invoke_hook', hook)
+    agent = SimpleNamespace(session_id='test', model='test', _persist_disabled=False)
+    blocks = []
+    context = _collect_pre_llm_call_context(
+        agent, effective_task_id='task', turn_id='turn', original_user_message='canonical ask',
+        messages=[{'role': 'user', 'content': 'wire ask'}], conversation_history=None,
+        current_turn_user_idx=0, blocks=blocks)
+    assert blocks == ['Policy veto']
+    assert context == ''
+    assert len(captured) == 1
+    assert captured[0]['canonical_user_content']['content'] == 'canonical ask'
+    assert captured[0]['canonical_user_content']['message_index'] == 0
+
+
 def test_native_and_legacy_replay_keep_distinct_provenance(tmp_path):
     import time
     from hermes_state import SessionDB
