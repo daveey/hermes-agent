@@ -1093,8 +1093,12 @@ def repair_missing_children(live: sqlite3.Connection, shadow: sqlite3.Connection
     with write_txn(live):
         held = {(t, u) for t, u in live.execute(
             "SELECT table_name, row_uid FROM kanban_sync_outbox WHERE state IN ('pending', 'rejected')")}
-        held |= {(t, u) for t, u in live.execute("SELECT table_name, row_uid FROM kanban_sync_tombstones")}
-        held |= {(t, u) for t, u in shadow.execute("SELECT table_name, row_uid FROM kanban_sync_tombstones")}
+        # Event deletion history can dwarf the links. The tombstone PK starts with table_name;
+        # read only the types consulted below, retaining task tombstones as a settlement veto.
+        tombstones_sql = ("SELECT table_name, row_uid FROM kanban_sync_tombstones "
+                          "WHERE table_name IN ('tasks', 'task_links', 'task_chat_links')")
+        held |= {(t, u) for t, u in live.execute(tombstones_sql)}
+        held |= {(t, u) for t, u in shadow.execute(tombstones_sql)}
         settled = {r[0] for r in live.execute("SELECT id, sync_version FROM tasks WHERE sync_version IS NOT NULL")
                    if seen.get(r[0]) == r[1] and ("tasks", r[0]) not in held}
         for table in ("task_links", "task_chat_links"):
@@ -1132,8 +1136,8 @@ def retire_lost_placeholder_links(live: sqlite3.Connection, shadow: sqlite3.Conn
         held = {u for t, u in live.execute(
             "SELECT table_name, row_uid FROM kanban_sync_outbox WHERE state IN ('pending', 'rejected')")
             if t == "task_chat_links"}
-        held |= {u for t, u in live.execute("SELECT table_name, row_uid FROM kanban_sync_tombstones")
-                 if t == "task_chat_links"}
+        held |= {r[0] for r in live.execute(
+            "SELECT row_uid FROM kanban_sync_tombstones WHERE table_name = 'task_chat_links'")}
         now_ms = time.time_ns() // 1_000_000
         for uid, _session in lost:
             if uid in have or uid in held:
