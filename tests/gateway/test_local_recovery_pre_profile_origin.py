@@ -119,9 +119,11 @@ _RECEIPT_DAMAGE = {
     ('malformed', 'JSONDecodeError'),
 ])
 async def test_a_refused_receipt_names_its_failing_check_in_the_log(tmp_path, monkeypatch, caplog, damage, clause):
-    """#140099: the client only ever sees ``storage_unavailable``; gateway.log must name the check that
-    refused the receipt (the wrapped cause, or where an inner check raised), on cold recovery and on
-    every later restore, so a field report pins the layer without offline replication."""
+    """#140099: gateway.log names the failing check without offline replication.
+
+    Invalid stored policy is now quarantined on first refusal, not retried and
+    logged forever; identity/lineage/outer JSON failures retain their old behavior.
+    """
     import logging
     from gateway.session_contract import Principal
     from gateway.session_local import create_local_session
@@ -141,7 +143,13 @@ async def test_a_refused_receipt_names_its_failing_check_in_the_log(tmp_path, mo
         assert any(clause in message for message in recovery), recovery
         assert len(recovery) == 1, f'one boot warning per refused receipt: {recovery}'
         caplog.clear()
-        with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
+        reason = 'invalid_params' if damage == 'terminal_policy' else 'storage_unavailable'
+        with pytest.raises(RuntimeStoreError, match=reason):
             restore_local_session(cold, ref.session_id)
     resumed = [r.getMessage() for r in caplog.records if ref.session_id in r.getMessage()]
-    assert any(clause in message for message in resumed), resumed
+    if damage == 'terminal_policy':
+        from gateway.session_local_recovery import local_receipt_ids
+        assert resumed == []
+        assert ref.session_id not in local_receipt_ids(cold)
+    else:
+        assert any(clause in message for message in resumed), resumed
