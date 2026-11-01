@@ -268,7 +268,9 @@ HUMAN_REQUEST = {
                 "value": {"type": "string", "minLength": 1, "maxLength": 120}},
                 "required": ["label", "value"], "additionalProperties": False},
         },
-        "resolved_check": {"type": "string", "minLength": 1, "maxLength": 2000, "description": (
+        # no maxLength: llama.cpp's grammar converter rejects >=2000 (#131278); kanban_human_request enforces
+        # RESOLVED_CHECK_MAX_CHARS server-side.
+        "resolved_check": {"type": "string", "minLength": 1, "description": (
             "Optional shell probe (bash -lc, 30 s) that tells when David's step is done even if he never "
             "unblocks: exit 0 = done, 1 = not yet, anything else = broken. It runs once when you file the "
             "ask: exit 0 refuses the ask (ask_already_resolved: the state already holds, continue the work), "
