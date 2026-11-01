@@ -32,6 +32,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
@@ -587,8 +588,9 @@ def open_shadow(slug: str, gateway: str) -> sqlite3.Connection:
     return conn
 
 
-def _pull_replica(slug: str, hub: Hub, gateway: str) -> int:
-    """The whole board into the replica copy (no hooks); a cursor below the retention floor rebuilds it."""
+@contextmanager
+def _pulled_replica(slug: str, hub: Hub, gateway: str):
+    """Keep the pulled (or rebuilt) replica open for this round, closing it on every exit."""
     replica = open_shadow(slug, gateway)
     try:
         try:
@@ -603,9 +605,15 @@ def _pull_replica(slug: str, hub: Hub, gateway: str) -> int:
             sync.mark_pulled(replica)
         except sqlite3.Error as exc:
             _log.warning("kanban sync: %s replica pull not stamped (%s)", slug, exc)
-        return pulled
+        yield replica, pulled
     finally:
         replica.close()
+
+
+def _pull_replica(slug: str, hub: Hub, gateway: str) -> int:
+    """Pull the whole replica for standalone callers that do not run repairs."""
+    with _pulled_replica(slug, hub, gateway) as (_, pulled):
+        return pulled
 
 
 def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
@@ -618,17 +626,16 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
         if mode == "off":
             return result
         ensure_identity(live, slug, gateway)
-        result.pulled = _pull_replica(slug, hub, gateway)
-        if mode == "primary":
-            try:
-                pull(live, hub, slug, observers=True, partition=gateway)
-            except Resync:
-                _log.warning("kanban sync: %s live cursor below the retention floor; rebuilding from a snapshot", slug)
-                resync(live, hub, slug, observers=True, partition=gateway)
-        from hermes_cli.kanban_sync_repair_revision import ensure_revision
-        ensure_revision(live)
-        replica = open_shadow(slug, gateway)
-        try:
+        with _pulled_replica(slug, hub, gateway) as (replica, pulled):
+            result.pulled = pulled
+            if mode == "primary":
+                try:
+                    pull(live, hub, slug, observers=True, partition=gateway)
+                except Resync:
+                    _log.warning("kanban sync: %s live cursor below the retention floor; rebuilding from a snapshot", slug)
+                    resync(live, hub, slug, observers=True, partition=gateway)
+            from hermes_cli.kanban_sync_repair_revision import ensure_revision
+            ensure_revision(live)
             inputs = _repair_inputs(path, replica, mode, gateway)
             if inputs is None or _REPAIRED.get(str(path)) != inputs:
                 from hermes_cli.kanban_sync_partition_repair import repair_partition_links
@@ -642,8 +649,6 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
                     _REPAIRED[str(path)] = inputs
             if mode == "primary":
                 heal_clobbered_completions(live)
-        finally:
-            replica.close()
         result.push = push(live, hub, slug, gateway, primary=mode == "primary")
         return result
     finally:
