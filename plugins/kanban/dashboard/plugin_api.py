@@ -571,7 +571,8 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             parents=list(payload.parents), entry="rest")
         if refused:
             raise HTTPException(status_code=409, detail=json.loads(refused))
-        # CreateTaskBody field names (less the overlap override) match create_task's keyword parameters.
+        from .plugin_api_human_request import check_create_ask
+        check_create_ask(conn, payload)
         task_id = kanban_db.create_task(conn, created_by="dashboard", board=board, **fields)
         after_create(conn, task_id)
         task = kanban_db.get_task(conn, task_id)

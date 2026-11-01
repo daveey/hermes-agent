@@ -558,6 +558,31 @@ def test_cli_create_retry_with_idempotency_key_runs_no_probe(board, capsys):
     assert (board / "runs").read_text().count("run") == 1
 
 
+# --- dashboard: create also uses the filing guard ----------------------------------------------------
+
+@pytest.mark.parametrize("cmd,code", [("true", kar.ALREADY_RESOLVED), ("exit 2", kar.BROKEN)])
+def test_dashboard_create_refuses_resolved_or_broken_probe(board, dashboard, cmd, code):
+    r = dashboard.post("/api/plugins/kanban/tasks", json={"title": "Pair watch", "assignee": "test-worker",
+        "initial_status": "blocked", "requires": [], "human_request": _ask(cmd)})
+    assert r.status_code == 409 and r.json()["detail"].startswith(code), r.text
+    with kbc.connect_closing() as conn:
+        assert not kb.list_tasks(conn)
+
+
+def test_dashboard_create_pending_and_idempotent_retry(board, dashboard):
+    args = {"title": "Pair watch", "assignee": "test-worker", "initial_status": "blocked", "requires": [],
+            "idempotency_key": "rest-pair", "human_request": _ask(_counting_probe(board))}
+    first = dashboard.post("/api/plugins/kanban/tasks", json=args)
+    assert first.status_code == 200, first.text
+    tid = first.json()["task"]["id"]
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "blocked" and _row(conn, tid)[2] == kar.PURPOSE
+    (board / "done").write_text("")
+    again = dashboard.post("/api/plugins/kanban/tasks", json=args)
+    assert again.status_code == 200 and again.json()["task"]["id"] == tid, again.text
+    assert (board / "runs").read_text().count("run") == 1
+
+
 # --- dashboard: PATCH and bulk run the filing probe too -------------------------------------------------
 
 @pytest.fixture
