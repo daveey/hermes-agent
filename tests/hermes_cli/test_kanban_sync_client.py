@@ -831,7 +831,9 @@ def test_feed_watcher_wakes_the_loop_on_a_change_frame_and_keeps_the_socket_aliv
         threading.Thread(target=server.serve_forever, daemon=True).start()
         wake = threading.Event()
         ident = ksc.Identity(url=f"http://127.0.0.1:{port}", key="gw-key", gateway=ME)
-        watcher = ksc.FeedWatcher(ident, BOARD, wake, lambda: not stop.is_set(), ping_s=0.2)
+        changed_boards = []
+        watcher = ksc.FeedWatcher(ident, BOARD, wake, lambda: not stop.is_set(), ping_s=0.2,
+                                  on_change=changed_boards.append)
         t = threading.Thread(target=watcher.run, daemon=True)
         t.start()
         try:
@@ -841,6 +843,7 @@ def test_feed_watcher_wakes_the_loop_on_a_change_frame_and_keeps_the_socket_aliv
                 time.sleep(0.05)
             assert seen["auth"] == "Bearer gw-key" and seen["path"] == f"/v2/boards/{BOARD}/ws"
             assert seen["pings"] >= 1 and watcher.frames == 1  # hello is not a change
+            assert changed_boards == [BOARD, BOARD]  # connection recovery, then the change frame
         finally:
             stop.set()
             server.shutdown()

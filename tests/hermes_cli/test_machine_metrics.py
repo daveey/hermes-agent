@@ -69,7 +69,7 @@ def test_sync_loop_reports_metrics_once_per_window(monkeypatch):
     monkeypatch.setattr(ksc.Hub, "report_metrics", lambda self, m: reported.append(m))
     monkeypatch.setattr(ksc.sync, "set_lease_client", lambda c: None)
     monkeypatch.setattr(ksc, "board_paths", list)
-    monkeypatch.setattr(ksc, "sync_all_once", lambda hub: [])
+    monkeypatch.setattr(ksc, "sync_all_once", lambda hub, *, boards=None: [])
     monkeypatch.setattr(ksc, "reconcile_links", lambda boards, gw: None)
     monkeypatch.setattr(ksc, "wait_for_work", lambda *a, **k: "period")
     monkeypatch.setattr(mm, "collect", lambda disk_path=None: {"cpus": 2})
