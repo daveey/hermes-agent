@@ -253,8 +253,9 @@ def stop_ended_run_scopes(
     """Stop the systemd scopes of this board's runs that ended ``grace_seconds`` ago.
 
     Throttled to one sweep per ``RUN_SCOPE_SWEEP_INTERVAL_SECONDS`` per board unless
-    ``force``. A run whose row is not on this board, whose retained worker is still
-    alive (``reap_terminal_workers`` owns that), or whose scope holds this process is
+    ``force``. A run with neither a row nor an eviction tombstone on this board,
+    whose retained worker is still alive (``reap_terminal_workers`` owns that),
+    or whose scope holds this process is
     left alone. Returns one record per scope acted on (also logged and booked as a
     ``run_scope_stopped`` event). Never raises.
     """
@@ -280,9 +281,8 @@ def stop_ended_run_scopes(
             if parsed is None:
                 continue
             task_id, run_id = parsed
-            row = conn.execute(
-                "SELECT ended_at, worker_pid FROM task_runs WHERE id = ? AND task_id = ?",
-                (run_id, task_id)).fetchone()
+            from hermes_cli.kanban_run_tombstones import ended_run
+            row = ended_run(conn, task_id, run_id)
             if row is None or row[0] is None or int(row[0]) > cutoff:
                 continue
             if row[1] is not None and kb._pid_alive(int(row[1])):

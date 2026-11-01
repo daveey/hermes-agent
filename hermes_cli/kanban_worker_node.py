@@ -272,6 +272,8 @@ def evict(conn: sqlite3.Connection) -> list[str]:
                     "SELECT 1 FROM kanban_sync_outbox WHERE state != 'rejected' AND (row_uid = ? OR "
                     "json_extract(fields, '$.task_id') = ?) LIMIT 1", (tid, tid)).fetchone():
                 continue
+            from hermes_cli.kanban_run_tombstones import retain_ended_runs
+            retain_ended_runs(conn, tid)
             for table in present:
                 conn.execute(f"DELETE FROM {table} WHERE task_id = ?", (tid,))
             # The copy's own edges go with it; an edge from it to a card still in this file belongs to that child
