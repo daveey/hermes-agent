@@ -45,6 +45,21 @@ def test_worker_does_not_invent_pool_for_nonpool_route(monkeypatch, explicit):
     assert worker_route(policy, {'api_key': 'fake-explicit' if explicit else None}).get('credential_pool') is None
 
 
+def test_bound_xai_launch_key_does_not_attach_profile_pool(tmp_path, monkeypatch):
+    import time
+    from hermes_cli import runtime_provider
+    entry = PooledCredential('xai-oauth', 'profile', 'profile', 'oauth', 0, 'manual:test',
+                             'fake-profile-token', expires_at_ms=int((time.time() + 3600) * 1000))
+    pool = CredentialPool('xai-oauth', [entry])
+    monkeypatch.setattr(pool, '_persist', lambda **kw: None)
+    monkeypatch.setattr(runtime_provider, 'load_pool', lambda *a, **kw: pool)
+    frame = _routed_frame(tmp_path, monkeypatch, 'grok-4', {'provider': 'xai-oauth'},
+                          api_key='fake-launch-token')
+    built = _constructed_agent(frame, monkeypatch)
+    assert built.api_key == 'fake-launch-token'
+    assert built._credential_pool is None
+
+
 def test_fallback_pool_never_attaches_to_primary(monkeypatch):
     from types import SimpleNamespace
     from gateway.session_worker_construct import worker_route
