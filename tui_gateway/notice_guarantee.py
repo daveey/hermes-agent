@@ -23,6 +23,11 @@ A notice about a card on another gateway (``gateway`` in its metadata, or only `
 by the ``blocked_on_human`` flag its writer stored, never by a local board lookup: its ``board`` is the owner's.
 A candidate whose handling raises is stamped ``closeout.state = "error"`` once and left for the auditor, instead
 of being retried (and logged) on every pass.
+
+A notice that only refreshes (blocked on a human, spent budget) is not stamped, so it stays a candidate; each
+backend refreshes it once per notice row (``_refreshed``) instead of re-deriving the same outcome every 30 s pass.
+A card move still refreshes through ``notice_fanout.card_change_pass``, a newer message makes a new candidate row,
+and a refresh that failed is retried. [daveey]
 """
 
 from __future__ import annotations
@@ -47,6 +52,13 @@ CLOSEOUT_TEXT = (
     "summary for the user, the decision you need from them, or what you are still waiting on.")
 CLOSEOUT_DISPLAY = "Close-out turn for the Kanban notice above"
 _wake_slots = threading.BoundedSemaphore(MAX_PARALLEL_WAKES)
+# (store path, session id, notice row id, branch) this backend already refreshed. Pruned to the current
+# candidates after every pass, so it holds at most one pass's candidates.
+_refreshed: set[tuple[str, str, int, str]] = set()
+
+
+def _reset_refreshed_for_tests() -> None:
+    _refreshed.clear()
 
 _CANDIDATES_SQL = """
 SELECT s.id AS sid, m.id AS msg_id, m.timestamp, m.content, m.display_metadata
@@ -195,9 +207,10 @@ def _spawn(job: Callable[[], Any]) -> None:
     spawn_context_thread(job, name="notice-closeout").start()
 
 
-def _refresh(db: Any, sid: str) -> None:
-    from hermes_state_outcome import refresh_outcomes_quietly
-    refresh_outcomes_quietly([sid], "notice", db=db)
+def _refresh(db: Any, sid: str) -> bool:
+    """Refresh one chat's outcome; True when it refreshed (``refresh_outcomes_quietly`` logs and swallows a failure)."""
+    import hermes_state_outcome as _outcome
+    return _outcome.refresh_outcomes_quietly([sid], "notice", db=db) > 0
 
 
 def _closeout_job(session_db, wake, sid: str, msg_id: int) -> str:
@@ -219,10 +232,26 @@ def _closeout_job(session_db, wake, sid: str, msg_id: int) -> str:
         _wake_slots.release()
 
 
-def _handle(db, cand: dict, now: float, *, holders, session_db, wake, spawn) -> str:
+def _refresh_key(db: Any, cand: dict, branch: str) -> tuple[str, str, int, str]:
+    return (str(getattr(db, "db_path", id(db))), cand["sid"], cand["msg_id"], branch)
+
+
+def _refresh_once(db: Any, cand: dict, branch: str, seen: set) -> str:
+    """Refresh the chat's outcome for this notice row once per backend; later passes skip it."""
+    key = _refresh_key(db, cand, branch)
+    seen.add(key)
+    if key in _refreshed:
+        return "skipped:refreshed"
+    if _refresh(db, cand["sid"]):
+        _refreshed.add(key)
+    return f"refreshed:{branch}"
+
+
+def _handle(db, cand: dict, now: float, *, holders, session_db, wake, spawn, seen: Optional[set] = None) -> str:
     from hermes_state_outcome import _live_turn
     from tui_gateway.kanban_unloaded import _other_holder
     sid = cand["sid"]
+    seen = set() if seen is None else seen
     if _other_holder(holders, {sid}):
         return "skipped:held"
     if _live_turn(db, sid):
@@ -230,11 +259,9 @@ def _handle(db, cand: dict, now: float, *, holders, session_db, wake, spawn) -> 
     if superseded(cand):
         return _supersede(db, cand, now)
     if blocked_on_human(cand):
-        _refresh(db, sid)
-        return "refreshed:human"
+        return _refresh_once(db, cand, "human", seen)
     if started_last_hour(db, sid, now) >= WAKES_PER_HOUR:
-        _refresh(db, sid)
-        return "refreshed:budget"
+        return _refresh_once(db, cand, "budget", seen)
     if not _wake_slots.acquire(blocking=False):
         return "skipped:slots"
     try:
@@ -297,15 +324,19 @@ def guarantee_pass(*, now: Optional[float] = None, stores: Callable[[], Iterator
     holders = holders or ku.registry_holders
     session_db = session_db or ku.find_session_db
     out: list[dict] = []
+    seen: set = set()
     try:
         for db in stores():
             for cand in candidates(db, now):
                 try:
-                    result = _handle(db, cand, now, holders=holders, session_db=session_db, wake=wake, spawn=spawn)
+                    result = _handle(db, cand, now, holders=holders, session_db=session_db, wake=wake, spawn=spawn,
+                                     seen=seen)
                 except Exception:
                     logger.warning("notice guarantee failed for %s", cand["sid"], exc_info=True)
                     result = _give_up(db, cand)
                 out.append({"session_id": cand["sid"], "msg_id": cand["msg_id"], "result": result})
     except Exception:
         logger.warning("notice guarantee pass failed", exc_info=True)
+        return out  # an incomplete pass keeps every memo entry
+    _refreshed.intersection_update(seen)
     return out

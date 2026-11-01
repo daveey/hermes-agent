@@ -27,6 +27,7 @@ HUMAN = {"action": "Reply ship or hold here. Unblock = deploy; archive = drop it
 def db(tmp_path):
     so._reset_hooks_for_tests()
     ksa._reset_cache_for_tests()
+    getattr(ng, "_reset_refreshed_for_tests", lambda: None)()  # per-backend refresh memo
     handle = SessionDB(tmp_path / "state.db")
     handle.create_session(CHAT, "desktop")
     handle.append_message(CHAT, "user", "run the deploy card")
@@ -223,3 +224,98 @@ def test_a_blocked_notice_whose_card_is_still_blocked_by_an_agent_still_gets_a_c
     out, calls = _run(db)
 
     assert calls == [(CHAT, row)] and [o["result"] for o in out] == ["dispatched"]
+
+
+# Repeat passes (residual idle CPU, t_01a1955ae48ded35): every backend runs this pass every 30 s. A notice that
+# only refreshes (blocked on a human, or a spent budget) stays a candidate, so before this fix each pass re-derived
+# the same chats' outcomes forever: 35 such chats on David-MBP cost ~1.3 CPU-s per pass per backend with no state
+# change. A notice row's refresh is now done once per backend; a card move (card_change_pass) or a new message
+# (new candidate row) still refreshes, and a refresh that failed retries on the next pass. [daveey]
+
+def _count_refreshes(monkeypatch):
+    calls = []
+    real = so.refresh_outcomes_quietly
+
+    def counting(sids, trigger, *, db=None):
+        calls.append((list(sids), trigger))
+        return real(sids, trigger, db=db)
+    monkeypatch.setattr(so, "refresh_outcomes_quietly", counting)
+    return calls
+
+
+def test_a_human_notice_is_refreshed_once_not_on_every_pass(db, monkeypatch):
+    tid = _decision_card()
+    _notice(db, f"⏸ Kanban {tid} blocked: needs approval — prod deploy", task_id=tid)
+    ksa._reset_cache_for_tests()
+    refreshes = _count_refreshes(monkeypatch)
+
+    first, _ = _run(db)
+    second, calls = _run(db)
+    third, _ = _run(db)
+
+    assert [o["result"] for o in first] == ["refreshed:human"]
+    assert [o["result"] for o in second] == [o["result"] for o in third] == ["skipped:refreshed"]
+    assert calls == [] and len(refreshes) == 1
+    assert so.get_outcome(CHAT, db=db)["kind"] == "decision"
+
+
+def test_a_spent_budget_notice_is_refreshed_once_not_on_every_pass(db, monkeypatch):
+    for n in range(ng.WAKES_PER_HOUR):
+        _notice(db, f"earlier close-out {n}", closeout={"state": "started", "at": time.time() - 600})
+    _notice(db, "✔ Kanban t_aaa done — deploy card")
+    refreshes = _count_refreshes(monkeypatch)
+
+    first, _ = _run(db)
+    second, calls = _run(db)
+
+    assert [o["result"] for o in first] == ["refreshed:budget"]
+    assert [o["result"] for o in second] == ["skipped:refreshed"] and calls == [] and len(refreshes) == 1
+
+
+def test_a_new_human_notice_row_refreshes_again(db, monkeypatch):
+    tid = _decision_card()
+    _notice(db, f"⏸ Kanban {tid} blocked: needs approval — prod deploy", task_id=tid)
+    ksa._reset_cache_for_tests()
+    refreshes = _count_refreshes(monkeypatch)
+    _run(db)
+
+    _notice(db, f"⏸ Kanban {tid} blocked: still needs approval — prod deploy", task_id=tid)
+    out, _ = _run(db)
+
+    assert [o["result"] for o in out] == ["refreshed:human"] and len(refreshes) == 2
+
+
+def test_a_failed_refresh_retries_on_the_next_pass(db, monkeypatch):
+    tid = _decision_card()
+    _notice(db, f"⏸ Kanban {tid} blocked: needs approval — prod deploy", task_id=tid)
+    ksa._reset_cache_for_tests()
+    real = so.refresh_outcome
+    state = {"fail": True}
+
+    def flaky(sid, trigger, *, db=None):
+        if state["fail"]:
+            raise RuntimeError("database is locked")
+        return real(sid, trigger, db=db)
+    monkeypatch.setattr(so, "refresh_outcome", flaky)
+
+    _run(db)
+    state["fail"] = False
+    out, _ = _run(db)
+
+    assert [o["result"] for o in out] == ["refreshed:human"]
+    assert so.get_outcome(CHAT, db=db)["kind"] == "decision"
+
+
+def test_a_human_notice_whose_card_is_answered_after_its_refresh_is_still_superseded(db):
+    tid = _decision_card()
+    row = _notice(db, f"⏸ [default] @default Kanban {tid} blocked: Decision needed — prod deploy", task_id=tid,
+                  board="default")
+    ksa._reset_cache_for_tests()
+    assert [o["result"] for o in _run(db)[0]] == ["refreshed:human"]
+    with contextlib.closing(kbc.connect()) as conn:
+        assert kb.unblock_task(conn, tid)
+    ksa._reset_cache_for_tests()
+
+    out, calls = _run(db)
+
+    assert calls == [] and [o["result"] for o in out] == ["superseded"] and _closeout(db, row) == "superseded"
