@@ -653,6 +653,8 @@ class _TurnRun:
     display_metadata: Any = None
     automation_text: str = ""
     automation_plan: Any = None
+    # [daveey] Producer text (a trusted completion: terminal output etc.) is data, never @-reference syntax.
+    literal_text: bool = False
 
 
 def _history_row_ids(history: list) -> set:
@@ -870,7 +872,7 @@ def _prepare_turn_input(sid: str, session: dict, st: _TurnRun, text: Any, images
     cols = session.get("cols", 80)
     streamer = make_stream_renderer(cols)
     prompt = text
-    if isinstance(prompt, str) and "@" in prompt:
+    if isinstance(prompt, str) and "@" in prompt and not st.literal_text:
         from agent.context_references import preprocess_context_references
         from agent.model_metadata import get_model_context_length
         ctx_len = get_model_context_length(
@@ -1354,6 +1356,7 @@ def _run_admitted_prompt(
         st.display_metadata = display_metadata
         from tui_gateway import automation_replay  # [daveey] a failed automation turn's copy and its one replay
         automation_replay.install_failure_copy(st, text)
+        st.literal_text = bool((display_metadata or {}).get("producer_admission"))
         goal_followup = None
         try:
             prepared = _prepare_turn_input(sid, session, st, text, images)

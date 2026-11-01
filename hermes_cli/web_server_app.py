@@ -122,6 +122,13 @@ async def standalone_lifespan(app: "FastAPI"):
             start_kanban_unloaded_sweeper()
         except Exception:
             logger.warning("kanban unloaded-session sweeper start failed", exc_info=True)
+        # [daveey] Cold unrouted chats holding a trusted producer completion (tui_gateway.producer_admission).
+        try:
+            from tui_gateway.producer_admission import start_producer_admission_sweeper
+
+            start_producer_admission_sweeper()
+        except Exception:
+            logger.warning("producer admission sweeper start failed", exc_info=True)
 
     # Build the session-list kanban annotation now, before the Desktop's reconnect burst: a cold one made every
     # session read, GET /api/sessions/<id> included, wait 4-10 s on one pass under that burst. [daveey]

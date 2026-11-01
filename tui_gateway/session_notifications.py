@@ -1533,6 +1533,9 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
         if now - last_kanban_poll >= _KANBAN_POLL_SECONDS:
             last_kanban_poll = now
             _notif_poll_kanban(sid, session)
+            # [daveey] Trusted producer completions queued for this unrouted chat (hermes_state_producer_admission).
+            from tui_gateway.producer_admission import deliver_pending
+            deliver_pending(sid, session)
         if now - last_parked_poll >= _PARKED_POLL_SECONDS:
             last_parked_poll = now
             _notif_take_parked(sid, session, process_registry, handle)
