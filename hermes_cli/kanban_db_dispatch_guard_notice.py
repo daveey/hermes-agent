@@ -60,12 +60,12 @@ def guard_hold_started_at(conn: sqlite3.Connection, task_id: str) -> Optional[in
     return hold[0][0] if hold else None
 
 
-def guard_hold_reason(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+def guard_hold_reason(conn: sqlite3.Connection, task_id: str, *, include_replies: bool = True) -> Optional[str]:
     """The reason of the latest guard, ignoring dispatcher notice comments.
     Other authors' replies still cause a fresh guard event on the next held tick, but do not
     reset the hold clock. One unbroken hold otherwise logs one event per reason, not per tick.
     """
-    hold = _current_guard_hold(conn, task_id, include_replies=True)
+    hold = _current_guard_hold(conn, task_id, include_replies=include_replies)
     if not hold:
         return None
     try:
@@ -107,7 +107,12 @@ def notify_guard_hold(conn: sqlite3.Connection, task_id: str, reason: str) -> bo
     """Once per unbroken hold, past the notify threshold: comment + fix card. [daveey]"""
     from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_dispatch as _kbd
+    from hermes_cli.kanban_wake_check import foreign_copy
 
+    # Pickup imports the hold clock, not maintenance authority. Local comment
+    # and create idempotency checks cannot deduplicate across unsynced gateways.
+    if foreign_copy(conn, task_id):
+        return False
     if reason in _kbd._GUARD_HOLD_EXEMPT_REASONS:
         return False
     started = guard_hold_started_at(conn, task_id)
@@ -149,6 +154,32 @@ def notify_guard_hold_safely(conn: sqlite3.Connection, task_id: str, reason: str
     except Exception:
         logger.warning("kanban: guard-hold notice for %s failed", task_id, exc_info=True)
         return False
+
+
+def sweep_remote_guard_holds(conn: sqlite3.Connection, result) -> None:
+    """Home maintenance for cards filtered out of this machine's execution lanes.
+
+    The executor's synced, unbroken hold is the evidence. Revalidate against
+    synced runs/errors so an expired cooldown is not mistaken for a live hold.
+    """
+    from hermes_cli import kanban_db_dispatch as dispatch
+    from hermes_cli.kanban_wake_check import foreign_ids
+
+    foreign = foreign_ids(conn)
+    for lane in ("ready", "review"):
+        for task_id in dispatch._local_refusals(conn, lane):
+            if task_id in foreign:
+                continue
+            try:
+                reason = guard_hold_reason(conn, task_id, include_replies=False)
+                if reason is None or dispatch.check_respawn_guard(conn, task_id, lane=lane) != reason:
+                    continue
+                if dispatch._block_if_guard_hold_capped(conn, task_id, reason):
+                    result.auto_blocked.append(task_id)
+                else:
+                    notify_guard_hold_safely(conn, task_id, reason)
+            except sqlite3.Error:
+                logger.exception("kanban: remote guard maintenance for %s failed", task_id)
 
 
 def record_guard_hold(conn: sqlite3.Connection, task_id: str, reason: str) -> None:

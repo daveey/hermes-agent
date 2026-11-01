@@ -2194,13 +2194,7 @@ def _dispatch_lane_task(
     guard_reason = dispatch_guard(conn, task_id, lane=lane, dry_run=dry_run)
     if guard_reason is not None:
         result.respawn_guarded.append((task_id, guard_reason))
-        # Event so ``hermes kanban tail`` shows why the task looks stuck.
-        # Honour kanban.default_assignee: when the dispatcher hits an unassigned ready task and an
-        # operator-configured fallback exists, persist the assignment and proceed. This removes the
-        # dashboard footgun where a task created without an assignee parks in 'ready' forever even though
-        # the operator's intent ("default") was perfectly clear (#27145). Mutating the row (not just the
-        # in-memory view) keeps diagnostics and the board state consistent: the task is now legitimately
-        # owned by ``kanban.default_assignee``, not "unassigned but secretly routed".
+        # Maintenance is home-owned; foreign executors still record the guard.
         if not dry_run:
             if _block_if_guard_hold_capped(conn, task_id, guard_reason):
                 result.auto_blocked.append(task_id)
@@ -2530,6 +2524,7 @@ def _dispatch_once_locked(
         # Agent-owned blocks get one triage respawn after 2h; standing human asks are re-checked every tick.
         from hermes_cli.kanban_block_policy import sweep_blocked_cards
         sweep_blocked_cards(conn, result)
+        _guard_notice.sweep_remote_guard_holds(conn, result)
     from hermes_cli.kanban_gateway_drain import dispatch_paused
     if dispatch_paused():
         _kb._log.info('kanban dispatcher: scheduling paused — gateway draining or restart requested')

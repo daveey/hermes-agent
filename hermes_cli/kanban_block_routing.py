@@ -148,8 +148,13 @@ def block_if_guard_hold_capped(conn, task_id: str, reason: str) -> bool:
     from hermes_cli import kanban_db_dispatch as dispatch
     from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_dispatch_quota as _kbq
+    from hermes_cli.kanban_wake_check import foreign_copy
     import time
 
+    # Executors still refuse the preclaim guard and record diagnostics, but
+    # only the card's home escalates or clears an expired hold.
+    if foreign_copy(conn, task_id):
+        return False
     cap = dispatch.guard_hold_cap_seconds(reason)
     if cap is None:
         return False
