@@ -213,7 +213,7 @@ def test_stranded_cached_reader_reopens(board, monkeypatch):
     ksa._reset_cache_for_tests()
     try:
         with monkeypatch.context() as m:
-            m.setattr(kanban_lockguard, "guard", lambda conn: False)  # the pre-fix, unguarded reader
+            m.setattr(kanban_lockguard, "guard", lambda conn, **kwargs: False)  # the pre-fix, unguarded reader
             with ksa.cached_ro(board) as conn:
                 assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 1
         _stray_raw_copy(board)

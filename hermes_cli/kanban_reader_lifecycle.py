@@ -3,17 +3,21 @@ import os
 import sqlite3
 import threading
 
-from hermes_cli.kanban_generation import DeletedWalGenerationError, lifecycle_access
+from hermes_cli.kanban_generation import DeletedWalGenerationError, lifecycle_access, retry_open
 
 
 def cached_entry(path):
+    return retry_open(lambda remaining: _cached_entry_once(path, remaining), 0.5)
+
+
+def _cached_entry_once(path, remaining):
     from hermes_cli import kanban_session_activity as activity
     from hermes_cli.kanban_lockguard import shm_identity
 
     key = str(path)
     # Same-board opens/last closes are atomic; registry locks protect only map
     # operations. Borrowers never wait for this board lock while holding the map.
-    with lifecycle_access(path, timeout=0.5):
+    with lifecycle_access(path, timeout=remaining):
         activity._recover_generation(path)
         try:
             st = os.stat(path)
@@ -36,7 +40,8 @@ def cached_entry(path):
             finally:
                 stale[2].release()
         if entry is None:
-            conn = activity._open_ro(path, check_same_thread=False)
+            conn = activity._open_ro(path, check_same_thread=False, timeout=0)
+            conn.execute("PRAGMA busy_timeout=500")
             entry = (conn, ident, threading.Lock(), shm_identity(path))
             with activity._RO_CACHE_LOCK:
                 activity._RO_CACHE[key] = entry

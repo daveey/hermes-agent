@@ -43,9 +43,15 @@ def test_busy_board_open_does_not_block_session_poll(tmp_path, monkeypatch, http
     entered = threading.Event()
     original = guard._apply
 
-    def observed_apply(conn, held_path=None):
-        entered.set()
-        return original(conn, held_path)
+    def observed_apply(conn, held_path=None, **kwargs):
+        if getattr(conn, "_hermes_tracked_path", None) == str(board_path):
+            # Every live attempt is probe-protected; busy attempts may close
+            # fully between retries rather than retaining a blocked handle.
+            assert has_live_connection(board_path)
+            with pytest.raises(LiveConnectionError), offline_file_access(board_path):
+                pass
+            entered.set()
+        return original(conn, held_path, **kwargs)
 
     monkeypatch.setattr(guard, "_apply", observed_apply)
 
@@ -84,9 +90,6 @@ def test_busy_board_open_does_not_block_session_poll(tmp_path, monkeypatch, http
                 elapsed.extend(future.result(timeout=4) for future in polls)
             assert max(elapsed) < 5
             assert not opening.done()
-            assert has_live_connection(board_path)
-            with pytest.raises(LiveConnectionError), offline_file_access(board_path):
-                pass
         finally:
             blocker.rollback()
             blocker.close()
@@ -102,7 +105,7 @@ def test_identity_setup_failure_closes_tracked_connection(tmp_path, monkeypatch)
     path = tmp_path / "board.db"
     seen = []
 
-    def fail_after_open(conn):
+    def fail_after_open(conn, **kwargs):
         seen.append(conn)
         assert has_live_connection(path)
         raise RuntimeError("generation registration failed")

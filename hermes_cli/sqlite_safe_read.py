@@ -145,8 +145,21 @@ def _tracking_factory(factory: type) -> type:
     return cached
 
 
+@contextlib.contextmanager
+def _tracking_access(blocking):
+    if not _live_lock.acquire(blocking=blocking):
+        exc = sqlite3.OperationalError("database is locked: SQLite tracking registry is busy")
+        exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        raise exc
+    try:
+        yield
+    finally:
+        _live_lock.release()
+
+
 def connect_tracked(
-    path: Path | str, *, tracking_path: Path | str | None = None, connect_fn=None, **kwargs,
+    path: Path | str, *, tracking_path: Path | str | None = None, connect_fn=None,
+    wait_for_tracking=True, **kwargs,
 ) -> sqlite3.Connection:
     """``sqlite3.connect`` that registers the connection for the lifetime of the fd (released on
     ``close()``). Use for any database that might be byte-probed (``state.db``, ``kanban.db``).
@@ -155,7 +168,7 @@ def connect_tracked(
     opener = connect_fn if connect_fn is not None else sqlite3.connect
     kwargs["factory"] = _tracking_factory(kwargs.get("factory", sqlite3.Connection))
 
-    with _live_lock:
+    with _tracking_access(wait_for_tracking):
         conn = opener(str(path), **kwargs)
         try:
             resolved = _key(tracking_path) if tracking_path is not None else _canonical_db_path(conn)
