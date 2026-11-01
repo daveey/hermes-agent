@@ -17,7 +17,10 @@ from __future__ import annotations
 from hermes_cli import kanban_lockguard as _kanban_lockguard
 from hermes_cli import kanban_activity_identity as _identity
 from hermes_cli import kanban_annotation_disk as _annotation_copy
+from hermes_cli import kanban_annotation_refresh as _bounded
 from hermes_cli import kanban_scope_heartbeat as _scope_hb
+from hermes_cli.kanban_session_activity_release import TERMINAL_STATUSES
+from hermes_cli.kanban_session_activity_release import owner_attests_terminal as _owner_attests_terminal
 from hermes_cli.kanban_db_sync import sync_enabled as _board_sync_enabled
 from hermes_cli.kanban_scope_heartbeat import scope_heartbeats as _scope_heartbeats
 from hermes_cli.kanban_session_activity_records import _fold_legacy_aliases, _moved_evidence, _retire_moved
@@ -75,6 +78,7 @@ _annotate_flight_scope: tuple[str, ...] | None = None
 _annotate_flight_result: tuple | None = None
 _last_annotation: dict[tuple[str, ...], tuple] = {}
 _annotate_waiters = 0
+_REFRESH_WAIT_S = 1.0  # [daveey] see kanban_annotation_refresh
 WAITING_ON_CAP = 50
 
 
@@ -601,39 +605,6 @@ def _meta_float(conn: sqlite3.Connection, key: str) -> float | None:
         return float(row[0]) if row and row[0] not in (None, "") else None
     except (sqlite3.Error, TypeError, ValueError):
         return None
-
-
-TERMINAL_STATUSES = ("done", "archived")
-
-
-def _owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | None, board: str,
-                            heartbeats: dict[tuple[str, str, str], tuple[float, float]], now: float, stale: bool,
-                            evidence: dict[str, Any]) -> bool:
-    """The owner itself, recently, published this card as closed.
-
-    Release needs all of: a fresh hub sync; a profile-qualified record whose own identity fields match its
-    key; a terminal status inside the owner collector's hash-bound observation (``origin_observation``, so a
-    replica row edited or truncated in transit proves nothing); and that collector's per-scope heartbeat for
-    this exact (profile, board) within that owner's window (``kanban_scope_heartbeat``), so an offline owner's last word is not taken
-    as current. Absence of a row is never release. This is the same rule a local board applies to its own
-    cards (``done``/``archived`` are not counted), applied only to evidence the owner signed. Pre-ledger
-    cards had no other release path, so every one of them stayed open forever. ``evidence`` is the task's
-    ``_owner_evidence`` (``_decode_replica_task``). [daveey]
-    """
-    if stale or owner_profile is None or task.get('status') not in TERMINAL_STATUSES:
-        return False
-    if task.get('profile') != owner_profile or task.get('board') != board or task.get('gateway') != gw:
-        return False
-    if not evidence:
-        return False
-    # A card bound through the origin ledger keeps the ledger's stricter release: its owner must
-    # have verified the completion (lifecycle event, run, contract and goal receipts), not just closed it.
-    # An archive is the exception: it produces nothing, so it closes the link without counting as completed
-    # (``closed_uncompleted`` on the row). [daveey]
-    if task.get('origin_bindings') and evidence.get('verified') is not True and task.get('status') != 'archived':
-        return False
-    beat = heartbeats.get((gw, owner_profile, board))
-    return beat is not None and _scope_hb.fresh(beat[0], now, beat[1])
 
 
 # (replica path, gw, record key) -> (row text, decoded row) from the last replica read: the projection rebuilds on
@@ -1869,7 +1840,9 @@ def _refresh_annotation_locked(scope: tuple[str, ...]) -> tuple:
     global _annotate_flight_scope, _annotate_flight_result
     _annotate_flight_scope = scope
     _annotate_flight_result = None
+    read_at = time.time()
     parts = _read_annotation_parts()
+    _bounded.record(scope, parts, read_at)
     _last_annotation[scope] = parts
     _annotate_flight_result = parts
     _annotation_copy.published(scope, parts)  # [daveey] a restart serves it while its first read runs
@@ -1911,10 +1884,17 @@ def _annotation_snapshot() -> tuple:
             return _refresh_annotation_locked(scope)
         finally:
             _annotate_refresh_lock.release()
-    try:
-        return _refresh_annotation_locked(scope)
-    finally:
-        _annotate_refresh_lock.release()
+    previous = _last_annotation.get(scope)
+    if previous is None:
+        try:
+            return _refresh_annotation_locked(scope)
+        finally:
+            _annotate_refresh_lock.release()
+    return _bounded.refresh_bounded(lambda: _refresh_annotation_locked(scope), _annotate_refresh_lock, previous,
+                                    _REFRESH_WAIT_S)
+
+
+annotation_read_at = _bounded.read_at
 
 
 # [daveey] Set by ``one_annotation_snapshot``: the reads the first annotation in the scope made, for the others.
@@ -1959,6 +1939,8 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         else:
             parts = _annotation_snapshot()
             copy_at = _annotation_copy.observed_at(parts)  # [daveey] a previous process's copy keeps its own date
+            if copy_at is None:
+                copy_at = annotation_read_at(parts)  # a previous read served while the next one runs keeps its date
             if parts is None:
                 # [daveey] Not a read error (those raise with their own traceback): one line, no synthetic
                 # traceback for self-heal to chase.
@@ -2039,6 +2021,7 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
     _annotate_flight_result = None
     _annotate_waiters = 0
     _last_annotation.clear()
+    _bounded.reset()
     _annotation_copy.reset()
     with _pairs_lock:
         _board_memo.clear()
