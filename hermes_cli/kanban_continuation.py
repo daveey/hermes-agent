@@ -87,6 +87,8 @@ def continue_task(
     max_continuations: Optional[int] = None, metadata: Optional[dict] = None,
     wake_check: Optional[str] = None, check_every: Optional[int] = None, clock_only: bool = False,
     awaiting: Any = None, in_txn: Optional[Callable[[sqlite3.Connection, int], None]] = None,
+    blocker_id: Optional[str] = None, blocker_provider: Optional[str] = None,
+    blocker_model: Optional[str] = None, blocker_lane: Optional[str] = None,
 ) -> dict[str, Any]:
     """End the running run as ``continued`` and re-queue the card.
 
@@ -176,13 +178,10 @@ def continue_task(
         )
         if cur.rowcount != 1:
             return {"ok": False, "error": "task changed state concurrently"}
-        meta = dict(metadata or {})
-        from hermes_cli.kanban_shared_blockers import normalize_blocker_id
-        if "blocker_id" in meta:
-            # Shared external blocker (kanban_shared_blockers); drop an unusable id. [daveey]
-            bid = normalize_blocker_id(meta.pop("blocker_id"))
-            if bid:
-                meta["blocker_id"] = bid
+        from hermes_cli.kanban_blocker_metadata import blocker_metadata, FIELDS
+        meta = blocker_metadata(conn, task_id, reason=checkpoint, metadata=metadata,
+                                blocker_id=blocker_id, blocker_provider=blocker_provider,
+                                blocker_model=blocker_model, blocker_lane=blocker_lane)
         meta.update({"checkpoint": checkpoint, "continuation": streak + 1,
                      "resume_after_seconds": resume_after, "resume_status": source_status})
         if wake_at is not None:
@@ -199,6 +198,7 @@ def continue_task(
         ).fetchone()[0]
         if meta.get("blocker_id"):
             payload["blocker_id"] = meta["blocker_id"]
+            payload.update({key: meta[key] for key in FIELDS if key in meta})
         from hermes_cli import kanban_wake_check as kwc  # condition wake [daveey]
         if wake_at is not None:
             payload["wake_at"] = wake_at

@@ -36,6 +36,12 @@ and re-parked without the id is not woken again until a later clear.
 Neutral outcomes (crash, timeout, reclaim, spawn failure, rate limit, give-up, failure) say
 nothing about the external condition, so they neither assert nor clear a blocker.
 
+Optional ``blocker_provider`` scopes a wall to that provider; ``blocker_model`` and
+``blocker_lane`` describe the observation only. Other-provider steps neither wait nor act as
+probes/clear evidence. Routing unknown (including unallocated classes) remains conservative;
+unscoped history keeps its board-wide behavior. Historical runs use their model_tier receipt,
+not a card's later pin or today's tier configuration.
+
 Matching on normalized error text was considered and left out: crash/timeout/protocol-violation
 errors share fixed preambles across unrelated cards (``_error_fingerprint`` keeps 80 chars), and
 LLM-written block reasons never match verbatim. Same-tick identical crash waves are already
@@ -111,6 +117,9 @@ def probe_interval_seconds(cfg: Optional[dict] = None) -> int:
 @dataclass
 class BlockerState:
     blocker_id: str
+    blocker_provider: Optional[str] = None
+    blocker_model: Optional[str] = None
+    blocker_lane: Optional[str] = None
     asserted_at: int = 0
     cleared_at: int = 0
     cleared_by: Optional[tuple[str, Optional[int]]] = None   # (task_id, run_id or None) that cleared it
@@ -131,6 +140,91 @@ class BlockerState:
 
 def _meta_blocker(kb, metadata) -> Optional[str]:
     return normalize_blocker_id(kb._json_dict(metadata).get("blocker_id"))
+
+
+def _optional_text(value) -> Optional[str]:
+    return value.strip() or None if isinstance(value, str) else None
+
+
+def _provider(value) -> Optional[str]:
+    value = _optional_text(value)
+    if not value or value.lower() in {"auto", "unknown"}:
+        return None
+    from hermes_cli.kanban_pin_provider import _canon
+    return _canon(value)
+
+
+def _applies(st: BlockerState, provider: Optional[str]) -> bool:
+    # Model/lane describe the assertion, not restrictions. Unknown routing is conservative.
+    scope, target = _provider(st.blocker_provider), _provider(provider)
+    return not scope or not target or scope == target
+
+
+def _run_route(conn, task_id, run_id) -> tuple[Optional[str], Optional[str], str]:
+    """Historical routing evidence, never today's tier config or a later card pin."""
+    from hermes_cli import kanban_db as kb
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='model_tier' "
+        "ORDER BY id DESC LIMIT 1", (task_id, run_id)).fetchone()
+    payload = kb._json_dict(row[0]) if row else {}
+    return (_optional_text(payload.get("model")), _provider(payload.get("provider")),
+            payload.get("lane") or kb._retry_status_for_run(conn, task_id, run_id))
+
+
+def task_route(conn, task_id) -> tuple[Optional[str], Optional[str], str]:
+    """Read-only preview of this run/next lane using the dispatcher's routing helpers.
+
+    Class allocation stays in the worker: auto is unknown, never a guessed provider.
+    """
+    from hermes_cli import kanban_db as kb, kanban_model_tier as tier
+    task = kb.get_task(conn, task_id)
+    if task is None:
+        return None, None, "ready"
+    lane = task.status if task.status in {"ready", "review"} else kb._retry_status_for_run(conn, task_id)
+    if task.status == "scheduled":
+        from hermes_cli.kanban_continuation import pending_wake
+        wake = pending_wake(conn, task_id) or {}
+        lane = "review" if wake.get("resume_status") == "review" else "ready"
+    if task.status == "running" and task.current_run_id:
+        model, provider, lane = _run_route(conn, task_id, task.current_run_id)
+        if model or provider:
+            return model, provider, lane
+    try:
+        from hermes_cli.kanban_model_assignment import _assignee_config
+        from hermes_cli.kanban_pin_provider import resolve_legacy_pin
+        from hermes_cli.kanban_provider_walls import retier_for_walls
+        cfg = tier.load_tier_config()
+        model, provider, reason = tier.resolve_model_tier(conn, task, lane=lane, cfg=cfg)
+        chosen = bool(model)
+        if reason == "pinned" and not task.provider_override:
+            task.provider_override = resolve_legacy_pin(task)[0]
+        if model:
+            task.model_override, task.provider_override = model, provider
+        if reason not in {"off", "profile_out_of_scope"}:
+            moved = retier_for_walls(task, cfg)
+            if moved:
+                task.model_override, task.provider_override = moved[:2]
+                chosen = True
+        model, provider = task.model_override, task.provider_override
+        if model and model.startswith("class:"):
+            if chosen and tier.class_unroutable_reason(model):
+                model = provider = None
+            else:
+                return model, None, lane
+        if not model:
+            config = _assignee_config(task.assignee) or {}
+            block = config.get("model") or {}
+            if isinstance(block, dict):
+                model, provider = block.get("default"), block.get("provider")
+        if model and model.startswith("class:"):
+            provider = None
+        return _optional_text(model), _provider(provider), lane
+    except Exception:
+        return None, None, lane
+
+
+def _task_applies(conn, st: BlockerState, task_id: str) -> bool:
+    return not st.blocker_provider or _applies(st, task_route(conn, task_id)[1])
 
 
 def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> dict[str, BlockerState]:
@@ -155,6 +249,10 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> di
         if ended >= st.asserted_at:
             st.asserted_at = ended
             st.reason = kb._first_line(row["summary"], 300)
+            meta = kb._json_dict(row["metadata"])
+            st.blocker_provider = _optional_text(meta.get("blocker_provider"))
+            st.blocker_model = _optional_text(meta.get("blocker_model"))
+            st.blocker_lane = _optional_text(meta.get("blocker_lane"))
         task_ids.add(row["task_id"])
     if not states:
         return states
@@ -169,19 +267,26 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> di
         asserting_run: Optional[int] = None
         for run in runs:
             started = kb._to_epoch(run["started_at"]) or 0
+            applicable = True
             if current is not None and current[0] in states:
                 st = states[current[0]]
-                st.probe_starts[tid] = max(st.probe_starts.get(tid, 0), started)
+                provider = None
+                if st.blocker_provider:
+                    provider = (_run_route(conn, tid, run["id"])[1] if run["ended_at"] is not None
+                                else task_route(conn, tid)[1])
+                applicable = _applies(st, provider)
+                if applicable:
+                    st.probe_starts[tid] = max(st.probe_starts.get(tid, 0), started)
             if run["ended_at"] is None:
                 continue
             ended = kb._to_epoch(run["ended_at"]) or 0
             effect, bid = run_effect(run["outcome"], run["metadata"])
             if effect == "assert" and bid is not None:
-                if current is not None and current[0] != bid and current[0] in states:
+                if applicable and current is not None and current[0] != bid and current[0] in states:
                     _mark_cleared(states[current[0]], tid, run["id"], ended)
                 current, asserting_run = (bid, ended), int(run["id"])
                 continue
-            if effect == "pass":
+            if effect == "pass" or not applicable:
                 continue
             if current is not None and current[0] in states:
                 _mark_cleared(states[current[0]], tid, run["id"], ended)
@@ -293,9 +398,9 @@ def shared_blocker_guard(
     now = int(time.time()) if now is None else int(now)
     states = blocker_states(conn, now=now)
     st = blocker_for_task(states, task_id)
-    if st is None or not st.is_open:
+    if st is None or not st.is_open or not _task_applies(conn, st, task_id):
         return None
-    others = [t for t in st.behind if t != task_id]
+    others = [t for t in st.behind if t != task_id and _task_applies(conn, st, t)]
     if others:
         marks = ",".join("?" * len(others))
         if conn.execute(
@@ -374,7 +479,9 @@ def probe_stranded_blockers(conn: sqlite3.Connection, *, now: Optional[int] = No
     for st in blocker_states(conn, now=now).values():
         if not st.is_open or not st.behind:
             continue
-        ids = sorted(st.behind)
+        ids = sorted(t for t in st.behind if _task_applies(conn, st, t))
+        if not ids:
+            continue
         marks = ",".join("?" * len(ids))
         rows = conn.execute(
             f"SELECT id, status, human_request FROM tasks WHERE id IN ({marks})", ids).fetchall()
@@ -402,16 +509,26 @@ def render_blocker_context(conn: sqlite3.Connection, task_id: str) -> str:
     if not states:
         return ""
     lines = ["## Open shared blockers on this board",
-             "External walls other cards already hit. If yours is one of them, stop early and end "
+             "External walls other cards already hit. Stop early only when the step this run is about "
+             "to take needs the walled capability; then end "
              "with kanban_block/kanban_continue passing the same `blocker_id` instead of rediscovering "
              "it; only one card probes a blocker at a time. A timed wait (kind='time' or a "
              "SCHEDULED_UNTIL= reason) keeps its wake time and wake_check when it also passes "
              "blocker_id."]
+    model, provider, lane = task_route(conn, task_id)
+    lines.append(f"Current route: provider={provider or 'unknown'}, model={model or 'unknown'}, lane={lane}.")
+    lines.append("Provider-scoped walls apply only to that provider. Continue unrelated work; if a later "
+                 "step needs the affected provider, wait at that step, not before it. Model/lane on a "
+                 "blocker describe where it was observed, not additional restrictions.")
     mine = None
     for st in sorted(states, key=lambda s: -s.asserted_at):
-        if task_id in st.behind:
+        applicable = _applies(st, provider)
+        if task_id in st.behind and applicable:
             mine = st
-        lines.append(f"- `{st.blocker_id}` ({len(st.behind)} card(s) parked): {st.reason or '(no reason)'}")
+        scope = (f"provider={st.blocker_provider or 'all'}, model={st.blocker_model or 'unspecified'}, "
+                 f"lane={st.blocker_lane or 'unspecified'}; "
+                 f"{'applicable' if applicable else 'not applicable'} to current route")
+        lines.append(f"- `{st.blocker_id}` ({len(st.behind)} card(s) parked): {st.reason or '(no reason)'} [{scope}]")
     if mine is not None:
         lines.append("")
         lines.append(

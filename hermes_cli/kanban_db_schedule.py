@@ -14,6 +14,8 @@ def schedule_task(
     expected_run_id: Optional[int] = None, wake_check: Optional[str] = None,
     check_every: Optional[int] = None, clock_only: bool = False, awaiting: Any = None,
     clear_blocker: bool = False, comment: Optional[tuple[str, str]] = None,
+    blocker_id: Optional[str] = None, blocker_provider: Optional[str] = None,
+    blocker_model: Optional[str] = None, blocker_lane: Optional[str] = None,
 ) -> bool:
     """Park in ``scheduled`` (waiting on time, not a human; not dispatchable) until its wake
     (``SCHEDULED_UNTIL=`` in the reason, else ``kanban_timed_park.DEFAULT_WAKE_SECONDS``) or an
@@ -68,7 +70,10 @@ def schedule_task(
             return False
         # A card behind a shared blocker stays behind it: a park without the id says nothing about
         # the wall (kanban_shared_blockers.run_effect) unless ``clear_blocker`` says it is gone.
-        meta = _kb._clear_meta(clear_blocker)
+        from hermes_cli.kanban_blocker_metadata import blocker_metadata
+        meta = blocker_metadata(conn, task_id, reason=reason, metadata=_kb._clear_meta(clear_blocker),
+                                blocker_id=blocker_id, blocker_provider=blocker_provider,
+                                blocker_model=blocker_model, blocker_lane=blocker_lane)
         run_id = _kb._end_or_synthesize_run(
             conn, task_id, outcome="scheduled", status="scheduled", summary=reason,
             metadata=meta or None, synthesize=bool(reason or meta),

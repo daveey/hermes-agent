@@ -138,6 +138,8 @@ def park(
     wake_check: Optional[str] = None, check_every: Optional[int] = None, clock_only: bool = False,
     awaiting=None, blocker_id: Optional[str] = None, run_metadata: Optional[dict] = None,
     blocker_wake: bool = False, probe_host: Optional[str] = None,
+    blocker_provider: Optional[str] = None, blocker_model: Optional[str] = None,
+    blocker_lane: Optional[str] = None,
 ) -> bool:
     """``running``/``ready``/``triage`` -> ``scheduled`` with a wake. Caller holds the write txn.
     ``from_untyped_block``: an untyped ``blocked`` card with no live run (classify-in-place) instead.
@@ -181,9 +183,11 @@ def park(
         params = (task_id, int(expected_run_id))
     if conn.execute(sql, params).rowcount != 1:
         return False
-    meta = dict(run_metadata or {})
-    if blocker_id:
-        meta["blocker_id"] = blocker_id
+    from hermes_cli.kanban_blocker_metadata import blocker_metadata, FIELDS
+    meta = blocker_metadata(conn, task_id, reason=reason, metadata=run_metadata,
+                            blocker_id=blocker_id, blocker_provider=blocker_provider,
+                            blocker_model=blocker_model, blocker_lane=blocker_lane)
+    blocker_id = meta.get("blocker_id")
     run_id = kb._end_or_synthesize_run(
         conn, task_id, outcome="scheduled", status="scheduled", summary=reason, metadata=meta or None,
         synthesize=bool(reason or meta),
@@ -193,6 +197,7 @@ def park(
         "wake_at": wake_at, "resume_status": source_status,
         **kwc.park_fields(wake_check, check_every, clock_only, conn=conn, probe_host=probe_host), "awaiting": record,
         **({"blocker_id": blocker_id} if blocker_id else {}),
+        **{key: meta[key] for key in FIELDS if key in meta},
         **({"blocker_wake": True} if blocker_wake else {}),
         **({"clear_blocker": True} if meta.get("clear_blocker") else {}),
     }, run_id=run_id)

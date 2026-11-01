@@ -24,7 +24,7 @@ from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kan
 from tools.kanban_tools_placement import (_local_placement, _machine_placement, _marker_placement_fields, _persisted_session_id,
                                           _placement_refused, _runs_where)
 from tools.kanban_tools_db_hint import generic_tool_error
-from tools.kanban_tools_park_args import _blocker_id_arg, _clear_blocker_arg
+from tools.kanban_tools_park_args import _blocker_id_arg, _clear_blocker_arg, _blocker_scope_args
 from hermes_cli.kanban_ask_resolved import ask_checks, create_ask_check, filing_context
 from tools import kanban_tools_completion as _kc, kanban_tools_create_args as _ca
 from tools.kanban_tools_schemas import (
@@ -1220,7 +1220,7 @@ def _handle_block(args: dict, **kw) -> str:
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
                            blocker_id=blocker_id, wake_check=wake[0], check_every=wake[1], awaiting=awaiting,
                            clock_only=wake[2], human_request=kb.redact_review_value(args.get("human_request")),
-                           clear_blocker=clear_blocker)
+                           clear_blocker=clear_blocker, **_blocker_scope_args(args))
         _check(ok, f"could not block {tid} (unknown id or not in running/ready/triage)")
         escalated = _escalated(kb, conn, tid)
         if escalated:
@@ -1273,12 +1273,13 @@ def _handle_schedule(args: dict, **kw) -> str:
                "the wake), or kanban_complete so the completion judge can evaluate it.")
         wake = _wake_check_args(args)
         awaiting, wake = _awaiting_arg(args, wake)
-        clear_blocker = _clear_blocker_arg(args)
+        blocker_id = _blocker_id_arg(args)
+        clear_blocker = _clear_blocker_arg(args, blocker_id)
         _park_guard(conn, tid, "schedule", wake, reason=reason)
         ok = kb.schedule_task(
             conn, tid, reason=reason, expected_run_id=_worker_run_id(tid),
             wake_check=wake[0], check_every=wake[1], clock_only=wake[2], awaiting=awaiting,
-            clear_blocker=clear_blocker)
+            clear_blocker=clear_blocker, blocker_id=blocker_id, **_blocker_scope_args(args))
         _check(ok, "" if ok else krc.human_answer_refusal(conn, tid, "schedule")
                or f"could not schedule {tid} (unknown id, or not in todo/ready/running/blocked/triage)")
         escalated = _escalated(kb, conn, tid)
@@ -1316,7 +1317,8 @@ def _handle_continue(args: dict, **kw) -> str:
         _park_guard(conn, tid, "continue", wake, resume_after=int(raw_after or 0))
         res = continue_task(conn, tid, checkpoint=checkpoint, resume_after_seconds=int(raw_after or 0),
                             expected_run_id=_worker_run_id(tid), metadata=metadata, awaiting=awaiting,
-                            wake_check=wake[0], check_every=wake[1], clock_only=wake[2])
+                            wake_check=wake[0], check_every=wake[1], clock_only=wake[2],
+                            **_blocker_scope_args(args))
         from hermes_cli.kanban_awaiting import CODES
         _check(res.get("ok"), f"could not continue {tid}: {res.get('error')}",
                res.get("reason_code") if res.get("reason_code") in CODES else None)

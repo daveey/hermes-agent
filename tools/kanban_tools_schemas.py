@@ -301,6 +301,9 @@ _BLOCKER_ID_DESC = (
     "clear it: the card stays behind the blocker."
 )
 _CLEAR_BLOCKER_PROP = {
+    "blocker_provider": _prop("string", "Optional provider affected by blocker_id. Other providers may proceed; omit for a provider-independent wall."),
+    "blocker_model": _prop("string", "Optional model that observed the wall (informational, not an applicability restriction)."),
+    "blocker_lane": _prop("string", "Optional lane that observed the wall (informational, not an applicability restriction)."),
     "clear_blocker": {"type": "boolean", "description": (
         "Optional, default false. True records that the shared blocker this card is "
         "parked behind is gone (you checked it), although this run parks for another "
@@ -399,7 +402,7 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
         "names the owner card doing it (create it on the gateway that holds the "
         "capability), and a wait on David is a kanban_block needs_input ask, never "
         "a park. A wait on another card on this board is a parent link "
-        "(kanban_link), not a park. This tool takes no blocker_id: a card already "
+        "(kanban_link), not a park. Without blocker_id a card already "
         "behind a shared blocker stays behind it when parked here (the park says "
         "nothing about the wall), and the blocker stays open for every other card; "
         "pass clear_blocker=true only when you saw the wall gone."
@@ -410,6 +413,7 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
             "Optional reason or machine-readable wake-up marker recorded on "
             "the completed run and scheduled event."
         )),
+        "blocker_id": _prop("string", _BLOCKER_ID_DESC),
         **_CLEAR_BLOCKER_PROP,
         **_NEEDS_PROP,
         **_WAKE_CHECK_PROPS,

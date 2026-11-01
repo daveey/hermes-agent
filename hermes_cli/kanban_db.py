@@ -3204,6 +3204,8 @@ def block_task(
     check_every: Optional[int] = None, clock_only: bool = False,
     human_request: Optional[dict] = None, awaiting: Any = None, clear_blocker: bool = False,
     comment: Optional[tuple[str, str]] = None,
+    blocker_provider: Optional[str] = None, blocker_model: Optional[str] = None,
+    blocker_lane: Optional[str] = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
     :func:`kanban_block_routing.route_block`). A wait on time -- ``kind='time'``, a ``dependency``
@@ -3245,6 +3247,10 @@ def block_task(
         from hermes_cli.kanban_dependency_validation import validate_dependency_block
         validate_dependency_block(conn, task_id, kind)
         from hermes_cli import kanban_assignment_routing as assignment_routing
+        from hermes_cli.kanban_blocker_metadata import blocker_metadata
+        run_meta = blocker_metadata(conn, task_id, reason=reason, metadata=_clear_meta(clear_blocker),
+                                    blocker_id=blocker_id, blocker_provider=blocker_provider,
+                                    blocker_model=blocker_model, blocker_lane=blocker_lane)
         # The breaker (``_record_task_failure``) parks cards ``blocked`` with no
         # ``block_kind`` and no ``blocked`` event -- the policy is the
         # supervisor's, not the kernel's -- but the transition guard below only
@@ -3273,7 +3279,7 @@ def block_task(
                     from_untyped_block=True, wake_check=wake_check,
                     check_every=check_every, clock_only=clock_only, awaiting=awaiting,
                     blocker_id=blocker_id, blocker_wake=mode == "blocker",
-                    run_metadata=_clear_meta(clear_blocker)))
+                    run_metadata=run_meta))
             _refuse_untimed_probe(kind, wake_check, clock_only)
             requested_kind, rekind_reason = kind, None
             if kind == "assignment":
@@ -3289,12 +3295,15 @@ def block_task(
                 return False
             sync_row(conn, task_id)
             payload = {"kind": kind, "reason": reason, "classified_in_place": True,
-                       "human_request": human_request, **filing_fields(conn, human_request)}
+                       "human_request": human_request, **filing_fields(conn, human_request), **run_meta}
             if requested_kind == "assignment":
                 payload.update(requested_kind=requested_kind, rekind_reason=rekind_reason)
             if kind == "assignment":
                 assignment_routing.route(conn, get_task(conn, task_id), payload)
-            _append_event(conn, task_id, "blocked", payload)
+            run_id = (_end_or_synthesize_run(conn, task_id, outcome="blocked", status="blocked",
+                                            summary=reason, metadata=run_meta, synthesize=True)
+                      if run_meta else None)
+            _append_event(conn, task_id, "blocked", payload, run_id=run_id)
             return noted.keep(True)
         source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else cur_row["status"]
         requested_kind, rekind_reason = kind, None
@@ -3320,7 +3329,7 @@ def block_task(
                 source_status=source_status, expected_run_id=expected_run_id,
                 wake_check=wake_check, check_every=check_every, clock_only=clock_only, awaiting=awaiting,
                 blocker_id=blocker_id, blocker_wake=mode == "blocker",
-                run_metadata=_clear_meta(clear_blocker)))
+                run_metadata=run_meta))
         _refuse_untimed_probe(kind, wake_check, clock_only)
         # Parent-less ``dependency`` behind a shared blocker with a human ask: sticky ``needs_input``.
         if kind == "dependency" and no_open_parent:
@@ -3363,7 +3372,7 @@ def block_task(
         store_request(conn, task_id, human_request)
         payload.update(human_request=human_request, **(filing_fields(conn, human_request) if new_status == "blocked" else {}))
         from hermes_cli.kanban_shared_blockers import CLEAR_FLAG
-        run_meta = {**({"blocker_id": blocker_id} if blocker_id else {}), **_clear_meta(clear_blocker)}
+        payload.update(run_meta)
         if clear_blocker:
             payload[CLEAR_FLAG] = True
         run_id = _end_or_synthesize_run(

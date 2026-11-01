@@ -25,6 +25,15 @@ def _blocker_id_arg(args: dict) -> Optional[str]:
     return bid
 
 
+def _blocker_scope_args(args: dict) -> dict:
+    from hermes_cli.kanban_blocker_metadata import scope_fields
+    try:
+        return scope_fields(args)
+    except ValueError as exc:
+        _check(False, str(exc))
+        return {}
+
+
 def _clear_blocker_arg(args: dict, blocker_id: Optional[str] = None) -> bool:
     """Validated ``clear_blocker``: the caller saw the card's shared blocker gone. [daveey]"""
     raw = args.get("clear_blocker", False)
