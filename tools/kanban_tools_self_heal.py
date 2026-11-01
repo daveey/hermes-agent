@@ -41,12 +41,12 @@ def granted_board(board: Optional[str], tid: str):
                           worker.current_run_id == kt._worker_run_id(env_tid),
                           "owner-wake supervisor no longer owns its current run")
                 if refs[0][0] == kb.get_current_board():
-                    yield kb, own, env_tid
+                    yield kb, own, (env_tid, refs[0][0])
                     return
                 path = kb.board_own_db_path(refs[0][0])
                 kt._check(path.is_file(), "orchestrator-only: listed owner-wake board is not available locally")
                 with kbc.connect_closing(db_path=path) as conn:
-                    yield kb, conn, env_tid
+                    yield kb, conn, (env_tid, refs[0][0])
                 return
     with kt._board(board) as (kb, conn):
         yield kb, conn, None
@@ -95,8 +95,9 @@ def handle_unblock(args: dict, **kw) -> str:
     tid = str(tid)
     env_tid = os.environ.get("HERMES_KANBAN_TASK")
     if env_tid and tid != env_tid:
-        with granted_board(args.get("board"), tid) as (kb, conn, owner):
+        with granted_board(args.get("board"), tid) as (kb, conn, grant):
             from hermes_cli.kanban_requeue import OWNER_WAKE_REQUEUE_STATUSES, requeue_grant
+            owner, target_board = grant if grant else (None, None)
             via, source = (("owner-wake-requeue", owner) if owner else
                            requeue_grant(conn, env_tid, tid,
                                          board=args.get("board") or kb.get_current_board()))
@@ -113,7 +114,7 @@ def handle_unblock(args: dict, **kw) -> str:
                             refs = [(slug, target) for slug, target in owner_wake_listed_refs(worker)
                                     if target == tid and (args.get("board") is None or args["board"] == slug)]
                             if (worker is None or worker.status != "running" or
-                                    worker.current_run_id != kt._worker_run_id(owner) or len(refs) != 1):
+                                    worker.current_run_id != kt._worker_run_id(owner) or refs != [(target_board, tid)]):
                                 return "owner-wake grant or run was revoked"
                     return None
 
