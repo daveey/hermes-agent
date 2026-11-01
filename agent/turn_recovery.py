@@ -1144,7 +1144,9 @@ def nonretryable_client_error_result(
     result = _failed_turn_result(_final_response, messages, api_call_count, _nonretryable_summary)
     result.update({
         "failure_reason": classified.reason.value,
-        "failure_retryable": bool(classified.retryable),
+        # Settlement can reject an initially retryable error (local validation or an
+        # exhausted request repair). Preserve that terminal verdict for auto-continue.
+        "failure_retryable": False,
     })
     if _keep_partial:
         result["partial"] = True

@@ -84,6 +84,53 @@ def test_non_retryable_failure_clears_the_marker_and_never_waits(emits, turn_env
     assert read_turn_marker(marker_home, "session-key") is None and not timers
 
 
+@pytest.mark.parametrize("error,retryable", [
+    (ValueError("Account selection requires a live main chat"), False),
+    (TypeError("invalid local request"), False),
+    (TimeoutError("request timed out"), True),
+])
+def test_terminal_error_auto_continue_follows_settlement(
+        emits, turn_env, marker_home, timers, error, retryable):
+    from agent.error_classifier import classify_api_error
+    from agent.turn_api_error import settle_unrecovered_error
+    from agent.turn_retry_state import TurnRetryState
+    from tests.agent.test_nonretryable_result_carries_verdict import _Agent
+
+    classified = classify_api_error(error, provider="custom", model="m")
+    # The initial generic classifier is permissive; settlement knows local validation cannot recover.
+    assert classified.retryable is True
+
+    terminal_agent = _Agent()
+    terminal_agent.provider = "custom"
+    terminal_agent.base_url = "https://example.com/v1"
+    terminal_agent.api_mode = "chat_completions"
+    terminal_agent._auto_recovery_cycles = 0
+
+    def run(message, **kwargs):
+        verdict = settle_unrecovered_error(
+            terminal_agent, api_error=error, classified=classified, _retry=TurnRetryState(),
+            status_code=None, error_msg=str(error), is_context_length_error=False,
+            is_rate_limited=False, _is_zai_coding_overload=False, _provider="custom",
+            _base="https://example.com/v1", _model="m", messages=[], api_messages=[],
+            api_kwargs=None, active_system_prompt="", conversation_history=[], approx_tokens=10,
+            retry_count=1, max_retries=1, compression_attempts=0, api_call_count=1,
+        )
+        assert verdict.action == "return"
+        return verdict.result
+
+    session = _session(agent=_agent(run), running=True)
+    server._run_prompt_submit("rid", "sid", session, "archive my receipts")
+    marker = read_turn_marker(marker_home, "session-key")
+    assert (marker is not None) is retryable
+    assert [t[0] for t in timers] == ([45.0] if retryable else [])
+    if not retryable:
+        assert server._maybe_schedule_auto_continue("sid", session, "session-key") is None
+    terminal = [payload for event, _, payload in emits if event == "message.complete"][-1]
+    assert terminal["status"] == "error"
+    assert terminal["error"] == str(error)
+    assert terminal["error_surface"]["retryable"] is retryable
+
+
 def test_a_replay_waits_longer_and_the_last_one_gives_up(emits, turn_env, marker_home, timers):
     session = _session(agent=_agent(), running=True, _auto_continue_attempt=1, _auto_continue_prompt="p")
     server._run_prompt_submit("rid", "sid", session, server._auto_continue_note("p"), display_kind="auto_continue")
