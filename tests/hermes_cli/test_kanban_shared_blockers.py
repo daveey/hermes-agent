@@ -52,6 +52,7 @@ def _route_run(conn, tid, provider):
         }, run_id=kb._current_run_id(conn, tid))
 
 
+
 @pytest.mark.parametrize("park", ["continue", "schedule"])
 @pytest.mark.parametrize("archived", [False, True], ids=["done", "archived"])
 def test_finished_other_route_wall_has_no_live_owner(kanban_home, scoped_routing, monkeypatch, park, archived):
@@ -124,6 +125,35 @@ def test_live_owner_wall_stays_open_and_renders(kanban_home, scoped_routing, sta
         assert st.is_open and set(st.behind) == {tid}
         assert BID in ksb.render_blocker_context(conn, viewer)
         assert "applicable to current route" in ksb.render_blocker_context(conn, viewer)
+
+
+@pytest.mark.parametrize("blocker_provider", ["openai-codex", "anthropic"])
+def test_pinned_wall_preview_matches_dispatch(kanban_home, monkeypatch, tmp_path, blocker_provider):
+    from hermes_cli import kanban_model_tier as tier, kanban_provider_walls as walls
+
+    cfg = {"default_model": "claude-sonnet-4", "default_provider": "anthropic"}
+    monkeypatch.setattr(tier, "load_tier_config", lambda: cfg)
+    monkeypatch.setattr(walls, "walls_path", lambda: tmp_path / "walls.json")
+    walls.record_wall("openai-codex", 3600, path=tmp_path / "walls.json")
+    with kbc.connect_closing() as conn:
+        tid = _blocked_behind(conn, "pinned")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_runs SET metadata=? WHERE task_id=?", (json.dumps({
+                "blocker_id": BID, "blocker_provider": blocker_provider,
+            }), tid))
+            conn.execute("UPDATE tasks SET model_override=?, provider_override=? WHERE id=?",
+                         ("gpt-6-astra", "openai-codex", tid))
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+        preview = ksb.task_route(conn, tid)
+        guard = ksb.shared_blocker_guard(conn, tid, interval=1800)
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        tier.apply_model_tier(conn, task, lane="ready", cfg=cfg)
+        assert preview == (task.model_override, task.provider_override, "ready")
+        assert preview == ("gpt-6-astra", "openai-codex", "ready")
+        expected = ksb.GUARD_REASON if blocker_provider == "openai-codex" else None
+        assert guard == expected
+
 
 
 def test_scoped_next_lane_and_context(kanban_home, scoped_routing):

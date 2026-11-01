@@ -231,7 +231,7 @@ def task_route(conn, task_id) -> tuple[Optional[str], Optional[str], str]:
             task.provider_override = resolve_legacy_pin(task)[0]
         if model:
             task.model_override, task.provider_override = model, provider
-        if reason not in {"off", "profile_out_of_scope"}:
+        if reason not in {"off", "profile_out_of_scope"} and not reason.startswith("pinned"):
             moved = retier_for_walls(task, cfg)
             if moved:
                 task.model_override, task.provider_override = moved[:2]
