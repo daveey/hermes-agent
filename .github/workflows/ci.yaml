@@ -2,13 +2,13 @@ name: CI
 
 # Orchestrator workflow. Runs ``detect-changes`` once, then conditionally
 # calls the sub-workflows that a PR can actually affect. A final
-# ``all-checks-pass`` gate job aggregates results so branch protection only
-# needs to require a single check.
+# ``all-checks-pass`` gate job keeps the v2 aggregate; the separately named
+# macOS state required (v1) consumer also fails closed on unknown selection.
 #
 # Sub-workflows are triggered via ``workflow_call`` and keep their own job
 # definitions, matrices, and concurrency settings. They no longer have
-# ``push:`` / ``pull_request:`` triggers of their own — everything flows
-# through this file.
+# ``push:`` / ``pull_request:`` triggers of their own, except hermes-state-macos:
+# it keeps standalone main validation, masked out of this workflow on main pushes.
 #
 # SECURITY: this workflow runs PR-controlled actions, workflows, and code.
 # Do not add ``secrets: inherit`` or GitHub App credentials here. Trusted
@@ -107,6 +107,7 @@ jobs:
       e2e_upgrade: ${{ steps.gate-lanes.outputs.e2e_upgrade }}
       e2e_desktop_core: ${{ steps.gate-lanes.outputs.e2e_desktop_core }}
       e2e_desktop_update: ${{ steps.gate-lanes.outputs.e2e_desktop_update }}
+      hermes_state: ${{ steps.gate-lanes.outputs.hermes_state }}
       event_name: ${{ github.event_name }}
       python_changed: ${{ steps.python-plan.outputs.changed }}
       python_slices: ${{ steps.python-plan.outputs.slices }}
@@ -125,11 +126,15 @@ jobs:
         # Overwrite the classifier outputs with 'true' when inputs.release. The E2E
         # lanes are forced off unless this is a release run or a manual dispatch
         # (whose empty diff already turns every lane on): never on a pull request
-        # or a push to main, whatever the diff or labels say.
+        # or a push to main, whatever the diff or labels say. The macOS state lane
+        # is off on a main push (hermes-state-macos.yml's own push trigger runs main, so
+        # a main push never runs the suite twice on the one mini runner) and on for
+        # a dispatch or a release.
         id: gate-lanes
         env:
           RELEASE: ${{ inputs.release }}
           EVENT_NAME: ${{ github.event_name }}
+          TEST_REF: ${{ inputs.commit || github.ref }}
           CLASSIFIED: ${{ toJSON(steps.classify.outputs) }}
         run: |
           python3 - <<'PY'
@@ -140,6 +145,9 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               for lane, value in values.items():
                   if lane.startswith('e2e') and not e2e_allowed:
+                      value = 'false'
+                  elif (lane == 'hermes_state' and os.environ['EVENT_NAME'] == 'push'
+                        and os.environ['TEST_REF'] == 'refs/heads/main' and not release):
                       value = 'false'
                   elif release and value in ('true', 'false'):
                       value = 'true'
@@ -289,6 +297,21 @@ jobs:
     # the other lanes and is required whenever detect selects it.
     if: needs.detect.outputs.remote_backends == 'true'
     uses: ./.github/workflows/remote-backends.yml
+    with:
+      commit: ${{ inputs.commit }}
+
+  hermes-state-macos:
+    name: hermes_state (macOS)
+    needs: detect
+    # tests/hermes_state/ on the self-hosted macOS mini, for a same-repository
+    # PR that touches the state modules, their tests, the harness or the
+    # dependency manifests (and every dispatch / release). A fork PR never runs
+    # on the mini: the job skips, and macos-state-required below then fails the
+    # selected lane, so a fork change to that surface cannot merge on a skip.
+    # Main pushes skip here (detect turns the lane off); the workflow's own push
+    # trigger runs main.
+    if: needs.detect.outputs.hermes_state == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    uses: ./.github/workflows/hermes-state-macos.yml
     with:
       commit: ${{ inputs.commit }}
 
@@ -499,6 +522,7 @@ jobs:
       - js-tests
       - rust-tests
       - remote-backends
+      - hermes-state-macos
       - catalog-tests
       - bootstrap-installer
       - e2e-desktop
@@ -547,6 +571,31 @@ jobs:
           args=()
           if [ "$RELEASE" = true ]; then args+=(--release); fi
           printf '%s' "$NEEDS" | python3 scripts/ci/required_results.py "${args[@]}"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # The macOS state lane's own required check. A separate, always-running
+  # consumer, so the protect-main ruleset can require the mini's suite by name
+  # without bumping the aggregate's version: a PR that detect selects for the
+  # lane (hermes_state == 'true') needs the lane's success, and a missing,
+  # skipped, failed or cancelled lane fails it. Only an explicitly unselected
+  # lane ('false') may skip. A detect that did not succeed fails closed: the
+  # selection is unknown. Logic and tests: scripts/ci/required_results.py
+  # --macos-state, tests/ci/test_required_results.py.
+  # ─────────────────────────────────────────────────────────────────────
+  macos-state-required:
+    name: macOS state required (v1)
+    needs: [detect, hermes-state-macos]
+    if: ${{ always() }}
+    runs-on: [self-hosted, ci-fast]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+      - name: Require the selected macOS state lane
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: printf '%s' "$NEEDS" | python3 scripts/ci/required_results.py --macos-state
 
   # ─────────────────────────────────────────────────────────────────────
   # CI timing report: collect per-job/step durations from the GitHub API,

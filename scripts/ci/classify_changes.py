@@ -51,6 +51,11 @@ Lanes:
   sshd container and the runner's Docker daemon (remote-backends.yml). Every
   other test of those backends is mocked, so a change to the backends, the
   terminal tool, or the real-backend tests runs it on the PR.
+* ``hermes_state`` — tests/hermes_state/ on the real macOS mini
+  (hermes-state-macos.yml): the state modules, their tests, the shared pytest
+  harness and the dependency manifests. An empty diff, a ``.github/`` change or
+  a list at the compare API's 300-file cap runs it. ci.yaml's ``detect`` turns
+  it off on a non-release main push: the standalone workflow already runs main.
 
 ``docker``, ``nix`` and the E2E lanes take most of the larger-runner minutes.
 An ordinary product change does not start them on a pull request. Every push
@@ -252,6 +257,12 @@ _PY_TEST_HARNESS = (
     "scripts/run_tests_parallel.py",
     "scripts/run_tests_host_slots.py",
 )
+# The macOS state lane (hermes-state-macos.yml runs tests/hermes_state/ on the mini):
+# hermes_state.py and every hermes_state_* sibling, their tests, the shared pytest harness
+# that runs them, and the dependency manifests they import through.
+_HERMES_STATE_PATHS = ("hermes_state", "tests/hermes_state/", *_PY_TEST_HARNESS, *_DEP_MANIFESTS)
+# The compare API returns at most this many files, so a list this long may be truncated.
+COMPARE_FILE_CAP = 300
 # Both Desktop suites package the app and share this harness (the update
 # suite imports the core suite's harness and provider).
 _DESKTOP_E2E_SHARED = (
@@ -676,6 +687,9 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
         "rust": any(_is_rust(f) for f in files),
         "remote_backends": any(f.startswith(_REMOTE_BACKEND_PATHS) for f in files),
         "catalog": catalog,
+        # A capped list may omit the state files, so it runs the lane.
+        "hermes_state": len(files) >= COMPARE_FILE_CAP
+        or any(f.startswith(_HERMES_STATE_PATHS) for f in files),
         **{lane: run_e2e or on for lane, on in _slow_lanes(files).items()},
     }
     consumers = [c for f in files for c in _SHARED_FIXTURE_CONSUMERS.get(f, ())]
@@ -698,6 +712,7 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
         ret["rust"] = True
         ret["remote_backends"] = True
         ret["catalog"] = True
+        ret["hermes_state"] = True
         ret.update(dict.fromkeys(_slow_lanes([]), True))
     return ret
 

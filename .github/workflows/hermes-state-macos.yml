@@ -10,8 +10,9 @@ name: hermes_state (macOS)
 # work dir, one job at a time. GitHub-hosted runners are not used (account
 # billing refusal), so this lane does not depend on billing.
 #
-# NON-BLOCKING: deliberately not called from ci.yaml and not in its aggregate
-# gate. After a week of green main runs, add it as a required check.
+# ci.yaml calls this for selected same-repository PRs and release/dispatch runs.
+# Its macOS state required (v1) consumer requires success when selected.
+# Main pushes run here directly; CI masks its duplicate call only on main pushes.
 #
 # HERMES_HOME points at a throwaway temp dir so the lane can never touch the
 # live ~/.hermes of anything else running on the mini.
@@ -20,24 +21,34 @@ on:
   push:
     branches: [main, 'ci-probe/**']
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      commit:
+        description: Commit to test. Empty keeps the triggering commit.
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: hermes-state-macos-${{ github.ref }}
-  # Let a running main suite finish even when pushes arrive faster than it runs.
+  # Collapse queued standalone pushes, but never supersede a required caller.
+  group: ${{ github.workflow == 'hermes_state (macOS)' && github.event_name == 'push' && format('hermes-state-macos-push-{0}', github.ref) || format('hermes-state-macos-{0}-{1}-{2}', github.run_id, github.run_attempt, inputs.commit || github.sha) }}
   cancel-in-progress: false
 
 jobs:
   hermes-state-macos:
     name: tests/hermes_state (macOS, mini)
+    # Defense in depth for other callers: fork PR code never reaches the mini.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, macOS, hermes-state]
     # Include cold environment provisioning and reduced-priority shared-host work.
     timeout-minutes: 90
     steps:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ inputs.commit || github.sha }}
 
       - name: Run tests/hermes_state
         shell: bash

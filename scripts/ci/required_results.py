@@ -41,7 +41,33 @@ _UPDATE_CONSUMER_LANES = {
     "e2e-desktop-update": ("e2e_desktop_update",),
     "remote-backends": ("remote_backends",),
     "catalog-tests": ("catalog",),
+    "hermes-state-macos": ("hermes_state",),
 }
+
+# ci.yaml's ``macOS state required (v1)`` consumer: the macOS state lane and its selector.
+MACOS_STATE_JOB = "hermes-state-macos"
+MACOS_STATE_LANE = "hermes_state"
+
+
+def evaluate_macos_state(needs: dict[str, dict[str, Any]] | None) -> dict[str, Any]:
+    """Verdict for ``macOS state required``: ``ok`` plus a one-line ``reason``.
+
+    A selected lane must succeed; only an explicitly unselected one may skip.
+    A detect that did not succeed, or a selection that is neither ``'true'`` nor
+    ``'false'``, fails closed: whether the lane was required is unknown.
+    """
+    entries = needs or {}
+    detect = entries.get("detect") or {}
+    if detect.get("result") != "success":
+        return {"ok": False, "reason": f"detect {detect.get('result') or 'missing'}: lane selection unknown"}
+    selected = (detect.get("outputs") or {}).get(MACOS_STATE_LANE)
+    lane = (entries.get(MACOS_STATE_JOB) or {}).get("result") or "missing"
+    if selected == "true":
+        return {"ok": lane == "success", "reason": f"{MACOS_STATE_LANE} selected, {MACOS_STATE_JOB} {lane}"}
+    if selected == "false":
+        return {"ok": lane in ("skipped", "success"),
+                "reason": f"{MACOS_STATE_LANE} not selected, {MACOS_STATE_JOB} {lane}"}
+    return {"ok": False, "reason": f"{MACOS_STATE_LANE} selection {selected!r}: lane selection unknown"}
 
 
 def evaluate_gate(
@@ -102,9 +128,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Strict mode: a skipped excluded job is the only tolerated skip.",
     )
+    parser.add_argument(
+        "--macos-state",
+        action="store_true",
+        help="Judge only the macOS state lane (ci.yaml's macOS state required check).",
+    )
     args = parser.parse_args(argv)
 
     needs = json.load(sys.stdin)
+    if args.macos_state:
+        verdict = evaluate_macos_state(needs)
+        print(("" if verdict["ok"] else "::error::") + verdict["reason"])
+        return 0 if verdict["ok"] else 1
     verdict = evaluate_gate(needs, release=args.release)
     compact = compact_results(needs)
 
