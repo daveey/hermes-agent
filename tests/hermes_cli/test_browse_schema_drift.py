@@ -200,6 +200,7 @@ def _drop_session_column(path, column):
     with closing(sqlite3.connect(path)) as conn:
         # SQLite refuses DROP COLUMN while an index references it; a pre-column store has neither.
         conn.execute("DROP INDEX IF EXISTS idx_sessions_effective_activity")
+        conn.execute("DROP TRIGGER IF EXISTS sessions_projection_update")
         conn.execute(f"ALTER TABLE sessions DROP COLUMN {column}")
         conn.commit()
 
@@ -273,6 +274,7 @@ def _lagging_store_with_history(home, rows=400):
     with closing(sqlite3.connect(path)) as conn:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.execute("DROP INDEX IF EXISTS idx_sessions_effective_activity")
+        conn.execute("DROP TRIGGER IF EXISTS sessions_projection_update")
         conn.execute("ALTER TABLE sessions DROP COLUMN last_read_at")
         conn.commit()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")

@@ -190,12 +190,7 @@ def _pet_changed_payload() -> dict:
 # last_activity_at / _description are left out on purpose: the session activity heartbeat restamps
 # them mid-turn and on idle ticks, so hashing them re-fired sessions.changed every heartbeat window
 # (#98005). Liveness comes from session.active_list, and a real turn still moves message_count.
-_SESSION_SIGNATURE_FIELDS = (
-    "id", "source", "session_key", "display_name", "model", "parent_session_id",
-    "started_at", "ended_at", "end_reason", "message_count", "tool_call_count",
-    "cwd", "git_branch", "git_repo_root", "title", "title_source", "profile_name",
-    "archived", "pinned", "hidden", "last_read_at", "handoff_state",
-)
+from hermes_state_projection import SESSION_SIGNATURE_FIELDS as _SESSION_SIGNATURE_FIELDS
 # path -> (database/WAL mtime, session-table digest). The mtime guard keeps the
 # normal 0.5 s watch pass stat-only; SQLite is read only after another process
 # actually commits (and for ``utils.RACY_MTIME_WINDOW_NS`` after it, see _settled_mtime).
@@ -205,25 +200,37 @@ _sessions_db_sig_cache: dict[str, tuple[object, tuple | None]] = {}
 # the cached mtime stays stale in between, so the change is still seen on the trailing edge.
 SESSION_DIGEST_MIN_S = 3.0
 _sessions_digest_at: dict[str, float] = {}
+_sessions_db_identity: dict[str, tuple[int, int]] = {}
 
 
 def _session_db_content_sig(db_path: Path):
-    """Digest list/transcript-relevant session rows, excluding unrelated tables.
+    """Read the transactional projection revision, or digest a legacy store.
 
-    ``gateway_heartbeats`` shares state.db and writes every minute. Using the
-    database mtime directly therefore emits sessions.changed while no session
-    changed (#98005). Cache behind the DB/WAL mtime, then inspect only the
-    sessions columns that drive Desktop projections. Legacy stores safely use
-    the subset of columns they have.
+    Upgraded stores use bounded schema/meta probes after writes, independent of
+    the legacy digest throttle. Settled unchanged files need no query. The file
+    identity distinguishes replacements whose counters happen to be equal.
+    Stores without the complete trigger capability retain the content fallback.
     """
     mtime = _newest_mtime_ns((db_path, db_path.with_name(f"{db_path.name}-wal")))
     cache_key = str(db_path)
     cached = _sessions_db_sig_cache.get(cache_key)
+    try:
+        stat = db_path.stat()
+        identity = (stat.st_dev, stat.st_ino)
+    except OSError:
+        _sessions_db_sig_cache.pop(cache_key, None)
+        return None
+    previous_identity = _sessions_db_identity.get(cache_key)
+    if previous_identity != identity:
+        cached = None
+        _sessions_db_sig_cache.pop(cache_key, None)
+    _sessions_db_identity[cache_key] = identity
+    revision_cached = cached is not None and cached[1] is not None and cached[1][0] == "revision"
 
     if cached is not None and cached[0] == mtime:
         return cached[1]
     now = time.monotonic()
-    if (cached is not None and cached[1] is not None
+    if (not revision_cached and cached is not None and cached[1] is not None
             and now - _sessions_digest_at.get(cache_key, -SESSION_DIGEST_MIN_S) < SESSION_DIGEST_MIN_S):
         return cached[1]
     if not db_path.exists():
@@ -239,6 +246,13 @@ def _session_db_content_sig(db_path: Path):
 
         conn = _connect_tracked_db(read_only_db_uri(db_path), tracking_path=db_path,
                                    uri=True, timeout=0.05)
+        from hermes_state_projection import session_projection_revision
+        conn.execute("BEGIN")
+        revision = session_projection_revision(conn)
+        if revision is not None:
+            signature = ("revision", identity, revision)
+            _sessions_db_sig_cache[cache_key] = (_settled_mtime(mtime), signature)
+            return signature
         available = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
         fields = tuple(field for field in _SESSION_SIGNATURE_FIELDS if field in available)
         if not fields:

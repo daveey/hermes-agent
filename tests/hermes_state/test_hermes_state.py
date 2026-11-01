@@ -2141,10 +2141,10 @@ class TestReconcileColumnsErrorHandling:
     def _db_missing_column(self, tmp_path):
         """A store whose sessions table lacks last_read_at."""
         db_path = tmp_path / "state.db"
-        seed = SessionDB(db_path=db_path)
-        seed.close()
+        SessionDB(db_path=db_path).close()
         conn = sqlite3.connect(str(db_path))
         try:
+            conn.execute("DROP TRIGGER IF EXISTS sessions_projection_update")
             conn.execute("ALTER TABLE sessions DROP COLUMN last_read_at")
             conn.commit()
         finally:
