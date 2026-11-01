@@ -12,10 +12,16 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_shared_blockers as ksb
 from hermes_cli import kanban_timed_park as ktp
 from hermes_cli import kanban_wake_check as kwc
-from tests.hermes_cli.test_kanban_wake_check_home import BUILD, _probe, _status, gws
+from tests.hermes_cli import test_kanban_wake_check_home as wake_home
+from tests.hermes_cli.test_kanban_wake_check_home import BUILD, _probe, _status
 from tests.hermes_cli.test_kanban_worker_node import BOARD
 
 BID = "copy-test-wall"
+
+
+@pytest.fixture
+def gws(tmp_path, monkeypatch):
+    yield from wake_home.gws.__wrapped__(tmp_path, monkeypatch)
 
 
 def _park(home, worker, flag):
