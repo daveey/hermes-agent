@@ -726,9 +726,11 @@ class FeedWatcher:
     ``ping_s`` and reconnects with backoff; polling still covers a closed socket."""
 
     def __init__(self, ident: Identity, board: str, wake: threading.Event, keep_running: Callable[[], bool],
-                 ping_s: float = 25.0, on_change: Optional[Callable[[str], None]] = None) -> None:
+                 ping_s: float = 25.0, on_change: Optional[Callable[[str], None]] = None,
+                 on_state: Optional[Callable[[str, bool], None]] = None) -> None:
         self.ident, self.board, self.wake, self.keep_running, self.ping_s = ident, board, wake, keep_running, ping_s
         self.on_change = on_change
+        self.on_state = on_state
         self.frames = 0
 
     def url(self) -> str:
@@ -750,6 +752,8 @@ class FeedWatcher:
                                                              "user-agent": "hermes-kanban-sync/1"},
                              open_timeout=HTTP_TIMEOUT_S, logger=ws_logger()) as ws:
                     backoff = 1.0
+                    if self.on_state is not None:
+                        self.on_state(self.board, True)
                     if self.on_change is not None:
                         self.on_change(self.board)
                         self.wake.set()  # reconnects must catch changes missed while disconnected
@@ -769,6 +773,8 @@ class FeedWatcher:
                                 self.on_change(self.board)
                             self.wake.set()
             except Exception as exc:  # health: allow BLE001 -- any socket failure: back off and reconnect; polling covers the gap
+                if self.on_state is not None:
+                    self.on_state(self.board, False)
                 _log.info("kanban sync: %s feed socket closed (%s: %s); reconnecting in %.0fs",
                           self.board, type(exc).__name__, exc, backoff)
                 deadline = time.monotonic() + backoff
@@ -945,8 +951,9 @@ def wait_for_work(wake: threading.Event, paths: Iterable[Path], period: float,
 def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = None,
                 sleep: Callable[[float], None] = time.sleep) -> None:
     """The gateway's sync loop (call from a worker thread). Installs the lease client for primary boards, holds one
-    feed socket per synced board, and runs a round when the Board reports a change, a local change is waiting, or
-    the poll period passes."""
+    feed socket per synced board. Connected boards pull on feed/local invalidation; disconnected boards and
+    failed pulls retain the poll period. An independent full recovery audits all boards at least every 60s
+    (or the configured period if longer), subject to in-flight IO and the next poll tick."""
     try:
         ident = load_identity()
     except SyncUnavailable as exc:
@@ -967,11 +974,13 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
         boards = board_paths()
         for slug, _path in boards:
             if slug not in watchers or not watchers[slug].is_alive():
-                watcher = FeedWatcher(ident, slug, wake, keep_running, on_change=work.changed)
+                watcher = FeedWatcher(ident, slug, wake, keep_running, on_change=work.changed,
+                                      on_state=work.feed_state)
                 watchers[slug] = threading.Thread(target=watcher.run, daemon=True, name=f"kanban-feed-{slug}")
                 watchers[slug].start()
         selected = work.select(boards, time.monotonic(), outbox_pending)
         for r in sync_all_once(hub, boards=selected):
+            work.finished(r.board, not r.error)
             if r.push and (r.push.sent or r.push.rejected):
                 _log.info("kanban sync: %s %s pulled=%d pushed=%d rejected=%d", r.board, r.mode, r.pulled,
                           r.push.sent, r.push.rejected)
