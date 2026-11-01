@@ -15,8 +15,14 @@ from tests.fakes.fake_llm_provider import FakeLLMServer, Text, ToolCall, write_h
 _HOST = "llm.offline-test.invalid"
 
 _TICK = '''
-import json, os, socket, sys
+import json, os, site, socket, sys
 from pathlib import Path
+
+# A borrowed managed checkout may re-exec into production-only dependencies.
+# Bootstrap first, then restore the test dependencies even after that re-exec.
+import hermes_bootstrap
+for path in json.loads(os.environ["OFFLINE_TEST_DEPENDENCY_SITES"]):
+    site.addsitedir(path)
 
 _real = socket.getaddrinfo
 marker = Path(os.environ["OFFLINE_MARKER"])
@@ -63,7 +69,9 @@ def _run_offline_job(tmp_path, agent_extra=""):
                if not k.startswith(("HERMES_", "_HERMES_"))
                and not k.endswith(("_API_KEY", "_TOKEN"))}
         env.update(HERMES_HOME=str(home), PYTHONPATH=str(Path(__file__).resolve().parents[2]),
-                   OFFLINE_MARKER=str(marker), OFFLINE_LOOKUPS="40")
+                   OFFLINE_MARKER=str(marker), OFFLINE_LOOKUPS="40",
+                   OFFLINE_TEST_DEPENDENCY_SITES=json.dumps([
+                       p for p in sys.path if Path(p).name in ("site-packages", "dist-packages")]))
         result = subprocess.run([sys.executable, "-c", _TICK], env=env, stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=240, check=False)
         served = len(srv.main_requests())
