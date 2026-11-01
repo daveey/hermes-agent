@@ -731,10 +731,14 @@ def _foreign_machines(task, cfg) -> list[str]:
 
 
 def _ready_hold_reason(task, events, cfg) -> Optional[str]:
-    """Why a ready card is deliberately not claimed: its last event is ``respawn_guarded`` (the
-    dispatcher is holding it), or it is pinned to a foreign machine this hub never runs. [daveey]"""
+    """Last observed guard or current foreign-machine pin, not a live admission verdict.
+
+    Capacity checks can precede pickup/guard evaluation, leaving old guard history on a
+    replica-only card. A same-second clear must outrank the guard it retired.
+    """
     evs = list(events or [])
-    if evs and _event_kind(max(evs, key=_event_ts)) == "respawn_guarded":
+    latest = max(evs, key=lambda ev: (_event_ts(ev), _task_field(ev, "id", 0) or 0)) if evs else None
+    if latest is not None and _event_kind(latest) == "respawn_guarded":
         return "respawn_guarded"
     if _foreign_machines(task, cfg):
         return "foreign_runs_on"
@@ -822,9 +826,13 @@ def _rule_held_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
         return []
     return [Diagnostic(
         kind="held_in_ready", severity="warning",
-        title=f"Ready {int(age / 60)}m, held ({reason})",
-        detail=f"Not stranded: {reason}. A respawn_guarded hold ends at its cap; a foreign "
-               f"machine:* pin waits for that machine (or a re-file).",
+        title=(f"Ready {int(age / 60)}m, last observed hold ({reason})" if reason == "respawn_guarded"
+               else f"Ready {int(age / 60)}m, held ({reason})"),
+        detail=("The last recorded dispatch decision was a guard hold; the current hold is not verified. "
+                "A cleared blocker, capacity limit, or missing pickup can leave this historical event "
+                "unchanged. Check the execution machine's current dispatcher verdict."
+                if reason == "respawn_guarded" else
+                "A foreign machine:* pin waits for that machine (or a re-file)."),
         actions=[_cli_hint("Check dispatcher status", "hermes kanban diagnostics")],
         first_seen_at=since, last_seen_at=since, count=1,
         data={"ready_since": since, "age_seconds": int(age), "hold_reason": reason,

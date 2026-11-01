@@ -473,8 +473,8 @@ def shared_blocker_guard(
 
 
 def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[str]:
-    """Wake ``blocked`` and ``scheduled`` cards behind a blocker that later evidence cleared.
-    Returns task ids."""
+    """Wake parked cards and retire ready/review hold evidence after a clear.
+    Returns only task ids whose lane changed (ready/review cards remain queued)."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_wake_check as kwc
 
@@ -487,12 +487,18 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
             if asserted > st.cleared_at or tid == by_task:
                 continue
             row = conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()
-            if row is None or row["status"] not in ("blocked", "scheduled"):
+            if row is None or row["status"] not in ("blocked", "scheduled", "ready", "review"):
                 continue
             if _already_saw_clear(conn, kb, tid, st):
                 continue
             payload = {"blocker_id": st.blocker_id, "cleared_by_task": by_task, "cleared_by_run": by_run,
                        "cleared_via": st.cleared_via or "run"}
+            if row["status"] in ("ready", "review"):
+                # Admission may be capacity-limited before the guard is evaluated again.
+                # Retire the historical hold without changing lanes or bypassing admission.
+                with kb.write_txn(conn):
+                    kb._append_event(conn, tid, CLEARED_EVENT, payload)
+                continue
             if row["status"] == "blocked":
                 if not kb.unblock_task(conn, tid):
                     continue
