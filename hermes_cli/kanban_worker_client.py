@@ -260,7 +260,24 @@ def main():
     return rc
 
 
+def _book_refusal(params, board_db, rc, line):
+    """Book this submitter's refusal as its run's receipt (``record_submitter_result``): a bound
+    run's crash diagnosis never trusts the shared task log, so the line printed below would
+    otherwise be lost to the owner-death classifier. Never raises: the exit must not depend on it. [daveey]"""
+    if params is None or not board_db:
+        return
+    try:
+        from hermes_cli import kanban_db as kb
+        from hermes_cli.kanban_db_connect import connect_closing
+        from hermes_cli.kanban_worker_log import record_submitter_result
+        with connect_closing(Path(board_db)) as conn, kb.write_txn(conn):
+            record_submitter_result(conn, params, os.getpid(), rc, line)
+    except Exception:  # health: allow BLE001 -- the receipt is best effort; the log line and exit trailer stand
+        pass
+
+
 def _submit():
+    params = board_db = None
     try:
         params = {'board': os.environ['HERMES_KANBAN_BOARD'], 'task_id': os.environ['HERMES_KANBAN_TASK'],
             'run_id': int(os.environ['HERMES_KANBAN_RUN_ID']), 'claim_lock': os.environ['HERMES_KANBAN_CLAIM_LOCK']}
@@ -279,11 +296,14 @@ def _submit():
         print(f'Kanban owner restarted: {exc}', file=sys.stderr)
         return KANBAN_OWNER_RESTART_EXIT_CODE
     except (KeyError, ValueError, OSError) as exc:
-        print(f'Kanban owner refused: {exc}', file=sys.stderr)
+        line = f'Kanban owner refused: {exc}'
+        print(line, file=sys.stderr)
+        rc = 1
         if getattr(exc, 'owner_unavailable', False):
             from hermes_cli.kanban_owner_unavailable import KANBAN_OWNER_UNAVAILABLE_EXIT_CODE
-            return KANBAN_OWNER_UNAVAILABLE_EXIT_CODE
-        return 1
+            rc = KANBAN_OWNER_UNAVAILABLE_EXIT_CODE
+        _book_refusal(params, board_db, rc, line)
+        return rc
 
 
 if __name__ == '__main__':

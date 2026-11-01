@@ -122,10 +122,20 @@ def managed_worker_output(conn, task_id, run_id, pid, claim_lock) -> Optional[st
     A bound managed run without a receipt has no attributable text: do not trust its
     shared log either. None is reserved for legacy/unbound callers' log fallback.
     """
-    from hermes_cli import kanban_db as kb
-
     if conn is None or run_id is None:
         return None
+    bound, output = _run_receipt_output(conn, task_id, run_id, pid, claim_lock)
+    if output is not None:
+        return output[-400:]
+    return "" if bound else None
+
+
+def _run_receipt_output(conn, task_id, run_id, pid, claim_lock):
+    """``(bound, last_output)`` of the run's newest receipt under *claim_lock* from *pid* (the
+    spawned submitter, ``tasks.worker_pid``) or the interpreter ``worker_bound`` recorded under
+    that claim; ``last_output`` is None when there is no such receipt."""
+    from hermes_cli import kanban_db as kb
+
     bound_row = conn.execute(
         "SELECT payload FROM task_events WHERE task_id=? AND run_id=? "
         "AND kind='worker_bound' ORDER BY id DESC LIMIT 1", (task_id, run_id),
@@ -143,8 +153,38 @@ def managed_worker_output(conn, task_id, run_id, pid, claim_lock) -> Optional[st
         if result.get('claim_lock') == claim_lock and result.get('pid') in pids:
             output = result.get('last_output')
             if isinstance(output, str):
-                return output[-400:]
-    return "" if bound_row else None
+                return bound_row is not None, output
+    return bound_row is not None, None
+
+
+def record_submitter_result(conn, params, pid, exit_code, last_output) -> bool:
+    """Book a managed submitter's own refusal/error exit as its run's ``worker_result``. [daveey]
+
+    The submitter (``kanban_worker_client``) is the run's ``tasks.worker_pid``; when the owner refuses
+    it (an owner that died: \"Kanban owner refused: Gateway inaccessible: service_identity_unverified\")
+    no interpreter ever writes a receipt, and a bound run's shared task log is not trusted
+    (``managed_worker_output``), so the refusal must be booked here or the owner-death classifier
+    loses it. Fenced on the exact attempt: the task still runs THIS run under THIS claim with *pid*
+    as its worker, and the run row agrees, so a late submitter of an older run writes nothing. An
+    existing receipt for the run (the interpreter's own exit, e.g. a 75 quota wall) is kept: the
+    submitter's echo of it must not supersede it. Caller holds ``write_txn``; returns whether it wrote.
+    """
+    from hermes_cli import kanban_db as kb
+
+    task_id, run_id, claim_lock = params['task_id'], int(params['run_id']), params['claim_lock']
+    task = conn.execute("SELECT status, current_run_id, claim_lock, worker_pid FROM tasks WHERE id=?",
+                        (task_id,)).fetchone()
+    if task is None or tuple(task) != ('running', run_id, claim_lock, pid):
+        return False
+    run = conn.execute("SELECT status, claim_lock, task_id FROM task_runs WHERE id=?", (run_id,)).fetchone()
+    if run is None or tuple(run) != ('running', claim_lock, task_id):
+        return False
+    if _run_receipt_output(conn, task_id, run_id, pid, claim_lock)[1] is not None:
+        return False
+    kb._append_event(conn, task_id, 'worker_result', {
+        'pid': pid, 'claim_lock': claim_lock, 'exit_code': int(exit_code),
+        'last_output': str(last_output)[-500:], 'submitter': True}, run_id=run_id)
+    return True
 
 
 def _worker_final_output(task_id: str, board: Optional[str] = None, *, run_id=None) -> str:
