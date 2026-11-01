@@ -11,13 +11,13 @@ import os
 from pathlib import Path
 import select
 import signal
-import subprocess
 import sys
 import textwrap
 
 import pytest
 
 from tests.ci import test_plugin_validation_sandbox as helpers
+from tests.ci.sandbox_startup_fixture import FencedProcess
 from tests.ci.test_plugin_validation_sandbox import SCRIPT, needs_isolation
 from tests.waiting import wait_until
 
@@ -59,7 +59,8 @@ def _blocked_in_read(pid):
 
 def _write_probe(work):
     probe = work / "probe.py"
-    probe.write_text(textwrap.dedent('''\
+    fixture_dir = str(Path(__file__).parent)
+    probe.write_text(f"import sys\nsys.path.insert(0, {fixture_dir!r})\n" + textwrap.dedent('''\
         import importlib.util
         import json
         import os
@@ -68,6 +69,7 @@ def _write_probe(work):
         import signal
         import subprocess
         import sys
+        from sandbox_startup_fixture import checkpoint
 
         source, control = sys.argv[1:3]
         control = Path(control)
@@ -85,8 +87,7 @@ def _write_probe(work):
                 super().__init__(argv, *args, **kwargs)
             def kill(self):
                 if self.args[0] == str(control / "gate") and not (control / "killer").exists():
-                    (control / "killer").write_text(str(os.getpid()))
-                    os.kill(os.getpid(), signal.SIGSTOP)
+                    checkpoint(control, "killer")
                 return super().kill()
         subprocess.Popen = CheckpointPopen
         original_remove = mod.remove_tree
@@ -113,13 +114,15 @@ def _write_probe(work):
         import sys
         if sys.argv[1:] == ["--version"]:
             os.execv("/usr/bin/bwrap", ["bwrap", "--version"])
+        sys.path.insert(0, {fixture_dir!r})
+        from sandbox_startup_fixture import checkpoint
         control = Path({str(work)!r})
         block = os.open(control / "block", os.O_RDWR)
         info = os.open(control / "info", os.O_WRONLY | os.O_CREAT, 0o600)
         os.set_inheritable(block, True)
         os.set_inheritable(info, True)
-        (control / "monitor").write_text(str(os.getpid()))
-        os.kill(os.getpid(), signal.SIGSTOP)
+        if not checkpoint(control, "monitor"):
+            sys.exit(0)
         os.execv("/usr/bin/bwrap", ["bwrap", "--block-fd", str(block),
                  "--info-fd", str(info), *sys.argv[1:]])
     '''))
@@ -136,7 +139,7 @@ def test_startup_cancel_reaps_init_before_cleanup(work, signum):
     monitor = killer = init_fd = None
     # A log file avoids a leaked init holding communicate()'s pipe open on RED.
     with (work / "output").open("w+") as output:
-        proc = subprocess.Popen(
+        proc = FencedProcess(work,
             [sys.executable, "-I", str(probe), str(SCRIPT), str(work),
              "--no-network", "--bwrap", str(gate), "--", "/bin/true"],
             env={**os.environ, "RUNNER_TEMP": str(work)}, stdout=output, stderr=output,
@@ -168,19 +171,44 @@ def test_startup_cancel_reaps_init_before_cleanup(work, signum):
             assert select.select([init_fd], [], [], 0)[0], "namespace init survived run_host"
             assert not list(work.glob("plugin-sandbox-*"))
         finally:
-            # Also clean the intentionally failing baseline; never leave a stopped
-            # process or namespace behind when a checkpoint/assertion fails.
-            if init_fd is not None:
-                try:
-                    signal.pidfd_send_signal(init_fd, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                os.close(init_fd)
-            for pid in {monitor, killer} - {None}:
-                try:
-                    os.kill(pid, signal.SIGCONT)
-                except ProcessLookupError:
-                    pass
-            if proc.poll() is None:
-                proc.kill()
-            proc.wait(timeout=10)
+            # The fence stays idle until AFTER the original assertions: cleanup
+            # cannot make the intentionally failing production baseline pass.
+            try:
+                proc.close()
+            finally:
+                if init_fd is not None:
+                    os.close(init_fd)
+
+
+@needs_isolation
+@pytest.mark.parametrize("phase", ["before_monitor", "before_killer", "unknown_init"])
+def test_checkpoint_timeout_reaps_real_sandbox(work, phase):
+    """Force a controller timeout without handing any discovered PID to cleanup."""
+    assert os.getuid() != 0, "this proof must exercise real non-root bwrap"
+    probe, gate = _write_probe(work)
+    with (work / "output").open("w+") as output:
+        proc = FencedProcess(work,
+            [sys.executable, "-I", str(probe), str(SCRIPT), str(work),
+             "--no-network", "--bwrap", str(gate), "--", "/bin/true"],
+            env={**os.environ, "RUNNER_TEMP": str(work)}, stdout=output, stderr=output,
+        )
+        try:
+            with pytest.raises(TimeoutError, match="injected checkpoint timeout"):
+                if phase != "before_monitor":
+                    wait_until(lambda: _read_pid(work / "monitor"), timeout=30)
+                    wait_until(lambda: _stopped(_read_pid(work / "monitor")), timeout=30)
+                if phase == "unknown_init":
+                    proc.send_signal(signal.SIGTERM)
+                    wait_until(lambda: _read_pid(work / "killer"), timeout=30)
+                    wait_until(lambda: _stopped(_read_pid(work / "killer")), timeout=30)
+                    os.kill(_read_pid(work / "monitor"), signal.SIGCONT)
+                    wait_until(lambda: _init_pid(work / "info"), timeout=30)
+                    # Deliberately do not open init_fd or write the observation file.
+                raise TimeoutError("injected checkpoint timeout")
+        finally:
+            proc.close()
+        # The subreaper's ECHILD acknowledgment covers even unpublished children.
+        # Also independently inspect every identity that did reach publication.
+        pids = [_read_pid(work / name) for name in ("wrapper", "monitor", "killer")]
+        pids.append(_init_pid(work / "info"))
+        assert all(not Path(f"/proc/{pid}").exists() for pid in pids if pid is not None)
