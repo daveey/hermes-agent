@@ -186,6 +186,31 @@ def _now() -> int:
     return int(time.time())
 
 
+#: Awake seconds a worker waits for the dispatcher to renew a lease that ran out while the host
+#: slept, before it gives up the in-place recovery (``recover_failed_kanban_turns``). The worker
+#: never renews its own lease: the dispatcher's stale sweep extends a live host-local worker's
+#: lapsed claim (``claim_extended``, reason ``pid_alive``) on its next pass, and the Board is asked
+#: first. A dispatcher pass is about a minute apart, so five minutes of awake time covers several.
+LAPSED_CLAIM_WAIT_SECONDS = 300.0
+#: Seconds between read-only re-proofs while waiting for that renewal.
+LAPSED_CLAIM_POLL_SECONDS = 15.0
+
+#: Claim proof outcomes (``worker_claim_state``).
+CLAIM_LIVE = "live"
+CLAIM_LAPSED = "lapsed"
+CLAIM_LOST = "lost"
+
+
+def _sleep(seconds: float) -> None:
+    """Backoff/poll sleep — one seam for tests (wall time; a host suspend may stretch it)."""
+    time.sleep(seconds)
+
+
+def _awake_clock() -> float:
+    """Awake seconds (``time.monotonic`` stops while the host sleeps) — the lapsed-lease budget."""
+    return time.monotonic()
+
+
 def worker_claim_is_live(
     *,
     task_id: Optional[str] = None,
@@ -196,6 +221,24 @@ def worker_claim_is_live(
 ) -> bool:
     """True when THIS process still owns a live, unexpired run/claim lease.
 
+    ``worker_claim_state(...) == "live"``; see :func:`worker_claim_state`.
+    """
+    return worker_claim_state(task_id=task_id, db_path=db_path, run_id=run_id, claim_lock=claim_lock,
+                              verify_pid=verify_pid) == CLAIM_LIVE
+
+
+def worker_claim_state(
+    *,
+    task_id: Optional[str] = None,
+    db_path: Optional[str] = None,
+    run_id: Optional[str] = None,
+    claim_lock: Optional[str] = None,
+    verify_pid: bool = True,
+) -> str:
+    """``"live"`` when THIS process still owns a live, unexpired run/claim lease; ``"lapsed"``
+    when every ownership coordinate is still ours and only the lease expiry has passed; else
+    ``"lost"``.
+
     Verified read-only against the dispatcher-pinned board before EVERY retry.
     All three pinned coordinates are REQUIRED — ``HERMES_KANBAN_DB``,
     ``HERMES_KANBAN_RUN_ID``, ``HERMES_KANBAN_CLAIM_LOCK`` — and compared with
@@ -204,18 +247,19 @@ def worker_claim_is_live(
 
     The lease itself is part of the liveness contract: the canonical stale-claim
     selector (``hermes_cli/kanban_db.py::release_stale_claims``) treats
-    ``status='running' AND claim_expires < now`` as stale and reclaims the task,
-    and the worker-liveness path treats an expired claim as non-live. So both
-    the task row AND the open run row must carry an UNEXPIRED ``claim_expires``
-    (``heartbeat_claim`` extends the task expiry and mirrors it onto the active
-    run row). An expired lease means mutation authority has lapsed even before
-    the reconciler processes the row; a NULL expiry is not a provable live
-    lease either and fails closed.
+    ``status='running' AND claim_expires < now`` as stale, and the worker-liveness
+    path treats an expired claim as non-live. So both the task row AND the open run
+    row must carry an UNEXPIRED ``claim_expires`` (``heartbeat_claim`` extends the
+    task expiry and mirrors it onto the active run row) for ``"live"``. An expired
+    lease means mutation authority has lapsed; it is reported as ``"lapsed"`` (never
+    authority) so the caller can wait for the dispatcher to renew it — a host that
+    slept past the TTL froze the renewing dispatcher with it. A NULL expiry is not a
+    provable lease at all and is ``"lost"``.
 
     FAIL-CLOSED: any missing coordinate, missing/unreadable DB, mismatched
-    run/lock/pid, closed run, or expired lease returns False and the caller
-    does not re-enter the model — an honest non-zero exit is always available,
-    whereas mutating state under a released or expired claim is not recoverable.
+    run/lock/pid or closed run returns ``"lost"``, and the caller does not
+    re-enter the model — an honest non-zero exit is always available, whereas
+    mutating state under a released or expired claim is not recoverable.
 
     An owner-side (managed) worker passes its carrier explicitly from the bound
     worker frame instead of the env pins, and ``verify_pid=False`` because there
@@ -225,11 +269,11 @@ def worker_claim_is_live(
     """
     task_id = _resolve_task_id(task_id)
     if task_id is None:
-        return False
+        return CLAIM_LOST
     db_path = _kanban_db_path() if db_path is None else (db_path.strip() or None)
     if not db_path or not Path(db_path).exists():
         logger.warning("kanban claim check: pinned board db %r not found — not retrying in place", db_path)
-        return False
+        return CLAIM_LOST
     run_id_env = str(run_id if run_id is not None else os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
     lock_env = str(claim_lock if claim_lock is not None else os.environ.get("HERMES_KANBAN_CLAIM_LOCK") or "").strip()
     if not run_id_env or not lock_env:
@@ -237,9 +281,9 @@ def worker_claim_is_live(
             "kanban claim check: missing dispatcher-pinned run-id/claim-lock carrier "
             "— no exact authority to re-prove, not retrying in place"
         )
-        return False
-    now = _now()
+        return CLAIM_LOST
     try:
+        now = _now()
         from hermes_cli import kanban_lockguard
         conn = kanban_lockguard.connect(f"{Path(db_path).absolute().as_uri()}?mode=ro", uri=True)
         try:
@@ -250,42 +294,81 @@ def worker_claim_is_live(
                 (task_id,),
             ).fetchone()
             if row is None:
-                return False
+                return CLAIM_LOST
             if (row["status"] or "") != "running":
-                return False
+                return CLAIM_LOST
             worker_pid = row["worker_pid"]
             if verify_pid and worker_pid is not None and int(worker_pid) != os.getpid():
-                return False
+                return CLAIM_LOST
             # A running task with no run pointer is not proof of a live run: the
             # dispatcher writes it on claim and clears it on release/end.
             current_run_id = row["current_run_id"]
             if current_run_id is None:
-                return False
+                return CLAIM_LOST
             if str(current_run_id) != run_id_env:
-                return False
+                return CLAIM_LOST
             if (row["claim_lock"] or "") != lock_env:
-                return False
-            if row["claim_expires"] is None or int(row["claim_expires"]) < now:
-                return False
+                return CLAIM_LOST
+            if row["claim_expires"] is None:
+                return CLAIM_LOST
             run = conn.execute(
                 "SELECT ended_at, worker_pid, claim_expires FROM task_runs WHERE id = ?",
                 (int(current_run_id),),
             ).fetchone()
             if run is None:
-                return False
+                return CLAIM_LOST
             if run["ended_at"] is not None:
-                return False
+                return CLAIM_LOST
             run_pid = run["worker_pid"]
             if verify_pid and run_pid is not None and int(run_pid) != os.getpid():
-                return False
-            if run["claim_expires"] is None or int(run["claim_expires"]) < now:
-                return False
-            return True
+                return CLAIM_LOST
+            if run["claim_expires"] is None:
+                return CLAIM_LOST
+            if int(row["claim_expires"]) < now or int(run["claim_expires"]) < now:
+                return CLAIM_LAPSED
+            return CLAIM_LIVE
         finally:
             conn.close()
     except Exception:
         logger.warning("kanban claim check failed — not retrying in place", exc_info=True)
-        return False
+        return CLAIM_LOST
+
+
+def wait_for_live_claim(
+    claim_state: Callable[[], str],
+    *,
+    sleep_fn: Optional[Callable[[float], None]] = None,
+    budget_s: Optional[float] = None,
+) -> bool:
+    """True once ``claim_state()`` proves ``"live"``; False on ``"lost"`` or when a ``"lapsed"``
+    lease is not renewed within ``budget_s`` AWAKE seconds (default
+    :data:`LAPSED_CLAIM_WAIT_SECONDS`). Read-only: the worker never extends its own lease, it only
+    waits for the dispatcher's holder-qualified extension, so a lease anyone else took over is
+    ``"lost"`` on the next proof and fences the worker out."""
+    sleep_fn = sleep_fn or _sleep
+    budget = LAPSED_CLAIM_WAIT_SECONDS if budget_s is None else max(float(budget_s), 0.0)
+    poll = max(float(LAPSED_CLAIM_POLL_SECONDS), 0.0)
+    # Bounded by polls as well as awake time, so a no-op sleep can never spin unbounded.
+    max_polls = int(budget // max(poll, 1.0)) + 1
+    started = _awake_clock()
+    polls = 0
+    while True:
+        state = claim_state()
+        if state == CLAIM_LIVE:
+            if polls:
+                logger.info("kanban claim check: lapsed lease renewed by the dispatcher after %d poll(s)", polls)
+            return True
+        if state != CLAIM_LAPSED:
+            return False
+        if polls >= max_polls or _awake_clock() - started >= budget:
+            logger.warning("kanban claim check: lease still lapsed after %.0fs awake — not retrying in place",
+                           _awake_clock() - started)
+            return False
+        if polls == 0:
+            logger.info("kanban claim check: lease lapsed (host suspend?) — waiting up to %.0fs awake "
+                        "for the dispatcher to renew it", budget)
+        polls += 1
+        sleep_fn(poll)
 
 
 def _truncate(text: str, limit: int = 300) -> str:
@@ -340,27 +423,41 @@ def recover_failed_kanban_turns(
     turn_fn: Callable[[str], Any],
     get_result: Callable[[], Any],
     *,
-    sleep_fn: Callable[[float], None] = time.sleep,
+    sleep_fn: Optional[Callable[[float], None]] = None,
     emit: Optional[Callable[[str], None]] = None,
     claim_check: Optional[Callable[[], bool]] = None,
     task_id: Optional[str] = None,
+    claim_state: Optional[Callable[[], str]] = None,
 ) -> int:
     """Retry an authorised kanban worker turn in place; returns attempts made.
 
     ``turn_fn(nudge)`` runs one more turn with the given synthetic user message.
     ``get_result()`` returns the LATEST settled turn result (``None`` stops the
     loop). Before EVERY attempt the worker must still own its live run/claim
-    (``claim_check``, default :func:`worker_claim_is_live`); the loop is bounded
-    by the attempt budget even when ``get_result`` never changes. The loop
-    deliberately does NOT extend its own claim lease during the backoff —
-    self-holding a claim is claim-lifetime policy (#95318), not this module's;
-    if the lease expires while sleeping, the re-proof fails and the attempt is
-    not made. ``task_id`` carries the worker identity explicitly (owner-side
-    workers pass their bound frame's task); such callers must also pass a
-    ``claim_check`` built from the same explicit carrier.
+    (``claim_state``, default :func:`worker_claim_state`; or a boolean
+    ``claim_check``); the loop is bounded by the attempt budget even when
+    ``get_result`` never changes. The loop deliberately does NOT extend its own
+    claim lease — self-holding a claim is claim-lifetime policy (#95318), not this
+    module's. A lease that is merely ``"lapsed"`` (every coordinate still ours, the
+    expiry passed while the host slept and froze the dispatcher that renews it) is
+    waited out read-only for the dispatcher's renewal, bounded by awake time
+    (:func:`wait_for_live_claim`); a lease that is ``"lost"`` or not renewed in time
+    stops the loop before model re-entry. ``task_id`` carries the worker identity
+    explicitly (owner-side workers pass their bound frame's task); such callers
+    must also pass a ``claim_state``/``claim_check`` built from the same explicit
+    carrier.
     """
     attempts = 0
-    check = claim_check or worker_claim_is_live
+    sleep_fn = sleep_fn or _sleep
+    if claim_state is None:
+        if claim_check is not None:
+            claim_state = lambda: CLAIM_LIVE if claim_check() else CLAIM_LOST
+        else:
+            claim_state = worker_claim_state
+
+    def check() -> bool:
+        return wait_for_live_claim(claim_state, sleep_fn=sleep_fn)
+
     while True:
         result = get_result()
         if not should_recover_turn(result, attempt=attempts, task_id=task_id):
@@ -393,7 +490,12 @@ def recover_failed_kanban_turns(
 
 
 __all__ = [
+    "CLAIM_LAPSED",
+    "CLAIM_LIVE",
+    "CLAIM_LOST",
     "DEFAULT_MAX_RECOVERY_ATTEMPTS",
+    "LAPSED_CLAIM_POLL_SECONDS",
+    "LAPSED_CLAIM_WAIT_SECONDS",
     "RECOVERY_DELAYS_SECONDS",
     "build_recovery_nudge",
     "kanban_task_id",
@@ -402,5 +504,7 @@ __all__ = [
     "recover_failed_kanban_turns",
     "recovery_delay_seconds",
     "should_recover_turn",
+    "wait_for_live_claim",
     "worker_claim_is_live",
+    "worker_claim_state",
 ]

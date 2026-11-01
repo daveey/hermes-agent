@@ -329,6 +329,7 @@ def test_lease_expired_during_the_backoff_blocks_model_reentry(
     _pin_carrier(clear_kanban_env, db, run_id="1", lock="lk")
     clock = iter([1_000, 1_700])  # pre-backoff proof sees a live lease; the re-proof does not
     monkeypatch.setattr(rec, "_now", lambda: next(clock))
+    monkeypatch.setattr(rec, "LAPSED_CLAIM_WAIT_SECONDS", 0.0)  # nobody renews it here
     turns: list[str] = []
     emitted: list[str] = []
 
@@ -481,6 +482,9 @@ def owner_worker(tmp_path, clear_kanban_env, monkeypatch):
                        ("HERMES_KANBAN_RUN_ID", "999"), ("HERMES_KANBAN_CLAIM_LOCK", "foreign")):
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(rec, "RECOVERY_DELAYS_SECONDS", (0.0,))
+    # An expired lease in these tests is never renewed: deny at once instead of waiting out the
+    # lapsed-lease budget (that wait is covered by tests/agent/test_kanban_darkwake_recovery.py).
+    monkeypatch.setattr(rec, "LAPSED_CLAIM_WAIT_SECONDS", 0.0)
     monkeypatch.setattr("agent.skill_commands.build_preloaded_skills_prompt", lambda *a, **k: ("", [], []))
 
     def install(script, *, goal_mode=False, expires=None, recovery=None):

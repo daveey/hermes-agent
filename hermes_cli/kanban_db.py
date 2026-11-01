@@ -2452,8 +2452,7 @@ def release_stale_claims(
         started_at = _row_get(row, "worker_started_at")
         live = host_local and row["worker_pid"] and _worker_alive(row["worker_pid"], started_at) and not heartbeat_stale
         lease_lost = _sync.lease_lost(conn, row["id"], now, _resolve_claim_ttl_seconds() if live else None)  # [daveey] asks the Board
-        if live and not lease_lost:
-            _extend_live_stale_claim(conn, row, now)
+        if _stale_claim_kept(conn, row, now, live=live and not lease_lost, host_local=host_local, started_at=started_at):
             continue
 
         termination = _terminate_reclaimed_worker(
@@ -4398,7 +4397,7 @@ from hermes_cli.kanban_db_workspace import (
     _managed_scratch_path_info,
     _scratch_workspace,
 )
-from hermes_cli.kanban_db_stale_claims import _extend_live_stale_claim
+from hermes_cli.kanban_db_stale_claims import _stale_claim_kept
 from hermes_cli.kanban_db_heartbeat import heartbeat_claim
 from hermes_cli.kanban_db_dispatch import (
     DEFAULT_FAILURE_LIMIT,

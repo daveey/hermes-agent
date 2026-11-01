@@ -556,44 +556,10 @@ def _estimate_chunk_bytes(chunk: Any) -> int:
     return size
 
 
-# ── Cross-turn stale-call circuit breaker (#58962) ─────────────────────
-# A session wedged against an unresponsive provider would otherwise hit the
-# stale detector on every call forever. ``agent._consecutive_stale_streams``
-# is bumped on every stale kill and reset only when a call completes or the
-# provider is swapped (switch_model / try_activate_fallback /
-# restore_primary_runtime — the streak measured the OLD provider). Past the
-# give-up threshold, calls abort immediately with an actionable error.
-
-def _stale_streak(agent) -> int:
-    try:
-        return int(getattr(agent, "_consecutive_stale_streams", 0) or 0)
-    except Exception:
-        return 0
-
-
-def _bump_stale_streak(agent) -> None:
-    with contextlib.suppress(Exception):
-        agent._consecutive_stale_streams = _stale_streak(agent) + 1
-
-
-def _reset_stale_streak(agent) -> None:
-    with contextlib.suppress(Exception):
-        agent._consecutive_stale_streams = 0
-
-
-_INTERRUPTED_WAIT_STALE_SECONDS = 30.0
-
-
-def _record_interrupted_provider_wait(agent, elapsed: float, *, response_started: bool) -> bool:
-    """Count a user-aborted pre-response stall toward the stale breaker: past the
-    wait-notice interval an interrupt is evidence of an unresponsive attempt.
-    Mid-response and early interrupts stay neutral."""
-    if response_started or elapsed < _INTERRUPTED_WAIT_STALE_SECONDS:
-        return False
-    _bump_stale_streak(agent)
-    logger.warning("Interrupted provider wait counted as stale after %.0fs with no output; "
-        "consecutive stale attempts=%d.", elapsed, _stale_streak(agent))
-    return True
+from agent.chat_completion_stale_breaker import (  # re-exported: callers use h._…
+    _INTERRUPTED_WAIT_STALE_SECONDS, _bump_stale_streak, _record_interrupted_provider_wait,
+    _reset_stale_streak, _stale_streak,
+)
 
 
 def _report_stale_nonstream_kill(agent, api_kwargs: dict, elapsed: float, stale_timeout: float, *,

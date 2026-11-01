@@ -74,3 +74,35 @@ def _defer_reclaim_for_live_worker(
         payload = {"reason": reason, "claim_lock": claim_lock, "claim_expires_now": grace}
         payload.update(termination)
         _kb._append_event(conn, task_id, "reclaim_deferred", payload, run_id=run_id)
+
+
+def _exit_booked_transient(conn: sqlite3.Connection, row: sqlite3.Row, host_local: bool, started_at) -> bool:
+    """[daveey] True when a stale claim's host-local worker is already dead and its run's authority
+    recorded the transient exit (``KANBAN_RATE_LIMIT_EXIT_CODE``: requeue without a failure) under
+    this claim. ``release_stale_claims`` then leaves the run to the crash sweep of the same dispatcher
+    pass, which books exactly that exit. Reclaiming it here instead closed runs 10712/10714 as
+    ``lease_lost`` failures after their workers exited 75 in a networkless DarkWake: the stale sweep
+    runs first, and a lease that lapsed during the sleep is all it sees. A live worker, a worker with
+    no booking or another exit code, and a remote claim are untouched (the reclaim proceeds)."""
+    from hermes_cli import kanban_db as _kb
+    from hermes_cli.kanban_owner_recovery import managed_run_exit_code
+
+    pid = row["worker_pid"]
+    if not host_local or not pid or _kb._worker_alive(pid, started_at):
+        return False
+    try:
+        code = managed_run_exit_code(conn, row["id"], int(pid), row["claim_lock"])
+    except (sqlite3.Error, TypeError, ValueError):
+        return False
+    return code == _kb.KANBAN_RATE_LIMIT_EXIT_CODE
+
+
+def _stale_claim_kept(conn: sqlite3.Connection, row: sqlite3.Row, now: int, *, live: bool, host_local: bool,
+                      started_at) -> bool:
+    """True when ``release_stale_claims`` keeps this expired claim: a live host-local worker the
+    Board still lets us hold has it extended (``_extend_live_stale_claim``), and a dead worker whose
+    transient exit is booked is left to the crash sweep (``_exit_booked_transient``)."""
+    if live:
+        _extend_live_stale_claim(conn, row, now)
+        return True
+    return _exit_booked_transient(conn, row, host_local, started_at)

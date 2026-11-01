@@ -388,15 +388,24 @@ def _bound_claim_is_live(context):
     """Retry proof for a managed worker: the frame's exact run/claim lease is live and unexpired,
     and THIS interpreter is the one ``bind_worker_context`` bound to it. The run's worker_pid is
     the dispatcher's spawned submitter here, so pid identity comes from ``worker_bound`` instead."""
-    from agent.kanban_turn_recovery import worker_claim_is_live
-    if not worker_claim_is_live(task_id=context['task_id'], db_path=context['db'], run_id=str(context['run_id']),
-                                claim_lock=context['claim_lock'], verify_pid=False):
-        return False
+    from agent.kanban_turn_recovery import CLAIM_LIVE
+    return _bound_claim_state(context) == CLAIM_LIVE
+
+
+def _bound_claim_state(context):
+    """``worker_claim_state`` for the frame's exact carrier (``live``/``lapsed``/``lost``), and
+    ``lost`` unless THIS interpreter is the one ``worker_bound`` recorded under that claim. A
+    ``lapsed`` lease is still ours in every coordinate; recovery waits for the dispatcher to renew it."""
+    from agent.kanban_turn_recovery import CLAIM_LOST, worker_claim_state
+    state = worker_claim_state(task_id=context['task_id'], db_path=context['db'], run_id=str(context['run_id']),
+                               claim_lock=context['claim_lock'], verify_pid=False)
+    if state == CLAIM_LOST:
+        return CLAIM_LOST
     try:
         with closing(sqlite3.connect(Path(context['db']).resolve().as_uri() + '?mode=ro', uri=True)) as conn:
-            return _bound_worker_matches(conn, context)
+            return state if _bound_worker_matches(conn, context) else CLAIM_LOST
     except sqlite3.Error:
-        return False
+        return CLAIM_LOST
 
 
 def worker_result(path, params):
@@ -441,7 +450,7 @@ def _run_task_turns(agent, frame, history, context):
     # carrier is this frame's bound claim, never the owner process's environment.
     from agent.kanban_turn_recovery import recover_failed_kanban_turns
     recover_failed_kanban_turns(recover, lambda: result, task_id=context['task_id'],
-                                claim_check=lambda: _bound_claim_is_live(context))
+                                claim_state=lambda: _bound_claim_state(context))
     from hermes_cli.turn_exit import turn_exit_code
     # Only a settled turn may continue the goal loop: an exhausted or denied recovery reaches
     # the honest exit path without re-entering the model under an unprovable claim.

@@ -70,6 +70,9 @@ def test_failed_turn_retries_in_place_from_frame_carrier(tmp_path, monkeypatch):
 
 def test_unprovable_claim_denies_retry_and_goal_continuation(tmp_path, monkeypatch):
     path, context, frame = _claimed_frame(tmp_path, monkeypatch, expired=True, goal_mode=True)
+    # Nobody renews this lapsed lease: deny at once instead of waiting out the awake budget
+    # (the wait itself is covered by tests/agent/test_kanban_darkwake_recovery.py).
+    monkeypatch.setattr(rec, "LAPSED_CLAIM_WAIT_SECONDS", 0.0)
     goal_calls = []
     monkeypatch.setattr("hermes_cli.goals.run_kanban_goal_loop", lambda **kw: goal_calls.append(kw))
     agent = _Agent([dict(FAILED)])
