@@ -108,13 +108,20 @@ def _family_mismatch(assignee, model, provider):
 
 
 def validate_task_pin(conn, task_id, model, provider):
-    """``set_model_override``: validate against the card's assignee, then bind a provider-less pin."""
+    """Repinning follows create's execution-host policy, including explicit remote providers."""
     from hermes_cli.kanban_db import _reject_spaced_pin
-    from hermes_cli.kanban_pin_provider import resolve_pin_provider
+    from hermes_cli.kanban_pin_provider import require_remote_pin_provider, resolve_pin_provider
+    from hermes_cli.kanban_runs_on_capabilities import runs_elsewhere
 
-    row = conn.execute('SELECT assignee FROM tasks WHERE id = ?', (task_id,)).fetchone()
-    assignee = row[0] if row else None
-    validate_model_assignment(assignee, model, provider)
+    row = conn.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    assignee = row['assignee'] if row else None
+    # runs_on is a sync extension: unsynced boards need not have the column.
+    runs_on = row['runs_on'] if row and 'runs_on' in row.keys() else None
+    remote = runs_elsewhere(conn, runs_on)
+    validate_model_assignment(assignee, model, provider, local_profile=not remote)
+    if remote:
+        require_remote_pin_provider(model, provider)
+        return model, provider
     if not provider:
         # Same pin-time binding as create_task: resolve against the card's assignee, or refuse.
         model, provider = resolve_pin_provider(model, None, assignee=assignee)

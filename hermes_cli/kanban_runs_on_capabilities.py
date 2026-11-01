@@ -153,7 +153,8 @@ def runs_elsewhere(conn, runs_on, *, machines: Optional[Mapping[str, Mapping[str
     landing dispatcher and :func:`claim_refusal`.
 
     False (keep the local checks) for no ``runs_on``, ``[]`` (any machine), a board that is not a primary, or
-    labels the registry cannot settle (unreachable). A ``machine:<other>`` label needs no registry: this
+    labels the registry cannot settle (unreachable, empty, or missing this machine's entry).
+    A ``machine:<other>`` label needs no registry: this
     machine only carries ``machine:<its own name>``."""
     if runs_on is None:
         return False
@@ -176,7 +177,10 @@ def runs_elsewhere(conn, runs_on, *, machines: Optional[Mapping[str, Mapping[str
         if reg is None:
             return False
         pool = reg.get("machines") or {}
-    return not set(labels) <= wn.effective_labels(pool.get(me), me)
+    # No self entry means unknown labels, not evidence that this machine lacks them.
+    if not pool.get(me):
+        return False
+    return not set(labels) <= wn.effective_labels(pool[me], me)
 
 
 def verdict_warning(implementer: str, task) -> dict:
