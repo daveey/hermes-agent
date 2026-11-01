@@ -303,6 +303,9 @@ class GatewayControlServer:
         from gateway.control_diagnostics import ControlDiagnostics
         self._diagnostics = ControlDiagnostics()
         self._loop_watchdog = None
+        # Strong refs: the loop holds tasks only weakly, so a pending connection task suspended
+        # on a reader nothing else references could otherwise be garbage collected.
+        self._connection_tasks: set[asyncio.Task] = set()
         self.ticket_store = None
         self.private_handlers = {}
         self._server: Optional[asyncio.AbstractServer] = None
@@ -321,15 +324,30 @@ class GatewayControlServer:
         """Bind and start serving. Returns True on success, False otherwise."""
         try:
             started = await (self._start_windows() if _IS_WINDOWS else self._start_posix())
-            if started:
-                from gateway.control_diagnostics import LoopWatchdog
-                self._loop_watchdog = LoopWatchdog(asyncio.get_running_loop())
-                self._loop_watchdog.start()
-            return started
         except Exception as exc:
             await self.stop()
             logger.warning("Gateway control socket failed to start: %s", exc)
             return False
+        if started:
+            self._start_loop_diagnostics()
+        return started
+
+    def _start_loop_diagnostics(self) -> None:
+        """Best-effort: a diagnostics failure never closes the already-bound listener."""
+        watchdog = None
+        try:
+            from gateway.control_diagnostics import LoopWatchdog
+            watchdog = LoopWatchdog(asyncio.get_running_loop())
+            watchdog.start()
+        except Exception as exc:  # health: allow BLE001 -- optional diagnostics must not close the listener; class-only log
+            if watchdog is not None:  # cancel the heartbeat a partial start scheduled
+                with contextlib.suppress(Exception):
+                    watchdog.stop()
+            self._loop_watchdog = None
+            # Class only: the message may carry environment detail.
+            logger.warning("Control loop diagnostics unavailable (%s)", type(exc).__name__)
+            return
+        self._loop_watchdog = watchdog
 
     async def _start_posix(self) -> bool:
         bind_path, pointer_file = resolve_server_socket_path(self._home)
@@ -528,6 +546,8 @@ class GatewayControlServer:
     def _connection_accepted(self, reader, writer):
         timing = self._diagnostics.accepted()
         task = asyncio.create_task(self._handle_connection(reader, writer, timing))
+        self._connection_tasks.add(task)
+        task.add_done_callback(self._connection_tasks.discard)
         # Also accounts for cancellation before the coroutine's first instruction.
         def completed(_):
             if timing.finish():

@@ -134,6 +134,12 @@ class LoopWatchdog:
         self._lock = threading.Lock()
         self._last_warning = float("-inf")
         self._heartbeat = None
+        # Liveness (``_due``) is refreshed on every beat; the task snapshot is best-effort and
+        # keeps its own timestamp, so a failing snapshot never looks like a blocked loop.
+        self._due = None
+        self._snapshot_at = None
+        self._tasks = "unavailable"
+        self._snapshot_error = None
         from agent.memory_provider import spawn_context_thread
         self.thread = spawn_context_thread(self._watch, name="control-loop-diagnostics", daemon=True)
 
@@ -145,13 +151,21 @@ class LoopWatchdog:
         if self._stop.is_set():
             return
         # asyncio task enumeration and get_stack are ONLY called on their owning loop.
-        stacks = "\n".join(
-            "task\n" + "\n".join(_frame_location(f) for f in task.get_stack(limit=16))
-            for task in itertools.islice(asyncio.all_tasks(self.loop), 64))
+        try:
+            stacks = "\n".join(
+                "task\n" + "\n".join(_frame_location(f) for f in task.get_stack(limit=16))
+                for task in itertools.islice(asyncio.all_tasks(self.loop), 64))
+            error = None
+        except Exception as exc:  # health: allow BLE001 -- best-effort snapshot; traceback may hold request data
+            # Class name only: the message or traceback may carry request data.
+            stacks, error = None, type(exc).__name__
+        now = time.monotonic()
         with self._lock:
-            self._snapshot_at = time.monotonic()
-            self._due = self._snapshot_at + self.interval
-            self._tasks = stacks
+            self._due = now + self.interval
+            self._snapshot_error = error
+            if stacks is not None:
+                self._snapshot_at = now
+                self._tasks = stacks
         self._heartbeat = self.loop.call_later(self.interval, self._beat)
 
     def _watch(self):
@@ -161,19 +175,24 @@ class LoopWatchdog:
     def _check(self):
         now = time.monotonic()
         with self._lock:
-            delay, tasks, age = now - self._due, self._tasks, now - self._snapshot_at
+            if self._due is None:
+                return
+            delay, tasks, error = now - self._due, self._tasks, self._snapshot_error
+            age = None if self._snapshot_at is None else now - self._snapshot_at
         if delay <= self.threshold or now - self._last_warning < self.repeat_interval:
             return
         self._last_warning = now
         threads = _thread_stacks()
         if self._stop.is_set():
             return
+        age_ms = None if age is None else age * 1000
         logger.warning(
             "Control event loop blocked delay_ms=%.1f; live thread stacks:\n%s\n"
-            "last loop-owned task snapshot age_ms=%.1f:\n%s",
-            delay * 1000, threads, age * 1000, tasks,
+            "last loop-owned task snapshot age_ms=%s error=%s:\n%s",
+            delay * 1000, threads, "unavailable" if age_ms is None else f"{age_ms:.1f}",
+            error or "none", tasks,
             extra=dict(delay_ms=delay * 1000, thread_stacks=threads, task_stacks=tasks,
-                       task_snapshot_age_ms=age * 1000))
+                       task_snapshot_age_ms=age_ms, task_snapshot_error=error))
 
     def stop(self):
         self._stop.set()
