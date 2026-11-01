@@ -8,7 +8,10 @@
   ``MIN_WALL_SECONDS`` is left to the normal respawn cooldown).
 * :func:`retier_for_walls` runs at claim time, after the tier decision. If the provider the worker would
   run on is walled, the card moves to the configured fallback (``kanban.default_model``/``default_provider``)
-  unless the fallback is walled too. This covers keep-pattern, review and retry tiers (which resolve to
+  unless the fallback is walled too; when it is (``default_provider`` is the walled one), the strong tier
+  (``kanban.strong_model``/``strong_provider``) is tried next. A provider also counts as walled when its OAuth
+  pool is quota-exhausted for the model right now (:func:`live_quota_wall`), so no worker has to crash first.
+  This covers keep-pattern, review and retry tiers (which resolve to
   ``model: null`` = profile default) as well as explicit pins. A card whose body contains ``require_model``
   keeps its pin.
 * :func:`rate_limit_storm` counts ``rate_limited`` runs in the last hour for the alert card.
@@ -122,20 +125,55 @@ def record_wall_for_run(conn: sqlite3.Connection, task_id: str, run_id: Optional
 def retier_for_walls(task: Any, cfg: dict[str, Any], *, now: Optional[float] = None,
                      path: Optional[Path] = None) -> Optional[tuple[str, str, str]]:
     """``(model, provider, walled_provider)`` to run on instead, or None to leave the task alone."""
-    walls = active_walls(now=now, path=path)
-    if not walls:
-        return None
     if REQUIRE_MODEL_MARKER in f"{getattr(task, 'title', '') or ''}\n{getattr(task, 'body', '') or ''}":
         return None
-    provider = _norm(getattr(task, "provider_override", None)) or (
-        profile_provider() if not str(getattr(task, "model_override", "") or "").strip() else "")
-    if provider not in walls:
+    walls = active_walls(now=now, path=path)
+    task_model = str(getattr(task, "model_override", "") or "").strip()
+    provider = _norm(getattr(task, "provider_override", None)) or (profile_provider() if not task_model else "")
+    if not provider or provider == "auto":
         return None
-    model = str(cfg.get("default_model") or "").strip()
-    fb = _norm(cfg.get("default_provider"))
-    if not model or not fb or fb == "auto" or fb in walls:
+    if provider not in walls and not live_quota_wall(provider, task_model or profile_model()):
         return None
-    return model, fb, provider
+    # 2026-11-01: kanban.default_model moved to gpt-6-astra/openai-codex, so a Codex wall's only fallback was
+    # Codex itself and every default-tier card waited out a 2.3-day wall while Anthropic had room. Try the
+    # strong tier next; a fallback is usable only when its own pool can serve its model now. [daveey]
+    for key in ("default", "strong"):
+        model = str(cfg.get(f"{key}_model") or "").strip()
+        fb = _norm(cfg.get(f"{key}_provider"))
+        if not model or not fb or fb == "auto" or fb == provider or fb in walls:
+            continue
+        if live_quota_wall(fb, model):
+            continue
+        return model, fb, provider
+    return None
+
+
+def profile_model() -> str:
+    try:
+        from hermes_cli.config import load_config
+        model = (load_config() or {}).get("model") or {}
+        return str(model.get("default") or "").strip() if isinstance(model, dict) else ""
+    except Exception:
+        return ""
+
+
+def live_quota_wall(provider: str, model: str) -> Optional[float]:
+    """Reset time when ``provider``'s OAuth pool is quota-exhausted for ``model`` right now, else None.
+
+    Same evidence the worker's startup resolver raises ``SubscriptionQuotaUnavailable`` on (known 429
+    cooldowns on every live OAuth entry), read at claim time so no worker has to crash to learn it. [daveey]
+    """
+    provider = _norm(provider)
+    if not provider or provider == "auto" or not model or model.startswith("class:"):
+        return None
+    try:
+        from agent.credential_pool import load_pool
+        from agent.model_routing_unavailable import quota_unavailable
+        unavailable = quota_unavailable(load_pool(provider, allowed_auth_types={"oauth"}), model)
+    except Exception as exc:  # never break dispatch over a pool read
+        logger.debug("kanban walls: live quota check failed for %s/%s (%s)", provider, model, exc)
+        return None
+    return float(unavailable.resets_at) if unavailable is not None else None
 
 
 def rate_limit_storm(conn: sqlite3.Connection, *, now: Optional[float] = None) -> int:

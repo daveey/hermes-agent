@@ -106,3 +106,57 @@ def test_storm_alert_opens_one_card(board):
 
 def test_storm_alert_quiet_below_threshold(board):
     assert walls.alert_on_storm(kbc.connect()) is None
+
+
+def test_default_tier_on_walled_default_provider_moves_to_strong_tier(board, monkeypatch):
+    """2026-11-01: default_model was gpt-6-astra/openai-codex; a Codex wall had only Codex as fallback."""
+    _write_cfg(board, default_model="gpt-6-astra", default_provider=CODEX,
+               strong_model=OPUS, strong_provider="anthropic")
+    monkeypatch.setattr(walls, "walls_path", lambda: board / "w.json")
+    walls.record_wall(CODEX, 200714, path=board / "w.json")
+    conn = kbc.connect()
+    tid = kb.create_task(conn, title="plain card", assignee="default")
+    seen = _dispatch(conn)
+    assert seen[tid][:2] == (OPUS, "anthropic")
+    assert "wall:openai-codex" in _tier_events(conn, tid)[-1]["reason"]
+
+
+def test_live_pool_exhaustion_counts_as_wall_without_a_crash(board, monkeypatch):
+    _write_cfg(board, default_model="gpt-6-astra", default_provider=CODEX,
+               strong_model=OPUS, strong_provider="anthropic")
+    monkeypatch.setattr(walls, "walls_path", lambda: board / "w.json")
+    monkeypatch.setattr(walls, "live_quota_wall",
+                        lambda p, m: time.time() + 200714 if p == CODEX else None)
+    conn = kbc.connect()
+    tid = kb.create_task(conn, title="plain card", assignee="default")
+    pinned = kb.create_task(conn, title="pinned", assignee="default", model_override="gpt-6-astra",
+                            provider_override=CODEX)
+    seen = _dispatch(conn)
+    assert seen[tid][:2] == (OPUS, "anthropic")
+    assert seen[pinned][:2] == ("gpt-6-astra", CODEX)  # exact pins keep their tuple
+
+
+def test_every_fallback_exhausted_leaves_task_on_its_route(board, monkeypatch):
+    _write_cfg(board, default_model="gpt-6-astra", default_provider=CODEX,
+               strong_model=OPUS, strong_provider="anthropic")
+    monkeypatch.setattr(walls, "walls_path", lambda: board / "w.json")
+    monkeypatch.setattr(walls, "live_quota_wall", lambda p, m: time.time() + 3600)
+    conn = kbc.connect()
+    tid = kb.create_task(conn, title="plain card", assignee="default")
+    assert _dispatch(conn)[tid][:2] == ("gpt-6-astra", CODEX)
+
+
+def test_live_quota_wall_reads_the_oauth_pool(monkeypatch):
+    import agent.credential_pool as cp
+    import agent.model_routing_unavailable as mru
+    calls = []
+    monkeypatch.setattr(cp, "load_pool", lambda provider, allowed_auth_types=None: calls.append(
+        (provider, allowed_auth_types)) or object())
+    monkeypatch.setattr(mru, "quota_unavailable",
+                        lambda pool, model: mru.SubscriptionQuotaUnavailable(CODEX, model, 1793774149.0))
+    assert walls.live_quota_wall(CODEX, "gpt-6-astra") == 1793774149.0
+    assert calls == [(CODEX, {"oauth"})]
+    monkeypatch.setattr(mru, "quota_unavailable", lambda pool, model: None)
+    assert walls.live_quota_wall(CODEX, "gpt-6-astra") is None
+    assert walls.live_quota_wall("auto", "gpt-6-astra") is None
+    assert walls.live_quota_wall(CODEX, "class:deep") is None
