@@ -246,8 +246,14 @@ def worker_route(policy, construct):
     if (api_mode == 'chat_completions' and runtime.get('provider') != 'custom'
             and not (frozen.get('model') or {}).get('api_mode')):
         api_mode = None
-    return {'api_key': construct['api_key'] or runtime.get('api_key'), 'base_url': runtime.get('base_url'),
-            'api_mode': api_mode}
+    result = {'api_key': construct['api_key'] or runtime.get('api_key'), 'base_url': runtime.get('base_url'),
+              'api_mode': api_mode}
+    # Preserve the resolver's rotation authority, not just its first bearer. Managed
+    # Kanban turns otherwise retry the same account forever while in-process turns rotate.
+    # Explicit credentials and deferred class routes do not supply a pool; don't invent one.
+    if runtime.get('credential_pool') is not None:
+        result['credential_pool'] = runtime['credential_pool']
+    return result
 
 
 def checkpoint_agent_kwargs(config):
