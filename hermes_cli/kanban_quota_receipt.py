@@ -5,14 +5,21 @@ import math
 def quota_fields(failure):
     """Allowlisted, credential-free fields from a failed turn or startup exception."""
     from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    from hermes_cli.auth import AuthError, is_rate_limited_auth_error
+    import time
     seen = set()
     while isinstance(failure, BaseException) and id(failure) not in seen:
         seen.add(id(failure))
         if isinstance(failure, SubscriptionQuotaUnavailable):
             failure = {'failure_reason': 'rate_limit', 'failure_resets_at': failure.resets_at}
             break
+        if isinstance(failure, AuthError) and is_rate_limited_auth_error(failure):
+            retry = failure.retry_after
+            if type(retry) in (float, int) and math.isfinite(retry) and retry > 0:
+                failure = {'failure_reason': 'rate_limit', 'failure_resets_at': time.time() + retry}
+                break
         failure = failure.__cause__ or failure.__context__
-    if not isinstance(failure, dict) or failure.get('failure_reason') != 'rate_limit':
+    if not isinstance(failure, dict) or failure.get('failure_reason') not in {'rate_limit', 'upstream_rate_limit', 'billing'}:
         return {}
     reset = failure.get('failure_resets_at')
     if type(reset) not in (float, int) or not math.isfinite(reset):
