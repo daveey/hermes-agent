@@ -586,7 +586,7 @@ jobs:
     name: macOS state required (v1)
     needs: [detect, hermes-state-macos]
     if: ${{ always() }}
-    runs-on: [self-hosted, hermes-hub]
+    runs-on: [self-hosted, ci-fast]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
