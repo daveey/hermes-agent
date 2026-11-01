@@ -322,7 +322,7 @@ def _run_worker_turns(agent, frame, history):
         code = turn_exit_code(None, kanban_worker=True, **credential_failure_flags(exc))
         raise
     finally:
-        _record_worker_result(context, code, last_output, failure)
+        _record_worker_result(context, code, last_output, failure, agent=agent)
 
 
 def record_start_failure(frame, exc):
@@ -376,19 +376,21 @@ def start_failure_line(exc):
     return failure_line(exc, 'Worker could not start')
 
 
-def _record_worker_result(context, code, last_output, failure=None, extra=None):
+def _record_worker_result(context, code, last_output, failure=None, extra=None, *, agent=None):
     _TURNS_DONE.set()
     import os
     from hermes_cli.kanban_db_connect import connect_closing
     from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_quota_receipt import quota_fields
+    from hermes_cli.kanban_quota_receipt import quota_fields, route_fields
     with connect_closing(Path(context['db'])) as conn, kb.write_txn(conn):
         if _bound_worker_matches(conn, context):
             # Closing a run clears its claim/PID and replaces metadata; keep the
             # result in the immutable attempt event stream instead.
             kb._append_event(conn, context['task_id'], 'worker_result',
                 {'pid': os.getpid(), 'claim_lock': context['claim_lock'], 'exit_code': code,
-                 'last_output': last_output, **quota_fields(failure), **(extra or {})}, run_id=context['run_id'])
+                 'last_output': last_output, **quota_fields(failure), **route_fields(failure, agent),
+                 **(extra or {})},
+                run_id=context['run_id'])
 
 
 def record_worker_loss(policy, reason, *, pid=None, bound=False):

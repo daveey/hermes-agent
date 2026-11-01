@@ -37,7 +37,7 @@ def test_expired_wall_ignored(board):
     assert walls.active_walls(path=p) == {}
 
 
-def test_keep_pattern_card_retiered_off_walled_profile_provider(board, monkeypatch):
+def test_keep_pattern_card_preserves_strong_route_under_wall(board, monkeypatch):
     _write_cfg(board, default_model=SONNET, default_provider="anthropic", default_model_keep_patterns=["security"])
     monkeypatch.setattr(walls, "profile_provider", lambda: CODEX)
     monkeypatch.setattr(walls, "walls_path", lambda: board / "w.json")
@@ -45,8 +45,8 @@ def test_keep_pattern_card_retiered_off_walled_profile_provider(board, monkeypat
     conn = kbc.connect()
     tid = kb.create_task(conn, title="security audit", assignee="default")
     seen = _dispatch(conn)
-    assert seen[tid][:2] == (SONNET, "anthropic")
-    assert "wall:openai-codex" in _tier_events(conn, tid)[-1]["reason"]
+    assert seen[tid][:2] == (None, None)
+    assert _tier_events(conn, tid)[-1]['reason'] == 'pattern:security'
 
 
 def test_pinned_card_on_walled_provider_keeps_exact_pin(board, monkeypatch):

@@ -3,17 +3,15 @@
 2026-10-26: the hub spawned workers on openai-codex that died ~60 s later with ``retry after 524389s``
 (~6 days), 285 times in 24h. A ``rate_limited`` exit is requeued as neutral, so nothing noticed.
 
-* :func:`record_wall` runs when a worker exits rate-limited. It reads the retry-after from the worker log
-  and stores ``provider -> until`` in ``<kanban home>/provider_walls.json`` (a wall under
-  ``MIN_WALL_SECONDS`` is left to the normal respawn cooldown).
-* :func:`retier_for_walls` runs at claim time, after the tier decision. If the provider the worker would
-  run on is walled, the card moves to the configured fallback (``kanban.default_model``/``default_provider``)
-  unless the fallback is walled too; when it is (``default_provider`` is the walled one), the strong tier
-  (``kanban.strong_model``/``strong_provider``) is tried next. A provider also counts as walled when its OAuth
-  pool is quota-exhausted for the model right now (:func:`live_quota_wall`), so no worker has to crash first.
-  This covers keep-pattern, review and retry tiers (which resolve to
-  ``model: null`` = profile default) as well as explicit pins. A card whose body contains ``require_model``
-  keeps its pin.
+* :func:`record_wall` stores ``provider -> until`` in ``provider_walls.json``.
+  Reaped attempts use their exact receipt/episode deadline; the log reader is
+  retained only for older callers without an episode.
+* :func:`retier_for_walls` moves ordinary default routing (``tier_reason: default``, no pin) off a walled
+  provider outside a quota episode: ``kanban.default_model`` first, then the strong tier when the default
+  provider is the walled one. A provider also counts as walled when its OAuth pool is quota-exhausted for
+  the model right now (:func:`live_quota_wall`). Explicit pins and strong tiers are never rewritten; a card
+  whose body contains ``require_model`` keeps its route. Attempt-specific admission, the class-route
+  alternate, backoff and notices live in ``kanban_quota_episode``.
 * :func:`rate_limit_storm` counts ``rate_limited`` runs in the last hour for the alert card.
 """
 
@@ -100,6 +98,12 @@ def record_wall(provider: str, retry_after: Optional[int], *, now: Optional[floa
 def record_wall_for_run(conn: sqlite3.Connection, task_id: str, run_id: Optional[int],
                         log_path: Optional[Path]) -> Optional[float]:
     """Wall bookkeeping for a rate-limited exit: provider from the run's ``model_tier`` event."""
+    from hermes_cli.kanban_quota_episode import episode
+    state = episode(conn, task_id)
+    if state and state['run_id'] == run_id:
+        # Exact-run receipt/backoff owns the deadline; never extend it with an
+        # unscoped log tail or the legacy provider-wide default.
+        return record_wall(state.get('provider'), max(0, state['until'] - time.time()))
     provider = ""
     try:
         for row in conn.execute(

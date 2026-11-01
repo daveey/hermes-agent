@@ -44,7 +44,9 @@ def _pin_first():
 # "status" covers dashboard drag-drop and `_set_status_direct()`.
 # ``review_requested`` wakes the origin like a block but is not one;
 # the task is not archived so later review cycles keep notifying.
-TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested")
+# ``quota_episode_notice`` (third consecutive quota requeue) is a passive notice: it never wakes the origin,
+# whose own turn would land on the same exhausted provider.
+TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "quota_episode_notice")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
 _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected")
@@ -52,7 +54,7 @@ _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "revie
 
 def diagnostic_event(ev) -> bool:
     """Infrastructure attention is distinct from an explicit owner decision."""
-    if ev.kind in {"crashed", "timed_out", "gave_up"}:
+    if ev.kind in {"crashed", "timed_out", "gave_up", "quota_episode_notice"}:
         return True
     if ev.kind in {"blocked", "block_loop_detected"}:
         return (ev.payload or {}).get("kind") != "needs_input"
@@ -465,6 +467,11 @@ def _fmt_failure(kind: str):
     return fmt
 
 
+def _fmt_quota_episode(ev, n) -> tuple:
+    from hermes_cli.kanban_quota_episode import notice_text
+    return f"⏳ {n.head}{notice_text(ev.payload)}", None, None
+
+
 def _fmt_timed_out(ev, n) -> tuple:
     limit = int(_payload(ev, "limit_seconds") or 0)
     minutes = max(1, round(limit / 60)) if limit else 0
@@ -492,6 +499,7 @@ _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
     "review_requested": _fmt_review_requested,
     "changes_requested": _fmt_changes_requested,
     "block_loop_detected": _fmt_block_loop_detected,
+    "quota_episode_notice": _fmt_quota_episode,
 }
 
 

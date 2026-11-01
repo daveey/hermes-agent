@@ -1393,6 +1393,13 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                              (dead.error_text[:500], row["id"]))
                 sweep.owner_restarted.append(row["id"])
             elif dead.rate_limited:
+                try:
+                    from hermes_cli.kanban_quota_episode import record_episode
+                    record_episode(conn, row["id"], run_id)
+                except sqlite3.Error:
+                    raise
+                except Exception:  # health: allow BLE001 -- episode bookkeeping never strands the sweep; traceback logged [daveey]
+                    _kb._log.warning("kanban: recording quota episode failed for %s", row["id"], exc_info=True)
                 sweep.rate_limited.append(row["id"])
                 try:
                     from hermes_cli import kanban_provider_walls as _walls
@@ -1673,9 +1680,13 @@ def check_respawn_guard(
         return None
 
     now = int(time.time())
-    from hermes_cli.kanban_quota_receipt import waiting_for_quota_reset
-    if waiting_for_quota_reset(conn, task_id, now):
-        return "subscription_quota_reset"
+    from hermes_cli.kanban_quota_episode import decision, episode
+    if episode(conn, task_id):
+        guard = decision(conn, _kb.get_task(conn, task_id), lane=lane, now=now)[0]
+        stamp = _kb._lossy_text(row['last_failure_error'])
+        if guard is None and _kbq.is_quota_error(stamp):
+            _kbq.clear_quota_error(conn, task_id, stamp)
+        return guard
     # Only the latest run gates admission; quota and infrastructure failures are neutral.
     rl_cooldown = _kb._resolve_rate_limit_cooldown_seconds()
     latest_run = conn.execute(
@@ -1695,22 +1706,6 @@ def check_respawn_guard(
         cooldown = _kb._env_int("HERMES_KANBAN_OWNER_RESTART_COOLDOWN_SECONDS", OWNER_RESTART_COOLDOWN_SECONDS)
         if ended_at is not None and (now - ended_at) < cooldown:
             return "owner_restart_cooldown"
-        return None
-    if latest_run is not None and latest_run["outcome"] == "rate_limited":
-        if rl_cooldown <= 0:
-            # Cooldown disabled — respawn immediately, skipping blocker_auth so
-            # the stamped rate-limit text doesn't re-trap the task.
-            return None
-        ended_at = _kb._to_epoch(latest_run["ended_at"])
-        if ended_at is not None and (now - ended_at) < rl_cooldown:
-            return "rate_limit_cooldown"
-        # Cooldown elapsed — return early so blocker_auth doesn't catch the
-        # stamped rate-limit text; this path intentionally retries forever
-        # (spaced by the cooldown) until quota returns or a real run supersedes it.
-        # The stamp is dropped so it cannot outlive this run (see 1b). [daveey]
-        stamp = _kb._lossy_text(row["last_failure_error"])
-        if _kbq.is_quota_error(stamp):
-            _kbq.clear_quota_error(conn, task_id, stamp)
         return None
 
     err = _kb._lossy_text(row["last_failure_error"])

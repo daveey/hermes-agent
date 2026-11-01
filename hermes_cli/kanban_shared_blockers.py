@@ -223,19 +223,13 @@ def task_route(conn, task_id) -> tuple[Optional[str], Optional[str], str]:
     try:
         from hermes_cli.kanban_model_assignment import _assignee_config
         from hermes_cli.kanban_pin_provider import resolve_legacy_pin
-        from hermes_cli.kanban_provider_walls import retier_for_walls
         cfg = tier.load_tier_config()
-        model, provider, reason = tier.resolve_model_tier(conn, task, lane=lane, cfg=cfg)
+        model, provider, reason = tier.resolve_dispatch_tier(conn, task, lane=lane, cfg=cfg)
         chosen = bool(model)
         if reason == "pinned" and not task.provider_override:
             task.provider_override = resolve_legacy_pin(task)[0]
         if model:
             task.model_override, task.provider_override = model, provider
-        if reason not in {"off", "profile_out_of_scope"} and not reason.startswith("pinned"):
-            moved = retier_for_walls(task, cfg)
-            if moved:
-                task.model_override, task.provider_override = moved[:2]
-                chosen = True
         model, provider = task.model_override, task.provider_override
         if model and model.startswith("class:"):
             if chosen and tier.class_unroutable_reason(model):

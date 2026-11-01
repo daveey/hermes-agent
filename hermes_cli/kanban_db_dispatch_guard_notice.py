@@ -115,6 +115,12 @@ def notify_guard_hold(conn: sqlite3.Connection, task_id: str, reason: str) -> bo
         return False
     if reason in _kbd._GUARD_HOLD_EXEMPT_REASONS:
         return False
+    if reason == "rate_limit_cooldown":
+        # A quota episode's backoff (up to 2 h) is self-clearing and posts its own notice after
+        # three requeues; a generic fix card would ask an agent to fix a provider's quota.
+        from hermes_cli.kanban_quota_episode import active
+        if active(conn, task_id):
+            return False
     started = guard_hold_started_at(conn, task_id)
     if started is None:
         return False

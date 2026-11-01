@@ -2,6 +2,18 @@
 from agent.model_routing import is_class_selector
 
 
+def class_requirements(config):
+    """Construction-time capability floor every AIAgent class allocation applies.
+
+    Shared with non-allocating probes (Kanban quota reroutes) so a probe never offers a
+    route the worker's own allocator would refuse."""
+    model_config = (config or {}).get("model", {})
+    requirements = {"tools": True, "streaming": True}
+    if isinstance(model_config, dict) and model_config.get("context_length"):
+        requirements["min_context_tokens"] = model_config["context_length"]
+    return requirements
+
+
 def prepare_agent_route(agent, model, provider, session_id, api_key, base_url,
                         api_mode, credential_pool, fallback_model):
     """Resolve only class selectors; concrete user pins retain legacy semantics.
@@ -21,10 +33,7 @@ def prepare_agent_route(agent, model, provider, session_id, api_key, base_url,
     from hermes_cli.runtime_provider import resolve_runtime_provider
 
     config = managed or load_user_config_effective()
-    model_config = config.get("model", {})
-    requirements = {"tools": True, "streaming": True}
-    if isinstance(model_config, dict) and model_config.get("context_length"):
-        requirements["min_context_tokens"] = model_config["context_length"]
+    requirements = class_requirements(config)
     session_id = session_id or new_session_id()
     runtime = resolve_runtime_provider(
         requested=provider or "auto", target_model=model,
