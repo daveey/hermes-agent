@@ -300,6 +300,9 @@ class GatewayControlServer:
         # The real directory, as clients canonicalize it: the peer check below refuses any
         # symlinked component, so an unresolved symlinked ~/.hermes would never mint tickets.
         self._home = Path(home).resolve()
+        from gateway.control_diagnostics import ControlDiagnostics
+        self._diagnostics = ControlDiagnostics()
+        self._loop_watchdog = None
         self.ticket_store = None
         self.private_handlers = {}
         self._server: Optional[asyncio.AbstractServer] = None
@@ -317,7 +320,12 @@ class GatewayControlServer:
     async def start(self) -> bool:
         """Bind and start serving. Returns True on success, False otherwise."""
         try:
-            return await (self._start_windows() if _IS_WINDOWS else self._start_posix())
+            started = await (self._start_windows() if _IS_WINDOWS else self._start_posix())
+            if started:
+                from gateway.control_diagnostics import LoopWatchdog
+                self._loop_watchdog = LoopWatchdog(asyncio.get_running_loop())
+                self._loop_watchdog.start()
+            return started
         except Exception as exc:
             await self.stop()
             logger.warning("Gateway control socket failed to start: %s", exc)
@@ -375,7 +383,7 @@ class GatewayControlServer:
         # Restrictive umask so the socket is never world-connectable, even for the instant before chmod.
         old_umask = os.umask(0o177)
         try:
-            self._server = await asyncio.start_unix_server(self._handle_connection, path=str(bind_path))
+            self._server = await asyncio.start_unix_server(self._connection_accepted, path=str(bind_path))
         finally:
             os.umask(old_umask)
         with contextlib.suppress(OSError):
@@ -389,6 +397,9 @@ class GatewayControlServer:
         return True
     async def stop(self) -> None:
         """Stop serving and remove the socket/pointer files."""
+        if self._loop_watchdog is not None:
+            self._loop_watchdog.stop()
+            self._loop_watchdog = None
         if self.ticket_store is not None:
             self.ticket_store.revoke()
         if self._server is not None:
@@ -514,15 +525,40 @@ class GatewayControlServer:
         except OSError:
             return None
 
-    async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    def _connection_accepted(self, reader, writer):
+        timing = self._diagnostics.accepted()
+        task = asyncio.create_task(self._handle_connection(reader, writer, timing))
+        # Also accounts for cancellation before the coroutine's first instruction.
+        def completed(_):
+            if timing.finish():
+                with contextlib.suppress(Exception):
+                    writer.close()
+        task.add_done_callback(completed)
+        return task
+
+    async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                                 timing=None) -> None:
+        timing = timing or self._diagnostics.accepted()
         try:
             raw = await asyncio.wait_for(reader.readline(), timeout=_DEFAULT_CLIENT_TIMEOUT)
             if not raw or len(raw) > _MAX_REQUEST_BYTES:
                 return
             # Handlers read disk; keep that off the loop that drives every platform
             # adapter so a fast-polling consumer can't stall heartbeats.
-            response = await asyncio.get_running_loop().run_in_executor(
-                _control_executor(), self.handle_request_line, raw.rstrip(b"\n"), self._posix_peer_subject(writer))
+            from gateway.control_diagnostics import safe_verb
+            timing.verb = safe_verb(raw, self._handlers.keys() | self.private_handlers.keys() | {"session-ticket"})
+            peer = self._posix_peer_subject(writer)
+            timing.enqueue()
+            try:
+                future = _control_executor().submit(timing.run, self.handle_request_line, raw.rstrip(b"\n"), peer)
+            except BaseException:
+                from concurrent.futures import Future
+                failed = Future()
+                failed.cancel()
+                timing.work_done(failed)
+                raise
+            future.add_done_callback(timing.work_done)
+            response = await asyncio.wrap_future(future)
             writer.write(response)
             await asyncio.wait_for(writer.drain(), timeout=_DEFAULT_CLIENT_TIMEOUT)
         except (TimeoutError, ConnectionError, OSError):
@@ -530,6 +566,7 @@ class GatewayControlServer:
         except Exception:
             logger.debug("Control socket connection handler error", exc_info=True)
         finally:
+            timing.finish()
             with contextlib.suppress(Exception):
                 writer.close()
 
