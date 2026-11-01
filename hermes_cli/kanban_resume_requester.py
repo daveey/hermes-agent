@@ -107,11 +107,15 @@ def ensure_recovery_cards(conn: sqlite3.Connection) -> list[str]:
     """Create the missing recovery card for every resumable continuation_exhausted park. Returns new ids."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_resume_exec as rx
-    from hermes_cli.kanban_wake_check import foreign_ids
+    from hermes_cli.kanban_wake_check import foreign_ids, own_gateway
 
     # A worker-node copy observes the same park with a different local event id.
     # Only the home owns recovery; local idempotency cannot arbitrate across replicas.
     copies = foreign_ids(conn)
+    # Requests and their executor are local; a portable requester loses the target
+    # when worker-node eviction drops its parked copy. Keep it beside the authority.
+    home = own_gateway(conn)
+    runs_on = [f"machine:{home}"] if home else None
     made: list[str] = []
     for row in _candidates(conn):
         target = row["id"]
@@ -133,7 +137,7 @@ def ensure_recovery_cards(conn: sqlite3.Connection) -> list[str]:
                 model_override=task.model_override, provider_override=task.provider_override,
                 requires=['terminal', 'file', 'kanban'] if goal else None,
                 created_by=CREATED_BY, workspace_kind="scratch", tenant=row["tenant"],
-                idempotency_key=_key(target, park_id), creator_task_id=target,
+                idempotency_key=_key(target, park_id), creator_task_id=target, runs_on=runs_on,
             )
         except (sqlite3.Error, ValueError):
             logger.exception("kanban: recovery card for %s failed", target)
