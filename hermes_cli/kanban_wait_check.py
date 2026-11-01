@@ -56,22 +56,41 @@ def _query(path: Path, sql: str, args=()):
     raise last  # type: ignore[misc]
 
 
+def _task_source(board, target):
+    """Live rows win; evicted worker copies remain in the selected Board shadow.
+
+    This is not the offline gateway cache in kanban_wait_replica. Unreadable
+    databases remain errors, not absence.
+    """
+    live = _db(board)
+    from hermes_cli.kanban_db_sync import board_slug_for_path
+    from hermes_cli.kanban_sync_client import shadow_path
+    slug = board_slug_for_path(str(live))
+    shadow = shadow_path(slug)
+    for path in (live, shadow):
+        if path.exists():
+            rows = _query(path, "select status from tasks where id=?", (target,))
+            if rows:
+                return path, rows
+    return live, []
+
+
 def check_local(kind: str, target: str, *, board: Optional[str] = None, until=DEFAULT_UNTIL,
                 since=()) -> tuple[int, str]:
     """``since``: statuses the target had when the waiter parked; still in one of them = not yet (exit 1), so a
     tracker that re-parks after handling a wake waits for the NEXT change instead of waking again at once."""
     try:
         if kind == "task":
-            rows = _query(_db(board), "select status from tasks where id=?", (target,))
+            source, rows = _task_source(board, target)
             if not rows:
                 return 2, f"error: {target} not found"
             status = rows[0][0]
             if status in set(since or ()):
                 return 1, f"{target} {status} (unchanged since park)"
-            suffix = _producer_suffix(board, target) if status in ("scheduled", "blocked") else ""
+            suffix = _producer_suffix(board, target, source=source) if status in ("scheduled", "blocked") else ""
             if status in set(until):
                 return 0, f"{target} {status}{suffix}"
-            if PARKED_AGENT in set(until) and status in ("scheduled", "blocked") and _agent_owned_park(board, target):
+            if PARKED_AGENT in set(until) and status in ("scheduled", "blocked") and _agent_owned_park(board, target, source=source):
                 return 0, f"{target} {status} (agent-owned park: nothing else will produce what it waits for)"
             return 1, f"{target} {status}{suffix}"
         if kind == "board-empty":
@@ -82,21 +101,21 @@ def check_local(kind: str, target: str, *, board: Optional[str] = None, until=DE
     return 2, f"error: unknown check {kind!r}"
 
 
-def _producer_suffix(board, target):
+def _producer_suffix(board, target, *, source=None):
     from hermes_cli.kanban_session_activity import _open_ro
     from hermes_cli.kanban_awaiting import card_orphan_reason
-    conn = _open_ro(_db(board))
+    conn = _open_ro(source or _db(board))
     try:
         return " (orphan producer)" if card_orphan_reason(conn, target) else ""
     finally:
         conn.close()
 
 
-def _agent_owned_park(board: Optional[str], target: str) -> bool:
+def _agent_owned_park(board: Optional[str], target: str, *, source=None) -> bool:
     """The target parked on something only an agent can end (certain, or a legacy park that has stalled)."""
     from hermes_cli.kanban_session_activity import _local_wait_info, _open_ro
 
-    conn = _open_ro(_db(board))
+    conn = _open_ro(source or _db(board))
     try:
         info = _local_wait_info(conn, [target]).get(target) or {}
     finally:
