@@ -217,9 +217,75 @@ def owner_model_pin(conn: sqlite3.Connection, task: Any) -> tuple[Optional[str],
     return model, (args[args.index("--provider") + 1] if "--provider" in args else None)
 
 
+RUN_ROUTE_EVENT = "run_route"
+
+
+def profile_route(assignee: Any) -> tuple[Optional[str], Optional[str]]:
+    """``(model, provider)`` from the assignee profile's ``model`` block: what an unpinned worker runs.
+
+    A class selector or ``auto`` provider leaves the provider unknown (the worker allocates it).
+    Unreadable or non-profile config is ``(None, None)``: unknown, never a guess."""
+    from agent.model_routing import is_class_selector
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    config = _assignee_config(assignee) or {}
+    block = config.get("model") if isinstance(config, dict) else None
+    if isinstance(block, dict):
+        model, provider = _str(block.get("default")) or None, _str(block.get("provider")) or None
+    elif isinstance(block, str):
+        model, provider = _str(block) or None, None
+    else:
+        return None, None
+    if not model or is_class_selector(model) or (provider or "").lower() == "auto":
+        provider = None
+    return model, provider
+
+
+def effective_route(task: Any) -> tuple[Optional[str], Optional[str], str]:
+    """``(model, provider, source)`` a claimed task's worker runs with after :func:`apply_model_tier`."""
+    from agent.model_routing import is_class_selector
+    model = _str(getattr(task, "model_override", None)) or None
+    provider = _str(getattr(task, "provider_override", None)) or None
+    if model:
+        if is_class_selector(model) or (provider or "").lower() == "auto":
+            return model, None, "class"
+        return model, provider, "pin" if provider else "pin_provider_unknown"
+    model, provider = profile_route(getattr(task, "assignee", None))
+    return model, provider, "profile_default" if model else "unknown"
+
+
+def record_run_route(conn: sqlite3.Connection, task: Any, *, lane: str, reason: str) -> None:
+    """Admission receipt (``run_route`` event on this run) for every spawn, tier on or off. [daveey]
+
+    Shared-blocker scope (``kanban_shared_blockers._run_route``) reads it as the run's historical route;
+    the card's later pins and today's config never rewrite it. Unknown stays None. Never raises."""
+    run_id = getattr(task, "current_run_id", None)
+    if run_id is None:
+        return
+    try:
+        model, provider, source = effective_route(task)
+    except Exception as exc:
+        logger.debug("kanban model tier: route resolve failed for %s (%s)", getattr(task, "id", "?"), exc)
+        model, provider, source = None, None, "unknown"
+    try:
+        from hermes_cli import kanban_db as _kb
+        with _kb.write_txn(conn):
+            _kb._append_event(conn, task.id, RUN_ROUTE_EVENT, {
+                "model": model, "provider": provider, "lane": lane, "source": source, "tier_reason": reason,
+            }, run_id=run_id)
+    except Exception as exc:
+        logger.debug("kanban model tier: route receipt failed for %s (%s)", getattr(task, "id", "?"), exc)
+
+
 def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:
-    """Pin the tier's model on the in-memory ``task`` (never the DB row) and record a ``model_tier`` event.
+    """Pin the tier's model on the in-memory ``task`` (never the DB row) and record a ``model_tier`` event,
+    plus the run's resolved ``run_route`` receipt (every spawn, tier off included).
     Returns the reason. Never raises: a failure leaves the task on its profile's model."""
+    reason = _apply_model_tier(conn, task, lane=lane, cfg=cfg)
+    record_run_route(conn, task, lane=lane, reason=reason)
+    return reason
+
+
+def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:
     try:
         model, provider, reason = resolve_model_tier(conn, task, lane=lane, cfg=cfg)
     except Exception as exc:

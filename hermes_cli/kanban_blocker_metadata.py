@@ -23,14 +23,15 @@ def scope_fields(values):
 
 def blocker_metadata(conn, task_id, *, reason=None, metadata=None, blocker_id=None,
                      blocker_provider=None, blocker_model=None, blocker_lane=None):
-    """Preserve explicit scope; infer only from an identified error or this run's error.
+    """Preserve explicit scope; otherwise infer it only from provider-labelled wall lines in
+    this park's own reason/checkpoint.
 
-    A park's prose may describe a later reviewer/delegate's wall. Never assign the
-    current run's provider merely because its checkpoint mentions a routing error.
-    Only a stored error on this exact run can use its historical routing receipt.
-    No current task pins, profile defaults, or past-run errors participate.
+    The executor's identity (this run's receipt or stored error, the card's pins, profile
+    defaults) is never borrowed: a delegated reviewer or later step can hit a wall on another
+    provider, so an unlabelled wall stays unscoped (board-wide). ``conn``/``task_id`` stay in
+    the signature for the callers.
     """
-    from hermes_cli.kanban_shared_blockers import normalize_blocker_id, _provider, _run_route
+    from hermes_cli.kanban_shared_blockers import normalize_blocker_id, _provider
 
     meta = dict(metadata or {})
     explicit = scope_fields(dict(zip(FIELDS, (blocker_provider, blocker_model, blocker_lane))))
@@ -46,43 +47,37 @@ def blocker_metadata(conn, task_id, *, reason=None, metadata=None, blocker_id=No
         raise ValueError("clear_blocker cannot be combined with blocker_id")
     meta["blocker_id"] = bid
     if not scope.get("blocker_provider"):
-        inferred = _infer_scope(conn, task_id, reason, _provider, _run_route)
-        scope = {**inferred, **scope}
+        scope = {**_error_scope(reason, _provider), **scope}
     meta.update(scope)
     return meta
 
 
 def _error_scope(text, canon):
-    # Provider-labelled error evidence can describe a different, later step.
+    """Scope named by wall lines (a wall marker AND a provider label on one line). Lines without
+    a wall marker are prose; several providers are ambiguous; a label that is not a known MODEL
+    provider (registry lookup, offline) names a service: all three give no scope (board-wide).
+    Explicit ``blocker_provider`` metadata never passes through here."""
     lines = "\n".join(line for line in (text or "").splitlines() if _WALL.search(line))
     providers = {canon(m) for m in _PROVIDER.findall(lines)} - {None}
     if len(providers) != 1:
         return {}
-    result = {"blocker_provider": providers.pop()}
+    provider = providers.pop()
+    if not _known_model_provider(provider):
+        # e.g. "GitHub API rate limit exceeded (provider: github)": a service wall, not a model
+        # route. Scoping to a provider no worker runs on would let every card past it.
+        return {}
+    result = {"blocker_provider": provider}
     models = set(_MODEL.findall(lines))
     if len(models) == 1:
         result["blocker_model"] = models.pop()
     return result
 
 
-def _infer_scope(conn, task_id, reason, canon, route):
-    observed = _error_scope(reason, canon)
-    if observed:
-        return observed
-    row = conn.execute(
-        "SELECT r.id, r.error FROM task_runs r JOIN tasks t ON t.current_run_id=r.id "
-        "WHERE t.id=? AND r.task_id=t.id AND r.ended_at IS NULL", (task_id,)).fetchone()
-    if row is None or not _WALL.search(row["error"] or ""):
-        return {}
-    observed = _error_scope(row["error"], canon)
-    if observed:
-        return observed
-    if _PROVIDER.search(row["error"]):
-        return {}  # ambiguous error identity must not fall back to the worker route
-    model, provider, lane = route(conn, task_id, row["id"])
-    if not provider:
-        return {}
-    result = {"blocker_provider": provider, "blocker_lane": lane}
-    if model:
-        result["blocker_model"] = model
-    return result
+def _known_model_provider(provider):
+    """Whether ``provider`` resolves in the model-provider registry (built-ins, overlays, plugin
+    profiles, cached models.dev catalog; offline). Unknown or a lookup failure is False."""
+    try:
+        from hermes_cli.providers import get_provider
+        return get_provider(provider, allow_network=False) is not None
+    except Exception:
+        return False

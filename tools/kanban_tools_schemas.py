@@ -291,7 +291,10 @@ _BLOCKER_ID_DESC = (
     "Optional. Set ONLY when the wall is outside this card and would stop other "
     "cards too (CI billing/quota refused, a provider or service outage, a release "
     "pipeline down): a short slug such as 'github-actions-billing'. Reuse an id "
-    "from 'Open shared blockers' in your context when it is the same wall. The "
+    "from 'Open shared blockers' in your context when it is the same wall; when that "
+    "entry is scoped (provider=X, not 'all'), pass blocker_provider=X with the reused id, "
+    "every time: a reassertion without it (or with another provider) makes the id "
+    "board-wide and holds every provider's cards. The "
     "dispatcher then holds every ready card behind it and runs one probe card per "
     "interval. The blocker clears only on evidence the wall is gone: a card behind "
     "it completes or hands off for review, a park passes clear_blocker=true, a run "
@@ -301,7 +304,7 @@ _BLOCKER_ID_DESC = (
     "clear it: the card stays behind the blocker."
 )
 _CLEAR_BLOCKER_PROP = {
-    "blocker_provider": _prop("string", "Optional provider affected by blocker_id. Other providers may proceed; omit for a provider-independent wall."),
+    "blocker_provider": _prop("string", "Optional provider affected by blocker_id. Other providers may proceed; omit for a provider-independent wall. An id asserted anywhere without a provider (or with a different one) in the last 14 days stays board-wide: use a new id for a narrower wall."),
     "blocker_model": _prop("string", "Optional model that observed the wall (informational, not an applicability restriction)."),
     "blocker_lane": _prop("string", "Optional lane that observed the wall (informational, not an applicability restriction)."),
     "clear_blocker": {"type": "boolean", "description": (

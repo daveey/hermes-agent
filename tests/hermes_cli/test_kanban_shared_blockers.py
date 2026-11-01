@@ -11,6 +11,7 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -205,10 +206,241 @@ def test_profile_class_provider_remains_unknown(kanban_home, scoped_routing, mon
         assert ksb.shared_blocker_guard(conn, tid) == ksb.GUARD_REASON
 
 
+def test_unknown_historical_route_neither_probes_nor_clears(kanban_home):
+    """No receipt and no resolvable route: under a scoped wall the run is no evidence, while
+    the other card's unknown next route is still held (conservative)."""
+    with kbc.connect_closing() as conn:
+        a, b = _blocked_behind(conn, "a"), _blocked_behind(conn, "b")
+        _scope(conn, a)
+        _scope(conn, b)
+        kb.unblock_task(conn, a)
+        kb.claim_task(conn, a)
+        assert ksb.task_route(conn, a)[1] is None
+        assert a not in ksb.blocker_states(conn)[BID].probe_starts
+        kb.complete_task(conn, a, result="done on an unknown route")
+        st = ksb.blocker_states(conn)[BID]
+        assert st.is_open and st.cleared_by is None and set(st.behind) == {b}
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (b,))
+        assert ksb.shared_blocker_guard(conn, b, interval=1800) == ksb.GUARD_REASON
+
+
 def test_unscoped_wall_still_holds_other_provider(kanban_home, scoped_routing):
     with kbc.connect_closing() as conn:
         tid = _blocked_behind(conn, "legacy")
         assert ksb.shared_blocker_guard(conn, tid, interval=1800) == ksb.GUARD_REASON
+
+
+# --- Real admission receipts (apply_model_tier via dispatch_once), no handwritten routes. ---
+
+WALL = "anthropic-usage-limit"
+
+
+def _write_home_cfg(home: Path, *, profile_model: str, profile_provider: str = "", kanban: str = "") -> None:
+    lines = ["model:", f"  default: {profile_model}"]
+    if profile_provider:
+        lines.append(f"  provider: {profile_provider}")
+    if kanban:
+        lines += ["kanban:", *(f"  {line}" for line in kanban.splitlines())]
+    home.joinpath("config.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _park_behind(conn, tid: str, provider: Optional[str] = "anthropic") -> None:
+    """The worker's own park: kanban_continue(blocker_id, blocker_provider), back to ready at once."""
+    from hermes_cli.kanban_continuation import continue_task
+    meta = {"blocker_id": WALL, **({"blocker_provider": provider} if provider else {})}
+    res = continue_task(conn, tid, checkpoint="Anthropic usage limit reached for the review step",
+                        resume_after_seconds=0, metadata=meta)
+    assert res["ok"], res
+    assert kb.get_task(conn, tid).status == "ready"
+
+
+def _receipt(conn, tid):
+    from hermes_cli.kanban_model_tier import RUN_ROUTE_EVENT
+    run_id = kb.list_runs(conn, tid)[-1].id
+    rows = [e.payload for e in kb.list_events(conn, tid) if e.kind == RUN_ROUTE_EVENT and e.run_id == run_id]
+    assert rows, f"no admission receipt for {tid} run {run_id}"
+    return rows[-1]
+
+
+@pytest.mark.parametrize("profile_model, profile_provider, clears", [
+    ("gpt-5", "openai-codex", False),            # tier off, Codex profile default: not evidence
+    ("class:standard", "", False),               # class default: provider unknown, not evidence
+    ("claude-opus-4", "anthropic", True),        # control: matching provider clears
+])
+def test_admitted_route_decides_clear_evidence(kanban_home, spawns, profile_model, profile_provider, clears):
+    """A card admitted on its profile default (tier off: no model_tier event) completing must not
+    clear an Anthropic-scoped wall unless its receipt names Anthropic."""
+    _write_home_cfg(kanban_home, profile_model=profile_model, profile_provider=profile_provider)
+    _spawned, fake_spawn = spawns
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="probe card", assignee="default")
+        assert kb.claim_task(conn, tid)
+        _park_behind(conn, tid)
+        _age_runs(conn, 1900)   # past the probe interval: the card may spawn whatever its route
+        res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert _spawned_ids(res) == [tid]
+        receipt = _receipt(conn, tid)
+        assert receipt["model"] == profile_model and receipt["source"] == "profile_default"
+        assert receipt["provider"] == (profile_provider or None)
+        assert not [e for e in kb.list_events(conn, tid) if e.kind == "model_tier"]   # tier off
+        st = ksb.blocker_states(conn)[WALL]
+        assert (tid in st.probe_starts) is clears
+        assert kb.complete_task(conn, tid, result="done")
+        st = ksb.blocker_states(conn)[WALL]
+        assert st.is_open is (not clears)
+
+
+@pytest.mark.parametrize("order", ["unscoped_first", "scoped_first"])
+def test_scoped_assertion_never_narrows_unscoped_same_id(kanban_home, order):
+    with kbc.connect_closing() as conn:
+        a = kb.create_task(conn, title="a", assignee="default")
+        b = kb.create_task(conn, title="b", assignee="default")
+        first, second = (None, "anthropic") if order == "unscoped_first" else ("anthropic", None)
+        for tid, provider in ((a, first), (b, second)):
+            assert kb.claim_task(conn, tid)
+            _park_behind(conn, tid, provider)
+        st = ksb.blocker_states(conn)[WALL]
+        assert st.blocker_provider is None
+        # Board-wide: a card known to run on Codex is held too.
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET model_override='gpt-5', provider_override='openai-codex' WHERE id=?", (a,))
+        assert ksb.shared_blocker_guard(conn, a, interval=1800) == ksb.GUARD_REASON
+
+
+@pytest.mark.parametrize("providers, expected", [
+    (("anthropic", "openai-codex"), None),       # differing providers: board-wide
+    (("anthropic", "anthropic"), "anthropic"),   # agreeing providers keep the scope
+])
+def test_assertion_scope_union(kanban_home, providers, expected):
+    with kbc.connect_closing() as conn:
+        for i, provider in enumerate(providers):
+            tid = kb.create_task(conn, title=f"c{i}", assignee="default")
+            assert kb.claim_task(conn, tid)
+            _park_behind(conn, tid, provider)
+        assert ksb.blocker_states(conn)[WALL].blocker_provider == expected
+
+
+def test_dispatch_codex_runs_behind_anthropic_wall_and_opus_probes_after_interval(kanban_home, spawns):
+    """End to end on dispatch_once, no human unblock: Codex cards behind an Anthropic-scoped wall
+    spawn, the Opus card is held within the probe interval, and neither a Codex completion nor a
+    fresh Codex run delays or replaces the real Opus probe once the interval has passed."""
+    _write_home_cfg(kanban_home, profile_model="gpt-5", profile_provider="openai-codex")
+    seen: dict[str, tuple] = {}
+
+    def spawn(task, workspace, board=None):
+        seen[task.id] = (task.model_override, task.provider_override)
+
+    with kbc.connect_closing() as conn:
+        opus = kb.create_task(conn, title="adversarial review", assignee="default",
+                              model_override="claude-opus-4", provider_override="anthropic")
+        codex1 = kb.create_task(conn, title="impl one", assignee="default")
+        codex2 = kb.create_task(conn, title="impl two", assignee="default", priority=5)
+        for tid in (opus, codex1, codex2):
+            assert kb.claim_task(conn, tid)
+            _park_behind(conn, tid)
+
+        # Within the interval: both Codex cards spawn, Opus is held.
+        res = kbd.dispatch_once(conn, spawn_fn=spawn)
+        assert sorted(_spawned_ids(res)) == sorted([codex1, codex2])
+        assert (opus, ksb.GUARD_REASON) in res.respawn_guarded
+        for tid in (codex1, codex2):
+            assert _receipt(conn, tid)["provider"] == "openai-codex"
+        assert not any(e.kind == "unblocked" for t in (opus, codex1, codex2) for e in kb.list_events(conn, t))
+
+        # A Codex completion is no evidence about the Anthropic wall.
+        assert kb.complete_task(conn, codex1, result="impl done")
+        st = ksb.blocker_states(conn)[WALL]
+        assert st.is_open and st.cleared_by is None and not st.probe_starts
+        res = kbd.dispatch_once(conn, spawn_fn=spawn)
+        assert opus not in _spawned_ids(res) and (opus, ksb.GUARD_REASON) in res.respawn_guarded
+
+        # Interval passes. codex2 checkpoints (no blocker id: still behind the wall) and starts a
+        # FRESH Codex run first (higher priority, one slot), so its start is newer than the interval.
+        _age_runs(conn, 1900)
+        res = continue_task_ok(conn, codex2)
+        res = kbd.dispatch_once(conn, spawn_fn=spawn, max_spawn=1)
+        assert _spawned_ids(res) == [codex2]
+        st = ksb.blocker_states(conn)[WALL]
+        assert codex2 in st.behind and codex2 not in st.probe_starts
+
+        # The running Codex card is neither "a probe in flight" nor a recent probe start.
+        res = kbd.dispatch_once(conn, spawn_fn=spawn)
+        assert _spawned_ids(res) == [opus]
+        assert seen[opus] == ("claude-opus-4", "anthropic")
+        assert _receipt(conn, opus)["provider"] == "anthropic"
+        st = ksb.blocker_states(conn)[WALL]
+        assert st.is_open and opus in st.probe_starts
+        assert not any(e.kind == "unblocked" for e in kb.list_events(conn, opus))
+
+
+def continue_task_ok(conn, tid):
+    from hermes_cli.kanban_continuation import continue_task
+    res = continue_task(conn, tid, checkpoint="impl checkpoint", resume_after_seconds=0)
+    assert res["ok"], res
+    return res
+
+
+def test_reassertion_guidance_carries_provider(kanban_home, scoped_routing):
+    """Context and the blocker_id tool description both tell a reassertion to pass blocker_provider,
+    since an unscoped reassertion widens the id to board-wide (union rule)."""
+    from tools.kanban_tools_schemas import _BLOCKER_ID_DESC
+    assert "blocker_provider" in _BLOCKER_ID_DESC and "board-wide" in _BLOCKER_ID_DESC
+    with kbc.connect_closing() as conn:
+        tid = _blocked_behind(conn, "scoped")
+        _scope(conn, tid)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
+        ctx = ksb.render_blocker_context(conn, tid)
+        assert "This run is the probe" in ctx
+        assert f'end again with `blocker_id: "{BID}"` and `blocker_provider: "anthropic"`' in ctx
+        assert "pass the same `blocker_provider`" in ctx and "board-wide" in ctx
+        # Control: an unscoped probe is told only the id.
+        other = _blocked_behind(conn, "unscoped", blocker_id="other-wall")
+        ctx = ksb.render_blocker_context(conn, other)
+        assert 'end again with `blocker_id: "other-wall"`. ' in ctx
+
+
+@pytest.mark.parametrize("scoped", [False, True], ids=["unscoped", "scoped"])
+def test_untyped_classification_clear_blocker_synthesizes_clearing_run(kanban_home, scoped):
+    """A breaker-parked UNTYPED card (no live run) classified in place with clear_blocker=True
+    gets a synthesized closed run carrying the flag; that run clears the blocker it was behind."""
+    with kbc.connect_closing() as conn:
+        a, b = _blocked_behind(conn, "a"), _blocked_behind(conn, "b")
+        if scoped:
+            _scope(conn, a)
+            _scope(conn, b)
+        assert ksb.blocker_states(conn)[BID].is_open
+        with kb.write_txn(conn):   # the failure breaker's shape: blocked, untyped, no live run
+            conn.execute("UPDATE tasks SET status='blocked', block_kind=NULL, current_run_id=NULL "
+                         "WHERE id=?", (a,))
+        runs_before = len(kb.list_runs(conn, a))
+        assert kb.block_task(conn, a, kind="capability", reason="needs a different tool; wall gone",
+                             clear_blocker=True)
+        runs = kb.list_runs(conn, a)
+        assert len(runs) == runs_before + 1
+        synth = runs[-1]
+        assert synth.metadata == {ksb.CLEAR_FLAG: True} and synth.outcome == "blocked"
+        ev = [e for e in kb.list_events(conn, a) if e.kind == "blocked"][-1]
+        assert ev.payload["classified_in_place"] is True and ev.run_id == synth.id
+        st = ksb.blocker_states(conn)[BID]
+        assert (st.is_open, st.cleared_by) == (False, (a, synth.id)), (scoped, st)
+
+
+def test_explicit_clear_from_other_provider_run_clears_scoped_wall(kanban_home, scoped_routing):
+    """Control for the route-independent explicit clear: a Codex run's completion would not clear
+    the Anthropic-scoped wall, but its park with clear_blocker=True does."""
+    with kbc.connect_closing() as conn:
+        a, b = _blocked_behind(conn, "a"), _blocked_behind(conn, "b")
+        _scope(conn, a)
+        _scope(conn, b)
+        kb.unblock_task(conn, a)
+        assert kb.claim_task(conn, a)
+        _route_run(conn, a, "openai-codex")
+        assert kb.block_task(conn, a, kind="capability", reason="other reason; wall seen gone",
+                             clear_blocker=True)
+        st = ksb.blocker_states(conn)[BID]
+        assert not st.is_open and st.cleared_by[0] == a
 
 
 

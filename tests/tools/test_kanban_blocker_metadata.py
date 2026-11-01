@@ -74,24 +74,43 @@ def test_invalid_scope_refused_without_transition(board, tool, field):
     assert kb.get_task(conn, tid).status == "running"
 
 
-def route(conn, tid, error=None):
-    with kb.write_txn(conn):
-        rid = kb._current_run_id(conn, tid)
-        kb._append_event(conn, tid, "model_tier", {
-            "provider": "openai-codex", "model": "gpt-test", "lane": "ready"}, run_id=rid)
-        if error:
-            conn.execute("UPDATE task_runs SET error=? WHERE id=?", (error, rid))
+def route(conn, tid):
+    """The run's real admission receipt (``apply_model_tier``): this run is on Codex."""
+    from hermes_cli import kanban_model_tier as tier
+    task = kb.get_task(conn, tid)
+    tier.apply_model_tier(conn, task, lane="ready",
+                          cfg={"default_model": "gpt-test", "default_provider": "openai-codex"})
+    receipt = [e.payload for e in kb.list_events(conn, tid) if e.kind == tier.RUN_ROUTE_EVENT]
+    assert receipt and receipt[-1]["provider"] == "openai-codex"
 
 
 @pytest.mark.parametrize("tool", ["kanban_block", "kanban_continue", "kanban_schedule"])
-@pytest.mark.parametrize("error", ["ModelRoutingError: exact pinned route unavailable", "provider quota exceeded"])
-def test_current_run_error_uses_receipt(board, tool, error):
+@pytest.mark.parametrize("error", ["ModelRoutingError: No eligible deep routes under billing/capability policy",
+                                   "provider quota exceeded"])
+def test_unlabelled_wall_never_borrows_current_receipt(board, tool, error):
+    """A wall marker with no provider label stays unscoped even though this run's receipt is Codex."""
     conn, tid = board
-    route(conn, tid, error)
+    route(conn, tid)
+    key = "checkpoint" if tool == "kanban_continue" else "reason"
+    call(tool, tid, **{key: error})
+    for data in persisted(conn, tid):
+        assert data["blocker_id"] == "provider-wall"
+        assert not set(SCOPE).intersection(data)
+
+
+@pytest.mark.parametrize("tool", ["kanban_block", "kanban_continue", "kanban_schedule"])
+def test_stored_run_error_never_borrows_current_receipt(board, tool):
+    """An unlabelled wall in this run's stored error (e.g. a delegated child's provider) is not
+    the executor's route: the receipt says Codex, but the park stays unscoped."""
+    conn, tid = board
+    route(conn, tid)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_runs SET error=? WHERE id=?",
+                     ("ModelRoutingError: No eligible deep routes", kb._current_run_id(conn, tid)))
     call(tool, tid)
     for data in persisted(conn, tid):
-        assert (data["blocker_provider"], data["blocker_model"], data["blocker_lane"]) == (
-            "openai-codex", "gpt-test", "ready")
+        assert data["blocker_id"] == "provider-wall"
+        assert not set(SCOPE).intersection(data)
 
 
 @pytest.mark.parametrize("tool", ["kanban_block", "kanban_continue", "kanban_schedule"])
@@ -120,8 +139,9 @@ def test_provider_labelled_error_is_not_current_run_identity(board, tool):
 
 def test_explicit_scope_wins_over_error(board):
     conn, tid = board
-    route(conn, tid, "provider quota exceeded")
-    call("kanban_continue", tid, **SCOPE)
+    route(conn, tid)
+    call("kanban_continue", tid, checkpoint="provider quota exceeded provider=openai-codex model=gpt-test",
+         **SCOPE)
     assert all({key: data[key] for key in SCOPE} == SCOPE for data in persisted(conn, tid))
 
 
@@ -147,20 +167,20 @@ def test_error_without_receipt_never_uses_current_task_pin(board):
     conn, tid = board
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET provider_override='anthropic', model_override='claude-test' WHERE id=?", (tid,))
-        conn.execute("UPDATE task_runs SET error='ModelRoutingError: unavailable' WHERE id=?",
-                     (kb._current_run_id(conn, tid),))
-    call("kanban_continue", tid)
+    call("kanban_continue", tid, checkpoint="ModelRoutingError: unavailable")
     assert all("blocker_provider" not in data for data in persisted(conn, tid))
 
 
 @pytest.mark.parametrize("error, expected", [
     ("provider quota exceeded provider=anthropic model=claude-test", "anthropic"),
     ("ModelRoutingError: provider=anthropic provider=openai-codex", None),
+    # A provider label on a line with no wall marker is prose, not wall identity.
+    ("Ran the impl on provider=openai-codex.\nLater reviewer: usage limit reached", None),
 ])
-def test_stored_error_identity_precedes_run_receipt(board, error, expected):
+def test_reason_identity_over_run_receipt(board, error, expected):
     conn, tid = board
-    route(conn, tid, error)
-    call("kanban_continue", tid)
+    route(conn, tid)
+    call("kanban_continue", tid, checkpoint=error)
     assert all(data.get("blocker_provider") == expected for data in persisted(conn, tid))
 
 
@@ -182,3 +202,56 @@ def test_direct_continuation_preserves_metadata_scope(board):
     assert continue_task(conn, tid, checkpoint="provider quota exceeded provider=openai-codex",
                          metadata={"blocker_id": "provider-wall", **SCOPE})["ok"]
     assert all({key: data[key] for key in SCOPE} == SCOPE for data in persisted(conn, tid))
+
+
+# --- Inference names only known MODEL providers; explicit scope is never filtered. ---
+
+@pytest.mark.parametrize("tool", ["kanban_block", "kanban_continue", "kanban_schedule"])
+@pytest.mark.parametrize("text", [
+    "GitHub API rate limit exceeded (provider: github)",
+    "rate limit exceeded provider=not-a-real-provider model=x",
+])
+def test_unknown_provider_label_is_not_inferred(board, tool, text):
+    """A service wall labelled with a non-model provider stays board-wide (unscoped)."""
+    conn, tid = board
+    route(conn, tid)
+    key = "checkpoint" if tool == "kanban_continue" else "reason"
+    call(tool, tid, **{key: text})
+    for data in persisted(conn, tid):
+        assert data["blocker_id"] == "provider-wall"
+        assert not set(SCOPE).intersection(data)
+
+
+@pytest.mark.parametrize("tool", ["kanban_block", "kanban_continue", "kanban_schedule"])
+@pytest.mark.parametrize("text, expected", [
+    ("Anthropic rate limit exceeded (provider: anthropic)", "anthropic"),
+    ("usage limit reached provider=openai-codex model=gpt-test", "openai-codex"),
+    ("usage limit reached provider=claude", "anthropic"),   # registry alias, canonical id stored
+])
+def test_known_model_provider_label_still_inferred(board, tool, text, expected):
+    conn, tid = board
+    key = "checkpoint" if tool == "kanban_continue" else "reason"
+    call(tool, tid, **{key: text})
+    for data in persisted(conn, tid):
+        assert data["blocker_provider"] == expected
+
+
+def test_unknown_and_known_label_on_wall_lines_is_ambiguous(board):
+    conn, tid = board
+    call("kanban_continue", tid, checkpoint="rate limit exceeded provider=github\n"
+                                            "usage limit reached provider=anthropic")
+    assert all("blocker_provider" not in data for data in persisted(conn, tid))
+
+
+@pytest.mark.parametrize("via", ["argument", "metadata"])
+def test_explicit_scope_is_never_filtered_by_registry(board, via):
+    """Explicit blocker_provider keeps its pre-inference compatibility, known or not."""
+    from hermes_cli.kanban_continuation import continue_task
+    conn, tid = board
+    text = "GitHub API rate limit exceeded (provider: github)"
+    if via == "argument":
+        call("kanban_continue", tid, checkpoint=text, blocker_provider="github")
+    else:
+        assert continue_task(conn, tid, checkpoint=text,
+                             metadata={"blocker_id": "provider-wall", "blocker_provider": "github"})["ok"]
+    assert all(data["blocker_provider"] == "github" for data in persisted(conn, tid))

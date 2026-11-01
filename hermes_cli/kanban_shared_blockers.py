@@ -39,8 +39,15 @@ nothing about the external condition, so they neither assert nor clear a blocker
 Optional ``blocker_provider`` scopes a wall to that provider; ``blocker_model`` and
 ``blocker_lane`` describe the observation only. Other-provider steps neither wait nor act as
 probes/clear evidence. Routing unknown (including unallocated classes) remains conservative;
-unscoped history keeps its board-wide behavior. Historical runs use their model_tier receipt,
-not a card's later pin or today's tier configuration.
+unscoped history keeps its board-wide behavior. A run's route is its admission receipt
+(``run_route`` event, written by ``kanban_model_tier.apply_model_tier`` on every spawn; legacy
+runs fall back to their ``model_tier`` event), never a card's later pin or today's tier
+configuration. Under a scoped blocker a run whose route is unknown (no receipt, or a
+class/``auto`` receipt) is no implicit evidence: its completion neither clears the blocker nor
+counts as a probe (an explicit ``clear_blocker`` attestation clears it on any route). A
+card's unknown NEXT route stays conservative: the guard still holds it. The scope is the union
+over every assertion of the id in the lookback window: one assertion without a provider, or
+with a different one, keeps the id board-wide (a narrower wall needs a new id).
 
 Matching on normalized error text was considered and left out: crash/timeout/protocol-violation
 errors share fixed preambles across unrelated cards (``_error_fingerprint`` keeps 80 chars), and
@@ -160,15 +167,35 @@ def _applies(st: BlockerState, provider: Optional[str]) -> bool:
     return not scope or not target or scope == target
 
 
-def _run_route(conn, task_id, run_id) -> tuple[Optional[str], Optional[str], str]:
-    """Historical routing evidence, never today's tier config or a later card pin."""
+def _run_receipt(conn, task_id, run_id) -> Optional[tuple[Optional[str], Optional[str], str]]:
+    """The run's admission receipt, or None when it has none (a run admitted before receipts).
+
+    Prefers the ``run_route`` event (every spawn, tier on or off); a legacy run falls back to its
+    ``model_tier`` event. A receipt whose provider is unknown (class, ``auto``) keeps it None."""
     from hermes_cli import kanban_db as kb
-    row = conn.execute(
-        "SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='model_tier' "
-        "ORDER BY id DESC LIMIT 1", (task_id, run_id)).fetchone()
-    payload = kb._json_dict(row[0]) if row else {}
-    return (_optional_text(payload.get("model")), _provider(payload.get("provider")),
-            payload.get("lane") or kb._retry_status_for_run(conn, task_id, run_id))
+    from hermes_cli.kanban_model_tier import RUN_ROUTE_EVENT
+    for kind in (RUN_ROUTE_EVENT, "model_tier"):
+        row = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind=? "
+            "ORDER BY id DESC LIMIT 1", (task_id, run_id, kind)).fetchone()
+        if row is None:
+            continue
+        payload = kb._json_dict(row[0])
+        model = _optional_text(payload.get("model"))
+        provider = _provider(payload.get("provider"))
+        if model and model.startswith("class:"):
+            provider = None
+        return model, provider, payload.get("lane") or kb._retry_status_for_run(conn, task_id, run_id)
+    return None
+
+
+def _run_route(conn, task_id, run_id) -> tuple[Optional[str], Optional[str], str]:
+    """Historical routing evidence, never today's tier config or a later card pin. Unknown is None."""
+    from hermes_cli import kanban_db as kb
+    receipt = _run_receipt(conn, task_id, run_id)
+    if receipt is not None:
+        return receipt
+    return None, None, kb._retry_status_for_run(conn, task_id, run_id)
 
 
 def task_route(conn, task_id) -> tuple[Optional[str], Optional[str], str]:
@@ -186,9 +213,11 @@ def task_route(conn, task_id) -> tuple[Optional[str], Optional[str], str]:
         wake = pending_wake(conn, task_id) or {}
         lane = "review" if wake.get("resume_status") == "review" else "ready"
     if task.status == "running" and task.current_run_id:
-        model, provider, lane = _run_route(conn, task_id, task.current_run_id)
-        if model or provider:
-            return model, provider, lane
+        # A receipt is authoritative even when it says "unknown"; only a run admitted before
+        # receipts falls back to the read-only preview below.
+        receipt = _run_receipt(conn, task_id, task.current_run_id)
+        if receipt is not None:
+            return receipt
     try:
         from hermes_cli.kanban_model_assignment import _assignee_config
         from hermes_cli.kanban_pin_provider import resolve_legacy_pin
@@ -224,7 +253,24 @@ def task_route(conn, task_id) -> tuple[Optional[str], Optional[str], str]:
 
 
 def _task_applies(conn, st: BlockerState, task_id: str) -> bool:
+    """Whether the blocker holds this card's next/current step: unknown routing is conservative."""
     return not st.blocker_provider or _applies(st, task_route(conn, task_id)[1])
+
+
+def _run_is_evidence(st: BlockerState, provider: Optional[str]) -> bool:
+    """Whether a run on ``provider`` says anything about ``st``: always for an unscoped blocker;
+    for a scoped one only a KNOWN matching provider (unknown is never a clear or a probe)."""
+    if not st.blocker_provider:
+        return True
+    return provider is not None and _applies(st, provider)
+
+
+def _explicit_clear(kb, metadata) -> bool:
+    """A run carrying ``clear_blocker`` is the caller's explicit attestation that the wall is gone
+    (the documented clear path), so it clears a scoped blocker whatever the run's route: e.g. the
+    zero-duration run synthesized when a breaker-parked untyped card is classified in place has
+    no admission receipt. Only implicit evidence (a completion/handoff) needs a matching route."""
+    return kb._json_dict(metadata).get(CLEAR_FLAG) is True
 
 
 def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> dict[str, BlockerState]:
@@ -239,6 +285,7 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> di
         (now - _LOOKBACK_SECONDS,),
     ).fetchall()
     states: dict[str, BlockerState] = {}
+    scopes: dict[str, set[Optional[str]]] = {}
     task_ids: set[str] = set()
     for row in asserting:
         bid = _meta_blocker(kb, row["metadata"])
@@ -246,16 +293,20 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> di
             continue
         st = states.setdefault(bid, BlockerState(bid))
         ended = kb._to_epoch(row["ended_at"]) or 0
+        meta = kb._json_dict(row["metadata"])
+        scopes.setdefault(bid, set()).add(_provider(meta.get("blocker_provider")))
         if ended >= st.asserted_at:
             st.asserted_at = ended
             st.reason = kb._first_line(row["summary"], 300)
-            meta = kb._json_dict(row["metadata"])
-            st.blocker_provider = _optional_text(meta.get("blocker_provider"))
             st.blocker_model = _optional_text(meta.get("blocker_model"))
             st.blocker_lane = _optional_text(meta.get("blocker_lane"))
         task_ids.add(row["task_id"])
     if not states:
         return states
+    for bid, st in states.items():
+        # Union of every recent assertion: any unscoped or differing provider keeps it board-wide.
+        providers = scopes.get(bid, set())
+        st.blocker_provider = next(iter(providers)) if len(providers) == 1 else None
     for tid in task_ids:
         status_row = conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()
         live = status_row is not None and status_row["status"] not in ("done", "archived")
@@ -274,7 +325,7 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> di
                 if st.blocker_provider:
                     provider = (_run_route(conn, tid, run["id"])[1] if run["ended_at"] is not None
                                 else task_route(conn, tid)[1])
-                applicable = _applies(st, provider)
+                applicable = _run_is_evidence(st, provider)
                 if applicable:
                     st.probe_starts[tid] = max(st.probe_starts.get(tid, 0), started)
             if run["ended_at"] is None:
@@ -286,7 +337,7 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> di
                     _mark_cleared(states[current[0]], tid, run["id"], ended)
                 current, asserting_run = (bid, ended), int(run["id"])
                 continue
-            if effect == "pass" or not applicable:
+            if effect == "pass" or not (applicable or _explicit_clear(kb, run["metadata"])):
                 continue
             if current is not None and current[0] in states:
                 _mark_cleared(states[current[0]], tid, run["id"], ended)
@@ -520,6 +571,9 @@ def render_blocker_context(conn: sqlite3.Connection, task_id: str) -> str:
     lines.append("Provider-scoped walls apply only to that provider. Continue unrelated work; if a later "
                  "step needs the affected provider, wait at that step, not before it. Model/lane on a "
                  "blocker describe where it was observed, not additional restrictions.")
+    lines.append("Reasserting a listed id whose provider is not 'all': pass the same `blocker_provider` "
+                 "with the `blocker_id` (e.g. `blocker_provider: \"anthropic\"`). A reassertion without it, "
+                 "or with another provider, makes the id board-wide and holds every provider's cards.")
     mine = None
     for st in sorted(states, key=lambda s: -s.asserted_at):
         applicable = _applies(st, provider)
@@ -530,10 +584,13 @@ def render_blocker_context(conn: sqlite3.Connection, task_id: str) -> str:
                  f"{'applicable' if applicable else 'not applicable'} to current route")
         lines.append(f"- `{st.blocker_id}` ({len(st.behind)} card(s) parked): {st.reason or '(no reason)'} [{scope}]")
     if mine is not None:
+        again = f"`blocker_id: \"{mine.blocker_id}\"`"
+        if mine.blocker_provider:
+            again += f" and `blocker_provider: \"{mine.blocker_provider}\"`"
         lines.append("")
         lines.append(
             f"This run is the probe for `{mine.blocker_id}`. Check first whether it still holds. If it "
-            f"does, end again with `blocker_id: \"{mine.blocker_id}\"`. If it is gone, carry on: "
+            f"does, end again with {again}. If it is gone, carry on: "
             "completing or handing off clears it and wakes the other parked cards. A park without the "
             "id does NOT clear it; if you park for another reason and saw the wall gone, pass "
             "`clear_blocker: true`.")
