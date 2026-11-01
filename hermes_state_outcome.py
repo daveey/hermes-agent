@@ -198,7 +198,7 @@ def _parse(raw: Any) -> Optional[dict[str, Any]]:
 
 
 def _row(db: Any, sid: str) -> Optional[dict[str, Any]]:
-    row = db._read_one("SELECT id, source, outcome_json, outcome_at, muted FROM sessions WHERE id = ?", (sid,))
+    row = db._read_one("SELECT id, source, end_reason, outcome_json, outcome_at, muted FROM sessions WHERE id = ?", (sid,))
     return dict(row) if row is not None else None
 
 
@@ -531,6 +531,14 @@ def _derive(db: Any, sid: str, *, ignore_live_turn: bool = False,
     if reason:
         return _outcome("unresolved", now, reason=reason, **carry)
     text = _text(tail[0].get("content"))
+    # Cron's successful no-news protocol deliberately has no prose summary. Respect that
+    # terminal receipt, but not a marker in an unfinished/failed run or a pending reply.
+    # Keep this after live work, notices and failure checks: silence cannot erase obligations.
+    if pending_reply is None and row.get("source") == "cron" and row.get("end_reason") == "cron_complete":
+        from gateway.response_filters import is_intentional_silence_response
+
+        if is_intentional_silence_response(text):
+            return _outcome("done", now, summary="Scheduled run completed with nothing to report.", **named, **carry)
     msg_id = tail[0].get("id")
     verdict = _judge_summary(sid, text, row.get("source"))
     if verdict is None:

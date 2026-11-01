@@ -211,6 +211,53 @@ def test_7_summary_is_done_otherwise_no_summary(db):
     assert so.refresh_outcome("chat", "turn_end", db=db)["reason"] == "no_summary"
 
 
+@pytest.mark.parametrize("marker", ["[SILENT]", "NO_REPLY", " SILENT "])
+def test_completed_silent_cron_is_done_without_a_judge(db, marker):
+    db._write_rowcount("UPDATE sessions SET source='cron', end_reason='cron_complete' WHERE id='chat'", ())
+    turn(db, marker)
+    out = so.refresh_outcome("chat", "manual", db=db)
+    assert out["kind"] == "done"
+    assert out["summary"] == "Scheduled run completed with nothing to report."
+    assert so.get_outcome("chat", db=db) == out
+
+
+@pytest.mark.parametrize("source, end_reason", [
+    ("desktop", "cron_complete"), ("cron", None), ("cron", "cron_incomplete_no_output"),
+])
+def test_silence_alone_does_not_prove_cron_completion(db, source, end_reason):
+    db._write_rowcount("UPDATE sessions SET source=?, end_reason=? WHERE id='chat'", (source, end_reason))
+    turn(db, "[SILENT]")
+    assert so.refresh_outcome("chat", "manual", db=db)["reason"] == "no_summary"
+
+
+@pytest.mark.parametrize("role, text, kw, expected", [
+    ("assistant", "[SILENT]", {"finish_reason": "error"}, "turn_failed"),
+    ("user", "card completed", {"display_kind": "kanban_notice"}, "notice_tail"),
+    ("tool", "result", {"tool_name": "terminal", "tool_call_id": "c1"}, "interrupted"),
+])
+def test_completed_silent_cron_preserves_tail_errors(db, role, text, kw, expected):
+    db._write_rowcount("UPDATE sessions SET source='cron', end_reason='cron_complete' WHERE id='chat'", ())
+    turn(db, "[SILENT]")
+    say(db, role, text, **kw)
+    assert so.refresh_outcome("chat", "manual", db=db)["reason"] == expected
+
+
+@pytest.mark.parametrize("status, human_request, expected", [
+    ("running", None, "waiting"), ("blocked", HUMAN_REQUEST, "decision"),
+])
+def test_completed_silent_cron_preserves_live_work(db, board, status, human_request, expected):
+    db._write_rowcount("UPDATE sessions SET source='cron', end_reason='cron_complete' WHERE id='chat'", ())
+    turn(db, "[SILENT]")
+    add_card(board, "t_work", "chat", status, human_request)
+    assert so.refresh_outcome("chat", "manual", db=db)["kind"] == expected
+
+
+def test_pending_silence_does_not_reuse_old_cron_completion(db):
+    db._write_rowcount("UPDATE sessions SET source='cron', end_reason='cron_complete' WHERE id='chat'", ())
+    turn(db, "[SILENT]")
+    assert so.derive_outcome("chat", db=db, pending_reply="[SILENT]")["reason"] == "no_summary"
+
+
 def test_7_pending_reply_is_judged_instead_of_the_saved_tail(db):
     turn(db, "Let me look at the logs next.")
     assert so.derive_outcome("chat", db=db)["reason"] == "no_summary"
