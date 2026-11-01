@@ -458,6 +458,17 @@ def _csv_list(value: Optional[str]) -> list[str]:
     return [s.strip() for s in (value or "").split(",") if s.strip()]
 
 
+_PROFILE_SESSION_SCAN_LOCK = threading.Lock()
+
+
+def _read_serial_profile_db(name, home, errors, read):
+    # Parallel aggregate polls amplify SQLite scan CPU. Serialize only the DB
+    # phase, not activity annotation or serialization; never cache fresh rows.
+    # Acquire before opening a connection, retaining the caller's profile context.
+    with _PROFILE_SESSION_SCAN_LOCK:
+        return _read_profile_db(name, home, errors, read)
+
+
 @sessions_router.get("/api/profiles/sessions")
 def get_profiles_sessions(
     # ``le=500`` caps the page size — this endpoint fans out across EVERY profile's state.db.
@@ -507,7 +518,7 @@ def get_profiles_sessions(
                 compact_rows=not full, include_pinned=True, **scoped)
             totals[name] = db.session_count(exclude_children=True, **scoped)
             merged.extend(stamp_automated(_tag_rows(rows, name, now), home))
-        _read_profile_db(name, home, errors, _read)
+        _read_serial_profile_db(name, home, errors, _read)
 
     sort_key = "last_active" if order == "recent" else "started_at"
     merged.sort(key=lambda s: s.get(sort_key) or s.get("started_at") or 0, reverse=True)
