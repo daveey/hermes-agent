@@ -78,6 +78,53 @@ def test_matching_lagging_replica_cannot_retire_unresolved(live, svc, kanban_hom
         shadow.close()
 
 
+@pytest.mark.parametrize("veto", ["version", "pending", "identity", "untranslated_run", "local_change"])
+def test_superseded_requires_settled_identity_and_local_snapshot(live, svc, monkeypatch, veto):
+    tid = reject_status(live, svc)
+    hub = svc.hub(ME)
+    original = hub.row_evidence
+
+    def read(*args):
+        evidence = original(*args)
+        if veto == "version":
+            evidence["row"]["version"] += 1
+        elif veto == "identity":
+            evidence["uid"] = "another-card"
+        elif veto == "local_change":
+            with kbc.write_txn(live):
+                live.execute("UPDATE tasks SET title='changed' WHERE id=?", (tid,))
+        return evidence
+
+    monkeypatch.setattr(hub, "row_evidence", read)
+    with kbc.write_txn(live):
+        if veto == "pending":
+            live.execute("INSERT INTO kanban_sync_outbox (op_id,table_name,row_uid,op,fields,hlc,created_at) "
+                         "VALUES ('pending','tasks',?,'upsert','{}','',2)", (tid,))
+        elif veto == "untranslated_run":
+            live.execute("UPDATE kanban_sync_state SET applying=1")
+            live.execute("UPDATE tasks SET current_run_id=999999 WHERE id=?", (tid,))
+            live.execute("UPDATE kanban_sync_state SET applying=0")
+    from hermes_cli.kanban_sync_rejections import resolve_rejections
+    report = resolve_rejections(live, hub, BOARD)
+    assert report[0]["classification"] == "unresolved"
+    assert client.status(live)["rejected"] == 1
+
+
+def test_cli_diff_dirty_then_clean_after_normal_sync(live, svc, kanban_home, monkeypatch, capsys):
+    from argparse import Namespace
+    from hermes_cli import kanban_sync_cli as cli
+    reject_status(live, svc)
+    monkeypatch.setattr(cli, "_board", lambda args: BOARD)
+    monkeypatch.setattr(cli, "_path", lambda slug: kanban_home / "kanban.db")
+    monkeypatch.setattr(client, "load_identity", lambda: svc.hub(ME).ident)
+    monkeypatch.setattr(client, "Hub", lambda ident: svc.hub(ME))
+    assert cli._diff(Namespace(json=True)) == 1
+    assert json.loads(capsys.readouterr().out)["clean"] is False
+    client.sync_board(BOARD, kanban_home / "kanban.db", svc.hub(ME), ME)
+    assert cli._diff(Namespace(json=True)) == 0
+    assert json.loads(capsys.readouterr().out)["clean"] is True
+
+
 def ghost(live):
     with kbc.write_txn(live):
         live.execute("INSERT INTO kanban_sync_outbox (op_id,table_name,row_uid,op,fields,hlc,created_at,state,last_error) "
