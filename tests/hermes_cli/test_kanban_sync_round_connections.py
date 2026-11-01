@@ -8,9 +8,30 @@ import pytest
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_sync_client as ksc
 from hermes_cli import kanban_sync_partition_repair as partition
-from tests.hermes_cli.test_kanban_sync_idle_round import (
-    _round, _settle, kanban_home, live, svc,
-)
+from tests.hermes_cli import kanban_sync_support as support
+from tests.hermes_cli.kanban_sync_fake_board import FakeService
+from tests.hermes_cli.test_kanban_sync_idle_round import _round, _settle
+
+
+@pytest.fixture
+def kanban_home(tmp_path, monkeypatch):
+    return support.kanban_home(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def svc():
+    return FakeService()
+
+
+@pytest.fixture
+def live(kanban_home):
+    support.write_sync_config(kanban_home, True)
+    conn = kbc.connect(kanban_home / "kanban.db")
+    ksc.ensure_identity(conn, "default", "macbook")
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize("mode", ["shadow", "primary"])
