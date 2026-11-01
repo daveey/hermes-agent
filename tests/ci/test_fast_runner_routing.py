@@ -44,10 +44,21 @@ FAST = {
     ("supply-chain-audit.yml", "scan"),
     ("supply-chain-audit.yml", "dep-bounds"),
     ("supply-chain-audit.yml", "aggregate"),
+    # Third admission (November 1, 2026): the macOS state lane's own required
+    # check. Checkout plus one python3 call over toJSON(needs); 14 s on ci-fast
+    # in run 41326127097 (job 124910774212). Its always() must stay (fail-closed
+    # when the lane is skipped or cancelled), and an always() job may not wait
+    # on hermes-hub (test_fork_runner_routing), so it cannot go back there.
+    ("ci.yaml", "macos-state-required"),
 }
 # Completion jobs in the orchestrator itself: the gate, and the advisory report
 # that runs after it. Neither can be one of the gate's own needs.
 COMPLETION = {("ci.yaml", "all-checks-pass"), ("ci.yaml", "ci-timings")}
+# Required checks that the ruleset names directly instead of through the gate,
+# so they are outside its needs and keep always(): never !cancelled() or skip.
+SEPARATE_REQUIRED = {
+    ("ci.yaml", "macos-state-required"): ("macOS state required (v1)", {"detect", "hermes-state-macos"}),
+}
 
 
 def _workflows():
@@ -115,6 +126,11 @@ def test_fast_label_is_known_and_checks_cannot_bypass_the_gate():
         elif (wf, name) in COMPLETION:
             assert name == "all-checks-pass" or "all-checks-pass" in job["needs"]
             assert job["if"] == "${{ !cancelled() }}"
+        elif (wf, name) in SEPARATE_REQUIRED:
+            title, needs = SEPARATE_REQUIRED[(wf, name)]
+            assert job["name"] == title
+            assert set(job["needs"]) == needs
+            assert job["if"] == "${{ always() }}"
         elif wf == "ci.yaml":
             assert name in gate["needs"]
         else:
@@ -139,7 +155,11 @@ def test_fork_rewriter_keeps_every_fast_job_on_the_fast_lane(tmp_path, upstream_
             match = re.search(r"(?m)^  " + re.escape(name) + r":\n(?:(?!  \S).*\n)*", text)
             assert match, (wf, name)
             block = match.group(0)
-            text = text.replace(block, re.sub(r"(?m)^    runs-on: .*$", f"    runs-on: {upstream_label}", block))
+            changed = re.sub(r"(?m)^    runs-on: .*$", f"    runs-on: {upstream_label}", block)
+            if (wf, name) in SEPARATE_REQUIRED:
+                # The bare form is what the script's completion rewrite turns into !cancelled().
+                changed = re.sub(r"(?m)^    if: .*$", "    if: always()", changed)
+            text = text.replace(block, changed)
         path.write_text(text, encoding="utf-8")
     yaml = YAML(typ="safe")
     for _ in range(2):
@@ -147,6 +167,9 @@ def test_fork_rewriter_keeps_every_fast_job_on_the_fast_lane(tmp_path, upstream_
         for wf, name in FAST:
             job = yaml.load((tmp_path / ".github/workflows" / wf).read_text(encoding="utf-8"))["jobs"][name]
             assert _labels(job) == ["self-hosted", "ci-fast"], (wf, name)
+            if (wf, name) in SEPARATE_REQUIRED:
+                # The fast pin must not turn a fail-closed check into a skippable one.
+                assert job["if"] == "always()", (wf, name)
     # Heavy work the script routes is untouched by the fast-lane pin.
     lint = yaml.load((tmp_path / ".github/workflows/lint.yml").read_text(encoding="utf-8"))
     assert lint["jobs"]["lint-diff"]["runs-on"] == ["self-hosted", "hermes-hub"]

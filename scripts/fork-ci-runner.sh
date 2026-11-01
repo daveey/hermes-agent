@@ -40,7 +40,9 @@ COMPLETION = {
     'supply-chain-audit.yml': ('aggregate',),
 }
 FAST = {
-    'ci.yaml': ('detect', 'all-checks-pass', 'ci-timings'),
+    # macos-state-required is FAST but not COMPLETION: it keeps always() so a
+    # skipped or cancelled macOS lane still fails the required check.
+    'ci.yaml': ('detect', 'all-checks-pass', 'ci-timings', 'macos-state-required'),
     'actionlint.yml': ('actionlint',),
     'lint.yml': ('ruff-blocking', 'code-health', 'windows-footguns'),
     'case-collision-check.yml': ('check-case-collisions',),

@@ -13,6 +13,20 @@ heavy `hermes-hub` pool they queued behind full suites (PR #266: 23 min for a
 `ci-fast` when it is re-run after an upstream merge.
 The `!cancelled()` condition still keeps superseded runs from latching their group.
 
+## Third admission (November 1, 2026)
+
+`macOS state required (v1)` (`ci.yaml` job `macos-state-required`) is the
+macOS state lane's own required check: checkout plus one `python3
+scripts/ci/required_results.py --macos-state` over `toJSON(needs)`. No build,
+Docker, secrets or matrix; 10-minute timeout. It ran 14 s on `ci-fast`
+(runner `ec2-gwgen4-1`, run 41326127097, job 124910774212, 16:41:34–16:41:48
+UTC). It must keep `if: ${{ always() }}` so a skipped or cancelled lane fails
+closed, and an `always()` job may not wait on `hermes-hub`
+(`tests/ci/test_fork_runner_routing.py`), so `ci-fast` is its only lane. It is
+not a completion job: `scripts/fork-ci-runner.sh` pins its runner but leaves its
+condition alone, and it is not in the aggregate's needs. The rollout must add
+its name to main's required status checks separately before promotion is complete.
+
 ## Second admission (October 30, 2026)
 
 At 02:31 PDT all 16 online `hermes-hub` runners were busy with full suites
