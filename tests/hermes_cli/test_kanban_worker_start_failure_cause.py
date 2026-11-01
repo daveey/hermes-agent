@@ -12,7 +12,7 @@ def test_start_failure_books_a_redacted_one_line_cause(monkeypatch):
     from agent.model_routing import ModelRoutingError
     from gateway import session_kanban
     booked = []
-    monkeypatch.setattr(session_kanban, '_record_worker_result', lambda ctx, code, out: booked.append((code, out)))
+    monkeypatch.setattr(session_kanban, '_record_worker_result', lambda ctx, code, out, failure=None: booked.append((code, out)))
     frame = {'policy': {'kanban_json': json.dumps({'db': '/nonexistent', 'task_id': 't', 'run_id': 1})}}
     session_kanban.record_start_failure(frame, ModelRoutingError('Class selectors require provider auto;\nuse a concrete model'))
     (code, out), = booked
@@ -46,7 +46,7 @@ def test_worker_failure_after_the_turn_books_its_cause(monkeypatch):
     from agent.runtime_session_store import WorkerPersistenceError
     from gateway import session_kanban
     booked = []
-    monkeypatch.setattr(session_kanban, '_record_worker_result', lambda ctx, code, out: booked.append((code, out)))
+    monkeypatch.setattr(session_kanban, '_record_worker_result', lambda ctx, code, out, failure=None: booked.append((code, out)))
     frame = {'policy': {'kanban_json': json.dumps({'db': '/nonexistent', 'task_id': 't', 'run_id': 1})}}
     session_kanban.record_worker_failure(frame, WorkerPersistenceError('invalid_params'))
     assert booked == [(1, 'Worker failed: WorkerPersistenceError: invalid_params')]
@@ -56,7 +56,7 @@ def test_start_failure_is_not_booked_twice(monkeypatch):
     from agent.model_routing import ModelRoutingError
     from gateway import session_kanban
     booked = []
-    monkeypatch.setattr(session_kanban, '_record_worker_result', lambda ctx, code, out: booked.append(out))
+    monkeypatch.setattr(session_kanban, '_record_worker_result', lambda ctx, code, out, failure=None: booked.append(out))
     frame = {'policy': {'kanban_json': json.dumps({'db': '/nonexistent', 'task_id': 't', 'run_id': 1})}}
     exc = ModelRoutingError('boom')
     session_kanban.record_start_failure(frame, exc)
@@ -102,7 +102,7 @@ def test_managed_worker_main_books_the_cause_of_a_late_failure(monkeypatch):
         raise WorkerPersistenceError('invalid_params')
 
     monkeypatch.setattr(mw, 'execute', execute)
-    monkeypatch.setattr(session_kanban, '_record_worker_result', lambda ctx, code, out: booked.append(out))
+    monkeypatch.setattr(session_kanban, '_record_worker_result', lambda ctx, code, out, failure=None: booked.append(out))
     assert mw.main() == 1
     assert booked == ['Worker failed: WorkerPersistenceError: invalid_params']
     assert sent[-1] == 'error'

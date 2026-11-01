@@ -148,9 +148,16 @@ def handle_api_error(
     )
 
     # A local quota refusal is not another provider response: rotating it would
-    # re-bench the last token and lose the original reset. Yield to the scheduler.
+    # re-bench the last token and lose the original reset.
     from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
     if isinstance(api_error, SubscriptionQuotaUnavailable):
+        # Only this route's pool is exhausted. Class fallback retains the no-paid
+        # fence and exact pins; yield only when no authorized sibling remains.
+        if agent._try_activate_fallback(reason=classified.reason, reset_at=api_error.resets_at):
+            from agent.conversation_loop import _arm_fallback_restart
+            active_system_prompt = _arm_fallback_restart(agent, api_messages, active_system_prompt, _retry)
+            retry_count = compression_attempts = 0
+            return _verdict("break")
         return _verdict("return", max_retries_exhausted_result(
             agent, api_error, classified, attempts=retry_count, is_rate_limited=True,
             error_msg=str(api_error), api_kwargs=api_kwargs, api_messages=api_messages,
