@@ -727,7 +727,11 @@ PLATFORM_HINTS = {
         "height live, width from the content's first measured span — lay content flush left with no centering wrappers "
         "or it measures full-bleed. Widgets talk back: data-hermes-send=\"prompt\" on any clickable element (or "
         "window.hermes.send(\"prompt\")) sends that prompt as a hidden user turn — answer it by updating the widget's "
-        "file, not with prose."
+        "file, not with prose. hermes.send takes at most 500 characters, one per second, and returns a Promise of "
+        "{ok:true} or {ok:false,error,retryAfterMs}: await it, retry after retryAfterMs when throttled, show the user "
+        "any other failure, and send large data in chunks (one record or a few per send). The frame is sandboxed, so "
+        "localStorage/sessionStorage/IndexedDB are unavailable: keep state with yourself (write it into the widget's "
+        "file) and never promise the user local saving."
     ),
     "api_server": (
         "You're responding through an API server. The rendering layer is unknown — assume plain text. No markdown "

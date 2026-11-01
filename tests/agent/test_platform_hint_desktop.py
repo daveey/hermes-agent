@@ -12,6 +12,8 @@ verifying — mocking the resolver would hide exactly the class of bug
 this test covers.
 """
 
+import re
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -91,3 +93,37 @@ class TestEmbeddedTuiPaneClarifier:
         assert out == PLATFORM_HINTS["tui"], (
             f"HERMES_DESKTOP_TERMINAL={val!r} should not trigger clarifier"
         )
+
+_INLINE_PREVIEW_TSX = (
+    Path(__file__).resolve().parents[2]
+    / "apps/desktop/src/components/assistant-ui/inline-preview-directive.tsx"
+)
+
+def _renderer_const(name):
+    m = re.search(rf"export const {name} = (\d+)", _INLINE_PREVIEW_TSX.read_text())
+    assert m, f"{name} not found in {_INLINE_PREVIEW_TSX}"
+    return int(m.group(1))
+
+class TestDesktopWidgetSendRules:
+    """Inline widgets lost a whole rating session (desktop-13785ebc41): the agent
+    sent every rating in one ``hermes.send`` (over the cap, refused), ignored the
+    refusal, and promised localStorage saving the sandboxed frame blocks. The
+    hint is the only place agents learn the widget contract, so it must state
+    the real limits, read from the renderer that enforces them."""
+
+    def test_hint_states_the_real_length_cap(self):
+        assert f"{_renderer_const('MAX_INTENT_LENGTH')} characters" in PLATFORM_HINTS["desktop"]
+
+    def test_hint_states_the_real_throttle(self):
+        # The hint says "one per second"; a changed throttle must change it too.
+        assert _renderer_const("INTENT_THROTTLE_MS") == 1000
+        assert "one per second" in PLATFORM_HINTS["desktop"]
+
+    def test_hint_says_to_check_the_ack_retry_and_chunk(self):
+        hint = PLATFORM_HINTS["desktop"]
+        assert "{ok:false" in hint and "retryAfterMs" in hint
+        assert "chunk" in hint
+
+    def test_hint_says_browser_storage_is_unavailable(self):
+        hint = PLATFORM_HINTS["desktop"]
+        assert "localStorage" in hint and "unavailable" in hint

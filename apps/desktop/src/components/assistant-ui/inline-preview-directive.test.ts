@@ -14,6 +14,7 @@ import {
   frameSizeFromMessage,
   INTENT_THROTTLE_MS,
   intentAckMessage,
+  intentRejectNotice,
   intentScript,
   MAX_INTENT_LENGTH,
   nextFrameHeight,
@@ -336,5 +337,27 @@ describe('intentScript', () => {
     await expect(send('   ')).resolves.toEqual({ error: 'invalid', ok: false })
     expect(posted).toHaveLength(0)
     expect(win.hermes?.maxLength).toBe(MAX_INTENT_LENGTH)
+  })
+})
+
+// desktop-13785ebc41: a rating page sent every rating in one over-length
+// intent and ignored the refusal, so the user saw nothing while all of it was
+// lost. A refusal must reach the user, not only the page.
+describe('intentRejectNotice', () => {
+  it('names an over-length refusal for the user', () => {
+    const notice = intentRejectNotice({ error: 'too_long', maxLength: MAX_INTENT_LENGTH, ok: false })
+
+    expect(notice).toContain('not sent')
+    expect(notice).toContain(String(MAX_INTENT_LENGTH))
+  })
+
+  it('names invalid and undelivered refusals', () => {
+    expect(intentRejectNotice({ error: 'invalid', ok: false })).toContain('not sent')
+    expect(intentRejectNotice({ error: 'undelivered', ok: false })).toContain('not sent')
+  })
+
+  it('stays quiet for accepted and throttled intents (a good widget retries those)', () => {
+    expect(intentRejectNotice({ ok: true })).toBeNull()
+    expect(intentRejectNotice({ error: 'throttled', ok: false, retryAfterMs: 400 })).toBeNull()
   })
 })

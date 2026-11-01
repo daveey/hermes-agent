@@ -184,6 +184,32 @@ export function intentAckMessage(token: string, id: number, ack: IntentAck) {
   return { ack, id, token, type: INTENT_ACK_MESSAGE_TYPE }
 }
 
+/** The line shown UNDER the frame when an intent was refused, or null.
+ *  The ack tells only the page, and a page that ignores it fails silently
+ *  while the user keeps entering data (desktop-13785ebc41: 333 ratings sent
+ *  as one over-length intent, all lost). Throttled is left to the page: a
+ *  well-built widget retries it after `retryAfterMs`, so a notice would be
+ *  noise. */
+export function intentRejectNotice(ack: IntentAck): string | null {
+  if (ack.ok) {
+    return null
+  }
+
+  switch (ack.error) {
+    case 'too_long':
+      return `Widget message not sent: longer than ${ack.maxLength ?? MAX_INTENT_LENGTH} characters. Ask the agent to send it in smaller pieces.`
+
+    case 'invalid':
+      return 'Widget message not sent: it was empty.'
+
+    case 'undelivered':
+      return 'Widget message not sent: no chat composer took it.'
+
+    default:
+      return null
+  }
+}
+
 /** Semantic tokens handed into the frame, resolved to concrete values from
  *  the LIVE theme. Friendly names, not internal ones — this is the contract
  *  reference HTML / skills write against (`var(--foreground)` etc.). */
@@ -429,6 +455,9 @@ function InlineHtmlFrame({
   const [sizing, setSizing] = useState<{ grow: number; measured: number | null }>({ grow: 0, measured: null })
   const measured = sizing.measured
   const [contentWidth, setContentWidth] = useState<number | null>(null)
+  // The last refused intent, shown under the frame (cleared by the next
+  // accepted one) so a refusal the page ignores still reaches the user.
+  const [rejectNotice, setRejectNotice] = useState<string | null>(null)
 
   // One token per mount: the message listener only trusts reports from the
   // document THIS mount injected, so two previews in one transcript (or a
@@ -490,6 +519,12 @@ function InlineHtmlFrame({
           ack = requestComposerSubmit(decision.prompt, { target: 'active', displayKind: 'hidden' })
             ? { ok: true }
             : { error: 'undelivered', ok: false }
+        }
+
+        const notice = intentRejectNotice(ack)
+
+        if (notice !== null || ack.ok) {
+          setRejectNotice(notice)
         }
 
         // Reply only to the sender that proved it holds this mount's token.
@@ -582,6 +617,11 @@ function InlineHtmlFrame({
             style={{ colorScheme }}
             title={file}
           />
+        </span>
+      )}
+      {rejectNotice !== null && (
+        <span className="mt-1 block text-xs text-destructive" role="status">
+          {rejectNotice}
         </span>
       )}
     </span>
