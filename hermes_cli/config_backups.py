@@ -85,13 +85,14 @@ def _last_full_good_backup(candidates: list[Path]) -> Optional[Path]:
     automatic recovery selection. Newest wins ties; normal rotation resumes when
     the document regains at least half the anchor's sections.
     """
+    from hermes_yaml import YAMLError
     from utils import fast_safe_load
 
     counts = []
     for path in candidates:
         try:
             doc = fast_safe_load(path.read_text(encoding="utf-8-sig"))
-        except Exception:
+        except (OSError, UnicodeError, YAMLError):
             counts.append(0)
         else:
             counts.append(len(doc) if isinstance(doc, dict) else 0)
