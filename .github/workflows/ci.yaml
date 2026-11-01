@@ -612,6 +612,7 @@ jobs:
     permissions:
       contents: read
       actions: read # download completed jobs' cache transfer logs
+      pull-requests: read # the PR's changed test files, to attribute a wall-time regression (or not)
     needs: [all-checks-pass]
     if: ${{ !cancelled() }}
     runs-on: [self-hosted, ci-fast]

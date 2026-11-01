@@ -159,6 +159,42 @@ _DEFAULT_FILE_RETRIES = 1
 # CI jobs by estimated total time, so no one job gets all the slow files.
 _DURATIONS_FILE = "test_durations.json"
 
+# [daveey] Slow test cases: each per-file pytest gets ``--durations=0
+# --durations-min=<threshold/4>`` and the runner prints one
+# ``⏱ slow test case <s>s <node id>`` line per case whose setup+call+teardown
+# reaches the threshold. scripts/ci/timings_report.py reads those lines from
+# the test-slice job logs, so the CI-timings review item can tell a PR's own
+# slow new case from CI-wide slowness. 0 disables (env: HERMES_TEST_SLOW_CASE_S).
+_SLOW_CASE_SECONDS = float(os.environ.get("HERMES_TEST_SLOW_CASE_S") or 10.0)
+_DURATION_LINE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)s\s+(?:setup|call|teardown)\s+(\S.*?)\s*$")
+_DURATIONS_HEADER_RE = re.compile(r"^=+ slowest(?: \d+)? durations =+$")
+
+
+def _durations_args(pytest_args: list[str], threshold: float) -> list[str]:
+    """pytest flags that make it list the cases a slow-case line may name (none if the caller set its own)."""
+    if threshold <= 0 or any(a == "--durations" or a.startswith("--durations=") for a in pytest_args):
+        return []
+    return ["--durations=0", f"--durations-min={threshold / 4:g}"]
+
+
+def _slow_cases_from_output(output: str, threshold: float) -> dict[str, float]:
+    """{node id: setup+call+teardown seconds} for cases at or above ``threshold``, from pytest's durations list."""
+    totals: dict[str, float] = {}
+    in_section = False
+    for line in output.splitlines():
+        stripped = line.strip()
+        if _DURATIONS_HEADER_RE.match(stripped):
+            in_section = True
+            continue
+        if in_section and stripped.startswith("="):
+            in_section = False
+            continue
+        if in_section:
+            m = _DURATION_LINE_RE.match(line)
+            if m:
+                totals[m.group(2)] = round(totals.get(m.group(2), 0.0) + float(m.group(1)), 2)
+    return {node: secs for node, secs in totals.items() if secs >= threshold}
+
 
 def _split_pathspec(value: str) -> list[str]:
     """Split a separator-joined path list (``--paths``/``--files``/
@@ -769,7 +805,8 @@ def _run_one_file_attempt(
 
     ``targets`` narrows the run to those node ids of ``file`` (the retry).
     """
-    cmd = [sys.executable, "-m", "pytest", *(targets or [str(file)]), *pytest_args]
+    cmd = [sys.executable, "-m", "pytest", *(targets or [str(file)]), *pytest_args,
+           *_durations_args(pytest_args, _SLOW_CASE_SECONDS)]
 
     # Give this subprocess its own pytest temp root.
     #
@@ -1804,6 +1841,9 @@ def main() -> int:
                 file_summary=summary,
                 subproc_wall=subproc_wall,
             )
+            if _SLOW_CASE_SECONDS > 0:
+                for node, secs in sorted(_slow_cases_from_output(output, _SLOW_CASE_SECONDS).items()):
+                    print(f"  ⏱ slow test case {secs:.2f}s {node}", flush=True)
             if rc != 0:
                 _print_inline_failure(fpath, output, repo_root, pytest_passthrough)
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -164,7 +165,8 @@ def _job_log(job_id: int, repo: str, token: str) -> str:
         raise OSError(f"job log HTTP {error.code}") from error
 
 
-def _collect_cache_data(jobs: list[dict], repo: str, token: str) -> dict:
+def _collect_cache_data(jobs: list[dict], repo: str, token: str, test_durations: dict | None = None) -> dict:
+    """Cache transfers from every job's log. Test-slice logs ("Run tests (...)") also fill ``test_durations``."""
     entries, unavailable = [], []
     seen: set[int] = set()
     for job in jobs:
@@ -174,13 +176,117 @@ def _collect_cache_data(jobs: list[dict], repo: str, token: str) -> dict:
         seen.add(job_id)
         name = " / ".join(part for part in (job["workflow_name"], job["name"]) if part)
         try:
-            parsed = parse_cache_log(_job_log(job_id, repo, token), job["steps"])
+            log = _job_log(job_id, repo, token)
         except OSError as error:
             print(f"Cache data unavailable for {name}: {error}", file=sys.stderr)
             unavailable.append(name)
             continue
+        parsed = parse_cache_log(log, job["steps"])
         entries.extend(dict(entry, job=name, job_id=job_id, job_url=job["html_url"]) for entry in parsed)
+        if test_durations is not None and str(job.get("name", "")).startswith("Run tests ("):
+            files, slow = parse_test_durations(log)
+            for bucket, found in (("files", files), ("slow_cases", slow)):
+                into = test_durations.setdefault(bucket, {})
+                for key, secs in found.items():
+                    into[key] = max(secs, into.get(key, 0.0))
     return {"entries": entries, "unavailable_jobs": unavailable}
+
+
+# ---------------------------------------------------------------------------
+# [daveey] Per-file test durations and the PR's own test changes. Together they
+# decide whether a wall-time regression is attributable to the PR (Warning) or
+# CI-wide slowness (Info). Regression: #546/#548/#552 (2026-11-01) were warned
+# for +34..44% wall time while their added tests took 9-19 s.
+# ---------------------------------------------------------------------------
+
+# A runner progress line: "[ 2.0% | ... ] ✓ tests/x/test_y.py (3✓ 1s, 1.8s)" (scripts/run_tests_parallel.py).
+_PROGRESS_RE = re.compile(r"[✓✗] (\S+\.py) \((?:[^()]*, )?(\d+(?:\.\d+)?)s\)\s*$")
+# The runner's slow-case line: "  ⏱ slow test case 12.40s tests/x/test_y.py::test_z".
+_SLOW_CASE_RE = re.compile(r"⏱ slow test case (\d+(?:\.\d+)?)s (\S+)\s*$")
+_TEST_FILE_RE = re.compile(r"(?:^|/)tests?/(?:.*/)?(?:test_[^/]*|[^/]*_test)\.py$")
+_ADDED_TEST_RE = re.compile(r"^\+\s*(?:async\s+)?def\s+(test\w*)\s*\(")
+
+# Attribution thresholds: the PR's added/changed test files in total, and one added case.
+_PR_TEST_FILES_WARN_S = 60.0
+_PR_TEST_CASE_WARN_S = 10.0
+
+
+def parse_test_durations(log: str) -> tuple[dict[str, float], dict[str, float]]:
+    """({test file: seconds}, {node id: seconds}) from a test-slice job log."""
+    files: dict[str, float] = {}
+    slow: dict[str, float] = {}
+    for line in log.splitlines():
+        m = _SLOW_CASE_RE.search(line)
+        if m:
+            slow[m.group(2)] = max(float(m.group(1)), slow.get(m.group(2), 0.0))
+            continue
+        m = _PROGRESS_RE.search(line)
+        if m:
+            files[m.group(1)] = max(float(m.group(2)), files.get(m.group(1), 0.0))
+    return files, slow
+
+
+def _pr_number_from_event() -> int | None:
+    path = os.environ.get("GITHUB_EVENT_PATH")
+    if path:
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                number = (json.load(f).get("pull_request") or {}).get("number")
+            if isinstance(number, int):
+                return number
+        except (OSError, ValueError, AttributeError):
+            pass
+    m = re.match(r"^refs/pull/(\d+)/", os.environ.get("GITHUB_REF", ""))
+    return int(m.group(1)) if m else None
+
+
+def collect_pr_changes(token: str, repo: str) -> dict | None:
+    """The PR's added/changed test files and the test functions its patch adds; None outside a PR."""
+    number = _pr_number_from_event()
+    if number is None:
+        return None
+    files = api_get(f"/repos/{repo}/pulls/{number}/files", token, params={"per_page": 100})
+    test_files: list[str] = []
+    added: dict[str, list[str]] = {}
+    for f in files if isinstance(files, list) else []:
+        name = f.get("filename", "")
+        if f.get("status") == "removed" or not _TEST_FILE_RE.search(name):
+            continue
+        test_files.append(name)
+        names = [m.group(1) for line in (f.get("patch") or "").splitlines() if (m := _ADDED_TEST_RE.match(line))]
+        if names:
+            added[name] = list(dict.fromkeys(names))
+    return {"number": number, "test_files": test_files, "added_cases": added}
+
+
+def _case_name(node_id: str) -> str:
+    """'tests/x.py::TestA::test_b[p]' -> 'test_b'."""
+    return node_id.split("::")[-1].split("[", 1)[0]
+
+
+def pr_test_attribution(timings: dict) -> dict | None:
+    """What the PR's own tests cost in this run, or None when the PR's changes are unknown."""
+    pr = timings.get("pr_changes")
+    if not isinstance(pr, dict):
+        return None
+    durations = timings.get("test_durations") or {}
+    per_file = durations.get("files") or {}
+    pr_files = list(pr.get("test_files") or [])
+    file_secs = {f: float(per_file.get(f, 0.0)) for f in pr_files}
+    added = pr.get("added_cases") or {}
+    slow_added = {
+        node: float(secs)
+        for node, secs in (durations.get("slow_cases") or {}).items()
+        if float(secs) >= _PR_TEST_CASE_WARN_S and _case_name(node) in (added.get(node.split("::", 1)[0]) or [])
+    }
+    total = round(sum(file_secs.values()), 1)
+    return {
+        "files": file_secs,
+        "not_run": [f for f in pr_files if f not in per_file],
+        "total_s": total,
+        "slow_added_cases": slow_added,
+        "attributable": total >= _PR_TEST_FILES_WARN_S or bool(slow_added),
+    }
 
 
 def parse_ts(ts: str | None) -> datetime | None:
@@ -323,6 +429,15 @@ def collect_timings(token: str, repo: str, run_id: str, head_sha: str) -> dict:
     all_jobs.sort(key=lambda j: j.get("started_at") or "")
     _annotate_wait_times(all_jobs)
 
+    test_durations: dict = {"files": {}, "slow_cases": {}}
+    cache_data = _collect_cache_data(all_jobs, repo, token, test_durations)
+    try:
+        pr_changes = collect_pr_changes(token, repo)
+    except TimingsUnavailable as error:
+        # Without the PR's file list a regression cannot be attributed; the review item says so.
+        print(f"PR changes unavailable: {error}", file=sys.stderr)
+        pr_changes = None
+
     return {
         "run_id": run_id,
         "head_sha": head_sha,
@@ -331,7 +446,9 @@ def collect_timings(token: str, repo: str, run_id: str, head_sha: str) -> dict:
                     and bool(run_info.get("event"))
                     and run_info["event"] not in ("pull_request", "pull_request_target")),
         "jobs": all_jobs,
-        "cache_data": _collect_cache_data(all_jobs, repo, token),
+        "cache_data": cache_data,
+        "test_durations": test_durations,
+        "pr_changes": pr_changes,
     }
 
 
@@ -959,6 +1076,7 @@ def generate_review_status(
     fragment.
     """
     stats = compute_stats(timings, baseline)
+    attribution = pr_test_attribution(timings) if baseline is not None else None
 
     if baseline is None:
         severity = "debug"
@@ -966,6 +1084,7 @@ def generate_review_status(
     else:
         wall = stats["wall"]
         bl_wall = stats["bl_wall"] or 0
+        pct = None
         if bl_wall > 0:
             pct = (wall - bl_wall) / bl_wall * 100
             wall_str = f"Wall time {fmt_dur(wall)} vs {fmt_dur(bl_wall)} ({pct:+.1f}%)."
@@ -984,6 +1103,19 @@ def generate_review_status(
         if stats["unchanged"]:
             wall_str += f" {stats['unchanged']} unchanged."
         summary = wall_str
+
+        # [daveey] A regression is the PR's only when its own tests explain it.
+        if severity == "warning" and attribution is not None:
+            if attribution["attributable"]:
+                named = [f"{f} {s:.1f} s" for f, s in sorted(attribution["files"].items(), key=lambda kv: -kv[1])]
+                named += [f"slow added case {n} {s:.1f} s"
+                          for n, s in sorted(attribution["slow_added_cases"].items(), key=lambda kv: -kv[1])]
+                summary = (f"CI wall time {pct:+.1f}% vs main, and this PR's added/changed test files took "
+                           f"{attribution['total_s']:.1f} s: " + ", ".join(named) + ".")
+            else:
+                severity = "info"
+                summary = (f"CI wall time {pct:+.1f}% vs main; not attributable to this PR "
+                           f"(its added/changed test files took {attribution['total_s']:.1f} s)")
 
     # Per-job delta detail (top 5 by absolute change)
     detail_lines: list[str] = []
@@ -1005,6 +1137,12 @@ def generate_review_status(
         deltas.sort(reverse=True)
         for _, name, delta_str in deltas[:5]:
             detail_lines.append(f"- {name}: {delta_str}")
+        if attribution is not None and attribution["files"]:
+            detail_lines.append("")
+            detail_lines.append("This PR's added/changed test files in this run:")
+            for f, s in sorted(attribution["files"].items(), key=lambda kv: -kv[1]):
+                note = " (not run)" if f in attribution["not_run"] else ""
+                detail_lines.append(f"- {f}: {s:.1f} s{note}")
 
     result: dict = {
         "kind": severity,
