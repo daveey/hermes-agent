@@ -1232,7 +1232,7 @@ def create_task(
     completion_contract: Optional[str] = None,
     validate_workspace: bool = False, validate_skills: bool = False,
     human_request: Optional[dict] = None,
-    origin_intent: Optional[dict] = None,
+    origin_intent: Optional[dict] = None, chat_origin: Optional[str] = None,
     requires: Optional[list[str]] = None,
     lint_blocked: bool = True, runs_on: Optional[Iterable[str]] = None, require_declaration: bool = False,
 ) -> str:
@@ -1267,7 +1267,8 @@ def create_task(
 
         return create_with_origin(conn, origin_intent, creation_options)
 
-    from hermes_cli.kanban_db_graph import initial_task_state, inherit_creator_origin
+    from hermes_cli.kanban_db_graph import initial_task_state
+    from hermes_cli.kanban_creator_chats import initialize_ownership
     from hermes_cli.kanban_pr_acceptance import validate_contract
     from hermes_cli.kanban_human_request import validate_initial_request
 
@@ -1396,8 +1397,7 @@ def create_task(
                     human_request=human_request,
                 )
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
-                inherit_creator_origin(conn, task_id, creator_task_id, created_at=now)
-                _inherit_notify_subs(conn, task_id, parents, created_at=now)
+                initialize_ownership(conn, task_id, creator_task_id, parents, now, chat_origin)
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:

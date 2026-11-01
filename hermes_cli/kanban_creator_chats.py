@@ -1,0 +1,158 @@
+"""Resolve worker provenance into durable human chat ownership. [daveey]"""
+from __future__ import annotations
+
+import json
+import sqlite3
+
+MAX_DEPTH = 16
+
+
+def initialize_ownership(conn, task_id, creator_task_id, parents, created_at, chat_origin):
+    """An explicit validated origin wins over ambient worker/ancestor ownership."""
+    from hermes_cli.kanban_db_graph import inherit_creator_origin
+    from hermes_cli.kanban_db_notify import _inherit_notify_subs, is_headless_session
+    from hermes_cli.kanban_db import _append_event
+    from hermes_cli.kanban_origin import parse_origin
+    from hermes_cli.kanban_chat_links import link_uid
+
+    if not chat_origin:
+        inherit_creator_origin(conn, task_id, creator_task_id, created_at=created_at)
+        _inherit_notify_subs(conn, task_id, parents, created_at=created_at)
+        return
+    origin = parse_origin(chat_origin)
+    conn.execute("UPDATE tasks SET session_id=NULL WHERE id=?", (task_id,))
+    _append_event(conn, task_id, "creator_chats_resolved", {"explicit_origin": origin.ref})
+    if is_headless_session(origin.session):
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO kanban_notify_subs "
+        "(task_id,platform,chat_id,thread_id,delivery_mode,delivery_metadata,created_at,last_event_id) "
+        "VALUES (?,'hub',?,'','notify',?, ?, (SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?))",
+        (task_id, origin.chat_id, json.dumps({"reason": "origin"}), created_at, task_id))
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone():
+        conn.execute(
+            "INSERT OR IGNORE INTO task_chat_links "
+            "(uid,task_id,chat_gateway,chat_profile,chat_session,kind,released,created_at) "
+            "VALUES (?,?,?,?,?,'created',0,?)",
+            (link_uid(task_id, origin.gateway, origin.profile, origin.session, "created"), task_id,
+             origin.gateway, origin.profile, origin.session, created_at))
+
+
+def _chat_links(conn: sqlite3.Connection, task_id: str) -> list[dict]:
+    """Include legacy courier origins that have a subscription but no projected link yet."""
+    from hermes_cli.kanban_db_notify import _owning_sub_clause
+    from hermes_cli.kanban_origin import parse_origin, OriginError
+
+    rows = [dict(r) for r in conn.execute("SELECT * FROM task_chat_links WHERE task_id=?", (task_id,))]
+    known = {(r["chat_gateway"], r["chat_profile"] or "default", r["chat_session"]) for r in rows}
+    out = [r for r in rows if not r["released"]]
+    for sub in conn.execute(
+            "SELECT s.* FROM kanban_notify_subs s LEFT JOIN tasks p ON p.id=s.task_id "
+            f"WHERE s.task_id=? AND s.platform='hub' AND {_owning_sub_clause()}", (task_id,)):
+        try:
+            origin = parse_origin(sub["chat_id"])
+        except OriginError:
+            continue
+        key = (origin.gateway, origin.profile, origin.session)
+        if key not in known:
+            out.append({"task_id": task_id, "chat_gateway": origin.gateway, "chat_profile": origin.profile,
+                        "chat_session": origin.session, "created_at": sub["created_at"]})
+            known.add(key)
+    return out
+
+
+def resolve_chats(conn: sqlite3.Connection, creator_task_id: str) -> list[dict]:
+    """Nearest unreleased human links; creator edges precede dependency parents, cycles stop."""
+    from hermes_cli.kanban_db_notify import is_headless_session
+    from hermes_cli.kanban_placement import is_placeholder_session
+
+    frontier, seen = [creator_task_id], set()
+    for _depth in range(MAX_DEPTH):
+        owners, following = {}, []
+        for task_id in frontier:
+            if task_id in seen:
+                continue
+            seen.add(task_id)
+            for row in _chat_links(conn, task_id):
+                if not is_headless_session(row["chat_session"]) and not is_placeholder_session(row["chat_session"]):
+                    key = (row["chat_gateway"], row["chat_profile"], row["chat_session"])
+                    owners.setdefault(key, dict(row))
+            row = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='created' "
+                               "ORDER BY id LIMIT 1", (task_id,)).fetchone()
+            payload = json.loads(row[0] or "{}") if row else {}
+            if payload.get("creator_task_id"):
+                following.append(payload["creator_task_id"])
+            following.extend(r[0] for r in conn.execute(
+                "SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id", (task_id,)))
+        if owners:
+            return list(owners.values())
+        frontier = list(dict.fromkeys(t for t in following if t not in seen))
+        if not frontier:
+            break
+    return []
+
+
+def _copy_delivery(conn: sqlite3.Connection, task_id: str, owner: dict) -> None:
+    """Retain every delivery column, never the source card's notification cursor."""
+    hub_chat = f"{owner['chat_gateway']}/{owner['chat_profile'] or 'default'}/{owner['chat_session']}"
+    conn.execute(
+        "INSERT OR IGNORE INTO kanban_notify_subs "
+        "(task_id, platform, chat_id, thread_id, user_id, user_id_alt, chat_type, notifier_profile, "
+        "delivery_mode, delivery_metadata, created_at, last_event_id) "
+        "SELECT ?, platform, chat_id, thread_id, user_id, user_id_alt, chat_type, notifier_profile, "
+        "delivery_mode, delivery_metadata, unixepoch(), "
+        "(SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?) "
+        "FROM kanban_notify_subs WHERE task_id=? AND "
+        "((platform='hub' AND chat_id=?) OR (platform='tui' AND chat_id=?))",
+        (task_id, task_id, owner["task_id"], hub_chat, owner["chat_session"]))
+
+
+def inherit_chats(conn: sqlite3.Connection, task_id: str, creator_task_id: str) -> None:
+    """Copy a creator's real chat links inside the card creation transaction."""
+    from hermes_cli.kanban_chat_links import link_uid
+    from hermes_cli.kanban_db import _append_event
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone():
+        return
+    owners = resolve_chats(conn, creator_task_id)
+    if not owners:
+        if not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='creator_chats_unresolved'",
+                            (task_id,)).fetchone():
+            _append_event(conn, task_id, "creator_chats_unresolved",
+                          {"task_id": task_id, "creator_task_id": creator_task_id, "max_depth": MAX_DEPTH})
+        return
+    _append_event(conn, task_id, "creator_chats_resolved", {"creator_task_id": creator_task_id})
+    for owner in owners:
+        conn.execute(
+            "INSERT OR IGNORE INTO task_chat_links "
+            "(uid, task_id, chat_gateway, chat_profile, chat_session, kind, released, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'created', 0, ?)",
+            (link_uid(task_id, owner["chat_gateway"], owner["chat_profile"], owner["chat_session"], "created"),
+             task_id, owner["chat_gateway"], owner["chat_profile"], owner["chat_session"], owner["created_at"]))
+        _copy_delivery(conn, task_id, owner)
+
+
+def backfill(conn: sqlite3.Connection) -> dict:
+    """Repair legacy worker creations once; unresolved rows remain discoverable and retryable."""
+    from hermes_cli.kanban_db import write_txn
+    from hermes_cli.kanban_db_notify import is_headless_session
+    from hermes_cli.kanban_placement import is_placeholder_session
+
+    rows = conn.execute(
+        "SELECT t.id, t.session_id, e.payload FROM tasks t JOIN task_events e ON e.task_id=t.id "
+        "AND e.kind='created' WHERE NOT EXISTS (SELECT 1 FROM task_events done WHERE done.task_id=t.id "
+        "AND done.kind='creator_chats_resolved')").fetchall()
+    attempted, unresolved = [], []
+    with write_txn(conn):
+        for row in rows:
+            if row["session_id"] and not (is_headless_session(row["session_id"])
+                                          or is_placeholder_session(row["session_id"])):
+                continue
+            creator = json.loads(row["payload"] or "{}").get("creator_task_id")
+            if not creator:
+                continue
+            inherit_chats(conn, row["id"], creator)
+            attempted.append(row["id"])
+            if not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='creator_chats_resolved'",
+                                (row["id"],)).fetchone():
+                unresolved.append(row["id"])
+    return {"attempted": attempted, "unresolved": unresolved}

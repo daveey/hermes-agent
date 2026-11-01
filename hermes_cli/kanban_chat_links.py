@@ -35,10 +35,9 @@ def link_uid(task_id: str, gateway: str, profile: Optional[str], session: str, k
 
 
 def _worker_shepherd(session: Any, kind: str) -> bool:
-    """A shepherd link on a headless receipt session (Kanban worker / cron transcript): never a chat. [daveey]
-    A ``created`` link from a worker stays: it records which run made the card, it wakes nothing."""
+    """A headless execution receipt is provenance, never a chat destination. [daveey]"""
     from hermes_cli.kanban_db_notify import is_headless_session
-    return kind == "shepherd" and is_headless_session(session)
+    return is_headless_session(session)
 
 
 def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, Any]]:
@@ -55,6 +54,12 @@ def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, 
         out[uid] = {"uid": uid, "task_id": task_id, "chat_gateway": gateway, "chat_profile": None,
                     "chat_session": session, "kind": kind, "released": 0, "created_at": int(created_at or now)}
 
+    for row in conn.execute(
+            "SELECT l.* FROM task_chat_links l WHERE l.chat_gateway=? AND l.kind='created' "
+            "AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=l.task_id "
+            "AND e.kind='creator_chats_resolved')", (gateway,)):
+        if not _worker_shepherd(row["chat_session"], row["kind"]):
+            out[row["uid"]] = dict(row)
     for task_id, session, created_at in conn.execute(
             "SELECT id, session_id, created_at FROM tasks WHERE session_id IS NOT NULL AND session_id != ''"):
         add(task_id, session, "created", created_at)
@@ -99,6 +104,8 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
     """Bring this gateway's links in ``conn`` (one board file) up to date. Writes go through the capture triggers,
     so every new or changed link is pushed to the service. Returns counts of added/changed/released links."""
     from hermes_cli.kanban_db_connect import write_txn
+    from hermes_cli.kanban_creator_chats import backfill
+    backfill(conn)
     want = _local_links(conn, gateway)
     if ledger:
         want.update(_ledger_links(board, gateway))

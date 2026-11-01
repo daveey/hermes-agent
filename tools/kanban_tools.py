@@ -1766,7 +1766,7 @@ def _handle_create(args: dict, **kw) -> str:
             initial_status=str(args.get("initial_status") or "running"),
             human_request=kb.redact_review_value(args.get("human_request")),
             created_by=_persisted_identity(), session_id=session_id,
-            origin_intent=origin_intent,
+            origin_intent=origin_intent, chat_origin=origin.ref if origin else args.get("origin_session"),
             # Reject a worktree path the dispatcher could never resolve now, to the
             # creator, instead of burning spawn retries on it later. [daveey]
             validate_workspace=True, validate_skills=True)

@@ -70,8 +70,7 @@ WORKER = "local-" + "7c" * 32  # a Kanban worker / cron receipt session: never a
 
 def test_a_worker_transcript_gets_no_shepherd_link_and_an_old_one_is_retired(live, monkeypatch):
     """Hub card t_a989e5e0: worker transcripts held shepherd subs/links, so its notice and wake went to sessions that
-    refuse them (4132). A worker's shepherd link is never written and an existing one is deleted; a worker's
-    ``created`` link (which run made the card) stays."""
+    refuse them (4132). No worker link is written; provenance belongs in task events, not chat ownership."""
     monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: [_ledger_row("t_remote", WORKER)])
     mine = kb.create_task(live, title="mine", assignee="worker", session_id=WORKER)
     with kbc.write_txn(live):
@@ -84,7 +83,7 @@ def test_a_worker_transcript_gets_no_shepherd_link_and_an_old_one_is_retired(liv
                      (links.link_uid("t_old", ME, None, WORKER, "shepherd"), ME, WORKER))
     out = links.reconcile(live, "default", ME)
     assert out["retired"] == 1
-    assert _links(live) == {(mine, WORKER, "created", 0), (mine, "s_chat", "shepherd", 0)}
+    assert _links(live) == {(mine, "s_chat", "shepherd", 0)}
 
 
 def test_reconcile_carries_this_gateways_ledger_links_and_their_release(live, monkeypatch):

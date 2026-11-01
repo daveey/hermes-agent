@@ -496,6 +496,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 conn, title=args.title, body=body,
                 assignee=assignee,
                 session_id=session_id, requires=getattr(args, "requires", None),
+                chat_origin=origin.ref if origin else getattr(args, "origin_session", None),
                 # [daveey] Same declaration gate as the kanban_create tool, for agent/worker shells only.
                 require_declaration=(in_worker or _agent_invoked()) and declaration_required(),
                 created_by=args.created_by or _profile_author(),
