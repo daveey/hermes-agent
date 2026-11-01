@@ -30,14 +30,13 @@ def _alive(pid: int) -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    if Path(f"/proc/{pid}/stat").exists():  # Linux: a zombie is dead
-        try:
-            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-        except FileNotFoundError:
-            # The reaper can remove procfs state after the existence check.
-            return False
-        return stat[stat.rfind(")") + 2:][:1] != "Z"
-    return True
+    if not sys.platform.startswith("linux"):
+        return True
+    try:  # Linux: a zombie is dead
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except (FileNotFoundError, ProcessLookupError):
+        return False  # reaped after the signal probe: an orphan's reaper runs at any moment
+    return stat[stat.rfind(")") + 2:][:1] != "Z"
 
 
 @pytest.mark.platforms("linux")
