@@ -90,7 +90,7 @@ def _last_full_good_backup(candidates: list[Path]) -> Optional[Path]:
     counts = []
     for path in candidates:
         try:
-            doc = fast_safe_load(path.read_text(encoding="utf-8"))
+            doc = fast_safe_load(path.read_text(encoding="utf-8-sig"))
         except Exception:
             counts.append(0)
         else:
