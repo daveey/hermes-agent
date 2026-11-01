@@ -45,7 +45,62 @@ def validate_human_request(value: Any, *, kind: str | None = None) -> dict | Non
     request = {field: value[field].strip() for field in FIELDS}
     if value.get("choices") is not None:
         request["choices"] = _validate_choices(value["choices"])
+    request.update(_validate_resolved_check(value))
     return request
+
+
+# [daveey] ``resolved_check``: a probe that exits 0 once David's step happened outside Hermes (kanban_ask_resolved).
+RESOLVED_CHECK_EVERY_DEFAULT, RESOLVED_CHECK_EVERY_MIN, RESOLVED_CHECK_EVERY_MAX = 900, 120, 21600
+RESOLVED_CHECK_MAX_CHARS = 2000
+RESOLVED_CHECK_SECRET = "resolved_check_secret"
+
+
+class ResolvedCheckRefused(ValueError):
+    """A resolved_check refused before or at filing; ``code`` is the stable refusal code (``kanban_ask_resolved``).
+    ``str()`` is the whole message, starting with the code; tool handlers render ``tool_error_fields``."""
+
+    def __init__(self, message: str, code: str):
+        self.code = code
+        self.tool_error_fields = {"rejection": code}
+        super().__init__(message)
+
+
+def _refuse_secret(cmd: str) -> None:
+    """The stored ask is redacted (``kanban_db.redact_review_value``) and the sweep runs the stored text, so a
+    probe whose redacted form differs would be stored broken, and with its secret if it were not redacted. Refuse
+    it before anything runs it; the message shows only the redacted form."""
+    from agent.redact import redact_sensitive_text
+
+    redacted = redact_sensitive_text(cmd, force=True)
+    if redacted == cmd:
+        return
+    raise ResolvedCheckRefused(
+        f"{RESOLVED_CHECK_SECRET}: human_request.resolved_check contains a secret or a credential-shaped value "
+        f"(stored it would read `{redacted}`, a different command), so it was not run or filed. Never inline a "
+        "secret: put the check in a script the probe runs (e.g. `sh ~/bin/check-pairing.sh`) that fetches the "
+        "secret itself (`aws secretsmanager get-secret-value ...`, token-broker), or read a header file "
+        "(`curl -H @$HOME/.hub-auth ...`).", RESOLVED_CHECK_SECRET)
+
+
+def _validate_resolved_check(value: dict) -> dict:
+    cmd, every = value.get("resolved_check"), value.get("resolved_check_every")
+    if cmd is None:
+        if every is not None:
+            raise ValueError("human_request resolved_check_every needs a resolved_check")
+        return {}
+    if not isinstance(cmd, str) or not cmd.strip():
+        raise ValueError("human_request resolved_check must be a non-empty shell command string")
+    if len(cmd.strip()) > RESOLVED_CHECK_MAX_CHARS:
+        raise ValueError(f"human_request resolved_check is longer than {RESOLVED_CHECK_MAX_CHARS} chars; "
+                         "put it in a script")
+    _refuse_secret(cmd)  # the raw text: redact(raw) == raw is what makes the stored command the filed one
+    if every is None:
+        every = RESOLVED_CHECK_EVERY_DEFAULT
+    if (not isinstance(every, int) or isinstance(every, bool)
+            or not RESOLVED_CHECK_EVERY_MIN <= every <= RESOLVED_CHECK_EVERY_MAX):
+        raise ValueError(f"human_request resolved_check_every must be an integer number of seconds between "
+                         f"{RESOLVED_CHECK_EVERY_MIN} and {RESOLVED_CHECK_EVERY_MAX}")
+    return {"resolved_check": cmd.strip(), "resolved_check_every": every}
 
 
 def needs_human(value: Any, *, kind: str | None = None) -> bool:

@@ -482,12 +482,19 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_skill_check import UnknownSkillError
         from hermes_cli.kanban_capabilities import RequiresDeclarationMissing, declaration_required
         from hermes_cli.kanban_worker_node import MachinePinRefused, check_machine_pins
+        from hermes_cli.kanban_ask_resolved import AskFilingRefused, check_create_filing, create_context
+        assignee = (args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
+                    or _cli_default_assignee(args))
         try:
+            # [daveey] A blocked ask's resolved_check runs once first, as the sweep will run it for this assignee
+            # and workspace: already met or broken refuses the create. A key hit returns the card: no probe.
+            check_create_filing(getattr(args, "human_request", None),
+                                None if idem_hit else getattr(args, "initial_status", None),
+                                context=create_context(conn, ws_path, assignee))
             check_machine_pins(conn, getattr(args, "runs_on", None))  # explicit pins need pickup [daveey]
             task_id = kb.create_task(
                 conn, title=args.title, body=body,
-                assignee=args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
-                or _cli_default_assignee(args),
+                assignee=assignee,
                 session_id=session_id, requires=getattr(args, "requires", None),
                 # [daveey] Same declaration gate as the kanban_create tool, for agent/worker shells only.
                 require_declaration=(in_worker or _agent_invoked()) and declaration_required(),
@@ -511,7 +518,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
             )
         except WorktreeWorkspaceConfigError as exc:
             return _err(f"kanban: --workspace: {exc}", 2)
-        except (CapabilityMismatchError, UnknownSkillError, RequiresDeclarationMissing, MachinePinRefused) as exc:
+        except (CapabilityMismatchError, UnknownSkillError, RequiresDeclarationMissing, MachinePinRefused,
+                AskFilingRefused) as exc:
             return _err(f"kanban: {exc.code}: {exc}", 2)
         except (PinProviderUnresolvedError, ModelProviderMismatchError) as exc:
             return _err(f"kanban: {exc}", 2)
@@ -1321,6 +1329,15 @@ def _cmd_block(args: argparse.Namespace) -> int:
         return routed
     from hermes_cli.kanban_human_request import validate_human_request
     request = validate_human_request(getattr(args, "human_request", None), kind=kind)
+    from hermes_cli.kanban_ask_resolved import filing_refusal, resolved_check
+    refused_ask = None
+    if resolved_check(request)[0]:  # [daveey] run per card before any ask is filed, as the sweep will run it
+        with kbc.connect_closing() as conn:
+            refused_ask = filing_refusal(conn, _bulk_ids(args), request)
+    if refused_ask:
+        tid, filed = refused_ask
+        return _err(f"kanban block: {filed}" + (f" (card {tid}; nothing was blocked)"
+                                                 if len(_bulk_ids(args) or ()) > 1 else ""), 2)
     if getattr(args, "metadata_only", False):
         from hermes_cli.kanban_human_request_migration import classify_cli_request
         return classify_cli_request(args, request, reason)

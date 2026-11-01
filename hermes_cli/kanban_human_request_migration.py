@@ -1,5 +1,4 @@
 """Explicit, audited classification of legacy parked cards; never unblock them."""
-import json
 import os
 
 from hermes_cli.kanban_human_request import validate_human_request
@@ -33,11 +32,12 @@ def classify_parked_request(conn, task_id: str, *, human_request: dict | None,
         if row is None or row["status"] not in ("blocked", "triage") or row["current_run_id"] is not None:
             return False
         request = validate_human_request(human_request, kind=row["block_kind"])
-        conn.execute("UPDATE tasks SET human_request = ? WHERE id = ?",
-                     (json.dumps(request) if request else None, task_id))
+        from hermes_cli.kanban_ask_resolved import filing_fields, store_request
+        store_request(conn, task_id, request)  # adds, changes or removes the resolved_check probe [daveey]
         db._append_event(conn, task_id, "blocked", {
             "human_request": request, "kind": row["block_kind"], "reason": reason,
             "actor": actor, "classified_in_place": True, "metadata_only": True,
+            **(filing_fields(conn, request) if row["status"] == "blocked" else {}),
         })
         return True
 

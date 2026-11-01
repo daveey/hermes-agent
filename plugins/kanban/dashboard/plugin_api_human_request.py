@@ -1,4 +1,6 @@
-"""Trusted actor resolution for audited human-request classification."""
+"""Trusted actor resolution for audited human-request classification, and the request writes it gates."""
+from typing import Optional
+
 from fastapi import HTTPException, Request
 
 
@@ -20,3 +22,21 @@ def classification_actor(request: Request) -> str:
         assert session is not None  # enforced by the canonical gate above
         return f"dashboard:{session.provider}:{session.user_id}"
     return "dashboard:loopback-token"
+
+
+def classify_request(conn, task_id, payload, actor: str) -> bool:
+    from hermes_cli.kanban_human_request_migration import classify_parked_request
+
+    return classify_parked_request(conn, task_id, human_request=payload.human_request,
+                                   actor=actor, reason=payload.block_reason)
+
+
+def ask_filing_refusal(conn, task_id: str, payload) -> Optional[str]:
+    """[daveey] An ask filed with a ``resolved_check`` (block or metadata-only) runs it once first, in the card's
+    sweep context, as every other filing path does (``kanban_ask_resolved``): exit 0 or a broken probe refuses."""
+    if not (payload.metadata_only or payload.status == "blocked"):
+        return None
+    from hermes_cli.kanban_ask_resolved import filing_refusal
+
+    hit = filing_refusal(conn, [task_id], payload.human_request)
+    return hit[1] if hit else None

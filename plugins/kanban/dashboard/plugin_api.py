@@ -40,6 +40,7 @@ from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_diagnostics as kd
 from plugins.kanban.dashboard.board_diagnostics import _attach_diagnostics, _warnings_summary_from_diagnostics
+from plugins.kanban.dashboard.plugin_api_human_request import ask_filing_refusal, classify_request
 from hermes_cli.kanban_db import KANBAN_ATTACHMENT_MAX_BYTES, _collision_free_path, _safe_attachment_name
 
 log = logging.getLogger(__name__)
@@ -739,13 +740,6 @@ def _validate_request_entry(payload) -> None:
                 raise ValueError("human_request/block_kind require blocked status or metadata_only classification")
 
 
-def _classify_request(conn, task_id, payload, actor: str) -> bool:
-    from hermes_cli.kanban_human_request_migration import classify_parked_request
-
-    return classify_parked_request(conn, task_id, human_request=payload.human_request,
-                                   actor=actor, reason=payload.block_reason)
-
-
 _RUNNING_DIRECT_MSG = "Cannot set status to 'running' directly; use the dispatcher/claim path"
 
 
@@ -888,9 +882,11 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
     actor = classification_actor(request) if payload.metadata_only else ""
     with _board_conn(board) as (board, conn):
         _require_task(conn, task_id)
+        if (refusal := ask_filing_refusal(conn, task_id, payload)):
+            raise _conflict(refusal)
         if payload.metadata_only:
             with _value_error_400():
-                if not _classify_request(conn, task_id, payload, actor):
+                if not classify_request(conn, task_id, payload, actor):
                     raise _conflict("classification requires parked card without a current run")
         # For a combined assignee+review patch, request_review must capture the
         # current implementer before the task is routed to the reviewer.
@@ -1030,8 +1026,11 @@ def delete_link(parent_id: str = Query(...), child_id: str = Query(...), board: 
 def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str], entry: dict, actor: str = "") -> None:
     """Apply the bulk patch to one task, recording refusals in ``entry`` without aborting the
     remaining ops — except a rejected status verb (``_StatusRejected`` propagates)."""
+    if (refusal := ask_filing_refusal(conn, tid, payload)):
+        entry.update(ok=False, error=refusal)
+        return
     if payload.metadata_only:
-        if not _classify_request(conn, tid, payload, actor):
+        if not classify_request(conn, tid, payload, actor):
             entry.update(ok=False, error="classification requires parked card without a current run")
         return
     if payload.archive:
