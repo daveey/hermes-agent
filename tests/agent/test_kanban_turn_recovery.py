@@ -51,6 +51,11 @@ KANBAN_ENV = (
 _FAR_FUTURE_EXPIRY = 4_102_444_800
 
 
+@pytest.fixture(autouse=True)
+def online_network(monkeypatch):
+    monkeypatch.setattr("agent.retry_utils.host_resolves", lambda *a, **k: True)
+
+
 @pytest.fixture
 def clear_kanban_env(monkeypatch):
     for var in KANBAN_ENV:

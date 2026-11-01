@@ -141,6 +141,11 @@ _SUCCESS = {"failed": False, "completed": True, "final_response": "done", "messa
 _SLEEP_S = 4 * 3600 + 33 * 60  # 16:57:52 -> 21:31:30
 
 
+@pytest.fixture(autouse=True)
+def online_network(monkeypatch):
+    monkeypatch.setattr("agent.retry_utils.host_resolves", lambda *a, **k: True)
+
+
 @pytest.fixture
 def submitter():
     """The dispatcher-spawned submitter process: alive the whole time the owner runs turns."""
@@ -276,6 +281,187 @@ def test_lapsed_lease_is_renewed_and_the_run_survives(slept_worker, failure):
     assert (task.consecutive_failures or 0) == 0
     runs = conn.execute("SELECT id FROM task_runs WHERE task_id = ?", (context["task_id"],)).fetchall()
     assert [r[0] for r in runs] == [context["run_id"]]  # no duplicate attempt
+
+
+@pytest.mark.parametrize("failure", [pytest.param(_CODEX_OFFLINE, id="codex-offline"),
+                                     pytest.param(_ANTHROPIC_STALE, id="anthropic-stale")])
+def test_repeated_offline_darkwakes_preserve_the_run(slept_worker, monkeypatch, failure):
+    """Each DNS recovery is followed by another offline turn, beyond the ordinary retry budget."""
+    import agent.kanban_turn_recovery as rec
+    import agent.retry_utils as retry
+    from hermes_cli import kanban_db as kb
+
+    further_failures = rec.DEFAULT_MAX_RECOVERY_ATTEMPTS + 2
+    clock = {"awake": 0.0, "wall": time.time(), "offline": 0, "until": 0.0}
+
+    class Outages(list):
+        def __getitem__(self, index):
+            result = super().__getitem__(index)
+            if index:
+                assert clock["awake"] >= clock["until"], "model re-entered while still offline"
+            # The first outage outlasts even the per-request 900-awake-second wait.
+            clock["until"] = clock["awake"] + (1000 if index == 0 else 30)
+            return result
+
+    def resolve(_host, **_kwargs):
+        online = clock["awake"] >= clock["until"]
+        clock["offline"] += not online
+        return online
+
+    def darkwake(seconds):
+        clock["awake"] += seconds
+        clock["wall"] += seconds + 3600  # an hour asleep does not spend awake time
+
+    def wake(n, conn, context):
+        _dispatcher_tick(n, conn, context)
+        darkwake(15)
+
+    monkeypatch.setattr(rec, "_awake_clock", lambda: clock["awake"])
+    monkeypatch.setattr(retry, "host_resolves", resolve)
+    monkeypatch.setattr(retry, "_OFFLINE_SLICE_S", 30)
+    # Isolate fake clocks from subprocess/SQLite clocks. Only the DNS boundary and sleep
+    # are fake; real claim checks and dispatcher renewal still run against the fixture DB.
+    monkeypatch.setattr(retry, "time", SimpleNamespace(
+        monotonic=lambda: clock["awake"], time=lambda: clock["wall"], sleep=darkwake,
+    ))
+    run, entered, context, conn = slept_worker(
+        Outages([failure] * (1 + further_failures) + [_SUCCESS]), on_sleep=wake,
+    )
+
+    assert run() == 0
+    assert len(entered) == further_failures + 2
+    assert clock["offline"] >= further_failures
+    task = kb.get_task(conn, context["task_id"])
+    assert task.status == "running" and task.current_run_id == context["run_id"]
+    assert task.claim_lock == context["claim_lock"]
+    assert (task.consecutive_failures or 0) == 0
+    runs = conn.execute("SELECT id FROM task_runs WHERE task_id=?", (context["task_id"],)).fetchall()
+    assert [row[0] for row in runs] == [context["run_id"]]
+    assert not {"reclaimed", "crashed", "timed_out", "heartbeat_stale"} & {
+        event.kind for event in kb.list_events(conn, context["task_id"])
+    }
+
+
+def test_offline_claim_loss_does_not_spend_an_attempt(monkeypatch):
+    import agent.kanban_turn_recovery as rec
+    import agent.retry_utils as retry
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_offline")
+    monkeypatch.delenv("HERMES_KANBAN_TURN_RECOVERY", raising=False)
+    live = {"value": True}
+
+    def resolve(_host, **_kwargs):
+        live["value"] = False
+        return False
+
+    monkeypatch.setattr(retry, "host_resolves", resolve)
+    turns, sleeps = [], []
+    attempts = rec.recover_failed_kanban_turns(
+        turns.append, lambda: _CODEX_OFFLINE, claim_check=lambda: live["value"],
+        sleep_fn=sleeps.append,
+    )
+    assert attempts == 0
+    assert turns == []
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("failure,online,expected", [
+    pytest.param(_CODEX_OFFLINE, True, 3, id="online-codex-is-bounded"),
+    pytest.param(_ANTHROPIC_STALE, True, 3, id="online-anthropic-is-bounded"),
+    pytest.param({**_CODEX_OFFLINE, "failure_reason": "server_error", "error": "HTTP 500"},
+                 False, 3, id="non-network-never-probes"),
+    pytest.param({**_CODEX_OFFLINE, "failure_reason": "billing"}, False, 0, id="billing-never-probes"),
+    pytest.param({**_CODEX_OFFLINE, "interrupted": True}, False, 0, id="cancelled-never-probes"),
+    pytest.param({**_CODEX_OFFLINE, "turn_exit_reason": "max_iterations_reached(5/5)"},
+                 False, 0, id="settled-never-probes"),
+])
+def test_offline_gate_preserves_normal_retry_authority(monkeypatch, failure, online, expected):
+    import agent.kanban_turn_recovery as rec
+    import agent.retry_utils as retry
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_probe")
+    monkeypatch.setenv("HERMES_KANBAN_TURN_RECOVERY", "3")
+
+    def resolve(_host, **_kwargs):
+        assert online, "a non-network or unauthorized failure probed DNS"
+        return True
+
+    monkeypatch.setattr(retry, "host_resolves", resolve)
+    turns = []
+    attempts = rec.recover_failed_kanban_turns(
+        turns.append, lambda: failure, claim_check=lambda: True, sleep_fn=lambda _seconds: None,
+    )
+    assert attempts == expected
+    assert len(turns) == expected
+
+
+@pytest.mark.parametrize("steal", ["reclaim", "relock"])
+def test_offline_wait_still_fences_a_stolen_run(slept_worker, monkeypatch, steal):
+    import agent.retry_utils as retry
+
+    run, entered, context, conn = slept_worker([_CODEX_OFFLINE, _SUCCESS], on_sleep=_dispatcher_tick)
+
+    def resolve(_host, **_kwargs):
+        (_steal if steal == "reclaim" else _relock_in_place)(1, conn, context)
+        return False
+
+    monkeypatch.setattr(retry, "host_resolves", resolve)
+    assert run() == KANBAN_RATE_LIMIT_EXIT_CODE
+    assert len(entered) == 1
+
+
+def test_mixed_offline_and_online_failures_only_charge_online_attempts(monkeypatch):
+    import agent.kanban_turn_recovery as rec
+    import agent.retry_utils as retry
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_mixed")
+    monkeypatch.setenv("HERMES_KANBAN_TURN_RECOVERY", "3")
+    clock = {"awake": 0.0, "until": 5.0}
+    charged = []
+
+    def turn(_nudge):
+        # Alternate a real offline wait with an online timeout; never succeed.
+        charged.append(clock["until"] == 0)
+        clock["until"] = clock["awake"] + 5 if charged[-1] else 0
+
+    monkeypatch.setattr(retry, "host_resolves", lambda *a, **k: clock["awake"] >= clock["until"])
+    monkeypatch.setattr(retry, "time", SimpleNamespace(
+        monotonic=lambda: clock["awake"],
+        sleep=lambda seconds: clock.__setitem__("awake", clock["awake"] + seconds),
+    ))
+    attempts = rec.recover_failed_kanban_turns(
+        turn, lambda: _CODEX_OFFLINE, claim_check=lambda: True, sleep_fn=lambda _seconds: None,
+    )
+    assert attempts == sum(charged) == 3
+    assert charged.count(False) > rec.DEFAULT_MAX_RECOVERY_ATTEMPTS
+
+
+@pytest.mark.parametrize("dns", ["blocked-control", "single-blip"])
+def test_one_failed_control_lookup_is_not_an_offline_exemption(monkeypatch, dns):
+    import agent.kanban_turn_recovery as rec
+    import agent.retry_utils as retry
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_probe")
+    probes = []
+
+    def resolve(host, **_kwargs):
+        probes.append(host)
+        if dns == "blocked-control":
+            if len(probes) > 5:
+                pytest.fail("waiting on one blocked control despite working DNS")
+            return host != retry.NETWORK_CONTROL_HOST
+        return len(probes) > 1
+
+    monkeypatch.setattr(retry, "host_resolves", resolve)
+    # A blocked-control regression should fail immediately, not sleep on the real network.
+    monkeypatch.setattr(retry, "time", SimpleNamespace(monotonic=lambda: 0,
+        sleep=lambda _s: pytest.fail("unnecessary offline wait")))
+    result = {"value": _CODEX_OFFLINE}
+    attempts = rec.recover_failed_kanban_turns(
+        lambda _n: result.update(value=_SUCCESS), lambda: result["value"],
+        claim_check=lambda: True, sleep_fn=lambda _seconds: None,
+    )
+    assert attempts == 1
 
 
 def _steal(n, conn, context):

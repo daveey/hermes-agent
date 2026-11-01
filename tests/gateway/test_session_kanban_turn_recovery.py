@@ -28,6 +28,7 @@ class _Agent:
 
 
 def _claimed_frame(tmp_path, monkeypatch, *, expired=False, goal_mode=False):
+    monkeypatch.setattr("agent.retry_utils.host_resolves", lambda *a, **k: True)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("HERMES_KANBAN_TURN_RECOVERY", raising=False)
     # The owner/gateway process carries a FOREIGN (stale) env carrier: the proof must ignore it.

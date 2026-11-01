@@ -419,6 +419,44 @@ def _emit_recovery_skipped(emit: Optional[Callable[[str], None]], task_id: Optio
             logger.debug("kanban turn-recovery emit failed", exc_info=True)
 
 
+def wait_out_worker_offline(result: dict, check: Callable[[], bool]) -> Optional[bool]:
+    """Return True after observed offline waiting, False if online/non-network, None if fenced.
+
+    Unlike the per-request wait, this worker wait is bounded by its externally owned claim, not
+    a retry budget. Each DNS wait uses awake time, so successive networkless DarkWakes cannot
+    exhaust it. No lease is written here. DNS availability is only permission to retry, not proof
+    the provider is reachable; failures with working DNS still spend the normal bounded budget.
+    """
+    from agent.retry_utils import (
+        DEFAULT_OFFLINE_WAIT_SECONDS, NETWORK_CONTROL_HOST, host_resolves,
+        is_local_network_error, wait_for_network,
+    )
+
+    if (result.get("failure_reason") != FailoverReason.timeout.value
+            and not is_local_network_error(result.get("error") or "")):
+        return False
+    # A blocked/sinkholed control name alone is not evidence that the host is offline.
+    def resolves(_host: str) -> bool:
+        return host_resolves(NETWORK_CONTROL_HOST) or host_resolves("example.com")
+
+    if resolves(NETWORK_CONTROL_HOST):
+        return False
+    waited = False
+    while check():
+        outcome, _spent = wait_for_network(
+            NETWORK_CONTROL_HOST, budget_s=DEFAULT_OFFLINE_WAIT_SECONDS,
+            is_interrupted=lambda: not check(), resolve=resolves,
+        )
+        if outcome == "online":
+            return True
+        if outcome == "already_online":
+            return waited  # one transient failed lookup is not an uncharged retry
+        if outcome != "exhausted":
+            return None
+        waited = True
+    return None
+
+
 def recover_failed_kanban_turns(
     turn_fn: Callable[[str], Any],
     get_result: Callable[[], Any],
@@ -429,14 +467,15 @@ def recover_failed_kanban_turns(
     task_id: Optional[str] = None,
     claim_state: Optional[Callable[[], str]] = None,
 ) -> int:
-    """Retry an authorised kanban worker turn in place; returns attempts made.
+    """Retry an authorised kanban worker turn in place; returns charged (online) attempts.
 
     ``turn_fn(nudge)`` runs one more turn with the given synthetic user message.
     ``get_result()`` returns the LATEST settled turn result (``None`` stops the
     loop). Before EVERY attempt the worker must still own its live run/claim
     (``claim_state``, default :func:`worker_claim_state`; or a boolean
-    ``claim_check``); the loop is bounded by the attempt budget even when
-    ``get_result`` never changes. The loop deliberately does NOT extend its own
+    ``claim_check``); online failures are bounded by the attempt budget. Observed local DNS
+    outages on network-class failures wait without spending that budget, fenced by the claim.
+    The loop deliberately does NOT extend its own
     claim lease — self-holding a claim is claim-lifetime policy (#95318), not this
     module's. A lease that is merely ``"lapsed"`` (every coordinate still ours, the
     expiry passed while the host slept and froze the dispatcher that renews it) is
@@ -460,16 +499,24 @@ def recover_failed_kanban_turns(
 
     while True:
         result = get_result()
-        if not should_recover_turn(result, attempt=attempts, task_id=task_id):
+        if not should_recover_turn(result, attempt=0, task_id=task_id):
             return attempts
         if not check():
             _emit_recovery_skipped(emit, task_id)
             return attempts
-        attempts += 1
-        delay = recovery_delay_seconds(attempts)
+        offline = wait_out_worker_offline(result, check)
+        if offline is None:
+            _emit_recovery_skipped(emit, task_id)
+            return attempts
+        if not offline and attempts >= max_recovery_attempts():
+            return attempts
+        if not offline:
+            attempts += 1
+        delay = recovery_delay_seconds(max(attempts, 1))
+        budget_note = "offline recovery uncharged" if offline else f"attempt {attempts}/{max_recovery_attempts()}"
         message = (
             f"[kanban] provider failure on {_resolve_task_id(task_id) or 'task'} — retrying the turn in place "
-            f"(attempt {attempts}/{max_recovery_attempts()}) after {int(delay)}s; session context preserved"
+            f"({budget_note}) after {int(delay)}s; session context preserved"
         )
         logger.warning("%s", message)
         if emit is not None:
@@ -485,7 +532,7 @@ def recover_failed_kanban_turns(
         if not check():
             _emit_recovery_skipped(emit, task_id)
             return attempts
-        turn_fn(build_recovery_nudge(result, attempt=attempts, max_attempts=max_recovery_attempts(),
+        turn_fn(build_recovery_nudge(result, attempt=max(attempts, 1), max_attempts=max_recovery_attempts(),
                                      task_id=task_id))
 
 
