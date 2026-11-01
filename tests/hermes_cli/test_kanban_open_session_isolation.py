@@ -14,8 +14,8 @@ import pytest
 
 
 @pytest.mark.platforms("linux", "macos")
-@pytest.mark.parametrize("http", [False, True])
-def test_busy_board_open_does_not_block_session_poll(tmp_path, monkeypatch, http):
+@pytest.mark.parametrize("http,discover_board", [(False, False), (True, False), (True, True)])
+def test_busy_board_open_does_not_block_session_poll(tmp_path, monkeypatch, http, discover_board):
     state_path = tmp_path / "state.db"
     writer = SessionDB(db_path=state_path)
     writer.create_session("poll-target", source="cli")
@@ -31,6 +31,10 @@ def test_busy_board_open_does_not_block_session_poll(tmp_path, monkeypatch, http
     client = TestClient(app)
     assert client.get("/api/sessions/poll-target").status_code == 200
     board_path = tmp_path / "board.db"
+    if discover_board:
+        from hermes_cli import kanban_session_activity as activity
+        activity._reset_cache_for_tests()
+        monkeypatch.setattr(activity, "_board_db_paths", lambda: [board_path])
     blocker = sqlite3.connect(board_path)
     blocker.execute("PRAGMA journal_mode=DELETE")
     blocker.execute("CREATE TABLE marker(value)")
@@ -58,6 +62,8 @@ def test_busy_board_open_does_not_block_session_poll(tmp_path, monkeypatch, http
             response = client.get("/api/sessions/poll-target")
             assert response.status_code == 200
             assert response.json()["id"] == "poll-target"
+            if discover_board:
+                assert response.json()["kanban_unknown"] is True
         else:
             db = _open_session_db_at_path(state_path, read_only=True)
             try:

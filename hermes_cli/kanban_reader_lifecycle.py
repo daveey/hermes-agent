@@ -3,7 +3,7 @@ import os
 import sqlite3
 import threading
 
-from hermes_cli.kanban_generation import DeletedWalGenerationError, lifecycle_lock
+from hermes_cli.kanban_generation import DeletedWalGenerationError, lifecycle_access
 
 
 def cached_entry(path):
@@ -13,7 +13,7 @@ def cached_entry(path):
     key = str(path)
     # Same-board opens/last closes are atomic; registry locks protect only map
     # operations. Borrowers never wait for this board lock while holding the map.
-    with lifecycle_lock(path):
+    with lifecycle_access(path, timeout=0.5):
         activity._recover_generation(path)
         try:
             st = os.stat(path)

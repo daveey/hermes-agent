@@ -38,6 +38,18 @@ def lifecycle_lock(database):
         return lock
 
 
+@contextmanager
+def lifecycle_access(database, timeout):
+    """A reader keeps its own busy budget even behind a long-timeout opener."""
+    lock = lifecycle_lock(database)
+    if not lock.acquire(timeout=max(0.0, float(timeout))):
+        raise sqlite3.OperationalError("database is locked: board lifecycle is busy")
+    try:
+        yield lock
+    finally:
+        lock.release()
+
+
 class DeletedWalGenerationError(sqlite3.OperationalError):
     """Retry after the remaining active handles leave the dead WAL generation."""
 

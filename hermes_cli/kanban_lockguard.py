@@ -55,23 +55,24 @@ def _release(conn: Any) -> None:
         fin()  # runs hermes_state_lockguard.release(held) exactly once
 
 
-class _LifecycleMixin:
-    def close(self) -> None:
-        # Must wrap BOTH tracking and guard close, even with an already-guarded
-        # custom factory: no board-lock wait while holding the tracking lock.
-        with getattr(self, "_hermes_lifecycle_lock", nullcontext()):
-            super().close()
-
-
 _lifecycle_factory_cache: dict[type, type] = {}
 
 
 def lifecycle_factory(factory: type) -> type:
-    if issubclass(factory, _LifecycleMixin):
+    # Inherited lifecycle support is not enough: a tracking wrapper may now
+    # precede it. Always put this method outside any newly composed wrappers.
+    if factory.__dict__.get("_hermes_outer_lifecycle", False):
         return factory
     cached = _lifecycle_factory_cache.get(factory)
     if cached is None:
-        cached = type(f"Lifecycle{factory.__name__}", (_LifecycleMixin, factory), {})
+        class LifecycleConnection(factory):
+            _hermes_outer_lifecycle = True
+
+            def close(self) -> None:
+                with getattr(self, "_hermes_lifecycle_lock", nullcontext()):
+                    super().close()
+
+        cached = LifecycleConnection
         _lifecycle_factory_cache[factory] = cached
     return cached
 
@@ -171,9 +172,9 @@ def guard(conn: sqlite3.Connection) -> bool:
 
 def connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
     """Drop-in ``sqlite3.connect`` for Kanban board files: same arguments, guarded result."""
-    from hermes_cli.kanban_generation import lifecycle_lock, recover, remember
-    lock = lifecycle_lock(database)
-    with lock:
+    from hermes_cli.kanban_generation import lifecycle_access, recover, remember
+    timeout = args[0] if args else kwargs.get("timeout", 5.0)
+    with lifecycle_access(database, timeout) as lock:
         recover(database)
         kwargs["factory"] = lifecycle_factory(guarded_factory(kwargs.get("factory", sqlite3.Connection)))
         conn = sqlite3.connect(database, *args, **kwargs)
