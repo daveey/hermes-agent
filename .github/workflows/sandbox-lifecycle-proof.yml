@@ -24,4 +24,4 @@ jobs:
           uname -a
       - name: Regression and lifecycle controls
         run: |
-          HERMES_TEST_FILE_RETRIES=0 scripts/run_tests.sh tests/ci/test_plugin_sandbox_normal_exit.py tests/ci/test_plugin_sandbox_lifecycle.py tests/ci/test_plugin_validation_sandbox.py -v
+          HERMES_TEST_FILE_RETRIES=0 scripts/run_tests.sh tests/ci/test_plugin_sandbox_startup.py tests/ci/test_plugin_sandbox_normal_exit.py tests/ci/test_plugin_sandbox_lifecycle.py tests/ci/test_plugin_validation_sandbox.py -v
