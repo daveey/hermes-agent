@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Query
 
 from hermes_cli.session_listing import automated_session_sources, stamp_automated, subagent_listing_scope
+from hermes_cli.profile_session_scan_cache import ProfileSessionScanCache
 from hermes_cli.web_deps import late
 from hermes_cli.config import get_process_hermes_home
 from hermes_cli.profiles import ProfileIdentitySettlementPending
@@ -459,14 +460,15 @@ def _csv_list(value: Optional[str]) -> list[str]:
 
 
 _PROFILE_SESSION_SCAN_LOCK = threading.Lock()
+_PROFILE_SESSION_SCAN_CACHE = ProfileSessionScanCache()
 
 
-def _read_serial_profile_db(name, home, errors, read):
-    # Parallel aggregate polls amplify SQLite scan CPU. Serialize only the DB
-    # phase, not activity annotation or serialization; never cache fresh rows.
-    # Acquire before opening a connection, retaining the caller's profile context.
+def _read_serial_profile_db(name, home, errors, read, cache_key):
+    # Keep PR476's serialization, including observer access across AnyIO threads.
+    # Cache only DB projections; time/config/activity stamps remain per-request.
     with _PROFILE_SESSION_SCAN_LOCK:
-        return _read_profile_db(name, home, errors, read)
+        return _PROFILE_SESSION_SCAN_CACHE.read(
+            home, cache_key, lambda: _read_profile_db(name, home, errors, read))
 
 
 @sessions_router.get("/api/profiles/sessions")
@@ -507,18 +509,24 @@ def get_profiles_sessions(
     errors: list[dict[str, str]] = []
     now = time.time()
     for name, home in targets:
-        def _read(db, name=name, home=home):
-            include_subagents, exclude = subagent_listing_scope(
-                home, source=filters["source"], sources=filters["sources"],
-                exclude_sources=filters["exclude_sources"])
-            scoped = {**filters, "exclude_sources": exclude, "include_subagents": include_subagents}
+        include_subagents, exclude = subagent_listing_scope(
+            home, source=filters["source"], sources=filters["sources"],
+            exclude_sources=filters["exclude_sources"])
+        scoped = {**filters, "exclude_sources": exclude, "include_subagents": include_subagents}
+        cache_key = (per_profile, order, full, tuple(
+            (key, tuple(value) if isinstance(value, list) else value) for key, value in scoped.items()))
+
+        def _read(db):
             rows = db.list_sessions_rich(
                 limit=per_profile, offset=0, order_by_last_active=order == "recent",
                 # Same SQL-level blob skip as /api/sessions.
                 compact_rows=not full, include_pinned=True, **scoped)
-            totals[name] = db.session_count(exclude_children=True, **scoped)
+            return rows, db.session_count(exclude_children=True, **scoped)
+
+        result = _read_serial_profile_db(name, home, errors, _read, cache_key)
+        if result:
+            rows, totals[name] = result
             merged.extend(stamp_automated(_tag_rows(rows, name, now), home))
-        _read_serial_profile_db(name, home, errors, _read)
 
     sort_key = "last_active" if order == "recent" else "started_at"
     merged.sort(key=lambda s: s.get(sort_key) or s.get("started_at") or 0, reverse=True)
