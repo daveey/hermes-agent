@@ -478,13 +478,15 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_wake_check as kwc
 
+    # Retained executor copies own host-local wake probes, not shared-wall policy writes.
+    foreign = kwc.foreign_ids(conn)
     released: list[str] = []
     for st in blocker_states(conn, now=now).values():
         if st.is_open or st.cleared_by is None:
             continue
         by_task, by_run = st.cleared_by
         for tid, asserted in sorted(st.behind.items()):
-            if asserted > st.cleared_at or tid == by_task:
+            if tid in foreign or asserted > st.cleared_at or tid == by_task:
                 continue
             row = conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()
             if row is None or row["status"] not in ("blocked", "scheduled", "ready", "review"):
@@ -531,7 +533,9 @@ def probe_stranded_blockers(conn: sqlite3.Connection, *, now: Optional[int] = No
     assertion is oldest is unblocked; it then spawns as the probe. Cards carrying a human ask
     (``human_request``) are left for the human. [daveey]"""
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_wake_check as kwc
 
+    foreign = kwc.foreign_ids(conn)
     now = int(time.time()) if now is None else int(now)
     if interval is None:
         interval = probe_interval_seconds()
@@ -553,6 +557,10 @@ def probe_stranded_blockers(conn: sqlite3.Connection, *, now: Optional[int] = No
         candidates = sorted((st.behind[r["id"]], r["id"]) for r in rows
                             if r["status"] == "blocked" and not r["human_request"])
         for _asserted, tid in candidates:
+            # Elect across all visible cards, then defer to the winner's home. Filtering
+            # foreign candidates first would elect a different probe on each gateway.
+            if tid in foreign:
+                break
             if not kb.unblock_task(conn, tid):
                 continue
             with kb.write_txn(conn):
