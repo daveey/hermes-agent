@@ -87,7 +87,11 @@ def release_recovered_quota_blocks(conn: sqlite3.Connection) -> list[str]:
     block. Each release gets a comment saying why.
     """
     from hermes_cli import kanban_db as _kb
+    from hermes_cli.kanban_wake_check import foreign_ids
 
+    # A retained executor copy may own a local probe, not this maintenance decision.
+    # Only the card's home releases it; replica-local dedup cannot fence another gateway.
+    copies = foreign_ids(conn)
     released: list[str] = []
     rows = conn.execute(
         "SELECT id FROM tasks WHERE status IN ('blocked', 'triage') "
@@ -95,6 +99,8 @@ def release_recovered_quota_blocks(conn: sqlite3.Connection) -> list[str]:
     ).fetchall()
     for row in rows:
         task_id = row["id"]
+        if task_id in copies:
+            continue
         from hermes_cli.kanban_block_routing import latest_block_reason
 
         parsed = _parse_hold_block(latest_block_reason(conn, task_id))
