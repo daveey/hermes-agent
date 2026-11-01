@@ -150,23 +150,43 @@ def _stray_route_target(authority, receipt, session_id):
     return True
 
 
+def _restore_receipt_policy(authority, sid, receipt):
+    from gateway.session_policy import restore_policy
+    from hermes_state_local_quarantine import quarantine_local_policy
+    if receipt.get('quarantine') is not None:
+        raise _ReceiptRefused('invalid_params', field='policy', detail='stored policy quarantined')
+    try:
+        return restore_policy(receipt['policy'])
+    except (KeyError, TypeError, ValueError) as exc:
+        # RuntimeStoreError is itself a ValueError. Only a validation cause from
+        # this policy decode is terminal, never a generic store/epoch refusal.
+        cause = exc.__cause__ if isinstance(exc, RuntimeStoreError) else exc
+        if not isinstance(cause, (KeyError, TypeError, ValueError)) or isinstance(cause, RuntimeStoreError):
+            raise
+        if quarantine_local_policy(authority.db, epoch=authority.epoch, session_id=sid,
+                                   expected=receipt, error_type=type(cause).__name__):
+            logging.getLogger(__name__).warning(
+                'Local session %s receipt quarantined: %s', sid, _refused_check(exc))
+        raise _ReceiptRefused('invalid_params', field='policy', detail='stored policy quarantined') from exc
+
+
 def restore_local_session(authority, sid):
     from gateway.session_authority import LiveSession
     from gateway.session_local import LocalSessionAdapter
-    from gateway.session_policy import restore_policy
     try:
         # The catch-up writes, so the receipt as stored must already be this owner's (#140060).
         receipt, source, route, entry = owned_receipt(authority, sid)
+        policy = _restore_receipt_policy(authority, sid, receipt)
         chat_id, store = source.chat_id, authority.runner.session_store
         adopted = _with_untracked_compression(authority, sid, receipt)
-        policy = restore_policy(adopted['policy'])
         if adopted is not receipt:  # re-read after a catch-up: check the copy that will be served
+            policy = _restore_receipt_policy(authority, sid, adopted)
             receipt, entry = adopted, _checked_entry(authority, adopted, source, route)
         target = entry.session_id
         from hermes_state_local_lineage import validate_local_lineage
         with authority.db._read_ctx() as conn:
             validate_local_lineage(conn, receipt)
-    except _CatchUpPending:
+    except (_CatchUpPending, _ReceiptRefused):
         raise
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         # The client only sees the bounded code: gateway.log names the check that refused (#140099).
@@ -397,7 +417,9 @@ def reset_local_session(store, old_entry, session_id, now, display_name):
 _BOOT_RECEIPTS_SQL = (
     "SELECT m.key FROM state_meta m LEFT JOIN sessions s "
     "ON s.id = CASE WHEN json_valid(m.value) THEN json_extract(m.value, '$.entry.session_id') END "
-    "WHERE m.key LIKE ? AND (s.ended_at IS NULL OR s.end_reason = 'compression' "
+    "WHERE m.key LIKE ? AND CASE WHEN json_valid(m.value) "
+    "THEN json_extract(m.value, '$.quarantine') END IS NULL "
+    "AND (s.ended_at IS NULL OR s.end_reason = 'compression' "
     "OR EXISTS (SELECT 1 FROM session_admissions a WHERE a.target_session_id = substr(m.key, ?) "
     "AND a.status IN ('queued','started','unknown')) "
     "OR EXISTS (SELECT 1 FROM state_meta c WHERE c.key = ? || substr(m.key, ?)))")

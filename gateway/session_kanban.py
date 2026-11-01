@@ -88,9 +88,8 @@ async def run_task(connection, params):
     from gateway.run import _load_gateway_config
     from gateway.session_local import create_local_session
     from gateway.session_contract import Submission
-    from gateway.session_local_recovery import local_identity
+    from gateway.session_local_recovery import local_identity, _restore_receipt_policy
     from hermes_state_local import local_receipt
-    from gateway.session_policy import restore_policy
     authority = connection.authority
     # Resolved off-loop up front: no await separates the saved-claim check from session
     # creation. The Kanban claim check and its marker share one off-loop transaction; a
@@ -102,7 +101,7 @@ async def run_task(connection, params):
     sid = local_identity(authority.profile_id, connection.actor.subject, request_id)
     saved = local_receipt(authority.db, sid) if authority.db.get_session(sid) is not None else None
     if saved:
-        policy = restore_policy(saved['policy'])
+        policy = _restore_receipt_policy(authority, sid, saved)
         context = json.loads(policy.kanban_json or '{}')
         if (not connection.native_owner or set(params) not in ({'board', 'task_id', 'run_id', 'claim_lock'}, {'board', 'task_id', 'run_id', 'claim_lock', 'db'})
                 or any(params[k] != context.get(k) for k in params)):
