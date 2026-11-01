@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -31,11 +32,17 @@ ASK = {"action": "Press the pair button on the watch. Unblock = finish pairing; 
 def board(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     home = tmp_path / ".hermes"
     home.mkdir()
+    # Own every input to board resolution: a Kanban worker's HERMES_KANBAN_DB pin outranks HERMES_HOME, and a
+    # copy of this fixture run outside tests/ (no conftest) wrote three cards to the live board that way.
+    for key in [k for k in os.environ if k.startswith("HERMES_KANBAN_")]:
+        monkeypatch.delenv(key)
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_PROFILE", "test-worker")
     monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
-    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    db = kb.kanban_db_path().resolve()
+    assert db.is_relative_to(home.resolve()), f"board resolved outside the test's home: {db}"
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
     yield tmp_path

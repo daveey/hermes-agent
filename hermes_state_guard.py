@@ -126,6 +126,47 @@ def _is_production_state_db(resolved: Path, root: Path) -> bool:
     return len(parts) == 3 and parts[0] == "profiles"
 
 
+def _account_hermes_root() -> Optional[Path]:
+    """The OS account's own Hermes root, from the password database on POSIX: tests rebind ``HOME`` to a
+    tempdir, which would move ``_real_platform_state_root`` onto their own boards. [daveey]"""
+    if sys.platform == "win32":
+        return _real_platform_state_root()
+    try:
+        import pwd
+
+        return (Path(pwd.getpwuid(os.getuid()).pw_dir) / ".hermes").resolve()
+    except (ImportError, KeyError, OSError):
+        return _real_platform_state_root()
+
+
+def _is_production_kanban_db(resolved: Path, root: Path) -> bool:
+    """*resolved* is the shared board ``<root>/kanban.db`` or a named board ``<root>/kanban/boards/<slug>/kanban.db``."""
+    try:
+        parts = resolved.relative_to(root).parts
+    except ValueError:
+        return False
+    return parts == ("kanban.db",) or (len(parts) == 4 and parts[:2] == ("kanban", "boards") and parts[3] == "kanban.db")
+
+
+def ensure_kanban_test_isolation(db_path: Path) -> None:
+    """Raise before any mkdir/open when a pytest-context process (env OR ancestry) resolves a production
+    Kanban board. The tests/conftest.py guard covers only files under ``tests/``: a pytest file elsewhere
+    (an agent's scratch probe) or ``--noconftest`` inherits a worker's ``HERMES_KANBAN_DB`` pin and wrote
+    live cards (t_f6b0a5ea, t_13317706, t_4d53a0f1). This choke point needs no conftest. [daveey]"""
+    if not _in_test_context():
+        return
+    root = _account_hermes_root()
+    if root is None:
+        return
+    resolved = Path(db_path).expanduser().resolve()
+    if _is_production_kanban_db(resolved, root):
+        raise RuntimeError(
+            f"live-system guard: a test resolved the production kanban board {resolved} (under the account's "
+            f"Hermes root {root}). Isolate HERMES_KANBAN_HOME and clear HERMES_KANBAN_DB/HERMES_KANBAN_BOARD "
+            "in the fixture, and run tests from the repo's tests/ tree so its conftest sandbox applies."
+        )
+
+
 # Test-only SessionDB instance registry. Under the hermetic suite every
 # successfully constructed SessionDB is added to this WeakSet so the autouse
 # teardown in tests/conftest.py (_close_leaked_session_dbs) can close whatever

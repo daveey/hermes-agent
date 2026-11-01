@@ -67,6 +67,8 @@ _version_info._cached_version_info = _version_info.VersionInfo(
 # otherwise the deny-list would point at the throwaway tempdir and the guard
 # would silently stop protecting the operator's actual ~/.hermes (#69385).
 _PRE_SANDBOX_KANBAN_OVERRIDE = os.environ.get("HERMES_KANBAN_HOME", "").strip()
+# A Kanban worker's board pin (the LIVE kanban.db): stripped below, but denied by the write guard too.
+_PRE_SANDBOX_KANBAN_DB = os.environ.get("HERMES_KANBAN_DB", "").strip()
 _PRE_SANDBOX_HERMES_HOME = os.environ.get("HERMES_HOME", "")
 
 # Capture before any test fixture can override Path.home()/LOCALAPPDATA.
@@ -853,6 +855,19 @@ def _capture_real_kanban_root() -> Path:
 _REAL_KANBAN_ROOT = _capture_real_kanban_root()
 
 
+def _kanban_deny_paths(kanban_root: Path, hermes_root: Path, pinned_db: str) -> tuple[Path, ...]:
+    """Every live location the kanban write guard refuses: the captured kanban root, the real Hermes
+    root even when a pre-set HERMES_KANBAN_HOME moved the kanban root elsewhere, and the inherited
+    HERMES_KANBAN_DB pin file wherever it lives. One root alone left the other two writable. [daveey]"""
+    paths = {kanban_root.resolve(), hermes_root.resolve()}
+    if pinned_db:
+        paths.add(Path(pinned_db).expanduser().resolve())
+    return tuple(sorted(paths))
+
+
+_REAL_KANBAN_DENY = _kanban_deny_paths(_REAL_KANBAN_ROOT, _real_test_root, _PRE_SANDBOX_KANBAN_DB)
+
+
 @pytest.fixture(autouse=True)
 def _kanban_write_guard(_hermetic_environment, monkeypatch):
     """Fail-closed guard: refuse kanban writes that target the REAL root.
@@ -893,14 +908,13 @@ def _kanban_write_guard(_hermetic_environment, monkeypatch):
                 .expanduser()
                 .resolve()
             )
-        try:
-            resolved.relative_to(_REAL_KANBAN_ROOT)
-        except ValueError:
-            # Resolved path is NOT under the real root — safe to write.
+        hit = next((p for p in _REAL_KANBAN_DENY if resolved.is_relative_to(p)), None)
+        if hit is None:
+            # Resolved path is NOT under a live root or the inherited pin — safe to write.
             return _orig_connect(db_path, *args, **kwargs)
         raise RuntimeError(
             f"kanban_write_guard: kanban DB path resolved to {resolved}, "
-            f"which is under the REAL kanban root ({_REAL_KANBAN_ROOT}). "
+            f"which is under the REAL kanban location {hit}. "
             f"Hermetic isolation has been bypassed — refusing to write "
             f"to the real ~/.hermes. See #69283."
         )
