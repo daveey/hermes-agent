@@ -509,9 +509,10 @@ def get_profiles_sessions(
     errors: list[dict[str, str]] = []
     now = time.time()
     for name, home in targets:
-        include_subagents, exclude = subagent_listing_scope(
-            home, source=filters["source"], sources=filters["sources"],
-            exclude_sources=filters["exclude_sources"])
+        include_subagents, exclude = (subagent_listing_scope(
+            home, source=source or None, sources=_csv_list(sources) or None,
+            exclude_sources=_csv_list(exclude_sources) or None)
+            if home is not None else (False, filters["exclude_sources"]))
         scoped = {**filters, "exclude_sources": exclude, "include_subagents": include_subagents}
         cache_key = (per_profile, order, full, tuple(
             (key, tuple(value) if isinstance(value, list) else value) for key, value in scoped.items()))

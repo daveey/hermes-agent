@@ -84,7 +84,8 @@ def test_effective_config_filter_and_profile_roster_are_live(listing, monkeypatc
     db.create_session('child', source='subagent', parent_session_id='first',
                       model_config={'_delegate_from': 'first'})
     assert [row['id'] for row in poll(client)['sessions']] == ['first']
-    monkeypatch.setattr(profiles, 'subagent_listing_scope', lambda *a, **kw: (True, None))
+    from hermes_cli.config import atomic_config_write
+    atomic_config_write(tmp_path / 'config.yaml', {'sessions': {'show_subagents': True}})
     assert {row['id'] for row in poll(client)['sessions']} == {'first', 'child'}
     assert len(scans) == 2
     other_home = tmp_path / 'other'
