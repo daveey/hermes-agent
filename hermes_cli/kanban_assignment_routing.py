@@ -60,18 +60,46 @@ _BUDGET_RESET = re.compile(
     re.IGNORECASE)
 
 
+# Model edits require the same non-worker authority as lifecycle edits. A new
+# profile cannot grant it. Bound matches to one clause and imperative verb forms.
+_MODEL_FIELD = r'\b(?:model|provider|pin|model_override|provider_override)\b'
+_EDIT_VERB = r'(?<![A-Za-z])(?:change|set|clear|edit|replace|remove)(?![A-Za-z])'
+_CLAUSE = r'[^\n.;]{0,100}?'
+_OTHER_CARD_MODEL_EDIT = re.compile(
+    _EDIT_VERB + _CLAUSE + _ID + _CLAUSE + _MODEL_FIELD
+    + r'|' + _EDIT_VERB + _CLAUSE + _MODEL_FIELD + _CLAUSE + _ID
+    + r'|' + _ID + r"(?:'s)?\s+needs?\s+(?:a\s+)?" + _MODEL_FIELD
+    + r'\s+(?:change|edit|replacement)\b', re.IGNORECASE,
+)
+
+
+def _model_edit_need(task_id, reason):
+    ids = [next(g for g in m if g) for m in _OTHER_CARD_MODEL_EDIT.findall(reason or '')]
+    return [i for i in dict.fromkeys(ids) if i != task_id]
+
+
 def execution_authority_need(task_id, reason):
     """The other card ids a block asks to move through its lifecycle (or ``['<budget>']`` for a
     continuation-budget reset), else ``[]``. Profile mismatches return ``[]``."""
     text = reason or ''
     ids = [next(g for g in m if g) for m in _OTHER_CARD_TRANSITION.findall(text)]
-    ids = [i for i in dict.fromkeys(ids) if i != task_id]
+    ids = [i for i in dict.fromkeys([*ids, *_model_edit_need(task_id, text)]) if i != task_id]
     if not ids and _BUDGET_RESET.search(text):
         ids = ['<budget>']
     return ids
 
 
-def _authority_error(task_id, needs):
+def _authority_error(task_id, needs, reason=None):
+    if _model_edit_need(task_id, reason):
+        return ExecutionAuthorityMismatch(
+            f'execution_authority_mismatch: task {task_id} asks to edit another card model/provider '
+            f'({", ".join(needs)}). Every worker profile has the same mutation fence; '
+            'assignment repair cannot grant non-worker authority and none was recorded. '
+            'No supported supervisor model-edit operation exists. Preserve mandatory model pins '
+            'and subscription billing policy; recover availability through the existing owner '
+            'or an authorized non-worker operator, not another profile or repeated repair cards. '
+            'A legacy repair cannot complete on profile existence alone; archive it before '
+            'recovering through the appropriate owner.')
     return ExecutionAuthorityMismatch(
         f'execution_authority_mismatch: task {task_id} asks to move another card '
         f'({", ".join(needs)}) through its lifecycle. That is fenced for every worker profile, so an '
@@ -153,7 +181,7 @@ def validate_repair_completion(conn, task_id):
         if isinstance(data, dict) and data.get('supervisor_task_id') == task_id:
             needs = execution_authority_need(original.id, data.get('reason'))
             if needs:
-                raise _authority_error(original.id, needs)
+                raise _authority_error(original.id, needs, data.get('reason'))
             break
     validate_assignment(original.assignee, requires=original.requires,
                         workspace_kind=original.workspace_kind,
@@ -169,7 +197,7 @@ def route(conn, task, payload):
     key = _SUPERVISOR_PREFIX + task.id
     needs = execution_authority_need(task.id, payload.get('reason'))
     if needs:
-        raise _authority_error(task.id, needs)
+        raise _authority_error(task.id, needs, payload.get('reason'))
     own_key = conn.execute('SELECT idempotency_key FROM tasks WHERE id=?', (task.id,)).fetchone()[0]
     previous = conn.execute('SELECT id FROM tasks WHERE idempotency_key=?', (key,)).fetchone()
     if (own_key or '').startswith(_SUPERVISOR_PREFIX) or previous:
