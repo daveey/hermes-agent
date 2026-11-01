@@ -81,20 +81,46 @@ def _candidates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def _park_uid(conn: sqlite3.Connection, target: str, park_id: int) -> Optional[str]:
+    from hermes_cli.kanban_db_sync import table_columns
+
+    if "uid" not in table_columns(conn, "task_events"):
+        return None  # unsynced boards retain the local integer linkage
+    row = conn.execute("SELECT uid FROM task_events WHERE task_id = ? AND id = ?",
+                       (target, park_id)).fetchone()
+    return row[0] if row else None
+
+
 def _event_for_park(conn: sqlite3.Connection, target: str, park_id: int) -> Optional[str]:
+    from hermes_cli.kanban_wake_check import foreign_copy
+
+    park_uid = _park_uid(conn, target, park_id)
+    foreign = foreign_copy(conn, target)
     for (raw,) in conn.execute(
             "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? ORDER BY id DESC", (target, EVENT)):
         try:
             data = json.loads(raw) if raw else {}
         except (TypeError, ValueError):
             continue
-        if isinstance(data, dict) and data.get("park_event_id") == park_id:
+        if not isinstance(data, dict):
+            continue
+        if data.get("park_event_uid"):
+            matches = data["park_event_uid"] == park_uid
+        else:
+            # Pre-UID links are only exact at home. A foreign reader cannot disprove
+            # ownership using an unrelated local integer: conservatively retain the hold.
+            matches = foreign or data.get("park_event_id") == park_id
+        if matches:
             return data.get("recovery_task_id")
     return None
 
 
 def open_recovery_card(conn: sqlite3.Connection, target: str) -> Optional[str]:
-    """The kernel recovery card for ``target``'s CURRENT park while it is still open, else None."""
+    """Open recovery for the current park; foreign pre-UID links conservatively retain their hold.
+
+    Legacy integer links are exact only at home. Triage policy also runs only at home,
+    so an ambiguous legacy hold on a retained copy cannot strand home-owned work.
+    """
     from hermes_cli import kanban_resume_exec as rx
     rec = _event_for_park(conn, target, rx._park_event_id(conn, target))
     if not rec:
@@ -142,7 +168,11 @@ def ensure_recovery_cards(conn: sqlite3.Connection) -> list[str]:
         except (sqlite3.Error, ValueError):
             logger.exception("kanban: recovery card for %s failed", target)
             continue
+        payload = {"recovery_task_id": rec, "park_event_id": park_id}
+        park_uid = _park_uid(conn, target, park_id)
+        if park_uid:
+            payload["park_event_uid"] = park_uid
         with kb.write_txn(conn):
-            kb._append_event(conn, target, EVENT, {"recovery_task_id": rec, "park_event_id": park_id})
+            kb._append_event(conn, target, EVENT, payload)
         made.append(rec)
     return made

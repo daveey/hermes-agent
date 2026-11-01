@@ -47,3 +47,13 @@ def test_foreign_park_has_one_board_wide_requester(gws, svc, home_first):
     assert cards[0]["created_on"] == home.name
     home.enter()
     assert rx.refusal(home.conn, cards[0]["id"], target) is None
+    # The writer publishes the blocked event's stable UID for replica readers.
+    import json
+    link = home.conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind=?", (target, rr.EVENT)
+    ).fetchone()
+    park = home.conn.execute(
+        "SELECT uid FROM task_events WHERE id=?", (rx._park_event_id(home.conn, target),)
+    ).fetchone()
+    assert json.loads(link[0])["park_event_uid"] == park[0]
+    assert rr.open_recovery_card(home.conn, target) == cards[0]["id"]
