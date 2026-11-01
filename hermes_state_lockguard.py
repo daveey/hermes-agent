@@ -78,7 +78,9 @@ Held = dict[Identity, tuple[int, int]]  # inode this handle guards -> its (start
 
 # Handles per guarded inode in this process. Several SessionDB handles on one file share the
 # same descriptors' locks (hold() locks every matching descriptor), so the LAST handle unlocks.
-_LOCK = threading.Lock()
+# GC can finalize another SessionDB inside either descriptor loop; its close() calls
+# release() on this same thread. Keep other threads excluded without deadlocking that cleanup.
+_LOCK = threading.RLock()
 _HANDLES: dict[Identity, int] = {}
 
 
