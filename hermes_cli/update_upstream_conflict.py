@@ -1,25 +1,61 @@
 """Turn an unattended upstream merge conflict into one durable repair owner."""
 from __future__ import annotations
 
+import argparse
 import hashlib
 import logging
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 AUTHOR = "upstream-merge"
+_RESULT = "__HERMES_UPSTREAM_CONFLICT_TASK__="
+_TIMEOUT_S = 60
 
 
 def report(cwd: Path, upstream: str, conflicts: list[str]) -> str | None:
-    """Best effort: card failures must remain visible without changing update custody."""
-    try:
-        from hermes_cli.kanban_db_connect import connect_closing
+    """Best effort: card failures must remain visible without changing update custody.
 
-        with connect_closing() as conn:
-            return _report(conn, cwd, upstream, conflicts)
-    except Exception:  # health: allow BLE001 -- escalation must not mask the original merge refusal
-        log.warning("Could not file upstream merge conflict card", exc_info=True)
-        print("    Warning: could not file upstream merge conflict card; see agent.log")
-        return None
+    Filed in a fresh interpreter: the caller is the updater, whose ``sys.modules`` still holds the
+    pre-update code while the checkout already holds the new one. Importing the kanban modules here
+    mixed the two (new kanban_capabilities asking the old config_effective for a name it lacked) and
+    the card was refused as a capability mismatch (kanban-c50ee42be6).
+    """
+    from hermes_cli._launchers import runtime_command
+    from hermes_constants import get_hermes_home
+
+    root = Path(__file__).resolve().parents[1]
+    args = ["--cwd", str(cwd), "--upstream", upstream, *(a for p in conflicts for a in ("--conflict", p))]
+    try:
+        proc = subprocess.run(
+            runtime_command(root, args, module="hermes_cli.update_upstream_conflict", home=get_hermes_home()), cwd=str(root),
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=_TIMEOUT_S, check=False)
+        found = re.findall(rf"^{re.escape(_RESULT)}(t_\w+)$", proc.stdout or "", re.MULTILINE)
+        if proc.returncode == 0 and found:
+            return found[-1]
+        detail = f"exit {proc.returncode}: " + (proc.stderr or proc.stdout or "")[-2000:]
+    except (OSError, subprocess.SubprocessError) as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+    log.warning("Could not file upstream merge conflict card (%s)", detail)
+    print("    Warning: could not file upstream merge conflict card; see agent.log")
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Child entry point: file (or refresh) the owner card and print its id on a marker line."""
+    parser = argparse.ArgumentParser(prog="hermes_cli.update_upstream_conflict")
+    parser.add_argument("--cwd", required=True, type=Path)
+    parser.add_argument("--upstream", required=True)
+    parser.add_argument("--conflict", action="append", default=[])
+    ns = parser.parse_args(argv)
+    from hermes_cli.kanban_db_connect import connect_closing
+
+    with connect_closing() as conn:
+        task_id = _report(conn, ns.cwd, ns.upstream, ns.conflict)
+    print(f"{_RESULT}{task_id}", flush=True)
+    return 0
 
 
 def _report(conn, cwd: Path, upstream: str, conflicts: list[str]) -> str:
@@ -55,3 +91,7 @@ def _report(conn, cwd: Path, upstream: str, conflicts: list[str]) -> str:
                  "an ancestor of origin/main, and the next unattended updater no longer reports this conflict. "
                  "Remove the worktree after landing.",
         )
+
+
+if __name__ == "__main__":
+    sys.exit(main())

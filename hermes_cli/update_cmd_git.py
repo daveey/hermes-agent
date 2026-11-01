@@ -438,8 +438,8 @@ def _synthesize_upstream_merge(git_cmd: list[str], cwd: Path, upstream: str) -> 
         if tree_proc.returncode == 1 and any(p.strip() for p in conflicts):
             from hermes_cli.update_upstream_conflict import report
             task_id = report(cwd, upstream, [p for p in conflicts if p.strip()])
-            if task_id:
-                print(f"    Repair owner: {task_id}")
+            # Fixed text: the signal detector keys on the NOT FILED line.
+            print(f"    Repair owner: {task_id}" if task_id else "    Repair owner: NOT FILED")
         return None
     msg = f"Merge upstream/main ({upstream[:10]}) into fork"
     commit = _git_stdout(git_cmd, ["commit-tree", tree, "-p", head, "-p", upstream, "-m", msg], cwd)
