@@ -62,18 +62,22 @@ def _check_managed_pin(model, provider, config):
         raise ModelPinNotInRegistryError(model, provider, exc.allowed) from exc
 
 
-def validate_model_assignment(assignee, model, provider, *, check_registry=True):
+def validate_model_assignment(assignee, model, provider, *, check_registry=True, local_profile=True):
     """Validate pinned models only; unknown/custom providers and models remain supported.
 
     This is configuration validation, not an entitlement or credential probe. Never
     automatically select a paid provider to repair an incompatible subscription pin.
     Under ``model_routing.enforce_subscription_only`` the pin must also pass the registry
     check the worker runs at startup; otherwise the card is accepted and only crashes later.
+
+    ``local_profile=False`` (a card whose ``runs_on`` rules this machine out) skips this machine's profile
+    config: the landing machine's worker runs its own registry check. Only the machine-independent
+    vendor/provider family check of an explicit provider remains. [daveey]
     """
     if not model:
         return
     model = model.strip()
-    config = _assignee_config(assignee)
+    config = _assignee_config(assignee) if local_profile else None
     if check_registry:
         _check_managed_pin(model, (provider or '').strip() or None, config)
     if not provider and assignee:

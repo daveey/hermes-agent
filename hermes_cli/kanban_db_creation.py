@@ -48,3 +48,37 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
             kb._append_event(conn, task_id, "dependency_wait", {
                 "reason": "parent_not_done", "parent": gating[0],
             })
+
+
+def validate_create_assignment(conn, assignee, *, runs_on, requires, workspace_kind, workspace_path, skills,
+                               validate_skills, require_declaration, model, provider):
+    """``create_task``'s assignee checks: pinned skills, required tools (here and where ``runs_on`` lands
+    it), the model pin and its provider binding. Returns ``(required, model, provider)`` or raises.
+
+    A card whose ``runs_on`` rules this machine out runs with the landing machine's profile of that name:
+    this machine's profiles (missing, or a same-named one with other tools, skills or registry) prove
+    nothing. :func:`~hermes_cli.kanban_runs_on_capabilities.check_create` reads the landing machines'
+    published tools (``claim_refusal`` re-checks them at pickup); pinned skills load or get the
+    missing-skill note in the landing worker (``missing_pin_note``); the model registry is checked by the
+    landing dispatcher (``route_model_mismatch``). A concrete pin must name its provider, since only the
+    landing machine's credentials could bind it. [daveey]
+    """
+    from hermes_cli.kanban_capabilities import validate_assignment
+    from hermes_cli.kanban_model_assignment import validate_model_assignment
+    from hermes_cli.kanban_pin_provider import require_remote_pin_provider, resolve_pin_provider
+    from hermes_cli.kanban_runs_on_capabilities import check_create, runs_elsewhere
+    from hermes_cli.kanban_skill_check import check_task_skills
+
+    remote = runs_elsewhere(conn, runs_on)
+    check_task_skills(skills, assignee, enabled=validate_skills and not remote)
+    required = validate_assignment(assignee, requires=requires, workspace_kind=workspace_kind,
+                                   workspace_path=workspace_path, skills=skills,
+                                   require_declaration=require_declaration, check_profile=not remote)
+    check_create(conn, runs_on, assignee=assignee, requires=required, workspace_kind=workspace_kind)
+    validate_model_assignment(assignee, model, provider, local_profile=not remote)
+    if remote:
+        require_remote_pin_provider(model, provider)
+        return required, model, provider
+    # Bind a provider-less concrete pin now (or refuse), never late-bind it to config at spawn.
+    model, provider = resolve_pin_provider(model, provider, assignee=assignee)
+    return required, model, provider

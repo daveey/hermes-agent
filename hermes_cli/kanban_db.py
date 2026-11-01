@@ -1328,9 +1328,6 @@ def create_task(
         )
         if problem := worktree_workspace_problem(workspace_path, board=board):
             raise WorktreeWorkspaceConfigError(problem)
-    from hermes_cli.kanban_skill_check import check_task_skills
-    check_task_skills(skills_list, assignee, enabled=validate_skills)
-
     now = int(time.time())
 
     # Only persistent kinds inherit the board ``default_workdir``: a scratch
@@ -1340,16 +1337,11 @@ def create_task(
         if board_default:
             workspace_path = str(board_default)
 
-    from hermes_cli.kanban_capabilities import validate_assignment
-    required = validate_assignment(assignee, requires=requires, workspace_kind=workspace_kind,
-                                   workspace_path=workspace_path, skills=skills_list, require_declaration=require_declaration)
-    from hermes_cli.kanban_runs_on_capabilities import check_create  # [daveey] where runs_on lands it
-    check_create(conn, runs_on, assignee=assignee, requires=required, workspace_kind=workspace_kind)
-    from hermes_cli.kanban_model_assignment import validate_model_assignment
-    validate_model_assignment(assignee, model_override, provider_override)
-    # [daveey] Bind a provider-less concrete pin now (or refuse), never late-bind it to config at spawn.
-    from hermes_cli.kanban_pin_provider import resolve_pin_provider
-    model_override, provider_override = resolve_pin_provider(model_override, provider_override, assignee=assignee)
+    from hermes_cli.kanban_db_creation import validate_create_assignment  # [daveey] runs_on-aware
+    required, model_override, provider_override = validate_create_assignment(
+        conn, assignee, runs_on=runs_on, requires=requires, workspace_kind=workspace_kind,
+        workspace_path=workspace_path, skills=skills_list, validate_skills=validate_skills,
+        require_declaration=require_declaration, model=model_override, provider=provider_override)
     _reject_spaced_pin(model_override, provider_override)
 
     # Retry once on the extremely unlikely id collision.

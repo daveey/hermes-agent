@@ -336,7 +336,7 @@ def _profile_capabilities(assignee: str, required: list[str] | None = None) -> s
 
 def validate_assignment(
     assignee: str | None, *, requires=None, workspace_kind: str = "scratch",
-    workspace_path=None, skills=None, require_declaration: bool = False,
+    workspace_path=None, skills=None, require_declaration: bool = False, check_profile: bool = True,
 ) -> list[str]:
     """Return canonical, deduplicated requirements or raise CapabilityMismatchError.
 
@@ -352,10 +352,16 @@ def validate_assignment(
     ``require_declaration=True`` (agent create surfaces, when ``kanban.require_capability_declaration``
     is on) first refuses an omitted ``requires`` (None) that nothing structured backs, with
     :class:`RequiresDeclarationMissing`; an explicit ``[]`` passes. [daveey]
+
+    ``check_profile=False`` (a card whose ``runs_on`` rules this machine out) validates only the shape and
+    returns the declared requirements: this machine's profile of that name, and the skills it resolves, say
+    nothing about the landing machine's. [daveey]
     """
     if require_declaration:
         check_declaration(requires, workspace_kind, skills=skills, assignee=assignee)
     required = _required_capabilities(requires, workspace_kind)
+    if not check_profile:
+        return required
     if skills:
         extra = skill_requirements(skills, assignee)
         if extra:

@@ -2,7 +2,11 @@
 
 :func:`hermes_cli.kanban_capabilities.validate_assignment` reads the assignee's profile on THIS machine. A
 card with ``runs_on`` runs on another machine, with that machine's profile of the same name, so the local
-check proves nothing about where it will run. Two halves close that gap:
+check proves nothing about where it will run. Three pieces close that gap:
+
+* :func:`runs_elsewhere` (create): a card whose ``runs_on`` rules this machine out skips ``create_task``'s
+  checks of this machine's profiles (tools, pinned skills, model registry, provider binding). A missing or
+  different local profile of that name never refuses it; the two checks below decide.
 
 * :func:`check` (create, ``kanban move``): every Board-registry machine whose labels satisfy ``runs_on`` (and,
   for a move, is not this one) is a candidate. A candidate's profile tools are known for this machine (local
@@ -142,6 +146,39 @@ def check_create(conn, runs_on, *, assignee: Optional[str], requires, workspace_
     check(labels, assignee=assignee, requires=requires, workspace_kind=workspace_kind, me=wn._own(conn))
 
 
+def runs_elsewhere(conn, runs_on, *, machines: Optional[Mapping[str, Mapping[str, Any]]] = None) -> bool:
+    """True when ``runs_on`` on a Board primary rules THIS machine out, so the card can only run with another
+    machine's profile of the assignee's name. ``create_task`` then skips its checks of this machine's
+    profiles (tools, skills, model registry, provider binding) and leaves them to :func:`check_create`, the
+    landing dispatcher and :func:`claim_refusal`.
+
+    False (keep the local checks) for no ``runs_on``, ``[]`` (any machine), a board that is not a primary, or
+    labels the registry cannot settle (unreachable). A ``machine:<other>`` label needs no registry: this
+    machine only carries ``machine:<its own name>``."""
+    if runs_on is None:
+        return False
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_worker_node as wn
+    if sync.board_mode(conn) != "primary":
+        return False
+    labels = wn.normalize_runs_on(runs_on if isinstance(runs_on, str) else list(runs_on)) or []
+    if not labels:
+        return False
+    me = wn._own(conn)
+    if any(lab.startswith("machine:") and lab != f"machine:{me}" for lab in labels):
+        return True
+    pool = machines
+    if pool is None:
+        try:
+            reg = wn.registry()
+        except Exception:  # health: allow BLE001 -- registry unreachable: unknown, keep the local checks
+            reg = None
+        if reg is None:
+            return False
+        pool = reg.get("machines") or {}
+    return not set(labels) <= wn.effective_labels(pool.get(me), me)
+
+
 def verdict_warning(implementer: str, task) -> dict:
     """``{"capability_warning": ...}`` for a ``changes_requested`` event, or ``{}``.
 
@@ -173,7 +210,9 @@ def claim_refusal(card: Mapping[str, Any], *, me: str = "") -> Optional[str]:
     """None when this machine's profile can run ``card`` (a replica row), else why not.
 
     The same check create runs locally, applied by the machine that would run the card. Logged once per
-    card and reason so a card no machine can take is visible in the worker's log."""
+    card and reason so a card no machine can take is visible in the worker's log. Pinned skills are not a
+    pickup gate: a worker that cannot load one runs with the missing-skill note (``missing_pin_note``), so a
+    remote card whose create skipped the skill check is never stranded on the Board. [daveey]"""
     assignee = card.get("assignee")
     if not assignee:
         return None

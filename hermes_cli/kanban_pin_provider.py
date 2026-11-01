@@ -158,6 +158,24 @@ def resolve_pin_provider(
     raise PinProviderUnresolvedError(model, "no known provider catalog lists that id", [])
 
 
+def require_remote_pin_provider(model: Optional[str], provider: Optional[str]) -> None:
+    """Refuse a concrete provider-less pin on a card that runs on another machine. [daveey]
+
+    :func:`resolve_pin_provider` binds against THIS machine's profile and credentials, which say nothing about
+    the landing machine's, and the landing dispatcher's :func:`resolve_legacy_pin` only logs when it cannot
+    bind, so the worker would late-bind to its config at spawn (the exit-78 failure above). The creator
+    passes the provider instead; class selectors keep provider auto."""
+    model = (model or "").strip()
+    if not model or (provider or "").strip():
+        return
+    from agent.model_routing import is_class_selector
+    if is_class_selector(model):
+        return
+    known = _static_candidates(model) or _vendor_candidates(model)
+    raise PinProviderUnresolvedError(
+        model, "the card runs on another machine, whose credentials this machine cannot check", known)
+
+
 def resolve_legacy_pin(task: Any) -> tuple[Optional[str], Optional[str]]:
     """Dispatcher path for rows pinned before the pin-time resolver: ``(provider, error)``. Never raises."""
     model = (getattr(task, "model_override", None) or "").strip()
