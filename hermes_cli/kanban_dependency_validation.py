@@ -1,0 +1,41 @@
+"""Refuse unresolved dependency edges before ending a worker's run."""
+import sqlite3
+
+
+def would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
+    """True iff ``parent_id`` is already a descendant of ``child_id``."""
+    seen = set()
+    stack = [child_id]
+    while stack:
+        node = stack.pop()
+        if node == parent_id:
+            return True
+        if node in seen:
+            continue
+        seen.add(node)
+        rows = conn.execute(
+            "SELECT child_id FROM task_links WHERE parent_id = ?", (node,)
+        ).fetchall()
+        stack.extend(r["child_id"] for r in rows)
+    return False
+
+
+def missing_dependency_error(ids):
+    return ValueError(
+        f"unknown task(s): {', '.join(ids)}; not on this board. "
+        "For a parent on another gateway, unlink any dangling edge, then use "
+        "kind='time', awaiting={kind:'card', ref:'<parent-id>', gateway:'<owner-gateway>'}. "
+        "The card wait supplies an owner-aware wake probe automatically "
+        "(kanban_wait.py task <id> over ssh); do not create a local dependency edge."
+    )
+
+
+def validate_dependency_block(conn, task_id, kind):
+    if kind != "dependency":
+        return
+    from hermes_cli.kanban_db import parent_states
+
+    # Synced-board foreign parents are valid when the replica resolves their state.
+    missing = [parent for parent, state in parent_states(conn, task_id) if state is None]
+    if missing:
+        raise missing_dependency_error(missing)

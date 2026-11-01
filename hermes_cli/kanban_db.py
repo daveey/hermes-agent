@@ -1603,9 +1603,10 @@ def link_tasks(
         raise ValueError("a task cannot depend on itself")
     gated = False
     with write_txn(conn):
+        from hermes_cli.kanban_dependency_validation import missing_dependency_error, would_cycle
         missing = _missing_task_ids(conn, [parent_id, child_id])
         if missing:
-            raise ValueError(f"unknown task(s): {', '.join(missing)}")
+            raise missing_dependency_error(missing)
         child = conn.execute(
             "SELECT status, current_run_id FROM tasks WHERE id = ?", (child_id,),
         ).fetchone()
@@ -1614,7 +1615,7 @@ def link_tasks(
             or child["current_run_id"] != expected_child_run_id
         ):
             raise ValueError(f"cannot link {parent_id} -> {child_id}: child is already running")
-        if _would_cycle(conn, parent_id, child_id):
+        if would_cycle(conn, parent_id, child_id):
             raise ValueError(f"linking {parent_id} -> {child_id} would create a cycle")
         _link(conn, parent_id, child_id)
         # If child was ready but parent is not yet terminal, demote child to todo
@@ -1640,24 +1641,6 @@ def link_tasks(
         )
         _inherit_notify_subs(conn, child_id, (parent_id,))
     return gated
-
-
-def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
-    """True iff ``parent_id`` is already a descendant of ``child_id``."""
-    seen = set()
-    stack = [child_id]
-    while stack:
-        node = stack.pop()
-        if node == parent_id:
-            return True
-        if node in seen:
-            continue
-        seen.add(node)
-        rows = conn.execute(
-            "SELECT child_id FROM task_links WHERE parent_id = ?", (node,)
-        ).fetchall()
-        stack.extend(r["child_id"] for r in rows)
-    return False
 
 
 def unlink_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
@@ -3260,6 +3243,8 @@ def block_task(
         ).fetchone()
         if cur_row is None:
             return False
+        from hermes_cli.kanban_dependency_validation import validate_dependency_block
+        validate_dependency_block(conn, task_id, kind)
         from hermes_cli import kanban_assignment_routing as assignment_routing
         # The breaker (``_record_task_failure``) parks cards ``blocked`` with no
         # ``block_kind`` and no ``blocked`` event -- the policy is the
