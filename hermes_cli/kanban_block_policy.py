@@ -295,12 +295,19 @@ def sweep_standing_asks(conn: sqlite3.Connection) -> list[str]:
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db import _json_dict
+    from hermes_cli.kanban_wake_check import foreign_ids
+
+    # Retaining a foreign copy for its host-local ask probe does not grant policy
+    # authority: event-id dedup is local, so only the card's home may recheck it.
+    copies = foreign_ids(conn)
     moved: list[str] = []
     rows = conn.execute(
         "SELECT id, title, human_request FROM tasks WHERE status = 'blocked' AND human_request IS NOT NULL "
         "AND current_run_id IS NULL").fetchall()
     for row in rows:
         tid = row["id"]
+        if tid in copies:
+            continue
         request = _json_dict(row["human_request"])
         if not request:
             continue
