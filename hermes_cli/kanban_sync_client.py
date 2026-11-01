@@ -625,6 +625,8 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
             except Resync:
                 _log.warning("kanban sync: %s live cursor below the retention floor; rebuilding from a snapshot", slug)
                 resync(live, hub, slug, observers=True, partition=gateway)
+        from hermes_cli.kanban_sync_repair_revision import ensure_revision
+        ensure_revision(live)
         replica = open_shadow(slug, gateway)
         try:
             inputs = _repair_inputs(path, replica, mode, gateway)
@@ -789,10 +791,10 @@ class _BoardWatch:
 
     ``outbox_pending`` runs every 0.5 s on every synced board. Opening a connection per call re-read the schema
     each time (about 13 ms of CPU per pass over 10 boards, 2.5% of a core in the gateway, 2026-10-31). A kept
-    connection answers the same indexed query in microseconds. ``PRAGMA data_version`` on a kept connection moves
-    whenever any other connection (any process, or this one's own writers) commits to the file, which is what
-    lets ``sync_board`` skip repair scans whose inputs did not change. A file replaced on disk (new inode) is
-    reopened, with a new generation so its restarted ``data_version`` never equals an old one. [daveey]"""
+    connection answers the same indexed query in microseconds. Repair scans use a transactional
+    input-table revision rather than data_version: dispatcher-clock commits must not invalidate them.
+    A file replaced on disk (new inode) is reopened with a new generation, so a restored revision
+    never equals a cached key for the old file. [daveey]"""
 
     MAX = 64
 
@@ -841,10 +843,6 @@ class _BoardWatch:
                 self._drop(os.path.realpath(path))
                 return None
 
-    def version(self, path: Path) -> Optional[tuple[int, int]]:
-        got = self.query(path, "PRAGMA data_version")
-        return None if got is None or got[1] is None else (got[0], int(got[1][0]))
-
     def reset(self) -> None:
         with self._lock:
             for key in list(self._conns):
@@ -864,15 +862,16 @@ def reset_board_watch() -> None:
 
 def _repair_inputs(live_path: Path, replica: sqlite3.Connection, mode: str, gateway: str) -> Optional[tuple]:
     """Everything the pure repair scans (partition links, remote parents, divergence, missing children, lost
-    placeholder links) read: the live file's commit version, the replica's identity and feed cursor, the mode, the
-    gateway and the placement config. Equal inputs give the same answer, so an idle round skips the scans (about
-    300 ms of CPU per round on the MacBook's default board, 2026-10-31). Read before the scans: a commit landing
-    during or after them moves the live version, so the next round scans again. The replica is written only by its
-    own pull (``cursor`` moves, or a rebuild makes a new file) and the ``pulled_at`` stamp, which the scans never
-    read. None (cannot tell) always scans. [daveey]"""
-    live_version = _WATCH.version(live_path)
-    if live_version is None:
+    placeholder links) read: a transactional revision of the live input tables, schema version,
+    replica identity/feed cursor, mode, gateway and placement config. Dispatcher clock writes are
+    deliberately not inputs. Read before the scans so concurrent relevant commits re-arm the next
+    round. Replica writes are its own pull (cursor moves or rebuild replaces the file) and the
+    pulled_at stamp, which the scans never read. None (cannot tell) always scans. [daveey]"""
+    got = _WATCH.query(live_path, "SELECT revision, schema_version FROM kanban_repair_revision, "
+                      "pragma_schema_version WHERE id = 1")
+    if got is None or got[1] is None:
         return None
+    live_version = (got[0], tuple(got[1]))
     try:
         replica_file = Path(replica.execute("PRAGMA database_list").fetchone()[2])
         st = os.stat(replica_file)

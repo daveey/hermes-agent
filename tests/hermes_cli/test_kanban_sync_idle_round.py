@@ -141,6 +141,68 @@ def test_a_capture_gap_after_idle_rounds_is_still_healed(live, svc, kanban_home,
     assert svc.board(BOARD)["rows"]["tasks"][parent]["title"] == "gap edit"
 
 
+@pytest.mark.parametrize("mode", ["shadow", "primary"])
+def test_dispatch_clock_commits_do_not_repeat_unchanged_repairs(live, svc, kanban_home, monkeypatch, mode):
+    _settle(live, svc, kanban_home, mode)
+    with kbc.write_txn(live):
+        live.execute("CREATE TABLE kanban_dispatch_stamp (id INTEGER PRIMARY KEY, at INTEGER)")
+    for _ in range(3):
+        _round(kanban_home, svc)
+    calls = _spy(monkeypatch, REPAIRS)
+    for stamp in range(4):
+        with kbc.write_txn(live):
+            live.execute("INSERT OR REPLACE INTO kanban_dispatch_stamp VALUES (1, ?)", (stamp,))
+        _round(kanban_home, svc)
+    assert not any(calls.values()), f"dispatch bookkeeping repeated repair scans: {calls}"
+
+
+@pytest.mark.parametrize("mode", ["shadow", "primary"])
+def test_repair_revision_rolls_back_and_tracks_other_connection(live, svc, kanban_home, monkeypatch, mode):
+    parent, _ = _settle(live, svc, kanban_home, mode)
+    for _ in range(3):
+        _round(kanban_home, svc)
+    calls = _spy(monkeypatch, REPAIRS)
+    writer = sqlite3.connect(kanban_home / "kanban.db", isolation_level=None)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("UPDATE tasks SET title = 'rolled back' WHERE id = ?", (parent,))
+        writer.rollback()
+        _round(kanban_home, svc)
+        assert not any(calls.values())
+        writer.execute("UPDATE tasks SET title = 'committed' WHERE id = ?", (parent,))
+        _round(kanban_home, svc)
+        assert all(n == 1 for n in calls.values()), calls
+    finally:
+        writer.close()
+
+
+@pytest.mark.parametrize("mode", ["shadow", "primary"])
+def test_write_during_repair_is_not_cached_as_already_repaired(live, svc, kanban_home, monkeypatch, mode):
+    parent, _ = _settle(live, svc, kanban_home, mode)
+    real = ksc.retire_lost_placeholder_links
+    wrote = False
+
+    def concurrent_write(*args):
+        nonlocal wrote
+        result = real(*args)
+        if not wrote:
+            wrote = True
+            with kbc.write_txn(live):
+                # Suppress capture without DDL: schema_version cannot mask a lost revision.
+                live.execute("UPDATE kanban_sync_state SET applying = 1")
+                live.execute("UPDATE tasks SET title = 'during repair' WHERE id = ?", (parent,))
+                live.execute("UPDATE kanban_sync_state SET applying = 0")
+        return result
+
+    monkeypatch.setattr(ksc, "retire_lost_placeholder_links", concurrent_write)
+    ksc._REPAIRED.clear()
+    _round(kanban_home, svc)
+    assert wrote
+    _round(kanban_home, svc)
+    _round(kanban_home, svc)
+    assert svc.board(BOARD)["rows"]["tasks"][parent]["title"] == "during repair"
+
+
 def test_outbox_poll_keeps_one_connection_per_board_and_sees_new_work(live, kanban_home, monkeypatch):
     path = kanban_home / "kanban.db"
     with kbc.write_txn(live):
