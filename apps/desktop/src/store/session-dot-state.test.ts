@@ -52,14 +52,26 @@ describe('showsRunningArc', () => {
     expect(showsRunningArc('needs-input')).toBe(false)
   })
 
+  it('keeps the arc while subagents or background processes outlive the turn', () => {
+    expect(showsRunningArc('background')).toBe(true)
+  })
+
   it('leaves a session that is not running unmarked', () => {
-    expect(showsRunningArc('background')).toBe(false)
     expect(showsRunningArc('idle')).toBe(false)
     expect(showsRunningArc('unread')).toBe(false)
   })
 })
 
 describe('sessionStatusStripe', () => {
+  it('keeps stored outcomes authoritative during background work, but not a live own turn', () => {
+    const decision = { kind: 'decision', summary: 'Pick A or B' } as const
+
+    expect(hasLiveTurn('background')).toBe(true)
+    expect(showsRunningArc('background')).toBe(true)
+    expect(sessionStatusStripe('background', true, false, 0, false, null, 0, 0, 0, decision as never)).toBe('stuck')
+    expect(sessionStatusStripe('working', true, false, 0, false, null, 0, 0, 0, decision as never)).toBeNull()
+  })
+
   // [daveey] A chat that handed its work to kanban cards waits on them: grey
   // `waiting`, never green and never blank, until they finish.
   it('is waiting (grey) while the chat has open kanban cards', () => {
@@ -167,8 +179,7 @@ describe('hasLiveTurn', () => {
     }
   })
 
-  it('excludes work that outlived the turn', () => {
-    expect(hasLiveTurn('background')).toBe(false)
+  it('excludes a finished session', () => {
     expect(hasLiveTurn('unread')).toBe(false)
   })
 })

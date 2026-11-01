@@ -221,9 +221,13 @@ export const $goalActiveSessionIds = computed([$sessions, $messagingSessions], (
 export type SessionDotState = 'background' | 'draft' | 'idle' | 'needs-input' | 'stalled' | 'unread' | 'working'
 
 /** The sidebar row's arc. A quiet turn is still authoritatively running, so
- *  `stalled` keeps it; a blocking prompt drops it, because the amber dot is the
- *  louder cue and two treatments at once fight each other. */
-export const showsRunningArc = (state: SessionDotState): boolean => state === 'stalled' || state === 'working'
+ *  `stalled` keeps it; so does `background`, because a turn that ended on
+ *  delegate_task(background=true) or terminal(background=true) still has work
+ *  running in the session, and a row with no arc read as finished. A blocking
+ *  prompt drops it, because the amber dot is the louder cue and two treatments
+ *  at once fight each other. The dot still tells background apart (hollow). */
+export const showsRunningArc = (state: SessionDotState): boolean =>
+  state === 'background' || state === 'stalled' || state === 'working'
 
 /** [daveey] The sidebar row's status stripe: `done` (green) when the agent
  *  finished its turn and is waiting on the user — read or not, so it stays
@@ -331,7 +335,7 @@ export const sessionStatusStripe = (
   kanbanStalled = 0,
   outcome: null | SessionOutcome | undefined = null
 ): null | SessionStatusStripe => {
-  if (!userBlocked && !hasLiveTurn(state)) {
+  if (!userBlocked && !hasOwnLiveTurn(state)) {
     const fromOutcome = outcomeStripe(outcome)
 
     if (fromOutcome) {
@@ -411,7 +415,7 @@ export const withRowActivity = (state: SessionDotState, row: RowActivity): Sessi
   // never saw its stream: a backend-woken close-out turn in an unopened chat, or a chat on a gateway other than the
   // active one (only the active gateway's `session.active_list` is polled). It beats every non-live state, so the
   // stored outcome (a red decision) yields to it like any live turn.
-  if (row.turn_live === true && !hasLiveTurn(state)) {
+  if (row.turn_live === true && !hasOwnLiveTurn(state)) {
     return 'working'
   }
 
@@ -427,9 +431,12 @@ export const withRowActivity = (state: SessionDotState, row: RowActivity): Sessi
   return (settled === 'idle' || settled === 'draft') && (row.kanban_unseen ?? 0) > 0 ? 'unread' : settled
 }
 
-/** Whether this turn is the session's own, live: brighter title, and the row's
- *  age yields to the actions menu. Wider than the arc — a turn waiting on an
- *  answer has not ended. */
+/** [daveey] Background work keeps the session live, but is not its own turn:
+ *  it must not suppress stored outcomes or outrank a backend turn_live stamp. */
+const hasOwnLiveTurn = (state: SessionDotState): boolean =>
+  state === 'working' || state === 'stalled' || state === 'needs-input'
+
+/** Whether the session is live, including work that outlives its own turn. */
 export const hasLiveTurn = (state: SessionDotState): boolean => showsRunningArc(state) || state === 'needs-input'
 
 /** The buckets the sidebar's status filter and ordering work in. `stalled` and
