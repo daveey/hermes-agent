@@ -1,0 +1,371 @@
+"""[daveey] One delayed replay for a failed automation turn.
+
+An automation turn is a turn no person typed: a Kanban notice (``display_kind="kanban_notice"``, which the
+chat-closeout and owner-wake plugins use too) or a background-process report (``"process_complete"``). Before
+this module such a turn that failed after its notice row was written ended on the user-turn boundary "Your request
+was not processed. Send it again ..." that nobody could act on, and nothing ran it again: the notice ledger acks
+a notice once its row is in the transcript, and the refused-turn replay (``_hold_refused_turn``, 2185d7299c)
+excludes automation turns so a failing delivery can never loop.
+
+This module is the retry owner between the two, bounded so it cannot loop either:
+
+- a failed automation turn (or a wake whose agent build failed) schedules ONE replay, at least
+  ``REPLAY_MIN_DELAY_S`` later, or at the recorded ``failure_resets_at`` when the failure is a typed quota or
+  route exhaustion with a known reset;
+- a second failure of the same chat's automation turns while one replay is pending joins it (one timer per chat);
+- a later turn in the chat that succeeds cancels the replay when the failed delivery is already in the transcript
+  (that turn's context carried it); a delivery that never reached the transcript (an agent build failure) is kept;
+- the replay is marked (``display_metadata[REPLAY_METADATA_KEY]``): its own failure gives up, records it and
+  schedules nothing.
+
+The timers live in this process: a backend restart drops a pending replay (the boot sweeps and the notice
+guarantee own that case). The boundary row an automation turn leaves says what failed and what happens next
+(``failure_line``), never "send it again".
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
+
+AUTOMATION_KINDS = frozenset({"kanban_notice", "process_complete"})
+REPLAY_METADATA_KEY = "automation_replay"
+# The replay never runs sooner than this after the failure (the card's floor, and longer than a lease blip).
+REPLAY_MIN_DELAY_S = 60.0
+# The replay found a turn running: it looks again this much later, at most this many times, then gives up.
+BUSY_RECHECK_S = 60.0
+BUSY_RECHECKS_MAX = 10
+# Tests switch this off (tests/tui_gateway/conftest.py) so no real timer outlives the test that armed it.
+ENABLED = True
+
+_TASK_ID = re.compile(r"\bt_[0-9a-f]{8,}\b")
+_CAUSE_MAX_CHARS = 200
+
+
+@dataclass
+class _Item:
+    text: str
+    display_kind: str
+    display_metadata: dict
+    persisted: bool  # the delivery's row is in the transcript, so a later successful turn carries it
+    cause: str
+    failed_at: float
+
+
+@dataclass
+class _Entry:
+    items: list = field(default_factory=list)
+    due: float = 0.0
+    timer: Any = None
+    busy_rechecks: int = 0
+
+
+_lock = threading.Lock()
+_entries: dict[str, _Entry] = {}
+
+
+@dataclass(frozen=True)
+class Plan:
+    """What happens to one failed automation turn: ``retry`` at ``due``, or not; ``line`` is its boundary copy."""
+    retry: bool
+    due: float | None
+    line: str
+    cause: str
+
+
+def is_automation(display_kind: Any) -> bool:
+    return display_kind in AUTOMATION_KINDS
+
+
+def is_replay(display_metadata: Any) -> bool:
+    return isinstance(display_metadata, dict) and bool(display_metadata.get(REPLAY_METADATA_KEY))
+
+
+def failure_cause(error: Any) -> str:
+    """The failure in one short line (first non-empty line, whitespace collapsed, capped)."""
+    text = str(error or "").strip()
+    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    line = " ".join(line.split()).rstrip(".")
+    if len(line) > _CAUSE_MAX_CHARS:
+        line = line[:_CAUSE_MAX_CHARS - 1].rstrip() + "…"
+    return line or "the turn failed"
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def replay_due(now: float, resets_at: Any = None) -> float:
+    """``now + REPLAY_MIN_DELAY_S``, or the recorded reset when that is later (typed quota/route exhaustion)."""
+    due = now + REPLAY_MIN_DELAY_S
+    reset = _number(resets_at)
+    return max(due, reset) if reset is not None else due
+
+
+def _task_ids(display_metadata: Any, text: Any) -> list[str]:
+    ids: list[str] = []
+    meta = display_metadata if isinstance(display_metadata, dict) else {}
+    for raw in meta.get("task_ids") or ():
+        if isinstance(raw, str) and raw and raw not in ids:
+            ids.append(raw)
+    if not ids:
+        for source in (meta.get("display_text"), text):
+            for match in _TASK_ID.findall(str(source or "")):
+                if match not in ids:
+                    ids.append(match)
+            if ids:
+                break
+    return ids
+
+
+def subject(display_kind: Any, display_metadata: Any, text: Any) -> str:
+    """What failed, in words: ``the notice for t_…`` / ``the background-job report``."""
+    if display_kind == "process_complete":
+        return "the background-job report"
+    ids = _task_ids(display_metadata, text)
+    if not ids:
+        return "the Kanban notice"
+    shown = ", ".join(ids[:3]) + (f" and {len(ids) - 3} more" if len(ids) > 3 else "")
+    return f"the notice for {shown}"
+
+
+def format_when(ts: float, now: float | None = None) -> str:
+    """``HH:MM PT`` (David's clock), with the date when it is not today there."""
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        zone, label = ZoneInfo("America/Los_Angeles"), "PT"
+    except Exception:  # health: allow BLE001 -- no tz database: UTC is still a correct time
+        from datetime import UTC
+        zone, label = UTC, "UTC"
+    when = datetime.fromtimestamp(ts, zone)
+    today = datetime.fromtimestamp(time.time() if now is None else now, zone)
+    if when.date() != today.date():
+        return f"{when:%b} {when.day} {when:%H:%M} {label}"
+    return f"{when:%H:%M} {label}"
+
+
+def failure_line(what: str, cause: str, *, due: float | None = None, gave_up: bool = False,
+                 now: float | None = None) -> str:
+    head = f"Couldn't process {what}: {cause}."
+    if due is not None:
+        return f"{head} Retrying once at {format_when(due, now)}."
+    return f"{head} Gave up after one retry."
+
+
+def plan_turn_failure(display_kind: Any, display_metadata: Any, text: Any, result: Any,
+                      now: float | None = None) -> Plan | None:
+    """The plan for a failed automation turn (None for any other turn). Pure: ``schedule`` acts on it."""
+    if not ENABLED or not is_automation(display_kind) or not isinstance(result, dict):
+        return None
+    now = time.time() if now is None else now
+    cause = failure_cause(result.get("error") or result.get("final_response"))
+    what = subject(display_kind, display_metadata, text)
+    if is_replay(display_metadata):
+        return Plan(False, None, failure_line(what, cause, gave_up=True, now=now), cause)
+    # Any failure gets its one replay, "non-retryable" ones too: the classifier judges a provider call, and the
+    # turns this owns failed on Hermes-side walls it reads as client errors (the chat ownership lease refusal of
+    # the 19 lost notices was "Non-retryable client error"). One bounded replay costs one turn at most.
+    due = replay_due(now, result.get("failure_resets_at"))
+    return Plan(True, due, failure_line(what, cause, due=due, now=now), cause)
+
+
+def _arm(key: str, entry: _Entry, delay: float, fire: Callable[[str], None]) -> None:
+    timer = threading.Timer(max(delay, 0.0), lambda: fire(key))
+    timer.daemon = True
+    entry.timer = timer
+    timer.start()
+
+
+def _cancel_timer(entry: _Entry) -> None:
+    cancel = getattr(entry.timer, "cancel", None)
+    if callable(cancel):
+        try:
+            cancel()
+        except Exception:  # health: allow BLE001 -- a timer that cannot cancel still finds no entry when it fires
+            logger.debug("automation-replay: timer cancel failed", exc_info=True)
+    entry.timer = None
+
+
+def schedule(session_key: str, *, text: str, display_kind: str, display_metadata: dict | None, due: float,
+             cause: str, persisted: bool, now: float | None = None,
+             fire: Callable[[str], None] | None = None) -> bool:
+    """Arm (or join) this chat's one pending replay. True when it is pending after the call."""
+    key = str(session_key or "")
+    if not ENABLED or not key or not isinstance(text, str) or not text.strip() or not is_automation(display_kind):
+        return False
+    now = time.time() if now is None else now
+    item = _Item(text, display_kind, dict(display_metadata or {}), persisted, cause, now)
+    fire = fire or _fire
+    with _lock:
+        entry = _entries.get(key)
+        if entry is not None:
+            entry.items.append(item)
+            # A later quota/route reset wins: the joined deliveries wait for it together. A plain failure a few
+            # seconds later joins the timer already armed (no re-arm per delivery).
+            if due > entry.due + REPLAY_MIN_DELAY_S:
+                entry.due = due
+                _cancel_timer(entry)
+                _arm(key, entry, max(due - now, REPLAY_MIN_DELAY_S), fire)
+            logger.info("automation-replay: %s joined the pending replay of %s (%d deliveries)",
+                        subject(display_kind, display_metadata, text), key, len(entry.items))
+            return True
+        entry = _Entry(items=[item], due=due)
+        _entries[key] = entry
+        _arm(key, entry, max(due - now, REPLAY_MIN_DELAY_S), fire)
+    logger.info("automation-replay: %s failed in %s (%s); one replay at %s", subject(display_kind, display_metadata,
+                text), key, cause, format_when(due, now))
+    return True
+
+
+def cancel_carried(*session_keys: str) -> bool:
+    """A turn in the chat succeeded: drop the pending deliveries its context already carried. True if any went."""
+    dropped = False
+    with _lock:
+        for key in dict.fromkeys(k for k in session_keys if k):
+            entry = _entries.get(key)
+            if entry is None:
+                continue
+            kept = [item for item in entry.items if not item.persisted]
+            if len(kept) == len(entry.items):
+                continue
+            dropped = True
+            entry.items = kept
+            if not kept:
+                _cancel_timer(entry)
+                del _entries[key]
+            logger.info("automation-replay: a later turn in %s succeeded and carries the failed delivery; %s",
+                        key, "replay cancelled" if not kept else f"{len(kept)} unpersisted delivery(ies) still pending")
+    return dropped
+
+
+def pending(session_key: str) -> bool:
+    with _lock:
+        return str(session_key or "") in _entries
+
+
+def reset() -> None:
+    """Drop every pending replay (tests)."""
+    with _lock:
+        for entry in _entries.values():
+            _cancel_timer(entry)
+        _entries.clear()
+
+
+def replay_payload(items: list) -> tuple[str, str, dict]:
+    """``(text, display_kind, display_metadata)`` of the one turn that replays ``items``."""
+    first = items[0]
+    failed_at = min(item.failed_at for item in items)
+    causes = "; ".join(dict.fromkeys(item.cause for item in items))
+    note = (f"[Hermes: automatic retry of {len(items)} automated deliver{'y' if len(items) == 1 else 'ies'} "
+            f"that failed at {format_when(failed_at)} ({causes}). This is the only retry. Check the current state "
+            "before redoing anything.]")
+    text = note + "\n\n" + "\n\n---\n\n".join(item.text for item in items)
+    marker = {"attempt": 1, "failed_at": failed_at, "cause": causes, "deliveries": len(items)}
+    if len(items) == 1:
+        meta = {**first.display_metadata, REPLAY_METADATA_KEY: marker}
+        if isinstance(meta.get("display_text"), str) and meta["display_text"]:
+            meta["display_text"] = f"Retry: {meta['display_text']}"
+        return text, first.display_kind, meta
+    kind = "kanban_notice" if any(item.display_kind == "kanban_notice" for item in items) else first.display_kind
+    shown = [str(item.display_metadata.get("display_text") or "") for item in items]
+    task_ids: list[str] = []
+    for item in items:
+        for tid in _task_ids(item.display_metadata, item.text):
+            if tid not in task_ids:
+                task_ids.append(tid)
+    meta: dict = {REPLAY_METADATA_KEY: marker}
+    if any(shown):
+        meta["display_text"] = "Retry: " + " · ".join(s for s in shown if s)
+    if task_ids:
+        meta["task_ids"] = task_ids
+    return text, kind, meta
+
+
+def install_failure_copy(st: Any, text: Any) -> None:
+    """The failed-turn boundary of an automation turn (``conversation_loop._close_durable_failed_turn``) says what
+    failed and whether it is retried, never "send it again": the agent asks this hook for the copy, and the plan it
+    makes is the one ``schedule_for_turn`` acts on. ``st`` is a ``prompt_turn._TurnRun``, read defensively."""
+    if not is_automation(getattr(st, "display_kind", None)):
+        return
+    st.automation_text = text if isinstance(text, str) else ""
+
+    def copy(result: Any) -> str | None:
+        st.automation_plan = plan_turn_failure(st.display_kind, getattr(st, "display_metadata", None),
+                                               st.automation_text, result)
+        return st.automation_plan.line if st.automation_plan is not None else None
+    try:
+        st.agent._failed_turn_notice_override = copy
+    except Exception:  # health: allow BLE001 -- an agent that refuses the hook keeps the stock copy
+        logger.debug("automation-replay: could not install the failure copy", exc_info=True)
+
+
+def remove_failure_copy(st: Any) -> None:
+    agent = getattr(st, "agent", None)
+    if agent is not None and getattr(agent, "_failed_turn_notice_override", None) is not None:
+        try:
+            agent._failed_turn_notice_override = None
+        except Exception:  # health: allow BLE001 -- the next turn installs its own copy (or none)
+            logger.debug("automation-replay: could not remove the failure copy", exc_info=True)
+
+
+def plan_for_turn(st: Any, result: Any) -> None:
+    """The plan of a failed automation turn whose boundary did not make one (no durable tail to close, a raise)."""
+    kind = getattr(st, "display_kind", None)
+    if getattr(st, "automation_plan", None) is None and is_automation(kind):
+        st.automation_plan = plan_turn_failure(kind, getattr(st, "display_metadata", None),
+                                               getattr(st, "automation_text", ""),
+                                               result if isinstance(result, dict) else {})
+
+
+def schedule_for_turn(session: dict, st: Any) -> None:
+    """Arm the one delayed replay a failed automation turn planned (a replay's own failure plans none)."""
+    plan = getattr(st, "automation_plan", None)
+    if plan is None:
+        return
+    st.automation_plan = None
+    key = str(session.get("session_key") or getattr(st, "marker_key", "") or "")
+    if not plan.retry:
+        logger.warning("automation-replay: %s in %s", plan.line, key)
+        return
+    schedule(key, text=getattr(st, "automation_text", ""), display_kind=st.display_kind,
+             display_metadata=getattr(st, "display_metadata", None), due=plan.due, cause=plan.cause, persisted=True)
+
+
+def _fire(key: str) -> None:
+    with _lock:
+        entry = _entries.pop(key, None)
+    if entry is None or not entry.items:
+        return  # cancelled by a later successful turn
+    text, kind, meta = replay_payload(entry.items)
+    what = ", ".join(dict.fromkeys(subject(i.display_kind, i.display_metadata, i.text) for i in entry.items))
+    try:
+        from tui_gateway import server
+        verdict = server._wake_session_turn(key, text, display_kind=kind, display_metadata=meta,
+                                            label="automation-replay")
+    except Exception:  # health: allow BLE001 -- the replay is best effort; logged as given up below
+        logger.warning("automation-replay: replay of %s raised", key, exc_info=True)
+        verdict = "error"
+    if verdict == "started":
+        logger.info("automation-replay: replayed %s in %s", what, key)
+        return
+    if verdict == "busy" and entry.busy_rechecks < BUSY_RECHECKS_MAX:
+        with _lock:
+            if key not in _entries:  # a newer failure may have armed its own entry meanwhile: join it
+                entry.busy_rechecks += 1
+                _entries[key] = entry
+                _arm(key, entry, BUSY_RECHECK_S, _fire)
+                return
+            current = _entries[key]
+            current.items[:0] = entry.items
+        return
+    logger.warning("automation-replay: gave up on %s in %s after one retry (%s); nothing more is scheduled",
+                   what, key, verdict)

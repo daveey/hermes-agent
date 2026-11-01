@@ -648,6 +648,11 @@ class _TurnRun:
     marker_key: str = ""
     display_kind: Any = None
     receipt_attempted: bool = False
+    # [daveey] An automation turn (kanban_notice, process_complete): its display metadata and the one replay plan
+    # its failure made (tui_gateway/automation_replay.py; the boundary row says the same thing).
+    display_metadata: Any = None
+    automation_text: str = ""
+    automation_plan: Any = None
 
 
 def _history_row_ids(history: list) -> set:
@@ -1346,6 +1351,9 @@ def _run_admitted_prompt(
         st.marker_key = _record_turn_marker(session, text, auto_continue=auto_continue and terminal_callback is None,
             notification_category=(display_metadata or {}).get("notification_category"))
         st.display_kind = display_kind
+        st.display_metadata = display_metadata
+        from tui_gateway import automation_replay  # [daveey] a failed automation turn's copy and its one replay
+        automation_replay.install_failure_copy(st, text)
         goal_followup = None
         try:
             prepared = _prepare_turn_input(sid, session, st, text, images)
@@ -1363,6 +1371,8 @@ def _run_admitted_prompt(
             status_note = _absorb_turn_result(
                 sid, session, st, text, display_kind, display_metadata)
             payload, raw, status = _complete_turn_payload(session, st, status_note, cols)
+            if status == "error":  # [daveey] module calls: harnesses rebind this body with minimal globals
+                automation_replay.plan_for_turn(st, st.result)
             paused_for_update = isinstance(st.result, dict) and bool(st.result.get("paused_for_update"))
             if paused_for_update:
                 from tui_gateway.update_pause import announce_pause
@@ -1376,6 +1386,10 @@ def _run_admitted_prompt(
                 note_task_done(session, st.result, st.agent, display_kind)
             _emit("message.complete", sid, payload)
             _schedule_refused_turn_retry(sid, session, st.marker_key)
+            if status == "complete":
+                # [daveey] This turn's context carried any failed delivery already in the transcript.
+                automation_replay.cancel_carried(st.marker_key, str(session.get("session_key") or ""))
+            automation_replay.schedule_for_turn(session, st)
             if paused_for_update:
                 # The new backend continues it; if no update replaces this one, continue it here.
                 from tui_gateway import update_pause
@@ -1389,7 +1403,10 @@ def _run_admitted_prompt(
         except Exception as e:
             logger.exception("Prompt turn failed")
             _recover_turn_exception(sid, session, st, e)
+            automation_replay.plan_for_turn(st, {"error": f"{type(e).__name__}: {e}"})
+            automation_replay.schedule_for_turn(session, st)
         finally:
+            automation_replay.remove_failure_copy(st)
             _release_turn_scopes(sid, session, st)
             try:  # a raising settle step must not skip the trim / HERMES_HOME reset
                 _current_runtime_session_record.reset(runtime_session_token)

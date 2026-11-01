@@ -16,3 +16,12 @@ def _no_refused_turn_replay(monkeypatch):
     """A real 45 s timer would outlive its test and replay into the next one; ``test_refused_turn_retry`` turns it on."""
     from tui_gateway import server
     monkeypatch.setattr(server, "_REFUSED_RETRY_DELAYS_S", ())
+
+
+@pytest.fixture(autouse=True)
+def _no_automation_replay(monkeypatch):
+    """Same for the automation-turn replay (a 60 s timer per failed notice); its tests turn it on and reset it."""
+    from tui_gateway import automation_replay
+    monkeypatch.setattr(automation_replay, "ENABLED", False)
+    yield
+    automation_replay.reset()

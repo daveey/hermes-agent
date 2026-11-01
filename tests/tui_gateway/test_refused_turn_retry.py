@@ -96,11 +96,194 @@ def test_a_replay_waits_longer_and_the_last_one_gives_up(emits, turn_env, marker
     assert read_turn_marker(marker_home, "session-key") is None and not timers
 
 
-@pytest.mark.parametrize("kind", ["process_complete", "kanban_notice"])
-def test_automation_turns_are_not_replayed(emits, turn_env, marker_home, timers, kind):
+@pytest.fixture()
+def replay(monkeypatch, timers):
+    """The automation-turn replay switched on (tests/tui_gateway/conftest.py keeps it off elsewhere)."""
+    import importlib.util
+    mod = None
+    if importlib.util.find_spec("tui_gateway.automation_replay") is not None:
+        from tui_gateway import automation_replay as mod
+        monkeypatch.setattr(mod, "ENABLED", True)
+        mod.reset()
+    yield mod
+    if mod is not None:
+        mod.reset()
+
+
+KINDS = ["kanban_notice", "process_complete"]
+TASK = "t_0123456789abcdef"
+META = {"display_text": f"Kanban {TASK} done", "task_ids": [TASK]}
+OK = {"final_response": "handled"}
+
+
+def _closing_agent(results, lines):
+    """A fake agent whose failed turns close their durable tail the way ``_close_durable_failed_turn`` does: the
+    host's copy override when one is installed, else the user-turn boundary."""
+    from agent.turn_failure_copy import FAILED_TURN_NOTICE
+    agent = types.SimpleNamespace(session_id="session-key", clear_interrupt=lambda: None)
+    pending = iter(results)
+
+    def run(message, **kwargs):
+        result = dict(next(pending))
+        if result.get("failed"):
+            override = getattr(agent, "_failed_turn_notice_override", None)
+            lines.append((override(result) if callable(override) else None) or FAILED_TURN_NOTICE)
+        return result
+    agent.run_conversation = run
+    return agent
+
+
+def _wake_into(session, calls, monkeypatch):
+    """``_wake_session_turn`` stand-in: records the replay and runs it as a turn in ``session``."""
+    def wake(key, text, *, display_kind=None, display_metadata=None, label="wake", build_timeout=120.0):
+        calls.append({"key": key, "text": text, "display_kind": display_kind, "meta": display_metadata,
+                      "label": label})
+        session["running"] = True
+        server._run_prompt_submit("rid", "sid", session, text, display_kind=display_kind,
+                                  display_metadata=display_metadata)
+        return "started"
+    monkeypatch.setattr(server, "_wake_session_turn", wake)
+
+
+def _deliver(session, kind, text="card done"):
+    session["running"] = True
+    server._run_prompt_submit("rid", "sid", session, text, display_kind=kind, display_metadata=dict(META))
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_refused_automation_turn_is_replayed_once_after_the_delay(
+        emits, turn_env, marker_home, timers, replay, monkeypatch, kind):
+    lines, calls = [], []
+    session = _session(agent=_closing_agent([_refused("x"), OK], lines), running=True)
+    _wake_into(session, calls, monkeypatch)
+    _deliver(session, kind)
+    assert len(timers) == 1 and timers[0][0] >= 60.0
+    assert "Send it again" not in lines[0] and "Retrying once at" in lines[0] and LEASE in lines[0]
+    assert read_turn_marker(marker_home, "session-key") is None  # the user-turn replay stays out of it
+    timers[0][1]()
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["key"] == "session-key" and call["display_kind"] == kind and call["label"] == "automation-replay"
+    assert "card done" in call["text"] and call["meta"]["automation_replay"]["attempt"] == 1
+    timers[0][1]()  # a stale second fire finds nothing
+    assert len(calls) == 1 and len(timers) == 1
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_second_refusal_gives_up_and_leaves_no_timers(
+        emits, turn_env, marker_home, timers, replay, monkeypatch, kind):
+    lines, calls = [], []
+    session = _session(agent=_closing_agent([_refused("x"), _refused("x")], lines), running=True)
+    _wake_into(session, calls, monkeypatch)
+    _deliver(session, kind)
+    timers[0][1]()
+    assert len(calls) == 1 and len(lines) == 2
+    assert "Gave up after one retry" in lines[1] and "Send it again" not in lines[1]
+    assert len(timers) == 1 and not replay.pending("session-key")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_later_successful_turn_cancels_the_pending_replay(
+        emits, turn_env, marker_home, timers, replay, monkeypatch, kind):
+    lines, calls = [], []
+    session = _session(agent=_closing_agent([_refused("x"), OK], lines), running=True)
+    _wake_into(session, calls, monkeypatch)
+    _deliver(session, kind)
+    assert len(timers) == 1
+    session["running"] = True
+    server._run_prompt_submit("rid", "sid", session, "what's next?")  # a person's turn; it carries the notice
+    assert not replay.pending("session-key")
+    timers[0][1]()
+    assert not calls
+
+
+def test_repeated_refusals_never_loop(emits, turn_env, marker_home, timers, replay, monkeypatch):
+    lines, calls = [], []
+    session = _session(agent=_closing_agent([_refused("x")] * 8, lines), running=True)
+    _wake_into(session, calls, monkeypatch)
+    for n, kind in enumerate(KINDS + KINDS):  # four deliveries fail: they share one replay
+        _deliver(session, kind, text=f"delivery {n}")
+    assert len(timers) == 1
+    for _ in range(3):
+        timers[-1][1]()
+    assert len(calls) == 1 and all(f"delivery {n}" in calls[0]["text"] for n in range(4))
+    assert len(timers) == 1 and not replay.pending("session-key")
+    assert "Gave up after one retry" in lines[-1]
+
+
+def test_a_quota_failure_replays_at_the_recorded_reset(emits, turn_env, marker_home, timers, replay, monkeypatch):
+    import time
+    resets_at = time.time() + 7200
+    lines = []
+    quota = {"failed": True, "error": "Subscription quota unavailable", "final_response": None,
+             "failure_reason": "rate_limit", "failure_retryable": True, "failure_resets_at": resets_at}
+    session = _session(agent=_closing_agent([quota], lines), running=True)
+    _deliver(session, "kanban_notice")
+    assert len(timers) == 1 and 7100 < timers[0][0] <= 7200
+    assert "Retrying once at" in lines[0] and "Send it again" not in lines[0]
+
+
+def test_a_user_turn_keeps_its_own_replay(emits, turn_env, marker_home, timers, replay):
     session = _session(agent=_agent(), running=True)
-    server._run_prompt_submit("rid", "sid", session, "a delivery", display_kind=kind)
-    assert read_turn_marker(marker_home, "session-key") is None and not timers
+    server._run_prompt_submit("rid", "sid", session, "archive my receipts")
+    assert [t[0] for t in timers] == [45.0] and not replay.pending("session-key")
+
+
+def _failed_build_session(monkeypatch, failure=None):
+    session = _session(agent=None, running=False)
+    session.update(agent=None, agent_error="ModelRoutingError: No eligible deep routes under billing/capability "
+                   "policy", agent_failure=failure or {}, agent_ready=threading.Event())
+    session["agent_ready"].set()
+    monkeypatch.setattr(server, "_find_live_session_by_key", lambda key: ("sid", session))
+    monkeypatch.setattr(server, "_start_agent_build", lambda sid, sess: None)
+    monkeypatch.setattr(server, "_restart_completed_failed_agent_build", lambda *a: False)
+    return session
+
+
+@pytest.mark.parametrize("label", ["owner-wake", "kanban-sweep-wake"])
+def test_a_wake_whose_build_failed_gets_exactly_one_later_retry(timers, replay, monkeypatch, label):
+    _failed_build_session(monkeypatch)
+    real, calls = server._wake_session_turn, []
+    monkeypatch.setattr(server, "_wake_session_turn", lambda *a, **k: calls.append((a, k)) or real(*a, **k))
+    verdict = real("session-key", f"Owner wake: {TASK} waits on you", display_kind="kanban_notice",
+                   display_metadata={"owner_wake": True, "task_ids": [TASK]}, label=label)
+    assert verdict == "error"  # the caller's contract is unchanged ("deferred (error)")
+    assert len(timers) == 1 and timers[0][0] >= 60.0
+    timers[0][1]()
+    assert len(calls) == 1 and calls[0][1]["label"] == "automation-replay"
+    assert calls[0][1]["display_metadata"]["automation_replay"]["attempt"] == 1
+    assert len(timers) == 1 and not replay.pending("session-key")  # the replay failed too: given up
+
+
+def test_a_wake_build_quota_failure_waits_for_the_reset(timers, replay, monkeypatch):
+    import time
+    _failed_build_session(monkeypatch, failure={"failure_resets_at": time.time() + 3600})
+    server._wake_session_turn("session-key", f"Owner wake: {TASK}", display_kind="kanban_notice",
+                              display_metadata={"owner_wake": True}, label="owner-wake")
+    assert len(timers) == 1 and 3500 < timers[0][0] <= 3600
+
+
+def test_a_closeout_wake_whose_build_failed_gets_its_one_retry(timers, replay, monkeypatch):
+    # notice_guarantee stamps the claimed row "error" and never offers it again: the replay is its only retry.
+    _failed_build_session(monkeypatch)
+    real, calls = server._wake_session_turn, []
+    monkeypatch.setattr(server, "_wake_session_turn", lambda *a, **k: calls.append((a, k)) or real(*a, **k))
+    closeout = {"display_text": "Close-out turn", "closeout": {"state": "self", "of": 7}}
+    assert real("session-key", "close out", display_kind="kanban_notice", display_metadata=closeout,
+                label="notice-closeout") == "error"
+    assert len(timers) == 1 and timers[0][0] >= 60.0
+    timers[0][1]()
+    meta = calls[0][1]["display_metadata"]
+    assert len(calls) == 1 and meta["closeout"] == {"state": "self", "of": 7} and meta["automation_replay"]
+    assert len(timers) == 1 and not replay.pending("session-key")
+
+
+def test_a_wake_retries_a_build_that_already_failed(timers, replay, monkeypatch):
+    _failed_build_session(monkeypatch)
+    restarted = []
+    monkeypatch.setattr(server, "_restart_completed_failed_agent_build", lambda *a: restarted.append(a) or False)
+    server._wake_session_turn("session-key", "notice", display_kind="kanban_notice", label="owner-wake")
+    assert restarted and restarted[0][0] == "sid"
 
 
 def test_a_goal_keeps_its_own_retry(emits, turn_env, marker_home, timers, monkeypatch):

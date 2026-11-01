@@ -293,6 +293,11 @@ def _start_agent_build(sid: str, session: dict) -> None:
         except (Exception, ConfigBackendUnavailable) as e:  # health: allow BLE001 -- reported as agent_error + error event
             from tui_gateway.credential_failure import build_failure_fields, provider_not_configured
             current["agent_failure"] = build_failure_fields(e, current)
+            # [daveey] A typed quota/route exhaustion knows when it clears: an automation replay waits for it.
+            resets_at = getattr(e, "resets_at", None)
+            if (isinstance(resets_at, (int, float)) and not isinstance(resets_at, bool)
+                    and "failure_resets_at" not in current["agent_failure"]):
+                current["agent_failure"]["failure_resets_at"] = float(resets_at)
             current["agent_error"] = str(e)
             # Logged: a failed build otherwise leaves no trace, so a prompt waiting on it reads in agent.log as
             # a message that "never ran" (the client only got an event, which a disconnect can lose). [daveey]

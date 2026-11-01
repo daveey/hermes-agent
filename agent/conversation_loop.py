@@ -45,7 +45,9 @@ from agent.turn_scripted_prelude import Prelude, play_prelude
 from agent.turn_api_call import handle_api_interrupt, nous_rate_limit_guard, perform_api_call
 from agent.turn_api_error import handle_api_error
 from agent.turn_api_request import build_api_request
-from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, OPEN_TURN_TAIL_ROLES, failed_turn_notice, site_copy
+from agent.turn_failure_copy import (
+    FAILED_TURN_DISPLAY_KIND, OPEN_TURN_TAIL_ROLES, PARTIAL_FAILED_TURN_NOTICE, failed_turn_notice, site_copy,
+)
 from agent.turn_final_response import finish_text_response
 from agent.turn_finalizer import finalize_turn
 from agent.turn_iteration_prep import (
@@ -1952,10 +1954,21 @@ def _close_durable_failed_turn(agent, result: Any) -> None:
         # hedge over the whole list rather than under-report a possible side effect.
         start = result.get("current_turn_user_idx")
         turn_messages = messages[start:] if isinstance(start, int) and 0 <= start < len(messages) else messages
-        boundary = {
-            "role": "assistant", "display_kind": FAILED_TURN_DISPLAY_KIND,
-            "content": failed_turn_notice(turn_messages, restarted=_stopped_by_backend_exit(agent, result)),
-        }
+        content = failed_turn_notice(turn_messages, restarted=_stopped_by_backend_exit(agent, result))
+        # [daveey] A turn nobody typed (a Kanban notice, a background-job report) is never "sent again" by a
+        # person: its host supplies copy that says what failed and what happens next (TUI: automation replay).
+        override = getattr(agent, "_failed_turn_notice_override", None)
+        if callable(override):
+            try:
+                custom = override(result)
+            except Exception:
+                logger.debug("failed-turn copy override raised", exc_info=True)
+                custom = None
+            if isinstance(custom, str) and custom.strip():
+                partial = content == PARTIAL_FAILED_TURN_NOTICE
+                custom = custom.strip() + (" Some actions may already have run; verify their effects." if partial else "")
+                content = _redact_display_metadata({"content": custom})["content"]
+        boundary = {"role": "assistant", "display_kind": FAILED_TURN_DISPLAY_KIND, "content": content}
         if failure := _failed_turn_display_metadata(agent, result):
             boundary["display_metadata"] = failure
         append_message(messages, boundary)
