@@ -264,19 +264,15 @@ def _gateway_turn_live(db: Any, sid: str) -> bool:
     """[daveey] A gateway routing entry for ``sid`` carries ``active_turn_token`` (``mark_turn_active`` at
     turn start, CAS-cleared at its end) and the gateway owning that routing scope is running. A crashed
     gateway leaves the token behind until its next start recovers it, so a dead gateway reads not-live."""
-    rows = db._read_all(
-        "SELECT scope, entry_json FROM gateway_routing WHERE json_extract(entry_json, '$.session_id') = ?"
-        " AND json_extract(entry_json, '$.active_turn_token') IS NOT NULL", (sid,))
+    from hermes_state_routing_snapshot import active_routing_entries
+
+    entries = active_routing_entries(db, sid)
     now = time.time()
-    for row in rows:
-        try:
-            entry = json.loads(row["entry_json"] or "{}")
-        except ValueError:
-            continue
+    for routing_scope, entry in entries:
         started = _iso_epoch(entry.get("active_turn_started_at"))
         if started is None or now - started > _GATEWAY_TURN_MAX_AGE_S:
             continue
-        scope = str(row["scope"] or "")
+        scope = str(routing_scope or "")
         gateway_home = Path(scope).parent if scope else Path(db.db_path).parent
         if _gateway_running(gateway_home):
             return True
