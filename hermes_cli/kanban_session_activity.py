@@ -929,13 +929,13 @@ def _replica_paths() -> list[Path]:
         return []
 
 
-def _activity_fingerprint() -> tuple:
-    """Invalidate on cross-process commits, including WAL writes and board replacement. The hub replica counts by
-    content (``_hub_content_signature``), the boards by stat."""
+def _activity_fingerprint(*, include_shadows: bool = True) -> tuple:
+    """Count inputs include sync shadows; the origin-ledger projection never reads them."""
     paths = _board_db_paths()
     hub = _hub_db_path()
     signature = [_hub_content_signature(hub)] if hub is not None else []
-    paths.extend(_replica_paths())
+    if include_shadows:
+        paths.extend(_replica_paths())
     for db in paths:
         for path in (db, Path(str(db) + "-wal")):
             try:
@@ -1040,7 +1040,7 @@ def _links_fingerprint() -> tuple:
     from hermes_constants import get_hermes_home
 
     ledger = get_hermes_home() / 'kanban' / 'origin-ledger.db'
-    signature = list(_activity_fingerprint())
+    signature = list(_activity_fingerprint(include_shadows=False))
     for path in (ledger, Path(str(ledger) + '-wal')):
         try:
             st = path.stat()

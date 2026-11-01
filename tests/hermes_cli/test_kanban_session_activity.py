@@ -808,7 +808,7 @@ def test_concurrent_sidebar_reads_share_one_recompute_while_the_board_keeps_chan
 
     _make_board(kanban_root / "kanban.db", [("t_run", "running", "s_live")])
     ticks = iter(range(10**6))
-    monkeypatch.setattr(ksa, "_activity_fingerprint", lambda: (next(ticks),))  # a write between every two reads
+    monkeypatch.setattr(ksa, "_activity_fingerprint", lambda **kw: (next(ticks),))  # a write between every two reads
     real_read = ksa._read_local_pairs_into
     reads: list[int] = []
     first_read_started = threading.Event()
