@@ -138,3 +138,90 @@ def test_orphan_reap_refreshes_each_reaped_row(monkeypatch, db):
 
     stored = so.get_outcome("reaped", db=db)
     assert (stored["kind"], stored["reason"]) == ("unresolved", "interrupted")
+
+
+# ---- agent-init failure ("failed before the agent was ready") --------------------------------------------
+# The deferred build failed (ModelRoutingError and the like), so no agent ever ran the turn: neither the
+# conversation-loop closer nor the gateway closer exists on this path. The TUI turn thread itself must close
+# the accepted user row with the failed-turn boundary and refresh the stored outcome, else the chat reads
+# unresolved{interrupted} forever.
+
+def _init_failed_session(sid: str, *, error: str | None = "ModelRoutingError: No eligible deep routes") -> dict:
+    ready = threading.Event()
+    ready.set()
+    return {
+        "agent": None, "agent_ready": ready, "agent_error": error, "session_key": sid, "history": [],
+        "history_lock": threading.Lock(), "history_version": 0, "running": True, "cols": 80, "inflight_turn": None,
+    }
+
+
+@pytest.fixture
+def init_env(monkeypatch, db):
+    for name, stub in {"_emit": lambda *_a, **_k: None, "render_message": lambda _raw, _cols: None,
+                       "_session_info": lambda *_a: {}, "_get_db": lambda: db}.items():
+        monkeypatch.setattr(server, name, stub)
+    return monkeypatch
+
+
+def _failed_rows(db, sid):
+    return [m for m in db.get_messages(sid) if m.get("display_kind") == "failed_turn"]
+
+
+def test_agent_init_failure_writes_one_boundary_and_reads_turn_failed(init_env, db):
+    from agent.turn_failure_copy import FAILED_TURN_NOTICE
+
+    db.create_session("row-init", source="desktop")
+    db.append_message("row-init", role="user", content="rotate the key")
+    session = _init_failed_session("row-init")
+
+    server._run_after_agent_ready("rid", "ui-init-1", session, "rotate the key", None, None, None)
+
+    rows = _failed_rows(db, "row-init")
+    assert len(rows) == 1, rows
+    boundary = rows[0]
+    assert boundary["role"] == "assistant" and boundary["content"] == FAILED_TURN_NOTICE
+    meta = boundary.get("display_metadata") or {}
+    assert meta.get("error_surface") == {"layer": "runtime", "code": "agent_init_failed", "retryable": True}
+    assert "No eligible deep routes" in meta.get("error", "")
+    assert db.latest_conversation_role("row-init") == "assistant"
+    stored = so.get_outcome("row-init", db=db)
+    assert stored is not None and (stored["kind"], stored.get("reason")) == ("unresolved", "turn_failed")
+    assert session["running"] is False
+
+
+def test_agent_init_failure_redelivery_adds_no_second_boundary(init_env, db):
+    db.create_session("row-init2", source="desktop")
+    db.append_message("row-init2", role="user", content="rotate the key")
+
+    for _ in range(2):
+        server._run_after_agent_ready(
+            "rid", "ui-init-2", _init_failed_session("row-init2"), "rotate the key", None, None, None)
+
+    assert len(_failed_rows(db, "row-init2")) == 1
+    stored = so.get_outcome("row-init2", db=db)
+    assert (stored["kind"], stored.get("reason")) == ("unresolved", "turn_failed")
+
+
+def test_agent_init_failure_secret_in_error_is_redacted(init_env, db):
+    db.create_session("row-init3", source="desktop")
+    db.append_message("row-init3", role="user", content="hi")
+    secret = "sk-ant-api03-" + "A" * 40
+    server._run_after_agent_ready(
+        "rid", "ui-init-3", _init_failed_session("row-init3", error=f"bad key {secret}"), "hi", None, None, None)
+
+    (row,) = _failed_rows(db, "row-init3")
+    assert secret not in str(row.get("display_metadata"))
+
+
+def test_cancelled_before_ready_turn_is_unchanged(init_env, db):
+    """Control: a turn cancelled before the build finished writes no boundary (the user stopped it)."""
+    db.create_session("row-cancel", source="desktop")
+    db.append_message("row-cancel", role="user", content="rotate the key")
+    session = _init_failed_session("row-cancel", error=None)
+    session["_turn_cancel_requested"] = True
+
+    server._run_after_agent_ready("rid", "ui-cancel", session, "rotate the key", None, None, None)
+
+    assert _failed_rows(db, "row-cancel") == []
+    assert db.latest_conversation_role("row-cancel") == "user"
+    assert so.get_outcome("row-cancel", db=db) is None

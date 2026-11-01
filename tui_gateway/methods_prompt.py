@@ -671,6 +671,33 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
     return error
 
 
+def _close_agent_init_failed_turn(session: dict, message: str, error_surface: dict) -> None:
+    """[daveey] Close the accepted user row of a turn whose agent build failed with the failed-turn boundary.
+
+    No agent ran, so neither ``agent/conversation_loop.py::_close_durable_failed_turn`` nor the gateway's
+    ``_hmwa_close_failed_turn`` exists on this path: without this row the chat's durable tail stays the
+    user row and its outcome reads ``unresolved{interrupted}`` forever instead of ``turn_failed``.
+    Idempotent on the DURABLE tail (``OPEN_TURN_TAIL_ROLES``), like the other two closers: a redelivery
+    or a tail another writer already closed is a no-op. No tool ran, so the copy is ``FAILED_TURN_NOTICE``.
+    Best-effort: the client frame still goes out when the store cannot be written."""
+    sid = str(session.get("session_key") or "")
+    if not sid:
+        return
+    try:
+        from agent.redact import redact_sensitive_text
+        from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE, OPEN_TURN_TAIL_ROLES
+
+        with _session_db(session) as db:
+            if db is None or db.latest_conversation_role(sid) not in OPEN_TURN_TAIL_ROLES:
+                return
+            error = redact_sensitive_text(str(message or "").strip()[:2000], force=True)
+            db.append_message(
+                sid, role="assistant", content=FAILED_TURN_NOTICE, display_kind=FAILED_TURN_DISPLAY_KIND,
+                display_metadata={k: v for k, v in (("error", error), ("error_surface", error_surface)) if v})
+    except Exception:  # health: allow BLE001 -- the terminal frame must still reach the client
+        logger.warning("prompt.submit: failed-turn boundary not written for %s", sid, exc_info=True)
+
+
 def _run_after_agent_ready(
     rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None,
     hosted_images=None, *, auto_continue=True
@@ -691,16 +718,18 @@ def _run_after_agent_ready(
         # without this the accepted message reads in agent.log as one that silently never ran. [daveey]
         logger.warning("prompt.submit: turn for session %s (%s) failed before the agent was ready: %s",
                        sid, session.get("session_key") or "", str(message)[:300])
+        surface = {"layer": "runtime", "code": "agent_init_failed", "retryable": True}
+        _close_agent_init_failed_turn(session, message, surface)
         # Terminal frame + retained snapshot (not a bare "error" event): the snapshot is
         # the only way resume shows this to a disconnected client.
-        _emit_terminal_turn_error(
-            sid, session, message,
-            error_surface={"layer": "runtime", "code": "agent_init_failed", "retryable": True})
+        _emit_terminal_turn_error(sid, session, message, error_surface=surface)
         with session["history_lock"]:
             if not owns(session):
                 return
             session["running"] = False
             session["last_active"] = time.time()
+        from tui_gateway.turn_outcome import refresh_turn_outcome
+        refresh_turn_outcome(session)
         _emit("session.info", sid, _session_info(session.get("agent"), session))
         return
     with session["history_lock"]:

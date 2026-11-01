@@ -188,8 +188,12 @@ def test_failed_build_drops_the_staged_row_and_a_later_turn_never_adopts_it(monk
         assert "_submit_user_row" not in session
         assert agent._pending_cli_user_message is None
         rows = db.get_messages_as_conversation(key, include_inactive=True)
+        # The failed build closed the first send with the failed-turn boundary, so the retry is a new request
+        # rather than one that repair_message_sequence would merge into the failed one.
+        from agent.turn_failure_copy import FAILED_TURN_NOTICE
         assert [(r["role"], r["content"]) for r in rows] == [
-            ("user", "please refactor the login page"), ("user", "please refactor the login page")]
+            ("user", "please refactor the login page"), ("assistant", FAILED_TURN_NOTICE),
+            ("user", "please refactor the login page")]
     finally:
         server._sessions.pop(sid, None)
         db.close()
