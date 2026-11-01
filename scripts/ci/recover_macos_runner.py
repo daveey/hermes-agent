@@ -88,7 +88,8 @@ class GhApi:
         self.gh = gh
 
     def _call(self, args: list[str]) -> Any:
-        proc = subprocess.run([self.gh, "api", *args], capture_output=True, text=True, check=False, timeout=60)
+        proc = subprocess.run([self.gh, "api", *args], capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", check=False, timeout=60)
         if proc.returncode != 0:
             raise ApiError(f"gh api {args[-1]} failed ({proc.returncode}): {proc.stderr.strip()[:500]}")
         return json.loads(proc.stdout) if proc.stdout.strip() else {}
@@ -245,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not args.event:
         parser.error("--event or GITHUB_EVENT_PATH is required")
-    with open(args.event, encoding="utf-8") as fh:
+    with open(args.event, encoding="utf-8-sig") as fh:
         event = json.load(fh)
     try:
         decision = recover(event, GhApi(), repository=args.repository, dry_run=args.dry_run)
