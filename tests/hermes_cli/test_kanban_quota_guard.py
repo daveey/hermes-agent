@@ -9,7 +9,6 @@ the hold cap escalated it to a human kind.
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
 import pytest
@@ -92,11 +91,12 @@ def test_rate_limited_outcome_clears_stamp_after_cooldown(kanban_home, monkeypat
 def test_real_auth_error_still_blocker_auth_and_escalates(kanban_home, monkeypatch, all_assignees_spawnable):
     monkeypatch.setenv("HERMES_KANBAN_GUARD_HOLD_CAP_SECONDS", "600")
     spawned = []
+    now = 5_000_000
+    # Freeze before lifecycle writes: a slow claim must not land after the first guard.
+    monkeypatch.setattr(kb.time, "time", lambda: now)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="auth", assignee="a")
-        now = int(time.time())
         _ended_with_error(conn, tid, "changes_requested", "401 authentication error", now - 5)
-        monkeypatch.setattr(kb.time, "time", lambda: now)
         assert kbd.check_respawn_guard(conn, tid) == "blocker_auth"
         kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: spawned.append(a) or 1)
         monkeypatch.setattr(kb.time, "time", lambda: now + 700)
@@ -117,9 +117,10 @@ def test_auth_wins_over_quota_words():
 def test_quota_hold_never_escalates_to_human_block(kanban_home, monkeypatch, all_assignees_spawnable, outcome):
     monkeypatch.setenv("HERMES_KANBAN_GUARD_HOLD_CAP_SECONDS", "600")
     spawned = []
+    now = 5_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: now)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="quota hold", assignee="a")
-        now = int(time.time())
         _ended_with_error(conn, tid, outcome, QUOTA_ERR, now - 5)
         for dt in (0, 300, 700, 1300):
             monkeypatch.setattr(kb.time, "time", lambda dt=dt: now + dt)
