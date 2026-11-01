@@ -161,7 +161,7 @@ def test_historical_route_not_replaced_by_current_pin(kanban_home, scoped_routin
 
 def test_profile_default_when_tiering_off(kanban_home, scoped_routing, monkeypatch):
     from hermes_cli import kanban_model_tier as tier
-    monkeypatch.setattr(tier, "load_tier_config", lambda: {})
+    monkeypatch.setattr(tier, "load_tier_config", dict)
     with kbc.connect_closing() as conn:
         tid = _blocked_behind(conn, "profile")
         _scope(conn, tid)
@@ -196,7 +196,7 @@ def test_retry_uses_strong_tier_without_writing_routing(kanban_home, scoped_rout
 
 def test_profile_class_provider_remains_unknown(kanban_home, scoped_routing, monkeypatch):
     from hermes_cli import kanban_model_tier as tier, kanban_model_assignment as assignment
-    monkeypatch.setattr(tier, "load_tier_config", lambda: {})
+    monkeypatch.setattr(tier, "load_tier_config", dict)
     monkeypatch.setattr(assignment, "_assignee_config", lambda _: {
         "model": {"default": "class:standard", "provider": "openai-codex"}})
     with kbc.connect_closing() as conn:
