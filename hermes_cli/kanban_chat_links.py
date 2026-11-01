@@ -54,12 +54,13 @@ def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, 
         out[uid] = {"uid": uid, "task_id": task_id, "chat_gateway": gateway, "chat_profile": None,
                     "chat_session": session, "kind": kind, "released": 0, "created_at": int(created_at or now)}
 
-    for row in conn.execute(
-            "SELECT l.* FROM task_chat_links l WHERE l.chat_gateway=? AND l.kind='created' "
-            "AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=l.task_id "
-            "AND e.kind='creator_chats_resolved')", (gateway,)):
-        if not _worker_shepherd(row["chat_session"], row["kind"]):
-            out[row["uid"]] = dict(row)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone():
+        for row in conn.execute(
+                "SELECT l.* FROM task_chat_links l WHERE l.chat_gateway=? AND l.kind='created' "
+                "AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=l.task_id "
+                "AND e.kind='creator_chats_resolved')", (gateway,)):
+            if not _worker_shepherd(row["chat_session"], row["kind"]):
+                out[row["uid"]] = dict(row)
     for task_id, session, created_at in conn.execute(
             "SELECT id, session_id, created_at FROM tasks WHERE session_id IS NOT NULL AND session_id != ''"):
         add(task_id, session, "created", created_at)

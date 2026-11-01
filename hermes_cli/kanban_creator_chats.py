@@ -24,11 +24,15 @@ def initialize_ownership(conn, task_id, creator_task_id, parents, created_at, ch
     _append_event(conn, task_id, "creator_chats_resolved", {"explicit_origin": origin.ref})
     if is_headless_session(origin.session):
         return
+    from hermes_cli.kanban_origin import gateway_names
+    from hermes_cli.profiles import get_active_profile_name
+    local = origin.gateway == gateway_names()[0] and origin.profile == get_active_profile_name()
+    platform, chat_id = ("tui", origin.session) if local else ("hub", origin.chat_id)
     conn.execute(
         "INSERT OR IGNORE INTO kanban_notify_subs "
         "(task_id,platform,chat_id,thread_id,delivery_mode,delivery_metadata,created_at,last_event_id) "
-        "VALUES (?,'hub',?,'','notify',?, ?, (SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?))",
-        (task_id, origin.chat_id, json.dumps({"reason": "origin"}), created_at, task_id))
+        "VALUES (?,?,?,'','notify',?, ?, (SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?))",
+        (task_id, platform, chat_id, json.dumps({"reason": "origin"}), created_at, task_id))
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone():
         conn.execute(
             "INSERT OR IGNORE INTO task_chat_links "

@@ -88,6 +88,9 @@ def test_explicit_origin_argument_and_same_gateway_origin(hub_gateway):
     assert res["ok"] and _hub_subs(res["task_id"]) == ["mini/default/s9"]
     same = json.loads(kt._handle_create({"title": "y", "assignee": "default", "origin_session": "hub:s_local"}))
     assert same["ok"] and _hub_subs(same["task_id"]) == [] and "origin_binding" not in same
+    with kbc.connect_closing() as conn:
+        assert [(s["platform"], s["chat_id"]) for s in kn.list_notify_subs(conn, same["task_id"])] == [
+            ("tui", "s_local")]
 
 
 def test_unknown_origin_gateway_fails_before_any_card_exists(hub_gateway, monkeypatch):
