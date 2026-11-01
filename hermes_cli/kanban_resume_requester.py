@@ -6,7 +6,7 @@ park. A parked card has no live run, so it cannot create that card itself, and e
 before the park fails the freshness fence by design. Without this module nothing could ever pass
 both fences, so the op was unreachable.
 
-Each dispatcher tick, :func:`ensure_recovery_cards` finds cards whose current park passes
+Each dispatcher tick, :func:`ensure_recovery_cards` finds home-owned cards whose current park passes
 :func:`kanban_resume_exec.exhaustion_refusal` (a continuation_exhausted rekind written by the
 refused run, no human gate, no live run, nothing moved it since) and creates ONE recovery card per
 park: ``creator_task_id=<target>`` (1 hop), ``created_by=kanban-recovery``, idempotency key
@@ -89,11 +89,15 @@ def ensure_recovery_cards(conn: sqlite3.Connection) -> list[str]:
     """Create the missing recovery card for every resumable continuation_exhausted park. Returns new ids."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_resume_exec as rx
+    from hermes_cli.kanban_wake_check import foreign_ids
 
+    # A worker-node copy observes the same park with a different local event id.
+    # Only the home owns recovery; local idempotency cannot arbitrate across replicas.
+    copies = foreign_ids(conn)
     made: list[str] = []
     for row in _candidates(conn):
         target = row["id"]
-        if row["created_by"] == CREATED_BY or rx.exhaustion_refusal(conn, target):
+        if target in copies or row["created_by"] == CREATED_BY or rx.exhaustion_refusal(conn, target):
             continue
         park_id = rx._park_event_id(conn, target)
         if _event_for_park(conn, target, park_id) or len(rx._resume_events(conn, target)) >= rx.MAX_RESUMES:
