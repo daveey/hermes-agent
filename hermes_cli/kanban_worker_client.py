@@ -272,8 +272,8 @@ def _book_refusal(params, board_db, rc, line):
         from hermes_cli.kanban_worker_log import record_submitter_result
         with connect_closing(Path(board_db)) as conn, kb.write_txn(conn):
             record_submitter_result(conn, params, os.getpid(), rc, line)
-    except Exception:  # health: allow BLE001 -- the receipt is best effort; the log line and exit trailer stand
-        pass
+    except Exception as exc:  # health: allow BLE001 -- preserve the original refusal exit on receipt-store failure
+        print(f'Kanban refusal receipt could not be recorded: {type(exc).__name__}', file=sys.stderr)
 
 
 def _submit():

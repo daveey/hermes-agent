@@ -275,6 +275,28 @@ def test_the_refused_submitter_books_its_own_run_qualified_receipt(board, monkey
             "pid": me, "claim_lock": task.claim_lock, "exit_code": 1, "last_output": REFUSAL, "submitter": True})]
 
 
+def test_refusal_receipt_store_failure_preserves_exit_without_leaking_details(board, monkeypatch, capsys):
+    from hermes_cli import kanban_worker_log
+    from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
+    with kbc.connect() as conn:
+        tid = _claim(conn, kb.create_task(conn, title="card", assignee="default"), os.getpid(), board, refused=False)
+        _submitter_env(monkeypatch, tid, conn)
+    client = _refused_by_dead_owner(monkeypatch)
+
+    def fail_store(*args):
+        raise PermissionError("private database details")
+
+    monkeypatch.setattr(kanban_worker_log, "record_submitter_result", fail_store)
+    assert client.main() == 1
+    stderr = capsys.readouterr().err
+    assert REFUSAL in stderr
+    assert "Kanban refusal receipt could not be recorded: PermissionError" in stderr
+    assert "private database details" not in stderr
+    assert stderr.rstrip().endswith(f"{KANBAN_WORKER_EXIT_TRAILER}1")
+    with kbc.connect() as conn:
+        assert _results(conn, tid) == []
+
+
 def test_a_real_submitter_refusal_at_an_owner_death_requeues_uncounted_end_to_end(board, monkeypatch, capsys):
     """``main`` -> ``_submit`` -> the refusal receipt -> the dead-worker sweep -> ``owner_restart_lost``."""
     from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
