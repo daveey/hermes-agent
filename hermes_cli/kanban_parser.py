@@ -95,7 +95,8 @@ def _bulk_ids(verb: str):
 
 _TASK_ID = _arg("task_id")
 _HUMAN_REQUEST = _arg("--human-request", type=json.loads, metavar="JSON", default=argparse.SUPPRESS,
-                      help="Explicit human request evidence (action, why_human, interaction, scope, evidence); never authorization")
+                      help="Explicit human request evidence (action, why_human, interaction, scope, evidence; optional "
+                           "choices, resolved_check, resolved_check_every); never authorization")
 
 
 def _WAKE_CHECK_ARGS():

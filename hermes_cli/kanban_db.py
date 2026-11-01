@@ -1012,7 +1012,7 @@ CREATE TABLE IF NOT EXISTS task_wake_checks (
     last_rc   INTEGER,
     last_out  TEXT,
     fails     INTEGER NOT NULL DEFAULT 0,
-    generation TEXT
+    generation TEXT, purpose TEXT NOT NULL DEFAULT 'wake'  -- 'wake' (park) | 'ask_resolved' (kanban_ask_resolved)
 );
 
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
@@ -3206,7 +3206,7 @@ def _refuse_untimed_probe(kind: Optional[str], wake_check: Optional[str], clock_
         f"refused: {what} only applies to a timed park (kind='time', a SCHEDULED_UNTIL=<ISO8601> "
         f"reason, or an agent-owned block with no human_request). This block (kind={kind!r}) would "
         f"land '{'todo' if kind == 'dependency' else 'blocked'}' and drop the {what}, so nothing "
-        "would run it. Use kind='time' to wait on it, or drop it for a human ask.")
+        "would run it. Use kind='time' to wait on it; for a human ask, put it in human_request.resolved_check.")
 
 
 def _clear_meta(clear_blocker: bool) -> dict:
@@ -3248,6 +3248,7 @@ def block_task(
     ``comment`` (``(author, body)``) is written in the same txn, before the transition event,
     and only when the block lands (``kanban_reason_comment``).
     """
+    from hermes_cli.kanban_ask_resolved import filing_fields, store_request, sync_row
     from hermes_cli.kanban_human_request import reject_timed_request, validate_human_request
     from hermes_cli.kanban_reason_comment import reason_comment
     human_request = validate_human_request(human_request, kind=kind)
@@ -3302,8 +3303,9 @@ def block_task(
             ).rowcount
             if classified != 1:
                 return False
+            sync_row(conn, task_id)
             payload = {"kind": kind, "reason": reason, "classified_in_place": True,
-                       "human_request": human_request}
+                       "human_request": human_request, **filing_fields(conn, human_request)}
             if requested_kind == "assignment":
                 payload.update(requested_kind=requested_kind, rekind_reason=rekind_reason)
             if kind == "assignment":
@@ -3356,7 +3358,6 @@ def block_task(
         if rekind_reason:
             payload["requested_kind"] = requested_kind
             payload["rekind_reason"] = rekind_reason
-        blocker_id = normalize_blocker_id(blocker_id)
         if blocker_id:
             payload["blocker_id"] = blocker_id
             if (new_status == "triage" and _row_get(cur_row, "block_kind") == payload.get("kind") == kind
@@ -3375,9 +3376,8 @@ def block_task(
             conn, task_id, expected_run_id, kind, new_status, set_sql, params, payload,
         ):
             return False
-        conn.execute("UPDATE tasks SET human_request = ? WHERE id = ?",
-                     (json.dumps(human_request) if human_request else None, task_id))
-        payload["human_request"] = human_request
+        store_request(conn, task_id, human_request)
+        payload.update(human_request=human_request, **(filing_fields(conn, human_request) if new_status == "blocked" else {}))
         from hermes_cli.kanban_shared_blockers import CLEAR_FLAG
         run_meta = {**({"blocker_id": blocker_id} if blocker_id else {}), **_clear_meta(clear_blocker)}
         if clear_blocker:

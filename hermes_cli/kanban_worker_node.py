@@ -252,8 +252,10 @@ def evict(conn: sqlite3.Connection) -> list[str]:
     # [daveey] A scheduled copy whose wake_check this gateway runs stays until it wakes: the probe row is
     # machine-local, and evicting the copy let the stale sweep delete it, so the card slept until its clock
     # (t_01a18c12ba6895b8). Its wake is a status write the Board carries to the home board.
-    keep = (" AND NOT (status = 'scheduled' AND EXISTS (SELECT 1 FROM task_wake_checks w WHERE w.task_id = tasks.id))"
-            if probes else "")
+    # A blocked copy whose ask resolved_check this gateway runs (it filed the ask) stays the same way.
+    keep = (" AND NOT EXISTS (SELECT 1 FROM task_wake_checks w WHERE w.task_id = tasks.id AND "
+            "((tasks.status = 'scheduled' AND w.purpose IS NOT 'ask_resolved') "
+            "OR (tasks.status = 'blocked' AND w.purpose = 'ask_resolved')))" if probes else "")
     rows = conn.execute(
         "SELECT id FROM tasks WHERE created_on IS NOT NULL AND created_on != ? AND claim_lock IS NULL "
         "AND status != 'running'" + keep, (own,)).fetchall()

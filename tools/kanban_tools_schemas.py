@@ -268,6 +268,19 @@ HUMAN_REQUEST = {
                 "value": {"type": "string", "minLength": 1, "maxLength": 120}},
                 "required": ["label", "value"], "additionalProperties": False},
         },
+        # no maxLength: llama.cpp's grammar converter rejects >=2000 (#131278); kanban_human_request enforces
+        # RESOLVED_CHECK_MAX_CHARS server-side.
+        "resolved_check": {"type": "string", "minLength": 1, "description": (
+            "Optional shell probe (bash -lc, 30 s) that tells when David's step is done even if he never "
+            "unblocks: exit 0 = done, 1 = not yet, anything else = broken. It runs once when you file the "
+            "ask: exit 0 refuses the ask (ask_already_resolved: the state already holds, continue the work), "
+            "a broken probe is refused (resolved_check_broken). While the card is blocked the dispatcher "
+            "re-runs it every resolved_check_every seconds; exit 0 unblocks the card with a comment telling "
+            "the next run to verify and continue, not redo the step. Examples: device button "
+            "`curl -sf http://hub.local:8080/api/devices/watch | jq -e '.paired == true'`; Settings toggle "
+            "`defaults read com.apple.AppleMultitouchTrackpad Clicking 2>/dev/null | grep -qx 1`.")},
+        "resolved_check_every": {"type": "integer", "minimum": 120, "maximum": 21600, "description": (
+            "Seconds between resolved_check runs while blocked (default 900).")},
     },
     "required": ["action", "why_human", "interaction", "scope", "evidence"],
     "additionalProperties": False,

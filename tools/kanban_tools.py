@@ -25,7 +25,7 @@ from tools.kanban_tools_placement import (_local_placement, _machine_placement, 
                                           _placement_refused, _runs_where)
 from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_park_args import _blocker_id_arg, _clear_blocker_arg
-from hermes_cli.kanban_block_policy import ask_lint_check
+from hermes_cli.kanban_ask_resolved import ask_checks, create_ask_check, filing_context
 from tools import kanban_tools_completion as _kc, kanban_tools_create_args as _ca
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
@@ -1216,7 +1216,7 @@ def _handle_block(args: dict, **kw) -> str:
         _standing_wait_guard(kb, conn, tid, kind, args.get("human_request"), reason)
         _park_guard(conn, tid, "block", wake, reason=reason, kind=kind, blocker_id=blocker_id,
                     human_request=args.get("human_request"))
-        _check(*ask_lint_check(args.get("human_request")))  # the ask line must say unblock/archive [daveey]
+        _check(*ask_checks(args.get("human_request"), context=filing_context(conn, tid)))  # lint + probe [daveey]
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
                            blocker_id=blocker_id, wake_check=wake[0], check_every=wake[1], awaiting=awaiting,
                            clock_only=wake[2], human_request=kb.redact_review_value(args.get("human_request")),
@@ -1643,7 +1643,6 @@ def _handle_create(args: dict, **kw) -> str:
     """Create a (child) task; orchestrator workers use this to fan out."""
     _reject_delegated_child_mutation("kanban_create")
     title = _require_text(args, "title")
-    _check(*ask_lint_check(args.get("human_request")))  # the ask line must say unblock/archive [daveey]
     assignee = args.get("assignee") or _persisted_identity()
     # Workspace sharing is always explicit: omitted fields mean a fresh scratch workspace
     # even for a dispatcher-spawned creator (reusing the parent's path would let a child
@@ -1673,6 +1672,7 @@ def _handle_create(args: dict, **kw) -> str:
         return tool_error(f"{exc.code}: {exc}")
     human_action_now = _parse_bool_arg(args, "human_action_now")
     with _board(args.get("board")) as (kb, conn):
+        _check(*create_ask_check(conn, args, str(assignee)))  # ask line, then its filing probe [daveey]
         # Never infer approval from prose or silently turn a human gate into
         # dispatchable work. Ask the creator to distinguish a future dependency
         # from a human action that can actually be taken while parents are open.

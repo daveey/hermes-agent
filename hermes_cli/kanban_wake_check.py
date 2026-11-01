@@ -440,11 +440,17 @@ def set_check(conn: sqlite3.Connection, task_id: str, cmd: Optional[str], every:
 
 
 def _row_dict(row) -> dict:
-    keys = ("task_id", "cmd", "every", "next_at", "last_at", "last_rc", "last_out", "fails", "generation")
+    keys = ("task_id", "cmd", "every", "next_at", "last_at", "last_rc", "last_out", "fails", "generation", "purpose")
     return {k: row[i] for i, k in enumerate(keys)}
 
 
-_SELECT = "SELECT task_id, cmd, every, next_at, last_at, last_rc, last_out, fails, generation FROM task_wake_checks"
+_SELECT = ("SELECT task_id, cmd, every, next_at, last_at, last_rc, last_out, fails, generation, purpose "
+           "FROM task_wake_checks")
+# [daveey] Which status each probe purpose runs in: a park's wake_check while ``scheduled``, a human ask's
+# resolved_check (``kanban_ask_resolved``) while ``blocked``. A row whose card left that status is stale.
+PURPOSE_STATUS = {"wake": "scheduled", "ask_resolved": "blocked"}
+_LIVE_ROW = ("((w.purpose = 'ask_resolved' AND t.status = 'blocked') "
+             "OR (w.purpose IS NOT 'ask_resolved' AND t.status = 'scheduled'))")
 
 
 def get_state(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
@@ -480,7 +486,8 @@ def describe_state(state: dict, *, now: Optional[int] = None) -> str:
             else f"last run {stamp(state['last_at'])} (last rc {state.get('last_rc')})")
     fails = f", {state['fails']} failing in a row" if state.get("fails") else ""
     due = "due now" if state["next_at"] <= now else f"next {stamp(state['next_at'])}"
-    return f"`{state['cmd']}` every {state['every']}s; {last}{fails}; {due}"
+    what = "ask resolved_check " if state.get("purpose") == "ask_resolved" else ""
+    return f"{what}`{state['cmd']}` every {state['every']}s; {last}{fails}; {due}"
 
 
 # --- probe runner -------------------------------------------------------------------------
@@ -534,14 +541,14 @@ def _tail(text: str) -> str:
     return text[-OUTPUT_TAIL_CHARS:]
 
 
-def _profile_home(task) -> Optional[str]:
+def _profile_home(assignee: Optional[str], task_id: Optional[str] = None) -> Optional[str]:
     from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
 
     try:
-        profile = normalize_profile_name(task.assignee) if task.assignee else None
+        profile = normalize_profile_name(assignee) if assignee else None
         return str(resolve_profile_env(profile)) if profile else None
     except (FileNotFoundError, ValueError, OSError):
-        logger.debug("wake check: no profile home for %s", task.id, exc_info=True)
+        logger.debug("wake check: no profile home for %s", task_id, exc_info=True)
         return None
 
 
@@ -549,21 +556,36 @@ def _probe_env(task, db_path: str) -> dict:
     """The assignee profile's env (``served_profile_child_env``: its HERMES_HOME and its own
     secrets, never the launch profile's) plus the board pin, so ``hermes kanban show`` in a
     probe reads the card's board."""
+    return probe_env(task.id, task.assignee, db_path)
+
+
+def probe_env(task_id: Optional[str], assignee: Optional[str], db_path: str) -> dict:
+    """``_probe_env`` by parts. ``task_id=None`` [daveey] is a card not created yet (an ask filed at create,
+    ``kanban_ask_resolved.create_context``): the env has no ``HERMES_KANBAN_TASK`` at all, never the
+    creating worker's own card id."""
     from agent.secret_scope import UnscopedSecretError
     from tools.environments.local import served_profile_child_env
 
-    home = _profile_home(task)
+    home = _profile_home(assignee, task_id)
     try:
         env = served_profile_child_env(target_home=home, inherit_credentials=True)
     except UnscopedSecretError:  # multiplex with no profile home: no credentials, not the launcher's
-        logger.debug("wake check: no secret scope for %s", task.id, exc_info=True)
+        logger.debug("wake check: no secret scope for %s", task_id, exc_info=True)
         env = served_profile_child_env(target_home=home, inherit_credentials=False)
-    for key in ("HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_CLAIM_LOCK", "HERMES_SESSION_ID", "HERMES_KANBAN_BOARD"):
+    for key in ("HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_CLAIM_LOCK", "HERMES_SESSION_ID", "HERMES_KANBAN_BOARD",
+                "HERMES_KANBAN_TASK"):
         env.pop(key, None)
-    env["HERMES_KANBAN_TASK"] = task.id
+    if task_id:
+        env["HERMES_KANBAN_TASK"] = task_id
     env["HERMES_KANBAN_DB"] = db_path
     env["HERMES_KANBAN_WAKE_PROBE"] = "1"  # wait-check's implicit --from applies only to probe runs [daveey]
     return env
+
+
+def probe_cwd(workspace_path: Optional[str]) -> str:
+    """The cwd a card's probe runs in: its workspace when that is an existing absolute dir, else home."""
+    ws = workspace_path
+    return ws if ws and os.path.isabs(ws) and os.path.isdir(ws) else str(Path.home())
 
 
 def _run_probe(key: tuple[str, str], cmd: str, cwd: str, env: dict) -> tuple[Any, str]:
@@ -702,12 +724,13 @@ def producer_note(hit: dict) -> str:
             "`--from <that status>`. Those statuses count as met, so without it the probe passes at once.")
 
 
-def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, now: Optional[int], generation: str) -> Any:
+def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, now: Optional[int], generation: str,
+                     purpose: str = "wake") -> Any:
     key = (db_path, task_id)
     try:
         rc, out = _run_probe(key, cmd, cwd, env)
         diag = None
-        if rc == 0:
+        if rc == 0 and purpose != "ask_resolved":  # an ask's exit 0 is read literally (kanban_ask_resolved)
             # One stray exit 0 must not wake a card (a stolen wait status once read as 0): confirm
             # with a second run and wake only if it passes again. The second result is what counts.
             first = {"first_rc": rc, "first_output": _tail(out)}
@@ -716,6 +739,10 @@ def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, 
         from hermes_cli import kanban_db_connect as kbc
         conn = kbc.connect(Path(db_path))
         try:
+            if purpose == "ask_resolved":
+                from hermes_cli import kanban_ask_resolved as kar
+                kar.apply_result(conn, task_id, cmd, rc, out, now=now, generation=generation)
+                return rc
             answered = None
             if rc == 1 and not output_error(out):
                 # [daveey] The probe says "not yet" but the hermes-hub request this park names is answered:
@@ -752,7 +779,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
         state = get_state(conn, task_id)
         status = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if (state is None or state["cmd"] != cmd or state["generation"] != generation
-                or status is None or status[0] != "scheduled"):
+                or state.get("purpose") == "ask_resolved" or status is None or status[0] != "scheduled"):
             return None
         rc_col = rc if isinstance(rc, int) else -1
         if rc == 0:
@@ -852,19 +879,23 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
         try:
             stale = conn.execute(
                 "SELECT w.task_id FROM task_wake_checks w LEFT JOIN tasks t ON t.id = w.task_id "
-                "WHERE t.status IS NOT 'scheduled'").fetchall()
+                f"WHERE t.id IS NULL OR NOT {_LIVE_ROW}").fetchall()
         except sqlite3.OperationalError:
             return {"submitted": [], "in_flight": 0}
         if stale:
             with kb.write_txn(conn):
                 for row in stale:
-                    conn.execute("DELETE FROM task_wake_checks WHERE task_id = ? AND task_id NOT IN "
-                                 "(SELECT id FROM tasks WHERE status = 'scheduled')", (row[0],))
+                    conn.execute("DELETE FROM task_wake_checks WHERE task_id = ? AND task_id IN (SELECT w.task_id "
+                                 "FROM task_wake_checks w LEFT JOIN tasks t ON t.id = w.task_id "
+                                 f"WHERE t.id IS NULL OR NOT {_LIVE_ROW})", (row[0],))
         restore_missing_checks(conn, now=ts)  # [daveey] a park whose probe never reached this board
+        from hermes_cli import kanban_ask_resolved as kar
+        kar.reconcile(conn, now=ts)  # [daveey] an ask's probe row follows its stored ask; a lost one is restored
         due = conn.execute(
-            "SELECT w.task_id, w.cmd, w.every, w.generation FROM task_wake_checks w JOIN tasks t ON t.id = w.task_id "
-            "WHERE t.status = 'scheduled' AND w.next_at <= ? ORDER BY w.next_at", (ts,)).fetchall()
-        for task_id, cmd, every, generation in due:
+            "SELECT w.task_id, w.cmd, w.every, w.generation, w.purpose FROM task_wake_checks w "
+            f"JOIN tasks t ON t.id = w.task_id WHERE {_LIVE_ROW} AND w.next_at <= ? ORDER BY w.next_at",
+            (ts,)).fetchall()
+        for task_id, cmd, every, generation, purpose in due:
             key = (db_path, task_id)
             with _LOCK:
                 busy = sum(1 for f in _IN_FLIGHT.values() if not f.done())
@@ -881,14 +912,15 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
             with kb.write_txn(conn):
                 claimed = conn.execute(
                     "UPDATE task_wake_checks SET next_at = ?, generation = ? "
-                    "WHERE task_id = ? AND cmd = ? AND generation IS ? AND next_at <= ? "
-                    "AND EXISTS (SELECT 1 FROM tasks WHERE id = ? AND status = 'scheduled')",
-                    (ts + int(every), claim, task_id, cmd, generation, ts, task_id))
+                    "WHERE task_id = ? AND cmd = ? AND generation IS ? AND next_at <= ? AND purpose IS ? "
+                    "AND EXISTS (SELECT 1 FROM tasks WHERE id = ? AND status = ?)",
+                    (ts + int(every), claim, task_id, cmd, generation, ts, purpose, task_id,
+                     PURPOSE_STATUS.get(purpose, "scheduled")))
                 if claimed.rowcount != 1:
                     continue
-            ws = task.workspace_path
-            cwd = ws if ws and os.path.isabs(ws) and os.path.isdir(ws) else str(Path.home())
-            fut = _pool().submit(_probe_and_apply, db_path, task_id, cmd, cwd, _probe_env(task, db_path), now, claim)
+            cwd = probe_cwd(task.workspace_path)
+            fut = _pool().submit(_probe_and_apply, db_path, task_id, cmd, cwd, _probe_env(task, db_path), now, claim,
+                                 purpose)
             with _LOCK:
                 _IN_FLIGHT[key] = fut
             submitted.append(task_id)

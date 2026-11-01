@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from agent.deadline import poll_until
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
+from hermes_state_guard import ensure_kanban_test_isolation
 from pathlib import Path
 from typing import Any
 from typing import Optional
@@ -889,6 +890,7 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     :func:`kanban_db_path` (``HERMES_KANBAN_DB`` -> ``HERMES_KANBAN_BOARD`` ->
     ``<root>/kanban/current`` -> ``default``)."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
+    ensure_kanban_test_isolation(path)
     from agent.delegation_context import kanban_path_is_fenced
     if kanban_path_is_fenced(path):
         # Reads must not enter schema/backfill write transactions. Never create a
@@ -976,6 +978,7 @@ def init_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> P
     migration pass — callers that know the on-disk schema may have drifted
     (tests writing legacy event kinds, external upgrades) use it to force it."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
+    ensure_kanban_test_isolation(path)
     _refuse_dead_board_resurrection(path, board)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Clear the cache entry so connect() re-runs schema + migrations.
@@ -1097,6 +1100,7 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     """Add columns introduced after v1 to legacy DBs (called via ``init_db``)."""
     if _table_exists(conn, "task_wake_checks"):
         _add_column_if_missing(conn, "task_wake_checks", "generation", "generation TEXT")
+        _add_column_if_missing(conn, "task_wake_checks", "purpose", "purpose TEXT NOT NULL DEFAULT 'wake'")
     cols = _column_names(conn, "tasks")
     for name, ddl in _BASE_TASK_COLUMNS + _EARLY_TASK_COLUMNS:
         if name not in cols:

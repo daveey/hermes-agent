@@ -32,9 +32,11 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
         block_kind = "needs_input" if human_request else None
         conn.execute("UPDATE tasks SET human_request = ?, block_kind = ? WHERE id = ?",
                      (json.dumps(human_request) if human_request else None, block_kind, task_id))
+        from hermes_cli.kanban_ask_resolved import filing_fields, sync_row
+        sync_row(conn, task_id)  # an ask with resolved_check gets its probe row [daveey]
         payload = {
             "reason": "initial_status", "status": "blocked", "actor": created_by or "user",
-            "human_request": human_request,
+            "human_request": human_request, **filing_fields(conn, human_request),
         }
         if block_kind:
             payload["kind"] = block_kind

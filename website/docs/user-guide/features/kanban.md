@@ -439,6 +439,58 @@ Probe state is in the `task_wake_checks` table and shown by `kanban show`,
 the worker context and the board API; `kanban diagnostics` flags failing or
 overdue probes, and parks more than 2 h out that have neither.
 
+Human asks that resolve outside Hermes: a blocked card's `human_request` may
+carry `resolved_check` (a shell command) and `resolved_check_every` (seconds,
+default 900, 120–21600). Use it when David's step leaves a readable trace, so
+the card resumes when he does the step even if he never clicks unblock. A
+device button:
+
+```json
+{"action": "Press the pair button on the watch. Unblock = finish pairing; archive = drop the watch.",
+ "why_human": "physical button on David's device", "interaction": "physical",
+ "scope": "watch pairing", "evidence": "hub lists the watch as unpaired",
+ "resolved_check": "curl -sf http://hub.local:8080/api/devices/watch | jq -e '.paired == true'"}
+```
+
+A Settings toggle works the same way, e.g. "turn on Tap to click" with
+`"resolved_check": "defaults read com.apple.AppleMultitouchTrackpad Clicking 2>/dev/null | grep -qx 1"`.
+Exit codes are read literally: 0 = the step is done, 1 = not yet, anything
+else (exit 2 or higher, a 30 s timeout, a probe that cannot start) = broken; the
+output is only quoted, never interpreted. The probe runs once, synchronously,
+when the ask is filed (`kanban_block`, `kanban_create` with
+`initial_status="blocked"`, `hermes kanban create|block --human-request`,
+`hermes kanban block --metadata-only --human-request`, the dashboard's
+blocked/metadata-only PATCH and bulk updates), in the cwd and profile env the
+dispatcher will use for that card; a bulk block runs it for every card before
+any is blocked. A create runs it before the card exists: same board pin,
+assignee env and workspace cwd, but no `HERMES_KANBAN_TASK` (file a probe that
+needs its own card id with `kanban block` after the create), and a create whose
+`idempotency_key` returns an existing card runs nothing. Exit 1 files it; exit 0 refuses the
+ask with `ask_already_resolved` (the asked-for state already holds: don't ask,
+continue the work); anything else refuses it with `resolved_check_broken` and
+the output tail. A probe containing a secret or credential-shaped value is
+refused (`resolved_check_secret`): asks are stored redacted, so the stored
+command would differ from the one that ran. While the card stays `blocked` the
+dispatcher runs it with the same runner, concurrency cap and failure count as a
+park's `wake_check` (state row in `task_wake_checks` with
+`purpose='ask_resolved'`). One exit 0 appends an `ask_resolved` event, comments
+that the ask was satisfied outside Hermes, and unblocks the card the normal way
+(`ready`, or `todo` behind an open parent). Three failures in a row append
+`resolved_check_broken`, comment once and stop probing; the card stays blocked,
+is never unblocked by a broken probe, and the probe is not restored until the
+ask is re-filed. A plain `wake_check` on a human block is still refused: the
+ask's probe goes in `human_request.resolved_check`.
+
+On a synced board the probe runs on the gateway that filed the ask (its filing
+event names it as `probe_host`). A worker node keeps its blocked copy while it
+runs that probe; a board that loses the probe of an ask it filed re-registers it
+once (`resolved_check_restored`, due at once), and a second loss comments once
+(`resolved_check_lost`) and stops probing. Another gateway's ask probe is never
+started here. The probing worker node notes `resolved_check_alive` at most every
+3 h; when the home board has heard nothing from it for that long plus two
+intervals and 15 min, it comments once (`resolved_check_host_silent`) and leaves
+the card blocked on David's ask.
+
 For an external GitHub PR wait, use the installed runtime's read-only probe:
 
 ```text
