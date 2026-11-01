@@ -24,7 +24,9 @@ def classify_parked_request(conn, task_id: str, *, human_request: dict | None,
         raise PermissionError("legacy classification is orchestrator-only")
     if not isinstance(actor, str) or not actor.strip() or not reason.strip():
         raise ValueError("classification requires actor and reason")
-    with db.write_txn(conn):
+    # Metadata/event writes have no post-commit effects: compose atomically with
+    # the caller's eligibility check and audit comment (outer rollback owns both).
+    with db.write_txn(conn, allow_nested=True):
         row = conn.execute(
             "SELECT status, block_kind, current_run_id FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()

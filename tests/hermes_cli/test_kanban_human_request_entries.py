@@ -183,6 +183,35 @@ def test_classification_refuses_execution_state(client, state):
     assert snapshot(tid) == before
 
 
+@pytest.mark.parametrize("rollback", [False, True])
+def test_classification_and_comment_share_outer_transaction(rollback):
+    from hermes_cli.kanban_human_request_migration import classify_parked_request
+
+    tid = parked()
+    before = snapshot(tid)
+    with connect_closing() as conn:
+        before_events = len(db.list_events(conn, tid))
+        try:
+            with db.write_txn(conn):
+                assert classify_parked_request(conn, tid, human_request=REQUEST,
+                                               actor="user-terminal", reason="Window closed")
+                db.add_comment(conn, tid, "user-terminal", "Closed job audit")
+                if rollback:
+                    raise ValueError("injected failure")
+        except ValueError as exc:
+            assert rollback and str(exc) == "injected failure"
+        count = conn.execute("SELECT count(*) FROM task_comments WHERE task_id=?", (tid,)).fetchone()[0]
+        assert count == (0 if rollback else 1)
+        assert len(db.list_events(conn, tid)) == before_events + (0 if rollback else 2)
+    after = snapshot(tid)
+    if rollback:
+        assert after == before
+    else:
+        assert json.loads(after.pop("human_request")) == REQUEST
+        before.pop("human_request")
+        assert after == before
+
+
 def test_worker_cannot_classify_legacy_card(monkeypatch):
     from hermes_cli.kanban_human_request_migration import classify_parked_request
 
