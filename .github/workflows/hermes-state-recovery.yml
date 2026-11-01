@@ -1,0 +1,58 @@
+name: hermes_state runner-loss recovery
+
+# When the mini's self-hosted runner drops a hermes_state (macOS) job (for
+# example a macOS update restarting the host: run 41003441463, annotation "The
+# self-hosted runner lost communication with the server. ..."), rerun that
+# run's failed jobs once. rerun-failed-jobs also reruns their dependents, so
+# CI's "macOS state required (v1)" and "All required checks pass (v2)"
+# aggregates are re-evaluated on the new attempt.
+#
+# SECURITY: workflow_run runs this file from the default branch with a write
+# token. It checks out only this workflow's own revision (github.workflow_sha),
+# never the failed run's head, and downloads no artifacts. Nothing from the
+# event payload is interpolated into a shell: the script reads
+# $GITHUB_EVENT_PATH and re-reads every fact from the API. Its gates (exact
+# repository and head repository, approved workflow path, first attempt, exact
+# macOS job on mini-hermes-state-1, exact runner-loss annotation, re-read before
+# the POST) and tests: scripts/ci/recover_macos_runner.py,
+# tests/ci/test_recover_macos_runner.py.
+
+on:
+  workflow_run:
+    workflows: ['CI', 'hermes_state (macOS)']
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  # One recovery at a time per failed run; never cancel one mid-decision. A
+  # second event for the same run waits, then sees run_attempt 2 and stops.
+  group: hermes-state-recovery-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    name: Rerun a runner-lost macOS state job
+    # Cheap pre-filter only; the script re-checks all of it against the API.
+    if: >-
+      github.repository == 'daveey/hermes'
+      && github.event.workflow_run.conclusion == 'failure'
+      && github.event.workflow_run.run_attempt == 1
+      && github.event.workflow_run.head_repository.full_name == 'daveey/hermes'
+    runs-on: [self-hosted, hermes-hub]
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      checks: read
+      contents: read
+    steps:
+      - name: Checkout this workflow's trusted revision
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Rerun failed jobs if the runner was lost
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/recover_macos_runner.py --event "$GITHUB_EVENT_PATH"
