@@ -105,6 +105,39 @@ def current_run_log(raw: str, run_id=None) -> str:
     return body[starts[-1].start():] if starts else body
 
 
+def managed_worker_output(conn, task_id, run_id, pid, claim_lock) -> Optional[str]:
+    """Prefer an attributable receipt over the shared log, even if its output is empty.
+
+    Old submitters can still flush into the task log after a new run's start marker.
+    Read on the reclaim transaction's connection; opening another connection can deadlock.
+    A bound managed run without a receipt has no attributable text: do not trust its
+    shared log either. None is reserved for legacy/unbound callers' log fallback.
+    """
+    from hermes_cli import kanban_db as kb
+
+    if conn is None or run_id is None:
+        return None
+    bound_row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND run_id=? "
+        "AND kind='worker_bound' ORDER BY id DESC LIMIT 1", (task_id, run_id),
+    ).fetchone()
+    bound = kb._json_dict(bound_row[0]) if bound_row else {}
+    pids = {pid}
+    if bound.get('claim_lock') == claim_lock and bound.get('pid') is not None:
+        pids.add(bound['pid'])
+    rows = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND run_id=? "
+        "AND kind='worker_result' ORDER BY id DESC", (task_id, run_id),
+    )
+    for row in rows:
+        result = kb._json_dict(row[0])
+        if result.get('claim_lock') == claim_lock and result.get('pid') in pids:
+            output = result.get('last_output')
+            if isinstance(output, str):
+                return output[-400:]
+    return "" if bound_row else None
+
+
 def _worker_final_output(task_id: str, board: Optional[str] = None, *, run_id=None) -> str:
     """Best-effort read of a dead worker's last printed text, for the board diagnostic.
 

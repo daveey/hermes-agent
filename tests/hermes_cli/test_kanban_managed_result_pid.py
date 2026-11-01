@@ -60,3 +60,46 @@ def test_managed_exit_75_requeues_rate_limited_not_crashed(conn, bound_claim, ex
     assert outcome == expected
     assert (tid in kbd.detect_crashed_workers._last_rate_limited) is (expected == "rate_limited")
     assert (tid in crashed) is (expected == "crashed")
+
+
+@pytest.mark.parametrize("reply", ["Worker could not start: ModelRoutingError: no route", "", None])
+@pytest.mark.parametrize("late_result", ["old_run", "wrong_pid", "wrong_claim"])
+def test_crash_output_ignores_late_prior_run_result(conn, reply, late_result):
+    import json
+
+    tid = kb.create_task(conn, title="interleaved replies", assignee="w")
+    first = kb.claim_task(conn, tid, claimer=kb._claimer_id())
+    assert first is not None
+    old_pid = _dead_pid()
+    kbd._set_worker_pid(conn, tid, old_pid)
+    assert tid in kbd.detect_crashed_workers(conn)
+    task = kb.claim_task(conn, tid, claimer=kb._claimer_id())
+    assert task is not None and task.current_run_id != first.current_run_id
+    submitter, interpreter = _dead_pid(), _dead_pid()
+    kbd._set_worker_pid(conn, tid, submitter)
+    with kb.write_txn(conn):
+        kb._append_event(conn, tid, "worker_bound", {
+            "pid": interpreter, "claim_lock": task.claim_lock,
+        }, run_id=task.current_run_id)
+        if reply is not None:
+            kb._append_event(conn, tid, "worker_result", {
+                "pid": interpreter, "claim_lock": task.claim_lock,
+                "exit_code": 1, "last_output": reply,
+            }, run_id=task.current_run_id)
+        kb._append_event(conn, tid, "worker_result", {
+            "pid": interpreter if late_result == "wrong_claim" else old_pid,
+            "claim_lock": "foreign" if late_result == "wrong_claim" else first.claim_lock,
+            "exit_code": 0, "last_output": "OLD REPLY",
+        }, run_id=first.current_run_id if late_result == "old_run" else task.current_run_id)
+    # The old submitter can still flush to the shared task log after B's marker.
+    with kbd._open_worker_log(task, None) as log:
+        log.write(f"{reply}\nOLD REPLY\n[kanban-worker-exit] rc=1\n".encode())
+    assert tid in kbd.detect_crashed_workers(conn)
+    error = conn.execute("SELECT error FROM task_runs WHERE id=?", (task.current_run_id,)).fetchone()[0]
+    payload = json.loads(conn.execute(
+        "SELECT payload FROM task_events WHERE run_id=? AND kind='crashed'",
+        (task.current_run_id,),
+    ).fetchone()[0])
+    assert "OLD REPLY" not in error
+    assert (reply or "") in error
+    assert payload.get("worker_output", "") == (reply or "")
