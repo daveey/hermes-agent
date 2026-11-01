@@ -22,9 +22,11 @@ equals a board slug does not count.
 Never matched: closed cards (a replica's stale legacy ``<board>/<id>`` row never outvotes its qualified
 ``<profile>/<board>/<id>`` twin), the creator's own card, the new card's parents, cards the same chat or the same
 worker created (fan-out), the waiting card a capability-owner create quotes, and another capability-owner
-card for that same waiting card, a card the new one parks/waits/depends on (:func:`waits_on`), and a card
-that names a different target (:func:`distinct_target`: another repo, host or process, or an inverted check at
-another revision; a newer sha or another ticket number alone is not a different target). Admitted look-alikes
+card for that same waiting card, a card the new one parks/waits/depends on (:func:`waits_on`), a card whose failed
+execution the new one recovers (:func:`recovers`: ``self-heal: kanban card t_X ... failed 2x``), and a card that
+names a different target (:func:`distinct_target`: another repo, host or process, an inverted check at another
+revision, or another work role, :func:`work_role`: implement vs measure vs deliver; a newer sha or another
+ticket number alone is not a different target). Admitted look-alikes
 are logged. Each card counts once per gateway. A missing or unreadable replica is skipped and logged, never a block.
 ``kanban.create_overlap_check: false`` turns the check off.
 """
@@ -234,9 +236,94 @@ def waits_on(card_id: str, title: str, body: str) -> bool:
                for m in _WAIT.finditer(text))
 
 
+# Work role (audits t_01a189b2d186a986, t_01a19075b3f1531a). Shared board and vocabulary say two cards are about the
+# same campaign; they do not say they do the same JOB. "Repair Stage B evidence gaps" (implements guards) was refused
+# against "Follow-through: send the verified Stage C report", and "bb-tuner burn-down: 7-day re-measure ..." against
+# four bb cluster fix/design cards. Roles are deliberately few and explicit; a title naming two roles ("Send
+# failing: fix") has none, and an unknown role never makes cards distinct, so a vague title still meets the
+# word-overlap rules. Verifying is NOT a role apart from implementing: "Verify green main CI: daveey/hermes" owns
+# making main green, so "Fix red main CI: daveey/hermes" is its duplicate (hub 10-30 02:31:55Z, judged correct).
+# Verbs only: "delivery", "measurement" and "implementation" are what a symptom is ABOUT ("Delivery receipts
+# missing"), not a job.
+_ROLES = {
+    "implement": "fix fixes fixing repair repairs repairing implement implements implementing design redesign",
+    "measure": "measure measures measuring re-measure remeasure",
+    "deliver": "follow-through send sends sending deliver delivers delivering notify notifies relay relays",
+}
+_ROLE_OF = {w: role for role, ws in _ROLES.items() for w in ws.split()}
+_ROLE_TOKEN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")  # "failed-fix" and "bb-self-fix" are not the verb "fix"
+_ROLE_NEGATORS = frozenset({"not", "no", "never", "without", "nor", "don", "dont", "doesn", "isn", "won"})
+_ROLE_CLAUSE = re.compile(r"[.;:!?,\n]+")  # negation never reaches across a clause ("No. Fix the gate")
+_ROLE_BODY_SCAN = 600  # the opening states the job; later sections ("DELIVERY: your own worktree") are steps
+_ROLE_VERB_SLOTS = 1  # a title's job is the first word of a clause: in "Discord send retries drop" send is a noun
+_ROLE_NOT_A_WORD = re.compile(r"\d")  # "7-day re-measure", "BB-1156: fix": numbers and ids precede the verb
+# Only "implement" is read from a body: symptom-titled cards say "smallest fix" there, while "notify David when
+# green" or "measure before and after" in a body is a closing step of nearly any card, not its job.
+_BODY_ROLES = frozenset({"implement"})
+
+
+def _role_tokens(text: str, *, verb_slots: Optional[int] = None) -> list[tuple[str, bool]]:
+    """``(role, negated)`` per role word, in order, clause by clause. ``not a second verification campaign`` is
+    negated. With ``verb_slots`` only the first N words of each clause count (titles); numbers and ids skipped."""
+    out: list[tuple[str, bool]] = []
+    for clause in _ROLE_CLAUSE.split(_TASK_REF.sub(" ", (text or "").lower())):
+        toks = _ROLE_TOKEN.findall(clause)
+        if verb_slots is not None:
+            toks = [t for t in toks if not _ROLE_NOT_A_WORD.search(t)]
+        out += [(_ROLE_OF[t], bool(_ROLE_NEGATORS & set(toks[max(0, i - 3):i]))) for i, t in enumerate(toks)
+                if t in _ROLE_OF and (verb_slots is None or i < verb_slots)]
+    return out
+
+
+def _one_role(tokens: list[tuple[str, bool]]) -> tuple[Optional[str], bool]:
+    """``(role, ambiguous)``: the role every unnegated role word agrees on; two roles are ambiguous."""
+    named = {role for role, neg in tokens if not neg}
+    return (next(iter(named)) if len(named) == 1 else None), len(named) > 1
+
+
+def work_role(title: str, body: str = "") -> tuple[Optional[str], Optional[str]]:
+    """``(role, source)``: the one role the title names in verb position (the first words of a clause; source
+    ``title``), else the one role the body's opening names (source ``body``: bb_bridge cards title the failure and
+    put "smallest fix" in the body), else ``(None, None)``. Text naming two roles is ambiguous and has none, and an
+    ambiguous title never falls back to its body."""
+    role, ambiguous = _one_role(_role_tokens(title, verb_slots=_ROLE_VERB_SLOTS))
+    if role or ambiguous:
+        return (role, "title") if role else (None, None)
+    role, _ = _one_role(_role_tokens((body or "")[:_ROLE_BODY_SCAN]))
+    return (role, "body") if role in _BODY_ROLES else (None, None)
+
+
+# A recovery card is ABOUT a card's failed execution: the self-heal lane files "self-heal: kanban card t_X on mini/bb
+# failed 2x (crashed,crashed): <t_X's title>" (coach signals.collect_kanban). It names t_X's board and repeats its
+# title, so it matched t_X itself and was refused 8 times (hub 11-01 00:31-01:21Z). Diagnosing why t_X's worker
+# died is not a second owner of t_X's work; another recovery card for t_X, or a card redoing t_X's work, still is.
+_RECOVERS = re.compile(r"\bcards?\s+(t_[0-9a-f]{8,16})\b(?:\+\d+)?(?:\s+on\s+[\w./-]+)?\s+(?:failed|crashed|stalled|"
+                       r"timed[ _]out|gave up|got stuck|is stuck|lost its worker)\b", re.IGNORECASE)
+# ... unless it says it does t_X's work itself: "card t_X crashed, take over" is a second owner of that work.
+_REDOES = re.compile(r"\b(?:take[ -]?over|takes over|taking over|redo|re-do|retry|re-run|rerun|resume|continue|"
+                     r"finish|refile|re-file|replace|replaces|instead of)\b", re.IGNORECASE)
+
+
+def recovers(card_id: str, title: str, card_title: str = "") -> bool:
+    """The new title is a recovery of ``card_id``'s failed execution (``card t_X ... failed|crashed|...``) and does
+    not say it redoes the work (``take over``, ``retry``, ``finish``...). Text after the next colon that quotes
+    ``card_title`` (self-heal appends the source title, cut short) is the source's words, not read for that."""
+    title = title or ""
+    for m in _RECOVERS.finditer(title):
+        if card_id and m.group(1).lower() == card_id.lower():
+            head, _, quoted = title[m.end():].partition(":")
+            quoted = quoted.strip().lower()
+            own = title[:m.end()] + head if quoted and (card_title or "").strip().lower().startswith(quoted) \
+                else title
+            return not _REDOES.search(own)
+    return False
+
+
 def _identity(title: str, body: str, gateways: Iterable[str]) -> dict:
     repo, in_title = _repo_of(title, body)
-    return {"title": title or "", **target_identity(title, gateways), "repo": repo, "repo_in_title": in_title}
+    role, role_src = work_role(title, body)
+    return {"title": title or "", **target_identity(title, gateways), "repo": repo, "repo_in_title": in_title,
+            "role": role, "role_src": role_src}
 
 
 def _distinct(a: dict, b: dict) -> Optional[str]:
@@ -250,7 +337,18 @@ def _distinct(a: dict, b: dict) -> Optional[str]:
     if (a["revision"] and b["revision"] and not a["revision"] & b["revision"]
             and (_inverts(a["title"], b["title"]) or _inverts(b["title"], a["title"]))):
         return f"revision {'/'.join(sorted(a['revision']))} inverts {'/'.join(sorted(b['revision']))}"
+    # A body-only role is a weak read (template text): it decides only against a role a title states. A role whose
+    # words the other title also uses is that card's subject, not a second job: "Send button disabled in BB
+    # client" (deliver?) vs "Fix send button disabled in BB client" is one defect.
+    if (a.get("role") and b.get("role") and a["role"] != b["role"]
+            and "title" in (a.get("role_src"), b.get("role_src"))
+            and not _role_words_in(a["role"], b["title"]) and not _role_words_in(b["role"], a["title"])):
+        return f"role {a['role']} != {b['role']}"
     return None
+
+
+def _role_words_in(role: str, title: str) -> bool:
+    return any(_ROLE_OF.get(t) == role for t in _ROLE_TOKEN.findall((title or "").lower()))
 
 
 def distinct_target(new_title: str, card_title: str, gateways: Iterable[str] = (), *, new_body: str = "",
@@ -425,6 +523,7 @@ def find(*, title: str, body: str, target_board: str, session_id: Optional[str],
             if mine is None:
                 mine = _identity(title, body, gateways)
             admit = (f"waits on {card['id']}" if waits_on(card["id"], title, body)
+                     else f"recovers {card['id']}" if recovers(card["id"], title, card.get("title") or "")
                      else _distinct(mine, _identity(card.get("title") or "", card.get("body") or "", gateways)))
             if admit:
                 # Logged so an audit can tell an admitted look-alike from a missed one.
