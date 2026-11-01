@@ -36,8 +36,10 @@ def test_session_rebuild_stops_previous_notification_poller(monkeypatch):
         assert second_stop is not first_stop
         assert first_stop.is_set()  # the previous poller was stopped, not orphaned
 
-        # The old loop wakes at most every 0.5s; give it its real deadline to exit.
-        first_thread.join(timeout=3.0)
+        # The queue's 0.5s poll interval does not bound thread scheduling, lazy imports,
+        # tick I/O or the shutdown drain. These are watchdogs, not latency assertions:
+        # allow throttled CI to run the real loop; join still returns as soon as it exits.
+        first_thread.join(timeout=30.0)
         assert not first_thread.is_alive(), "the stopped previous poller never exited"
         live = [
             thread
@@ -48,10 +50,10 @@ def test_session_rebuild_stops_previous_notification_poller(monkeypatch):
 
         # Session close can only signal the newest stop event — which now stops the only live poller.
         second_stop.set()
-        live[0].join(timeout=3.0)
+        live[0].join(timeout=30.0)
         assert not live[0].is_alive()
     finally:
         server._sessions.pop("sid_rebuild", None)
         for stop, thread in list(server._notification_pollers):
             stop.set()
-            thread.join(timeout=1.0)
+            thread.join(timeout=30.0)
