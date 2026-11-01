@@ -11,7 +11,45 @@ grow. The shell fence is unchanged; only the in-process tool has these grants:
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from typing import Optional
+
+
+@contextmanager
+def granted_board(board: Optional[str], tid: str):
+    """Resolve an exact owner-wake grant, never changing the global worker pin.
+
+    Authority is read on the worker's pinned board; only the listed target is
+    opened on its own local board. Ordinary workers and descendants keep the
+    existing resolution. Omitted board is inferred only for a unique listing.
+    """
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli.kanban_requeue import owner_wake_listed_refs
+
+    env_tid = os.environ.get("HERMES_KANBAN_TASK")
+    if env_tid and kt._is_dispatcher_owned_worker():
+        with kt._board(None) as (kb, own):
+            worker = kb.get_task(own, env_tid)
+            refs = [(slug, target) for slug, target in
+                    owner_wake_listed_refs(worker)
+                    if target == tid and (board is None or board == slug)]
+            kt._check(len(refs) < 2, "ambiguous owner-wake target; specify board")
+            if len(refs) == 1:
+                kt._check(worker.status == "running" and
+                          kt._worker_run_id(env_tid) is not None and
+                          worker.current_run_id == kt._worker_run_id(env_tid),
+                          "owner-wake supervisor no longer owns its current run")
+                if refs[0][0] == kb.get_current_board():
+                    yield kb, own, env_tid
+                    return
+                path = kb.board_own_db_path(refs[0][0])
+                kt._check(path.is_file(), "orchestrator-only: listed owner-wake board is not available locally")
+                with kbc.connect_closing(db_path=path) as conn:
+                    yield kb, conn, env_tid
+                return
+    with kt._board(board) as (kb, conn):
+        yield kb, conn, None
 
 
 def check_unblock() -> bool:
@@ -39,6 +77,7 @@ def _log_requeue(conn, kb, tid: str, env_tid: str, via: str, source: Optional[st
         if via == "owner-wake-requeue":
             kb._append_event(conn, tid, "owner_wake_requeue", {
                 "by": env_tid, "supervisor_card": source, "target": tid,
+                "supervisor_board": kb.get_current_board(),
             })
         else:
             kb._append_event(conn, tid, "self_heal_requeue", {
@@ -56,11 +95,29 @@ def handle_unblock(args: dict, **kw) -> str:
     tid = str(tid)
     env_tid = os.environ.get("HERMES_KANBAN_TASK")
     if env_tid and tid != env_tid:
-        with kt._board(args.get("board")) as (kb, conn):
-            from hermes_cli.kanban_requeue import requeue_grant
-            via, source = requeue_grant(conn, env_tid, tid, board=args.get("board") or kb.get_current_board())
+        with granted_board(args.get("board"), tid) as (kb, conn, owner):
+            from hermes_cli.kanban_requeue import OWNER_WAKE_REQUEUE_STATUSES, requeue_grant
+            via, source = (("owner-wake-requeue", owner) if owner else
+                           requeue_grant(conn, env_tid, tid,
+                                         board=args.get("board") or kb.get_current_board()))
             if via:
-                ok = kb.unblock_task(conn, tid)
+                def precondition(current):
+                    task = kb.get_task(current, tid)
+                    if via == "owner-wake-requeue" and (
+                            task is None or task.status not in OWNER_WAKE_REQUEUE_STATUSES):
+                        return "owner-wake target must be triage or blocked"
+                    if owner:
+                        from hermes_cli.kanban_requeue import owner_wake_listed_refs
+                        with kt._board(None) as (_, own):
+                            worker = kb.get_task(own, owner)
+                            refs = [(slug, target) for slug, target in owner_wake_listed_refs(worker)
+                                    if target == tid and (args.get("board") is None or args["board"] == slug)]
+                            if (worker is None or worker.status != "running" or
+                                    worker.current_run_id != kt._worker_run_id(owner) or len(refs) != 1):
+                                return "owner-wake grant or run was revoked"
+                    return None
+
+                ok = kb.unblock_task(conn, tid, precondition=precondition)
                 kt._check(ok, f"could not unblock {tid} (not blocked/triage/scheduled, or unknown)")
                 _log_requeue(conn, kb, tid, env_tid, via, source)
                 return kt._ok(task_id=tid, via=via, **kt._fields(kb.get_task(conn, tid), ("status",)))

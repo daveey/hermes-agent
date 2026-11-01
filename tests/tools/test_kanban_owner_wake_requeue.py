@@ -106,7 +106,8 @@ def test_supervisor_requeues_a_listed_triage_or_blocked_card(board, monkeypatch,
     conn = kbc.connect()
     try:
         events = [e for e in kb.list_events(conn, a) if e.kind == "owner_wake_requeue"]
-        assert [e.payload for e in events] == [{"by": sup, "supervisor_card": sup, "target": a}]
+        assert [e.payload for e in events] == [{
+            "by": sup, "supervisor_card": sup, "target": a, "supervisor_board": "default"}]
     finally:
         conn.close()
 

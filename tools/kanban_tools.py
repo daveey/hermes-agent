@@ -897,7 +897,7 @@ def _handle_show(args: dict, **kw) -> str:
                 "task to show by default. Call kanban_list to see task ids on "
                 "the board, then kanban_show(task_id=<id>) for full state."),
         })
-    with _board(args.get("board")) as (kb, conn):
+    with _granted_board(args.get("board"), tid) as (kb, conn, _):
         task = _existing_task(kb, conn, tid)
         return json.dumps({
             "task": _fields(task, _TASK_FIELDS),
@@ -2030,7 +2030,7 @@ _handle_link = _kanban_handler("kanban_link")(_graph.handle_link)
 _handle_unlink = _kanban_handler("kanban_unlink")(_graph.handle_unlink)
 _handle_supervisor_request = _kanban_handler("kanban_supervisor_request")(_graph.handle_supervisor_request)
 from tools.kanban_tools_self_heal import check_unblock as _check_kanban_unblock_fn
-from tools.kanban_tools_self_heal import handle_unblock as _handle_unblock_fn
+from tools.kanban_tools_self_heal import handle_unblock as _handle_unblock_fn, granted_board as _granted_board
 _check_kanban_unblock = no_cache_check_fn(_check_kanban_unblock_fn)
 _handle_unblock = _kanban_handler("kanban_unblock")(_handle_unblock_fn)
 _TOOLS = (

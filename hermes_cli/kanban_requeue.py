@@ -5,8 +5,8 @@ Moved out of ``hermes_cli/kanban.py`` (at its line cap); ``kanban`` re-exports e
 - A self-heal fix card may unblock the single card named in its defect; a card a finished fix card created may do
   the same (``self_heal_requeue_grant``).
 - An owner-wake supervisor card (chat-closeout ``supervise_on_board``: ``created_by='owner-wake'``, title
-  ``Owner wake: supervise ...``) may unblock exactly the ``- <board>/<id>`` card lines of its body on this board,
-  only while each is in triage or blocked (``requeue_grant``).
+  ``Owner wake: supervise ...``) may unblock exactly the local ``- <board>/<id>`` card lines of its body,
+  only while each is in triage or blocked (``requeue_grant``); the tool resolves cross-board grants.
 """
 from __future__ import annotations
 
@@ -87,21 +87,19 @@ def _is_owner_wake_supervisor(task) -> bool:
             and (task.title or "").startswith(_OWNER_WAKE_TITLE))
 
 
-def owner_wake_listed_cards(task, board: str) -> list[str]:
-    """The card ids an owner-wake supervisor card's body lists on ``board``, in order.
-
-    Only the card-line block (the lines before the first blank line) counts, so
-    ids cited later in the instructions are not grants. [daveey]
-    """
+def owner_wake_listed_refs(task) -> list[tuple[str, str]]:
+    """Exact local (board, id) grants in the initial card-line block only."""
     if not _is_owner_wake_supervisor(task):
         return []
     head = (task.body or "").split("\n\n", 1)[0]
-    found = []
-    for line in head.splitlines():
-        m = _OWNER_WAKE_CARD_LINE.match(line)
-        if m and m.group(1) == board:
-            found.append(m.group(2))
-    return list(dict.fromkeys(found))
+    return list(dict.fromkeys(
+        (m.group(1), m.group(2)) for line in head.splitlines()
+        if (m := _OWNER_WAKE_CARD_LINE.match(line))))
+
+
+def owner_wake_listed_cards(task, board: str) -> list[str]:
+    """Card ids listed for exactly this board; later prose is never a grant."""
+    return [tid for slug, tid in owner_wake_listed_refs(task) if slug == board]
 
 
 def requeue_grant(conn, worker_task_id: str, target_id: str, *,
@@ -136,4 +134,4 @@ def has_requeue_grant(conn, worker_task_id: str, *, board: Optional[str] = None)
     if self_heal_requeue_grant(conn, worker_task_id)[0] is not None:
         return True
     worker = kb.get_task(conn, worker_task_id)
-    return bool(owner_wake_listed_cards(worker, board or kb.get_current_board()))
+    return bool(owner_wake_listed_refs(worker))

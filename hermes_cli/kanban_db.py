@@ -572,7 +572,7 @@ def _descendant_may_follow_explicit_board(slug: str) -> bool:
 def board_own_db_path(slug: Optional[str]) -> Path:
     """The board's own ``kanban.db``, ignoring every env pin: ``<root>/kanban.db`` for
     ``default``, else ``board_dir(slug)/kanban.db``. For read-only listings that must describe
-    each board (``boards list`` counts), never for routing a write. [daveey]"""
+    each board (``boards list`` counts), and the exact-grant owner-wake tool resolver. [daveey]"""
     s = _slug_or_default(slug)
     if s == DEFAULT_BOARD:
         return kanban_home() / "kanban.db"
