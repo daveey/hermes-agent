@@ -1,0 +1,43 @@
+"""Prepare cached board readers without holding a global lock across SQLite I/O."""
+import os
+import sqlite3
+import threading
+
+from hermes_cli.kanban_generation import DeletedWalGenerationError, lifecycle_lock
+
+
+def cached_entry(path):
+    from hermes_cli import kanban_session_activity as activity
+    from hermes_cli.kanban_lockguard import shm_identity
+
+    key = str(path)
+    # Same-board opens/last closes are atomic; registry locks protect only map
+    # operations. Borrowers never wait for this board lock while holding the map.
+    with lifecycle_lock(path):
+        activity._recover_generation(path)
+        try:
+            st = os.stat(path)
+        except OSError as exc:
+            raise sqlite3.OperationalError(f"unable to open database file {path}: {exc}") from exc
+        ident = (st.st_dev, st.st_ino)
+        with activity._RO_CACHE_LOCK:
+            entry = activity._RO_CACHE.get(key)
+            stale = entry if entry is not None and entry[1] != ident else None
+            if stale is not None:
+                # A borrower may need the board lock to close on a read error.
+                # Never wait for it while holding that lock; preserve its entry.
+                if not stale[2].acquire(blocking=False):
+                    raise DeletedWalGenerationError(f"kanban DB {path}: replaced reader is still borrowed; retry")
+                del activity._RO_CACHE[key]
+                entry = None
+        if stale is not None:
+            try:
+                activity._close_quietly(stale[0])
+            finally:
+                stale[2].release()
+        if entry is None:
+            conn = activity._open_ro(path, check_same_thread=False)
+            entry = (conn, ident, threading.Lock(), shm_identity(path))
+            with activity._RO_CACHE_LOCK:
+                activity._RO_CACHE[key] = entry
+        return key, entry

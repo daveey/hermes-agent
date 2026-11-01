@@ -6,6 +6,7 @@ a foreign thread's handle or roll back an outstanding transaction to get past th
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import sqlite3
 import threading
@@ -16,6 +17,25 @@ _lock = threading.RLock()
 _connections: weakref.WeakSet = weakref.WeakSet()
 _reader_caches: list = []
 _poisoned: set[str] = set()
+_lifecycle_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+
+
+def lifecycle_lock(database):
+    """Serialize one board's open/close transitions, never unrelated databases.
+
+    Callers retain the lock through the whole transition and on returned handles.
+    Reentrant because recovery may close a same-thread stale handle. The registry
+    lock is released before waiting, reading SQL or invoking cache eviction.
+    """
+    path = _path(database)
+    if path is None:
+        return threading.RLock()
+    with _lock:
+        lock = _lifecycle_locks.get(path)
+        if lock is None:
+            lock = threading.RLock()
+            _lifecycle_locks[path] = lock
+        return lock
 
 
 class DeletedWalGenerationError(sqlite3.OperationalError):
@@ -64,10 +84,22 @@ def register_reader_cache(evict) -> None:
             _reader_caches.append(evict)
 
 
+@contextmanager
+def _cache_registry_available(lock):
+    # Recovery runs under a board lifecycle lock. Never wait for a foreign
+    # cache owner (including legacy callers) that might be opening that board.
+    if not lock.acquire(blocking=False):
+        raise DeletedWalGenerationError("kanban reader registry is busy; retry generation recovery")
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 def evict_readers(path: str) -> None:
     from hermes_cli import kanban_session_activity as activity
 
-    with activity._RO_CACHE_LOCK:
+    with _cache_registry_available(activity._RO_CACHE_LOCK):
         entries = [(key, entry) for key, entry in activity._RO_CACHE.items() if os.path.realpath(key) == path]
     for key, entry in entries:
         # Never wait while a caller might hold the cache lock: borrowers take that lock
@@ -75,7 +107,7 @@ def evict_readers(path: str) -> None:
         if not entry[2].acquire(blocking=False):
             raise DeletedWalGenerationError(f"kanban DB {path}: stale reader is still borrowed; retry")
         try:
-            with activity._RO_CACHE_LOCK:
+            with _cache_registry_available(activity._RO_CACHE_LOCK):
                 if activity._RO_CACHE.get(key) is not entry:
                     continue
                 if entry[0].in_transaction:

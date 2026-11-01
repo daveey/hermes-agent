@@ -16,18 +16,20 @@ def connect_with_identity(path, **kwargs):
     dispatch: reopen after contention clears instead of trusting a pathname.
     """
     from hermes_cli.kanban_db_connect import _dispatch_tick_lock
-    from hermes_cli.kanban_generation import recover, remember
+    from hermes_cli.kanban_generation import lifecycle_lock, recover, remember
     from hermes_cli.sqlite_safe_read import connect_tracked, _tracking_factory
 
     canonical = Path(path).resolve()
     # Keep guard release outside the tracking close lock, as in the previous
     # guarded-opener composition. Only sqlite open + registration need that
     # global lock; the first journal read may wait on an unrelated board writer.
-    kwargs["factory"] = _kanban_lockguard.guarded_factory(
-        _tracking_factory(kwargs.get("factory", sqlite3.Connection)))
-    with _dispatch_tick_lock(canonical) as held:
+    kwargs["factory"] = _kanban_lockguard.lifecycle_factory(_kanban_lockguard.guarded_factory(
+        _tracking_factory(kwargs.get("factory", sqlite3.Connection))))
+    lock = lifecycle_lock(canonical)
+    with lock, _dispatch_tick_lock(canonical) as held:
         recover(str(canonical))
         conn = connect_tracked(str(canonical), **kwargs)
+        conn._hermes_lifecycle_lock = lock
         try:
             _kanban_lockguard.guard(conn)
             remember(conn)

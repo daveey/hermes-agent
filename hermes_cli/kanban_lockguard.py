@@ -25,6 +25,7 @@ true last close still checkpoints and removes the sidecars normally.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import logging
 import os
 import sqlite3
@@ -52,6 +53,27 @@ def _release(conn: Any) -> None:
     if fin is not None:
         conn._hermes_lockguard_finalizer = None
         fin()  # runs hermes_state_lockguard.release(held) exactly once
+
+
+class _LifecycleMixin:
+    def close(self) -> None:
+        # Must wrap BOTH tracking and guard close, even with an already-guarded
+        # custom factory: no board-lock wait while holding the tracking lock.
+        with getattr(self, "_hermes_lifecycle_lock", nullcontext()):
+            super().close()
+
+
+_lifecycle_factory_cache: dict[type, type] = {}
+
+
+def lifecycle_factory(factory: type) -> type:
+    if issubclass(factory, _LifecycleMixin):
+        return factory
+    cached = _lifecycle_factory_cache.get(factory)
+    if cached is None:
+        cached = type(f"Lifecycle{factory.__name__}", (_LifecycleMixin, factory), {})
+        _lifecycle_factory_cache[factory] = cached
+    return cached
 
 
 class _GuardMixin:
@@ -149,14 +171,20 @@ def guard(conn: sqlite3.Connection) -> bool:
 
 def connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
     """Drop-in ``sqlite3.connect`` for Kanban board files: same arguments, guarded result."""
-    from hermes_cli.kanban_generation import recover, remember
-    recover(database)
-    kwargs["factory"] = guarded_factory(kwargs.get("factory", sqlite3.Connection))
-    conn = sqlite3.connect(database, *args, **kwargs)
-    guard(conn)
-    if isinstance(conn, _GuardMixin):
-        remember(conn)
-    return conn
+    from hermes_cli.kanban_generation import lifecycle_lock, recover, remember
+    lock = lifecycle_lock(database)
+    with lock:
+        recover(database)
+        kwargs["factory"] = lifecycle_factory(guarded_factory(kwargs.get("factory", sqlite3.Connection)))
+        conn = sqlite3.connect(database, *args, **kwargs)
+        conn._hermes_lifecycle_lock = lock
+        try:
+            guard(conn)
+            remember(conn)
+            return conn
+        except BaseException:
+            conn.close()
+            raise
 
 
 def _canonical(path: Any) -> str:
