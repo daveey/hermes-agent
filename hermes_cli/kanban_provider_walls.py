@@ -153,7 +153,8 @@ def profile_model() -> str:
         from hermes_cli.config import load_config
         model = (load_config() or {}).get("model") or {}
         return str(model.get("default") or "").strip() if isinstance(model, dict) else ""
-    except Exception:
+    except Exception:  # a broken config must not break dispatch; the worker reports it itself
+        logger.debug("kanban walls: cannot read the profile model", exc_info=True)
         return ""
 
 
@@ -171,7 +172,7 @@ def live_quota_wall(provider: str, model: str) -> Optional[float]:
         from agent.model_routing_unavailable import quota_unavailable
         unavailable = quota_unavailable(load_pool(provider, allowed_auth_types={"oauth"}), model)
     except Exception as exc:  # never break dispatch over a pool read
-        logger.debug("kanban walls: live quota check failed for %s/%s (%s)", provider, model, exc)
+        logger.debug("kanban walls: live quota check failed for %s/%s (%s)", provider, model, exc, exc_info=True)
         return None
     return float(unavailable.resets_at) if unavailable is not None else None
 
