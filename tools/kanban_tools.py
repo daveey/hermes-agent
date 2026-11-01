@@ -594,27 +594,7 @@ def _goal_judge_available() -> bool:
     return client is not None and bool(model)
 
 
-# Per-tool guidance for a judge rejection: verdict -> message. ``{reason}``/``{tid}`` are filled in.
-_GOAL_GATE_MESSAGES = {
-    "kanban_complete": {
-        "blocked": (
-            "Goal completion rejected: judge ruled the goal unachievable — {reason}. The task "
-            "will NOT complete silently. Either re-scope the task with kanban_edit, or record "
-            "the block with kanban_block and hand the decision to a human / reviewer."),
-        "continue": (
-            "Goal completion rejected by judge: {reason}. To proceed, either: (1) provide "
-            "explicit acceptance evidence in your summary matching the task's criteria, or (2) "
-            "create continuation tasks with parents=[{tid}] and keep this task alive.")},
-    "kanban_request_review": {
-        "blocked": (
-            "Goal review handoff rejected: judge ruled the goal unachievable — {reason}. "
-            "Record the block with kanban_block instead of requesting review."),
-        "continue": (
-            "Goal review handoff rejected by judge: {reason}. Provide acceptance evidence "
-            "matching the card before requesting review.")}}
-
-
-def _goal_gate(tool_name: str, task, tid: str, evidence: str):
+def _goal_gate(tool_name: str, task, tid: str, evidence: str, *, conn=None):
     """Goal-mode pre-handoff judge gate: a worker must not complete / request
     review before acceptance criteria are met. ``blocked`` gets its own
     guidance; any other non-``done`` verdict gets the ``continue`` guidance.
@@ -647,8 +627,10 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str):
             return
         from hermes_cli.kanban_goal_receipt import GoalVerification
         return GoalVerification.for_handoff(task, evidence)
+    if verdict == 'blocked' and not parse_failed:
+        _kc.park_unachievable(task, tid, reason, conn)
     key = "blocked" if verdict == "blocked" else "continue"
-    raise _Reject(_GOAL_GATE_MESSAGES[tool_name][key].format(reason=reason, tid=tid), "goal_judge")
+    raise _Reject(_kc.GOAL_GATE_MESSAGES[tool_name][key].format(reason=reason, tid=tid), "goal_judge")
 
 
 # --- Runtime-activity → board bridges (auto-heartbeat, live comment injection) ---
@@ -975,7 +957,7 @@ def _handle_complete(args: dict, **kw) -> str:
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
-        goal_verification = _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
+        goal_verification = _goal_gate("kanban_complete", task, tid, (summary or result or "").strip(), conn=conn)
         try:
             run_id = _worker_run_id(tid)
             if run_id is not None and _kc.parked_by_own_run(conn, tid, run_id):
@@ -1370,7 +1352,7 @@ def _handle_request_review(args: dict, **kw) -> str:
                f"reviewer profile {reviewer!r} is not installed. "
                f"Installed profiles: {', '.join(list_profile_names())}")
     with _board(args.get("board")) as (kb, conn):
-        _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary)
+        _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary, conn=conn)
         try:
             ok, fail_reason = kb.request_review(
                 conn, tid, summary=summary, metadata=metadata, reviewer=reviewer,

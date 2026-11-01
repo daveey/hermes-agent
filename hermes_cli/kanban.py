@@ -1175,6 +1175,9 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str,
 
         _logging.getLogger(__name__).warning("goal judge unreachable (%s), allowing lifecycle handoff", reason)
         return ("done", None)
+    if verdict == 'blocked' and parse_failed:
+        # An unparsed answer is not evidence that can authorize a recovery park.
+        return ('continue', reason)
     if verdict == 'done' and not parse_failed and verified is not None and handoff_tool == 'kanban_complete':
         from hermes_cli.kanban_goal_receipt import GoalVerification
         verified.append(GoalVerification.for_handoff(task, evidence))
@@ -1187,8 +1190,13 @@ def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: 
     applied to every terminal handoff so request-review can't bypass it. Returns the error line, or
     None to allow."""
     tool = "kanban_request_review" if handoff.startswith("review") else "kanban_complete"
-    verdict, rejection = _goal_mode_handoff_rejection(kb.get_task(conn, tid), evidence, tool, verified=verified)
+    task = kb.get_task(conn, tid)
+    verdict, rejection = _goal_mode_handoff_rejection(task, evidence, tool, verified=verified)
     if verdict == "blocked":
+        from hermes_cli.kanban_goal_recovery import park
+        if park(conn, task, rejection, expected_run_id=_worker_run_id_for(tid)):
+            return (f"kanban: goal {handoff} of {tid} rejected: {rejection}. "
+                    "Parked in triage for bounded supervisor recovery; acceptance unchanged.")
         return (f"kanban: goal {handoff} of {tid} rejected: judge ruled "
                 f"the goal unachievable — {rejection}. {blocked_hint}")
     if rejection is not None:

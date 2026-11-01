@@ -3161,19 +3161,13 @@ def _refuse_untimed_probe(kind: Optional[str], wake_check: Optional[str], clock_
         "would run it. Use kind='time' to wait on it; for a human ask, put it in human_request.resolved_check.")
 
 
-def _clear_meta(clear_blocker: bool) -> dict:
-    """Run metadata for an explicit "the shared blocker is gone" park (``kanban_shared_blockers``)."""
-    from hermes_cli.kanban_shared_blockers import CLEAR_FLAG
-    return {CLEAR_FLAG: True} if clear_blocker else {}
-
-
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
     blocker_id: Optional[str] = None, wake_check: Optional[str] = None,
     check_every: Optional[int] = None, clock_only: bool = False,
     human_request: Optional[dict] = None, awaiting: Any = None, clear_blocker: bool = False,
-    comment: Optional[tuple[str, str]] = None,
+    comment: Optional[tuple[str, str]] = None, goal_rejection=None,
     blocker_provider: Optional[str] = None, blocker_model: Optional[str] = None,
     blocker_lane: Optional[str] = None,
 ) -> bool:
@@ -3203,12 +3197,14 @@ def block_task(
     and only when the block lands (``kanban_reason_comment``).
     """
     from hermes_cli.kanban_ask_resolved import filing_fields, store_request, sync_row
-    from hermes_cli.kanban_human_request import reject_timed_request, validate_human_request
+    from hermes_cli.kanban_human_request import reject_timed_request
+    from hermes_cli.kanban_block_routing import clear_meta, validate_block_request
+    from hermes_cli.kanban_goal_recovery import record_block
     from hermes_cli.kanban_reason_comment import reason_comment
-    human_request = validate_human_request(human_request, kind=kind)
-    if kind is not None and kind not in VALID_BLOCK_KINDS:
-        raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
+    human_request = validate_block_request(human_request, kind)
     with write_txn(conn), reason_comment(conn, task_id, comment) as noted:
+        if not record_block(conn, task_id, goal_rejection, reason, expected_run_id, kind, human_request):
+            return False
         cur_row = conn.execute(
             "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
@@ -3218,7 +3214,7 @@ def block_task(
         validate_dependency_block(conn, task_id, kind)
         from hermes_cli import kanban_assignment_routing as assignment_routing
         from hermes_cli.kanban_blocker_metadata import blocker_metadata
-        run_meta = blocker_metadata(conn, task_id, reason=reason, metadata=_clear_meta(clear_blocker),
+        run_meta = blocker_metadata(conn, task_id, reason=reason, metadata=clear_meta(clear_blocker),
                                     blocker_id=blocker_id, blocker_provider=blocker_provider,
                                     blocker_model=blocker_model, blocker_lane=blocker_lane)
         # The breaker (``_record_task_failure``) parks cards ``blocked`` with no
