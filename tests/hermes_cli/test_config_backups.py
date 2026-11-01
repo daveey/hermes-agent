@@ -5,6 +5,28 @@ from pathlib import Path
 from hermes_cli.config_backups import backup_config, list_config_backups
 
 
+def test_good_rotation_retains_last_full_config_after_collapse(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yaml"
+    full = "".join(f"section_{i}: enabled\n" for i in range(20))
+    cfg.write_text(full)
+    stamps = iter(f"20260101-{i:06d}" for i in range(20))
+    monkeypatch.setattr("hermes_cli.config_backups.time.strftime", lambda _fmt: next(stamps))
+    anchor = backup_config(cfg, "good", keep=2)
+    for i in range(8):
+        cfg.write_text(f"image_gen: {{model: fixture-{i}}}\n")
+        backup_config(cfg, "good", keep=2)
+    kept = list_config_backups(cfg, "good")
+    assert anchor in kept
+    assert anchor.read_text() == full
+    assert len(kept) <= 3  # rolling window plus one last-full anchor
+    assert kept[0].read_text() == "image_gen: {model: fixture-7}\n"
+    # Restoration retires the extra anchor; normal retention remains bounded.
+    cfg.write_text(full + "restored: true\n")
+    backup_config(cfg, "good", keep=2)
+    assert len(list_config_backups(cfg, "good")) == 2
+    assert not anchor.exists()
+
+
 def test_repeat_backups_dedupe_and_rotate(tmp_path: Path, monkeypatch):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("model: a\n")

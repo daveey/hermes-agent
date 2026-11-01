@@ -4,8 +4,9 @@ Every writer that wants a "before" copy of the user's config (setup wizard, corr
 snapshot, model migrations) goes through :func:`backup_config`. Copies live in
 ``<HERMES_HOME>/backups/config/`` — ``backups/`` is already excluded from full backups, so they
 never nest — as ``config.yaml.<reason>.<YYYYMMDD-HHMMSS>``. A copy identical to the newest one
-for the same reason is skipped, and only the newest ``keep`` per reason survive, so repeated
-``hermes setup`` runs or a gateway restarting against broken YAML cannot litter the home dir.
+for the same reason is skipped, and only the newest ``keep`` per reason survive, except for
+one last-full ``good`` anchor after a top-level collapse. Repeated setup runs and gateway loads
+stay bounded without evicting the only pre-collapse recovery copy.
 """
 
 from __future__ import annotations
@@ -66,12 +67,38 @@ def backup_config(config_path: Path, reason: str, *, keep: int = DEFAULT_KEEP) -
         if dest.is_symlink() or dest.exists():  # never write through a planted link
             return None
         shutil.copy2(config_path, dest)  # config-reader: ok — file tooling, gated above
+        anchor = _last_full_good_backup([dest, *existing]) if reason == "good" else None
         for stale in [dest, *existing][keep:]:
-            stale.unlink(missing_ok=True)
+            if stale != anchor:
+                stale.unlink(missing_ok=True)
         return dest
     except OSError as exc:
         logger.warning("Could not back up %s (%s): %s", config_path, reason, exc)
         return None
+
+
+def _last_full_good_backup(candidates: list[Path]) -> Optional[Path]:
+    """Keep one extra recovery anchor after loss of most top-level settings.
+
+    Parseability is not completeness: repeated loads of a valid partial document
+    must not evict every pre-collapse copy. This affects retention only, never
+    automatic recovery selection. Newest wins ties; normal rotation resumes when
+    the document regains at least half the anchor's sections.
+    """
+    from utils import fast_safe_load
+
+    counts = []
+    for path in candidates:
+        try:
+            doc = fast_safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            counts.append(0)
+        else:
+            counts.append(len(doc) if isinstance(doc, dict) else 0)
+    largest = max(counts, default=0)
+    if largest >= 10 and counts[0] * 2 < largest:
+        return candidates[counts.index(largest)]
+    return None
 
 
 def load_newest_good_backup(config_path: Path) -> Optional[dict]:
