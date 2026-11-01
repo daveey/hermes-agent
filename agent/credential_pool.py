@@ -1301,13 +1301,10 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
     def _adopt_pushed_norefresh_row(self, entry: PooledCredential) -> PooledCredential:
         """Adopt a token pushed to disk for an OAuth row that carries no refresh_token.
 
-        A minter (hub-side token authority) writes ``{access_token, expires_at_ms}`` rows with no
-        refresh_token into this home's pool store. Such a row can never refresh itself, so a LIVE
-        pool would otherwise keep the expired (or 401-benched) copy forever and only a fresh
-        ``load_pool()`` would see the new token. Re-read the exact persisted row under the
-        cross-process auth-store lock; when its access_token differs, adopt it and clear the status.
-        Rows that do have a refresh_token, borrowed sources and token-less disk rows are left alone.
+        Re-read under the auth lock: a pushed token repairs auth failures, not live account quota.
+        Refresh-bearing, borrowed and token-less rows are left alone.
         """
+        from agent.credential_pool_pushed import has_live_quota_mark
         if entry.auth_type != AUTH_TYPE_OAUTH or (entry.refresh_token or "").strip():
             return entry
         if is_borrowed_credential_source(entry.source, self.provider):
@@ -1325,9 +1322,10 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 if not (stored.access_token or "").strip() or stored.access_token == entry.access_token:
                     return entry
                 logger.debug("Pool entry %s: adopting pushed %s token (no refresh_token)", entry.id, self.provider)
-                adopted = replace(stored, **_MARK_OK)
+                keep_quota = has_live_quota_mark(stored)
+                adopted = stored if keep_quota else replace(stored, **_MARK_OK)
                 self._replace_entry(entry, adopted)
-                self._persist(status_cleared_ids=[entry.id])
+                self._persist(status_cleared_ids=[] if keep_quota else [entry.id])
                 return self._find(lambda e: e.id == adopted.id) or adopted
         except Exception as exc:
             logger.debug("Failed to adopt pushed %s token for entry %s: %s", self.provider, entry.id, exc)
@@ -1522,7 +1520,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             # No refresh_token (pushed by a minter): the only way to renew is a newer token on disk.
             adopted = self._adopt_pushed_norefresh_row(entry)
             if adopted is not entry:
-                return adopted
+                return adopted if adopted.last_status == STATUS_OK else None
         if entry.auth_type != AUTH_TYPE_OAUTH or not entry.refresh_token:
             if force:
                 self._mark_exhausted(entry, None)
