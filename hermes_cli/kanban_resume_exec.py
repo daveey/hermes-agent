@@ -134,6 +134,11 @@ def exhaustion_refusal(conn: sqlite3.Connection, target: str) -> Optional[str]:
         f"SELECT id, kind, run_id, payload FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
         "ORDER BY id DESC LIMIT 1", (target, *_LIFECYCLE_KINDS)).fetchone()
     payload = _payload(last[3]) if last else {}
+    if last and last[1] == 'blocked' and payload.get('rekind_reason') == 'goal_unachievable':
+        from hermes_cli.kanban_goal_recovery import valid_receipt
+        if valid_receipt(conn, target, last[2], payload.get('reason'), before=last[0]):
+            return None
+        return f"{target}'s goal-unachievable park lacks a valid current-run kernel receipt"
     if not last or last[1] != "blocked" or payload.get("rekind_reason") != "continuation_exhausted":
         return (f"{target}'s current park is not a continuation_exhausted block "
                 f"(newest lifecycle event: {last[1] if last else 'none'})")

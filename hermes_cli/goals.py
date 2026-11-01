@@ -1670,6 +1670,7 @@ def run_kanban_goal_loop(
     max_turns: int = DEFAULT_MAX_TURNS,
     first_response: str = "",
     log=None,
+    unachievable_fn=None,
 ) -> dict[str, Any]:
     """Drive a kanban worker through a Ralph-style goal loop.
 
@@ -1744,7 +1745,16 @@ def run_kanban_goal_loop(
             # re-poking an impossible goal, and never let it land in done.
             # The judge ruled the goal cannot be satisfied at all — this is NOT done (#100954).
             _log(f"kanban goal loop: task {task_id} judged unachievable; blocking")
-            _block(f"Goal-mode judge ruled the goal unachievable: {reason}")
+            if unachievable_fn is not None:
+                try:
+                    if _parse_failed or not unachievable_fn(reason):
+                        return _result("stopped", "unachievable park refused", failed=True)
+                except Exception as exc:
+                    logger.exception("kanban goal loop: unachievable park failed")
+                    _log(f"kanban goal loop: unachievable park failed ({exc})")
+                    return _result("stopped", "unachievable park failed", failed=True)
+            else:
+                _block(f"Goal-mode judge ruled the goal unachievable: {reason}")
             return _result("blocked_unachievable", f"judge verdict blocked: {reason}")
 
         if verdict == "done":

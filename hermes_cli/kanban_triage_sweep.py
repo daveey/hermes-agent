@@ -119,8 +119,9 @@ def sweep_stale_triage(
         (cutoff, *TRIAGE_ENTRY_EVENTS, *TRIAGE_ENTRY_EVENTS),
     ).fetchall()
     from hermes_cli.kanban_resume_requester import open_recovery_card
+    from hermes_cli.kanban_goal_recovery import current_park
     for row in rows:
-        if row["human_request"] or open_recovery_card(conn, row["id"]):
+        if row["human_request"] or open_recovery_card(conn, row["id"]) or current_park(conn, row['id']):
             continue  # a human owns it, or its kernel recovery card is its producer
         recent = conn.execute(
             "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'triage_swept' AND created_at > ?",

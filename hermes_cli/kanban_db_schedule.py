@@ -70,8 +70,9 @@ def schedule_task(
             return False
         # A card behind a shared blocker stays behind it: a park without the id says nothing about
         # the wall (kanban_shared_blockers.run_effect) unless ``clear_blocker`` says it is gone.
+        from hermes_cli.kanban_block_routing import clear_meta
         from hermes_cli.kanban_blocker_metadata import blocker_metadata
-        meta = blocker_metadata(conn, task_id, reason=reason, metadata=_kb._clear_meta(clear_blocker),
+        meta = blocker_metadata(conn, task_id, reason=reason, metadata=clear_meta(clear_blocker),
                                 blocker_id=blocker_id, blocker_provider=blocker_provider,
                                 blocker_model=blocker_model, blocker_lane=blocker_lane)
         run_id = _kb._end_or_synthesize_run(
