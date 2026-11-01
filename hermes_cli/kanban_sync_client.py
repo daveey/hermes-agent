@@ -127,6 +127,11 @@ class Hub:
         from urllib.parse import quote
         return self._call("GET", f"/v2/boards/{board}/snapshot?table={table}&after={quote(after)}&limit={limit}")
 
+    def row_evidence(self, board: str, table: str, uid: str) -> dict:
+        """Exact authoritative row/deletion/history evidence, never a replica lookup."""
+        from urllib.parse import urlencode
+        return self._call("GET", f"/v2/boards/{board}/evidence?" + urlencode({"table": table, "uid": uid}))
+
     def leases(self, board: str, body: dict) -> dict:
         return self._call("POST", f"/v2/boards/{board}/leases", body)
 
@@ -578,6 +583,7 @@ class RoundResult:
     push: Optional[PushResult] = None
     error: Optional[str] = None
     repaired: dict[str, list[str]] = field(default_factory=dict)  # cards re-pushed by repair_divergence
+    rejection_resolutions: list[dict] = field(default_factory=list)
 
 
 def open_shadow(slug: str, gateway: str) -> sqlite3.Connection:
@@ -650,6 +656,8 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
             if mode == "primary":
                 heal_clobbered_completions(live)
         result.push = push(live, hub, slug, gateway, primary=mode == "primary")
+        from hermes_cli.kanban_sync_rejections import resolve_rejections
+        result.rejection_resolutions = resolve_rejections(live, hub, slug)
         return result
     finally:
         live.close()

@@ -152,6 +152,15 @@ class FakeHub:
         more = len([c for c in b["changes"] if c["seq"] > since]) > len(page)
         return {"changes": copy.deepcopy(page), "next": page[-1]["seq"] if page else since, "head": b["seq"], "more": more}
 
+    def row_evidence(self, board: str, table: str, uid: str) -> dict:
+        self._check()
+        b = self.svc.board(board)
+        row = copy.deepcopy(b["rows"].get(table, {}).get(uid))
+        state = ("deleted" if row.get("deleted_at") is not None else "live") if row else (
+            "unknown" if b["floor"] else "never_existed")
+        return {"table": table, "uid": uid, "state": state, "row": row,
+                "tombstone": None, "floor": b["floor"], "head": b["seq"]}
+
     def snapshot_page(self, board: str, table: str, after: str = "", limit: int = 1000) -> dict:
         self._check()
         b = self.svc.board(board)
