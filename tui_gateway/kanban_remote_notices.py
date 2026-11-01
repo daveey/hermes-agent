@@ -904,6 +904,39 @@ def _persist_claimed(session_db, profile: str, sid: str, text: str, metadata: di
     return True
 
 
+def _settle_unread(ledger, *, session: str, ref: str, state: str, now: float, notice_key: str, swept_key: tuple,
+                   reason: str) -> bool:
+    """Record a notice no chat will read (its target is a worker transcript) as SETTLED, with a ``swept`` row of
+    ``reason``: no transcript row, no wake, and no later pass offers it again. An existing claim in flight or a
+    DELIVERED row is left as it is. Returns whether this call settled it. Never raises. [daveey]
+
+    Hub card t_a989e5e0 (2026-10-31): its done notice was written into five MacBook worker transcripts that held
+    shepherd subs, and the wake of each was refused (``session.resume`` 4132)."""
+    try:
+        with contextlib.closing(_ledger(ledger)) as conn:
+            with conn:
+                before = conn.total_changes
+                conn.execute(
+                    "INSERT OR IGNORE INTO notices (session, ref, state, at, delivered, notice_key, legacy_seen, "
+                    "settled) VALUES (?,?,?,?,?,?,1,?)", (session, ref, state, now, SETTLED, notice_key, reason))
+                if conn.total_changes == before:
+                    conn.execute(
+                        "UPDATE notices SET delivered=?, settled=?, notice_key=IFNULL(notice_key, ?) "
+                        "WHERE session=? AND ref=? AND state=? AND delivered=0 AND holder_pid IS NULL",
+                        (SETTLED, reason, notice_key, session, ref, state))
+                changed = conn.total_changes != before
+                if changed:
+                    _swept_row(conn, swept_key, reason)
+        if changed:
+            logger.info("remote kanban notice %s %s not delivered to %s: %s", ref, state, session, reason)
+        else:
+            _remember_delivered(tuple(swept_key))
+        return changed
+    except Exception:
+        logger.debug("remote kanban: settling an unread notice failed", exc_info=True)
+        return False
+
+
 def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session_db, ledger, settled,
                   delivered: list, swept: list, waker=None, observed_at=None, now=None) -> None:
     """Deliver one fresh notice unless the memo or the ledger already settled it. A failed write is not remembered.
@@ -931,8 +964,12 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
         with session_db(profile, sid) as (db, tip):
             if db is None or not text:
                 return
-            from tui_gateway.notice_fanout import chat_skip_reason
+            from tui_gateway.notice_fanout import chat_skip_reason, worker_transcript_reason
             if chat_skip_reason(db, sid) is not None:  # [daveey] archived chat or a copy moved to another gateway
+                return
+            if (why := worker_transcript_reason(db, sid)) is not None:
+                _settle_unread(ledger, session=sid, ref=ref, state=state, now=now or time.time(),
+                               notice_key=event_key, swept_key=memo_key, reason=why)
                 return
             if settled((sid, tip), ref, state):
                 _remember_delivered(memo_key)

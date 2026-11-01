@@ -59,6 +59,27 @@ def chat_skip_reason(db: Any, chat_id: str) -> Optional[str]:
     return None
 
 
+WORKER_TRANSCRIPT = "worker_transcript"
+
+
+def worker_transcript_reason(db: Any, chat_id: str) -> Optional[str]:
+    """``"worker_transcript"`` when ``chat_id`` is a headless run, not a chat: a ``local-<sha256>`` receipt id
+    (Kanban worker, cron, one-shot) or a session this store tags ``kanban`` (older worker ids look like chats).
+    A notice there is never read and its wake is always refused (``session.resume`` code 4132). [daveey]
+
+    Hub card t_a989e5e0 (2026-10-31): five MacBook worker transcripts of another card held shepherd subs on it, so
+    its done notice was written into all five and each wake was refused. Never raises (unknown = a chat)."""
+    from hermes_cli.kanban_db_notify import is_headless_session
+    if is_headless_session(chat_id):
+        return WORKER_TRANSCRIPT
+    probe = getattr(db, "is_kanban_owned_session", None)
+    try:
+        return WORKER_TRANSCRIPT if probe is not None and probe(chat_id) is True else None
+    except sqlite3.Error:
+        logger.debug("worker-transcript probe failed for %s", chat_id, exc_info=True)
+        return None
+
+
 def link_released(link: Any) -> bool:
     """A replica ``sessions[]`` link (or ``task_chat_links`` row) the owner released: no notices go there."""
     return isinstance(link, dict) and str(link.get("released") or "0").lower() not in ("0", "false", "")

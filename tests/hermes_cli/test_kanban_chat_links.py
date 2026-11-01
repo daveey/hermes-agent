@@ -65,6 +65,28 @@ def test_reconcile_writes_created_and_shepherd_links_once_and_through_capture(li
     assert (mine, "s_watcher", "shepherd", 1) in _links(live)
 
 
+WORKER = "local-" + "7c" * 32  # a Kanban worker / cron receipt session: never a chat
+
+
+def test_a_worker_transcript_gets_no_shepherd_link_and_an_old_one_is_retired(live, monkeypatch):
+    """Hub card t_a989e5e0: worker transcripts held shepherd subs/links, so its notice and wake went to sessions that
+    refuse them (4132). A worker's shepherd link is never written and an existing one is deleted; a worker's
+    ``created`` link (which run made the card) stays."""
+    monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: [_ledger_row("t_remote", WORKER)])
+    mine = kb.create_task(live, title="mine", assignee="worker", session_id=WORKER)
+    with kbc.write_txn(live):
+        live.execute("INSERT INTO kanban_notify_subs (task_id, platform, chat_id, created_at) VALUES (?, 'tui', ?, 1)",
+                     (mine, WORKER))  # an older process wrote it before add_notify_sub refused workers
+        live.execute("INSERT INTO kanban_notify_subs (task_id, platform, chat_id, created_at) VALUES (?, 'tui', 's_chat', 1)",
+                     (mine,))
+        live.execute("INSERT INTO task_chat_links (uid, task_id, chat_gateway, chat_profile, chat_session, kind, released, "
+                     "created_at) VALUES (?, 't_old', ?, NULL, ?, 'shepherd', 0, 1)",
+                     (links.link_uid("t_old", ME, None, WORKER, "shepherd"), ME, WORKER))
+    out = links.reconcile(live, "default", ME)
+    assert out["retired"] == 1
+    assert _links(live) == {(mine, WORKER, "created", 0), (mine, "s_chat", "shepherd", 0)}
+
+
 def test_reconcile_carries_this_gateways_ledger_links_and_their_release(live, monkeypatch):
     rows = [_ledger_row("t_remote1", "s_chat"), _ledger_row("t_remote2", "s_chat", via="origin"),
             _ledger_row("t_other_board", "s_chat", board="runners")]

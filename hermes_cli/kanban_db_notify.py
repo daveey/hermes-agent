@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from hermes_cli import kanban_lockguard as _kanban_lockguard
 import json
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -38,6 +39,18 @@ _SCALAR_TYPES = (str, int, float, bool)
 # Subscription primary key predicate; every per-row statement below binds
 # ``(task_id, platform, chat_id, thread_id or "")`` against it.
 _SUB_KEY_WHERE = "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?"
+
+
+# A ``local-<sha256>`` session id is a headless LOCAL creation receipt (``hermes_state_keys.local_identity``): a
+# Kanban worker run, cron job or one-shot, never an interactive chat. Its notices are never read and a wake is
+# refused (``session.resume`` 4132 for workers), so it is never a notify destination. [daveey]
+_HEADLESS_SESSION = re.compile(r"local-[0-9a-f]{64}")
+_HEADLESS_GLOB = "local-" + "[0-9a-f]" * 64
+
+
+def is_headless_session(chat_id: Any) -> bool:
+    """True for a headless receipt session id, bare (``tui``) or ``<gw>/<profile>/<session>`` (``hub``)."""
+    return bool(_HEADLESS_SESSION.fullmatch(str(chat_id or "").rsplit("/", 1)[-1]))
 
 
 def _sub_key(task_id: str, platform: str, chat_id: str, thread_id: Optional[str]) -> tuple:
@@ -100,7 +113,7 @@ def add_notify_sub(
     ``MAX(task_events.id)``) so the notifier never replays history at boot.
     """
     from hermes_cli.kanban_placement import is_placeholder_session
-    if platform in ("hub", "tui") and is_placeholder_session(chat_id):
+    if platform in ("hub", "tui") and (is_placeholder_session(chat_id) or is_headless_session(chat_id)):
         return
     valid_mode = delivery_mode if delivery_mode in _NOTIFY_DELIVERY_MODES else None
     # api_server is stateless: the adapter has no send(), the wake self-post IS
@@ -814,8 +827,12 @@ def _owning_sub_clause() -> str:
     observers = ", ".join(f"'{r}'" for r in OBSERVER_SUB_REASONS)
     reason = ("CASE WHEN json_valid(s.delivery_metadata) "
               "THEN json_extract(s.delivery_metadata, '$.reason') END")
-    return (f"COALESCE({reason} IN ({observers}), 0) = 0 AND ({reason} IS NOT NULL OR s.platform != 'hub' "
-            f"OR s.created_at <= COALESCE(p.created_at, 0) + {LEGACY_ORIGIN_BIND_WINDOW_S})")
+    # A headless receipt session (worker/cron transcript) is never a destination, whatever its reason: a row
+    # written before ``add_notify_sub`` refused them must not spread to children (``is_headless_session``).
+    headless = (f"(s.platform IN ('hub', 'tui') AND (s.chat_id GLOB '{_HEADLESS_GLOB}' "
+                f"OR s.chat_id GLOB '*/{_HEADLESS_GLOB}'))")
+    return (f"COALESCE({reason} IN ({observers}), 0) = 0 AND NOT {headless} AND ({reason} IS NOT NULL "
+            f"OR s.platform != 'hub' OR s.created_at <= COALESCE(p.created_at, 0) + {LEGACY_ORIGIN_BIND_WINDOW_S})")
 
 
 # Late-bound origin namespace (see module docstring); imported LAST so this

@@ -34,6 +34,13 @@ def link_uid(task_id: str, gateway: str, profile: Optional[str], session: str, k
     return f"{task_id}:{gateway}:{profile or '-'}:{session}:{kind}"
 
 
+def _worker_shepherd(session: Any, kind: str) -> bool:
+    """A shepherd link on a headless receipt session (Kanban worker / cron transcript): never a chat. [daveey]
+    A ``created`` link from a worker stays: it records which run made the card, it wakes nothing."""
+    from hermes_cli.kanban_db_notify import is_headless_session
+    return kind == "shepherd" and is_headless_session(session)
+
+
 def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, Any]]:
     """Links from this board file's own data: creating chats and ``tui`` shepherd subscriptions."""
     from hermes_cli.kanban_session_activity import _counted_sub_clause
@@ -42,7 +49,7 @@ def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, 
 
     def add(task_id: str, session: str, kind: str, created_at: Any) -> None:
         from hermes_cli.kanban_placement import is_placeholder_session
-        if is_placeholder_session(session):
+        if is_placeholder_session(session) or _worker_shepherd(session, kind):
             return
         uid = link_uid(task_id, gateway, None, session, kind)
         out[uid] = {"uid": uid, "task_id": task_id, "chat_gateway": gateway, "chat_profile": None,
@@ -71,9 +78,9 @@ def _ledger_links(board: str, gateway: str) -> dict[str, dict[str, Any]]:
         if card.get("board") != board or card.get("origin_gateway") not in (None, gateway) or not card.get("session"):
             continue
         from hermes_cli.kanban_placement import is_placeholder_session
-        if is_placeholder_session(card["session"]):
-            continue
         kind = "created" if card.get("via") == "origin" else "shepherd"
+        if is_placeholder_session(card["session"]) or _worker_shepherd(card["session"], kind):
+            continue
         profile = card.get("origin_profile")
         uid = link_uid(card["id"], gateway, profile, card["session"], kind)
         out[uid] = {"uid": uid, "task_id": card["id"], "chat_gateway": gateway, "chat_profile": profile,
@@ -96,12 +103,13 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
     if ledger:
         want.update(_ledger_links(board, gateway))
     from hermes_cli.kanban_placement import is_placeholder_session
-    rows = conn.execute("SELECT uid, released, chat_session FROM task_chat_links WHERE chat_gateway = ?",
+    rows = conn.execute("SELECT uid, released, chat_session, kind FROM task_chat_links WHERE chat_gateway = ?",
                         (gateway,)).fetchall()
     have = {r[0]: r[1] for r in rows}
     # A placement attribution id is not a chat: its link is deleted (captured, so the Board drops it too), never
-    # merely released; a released one still counted in every diff and replica read.
-    placeholders = {r[0] for r in rows if is_placeholder_session(r[2])}
+    # merely released; a released one still counted in every diff and replica read. A worker transcript's
+    # shepherd link is no chat either (its wakes are refused). [daveey]
+    placeholders = {r[0] for r in rows if is_placeholder_session(r[2]) or _worker_shepherd(r[2], r[3])}
     added = changed = released = retired = 0
     with write_txn(conn):
         for uid in placeholders - set(want):

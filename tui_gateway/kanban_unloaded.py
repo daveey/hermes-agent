@@ -379,9 +379,15 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
                     logger.info("Dropped notify sub for archived %s/%s: no store holds chat %s",
                                 slug, ident["task_id"], ident["chat_id"])
             return None
-        from tui_gateway.notice_fanout import chat_skip_reason
+        from tui_gateway.notice_fanout import chat_skip_reason, worker_transcript_reason
         skip = chat_skip_reason(db, sub["chat_id"])  # [daveey] archived / moved copy: the notice goes nowhere
+        # [daveey] A worker transcript never reads a notice and refuses the wake (4132): no row, and its sub goes.
+        worker = skip is None and worker_transcript_reason(db, sub["chat_id"]) is not None
+        skip = "worker_transcript" if worker else skip
         old, new, claimed = _kbn.claim_unseen_events_for_sub(conn, kinds=kinds, durable=skip is None, **ident)
+        if worker:
+            with contextlib.suppress(Exception):
+                _kbn.remove_notify_sub(conn, **ident)
         if not claimed:
             return None  # a live poller or another sweeper got there first
     if skip is not None:

@@ -8,6 +8,7 @@ binding's ``origin``, legacy rows written in the creating call) plus the creator
 The DM-routing columns of what IS inherited stay covered by test_kanban_notify.py (issue #73030).
 """
 import argparse
+import json
 import time
 from pathlib import Path
 
@@ -83,6 +84,63 @@ def test_shepherd_observer_subs_not_inherited_by_child(kanban_home, path):
             kb.link_tasks(conn, parent, child)
         assert _sub_keys(conn, child) == OWNING
         assert _reasons(conn, child) == {"creator": "create", "macbook/default/origin": "origin"}
+    finally:
+        conn.close()
+
+
+WORKER = "local-" + "7c" * 32  # a headless receipt session: a Kanban worker (or cron) run, never a chat
+
+
+def _worker_rows(conn, parent):
+    """Subs on worker transcripts an older process wrote before ``add_notify_sub`` refused them. They carry OWNING
+    reasons (a worker-created card's ``create``, an origin bound to a worker), so provenance alone would copy them."""
+    with kb.write_txn(conn):
+        for platform, chat, reason in (("hub", f"macbook/default/{WORKER}", "origin"), ("tui", WORKER, "create")):
+            conn.execute(
+                "INSERT INTO kanban_notify_subs (task_id, platform, chat_id, thread_id, delivery_metadata, "
+                "created_at, last_event_id) VALUES (?, ?, ?, '', ?, ?, 0)",
+                (parent, platform, chat, json.dumps({"reason": reason}), int(time.time())))
+
+
+@pytest.mark.parametrize("path", ["link", "parents", "creator"])
+def test_worker_transcript_subs_never_reach_a_child(kanban_home, path):
+    """Hub card t_a989e5e0: linking it under t_ae24b36d (2026-10-27 14:15:47Z, ``link_tasks`` ->
+    ``_inherit_notify_subs``) copied five MacBook worker-transcript shepherd subs onto it; its done notice then
+    went into five transcripts whose wakes were refused (4132). No inheritance path copies a worker sub."""
+    conn = kbc.connect()
+    try:
+        parent = kb.create_task(conn, title="rollout", assignee="default", session_id="creator")
+        kbn.add_notify_sub(conn, task_id=parent, platform="tui", chat_id="creator",
+                           notifier_profile="default", delivery_metadata={"reason": "create"})
+        _worker_rows(conn, parent)
+        assert len(kbn.list_notify_subs(conn, parent)) == 3
+        if path == "link":
+            child = kb.create_task(conn, title="later", assignee="w")
+            kb.link_tasks(conn, parent, child)
+        elif path == "parents":
+            child = kb.create_task(conn, title="gated", assignee="w", parents=[parent])
+        else:
+            child = kb.create_task(conn, title="fan-out", assignee="w", creator_task_id=parent)
+        assert _sub_keys(conn, child) == [("tui", "creator")]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("platform, chat", [("hub", f"macbook/default/{WORKER}"), ("tui", WORKER)])
+def test_worker_transcript_is_never_subscribed(kanban_home, platform, chat):
+    """hermes-hub's ``shepherd`` action runs ``notify-subscribe --platform hub`` for whatever session the requester
+    names; MacBook workers' cross_task reads made 69 such requests for their own transcripts (hub req_ledger,
+    2026-10-29..30). A worker transcript is refused; a chat (control) is subscribed."""
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="card", assignee="default")
+    finally:
+        conn.close()
+    _subscribe_cli(tid, platform, chat)
+    _subscribe_cli(tid, platform, chat.replace(WORKER, "20261026_110445_20914b"))
+    conn = kbc.connect()
+    try:
+        assert [c for _p, c in _sub_keys(conn, tid)] == [chat.replace(WORKER, "20261026_110445_20914b")]
     finally:
         conn.close()
 
