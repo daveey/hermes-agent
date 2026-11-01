@@ -3,7 +3,7 @@
 Neither a promotion nor comment prose is permission to retry an implementation.
 Only an authenticated park can capture the PRs and dependency edges being awaited.
 A completed review then authorizes one continuation of those same PRs: a repair
-when it records ``changes_required`` with ``reviewed_sha``, or a landing
+when it records ``changes_required`` with ``reviewed_sha``/``head``, or a landing
 continuation when it records an exact-head approval. The next claim consumes it.
 A later comment that repeats a captured PR does not re-arm the hold; a new PR,
 a review naming a different PR, or a crash/reclaim does.
@@ -25,7 +25,7 @@ def checkpoint(conn, task_id, expected_run_id):
     if expected_run_id is None:
         return None
     row = conn.execute(
-        "SELECT r.id FROM tasks t JOIN task_runs r ON r.id = t.current_run_id "
+        "SELECT r.* FROM tasks t JOIN task_runs r ON r.id = t.current_run_id "
         "WHERE t.id = ? AND t.status = 'running' AND r.id = ? "
         "AND r.task_id = t.id AND r.profile = t.assignee AND r.ended_at IS NULL",
         (task_id, expected_run_id),
@@ -40,8 +40,13 @@ def checkpoint(conn, task_id, expected_run_id):
         return None
     awaited = [p for p, status in kb.parent_states(conn, task_id)
                if status not in {"done", "archived"}]
-    return {"run_id": expected_run_id, "parents": sorted(parents),
-            "awaited": sorted(awaited), "prs": sorted(urls)}
+    evidence = {"run_id": expected_run_id, "parents": sorted(parents),
+                "awaited": sorted(awaited), "prs": sorted(urls)}
+    # Integer run IDs are database-local; sync remaps the event FK but deliberately
+    # leaves its JSON payload unchanged. Carry the run's stable identity as well.
+    if "uid" in row.keys() and row["uid"]:
+        evidence["run_uid"] = row["uid"]
+    return evidence
 
 
 def apply_block_update(conn, task_id, expected_run_id, kind, new_status, set_sql, params, payload):
@@ -145,8 +150,7 @@ def _reviewed_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) 
     if row is None:
         return set()
     data = kb._json_dict(row["metadata"])
-    sha = data.get("reviewed_sha")
-    if not isinstance(sha, str) or not _SHA.fullmatch(sha) or not _requests_changes(row, data):
+    if not _exact_head(data) or not _requests_changes(row, data):
         return set()
     named = _named_prs(data, captured)
     if named is not None:
@@ -211,12 +215,24 @@ def _awaited_parents(conn, parents, evidence, parked_at):
     return [p for p in parents if p in awaited or not _historical_parent(conn, p, parked_at)]
 
 
+def _checkpoint_matches_run(evidence, run):
+    if not isinstance(evidence, dict):
+        return False
+    if "run_uid" in evidence:
+        uid = evidence["run_uid"]
+        # A present but invalid/mismatched UID must never fall back to an integer
+        # that happens to collide on this gateway.
+        return isinstance(uid, str) and bool(uid) and "uid" in run.keys() and uid == run["uid"]
+    # Legacy/local-only boards have no UID. Do not infer a remapped legacy ID.
+    return type(evidence.get("run_id")) is int and evidence["run_id"] == run["id"]
+
+
 def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     """One continuation only: claiming any new run consumes the park's permission."""
     from hermes_cli import kanban_db as kb
 
     row = conn.execute(
-        "SELECT e.payload, e.created_at, r.id, r.profile, r.outcome, t.assignee "
+        "SELECT e.payload, e.created_at, r.*, t.assignee "
         "FROM task_events e JOIN task_runs r ON r.id = e.run_id "
         "JOIN tasks t ON t.id = e.task_id "
         "WHERE e.task_id = ? AND e.kind = 'dependency_wait' AND r.task_id = t.id "
@@ -227,7 +243,7 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
         return False
     payload = kb._json_dict(row["payload"])
     evidence = payload.get("review_checkpoint")
-    if not isinstance(evidence, dict) or evidence.get("run_id") != row["id"]:
+    if not isinstance(evidence, dict) or not _checkpoint_matches_run(evidence, row):
         return False
     parents = kb.parent_ids(conn, task_id)
     if (not parents or sorted(parents) != evidence.get("parents")
