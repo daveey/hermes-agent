@@ -29,17 +29,29 @@ SESSION_PROJECTION_SQL = "\n".join(
 )
 
 
-def session_projection_revision(conn):
-    """Return a revision only when all current triggers are installed.
+# Installation and replacement of the triggers seed a fresh generation in the
+# same write transaction, so stores upgraded without later session writes never
+# share a value. Settled opens skip installation and therefore write nothing.
+SEED_SESSION_PROJECTION_SQL = _CHANGE_SQL
 
-    An absent counter means zero on first installation, not missing capability.
-    The caller holds a read transaction across capability and counter probes.
-    """
+
+def session_projection_installed(conn) -> bool:
+    """True when all three projection triggers exist with the current bodies."""
     names = tuple(SESSION_PROJECTION_TRIGGERS)
     rows = conn.execute(
         "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND name IN (?, ?, ?)", names,
     ).fetchall()
-    if dict(rows) != SESSION_PROJECTION_TRIGGERS:
+    return dict(rows) == SESSION_PROJECTION_TRIGGERS
+
+
+def session_projection_revision(conn):
+    """Return the generation only when all current triggers and a generation exist.
+
+    A missing generation is unavailable capability (None), never a shared zero:
+    two stores without one cannot be told apart. The caller holds a read
+    transaction across capability and generation probes.
+    """
+    if not session_projection_installed(conn):
         return None
     row = conn.execute("SELECT value FROM state_meta WHERE key='sessions_change_seq'").fetchone()
-    return row[0] if row else 0
+    return row[0] if row else None

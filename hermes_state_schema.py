@@ -337,6 +337,36 @@ class SessionSchemaMixin:
             raise sqlite3.OperationalError("incomplete DDL statement")
 
     @staticmethod
+    def _ensure_session_projection(cursor: sqlite3.Cursor) -> None:
+        """Install/replace the session projection triggers and seed a fresh random generation
+        in ONE write transaction; a settled store is detected by a read probe and not written.
+
+        Seeding only here (never per open or on a timer) keeps settled opens lock-free while
+        guaranteeing every installed store carries a generation unique to it, so an in-place
+        restore of another upgraded store is visible even before any session write. The probe
+        is repeated under BEGIN IMMEDIATE so a sibling that installed first is not reseeded.
+        """
+        from hermes_state_projection import (
+            SEED_SESSION_PROJECTION_SQL, SESSION_PROJECTION_SQL, session_projection_installed,
+        )
+
+        if session_projection_installed(cursor):
+            return
+        owns = not cursor.connection.in_transaction
+        if owns:
+            cursor.execute("BEGIN IMMEDIATE")
+        try:
+            if not session_projection_installed(cursor):
+                SessionSchemaMixin._execute_ddl_skipping_settled_triggers(cursor, SESSION_PROJECTION_SQL)
+                cursor.execute(SEED_SESSION_PROJECTION_SQL)
+        except BaseException:
+            if owns:
+                cursor.execute("ROLLBACK")
+            raise
+        if owns:
+            cursor.execute("COMMIT")
+
+    @staticmethod
     def _execute_ddl_script_transactional(cursor: sqlite3.Cursor, ddl: str) -> None:
         """Execute a DDL script without ``executescript``'s implicit commit."""
         statement = ""
@@ -980,8 +1010,7 @@ class SessionSchemaMixin:
         except sqlite3.OperationalError as exc:
             logger.debug("idx_messages_platform_msg_id create skipped: %s", exc)
         self._execute_ddl_skipping_settled_triggers(cursor, DEFERRED_INDEX_SQL)  # same ordering constraint (``active``)
-        from hermes_state_projection import SESSION_PROJECTION_SQL
-        self._execute_ddl_skipping_settled_triggers(cursor, SESSION_PROJECTION_SQL)
+        self._ensure_session_projection(cursor)
 
         # Heal NULL ``active`` rows on every startup: older reconciler builds added ``active``
         # without NOT NULL DEFAULT 1, so ``WHERE active = 1`` loaders hid whole histories. A

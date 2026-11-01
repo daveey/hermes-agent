@@ -107,17 +107,18 @@ def test_heartbeat_and_equal_updates_do_not_write_counter(store):
         assert writer.execute("SELECT value FROM state_meta WHERE key='sessions_change_seq'").fetchone() == before
 
 
-def test_first_install_zero_and_settled_open_are_read_only(tmp_path, monkeypatch):
+def test_first_install_seeds_generation_and_settled_open_is_read_only(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "kanban"))
     path = tmp_path / "state.db"
     db = SessionDB(path)
     db.close()
     with sqlite3.connect(path) as observer:
-        assert observer.execute("SELECT value FROM state_meta WHERE key='sessions_change_seq'").fetchone() is None
+        seeded = observer.execute("SELECT value FROM state_meta WHERE key='sessions_change_seq'").fetchone()
+        assert seeded is not None and len(seeded[0]) == 32
         schema_before = observer.execute("PRAGMA schema_version").fetchone()
         before = server._session_db_content_sig(path)
         assert before[0] == "revision"
-        assert before[-1] == 0
+        assert before[-1] == seeded[0]
         reopened = SessionDB(path)
         reopened.close()
         assert observer.execute("PRAGMA schema_version").fetchone() == schema_before
@@ -193,11 +194,68 @@ def test_upgrade_populated_store_without_counter(store):
     upgraded.close()
     before = server._session_db_content_sig(path)
     assert before[0] == "revision"
-    assert before[-1] == 0
+    assert before[-1] not in (None, 0)
     with sqlite3.connect(path) as writer:
         assert writer.execute("SELECT id FROM sessions").fetchall() == [('s',)]
         writer.execute("UPDATE sessions SET title='upgraded'")
     assert server._session_db_content_sig(path) != before
+
+
+def _pre_trigger_store(path, session_id):
+    from contextlib import closing
+
+    from hermes_state_projection import SESSION_PROJECTION_TRIGGERS
+
+    db = SessionDB(path)
+    db.create_session(session_id, source="cli")
+    db.close()
+    # Model a populated store written by a release predating the projection triggers.
+    with closing(sqlite3.connect(path)) as writer:
+        for name in SESSION_PROJECTION_TRIGGERS:
+            writer.execute(f"DROP TRIGGER {name}")
+        writer.execute("DELETE FROM state_meta WHERE key='sessions_change_seq'")
+        writer.commit()
+        writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+
+def test_divergent_upgraded_stores_restore_in_place_invalidates(tmp_path, monkeypatch):
+    from contextlib import closing
+
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "kanban"))
+    server._sessions_db_sig_cache.clear()
+    server._sessions_digest_at.clear()
+    live, backup = tmp_path / "state.db", tmp_path / "backup.db"
+    _pre_trigger_store(live, "live-only")
+    _pre_trigger_store(backup, "backup-only")
+    # Upgrade both; no session writes follow, so only installation can give them a generation.
+    SessionDB(live).close()
+    SessionDB(backup).close()
+    before = server._session_db_content_sig(live)
+    assert before[0] == "revision"
+    inode = live.stat().st_ino
+    with closing(sqlite3.connect(backup)) as source, closing(sqlite3.connect(live)) as target:
+        source.backup(target)
+    assert live.stat().st_ino == inode
+    after = server._session_db_content_sig(live)
+    assert after != before
+    assert after[0] == "revision"
+    # A settled reopen of the restored store commits nothing.
+    with closing(sqlite3.connect(live)) as observer:
+        data_version = observer.execute("PRAGMA data_version").fetchone()
+        generation = observer.execute("SELECT value FROM state_meta WHERE key='sessions_change_seq'").fetchone()
+        SessionDB(live).close()
+        assert observer.execute("PRAGMA data_version").fetchone() == data_version
+        assert observer.execute(
+            "SELECT value FROM state_meta WHERE key='sessions_change_seq'").fetchone() == generation
+    assert server._session_db_content_sig(live) == after
+
+
+def test_installed_triggers_without_generation_fall_back_to_content(store):
+    path, _db = store
+    with sqlite3.connect(path) as writer:
+        writer.execute("DELETE FROM state_meta WHERE key='sessions_change_seq'")
+    fallback = server._session_db_content_sig(path)
+    assert fallback[0] == server._SESSION_SIGNATURE_FIELDS
 
 
 def test_missing_trigger_falls_back_to_content(store):
