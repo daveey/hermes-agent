@@ -253,9 +253,14 @@ class DiscordStandin(StandinServer):
             self.record(name, {**params, "_error": repr(exc)}, body, faulted=True)
             return _json(body, status=500)
         self.record(name, params, result, faulted=status >= 400)
+        # An immediately replenished bucket keeps this stand-in unthrottled while
+        # giving discord.py an expiry. Without it, cancelling a progress request
+        # during bucket release leaves the next request in its 30s fallback wait.
+        headers = {"X-RateLimit-Limit": "1", "X-RateLimit-Remaining": "0",
+                   "X-RateLimit-Reset-After": "0"}
         if status == 204:
-            return web.Response(status=204)
-        return _json(result, status=status)
+            return web.Response(status=204, headers=headers)
+        return _json(result, status=status, headers=headers)
 
     # REST handlers: each returns (status, json) -------------------------------------------------
     def _r_get_me(self, _p: dict[str, Any]) -> tuple[int, Any]:
