@@ -176,3 +176,33 @@ def test_pending_connection_task_is_strongly_referenced(tmp_path):
         assert server._diagnostics.in_flight == 0
 
     asyncio.run(run())
+
+
+@pytest.mark.platforms("posix")
+def test_verb_metadata_recursion_error_still_replies(tmp_path, monkeypatch, caplog):
+    # Python 3.12's json raises RecursionError on deeply nested input (3.14 raises a decode
+    # error), so inject it into the metadata parser only; the real handler parses normally.
+    from gateway import control_diagnostics
+
+    def nested_too_deep(raw):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(control_diagnostics, "json", types.SimpleNamespace(loads=nested_too_deep))
+
+    def status():
+        threading.Event().wait(0.6)  # health: allow HX013 -- slow handler forces the latency record
+        return {"alive": True}
+
+    async def run():
+        server = GatewayControlServer(tmp_path, verb_handlers={"status": status})
+        assert await server.start()
+        try:
+            return await _exchange(server)
+        finally:
+            await server.stop()
+
+    with caplog.at_level(logging.WARNING):
+        reply = asyncio.run(run())
+    assert reply["ok"] and reply["result"] == {"alive": True}
+    records = [r for r in caplog.records if "Control request latency" in r.getMessage()]
+    assert [r.verb for r in records] == ["unknown"]

@@ -17,7 +17,7 @@ def safe_verb(raw, allowed):
         request = json.loads(raw)
         verb = request.get("verb") if isinstance(request, dict) else None
         return verb if isinstance(verb, str) and verb in allowed else "unknown"
-    except (ValueError, UnicodeError):
+    except (ValueError, UnicodeError, RecursionError):
         return "unknown"
 
 
