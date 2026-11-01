@@ -123,7 +123,7 @@ DEFAULT_WORKFLOW = Workflow(
         Column("done", "Done", "✓"),
     ),
     manual=_frozen_manual({
-        "triage": ("todo", "ready"),
+        "triage": ("todo", "scheduled", "ready", "blocked"),
         "todo": ("triage", "scheduled", "ready"),
         "scheduled": ("triage", "todo", "ready", "done"),  # done: force-complete a parked card
         "ready": ("triage", "todo", "scheduled", "blocked", "review", "done"),
