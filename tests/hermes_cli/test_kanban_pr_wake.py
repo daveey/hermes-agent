@@ -116,7 +116,7 @@ def test_closed_pr_wakes_real_board_but_does_not_complete(probe, tmp_path, monke
         command = (f"PYTHONPATH={shlex.quote(str(Path(kb.__file__).resolve().parents[1]))} "
                    f"PATH={shlex.quote(str(tmp_path) + ':' + os.environ['PATH'])} "
                    f"{shlex.quote(sys.executable)} -m hermes_cli.kanban_pr_wake {URL}{extra}")
-        monkeypatch.setattr(wakes, "_profile_home", lambda task: str(tmp_path / "home"))
+        monkeypatch.setattr(wakes, "_profile_home", lambda assignee, task_id=None: str(tmp_path / "home"))
         assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", wake_check=command, check_every=120)
         wakes.run_due_wake_checks(conn, now=int(time.time()), wait=True)
         assert kb.get_task(conn, tid).status == "ready", wakes.get_state(conn, tid)["last_out"]
