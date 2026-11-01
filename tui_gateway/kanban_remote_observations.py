@@ -54,6 +54,7 @@ def _snapshot(replica: Path, previous=None) -> tuple[bool, list[tuple] | None, t
 # so decoding every row per change kept the notice pollers busy while Desktop sat idle. A row
 # is re-read only when its seq moved; the summary keeps just the fields _persist reads.
 _decoded: dict[tuple, tuple] = {}
+_decoded_files: dict[str, tuple | None] = {}  # replica -> file identity its _decoded rows came from
 
 
 def _summary(task) -> dict | None:
@@ -146,25 +147,53 @@ def _file_id(path: Path) -> tuple | None:
 def observe(replica: Path, ledger, now: float) -> dict[tuple, float | None]:
     """Only changed replica snapshots decode cards and touch the observation ledger.
 
+    An unchanged replica change key (the observer's data_version) skips the replica read entirely; a key is kept
+    only when it brackets the read. A commit racing the read keeps the decoded rows of the same db file (their
+    seqs still gate every re-decode); only a replaced file or an unknown key forgets them.
     Cache timestamps, not freshness verdicts: a quiet replica must still age out.
     Ledger replacement invalidates the cache; acknowledgements need not invalidate it.
     """
     from tui_gateway.kanban_remote_notices import ledger_path
+    from tui_gateway.kanban_replica_observer import file_identity, fingerprint
 
     ledger = Path(ledger) if ledger is not None else ledger_path()
     key = (str(replica.resolve()), str(ledger.resolve()))
+    tag = str(replica)
     with _lock:
-        cached = _memo.get(key)
-        if cached is not None and cached[2] != _file_id(ledger):
+        stamp = fingerprint(replica)
+        ident = file_identity(stamp)
+        cached = _memo.get(key)  # (signature, fresh, ledger id, key or None, replica file identity)
+        if cached is not None and (cached[2] != _file_id(ledger) or cached[4] != ident):
+            _memo.pop(key)  # a replaced ledger, or a replaced/recreated/unreadable replica
             cached = None
+        if cached is not None and stamp is not None and cached[3] == stamp:
+            return cached[1]
+        if ident is None or _decoded_files.pop(tag, None) != ident:
+            _forget_decoded(tag)  # another db file may reuse a key at an equal seq with other contents
         ready, cards, signature = _snapshot(replica, cached[0] if cached else None)
+        after = fingerprint(replica)
+        if stamp is None or after != stamp:
+            stamp = None  # a commit raced the read: keep nothing that would skip the next poll
+            ident = ident if file_identity(after) == ident else None
+        _decoded_files[tag] = ident
+        while len(_decoded_files) > 16:
+            _forget_decoded(next(iter(_decoded_files)))
         if not ready:
             return {}
         if cards is None and cached is not None:
-            return cached[1]
-        fresh = _persist(key[0], cards or [], ledger, now)
-        _memo[key] = (signature, fresh, _file_id(ledger))
+            fresh = cached[1]
+        else:
+            fresh = _persist(key[0], cards or [], ledger, now)
+        if ident is not None:
+            _memo[key] = (signature, fresh, _file_id(ledger), stamp, ident)
+        else:
+            _memo.pop(key, None)
         while len(_memo) > 16:
             _memo.pop(next(iter(_memo)))
         return fresh
 
+
+def _forget_decoded(tag: str) -> None:
+    _decoded_files.pop(tag, None)
+    for ident in [ident for ident in _decoded if ident[0] == tag]:
+        del _decoded[ident]

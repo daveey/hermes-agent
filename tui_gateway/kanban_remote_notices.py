@@ -47,7 +47,7 @@ LINK_RELS = ("shepherd",)
 _TERMINAL = ("done", "blocked")
 
 _lock = threading.Lock()
-_index_memo: Optional[tuple] = None  # (path, signature, me, index)
+_index_memo: Optional[tuple] = None  # (stamp, file identity, signature, me, index)
 
 
 def hub_db_path() -> Path:
@@ -116,17 +116,27 @@ def _canonical(rows: list[tuple]) -> list[tuple]:
 
 def _index(path: Path) -> tuple[str, dict]:
     """``(this gateway, {(profile, session): [card, ...]})`` for terminal cards owned by other gateways, cached on
-    the replica's task-row signature (one decode per change, shared by every chat's poll)."""
+    the replica observer's change key (an unchanged replica is not read) and, for the same db file, on its task-row
+    signature (one decode per change, shared by every chat's poll)."""
     global _index_memo
+    from tui_gateway.kanban_replica_observer import file_identity, fingerprint
+
+    stamp = fingerprint(path)
+    memo = _index_memo  # (stamp, file identity, sig, me, index), kept only from reads the key brackets
+    if stamp is not None and memo is not None and memo[0] == stamp:
+        return memo[3], memo[4]
+    _index_memo = None
     conn = _ro(path)
     try:
         row = conn.execute("SELECT v FROM meta WHERE k = 'gateway'").fetchone()
         me = str(row[0]) if row and row[0] else ""
         sig = conn.execute("SELECT COUNT(*), MAX(seq), TOTAL(seq) FROM replica WHERE coll = 'tasks'").fetchone()
-        memo = _index_memo
-        if memo is not None and memo[0] == str(path) and memo[1] == sig and memo[2] == me:
-            return me, memo[3]
+        if (memo is not None and stamp is not None and memo[1] == file_identity(stamp) and memo[2:4] == (sig, me)
+                and fingerprint(path) == stamp):
+            _index_memo = (stamp, *memo[1:])  # same file, no task row moved (a meta write or checkpoint)
+            return me, memo[4]
         rows = _canonical(_task_rows(conn))
+        stable = stamp is not None and fingerprint(path) == stamp
     finally:
         conn.close()
     index: dict[tuple[str, str], list[dict]] = {}
@@ -141,7 +151,8 @@ def _index(path: Path) -> tuple[str, dict]:
             continue
         for chat in _linked_chats(task, me):
             index.setdefault(chat, []).append({"gw": str(gw), "key": str(key), "task": task})
-    _index_memo = (str(path), sig, me, index)
+    if stable:
+        _index_memo = (stamp, file_identity(stamp), sig, me, index)
     return me, index
 
 
@@ -674,11 +685,14 @@ def _record_swept(keys: list[tuple], ledger: Optional[Path], *, reason: str) -> 
 
 def _reset_for_tests() -> None:
     """Forget this process's memos, as a restarted backend would (the ledger file stays)."""
-    from tui_gateway.kanban_remote_observations import _decoded, _memo
+    from tui_gateway.kanban_remote_observations import _decoded, _decoded_files, _memo
+    from tui_gateway.kanban_replica_observer import reset as reset_observers
 
     global _index_memo
+    reset_observers()
     _memo.clear()
     _decoded.clear()
+    _decoded_files.clear()
     _index_memo = None
     _delivered.clear()
     _swept_loaded.clear()
