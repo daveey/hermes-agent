@@ -29,12 +29,20 @@ def prewarm_annotation() -> bool:
         return False
 
 
+def _boot_prewarm() -> None:
+    """The annotation first (every session read waits on it), then the project tree, which reads that annotation."""
+    prewarm_annotation()
+    from hermes_cli.projects_tree_prewarm import prewarm_project_tree
+
+    prewarm_project_tree()
+
+
 def start_annotation_prewarm() -> Optional[threading.Thread]:
-    """Run ``prewarm_annotation`` on a daemon thread (not under the test harness)."""
+    """Run the annotation and project-tree prewarms on one daemon thread (not under the test harness)."""
     if os.environ.get("HERMES_TEST_ISOLATION"):
         return None
     from agent.memory_provider import spawn_context_thread
 
-    thread = spawn_context_thread(prewarm_annotation, name="kanban-annotation-prewarm")
+    thread = spawn_context_thread(_boot_prewarm, name="kanban-annotation-prewarm")
     thread.start()
     return thread

@@ -56,6 +56,9 @@ def test_start_runs_prewarm_on_a_daemon_thread(monkeypatch):
     monkeypatch.delenv("HERMES_TEST_ISOLATION", raising=False)
     ran = threading.Event()
     monkeypatch.setattr(prewarm, "prewarm_annotation", lambda: ran.set() or True)
+    from hermes_cli import projects_tree_prewarm
+
+    monkeypatch.setattr(projects_tree_prewarm, "prewarm_project_tree", lambda: True)
     thread = prewarm.start_annotation_prewarm()
     assert thread is not None and thread.daemon and thread.name == "kanban-annotation-prewarm"
     thread.join(5)
