@@ -5,6 +5,42 @@ import sqlite3
 import time
 from typing import Any, Optional
 
+def note_missing_parents(
+    conn: sqlite3.Connection, task_id: str, states: list[tuple[str, Optional[str]]],
+) -> bool:
+    """Track a missing-parent streak inside the home gateway's readiness transaction."""
+    from hermes_cli import kanban_db as kb
+
+    if not states:
+        return False
+    missing = [pid for pid, st in states if st is None]
+    last = conn.execute(
+        "SELECT kind, created_at FROM task_events WHERE task_id = ? AND kind IN ('parent_missing', 'parent_found') "
+        "ORDER BY id DESC LIMIT 1", (task_id,),
+    ).fetchone()
+    if not missing:
+        if last is not None and last["kind"] == "parent_missing":
+            kb._append_event(conn, task_id, "parent_found", None)
+        return False
+    if last is None or last["kind"] != "parent_missing":
+        kb._append_event(conn, task_id, "parent_missing", {"parents": missing})
+        return False
+    if int(kb.time.time()) - int(last["created_at"] or 0) < kb.PARENT_MISSING_BLOCK_SECONDS:
+        return False
+    reason = "; ".join(f"parent {pid} missing from this board" for pid in missing)
+    cur = conn.execute(
+        "UPDATE tasks SET status = 'blocked', block_kind = 'transient' WHERE id = ? AND status = 'todo'",
+        (task_id,),
+    )
+    if cur.rowcount != 1:
+        return False
+    kb._append_event(conn, task_id, "blocked", {
+        "reason": reason + f" (unlink it with `hermes kanban unlink <parent> {task_id}`, then unblock)",
+        "kind": "transient", "source": "parent_missing", "parents": missing,
+    })
+    return True
+
+
 def inherit_creator_origin(
     conn: sqlite3.Connection, task_id: str, creator_task_id: Optional[str], *,
     created_at: int,

@@ -2181,34 +2181,8 @@ def _note_missing_parents(
     """Inside :func:`recompute_ready`'s txn, for a ``todo`` child: record when a parent goes missing
     (``parent_missing`` event, once per streak), clear the streak when it comes back (``parent_found``), and block
     the child after :data:`PARENT_MISSING_BLOCK_SECONDS`. True when the child was blocked here."""
-    if not states:
-        return False
-    missing = [pid for pid, st in states if st is None]
-    last = conn.execute(
-        "SELECT kind, created_at FROM task_events WHERE task_id = ? AND kind IN ('parent_missing', 'parent_found') "
-        "ORDER BY id DESC LIMIT 1", (task_id,),
-    ).fetchone()
-    if not missing:
-        if last is not None and last["kind"] == "parent_missing":
-            _append_event(conn, task_id, "parent_found", None)
-        return False
-    if last is None or last["kind"] != "parent_missing":
-        _append_event(conn, task_id, "parent_missing", {"parents": missing})
-        return False
-    if int(time.time()) - int(last["created_at"] or 0) < PARENT_MISSING_BLOCK_SECONDS:
-        return False
-    reason = "; ".join(f"parent {pid} missing from this board" for pid in missing)
-    cur = conn.execute(
-        "UPDATE tasks SET status = 'blocked', block_kind = 'transient' WHERE id = ? AND status = 'todo'",
-        (task_id,),
-    )
-    if cur.rowcount != 1:
-        return False
-    _append_event(conn, task_id, "blocked", {
-        "reason": reason + f" (unlink it with `hermes kanban unlink <parent> {task_id}`, then unblock)",
-        "kind": "transient", "source": "parent_missing", "parents": missing,
-    })
-    return True
+    from hermes_cli.kanban_db_graph import note_missing_parents
+    return note_missing_parents(conn, task_id, states)
 
 
 def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:
