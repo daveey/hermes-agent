@@ -292,6 +292,82 @@ def _foreign_pr_comment_ids(conn: sqlite3.Connection, task_id: str) -> set[int]:
     return foreign
 
 
+def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int) -> bool:
+    """A claimed owner's orderly dependency park permits exactly one continuation.
+
+    Operator links/synthetic runs are not owner intent. Compare occurrence times,
+    not insertion order: synced history can append older events after promotion.
+    """
+    from hermes_cli import kanban_db as kb
+
+    run = conn.execute(
+        "SELECT r.* FROM task_runs r JOIN tasks t ON t.id = r.task_id "
+        "WHERE r.task_id = ? AND r.profile = t.assignee "
+        "AND r.id = (SELECT MAX(id) FROM task_runs WHERE task_id = t.id)",
+        (task_id,),
+    ).fetchone()
+    if run is None or run["outcome"] != "blocked" or run["ended_at"] is None:
+        return False
+    ended = kb._to_epoch(run["ended_at"])
+    events = list(conn.execute(
+        "SELECT id, kind, payload, run_id, created_at FROM task_events WHERE task_id = ? "
+        "AND kind IN ('dependency_wait', 'promoted', 'claimed', 'crashed', 'reclaimed', 'timed_out')",
+        (task_id,),
+    ))
+    timed: list[tuple[int, sqlite3.Row]] = []
+    for event in events:
+        at = kb._to_epoch(event["created_at"])
+        if at is None:
+            return False
+        timed.append((at, event))
+    parks = [(at, e) for at, e in timed
+             if e["kind"] == "dependency_wait" and e["run_id"] == run["id"]]
+    if not parks:
+        return False
+    parked_at, park = max(parks, key=lambda pair: (pair[0], pair[1]["id"]))
+    payload = kb._json_dict(park["payload"])
+    evidence = payload.get("review_checkpoint")
+    # The event's run_id identifies the run closed, not the writer: an operator
+    # can close that same run. Only the authenticated expected_run_id path stamps
+    # this checkpoint (for ordering dependencies as well as reviews).
+    if not isinstance(evidence, dict) or evidence.get("run_id") != run["id"]:
+        return False
+    if (parked_at <= since or ended is None or ended < since
+            or payload.get("kind") != "dependency" or payload.get("source_status") not in {"ready", "review"}):
+        return False
+    if not any(e["kind"] == "claimed" and e["run_id"] == run["id"] and at <= parked_at
+               for at, e in timed):
+        return False
+    if any(e["kind"] in {"crashed", "reclaimed", "timed_out"} and at >= parked_at
+           for at, e in timed):
+        return False
+    if not any(e["kind"] == "promoted" and at >= ended
+               and (at, e["id"]) > (parked_at, park["id"]) for at, e in timed):
+        return False
+    # A promotion alone is not proof: the dependency edges must still exist and
+    # be satisfied, rather than having been removed by an operator.
+    parents = kb.parent_ids(conn, task_id)
+    if (not parents or sorted(parents) != evidence.get("parents")
+            or kb.unsatisfied_parents(conn, task_id)):
+        return False
+    from hermes_cli.kanban_dependency_review import _awaited_parents, _SUMMARY_VERDICT
+    if not _awaited_parents(conn, parents, evidence, parked_at):
+        return False
+    # Review results, including incomplete/invalid verdicts, belong exclusively to
+    # resumes_review. An ordering handoff must not bypass its exact-head checks.
+    for parent in parents:
+        result = conn.execute(
+            "SELECT metadata, summary FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (parent,),
+        ).fetchone()
+        if result is None:
+            return False
+        metadata = kb._json_dict(result["metadata"])
+        if (any(key in metadata for key in ("verdict", "approved", "reviewed_sha"))
+                or _SUMMARY_VERDICT.search(result["summary"] or "")):
+            return False
+    return True
+
+
 def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Optional[str]:
     """Respawn-guard step 4: ``"active_pr"`` when a comment in the last 24 h names a PR, else None.
 
@@ -301,7 +377,13 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     an ``unblocked`` event: a worker that opened its PR and blocked itself waiting for the
     merge is resumed by that unblock to ship/verify THAT PR. So does an orderly park AFTER the
     PR comment (``continued`` checkpoint or ``scheduled`` timed wait): the owner parked knowing
-    its PR, and the wake resumes it from that checkpoint, not a context-free respawn. So does
+    its PR, and the wake resumes it from that checkpoint, not a context-free respawn.
+    An ordering ``dependency_wait`` strictly after the newest PR comment also permits
+    one continuation after parent completion/promotion: it must belong to the latest
+    claimed run of this card and assignee, ended orderly as blocked, with no subsequent
+    crash/reclaim/timeout. Operator-only links or synthetic unclaimed runs do not count;
+    the next claim consumes the handoff. Same-second dependency parks stay guarded.
+    This does not change the separate review-checkpoint exception below. So does
     a completed exact-head review of the checkpointed PRs (repair metadata, or an approval
     whose full head is ``head``/``reviewed_sha``): a later comment that repeats those PRs
     does not invalidate it. A
@@ -356,6 +438,8 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
             "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked', "
             "'continued', 'scheduled')",
             cols=", kind, payload", strict=True)):
+        return None
+    if _dependency_handoff_after(conn, task_id, max(pr_times)):
         return None
     from hermes_cli.kanban_dependency_review import resumes_review
     if resumes_review(conn, task_id, pr_urls):
