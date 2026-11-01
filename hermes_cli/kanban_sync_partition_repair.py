@@ -36,14 +36,17 @@ def repair_partition_links(live: sqlite3.Connection, replica: sqlite3.Connection
             "SELECT table_name, row_uid FROM kanban_sync_outbox WHERE state IN ('pending', 'rejected') "
             "UNION SELECT table_name, row_uid FROM kanban_sync_tombstones")}
         present = {r[0] for r in live.execute("SELECT id FROM tasks")}
+        # Only edges that will be inserted toggle ``applying``: an edge to a card not in this file stays a
+        # candidate every round, and an unconditional toggle rewrote the sync state (a WAL commit) each round for
+        # nothing. [daveey]
+        todo = [(parent, child) for parent, child in edges if child in present and not any(
+            key in held for key in (("task_links", f"{parent}>{child}"), ("tasks", parent), ("tasks", child)))]
+        if not todo:
+            return []
         applying = sync.sync_state(live)["applying"]
         live.execute("UPDATE kanban_sync_state SET applying = 1")
-        for parent, child in edges:
+        for parent, child in todo:
             uid = f"{parent}>{child}"
-            if child not in present:
-                continue
-            if any(key in held for key in (("task_links", uid), ("tasks", parent), ("tasks", child))):
-                continue
             if live.execute("INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
                             (parent, child)).rowcount:
                 restored.append(uid)

@@ -25,6 +25,7 @@ from __future__ import annotations
 from hermes_cli import kanban_lockguard as _kanban_lockguard
 import json
 import logging
+import os
 import re
 import sqlite3
 import threading
@@ -520,6 +521,11 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
             changes = own_partition(conn, changes, partition)
         changes = without_pending(changes, pending_task_fields(conn))
         nxt = int(page.get("next", cursor))
+        if not page.get("changes") and nxt == cursor and not page.get("more") and not _applying(conn):
+            # An idle poll: no change, same cursor. The apply would only rewrite ``applying`` and ``cursor`` to
+            # the values they hold, a write transaction (WAL frame, fsync, observer wake) every round on every
+            # board for nothing. [daveey]
+            return total
         # [daveey] The pre-filter above can miss a local edit committed after it read the outbox (a claim in
         # flight): ``local_pending_wins`` checks again inside the apply transaction.
         sync.apply_remote_changes(conn, changes, new_cursor=nxt, board=board, observers=observers,
@@ -528,6 +534,10 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
         cursor = nxt
         if not page.get("more"):
             return total
+
+
+def _applying(conn: sqlite3.Connection) -> bool:
+    return bool((sync.sync_state(conn) or {}).get("applying"))
 
 
 def resync(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool, partition: Optional[str] = None) -> int:
@@ -617,13 +627,17 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
                 resync(live, hub, slug, observers=True, partition=gateway)
         replica = open_shadow(slug, gateway)
         try:
-            from hermes_cli.kanban_sync_partition_repair import repair_partition_links
-            repair_partition_links(live, replica, gateway)
-            if mode == "primary" and sync.refresh_remote_parents(live, replica):
-                sync.wake_dispatcher()  # a foreign parent moved: re-gate its children now
-            result.repaired = repair_divergence(live, replica, gateway)
-            repair_missing_children(live, replica, gateway)
-            retire_lost_placeholder_links(live, replica, gateway)
+            inputs = _repair_inputs(path, replica, mode, gateway)
+            if inputs is None or _REPAIRED.get(str(path)) != inputs:
+                from hermes_cli.kanban_sync_partition_repair import repair_partition_links
+                repair_partition_links(live, replica, gateway)
+                if mode == "primary" and sync.refresh_remote_parents(live, replica):
+                    sync.wake_dispatcher()  # a foreign parent moved: re-gate its children now
+                result.repaired = repair_divergence(live, replica, gateway)
+                repair_missing_children(live, replica, gateway)
+                retire_lost_placeholder_links(live, replica, gateway)
+                if inputs is not None:
+                    _REPAIRED[str(path)] = inputs
             if mode == "primary":
                 heal_clobbered_completions(live)
         finally:
@@ -770,18 +784,112 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str) -> None:
             _log.warning("kanban sync: chat links for %s failed (%s: %s)", slug, type(exc).__name__, exc)
 
 
-def outbox_pending(paths: Iterable[Path]) -> bool:
-    """True when any synced board has a local change waiting to be pushed (one cheap read-only query each)."""
-    for path in paths:
+class _BoardWatch:
+    """One long-lived read-only connection per board file, for the sync loop's cheap questions.
+
+    ``outbox_pending`` runs every 0.5 s on every synced board. Opening a connection per call re-read the schema
+    each time (about 13 ms of CPU per pass over 10 boards, 2.5% of a core in the gateway, 2026-10-31). A kept
+    connection answers the same indexed query in microseconds. ``PRAGMA data_version`` on a kept connection moves
+    whenever any other connection (any process, or this one's own writers) commits to the file, which is what
+    lets ``sync_board`` skip repair scans whose inputs did not change. A file replaced on disk (new inode) is
+    reopened, with a new generation so its restarted ``data_version`` never equals an old one. [daveey]"""
+
+    MAX = 64
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._conns: dict[str, tuple[tuple[int, int], sqlite3.Connection, int]] = {}
+        self._gen = 0
+
+    def _conn(self, path: Path) -> Optional[tuple[sqlite3.Connection, int]]:
+        key = os.path.realpath(path)
         try:
-            conn = _kanban_lockguard.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=1)
+            st = os.stat(key)
+        except OSError:
+            self._drop(key)
+            return None
+        ent = self._conns.get(key)
+        if ent is not None and ent[0] == (st.st_dev, st.st_ino):
+            return ent[1], ent[2]
+        self._drop(key)
+        if len(self._conns) >= self.MAX:
+            self._drop(next(iter(self._conns)))
+        conn = _kanban_lockguard.connect(f"{Path(key).as_uri()}?mode=ro", uri=True, timeout=1,
+                                         check_same_thread=False)
+        self._gen += 1
+        self._conns[key] = ((st.st_dev, st.st_ino), conn, self._gen)
+        return conn, self._gen
+
+    def _drop(self, key: str) -> None:
+        ent = self._conns.pop(key, None)
+        if ent is not None:
             try:
-                if conn.execute("SELECT 1 FROM kanban_sync_outbox WHERE state = 'pending' LIMIT 1").fetchone():
-                    return True
-            finally:
-                conn.close()
-        except sqlite3.Error:
-            continue
+                ent[1].close()
+            except sqlite3.Error:
+                pass
+
+    def query(self, path: Path, sql: str) -> Optional[tuple[int, Any]]:
+        """(generation, first row) or None when the file cannot be read."""
+        with self._lock:
+            try:
+                got = self._conn(path)
+                if got is None:
+                    return None
+                conn, gen = got
+                return gen, conn.execute(sql).fetchone()
+            except sqlite3.Error:
+                self._drop(os.path.realpath(path))
+                return None
+
+    def version(self, path: Path) -> Optional[tuple[int, int]]:
+        got = self.query(path, "PRAGMA data_version")
+        return None if got is None or got[1] is None else (got[0], int(got[1][0]))
+
+    def reset(self) -> None:
+        with self._lock:
+            for key in list(self._conns):
+                self._drop(key)
+
+
+_WATCH = _BoardWatch()
+# Per board file: the inputs the last completed repair pass saw (see ``_repair_inputs``).
+_REPAIRED: dict[str, tuple] = {}
+
+
+def reset_board_watch() -> None:
+    """Tests: close the kept connections and forget completed repair passes."""
+    _WATCH.reset()
+    _REPAIRED.clear()
+
+
+def _repair_inputs(live_path: Path, replica: sqlite3.Connection, mode: str, gateway: str) -> Optional[tuple]:
+    """Everything the pure repair scans (partition links, remote parents, divergence, missing children, lost
+    placeholder links) read: the live file's commit version, the replica's identity and feed cursor, the mode, the
+    gateway and the placement config. Equal inputs give the same answer, so an idle round skips the scans (about
+    300 ms of CPU per round on the MacBook's default board, 2026-10-31). Read before the scans: a commit landing
+    during or after them moves the live version, so the next round scans again. The replica is written only by its
+    own pull (``cursor`` moves, or a rebuild makes a new file) and the ``pulled_at`` stamp, which the scans never
+    read. None (cannot tell) always scans. [daveey]"""
+    live_version = _WATCH.version(live_path)
+    if live_version is None:
+        return None
+    try:
+        replica_file = Path(replica.execute("PRAGMA database_list").fetchone()[2])
+        st = os.stat(replica_file)
+        cursor = int((sync.sync_state(replica) or {}).get("cursor") or 0)
+        from hermes_cli.kanban_placement import config
+        placement = json.dumps(config(), sort_keys=True, default=str)
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return None
+    return live_version, (st.st_dev, st.st_ino, cursor), mode, gateway, placement
+
+
+def outbox_pending(paths: Iterable[Path]) -> bool:
+    """True when any synced board has a local change waiting to be pushed (one indexed read on a kept connection)."""
+    for path in paths:
+        got = _WATCH.query(path, "SELECT 1 FROM kanban_sync_outbox WHERE state = 'pending' LIMIT 1")
+        if got is not None and got[1]:
+            return True
     return False
 
 

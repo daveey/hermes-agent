@@ -25,6 +25,8 @@ def kanban_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     sync.consume_dispatcher_wake()
+    from hermes_cli import kanban_sync_client
+    kanban_sync_client.reset_board_watch()  # kept read connections and repair memos belong to one test's files
     return home
 
 
