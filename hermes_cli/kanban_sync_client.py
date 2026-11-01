@@ -697,12 +697,13 @@ def publish_pickup_if_changed(hub: Any, *, now: Optional[float] = None) -> bool:
     return True
 
 
-def sync_all_once(hub: Optional[Hub] = None) -> list[RoundResult]:
+def sync_all_once(hub: Optional[Hub] = None, *,
+                  boards: Optional[list[tuple[str, Path]]] = None) -> list[RoundResult]:
     ident = load_identity() if hub is None else hub.ident
     hub = hub or Hub(ident)
     publish_pickup_if_changed(hub)
     results = []
-    for slug, path in board_paths():
+    for slug, path in board_paths() if boards is None else boards:
         try:
             results.append(sync_board(slug, path, hub, ident.gateway))
         except (HubError, OSError, Resync, sqlite3.Error, SyncUnavailable) as exc:
@@ -717,8 +718,9 @@ class FeedWatcher:
     ``ping_s`` and reconnects with backoff; polling still covers a closed socket."""
 
     def __init__(self, ident: Identity, board: str, wake: threading.Event, keep_running: Callable[[], bool],
-                 ping_s: float = 25.0) -> None:
+                 ping_s: float = 25.0, on_change: Optional[Callable[[str], None]] = None) -> None:
         self.ident, self.board, self.wake, self.keep_running, self.ping_s = ident, board, wake, keep_running, ping_s
+        self.on_change = on_change
         self.frames = 0
 
     def url(self) -> str:
@@ -740,6 +742,9 @@ class FeedWatcher:
                                                              "user-agent": "hermes-kanban-sync/1"},
                              open_timeout=HTTP_TIMEOUT_S, logger=ws_logger()) as ws:
                     backoff = 1.0
+                    if self.on_change is not None:
+                        self.on_change(self.board)
+                        self.wake.set()  # reconnects must catch changes missed while disconnected
                     while self.keep_running():
                         try:
                             raw = ws.recv(timeout=self.ping_s)
@@ -752,6 +757,8 @@ class FeedWatcher:
                             continue
                         if kind in ("changes", "changed", "resync"):
                             self.frames += 1
+                            if self.on_change is not None:
+                                self.on_change(self.board)
                             self.wake.set()
             except Exception as exc:  # health: allow BLE001 -- any socket failure: back off and reconnect; polling covers the gap
                 _log.info("kanban sync: %s feed socket closed (%s: %s); reconnecting in %.0fs",
@@ -807,6 +814,7 @@ class _BoardWatch:
         self._lock = threading.Lock()
         self._conns: dict[str, tuple[tuple[int, int], sqlite3.Connection, int]] = {}
         self._gen = 0
+        self._answers: dict[str, tuple[int, str, Any]] = {}
 
     def _conn(self, path: Path) -> Optional[tuple[sqlite3.Connection, int]]:
         key = os.path.realpath(path)
@@ -828,6 +836,7 @@ class _BoardWatch:
         return conn, self._gen
 
     def _drop(self, key: str) -> None:
+        self._answers.pop(key, None)
         ent = self._conns.pop(key, None)
         if ent is not None:
             try:
@@ -835,7 +844,7 @@ class _BoardWatch:
             except sqlite3.Error:
                 pass
 
-    def query(self, path: Path, sql: str) -> Optional[tuple[int, Any]]:
+    def query(self, path: Path, sql: str, *, unchanged_ok: bool = False) -> Optional[tuple[int, Any]]:
         """(generation, first row) or None when the file cannot be read."""
         with self._lock:
             try:
@@ -843,7 +852,17 @@ class _BoardWatch:
                 if got is None:
                     return None
                 conn, gen = got
-                return gen, conn.execute(sql).fetchone()
+                key = os.path.realpath(path)
+                version = conn.execute("PRAGMA data_version").fetchone()[0] if unchanged_ok else None
+                cached = self._answers.get(key)
+                if unchanged_ok and cached is not None and cached[:2] == (version, sql):
+                    return gen, cached[2]
+                answer = conn.execute(sql).fetchone()
+                if unchanged_ok:
+                    # Version is read BEFORE the query: a concurrent commit may cause
+                    # one extra read, but cannot publish a stale answer as current.
+                    self._answers[key] = (version, sql, answer)
+                return gen, answer
             except sqlite3.Error:
                 self._drop(os.path.realpath(path))
                 return None
@@ -891,7 +910,8 @@ def _repair_inputs(live_path: Path, replica: sqlite3.Connection, mode: str, gate
 def outbox_pending(paths: Iterable[Path]) -> bool:
     """True when any synced board has a local change waiting to be pushed (one indexed read on a kept connection)."""
     for path in paths:
-        got = _WATCH.query(path, "SELECT 1 FROM kanban_sync_outbox WHERE state = 'pending' LIMIT 1")
+        got = _WATCH.query(path, "SELECT 1 FROM kanban_sync_outbox WHERE state = 'pending' LIMIT 1",
+                           unchanged_ok=True)
         if got is not None and got[1]:
             return True
     return False
@@ -929,6 +949,8 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
     period = float(interval or sync.sync_config().get("interval_seconds") or DEFAULT_INTERVAL_S)
     _log.info("kanban sync: running as gateway %s against %s (feed sockets; poll every %.1fs)", ident.gateway, ident.url, period)
     wake = threading.Event()
+    from hermes_cli.kanban_sync_work import SyncWork
+    work = SyncWork(period)
     watchers: dict[str, threading.Thread] = {}
     next_links = 0.0
     from hermes_cli.machine_metrics import Reporter
@@ -937,10 +959,11 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
         boards = board_paths()
         for slug, _path in boards:
             if slug not in watchers or not watchers[slug].is_alive():
-                watcher = FeedWatcher(ident, slug, wake, keep_running)
+                watcher = FeedWatcher(ident, slug, wake, keep_running, on_change=work.changed)
                 watchers[slug] = threading.Thread(target=watcher.run, daemon=True, name=f"kanban-feed-{slug}")
                 watchers[slug].start()
-        for r in sync_all_once(hub):
+        selected = work.select(boards, time.monotonic(), outbox_pending)
+        for r in sync_all_once(hub, boards=selected):
             if r.push and (r.push.sent or r.push.rejected):
                 _log.info("kanban sync: %s %s pulled=%d pushed=%d rejected=%d", r.board, r.mode, r.pulled,
                           r.push.sent, r.push.rejected)
@@ -948,7 +971,8 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
             reconcile_links(boards, ident.gateway)
             next_links = time.monotonic() + LINKS_EVERY_S
         metrics.report_due()
-        wait_for_work(wake, [p for _s, p in boards], period, keep_running)
+        remaining = max(0.0, work.deadline - time.monotonic())
+        wait_for_work(wake, [p for _s, p in boards], remaining, keep_running)
 
 
 # --- import ---------------------------------------------------------------------------------------
