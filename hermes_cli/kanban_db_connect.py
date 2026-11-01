@@ -62,13 +62,11 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
     """Open a Kanban SQLite connection via ``connect_tracked``: while registered,
     byte-level probes of the file are refused because an ``open()``/``close()``
     would cancel this process's POSIX advisory locks (see ``sqlite_safe_read``)."""
-    from hermes_cli.sqlite_safe_read import connect_tracked
     from hermes_cli.kanban_dispatch_owner import connect_with_identity
 
     busy_timeout_ms = _resolve_busy_timeout_ms()
-    conn = connect_tracked(
+    conn = connect_with_identity(
         path,
-        connect_fn=connect_with_identity,
         isolation_level=None,
         timeout=busy_timeout_ms / 1000.0,
     )
