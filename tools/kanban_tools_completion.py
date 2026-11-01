@@ -11,6 +11,37 @@ from __future__ import annotations
 import json
 
 
+GOAL_GATE_MESSAGES = {
+    "kanban_complete": {
+        "blocked": (
+            "Goal completion rejected: judge ruled the goal unachievable — {reason}. The task "
+            "will NOT complete silently. Either re-scope the task with kanban_edit, or record "
+            "the block with kanban_block and hand the decision to a human / reviewer."),
+        "continue": (
+            "Goal completion rejected by judge: {reason}. To proceed, either: (1) provide "
+            "explicit acceptance evidence in your summary matching the task's criteria, or (2) "
+            "create continuation tasks with parents=[{tid}] and keep this task alive.")},
+    "kanban_request_review": {
+        "blocked": (
+            "Goal review handoff rejected: judge ruled the goal unachievable — {reason}. "
+            "Record the block with kanban_block instead of requesting review."),
+        "continue": (
+            "Goal review handoff rejected by judge: {reason}. Provide acceptance evidence "
+            "matching the card before requesting review.")}}
+
+
+def park_unachievable(task, tid, reason, conn):
+    """Park a verified judge rejection using the handoff's board and worker identity."""
+    from contextlib import nullcontext
+    from hermes_cli.kanban_goal_recovery import park
+    from tools import kanban_tools as kt
+    with (nullcontext((None, conn)) if conn is not None else kt._board(None)) as (_, gate_conn):
+        parked = park(gate_conn, task, reason, expected_run_id=kt._worker_run_id(tid))
+    if parked:
+        raise kt._Reject(f'Goal judged unachievable: {reason}. Parked in triage for bounded '
+                         'supervisor recovery; acceptance is unchanged.', 'goal_judge')
+
+
 def parked_by_own_run(conn, tid: str, run_id: int) -> bool:
     """True when ``run_id`` is the card's latest run, ended by ``kanban_block``, and nothing has
     claimed the card since (no current run, no claim lock, status ready/blocked)."""

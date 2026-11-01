@@ -125,8 +125,12 @@ def _profile_author(default: str = "specifier") -> str:
 
 def _load_triage_task(task_id: str) -> tuple[Optional[kb.Task], str]:
     """``(task, "")`` when the task exists and is in triage, else ``(None, reason)``."""
+    from hermes_cli.kanban_goal_recovery import current_park
+
     with kbc.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
+        if task is not None and task.status == "triage" and current_park(conn, task_id):
+            return None, "goal_unachievable park requires bounded supervisor recovery"
     if task is None:
         return None, "unknown task id"
     if task.status != "triage":
@@ -235,7 +239,9 @@ def specify_task(
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Task ids in the triage column; ``tenant`` narrows the sweep."""
+    """Task ids eligible for specification; ``tenant`` narrows the sweep."""
+    from hermes_cli.kanban_goal_recovery import current_park
+
     with kbc.connect_closing() as conn:
         tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
-    return [t.id for t in tasks]
+        return [t.id for t in tasks if not current_park(conn, t.id)]

@@ -459,12 +459,18 @@ def _run_task_turns(agent, frame, history, context):
     from hermes_cli.goals import run_kanban_goal_loop, DEFAULT_MAX_TURNS
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect_closing
+    with connect_closing() as conn:
+        judged_task = kb.get_task(conn, context['task_id'])
     def status():
         with connect_closing() as conn:
             return kb.goal_run_status(conn, context['task_id'], context['run_id'])
     def block(reason):
         with connect_closing() as conn:
             kb.block_task(conn, context['task_id'], reason=reason, expected_run_id=context['run_id'])
+    def unachievable(reason):
+        from hermes_cli.kanban_goal_recovery import park
+        with connect_closing() as conn:
+            return park(conn, judged_task, reason, expected_run_id=context['run_id'])
     def turn(prompt):
         nonlocal result
         result = agent.run_conversation(prompt, conversation_history=agent._session_db.get_messages_as_conversation(agent.session_id),
@@ -473,6 +479,6 @@ def _run_task_turns(agent, frame, history, context):
     from hermes_cli.goals import kanban_goal_loop_turn_result
     loop = run_kanban_goal_loop(task_id=context['task_id'], goal_text=context['goal_text'], run_turn=turn,
         task_status_fn=status, block_fn=block, max_turns=context['goal_max_turns'] or DEFAULT_MAX_TURNS,
-        first_response=result.get('final_response', ''))
+        first_response=result.get('final_response', ''), unachievable_fn=unachievable)
     # A broken loop exits non-zero; a parked or dispatcher-owned stop keeps the settled result (rc 0).
     return kanban_goal_loop_turn_result(result, loop)

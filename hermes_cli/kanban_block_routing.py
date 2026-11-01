@@ -4,6 +4,22 @@ from __future__ import annotations
 import sqlite3
 
 
+def validate_block_request(human_request, kind):
+    """Validate the human request before checking the block-kind vocabulary."""
+    from hermes_cli.kanban_db import VALID_BLOCK_KINDS
+    from hermes_cli.kanban_human_request import validate_human_request
+    human_request = validate_human_request(human_request, kind=kind)
+    if kind is not None and kind not in VALID_BLOCK_KINDS:
+        raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
+    return human_request
+
+
+def clear_meta(clear_blocker: bool) -> dict:
+    """Run metadata for an explicit "the shared blocker is gone" park (``kanban_shared_blockers``)."""
+    from hermes_cli.kanban_shared_blockers import CLEAR_FLAG
+    return {CLEAR_FLAG: True} if clear_blocker else {}
+
+
 def latest_run_blocker(conn: sqlite3.Connection, task_id: str) -> str | None:
     """Shared blocker the card is still behind: the newest closed run that said anything about
     it (``kanban_shared_blockers.run_effect``; neutral outcomes and re-parks without the id pass)."""
@@ -59,6 +75,12 @@ def classify_stop(conn, task_id, kind, reason, blocker_id, *, human_request=None
     from hermes_cli.kanban_continuation_recovery import is_exhausted_budget_block
     from hermes_cli.kanban_db import get_task
 
+    from hermes_cli.kanban_goal_recovery import valid_receipt
+    task = get_task(conn, task_id)
+    if (kind == 'transient' and human_request is None and task and task.status == 'running'
+            and task.human_request is None
+            and valid_receipt(conn, task_id, task.current_run_id, reason)):
+        return 'transient', 'goal_unachievable', True
     if is_exhausted_budget_block(conn, task_id, kind, reason):
         return "transient", "continuation_exhausted", True
     if kind in {"capability", "assignment"} and (human_request is not None or not blocker_id):

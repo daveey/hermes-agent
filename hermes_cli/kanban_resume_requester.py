@@ -55,11 +55,29 @@ def _body(target: str, title: str, park_id: int) -> str:
     )
 
 
+def _goal_body(target: str, title: str, park_id: int) -> str:
+    return (
+        f"The kernel judged {target} ({title!r}) goal_unachievable (park event {park_id}). "
+        "Investigate its judge receipt, runs and evidence with kanban_show. Diagnose and remedy "
+        "the missing prerequisite using existing tools and authorized owners. Preserve the original "
+        "body, acceptance criteria, dependency graph, mandatory model/provider pins and subscription "
+        "billing policy. Do not invent profiles or use paid credentials as a workaround.\n\n"
+        "Only after proving the prerequisite repaired, file "
+        f'kanban_supervisor_request(ops=[{{"op":"resume","task_id":"{target}"}}], '
+        'reason="<repair evidence>"). The non-worker executor rechecks ownership, freshness, human '
+        "gates and the two-resume lifetime bound. Read back its receipt and the target status. "
+        "Never use raw board mutations, edit model pins, weaken acceptance, or complete/archive "
+        "the original. If not repaired, leave it parked and record the concrete unresolved cause; "
+        "do not resume speculatively or create another recovery loop. Complete this recovery card "
+        "only with the investigation/remediation evidence and resume receipt (or why it remains parked)."
+    )
+
+
 def _candidates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT id, title, assignee, tenant, created_by FROM tasks "
         "WHERE status IN ('triage', 'blocked') AND current_run_id IS NULL AND human_request IS NULL "
-        "AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = tasks.id AND e.kind = 'continuation_exhausted')"
+        "AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = tasks.id AND e.kind IN ('continuation_exhausted', 'goal_unachievable'))"
     ).fetchall()
 
 
@@ -103,9 +121,17 @@ def ensure_recovery_cards(conn: sqlite3.Connection) -> list[str]:
         if _event_for_park(conn, target, park_id) or len(rx._resume_events(conn, target)) >= rx.MAX_RESUMES:
             continue
         try:
+            from hermes_cli.kanban_goal_recovery import current_park, recovery_assignee
+            task = kb.get_task(conn, target)
+            goal = current_park(conn, target)
+            assignee = recovery_assignee(task) if goal else row['assignee'] or 'default'
+            if not assignee:
+                continue
             rec = kb.create_task(
-                conn, title=f"Recover {target}: continuation budget exhausted"[:200],
-                body=_body(target, row["title"] or "", park_id), assignee=row["assignee"] or "default",
+                conn, title=f"Recover {target}: {'goal unachievable' if goal else 'continuation budget exhausted'}"[:200],
+                body=(_goal_body if goal else _body)(target, row["title"] or "", park_id), assignee=assignee,
+                model_override=task.model_override, provider_override=task.provider_override,
+                requires=['terminal', 'file', 'kanban'] if goal else None,
                 created_by=CREATED_BY, workspace_kind="scratch", tenant=row["tenant"],
                 idempotency_key=_key(target, park_id), creator_task_id=target,
             )
