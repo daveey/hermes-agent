@@ -47,6 +47,15 @@ _RESTART_CONTROL_REASONS = frozenset({'invalid_control_peer', 'incomplete_contro
                                       'invalid_control_response'})
 # Past the board lock wait: the owner's session setup and receipt before and after the write.
 ADMISSION_ANSWER_MARGIN_S = 60.0
+# [daveey] Owner refusals of ``kanban.run`` that are the host's own condition, not the card's: its
+# runtime store or session policy could not be read. hermes-hub 2026-11-01 12:33-12:38 PST: a
+# near-empty config.yaml left the session policy with no model, ``restore_policy`` refused it, and 17
+# runs exited 1 on ``storage_unavailable`` before any admission; failure_limit=2 sent ten unrelated
+# cards to triage. Before an admission the worker asks again (``kanban.run`` is idempotent per
+# attempt), and an owner that keeps refusing for ``OWNER_WAIT_S`` ends the run owner-unavailable (69:
+# requeued uncounted, bounded by ``NEUTRAL_STREAK_LIMIT``). Once admitted a turn may be running, so the
+# refusal stays final there.
+_HOST_REFUSAL_REASONS = frozenset({'storage_unavailable'})
 
 
 def admission_answer_budget():
@@ -153,7 +162,8 @@ async def run(params, board_db):
         # A restart also surfaces as a refused or reset dial, a failed handshake, or an answer
         # that never came.
         except (GatewayClientError, WebSocketException, OSError, TimeoutError) as exc:
-            if not _restartable(exc):
+            host_refusal = _host_refusal(exc, claim)
+            if not (host_refusal or _restartable(exc)):
                 raise
             claim.note_refusal(exc)
             if claim.silent_for() >= OWNER_WAIT_S:
@@ -161,7 +171,8 @@ async def run(params, board_db):
                 status = getattr(getattr(exc, 'response', None), 'status_code', None)
                 detail = exc if isinstance(exc, GatewayClientError) else type(exc).__name__ + (
                     f' (HTTP {status})' if status else '')
-                message = f'Kanban owner silent for {claim.silent_for():.0f}s: {detail}'
+                verb = 'kept refusing' if host_refusal else 'silent'
+                message = f'Kanban owner {verb} for {claim.silent_for():.0f}s: {detail}'
                 if claim.restarted:
                     # An ADMITTED turn lost to the owner's restart: exit 76, requeued uncounted. [daveey]
                     raise OwnerRestartLost(message) from exc
@@ -190,6 +201,14 @@ def _restartable(exc):
     if isinstance(exc, GatewayUnavailableError):
         return exc.state in _TRANSIENT_OWNER_STATES or exc.reason_code in _RESTART_CONTROL_REASONS
     return True
+
+
+def _host_refusal(exc, claim):
+    """True for an owner refusal that is the host's condition (``_HOST_REFUSAL_REASONS``) while no
+    admission exists: nothing ran, so asking again is safe. [daveey]"""
+    from hermes_cli.gateway_client import GatewayRPCError
+    return (claim.admission_id is None and isinstance(exc, GatewayRPCError)
+            and str(exc) in _HOST_REFUSAL_REASONS)
 
 
 async def _discard(events):
