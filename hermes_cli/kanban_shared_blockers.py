@@ -56,12 +56,14 @@ tripped by ``_account_crashes``.
 """
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+logger = logging.getLogger(__name__)
 GUARD_REASON = "shared_blocker"
 CLEARED_EVENT = "shared_blocker_cleared"
 PROBE_RELEASED_EVENT = "shared_blocker_probe_released"
@@ -248,7 +250,8 @@ def task_route(conn, task_id) -> tuple[Optional[str], Optional[str], str]:
         if model and model.startswith("class:"):
             provider = None
         return _optional_text(model), _provider(provider), lane
-    except Exception:
+    except Exception:  # route preview is best-effort: unknown routing stays conservative
+        logger.debug("kanban shared blockers: route preview failed for %s", task_id, exc_info=True)
         return None, None, lane
 
 

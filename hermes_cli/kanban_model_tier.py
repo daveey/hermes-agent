@@ -264,7 +264,8 @@ def record_run_route(conn: sqlite3.Connection, task: Any, *, lane: str, reason: 
     try:
         model, provider, source = effective_route(task)
     except Exception as exc:
-        logger.debug("kanban model tier: route resolve failed for %s (%s)", getattr(task, "id", "?"), exc)
+        logger.debug("kanban model tier: route resolve failed for %s (%s)", getattr(task, "id", "?"), exc,
+                     exc_info=True)
         model, provider, source = None, None, "unknown"
     try:
         from hermes_cli import kanban_db as _kb
@@ -273,7 +274,8 @@ def record_run_route(conn: sqlite3.Connection, task: Any, *, lane: str, reason: 
                 "model": model, "provider": provider, "lane": lane, "source": source, "tier_reason": reason,
             }, run_id=run_id)
     except Exception as exc:
-        logger.debug("kanban model tier: route receipt failed for %s (%s)", getattr(task, "id", "?"), exc)
+        logger.debug("kanban model tier: route receipt failed for %s (%s)", getattr(task, "id", "?"), exc,
+                     exc_info=True)
 
 
 def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:
@@ -289,7 +291,8 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
     try:
         model, provider, reason = resolve_model_tier(conn, task, lane=lane, cfg=cfg)
     except Exception as exc:
-        logger.warning("kanban model tier: resolve failed for %s (%s)", getattr(task, "id", "?"), exc)
+        logger.warning("kanban model tier: resolve failed for %s (%s)", getattr(task, "id", "?"), exc,
+                       exc_info=True)
         return "error"
     if reason == "pinned" and not _str(getattr(task, "provider_override", None)):
         # A row pinned before pin-time binding (concrete model, NULL provider) used to take its provider from
@@ -316,7 +319,8 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
                 model, provider, walled = moved
                 reason = f"{reason}+wall:{walled}"
         except Exception as exc:  # never break dispatch over wall bookkeeping
-            logger.debug("kanban model tier: wall re-tier failed for %s (%s)", getattr(task, "id", "?"), exc)
+            logger.debug("kanban model tier: wall re-tier failed for %s (%s)", getattr(task, "id", "?"), exc,
+                         exc_info=True)
     if model:
         from agent.model_routing import is_class_selector
         why = class_unroutable_reason(model) if is_class_selector(model) else None
@@ -341,5 +345,6 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
             with _kb.write_txn(conn):
                 _kb._append_event(conn, task.id, "model_tier", payload, run_id=getattr(task, "current_run_id", None))
         except Exception as exc:
-            logger.debug("kanban model tier: event write failed for %s (%s)", getattr(task, "id", "?"), exc)
+            logger.debug("kanban model tier: event write failed for %s (%s)", getattr(task, "id", "?"), exc,
+                         exc_info=True)
     return reason

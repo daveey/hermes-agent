@@ -41,7 +41,7 @@ from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_diagnostics as kd
 from plugins.kanban.dashboard.board_diagnostics import _attach_diagnostics, _warnings_summary_from_diagnostics
 from plugins.kanban.dashboard.plugin_api_human_request import ask_filing_refusal, classify_request
-from hermes_cli.kanban_db import KANBAN_ATTACHMENT_MAX_BYTES, _collision_free_path, _safe_attachment_name
+from hermes_cli.kanban_db_attachment_names import _collision_free_path, _safe_attachment_name
 
 log = logging.getLogger(__name__)
 
@@ -625,11 +625,11 @@ async def upload_task_attachment(
             with open(dest_path, "wb") as out:  # noqa: ASYNC230 -- chunked local write of the upload stream; open() is non-blocking in practice
                 while chunk := await file.read(1024 * 1024):
                     total += len(chunk)
-                    if total > KANBAN_ATTACHMENT_MAX_BYTES:
+                    if total > kanban_db.KANBAN_ATTACHMENT_MAX_BYTES:
                         out.close()
                         dest_path.unlink(missing_ok=True)
                         raise HTTPException(
-                            status_code=413, detail=f"attachment exceeds {KANBAN_ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB limit")
+                            status_code=413, detail=f"attachment exceeds {kanban_db.KANBAN_ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB limit")
                     out.write(chunk)
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"failed to store attachment: {exc}")

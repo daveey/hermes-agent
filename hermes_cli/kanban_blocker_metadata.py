@@ -1,8 +1,10 @@
 """Provider scope for shared-blocker observations, not for the task's future route."""
 from __future__ import annotations
 
+import logging
 import re
 
+logger = logging.getLogger(__name__)
 FIELDS = ("blocker_provider", "blocker_model", "blocker_lane")
 _WALL = re.compile(r"ModelRoutingError|\b(?:insufficient_quota|provider quota|quota exceeded|rate.limit(?:ed)?|usage limit)\b", re.IGNORECASE)
 _PROVIDER = re.compile(r"\bprovider\s*[:=]\s*['\"]?([\w.-]+)", re.IGNORECASE)
@@ -79,5 +81,6 @@ def _known_model_provider(provider):
     try:
         from hermes_cli.providers import get_provider
         return get_provider(provider, allow_network=False) is not None
-    except Exception:
+    except Exception:  # registry/plugin lookup is a boundary: unknown stays conservative
+        logger.debug("kanban blocker metadata: provider lookup failed for %r", provider, exc_info=True)
         return False

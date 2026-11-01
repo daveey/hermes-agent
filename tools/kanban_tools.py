@@ -24,7 +24,7 @@ from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kan
 from tools.kanban_tools_placement import (_local_placement, _machine_placement, _marker_placement_fields, _persisted_session_id,
                                           _placement_refused, _runs_where)
 from tools.kanban_tools_db_hint import generic_tool_error
-from tools.kanban_tools_park_args import _blocker_id_arg, _clear_blocker_arg, _blocker_scope_args
+from tools.kanban_tools_park_args import _blocker_id_arg, _clear_blocker_arg, _blocker_scope_args, _park_guard
 from hermes_cli.kanban_ask_resolved import ask_checks, create_ask_check, filing_context
 from tools import kanban_tools_completion as _kc, kanban_tools_create_args as _ca
 from tools.kanban_tools_schemas import (
@@ -1096,16 +1096,6 @@ def _awaiting_arg(args: dict, wake: tuple) -> tuple[Optional[dict], tuple]:
     except kaw.AwaitingError as exc:
         raise _Reject(str(exc), exc.code) from exc
     return awaiting, wake
-
-
-def _park_guard(conn, tid: str, op: str, wake: tuple, **plan: Any) -> None:
-    """Refuse a park that wakes > 2 h away with no wake_check and no clock_only. [daveey]"""
-    from hermes_cli import kanban_wake_check as kwc
-
-    wake_at = kwc.planned_wake(conn, tid, op=op, **plan, **({"wake_check": wake[0], "clock_only": wake[2]}
-                                                            if op == "block" else {}))
-    err = kwc.guard_error(wake_at=wake_at, wake_check=wake[0], clock_only=wake[2])
-    _check(err is None, f"kanban_{op} {err}", "invalid_args")
 
 
 def _route_needs(op: str, args: dict, tid: str, reason: Optional[str]) -> Optional[str]:

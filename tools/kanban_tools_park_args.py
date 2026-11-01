@@ -40,3 +40,13 @@ def _clear_blocker_arg(args: dict, blocker_id: Optional[str] = None) -> bool:
     _check(isinstance(raw, bool), "clear_blocker must be true or false")
     _check(not (raw and blocker_id), "clear_blocker says the wall is gone; blocker_id says it still stands. Pass one")
     return raw
+
+
+def _park_guard(conn, tid: str, op: str, wake: tuple, **plan: Any) -> None:
+    """Refuse a park that wakes > 2 h away with no wake_check and no clock_only. [daveey]"""
+    from hermes_cli import kanban_wake_check as kwc
+
+    wake_at = kwc.planned_wake(conn, tid, op=op, **plan, **({"wake_check": wake[0], "clock_only": wake[2]}
+                                                            if op == "block" else {}))
+    err = kwc.guard_error(wake_at=wake_at, wake_check=wake[0], clock_only=wake[2])
+    _check(err is None, f"kanban_{op} {err}", "invalid_args")

@@ -1814,29 +1814,6 @@ class AttachmentTooLarge(ValueError):
     still catch it while the tool/CLI can give a 413-style message."""
 
 
-def _safe_attachment_name(raw: str) -> str:
-    """Client filename -> safe basename: strip directories (both separators),
-    control chars and leading dots (no dotfiles, no traversal); ValueError when
-    nothing usable remains. Only ever joined under the per-task attachments dir."""
-    name = (raw or "").replace("\\", "/").split("/")[-1].strip()
-    name = "".join(ch for ch in name if ch.isprintable() and ch not in "\x00").strip()
-    name = name.lstrip(".").strip()
-    if not name:
-        raise ValueError("invalid attachment filename")
-    return name[:200]
-
-
-def _collision_free_path(dest_dir: Path, safe_name: str) -> Path:
-    """``foo.pdf`` -> ``foo.pdf``, ``foo (1).pdf``, ... first one that doesn't exist."""
-    stem, dot, ext = safe_name.partition(".")
-    candidate = safe_name
-    n = 1
-    while (dest_dir / candidate).exists():
-        candidate = f"{stem} ({n}){dot}{ext}"
-        n += 1
-    return dest_dir / candidate
-
-
 def store_attachment_bytes(
     conn: sqlite3.Connection, task_id: str, filename: str, data: bytes, *,
     content_type: Optional[str] = None, uploaded_by: Optional[str] = None,
@@ -1850,6 +1827,7 @@ def store_attachment_bytes(
         max_bytes = KANBAN_ATTACHMENT_MAX_BYTES
     if len(data) > max_bytes:
         raise AttachmentTooLarge(f"attachment exceeds {max_bytes // (1024 * 1024)} MB limit")
+    from hermes_cli.kanban_db_attachment_names import _collision_free_path, _safe_attachment_name
     safe_name = _safe_attachment_name(filename)
     dest_dir = task_attachments_dir(task_id, board=board)
     dest_dir.mkdir(parents=True, exist_ok=True)
