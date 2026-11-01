@@ -201,9 +201,14 @@ def creation_lint_error(title, initial_status, human_request, *, triage=False) -
 
 def sweep_agent_owned_blocks(conn: sqlite3.Connection, *, now: Optional[int] = None,
                              grace: int = AGENT_BLOCK_GRACE_SECONDS) -> list[str]:
-    """One triage respawn, with evidence, for agent-owned blocks older than *grace*."""
+    """One triage respawn, with evidence, for this gateway's agent-owned blocks older than *grace*."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db import _json_dict
+    from hermes_cli.kanban_wake_check import foreign_ids
+
+    # Pending writes can retain a worker's copy after its run ends. Execution
+    # transitions belong to that worker; maintenance belongs to the creator.
+    copies = foreign_ids(conn)
     now = int(now if now is not None else time.time())
     escalated: list[str] = []
     rows = conn.execute(
@@ -212,6 +217,8 @@ def sweep_agent_owned_blocks(conn: sqlite3.Connection, *, now: Optional[int] = N
     ).fetchall()
     for row in rows:
         tid = row["id"]
+        if tid in copies:
+            continue
         ev = conn.execute(
             "SELECT id, payload, created_at FROM task_events WHERE task_id = ? "
             "AND kind IN ('blocked','block_loop_detected') ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
