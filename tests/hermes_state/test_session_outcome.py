@@ -86,6 +86,108 @@ def test_2_live_turn_is_running(db):
     assert so.derive_outcome("chat", db=db)["kind"] == "done"
 
 
+@pytest.mark.parametrize("platform", ["kanban", "cli", "cron", "desktop"])
+def test_2_durable_turn_without_marker_or_gateway_token_is_running(db, platform):
+    import os
+
+    from hermes_state_pidns import holder_namespace_token
+
+    say(db, "user", "keep working")
+    holder = f"pid={os.getpid()}{holder_namespace_token()}:turn=chat:nonce:platform={platform}"
+    assert db.try_acquire_session_turn_lease("chat", holder)
+    try:
+        assert so.refresh_outcome("chat", "manual", db=db)["kind"] == "running"
+        assert so.get_outcome("chat", db=db)["kind"] == "running"
+        assert so.derive_outcome("chat", db=db, ignore_live_turn=True)["reason"] == "interrupted"
+        db.end_session("chat", "compression")
+        db.create_session("tip", source=platform, parent_session_id="chat")
+        db.append_message("tip", role="user", content="after compression")
+        assert so.derive_outcome("tip", db=db)["kind"] == "running"
+    finally:
+        db.release_session_turn_lease("chat", holder)
+    assert so.refresh_outcome("chat", "manual", db=db)["reason"] == "interrupted"
+
+
+def test_2_expired_durable_turn_does_not_hide_interruption(db):
+    import os
+
+    from hermes_state_pidns import holder_namespace_token
+
+    say(db, "user", "keep working")
+    holder = f"pid={os.getpid()}{holder_namespace_token()}:turn=chat:platform=kanban"
+    assert db.try_acquire_session_turn_lease("chat", holder, ttl_seconds=300)
+    with sqlite3.connect(db.db_path) as conn:
+        conn.execute("UPDATE session_turn_leases SET expires_at = ?", (time.time() - 1,))
+    assert so.derive_outcome("chat", db=db)["reason"] == "interrupted"
+
+
+def test_2_dead_durable_turn_owner_does_not_hide_interruption(db):
+    import subprocess
+    import sys
+
+    from hermes_state_pidns import holder_namespace_token
+
+    say(db, "user", "keep working")
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    holder = f"pid={child.pid}{holder_namespace_token()}:turn=chat:platform=kanban"
+    try:
+        assert db.try_acquire_session_turn_lease("chat", holder)
+        assert so.derive_outcome("chat", db=db)["kind"] == "running"
+        child.communicate(timeout=15)
+        assert so.derive_outcome("chat", db=db)["reason"] == "interrupted"
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.communicate(timeout=15)
+
+
+def test_2_other_conversation_lease_does_not_hide_interruption(db):
+    import os
+
+    from hermes_state_pidns import holder_namespace_token
+
+    say(db, "user", "keep working")
+    db.create_session("other", source="kanban")
+    holder = f"pid={os.getpid()}{holder_namespace_token()}:turn=other:platform=kanban"
+    assert db.try_acquire_session_turn_lease("other", holder)
+    assert so.derive_outcome("chat", db=db)["reason"] == "interrupted"
+
+
+def test_2_abandoned_durable_turn_is_not_running(db):
+    import os
+
+    from hermes_state_compression import _forget_abandoned_turn_lease, _mark_turn_lease_abandoned
+    from hermes_state_pidns import holder_namespace_token
+
+    say(db, "user", "keep working")
+    holder = f"pid={os.getpid()}{holder_namespace_token()}:turn=chat:platform=kanban"
+    assert db.try_acquire_session_turn_lease("chat", holder)
+    _mark_turn_lease_abandoned(db.db_path, holder)
+    try:
+        assert so.derive_outcome("chat", db=db)["reason"] == "interrupted"
+    finally:
+        _forget_abandoned_turn_lease(db.db_path, holder)
+
+
+def test_2_audit_refresh_replaces_running_after_durable_turn_releases(db, monkeypatch):
+    import os
+
+    from hermes_cli import sessions_cmd_outcome as cli
+    from hermes_state_pidns import holder_namespace_token
+
+    # Real audit entry point and store; isolate only plugin discovery.
+    monkeypatch.setattr(cli, "ensure_outcome_hooks", lambda: None)
+    say(db, "user", "keep working")
+    holder = f"pid={os.getpid()}{holder_namespace_token()}:turn=chat:platform=kanban"
+    assert db.try_acquire_session_turn_lease("chat", holder)
+    assert cli.audit_rows(db, refresh=True)[0]["kind"] == "running"
+    db.release_session_turn_lease("chat", holder)
+    assert cli.audit_rows(db, refresh=True)[0]["reason"] == "interrupted"
+    say(db, "assistant", SUMMARY)
+    assert cli.audit_rows(db, refresh=True)[0]["kind"] == "done"
+    assert so.get_outcome("chat", db=db)["kind"] == "done"
+
+
 def _gateway_turn(db, tmp_path, *, started_at=None, token: str | None = "tok", sid="chat"):
     from datetime import UTC, datetime
 

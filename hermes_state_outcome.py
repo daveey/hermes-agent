@@ -228,16 +228,32 @@ def _text(content: Any) -> str:
 
 
 def _live_turn(db: Any, sid: str) -> bool:
-    """A turn is live while its interrupted-turn marker exists and the process that wrote it is alive, or
-    while a running messaging gateway holds the chat's durable active-turn token (gateway-run turns, the
-    Desktop ``local`` platform included, never write the TUI marker)."""
+    """A live turn has a durable writer lease, a live TUI marker, or a gateway active-turn token.
+
+    Managed workers and CLI turns need no TUI marker or gateway routing entry. Their shared
+    turn-facade lease is the cross-process evidence; an idle attached session is not a turn."""
     from tui_gateway.turn_marker import marker_writer_state, read_turn_marker
 
     home = Path(db.db_path).parent
     marker = read_turn_marker(home, sid)
     if marker and marker_writer_state(marker) == "alive":
         return True
+    if _guarded("durable turn", sid, lambda: _durable_turn_live(db, sid), False):
+        return True
     return _guarded("gateway turn", sid, lambda: _gateway_turn_live(db, sid), False)
+
+
+def _durable_turn_live(db: Any, sid: str) -> bool:
+    """Read the compression-root writer without reclaiming it; expired authority is not liveness.
+
+    The store rejects dead local owners. Expiry also bounds abandoned releases and unknown
+    remote owners; unlike takeover we need not wait for an expired live process to acknowledge.
+    """
+    from hermes_state_compression import _turn_lease_abandoned
+
+    owner = db.session_turn_lease_owner(sid)
+    return (owner is not None and float(owner["expires_at"]) > time.time()
+            and not _turn_lease_abandoned(db.db_path, owner["holder"]))
 
 
 # [daveey] A gateway turn token older than this is a leaked marker (its CAS clear failed), not a live turn.
