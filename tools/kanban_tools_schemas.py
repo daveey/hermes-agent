@@ -970,21 +970,29 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
         "unblock, so parent gating applies (ready, or todo while a parent is open); the result reads back "
         "the target's status. A request carries only resume ops. "
         "Op retry_limit {task_id, max_retries 1-10} asks the executor to set the retry breaker on a card "
-        "THIS task created (never this card itself); a request carries only retry_limit ops."
+        "THIS task created (never this card itself); a request carries only retry_limit ops. "
+        "Op archive {task_id} asks the executor to cancel (archive) an UNSTARTED card orphaned in this "
+        "task's creator tree: created by a card this task created (up to 3 hops) whose creator(s) are all "
+        "done or archived, so no live card owns it. Cards this task created directly are refused (use "
+        "kanban_archive), as are claimed/running/done cards and anything outside the tree; a request "
+        "carries only archive ops."
     ),
     {
         "ops": {
             "type": "array",
-            "description": "Edge edits applied in order, reconcile_notify ops, resume ops, or retry_limit ops (max 20).",
+            "description": "Edge edits applied in order, reconcile_notify ops, resume ops, retry_limit ops, "
+                           "or archive ops (max 20).",
             "items": {
                 "type": "object",
                 "properties": {
-                    "op": {"type": "string", "enum": ["link", "unlink", "reconcile_notify", "resume", "retry_limit"]},
+                    "op": {"type": "string", "enum": ["link", "unlink", "reconcile_notify", "resume", "retry_limit",
+                                                         "archive"]},
                     "parent_id": {"type": "string"},
                     "child_id": {"type": "string"},
                     "task_id": {"type": "string", "description": "reconcile_notify: the subscribed task; "
                                                                  "resume: the card to requeue; "
-                                                                 "retry_limit: the card to edit."},
+                                                                 "retry_limit: the card to edit; "
+                                                                 "archive: the card to cancel."},
                     "max_retries": {"type": "integer", "description": "retry_limit: the new breaker, 1-10."},
                     "chat_id": {"type": "string", "description": "reconcile_notify: the tui row's chat (session id)."},
                     "thread_id": {"type": "string", "description": "reconcile_notify: the row's thread, if any."},
