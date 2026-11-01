@@ -1228,7 +1228,7 @@ from hermes_cli.kanban_worker_log import (
     current_run_log, exit_summary_marker as _exit_summary_marker, log_noise_prefixes as _log_noise_prefixes)
 
 
-from hermes_cli.kanban_worker_log import _worker_final_output
+from hermes_cli.kanban_worker_log import _worker_final_output, crash_worker_output
 
 
 def _classify_dead_worker(
@@ -1254,10 +1254,7 @@ def _classify_dead_worker(
     else:
         dead = _ou.noted(_classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board, run_id=run_id), conn, task_id, run_id, log)
     if task_id and not dead.rate_limited:
-        from hermes_cli.kanban_worker_log import managed_worker_output
-        worker_output = managed_worker_output(conn, task_id, run_id, pid, claimer)
-        if worker_output is None:
-            worker_output = _worker_final_output(task_id, board=board, run_id=run_id)
+        worker_output = crash_worker_output(conn, task_id, run_id, pid, claimer, board=board)
         if worker_output:
             dead.error_text += f"{WORKER_OUTPUT_SEP}{worker_output!r}"
             dead.event_payload["worker_output"] = worker_output

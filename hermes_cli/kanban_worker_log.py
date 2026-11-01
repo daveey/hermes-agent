@@ -105,6 +105,15 @@ def current_run_log(raw: str, run_id=None) -> str:
     return body[starts[-1].start():] if starts else body
 
 
+def crash_worker_output(conn, task_id, run_id, pid, claim_lock, *, board=None) -> str:
+    """Select run-owned managed output, retaining the legacy log reader's patch seam."""
+    output = managed_worker_output(conn, task_id, run_id, pid, claim_lock)
+    if output is not None:
+        return output
+    from hermes_cli import kanban_db_dispatch as dispatch
+    return dispatch._worker_final_output(task_id, board=board, run_id=run_id)
+
+
 def managed_worker_output(conn, task_id, run_id, pid, claim_lock) -> Optional[str]:
     """Prefer an attributable receipt over the shared log, even if its output is empty.
 
