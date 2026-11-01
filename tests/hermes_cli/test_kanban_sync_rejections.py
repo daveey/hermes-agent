@@ -7,7 +7,31 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_sync_client as client
-from tests.hermes_cli.test_kanban_sync_client import BOARD, ME, OTHER, kanban_home, live, svc
+from tests.hermes_cli import kanban_sync_support as support
+from tests.hermes_cli.kanban_sync_fake_board import FakeService
+
+BOARD, ME, OTHER = "default", "macbook", "mini"
+
+
+@pytest.fixture
+def kanban_home(tmp_path, monkeypatch):
+    return support.kanban_home(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def svc():
+    return FakeService()
+
+
+@pytest.fixture
+def live(kanban_home):
+    support.write_sync_config(kanban_home, True)
+    conn = kbc.connect(kanban_home / "kanban.db")
+    client.ensure_identity(conn, BOARD, ME)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def reject_status(live, svc):
