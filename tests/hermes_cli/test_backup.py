@@ -1442,9 +1442,10 @@ class TestSafeCopyDb:
         assert rows == [(42,)]
 
     def test_aborts_when_source_remains_busy_past_deadline(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, caplog
     ):
         from hermes_cli import backup as backup_mod
+        from hermes_cli import kanban_lockguard
 
         src = tmp_path / "locked.db"
         dst = tmp_path / "copy.db"
@@ -1482,11 +1483,15 @@ class TestSafeCopyDb:
             connect_calls.append((args, kwargs))
             return next(connections)
 
+        # Inject busy progress at the backup's two opener boundaries, not
+        # underneath the source guard's real SQL initialization.
+        monkeypatch.setattr(kanban_lockguard, "connect", fake_connect)
         monkeypatch.setattr(backup_mod.sqlite3, "connect", fake_connect)
         monkeypatch.setattr(backup_mod.time, "monotonic", lambda: next(clock))
         monkeypatch.setattr(Path, "unlink", assert_closed_before_unlink)
 
         assert backup_mod._safe_copy_db(src, dst, timeout_seconds=1.0) is False
+        assert "database remained locked for 1 seconds" in caplog.text
         assert connect_calls[0][1]["timeout"] == 0.0
         assert not dst.exists()
 
