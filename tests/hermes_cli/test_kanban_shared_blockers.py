@@ -52,6 +52,80 @@ def _route_run(conn, tid, provider):
         }, run_id=kb._current_run_id(conn, tid))
 
 
+@pytest.mark.parametrize("park", ["continue", "schedule"])
+@pytest.mark.parametrize("archived", [False, True], ids=["done", "archived"])
+def test_finished_other_route_wall_has_no_live_owner(kanban_home, scoped_routing, monkeypatch, park, archived):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="implementation", assignee="default")
+        assert kb.claim_task(conn, tid)
+        _route_run(conn, tid, "openai-codex")
+        run_id = kb._current_run_id(conn, tid)
+        kbd._set_worker_pid(conn, tid, os.getpid())
+        viewer = kb.create_task(conn, title="review", assignee="default",
+                                model_override="claude-opus-4", provider_override="anthropic")
+        assert kb.claim_task(conn, viewer)
+        _route_run(conn, viewer, "anthropic")
+    with monkeypatch.context() as worker:
+        worker.setenv("HERMES_KANBAN_TASK", tid)
+        worker.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+        args = {"blocker_id": BID, "blocker_provider": "anthropic"}
+        if park == "continue":
+            result = kt._handle_continue({**args, "checkpoint": "provider wall", "resume_after_seconds": 600})
+        else:
+            result = kt._handle_schedule({**args, "reason": f"SCHEDULED_UNTIL={_future_iso(600)} provider wall"})
+        assert json.loads(result)["status"] == "scheduled", result
+    with kbc.connect_closing() as conn:
+        assert ksb.blocker_states(conn)[BID].is_open
+        assert BID in ksb.render_blocker_context(conn, viewer)
+        assert kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid)
+        _route_run(conn, tid, "openai-codex")
+        assert kb.complete_task(conn, tid, result="implementation done")
+        if archived:
+            assert kb.archive_task(conn, tid)
+        st = ksb.blocker_states(conn)[BID]
+        assert not st.behind and st.cleared_by is None
+        assert not st.is_open
+        assert BID not in ksb.render_blocker_context(conn, viewer)
+
+
+@pytest.mark.parametrize("outcome", ["completed", "review_requested", "changes_requested"])
+def test_terminal_outcome_blocker_metadata_is_not_assertion(kanban_home, outcome):
+    assert ksb.run_effect(outcome, {"blocker_id": BID}) == ("clear", None)
+    with kbc.connect_closing() as conn:
+        tid = _blocked_behind(conn, "implementation")
+        _scope(conn, tid)
+        _age_runs(conn, 60)
+        before = ksb.blocker_states(conn)[BID]
+        assert kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid)
+        _route_run(conn, tid, "anthropic")
+        with kb.write_txn(conn):
+            kb._end_run(conn, tid, outcome=outcome, summary="finished work",
+                        metadata={"blocker_id": BID})
+            conn.execute("UPDATE tasks SET status=? WHERE id=?",
+                         ("done" if outcome == "completed" else "review", tid))
+        after = ksb.blocker_states(conn)[BID]
+        assert (after.asserted_at, after.reason, after.blocker_provider) == (
+            before.asserted_at, before.reason, "anthropic")
+        assert after.cleared_by is not None and not after.is_open
+
+
+@pytest.mark.parametrize("status", ["blocked", "scheduled", "ready", "running"])
+def test_live_owner_wall_stays_open_and_renders(kanban_home, scoped_routing, status):
+    with kbc.connect_closing() as conn:
+        tid = _blocked_behind(conn, "live owner")
+        _scope(conn, tid)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, tid))
+        viewer = kb.create_task(conn, title="review", assignee="default",
+                                model_override="claude-opus-4", provider_override="anthropic")
+        st = ksb.blocker_states(conn)[BID]
+        assert st.is_open and set(st.behind) == {tid}
+        assert BID in ksb.render_blocker_context(conn, viewer)
+        assert "applicable to current route" in ksb.render_blocker_context(conn, viewer)
+
+
 def test_scoped_next_lane_and_context(kanban_home, scoped_routing):
     with kbc.connect_closing() as conn:
         tid = _blocked_behind(conn, "scoped")
@@ -288,7 +362,8 @@ def test_admitted_route_decides_clear_evidence(kanban_home, spawns, profile_mode
         assert (tid in st.probe_starts) is clears
         assert kb.complete_task(conn, tid, result="done")
         st = ksb.blocker_states(conn)[WALL]
-        assert st.is_open is (not clears)
+        assert (st.cleared_by is not None) is clears
+        assert not st.is_open  # no live card remains, independently of clear evidence
 
 
 @pytest.mark.parametrize("order", ["unscoped_first", "scoped_first"])

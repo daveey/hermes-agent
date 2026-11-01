@@ -6,7 +6,8 @@ pipeline down) ends its run with ``kanban_block(..., blocker_id="<slug>")`` or
 (``blocker_id``); nothing else is stored, so the blocker's state is derived from run history:
 
 * a card is **behind** blocker X while its latest run that said anything about X carries X;
-* X was **asserted** at the newest ``ended_at`` of any run carrying X;
+* X was **asserted** at the newest ``ended_at`` of an asserting run carrying X;
+  completed/handed-off runs never assert, even if their metadata carries X;
 * X was **cleared** only on evidence that the wall is gone, at the newest of:
   - the ``ended_at`` of a run that followed an X-run on the same card and completed or handed
     off (``CLEAR_OUTCOMES``);
@@ -16,7 +17,8 @@ pipeline down) ends its run with ``kanban_block(..., blocker_id="<slug>")`` or
     hit another wall);
   - a ``condition_met`` event (the card's wake_check exited 0) on a card behind X, when the park
     that set that wake_check carried X (a probe set by a park without the id may test anything);
-* X is **open** while asserted > cleared.
+* X is **open** while asserted > cleared and at least one live card is behind it.
+  Done/archived cards cannot keep a wall open; a later encounter asserts it again.
 
 A re-park WITHOUT the id (``blocked``/``scheduled``/``continued`` with no ``clear_blocker``) says
 nothing about X: the card stays behind X and X stays open. It used to count as a clear, so a
@@ -75,7 +77,7 @@ NEUTRAL_OUTCOMES = frozenset({
 })
 # Only blockers asserted this recently are considered (bounds the scan on old boards).
 _LOOKBACK_SECONDS = 14 * 86400
-# A run without the id that ended this way is evidence the wall is gone: the card finished,
+# A run that ended this way is evidence the wall is gone: the card finished,
 # or handed off to review / back from review.
 CLEAR_OUTCOMES = frozenset({"completed", "review_requested", "changes_requested"})
 # Run metadata / tool arg: the caller says the card's shared blocker is gone.
@@ -90,10 +92,12 @@ def run_effect(outcome: Optional[str], metadata) -> tuple[str, Optional[str]]:
     from hermes_cli import kanban_db as kb
 
     meta = kb._json_dict(metadata)
+    if (outcome or "") in CLEAR_OUTCOMES:
+        return "clear", None
     bid = normalize_blocker_id(meta.get("blocker_id"))
     if bid is not None:
         return "assert", bid
-    if meta.get(CLEAR_FLAG) is True or (outcome or "") in CLEAR_OUTCOMES:
+    if meta.get(CLEAR_FLAG) is True:
         return "clear", None
     return "pass", None
 
@@ -144,11 +148,7 @@ class BlockerState:
 
     @property
     def is_open(self) -> bool:
-        return self.asserted_at > self.cleared_at
-
-
-def _meta_blocker(kb, metadata) -> Optional[str]:
-    return normalize_blocker_id(kb._json_dict(metadata).get("blocker_id"))
+        return bool(self.behind) and self.asserted_at > self.cleared_at
 
 
 def _optional_text(value) -> Optional[str]:
@@ -282,7 +282,7 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> di
 
     now = int(time.time()) if now is None else int(now)
     asserting = conn.execute(
-        "SELECT id, task_id, ended_at, metadata, summary FROM task_runs "
+        "SELECT id, task_id, ended_at, outcome, metadata, summary FROM task_runs "
         "WHERE ended_at IS NOT NULL AND ended_at >= ? AND metadata LIKE '%\"blocker_id\"%' "
         "ORDER BY id",
         (now - _LOOKBACK_SECONDS,),
@@ -291,8 +291,8 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None) -> di
     scopes: dict[str, set[Optional[str]]] = {}
     task_ids: set[str] = set()
     for row in asserting:
-        bid = _meta_blocker(kb, row["metadata"])
-        if bid is None:
+        effect, bid = run_effect(row["outcome"], row["metadata"])
+        if effect != "assert" or bid is None:
             continue
         st = states.setdefault(bid, BlockerState(bid))
         ended = kb._to_epoch(row["ended_at"]) or 0
