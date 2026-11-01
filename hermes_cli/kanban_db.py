@@ -2087,9 +2087,11 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     from hermes_cli.kanban_block_routing import has_sticky_block
+    from hermes_cli.kanban_wake_check import foreign_ids
     promoted = 0
     remote = _sync.has_remote_parents(conn)
     with write_txn(conn):
+        copies = foreign_ids(conn)
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries "
             "FROM tasks WHERE status IN ('todo', 'blocked') OR ("
@@ -2100,6 +2102,11 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
+            # The home gateway owns readiness and missing-parent maintenance.
+            # A retained worker copy may still claim ready work, but must not
+            # publish a second promotion or expire the owner's missing streak.
+            if task_id in copies:
+                continue
             cur_status = row["status"]
             if cur_status in ("blocked", "triage") and has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
