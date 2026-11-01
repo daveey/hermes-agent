@@ -64,9 +64,11 @@ def _classify(op, before, evidence, parent_evidence):
         if (remote.get("uid") != op["row_uid"] or not isinstance(version, int)
                 or version < (op.get("base_version") or 0)):
             return "unresolved", "authoritative identity/version does not cover rejected write"
-        if op["table_name"] == "tasks" and local.get("sync_version") != version:
-            return "unresolved", "local task has not settled at authoritative version"
-        if local.get("current_run_id") is not None and before["fields"].get("current_run_uid") is None:
+        if op["table_name"] in ("tasks", "task_runs") and local.get("sync_version") != version:
+            return "unresolved", "local row has not settled at authoritative version"
+        if any(table == op["table_name"] and local.get(column) is not None
+               and before["fields"].get(wire) is None
+               for (table, column), wire in sync.REF_COLUMNS.items()):
             return "unresolved", "local run reference cannot be translated"
         if fields and all(k in before["fields"] and k in remote and before["fields"][k] == remote[k] for k in fields):
             return "superseded", "authoritative row equals current local values for every rejected wire field"
