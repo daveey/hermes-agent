@@ -8,6 +8,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as dispatch
 from hermes_cli import kanban_db_dispatch_pr_state as prs
+from hermes_cli import kanban_db_sync as sync
 from tests.hermes_cli.kanban_guard_helpers import worker_comment
 from tests.hermes_cli.test_kanban_dependency_review import HEAD, PR, finish_reviews, parked
 
@@ -121,14 +122,21 @@ def test_ambiguous_numeric_reference_does_not_cover_two_repositories(board):
     assert _named_prs({"pr": 10}, {PR, "https://github.com/other/repo/pull/10"}) == set()
 
 
-def test_missing_nonlocal_parent_can_be_checkpointed(board):
+def test_synced_nonlocal_parent_can_be_checkpointed(board):
+    # A nonlocal parent is one the board sync resolved from another partition. A parent with no
+    # state anywhere (a dangling edge) is refused by block_task; test_kanban_missing_parent_refusal
+    # covers that path.
     task = kb.create_task(board, title="implementation", assignee="dev")
     kb.claim_task(board, task)
     run = kb.get_task(board, task).current_run_id
     worker_comment(board, task, "dev", PR)
+    board.executescript(sync.SYNC_SCHEMA_SQL)
     with kb.write_txn(board):
         board.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", ("t_remote_missing", task))
-    assert kb.parent_states(board, task) == [("t_remote_missing", None)]
+        board.execute("INSERT INTO kanban_sync_remote_parents (parent_id, status, refreshed_at) "
+                      "VALUES ('t_remote_missing', 'running', 1)")
+    assert kb.get_task(board, "t_remote_missing") is None
+    assert kb.parent_states(board, task) == [("t_remote_missing", "running")]
     assert kb.block_task(board, task, kind="dependency", reason="remote review", expected_run_id=run)
     row = board.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'dependency_wait'", (task,)).fetchone()
     assert json.loads(row["payload"])["review_checkpoint"]["awaited"] == ["t_remote_missing"]
