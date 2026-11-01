@@ -583,6 +583,7 @@ class RoundResult:
     push: Optional[PushResult] = None
     error: Optional[str] = None
     repaired: dict[str, list[str]] = field(default_factory=dict)  # cards re-pushed by repair_divergence
+    rejection_resolutions: list[dict] = field(default_factory=list)
 
 
 def open_shadow(slug: str, gateway: str) -> sqlite3.Connection:
@@ -656,7 +657,7 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
                 heal_clobbered_completions(live)
         result.push = push(live, hub, slug, gateway, primary=mode == "primary")
         from hermes_cli.kanban_sync_rejections import resolve_rejections
-        resolve_rejections(live, hub, slug)
+        result.rejection_resolutions = resolve_rejections(live, hub, slug)
         return result
     finally:
         live.close()

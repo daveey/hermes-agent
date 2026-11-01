@@ -50,7 +50,9 @@ def test_normal_sync_retires_superseded_keeps_audit_and_is_idempotent(live, svc,
     reject_status(live, svc)
     audits = [tuple(r) for r in live.execute("SELECT * FROM task_events WHERE kind='sync_rejected'")]
     assert audits
-    client.sync_board(BOARD, kanban_home / "kanban.db", svc.hub(ME), ME)
+    result = client.sync_board(BOARD, kanban_home / "kanban.db", svc.hub(ME), ME)
+    assert result.rejection_resolutions[0]["classification"] == "superseded"
+    assert result.rejection_resolutions[0]["action"] == "retired"
     assert client.status(live)["rejected"] == 0
     assert [tuple(r) for r in live.execute("SELECT * FROM task_events WHERE kind='sync_rejected'")] == audits
     client.sync_board(BOARD, kanban_home / "kanban.db", svc.hub(ME), ME)
