@@ -67,19 +67,28 @@ def _spawn_fake_gateway(script) -> subprocess.Popen:
 
 
 class _FakeSupervisor:
-    """A KeepAlive manager this test owns: relaunches the gateway once its first instance exits."""
+    """A KeepAlive manager this test owns: relaunches the gateway once its first instance exits.
+
+    ``close`` stops relaunching before it kills anything: killing ``first`` wakes the watcher, and
+    without the closed flag (checked under the same lock the relaunch holds) it spawned ``second``
+    after teardown had already passed it, leaking a lookalike gateway past the test.
+    """
 
     def __init__(self, script, relaunch: bool = True):
         self._script = script
+        self._lock = threading.Lock()
+        self._closed = False
         self.first = _spawn_fake_gateway(script)
         self.second: subprocess.Popen | None = None
         self._relaunch = relaunch
-        threading.Thread(target=self._watch, daemon=True).start()
+        self._watcher = threading.Thread(target=self._watch, daemon=True)
+        self._watcher.start()
 
     def _watch(self):
         self.first.wait()
-        if self._relaunch:
-            self.second = _spawn_fake_gateway(self._script)
+        with self._lock:
+            if self._relaunch and not self._closed:
+                self.second = _spawn_fake_gateway(self._script)
 
     def running_pid(self, *a, **k):
         if self.first.poll() is None:
@@ -87,9 +96,15 @@ class _FakeSupervisor:
         return self.second.pid if self.second is not None else None
 
     def close(self):
+        with self._lock:  # waits out an in-flight relaunch, then forbids any later one
+            self._closed = True
         for proc in (self.first, self.second):
             if proc is not None and proc.poll() is None:
                 proc.kill()
+        self._watcher.join(timeout=10)
+        for proc in (self.first, self.second):
+            if proc is not None:
+                proc.wait(timeout=10)
 
 
 @pytest.fixture
@@ -153,22 +168,19 @@ def test_detach_restart_hands_back_to_external_supervisor_despite_failing_instal
     assert supervisor.second is not None
     assert f"relaunched by its supervisor (PID {supervisor.second.pid})" in out
     assert "Gateway service restart failed" not in out
-    assert calls["service"] == [], "a service definition that does not own the gateway must not be dispatched"
+    assert calls["service"] == [], "an externally-supervised gateway is handed back, never service-dispatched"
     assert not (calls["stopped"] or calls["started"] or calls["replacement_started"])
 
 
-def test_installed_service_that_owns_the_gateway_is_still_dispatched(scenario, monkeypatch, capsys):
+def test_installed_service_owner_also_gets_graceful_handback(scenario, monkeypatch, capsys):
     supervisor, calls = scenario
-    # The canonical plist itself runs `gateway run --external-supervisor` (through a stderr launcher
-    # whose pid launchd reports). When launchd's job pid is the gateway or its ancestor the service
-    # path (plist refresh + kickstart) stays authoritative, and its failure is still exit 1.
+    # Even the canonical supervisor must drain gracefully, not kickstart its live worker.
     monkeypatch.setattr(gw, "_launchd_print_service_pid", lambda domain, label: (True, os.getpid()))
-    with pytest.raises(SystemExit) as exc:
-        gw.gateway_command(_parse("restart", "--detach"))
-    assert exc.value.code == 1
-    assert calls["service"] == [("launchd", "restart")]
-    assert supervisor.first.poll() is None, "no SIGUSR1 handback once the owning service was asked"
-    assert "Gateway service restart failed" in capsys.readouterr().out
+    gw.gateway_command(_parse("restart", "--detach"))
+    assert calls["service"] == []
+    assert supervisor.first.returncode == 75
+    assert supervisor.second is not None
+    assert "relaunched by its supervisor" in capsys.readouterr().out
 
 
 def test_refusal_guards_still_run_before_the_handback(scenario, monkeypatch):
@@ -195,3 +207,21 @@ def test_supervisor_that_never_relaunches_still_fails_loudly(scenario, monkeypat
     assert supervisor.first.returncode == 75
     assert "Supervisor did not relaunch the gateway" in capsys.readouterr().out
     assert not (calls["stopped"] or calls["started"] or calls["replacement_started"])
+
+
+def test_fake_supervisor_close_never_relaunches_after_teardown(tmp_path):
+    # Teardown kills `first` while it still runs, which wakes the relaunch watcher. A relaunch
+    # after close() returned would leak a `gateway run --external-supervisor` lookalike.
+    script = tmp_path / "bin" / "hermes"
+    script.parent.mkdir()
+    script.write_text(_FAKE_GATEWAY_CODE, encoding="utf-8")
+    supervisor = _FakeSupervisor(script)
+    first_pid = supervisor.first.pid
+    supervisor.close()
+    time.sleep(0.5)  # longer than a relaunch takes to start a second child
+    assert supervisor.second is None, "close() must stop the supervisor before it kills the gateway"
+    assert supervisor.first.returncode is not None
+    assert not supervisor._watcher.is_alive()
+    assert supervisor.running_pid() is None
+    with pytest.raises(ProcessLookupError):
+        os.kill(first_pid, 0)
