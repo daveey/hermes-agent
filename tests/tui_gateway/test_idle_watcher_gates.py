@@ -7,11 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.tui_gateway.test_change_watcher import watcher_home
+from tests.tui_gateway import test_change_watcher as watcher_tests
 from tests.tui_gateway.test_kanban_remote_idle_read import NOW, _insert, _replica
 from tests.tui_gateway.test_kanban_remote_arrival import CHAT, _card
 from tui_gateway import kanban_remote_notices as krn
 from tui_gateway import server
+
+watcher_home = watcher_tests.watcher_home
 
 
 @pytest.mark.parametrize("kind", ["pairing", "outbox"])
