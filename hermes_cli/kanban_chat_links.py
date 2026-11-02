@@ -95,6 +95,47 @@ def _ledger_links(board: str, gateway: str) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Released copies of the ``created`` links another gateway (the card's owner) wrote for this gateway's chats,
+    once the replica shows the card closed (``done``/``archived``). [daveey]
+
+    The owner writes them in ``kanban_creator_chats`` (``initialize_ownership`` / ``inherit_chats``) for a remote
+    origin chat. The owner's reconcile manages only its own chats' links, so nothing released them: a done card
+    whose origin ledger had no row for that chat (no ledger link with the same uid, no released shepherd sibling)
+    stayed an ``unknown`` obligation in ``replica_cards`` forever (4 hub cards on macbook chat
+    20261027_134353_5ab65c, 2026-11-01). The chat's gateway releases them by writing the same uid (the same row on
+    the Board) with ``released = 1``, as it already does for a ledger ``origin`` row. Open cards and missing card
+    rows are left alone; links ``want`` already carries keep the ledger's answer. A card reopened after the release
+    stays released for that chat: the uid is one row, so the owner's original intent is not recoverable here."""
+    from hermes_cli import kanban_sync_client as ksc
+    from hermes_cli.kanban_placement import is_placeholder_session
+    path = ksc.shadow_path(board)
+    if not path.exists():
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        try:
+            conn.row_factory = sqlite3.Row
+            marks = ",".join("?" * len(TERMINAL_STATUSES))
+            rows = [dict(r) for r in conn.execute(
+                "SELECT l.uid, l.task_id, l.chat_gateway, l.chat_profile, l.chat_session, l.kind, l.created_at "
+                "FROM task_chat_links l JOIN tasks t ON t.id = l.task_id "
+                "WHERE l.chat_gateway = ? AND l.kind = 'created' AND l.released = 0 AND l.uid IS NOT NULL "
+                f"AND t.created_on IS NOT NULL AND t.created_on != ? AND t.status IN ({marks})",
+                (gateway, gateway, *TERMINAL_STATUSES))]
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:  # an unreadable replica releases nothing this round; the next one retries
+        _log.info("kanban chat links: replica %s unreadable for owner-link releases (%s)", path, exc)
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        if r["uid"] in want or is_placeholder_session(r["chat_session"]) or _worker_shepherd(r["chat_session"], "created"):
+            continue
+        out[r["uid"]] = {**r, "released": 1, "created_at": int(r["created_at"] or time.time())}
+    return out
+
+
 def ledger_boards(gateway: str) -> set[str]:
     """Boards on which this gateway's chats have cards, per the origin-ledger projection."""
     from hermes_cli.kanban_session_activity import _remote_links
@@ -110,6 +151,7 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
     want = _local_links(conn, gateway)
     if ledger:
         want.update(_ledger_links(board, gateway))
+    want.update(_owner_written_releases(board, gateway, want))
     from hermes_cli.kanban_placement import is_placeholder_session
     rows = conn.execute("SELECT uid, released, chat_session, kind FROM task_chat_links WHERE chat_gateway = ?",
                         (gateway,)).fetchall()

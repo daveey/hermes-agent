@@ -112,6 +112,45 @@ def _replica(path, tasks, chat_links):
     conn.close()
 
 
+def test_reconcile_releases_the_owners_created_link_once_the_card_is_closed(live, kanban_home, monkeypatch):
+    """Hub cards t_01a1842a037068ba et al. (2026-11-01): the hub wrote a ``created`` link for a macbook chat
+    (kanban_creator_chats), the macbook ledger had no row for that chat+card, and no reconcile ever released it, so
+    each done card stayed an ``unknown`` obligation in replica_cards. The chat's gateway now releases it under the
+    same uid once the replica shows the card closed; open cards, ledger-held links and local cards are untouched."""
+    rep = ksc.shadow_path("default")
+    _replica(rep, [("t_done", "done", "done", OTHER), ("t_archived", "archived", "archived", OTHER),
+                   ("t_open", "open", "running", OTHER), ("t_held", "held", "done", OTHER),
+                   ("t_local", "local", "done", ME)],
+             [("t_done", ME, "s1", "created", 0), ("t_archived", ME, "s1", "created", 0),
+              ("t_open", ME, "s1", "created", 0), ("t_held", ME, "s1", "created", 0),
+              ("t_local", ME, "s1", "created", 0), ("t_done", "mini", "s9", "created", 0),
+              ("t_gone", ME, "s1", "created", 0)])  # t_gone: no card row in the replica, stays unknown
+    held = {**_ledger_row("t_held", "s1", via="origin", status="unknown"), "unfinished": True}
+    monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: [held])
+    with kbc.write_txn(live):
+        live.execute("DELETE FROM kanban_sync_outbox")
+    assert links.reconcile(live, "default", ME)["added"] == 3
+    assert _links(live) == {("t_done", "s1", "created", 1), ("t_archived", "s1", "created", 1),
+                            ("t_held", "s1", "created", 0)}
+    uid = links.link_uid("t_done", ME, "default", "s1", "created")
+    assert live.execute("SELECT released FROM task_chat_links WHERE uid = ?", (uid,)).fetchone()[0] == 1  # same row
+    pushed = {r[0] for r in live.execute("SELECT row_uid FROM kanban_sync_outbox WHERE table_name = 'task_chat_links'")}
+    assert uid in pushed  # captured, so the Board's (owner-written) row turns released
+    assert links.reconcile(live, "default", ME) == {"added": 0, "changed": 0, "released": 0, "retired": 0}
+    # Before the push comes back: the replica still lists the done cards. After it (the same uids now released),
+    # only the open card, the ledger-held one and the missing row remain this chat's.
+    before = {c["id"] for c in links.replica_cards(["s1"], ME, replicas=[("default", rep)])}
+    assert {"t_done", "t_archived"} <= before
+    conn = sqlite3.connect(rep)
+    conn.execute("UPDATE task_chat_links SET released = 1 WHERE uid IN (?, ?)",
+                 (uid, links.link_uid("t_archived", ME, "default", "s1", "created")))
+    conn.commit()
+    conn.close()
+    after = {c["id"] for c in links.replica_cards(["s1"], ME, replicas=[("default", rep)])}
+    assert after == {"t_open", "t_held", "t_gone"}
+    assert links.reconcile(live, "default", ME) == {"added": 0, "changed": 0, "released": 0, "retired": 0}
+
+
 def test_replica_answers_a_chats_open_cards_on_other_gateways(tmp_path):
     rep = tmp_path / "default.db"
     _replica(rep, [("t_open", "open card", "running", OTHER), ("t_done", "done card", "done", OTHER),
