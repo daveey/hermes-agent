@@ -25,6 +25,18 @@ class TestMCPLoopExceptionHandler:
         _mcp_loop_exception_handler(loop, context)
         loop.default_exception_handler.assert_not_called()
 
+    def test_drops_reports_while_interpreter_finalizes(self):
+        """Pending-task reports at interpreter shutdown are dropped: logging them then prints a
+        '--- Logging error ---' traceback to the worker's stderr (kanban-96867340ba)."""
+        from tools.mcp_tool_loop import _mcp_loop_exception_handler
+        loop = MagicMock()
+        context = {"message": "Task was destroyed but it is pending!", "task": MagicMock()}
+        with patch("sys.is_finalizing", return_value=True):
+            _mcp_loop_exception_handler(loop, context)
+        loop.default_exception_handler.assert_not_called()
+        _mcp_loop_exception_handler(loop, context)
+        loop.default_exception_handler.assert_called_once_with(context)
+
 
     def test_probe_cleanup_does_not_stop_loop_with_registered_servers(self):
         """Probe cleanup must not kill the shared loop used by live MCP tools."""
