@@ -27,6 +27,10 @@ from hermes_cli.kanban_host_refusal import PROOF_KEY, proven, run_error
 
 OWNER_UNAVAILABLE_OUTCOME = "owner_unavailable"
 EXIT_KIND = "owner_unavailable"
+# A worker that found its owner's service failed/masked/disabled (``kanban_owner_down``): booked the same
+# way (requeued uncounted, the same admission and streak limits), under its own outcome. [daveey]
+OWNER_DOWN_KIND = "owner_down"
+_NEUTRAL_OUTCOMES = (OWNER_UNAVAILABLE_OUTCOME, OWNER_DOWN_KIND)
 # The worker's exit code for it (``kanban_worker_client``). 69 == BSD EX_UNAVAILABLE.
 KANBAN_OWNER_UNAVAILABLE_EXIT_CODE = 69
 NEUTRAL_STREAK_LIMIT = 5
@@ -49,7 +53,7 @@ def _neutral_streak(conn: sqlite3.Connection, task_id: str) -> int:
         "SELECT outcome FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT ?",
         (task_id, NEUTRAL_STREAK_LIMIT + 1),
     ):
-        if row[0] != OWNER_UNAVAILABLE_OUTCOME:
+        if row[0] not in _NEUTRAL_OUTCOMES:
             break
         streak += 1
     return streak
@@ -102,8 +106,9 @@ def note(dead, conn, task_id, run_id) -> None:
     """Rebook a dead worker (``_DeadWorker``) that exited owner-unavailable as a neutral requeue, or
     turn it back into a plain nonzero-exit crash when the run cannot be proven turn-free. No-op for
     any other exit."""
-    if dead.kind != EXIT_KIND:
+    if dead.kind not in (EXIT_KIND, OWNER_DOWN_KIND):
         return
+    owner_down = dead.kind == OWNER_DOWN_KIND
     reason = proof = None
     if conn is None or not task_id:
         reason = "no board connection to check the admission"
@@ -125,6 +130,14 @@ def note(dead, conn, task_id, run_id) -> None:
     dead.owner_unavailable = True
     dead.event_kind = OWNER_UNAVAILABLE_OUTCOME
     dead.event_payload["owner_unavailable"] = True
+    if owner_down:
+        dead.owner_down = True
+        dead.event_kind = OWNER_DOWN_KIND
+        dead.event_payload["owner_down"] = True
+        dead.error_text = (f"pid {dead.event_payload.get('pid')}: the profile owner's gateway service is "
+                           "failed, masked or disabled; no turn ran, requeued without counting a failure "
+                           "(the dispatcher holds the card until the owner is back)")
+        return
     if proof:
         dead.event_payload[PROOF_KEY] = proof
         dead.error_text = run_error(dead.event_payload.get("pid"), proof)

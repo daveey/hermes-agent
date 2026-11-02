@@ -27,11 +27,14 @@ class _DeadWorker:
     reboot_culprit: Optional[dict] = None  # this card's own sudo shutdown (journal line): blocked at once [daveey]
     owner_unavailable: bool = False  # the profile owner never answered the claim: no failure counted [daveey]
     owner_restart: bool = False  # the profile owner restarted under the attempt: requeued uncounted [daveey]
+    owner_down: bool = False  # the profile owner's service is failed/masked/disabled: requeued uncounted [daveey]
 
     @property
     def run_outcome(self) -> str:
         if self.host_reboot:
             return HOST_REBOOT_OUTCOME
+        if self.owner_down:
+            return "owner_down"
         if self.owner_unavailable:
             return OWNER_UNAVAILABLE_OUTCOME
         if self.owner_restart:

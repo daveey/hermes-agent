@@ -162,6 +162,13 @@ async def run(params, board_db):
         # A restart also surfaces as a refused or reset dial, a failed handshake, or an answer
         # that never came.
         except (GatewayClientError, WebSocketException, OSError, TimeoutError) as exc:
+            if _owner_down(exc, claim):
+                # [daveey] The owner's service is failed/masked/disabled (an operator's act, not a blip):
+                # redialing cannot help and the card did nothing wrong. Exit ``KANBAN_OWNER_DOWN_EXIT_CODE``
+                # at once; the sweep requeues it uncounted and the dispatcher holds the card
+                # (``kanban_owner_down``). t_01a19b8ff5c2ddc9 was booked crashed twice for this.
+                exc.owner_down = True
+                raise
             host_refusal = _host_refusal(exc, claim)
             if not (host_refusal or _restartable(exc)):
                 raise
@@ -204,6 +211,14 @@ def _restartable(exc):
     if isinstance(exc, GatewayUnavailableError):
         return exc.state in _TRANSIENT_OWNER_STATES or exc.reason_code in _RESTART_CONTROL_REASONS
     return True
+
+
+def _owner_down(exc, claim):
+    """True for a persistent pre-admission service state (``kanban_owner_down.PERSISTENT_CODES``). [daveey]"""
+    from hermes_cli.gateway_client import GatewayUnavailableError
+    from hermes_cli.kanban_owner_down import persistent
+    return (claim.admission_id is None and isinstance(exc, GatewayUnavailableError)
+            and persistent(exc.reason_code))
 
 
 def _host_refusal(exc, claim):
@@ -327,7 +342,10 @@ def _submit():
         print(line, file=sys.stderr)
         rc = 1
         proof = None
-        if getattr(exc, 'owner_unavailable', False):
+        if getattr(exc, 'owner_down', False):
+            from hermes_cli.kanban_owner_down import KANBAN_OWNER_DOWN_EXIT_CODE
+            rc = KANBAN_OWNER_DOWN_EXIT_CODE
+        elif getattr(exc, 'owner_unavailable', False):
             from hermes_cli.kanban_owner_unavailable import KANBAN_OWNER_UNAVAILABLE_EXIT_CODE
             from hermes_cli.kanban_host_refusal import preadmission_proof
             rc = KANBAN_OWNER_UNAVAILABLE_EXIT_CODE
