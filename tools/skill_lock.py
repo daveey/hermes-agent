@@ -438,4 +438,10 @@ def command_refusal(command: str, cwd: str) -> str | None:
     locked = locked_skill_dirs()
     if not locked:
         return None
-    return _command_refusal(command, cwd or os.getcwd(), locked, _record_path())
+    from agent.runtime_cwd import process_cwd
+
+    cwd = cwd or process_cwd()
+    if not cwd:
+        # Without a base, relative targets cannot be checked against the user's locks.
+        return "Cannot check skill locks: working directory is unavailable. Supply an explicit workdir."
+    return _command_refusal(command, cwd, locked, _record_path())
