@@ -411,7 +411,8 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     crash/reclaim/timeout. Operator-only links or synthetic unclaimed runs do not count;
     the next claim consumes the handoff. Same-second dependency parks stay guarded.
     This does not change the separate review-checkpoint exception below. So does
-    a completed exact-head review of the checkpointed PRs (repair metadata, or an approval
+    a completed exact-head review of the checkpointed PRs (repair metadata, including
+    absent/unrecognised verdicts, or an approval
     whose full head is ``head``/``reviewed_sha``): a later comment that repeats those PRs
     does not invalidate it. A
     crash/reclaim is not a handoff, so the worker that opened the PR is still not re-spawned

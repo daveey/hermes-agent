@@ -3,7 +3,8 @@
 Neither a promotion nor comment prose is permission to retry an implementation.
 Only an authenticated park can capture the PRs and dependency edges being awaited.
 A completed review then authorizes one continuation of those same PRs: a repair
-when it records ``changes_required`` with ``reviewed_sha``/``head``, or a landing
+when it records changes or an absent/unrecognised verdict with an exact
+``reviewed_sha``/``head``, or a landing
 continuation when it records an exact-head approval. The next claim consumes it.
 A later comment that repeats a captured PR does not re-arm the hold; a new PR,
 a review naming a different PR, or a crash/reclaim does.
@@ -139,7 +140,7 @@ def _requests_changes(row, data) -> bool:
 
 
 def _reviewed_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) -> set[str]:
-    """Repair evidence: a change request at an exact head, bound to one PR.
+    """Repair evidence: changes or an unknown verdict at an exact head, PR-bound.
 
     A named ``pr`` is the only PR covered. With none, the authenticated checkpoint
     is the binding, unless the summary names ``PR #N`` that matches none of it.
@@ -150,7 +151,11 @@ def _reviewed_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) 
     if row is None:
         return set()
     data = kb._json_dict(row["metadata"])
-    if not _exact_head(data) or not _requests_changes(row, data):
+    verdict = data.get("verdict")
+    approval = isinstance(verdict, str) and verdict.strip().lower() in _APPROVALS
+    # Respawn is not merge approval. An unrecognised/absent verdict still hands
+    # findings back to the parked owner; keep explicit approvals on their all-parent path.
+    if not _exact_head(data) or (approval and not _requests_changes(row, data)):
         return set()
     named = _named_prs(data, captured)
     if named is not None:
