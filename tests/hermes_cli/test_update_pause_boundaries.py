@@ -43,6 +43,9 @@ def cell(tmp_path):
             from pathlib import Path
             root = Path(sys.argv[1])
             spec = importlib.util.spec_from_file_location("hermes_cli.update_pause_record", root / "hermes_cli/update_pause_record.py")
+            def put(path, text):  # atomic: a waiter never sees the file created but still empty
+                path = Path(path); tmp = path.with_name(path.name + ".tmp")
+                tmp.write_text(text, encoding="utf-8"); os.replace(tmp, path)
             r = importlib.util.module_from_spec(spec)
             sys.modules[spec.name] = r
             spec.loader.exec_module(r)
@@ -71,10 +74,10 @@ def test_consumption_checkpoints_debt_before_unlink_and_producer_death(cell, cla
     base, home, launch = cell
     consumer = launch('''
         from gateway.status import consume_planned_stop_marker_for_self
-        Path(sys.argv[2]).write_text(str(os.getpid()), encoding="utf-8")
+        put(sys.argv[2], str(os.getpid()))
         while not Path(sys.argv[3]).exists(): time.sleep(.01)
         accepted = consume_planned_stop_marker_for_self()
-        Path(sys.argv[4]).write_text(json.dumps(accepted), encoding="utf-8")
+        put(sys.argv[4], json.dumps(accepted))
         while True: time.sleep(.05)
     ''', base / "ready", base / "consume", base / "consumed")
     _wait(base / "ready", consumer)
