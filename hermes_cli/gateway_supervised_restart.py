@@ -49,6 +49,40 @@ def gateway_declares_external_supervisor(pid: int, home: Path | None = None) -> 
     return argv_declares_external_supervisor(argv)
 
 
+def installed_service_owns_gateway(kind: str | None, pid: int, system: bool = False) -> bool:
+    """[daveey] True when the installed ``kind`` service's live job IS ``pid`` or one of its ancestors.
+
+    ``_installed_service_kind_for`` only proves the canonical plist/unit FILE exists. A gateway run
+    by a custom launchd agent / unit (``gateway run --external-supervisor``) next to a leftover or
+    never-loaded canonical definition is owned by its own supervisor, and dispatching the restart to
+    the canonical service fails (or bootstraps a second, competing supervisor). The canonical plist
+    starts the gateway through a stderr launcher, so its job pid may be the gateway's parent: walk
+    the ancestry. Only a positive match counts; an unreadable job (launchctl/systemctl error or
+    timeout) is not proof of ownership. Kinds other than launchd/systemd keep the service path.
+    """
+    if kind not in ("launchd", "systemd"):
+        return True
+    from hermes_cli import gateway as gw
+
+    try:
+        if kind == "launchd":
+            service_pid = gw._launchd_print_service_pid(gw._launchd_domain(), gw.get_launchd_label())[1]
+        else:
+            service_pid = gw._systemd_main_pid(system=system)
+    except Exception:
+        return False
+    if not service_pid or service_pid <= 1:
+        return False
+    current: int | None = pid
+    for _ in range(8):  # gateway → launcher → job; bounded against pid-reuse cycles
+        if current is None or current <= 1:
+            return False
+        if current == service_pid:
+            return True
+        current = gw._get_parent_pid(current)
+    return False
+
+
 def _wait_for_supervised_gateway_replacement(
     old_pid: int, timeout: float | None = None, *, poll_interval: float = 0.5
 ) -> int | None:

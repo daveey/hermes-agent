@@ -5478,6 +5478,20 @@ def _cmd_restart(args):
     # The Windows restart path handles both registered installs and detached restarts.
     kind = _installed_service_kind_for(is_windows)
     service_configured = kind is not None and (kind != "windows" or _gw_windows().is_installed())
+    from gateway.status import get_running_pid
+    from hermes_cli.gateway_supervised_restart import (
+        gateway_declares_external_supervisor, installed_service_owns_gateway, refuse_restart_of_service_managed_gateway,
+        restart_externally_supervised_gateway, start_restart_replacement,
+    )
+    # [daveey] A canonical plist/unit on disk is not proof it runs THIS gateway: a custom agent's
+    # `gateway run --external-supervisor` next to a stale or unloaded definition restarts by exiting
+    # back to its own supervisor. Dispatching to the file-only service first failed and exited 1
+    # ("Gateway service restart failed") before the handback below was ever reached.
+    supervised_pid = get_running_pid() if kind is not None else None
+    if (supervised_pid and gateway_declares_external_supervisor(supervised_pid)
+            and not installed_service_owns_gateway(kind, supervised_pid, system)):
+        restart_externally_supervised_gateway(supervised_pid)
+        return
     if kind is not None:
         swallow = (RuntimeError, OSError) if kind == "windows" else ()
         try:
@@ -5512,11 +5526,6 @@ def _cmd_restart(args):
     # A gateway that declares an external supervisor (custom launchd agent / unit running
     # `gateway run --external-supervisor`) restarts by exiting back to it: the stop + foreground
     # run below would stamp this CLI's PID as the gateway and wedge every respawn (#110637).
-    from gateway.status import get_running_pid
-    from hermes_cli.gateway_supervised_restart import (
-        gateway_declares_external_supervisor, refuse_restart_of_service_managed_gateway,
-        restart_externally_supervised_gateway, start_restart_replacement,
-    )
     supervised_pid = get_running_pid()
     if supervised_pid and gateway_declares_external_supervisor(supervised_pid):
         restart_externally_supervised_gateway(supervised_pid)
