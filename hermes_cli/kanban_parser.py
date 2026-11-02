@@ -623,6 +623,9 @@ _SPECS = [
         _cmd("links", help="Reconcile this gateway's chat links (which chats each card belongs to) now"),
         _cmd("links-diff", [_json_flag()],
              help="Compare chat links from the origin ledger with the synced links in the replicas (exit 1 if not clean)"),
+        _cmd("machine-links", [_json_flag(), _arg("--release", action="store_true",
+                                                  help="Release them now (default: dry run)")],
+             help="Unreleased chat links to this gateway's worker/cron/one-shot/subagent sessions (dry run)"),
         _cmd("reconcile", [_json_flag()],
              help="After the board file lost rows (a recovery): upload rows the service lacks, restore this "
                   "gateway's rows the file lost from the service snapshot, then diff (exit 1 if not clean)"),

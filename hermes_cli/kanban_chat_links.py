@@ -41,37 +41,46 @@ def _worker_shepherd(session: Any, kind: str) -> bool:
 
 
 def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, Any]]:
-    """Links from this board file's own data: creating chats and ``tui`` shepherd subscriptions."""
+    """Links from this board file's own data: creating chats and ``tui`` shepherd subscriptions.
+
+    A machine session of this gateway (``is_machine_session``: a worker/cron/one-shot/subagent transcript) is no
+    chat, so it is never wanted: :func:`reconcile` releases a link to it and never writes one back. [daveey]"""
+    from hermes_cli.kanban_db_notify import machine_sessions
     from hermes_cli.kanban_session_activity import _counted_sub_clause
     now = int(time.time())
     out: dict[str, dict[str, Any]] = {}
+    has_links = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone())
+    created = [dict(r) for r in conn.execute(
+        "SELECT l.* FROM task_chat_links l WHERE l.chat_gateway=? AND l.kind='created' "
+        "AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=l.task_id "
+        "AND e.kind='creator_chats_resolved')", (gateway,))] if has_links else []
+    sessions = [tuple(r) for r in conn.execute(
+        "SELECT id, session_id, created_at FROM tasks WHERE session_id IS NOT NULL AND session_id != ''")]
+    try:
+        shepherds = [tuple(r) for r in conn.execute(
+            f"SELECT s.task_id, s.chat_id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
+            f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)}")]
+    except sqlite3.Error:  # board predates notify subscriptions
+        shepherds = []
+    machine = machine_sessions(gateway, [r["chat_session"] for r in created] + [r[1] for r in sessions]
+                               + [r[1] for r in shepherds], local_gateway=gateway)
 
     def add(task_id: str, session: str, kind: str, created_at: Any) -> None:
         from hermes_cli.kanban_placement import is_placeholder_session
-        if is_placeholder_session(session) or _worker_shepherd(session, kind):
+        if is_placeholder_session(session) or _worker_shepherd(session, kind) or session in machine:
             return
         uid = link_uid(task_id, gateway, None, session, kind)
         out[uid] = {"uid": uid, "task_id": task_id, "chat_gateway": gateway, "chat_profile": None,
                     "chat_session": session, "kind": kind, "released": 0, "created_at": int(created_at or now)}
 
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone():
-        for row in conn.execute(
-                "SELECT l.* FROM task_chat_links l WHERE l.chat_gateway=? AND l.kind='created' "
-                "AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=l.task_id "
-                "AND e.kind='creator_chats_resolved')", (gateway,)):
-            if not _worker_shepherd(row["chat_session"], row["kind"]):
-                out[row["uid"]] = dict(row)
-    for task_id, session, created_at in conn.execute(
-            "SELECT id, session_id, created_at FROM tasks WHERE session_id IS NOT NULL AND session_id != ''"):
+    for row in created:
+        if not _worker_shepherd(row["chat_session"], row["kind"]) and row["chat_session"] not in machine:
+            out[row["uid"]] = row
+    for task_id, session, created_at in sessions:
         add(task_id, session, "created", created_at)
-    try:
-        for task_id, session in conn.execute(
-                f"SELECT s.task_id, s.chat_id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
-                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)}"):
-            if link_uid(task_id, gateway, None, session, "created") not in out:
-                add(task_id, session, "shepherd", None)
-    except sqlite3.Error:  # board predates notify subscriptions
-        pass
+    for task_id, session in shepherds:
+        if link_uid(task_id, gateway, None, session, "created") not in out:
+            add(task_id, session, "shepherd", None)
     return out
 
 
@@ -86,6 +95,9 @@ def _ledger_links(board: str, gateway: str) -> dict[str, dict[str, Any]]:
         from hermes_cli.kanban_placement import is_placeholder_session
         kind = "created" if card.get("via") == "origin" else "shepherd"
         if is_placeholder_session(card["session"]) or _worker_shepherd(card["session"], kind):
+            continue
+        from hermes_cli.kanban_db_notify import is_machine_session
+        if is_machine_session(gateway, card["session"], local_gateway=gateway):
             continue
         profile = card.get("origin_profile")
         uid = link_uid(card["id"], gateway, profile, card["session"], kind)
@@ -106,8 +118,13 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
     20261027_134353_5ab65c, 2026-11-01). The chat's gateway releases them by writing the same uid (the same row on
     the Board) with ``released = 1``, as it already does for a ledger ``origin`` row. Open cards and missing card
     rows are left alone; links ``want`` already carries keep the ledger's answer. A card reopened after the release
-    stays released for that chat: the uid is one row, so the owner's original intent is not recoverable here."""
+    stays released for that chat: the uid is one row, so the owner's original intent is not recoverable here.
+
+    A link to a machine session of this gateway (``is_machine_session``) is released whatever the card's status:
+    no human reads that session, so it owns nothing even on an open card (hub t_01a19864fc42f5b2 was owned by
+    MacBook worker transcript 20261029_180356_84db5f, 2026-11-01)."""
     from hermes_cli import kanban_sync_client as ksc
+    from hermes_cli.kanban_db_notify import machine_sessions
     from hermes_cli.kanban_lockguard import connect
     from hermes_cli.kanban_placement import is_placeholder_session
     path = ksc.shadow_path(board)
@@ -117,21 +134,23 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
         conn = connect(f"file:{path}?mode=ro", uri=True, timeout=5)
         try:
             conn.row_factory = sqlite3.Row
-            marks = ",".join("?" * len(TERMINAL_STATUSES))
             rows = [dict(r) for r in conn.execute(
-                "SELECT l.uid, l.task_id, l.chat_gateway, l.chat_profile, l.chat_session, l.kind, l.created_at "
-                "FROM task_chat_links l JOIN tasks t ON t.id = l.task_id "
+                "SELECT l.uid, l.task_id, l.chat_gateway, l.chat_profile, l.chat_session, l.kind, l.created_at, "
+                "t.status FROM task_chat_links l JOIN tasks t ON t.id = l.task_id "
                 "WHERE l.chat_gateway = ? AND l.kind = 'created' AND l.released = 0 AND l.uid IS NOT NULL "
-                f"AND t.created_on IS NOT NULL AND t.created_on != ? AND t.status IN ({marks})",
-                (gateway, gateway, *TERMINAL_STATUSES))]
+                "AND t.created_on IS NOT NULL AND t.created_on != ?",
+                (gateway, gateway))]
         finally:
             conn.close()
     except sqlite3.Error as exc:  # an unreadable replica releases nothing this round; the next one retries
         _log.info("kanban chat links: replica %s unreadable for owner-link releases (%s)", path, exc)
         return {}
+    machine = machine_sessions(gateway, [r["chat_session"] for r in rows], local_gateway=gateway)
     out: dict[str, dict[str, Any]] = {}
     for r in rows:
         if r["uid"] in want or is_placeholder_session(r["chat_session"]) or _worker_shepherd(r["chat_session"], "created"):
+            continue
+        if r.pop("status") not in TERMINAL_STATUSES and r["chat_session"] not in machine:
             continue
         out[r["uid"]] = {**r, "released": 1, "created_at": int(r["created_at"] or time.time())}
     return out
@@ -143,19 +162,63 @@ def ledger_boards(gateway: str) -> set[str]:
     return {c["board"] for c in _remote_links() if c.get("board") and c.get("origin_gateway") in (None, gateway)}
 
 
-def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: bool = True) -> dict[str, int]:
-    """Bring this gateway's links in ``conn`` (one board file) up to date. Writes go through the capture triggers,
-    so every new or changed link is pushed to the service. Returns counts of added/changed/released links."""
-    from hermes_cli.kanban_db_connect import write_txn
-    from hermes_cli.kanban_creator_chats import backfill
-    backfill(conn)
+def _plan(conn: sqlite3.Connection, board: str, gateway: str, ledger: bool) -> tuple[dict, list]:
+    """``(want, rows)``: the links this gateway wants in ``conn`` and the rows it has (read-only)."""
     want = _local_links(conn, gateway)
     if ledger:
         want.update(_ledger_links(board, gateway))
     want.update(_owner_written_releases(board, gateway, want))
+    rows = conn.execute("SELECT uid, released, chat_session, kind, task_id FROM task_chat_links "
+                        "WHERE chat_gateway = ?", (gateway,)).fetchall()
+    return want, rows
+
+
+def _machine_releases(want: dict, rows: list, gateway: str) -> list[dict[str, Any]]:
+    """The links a reconcile pass releases because their chat is a machine session of this gateway: an unreleased
+    row nothing wants any more, or an owner-written row it writes back released (``_owner_written_releases``)."""
+    from hermes_cli.kanban_db_notify import is_headless_session, machine_sessions
     from hermes_cli.kanban_placement import is_placeholder_session
-    rows = conn.execute("SELECT uid, released, chat_session, kind FROM task_chat_links WHERE chat_gateway = ?",
-                        (gateway,)).fetchall()
+    have = {r[0]: r for r in rows}
+    out = [{"uid": r[0], "task_id": r[4], "chat_session": r[2], "kind": r[3]} for r in rows
+           if not r[1] and r[0] not in want]
+    out += [{"uid": uid, "task_id": l["task_id"], "chat_session": l["chat_session"], "kind": l["kind"]}
+            for uid, l in want.items() if l["released"] and (uid not in have or not have[uid][1])]
+    out = [o for o in out if not is_placeholder_session(o["chat_session"]) and not is_headless_session(o["chat_session"])]
+    machine = machine_sessions(gateway, [o["chat_session"] for o in out], local_gateway=gateway)
+    return sorted((o for o in out if o["chat_session"] in machine), key=lambda o: o["uid"])
+
+
+def machine_links(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: bool = True) -> list[dict[str, Any]]:
+    """Dry run: the links to this gateway's machine sessions the next :func:`reconcile` of ``board`` releases."""
+    return _machine_releases(*_plan(conn, board, gateway, ledger), gateway)
+
+
+def _write_release_receipt(board: str, gateway: str, released: list[dict[str, Any]]) -> None:
+    """``~/.hermes/kanban/repairs/machine-links-<board>-<ts>.json``: the uids one pass released (audit trail)."""
+    from hermes_cli import kanban_db
+    try:
+        path = kanban_db.kanban_home() / "kanban" / "repairs" / (
+            f"machine-links-{board}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{len(released)}.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"board": board, "gateway": gateway, "released_at": int(time.time()),
+                                    "released": released}, indent=1) + "\n", encoding="utf-8")
+        _log.info("kanban chat links: %s released %d links to machine sessions (receipt %s)", board, len(released), path)
+    except OSError as exc:  # the release itself is committed; only the audit copy is lost
+        _log.warning("kanban chat links: machine-link receipt for %s not written (%s)", board, exc)
+
+
+def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: bool = True) -> dict[str, int]:
+    """Bring this gateway's links in ``conn`` (one board file) up to date. Writes go through the capture triggers,
+    so every new or changed link is pushed to the service. Returns counts of added/changed/released links.
+
+    A link to a machine session of this gateway (``kanban_db_notify.is_machine_session``) is released here, through
+    the same captured writes; each pass that releases any writes a receipt (``_write_release_receipt``). [daveey]"""
+    from hermes_cli.kanban_db_connect import write_txn
+    from hermes_cli.kanban_creator_chats import backfill
+    backfill(conn)
+    want, rows = _plan(conn, board, gateway, ledger)
+    machine = _machine_releases(want, rows, gateway)
+    from hermes_cli.kanban_placement import is_placeholder_session
     have = {r[0]: r[1] for r in rows}
     # A placement attribution id is not a chat: its link is deleted (captured, so the Board drops it too), never
     # merely released; a released one still counted in every diff and replica read. A worker transcript's
@@ -181,6 +244,8 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
             if uid not in want and not was_released:
                 conn.execute("UPDATE task_chat_links SET released = 1 WHERE uid = ?", (uid,))
                 released += 1
+    if machine:
+        _write_release_receipt(board, gateway, machine)
     return {"added": added, "changed": changed, "released": released, "retired": retired}
 
 

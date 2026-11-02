@@ -53,6 +53,81 @@ def is_headless_session(chat_id: Any) -> bool:
     return bool(_HEADLESS_SESSION.fullmatch(str(chat_id or "").rsplit("/", 1)[-1]))
 
 
+# ``sessions.source`` values of sessions no human reads: Kanban worker runs, cron runs, one-shots, subagents.
+# Older ones carry ordinary timestamp ids (``20261029_180356_84db5f``), so the id rule above misses them. [daveey]
+MACHINE_SESSION_SOURCES = frozenset({"kanban", "cron", "oneshot", "subagent"})
+_MISSING_TTL_S = 300.0
+# ``(state.db, session) -> (source, cached_at)``. A session's source never changes, so found rows stay cached;
+# a missing row is re-read after ``_MISSING_TTL_S`` (its session may be created later).
+_source_cache: dict[tuple[str, str], tuple[Optional[str], float]] = {}
+
+
+def _local_session_sources(sessions: Iterable[str]) -> dict[str, Optional[str]]:
+    """``sessions.source`` for each id in this gateway's state.db (None when missing or unreadable). Read-only."""
+    from contextlib import closing
+    from hermes_constants import get_hermes_home
+    path = str(get_hermes_home() / "state.db")
+    now = time.monotonic()
+    out: dict[str, Optional[str]] = {}
+    todo = []
+    for sid in dict.fromkeys(sessions):
+        hit = _source_cache.get((path, sid))
+        if hit is not None and (hit[0] is not None or now - hit[1] < _MISSING_TTL_S):
+            out[sid] = hit[0]
+        else:
+            todo.append(sid)
+    if not todo:
+        return out
+    found: dict[str, Optional[str]] = {}
+    readable = False
+    if Path(path).exists():
+        try:
+            uri = Path(path).as_uri() + "?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True, timeout=5)) as db:  # noqa: kanban-lockguard (state.db, not a board)
+                for i in range(0, len(todo), 500):
+                    chunk = todo[i:i + 500]
+                    found.update(db.execute(
+                        f"SELECT id, source FROM sessions WHERE id IN ({','.join('?' * len(chunk))})", chunk))
+            readable = True
+        except sqlite3.Error:
+            pass
+    for sid in todo:
+        source = found.get(sid)
+        out[sid] = str(source) if source is not None else None
+        if readable:
+            _source_cache[(path, sid)] = (out[sid], now)
+    return out
+
+
+def machine_sessions(gateway: Any, sessions: Iterable[Any], *, local_gateway: Optional[str] = None) -> set[str]:
+    """The ids among ``sessions`` (chats of ``gateway``; bare or ``<gw>/<profile>/<session>``) that are machine
+    sessions per :func:`is_machine_session`, with one state.db read for the batch."""
+    ids = {str(s or "") for s in sessions}
+    out = {s for s in ids if is_headless_session(s) or s.rsplit("/", 1)[-1].startswith("cron_")}
+    rest = {s: s.rsplit("/", 1)[-1] for s in ids - out if s}
+    if not rest or not gateway:
+        return out
+    if local_gateway is None:
+        from hermes_cli.kanban_origin import gateway_names
+        local_gateway = gateway_names()[0]
+    if not local_gateway or str(gateway) != local_gateway:
+        return out
+    sources = _local_session_sources(rest.values())
+    return out | {s for s, sid in rest.items() if sources.get(sid) in MACHINE_SESSION_SOURCES}
+
+
+def is_machine_session(gateway: Any, session: Any, *, local_gateway: Optional[str] = None) -> bool:
+    """True when ``session`` (a chat of ``gateway``) is a session no human reads, so never a chat owner:
+
+    - a headless receipt id (:func:`is_headless_session`);
+    - a cron run id (``cron_<job>_<ts>``);
+    - a session of THIS gateway whose state.db ``sessions.source`` is in :data:`MACHINE_SESSION_SOURCES`.
+
+    A missing or unknown session, or one on another gateway (its state.db is not readable here), stays human.
+    ``local_gateway`` defaults to ``kanban_origin.gateway_names()[0]``; batch callers pass it once. [daveey]"""
+    return bool(machine_sessions(gateway, (session,), local_gateway=local_gateway))
+
+
 def _sub_key(task_id: str, platform: str, chat_id: str, thread_id: Optional[str]) -> tuple:
     return (task_id, platform, chat_id, thread_id or "")
 
@@ -871,6 +946,11 @@ def _inherit_notify_subs(
     ).fetchone()
     cursor = int(row["cursor"] if row is not None else 0)
     placeholders = ",".join("?" * len(parent_ids))
+    machine = _machine_sub_chats(conn, parent_ids)
+    skip = ""
+    if machine:
+        skip = (" AND (s.platform || char(31) || s.chat_id) NOT IN ("
+                + ",".join("?" * len(machine)) + ")")
     conn.execute(
         f"""
         INSERT OR IGNORE INTO kanban_notify_subs
@@ -882,10 +962,36 @@ def _inherit_notify_subs(
                COALESCE(s.delivery_mode, 'notify'), s.delivery_metadata, ?, ?
           FROM kanban_notify_subs s
           LEFT JOIN tasks p ON p.id = s.task_id
-         WHERE s.task_id IN ({placeholders}) AND {_owning_sub_clause()}
+         WHERE s.task_id IN ({placeholders}) AND {_owning_sub_clause()}{skip}
         """,
-        (child_id, int(created_at if created_at is not None else time.time()), cursor, *parent_ids),
+        (child_id, int(created_at if created_at is not None else time.time()), cursor, *parent_ids, *machine),
     )
+
+
+def _machine_sub_chats(conn: sqlite3.Connection, parent_ids: tuple) -> list[str]:
+    """``platform\\x1fchat_id`` of the parents' ``tui``/``hub`` subs whose chat is a machine session
+    (``is_machine_session``: a worker/cron/one-shot/subagent transcript), which a child must not inherit. [daveey]"""
+    from hermes_cli.kanban_origin import OriginError, gateway_names, parse_origin
+    rows = conn.execute(
+        f"SELECT DISTINCT platform, chat_id FROM kanban_notify_subs WHERE task_id IN ({','.join('?' * len(parent_ids))})"
+        " AND platform IN ('tui', 'hub')", parent_ids).fetchall()
+    if not rows:
+        return []
+    me = gateway_names()[0]
+    by_gateway: dict[str, dict[str, str]] = {}
+    for platform, chat_id in rows:
+        gateway = me
+        if platform == "hub":
+            try:
+                gateway = parse_origin(chat_id).gateway
+            except OriginError:
+                gateway = ""
+        by_gateway.setdefault(gateway, {})[chat_id] = f"{platform}\x1f{chat_id}"
+    out = []
+    for gateway, chats in by_gateway.items():
+        hits = machine_sessions(gateway, chats, local_gateway=me)
+        out.extend(chats[c] for c in hits)
+    return out
 
 
 def _owning_sub_clause() -> str:

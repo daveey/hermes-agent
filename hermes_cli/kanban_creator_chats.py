@@ -76,10 +76,15 @@ def _chat_links(conn: sqlite3.Connection, task_id: str) -> list[dict]:
 
 
 def resolve_chats(conn: sqlite3.Connection, creator_task_id: str) -> list[dict]:
-    """Nearest unreleased human links; creator edges precede dependency parents, cycles stop."""
-    from hermes_cli.kanban_db_notify import is_headless_session
+    """Nearest unreleased human links; creator edges precede dependency parents, cycles stop.
+
+    A machine session (``is_machine_session``: a worker/cron/one-shot/subagent transcript, whatever its id
+    shape) owns nothing: its link is skipped and the walk goes on to the next level. [daveey]"""
+    from hermes_cli.kanban_db_notify import is_machine_session
+    from hermes_cli.kanban_origin import gateway_names
     from hermes_cli.kanban_placement import is_placeholder_session
 
+    me = gateway_names()[0]
     frontier, seen = [creator_task_id], set()
     for _depth in range(MAX_DEPTH):
         owners, following = {}, []
@@ -88,7 +93,8 @@ def resolve_chats(conn: sqlite3.Connection, creator_task_id: str) -> list[dict]:
                 continue
             seen.add(task_id)
             for row in _chat_links(conn, task_id):
-                if not is_headless_session(row["chat_session"]) and not is_placeholder_session(row["chat_session"]):
+                if (not is_machine_session(row["chat_gateway"], row["chat_session"], local_gateway=me)
+                        and not is_placeholder_session(row["chat_session"])):
                     key = (row["chat_gateway"], row["chat_profile"], row["chat_session"])
                     owners.setdefault(key, dict(row))
             row = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='created' "

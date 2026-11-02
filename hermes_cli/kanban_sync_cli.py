@@ -151,8 +151,38 @@ def _reconcile(args: argparse.Namespace) -> int:
     return 0 if report.get("clean") or report.get("mode") == "off" else 1
 
 
+def _machine_links(args: argparse.Namespace) -> int:
+    """Links of this gateway's machine sessions (worker/cron/one-shot/subagent transcripts) still unreleased in each
+    synced board (dry run), or, with ``--release``, release them now through the reconcile (receipt under
+    ``~/.hermes/kanban/repairs/``). [daveey]"""
+    from hermes_cli import kanban_chat_links
+    gateway = ksc.load_identity().gateway
+    boards = [(s, p) for s, p in ksc.board_paths() if not getattr(args, "board", None) or s == args.board]
+    out = {}
+    for slug, path in boards:
+        conn = kbc.connect(path)
+        try:
+            if sync.board_mode(conn) == "off":
+                continue
+            pending = kanban_chat_links.machine_links(conn, slug, gateway)
+            if args.release and pending:
+                kanban_chat_links.reconcile(conn, slug, gateway)
+                left = kanban_chat_links.machine_links(conn, slug, gateway)
+                out[slug] = {"released": len(pending) - len(left), "left": len(left), "uids": [p["uid"] for p in pending]}
+            else:
+                out[slug] = {"pending": len(pending), "uids": [p["uid"] for p in pending]}
+        finally:
+            conn.close()
+    if args.json:
+        print(json.dumps(out, indent=2))
+    else:
+        for slug, r in out.items():
+            print(f"{slug}: " + " ".join(f"{k}={v}" for k, v in r.items() if k != "uids"))
+    return 0
+
+
 _ACTIONS = {"status": _status, "attach": _attach, "import": _import, "diff": _diff, "run": _run,
-            "links": _links, "links-diff": _links_diff, "reconcile": _reconcile}
+            "links": _links, "links-diff": _links_diff, "reconcile": _reconcile, "machine-links": _machine_links}
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
