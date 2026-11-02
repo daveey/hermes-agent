@@ -25,7 +25,8 @@ _IS_WINDOWS = platform.system() == "Windows"
 # (not merely "not Windows") so macOS and other POSIX platforms never touch systemd.
 # See #70716.
 _IS_LINUX = platform.system() == "Linux"
-from tools.environments.local import _append_dropped_path_entries, _find_shell, _resolve_safe_cwd, _sanitize_subprocess_env, _terminal_env, process_cwd
+from tools.process_registry_bg_shell import bg_command_env, bg_login_argv
+from tools.environments.local import _append_dropped_path_entries, _resolve_safe_cwd, _sanitize_subprocess_env, _terminal_env, process_cwd
 from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import MISSING, dataclass, field
 from typing import Any, Dict, List, Literal, NamedTuple, Optional
@@ -1116,11 +1117,10 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
         return tempfile.gettempdir()
 
     def _scope_argv(self, session: ProcessSession, safe_command: str, unit_suffix: str, label: str) -> list[str]:
-        """Login-shell argv for *safe_command* (parity with LocalEnvironment: rc files
-        sourced, user tools on PATH), wrapped in a transient systemd scope when we are
-        the supervised gateway (own cgroup: an OOM kills only the worker, not the
-        gateway and its messaging control plane)."""
-        argv = [_find_shell(), "-lic", f"set +m; {safe_command}"]
+        """Login-shell argv (rc files sourced, user tools on PATH, then the foreground's bash runs
+        the command), wrapped in a transient systemd scope when we are the supervised gateway
+        (own cgroup: an OOM kills only the worker, not the gateway and its messaging control plane)."""
+        argv = bg_login_argv(safe_command)
         # This applies to both pipe mode and the PTY path above. See #70716.
         in_supervised_gateway = _IS_LINUX and _is_supervised_gateway_process()
         if in_supervised_gateway and _systemd_run_user_scope_available():
@@ -1169,7 +1169,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
         else:
             from ptyprocess import PtyProcess as _PtyProcessCls
         pty_argv = self._scope_argv(session, safe_command, session.id, "PTY")
-        pty_env = self._spawn_env(env_vars)
+        pty_env = bg_command_env(self._spawn_env(env_vars), safe_command)
         if session.systemd_unit:
             pty_env = systemd_user_bus_env(pty_env)
         # A PTY is a real TTY, so pager-happy tools (git log/diff, man) WILL page and
@@ -1223,7 +1223,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
         unit_suffix = f"{session.id}-pipe-fallback" if pty_scope_attempted else session.id
         spawn_argv = self._scope_argv(session, record_exit_command(log, safe_command) if log else safe_command,
                                       unit_suffix, "Local")
-        spawn_env = self._spawn_env(env_vars)
+        spawn_env = bg_command_env(self._spawn_env(env_vars), record_exit_command(log, safe_command) if log else safe_command)
         if session.systemd_unit:
             spawn_env = systemd_user_bus_env(spawn_env)
         # start_new_session is REQUIRED with systemd-run --scope too: the scope does not

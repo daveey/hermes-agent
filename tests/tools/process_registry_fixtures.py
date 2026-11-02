@@ -46,3 +46,13 @@ os._exit(0)
         proc.wait(timeout=60)
         proc.stdin.close()
         proc.stdout.close()
+
+
+def bg_script():
+    """Login-shell script spawn_local passes: init, then exec the foreground bash."""
+    import shlex
+
+    from tools.process_registry_bg_shell import _find_bash
+
+    return ('set +m; _hc=$HERMES_BG_COMMAND; unset HERMES_BG_COMMAND; '
+            f'exec {shlex.quote(_find_bash())} -c "$_hc"')

@@ -212,6 +212,7 @@ def test_submit_stdin_keeps_lf_for_windows_pipe(registry):
 # Get / Poll
 # =========================================================================
 
+
 class TestGetAndPoll:
     def test_poll_running(self, registry):
         s = _make_session(output="some output here")
@@ -896,7 +897,7 @@ class TestSpawnEnvSanitization:
             "TELEGRAM_BOT_TOKEN": "bot-secret",
             "FIRECRAWL_API_KEY": "fc-secret",
         }, clear=True), \
-            patch("tools.process_registry._find_shell", return_value="/bin/bash"), \
+            patch("tools.process_registry_bg_shell._find_shell", return_value="/bin/bash"), \
             patch("subprocess.Popen", side_effect=fake_popen), \
             patch("threading.Thread", return_value=fake_thread), \
             patch.object(registry, "_write_checkpoint"):
@@ -1140,7 +1141,7 @@ class TestPopenLeakOnSetupFailure:
         # The orphan path terminates through _terminate_host_pid, which
         # revalidates the recorded kernel start time before signalling, so a
         # MagicMock pid can never reach a real killpg/os.kill.
-        with patch("tools.process_registry._find_shell", return_value="/bin/bash"), \
+        with patch("tools.process_registry_bg_shell._find_shell", return_value="/bin/bash"), \
              patch("subprocess.Popen", return_value=proc), \
              patch("threading.Thread", side_effect=boom), \
              patch.object(ProcessRegistry, "_terminate_host_pid") as terminate, \
@@ -1170,7 +1171,7 @@ class TestSpawnRewriteCompoundBackground:
         captured_cmd = []
 
         def fake_popen(args, **kwargs):
-            captured_cmd.append(args)
+            captured_cmd.append(kwargs["env"]["HERMES_BG_COMMAND"])
             proc = MagicMock()
             proc.pid = 1111
             proc.stdout = MagicMock()
@@ -1179,7 +1180,7 @@ class TestSpawnRewriteCompoundBackground:
         fake_thread = MagicMock()
         fake_thread.daemon = False
 
-        with patch("tools.process_registry._find_shell", return_value="/bin/bash"), \
+        with patch("tools.process_registry_bg_shell._find_shell", return_value="/bin/bash"), \
              patch("subprocess.Popen", side_effect=fake_popen), \
              patch("threading.Thread", return_value=fake_thread), \
              patch.object(registry, "_write_checkpoint"):
@@ -1187,8 +1188,8 @@ class TestSpawnRewriteCompoundBackground:
 
         assert len(captured_cmd) == 1
         shell_cmd = captured_cmd[0]
-        # The command passed to Popen should be the REWRITTEN version
-        assert "&& { node server.js &>/tmp/srv.log & }" in shell_cmd[2]
+        # The command handed to the login shell (via env) is the REWRITTEN version
+        assert "&& { node server.js &>/tmp/srv.log & }" in shell_cmd
 
 
     def test_pty_path_uses_rewritten_command(self, registry):
@@ -1202,7 +1203,7 @@ class TestSpawnRewriteCompoundBackground:
         fake_thread = MagicMock()
         fake_thread.daemon = False
 
-        with patch("tools.process_registry._find_shell", return_value="/bin/bash"), \
+        with patch("tools.process_registry_bg_shell._find_shell", return_value="/bin/bash"), \
              patch.dict("sys.modules", {"ptyprocess": mock_pty_module}), \
              patch("threading.Thread", return_value=fake_thread), \
              patch.object(registry, "_write_checkpoint"):
@@ -1214,9 +1215,8 @@ class TestSpawnRewriteCompoundBackground:
 
         assert mock_pty_module.PtyProcess.spawn.called, \
             "PTY spawn should have been attempted"
-        pty_args = mock_pty_module.PtyProcess.spawn.call_args[0][0]
-        assert "&& { node server.js & }" in pty_args[2], \
-            f"PTY path should use rewritten command, got: {pty_args[2]}"
+        pty_cmd = mock_pty_module.PtyProcess.spawn.call_args.kwargs["env"]["HERMES_BG_COMMAND"]
+        assert "&& { node server.js & }" in pty_cmd, pty_cmd
         assert session.command == "cd /app && node server.js &"
 
 
@@ -2147,7 +2147,7 @@ class TestSystemdCgroupIsolation:
         wrapped in ``systemd-run --user --scope --unit=hermes-worker-<id>``."""
         fake_popen, captured = self._fake_popen_capture()
 
-        monkeypatch.setattr("tools.process_registry._find_shell", lambda: "/bin/bash")
+        monkeypatch.setattr("tools.process_registry_bg_shell._find_shell", lambda: "/bin/bash")
         monkeypatch.setattr(
             "tools.process_registry._systemd_run_user_scope_available",
             lambda: True,
@@ -2196,7 +2196,7 @@ class TestSystemdCgroupIsolation:
         assert "--" in argv, "systemd-run argv must use -- to separate command"
         sep_idx = argv.index("--")
         assert "/bin/bash" in argv[sep_idx:]
-        assert "set +m; echo hello" in argv[sep_idx:]
+        assert process_registry_fixtures.bg_script() in argv[sep_idx:]
         # systemd-run --scope gives the worker a new cgroup but NOT a new
         # session (#70716 regression: start_new_session was False, so the
         # worker kept the parent's session + controlling terminal → SIGTTIN/
@@ -2212,7 +2212,7 @@ class TestSystemdCgroupIsolation:
         cgroup)."""
         fake_popen, captured = self._fake_popen_capture()
 
-        monkeypatch.setattr("tools.process_registry._find_shell", lambda: "/bin/bash")
+        monkeypatch.setattr("tools.process_registry_bg_shell._find_shell", lambda: "/bin/bash")
         monkeypatch.setattr(
             "tools.process_registry._systemd_run_user_scope_available",
             lambda: False,
@@ -2231,7 +2231,7 @@ class TestSystemdCgroupIsolation:
 
         argv = captured["argv"]
         # No systemd-run wrapping — direct shell invocation.
-        assert argv == ["/bin/bash", "-lic", "set +m; echo hello"], argv
+        assert argv == ["/bin/bash", "-lic", process_registry_fixtures.bg_script()], argv
         assert captured["start_new_session"] is True
 
     def test_falls_back_when_not_under_supervisor(self, registry, monkeypatch):
@@ -2239,7 +2239,7 @@ class TestSystemdCgroupIsolation:
         systemd-run is available — isolation is a gateway concern."""
         fake_popen, captured = self._fake_popen_capture()
 
-        monkeypatch.setattr("tools.process_registry._find_shell", lambda: "/bin/bash")
+        monkeypatch.setattr("tools.process_registry_bg_shell._find_shell", lambda: "/bin/bash")
         monkeypatch.setattr(
             "tools.process_registry._systemd_run_user_scope_available",
             lambda: True,
@@ -2257,7 +2257,7 @@ class TestSystemdCgroupIsolation:
             registry.spawn_local("echo hello", cwd="/tmp")
 
         argv = captured["argv"]
-        assert argv == ["/bin/bash", "-lic", "set +m; echo hello"], argv
+        assert argv == ["/bin/bash", "-lic", process_registry_fixtures.bg_script()], argv
         assert captured["start_new_session"] is True
 
     @pytest.mark.parametrize("use_pty", [False, True])
@@ -2271,7 +2271,7 @@ class TestSystemdCgroupIsolation:
         """
         monkeypatch.setenv("INVOCATION_ID", "herdr-service-inherited-marker")
         monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
-        monkeypatch.setattr("tools.process_registry._find_shell", lambda: "/bin/bash")
+        monkeypatch.setattr("tools.process_registry_bg_shell._find_shell", lambda: "/bin/bash")
         monkeypatch.setattr(
             "tools.process_registry._systemd_run_user_scope_available",
             lambda: True,
@@ -2289,7 +2289,7 @@ class TestSystemdCgroupIsolation:
             ):
                 session = registry.spawn_local("codex", cwd="/tmp", use_pty=True)
             assert pty_spawn.call_args.args[0] == [
-                "/bin/bash", "-lic", "set +m; codex",
+                "/bin/bash", "-lic", process_registry_fixtures.bg_script(),
             ]
         else:
             fake_popen, captured = self._fake_popen_capture()
@@ -2300,7 +2300,7 @@ class TestSystemdCgroupIsolation:
             ):
                 session = registry.spawn_local("echo hello", cwd="/tmp")
             assert captured["argv"] == [
-                "/bin/bash", "-lic", "set +m; echo hello",
+                "/bin/bash", "-lic", process_registry_fixtures.bg_script(),
             ]
             assert captured["start_new_session"] is True
 
@@ -2322,7 +2322,7 @@ class TestSystemdCgroupIsolation:
             "gateway.status.get_running_pid",
             lambda *, cleanup_stale=False: os.getpid() + 1,
         )
-        monkeypatch.setattr("tools.process_registry._find_shell", lambda: "/bin/bash")
+        monkeypatch.setattr("tools.process_registry_bg_shell._find_shell", lambda: "/bin/bash")
         monkeypatch.setattr(
             "tools.process_registry._systemd_run_user_scope_available",
             lambda: True,
@@ -2340,7 +2340,7 @@ class TestSystemdCgroupIsolation:
             ):
                 session = registry.spawn_local("codex", cwd="/tmp", use_pty=True)
             assert pty_spawn.call_args.args[0] == [
-                "/bin/bash", "-lic", "set +m; codex",
+                "/bin/bash", "-lic", process_registry_fixtures.bg_script(),
             ]
         else:
             fake_popen, captured = self._fake_popen_capture()
@@ -2351,7 +2351,7 @@ class TestSystemdCgroupIsolation:
             ):
                 session = registry.spawn_local("echo hello", cwd="/tmp")
             assert captured["argv"] == [
-                "/bin/bash", "-lic", "set +m; echo hello",
+                "/bin/bash", "-lic", process_registry_fixtures.bg_script(),
             ]
             assert captured["start_new_session"] is True
 
@@ -2365,7 +2365,7 @@ class TestSystemdCgroupIsolation:
         fake_popen, _captured = self._fake_popen_capture()
         fake_proc = fake_popen(["placeholder"])
 
-        monkeypatch.setattr("tools.process_registry._find_shell", lambda: "/bin/bash")
+        monkeypatch.setattr("tools.process_registry_bg_shell._find_shell", lambda: "/bin/bash")
         monkeypatch.setattr(
             "tools.process_registry._systemd_run_user_scope_available",
             lambda: True,
@@ -2400,7 +2400,7 @@ class TestSystemdCgroupIsolation:
         fake_pty = MagicMock()
         fake_pty.pid = 4321
 
-        monkeypatch.setattr("tools.process_registry._find_shell", lambda: "/bin/bash")
+        monkeypatch.setattr("tools.process_registry_bg_shell._find_shell", lambda: "/bin/bash")
         monkeypatch.setattr(
             "tools.process_registry._systemd_run_user_scope_available",
             lambda: True,
@@ -2421,7 +2421,7 @@ class TestSystemdCgroupIsolation:
         assert "--scope" in argv
         assert "--unit" in argv
         assert "--" in argv
-        assert argv[-3:] == ["/bin/bash", "-lic", "set +m; codex"]
+        assert argv[-3:] == ["/bin/bash", "-lic", process_registry_fixtures.bg_script()]
         assert session.systemd_unit == f"hermes-worker-{session.id}.scope"
 
     @pytest.mark.platforms("linux")
@@ -2450,7 +2450,7 @@ class TestSystemdCgroupIsolation:
             events.append(("pty", None))
             raise RuntimeError("PTY wrapper failed after scope creation")
 
-        monkeypatch.setattr("tools.process_registry._find_shell", lambda: "/bin/bash")
+        monkeypatch.setattr("tools.process_registry_bg_shell._find_shell", lambda: "/bin/bash")
         monkeypatch.setattr(
             "tools.process_registry._systemd_run_user_scope_available",
             lambda: True,
@@ -2487,7 +2487,7 @@ class TestSystemdCgroupIsolation:
         """Do not launch a duplicate command while the failed PTY scope may live."""
         from ptyprocess import PtyProcess
 
-        monkeypatch.setattr("tools.process_registry._find_shell", lambda: "/bin/bash")
+        monkeypatch.setattr("tools.process_registry_bg_shell._find_shell", lambda: "/bin/bash")
         monkeypatch.setattr(
             "tools.process_registry._systemd_run_user_scope_available",
             lambda: True,
