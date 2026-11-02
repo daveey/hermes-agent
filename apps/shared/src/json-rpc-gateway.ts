@@ -238,7 +238,17 @@ export class JsonRpcGatewayClient {
 
     this.setState('connecting')
 
-    const socket = this.options.socketFactory?.(wsUrl) ?? new WebSocket(wsUrl)
+    let socket: WebSocketLike
+
+    try {
+      socket = this.options.socketFactory?.(wsUrl) ?? new WebSocket(wsUrl)
+    } catch (error) {
+      // No handshake listeners/timer exist yet. Leave a failed construction
+      // recoverable so the connection owner can retry with fresh credentials.
+      this.dropSocket(error instanceof Error ? error : new Error(String(error)))
+      throw error
+    }
+
     const transport = socketTransport(socket)
     this.socket = socket
     this.channel.stopHeartbeat()
