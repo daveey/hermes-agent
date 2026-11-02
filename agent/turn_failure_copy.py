@@ -48,8 +48,8 @@ def stamp_failure(result: dict[str, Any], reason: str, retryable: bool) -> dict[
 
 # ---- failed-turn transcript boundary ----------------------------------------------------------
 # The Hermes-authored assistant row that closes a durable turn which ended without one. A
-# transcript boundary, NOT the model's answer: no provider/model error or refusal detail is
-# ever interpolated (that rides ``final_response``). Owned here so the core closer
+# transcript boundary, NOT the model's answer: only a validated refusal category is interpolated;
+# raw provider prose stays in ``final_response``. Owned here so the core closer
 # (``agent/conversation_loop.py::run_conversation``) and the gateway's own writer
 # (``gateway/run_turn.py::_hmwa_close_failed_turn``) say the same thing.
 
@@ -92,14 +92,27 @@ def untyped_failed_turn_display_kind(role: Any, content: Any) -> Optional[str]:
     return None
 
 
-def failed_turn_notice(turn_messages: Any, *, restarted: bool = False) -> str:
-    """Boundary copy for a failed turn: never claim "not processed" when a tool may have run. ``restarted``:
-    the turn was stopped by a backend restart, whose recovery continues a turn that ran no tool."""
-    for row in turn_messages or ():
-        if isinstance(row, dict) and (
+def failed_turn_notice(turn_messages: Any, *, restarted: bool = False, result: Any = None) -> str:
+    """Display-only boundary: preserve refusal categories and possible tool effects, not raw provider prose."""
+    partial = any(
+        isinstance(row, dict) and (
             row.get("role") == "tool" or (row.get("role") == "assistant" and row.get("tool_calls"))
-        ):
-            return PARTIAL_FAILED_TURN_NOTICE
+        ) for row in turn_messages or ()
+    )
+    if isinstance(result, dict) and result.get("failure_reason") == "content_policy_blocked":
+        category = result.get("refusal_category")
+        # Category is a machine identifier, not arbitrary provider prose/markup or reasoning.
+        safe = (isinstance(category, str) and 0 < len(category) <= 80
+                and all(c.isascii() and (c.isalnum() or c in "_-") for c in category))
+        detail = f" (category: {category})" if safe else ""
+        notice = (
+            f"The model provider's content filter refused this turn{detail}. "
+            "Try to rephrase your question, or start a new chat or fork from before the problematic context; "
+            "a long conversation can contribute to a filter trigger."
+        )
+        return notice + (" Some actions may already have run; verify their effects." if partial else "")
+    if partial:
+        return PARTIAL_FAILED_TURN_NOTICE
     return RESTART_FAILED_TURN_NOTICE if restarted else FAILED_TURN_NOTICE
 
 
