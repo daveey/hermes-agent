@@ -69,6 +69,9 @@ work; existing and undeclared cards retain that default. Prose URLs are not poli
 After publishing, pass `metadata.published_pr` to completion, including for a card
 initially marked `local-only`. The first matching URL binds the card; retries cannot
 substitute a green sibling PR (a positively closed-unmerged binding can be replaced).
+A review-only card must not pass `metadata.published_pr` for the PR it reviewed: cite it
+in `metadata.pr` or `metadata.reviewed_pr`. A value that is not one exact PR URL string
+is refused as `malformed_published_pr` without a GitHub read.
 CLI `show --json` and `kanban_show` expose the persisted contract.
 
 An **OPEN** PR cannot complete merely because it was published or CI passed. Merge

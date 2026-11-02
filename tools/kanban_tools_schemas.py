@@ -120,7 +120,9 @@ KANBAN_COMPLETE_SCHEMA = _schema(
         "\"<nonblank reason>\"}. OPEN/MERGED still require exact-head required CI; contract_waiver "
         "only waives absent required checks, never landing. Merge now with exact-head required CI green "
         "and every review comment (bots too) answered (standing approval), or create the landing card. "
-        "The hub batch only installs merged main; it never merges PRs."
+        "The hub batch only installs merged main; it never merges PRs. A review-only card cites the "
+        "reviewed PR in metadata.pr or metadata.reviewed_pr, never metadata.published_pr (it binds "
+        "this card's completion contract to that PR permanently)."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),

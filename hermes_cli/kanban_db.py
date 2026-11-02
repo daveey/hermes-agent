@@ -2747,7 +2747,7 @@ def complete_task(
         if prior_status == "review" and not event_summary:
             event_summary = _REVIEW_APPROVED_NOTE
         from hermes_cli.kanban_db_completion_payload import completed_event_payload
-        completion_payload = completed_event_payload(result, event_summary, verified_cards, metadata)
+        completion_payload = completed_event_payload(result, event_summary, verified_cards, metadata, acceptance)
         if goal_event_id is not None:
             conn.execute('UPDATE task_events SET run_id=? WHERE id=? AND task_id=?',
                          (run_id, goal_event_id, task_id))
