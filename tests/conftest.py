@@ -1707,28 +1707,47 @@ def _audio_playback_guard(request, monkeypatch):
     yield
 
 
-# ── Live Nous services fence ─────────────────────────────────────────────────
-# A test home starts with no Nous identity, so any path that ends in a hosted
-# connector action (connect, rename, status, the tool's first call) mints a REAL
-# guest on the production Portal: up to GUEST_MINT_TIMEOUT_SECONDS per test,
-# red whenever the Portal is slow, and a new guest identity on production on
-# every CI run. The same holds for billing, plan limits, the dashboard OAuth
-# provider and every other client built on a Nous URL. Refusing the name lookup
-# covers all of them at once (httpx, urllib, aiohttp and asyncio all resolve
-# through socket.getaddrinfo), and fails exactly like an offline host, which is
-# the path production already handles. Tests of these clients stub the
-# transport (tests/hermes_cli/anon_portal.py routes httpx at a fake Portal), so
-# they never reach the lookup. Live canaries opt in with ``@pytest.mark.live``.
+# ── External network fence ───────────────────────────────────────────────────
+# Unit tests never resolve a non-loopback host. A test that forgets to stub its
+# transport otherwise reads live third-party data (a model catalog, a registry,
+# an account endpoint) and turns red whenever that data changes; for Nous URLs
+# it also mints REAL guests on the production Portal. Refusing the name lookup
+# covers every client at once (httpx, urllib, requests, aiohttp and asyncio all
+# resolve through socket.getaddrinfo) and fails exactly like an offline host,
+# the path production already handles, so the result is the same on every run.
+# Only loopback (localhost, 127.0.0.0/8, ::1) resolves, plus the unspecified
+# bind addresses (0.0.0.0, ::, no host) that local servers listen on. A test
+# that needs another name installs its own resolver with
+# ``monkeypatch.setattr(socket, "getaddrinfo", fake)``, which replaces this
+# one. Live canaries opt out with ``@pytest.mark.live``.
 _NOUS_SERVICE_DOMAINS = ("nousresearch.com", "staging-nousresearch.com")
 
 
+def _host_name(host) -> str:
+    return (host.decode() if isinstance(host, bytes) else str(host or "")).lower().rstrip(".")
+
+
 def _is_nous_service_host(host) -> bool:
-    name = (host.decode() if isinstance(host, bytes) else str(host or "")).lower().rstrip(".")
+    name = _host_name(host)
     return any(name == domain or name.endswith("." + domain) for domain in _NOUS_SERVICE_DOMAINS)
+
+
+def _is_local_test_host(host) -> bool:
+    import ipaddress
+
+    name = _host_name(host).strip("[]").split("%", 1)[0]
+    if name in ("", "localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
 
 
 @pytest.fixture(autouse=True)
 def _no_live_nous_services(request, monkeypatch):
+    """Refuse every non-loopback name lookup (historical name: Nous was first)."""
     if request.node.get_closest_marker("live"):
         return
     import socket
@@ -1736,12 +1755,16 @@ def _no_live_nous_services(request, monkeypatch):
     real_getaddrinfo = socket.getaddrinfo
 
     def fenced_getaddrinfo(host, *args, **kwargs):
+        if _is_local_test_host(host):
+            return real_getaddrinfo(host, *args, **kwargs)
         if _is_nous_service_host(host):
-            raise socket.gaierror(
-                socket.EAI_NONAME,
-                f"test fence: {host!r} is a live Nous service; stub the HTTP layer "
-                "(tests/hermes_cli/anon_portal.py) or mark the test live")
-        return real_getaddrinfo(host, *args, **kwargs)
+            hint = "stub the HTTP layer (tests/hermes_cli/anon_portal.py) or mark the test live"
+            kind = "a live Nous service"
+        else:
+            hint = "stub the HTTP layer (or install a test resolver) or mark the test live"
+            kind = "not a loopback host"
+        raise socket.gaierror(
+            socket.EAI_NONAME, f"test fence: {_host_name(host)!r} is {kind}; unit tests stay offline: {hint}")
 
     monkeypatch.setattr(socket, "getaddrinfo", fenced_getaddrinfo)
 
