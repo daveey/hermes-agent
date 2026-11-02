@@ -26,6 +26,13 @@ def _start_session_work(target, *, name: str, session: dict | None = None, home=
     return start_work(target, name=name, session=session, home=home, busy_wait_s=busy_wait_s)
 
 
+def _prepare_session_work(target, *, name: str, session: dict, busy_wait_s=None):
+    """``_start_session_work`` for a caller that spawns under ``_sessions_lock``: retain the admission here
+    (takes ``history_lock``, so BEFORE ``_sessions_lock``), then ``start()``/``cancel()`` the returned work."""
+    from tui_gateway.turn_admission import prepare_work
+    return prepare_work(target, name=name, session=session, busy_wait_s=busy_wait_s)
+
+
 def _notify_session_boundary(event_type: str, session_id: str | None, platform: str | None = None) -> list[str]:
     """Fire session lifecycle hooks with CLI parity; returns plugin ``on_session_finalize`` user messages."""
     with contextlib.suppress(Exception):

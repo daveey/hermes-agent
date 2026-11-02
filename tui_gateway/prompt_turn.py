@@ -1464,16 +1464,28 @@ def _run_admitted_prompt(
         if followup is not None:
             _run_post_turn_followups(rid, sid, session, *followup)
     # The handle is resolved BEFORE _sessions_lock: a profile session opens its own SessionDB through the
-    # state registry, and _sessions_lock gates every create/close/prompt on this backend.
+    # state registry, and _sessions_lock gates every create/close/prompt on this backend. The worker's
+    # admission is retained before it too: that takes history_lock, and session.resume/activate hold
+    # history_lock while they take _sessions_lock (a resume racing this submit deadlocked the backend).
+    work = _prepare_session_work(run, name=f"prompt-turn-{sid}", session=session)
+    spawn_error = None
     with _routing_provenance_db(session) as routing_db, _sessions_lock:
         registered = _sessions.get(sid)
-        can_start = not session.get("_closing") and (registered is None or registered is session)
+        can_start = work is not None and not session.get("_closing") and (registered is None or registered is session)
         if can_start:
             # Only a registered session is proof the conversation is routed here; an unregistered one may
             # still run its turn, but its stamp stays (#106459).
             if registered is session:
                 _reopen_routed_session_row(routing_db, sid, session)
-            can_start = _start_session_work(run, name=f"prompt-turn-{sid}", session=session) is not None
+            try:
+                work.start(abort_on_error=False)  # spawns only; the close-race check above stays atomic
+            except BaseException as exc:
+                spawn_error = exc
+    if spawn_error is not None:
+        work.abort()  # the worker's cleanup takes history_lock: never under _sessions_lock
+        raise spawn_error
+    if work is not None and not can_start:
+        work.cancel()
     if not can_start:
         from tui_gateway.turn_admission import owns
         with session["history_lock"]:

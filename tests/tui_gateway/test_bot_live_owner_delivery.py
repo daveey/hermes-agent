@@ -14,7 +14,7 @@ def test_refused_input_commits_failed_mailbox_receipt(tmp_path):
     import logging
     import time
     from tui_gateway import prompt_turn
-    from tui_gateway.session_lifecycle import _start_session_work
+    from tui_gateway.session_lifecycle import _prepare_session_work
     from tools import bot_live_delivery as mailbox
 
     owner = dict(profile_home=str(tmp_path.resolve()), session_id="chat",
@@ -30,17 +30,17 @@ def test_refused_input_commits_failed_mailbox_receipt(tmp_path):
     worker_errors = []
     # server installs a process-wide excepthook during the worker's lazy import;
     # capture at the worker boundary rather than relying on that mutable hook.
-    def start_work(target, **kwargs):
+    def prepare_work(target, **kwargs):
         def run():
             try:
                 target()
             except BaseException as exc:
                 worker_errors.append(exc)
-        return _start_session_work(run, **kwargs)
+        return _prepare_session_work(run, **kwargs)
 
     submit = rebind(prompt_turn._run_admitted_prompt, {
         "threading": threading, "time": time, "logger": logging.getLogger(__name__),
-        "_start_session_work": start_work,
+        "_prepare_session_work": prepare_work,
         "_sessions_lock": threading.RLock(), "_sessions": {},
         "_admit_prompt_turn": lambda *args, **kwargs: ([], agent),
         "_session_profile_runtime_scope": lambda session: contextlib.nullcontext(),

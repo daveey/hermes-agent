@@ -191,7 +191,18 @@ def start_build_work(session, target, *, delay=None):
 
 
 def start_work(target, *, name, session=None, home=None, busy_wait_s=None):
-    from agent.memory_provider import spawn_context_thread
+    prepared = prepare_work(target, name=name, session=session, home=home, busy_wait_s=busy_wait_s)
+    return None if prepared is None else prepared.start()
+
+
+def prepare_work(target, *, name, session=None, home=None, busy_wait_s=None):
+    """``start_work`` split in two: retain the admission now (takes ``history_lock``), spawn the worker with
+    ``start()`` later without touching ``history_lock``, or give the admission back with ``cancel()``.
+
+    Lock order is ``history_lock`` -> ``_sessions_lock`` (session.resume/activate rebind a transport under
+    ``history_lock``, then cancel the orphan reap under ``_sessions_lock``). A caller that must start the
+    worker atomically with a ``_sessions_lock`` check prepares BEFORE taking that lock; taking
+    ``history_lock`` inside it deadlocked a resume racing its session's own prompt.submit."""
     if session is not None:
         with session["history_lock"]:
             if not owns(session):
@@ -202,6 +213,7 @@ def start_work(target, *, name, session=None, home=None, busy_wait_s=None):
                 token.retain()
     else:
         token = None
+    installed = False
     if token is None:
         token = acquire(home or (session or {}).get("profile_home"), busy_wait_s=busy_wait_s)
         if token is not None and session is not None:
@@ -213,19 +225,29 @@ def start_work(target, *, name, session=None, home=None, busy_wait_s=None):
                 else:
                     session[_KEY] = token.retain()
                     session["_turn_admission_generation"] = token
+                    installed = True
     if token is None:
         return None
     with token.lock:
         token.workers += 1
-    finished = False
-    finish_lock = threading.Lock()
+    return PreparedWork(target, name, session, token, installed)
 
-    def finish():
-        nonlocal finished
-        with finish_lock:
-            if finished:
+
+class PreparedWork:
+    """A worker whose admission is retained but whose thread has not started (see ``prepare_work``)."""
+
+    def __init__(self, target, name, session, token, installed):
+        self._target, self._name, self._session, self._token = target, name, session, token
+        self._installed = installed  # this prepare put ``token`` on the session (no turn owned it yet)
+        self._finished = False
+        self._finish_lock = threading.Lock()
+
+    def _finish(self):
+        with self._finish_lock:
+            if self._finished:
                 return
-            finished = True
+            self._finished = True
+        session, token = self._session, self._token
         # The final worker also covers failures before normal terminal cleanup.
         if session is not None:
             with session["history_lock"], token.lock:
@@ -238,26 +260,53 @@ def start_work(target, *, name, session=None, home=None, busy_wait_s=None):
                 token.workers -= 1
         token.release()
 
-    def run():
-        context = _current.set((session, token))
+    def cancel(self):
+        """Never started: undo the prepare only (no settlement), as if ``start_work`` had not been called."""
+        with self._finish_lock:
+            if self._finished:
+                return
+            self._finished = True
+        session, token = self._session, self._token
+        if session is not None and self._installed:
+            with session["history_lock"]:
+                if session.get(_KEY) is token:
+                    session.pop(_KEY)
+                    if session.get("_turn_admission_generation") is token:
+                        session.pop("_turn_admission_generation", None)
+                    token.release()
+        with token.lock:
+            token.workers -= 1
+        token.release()
+
+    def _run(self):
+        context = _current.set((self._session, self._token))
         try:
-            target()
+            self._target()
         finally:
             try:
-                finish()
+                self._finish()
             finally:
                 _current.reset(context)
 
-    try:
-        thread = spawn_context_thread(run, name=name)
-        if session is not None:
-            session["_run_thread"] = thread
-        thread.start()
-        return thread
-    except BaseException:
-        context = _current.set((session, token))
+    def abort(self):
+        """A ``start`` that raised: the worker's own cleanup (it may settle the turn), from this thread."""
+        context = _current.set((self._session, self._token))
         try:
-            finish()
+            self._finish()
         finally:
             _current.reset(context)
-        raise
+
+    def start(self, *, abort_on_error=True):
+        """Spawn the worker; takes no session lock. Under ``_sessions_lock`` pass ``abort_on_error=False`` and
+        call ``abort()`` after releasing it, since the cleanup takes ``history_lock``."""
+        from agent.memory_provider import spawn_context_thread
+        try:
+            thread = spawn_context_thread(self._run, name=self._name)
+            if self._session is not None:
+                self._session["_run_thread"] = thread
+            thread.start()
+            return thread
+        except BaseException:
+            if abort_on_error:
+                self.abort()
+            raise
