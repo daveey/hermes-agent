@@ -1932,8 +1932,11 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
                 row.pop(key, None)
         # [daveey] The open card ids the chat waits on (lineage-wide, capped): the sidebar's "waiting on N cards".
         open_ids = {tid for sid in ids for tid in waiting.get(sid, ())}
-        # Plugin sources (pending close-outs): count the ids the boards don't already count as open.
-        pending = {tid for sid in ids for tid in extra.get(sid, ())} - open_ids
+        # Plugin sources (pending close-outs) must not recount local OR scoped remote obligations.
+        extra_ids = {tid for sid in ids for tid in extra.get(sid, ())}
+        counted_remote = {key for sid in ids for key, bucket, _ in remote_keys.get(sid, ())
+                          if bucket in ("active", "blocked")}
+        pending = extra_ids - open_ids - counted_remote
         if pending:
             row["kanban_active"] = int(row.get("kanban_active") or 0) + len(pending)
         # [daveey] Parked/held are subsets of kanban_active. kanban_parked is stamped (even 0) whenever there is open
@@ -1954,7 +1957,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             row["kanban_stalled"] = n_stalled
         else:
             row.pop("kanban_stalled", None)
-        ids_waiting = sorted(open_ids | pending)
+        ids_waiting = sorted(open_ids | extra_ids)
         if ids_waiting:
             row["kanban_waiting_on"] = ids_waiting[:WAITING_ON_CAP]
         else:
