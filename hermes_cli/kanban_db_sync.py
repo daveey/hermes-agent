@@ -1096,10 +1096,12 @@ def apply_remote_changes(
     pull and the snapshot rebuild) keeps every task field that has an unanswered local edit in the outbox, read
     in the same transaction as the apply. [daveey]"""
     from hermes_cli.kanban_db_connect import write_txn
-    if board_mode(conn) == "off":
-        raise RuntimeError("apply_remote_changes: kanban sync is not enabled on this board")
     result = ApplyResult(cursor=new_cursor, local_pending_wins=local_pending_wins)
     with write_txn(conn):
+        # Serialize with set_mode(off): a feed fetched before detach must not
+        # overwrite locally held custody after the detach transaction commits.
+        if board_mode(conn) == "off":
+            raise RuntimeError("apply_remote_changes: kanban sync is not enabled on this board")
         if changes:
             conn.execute("UPDATE kanban_sync_state SET applying = 1")
             own = _state(conn)["gateway_id"]
