@@ -59,6 +59,8 @@ GATEWAY_CONFIG = (
     "  max_spawn: 0\n"
     "  auto_decompose: true\n"
     "  auto_decompose_per_tick: 10\n"
+    # Billing probes need immediate eligibility, not the production creator parking grace.
+    "  auto_decompose_min_age_seconds: 0\n"
     "auxiliary:\n"
     "  transient_retries: 0\n"
 )
