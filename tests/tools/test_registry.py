@@ -336,6 +336,108 @@ class TestCheckFnExceptionHandling:
         assert any(u["name"] == "crashes" for u in unavailable)
 
 
+class TestCheckFnQuotaWall:
+    """A subscription quota wall is an expected state with a known reset, not a crashed probe.
+
+    Live case (self-heal agent-ffb3d1ba3e): the vision/video check raised
+    ``SubscriptionQuotaUnavailable`` for a walled Codex route, and the registry logged it as a WARNING
+    with a traceback ("check_fn ... raised"), which the self-heal lane files as a defect each window.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_caches(self):
+        from tools import registry as registry_mod
+
+        registry_mod.invalidate_check_fn_cache()
+        getattr(registry_mod, "_check_fn_quota_logged", set()).clear()
+        yield
+        registry_mod.invalidate_check_fn_cache()
+
+    @staticmethod
+    def _walled(resets_at, calls=None):
+        from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+
+        def check_video_requirements():
+            if calls is not None:
+                calls.append(1)
+            raise SubscriptionQuotaUnavailable("openai-codex", "gpt-6-astra", resets_at)
+
+        return check_video_requirements
+
+    @staticmethod
+    def _loud(caplog):
+        return [r for r in caplog.records if r.levelno >= logging.WARNING or r.exc_info]
+
+    @pytest.mark.parametrize("path", ["cached", "uncached"])
+    def test_quota_wall_is_false_with_info_and_no_traceback(self, caplog, path):
+        import time as _time
+
+        from tools import registry as registry_mod
+
+        fn = self._walled(_time.time() + 3600)
+        run = registry_mod._check_fn_cached if path == "cached" else registry_mod._run_check_fn_uncached
+        with caplog.at_level(logging.DEBUG, logger="tools.registry"):
+            assert run(fn) is False
+        assert self._loud(caplog) == []
+        infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        assert any("quota wall until" in m and "openai-codex/gpt-6-astra" in m for m in infos), infos
+
+    def test_other_routing_errors_stay_loud(self, caplog):
+        from agent.model_routing import ModelRoutingError
+        from agent.model_routing_managed import ManagedPinRejectedError
+        from tools import registry as registry_mod
+
+        for exc in (ModelRoutingError("no route for class vision"), ManagedPinRejectedError("gpt-x", "openai-codex", [])):
+            def bad(exc=exc):
+                raise exc
+
+            for run in (registry_mod._check_fn_cached, registry_mod._run_check_fn_uncached):
+                registry_mod.invalidate_check_fn_cache()
+                caplog.clear()
+                with caplog.at_level(logging.DEBUG, logger="tools.registry"):
+                    assert run(bad) is False
+                warned = [r for r in caplog.records if r.levelno == logging.WARNING]
+                assert warned and warned[0].exc_info, (run.__name__, type(exc).__name__)
+
+    def test_info_line_once_per_reset(self, caplog):
+        import time as _time
+
+        from tools import registry as registry_mod
+
+        reset = _time.time() + 3600
+        with caplog.at_level(logging.DEBUG, logger="tools.registry"):
+            fn = self._walled(reset)
+            for _ in range(3):
+                assert registry_mod._run_check_fn_uncached(fn) is False
+                registry_mod.invalidate_check_fn_cache()
+                assert registry_mod._check_fn_cached(fn) is False
+            later = self._walled(reset + 600)
+            assert registry_mod._run_check_fn_uncached(fn) is False
+        walls = [r.getMessage() for r in caplog.records if "quota wall until" in r.getMessage()]
+        assert len(walls) == 1, walls
+        with caplog.at_level(logging.DEBUG, logger="tools.registry"):
+            assert registry_mod._run_check_fn_uncached(later) is False
+        walls = [r.getMessage() for r in caplog.records if "quota wall until" in r.getMessage()]
+        assert len(walls) == 2, walls
+
+    def test_verdict_not_cached_past_reset(self):
+        import time as _time
+
+        from tools import registry as registry_mod
+
+        calls = []
+        fn = self._walled(_time.time() + 1, calls)  # reopens well inside the 30 s TTL
+        assert registry_mod._check_fn_cached(fn) is False
+        assert registry_mod._check_fn_cached(fn) is False
+        assert len(calls) == 2  # re-probed, not served a cached False that outlives the wall
+
+        far = []
+        walled = self._walled(_time.time() + 3600, far)
+        assert registry_mod._check_fn_cached(walled) is False
+        assert registry_mod._check_fn_cached(walled) is False
+        assert len(far) == 1  # a long wall still uses the normal TTL cache
+
+
 class TestBuiltinDiscovery:
 
 

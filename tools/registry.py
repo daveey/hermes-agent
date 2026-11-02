@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
 from hermes_constants import hermes_home_key, normalize_scope
+from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +265,7 @@ _check_fn_cache: dict[tuple[Callable, Optional[str]], tuple[float, bool]] = {}
 _check_fn_last_good: dict[tuple[Callable, Optional[str]], float] = {}
 _check_fn_ever_good: set[tuple[Callable, Optional[str]]] = set()  # probes that admitted tools this process
 _check_fn_core_drop_warned: set[tuple[Callable, Optional[str]]] = set()  # once-per-process WARNING gate
+_check_fn_quota_logged: set[tuple] = set()  # once per (check, quota wall) INFO gate; survives invalidation
 _check_fn_cache_lock = threading.Lock()
 CHECK_FN_CACHE_BYPASS = ""
 _NO_CACHE_CHECK_FNS: set[Callable] = set()
@@ -308,6 +310,49 @@ def check_fn_cache_scope() -> Optional[str]:
         return CHECK_FN_CACHE_BYPASS
 
 
+def _quota_wall_outcome(fn: Callable, exc: BaseException) -> Optional[str]:
+    """Verdict text for a typed subscription quota wall, else None. [daveey]
+
+    ``SubscriptionQuotaUnavailable`` means routing policy is satisfied but every route with capacity
+    is walled until a known reset: an expected state, not a crashed probe. It is logged at INFO with
+    its reset time, once per (check, wall) per process, with no traceback, so the self-heal lane does
+    not file each quota window as a defect (agent-ffb3d1ba3e). Only this exact type is softened:
+    every other ModelRoutingError (ManagedPinRejectedError, a missing route) stays a WARNING.
+    """
+    try:
+        from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    except ImportError:  # routing not importable: nothing could have raised it
+        return None
+    if not isinstance(exc, SubscriptionQuotaUnavailable):
+        return None
+    reset = getattr(exc, "resets_at", None)
+    try:
+        until = datetime.fromtimestamp(float(reset), tz=UTC).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OverflowError, OSError):
+        until = str(reset)
+    route = f"{getattr(exc, 'provider', '?')}/{getattr(exc, 'model', '?')}"
+    outcome = f"quota wall until {until} ({route})"
+    key = (str(_fn_label(fn)), route, reset)
+    with _check_fn_cache_lock:
+        first = key not in _check_fn_quota_logged
+        if first:
+            while len(_check_fn_quota_logged) >= _CHECK_FN_CACHE_MAX:
+                _check_fn_quota_logged.pop()
+            _check_fn_quota_logged.add(key)
+    if first:
+        logger.info("check_fn %s hit a %s; dependent tools stay unavailable until it reopens",
+                    _fn_label(fn), outcome)
+    return outcome
+
+
+def _quota_wall_open_seconds(exc: BaseException) -> Optional[float]:
+    """Wall-clock seconds until a quota wall's ``resets_at``, or None when unknown."""
+    try:
+        return float(exc.resets_at) - time.time()
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+
+
 def _run_check_fn_uncached(fn: Callable) -> bool:
     """Run an availability check without cache/grace handling."""
     from agent.secret_scope import UnscopedSecretError, current_secret_scope
@@ -332,10 +377,11 @@ def _run_check_fn_uncached(fn: Callable) -> bool:
                 "check_fn %s raised UnscopedSecretError while the profile cache "
                 "scope was resolved; dependent tools will be unavailable this turn",
                 _fn_label(fn), exc_info=True)
-    except Exception:
-        logger.warning(
-            "check_fn %s raised; dependent tools will be unavailable this turn",
-            _fn_label(fn), exc_info=True)
+    except Exception as exc:
+        if _quota_wall_outcome(fn, exc) is None:
+            logger.warning(
+                "check_fn %s raised; dependent tools will be unavailable this turn",
+                _fn_label(fn), exc_info=True)
     return False
 
 
@@ -357,6 +403,17 @@ def _check_fn_cached(fn: Callable) -> bool:
     try:
         value, outcome = bool(fn()), "returned False"
     except Exception as exc:
+        quota_outcome = _quota_wall_outcome(fn, exc)
+        if quota_outcome is not None:
+            # A known wall is not a flake: no last-good grace, no core-drop WARNING, and the False
+            # verdict is never cached past the wall's reset (the probe re-runs once it reopens).
+            with _check_fn_cache_lock:
+                _prune_check_fn_caches(now)
+                _check_fn_last_good.pop(cache_key, None)
+                left = _quota_wall_open_seconds(exc)
+                if left is None or left >= _CHECK_FN_TTL_SECONDS:
+                    _check_fn_cache[cache_key] = (now, False)
+            return False
         # Keep the exception for the verdict log below (emitted outside this block, where
         # ``exc_info=True`` would resolve to nothing): a check_fn that raises is a bug in the probe
         # or its resolver, and a bare "raised" verdict reads as "nothing configured" (#87950).
