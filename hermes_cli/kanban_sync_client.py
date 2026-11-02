@@ -29,8 +29,11 @@ import os
 import re
 import sqlite3
 import threading
+import threading as _hub_threading  # Hub's own handle: tests replace the module-level ``threading``/``time``
 import time
+from time import monotonic as _hub_monotonic
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -95,19 +98,55 @@ def load_identity(cfg: Optional[dict] = None) -> Identity:
     return Identity(url=url, key=key, gateway=gateway)
 
 
+def _peer_closed(conn) -> bool:
+    """True when an idle kept-alive socket is readable (the server sent FIN) or already gone."""
+    import select
+    sock = getattr(conn, "sock", None)
+    if sock is None:
+        return True
+    try:  # poll, not select: select raises for fds >= 1024, which a busy gateway has
+        if not hasattr(select, "poll"):  # Windows: select has no fd ceiling there
+            return bool(select.select([sock], [], [], 0)[0])
+        poller = select.poll()
+        poller.register(sock, select.POLLIN | select.POLLPRI)
+        return bool(poller.poll(0))
+    except (OSError, ValueError):
+        return True
+
+
 class Hub:
-    """The Board service's HTTP API for one gateway."""
+    """The Board service's HTTP API for one gateway.
+
+    Requests reuse one kept-alive HTTP/1.1 connection per thread. A fresh connection per request (``urlopen``) paid a
+    TCP connect, a TLS handshake and a platform trust evaluation (truststore → ``SecTrustEvaluateWithError`` on macOS)
+    every time: ~8.8 ms of thread CPU per request against ~0.5 ms on a reused connection, at several requests a second
+    while cards run. Errors keep ``urlopen``'s contract: non-2xx → :class:`HubError` / :class:`Resync`, transport
+    failures → ``urllib.error.URLError`` (an ``OSError``). A proxy from the environment keeps the ``urlopen`` path.
+    """
+
+    # Drop a connection idle this long instead of racing the server's own idle close. Not a data cache: it only bounds
+    # how long a socket is reused.
+    IDLE_REUSE_S = 30.0
 
     def __init__(self, ident: Identity, timeout: float = HTTP_TIMEOUT_S) -> None:
         self.ident, self.timeout = ident, timeout
+        self._local = _hub_threading.local()
+        self._ssl_context = None
+        self._ssl_lock = _hub_threading.Lock()
+
+    def _headers(self) -> dict:
+        return {"authorization": f"Bearer {self.ident.key}", "content-type": "application/json",
+                "user-agent": "hermes-kanban-sync/1"}
 
     def _call(self, method: str, path: str, body: Optional[dict] = None) -> dict:
         data = None if body is None else json.dumps(body).encode()
-        req = urllib.request.Request(
-            self.ident.url + path, data=data, method=method,
-            headers={"authorization": f"Bearer {self.ident.key}", "content-type": "application/json",
-                     "user-agent": "hermes-kanban-sync/1"},
-        )
+        parts = urllib.parse.urlsplit(self.ident.url)
+        if parts.scheme not in ("http", "https") or not parts.hostname or self._proxied(parts):
+            return self._call_urlopen(method, path, data)
+        return self._call_kept_alive(parts, method, path, data)
+
+    def _call_urlopen(self, method: str, path: str, data: Optional[bytes]) -> dict:
+        req = urllib.request.Request(self.ident.url + path, data=data, method=method, headers=self._headers())
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return json.loads(resp.read() or b"{}")
@@ -116,6 +155,95 @@ class Hub:
             if exc.code == 410:
                 raise Resync(text) from exc
             raise HubError(exc.code, text) from exc
+
+    @staticmethod
+    def _proxied(parts: urllib.parse.SplitResult) -> bool:
+        proxies = urllib.request.getproxies()
+        return bool(proxies.get(parts.scheme) or proxies.get("all")) and not urllib.request.proxy_bypass(parts.hostname)
+
+    def close(self) -> None:
+        """Close this thread's kept-alive connection (other threads' close when they reuse or exit)."""
+        self._drop()
+
+    def _drop(self) -> None:
+        conn = getattr(self._local, "conn", None)
+        self._local.conn = None
+        if conn is not None and getattr(self._local, "pid", None) == os.getpid():
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def _connection(self, parts: urllib.parse.SplitResult):
+        """``(connection, reused)`` for this thread. A connection inherited across ``fork`` is never touched."""
+        loc = self._local
+        conn = getattr(loc, "conn", None)
+        if conn is not None and loc.pid != os.getpid():
+            loc.conn = conn = None  # the parent process's socket: leave it to the parent
+        if conn is not None and (_hub_monotonic() - loc.used > self.IDLE_REUSE_S or _peer_closed(conn)):
+            self._drop()
+            conn = None
+        if conn is not None:
+            return conn, True
+        import http.client
+        if parts.scheme == "https":
+            with self._ssl_lock:
+                if self._ssl_context is None:
+                    import ssl
+                    self._ssl_context = ssl.create_default_context()  # truststore-injected when installed
+            conn = http.client.HTTPSConnection(parts.hostname, parts.port, timeout=self.timeout,
+                                               context=self._ssl_context)
+        else:
+            conn = http.client.HTTPConnection(parts.hostname, parts.port, timeout=self.timeout)
+        loc.conn, loc.pid, loc.used = conn, os.getpid(), _hub_monotonic()
+        return conn, False
+
+    def _call_kept_alive(self, parts: urllib.parse.SplitResult, method: str, path: str, data: Optional[bytes]) -> dict:
+        import http.client
+        target = (parts.path or "") + path
+        headers = self._headers()
+        for attempt in (0, 1):
+            conn, reused = self._connection(parts)
+            try:
+                conn.request(method, target, body=data, headers=headers)
+            except (OSError, http.client.HTTPException) as exc:
+                self._drop()
+                if reused and attempt == 0:  # a stale kept-alive socket: the request never reached the server
+                    continue
+                raise urllib.error.URLError(exc) from exc
+            try:
+                resp = conn.getresponse()
+            except (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError) as exc:
+                self._drop()
+                # The server closed a reused socket without answering. Only an idempotent GET is resent: a POST
+                # (ops, leases) may have been applied, so it fails like any transport error and the round retries.
+                if reused and attempt == 0 and method == "GET":
+                    continue
+                raise urllib.error.URLError(exc) from exc
+            except (OSError, http.client.HTTPException) as exc:
+                self._drop()
+                raise urllib.error.URLError(exc) from exc
+            try:
+                raw = resp.read()
+            except (OSError, http.client.HTTPException) as exc:
+                self._drop()
+                raise urllib.error.URLError(exc) from exc
+            if resp.will_close:
+                self._drop()
+            else:
+                self._local.used = _hub_monotonic()
+            status = resp.status
+            if 300 <= status < 400 and method == "GET":  # the Board service sends none; urlopen follows them
+                return self._call_urlopen(method, path, data)
+            if 300 <= status < 400:  # never resend a POST the server may have applied
+                raise HubError(status, raw.decode("utf-8", "replace")[:500])
+            if not 200 <= status < 300:
+                text = raw.decode("utf-8", "replace")[:500]
+                if status == 410:
+                    raise Resync(text)
+                raise HubError(status, text)
+            return json.loads(raw or b"{}")
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def ops(self, board: str, ops: list[dict]) -> dict:
         return self._call("POST", f"/v2/boards/{board}/ops", {"ops": ops})
