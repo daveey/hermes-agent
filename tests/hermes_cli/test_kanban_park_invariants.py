@@ -144,9 +144,9 @@ def test_closed_unmerged_pr_gets_its_own_classification(monkeypatch):
     from hermes_cli import kanban_pr_acceptance as kpa
     monkeypatch.setattr(kpa, "_api", _fake_api({610: "CLOSED"}))
     receipt = kpa.collect_acceptance("https://github.com/acme/repo/pull/610", None)
-    assert receipt["classification"] == "closed_unmerged"
-    assert "authentication" not in receipt["detail"]
-    assert "published_pr" in receipt["detail"]
+    assert receipt["ok"] and receipt["classification"] == "closed"
+    assert receipt["pr_state"] == "CLOSED"
+    assert "not delivery" in receipt["detail"]
 
 
 def test_catch_all_failure_names_the_phase_not_gh_auth(monkeypatch):

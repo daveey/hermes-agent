@@ -21,6 +21,11 @@ def completed_event_payload(
     if final_sends := parse_final_sends(event_summary):
         payload["final_sends"] = final_sends
     if isinstance(metadata, dict):
+        from hermes_cli.kanban_pr_landing import left_open_reason
+        if reason := left_open_reason(metadata):
+            payload["pr_left_open"] = {"reason": reason}
+        if metadata.get("landing_owner"):
+            payload["landing_owner"] = metadata["landing_owner"]
         cleaned = _cleaned_artifact_paths(metadata)
         if cleaned:
             payload["artifacts"] = cleaned

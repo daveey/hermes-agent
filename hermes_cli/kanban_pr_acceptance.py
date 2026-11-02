@@ -205,13 +205,10 @@ def collect_acceptance(contract: str, published_pr: str | None,
         pr = repository["pullRequest"]
         sha, branch = pr["headRefOid"], pr["baseRefName"]
         receipt["head_sha"] = sha
+        receipt["pr_state"] = pr["state"]
         if pr["state"] == "CLOSED":
-            # Closed without merging (e.g. the code landed by a direct push): this PR can never
-            # be accepted. Name it, and the way out: a new PR rebinds the contract. [daveey]
-            receipt.update(classification="closed_unmerged",
-                           detail=f"Bound PR {url} was closed without merging; it can never pass acceptance. "
-                                  "Open (or find) the PR that carries the change and complete with "
-                                  "metadata.published_pr=<that PR URL>; a closed-unmerged binding is replaced.")
+            # Closure is a disposition, not a claim that the change shipped.
+            receipt.update(ok=True, classification="closed", detail="PR closed without merging; not delivery.")
             return receipt
         if not re.fullmatch(r"[0-9a-f]{40}", sha) or pr["state"] not in {"OPEN", "MERGED"}:
             raise ValueError("PR head is unavailable")
@@ -267,6 +264,9 @@ def collect_acceptance(contract: str, published_pr: str | None,
         if current["head"]["sha"] != sha or current["base"]["ref"] != branch or (current["state"] == "closed" and not current.get("merged")):
             receipt.update(classification="stale", detail="PR head/base changed while collecting evidence; retry.")
             return receipt
+        if current["state"] not in {"open", "closed"}:
+            raise ValueError("PR state is unavailable")
+        receipt["pr_state"] = "MERGED" if current.get("merged") else current["state"].upper()
         receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")
         receipt["ok"] = receipt["classification"] == "success"
         return receipt

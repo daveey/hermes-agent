@@ -405,6 +405,9 @@ def _fmt_completed(ev, n) -> tuple:
     elif n.task and n.task.result:
         from hermes_cli.kanban_final_send import public_summary
         wake_handoff = _first_line(public_summary(n.task.result), 160)
+    from hermes_cli.kanban_pr_landing import left_open_notice
+    if disposition := left_open_notice(ev.payload):
+        wake_handoff = f"{wake_handoff}\n{disposition}" if wake_handoff else disposition
     handoff = f"\n{wake_handoff}" if wake_handoff is not None else ""
     return t("gateway.kanban.ping.completed", head=n.head, title=n.title, handoff=handoff), wake_handoff, None
 

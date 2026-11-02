@@ -114,7 +114,13 @@ KANBAN_COMPLETE_SCHEMA = _schema(
         "in ``artifacts`` — the gateway notifier will upload them as "
         "native attachments to the human who subscribed to the task, "
         "so the deliverable lands in their chat alongside the summary "
-        "instead of being a path they have to fetch by hand."
+        "instead of being a path they have to fetch by hand. PR contracts and metadata.published_pr "
+        "require a landing disposition: MERGED or CLOSED, or for OPEN an open same-board card "
+        "bound to the exact PR in metadata.landing_owner, or metadata.pr_left_open={\"reason\": "
+        "\"<nonblank reason>\"}. OPEN/MERGED still require exact-head required CI; contract_waiver "
+        "only waives absent required checks, never landing. Merge now with exact-head required CI green "
+        "and every review comment (bots too) answered (standing approval), or create the landing card. "
+        "The hub batch only installs merged main; it never merges PRs."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
@@ -856,7 +862,10 @@ KANBAN_CREATE_SCHEMA = _schema(
         )),
         "completion_contract": _prop("string", (
             "Declare at creation: local-only (default), OWNER/REPO for PR publication, or an exact GitHub PR URL. "
-            "PR tasks cannot complete until repository-required exact-head CI passes. On publication pass metadata.published_pr. "
+            "OPEN/MERGED PRs require repository-required exact-head CI and a landing disposition. "
+            "On publication pass metadata.published_pr (also enforced on local-only cards). "
+            "OPEN needs metadata.landing_owner bound to the same PR on an open same-board card, "
+            "or metadata.pr_left_open={\"reason\": ...}; CLOSED is disposition, not delivery. "
             "A repo with no required checks can only complete with metadata.contract_waiver={\"reason\": ...} "
             "(prefer local-only there)."
         )),

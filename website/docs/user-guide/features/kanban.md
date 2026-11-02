@@ -66,9 +66,25 @@ Declare PR work at creation with `--completion-contract OWNER/REPO` (or an exact
 accepts the same `completion_contract`. Use `local-only` for intentionally local
 work; existing and undeclared cards retain that default. Prose URLs are not policy.
 
-After publishing, pass `metadata.published_pr` to completion. The first matching
-URL binds the card permanently; retries cannot substitute a green sibling PR.
+After publishing, pass `metadata.published_pr` to completion, including for a card
+initially marked `local-only`. The first matching URL binds the card; retries cannot
+substitute a green sibling PR (a positively closed-unmerged binding can be replaced).
 CLI `show --json` and `kanban_show` expose the persisted contract.
+
+An **OPEN** PR cannot complete merely because it was published or CI passed. Merge
+now with exact-head required CI green and every review comment (bots too) answered
+(standing approval), or create a landing card on the same board, bind its
+`completion_contract` to the exact PR URL, and pass `metadata.landing_owner=<card id>`.
+The owner must be another open card; self, done, archived, missing, and different-PR
+owners are refused. The owner is checked again under the completion write lock,
+without network I/O. A pre-created review/release child alone is not a landing owner.
+
+To deliberately leave the PR open instead, pass
+`metadata.pr_left_open={"reason": "<nonblank reason>"}`. The completed event and done
+notice retain that reason and the caveat: **the hub batch only installs merged main;
+it never merges PRs**. A **MERGED** PR still requires exact-head CI acceptance.
+A **CLOSED** PR is an accepted disposition, not a claim of delivery; its closure
+does not require green CI. GitHub read errors remain fail-closed.
 
 The shared `complete_task` boundary covers worker tools, CLI, review approval and
 dashboard completion. It reads classic branch protection and active ruleset
@@ -76,8 +92,9 @@ required contexts, paginates exact-head check runs and legacy statuses, then
 re-reads the PR head/base. Optional failed/skipped telemetry does not veto accepted
 required checks. Missing, pending, failed, cancelled, timed-out, stale, skipped or
 neutral **required** evidence cannot complete the card. Neither can zero-run
-acceptance, unreadable policy or GitHub API failures. A repository without required
-checks needs a local-only contract. `gh` must be authenticated with read access to
+acceptance, unreadable policy or GitHub API failures. For OPEN/MERGED PRs with no
+required checks, `metadata.contract_waiver={"reason": "<local verification>"}` waives
+only that CI condition, never the landing gate. `gh` must be authenticated with read access to
 the repository's checks and rules; no remote writes are performed by this gate.
 Acceptance reads run as the **assignee profile's** `gh` login — its `GH_TOKEN` /
 `GH_CONFIG_DIR` from the profile's own `.env`, never the ambient login of the
