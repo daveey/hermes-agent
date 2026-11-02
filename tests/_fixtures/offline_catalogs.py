@@ -38,6 +38,25 @@ def _offline_video_catalog(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _offline_registry_transport(request, monkeypatch):
+    """Keep registry fetch/cache logic real, with an offline transport default."""
+    if request.node.get_closest_marker("live"):
+        return
+    import requests
+    from agent import models_dev
+
+    real_get = requests.get
+
+    def get(url, *args, **kwargs):
+        if str(url) == models_dev._get_models_dev_url() and not _is_loopback(urlsplit(str(url)).hostname or ""):
+            raise requests.ConnectionError(
+                "offline registry fixture: stub requests.get to exercise a registry response")
+        return real_get(url, *args, **kwargs)
+
+    monkeypatch.setattr(requests, "get", get)
+
+
+@pytest.fixture(autouse=True)
 def _offline_metadata_transport(request, monkeypatch):
     """Only incidental metadata clients get an offline remote transport default.
 
