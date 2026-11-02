@@ -130,8 +130,8 @@ def test_escalated_kill_of_sigterm_ignoring_child_reports_killed(tmp_path, monke
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal escalation; Windows uses taskkill")
 @pytest.mark.live_system_guard_bypass  # the late children are SIGKILLed after their shell dies
 def test_kill_reaps_children_spawned_during_the_grace_window(tmp_path, monkeypatch):
-    """The interactive ``bash -lic`` wrapper ignores SIGTERM and keeps running its script
-    through the grace window. Children it starts after the kill began must die with it,
+    """A shell that ignores SIGTERM (the script traps it; the old interactive ``bash -lic``
+    wrapper did this implicitly) keeps running its script through the grace window. Children it starts after the kill began must die with it,
     not be reparented to init when the shell is finally SIGKILLed."""
     import psutil
 
@@ -147,7 +147,7 @@ def test_kill_reaps_children_spawned_during_the_grace_window(tmp_path, monkeypat
     started, pid_file = tmp_path / "started", tmp_path / "late_pids"
     reg = ProcessRegistry()
     s = reg.spawn_local(
-        f"touch {started}; sleep 0.5; for i in 1 2 3; do sleep 30 & echo $! >> {pid_file}; done; wait",
+        f"trap '' TERM; touch {started}; sleep 0.5; for i in 1 2 3; do sleep 30 & echo $! >> {pid_file}; done; wait",
         cwd=str(tmp_path),
     )
     late = []
