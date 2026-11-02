@@ -37,6 +37,18 @@ def revalidatable(fingerprint: tuple, wall: float) -> bool:
     return True
 
 
+def board_memo_key(path) -> tuple:
+    """Observe same-stat commits before reusing per-board rows, independently of the counts TTL."""
+    from hermes_cli import kanban_session_activity as _ksa
+
+    key = _ksa._board_content_key(path)
+    if key[:1] == ("stat",):
+        # data_version is connection-local: retain identity to reject a replacement reader.
+        with _ksa.cached_ro(path) as conn:
+            return key, conn, conn.execute("PRAGMA data_version").fetchone()[0]
+    return key
+
+
 def counts_fresh(scope: tuple[str, ...], fingerprint: tuple, now: float) -> bool:
     """Caller holds ``_ksa._cache_lock``. The cached counts answer for ``fingerprint``: same scope and inputs, and
     either within the TTL or (``revalidatable`` fingerprint) younger than ``_ksa._COUNTS_MAX_AGE_S``."""
