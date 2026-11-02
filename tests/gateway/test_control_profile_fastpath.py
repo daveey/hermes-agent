@@ -123,6 +123,52 @@ def test_identical_safe_snapshots_batch_exact_counts_and_skip_per_thread_work(mo
     assert len(h.reads) == 3 * len(read_times)
 
 
+def test_cpu_refresh_keeps_stable_snapshot_run_open(monkeypatch):
+    thread = FakeThread(1, 11, 'stable')
+    frame = FakeFrame(FakeCode('wait'))
+    Harness(monkeypatch, lambda now: {1: (thread, frame)})
+    flushes = []
+    original = profiler._Window.flush
+
+    def flush(window):
+        flushes.append(window.run)
+        return original(window)
+
+    monkeypatch.setattr(profiler._Window, 'flush', flush)
+    row = _rows(profiler._collect(1, 100, 5))['stable']
+    assert row['samples'] == 100
+    assert row['cpu_s'] == pytest.approx(1.0)
+    # Initial walk and final flush only; CPU refresh must not redo histogram work.
+    assert flushes == [0, 99]
+
+
+def test_refresh_registry_change_does_not_reuse_old_lifetime(monkeypatch):
+    old, new = FakeThread(1, 11, 'old'), FakeThread(1, 12, 'new')
+    frame = FakeFrame(FakeCode('wait'))
+    # Deliberately identical snapshot, but different owner at a CPU-refresh tick.
+    Harness(monkeypatch, lambda now: {1: (old if now < 0.1 else new, frame)})
+    rows = _rows(profiler._collect(1, 100, 5))
+    assert set(rows) == {'old', 'new'}
+    assert sum(row['samples'] for row in rows.values()) == 100
+    assert rows['old']['last_seen_sample'] < rows['new']['first_seen_sample']
+
+
+def test_refresh_registry_sandwich_checks_before_as_well_as_after(monkeypatch):
+    thread, other = FakeThread(1, 11, 'stable'), FakeThread(1, 12, 'other')
+    frame = FakeFrame(FakeCode('wait'))
+
+    def registry(now, call_in_tick):
+        if 0.105 < now < 0.115 and call_in_tick == 1:
+            return [other]
+        return [thread]
+
+    Harness(monkeypatch, lambda now: {1: (thread, frame)}, registry=registry)
+    row = _rows(profiler._collect(1, 100, 5))['stable']
+    assert row['samples'] == 99  # ambiguous sandwich tick is not attributed
+    assert dict(row['top_self']) == {'fake.py:1:wait': 99}
+    assert dict(row['top_inclusive']) == {'fake.py:1:wait': 99}
+
+
 def test_ancestor_generator_caller_change_is_rewalked(monkeypatch):
     leaf = FakeCode('leaf')
     gen = FakeCode('gen', inspect.CO_GENERATOR)

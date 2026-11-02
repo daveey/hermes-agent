@@ -55,6 +55,10 @@ python3 scripts/benchmark_gateway_profile.py --seconds 5 --rounds 3 --threads 15
 
 This creates an isolated process with 150 idle event-waiting threads. Each round measures **whole-process** `time.process_time()` and monotonic wall time, once without profiling and once with it; order alternates. Incremental percent of one core is `(profile CPU / profile wall - baseline CPU / baseline wall) * 100`. Thread creation is outside the measured intervals. The script prints raw measurements, Python/OS metadata, samples and idle-thread census; it never contacts a live gateway.
 
+### Measurement history
+
+The following figures record intermediate implementations, not the final performance claim. The final stable CPU-refresh implementation and its confirmation measurements are listed below.
+
 Measured on Linux 7.0.0-1014-aws, x86_64, glibc 2.39, Python 3.14.9:
 
 | Round | Baseline CPU s | Baseline wall s | Profile CPU s | Profile wall s | Incremental % core | Samples / idle threads |
@@ -107,7 +111,25 @@ All rounds collected 500 samples, all 150 idle threads, and readable CPU for eve
 
 A separate Python 3.12 attribution probe measured whole-profile CPU at 3.743% with the real reader versus 2.739% with a constant reader; collecting frames alone at 100 Hz measured 1.721%. These are attribution controls, not baseline-subtracted acceptance figures. The initial design coupled native counters to every stack tick and repeated Python bookkeeping for unchanged stacks; native benchmarking caught that cost after Linux-only performance checks passed. Counter refresh decoupling and exact run aggregation address that design, with deterministic cadence/lifetime tests and native A/B measurements preventing a Linux-only performance claim. Remaining native-reader and snapshot cost needs further work rather than rounding 3.11% down to the target.
 
+### Stable CPU-refresh batching (final implementation)
+
+CPU refresh no longer flushes/rebuilds unchanged stack histograms. When both sides of the registry sandwich equal the preceding registry and every safe frame is unchanged, only the active cached CPU rows are refreshed; the exact histogram run remains open. Changed owners, ambiguous registry sandwiches, generators/coroutines and greenlet still take the full path. CPU read cadence and lifetime checks are unchanged.
+
+Native paired measurement on the same Mac mini, Python 3.14.9, 150 idle threads at 100 Hz:
+
+| Implementation | Window | Incremental % core rounds | Median % core |
+| --- | --- | --- | ---: |
+| Previous single-snapshot refresh | 5 s | 3.51001, 3.52259, 3.43461 | 3.51001 |
+| Stable CPU-refresh batching | 5 s | 3.04950, 2.84946, 2.98960 | 2.98960 |
+| Stable CPU-refresh batching, longer confirmation | 10 s | 2.71996, 2.67913, 2.62472 | 2.67913 |
+
+Both optimized medians meet the under-3% target for this measured workload; one 5-second round was 3.04950%, so this is not a per-window guarantee. The 10-second rounds each had 1000 samples, 150 idle threads and zero unavailable idle CPU readings. Baseline/profile CPU seconds were respectively 0.001513/0.273869, 0.000475/0.268571 and 0.000404/0.263057; baseline/profile wall seconds were 10.006841/10.013199, 10.006285/10.006834 and 10.009193/10.006869. All native functional checks passed again (busy 1.474682 CPU s, native worker 0.641537, sleeper 0.003285, short-lived 0.144580 marked partial). No live gateway was contacted. Final Linux 5-second rounds were 0.73508%, 0.68514%, 0.64804%, median **0.68514%**.
+
+Why the remaining overhead existed: the previous CPU-refresh tick unconditionally flushed all histograms and rebuilt per-thread dictionaries even for identical stacks (`_Window.slow_tick`). The new deterministic test failed on that implementation with repeated flushes instead of one final 99-tick run. Registry-change and before/after mismatch controls guard lifetime attribution; the existing exact-histogram/cadence/generator/cleanup tests exercise the optimized path too. This closes the remaining unnecessary-bookkeeping design gap, not by lowering sampling or CPU refresh frequency. Independent review found no correctness blockers.
+
 ## Verification status
+
+Final stable-refresh change: **38 passed, 1 macOS-only skipped** across the five profiler files via `scripts/run_tests.sh`; all **15 checks** passed via `python3 scripts/check --base HEAD`. The refresh-run test was RED on the preceding implementation and GREEN after; registry replacement and both sides of the lifetime sandwich have explicit controls. Earlier verification stages follow.
 
 `tests/gateway/test_control_profile_fastpath.py` drives `_collect` with a fake clock, frame snapshot and thread registry, and covers: exact batched counts for identical safe snapshots (with recursive dedup and no per-thread work between CPU refreshes), re-walking when an ancestor generator's caller changes under the same leaf frame, re-walking when `greenlet` is imported, CPU cadence without catch-up after a stall, exited-thread lower bounds with a dead-thread read discarded, recovery from a failed first CPU read (marked partial), rejecting an identifier reused between the two enumerations, and no frame references surviving success or an error. A real-thread test checks the fast path engages for idle threads (it failed with 200 enumerations per 100 ticks before the sampler's own frame was kept stable). Each failed on the previous implementation and passes now; existing tests are unchanged. Five profiler test files via `scripts/run_tests.sh`: **35 passed, 1 macOS-only skipped**, three consecutive runs; `python3 scripts/check --base HEAD`: 15 checks ok.
 

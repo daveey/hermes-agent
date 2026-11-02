@@ -104,6 +104,8 @@ class _Window:
         self.code_keys = {}  # id(code) -> (code, frame key, suspendable); keeps ids valid
         self.previous_frames = {}
         self.previous = {}  # ident -> (row, stack_key, reusable)
+        self.previous_threads = {}
+        self.cpu_rows = []  # active (Thread, native_id, row), rebuilt on snapshot change
         self.batchable = False
         self.run = 0  # open run of ticks identical to ``previous_frames``
         self.run_last = 0
@@ -135,8 +137,19 @@ class _Window:
         return tuple(stack), reusable
 
     def slow_tick(self, sample, cpu_due, no_greenlet, before, frames, after):
+        if (self.batchable and no_greenlet and frames == self.previous_frames
+                and before == after == self.previous_threads):
+            # CPU refresh does not invalidate a stable stack run. The registry
+            # sandwich still fences lifetime changes before reusing the rows.
+            if cpu_due:
+                for thread, native_id, row in self.cpu_rows:
+                    _record_cpu(row, _read_cpu(thread, native_id), sample)
+            self.run += 1
+            self.run_last = sample
+            return
         self.flush()
         current = {}
+        cpu_rows = []
         batchable = no_greenlet
         for ident, frame in frames.items():
             thread = after.get(ident)
@@ -163,8 +176,10 @@ class _Window:
             counts = row['stack_counts']
             counts[stack_key] = counts.get(stack_key, 0) + 1
             current[ident] = (row, stack_key, reusable)
+            cpu_rows.append((thread, native_id, row))
             batchable = batchable and reusable
         self.previous_frames, self.previous, self.batchable = frames, current, batchable
+        self.previous_threads, self.cpu_rows = after, cpu_rows
 
     def finish(self, samples, top):
         output = []
