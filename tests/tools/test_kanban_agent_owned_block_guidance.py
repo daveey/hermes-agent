@@ -71,7 +71,11 @@ def test_tool_block_refusal_has_human_request_skeleton(worker_env, kind):
         args["kind"] = kind
     d = json.loads(kt._handle_block(args))
     _assert_teaches_fix(d["error"])
-    assert "kind='assignment'" in d["error"] or "needs=" in d["error"]
+    # No different profile is configured here, so assignment cannot route: the refusal names the routes that
+    # work on one profile instead (test_kanban_block_assignment_guidance.py covers the configured case).
+    assert "kind='assignment'" not in d["error"]
+    for route in ("kanban_create", "needs=", "kanban_supervisor_request"):
+        assert route in d["error"], route
     assert _status(worker_env) == ("running", None)  # guard unchanged: still refused, task untouched
 
 

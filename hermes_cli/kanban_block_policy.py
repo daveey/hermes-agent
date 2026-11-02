@@ -49,6 +49,7 @@ def block_policy_error(kind, *, human_request=None, wake_check=None, clock_only=
         return None
     if reason and "SCHEDULED_UNTIL=" in reason:
         return None
+    from hermes_cli.kanban_assignment_routing import NO_SECOND_PROFILE_ROUTES
     if kind == "needs_input":
         return (
             f"{ERROR_CODE}: kind='needs_input' with no human_request is invisible to David (the "
@@ -58,20 +59,43 @@ def block_policy_error(kind, *, human_request=None, wake_check=None, clock_only=
             "(needs=['host:<gateway>'] or the exact capability, e.g. 'ssh:mini') so an owner card "
             "is opened on that gateway, or kanban_create the owner card there and park on it "
             "(kind='time', awaiting={kind:'card', ref, gateway}); (3) a timed wait -> kind='time' "
-            "with awaiting plus wake_check (or clock_only=true)."
+            "with awaiting plus wake_check (or clock_only=true); (4) archive, unlink, resume or "
+            "retry_limit on a card in your creator tree -> kanban_supervisor_request."
         ) + _SKELETON_NOTE
+    if _assignment_routes(task):
+        agent_work = (
+            "create the owner card on the gateway that holds the capability and park on it (kind='time', "
+            "awaiting={kind:'card', ref, gateway}), or kind='assignment' so a capable supervisor is routed "
+            "(a different profile is configured for this card)")
+    else:
+        agent_work = "use one of: " + NO_SECOND_PROFILE_ROUTES.rstrip(".")
     return (
         f"{ERROR_CODE}: kind={kind!r} with no human_request, wake_check or clock_only leaves the "
         "card with no owner and nothing to wake it. Pick one: (1) a decision/action only David can "
         "take -> pass human_request (kind needs_input or capability); (2) a condition an agent action "
-        "changes (a grant, a permission, an install, a fix) is work, not a wait -> create the owner "
-        "card on the gateway that holds the capability and park on it (kind='time', "
-        "awaiting={kind:'card', ref, gateway}), or kind='assignment' so a capable supervisor is "
-        "routed; (3) a wait needs a producer -> kind='time' with awaiting naming it (a live card, a "
+        f"changes (a grant, a permission, an install, a fix) is work, not a wait -> {agent_work}; "
+        "(3) a wait needs a producer -> kind='time' with awaiting naming it (a live card, a "
         "CI run, a vendor ticket, a real clock window) plus wake_check (or clock_only=true). "
         "If the work is actually done, call kanban_complete; if it needs another card, "
         "kanban_create it and link it as a parent."
     ) + _SKELETON_NOTE
+
+
+def _assignment_routes(task) -> bool:
+    """kind='assignment' can route the card in ``task=(conn, task_id)``; False without one or on any error.
+
+    Single-profile hosts (no kanban.orchestrator_profile, creator == assignee) always refuse it with
+    no_capable_supervisor, and offering it there sent 38 cards in 72 h into that wall. [daveey]
+    """
+    if task is None:
+        return False
+    try:
+        from hermes_cli import kanban_db as kb
+        from hermes_cli.kanban_assignment_routing import supervisor_available
+        row = kb.get_task(task[0], task[1])
+        return row is not None and supervisor_available(row)
+    except Exception:  # guidance only: an unreadable config or card never offers a route that may fail
+        return False
 
 
 ASK_LINT_CODE = "user_ask_incomplete"

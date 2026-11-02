@@ -159,6 +159,28 @@ def _supervisor(task):
     return None, []
 
 
+def supervisor_available(task) -> bool:
+    """True when kind='assignment' can route *task*: a different, existing, capable profile is configured.
+
+    Same check as :func:`route` (``_supervisor``), no new IO. Guidance texts offer assignment only when this
+    holds: on single-profile hosts (no orchestrator_profile, creator == assignee) it is always
+    ``no_capable_supervisor``. [daveey]
+    """
+    return _supervisor(task)[0] is not None
+
+
+# The routes that work without a second profile. Shown wherever assignment cannot route (the
+# agent_owned_block refusal, route()'s no_capable_supervisor refusal). [daveey]
+NO_SECOND_PROFILE_ROUTES = (
+    "(a) work that needs another gateway's access -> kanban_create the owner card on the gateway that "
+    "holds it (placement='<gateway>'), then park on it with kind='time', awaiting={kind:'card', "
+    "ref:'<owner id>', gateway:'<gateway>'}; (b) another gateway holds the access -> kanban_block("
+    "needs=['host:<gateway>'] or the exact capability, e.g. 'ssh:mini') so an owner card opens there; "
+    "(c) archive, unlink, resume or retry_limit on a card in your creator tree -> "
+    "kanban_supervisor_request(ops=[{'op': 'archive'|'unlink'|'resume'|'retry_limit', ...}])."
+)
+
+
 def validate_repair_completion(conn, task_id):
     """A completed repair must not release an invalid assignment after policy drift."""
     from hermes_cli import kanban_db as kb
@@ -210,8 +232,9 @@ def route(conn, task, payload):
     if name is None:
         raise AssignmentRoutingError(
             f'no_capable_supervisor: task {task.id} requires a different profile '
-            'with its original capabilities and kanban tools; configure '
-            'kanban.orchestrator_profile or a capable creator profile.'
+            'with its original capabilities and kanban tools. No different profile is '
+            'configured on this host, so assignment cannot help; use one of: '
+            + NO_SECOND_PROFILE_ROUTES
         )
     # The enclosing block transaction owns the run CAS and validated this profile.
     # assign_task's post-commit observer cannot run inside this transaction.

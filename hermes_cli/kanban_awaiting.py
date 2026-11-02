@@ -115,8 +115,10 @@ class RepeatedPark(Exception):
 _REMEDY = (
     "A wait needs a producer; agent-action conditions are work, not waits. Either (1) create the owner "
     "card on the gateway that holds the capability (kanban_create there, or `hermes kanban create` over "
-    "ssh) and park with awaiting={kind:'card', ref:'<owner id>', gateway:'<gw>'}; or (2) kanban_block "
-    "kind='assignment' so a capable supervisor is routed.")
+    "ssh) and park with awaiting={kind:'card', ref:'<owner id>', gateway:'<gw>'}; (2) kanban_block "
+    "needs=[...] when another gateway holds the access; or (3) kanban_supervisor_request for archive, "
+    "unlink, resume or retry_limit on your creator tree. kanban_block kind='assignment' routes only when "
+    "a different profile is configured (kanban.orchestrator_profile or a creator other than the assignee).")
 
 
 # --- parsing ---------------------------------------------------------------------------------
