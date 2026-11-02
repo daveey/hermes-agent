@@ -25,6 +25,10 @@ from pathlib import Path
 from tui_gateway import server
 from hermes_cli.active_sessions import SESSION_NOT_OWNED
 
+# This subprocess harness consumes stdout as its RPC channel, like tui_gateway.entry._serve().
+# Importing the server alone must not opt a daemon's diagnostic stdout into RPC.
+server._stdio_is_rpc_channel = True
+
 def make_session():
     return {"agent": None, "session_key": os.environ["KEY"], "history": [], "history_lock": threading.Lock(),
             "history_version": 0, "running": False, "attached_images": [], "image_counter": 0, "cols": 80,
