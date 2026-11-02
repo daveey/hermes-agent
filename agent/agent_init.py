@@ -54,10 +54,7 @@ from utils import base_url_host_matches, is_truthy_value
 logger = logging.getLogger("run_agent")
 
 
-def _provider_default_routes(provider: str) -> set[str]:
-    """Return known exact default routes for a canonical provider id."""
-    from agent.agent_init_routes import provider_default_routes
-    return provider_default_routes(provider)
+from agent.agent_init_routes import provider_default_routes as _provider_default_routes
 
 
 def _context_route_mismatch(
