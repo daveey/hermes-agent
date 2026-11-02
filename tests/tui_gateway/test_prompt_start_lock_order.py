@@ -184,3 +184,32 @@ def test_turn_refused_for_a_closing_session_gives_back_the_prepared_admission(
         with server._sessions_lock:
             server._sessions.pop(sid, None)
     assert fence.active_count() == 0
+
+
+def test_cancelled_work_settles_a_turn_whose_sibling_worker_finished_meanwhile(tmp_path, monkeypatch, request):
+    """A sibling worker that ends while this work is prepared but unstarted skips settlement (this work is
+    still counted); cancelling it must then settle the turn, as the sibling would have had it never been
+    prepared. Without a sibling, cancel leaves the claimed turn alone."""
+    from hermes_cli import backend_retirement
+    from tui_gateway import turn_admission as ta
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    fence = backend_retirement.RetirementFence()
+    monkeypatch.setattr(backend_retirement, "retirement", fence)
+    session = {"history_lock": threading.Lock(), "running": False, "profile_home": str(tmp_path)}
+    with ta.admission(session) as accepted:
+        assert accepted
+        session["running"] = True
+    release = threading.Event()
+    sibling = ta.start_work(release.wait, name=f"sibling-{request.node.name}", session=session)
+    assert sibling is not None
+    work = ta.prepare_work(lambda: None, name="prepared", session=session)
+    assert work is not None
+    release.set()
+    sibling.join(10)
+    assert not sibling.is_alive()
+    assert session["running"] is True, "the sibling must defer settlement to the still-counted work"
+    work.cancel()
+    assert session["running"] is False
+    assert session.get("_turn_admission") is None
+    assert fence.active_count() == 0

@@ -229,16 +229,18 @@ def prepare_work(target, *, name, session=None, home=None, busy_wait_s=None):
     if token is None:
         return None
     with token.lock:
+        shared = token.workers > 0  # another worker of this turn is running and would have settled it
         token.workers += 1
-    return PreparedWork(target, name, session, token, installed)
+    return PreparedWork(target, name, session, token, installed, shared)
 
 
 class PreparedWork:
     """A worker whose admission is retained but whose thread has not started (see ``prepare_work``)."""
 
-    def __init__(self, target, name, session, token, installed):
+    def __init__(self, target, name, session, token, installed, shared):
         self._target, self._name, self._session, self._token = target, name, session, token
         self._installed = installed  # this prepare put ``token`` on the session (no turn owned it yet)
+        self._shared = shared  # another worker was running when this one joined the turn
         self._finished = False
         self._finish_lock = threading.Lock()
 
@@ -247,6 +249,9 @@ class PreparedWork:
             if self._finished:
                 return
             self._finished = True
+        self._leave()
+
+    def _leave(self):
         session, token = self._session, self._token
         # The final worker also covers failures before normal terminal cleanup.
         if session is not None:
@@ -261,11 +266,17 @@ class PreparedWork:
         token.release()
 
     def cancel(self):
-        """Never started: undo the prepare only (no settlement), as if ``start_work`` had not been called."""
+        """Never started: leave the turn as if ``start_work`` had not been called (a sibling worker that
+        finished meanwhile deferred settlement to this one, so it settles then; otherwise only undo)."""
         with self._finish_lock:
             if self._finished:
                 return
             self._finished = True
+        if self._shared:
+            # A sibling that finished meanwhile skipped settlement because this worker was counted; leaving
+            # as the last worker settles the turn exactly as that sibling would have.
+            self._leave()
+            return
         session, token = self._session, self._token
         if session is not None and self._installed:
             with session["history_lock"]:
