@@ -78,7 +78,7 @@ def test_recovery_retires_all_alias_caches_and_idle_board_handles(board, monkeyp
     reader = None
     try:
         with monkeypatch.context() as m:
-            m.setattr(kanban_lockguard, "guard", lambda conn: False)
+            m.setattr(kanban_lockguard, "guard", lambda conn, **kwargs: False)
             reader = kanban_lockguard.connect(board)
             reader.execute("SELECT * FROM tasks").fetchall()
             for path in (board, alias):
@@ -100,7 +100,7 @@ def test_recovery_retires_all_alias_caches_and_idle_board_handles(board, monkeyp
 def test_recovery_does_not_rollback_a_live_transaction(board, monkeypatch):
     from hermes_cli.kanban_generation import DeletedWalGenerationError
     with monkeypatch.context() as m:
-        m.setattr(kanban_lockguard, "guard", lambda conn: False)
+        m.setattr(kanban_lockguard, "guard", lambda conn, **kwargs: False)
         reader = kanban_lockguard.connect(board)
         reader.execute("BEGIN")
         reader.execute("SELECT * FROM tasks").fetchall()
@@ -126,7 +126,7 @@ def test_unregistered_stranded_peer_refuses_retries_and_ro_fallback(board, monke
     try:
         if registered:
             with monkeypatch.context() as m:
-                m.setattr(kanban_lockguard, "guard", lambda conn: False)
+                m.setattr(kanban_lockguard, "guard", lambda conn, **kwargs: False)
                 peer = kanban_lockguard.connect(board)
         _strand(board)
         for _ in range(2):
@@ -161,7 +161,7 @@ def test_foreign_thread_handle_refused_until_owner_closes(board, monkeypatch):
             opened.set()
 
     with monkeypatch.context() as m:
-        m.setattr(kanban_lockguard, "guard", lambda conn: False)
+        m.setattr(kanban_lockguard, "guard", lambda conn, **kwargs: False)
         thread = threading.Thread(target=owner)
         thread.start()
         assert opened.wait(10)
@@ -186,7 +186,7 @@ def test_borrowed_cache_is_not_closed_or_waited_on_during_recovery(board, monkey
     activity._reset_cache_for_tests()
     try:
         with monkeypatch.context() as m:
-            m.setattr(kanban_lockguard, "guard", lambda conn: False)
+            m.setattr(kanban_lockguard, "guard", lambda conn, **kwargs: False)
             with activity.cached_ro(board) as borrowed:
                 borrowed.execute("SELECT * FROM tasks").fetchall()
                 _strand(board)
