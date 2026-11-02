@@ -115,3 +115,30 @@ def test_failed_intent_insert_rolls_back_task_and_events(board):
         assert conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == 0
         tid = kb.create_task(conn, title="Build", origin_intent=intent())
         assert kb.get_task(conn, tid).title == "Build"
+
+
+def _strip_late_options(conn):
+    row = conn.execute("SELECT request_id,intent_json FROM origin_creation_intents").fetchone()
+    env = json.loads(row["intent_json"])
+    for k in ("chat_origin", "placement_policy"):
+        env["options"].pop(k, None)
+    conn.execute("UPDATE origin_creation_intents SET intent_json=? WHERE request_id=?",
+                 (json.dumps(env, sort_keys=True, separators=(",", ":")), row["request_id"]))
+    conn.commit()
+
+
+def test_retry_ignores_default_options_added_after_intent_was_stored(board):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Build", origin_intent=intent())
+        _strip_late_options(conn)
+        assert kb.create_task(conn, title="Build", origin_intent=intent()) == tid
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+
+
+def test_retry_with_non_default_late_option_still_conflicts(board):
+    with kbc.connect_closing() as conn:
+        kb.create_task(conn, title="Build", origin_intent=intent())
+        _strip_late_options(conn)
+        with pytest.raises(OriginError) as err:
+            kb.create_task(conn, title="Build", origin_intent=intent(), chat_origin="gw/prof/sess")
+        assert err.value.code == "origin_creation_conflict"
