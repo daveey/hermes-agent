@@ -838,37 +838,8 @@ def inject_soft_deadline_from_env(agent: Any, *, now: Optional[float] = None) ->
 @_kanban_handler("kanban_show")
 def _handle_show(args: dict, **kw) -> str:
     """Full task state: row, parents, children, comments, runs, last 50 events."""
-    tid = _default_task_id(args.get("task_id"))
-    if not tid:
-        # No dispatcher task in scope and no explicit id: the caller asked "what
-        # should I be looking at". A chat profile cannot set HERMES_KANBAN_TASK,
-        # so an error naming the env var is dead end (#91431) — answer instead.
-        return json.dumps({
-            "current_task": None,
-            "hint": (
-                "No dispatcher-assigned task in this session, so there is no "
-                "task to show by default. Call kanban_list to see task ids on "
-                "the board, then kanban_show(task_id=<id>) for full state."),
-        })
-    with _granted_board(args.get("board"), tid) as (kb, conn, _):
-        task = _existing_task(kb, conn, tid)
-        return json.dumps({
-            "task": _fields(task, _TASK_FIELDS),
-            "parents": kb.parent_ids(conn, tid),
-            # Non-terminal parents; on a running card this means the dependency
-            # gate is not holding it and kanban_complete will refuse.
-            "unsatisfied_parents": [
-                {"id": pid, "status": status} for pid, status in kb.unsatisfied_parents(conn, tid)],
-            "children": kb.child_ids(conn, tid),
-            "comments": [_fields(c, _COMMENT_FIELDS) for c in kb.list_comments(conn, tid)],
-            # Posted during the live run, not written by it, not yet steered into it.
-            "undelivered_comments": [c.id for c in kb.undelivered_live_comments(conn, tid)],
-            # Capped; full log via CLI.
-            "events": [_fields(e, _EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
-            "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)],
-            "supervisor_requests": _graph.supervisor_requests(conn, tid),  # kanban_supervisor_request
-            # Same string build_worker_context hands the dispatcher at spawn time.
-            "worker_context": kb.build_worker_context(conn, tid)})
+    from tools.kanban_show import show
+    return show(args)
 
 
 @_kanban_handler("kanban_list")

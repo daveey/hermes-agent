@@ -98,6 +98,8 @@ def active_card_runs() -> Optional[int]:
 def collect(disk_path: Optional[Path] = None) -> dict[str, Any]:
     """``{cpu_load1, cpus, mem_used_pct, disk_free_gb, disk_total_gb}``; a value that cannot be read is left out."""
     out: dict[str, Any] = {"active_card_runs": active_card_runs()}
+    from hermes_cli import machine_drain_metrics
+    out.update(machine_drain_metrics.collect())
     try:
         out["cpu_load1"] = round(os.getloadavg()[0], 2)
     except (OSError, AttributeError):
@@ -133,7 +135,8 @@ class Reporter:
             return False
         self.next_at = now + REPORT_EVERY_S
         try:
-            self.send((self.collect_fn or collect)())
+            from hermes_cli.machine_drain_metrics import send_compatible
+            send_compatible(self.send, (self.collect_fn or collect)())
             return True
         except Exception as exc:  # health: allow BLE001 -- load reporting must never stop kanban sync
             status = getattr(exc, "status", None)

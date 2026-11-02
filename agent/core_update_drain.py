@@ -46,14 +46,16 @@ def hold_paths() -> list[Path]:
     return paths
 
 
-def read_hold(path: Path, now: Optional[float] = None) -> Optional[dict]:
-    """The hold record when ``path`` is an active hold, else None."""
+def read_hold(path: Path, now: Optional[float] = None, *, strict_errors: bool = False) -> Optional[dict]:
+    """Active hold or None; diagnostic readers can distinguish unreadable from absent."""
     try:
         raw = path.read_text(encoding="utf-8-sig")
         st = path.stat()
     except (FileNotFoundError, NotADirectoryError):
         return None
     except OSError:
+        if strict_errors:
+            raise
         return None
     try:
         data = json.loads(raw)

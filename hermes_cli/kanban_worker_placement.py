@@ -114,18 +114,23 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
         "AND NOT EXISTS (SELECT 1 FROM kanban_sync_outbox o WHERE o.table_name='tasks' "
         "AND o.row_uid=tasks.id AND o.state='pending') ORDER BY (id <= ?), id LIMIT ?",
         (POLICY, gateway, cursor, MAX_RESERVES_PER_TICK)).fetchall()
+    from hermes_cli import kanban_queue_reason as queue
+
     attempted = 0
     last = None
     try:
         for row in rows:
             last = row["id"]
             try:
-                hub.reserve(board, task_id=row["id"], expected_revision=row["sync_version"], candidates=candidates)
+                reply = hub.reserve(board, task_id=row["id"], expected_revision=row["sync_version"], candidates=candidates)
+                queue.try_record(queue.record_reply, conn, row["id"], gateway, reply)
                 attempted += 1
-            except OSError:
+            except OSError as exc:
                 # An unavailable transport applies to the entire batch, not just this card.
+                queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc)
                 return attempted
-            except client.HubError:
+            except client.HubError as exc:
+                queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc)
                 # Refused revisions still advance the local cursor, but never the feed.
                 continue
     finally:
@@ -189,7 +194,12 @@ def dispatch_tick(conn):
             return
         hub = client.Hub(ident, timeout=DISPATCH_NETWORK_BUDGET_S,
                          deadline=time.monotonic() + DISPATCH_NETWORK_BUDGET_S)
-        client.pull(conn, hub, state["board_id"], observers=True, partition=ident.gateway)
+        try:
+            client.pull(conn, hub, state["board_id"], observers=True, partition=ident.gateway)
+        except (client.HubError, client.SyncUnavailable, client.Resync, OSError) as exc:
+            from hermes_cli import kanban_queue_reason as queue
+            queue.try_record(queue.record_pull_error, conn, ident.gateway, error=exc)
+            return
         reevaluate(conn, hub, state["board_id"], ident.gateway)
     except (client.HubError, client.SyncUnavailable, client.Resync, OSError):
         # Offline origin cannot remove the queue fence or manufacture an assignment.
