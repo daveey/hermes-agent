@@ -2,8 +2,35 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from typing import Optional
+
+
+def writer_provenance(conn: sqlite3.Connection, task_id: str) -> dict:
+    """``commented`` payload fields naming THIS process's run when it is the worker of ``task_id``
+    (``HERMES_KANBAN_TASK`` matches and ``HERMES_KANBAN_RUN_ID`` is an int), else ``{}``.
+    Every writer inside a worker run (the kanban_comment tool, ``hermes kanban comment``
+    from its terminal, delegate children) inherits both, so the run is known in any process.
+
+    [daveey] ``writer_run_id`` is database-local: sync remaps ``task_events.run_id`` but not
+    this payload. ``writer_run_uid`` (``task_runs.uid``) names the writer on every replica."""
+    if os.environ.get("HERMES_KANBAN_TASK") != task_id:
+        return {}
+    try:
+        run_id = int((os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip())
+    except ValueError:
+        return {}
+    uid = _run_uid(conn, run_id)
+    return {"writer_run_id": run_id, **({"writer_run_uid": uid} if uid else {})}
+
+
+def _run_uid(conn: sqlite3.Connection, run_id: int) -> Optional[str]:
+    try:
+        row = conn.execute("SELECT uid FROM task_runs WHERE id = ?", (int(run_id),)).fetchone()
+    except sqlite3.OperationalError:
+        return None  # unsynced schema: no uid column
+    return row[0] if row and isinstance(row[0], str) and row[0] else None
 
 
 def own_comment_ids(conn: sqlite3.Connection, task_id: str, run_id: int) -> set[int]:
@@ -12,11 +39,7 @@ def own_comment_ids(conn: sqlite3.Connection, task_id: str, run_id: int) -> set[
     [daveey] A comment stamped with ``writer_run_uid`` is matched by that stable uid only
     (the payload integer is local to the database that wrote it); legacy uid-less comments
     keep the integer match."""
-    try:
-        row = conn.execute("SELECT uid FROM task_runs WHERE id = ?", (int(run_id),)).fetchone()
-    except sqlite3.OperationalError:
-        row = None  # unsynced schema: no uid column
-    uid = row[0] if row and isinstance(row[0], str) and row[0] else None
+    uid = _run_uid(conn, run_id)
     rows = conn.execute(
         "SELECT json_extract(payload, '$.comment_id') FROM task_events "
         "WHERE task_id = ? AND kind = 'commented' AND ("
