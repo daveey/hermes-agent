@@ -14222,19 +14222,14 @@ def test_interrupt_error_after_tts_stop_still_resumes_wake(monkeypatch):
     monkeypatch.setattr(wake_word, "resume_listening", resume_listening)
     monkeypatch.setattr(server, "_voice_wake_owner", None)
     monkeypatch.setattr(server, "_session_uses_compute_host", lambda _session: True)
-    # The failed host call reaches _recover_unreachable_compute_host_turn's pending-turn probe; without a stub
-    # it builds a REAL HostSupervisor, i.e. spawns a compute-host process that outlives the test. [daveey]
-    monkeypatch.setattr(server, "_get_compute_host_supervisor",
-                        lambda _cfg=None: types.SimpleNamespace(has_pending_turn=lambda _sid: False))
+    monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: types.SimpleNamespace(has_pending_turn=lambda _sid: False))  # else a REAL HostSupervisor spawns a compute-host process [daveey]
 
     def _host_failed(*_args, **_kwargs):
         raise RuntimeError("host failed")
 
     monkeypatch.setattr(server, "_interrupt_session_turn", _host_failed)
     try:
-        paused = _dispatch_sync(
-            {"id": "pause", "method": "wake.pause", "params": {}}, transport=owner
-        )
+        paused = _dispatch_sync({"id": "pause", "method": "wake.pause", "params": {}}, transport=owner)
         missing = _dispatch_sync(
             {"id": "missing", "method": "session.interrupt", "params": {"session_id": "gone"}},
             transport=owner,

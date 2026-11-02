@@ -6,6 +6,7 @@ process-wide default, such a thread on hermes-hub loaded the host's live ``hub.d
 rows per read) and pushed tests/tui_gateway/test_tui_gateway_server.py past the 512 MB per-file budget.
 """
 
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import os
 import threading
 from pathlib import Path
