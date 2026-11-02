@@ -77,12 +77,16 @@ _CONTENDER_SCRIPT = (
     "        if time.time() > deadline:\n"
     "            raise RuntimeError('timed out waiting for ' + what)\n"
     "        time.sleep(0.01)\n"
+    "def results():\n"
+    "    # Only published results: a '.N.tmp' staging file listed by iterdir()\n"
+    "    # can be renamed away before it is read (FileNotFoundError).\n"
+    "    return [p for p in results_dir.iterdir() if not p.name.startswith('.')]\n"
     "(ready_dir / idx).write_text('ready', encoding='utf-8')\n"
     "wait_for(go_file.exists, 'go file')\n"
     "if idx == late_worker:\n"
     "    # Attempt only once another process provably holds the last slot.\n"
     "    wait_for(lambda: any(p.read_text(encoding='utf-8') == 'OK'\n"
-    "                         for p in results_dir.iterdir()), 'a holder')\n"
+    "                         for p in results()), 'a holder')\n"
     "lease, message = try_acquire_active_session(\n"
     "    session_id=f'process-{idx}',\n"
     "    surface='cli',\n"
@@ -94,8 +98,7 @@ _CONTENDER_SCRIPT = (
     "tmp.replace(results_dir / idx)\n"
     "print(outcome, flush=True)\n"
     "if lease is not None:\n"
-    "    wait_for(lambda: len([p for p in results_dir.iterdir()\n"
-    "                          if not p.name.startswith('.')]) >= worker_count,\n"
+    "    wait_for(lambda: len(results()) >= worker_count,\n"
     "             'all workers to attempt acquire')\n"
     "    lease.release()\n"
 )
@@ -136,19 +139,32 @@ def test_cross_process_acquire_claims_only_one_last_slot(tmp_path, monkeypatch):
             )
 
         wait_until(
-            lambda: len(list(ready_dir.iterdir())) >= len(workers),
+            lambda: len(list(ready_dir.iterdir())) >= len(workers)
+            or any(w.poll() is not None for w in workers),
             timeout=max(0.0, deadline - time.monotonic()),
             what="every contender to become ready",
         )
         go_file.write_text("go", encoding="utf-8")
 
-        outputs = []
+        # The holder waits for every other contender's result, so a crashed
+        # contender would hold it (and a sequential communicate()) until the
+        # hang guard. Stop as soon as all exit or any one fails.
+        wait_until(
+            lambda: all(w.poll() is not None for w in workers)
+            or any(w.poll() not in (None, 0) for w in workers),
+            timeout=max(0.0, deadline - time.monotonic()),
+            what="every contender to exit",
+        )
+        failed = [w for w in workers if w.poll() not in (None, 0)]
         for worker in workers:
-            stdout, stderr = worker.communicate(
-                timeout=max(0.0, deadline - time.monotonic())
-            )
-            assert worker.returncode == 0, stderr
-            outputs.append(stdout.strip())
+            if worker.poll() is None:
+                worker.kill()
+        finished = [worker.communicate() for worker in workers]
+        assert not failed, [
+            stderr for worker, (_, stderr) in zip(workers, finished)
+            if worker in failed
+        ]
+        outputs = [stdout.strip() for stdout, _ in finished]
     finally:
         for worker in workers:
             if worker.poll() is None:
