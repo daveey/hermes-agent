@@ -227,8 +227,12 @@ def worker_lease_key(db, conn, session_id, payload):
     return {'value': key}
 
 
+from agent.model_routing_switch_intent import worker_consume as _switch_consume, worker_pending as _switch_pending
+
 WORKER_LIFECYCLE_HANDLERS = {
     'session.model': worker_model,
+    'route_switch.pending': _switch_pending,
+    'route_switch.consume': _switch_consume,
     'session.lease_key': worker_lease_key,
     'session.title': worker_title,
     'session.title_source': worker_title_source,

@@ -31,13 +31,14 @@ def pending(session_db, session_id, model, provider):
     """The raw intent row when it names exactly this session and tuple, else ``None``."""
     if session_db is None or not session_id or not model:
         return None
-    get = getattr(session_db, "get_meta", None)
-    if not callable(get):
+    # Both the owner's SessionDB and a managed worker's RuntimeSessionStore expose this one narrow read,
+    # bound to the session it names (the worker's is owner-checked against its own assignment). A store
+    # without it (a test double, a foreign wrapper) has no committed switch to honour; a store that has
+    # it and fails raises, so a broken owner link is never mistaken for "no switch".
+    read = getattr(session_db, "route_switch_intent", None)
+    if not callable(read):
         return None
-    try:
-        raw = get(PREFIX + session_id)
-    except Exception:
-        return None
+    raw = read(session_id)
     if not raw:
         return None
     try:
@@ -54,4 +55,31 @@ def pending(session_db, session_id, model, provider):
 
 def consume(session_db, session_id, raw):
     """Delete the intent only if it is still the one this build honoured (a newer switch survives)."""
-    session_db._write_sql("DELETE FROM state_meta WHERE key=? AND value=?", (PREFIX + session_id, raw))
+    session_db.consume_route_switch_intent(session_id, raw)
+
+
+def read_on_conn(conn, session_id):
+    row = conn.execute("SELECT value FROM state_meta WHERE key=?", (PREFIX + session_id,)).fetchone()
+    return row[0] if row is not None else None
+
+
+def consume_on_conn(conn, session_id, raw):
+    """Compare-and-delete; true only when this exact intent was the one removed."""
+    return conn.execute("DELETE FROM state_meta WHERE key=? AND value=?",
+                        (PREFIX + session_id, raw)).rowcount == 1
+
+
+def worker_pending(db, conn, session_id, payload):
+    """``worker.persist`` ``route_switch.pending``: the intent of the worker's own assigned session only."""
+    from hermes_state_runtime import RuntimeStoreError
+    if payload:
+        raise RuntimeStoreError('invalid_params')
+    return {'value': read_on_conn(conn, session_id)}
+
+
+def worker_consume(db, conn, session_id, payload):
+    """``worker.persist`` ``route_switch.consume``: CAS-delete the worker's own session intent."""
+    from hermes_state_runtime import RuntimeStoreError
+    if set(payload) != {'raw'} or not isinstance(payload['raw'], str):
+        raise RuntimeStoreError('invalid_params')
+    return {'value': consume_on_conn(conn, session_id, payload['raw'])}

@@ -169,7 +169,17 @@ def route_runtime(policy, frozen, model, key, *, fallback=True):
     """``(runtime, fallback_entry)`` for a launch-policy route: the session's FROZEN config and launch
     credential, walking its own fallback chain on an AuthError unless ``fallback=False`` (a session
     control asking which route the session itself runs). The one resolver an in-process turn
-    (``_resolve_policy_agent_runtime``) and a managed worker (``worker_route``) share."""
+    (``_resolve_policy_agent_runtime``) and a managed worker (``worker_route``) share.
+
+    This is a pre-build lookup: a managed route resolved here has no session identity yet (the resolver
+    mints a random one), so it must not record a standing allocation. The agent's own
+    ``prepare_agent_route`` allocates under the real session id."""
+    from agent.model_routing_runtime import temporary_resolution
+    with temporary_resolution():
+        return _route_runtime(policy, frozen, model, key, fallback=fallback)
+
+
+def _route_runtime(policy, frozen, model, key, *, fallback=True):
     from hermes_cli.runtime_provider import (
         frozen_runtime_config, resolve_runtime_provider, resolve_runtime_with_fallback,
     )

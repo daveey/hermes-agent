@@ -39,8 +39,14 @@ def prepare_agent_route(agent, model, provider, session_id, api_key, base_url,
     # recorded allocation once; nothing else may move an exact pin.
     from agent.model_routing_switch_intent import consume, pending
     intent = pending(session_db, session_id, model, provider)
+    requested = provider or "auto"
+    if intent is not None and requested == "auto":
+        # An ``auto`` build honouring a switch must land on the provider the switch committed, never a
+        # sibling route serving the same model name; a provider that cannot serve it refuses below.
+        import json
+        requested = json.loads(intent).get("provider") or requested
     runtime = resolve_runtime_provider(
-        requested=provider or "auto", target_model=model,
+        requested=requested, target_model=model,
         explicit_api_key=None if managed else api_key, explicit_base_url=None if managed else base_url,
         routing_session_id=session_id, routing_config=config,
         routing_requirements=requirements, routing_replace=intent is not None)
