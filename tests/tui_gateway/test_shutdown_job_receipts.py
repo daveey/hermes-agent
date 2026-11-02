@@ -852,3 +852,15 @@ def test_user_stop_before_late_marker_keeps_journaled_receipts(home):
     marker = read_turn_marker(home, "session-key")
     assert marker["reason"] == JOBS_REASON
     assert sorted(j["session_id"] for j in marker["killed_jobs"]) == ["K1", "P2"]
+
+
+def test_marker_then_exit_journal_then_cancelled_retire_keeps_journaled_receipt(home):
+    """Retiring the cancelled notice turn must preserve a later journaled completion."""
+    from tui_gateway.exit_job_receipts import JOBS_REASON, _save_receipts
+    from tui_gateway.turn_marker import retire_cancelled_turn_marker
+    assert record_turn_start(home, "session-key", "notice P1 finished", carried_job_ids=["P1"])
+    assert _save_receipts(home, "session-key", [_rcpt("P2")])
+    retire_cancelled_turn_marker(home, "session-key")
+    marker = read_turn_marker(home, "session-key")
+    assert marker is not None and marker["reason"] == JOBS_REASON
+    assert [j["session_id"] for j in marker["killed_jobs"]] == ["P2"]

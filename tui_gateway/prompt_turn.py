@@ -182,7 +182,6 @@ def _admit_prompt_turn(
                 # the session already held stays for close's own handoff (_settle_isolated_turn_before_close).
                 _release_active_session_slot(session)
             return None
-        from tui_gateway.session_notifications import admit_synthesized_turn
         if not admit_synthesized_turn(session):
             # [daveey] A backend exit fenced automatic turns after this one's claim: its notice is journaled
             # for the next backend (exit_job_receipts), so it must not also run here. Delivery itself is
@@ -1501,7 +1500,6 @@ def _run_admitted_prompt(
                 _reopen_routed_session_row(routing_db, sid, session)
             # [daveey] Under _sessions_lock: the exit fence check, the notice's delivered mark and the start
             # are one commit (a refused or raising start rolls the mark back; exit_job_receipts).
-            from tui_gateway.session_notifications import start_synthesized_turn
             can_start = start_synthesized_turn(session, lambda: _start_session_work(
                 run, name=f"prompt-turn-{sid}", session=session)) is not None
     if not can_start:
