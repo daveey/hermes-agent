@@ -63,6 +63,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 # "skipped on this host" note and the lanes can never disagree.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.ci.list_os_marked_tests import gated_specs, spec_hosts
+from scripts import run_tests_parallel_rss as _rss  # [daveey] per-file peak RSS
 from scripts.run_tests_host_slots import HELD_ENV as HOST_SLOT_HELD_ENV, host_slot_count, host_slot_dir, host_test_slot
 
 
@@ -167,6 +168,8 @@ _DURATIONS_FILE = "test_durations.json"
 # slow new case from CI-wide slowness. 0 disables (env: HERMES_TEST_SLOW_CASE_S).
 _SLOW_CASE_SECONDS = float(os.environ.get("HERMES_TEST_SLOW_CASE_S") or 10.0)
 _DURATION_LINE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)s\s+(?:setup|call|teardown)\s+(\S.*?)\s*$")
+
+
 _DURATIONS_HEADER_RE = re.compile(r"^=+ slowest(?: \d+)? durations =+$")
 
 
@@ -847,6 +850,7 @@ def _run_one_file_attempt(
         # _kill_tree handles the Windows path via taskkill /F /T.
         start_new_session=True,
     )
+    _rss.reap_with_rusage(proc)
 
     # Capture the pgid NOW, before the leader can exit and be reaped. Once
     # the leader is reaped, os.getpgid(proc.pid) raises ProcessLookupError
@@ -885,6 +889,7 @@ def _run_one_file_attempt(
 
         output +=  "\n"
     finally:
+        _rss.record_peak_rss(file, _rss.proc_peak_rss_bytes(proc))
         _kill_detached_leftovers(temproot)
         # Delete the temp root for this attempt. Nothing reads it after the
         # subprocess exits. More than 3000 of them fill the disk of the
@@ -1941,11 +1946,11 @@ def main() -> int:
         print(f"  Total subprocess CPU-wall: {total_subproc:.1f}s  (runner wall: {elapsed:.1f}s, parallelism: {args.jobs}x)")
         print(f"  P50: {p50:.2f}s  P90: {p90:.2f}s  P95: {p95:.2f}s  P99: {p99:.2f}s  Max: {max_t:.2f}s")
         print(f"  <1s: {fast} files ({fast/len(times)*100:.0f}%)  <2s: {fast_2s} files ({fast_2s/len(times)*100:.0f}%)")
-        # Top 10 slowest files — likely the ones dragging the run.
         slowest = sorted(file_times, key=lambda x: x[1], reverse=True)[:10]
         print("  Top 10 slowest:")
         for f, t in slowest:
             print(f"    {t:>6.2f}s  {_format_file(f, repo_root)}")
+        _rss.print_peak_rss_report(repo_root)
 
     skips_fail_the_run = bool(args.fail_on_skip) and _report_skips(skipped_files, repo_root)
 

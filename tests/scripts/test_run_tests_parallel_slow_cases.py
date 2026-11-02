@@ -58,6 +58,7 @@ def test_runner_prints_the_slow_case_line(tmp_path, monkeypatch):
     (root / "scripts" / "ci").mkdir(parents=True)
     shutil.copy2(_REAL / "run_tests_parallel.py", root / "scripts")
     shutil.copy2(_REAL / "run_tests_host_slots.py", root / "scripts")
+    shutil.copy2(_REAL / "run_tests_parallel_rss.py", root / "scripts")
     shutil.copy2(_REAL / "ci" / "list_os_marked_tests.py", root / "scripts" / "ci")
     probe_dir = tmp_path / "probe"
     probe_dir.mkdir()

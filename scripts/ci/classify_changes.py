@@ -256,6 +256,7 @@ _PY_TEST_HARNESS = (
     "scripts/run_tests.sh",
     "scripts/run_tests_parallel.py",
     "scripts/run_tests_host_slots.py",
+    "scripts/run_tests_parallel_rss.py",
 )
 # The macOS state lane (hermes-state-macos.yml runs tests/hermes_state/ on the mini):
 # hermes_state.py and every hermes_state_* sibling, their tests, the shared pytest harness
