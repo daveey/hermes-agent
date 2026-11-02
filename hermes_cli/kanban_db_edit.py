@@ -8,8 +8,6 @@ import json
 import sqlite3
 from typing import Optional
 
-from hermes_cli import kanban_db as _kb
-
 
 class PriorityLowerRefused(ValueError):
     """An edit would lower a card's priority without a reason (``require_lower_reason``). [daveey]"""
@@ -113,3 +111,8 @@ def edit_task(
             )
     _kb.notify_task_updated(conn, task_id, changed_fields, board=board)
     return True
+
+
+# Late-bound origin namespace, imported LAST so this module is fully populated before
+# ``kanban_db`` imports from it (import-first cycle, test_kanban_db_split_imports).
+from hermes_cli import kanban_db as _kb
