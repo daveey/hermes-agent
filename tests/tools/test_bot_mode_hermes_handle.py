@@ -58,7 +58,7 @@ def test_remote_default_is_never_offered_as_a_bare_form_a_local_profile_answers_
     root = _managed_home(tmp_path, teammates=("researcher",))
     sender = root / "profiles" / "researcher"
     authority = _canonical_target(monkeypatch, root)
-    bot_relay.write_remote_roster(sender, [
+    bot_relay.write_remote_roster(root, [
         {"profile": "default", "handle": "default", "title": "Remote Main", "connection_id": "box", "connection_label": "Box"},
         {"profile": "hermes", "handle": "hermes", "connection_id": "box", "connection_label": "Box"},
     ])
@@ -69,4 +69,4 @@ def test_remote_default_is_never_offered_as_a_bare_form_a_local_profile_answers_
 
     assert offered != "default" and ack["status"] == "queued", (offered, ack)
     assert authority.calls == []
-    assert [(e["target_connection"], e["target_profile"]) for e in bot_relay.claim_pending_envelopes(sender)] == [("box", "default")]
+    assert [(e["target_connection"], e["target_profile"]) for e in bot_relay.claim_pending_envelopes(root)] == [("box", "default")]
