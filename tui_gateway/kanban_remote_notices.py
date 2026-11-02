@@ -48,6 +48,7 @@ _TERMINAL = ("done", "blocked")
 
 _lock = threading.Lock()
 _index_memo: Optional[tuple] = None  # (stamp, file identity, signature, me, index)
+_sweep_memo: Optional[tuple] = None  # (stamp, gateway, cards, current states)
 
 
 def hub_db_path() -> Path:
@@ -688,7 +689,8 @@ def _reset_for_tests() -> None:
     from tui_gateway.kanban_remote_observations import _decoded, _decoded_files, _memo
     from tui_gateway.kanban_replica_observer import reset as reset_observers
 
-    global _index_memo
+    global _index_memo, _sweep_memo
+    _sweep_memo = None
     reset_observers()
     _memo.clear()
     _decoded.clear()
@@ -761,7 +763,7 @@ def _stale_notice_id(row, task: dict) -> tuple[str, str]:
     return profile, key or f"remote:{row['ref']}:{row['state']}:{profile}:{sid}"
 
 
-def _settle_stale_claims(rows: list[tuple], path, ledger) -> int:
+def _settle_stale_claims(states: dict, path, ledger) -> int:
     """Settle in-flight claims nobody can finish: the holder is dead AND the card left the notice's state. [daveey]
 
     ``collect`` and the sweep only walk cards that are terminal NOW, so a claim whose holder died after the card
@@ -774,7 +776,6 @@ def _settle_stale_claims(rows: list[tuple], path, ledger) -> int:
     it) and a card missing from the replica (partial sync) are left alone. Never raises.
     """
     try:
-        states = _current_states(rows)
         conn = _ledger(ledger)
         try:
             claims = conn.execute(
@@ -968,12 +969,12 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
     if not profile or not sid or sid in live:
         return
     try:
-        event_key, metadata, text = _sweep_payload(owner, key, task, me, profile, sid)
-        memo_key = (str(path), profile, sid, metadata["notice_id"])
+        memo_key = (str(path), profile, sid, _notice_id(owner, key, task, profile, sid))
         if memo_key in _delivered:
             return
         if waker is not None and observed_at is not None and now is not None and now - observed_at < waker.grace_s:
             return  # a live poller (any backend) claims within seconds; it owns the chat's turn
+        event_key, metadata, text = _sweep_payload(owner, key, task, me, profile, sid)
         claim = {"session": sid, "ref": ref, "state": state, "notice_key": event_key}
         with session_db(profile, sid) as (db, tip):
             if db is None or not text:
@@ -1030,6 +1031,30 @@ def _deliver_fresh(cards, fresh_times, me, now, path, live, session_db, ledger, 
                           delivered=delivered, swept=swept, waker=waker, observed_at=observed_at, now=now)
 
 
+def _sweep_snapshot(path, me: str) -> tuple:
+    """Cache only replica-derived data, never claim recovery or time/liveness decisions.
+
+    Bracket the snapshot with SQLite's published-commit key, not WAL timestamps.
+    One memo bounds retained data; a failed/racing read cannot bless a stale snapshot.
+    """
+    global _sweep_memo
+    from tui_gateway.kanban_replica_observer import fingerprint
+
+    stamp = fingerprint(path)
+    memo = _sweep_memo
+    if stamp is not None and memo is not None and memo[:2] == (stamp, me):
+        return memo[2], memo[3]
+    _sweep_memo = None
+    with contextlib.closing(_ro(Path(path))) as conn:
+        rows = _canonical(_task_rows(conn, me))
+    cards = list(_sweep_cards(rows, me))
+    states = {ref: (state, {"sessions": task.get("sessions")})
+              for ref, (state, task) in _current_states(rows).items()}
+    if stamp is not None and fingerprint(path) == stamp:
+        _sweep_memo = (stamp, me, cards, states)
+    return cards, states
+
+
 def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session_db, live_ids=None,
                          ledger=None, now: Optional[float] = None, waker=None) -> list[dict]:
     """Persist addressed notices, then ack the ledger. Write-first: a failed append leaves no delivered row
@@ -1058,20 +1083,19 @@ def sweep_remote_notices(*, replica_path=None, gateway=None, session_db=_session
     now = time.time() if now is None else now
     live = set(live_ids or ())
     try:
-        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
-            rows = _canonical(_task_rows(conn, me))
+        cards, states = _sweep_snapshot(path, me)
     except sqlite3.Error:
         logger.debug("remote Kanban replica unavailable", exc_info=True)
         return []
     from tui_gateway.kanban_remote_observations import observe
-    cards = list(_sweep_cards(rows, me))
+
     try:
         fresh_times = observe(Path(path), ledger, now)
     except (OSError, sqlite3.Error):
         logger.debug("remote kanban observation failed; defer notices", exc_info=True)
         return []
     _load_swept(ledger)
-    _settle_stale_claims(rows, path, ledger)
+    _settle_stale_claims(states, path, ledger)
     delivered: list[dict] = []
     swept: list = []
     counts: dict = {}

@@ -52,20 +52,13 @@ def _dir_tree_signature(root, sig, depth=_SIGNATURE_MAX_DEPTH) -> None:
     names, not only mtimes: an install and an uninstall inside one coarse mtime tick (1-2 s on some
     filesystems) leave every mtime equal, and the change must still show. ~1 ms for 170 dirs."""
     from agent.skill_utils import EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS
+    from utils_directory_snapshot import directory_snapshot
     try:
-        mtime = os.stat(root).st_mtime_ns
-        with os.scandir(root) as it:
-            entries = list(it)
+        mtime, entries = directory_snapshot(root)
     except OSError:
         return
-    names, is_skill = [], False
-    for entry in entries:
-        with suppress(OSError):
-            if entry.is_dir():
-                names.append(entry.name)
-            elif entry.name == "SKILL.md":
-                is_skill = True
-    names.sort()
+    names = sorted(name for name, is_dir in entries if is_dir)
+    is_skill = any(name == "SKILL.md" and not is_dir for name, is_dir in entries)
     sig.append((str(root), mtime, tuple(names)))
     if depth <= 0:
         return

@@ -191,9 +191,8 @@ def _pet_changed_payload() -> dict:
 # them mid-turn and on idle ticks, so hashing them re-fired sessions.changed every heartbeat window
 # (#98005). Liveness comes from session.active_list, and a real turn still moves message_count.
 from hermes_state_projection import SESSION_SIGNATURE_FIELDS as _SESSION_SIGNATURE_FIELDS
-# path -> (database/WAL mtime, session-table digest). The mtime guard keeps the
-# normal 0.5 s watch pass stat-only; SQLite is read only after another process
-# actually commits (and for ``utils.RACY_MTIME_WINDOW_NS`` after it, see _settled_mtime).
+# path -> (published SQLite commit key, session-table digest). A retained observer
+# avoids reopening unchanged stores and sees WAL commits after their frames publish.
 _sessions_db_sig_cache: dict[str, tuple[object, tuple | None]] = {}
 # A busy fleet commits to state.db continuously, so the mtime guard alone re-digests every
 # session row (thousands) on nearly every 0.5 s pass. Re-digest a moved db at most this often;
@@ -207,10 +206,13 @@ def _session_db_content_sig(db_path: Path):
     """Read the transactional projection revision, or digest a legacy store.
 
     Upgraded stores use bounded schema/meta probes after writes, independent of
-    the legacy digest throttle. Settled unchanged files need no query. The file
+    the legacy digest throttle. Unchanged stores need only data_version. The file
     identity distinguishes replacements whose counters happen to be equal.
     Stores without the complete trigger capability retain the content fallback.
     """
+    from tui_gateway.kanban_replica_observer import fingerprint
+
+    stamp = fingerprint(db_path)
     mtime = _newest_mtime_ns((db_path, db_path.with_name(f"{db_path.name}-wal")))
     cache_key = str(db_path)
     cached = _sessions_db_sig_cache.get(cache_key)
@@ -227,7 +229,7 @@ def _session_db_content_sig(db_path: Path):
     _sessions_db_identity[cache_key] = identity
     revision_cached = cached is not None and cached[1] is not None and cached[1][0] == "revision"
 
-    if cached is not None and cached[0] == mtime:
+    if stamp is not None and cached is not None and cached[0] == stamp:
         return cached[1]
     now = time.monotonic()
     if (not revision_cached and cached is not None and cached[1] is not None
@@ -251,7 +253,8 @@ def _session_db_content_sig(db_path: Path):
         revision = session_projection_revision(conn)
         if revision is not None:
             signature = ("revision", identity, revision)
-            _sessions_db_sig_cache[cache_key] = (_settled_mtime(mtime), signature)
+            stable = stamp if stamp is not None and fingerprint(db_path) == stamp else None
+            _sessions_db_sig_cache[cache_key] = (stable, signature)
             return signature
         available = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
         fields = tuple(field for field in _SESSION_SIGNATURE_FIELDS if field in available)
@@ -278,25 +281,11 @@ def _session_db_content_sig(db_path: Path):
         if conn is not None:
             conn.close()
 
-    _sessions_db_sig_cache[cache_key] = (_settled_mtime(mtime), signature)
+    stable = stamp if stamp is not None and fingerprint(db_path) == stamp else None
+    _sessions_db_sig_cache[cache_key] = (stable, signature)
     _sessions_digest_at[cache_key] = now
 
     return signature
-
-
-# Filesystem timestamps come from a coarse clock (~4 ms ticks; whole seconds on some filesystems) and
-# SQLite commits in place, so a commit landing in the tick of a read leaves the DB/WAL mtime unchanged.
-# A digest read while the mtime is that fresh must not become a cache hit ("racily clean", as in git's
-# index): it is cached under a key no mtime equals, so the next tick re-reads the rows.
-_RACY_MTIME = object()
-
-
-def _settled_mtime(mtime):
-    """``mtime`` when it is old enough to trust as a cache key, else a never-matching sentinel."""
-    from utils import mtime_is_racy  # function-local: bodies are rebound onto server.py's globals
-    if mtime is None or mtime_is_racy(mtime):
-        return _RACY_MTIME
-    return mtime
 
 
 def _sessions_sig():
@@ -324,6 +313,16 @@ def _projects_sig():
         for name in ("projects.db", "projects.db-wal"))
 
 
+def _watcher_entries(root: Path) -> tuple:
+    """Cache membership only; the signature still stats files for in-place edits."""
+    from utils_directory_snapshot import directory_snapshot
+    try:
+        _mtime, entries = directory_snapshot(root)
+        return tuple(root / name for name, _is_dir in entries)
+    except OSError:
+        return ()
+
+
 def _pairing_sig():
     """Per-file stat signature of every profile's pairing ledgers (legacy ``pairing/`` and
     ``platforms/pairing/``): the gateway process writes pending codes, so the files are the only
@@ -333,7 +332,7 @@ def _pairing_sig():
         with contextlib.suppress(OSError):
             # Only the ledgers: _rate_limits.json moves on every unauthorized DM.
             entries += [
-                e for e in root.iterdir() if e.name.endswith(("-pending.json", "-approved.json"))]
+                e for e in _watcher_entries(root) if e.name.endswith(("-pending.json", "-approved.json"))]
     return _files_sig(entries)
 
 
@@ -379,7 +378,7 @@ def _bot_relay_outbox_sig():
     home = _watcher_home()
     root = home.parent.parent if home.parent.name == "profiles" else home
     with contextlib.suppress(OSError):
-        for entry in (root / "bot_relay" / "outbox").iterdir():
+        for entry in _watcher_entries(root / "bot_relay" / "outbox"):
             if entry.name.endswith(".json"):
                 _bot_relay_outbox_seen = max(_bot_relay_outbox_seen, _watcher_mtime_ns(entry) or 0)
     return _bot_relay_outbox_seen or None
