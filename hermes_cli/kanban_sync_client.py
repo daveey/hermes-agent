@@ -974,7 +974,8 @@ class FeedWatcher:
 LINKS_EVERY_S = 60.0
 # Machine-session sources come from state.db (``kanban_db_notify._local_session_sources``), which is not in a links
 # pass's key: a missing session is re-read after its 300 s TTL. An unchanged board is still reconciled this long after
-# its last pass, so a session classified later is released within the same bound as before. [daveey]
+# its last pass. A shared-cache refresh can add this interval after the missing-source TTL; content changes
+# still reconcile immediately on the next links pass, and notification delivery checks sources independently. [daveey]
 LINKS_MAX_AGE_S = 300.0
 # Per board file: (inputs, started at) of the last completed links pass (see ``_links_inputs``).
 _LINKS_DONE: dict[str, tuple[tuple, float]] = {}
