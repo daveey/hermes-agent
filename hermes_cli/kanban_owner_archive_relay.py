@@ -157,12 +157,12 @@ def apply_requests(conn: sqlite3.Connection, *, signal_fn=None) -> list[str]:
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import write_txn
 
-    # Per-card index probes (idx_events_task), not a scan of every event on the board.
-    rows = conn.execute(
-        "SELECT t.id FROM tasks t WHERE t.status != 'archived' AND EXISTS "
-        "(SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind = ?)", (REQUEST_KIND,)).fetchall()
+    from hermes_cli.kanban_idle_candidates import candidate_task_ids
+    # The task/event set is structural; home authority and answered UIDs below
+    # are still checked every tick, including changes in remote replicas.
+    rows = candidate_task_ids(conn, ('archived',), (REQUEST_KIND,), exclude_statuses=True)
     done: list[str] = []
-    for (waiting,) in rows:
+    for waiting in rows:
         if _home_of(conn, waiting) is not None:
             continue
         answered = {p.get("request_uid") for p in _events(conn, waiting, RESULT_KIND)}
@@ -244,19 +244,27 @@ def apply_remote_archives(conn: sqlite3.Connection) -> list[str]:
     (:func:`apply_requests`), then send the archives of placed copies whose remote id has resolved since their card
     was archived (:func:`hermes_cli.kanban_placement_forward.sweep_unresolved_archives`). Returns the ids archived
     here; a failing source is logged and skipped."""
-    from hermes_cli.kanban_remote_stop import apply_stop_requests
+    from hermes_cli.kanban_remote_stop import STOP_KIND, apply_stop_requests
+    from hermes_cli.kanban_idle_candidates import event_candidates
 
     done: list[str] = []
-    for label, apply in (("remote stop requests", apply_stop_requests), ("forwarded owner archives", apply_requests)):
+    sources = (
+        ('remote stop requests', apply_stop_requests, ('running',), (STOP_KIND,)),
+        ('forwarded owner archives', apply_requests,
+         ('archived',), (REQUEST_KIND,)),
+    )
+    for label, apply, statuses, kinds in sources:
         try:
-            done += apply(conn)
+            if event_candidates(conn, statuses, kinds, exclude_statuses=apply is apply_requests):
+                done += apply(conn)
         except Exception:  # health: allow BLE001 -- one failing source must not stop the dispatcher tick
             _log.warning("kanban: applying %s failed", label, exc_info=True)
     # [daveey] Placed copies whose remote id was unknown when their card was archived here: archive them there now.
     try:
-        from hermes_cli.kanban_placement_forward import sweep_unresolved_archives
-        for tid in sweep_unresolved_archives(conn):
-            _log.info("kanban: sent the deferred archive of %s's placed copy", tid)
+        from hermes_cli.kanban_placement_forward import ARCHIVE_FORWARDED, CANCEL_INTENT, sweep_unresolved_archives
+        if event_candidates(conn, ('done', 'archived'), (ARCHIVE_FORWARDED, CANCEL_INTENT)):
+            for tid in sweep_unresolved_archives(conn):
+                _log.info("kanban: sent the deferred archive of %s's placed copy", tid)
     except Exception:  # health: allow BLE001 -- one failing source must not stop the dispatcher tick
         _log.warning("kanban: sweeping unresolved placement archives failed", exc_info=True)
     return done

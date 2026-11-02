@@ -196,6 +196,9 @@ def sweep_remote_guard_holds(conn: sqlite3.Connection, result) -> None:
     from hermes_cli.kanban_wake_check import foreign_ids
     from hermes_cli.kanban_worker_node import dispatch_refusals
 
+    from hermes_cli.kanban_idle_candidates import event_candidates
+    if not event_candidates(conn, ('ready', 'review'), ('respawn_guarded',)):
+        return
     foreign = foreign_ids(conn)
     for lane in ("ready", "review"):
         for task_id in dispatch_refusals(conn, lane):

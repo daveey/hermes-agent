@@ -67,8 +67,10 @@ import hashlib
 import json
 import re
 import subprocess
+import threading
 import time
-from typing import Callable, Optional
+from contextlib import contextmanager
+from typing import Callable, Iterator, Optional
 
 from hermes_cli import kanban_capability_registry as reg
 
@@ -254,7 +256,32 @@ def target_info(target: str, *, now: float, remote: Optional[dict] = None) -> di
     return {"profiles": profiles, "tools": tools}
 
 
+_round_config = threading.local()  # .cfg: the placement config pinned by ``config_snapshot`` on this thread
+
+
+@contextmanager
+def config_snapshot() -> Iterator[dict]:
+    """Pin one placement-config load for this thread while the block runs (one sync round or links pass). [daveey]
+
+    Placeholder checks run per task, subscription and link row, and each unpinned check reloaded the config: about 5k
+    loads per chat-link pass on a 600-card board (2026-11-02). Nested snapshots share the outer one; another thread
+    never sees it. The next block loads afresh, so a config edit applies from the next round.
+    """
+    pinned = getattr(_round_config, "cfg", None)
+    if pinned is not None:
+        yield pinned
+        return
+    _round_config.cfg = cfg = config()
+    try:
+        yield cfg
+    finally:
+        _round_config.cfg = None
+
+
 def config() -> dict:
+    pinned = getattr(_round_config, "cfg", None)
+    if pinned is not None:
+        return pinned
     try:
         from hermes_cli.config import load_config_readonly
         cfg = ((load_config_readonly() or {}).get("kanban") or {}).get("placement") or {}

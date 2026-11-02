@@ -412,6 +412,28 @@ def test_rest_create_refuses_a_duplicate_owner(chat):
     assert _titles() == [_LIVE_TITLE]
 
 
+@pytest.mark.parametrize("surface", ["tool", "cli", "rest"])
+def test_mirror_singleton_refused_on_every_create_path(chat, monkeypatch, capsys, surface):
+    from tests.tools.test_kanban_create_overlap_singleton import NEW, OPEN_TITLE
+    with kbc.connect_closing() as conn:
+        live = kb.create_task(conn, title=OPEN_TITLE, assignee="default", session_id="other-chat",
+                              idempotency_key="core-mirror:a")
+    payload = {"title": NEW, "assignee": "default", "requires": [], "idempotency_key": "core-mirror:b"}
+    if surface == "tool":
+        from tools.registry import registry
+        out = json.loads(registry.dispatch("kanban_create", payload))
+    elif surface == "cli":
+        assert _cli([NEW, "--assignee", "default", "--json", "--idempotency-key", "core-mirror:b"],
+                    monkeypatch) == 2
+        out = json.loads(capsys.readouterr().out)
+    else:
+        response = _rest(payload)
+        assert response.status_code == 409, response.text
+        out = response.json()["detail"]
+    assert out["code"] == "create_overlap" and [m["id"] for m in out["matches"]] == [live], out
+    assert _titles() == [OPEN_TITLE]
+
+
 def test_rest_create_override_is_accepted_and_recorded(chat):
     live = _open_owner()
     r = _rest({"title": _DUP_TITLE, "assignee": "default", "distinct_from": [live]})

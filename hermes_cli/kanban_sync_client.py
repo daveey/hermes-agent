@@ -790,8 +790,9 @@ def _pull_replica(slug: str, hub: Hub, gateway: str) -> int:
 
 def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
     """Exclude explicit detach until this round's repairs and sends have ended."""
+    from hermes_cli.kanban_placement import config_snapshot
     from hermes_cli.kanban_sync_guard import board_sync_lock
-    with board_sync_lock(path):
+    with board_sync_lock(path), config_snapshot():  # one placement load per round, not one per placeholder check
         return _sync_board_locked(slug, path, hub, gateway)
 
 
@@ -971,32 +972,119 @@ class FeedWatcher:
 
 
 LINKS_EVERY_S = 60.0
+# Machine-session sources come from state.db (``kanban_db_notify._local_session_sources``), which is not in a links
+# pass's key: a missing session is re-read after its 300 s TTL. An unchanged board is still reconciled this long after
+# its last pass. A shared-cache refresh can add this interval after the missing-source TTL; content changes
+# still reconcile immediately on the next links pass, and notification delivery checks sources independently. [daveey]
+LINKS_MAX_AGE_S = 300.0
+# Per board file: (inputs, started at) of the last completed links pass (see ``_links_inputs``).
+_LINKS_DONE: dict[str, tuple[tuple, float]] = {}
 
 
-def reconcile_links(boards: list[tuple[str, Path]], gateway: str) -> None:
-    """Bring this gateway's chat links up to date in every synced board (kanban_chat_links.reconcile), creating a
-    link-only board for each board this gateway's chats have cards on but this host does not have."""
-    from hermes_cli import kanban_chat_links
+def _links_clock() -> float:
+    return time.monotonic()
+
+
+def _ledger_slices(cards: Iterable[Mapping[str, Any]], gateway: str) -> dict[str, frozenset]:
+    """Per board, every field of this gateway's origin-ledger rows that a links pass reads (``ledger_boards``,
+    ``kanban_chat_links._ledger_links``). Compared by value: a re-projection with the same rows is no change."""
+    out: dict[str, set] = {}
+    for c in cards:
+        if not c.get("board") or c.get("origin_gateway") not in (None, gateway):
+            continue
+        out.setdefault(str(c["board"]), set()).add(
+            (c.get("id"), c.get("session"), c.get("via"), c.get("origin_profile"), bool(c.get("released"))))
+    return {board: frozenset(rows) for board, rows in out.items()}
+
+
+def _links_signature(gateway: str, placement: Mapping[str, Any]) -> Optional[tuple]:
+    """The configuration a links pass reads besides its board: gateway names, profile, homes, placement config."""
     try:
-        created = ensure_link_boards(kanban_chat_links.ledger_boards(gateway), gateway)
-        if created:
-            _log.info("kanban sync: link-only boards %s", created)
-            boards = board_paths()
-    except Exception as exc:  # health: allow BLE001 -- link-only boards are best effort; local links still reconcile
-        _log.warning("kanban sync: link-only boards failed (%s: %s)", type(exc).__name__, exc)
-    for slug, path in boards:
+        from hermes_constants import get_hermes_home
+        from hermes_cli.kanban_origin import gateway_names
+        from hermes_cli.profiles import get_active_profile_name
+        return (gateway, gateway_names()[0], get_active_profile_name(), str(get_hermes_home()),
+                json.dumps(placement, sort_keys=True, default=str))
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return None
+
+
+def _links_inputs(conn: sqlite3.Connection, path: Path, slug: str, gateway: str, mode: str,
+                  ledger: Optional[dict[str, frozenset]], signature: Optional[tuple]) -> Optional[tuple]:
+    """Everything one board's links pass (``kanban_chat_links.reconcile`` with its creator-chats backfill) reads,
+    besides state.db (``LINKS_MAX_AGE_S``): the live file's identity and transactional activity revision (tasks,
+    events, subscriptions, links; trigger-backed, so dispatcher clocks and sync stamps do not move it), the replica's
+    identity and feed cursor (its only writer besides the ``pulled_at`` stamp is the pull), this gateway's ledger rows
+    for the board, the mode and the configuration. Read before the pass, so a commit during it re-arms the next one.
+    None (cannot tell: no counter, unreadable file) always reconciles. [daveey]"""
+    from hermes_cli import kanban_activity_revision as rev
+    if ledger is None or signature is None:
+        return None
+    try:
+        st = os.stat(path)
+        revision = rev.read_key(conn, rev.LOCAL_TABLES)
+        if revision is None:
+            return None
+        shadow = shadow_path(slug)
+        if not shadow.exists():
+            replica: tuple = ("absent",)
+        else:
+            # The loop's own pooled replica handle (generation-recovered on borrow), not another connection.
+            with connection(shadow, lambda: open_shadow(slug, gateway)) as replica_conn:
+                rst = os.stat(shadow)
+                replica = (rst.st_dev, rst.st_ino, int((sync.sync_state(replica_conn) or {}).get("cursor") or 0))
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return None
+    return (st.st_dev, st.st_ino), revision, replica, ledger.get(slug, frozenset()), mode, signature
+
+
+def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchanged: bool = False) -> None:
+    """Bring this gateway's chat links up to date in every synced board (kanban_chat_links.reconcile), creating a
+    link-only board for each board this gateway's chats have cards on but this host does not have.
+
+    ``skip_unchanged`` (the sync loop): a board whose links-pass inputs (``_links_inputs``) equal those of its last
+    completed pass, less than ``LINKS_MAX_AGE_S`` ago, is not reconciled again. A failed pass records nothing, so the
+    next one retries. Explicit callers (``hermes kanban sync links``) always reconcile. Boards are borrowed through
+    the loop's connection scope (``kanban_sync_connections``). [daveey]"""
+    from hermes_cli import kanban_chat_links
+    from hermes_cli.kanban_placement import config_snapshot
+    with config_snapshot() as placement:
+        ledger: Optional[dict[str, frozenset]] = None
         try:
-            conn = _connect(path)
+            from hermes_cli.kanban_session_activity import _remote_links
+            ledger = _ledger_slices(_remote_links(), gateway)
+            local = {slug for slug, _path in boards}
+            if not skip_unchanged or set(ledger) - local:
+                created = ensure_link_boards(set(ledger), gateway)
+                if created:
+                    _log.info("kanban sync: link-only boards %s", created)
+                    boards = board_paths()
+        except Exception as exc:  # health: allow BLE001 -- link-only boards are best effort; local links still reconcile
+            _log.warning("kanban sync: link-only boards failed (%s: %s)", type(exc).__name__, exc)
+        signature = _links_signature(gateway, placement) if skip_unchanged else None
+        for slug, path in boards:
+            key = str(path)
             try:
-                if sync.board_mode(conn) == "off":
-                    continue
-                counts = kanban_chat_links.reconcile(conn, slug, gateway)
-            finally:
-                conn.close()
-            if any(counts.values()):
-                _log.info("kanban sync: %s chat links %s", slug, counts)
-        except Exception as exc:  # health: allow BLE001 -- one board's links must not stop the sync loop
-            _log.warning("kanban sync: chat links for %s failed (%s: %s)", slug, type(exc).__name__, exc)
+                with connection(path, lambda: _connect(path)) as conn:
+                    mode = sync.board_mode(conn)
+                    if mode == "off":
+                        continue
+                    inputs, started = None, 0.0
+                    if skip_unchanged:
+                        inputs = _links_inputs(conn, path, slug, gateway, mode, ledger, signature)
+                        done = _LINKS_DONE.pop(key, None)
+                        started = _links_clock()
+                        if inputs is not None and done is not None and done[0] == inputs \
+                                and started - done[1] < LINKS_MAX_AGE_S:
+                            _LINKS_DONE[key] = done
+                            continue
+                    counts = kanban_chat_links.reconcile(conn, slug, gateway)
+                    if inputs is not None:
+                        _LINKS_DONE[key] = (inputs, started)
+                if any(counts.values()):
+                    _log.info("kanban sync: %s chat links %s", slug, counts)
+            except Exception as exc:  # health: allow BLE001 -- one board's links must not stop the sync loop
+                _log.warning("kanban sync: chat links for %s failed (%s: %s)", slug, type(exc).__name__, exc)
 
 
 class _BoardWatch:
@@ -1098,6 +1186,7 @@ def reset_board_watch() -> None:
     _REPAIRED.clear()
     _REPAIRED_AT.clear()
     _REPAIR_DEFERRED.clear()
+    _LINKS_DONE.clear()
 
 
 def _defer_repair(key: str, inputs: Optional[tuple]) -> bool:
@@ -1221,7 +1310,7 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
                 _log.info("kanban sync: %s %s pulled=%d pushed=%d rejected=%d", r.board, r.mode, r.pulled,
                           r.push.sent, r.push.rejected)
         if time.monotonic() >= next_links:
-            reconcile_links(boards, ident.gateway)
+            reconcile_links(boards, ident.gateway, skip_unchanged=True)
             next_links = time.monotonic() + LINKS_EVERY_S
         metrics.report_due()
         remaining = max(0.0, work.deadline - time.monotonic())

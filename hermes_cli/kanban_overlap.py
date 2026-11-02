@@ -11,6 +11,10 @@ An open card matches when:
   the hundreds of cards on ``bb`` or ``hermes`` is chance, not overlap), or
 - both titles share at least half of the longer title's significant words (3 or more).
 
+The hermes-mods core mirror is a singleton job: titles naming ``mirror``, ``hermes-mods``
+and ``core`` match regardless of score or heuristic exemptions below. Exact-key retries
+still return the existing card; an intentional second owner requires a recorded override.
+
 Naming a board means an explicit reference in the title or body: ``board <slug>``, ``--board <slug>``,
 ``<slug> board``, ``@task:<slug>@...`` / ``@task:<slug>/...`` or ``<gateway>/<slug>`` for a known gateway
 (``hub/runners``). A plain-word slug (``hermes``, ``bb``, ``runners``) inside a URL, a filesystem path or a
@@ -112,9 +116,20 @@ def _names_board(slug: str, title: str, body: str, gateways: Iterable[str] = ())
     return bool(re.search(rf"(?<![a-z0-9_-]){s}(?![a-z0-9_-])", (title or "").lower()))
 
 
+def singleton_job(title: str) -> Optional[str]:
+    """Explicit single-writer jobs, not a change to general title similarity. [daveey]"""
+    tokens = set(re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", (title or "").lower()))
+    if {"mirror", "hermes-mods", "core"} <= tokens:
+        return "hermes-mods core mirror"
+    return None
+
+
 def _reasons(card: dict, new_words: set[str], title: str, body: str, target_board: str,
              gateways: Iterable[str] = ()) -> tuple[list[str], float]:
     reasons, score = [], 0.0
+    job = singleton_job(title)
+    if job and job == singleton_job(card.get("title") or ""):
+        reasons.append(f"same singleton job: {job}")
     theirs = words(card.get("title") or "")
     shared = new_words & theirs
     # A board named in passing (a path, a log line) is not enough: the titles must share a word too. A plain-word
@@ -496,25 +511,28 @@ def _sibling_owner(card_title: str, waiting_id: str) -> bool:
 def find(*, title: str, body: str, target_board: str, session_id: Optional[str], self_tid: Optional[str],
          parents: Iterable[str], family: Optional[str] = None) -> list[dict]:
     """Open cards elsewhere that already cover this work, best match first. Never raises. ``family`` (the new
-    card's idempotency-key family) skips cards from the same keyed creator: its keys already dedupe them."""
+    card's idempotency-key family) skips cards from the same keyed creator, except singleton jobs."""
     try:
         from hermes_cli import kanban_capability_registry as reg
         self_gw = reg.self_gateway()
         skip = set(parents) | ({self_tid} if self_tid else set())
         waiting = capability_owner_waiting_id(title, body)
         new_words = words(title)
+        job = singleton_job(title)
         out, seen, mine = [], set(), None
         cards = [*_local_cards(self_gw), *_replica_cards(self_gw)]
         gateways = {g for g in (self_gw, *(c["gateway"] for c in cards)) if g}
         if gateways & {"hub", "hermes-hub"}:
             gateways |= {"hub", "hermes-hub"}
         for card in cards:
-            if (card["id"] in skip or card["id"] == waiting
+            singleton = bool(job and job == singleton_job(card.get("title") or ""))
+            if (card["gateway"], card["id"]) in seen:
+                continue
+            if not singleton and (card["id"] in skip or card["id"] == waiting
                     or (waiting and _sibling_owner(card.get("title") or "", waiting))
                     or (session_id and card["session_id"] == session_id)
                     or (self_tid and card["creator_task_id"] == self_tid)
-                    or (family and card.get("key_family") == family)
-                    or (card["gateway"], card["id"]) in seen):
+                    or (family and card.get("key_family") == family)):
                 continue
             seen.add((card["gateway"], card["id"]))
             reasons, score = _reasons(card, new_words, title, body, target_board, gateways)
@@ -525,7 +543,7 @@ def find(*, title: str, body: str, target_board: str, session_id: Optional[str],
             admit = (f"waits on {card['id']}" if waits_on(card["id"], title, body)
                      else f"recovers {card['id']}" if recovers(card["id"], title, card.get("title") or "")
                      else _distinct(mine, _identity(card.get("title") or "", card.get("body") or "", gateways)))
-            if admit:
+            if admit and not singleton:
                 # Logged so an audit can tell an admitted look-alike from a missed one.
                 _log.info("kanban create overlap: admitted %r despite %s/%s/%s (%s): %s", title, card["gateway"],
                           card["board"], card["id"], "; ".join(reasons), admit)

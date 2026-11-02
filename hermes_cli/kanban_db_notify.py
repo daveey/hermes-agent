@@ -275,6 +275,8 @@ def list_notify_subs(
     include_unowned: bool = False,
     platform: Optional[str] = None,
     chat_id: Optional[str] = None,
+    platforms: Optional[Iterable[str]] = None,
+    pending_only: bool = False,
 ) -> list[dict]:
     """List subscriptions, optionally restricted to notifier profile owners.
 
@@ -301,6 +303,15 @@ def list_notify_subs(
         if value is not None:
             where.append(clause)
             params.append(value)
+    if platforms is not None:
+        active = sorted({p.lower() for p in platforms})
+        where.append(f"LOWER(platform) IN ({','.join('?' * len(active))})")
+        params.extend(active)
+    if pending_only:
+        # A durable claim advanced the cursor, but a live holder can expire
+        # without another event. Keep it eligible for claim-path recovery.
+        where.append("(inflight_from IS NOT NULL OR EXISTS (SELECT 1 FROM task_events e "
+                     "WHERE e.task_id = kanban_notify_subs.task_id AND e.id > kanban_notify_subs.last_event_id))")
     sql = "SELECT * FROM kanban_notify_subs"
     if where:
         sql += " WHERE " + " AND ".join(f"({clause})" for clause in where)
@@ -323,16 +334,19 @@ def count_notify_subs(
     chat_id: Optional[str] = None,
     thread_id: Optional[str] = None,
 ) -> int:
-    """Count ``kanban_notify_subs`` rows via a read-only connection — the
+    """Count ``kanban_notify_subs`` rows via a shared query-only reader — the
     notifier's cheap zero-subscription early exit. Unlike :func:`connect` it
-    never creates the file, runs init/migration or opens writable; WAL rows are
-    still visible so a fresh sub is never missed. Missing DB / missing table
+    never creates the file or runs init/migration. Generation recovery may use
+    a query-only writable handle when a read-only WAL open is unavailable.
+    Committed WAL rows remain visible so a fresh sub is never missed. Missing DB / missing table
     counts as zero; platform matches case-insensitively (as notifier routing),
     chat/thread exactly. Raises :class:`sqlite3.Error` if the DB exists but is
     unreadable — callers pick their own fallback.
     """
+    from hermes_cli import kanban_reader_retention as retention
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
     if not path.exists():
+        retention.prune(missing=str(path.resolve()))
         return 0
     owner_where, owner_params = _notify_profile_filter(
         notifier_profiles, include_unowned=include_unowned,
@@ -353,8 +367,8 @@ def count_notify_subs(
     query = "SELECT COUNT(*) FROM kanban_notify_subs"
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
-    conn = _kanban_lockguard.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
-    try:
+    # Consume cursors in autocommit; committed subscriptions are visible next poll.
+    with retention.reader(path.resolve()) as conn:
         try:
             row = conn.execute(query, params).fetchone()
         except sqlite3.OperationalError as exc:
@@ -362,8 +376,6 @@ def count_notify_subs(
                 return 0
             raise
         return int(row[0]) if row else 0
-    finally:
-        conn.close()
 
 
 def remove_notify_sub(
