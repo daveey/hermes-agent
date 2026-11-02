@@ -308,7 +308,11 @@ async def execute_admission(authority, ref, row):
                     event.text = '\n'.join(part['text'] for part in prepared['content'] if part.get('type') == 'text')
                 event.allow_gateway_control = False
                 event.internal = True  # trust comes from the private binding and preclaim, never client JSON
-            response = await authority.runner._handle_message(event)
+            # [daveey] A following session's selection is committed before its in-process build,
+            # from the one profile read that build resolves (the managed path commits in _bootstrap).
+            from gateway.session_local_profile import turn_selection
+            with turn_selection(authority, ref, local_policy, row['generation']):
+                response = await authority.runner._handle_message(event)
             result = captured.get('terminal_result', captured.get('result'))
             if result is None:
                 # No TurnRunner result means the handler answered without executing the turn.
