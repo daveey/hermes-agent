@@ -317,7 +317,7 @@ def _build_section(home: Path) -> str:
         f"You are `@{_handle(me, names)}`. Your teammates (live roster; roles from their "
         "profiles):\n"
         f"{roster_block}"
-        + _remote_paragraph(home)
+        + _remote_paragraph(root)
         + _peer_paragraph(root)
     )
 
