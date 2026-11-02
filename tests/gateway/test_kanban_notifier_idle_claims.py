@@ -1,6 +1,7 @@
 """Idle filtering must preserve recovery of expired claims held by live processes."""
 import time
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -37,5 +38,28 @@ def test_collector_retains_live_claims_for_expiry_recovery(tmp_path, monkeypatch
         assert len(collector.deliveries) == int(expired)
         if expired:
             assert [event.kind for event in collector.deliveries[0]['events']] == ['completed']
+    finally:
+        conn.close()
+
+
+def test_collector_does_not_claim_idle_subscription(tmp_path, monkeypatch):
+    path = tmp_path / 'board.db'
+    monkeypatch.setenv('HERMES_KANBAN_DB', str(path))
+    conn = kbc.connect(path)
+    try:
+        task = kb.create_task(conn, title='idle notification', assignee='default')
+        notify.add_notify_sub(conn, task_id=task, platform='telegram', chat_id='chat')
+        assert len(notify.list_notify_subs(conn)) == 1
+        claim = Mock(wraps=notify.claim_unseen_events_for_sub)
+        monkeypatch.setattr(notify, 'claim_unseen_events_for_sub', claim)
+        runner = SimpleNamespace(_owns_kanban_dispatcher_lock=lambda: True,
+                                 adapters={'telegram': object()}, _profile_adapters={},
+                                 config=SimpleNamespace(multiplex_profiles=False))
+        monkeypatch.setattr(watcher, '_adapter_for_subscription', lambda *a: object())
+        collector = watcher._Collector(runner, kb, notifier_profile='default', gc_due=False, gc_retention_days=30)
+        with kb.pin_first_board_resolution():
+            collector.collect_board('default')
+        claim.assert_not_called()
+        assert collector.deliveries == []
     finally:
         conn.close()
