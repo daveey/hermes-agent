@@ -18,7 +18,9 @@ _DESC_BOARD = (
     "HERMES_KANBAN_BOARD env → the 'current' symlink under the kanban "
     "home → 'default'. Pass an explicit slug only when the caller (e.g. "
     "a Telegram routing layer) needs to override the env-pinned active "
-    "board for this one call."
+    "board for this one call. A dispatcher worker's explicit slug must match "
+    "its pinned database's board; a mismatch returns board_pinned rather than "
+    "silently using the pinned board (existing exact-target owner-wake grants excepted)."
 )
 
 

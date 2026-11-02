@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import time
-from contextlib import contextmanager
+from tools.kanban_tools_board import tool_board as _board
 from typing import Any, Callable, Optional
 
 from agent.redact import redact_sensitive_text
@@ -416,24 +416,6 @@ def _require_orchestrator_tool(tool_name: str) -> None:
             f"{tool_name} is orchestrator-only; dispatcher-spawned workers must use "
             "kanban_complete, kanban_request_review, kanban_request_changes, kanban_block, "
             "kanban_heartbeat, or kanban_comment for their assigned task.")
-
-
-@contextmanager
-def _board(board: Optional[str], *, quiet_close: bool = False):
-    """``with _board(slug) as (kb, conn)``; lazy import so the module loads in non-kanban
-    contexts. ``board=None`` keeps the env/symlink resolution chain; an explicit slug
-    overrides it per call. ``quiet_close`` swallows close() errors (best-effort bridges)."""
-    from hermes_cli import kanban_db as kb
-    from hermes_cli import kanban_db_connect as kbc
-    conn = kbc.connect(board=board)
-    try:
-        yield kb, conn
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            if not quiet_close:
-                raise
 
 
 def _existing_task(kb, conn, tid: str):
