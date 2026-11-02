@@ -14,13 +14,21 @@ class RoutingState:
 
     def allocate(self, session_id, parent_session_id, level, candidates, version, excluded, prepare=None,
                  exact_pin=False, replace=False):
-        """Allocate and persist atomically; aliases share one failover decision."""
+        """Allocate and persist atomically; aliases share one failover decision.
+
+        ``replace`` is ``True`` (unconditional, an in-session switch) or a committed switch-intent fence
+        token: that intent replaces this lineage's class allocation at most once. The fence is recorded
+        in this transaction, so overlapping builds and a crash retry before the intent is consumed
+        re-read the honoured allocation instead of choosing again; a failed ``prepare`` rolls it back.
+        """
         with closing(sqlite3.connect(self.path, timeout=30, isolation_level=None)) as db:
             db.execute("PRAGMA busy_timeout=30000")
             db.execute("CREATE TABLE IF NOT EXISTS aliases (session TEXT PRIMARY KEY, root TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS routes (root TEXT, class TEXT, metadata TEXT NOT NULL, "
                        "PRIMARY KEY(root, class))")
             db.execute("CREATE TABLE IF NOT EXISTS counters (pool TEXT PRIMARY KEY, position INTEGER NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS switch_fences (root TEXT, class TEXT, intent TEXT NOT NULL, "
+                       "PRIMARY KEY(root, class))")
             db.execute("BEGIN IMMEDIATE")
             try:
                 result = self._allocate(db, session_id, parent_session_id, level, candidates, version, excluded,
@@ -73,6 +81,12 @@ class RoutingState:
         from agent.model_routing import ModelRoutingError
 
         root = self._root(db, session, parent)
+        fence = replace if isinstance(replace, str) and replace else None
+        if fence is not None:
+            honoured = db.execute("SELECT intent FROM switch_fences WHERE root=? AND class=?",
+                                  (root, level)).fetchone()
+            if honoured is not None and honoured[0] == fence:
+                replace = False  # this intent already replaced the allocation: ordinary sticky lookup
         row = db.execute("SELECT metadata FROM routes WHERE root=? AND class=?", (root, level)).fetchone()
         if row and not replace:
             previous = json.loads(row[0])
@@ -101,6 +115,8 @@ class RoutingState:
         if replace:
             metadata["reason"] = "explicit-switch"
         db.execute("INSERT OR REPLACE INTO routes VALUES (?, ?, ?)", (root, level, json.dumps(metadata)))
+        if replace and fence is not None:
+            db.execute("INSERT OR REPLACE INTO switch_fences VALUES (?, ?, ?)", (root, level, fence))
         return metadata
 
     @staticmethod

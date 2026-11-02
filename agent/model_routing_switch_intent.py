@@ -13,10 +13,24 @@ transaction). The next build of exactly that session on exactly that tuple alloc
 exact pin still refuses to move, so a stale row or a reader's guess cannot override it. A failed
 allocation (credential prepare raised) rolls back in the allocation store and leaves the intent for
 the next attempt.
+
+Reading the intent, allocating and compare-deleting it span two stores, and builds of one session can
+overlap (a cold ``/review`` builds a same-session agent while the durable queue drains the next turn; the
+adapter's idle guard reserves nothing). The allocator therefore keys the replacement to the intent itself:
+``fence_token`` is passed as ``replace`` and recorded beside the route in the allocation transaction, so an
+intent replaces a lineage's class allocation at most once. An overlapping build, or a retry after a crash
+between allocation and consume, re-reads the honoured route; a rolled-back allocation leaves no fence.
+Consume still happens only after the allocation commits, never before it.
 """
+import hashlib
 import json
 
 PREFIX = "gateway.route_switch.v1."
+
+
+def fence_token(raw):
+    """The allocator's idempotence key for exactly this committed intent (session, tuple, generation)."""
+    return "switch-intent:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def record_in_transaction(conn, session_id, model, provider, generation):

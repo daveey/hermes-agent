@@ -37,8 +37,8 @@ def prepare_agent_route(agent, model, provider, session_id, api_key, base_url,
     session_id = session_id or new_session_id()
     # A committed explicit switch to exactly this tuple, for exactly this session, replaces the
     # recorded allocation once; nothing else may move an exact pin.
-    from agent.model_routing_switch_intent import consume, pending
-    intent = pending(session_db, session_id, model, provider)
+    from agent import model_routing_switch_intent as switch_intent
+    intent = switch_intent.pending(session_db, session_id, model, provider)
     requested = provider or "auto"
     if intent is not None and is_class_selector(model):
         # Canonical class picks inherit the prior provider in their stored policy;
@@ -53,9 +53,12 @@ def prepare_agent_route(agent, model, provider, session_id, api_key, base_url,
         requested=requested, target_model=model,
         explicit_api_key=None if managed else api_key, explicit_base_url=None if managed else base_url,
         routing_session_id=session_id, routing_config=config,
-        routing_requirements=requirements, routing_replace=intent is not None)
+        routing_requirements=requirements,
+        # Keyed to this committed intent: the allocator honours it at most once per lineage class, so an
+        # overlapping same-session build or a retry after a lost consume cannot replace twice.
+        routing_replace=switch_intent.fence_token(intent) if intent is not None else False)
     if intent is not None:
-        consume(session_db, session_id, intent)
+        switch_intent.consume(session_db, session_id, intent)  # only after the allocation committed
     agent.model_routing = runtime["model_routing"]
     agent._model_routing_requirements = requirements
     return (runtime["model"], runtime["provider"], session_id,
