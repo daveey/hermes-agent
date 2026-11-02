@@ -6,8 +6,8 @@ import threading
 from hermes_cli.kanban_generation import DeletedWalGenerationError, lifecycle_access, retry_open
 
 
-def cached_entry(path):
-    return retry_open(lambda remaining: _cached_entry_once(path, remaining), 0.5)
+def cached_entry(path, busy_budget=0.5):
+    return retry_open(lambda remaining: _cached_entry_once(path, remaining), busy_budget)
 
 
 def _cached_entry_once(path, remaining):

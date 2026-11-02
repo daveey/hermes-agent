@@ -513,14 +513,14 @@ register_reader_cache(evict_readers)
 
 
 @contextlib.contextmanager
-def cached_ro(path: Path) -> Iterator[sqlite3.Connection]:
+def cached_ro(path: Path, *, busy_budget: float = 0.5) -> Iterator[sqlite3.Connection]:
     """A shared read-only connection to ``path``, held exclusively for the ``with`` body. Reopened when the file is
     replaced (new inode: a rebuilt replica), after any sqlite error, or when its ``-shm`` generation is gone (the
     connection is stranded on a deleted WAL index and would fail with ``disk I/O error`` or read stale rows until
     restart; kanban-759104eb56). Raises ``sqlite3.OperationalError`` when the file is missing, like ``_open_ro``."""
     from hermes_cli.kanban_reader_lifecycle import cached_entry
 
-    key, entry = cached_entry(path)
+    key, entry = cached_entry(path, busy_budget)
     conn, _ident, lock, _shm = entry
     with lock:  # bodies read every result they start: an unfinished cursor would pin a WAL snapshot
         with _RO_CACHE_LOCK:
@@ -874,8 +874,9 @@ def _shadow_fingerprint() -> tuple:
 
 
 def _board_content_key(path: Path, tables: tuple[str, ...] = _revision.LOCAL_TABLES) -> tuple:
-    """Changes on every write to a row the activity readers read in ``path`` (stat fallback without the counter)."""
-    return _revision.content_key(path, tables, cached_ro)
+    """Changes on every write to a row the activity readers read in ``path`` (stat fallback without the counter, or
+    at once while the board is busy: this probe precedes the real read and must never spend its busy budget)."""
+    return _revision.content_key(path, tables, lambda p: cached_ro(p, busy_budget=0))
 
 
 def _without_local_open_duplicates(rows: list[dict[str, Any]], *, gateway: str,
