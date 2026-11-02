@@ -4,10 +4,13 @@ from pathlib import Path
 
 import pytest
 
+from tests.gateway import test_model_switch_worker_composed as _composed
 from tests.gateway.test_model_switch_worker_composed import (
-    home, OPUS, ASTRA, _owner, _noop, _worker_build, _allocation, _pinned_opus,
+    OPUS, ASTRA, _owner, _noop, _worker_build, _allocation, _pinned_opus,
 )
 from tests.gateway.test_bot_chat_follows_profile import _open, _legacy
+
+home = _composed.home  # the composed suite's profile-home fixture, shared as-is
 
 
 @pytest.fixture(autouse=True)

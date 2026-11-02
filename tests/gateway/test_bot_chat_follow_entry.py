@@ -24,14 +24,17 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
+from tests.gateway import test_model_switch_worker_composed as _composed
 from tests.gateway.test_model_switch_worker_composed import (
-    home, OPUS, ASTRA, _owner, _allocation, _live_policy, _mutate, PERSIST_FIELDS,
+    OPUS, ASTRA, _owner, _allocation, _live_policy, _mutate, PERSIST_FIELDS,
 )
 from tests.gateway.test_bot_chat_follows_profile import _open
 from tests.gateway.test_bot_chat_managed_follow import _profile_pick, _receipt_model
 # autouse: the owner's state.db lives in its profile home, beside the config.yaml profile_config reads
 from tests.gateway.test_bot_chat_managed_follow import _state_db_in_profile
 from tests.waiting import async_wait_until
+
+home = _composed.home  # the composed suite's profile-home fixture, shared as-is
 
 
 def _in_process_handler(built):
