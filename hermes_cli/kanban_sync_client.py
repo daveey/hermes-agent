@@ -892,6 +892,8 @@ def publish_pickup_if_changed(hub: Any, *, now: Optional[float] = None) -> bool:
 
 def sync_all_once(hub: Optional[Hub] = None, *,
                   boards: Optional[list[tuple[str, Path]]] = None) -> list[RoundResult]:
+    from hermes_cli.kanban_sync_guard import SyncRoundBusy
+
     ident = load_identity() if hub is None else hub.ident
     hub = hub or Hub(ident)
     publish_pickup_if_changed(hub)
@@ -899,7 +901,7 @@ def sync_all_once(hub: Optional[Hub] = None, *,
     for slug, path in board_paths() if boards is None else boards:
         try:
             results.append(sync_board(slug, path, hub, ident.gateway))
-        except (HubError, OSError, Resync, sqlite3.Error, SyncUnavailable) as exc:
+        except (HubError, OSError, Resync, sqlite3.Error, SyncUnavailable, SyncRoundBusy) as exc:
             _log.warning("kanban sync: round for %s failed (%s: %s)", slug, type(exc).__name__, exc)
             results.append(RoundResult(board=slug, mode="?", error=f"{type(exc).__name__}: {exc}"))
     return results

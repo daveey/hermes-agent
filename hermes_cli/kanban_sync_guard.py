@@ -3,6 +3,10 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+class SyncRoundBusy(RuntimeError):
+    """A sync round or detach already owns this board's synchronization fence."""
+
+
 @contextmanager
 def board_sync_lock(path: Path):
     """Never wait for network I/O while detaching: a busy round must finish first.
@@ -14,5 +18,5 @@ def board_sync_lock(path: Path):
     canonical = Path(path).resolve()
     with _dispatch_tick_lock(canonical.with_name(canonical.name + ".sync")) as held:
         if not held:
-            raise RuntimeError("board sync round is busy; retry detach after it finishes")
+            raise SyncRoundBusy("board sync round is busy; retry after it finishes")
         yield

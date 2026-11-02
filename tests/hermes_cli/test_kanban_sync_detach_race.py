@@ -76,3 +76,25 @@ def test_detach_refuses_until_whole_sync_round_including_push_finishes(synced_co
         # A round enumerated before detach but starting after it does no I/O.
         result = client.sync_board("default", path, None, "fixture-host")
         assert result.mode == "off"
+
+
+def test_busy_round_is_scoped_to_one_board_and_next_pass_recovers(synced_conn, tmp_path):
+    from hermes_cli import kanban_sync_client as client
+    from hermes_cli.kanban_sync_guard import board_sync_lock
+    from tests.hermes_cli.kanban_sync_fake_board import FakeService
+
+    first = Path(sync._db_key(synced_conn))
+    second = tmp_path / "second.db"
+    client.ensure_identity(synced_conn, "first", "fixture-host")
+    sync.set_mode(synced_conn, "primary")
+    with kbc.connect_closing(second) as conn:
+        client.ensure_identity(conn, "second", "fixture-host")
+        sync.set_mode(conn, "primary")
+    hub = FakeService().hub("fixture-host")
+    boards = [("first", first), ("second", second)]
+    with board_sync_lock(first):
+        results = client.sync_all_once(hub, boards=boards)
+    assert [r.board for r in results] == ["first", "second"]
+    assert "busy" in results[0].error
+    assert not results[1].error
+    assert all(not r.error for r in client.sync_all_once(hub, boards=boards))
