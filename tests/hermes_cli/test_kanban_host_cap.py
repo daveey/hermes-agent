@@ -408,6 +408,14 @@ def test_all_at_capacity_needs_every_ticked_board_capped():
     assert not kbd.all_at_capacity([locked]), "no board actually ticked"
 
 
+def test_all_at_capacity_ignores_boards_owned_by_another_dispatcher():
+    capped = kb.DispatchResult(at_capacity="max_in_progress=16/16")
+    owned = kb.DispatchResult(skipped_owned=True)
+    assert kbd.all_at_capacity([capped, owned])
+    assert not kbd.all_at_capacity([owned]), "no board actually ticked"
+    assert not kbd.all_at_capacity([capped, owned, kb.DispatchResult()])
+
+
 def _daemon_stderr(monkeypatch, capsys, res, ticks=8):
     import argparse
     from hermes_cli import kanban_ops

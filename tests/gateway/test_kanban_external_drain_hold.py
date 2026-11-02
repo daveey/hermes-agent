@@ -120,6 +120,30 @@ class _NoSpawnDispatcher:
         return None
 
 
+def test_capacity_with_foreign_owned_board_keeps_bad_ticks_zero(home, monkeypatch, caplog):
+    from gateway import kanban_watchers as watchers
+    from hermes_cli.kanban_db import DispatchResult
+
+    calls = []
+
+    def capped_tick(self, *, suppress_spawn=False):
+        calls.append(suppress_spawn)
+        return [
+            ("default", DispatchResult(at_capacity="max_in_progress=16/16")),
+            ("dedicated", DispatchResult(skipped_owned=True)),
+        ]
+
+    monkeypatch.setattr(_NoSpawnDispatcher, "tick_once", capped_tick)
+    monkeypatch.setattr(watchers, "_KanbanDispatcher", _NoSpawnDispatcher)
+    # Even one bad tick would warn: silence proves zero, not merely below the window.
+    monkeypatch.setattr(watchers, "_HEALTH_WINDOW", 1)
+    caplog.set_level(logging.INFO, logger="gateway")
+    assert _run_ticks(monkeypatch, [False] * 10) == 10
+    assert calls == [False] * 10
+    assert _lines(caplog, STUCK) == []
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
 def test_external_drain_suppresses_spawns_and_never_reports_stuck(home, monkeypatch, caplog):
     """Many held ticks with a non-empty ready queue: every tick is spawn-suppressed, bad_ticks never reaches
     the stuck window, and the hold is announced once."""

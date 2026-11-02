@@ -76,5 +76,5 @@ def all_at_capacity(results: Iterable[Optional[Any]]) -> bool:
 
     The "dispatcher stuck" detectors skip such ticks: ready work waiting behind ``kanban.max_in_progress``
     running workers is the cap doing its job (stale/timeout reclaim frees hung workers). [daveey]"""
-    ran = [res for res in results if res is not None and not res.skipped_locked]
+    ran = [res for res in results if res is not None and not res.skipped_locked and not res.skipped_owned]
     return bool(ran) and all(res.at_capacity for res in ran)
