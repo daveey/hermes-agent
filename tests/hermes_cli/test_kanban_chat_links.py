@@ -318,3 +318,44 @@ def test_session_tasks_stale_ok_does_not_wait_behind_a_ledger_rebuild(live, kanb
 
 
 _real_remote_links = ksa._remote_links
+
+
+def test_a_done_card_whose_shepherd_link_is_released_drops_the_owners_created_link(live, kanban_home, monkeypatch,
+                                                                                   tmp_path):
+    """[daveey] Phantom count (2026-11-01): the owner (hub) writes a ``created`` link for the origin chat
+    (``kanban_creator_chats``) that no gateway ever releases; the origin's ``shepherd`` link carries the verified
+    release. The done card stayed ``unknown`` and the sidebar said "4 open" while naming none. A released sibling
+    link of the same chat settles a closed card; it never drops an open card or another chat's link."""
+    rep = tmp_path / "default.db"
+    _replica(rep, [("t_done", "done", "done", OTHER), ("t_arch", "archived", "archived", OTHER),
+                   ("t_open", "open", "running", OTHER), ("t_unrel", "done, unverified", "done", OTHER)],
+             [("t_done", ME, "s1", "created", 0), ("t_done", ME, "s1", "shepherd", 1),
+              ("t_arch", ME, "s1", "created", 0), ("t_arch", ME, "s1", "shepherd", 1),
+              ("t_done", ME, "s2", "created", 0),  # another chat: its own release never arrived
+              ("t_open", ME, "s1", "created", 0), ("t_open", ME, "s1", "shepherd", 1),
+              ("t_unrel", ME, "s3", "created", 0), ("t_unrel", ME, "s3", "shepherd", 0)])
+    got = sorted((c["session"], c["id"], c["status"])
+                 for c in links.replica_cards(None, ME, ksa.LISTED_STATUSES, replicas=[("default", rep)]))
+    assert got == [("s1", "t_open", "running"), ("s2", "t_done", "unknown"), ("s3", "t_unrel", "unknown")]
+    _switch_to_replica(kanban_home, monkeypatch, rep)
+    assert ksa.active_task_counts() == {"s1": 1, "s2": 1, "s3": 1}
+    rows = ksa.annotate_kanban_activity([{"id": "s1"}, {"id": "s2"}, {"id": "s3"}])
+    assert [r.get("kanban_active") for r in rows] == [1, 1, 1]
+    assert [c["id"] for c in ksa.session_tasks(["s1"])] == ["t_open"]  # the count names what it counts
+
+
+def test_tui_legacy_subs_on_done_local_cards_count_nothing(live, kanban_home, monkeypatch):
+    """Legacy ``tui`` subs (no/invalid ``delivery_metadata``) keep an OPEN card counted, never a done one."""
+    monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: [])
+    done = kb.create_task(live, title="done", assignee="worker")
+    still = kb.create_task(live, title="open", assignee="worker")
+    with kbc.write_txn(live):
+        for tid in (done, still):
+            live.execute("INSERT INTO kanban_notify_subs (task_id, platform, chat_id, created_at) "
+                         "VALUES (?, 'tui', 's_legacy', 1)", (tid,))
+            live.execute("INSERT INTO kanban_notify_subs (task_id, platform, chat_id, delivery_metadata, created_at) "
+                         "VALUES (?, 'tui', 's_junk', '{not json', 1)", (tid,))
+        live.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (done,))
+    ksa._reset_cache_for_tests()
+    assert ksa.active_task_counts() == {"s_legacy": 1, "s_junk": 1}
+    assert ksa.waiting_on_task_ids() == {"s_legacy": frozenset({still}), "s_junk": frozenset({still})}

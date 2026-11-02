@@ -164,13 +164,22 @@ def _stale_after_s() -> float:
 
 def _read_replica(path: Path, gateway: str, profile: str) -> tuple[list[dict[str, Any]], Optional[float]]:
     """Every unreleased link of this gateway+profile's chats in one replica, with its card row (or none when the
-    card row is missing), and the replica's last successful pull. Raises ``sqlite3.Error`` when unreadable."""
+    card row is missing), and the replica's last successful pull. Raises ``sqlite3.Error`` when unreadable.
+
+    ``chat_released`` is 1 when another link of the same card and chat (other kind) is released. [daveey] The owner
+    writes a ``created`` link for a remote origin chat (``kanban_creator_chats``) that no gateway ever releases: the
+    owner's reconcile only manages its own chats' links and the origin's only its own board file. The origin's
+    ``shepherd`` link carries the verified release instead, so a done card stayed an ``unknown`` obligation forever
+    (sidebar "4 open" naming none, 2026-11-01)."""
     from hermes_cli.kanban_session_activity import cached_ro  # lazy: that module imports this one
     with cached_ro(path) as conn:
         conn.row_factory = sqlite3.Row
         rows = [dict(r) for r in conn.execute(
             "SELECT l.task_id AS id, t.id AS task_row, t.title, t.status, t.assignee, t.created_at, t.started_at, "
-            "t.priority, t.block_kind, t.human_request, t.created_on, l.chat_session, l.chat_profile, l.kind "
+            "t.priority, t.block_kind, t.human_request, t.created_on, l.chat_session, l.chat_profile, l.kind, "
+            "EXISTS (SELECT 1 FROM task_chat_links r WHERE r.task_id = l.task_id AND r.chat_gateway = l.chat_gateway "
+            "AND r.chat_profile IS l.chat_profile AND r.chat_session = l.chat_session AND r.released = 1) "
+            "AS chat_released "
             "FROM task_chat_links l LEFT JOIN tasks t ON t.id = l.task_id "
             "WHERE l.chat_gateway = ? AND l.chat_profile = ? AND l.released = 0 "
             "AND (t.id IS NULL OR (t.created_on IS NOT NULL AND t.created_on != ?))",
@@ -295,6 +304,10 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
             missing = r["task_row"] is None
             unknown = missing or status in TERMINAL_STATUSES or status is None
             if not unknown and status not in statuses:
+                continue
+            # A closed card this chat's other link released is settled for this chat (see ``_read_replica``). Only a
+            # terminal row: an open card keeps every unreleased link, and a missing row stays unknown.
+            if status in TERMINAL_STATUSES and r.get("chat_released"):
                 continue
             tid = str(r["id"])
             owner, owner_profile = _owner_of((owners or {}).get((board, tid), []), r["created_on"], r["chat_session"])
