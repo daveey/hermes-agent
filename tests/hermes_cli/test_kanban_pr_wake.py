@@ -122,7 +122,8 @@ def test_closed_pr_wakes_real_board_but_does_not_complete(probe, tmp_path, monke
         assert kb.get_task(conn, tid).status == "ready", wakes.get_state(conn, tid)["last_out"]
         context = kb.build_worker_context(conn, tid)
         assert "reconcile" in context and "not acceptance" in context
-        # Abandoned and superseded PRs are identical until independent evidence exists.
+        # Waking is still not completion; a fresh CLOSED read is accepted as disposition, not delivery.
         monkeypatch.setattr(acceptance, "_api", lambda *a, **kw: {"data": {"repository": {"pullRequest": {"state": "CLOSED", "headRefOid": "a" * 40, "baseRefName": "main"}}}})
         receipt = acceptance.collect_acceptance(URL, URL)
-        assert not receipt["ok"] and receipt["classification"] == "closed_unmerged"
+        assert receipt["ok"] and receipt["classification"] == "closed"
+        assert "not delivery" in receipt["detail"]

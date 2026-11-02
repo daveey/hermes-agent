@@ -23,7 +23,7 @@ def github(tmp_path, monkeypatch):
                 rule = None if state.get("no_required") else {"requiredStatusChecks": [
                     {"context": "required", "app": {"databaseId": 1}}]}
                 value = {"data": {"repository": {"pullRequest": {
-                    "headRefOid": sha, "baseRefName": "main", "state": "OPEN",
+                    "headRefOid": sha, "baseRefName": "main", "state": state.get("pr_state", "MERGED"),
                     "baseRef": {"branchProtectionRule": rule}},
                     "defaultBranchRef": {"name": "main", "branchProtectionRule": rule}}}}
             elif "/rules/branches/" in self.path:
@@ -45,7 +45,9 @@ def github(tmp_path, monkeypatch):
             elif "/statuses" in self.path:
                 value = [[]]
             elif "/pulls/" in self.path:
-                value = {"head": {"sha": sha}, "base": {"ref": "main"}, "state": "open"}
+                value = {"head": {"sha": sha}, "base": {"ref": "main"},
+                         "state": "open" if state.get("pr_state", "MERGED") == "OPEN" else "closed",
+                         "merged": state.get("pr_state", "MERGED") == "MERGED"}
             else:
                 self.send_error(404)
                 return

@@ -485,7 +485,13 @@ def _kb_completed(task, payload: dict, title: str) -> str:
     from hermes_cli.kanban_final_send import public_summary
     handoff = (_kb_first_line(payload["summary"], 200) if payload.get("summary")
                else _kb_first_line(public_summary(getattr(task, "result", None)), 160))
-    return f" done — {title}{handoff}"
+    return f" done — {title}{handoff}{_kb_left_open(payload)}"
+
+
+def _kb_left_open(payload: dict) -> str:
+    from hermes_cli.kanban_pr_landing import left_open_notice
+    notice = left_open_notice(payload)
+    return f"\n{notice}" if notice else ""
 
 
 def _kb_timed_out(task, payload: dict, title: str) -> str:
@@ -535,7 +541,7 @@ def _format_kanban_event_text(sub: dict, task, ev, board_slug: str) -> Optional[
         # A worker refused a send into this chat put its message in the summary as a FINAL SEND line. [daveey]
         from hermes_cli.kanban_final_send import final_send_for_chat
         if final := final_send_for_chat(payload, str(sub.get("chat_id") or "")):
-            return f"{prefix}Kanban {task_id} done — {title}\n{final}"
+            return f"{prefix}Kanban {task_id} done — {title}\n{final}{_kb_left_open(payload)}"
     return f"{prefix}Kanban {task_id}{fmt(task, payload, title)}"
 
 

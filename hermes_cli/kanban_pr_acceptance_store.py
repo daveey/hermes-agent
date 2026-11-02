@@ -11,19 +11,33 @@ def _snapshot(conn, task_id):
     return tuple(row) if row else None
 
 
+def malformed_publication_receipt(published_pr) -> dict:
+    """Refusal receipt for a ``metadata.published_pr`` that is not one exact GitHub PR URL."""
+    return {"ok": False, "classification": "malformed_published_pr", "head_sha": None, "pr_url": None,
+            "checks": [], "detail": f"metadata.published_pr must be one exact GitHub PR URL string "
+                                    f"(https://github.com/OWNER/REPO/pull/N); got {type(published_pr).__name__}.",
+            "recovery": "Retry completion with metadata.published_pr=<exact PR URL> for a PR this card "
+                        "published. A review-only card cites the reviewed PR in metadata.pr or "
+                        "metadata.reviewed_pr instead; published_pr binds the card's contract permanently."}
+
+
 def prepare_acceptance(conn, task_id, expected_run_id, metadata):
     snapshot = _snapshot(conn, task_id)
     if snapshot is None:
         return False
     run_id, status, contract = snapshot
-    if not contract or contract == "local-only":
+    published_pr = metadata.get("published_pr") if isinstance(metadata, dict) else None
+    if (not contract or contract == "local-only") and published_pr is None:
         return None
     if status not in {"running", "ready", "blocked", "review"} or (expected_run_id is not None and run_id != expected_run_id):
         return False
-    published_pr = metadata.get("published_pr") if isinstance(metadata, dict) else None
     match = _PR.fullmatch(published_pr) if isinstance(published_pr, str) else None
-    # Publication binds once. Retrying cannot replace the task's PR with a green sibling.
-    if match and contract == match[1]:
+    if published_pr is not None and not match:
+        # A shape error is the worker's to fix: never a GitHub read (infra retry) nor a
+        # "does not match the persisted contract" claim against a local-only card.
+        return snapshot, malformed_publication_receipt(published_pr), metadata
+    # Publication binds once, including publications from initially local-only work.
+    if match and contract in (None, "local-only", match[1]):
         with write_txn(conn):
             if _snapshot(conn, task_id) != snapshot:
                 return False
@@ -31,10 +45,9 @@ def prepare_acceptance(conn, task_id, expected_run_id, metadata):
         snapshot = (run_id, status, published_pr)
         contract = published_pr
     elif match and published_pr != contract and (bound := _PR.fullmatch(contract)) and bound[1] == match[1]:
-        # Publication binds once -- unless the bound PR was closed without merging (the
-        # change shipped some other way). That PR can never be accepted, so a binding that
-        # cannot be replaced parks the card forever. Rebind only on GitHub's positive
-        # "closed, not merged" answer, and leave an audit event. [daveey]
+        # A closed-unmerged PR may be replaced when the change ships another way.
+        # Preserve that recovery path even though closure itself is now a valid
+        # disposition. Rebind only on GitHub's positive answer, with an audit event.
         assignee = conn.execute("SELECT assignee FROM tasks WHERE id=?", (task_id,)).fetchone()["assignee"]
         if _kpa.pr_closed_unmerged(contract, assignee):
             from hermes_cli.kanban_db import _append_event
@@ -55,15 +68,19 @@ def prepare_acceptance(conn, task_id, expected_run_id, metadata):
         # The only waivable classification, judged on THIS fresh read: a repo that gained
         # required checks (or a failing/missing/pending check) is never waived. [daveey]
         receipt["waived"] = {"reason": reason}
-    return snapshot, receipt
+    from hermes_cli.kanban_pr_landing import check_landing
+    check_landing(conn, task_id, receipt, metadata)
+    return snapshot, receipt, metadata
 
 
 def record_acceptance(conn, task_id, acceptance):
     """Called under complete_task's write_txn, before its terminal UPDATE."""
     from hermes_cli.kanban_db import _append_event
-    snapshot, receipt = acceptance
+    from hermes_cli.kanban_pr_landing import check_landing
+    snapshot, receipt, metadata = acceptance
     if _snapshot(conn, task_id) != snapshot:
         return False
+    check_landing(conn, task_id, receipt, metadata)
     _append_event(conn, task_id, "pr_acceptance", receipt, run_id=snapshot[0])
     if receipt.get("waived") and receipt.get("classification") == "no_required_checks":
         acceptance_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]

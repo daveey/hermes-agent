@@ -163,7 +163,9 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
             waived = (receipt.get('classification') == 'no_required_checks'
                       and isinstance(receipt.get('waived'), dict)) if isinstance(receipt, dict) else False
             contract_verified = bool(isinstance(receipt, dict)
-                                     and ((receipt.get('ok') is True and receipt.get('classification') == 'success')
+                                     # CLOSED is the gate's accepted disposition (not delivery), like success.
+                                     and ((receipt.get('ok') is True
+                                           and receipt.get('classification') in ('success', 'closed'))
                                           or waived)
                                      and receipt.get('pr_url') == row[4]
                                      and isinstance(receipt.get('head_sha'), str)
