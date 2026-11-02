@@ -222,11 +222,17 @@ def apply_stop_gates(
         # hold=True is bounded: every hold increments _pre_final_gate_attempts, which
         # max_attempts() caps, so a plugin cannot hold a turn indefinitely.
         agent._pre_final_gate_attempts = getattr(agent, "_pre_final_gate_attempts", 0) + 1
+        # Read before the discard: a buffered draft never streamed, so the model is told it was not shown
+        # (an interrupt-only stop is not a hold and gets no notice).
+        from agent.pre_final_gate import held_nudge
+
+        shown = not _decision.hold or (
+            isinstance(final_response, str) and agent._interim_content_was_streamed(final_response))
         agent._discard_final_gate_buffer()
         final_msg["finish_reason"] = "pre_final_gate_hold"
         final_msg[_PFG_FLAG] = True
         append_message(messages, final_msg)
-        verdict = _continue(_decision.nudge or "Turn interrupted.", _PFG_FLAG)
+        verdict = _continue(held_nudge(_decision.nudge or "Turn interrupted.", shown), _PFG_FLAG)
         if _decision.unresolved_fallback is not None:
             verdict.pending_verification_response = _decision.unresolved_fallback
             verdict.pending_verification_response_previewed = False
