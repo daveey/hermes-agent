@@ -250,6 +250,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
         phase = "reading commit statuses"
         statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
                                                        paginate=True, profile_home=profile_home) for s in page]
+        phase = "selecting merge-time evidence"
         runs, statuses = merge_evidence(receipt, pr, repo, runs, statuses)
         outcomes = []
         for context, app_id in sorted(required, key=str):

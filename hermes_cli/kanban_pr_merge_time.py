@@ -37,6 +37,9 @@ def partition_at_merge(checks, merged_at, *, runs):
         if started > cutoff:
             post.append(check)
             continue
+        # A pre-merge start does not make its later conclusion evidence at merge.
+        if runs and check.get("completed_at") and timestamp(check["completed_at"]) > cutoff:
+            check = {**check, "status": "in_progress", "conclusion": None}
         key = (check["name"], check["app"]["id"]) if runs else check["context"]
         order = (started, check["id"])
         if key not in latest or order > latest[key][0]:

@@ -33,7 +33,7 @@ def evidence(monkeypatch):
         if "/check-runs?" in endpoint:
             runs = state["runs"]
             if "filter=latest" in endpoint:
-                # GitHub hides earlier executions for the same check name.
+                # Reduced single-suite history; latest retains other suites in real responses.
                 runs = [max(runs, key=lambda r: r["id"])] if runs else []
             return [{"total_count": len(runs) + state.get("omitted", 0), "check_runs": runs}]
         if "/statuses?" in endpoint:
@@ -62,6 +62,13 @@ def test_merged_fast_forward_uses_premerge_success(evidence):
     assert "rerun" not in receipt["recovery"].lower()
 
 
+@pytest.mark.parametrize("conclusion", ["success", "failure"])
+def test_run_finishing_after_merge_remains_pending_at_merge(evidence, conclusion):
+    evidence["runs"] = [{**PRE, "completed_at": POST["completed_at"], "conclusion": conclusion}]
+    receipt = collect()
+    assert not receipt["ok"] and receipt["classification"] == "pending"
+
+
 def test_open_still_uses_latest_without_cutoff(evidence):
     evidence["state"] = "OPEN"
     receipt = collect()
@@ -81,7 +88,7 @@ def test_later_success_never_repairs_premerge_evidence(evidence, result):
 
 
 def test_failed_premerge_rerun_overrides_earlier_success(evidence):
-    evidence["runs"] = [PRE, {**POST, "started_at": MERGED}]
+    evidence["runs"] = [PRE, {**POST, "started_at": MERGED, "completed_at": MERGED}]
     receipt = collect()
     assert not receipt["ok"] and receipt["classification"] == "failure"
     assert receipt["checks"][0]["id"] == POST["id"]
@@ -90,7 +97,7 @@ def test_failed_premerge_rerun_overrides_earlier_success(evidence):
 
 def test_successful_premerge_rerun_overrides_earlier_failure(evidence):
     evidence["runs"] = [{**PRE, "conclusion": "failure"},
-                        {**POST, "started_at": MERGED, "conclusion": "success"}]
+                        {**POST, "started_at": MERGED, "completed_at": MERGED, "conclusion": "success"}]
     assert collect()["ok"]
 
 
@@ -137,7 +144,7 @@ def test_legacy_statuses_obey_merge_cutoff(evidence, pre, post, expected):
 
 def test_legacy_latest_premerge_failure_wins(evidence):
     evidence.update(app=None, runs=[], statuses=[status(PRE, "success"),
-                    status({**POST, "started_at": MERGED}, "failure")])
+                    status({**POST, "started_at": MERGED, "completed_at": MERGED}, "failure")])
     assert collect()["classification"] == "failure"
 
 
