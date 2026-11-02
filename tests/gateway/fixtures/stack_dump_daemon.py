@@ -1,25 +1,43 @@
 """Ordinary daemon plus delayed diagnostics (native-runner readiness stalls only).
 
 No behaviour change: after ``UGW_STACK_DUMP_AFTER`` seconds every OS thread's stack
-(faulthandler), every asyncio task's coroutine stack, the live runtime descriptor and a
+(refcounted Python frames), every asyncio task's coroutine stack, the live runtime descriptor and a
 locally answered ``identify`` are appended to ``$HERMES_HOME/logs/stacks.txt`` so a stall
 on a runner without SIGUSR2/strace still names the awaiting frame.
 """
 import asyncio
-import faulthandler
 import gc
 import json
 import os
 from pathlib import Path
 import runpy
+import sys
+import threading
 import time
+import traceback
 
 path = Path(os.environ['HERMES_HOME']) / 'logs' / 'stacks.txt'
 path.parent.mkdir(parents=True, exist_ok=True)
 delay = float(os.environ.get('UGW_STACK_DUMP_AFTER', '60'))
-_sink = open(path, "w", encoding="utf-8")
-faulthandler.dump_traceback_later(delay, repeat=True, file=_sink)
+_stop_dumps = threading.Event()
 _real_run = asyncio.run
+
+
+def _dump_threads():
+    # faulthandler's native watchdog walks raw interpreter frames without the
+    # GIL; a returning thread can retire a frame/code object mid-walk (SIGSEGV).
+    # Like the gateway's SIGUSR2 dumper, retain real Python frame references.
+    # A Python thread still observes an event loop blocked in GIL-releasing I/O.
+    while not _stop_dumps.wait(delay):
+        frames = sys._current_frames()
+        try:
+            with path.open('a', encoding='utf-8') as sink:
+                sink.write(f'\n=== threads @ {time.time():.0f} ===\n')
+                for ident, frame in frames.items():
+                    sink.write(f'\n--- Thread 0x{ident:x} ---\n')
+                    traceback.print_stack(frame, file=sink)
+        finally:
+            del frames
 
 
 def _describe(sink):
@@ -67,4 +85,10 @@ def _run(main, **kwargs):
 
 
 asyncio.run = _run
-runpy.run_module('gateway.run', run_name='__main__')
+_dumper = threading.Thread(target=_dump_threads, name='stack-dump-diagnostics', daemon=True)
+_dumper.start()
+try:
+    runpy.run_module('gateway.run', run_name='__main__')
+finally:
+    _stop_dumps.set()
+    _dumper.join()
