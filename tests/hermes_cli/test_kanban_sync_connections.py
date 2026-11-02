@@ -269,7 +269,7 @@ def test_run_forever_owns_and_closes_connections(board, opened, monkeypatch, fai
     monkeypatch.setattr(client, "Hub", lambda ident: hub)
     monkeypatch.setattr(client.sync, "set_lease_client", lambda value: None)
     monkeypatch.setattr(client, "board_paths", list)
-    monkeypatch.setattr(client, "reconcile_links", lambda *args: None)
+    monkeypatch.setattr(client, "reconcile_links", lambda *args, **kwargs: None)
     monkeypatch.setattr(machine_metrics, "Reporter", lambda *args: SimpleNamespace(report_due=lambda: None))
     # FakeHub has no metrics transport; the loop only needs this for Reporter construction.
     monkeypatch.setattr(hub, "report_metrics", lambda *args: None, raising=False)

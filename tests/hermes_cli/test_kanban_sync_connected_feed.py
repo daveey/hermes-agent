@@ -81,7 +81,7 @@ def test_connected_feed_skips_unchanged_poll_and_observes_next_change(monkeypatc
     monkeypatch.setattr(client, 'board_paths', lambda: boards)
     monkeypatch.setattr(client.sync, 'set_lease_client', lambda _: None)
     monkeypatch.setattr(client, 'publish_pickup_if_changed', lambda _: None)
-    monkeypatch.setattr(client, 'reconcile_links', lambda *args: None)
+    monkeypatch.setattr(client, 'reconcile_links', lambda *args, **kwargs: None)
     monkeypatch.setattr(client, 'outbox_pending', lambda paths: any(p in pending for p in paths))
     monkeypatch.setattr(client, 'time', SimpleNamespace(monotonic=lambda: clock[0], sleep=lambda _: None))
     from hermes_cli import machine_metrics
