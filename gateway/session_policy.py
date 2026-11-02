@@ -202,6 +202,14 @@ class LocalSessionPolicy:
         endpoint. Explicit choices (create-time reasoning / tier / toolsets, a session ``/reasoning`` until
         reset, a pick that still holds) are applied over the followed defaults; frozen secrets of followed
         sections are never recovered."""
+        return self.effective_selection(authority, secrets=secrets)[:2]
+
+    def effective_selection(self, authority=None, *, secrets=True):
+        """``effective()`` plus whether a recorded pick (``model.selection_profile``) has ended on that
+        same read: True once the profile no longer targets what the pick diverged from (or its entry no
+        longer serves the pinned endpoint), else False. The owner commits that end
+        (``session_profile_selection.commit_selection``) so the pick never holds again when the
+        profile later returns to that target: a pick holds until the NEXT profile edit, once."""
         config = present_sections(json.loads(self.config_json))
         live = self.read_profile(authority)
         if self.config_secret_ref is not None and authority is not None and secrets:
@@ -216,11 +224,12 @@ class LocalSessionPolicy:
                     target = target.setdefault(key, {}) if isinstance(target, dict) else target[key]
                 target[path[-1]] = value
             disable_dropped_secrets(config, getattr(recovered, 'dropped', ()), getattr(recovered, 'session', None))
-        model = self.model
+        model, ended = self.model, False
         if live:
             frozen, request = config.get('model') or {}, json.loads(self.request_json)
             pick = frozen.get('selection_profile')
             held = pick is not None and pick == list(profile_target(live)) and entry_serves(frozen, live)
+            ended = pick is not None and not held
             pinned = {'platform_toolsets', 'disabled_toolsets'} if 'toolsets' in request else set()
             chosen = session_pinned(config, 'reasoning', 'reasoning' in request)
             pinned |= {'reasoning_effort', 'reasoning_overrides'} if chosen else set()
@@ -252,7 +261,7 @@ class LocalSessionPolicy:
             for part in source:
                 value = value.get(part) if isinstance(value, dict) else None
             config['model']['api_key'] = value
-        return config, model
+        return config, model, ended
 
     @cached_property
     def follows_profile(self):
