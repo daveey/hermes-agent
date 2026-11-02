@@ -28,7 +28,8 @@ def plan_data_removal(home: Path, project: Path, userdata: Path | None = None) -
     protected = {
         project.resolve(), base_venv(project).resolve(), store_root(project).resolve(),
         installs_root().resolve(), machine / "tools", machine / "bin", machine / "cache",
-        machine / "spawn-ledger.json", machine / "spawn-ledger.json.lock", home / "gateway.lock", home / ".backup.lock",
+        machine / "spawn-ledger.json", machine / "spawn-ledger.json.lock", machine / "spawn-ledger.json.pending",
+        home / "gateway.lock", home / ".backup.lock",
         home / "runtime" / "active_sessions.lock", home / "cron" / ".tick.lock",
         store_lock_path(home / "checkpoints"),
     }
