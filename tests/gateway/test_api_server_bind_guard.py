@@ -110,10 +110,11 @@ class TestBindMechanics:
         )
 
     @staticmethod
-    def _free_port() -> int:
-        with socket.socket() as s:
-            s.bind(("", 0))
-            return s.getsockname()[1]
+    def _bound_port(adapter: APIServerAdapter) -> int:
+        # Read the port while its listener still owns it, never probe and release
+        # a "free" port that another parallel test can claim before connect().
+        assert adapter._runner is not None
+        return adapter._runner.addresses[0][1]
 
     @pytest.mark.asyncio
     async def test_immediate_rebind_after_disconnect(self):
@@ -123,10 +124,12 @@ class TestBindMechanics:
         reuse) made a quick gateway restart fail while the previous socket
         sat in TIME_WAIT.
         """
-        port = self._free_port()
-        first = self._make_adapter(port)
-        assert await first.connect() is True
-        await first.disconnect()
+        first = self._make_adapter(0)
+        try:
+            assert await first.connect() is True
+            port = self._bound_port(first)
+        finally:
+            await first.disconnect()
 
         second = self._make_adapter(port)
         try:
@@ -167,11 +170,12 @@ class TestBindMechanics:
         filling errors.log and leaking 2 fds per retry (#52132: 1568+
         retries over 5 days in a multi-profile setup).
         """
-        port = self._free_port()
-        first = self._make_adapter(port)
-        assert await first.connect() is True
-        second = self._make_adapter(port)
+        first = self._make_adapter(0)
+        second = None
         try:
+            assert await first.connect() is True
+            port = self._bound_port(first)
+            second = self._make_adapter(port)
             result = await second.connect()
             assert result is False
             assert second.has_fatal_error is True
@@ -180,4 +184,5 @@ class TestBindMechanics:
             assert str(port) in (second.fatal_error_message or "")
         finally:
             await first.disconnect()
-            await second.disconnect()
+            if second is not None:
+                await second.disconnect()
