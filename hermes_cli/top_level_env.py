@@ -142,9 +142,10 @@ def _task_state(db: Path, task_id: str) -> Optional[tuple[str, Optional[int], Op
             conn.execute("PRAGMA query_only=ON")
         try:
             row = conn.execute("SELECT status, worker_pid FROM tasks WHERE id = ?", (task_id,)).fetchone()
-            if row is not None and not row[1] and str(row[0] or "") not in _TERMINAL_STATUSES:
-                # A live worker whose card was parked (kanban_block -> todo/blocked) has its pid cleared on
-                # the card but retained on its latest run: that is still the worker, not a leak.
+            if row is not None and not row[1]:
+                # A live worker whose card was parked (kanban_block -> todo/blocked) or finished
+                # (kanban_complete -> done) has its pid cleared on the card but retained on its latest
+                # run: that is still the worker, not a leak.
                 try:
                     run = conn.execute("SELECT worker_pid FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
                                        (task_id,)).fetchone()
@@ -220,7 +221,9 @@ def leaked_worker_env_diagnosis(environ: Optional[Mapping[str, str]] = None) -> 
     """Why this process's ``HERMES_DELEGATED_CHILD_CONTEXT`` looks leaked, or ``None``.
 
     A real delegate child (or a worker's tool subprocess) descends from a live worker whose card is
-    ``running``. A marker whose worker card is finished, whose worker pid is gone, or which this
+    ``running``; one whose card is already done/archived gets a "card is finished, use
+    kanban_comment" hint instead of the leak/Desktop advice. A marker whose worker card is
+    finished, whose worker pid is gone, or which this
     process does not descend from was inherited by a launch from inside a worker. Conservative:
     ``None`` whenever the lineage task can't be identified or the board can't be read.
     """
@@ -237,7 +240,15 @@ def leaked_worker_env_diagnosis(environ: Optional[Mapping[str, str]] = None) -> 
     status, worker_pid, bound_pid = state
     if not status:
         reason = f"its worker card {tid} is not on the board"
-    elif status != "running" and (status in _TERMINAL_STATUSES or not (worker_pid or bound_pid)):
+    elif status in _TERMINAL_STATUSES:
+        if _descends_from_live_agent(env, bound_pid) or (
+                worker_pid and worker_pid > 1 and _pid_alive(worker_pid) and _is_ancestor(worker_pid)):
+            # The worker's own shell after kanban_complete: the env is legitimately its own, the card
+            # is just finished. No Desktop is involved (t_01a198dc526bff6e). [daveey]
+            return (f"your Kanban card {tid} is {status}: board writes from its worker shell are fenced. "
+                    "Use kanban_comment on the card you mean (or ask an operator chat), not the CLI.")
+        reason = f"its worker card {tid} is {status}"
+    elif status != "running" and not (worker_pid or bound_pid):
         reason = f"its worker card {tid} is {status}"
     elif _descends_from_live_agent(env, bound_pid):
         return None  # a live managed worker / delegation owner is this process's ancestor

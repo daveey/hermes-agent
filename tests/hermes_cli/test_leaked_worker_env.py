@@ -109,7 +109,7 @@ def test_diagnosis_names_a_finished_worker_card(tmp_path):
     db = _board(tmp_path, [("t_45d5a361", "done", 99999999)])
     msg = tle.leaked_worker_env_diagnosis(_leak_env(db))
     assert msg and "leaked worker env" in msg and "t_45d5a361" in msg and "is done" in msg
-    assert "reopen" in msg
+    assert "reopen" in msg and "Cmd-Q" in msg
 
 
 def test_diagnosis_names_a_dead_worker_pid(tmp_path):
@@ -359,4 +359,84 @@ def test_live_managed_worker_shell_gets_the_plain_cli_fence(monkeypatch, tmp_pat
     text = err.err + err.out
     assert rc != 0
     assert "cannot mutate Kanban tasks via the CLI" in text and "kanban_* tools" in text
+    assert "leaked worker env" not in text and "Cmd-Q" not in text
+
+
+# ── a live worker whose own card is finished is fenced, not leaked ───────────────────────────
+# t_01a198dc526bff6e (hub, 2026-11-01): after kanban_complete the worker's own shell ran
+# `hermes kanban edit --priority` and was told "leaked worker env ... Hermes Desktop: Cmd-Q".
+# No Desktop was involved: the env was the worker's own and its card was simply done.
+
+def _assert_finished_hint(msg, status="done"):
+    assert msg and f"t_45d5a361 is {status}" in msg and "kanban_comment" in msg
+    assert "Cmd-Q" not in msg and "leaked worker env" not in msg
+
+
+@pytest.mark.parametrize("status", ["done", "archived"])
+def test_finished_card_of_a_live_bound_ancestor_worker_gets_the_fenced_hint(tmp_path, sibling_spawn_pid, status):
+    db = _managed_board(tmp_path, sibling_spawn_pid, os.getpid(), status=status)
+    _assert_finished_hint(tle.leaked_worker_env_diagnosis(_leak_env(db)), status)
+
+
+def test_finished_card_whose_run_pid_is_a_live_ancestor_gets_the_fenced_hint(tmp_path):
+    """complete_task clears the card's worker_pid; the latest run keeps the worker's pid."""
+    db = _parked_board(tmp_path, "done", os.getppid())
+    _assert_finished_hint(tle.leaked_worker_env_diagnosis(_leak_env(db)))
+
+
+def test_finished_card_whose_delegation_owner_is_a_live_ancestor_gets_the_fenced_hint(tmp_path, sibling_spawn_pid):
+    db = _managed_board(tmp_path, sibling_spawn_pid, None, status="done")
+    env = {**_leak_env(db), "HERMES_DELEGATED_CHILD_OWNER": f"{os.getppid()}:123"}
+    _assert_finished_hint(tle.leaked_worker_env_diagnosis(env))
+
+
+def test_finished_card_with_a_dead_worker_keeps_the_desktop_hint(tmp_path):
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    db = _managed_board(tmp_path, p.pid, p.pid, status="done")
+    msg = tle.leaked_worker_env_diagnosis(_leak_env(db))
+    assert msg and "leaked worker env" in msg and "Cmd-Q" in msg and "kanban_comment" not in msg
+
+
+def test_finished_card_with_a_live_non_ancestor_worker_keeps_the_desktop_hint(tmp_path, sibling_spawn_pid):
+    """A Desktop relaunched from inside a still-running worker process: not its descendant."""
+    db = _managed_board(tmp_path, sibling_spawn_pid, sibling_spawn_pid, status="done")
+    env = {**_leak_env(db), "HERMES_DELEGATED_CHILD_OWNER": f"{sibling_spawn_pid}:123"}
+    msg = tle.leaked_worker_env_diagnosis(env)
+    assert msg and "leaked worker env" in msg and "Cmd-Q" in msg and "kanban_comment" not in msg
+
+
+def test_finished_worker_shell_cli_refusal_points_at_kanban_comment(monkeypatch, tmp_path, capsys):
+    """End to end: a real board, a completed card whose bound worker is this process, `kanban archive`."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for k in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_RUN_ID"):
+        monkeypatch.delenv(k, raising=False)
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="worker that already completed", assignee="default")
+        kb.claim_task(conn, tid)
+        run_id = conn.execute("SELECT current_run_id FROM tasks WHERE id = ?", (tid,)).fetchone()[0]
+        with conn:
+            conn.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
+                         "VALUES (?, ?, 'worker_bound', ?, 0)", (tid, run_id, json.dumps({"pid": os.getpid()})))
+        kb.complete_task(conn, tid, summary="done")
+        other = kb.create_task(conn, title="the finished worker tries to edit this", assignee="default")
+    finally:
+        conn.close()
+    monkeypatch.setenv(MARKER, str(home))
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(home / "kanban" / "workspaces" / tid))
+    import argparse
+    from hermes_cli import kanban as kcli
+    rc = kcli.kanban_command(argparse.Namespace(kanban_action="archive", task_ids=[other], board=None))
+    err = capsys.readouterr()
+    text = err.err + err.out
+    assert rc != 0
+    assert "cannot mutate Kanban tasks via the CLI" in text
+    assert f"{tid} is done" in text and "kanban_comment" in text
     assert "leaked worker env" not in text and "Cmd-Q" not in text
