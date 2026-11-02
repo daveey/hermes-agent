@@ -21,6 +21,7 @@ from hermes_cli import kanban_annotation_refresh as _bounded
 from hermes_cli import kanban_activity_revision as _revision
 from hermes_cli import kanban_session_activity_hub as _hub_signature
 from hermes_cli import kanban_session_activity_revalidate as _revalidate
+from hermes_cli import kanban_session_activity_recent_done as _recent_done
 from hermes_cli.kanban_session_activity_origin_snapshot import remote_snapshot as _remote_snapshot
 from hermes_cli.kanban_session_activity_hub import _hub_content_signature
 from hermes_cli import kanban_scope_heartbeat as _scope_hb
@@ -1703,34 +1704,7 @@ def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool]) -> Call
 
 def _read_recent_done(path: Path, since: float) -> list[tuple[str, dict[str, Any]]]:
     """``(session_id, card)`` for done cards completed since ``since`` that a session created or shepherds."""
-    conn = _kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
-    conn.row_factory = sqlite3.Row
-    try:
-        has_runs = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_runs'").fetchone() is not None
-        summary = ("COALESCE((SELECT r.summary FROM task_runs r WHERE r.task_id = t.id AND r.summary IS NOT NULL "
-                   "AND r.summary != '' ORDER BY r.id DESC LIMIT 1), t.result)") if has_runs else "t.result"
-        fields = f"t.id AS id, t.title AS title, t.completed_at AS completed_at, {summary} AS summary"
-        cond = "t.status = 'done' AND t.completed_at >= ?"
-        pairs = [(str(r["session_id"]), dict(r)) for r in conn.execute(
-            f"SELECT t.session_id AS session_id, {fields} FROM tasks t WHERE t.session_id IS NOT NULL "
-            f"AND t.session_id != '' AND {cond}", (since,))]
-        try:
-            pairs.extend((str(r["chat_id"]), dict(r)) for r in conn.execute(
-                f"SELECT s.chat_id AS chat_id, {fields} FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
-                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {cond}",
-                (since,)))
-        except sqlite3.Error:  # board predates notify subscriptions
-            pass
-    finally:
-        conn.close()
-    board = _board_slug(path)
-    out = []
-    for sid, card in pairs:
-        card.pop("session_id", None)
-        card.pop("chat_id", None)
-        out.append((sid, {**card, "board": board, "board_path": str(path)}))
-    return out
+    return _recent_done.read_recent_done(path, since, _counted_sub_clause, _board_slug)
 
 
 def attention_task_counts(now: float | None = None) -> dict[str, int]:
