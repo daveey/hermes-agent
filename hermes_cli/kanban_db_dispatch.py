@@ -2261,32 +2261,29 @@ def _run_reclaim_phase(
     # [daveey] Before any stale check: a long gap since the last pass is a host suspend, which the
     # heartbeat backstop, the stale sweep and max_runtime must not count (``kanban_suspend_ledger``).
     _record_dispatch_pass(conn, dry_run=dry_run)
-    result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
+    # Process death and timeout expiry do not advance a content revision. Only
+    # a proven empty running set may skip these sweeps, never a prior no-op.
+    has_running = conn.execute("SELECT 1 FROM tasks WHERE status = 'running' LIMIT 1").fetchone() is not None
+    if has_running:
+        result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
+        if reconcile_orphans:
+            result.reconciled_orphans = reconcile_orphaned_running(conn)
     if reconcile_orphans:
-        result.reconciled_orphans = reconcile_orphaned_running(conn)
-        close_dangling_runs(conn)
-    result.stale = detect_stale_running(conn, stale_timeout_seconds=stale_timeout_seconds)
-    result.crashed = detect_crashed_workers(conn, board=board)
-    # Side-channel attributes (see detect_crashed_workers); rate-limited tasks
-    # went back to ``ready`` and the respawn guard defers them until quota clears.
-    result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
-    result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
-    result.reclaimed += len(getattr(detect_crashed_workers, "_last_owner_restarted", []))  # [daveey]
-    result.timed_out = enforce_max_runtime(conn)
+        close_dangling_runs(conn)  # ended/non-running tasks can still retain a running run
+    if has_running:
+        result.stale = detect_stale_running(conn, stale_timeout_seconds=stale_timeout_seconds)
+        result.crashed = detect_crashed_workers(conn, board=board)
+        result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
+        result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
+        result.reclaimed += len(getattr(detect_crashed_workers, "_last_owner_restarted", []))
+        result.timed_out = enforce_max_runtime(conn)
     from hermes_cli.kanban_supervisor_requests import dispatcher_drain  # [daveey] non-worker executor
     result.supervisor_requests = [] if dry_run else dispatcher_drain(conn, board=board)
     from hermes_cli.kanban_continuation import wake_due_continuations
     result.woken_continuations = wake_due_continuations(conn)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
-    from hermes_cli.kanban_shared_blockers import probe_stranded_blockers, release_cleared_blockers
-    try:
-        result.shared_blocker_released = release_cleared_blockers(conn)
-    except Exception:
-        _kb._log.warning("kanban: releasing cleared shared blockers failed", exc_info=True)
-    try:
-        result.shared_blocker_probed = probe_stranded_blockers(conn)
-    except Exception:
-        _kb._log.warning("kanban: probing stranded shared blockers failed", exc_info=True)
+    from hermes_cli.kanban_idle_candidates import sweep_shared_blockers
+    sweep_shared_blockers(conn, result)
     try:
         from hermes_cli import kanban_provider_walls as _walls
         _walls.alert_on_storm(conn, board=board)

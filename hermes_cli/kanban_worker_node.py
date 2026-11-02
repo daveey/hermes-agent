@@ -27,6 +27,7 @@ import json
 import logging
 import re
 import sqlite3
+import threading
 import time
 from typing import Any, Callable, Iterable, Mapping, Optional
 
@@ -37,13 +38,15 @@ _log = logging.getLogger(__name__)
 LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9:._-]{0,63}$")
 MAX_LABELS = 32
 REGISTRY_TTL_S = 60
+REGISTRY_RETRY_S = 5
 # Copy at most this many cards per tick when the dispatcher has no cap.
 DEFAULT_PICKUP_BATCH = 4
 # History copied with a card: enough for the worker's context, without the whole event log.
 EVENT_TAIL = 200
 _CHILD_TABLES = ("task_runs", "task_comments", "task_attachments", "task_events")
 
-_REGISTRY: dict[str, Any] = {"at": 0.0, "value": None}
+_REGISTRY: dict[str, Any] = {"at": None, "value": None, "retry": False}
+_REGISTRY_LOCK = threading.Lock()
 _FETCH: Optional[Callable[[], Mapping[str, Any]]] = None
 
 
@@ -174,14 +177,24 @@ def _parse(value: Any) -> Optional[list[str]]:
 def set_registry_fetch(fn: Optional[Callable[[], Mapping[str, Any]]]) -> None:
     """Tests (and the sync loop) inject how ``GET /v2/machines`` is read; resets the cache."""
     global _FETCH
-    _FETCH = fn
-    _REGISTRY.update(at=0.0, value=None)
+    with _REGISTRY_LOCK:
+        _FETCH = fn
+        _REGISTRY.update(at=None, value=None, retry=False)
 
 
 def registry() -> Optional[Mapping[str, Any]]:
     """``{me, machines: {name: entry}}``, cached for :data:`REGISTRY_TTL_S`; None when unreachable."""
+    # Several board/executor ticks can reach the same expired entry concurrently.
+    # Failed attempts also consume the TTL: an outage must not turn every tick
+    # into another HTTP request. The Board still authorizes every actual lease.
+    with _REGISTRY_LOCK:
+        return _registry_locked()
+
+
+def _registry_locked() -> Optional[Mapping[str, Any]]:
     now = time.monotonic()
-    if _REGISTRY["value"] is not None and now - _REGISTRY["at"] < REGISTRY_TTL_S:
+    ttl = REGISTRY_RETRY_S if _REGISTRY.get('retry') else REGISTRY_TTL_S
+    if _REGISTRY["at"] is not None and now - _REGISTRY["at"] < ttl:
         return _REGISTRY["value"]
     fetch = _FETCH
     if fetch is None:
@@ -191,10 +204,11 @@ def registry() -> Optional[Mapping[str, Any]]:
     try:
         raw = fetch()
     except Exception as exc:  # health: allow BLE001 -- registry unreachable: pick up nothing this tick
+        _REGISTRY.update(at=time.monotonic(), retry=True)
         _log.info("kanban worker node: machine registry unavailable (%s: %s)", type(exc).__name__, exc)
         return _REGISTRY["value"]
     value = {"me": raw.get("me"), "machines": {m["name"]: m for m in raw.get("machines") or [] if m.get("name")}}
-    _REGISTRY.update(at=now, value=value)
+    _REGISTRY.update(at=time.monotonic(), value=value, retry=False)
     return value
 
 

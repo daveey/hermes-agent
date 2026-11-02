@@ -344,7 +344,10 @@ class _Collector:
             # No explicit init_db(): connect() already runs the migration once per
             # process, and init_db() would re-run it on a second connection racing
             # the first.
-            subs = _kbn().list_notify_subs(conn, notifier_profiles=self.notifier_profiles, include_unowned=self.include_unowned)
+            subs = _kbn().list_notify_subs(
+                conn, notifier_profiles=self.notifier_profiles, include_unowned=self.include_unowned,
+                platforms=self.active_platforms, pending_only=True,
+            )
             if not subs:
                 logger.debug("kanban notifier: board %s has no subscriptions", slug)
             for sub in subs:
