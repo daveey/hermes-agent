@@ -194,6 +194,9 @@ def test_migration_backfills_origin_gateway(kanban_home) -> None:
         tid = kb.create_task(conn, title="t", assignee="worker")
     raw = sqlite3.connect(str(db))
     if "origin_gateway" in {r[1] for r in raw.execute("PRAGMA table_info(task_comments)")}:
+        # A pre-column DB also predates the activity triggers, which name every read column and block the DROP.
+        from hermes_cli.kanban_activity_revision import drop_triggers
+        drop_triggers(raw)
         raw.execute("ALTER TABLE task_comments DROP COLUMN origin_gateway")
     for author in ("hub:gw:macbook", "macbook/t_01a18013d59457e9", "default", "hub:op:david"):
         raw.execute("INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, ?, 'x', 1)",

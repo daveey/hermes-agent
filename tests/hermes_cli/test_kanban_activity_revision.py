@@ -142,6 +142,25 @@ def test_reinstall_after_a_gap_moves_the_key(board, home):
     assert rev.is_revision(ksa._board_content_key(path)) and ksa._board_content_key(path) != gap
 
 
+def test_drop_column_after_drop_triggers_reinstalls_for_the_new_columns(board, home):
+    tid = kb.create_task(board, title="work", assignee="worker", session_id="s_chat")
+    path = ksa._board_db_paths()[0]
+    with pytest.raises(sqlite3.OperationalError):  # the update trigger names every read column
+        board.execute("ALTER TABLE task_comments DROP COLUMN origin_gateway")
+    rev.drop_triggers(board)
+    board.execute("ALTER TABLE task_comments DROP COLUMN origin_gateway")
+    board.commit()
+    assert ksa._board_content_key(path)[0] == "stat"
+    rev.ensure_revision(board, rev.LOCAL_TABLES)
+    assert "origin_gateway" not in rev.wanted_triggers(board, ["task_comments"])["kanban_activity_rev_task_comments_update"]
+    before = ksa._board_content_key(path)
+    assert rev.is_revision(before)
+    with kbc.write_txn(board):
+        board.execute("INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, 'a', 'x', 1)",
+                      (tid,))
+    assert ksa._board_content_key(path) != before
+
+
 def test_hub_bookkeeping_does_not_move_the_fingerprint(board, home):
     hub_dir = home.parent / "hub-state"
     hub_dir.mkdir()

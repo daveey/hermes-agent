@@ -16,6 +16,10 @@ Readers (``content_key``) only trust the counter when every table they read that
 of its triggers; otherwise (older writer, dropped trigger, rebuilt file) they fall back to the file's stat, the
 previous behaviour. The key also carries the file identity and ``schema_version``, so a replaced file or a schema
 change always reads afresh.
+
+The update trigger names each read column, so SQLite refuses ``ALTER TABLE ... DROP COLUMN`` of a watched column
+while it is installed. Call ``drop_triggers(conn)`` first; the next writer init reinstalls them for the new columns
+(readers fall back to the stat key in between).
 """
 
 from __future__ import annotations
@@ -101,6 +105,15 @@ def ensure_revision(conn: sqlite3.Connection, tables: Iterable[str]) -> None:
             if found.get(name) != sql:
                 conn.execute(f"DROP TRIGGER IF EXISTS {name}")
                 conn.execute(sql)
+
+
+def drop_triggers(conn: sqlite3.Connection) -> None:
+    """Remove the activity triggers (not the counter), e.g. before a ``DROP COLUMN`` of a watched column. Readers
+    fall back to the file's stat until the next writer init reinstalls them."""
+    names = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name GLOB ?",
+                                        (PREFIX + "*",))]
+    for name in names:
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
 
 
 _READ_SQL = (f"SELECT r.revision, (SELECT schema_version FROM pragma_schema_version) FROM {REVISION_TABLE} r "

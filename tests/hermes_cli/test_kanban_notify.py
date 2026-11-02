@@ -947,7 +947,10 @@ def test_migration_backfills_legacy_gateway_subs_to_notify_wake(kanban_home):
     with kbc.connect() as conn:
         task_id = kb.create_task(conn, title="legacy sub upgrade")
         # Simulate a pre-delivery_mode database: drop the column entirely,
-        # then insert legacy-shaped rows (one gateway, one tui).
+        # then insert legacy-shaped rows (one gateway, one tui). A pre-column DB also predates the activity
+        # triggers, which name every read column and so block the DROP.
+        from hermes_cli.kanban_activity_revision import drop_triggers
+        drop_triggers(conn)
         conn.execute("ALTER TABLE kanban_notify_subs DROP COLUMN delivery_mode")
         conn.execute(
             "INSERT INTO kanban_notify_subs "
