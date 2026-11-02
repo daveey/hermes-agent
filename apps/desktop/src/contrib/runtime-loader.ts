@@ -563,13 +563,21 @@ export async function loadRuntimePlugin(
 //    main): saving the file hot-reloads the plugin in place;
 //  - each root is fs-watched too (watchDirectory IPC), so new folders load +
 //    removed ones unload on the change tick; older Electron shells without
-//    watchDirectory fall back to the slow visible-tab poll.
+//    watchDirectory fall back to the slow visible-tab poll;
+//  - [daveey] fs events are a hint, not the truth: on every power resume and
+//    once a minute each known plugin.js is re-read and reloaded when its bytes
+//    differ from what was loaded (refreshChangedDiskPlugins). macOS FSEvents can
+//    drop events (libuv discards the "events were dropped" notice, so fs.watch
+//    never says so), and a `git pull` into a linked checkout right after a wake
+//    left a Desktop running a stale plugin until the file was touched again.
 // Panes land via placement adoption and STAY where the user drags them —
 // the tree treats not-yet-loaded pane ids as hidden, so boot and reload are
 // collapse -> appear, never a placeholder flash.
 // ---------------------------------------------------------------------------
 
 const DISK_POLL_MS = 5_000
+/** [daveey] Level-triggered re-check of every known plugin.js (see header). */
+export const DISK_REFRESH_MS = 60_000
 
 interface DiskRoot {
   dir: string
@@ -647,6 +655,9 @@ interface DiskPlugin {
   packageOrigin?: PackageMarker['origin']
   /** Loaded plugin id (null while broken — kept so a fixing save reloads). */
   id: null | string
+  /** [daveey] The plugin.js text last read for this entry (loaded or not): the
+   *  refresh pass reloads only when the file on disk differs from it. */
+  loadedSource?: string
   /** Origin label (folder name) — the toast/inventory name for load errors. */
   origin: string
   /** Linked dev package only: the SOURCE `desktop/plugin.js` this copy came from. */
@@ -713,6 +724,7 @@ async function loadDiskPlugin(entry: DiskPlugin): Promise<boolean> {
 
   try {
     const text = await readPluginSourceText(entry.file)
+    entry.loadedSource = text
 
     const id = await loadRuntimePlugin(text, entry.origin, {
       defaultEnabled: entry.defaultEnabled,
@@ -1039,6 +1051,73 @@ export async function uninstallDiskPlugin(
   return { ok: true }
 }
 
+let refreshing = false
+
+/** [daveey] Re-read every known plugin.js and reload the ones whose bytes no
+ *  longer match what was loaded, re-arming their watch (a rename-over or a
+ *  folder swap orphans the old one). Runs on power resume and every
+ *  DISK_REFRESH_MS, so a change whose fs event never arrived (dropped FSEvents
+ *  around sleep/wake, a dead watch) is picked up within a minute instead of at
+ *  the next save or restart. Returns the reloaded entry files. */
+export async function refreshChangedDiskPlugins(reason = 'refresh'): Promise<string[]> {
+  const desktop = window.hermesDesktop
+
+  if (!desktop || scanning || refreshing || disk.size === 0) {
+    return []
+  }
+
+  refreshing = true
+  const reloaded: string[] = []
+  let rescan = false
+
+  try {
+    // Linked dev packages: let Electron re-copy changed sources first (it
+    // reloads what it touched), so the copy compared below is current.
+    if ([...disk.values()].some(record => record.sourceFile)) {
+      await resyncLinkedDiskPlugins()
+    }
+
+    for (const [file, record] of [...disk.entries()]) {
+      if (disk.get(file) !== record) {
+        continue // Retired or replaced while this pass awaited.
+      }
+
+      let text: string
+
+      try {
+        text = await readPluginSourceText(file)
+      } catch (error) {
+        // Oversize: already reported on its row at load; re-reporting it every
+        // pass would toast once a minute. Anything else: gone or unreadable,
+        // so the scan reconciles/unloads it.
+        rescan ||= !(error instanceof PluginSourceOversizeError)
+
+        continue
+      }
+
+      if (text === record.loadedSource) {
+        continue
+      }
+
+      if (await loadDiskPlugin(record)) {
+        await watchDiskPluginFile(desktop, record)
+        reloaded.push(file)
+        desktop.logLine?.(`[plugins] ${record.origin}: plugin.js changed with no watch event; reloaded (${reason})`)
+      } else {
+        rescan = true
+      }
+    }
+  } finally {
+    refreshing = false
+  }
+
+  if (rescan) {
+    void scanDiskPlugins()
+  }
+
+  return reloaded
+}
+
 /** Manual rescan (the ⌘K "Reload desktop plugins" fallback) — re-reads
  *  known entries too, unlike the fs-watch/poll reconcile. */
 export const discoverRuntimePlugins = (): Promise<void> => scanDiskPlugins(true)
@@ -1123,6 +1202,14 @@ export function watchRuntimePlugins(): void {
   }
 
   void scanDiskPlugins().then(() => $diskPluginsScanPending.set(false))
+
+  // [daveey] Level-triggered backstop for missed fs events (see header): a
+  // wake is exactly when FSEvents drops, and a sync/pull often lands right
+  // after it; the interval covers everything else. Both live as long as the
+  // window, like the watches.
+  desktop.onPowerResume?.(() => void refreshChangedDiskPlugins('resume'))
+  window.setInterval(() => void refreshChangedDiskPlugins('interval'), DISK_REFRESH_MS)
+
   void startDirWatches().then(watched => {
     if (watched) {
       return
