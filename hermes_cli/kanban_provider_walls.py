@@ -127,11 +127,14 @@ def record_wall_for_run(conn: sqlite3.Connection, task_id: str, run_id: Optional
 
 
 def retier_for_walls(task: Any, cfg: dict[str, Any], *, now: Optional[float] = None,
-                     path: Optional[Path] = None) -> Optional[tuple[str, str, str]]:
-    """``(model, provider, walled_provider)`` to run on instead, or None to leave the task alone."""
+                     path: Optional[Path] = None,
+                     extra_walls: Optional[dict[str, float]] = None) -> Optional[tuple[str, str, str]]:
+    """``(model, provider, walled_provider)`` to run on instead, or None to leave the task alone.
+
+    ``extra_walls`` adds walls only the caller knows (a card's own quota episode)."""
     if REQUIRE_MODEL_MARKER in f"{getattr(task, 'title', '') or ''}\n{getattr(task, 'body', '') or ''}":
         return None
-    walls = active_walls(now=now, path=path)
+    walls = {**active_walls(now=now, path=path), **(extra_walls or {})}
     task_model = str(getattr(task, "model_override", "") or "").strip()
     provider = _norm(getattr(task, "provider_override", None)) or (profile_provider() if not task_model else "")
     if not provider or provider == "auto":

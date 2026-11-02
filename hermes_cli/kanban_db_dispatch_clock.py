@@ -22,6 +22,8 @@ CLOCK_REASONS = frozenset({
     "infrastructure_cooldown",   # latest refused spawn + the same cooldown
     "owner_restart_cooldown",    # run lost to its owner's restart + owner-restart cooldown
 })
+# The reasons ``kanban_quota_episode.decision`` holds an episode card on.
+_EPISODE_REASONS = frozenset({"subscription_quota_reset", "rate_limit_cooldown"})
 
 
 def guard_hold_until(conn: sqlite3.Connection, task_id: str, reason: str, now: int) -> Optional[int]:
@@ -29,6 +31,12 @@ def guard_hold_until(conn: sqlite3.Connection, task_id: str, reason: str, now: i
     if reason not in CLOCK_REASONS:
         return None
     from hermes_cli import kanban_db as kb
+    if reason in _EPISODE_REASONS:
+        # A quota episode's deadline (doubling backoff, every provider's wall) is what the guard holds on.
+        from hermes_cli.kanban_quota_episode import hold_until
+        until = hold_until(conn, task_id, now)
+        if until is not None:
+            return int(until) if until > now else None
     if reason == "subscription_quota_reset":
         reset = _receipt_reset_at(conn, task_id)
         return int(reset) if reset is not None and reset > now else None

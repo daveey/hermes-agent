@@ -272,8 +272,9 @@ def test_new_unpinned_card_created_after_a_known_wall_never_routes_to_it(board, 
              fields={'failure_reason': 'rate_limit', 'failure_retryable': True, 'failure_resets_at': float(reset),
                      'route_provider': 'openai-codex', 'route_model': 'gpt-6-astra'})
         assert walls.active_walls(now=clock[0]).get('openai-codex') == pytest.approx(reset, abs=1)
-        # Hold the first card out of this tick so only the new one can be dispatched.
-        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (first,))
+        # Take the first card out of this tick so only the new one can be dispatched (its own episode
+        # now reroutes it too; test_kanban_quota_episode_walls covers that).
+        kb.archive_task(conn, first)
         clock[0] += 60
         new = kb.create_task(conn, title='brand-new default card', assignee='a')
         conn.commit()

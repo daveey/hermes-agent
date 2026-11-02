@@ -289,13 +289,14 @@ def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Opt
 
 def resolve_dispatch_tier(conn, task, *, lane, cfg=None):
     """One read-only route decision for preview and actual admission."""
-    from hermes_cli.kanban_quota_episode import decision, episode
+    from hermes_cli.kanban_quota_episode import active, decision
     base = resolve_model_tier(conn, task, lane=lane, cfg=cfg)
     _, route = decision(conn, task, lane=lane, cfg=cfg, base=base)
     if route:
         return *route, f'{base[2]}+quota_reroute'
-    if episode(conn, task.id):
+    if active(conn, task.id):
         return base
+    # An expired episode no longer judges the route: another card's (or the live pool's) wall still does.
     # Legacy provider-wide walls may only change ordinary default routing.
     if base[2] == 'default' and not task.provider_override:
         from hermes_cli.kanban_provider_walls import retier_for_walls

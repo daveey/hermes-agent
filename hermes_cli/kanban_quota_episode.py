@@ -80,8 +80,8 @@ def _outstanding(conn, task_id, state, now):
     return out
 
 
-def _base_provider(task, base):
-    """The concrete provider admission would run *task* on with *base*, or None when unknown."""
+def _base_route(task, base):
+    """The concrete ``(model, provider)`` admission would run *task* on with *base*, or None when unknown."""
     from agent.model_routing import is_class_selector
     from hermes_cli.kanban_model_tier import profile_route
     model, provider = base[:2]
@@ -91,7 +91,40 @@ def _base_provider(task, base):
         model, provider = profile_route(getattr(task, 'assignee', None))
     if not model or is_class_selector(model) or not provider or str(provider).lower() == 'auto':
         return None
-    return str(provider).strip().lower()
+    return str(model), str(provider).strip().lower()
+
+
+def _walled_elsewhere(model, provider, now):
+    """Deadline of a wall on *provider* that this episode never saw (another card's, or the live pool's)."""
+    from hermes_cli import kanban_provider_walls as pw
+    known = pw.active_walls(now=now).get(provider)
+    return known if known is not None else pw.live_quota_wall(provider, model)
+
+
+def _strong_fallback(task, base, walls, cfg, now):
+    """Main's strong-tier fallback for an unpinned default card, judged against this episode's walls too.
+
+    Used when no class alternate exists (routing off, or the default model is in no class): without it the
+    card waited out the whole wall although the strong tier had room."""
+    from copy import copy
+    from hermes_cli.kanban_model_tier import load_tier_config
+    from hermes_cli.kanban_provider_walls import retier_for_walls
+    if task.model_override or task.provider_override or base[2] != 'default' or not base[0]:
+        return None
+    probe = copy(task)
+    probe.model_override, probe.provider_override = base[:2]
+    moved = retier_for_walls(probe, load_tier_config() if cfg is None else cfg, now=now, extra_walls=walls)
+    return moved[:2] if moved else None
+
+
+def hold_until(conn, task_id, now=None):
+    """Latest deadline this task's quota episode still holds (every provider it hit), or None."""
+    state = episode(conn, task_id)
+    if not state:
+        return None
+    now = time.time() if now is None else now
+    outstanding = _outstanding(conn, task_id, state, now)
+    return max(s['until'] for s in outstanding) if outstanding else None
 
 
 def alternate_route(conn, task, walls, base, now):
@@ -151,20 +184,25 @@ def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
             walls[name] = max(walls.get(name, 0), wall['until'])
     try:
         base = base or resolve_model_tier(conn, task, lane=lane, cfg=cfg)
-        target = _base_provider(task, base)
+        target = _base_route(task, base)
+        if target is not None and not unknown and target[1] not in walls:
+            # A provider this episode never hit may still be walled (another card's wall, the live pool):
+            # admitting it would send a card moved off codex, then walled on anthropic, back to codex.
+            elsewhere = _walled_elsewhere(*target, now)
+            if elsewhere is None:
+                # The route admission will use is a known, free, different provider (e.g. a re-pinned card).
+                return None, None
+            walls[target[1]] = elsewhere
     except sqlite3.Error:
         raise
     except Exception:
         logger.warning('kanban quota: route resolve failed for %s; holding', task.id, exc_info=True)
         return held, None
-    if target is not None and not unknown and target not in walls:
-        # The route admission will use is a known, different provider (e.g. a re-pinned card).
-        return None, None
     if lane == 'review' or unknown:
         # An unrecorded wall may be any provider: no route can be proven to avoid it.
         return held, None
     try:
-        route = alternate_route(conn, task, walls, base, now)
+        route = alternate_route(conn, task, walls, base, now) or _strong_fallback(task, base, walls, cfg, now)
     except sqlite3.Error:
         raise
     except Exception:
