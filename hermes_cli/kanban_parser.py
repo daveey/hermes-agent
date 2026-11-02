@@ -438,7 +438,7 @@ _SPECS = [
         _TASK_ID,
         _arg("--title", help="Replace the task title"),
         _arg("--body", help="Replace the task body"),
-        _arg("--priority", type=int, help="Replace the task priority"),
+        _arg("--priority", type=int, help="Replace the task priority (lowering it requires --reason)"),
         _arg("--result", help="Backfilled task result text for a done task"),
         *_STEP_HANDOFF,
         _arg("--max-retries", type=int, metavar="N", dest="max_retries",
@@ -456,7 +456,8 @@ _SPECS = [
              help="Orchestrator only: re-point the completion gate (local-only, OWNER/REPO or an exact "
                   "PR URL) when the bound one can never pass, e.g. the repo moved or was suspended. "
                   "Requires --reason; can't be combined with other edit flags"),
-        _arg("--reason", help="With --completion-contract: why (recorded as an event and a comment)"),
+        _arg("--reason", help="With --completion-contract: why (recorded as an event and a comment). "
+                              "With --priority: why (required to lower it; recorded on the reprioritized event)"),
     ], help="Edit task fields, operator fields (retries, goal mode, runtime cap, session, completion "
             "contract), or recovery fields on an already-completed task"),
     _cmd("reopen", [

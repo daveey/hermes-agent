@@ -1266,8 +1266,9 @@ _OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runti
 def _cmd_edit(args: argparse.Namespace) -> int:
     if getattr(args, "completion_contract", None) is not None:
         return _contract_cli.cmd_edit_contract(args)
-    if getattr(args, "reason", None) is not None:
-        return _err("kanban edit: --reason only applies to --completion-contract", 2)
+    reason = getattr(args, "reason", None)
+    if reason is not None and getattr(args, "priority", None) is None:
+        return _err("kanban edit: --reason only applies to --completion-contract or --priority", 2)
     result = getattr(args, "result", None)
     raw_metadata = getattr(args, "metadata", None)
     summary = getattr(args, "summary", None)
@@ -1292,6 +1293,12 @@ def _cmd_edit(args: argparse.Namespace) -> int:
         return rc
     with kbc.connect_closing() as conn:
         changed: dict = {}
+        if priority is not None and has_operator and not (reason or "").strip():
+            # Refuse before the operator columns commit, so a refused lowering applies nothing;
+            # edit_task re-checks inside its own write transaction. [daveey]
+            row = conn.execute("SELECT priority FROM tasks WHERE id = ?", (args.task_id,)).fetchone()
+            if row is not None and priority < int(row[0] or 0):
+                return _err(f"kanban edit: {kb.PriorityLowerRefused(args.task_id, int(row[0] or 0), priority)}")
         if has_operator:
             # Operator columns first: a refusal (e.g. a session_id overwrite) must leave the
             # whole edit unapplied rather than half of it. [daveey]
@@ -1304,10 +1311,14 @@ def _cmd_edit(args: argparse.Namespace) -> int:
             if changed is None:
                 return _err(f"cannot edit {args.task_id} (unknown id)")
         if any(value is not None for value in (title, body, priority, result)):
-            ok = kb.edit_task(
-                conn, args.task_id, title=title, body=body, priority=priority,
-                result=result, summary=summary, metadata=metadata,
-            )
+            try:
+                ok = kb.edit_task(
+                    conn, args.task_id, title=title, body=body, priority=priority,
+                    result=result, summary=summary, metadata=metadata,
+                    priority_reason=reason, require_lower_reason=True,
+                )
+            except kb.PriorityLowerRefused as exc:
+                return _err(f"kanban edit: {exc}")
             if not ok:
                 return _err(f"cannot edit {args.task_id} (unknown id, or --result used on a task that is not done)")
     detail = "; ".join(f"{f}: {c['old']!r} -> {c['new']!r}" for f, c in (changed or {}).items())
