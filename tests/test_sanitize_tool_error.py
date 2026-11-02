@@ -8,6 +8,7 @@ itself might react to (XML role tags, CDATA, markdown code fences) and to
 cap pathological lengths.
 """
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 from model_tools import _sanitize_tool_error, _TOOL_ERROR_MAX_LEN
 

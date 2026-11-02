@@ -1,4 +1,5 @@
 """Tests for network.force_ipv4 — the socket.getaddrinfo monkey-patch."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import importlib
 import socket

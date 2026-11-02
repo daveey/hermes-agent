@@ -14,6 +14,7 @@ splits them at the first space and no quoting helps, so they are not checked.
 """
 
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import ast
 import os

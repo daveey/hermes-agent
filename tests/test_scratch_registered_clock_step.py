@@ -1,5 +1,6 @@
 """The spawn ledger's boot-relative identity: a registered gateway's scratch survives a wall-clock
 step (NTP, VM resume), and boot ticks never vouch for a process across a reboot."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import json
 import os

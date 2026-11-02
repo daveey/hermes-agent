@@ -8,6 +8,7 @@ parent, so the rename that published the new file sat outside the requested dura
 ``/var`` -> ``/private/var`` and a raw comparison fails even on a correct fix.
 """
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 from pathlib import Path
 from unittest.mock import patch

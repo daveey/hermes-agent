@@ -5,6 +5,7 @@ CSafeLoader C extension for speed. These tests assert the behavior contract
 (it parses identically to safe_load across input shapes), not a snapshot of
 any particular document.
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import io
 

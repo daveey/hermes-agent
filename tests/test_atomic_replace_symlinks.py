@@ -11,6 +11,7 @@ overwritten in-place while the symlink survives.  All atomic-write sites in
 the codebase were migrated to the helper; these tests pin that invariant.
 """
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import errno
 import json

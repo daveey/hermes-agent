@@ -4,6 +4,7 @@ proved by ``test_hermes_dir_acl_windows.py`` on Windows CI).
 No test pretends to be on Windows: elevation is a host fact the functions take as data (or the
 process_is_elevated probe stands in for it on a production path), and only the native writer
 (``_grant_with_pywin32``) is replaced, to record what an elevated grant would have touched."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import os
 from pathlib import Path
 

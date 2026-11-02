@@ -7,6 +7,7 @@ tests/agent/test_direct_provider_url_detection.py.
 """
 
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 from utils import base_url_hostname, base_url_host_matches
 

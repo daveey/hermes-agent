@@ -17,6 +17,7 @@ imported the test modules, and by then the handler holds an absolute path.
 `tests/conftest.py` sets HERMES_HOME at module scope for that reason - this
 guards the property so a refactor cannot quietly undo it.
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import logging
 import os

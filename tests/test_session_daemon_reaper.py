@@ -4,6 +4,7 @@ A test that runs a real ``hermes chat -q`` child gets a grandchild ``gateway run
 session; no per-test subprocess patch sees it, and pytest's tmp cleanup removes only directories.
 """
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import os
 import subprocess

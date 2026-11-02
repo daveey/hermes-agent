@@ -10,6 +10,7 @@ session vars (``clear_session_vars`` sets ``""``, which masks ``os.environ``) ma
 ``get_session_env`` ignore their monkeypatched HERMES_SESSION_ID / HERMES_CRON_SESSION
 (test_kanban_provenance -> test_cronjob_tools, test_kanban_tools, test_completed_process_results).
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import os
 

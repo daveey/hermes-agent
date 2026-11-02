@@ -1,4 +1,5 @@
 """The tui_gateway.server reset fixture must tolerate a module another thread is still importing."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import importlib.machinery
 import sys
 import types

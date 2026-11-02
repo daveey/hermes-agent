@@ -1,4 +1,5 @@
 """Tests for hermes_constants module."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import json
 import os

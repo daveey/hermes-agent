@@ -4,6 +4,7 @@ This helper backs tui_gateway/server.py:_save_cfg(), which used to call
 yaml.safe_dump and silently clobber user-edited config files on every
 TUI/gateway setting change (e.g. /personality, /reasoning, /details_mode).
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import os
 from pathlib import Path

@@ -6,6 +6,7 @@ clone needs the retry.  Regression coverage for #117170, #117176, #117179 and #1
 """
 
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import os
 import stat

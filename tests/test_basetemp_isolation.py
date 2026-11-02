@@ -5,6 +5,7 @@ prefers the platform-native home whenever ``HERMES_HOME`` sits *under* it — so
 inside the home silently turns the sandbox back into the live install (#111101).
 """
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 from pathlib import Path
 from types import SimpleNamespace

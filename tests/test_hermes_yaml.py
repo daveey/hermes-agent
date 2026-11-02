@@ -1,4 +1,5 @@
 """Contracts for Hermes' shared YAML reader and writer."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import io
 from concurrent.futures import ThreadPoolExecutor

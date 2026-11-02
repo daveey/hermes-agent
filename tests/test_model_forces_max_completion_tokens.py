@@ -8,6 +8,7 @@ error seen when third-party OpenAI-compatible endpoints serve gpt-4o / 4.1 /
 """
 
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 from utils import model_forces_max_completion_tokens
 

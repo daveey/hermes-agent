@@ -1,4 +1,5 @@
 """Tests for shared truthy-value helpers."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 from utils import env_var_enabled, is_truthy_value
 

@@ -15,6 +15,7 @@ These tests pin:
 - every call returns a list that is not the cached one, even after mutation
 """
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier

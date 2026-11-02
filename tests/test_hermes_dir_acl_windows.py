@@ -11,6 +11,7 @@ and skips with the runner's identity when it is not (the arm64 hosted runner onc
 The parent needs an elevated token (the hosted runner has one) to stand in for the elevated
 install; ``make_user_dir`` only grants when the creating process is elevated.
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import json
 import subprocess
 import sys

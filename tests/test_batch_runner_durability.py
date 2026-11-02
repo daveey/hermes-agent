@@ -9,6 +9,7 @@ Verifies:
      join(timeout=10) raises TypeError — so the tests also assert join()
      is invoked with no arguments.
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import json
 import os

@@ -4,6 +4,7 @@ A test home has no Nous identity, so a hosted connector action used to mint a re
 the production Portal: seconds per test, red when the Portal was slow, and a new production
 guest on every CI run.
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import socket
 

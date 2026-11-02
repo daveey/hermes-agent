@@ -9,6 +9,7 @@ would crash with RuntimeError("Event loop is closed") when garbage-collected.
 
 The fix replaces asyncio.run() with a persistent event loop in _run_async().
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import asyncio
 import json

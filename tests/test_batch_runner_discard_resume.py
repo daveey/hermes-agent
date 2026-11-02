@@ -7,6 +7,7 @@ discarded sample was re-run at full cost on each restart. The fix writes
 a tombstone row that the content scan treats as completed and the
 trajectories.jsonl merge excludes.
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import json
 from unittest.mock import MagicMock, patch

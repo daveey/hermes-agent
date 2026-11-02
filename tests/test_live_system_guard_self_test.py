@@ -18,6 +18,7 @@ the live systemd unit MUST be exercised below. Adding a new primitive to
 the guard? Add a test here too.
 """
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import os
 import signal

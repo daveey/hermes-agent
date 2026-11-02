@@ -1,4 +1,5 @@
 """Independent core/optional dependency and reviewed CVE policies."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import tomllib
 from pathlib import Path
 

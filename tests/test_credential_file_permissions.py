@@ -7,6 +7,7 @@ mode) end up group/world-readable under the default umask, silently exposing
 plaintext secrets to other local users. The helper warns with a remediation
 hint; adapters call it on every read path.
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import logging
 import os

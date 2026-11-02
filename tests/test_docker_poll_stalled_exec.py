@@ -7,6 +7,7 @@ stand-in tests need neither.
 """
 
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import subprocess
 from types import SimpleNamespace

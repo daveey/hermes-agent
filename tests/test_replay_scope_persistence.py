@@ -1,4 +1,5 @@
 """Legacy replay uncertainty must survive native durable history rewrites."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import pytest
 from hermes_state import SessionDB
 

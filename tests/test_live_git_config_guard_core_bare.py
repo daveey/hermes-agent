@@ -4,6 +4,7 @@
 (``git init --bare`` with no path and an inherited GIT_DIR does exactly that), the shared .git/config read core.bare=true, and every
 worktree and ``hermes update`` failed with "this operation must be run in a work tree".
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import os
 import subprocess

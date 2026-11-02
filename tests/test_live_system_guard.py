@@ -6,6 +6,7 @@ while still scanning every token of wrapper invocations like ``bash -c``.
 All blocked-case commands use patterns that match no real process, so a
 guard regression cannot kill anything.
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import os
 import subprocess

@@ -1,4 +1,5 @@
 """Tests for batch_runner checkpoint behavior — incremental writes, resume, atomicity."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import json
 from pathlib import Path

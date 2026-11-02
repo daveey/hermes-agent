@@ -7,6 +7,7 @@ that skips the cleanup, or writes through the target instead of a sibling temp, 
 """
 
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import json
 from pathlib import Path

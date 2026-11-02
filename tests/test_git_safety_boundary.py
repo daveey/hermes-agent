@@ -1,4 +1,5 @@
 """A removed live-checkout guard can damage only disposable repositories here."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 from pathlib import Path
 import shlex
 import subprocess

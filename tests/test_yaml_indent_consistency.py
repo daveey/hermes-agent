@@ -1,4 +1,5 @@
 """All YAML write paths use indented block sequences (#31999)."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import pytest
 

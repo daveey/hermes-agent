@@ -9,6 +9,7 @@ process_directory() would fail with "Event loop is closed".
 The fix creates the AsyncOpenAI client lazily via _get_async_client() so
 each asyncio.run() gets a client bound to the current loop.
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch

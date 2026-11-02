@@ -9,6 +9,7 @@ real defects (agent-dada3769d1).
 Every case uses a disposable HOME, so the "production" root here is ``<tmp>/.hermes``,
 never the real one.
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import os
 from pathlib import Path
 import subprocess

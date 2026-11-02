@@ -1,4 +1,5 @@
 """Existing databases remain usable while a config writer finishes publication."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing

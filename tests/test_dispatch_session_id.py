@@ -1,4 +1,5 @@
 """Tests that handle_function_call forwards session_id into registry.dispatch."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import json
 from unittest.mock import MagicMock, patch

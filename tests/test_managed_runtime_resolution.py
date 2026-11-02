@@ -24,6 +24,7 @@ whose behavior is separately covered by a real test.
 """
 
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import ast
 import functools

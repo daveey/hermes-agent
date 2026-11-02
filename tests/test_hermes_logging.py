@@ -1,4 +1,5 @@
 """Tests for hermes_logging — centralized logging setup."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import importlib.util
 import io
 import logging

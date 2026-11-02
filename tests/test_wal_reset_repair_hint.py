@@ -4,6 +4,7 @@ The WAL-reset corruption warning's repair hint must match what the user's
 install can actually do: source checkouts get the venv-setup step, packaged
 installs get their steward's update command (#75153).
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 from unittest.mock import patch
 

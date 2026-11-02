@@ -11,6 +11,7 @@ and the repo's own ``agent.proxy_bypass`` matcher all understand.
 """
 
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import pytest
 

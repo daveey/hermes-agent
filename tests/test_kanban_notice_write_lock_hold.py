@@ -5,6 +5,7 @@ hermes-hub 2026-10-29: 328 "write lock unavailable" warnings. py-spy of the hold
 (hermes_state_messages.py:505): the notice-id dedupe query planned ``SCAN m`` over all 300k messages
 (1.9 GB) while holding BEGIN IMMEDIATE, and the sweep re-offers every done card every 30 s.
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import sqlite3
 
 import pytest

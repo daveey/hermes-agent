@@ -7,6 +7,7 @@ Two halves under test:
 - ``delete_session`` / ``delete_sessions`` / ``prune_sessions`` capture the doomed messages'
   pointers inside the delete transaction and unlink the archives afterwards — but only once no
   SURVIVING session references them (branch/compression siblings may share the pointer)."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import os
 import time

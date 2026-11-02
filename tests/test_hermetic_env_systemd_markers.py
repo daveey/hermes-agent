@@ -5,6 +5,7 @@ inherits INVOCATION_ID (and NOTIFY_SOCKET etc.). Unscrubbed, the Kanban spawn
 path took the restart-safe-scope branch and raised "cannot create restart-safe
 systemd scope ... no current run id" on hosts only, never on CI.
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import os
 

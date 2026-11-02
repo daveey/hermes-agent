@@ -8,6 +8,7 @@ appends sub-paths (the skill_manage schema showed the agent
 ``~/AppData\\Local\\hermes/skills/``). The ``~/`` shorthand implies POSIX
 rendering; the whole string must be consistent.
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import os
 import sys
 import unittest

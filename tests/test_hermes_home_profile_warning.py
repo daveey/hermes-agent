@@ -12,6 +12,7 @@ The warning goes to stderr directly (not through logging) because this
 function is called at module-import time from 30+ sites, often before the
 logging subsystem has been configured.
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 from pathlib import Path
 

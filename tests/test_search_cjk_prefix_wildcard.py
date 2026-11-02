@@ -11,6 +11,7 @@ the identical query without the star returns rows.
 Runs against a real SessionDB in a temp HERMES_HOME, on the trigram and LIKE
 routes only — no ``cjk_unicode61`` tokenizer toolchain is required.
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 from hermes_state import SessionDB
 

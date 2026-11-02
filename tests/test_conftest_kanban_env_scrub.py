@@ -3,6 +3,7 @@ them before any test module is imported, not only per test: collection-time code
 would otherwise resolve the production board (hub incident 2026-10-28). [daveey]"""
 
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import os
 import subprocess

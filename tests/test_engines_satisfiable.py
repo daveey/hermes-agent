@@ -17,6 +17,7 @@ declare and the toolchain that has to satisfy it.
 """
 
 from __future__ import annotations
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import json
 from pathlib import Path

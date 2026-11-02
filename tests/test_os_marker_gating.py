@@ -1,4 +1,5 @@
 """Run the real collection hook; skip-all and unregistered guards must fail."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import os
 from pathlib import Path
 import subprocess
