@@ -725,8 +725,10 @@ def open_shadow(slug: str, gateway: str) -> sqlite3.Connection:
 
 @contextmanager
 def _pulled_replica(slug: str, hub: Hub, gateway: str):
-    """Keep the pulled (or rebuilt) replica open for this round, closing it on every exit."""
+    """Keep the pulled (or rebuilt) replica open for this round, closing it on every exit. Yields
+    ``(replica, pulled, rebuilt)``; ``rebuilt`` is True when the replica was replaced from a snapshot."""
     replica = open_shadow(slug, gateway)
+    rebuilt = False
     try:
         try:
             pulled = pull(replica, hub, slug, observers=False)
@@ -735,19 +737,20 @@ def _pulled_replica(slug: str, hub: Hub, gateway: str):
             replica.close()
             shadow_path(slug).unlink(missing_ok=True)
             replica = open_shadow(slug, gateway)
+            rebuilt = True
             pulled = resync(replica, hub, slug, observers=False)
         try:  # readers derive the replica's staleness from this (kanban_chat_links); a failed stamp only ages it
             sync.mark_pulled(replica)
         except sqlite3.Error as exc:
             _log.warning("kanban sync: %s replica pull not stamped (%s)", slug, exc)
-        yield replica, pulled
+        yield replica, pulled, rebuilt
     finally:
         replica.close()
 
 
 def _pull_replica(slug: str, hub: Hub, gateway: str) -> int:
     """Pull the whole replica for standalone callers that do not run repairs."""
-    with _pulled_replica(slug, hub, gateway) as (_, pulled):
+    with _pulled_replica(slug, hub, gateway) as (_, pulled, _rebuilt):
         return pulled
 
 
@@ -764,7 +767,7 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
         if mode == "off":
             return result
         ensure_identity(live, slug, gateway)
-        with _pulled_replica(slug, hub, gateway) as (replica, pulled):
+        with _pulled_replica(slug, hub, gateway) as (replica, pulled, rebuilt):
             result.pulled = pulled
             if mode == "primary":
                 try:
@@ -777,7 +780,7 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
             inputs = _repair_inputs(path, replica, mode, gateway)
             key = str(path)
             if inputs is None or _REPAIRED.get(key) != inputs:
-                deferred = _defer_repair(key, inputs)
+                deferred = not rebuilt and _defer_repair(key, inputs)
                 from hermes_cli.kanban_sync_partition_repair import repair_partition_chat_links, repair_partition_links
                 if not deferred:
                     repair_partition_links(live, replica, gateway)

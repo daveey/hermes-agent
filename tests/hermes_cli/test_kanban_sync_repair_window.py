@@ -167,11 +167,32 @@ def test_an_uncaptured_local_write_inside_the_window_is_healed(live, svc, kanban
 def test_a_rebuilt_replica_repairs_at_once(live, svc, kanban_home, monkeypatch, clock):
     _settle(live, svc, kanban_home, "shadow")
     calls = _spy(monkeypatch, HEAVY)
+    _remote(svc)
+    svc.compact(BOARD)  # the replica's cursor is now below the retention floor: the round rebuilds it
+    # Never decided by inode alone: a delete-and-recreate can get the same inode back (ext4 does).
+    real_stat = ksc.os.stat
     path = str(kanban_home / "kanban.db")
-    last = ksc._REPAIRED[path]
-    live_version, (dev, ino, cursor), *rest = last
-    # The replica file was replaced (a snapshot rebuild): a different inode is never a cursor-only change.
-    ksc._REPAIRED[path] = (live_version, (dev, ino + 1, cursor), *rest)
+    _dev, ino = ksc._REPAIRED[path][1][:2]
+
+    def _same_inode(st):
+        fields = list(st[:10])
+        fields[1], fields[2] = ino, _dev  # stat_result order: mode, ino, dev, ...
+        return ksc.os.stat_result(fields)
+
+    shadow_file = str(ksc.shadow_path(BOARD))
+    monkeypatch.setattr(ksc.os, "stat", lambda p, *a, **k: _same_inode(real_stat(p)) if str(p) == shadow_file
+                        else real_stat(p, *a, **k))
+    assert not _round(kanban_home, svc).repair_deferred
+    assert all(n == 1 for n in calls.values()), calls
+
+
+@pytest.mark.parametrize("before,after", [("shadow", "primary"), ("primary", "shadow")])
+def test_a_mode_change_inside_the_window_repairs_at_once(live, svc, kanban_home, monkeypatch, clock, before, after):
+    _settle(live, svc, kanban_home, before)
+    calls = _spy(monkeypatch, HEAVY)
+    _remote(svc)
+    assert _round(kanban_home, svc).repair_deferred
+    sync.set_mode(live, after)
     _remote(svc)
     assert not _round(kanban_home, svc).repair_deferred
     assert all(n == 1 for n in calls.values()), calls
