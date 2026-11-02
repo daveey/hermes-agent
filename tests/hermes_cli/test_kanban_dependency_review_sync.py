@@ -30,10 +30,8 @@ def transport(source, target):
                                 op["fields"], i, op["hlc"], "source")
                for i, op in enumerate(sync.outbox(source), 1)]
     sync.apply_remote_changes(target, changes, new_cursor=len(changes), observers=False)
-    # Repeat the PR as an unattributed publication on the destination. Comment
-    # provenance has its own local IDs; it is not the checkpoint under test.
-    for row in source.execute("SELECT DISTINCT task_id FROM task_events WHERE kind = 'dependency_wait'"):
-        kb.add_comment(target, row["task_id"], "dev", PR)
+    # No destination re-add: the owner's PR comment keeps its writer by run uid across
+    # the remap (test_kanban_pr_comment_writer_uid_sync).
 
 
 def checkpoint_row(conn, task):

@@ -283,7 +283,18 @@ def _foreign_pr_comment_ids(conn: sqlite3.Connection, task_id: str) -> set[int]:
             continue
         seen.add(cid)
         writer = data.get("writer_run_id")
-        if "writer_run_id" not in data:
+        if "writer_run_uid" in data:
+            # Portable identity decides; never fall back to the database-local integer,
+            # which on a replica can name another card's run. Unusable/unknown: owned.
+            uid = data["writer_run_uid"]
+            try:
+                run = conn.execute("SELECT task_id FROM task_runs WHERE uid = ?", (uid,)).fetchone() \
+                    if isinstance(uid, str) and uid else None
+            except sqlite3.OperationalError:
+                run = None  # no uid column here: provenance unreadable, stays owned
+            if run is not None and run[0] != task_id:
+                foreign.add(cid)
+        elif "writer_run_id" not in data:
             foreign.add(cid)
         elif type(writer) is int:
             run = conn.execute("SELECT task_id FROM task_runs WHERE id = ?", (writer,)).fetchone()

@@ -1709,6 +1709,17 @@ def _writer_run_id(task_id: str) -> Optional[int]:
         return None
 
 
+def _writer_run_uid(conn: sqlite3.Connection, run_id: int) -> Optional[str]:
+    """``task_runs.uid`` of ``run_id`` (portable across synced boards), or None when the
+    board has no uid column or the run has none."""
+    try:
+        row = conn.execute("SELECT uid FROM task_runs WHERE id = ?", (int(run_id),)).fetchone()
+    except sqlite3.OperationalError:
+        return None  # unsynced schema: no uid column
+    uid = row[0] if row else None
+    return uid if isinstance(uid, str) and uid else None
+
+
 def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, *,
                 origin_gateway: Optional[str] = None) -> int:
     """Append a comment. ``origin_gateway``: the gateway it came from (the hermes-hub relay passes the
@@ -1736,6 +1747,11 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, 
         payload: dict = {"author": author, "len": len(body), "comment_id": cid}
         if writer_run is not None:
             payload["writer_run_id"] = writer_run
+            # [daveey] The integer is database-local: sync remaps the event's run_id column
+            # but not this payload. The run's stable uid names the writer on every replica.
+            writer_uid = _writer_run_uid(conn, writer_run)
+            if writer_uid:
+                payload["writer_run_uid"] = writer_uid
         _append_event(conn, task_id, "commented", payload)
         return cid
 

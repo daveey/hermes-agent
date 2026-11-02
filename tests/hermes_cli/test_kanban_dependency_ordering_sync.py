@@ -51,14 +51,9 @@ def transport(source, target, task, comment_at, clock):
                                 op["fields"], i, op["hlc"], "source")
                for i, op in enumerate(sync.outbox(source), 1)]
     sync.apply_remote_changes(target, changes, new_cursor=len(changes), observers=False)
-    # Comment provenance (writer_run_id) is a separate local-id problem; re-add the
-    # owner's PR comment at its original time as an unattributed publication.
-    with kb.write_txn(target):
-        target.execute("DELETE FROM task_comments WHERE task_id = ?", (task,))
-    saved = clock[0]
-    clock[0] = comment_at
-    kb.add_comment(target, task, "dev", PR)
-    clock[0] = saved
+    # No destination re-add: the owner's PR comment keeps its writer by run uid across
+    # the remap (test_kanban_pr_comment_writer_uid_sync).
+    del task, comment_at, clock
 
 
 def event(conn, task):

@@ -7,11 +7,24 @@ from typing import Optional
 
 
 def own_comment_ids(conn: sqlite3.Connection, task_id: str, run_id: int) -> set[int]:
-    """Ids of the comments on ``task_id`` written from inside run ``run_id`` (any process)."""
+    """Ids of the comments on ``task_id`` written from inside run ``run_id`` (any process).
+
+    [daveey] A comment stamped with ``writer_run_uid`` is matched by that stable uid only
+    (the payload integer is local to the database that wrote it); legacy uid-less comments
+    keep the integer match."""
+    try:
+        row = conn.execute("SELECT uid FROM task_runs WHERE id = ?", (int(run_id),)).fetchone()
+    except sqlite3.OperationalError:
+        row = None  # unsynced schema: no uid column
+    uid = row[0] if row and isinstance(row[0], str) and row[0] else None
     rows = conn.execute(
         "SELECT json_extract(payload, '$.comment_id') FROM task_events "
-        "WHERE task_id = ? AND kind = 'commented' "
-        "AND json_extract(payload, '$.writer_run_id') = ?", (task_id, int(run_id)),
+        "WHERE task_id = ? AND kind = 'commented' AND ("
+        "(json_type(payload, '$.writer_run_uid') IS NULL "
+        " AND json_extract(payload, '$.writer_run_id') = ?) "
+        "OR (? IS NOT NULL AND json_type(payload, '$.writer_run_uid') = 'text' "
+        "    AND json_extract(payload, '$.writer_run_uid') = ?))",
+        (task_id, int(run_id), uid, uid),
     ).fetchall()
     return {int(r[0]) for r in rows if r[0] is not None}
 
