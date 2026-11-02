@@ -10,8 +10,21 @@ from hermes_state_runtime import RuntimeStoreError
 from tests.gateway.test_local_receipt_untracked_compression import _owner, _unrecovered_owner
 
 
+def _set_policy(key, value):
+    return lambda receipt: receipt['policy'].__setitem__(key, value)
+
+
+DAMAGE = {
+    'empty_model': _set_policy('model', ''),
+    'missing_model': lambda receipt: receipt['policy'].pop('model'),
+    'bad_toolsets': _set_policy('toolsets', 42),
+    'bad_json': _set_policy('config_json', '{'),
+    'missing_policy': lambda receipt: receipt.pop('policy'),
+}
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize('damage', ['empty_model', 'missing_model', 'bad_toolsets', 'bad_json', 'missing_policy'])
+@pytest.mark.parametrize('damage', list(DAMAGE))
 async def test_invalid_policy_is_quarantined_once(tmp_path, monkeypatch, caplog, damage):
     first, connection = await _owner(tmp_path, monkeypatch, 'first')
     ref = create_local_session(first, connection.actor, {
@@ -21,16 +34,7 @@ async def test_invalid_policy_is_quarantined_once(tmp_path, monkeypatch, caplog,
     with first.db._read_ctx() as conn:
         receipt = json.loads(conn.execute('SELECT value FROM state_meta WHERE key=?',
                                          (POLICY_PREFIX + sid,)).fetchone()[0])
-    if damage == 'empty_model':
-        receipt['policy']['model'] = ''
-    elif damage == 'missing_model':
-        del receipt['policy']['model']
-    elif damage == 'bad_toolsets':
-        receipt['policy']['toolsets'] = 42
-    elif damage == 'bad_json':
-        receipt['policy']['config_json'] = '{'
-    else:
-        del receipt['policy']
+    DAMAGE[damage](receipt)
     first.db._execute_write(lambda conn: conn.execute(
         'UPDATE state_meta SET value=? WHERE key=?', (json.dumps(receipt), POLICY_PREFIX + sid)))
     await connection.close()

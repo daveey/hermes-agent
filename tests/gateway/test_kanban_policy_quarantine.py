@@ -9,7 +9,7 @@ from tests.gateway.test_kanban_finite_admission import kanban_owner
 
 
 @pytest.mark.asyncio
-async def test_kanban_invalid_policy_retries_keep_one_receipt(kanban_owner, monkeypatch):
+async def test_kanban_invalid_policy_retries_keep_one_receipt(kanban_owner, monkeypatch):  # health: allow F811 -- pytest injects the imported kanban_owner fixture by parameter name
     from gateway import session_kanban
     from gateway.session_local_recovery import local_receipt_ids
     from dataclasses import replace
