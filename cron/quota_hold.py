@@ -1,7 +1,9 @@
 """Hold a job's fires while a provider's usage window is known to be closed (#89376).
 
 A quota-exhausted provider answers with an explicit ``retry after <N>s`` (Codex 429: the
-``AuthError`` from ``hermes_cli.auth_codex._codex_quota_exhausted_error``). When the whole
+``AuthError`` from ``hermes_cli.auth_codex._codex_quota_exhausted_error``), and the routing
+pool refuses before any request with ``SubscriptionQuotaUnavailable`` carrying ``resets_at``
+(``agent.model_routing_unavailable.quota_wait_seconds`` maps every such type). When the whole
 fallback chain is unavailable, re-firing on cadence is guaranteed to fail identically until
 the window reopens — every fire is a usage probe plus a delivered failure alert. The failing
 run's alert says the job is held; ``mark_job_run`` then parks ``next_run_at`` at the recovery
@@ -16,7 +18,6 @@ closed provider window. Any run that reaches the model clears the marker.
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -33,40 +34,31 @@ SCHEDULE_EXPR_KEY = "quota_hold_cron_expr"
 # recorded a little wall clock has passed, so land clearly past the boundary.
 HOLD_SLACK_SECONDS = 60
 
-_RETRY_AFTER_RE = re.compile(r"retry after (\d+)s", re.IGNORECASE)
-
-
 def hold_seconds_from_failure(exc: BaseException) -> Optional[float]:
-    """Seconds the provider said it will stay closed, or None when *exc* (or anything in its
-    cause chain) is not a rate-limited ``AuthError`` carrying a wait hint. Anchored on the
-    AuthError itself, never on arbitrary text, so an unrelated "retry after" in an agent's
-    output cannot park a job."""
-    from hermes_cli.auth import AuthError, is_rate_limited_auth_error
+    """Seconds the provider said it will stay closed, or None when *exc*'s cause chain does not
+    end in a typed quota refusal with a deadline: the routing pool's ``SubscriptionQuotaUnavailable``
+    (``resets_at``), a rate-limited ``AuthError`` (``retry after <N>s``), or a
+    ``ProviderFallbackError`` whose every route is one of those. Anchored on the exception types,
+    never on arbitrary text, so an unrelated "retry after" in an agent's output cannot park a job.
+    The type list lives in ``agent.model_routing_unavailable.quota_wait_seconds`` (one mapping for
+    every consumer)."""
+    from agent.model_routing_unavailable import quota_wait_seconds
 
-    from hermes_cli.fallback_errors import ProviderFallbackError
+    return quota_wait_seconds(exc)
 
-    def route_hold(error: BaseException) -> Optional[float]:
-        if isinstance(error, ProviderFallbackError):
-            waits = [route_hold(failure) for _, _, failure in error.failures]
-            return min(waits) if waits and all(wait is not None for wait in waits) else None
-        if isinstance(error, AuthError) and is_rate_limited_auth_error(error):
-            hint = getattr(error, "retry_after", None)
-            if hint is None:
-                m = _RETRY_AFTER_RE.search(str(error))
-                hint = float(m.group(1)) if m else None
-            return float(hint) if hint is not None and float(hint) > 0 else None
-        # A fallback's implicit context may be the primary quota exception.
-        # Never mistake that for a quota refusal by this route.
-        return None
 
-    seen: set[int] = set()
-    cur: Optional[BaseException] = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        if isinstance(cur, (ProviderFallbackError, AuthError)):
-            return route_hold(cur)
-        cur = cur.__cause__ or cur.__context__
-    return None
+def classify_failure_hold(job: dict[str, Any], exc: BaseException) -> Optional[float]:
+    """The hold for a failed run, or None. A quota-class failure that maps to no hold (no usable
+    deadline, or a new refusal type the mapping misses) logs ONE "quota failure not held" warning
+    per failed run: the self-heal lane keys on that line instead of every hourly traceback."""
+    from agent.model_routing_unavailable import is_quota_failure
+
+    hold = hold_seconds_from_failure(exc)
+    if hold is None and is_quota_failure(exc):
+        logger.warning(
+            "Job '%s': quota failure not held (no usable reset deadline in %s: %s); it will re-fire "
+            "on cadence", job.get("name", job.get("id", "?")), type(exc).__name__, exc)
+    return hold
 
 
 def hold_active(job: dict[str, Any], now: Optional[datetime] = None) -> bool:
