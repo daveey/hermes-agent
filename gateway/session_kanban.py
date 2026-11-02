@@ -71,14 +71,11 @@ def build_kanban_policy(connection, params, config):
         goal_text='\n\n'.join(p for p in (task.title, task.body) if p), context=context,
         max_runtime_seconds=task.max_runtime_seconds, accept_hooks=True)
     context['db'] = str(path)
-    if resume_from is not None:
-        from gateway.session_kanban_resume import compaction_threshold_tokens, plan_resume, resume_context
-        db = getattr(authority, 'db', None)
-        plan = plan_resume(resume_from, task=task, run_id=task.current_run_id, session_db=db,
-                           owner_db=getattr(db, 'db_path', None), threshold_tokens=lambda: compaction_threshold_tokens(policy))
-        context['restart_resume'] = plan
-        if plan.get('resumed_session_id'):
-            context['resume_context'] = resume_context(resume_base, plan)
+    if resume_from is not None:  # [daveey] planned and copied off-loop in run_task, after session creation
+        from gateway.session_kanban_resume import resume_context
+        context['restart_candidate'] = {**resume_from, 'assignee': task.assignee}
+        context['resume_context'] = resume_context(resume_base, {'prior_run_id': resume_from['prior_run_id'],
+                                                                 'run_id': task.current_run_id})
     request = json.loads(policy.request_json)
     request.update(source='kanban', board=board, task_id=task.id, run_id=task.current_run_id)
     return replace(policy, source='kanban', platform='cli', toolsets=tuple(sorted(set(policy.toolsets) | {'kanban'})),
@@ -116,8 +113,8 @@ async def run_task(connection, params):
         policy, private = build_kanban_policy(connection, params, _load_gateway_config())
         ref = create_local_session(authority, connection.actor, {'request_id': request_id},
                                    trusted_policy=policy, trusted_secrets=private)
-    resume_plan = json.loads(policy.kanban_json or '{}').get('restart_resume') if not saved else None
-    copied = await _seed_restart_resume(authority, ref.session_id, resume_plan)
+    candidate = json.loads(policy.kanban_json or '{}').get('restart_candidate') if not saved else None
+    resume_plan, copied = await _seed_restart_resume(authority, ref.session_id, policy, candidate, params['run_id'])
     from hermes_cli.kanban_db_connect import connect_closing
     from hermes_cli import kanban_db as kb
     import os
@@ -173,21 +170,21 @@ async def run_task(connection, params):
     return {'session_id': ref.session_id, 'receipt': asdict(receipt)}
 
 
-async def _seed_restart_resume(authority, session_id, plan):
-    """[daveey] Copy a restart-lost run's transcript into this run's fresh session; 0 on any failure
-    (the worker then sees an empty history and runs today's transcript-tail context)."""
-    if not plan or not plan.get('resumed_session_id'):
-        return 0
+async def _seed_restart_resume(authority, session_id, policy, candidate, run_id):
+    """[daveey] Plan and copy a restart-lost run's transcript into this run's fresh session, off the owner
+    loop. ``(None, 0)`` without a candidate; a failure is a recorded fallback (the worker then sees an empty
+    history and runs today's transcript-tail context)."""
+    if not candidate:
+        return None, 0
     from functools import partial
-    from gateway.session_kanban_resume import seed_resumed_session
+    from types import SimpleNamespace
+    from gateway.session_kanban_resume import compaction_threshold_tokens, plan_and_seed
     from gateway.session_runtime_workers import tracked_write
-    try:
-        return await tracked_write(authority, partial(seed_resumed_session, authority.db, session_id, plan))
-    except Exception:
-        import logging
-        logging.getLogger(__name__).warning('Kanban restart resume: copying %s failed; fresh session',
-                                            plan.get('resumed_session_id'), exc_info=True)
-        return 0
+    db = authority.db
+    return await tracked_write(authority, partial(
+        plan_and_seed, candidate, task=SimpleNamespace(assignee=candidate.get('assignee')), run_id=run_id,
+        session_db=db, owner_db=getattr(db, 'db_path', None), session_id=session_id,
+        threshold_tokens=lambda: compaction_threshold_tokens(policy)))
 
 
 def bind_worker_context(frame):

@@ -30,6 +30,9 @@ from typing import Any, Callable, Optional
 logger = logging.getLogger(__name__)
 
 EVENT_KIND = 'restart_resume'
+# Resume only below this share of the owner's compaction threshold: room for the first turn, and slack for
+# an owner-side context-length lookup that resolves a larger window than the worker's agent does.
+RESUME_HEADROOM = 0.85
 INTERRUPTED_TOOL_RESULT = (
     'Interrupted by gateway restart: this tool call may or may not have run and its result was not '
     'recorded. Re-check the current state (files, processes, remote effects) before repeating any side effect.'
@@ -131,14 +134,16 @@ def plan_resume(candidate: Optional[dict], *, task, run_id: int, session_db, own
         return fallback('foreign_home')
     try:
         with closing(sqlite3.connect(here.as_uri() + '?mode=ro', uri=True, timeout=2)) as state:
-            row = state.execute('SELECT source, profile_name FROM sessions WHERE id=?', (sid,)).fetchone()
+            row = state.execute('SELECT source, profile_name, end_reason FROM sessions WHERE id=?', (sid,)).fetchone()
             count = state.execute('SELECT COUNT(*) FROM messages WHERE session_id=? AND active=1', (sid,)).fetchone()[0]
     except (OSError, sqlite3.Error):
         return fallback('prior_session_unreadable')
     if row is None:
         return fallback('prior_session_missing')
-    if tuple(row) != ('kanban', task.assignee):
+    if tuple(row[:2]) != ('kanban', task.assignee):
         return fallback('foreign_profile')
+    if row[2] == 'compression':  # rotated by compaction (compression.in_place: false): the live transcript is a child
+        return fallback('prior_session_rotated')
     if not count:
         return fallback('prior_session_empty')
     try:
@@ -160,9 +165,30 @@ def plan_resume(candidate: Optional[dict], *, task, run_id: int, session_db, own
     if not threshold:
         return fallback('threshold_unknown', **{k: plan[k] for k in ('messages', 'tokens')})
     plan['threshold'] = int(threshold)
-    if tokens >= threshold:
+    if tokens >= threshold * RESUME_HEADROOM:
         return fallback('over_compaction_threshold')
     return {**plan, 'resumed_session_id': sid, 'interrupted_calls': _unanswered_tool_calls(history)}
+
+
+def plan_and_seed(candidate: dict, *, task, run_id: int, session_db, owner_db: Optional[str], session_id: str,
+                  threshold_tokens: Callable[[], Optional[int]]) -> tuple[dict, int]:
+    """Plan the resume and copy the transcript into ``session_id``; runs off the owner loop. Never raises:
+    any failure is a recorded fallback and the run starts with today's transcript-tail context."""
+    try:
+        plan = plan_resume(candidate, task=task, run_id=run_id, session_db=session_db, owner_db=owner_db,
+                           threshold_tokens=threshold_tokens)
+    except Exception:
+        logger.warning('Kanban restart resume: planning failed; fresh session', exc_info=True)
+        return {'prior_run_id': candidate.get('prior_run_id'), 'run_id': run_id,
+                'prior_session_id': candidate.get('session_id'), 'fallback': 'plan_failed'}, 0
+    if not plan.get('resumed_session_id'):
+        return plan, 0
+    try:
+        return plan, seed_resumed_session(session_db, session_id, plan)
+    except Exception:
+        logger.warning('Kanban restart resume: copying %s failed; fresh session', plan['resumed_session_id'],
+                       exc_info=True)
+        return plan, 0
 
 
 def compaction_threshold_tokens(policy) -> Optional[int]:
@@ -243,6 +269,8 @@ def record_resume_event(conn, task_id: str, run_id: int, plan: dict, copied: Opt
 
 
 def resume_context(base_context: str, plan: dict) -> str:
+    """Built at policy time for every run that follows a restart loss; the worker uses it only when the
+    copied history arrived (``worker_prompt_context``)."""
     return RESUME_NOTE.format(prior_run=plan['prior_run_id'], run_id=plan['run_id']) + base_context
 
 

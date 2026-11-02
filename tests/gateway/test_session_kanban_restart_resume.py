@@ -10,6 +10,8 @@ import json
 import time
 from types import SimpleNamespace
 
+import sqlite3
+
 import pytest
 
 from hermes_cli import kanban_db as kb
@@ -199,6 +201,22 @@ def _broken_reader(env):
     env.monkeypatch.setattr(env.db, 'get_messages_as_conversation', broken)
 
 
+def _broken_estimate(env):
+    def boom(*a, **kw):
+        raise TypeError('odd row')
+    env.monkeypatch.setattr('agent.usage_anchor.persisted_anchor_tokens', boom)
+
+
+def _rotated(env):
+    env.db._execute_write(lambda conn: conn.execute("UPDATE sessions SET end_reason='compression' WHERE id=?", (PRIOR,)))
+
+
+def _broken_seed(env):
+    def boom(*a, **kw):
+        raise sqlite3.OperationalError('disk I/O error')
+    env.monkeypatch.setattr('gateway.session_kanban_resume.seed_resumed_session', boom)
+
+
 def _tiny_threshold(env):
     env.monkeypatch.setattr('gateway.session_kanban_resume.compaction_threshold_tokens', lambda policy: 10)
 
@@ -212,6 +230,9 @@ _FALLBACKS = {
     'foreign_profile': ({'profile': 'other'}, None, None, 'foreign_profile', False),
     'unreadable': ({}, None, _broken_reader, 'prior_session_unreadable', True),
     'over_threshold': ({}, None, _tiny_threshold, 'over_compaction_threshold', True),
+    'plan_raises': ({}, None, _broken_estimate, 'plan_failed', True),
+    'rotated': ({}, None, _rotated, 'prior_session_rotated', True),
+    'seed_raises': ({}, None, _broken_seed, 'seed_failed', True),
 }
 
 
@@ -231,7 +252,6 @@ def test_each_fallback_keeps_the_tail_only_fresh_session(env, case):
     assert 'resumed_session_id' not in run.events['restart_resume']
     assert 'resumed_session_id' not in run.events['owner_admitted']
     assert run.history == []  # a fresh session
-    assert 'resume_context' not in run.context
     prompt = worker_prompt_context(run.context, run.history)
     # Today's context, unchanged: the tail reader applies its own checks and renders a tail where it can.
     assert prompt == run.context['context']
@@ -254,7 +274,7 @@ def test_a_non_restart_requeue_is_unchanged(env, kind):
                             metadata={'exit_code': 124})
                 conn.execute("UPDATE tasks SET status='ready', claim_lock=NULL, claim_expires=NULL WHERE id=?", (tid,))
     run = _admit_next(env, tid)
-    assert 'restart_resume' not in run.events and 'restart_resume' not in run.context
+    assert 'restart_resume' not in run.events and 'restart_candidate' not in run.context
     assert 'resumed_session_id' not in run.events['owner_admitted']
     assert run.history == [] and 'resume_context' not in run.context
 
