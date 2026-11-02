@@ -5483,11 +5483,7 @@ def _cmd_restart(args):
         gateway_declares_external_supervisor, refuse_restart_of_service_managed_gateway,
         restart_externally_supervised_gateway, start_restart_replacement,
     )
-    # External supervision is the running process's lifecycle contract, so it is honored before
-    # any service dispatch, even when the installed canonical service owns the gateway: a
-    # service-manager failure (a stale or unloaded canonical definition beside a custom agent)
-    # exited 1 before the graceful SIGUSR1 handback was ever reached. This is also the only
-    # handback point: the manual fallback below never sees a supervised gateway (#110637).
+    # Honor the running process's supervisor before service failures can prevent handback.
     supervised_pid = get_running_pid()
     if supervised_pid and gateway_declares_external_supervisor(supervised_pid):
         restart_externally_supervised_gateway(supervised_pid)
