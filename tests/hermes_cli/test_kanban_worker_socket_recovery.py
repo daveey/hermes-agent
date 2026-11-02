@@ -54,7 +54,7 @@ class _Owner:
         owner = self
 
         @asynccontextmanager
-        async def _connect():
+        async def _connect(**_):
             owner.dials += 1
             owner._step(owner.connects, owner.after)
 
