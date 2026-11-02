@@ -33,7 +33,7 @@ class _OrderCheckedLock:
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
         self.acquisitions += 1
-        if getattr(server._sessions_lock, "_is_owned")():
+        if server._sessions_lock._is_owned():
             self.under_sessions_lock.append(threading.current_thread().name)
         if threading.current_thread().name == self.watched_thread and self._lock.locked():
             self.contended.set()
@@ -211,5 +211,40 @@ def test_cancelled_work_settles_a_turn_whose_sibling_worker_finished_meanwhile(t
     assert session["running"] is True, "the sibling must defer settlement to the still-counted work"
     work.cancel()
     assert session["running"] is False
+    assert session.get("_turn_admission") is None
+    assert fence.active_count() == 0
+
+
+@pytest.mark.parametrize("failure", ["before-spawn", "spawn"])
+def test_turn_start_failure_releases_the_prepared_admission_outside_sessions_lock(
+        turn_env, request, tmp_path, monkeypatch, failure):
+    """A failure under ``_sessions_lock`` (routing-row reopen, or the thread spawn itself) propagates and
+    gives the prepared admission back, taking ``history_lock`` only after ``_sessions_lock`` is released."""
+    import agent.memory_provider as memory_provider
+    from hermes_cli import backend_retirement
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    fence = backend_retirement.RetirementFence()
+    monkeypatch.setattr(backend_retirement, "retirement", fence)
+
+    def boom(*a, **k):
+        raise RuntimeError(failure)
+
+    if failure == "spawn":
+        monkeypatch.setattr(memory_provider, "spawn_context_thread", boom)
+    else:
+        monkeypatch.setattr(server, "_reopen_routed_session_row", boom)
+    sid = f"lockfail-{request.node.name}"[:60]
+    lock, completed = _OrderCheckedLock(), threading.Event()
+    session = _registered_session(sid, lock, completed)
+    session.update(profile_home=str(tmp_path))
+    try:
+        with pytest.raises(RuntimeError, match=failure):
+            server._run_prompt_submit("rid", sid, session, "go")
+    finally:
+        with server._sessions_lock:
+            server._sessions.pop(sid, None)
+    assert not completed.is_set()
+    assert lock.under_sessions_lock == []
     assert session.get("_turn_admission") is None
     assert fence.active_count() == 0
