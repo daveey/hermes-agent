@@ -643,8 +643,9 @@ def mark_pulled(conn: sqlite3.Connection, at: Optional[float] = None) -> None:
     """Stamp a successful feed pull (``pulled_at``), so readers of a replica can tell a fresh copy from an old one
     without asking the network. [daveey]"""
     from hermes_cli.kanban_db_connect import write_txn
+    stamp = time.time() if at is None else at
     with write_txn(conn):
-        conn.execute("UPDATE kanban_sync_state SET pulled_at = ?", (time.time() if at is None else at,))
+        conn.execute("UPDATE kanban_sync_state SET pulled_at = ? WHERE pulled_at IS NOT ?", (stamp, stamp))
 
 
 def new_task_id(conn: sqlite3.Connection) -> str:
@@ -1099,11 +1100,15 @@ def apply_remote_changes(
         raise RuntimeError("apply_remote_changes: kanban sync is not enabled on this board")
     result = ApplyResult(cursor=new_cursor, local_pending_wins=local_pending_wins)
     with write_txn(conn):
-        conn.execute("UPDATE kanban_sync_state SET applying = 1")
-        own = _state(conn)["gateway_id"]
-        for change in changes:
-            _apply_one(conn, change, own, result)
-        conn.execute("UPDATE kanban_sync_state SET cursor = ?, applying = 0", (new_cursor,))
+        if changes:
+            conn.execute("UPDATE kanban_sync_state SET applying = 1")
+            own = _state(conn)["gateway_id"]
+            for change in changes:
+                _apply_one(conn, change, own, result)
+        # Cursor-only pages have no capture triggers to suppress. Avoid dirtying
+        # the state row at all when both persisted values already match.
+        conn.execute("UPDATE kanban_sync_state SET cursor = ?, applying = 0 "
+                     "WHERE cursor IS NOT ? OR applying IS NOT 0", (new_cursor, new_cursor))
     if observers:
         _after_commit(conn, result, board)
     return result

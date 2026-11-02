@@ -86,7 +86,8 @@ def record_dispatch_pass(
                 recorded = (previous, now)
             conn.execute(
                 "INSERT INTO kanban_dispatch_stamp (id, at) VALUES (1, ?) "
-                "ON CONFLICT(id) DO UPDATE SET at = excluded.at", (now,))
+                "ON CONFLICT(id) DO UPDATE SET at = excluded.at "
+                "WHERE kanban_dispatch_stamp.at IS NOT excluded.at", (now,))
             conn.execute("DELETE FROM kanban_suspend_ledger WHERE end < ?", (now - RETENTION_SECONDS,))
     except (sqlite3.Error, RuntimeError):
         _log.warning("kanban: recording the dispatcher pass stamp failed", exc_info=True)

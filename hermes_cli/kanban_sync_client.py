@@ -35,12 +35,13 @@ from time import monotonic as _hub_monotonic
 import urllib.error
 import urllib.parse
 import urllib.request
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from hermes_cli import kanban_db_sync as sync
+from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
 
 _log = logging.getLogger(__name__)
 
@@ -749,25 +750,29 @@ class RoundResult:
 def open_shadow(slug: str, gateway: str) -> sqlite3.Connection:
     path = shadow_path(slug)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = _connect(path)
-    ensure_identity(conn, slug, gateway)
-    return conn
+    with ExitStack() as cleanup:
+        conn = _connect(path)
+        cleanup.callback(conn.close)
+        ensure_identity(conn, slug, gateway)
+        cleanup.pop_all()
+        return conn
 
 
 @contextmanager
 def _pulled_replica(slug: str, hub: Hub, gateway: str):
-    """Keep the pulled (or rebuilt) replica open for this round, closing it on every exit. Yields
-    ``(replica, pulled, rebuilt)``; ``rebuilt`` is True when the replica was replaced from a snapshot."""
-    replica = open_shadow(slug, gateway)
-    rebuilt = False
-    try:
+    """Borrow the pulled replica for this round; retention rebuilds discard the old handle."""
+    path = shadow_path(slug)
+    with ExitStack() as stack:
+        replica = stack.enter_context(connection(path, lambda: open_shadow(slug, gateway)))
+        rebuilt = False
         try:
             pulled = pull(replica, hub, slug, observers=False)
         except Resync:
             _log.warning("kanban sync: %s replica cursor below the retention floor; rebuilding from a snapshot", slug)
-            replica.close()
-            shadow_path(slug).unlink(missing_ok=True)
-            replica = open_shadow(slug, gateway)
+            stack.close()
+            invalidate(path)  # must close the pooled descriptor BEFORE unlinking its database
+            path.unlink(missing_ok=True)
+            replica = stack.enter_context(connection(path, lambda: open_shadow(slug, gateway)))
             rebuilt = True
             pulled = resync(replica, hub, slug, observers=False)
         try:  # readers derive the replica's staleness from this (kanban_chat_links); a failed stamp only ages it
@@ -775,8 +780,6 @@ def _pulled_replica(slug: str, hub: Hub, gateway: str):
         except sqlite3.Error as exc:
             _log.warning("kanban sync: %s replica pull not stamped (%s)", slug, exc)
         yield replica, pulled, rebuilt
-    finally:
-        replica.close()
 
 
 def _pull_replica(slug: str, hub: Hub, gateway: str) -> int:
@@ -791,8 +794,7 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
     # Dropped first, so a round that fails or finds nothing to repair never leaves a stale deferral that would
     # make the sync loop reselect this board without waiting; a deferring round sets it again.
     _REPAIR_DEFERRED.pop(str(path), None)
-    live = _connect(path)
-    try:
+    with connection(path, lambda: _connect(path)) as live:
         mode = sync.board_mode(live)
         result = RoundResult(board=slug, mode=mode)
         if mode == "off":
@@ -837,8 +839,6 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
             from hermes_cli.kanban_worker_placement import reevaluate
             reevaluate(live, hub, slug, gateway)
         return result
-    finally:
-        live.close()
 
 
 _UNPUBLISHED = object()
@@ -1173,6 +1173,7 @@ def wait_for_work(wake: threading.Event, paths: Iterable[Path], period: float,
     return "stopped"
 
 
+@connection_scope()
 def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = None,
                 sleep: Callable[[float], None] = time.sleep) -> None:
     """The gateway's sync loop (call from a worker thread). Installs the lease client for primary boards, holds one
