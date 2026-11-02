@@ -53,7 +53,8 @@ def merge_evidence(receipt, pr, repo, runs, statuses):
     statuses, post_statuses = partition_at_merge(statuses, merged_at, runs=False)
     sha = receipt["head_sha"]
     receipt["post_merge_checks"] = [check_receipt(c, sha) for c in post_runs + post_statuses]
-    if any(c["classification"] in {"failure", "infra"} for c in receipt["post_merge_checks"]):
+    if any(c["conclusion"] in {"failure", "error", "timed_out", "action_required"}
+           for c in receipt["post_merge_checks"]):
         receipt["main_health"] = {
             "idempotency_key": f"ci-red:{repo}:{sha}",
             "detail": f"Main CI is red for {repo}@{sha}; owned by ci-main-watch, not this PR's acceptance."}

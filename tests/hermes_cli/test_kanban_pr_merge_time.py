@@ -163,6 +163,14 @@ def test_unknown_merge_chronology_fails_closed(evidence, field, value):
     assert not receipt["ok"] and receipt["classification"] == "infra"
 
 
+@pytest.mark.parametrize("conclusion", ["skipped", "neutral", "cancelled", "success"])
+def test_nonfailure_postmerge_checks_do_not_claim_main_is_red(evidence, conclusion):
+    evidence["runs"][0]["conclusion"] = conclusion
+    receipt = collect()
+    assert receipt["ok"] and "main_health" not in receipt
+    assert receipt["post_merge_checks"][0]["conclusion"] == conclusion
+
+
 @pytest.mark.parametrize("owner_state", ["ready", "done", "archived", None])
 def test_completion_receipt_names_main_health_owner(evidence, owner_state):
     from hermes_cli import kanban_db as kb
