@@ -100,6 +100,40 @@ export async function runGatewayOwnerRestart(
   return result.code === 2 && /unrecognized arguments:.*--detach/.test(result.stderr) ? run(args) : result
 }
 
+const GATEWAY_RESTART_FAILURE_TAIL_LINES = 20
+
+function tailLines(text: string, count: number): string[] {
+  return String(text ?? '').split(/\r?\n/).filter(line => line.trim()).slice(-count)
+}
+
+/** The Desktop log line(s) for one `hermes gateway restart` of a stale owner. Success stays one line
+ *  (the CLI's last word). A failure keeps the last 20 stdout and last 20 stderr lines SEPARATELY: the
+ *  reason sits above a trailing hint on stdout (`✗ Gateway service restart failed.` + fix advice), and
+ *  the combined last line dropped it. Desktop restarts a stale owner once (createStaleGatewayRestarter),
+ *  so the line says who owes the next attempt. */
+export function formatGatewayRestartLog(ownerProfile: string, result: { code: number; stdout: string; stderr: string }): string {
+  const head = `[gateway] hermes --profile ${ownerProfile} gateway restart exited ${result.code}`
+
+  if (result.code === 0) {
+    const reason = tailLines(`${result.stdout}\n${result.stderr}`, 1)[0]?.trim()
+
+    return reason ? `${head}: ${reason}` : head
+  }
+
+  const section = (name: string, text: string) => {
+    const lines = tailLines(text, GATEWAY_RESTART_FAILURE_TAIL_LINES)
+    const title = `[gateway] restart ${name} (last ${GATEWAY_RESTART_FAILURE_TAIL_LINES} lines):`
+
+    return lines.length ? [title, ...lines.map(line => `  ${line}`)] : [`${title} (empty)`]
+  }
+
+  return [
+    `${head}; Desktop does not retry a stale-owner restart, so hermes-sync owes the restart`,
+    ...section('stdout', result.stdout),
+    ...section('stderr', result.stderr)
+  ].join('\n')
+}
+
 /** One restart per (owner process, stale gateway, client) per Desktop process. An owner a restart cannot move
  *  (a service unit pinned to another checkout) is then attached as-is instead of being restarted
  *  on every dial. */
