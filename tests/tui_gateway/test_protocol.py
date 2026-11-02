@@ -73,8 +73,9 @@ def server():
 
 
 @pytest.fixture()
-def capture(server):
-    """Redirect server's real stdout to a StringIO and return (server, buf)."""
+def capture(server, monkeypatch):
+    """Redirect the explicitly selected stdio RPC channel to a StringIO."""
+    monkeypatch.setattr(server, "_stdio_is_rpc_channel", True)
     buf = io.StringIO()
     server._real_stdout = buf
     return server, buf

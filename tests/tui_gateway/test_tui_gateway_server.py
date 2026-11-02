@@ -1168,6 +1168,7 @@ def test_write_json_serializes_concurrent_writes(monkeypatch):
         def flush(self) -> None:
             return None
 
+    monkeypatch.setattr(server, "_stdio_is_rpc_channel", True)
     monkeypatch.setattr(server, "_real_stdout", RecordingStdout())
 
     barrier = threading.Barrier(8)
@@ -1197,6 +1198,7 @@ def test_write_json_serializes_concurrent_writes(monkeypatch):
 
 
 def test_write_json_returns_false_on_broken_pipe(monkeypatch):
+    monkeypatch.setattr(server, "_stdio_is_rpc_channel", True)
     monkeypatch.setattr(server, "_real_stdout", _BrokenStdout())
 
     assert server.write_json({"ok": True}) is False
@@ -1210,6 +1212,7 @@ def test_write_json_unserializable_payload_becomes_error_frame(monkeypatch, capl
     import logging
 
     out = _ChunkyStdout()
+    monkeypatch.setattr(server, "_stdio_is_rpc_channel", True)
     monkeypatch.setattr(server, "_real_stdout", out)
     with caplog.at_level(logging.ERROR, logger="tui_gateway.transport"):
         assert server.write_json({"jsonrpc": "2.0", "id": "profiles",

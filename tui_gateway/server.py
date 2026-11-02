@@ -236,7 +236,7 @@ class _DropTransport:
 
 # Module-level stdio transport — fallback sink when no transport is bound via contextvar or session.
 # Stream resolved through a lambda so test monkey-patches of `_real_stdout` still land.
-_stdio_transport = StdioTransport(lambda: _real_stdout, _stdout_lock)
+_stdio_transport = StdioTransport(lambda: _real_stdout, _stdout_lock, enabled=lambda: _stdio_is_rpc_channel)
 
 # Detached websocket sessions use a drop sink instead of stdio: Desktop embeds the gateway in-process
 # and captures stdout into logs, so stale frames must not fall through while a session awaits resume/reap.
@@ -572,7 +572,8 @@ def _default_session_cwd() -> str:
 def write_json(obj: dict) -> bool:
     """Emit one JSON frame via the most-specific transport: (1) event frames with a session id → that
     session's transport (async events reach the owner even from threads with no contextvar binding);
-    (2) the context-bound transport (:func:`dispatch`); (3) module stdio (tests monkey-patch ``_real_stdout``).
+    (2) the context-bound transport (:func:`dispatch`); (3) module stdio only when the
+    stdio entrypoint explicitly owns stdout as its protocol channel (otherwise drop).
     Every event frame gets a per-session monotonic ``seq`` + replay-ring entry so ``session.events.since`` can resume."""
     from tui_gateway.event_replay import _stamp_event
     from tui_gateway.hosted_room_member_activity import project_room_member_activity
