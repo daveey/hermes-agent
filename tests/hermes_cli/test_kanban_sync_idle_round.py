@@ -115,11 +115,14 @@ def test_repair_scans_run_once_per_change_not_every_round(live, svc, kanban_home
     _round(kanban_home, svc)
     assert all(calls[n] == seen[n] + 1 for n in REPAIRS), calls
 
-    # So does a remote change pulled into the replica (its cursor moves).
+    # So does a remote change pulled into the replica (its cursor moves), once the replica-only repair window
+    # since the last pass has passed (test_kanban_sync_repair_window.py covers changes inside the window).
     seen = dict(calls)
     for _ in range(3):
         _round(kanban_home, svc)
     settled = dict(calls)
+    later = time.monotonic() + ksc.REPLICA_REPAIR_MIN_S + 1
+    monkeypatch.setattr(ksc, "_repair_clock", lambda: later)
     svc.hub(OTHER).ops(BOARD, [{"client_op_id": "o-x", "op": "upsert", "table": "tasks", "uid": "t_remote",
                                 "hlc": f"{int(time.time() * 1000):013d}-0000-{OTHER}",
                                 "fields": {"title": "remote", "status": "ready", "created_at": 1}}])

@@ -712,6 +712,7 @@ class RoundResult:
     error: Optional[str] = None
     repaired: dict[str, list[str]] = field(default_factory=dict)  # cards re-pushed by repair_divergence
     rejection_resolutions: list[dict] = field(default_factory=list)
+    repair_deferred: bool = False  # a replica-only change waits for the repair window (see ``_defer_repair``)
 
 
 def open_shadow(slug: str, gateway: str) -> sqlite3.Connection:
@@ -753,6 +754,9 @@ def _pull_replica(slug: str, hub: Hub, gateway: str) -> int:
 def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
     """One round for one board. Both modes keep the replica copy (the whole board) current and push the live
     outbox; ``primary`` also applies this gateway's own cards from the feed into the live board."""
+    # Dropped first, so a round that fails or finds nothing to repair never leaves a stale deferral that would
+    # make the sync loop reselect this board without waiting; a deferring round sets it again.
+    _REPAIR_DEFERRED.pop(str(path), None)
     live = _connect(path)
     try:
         mode = sync.board_mode(live)
@@ -771,17 +775,25 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
             from hermes_cli.kanban_sync_repair_revision import ensure_revision
             ensure_revision(live)
             inputs = _repair_inputs(path, replica, mode, gateway)
-            if inputs is None or _REPAIRED.get(str(path)) != inputs:
+            key = str(path)
+            if inputs is None or _REPAIRED.get(key) != inputs:
+                deferred = _defer_repair(key, inputs)
                 from hermes_cli.kanban_sync_partition_repair import repair_partition_chat_links, repair_partition_links
-                repair_partition_links(live, replica, gateway)
-                repair_partition_chat_links(live, replica, gateway)
+                if not deferred:
+                    repair_partition_links(live, replica, gateway)
+                    repair_partition_chat_links(live, replica, gateway)
+                # The remote-parent mirror is cheap and gates child promotion, so a deferral never delays it.
                 if mode == "primary" and sync.refresh_remote_parents(live, replica):
                     sync.wake_dispatcher()  # a foreign parent moved: re-gate its children now
-                result.repaired = repair_divergence(live, replica, gateway)
-                repair_missing_children(live, replica, gateway)
-                retire_lost_placeholder_links(live, replica, gateway)
-                if inputs is not None:
-                    _REPAIRED[str(path)] = inputs
+                if deferred:
+                    result.repair_deferred = True
+                else:
+                    result.repaired = repair_divergence(live, replica, gateway)
+                    repair_missing_children(live, replica, gateway)
+                    retire_lost_placeholder_links(live, replica, gateway)
+                    if inputs is not None:
+                        _REPAIRED[key] = inputs
+                        _REPAIRED_AT[key] = _repair_clock()
             if mode == "primary":
                 heal_clobbered_completions(live)
         result.push = push(live, hub, slug, gateway, primary=mode == "primary")
@@ -1019,12 +1031,59 @@ class _BoardWatch:
 _WATCH = _BoardWatch()
 # Per board file: the inputs the last completed repair pass saw (see ``_repair_inputs``).
 _REPAIRED: dict[str, tuple] = {}
+# Per board file: when that pass finished (``_repair_clock``), and when a deferred pass is due.
+_REPAIRED_AT: dict[str, float] = {}
+_REPAIR_DEFERRED: dict[str, float] = {}
+# A full repair pass over a large board is expensive (David-MBP default board, 2026-11-02: 0.73 s thread-CPU
+# per pass under cProfile, ~6k rows decoded). The replica's cursor moves on every change any gateway makes to
+# the board, so a busy Board made the pass run nearly every round (29 rounds in 90 s; the sync thread used
+# 13.5% of a core). A change that only moved the replica cursor therefore waits until this long after the last
+# pass; local writes, a rebuilt replica and mode/gateway/placement changes still repair at once.
+REPLICA_REPAIR_MIN_S = 30.0
+
+
+def _repair_clock() -> float:
+    return time.monotonic()
 
 
 def reset_board_watch() -> None:
     """Tests: close the kept connections and forget completed repair passes."""
     _WATCH.reset()
     _REPAIRED.clear()
+    _REPAIRED_AT.clear()
+    _REPAIR_DEFERRED.clear()
+
+
+def _defer_repair(key: str, inputs: Optional[tuple]) -> bool:
+    """True when the only repair input that changed since the last completed pass is the replica's feed cursor
+    (same replica file, live revision, schema, mode, gateway and placement) and that pass finished less than
+    ``REPLICA_REPAIR_MIN_S`` ago; records when the deferred pass is due so the sync loop runs it then. Unknown
+    inputs (None) or no completed pass never defer. A primary board's own cards are applied by its pull before
+    the inputs are read, so a remote change to them arrives as a live revision change, not a deferral."""
+    last = _REPAIRED.get(key)
+    if inputs is None or last is None:
+        return False
+    live_version, (dev, ino, _cursor), *rest = inputs
+    last_version, (last_dev, last_ino, _last_cursor), *last_rest = last
+    if live_version != last_version or (dev, ino) != (last_dev, last_ino) or rest != last_rest:
+        return False
+    due = _REPAIRED_AT.get(key, float("-inf")) + REPLICA_REPAIR_MIN_S
+    if _repair_clock() >= due:
+        return False
+    _REPAIR_DEFERRED[key] = due
+    return True
+
+
+def deferred_repairs_due(boards: list[tuple[str, Path]], now: float) -> list[tuple[str, Path]]:
+    """Boards whose deferred repair pass is due at ``now`` (``_repair_clock`` time)."""
+    return [(slug, path) for slug, path in boards
+            if (due := _REPAIR_DEFERRED.get(str(path))) is not None and now >= due]
+
+
+def next_deferred_repair(boards: list[tuple[str, Path]]) -> Optional[float]:
+    """The earliest due time (``_repair_clock``) of a deferred repair pass among ``boards``, or None."""
+    dues = [due for _slug, path in boards if (due := _REPAIR_DEFERRED.get(str(path))) is not None]
+    return min(dues) if dues else None
 
 
 def _repair_inputs(live_path: Path, replica: sqlite3.Connection, mode: str, gateway: str) -> Optional[tuple]:
@@ -1108,6 +1167,7 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
                 watchers[slug] = threading.Thread(target=watcher.run, daemon=True, name=f"kanban-feed-{slug}")
                 watchers[slug].start()
         selected = work.select(boards, time.monotonic(), outbox_pending)
+        selected += [b for b in deferred_repairs_due(boards, _repair_clock()) if b not in selected]
         for r in sync_all_once(hub, boards=selected):
             work.finished(r.board, not r.error)
             if r.push and (r.push.sent or r.push.rejected):
@@ -1118,6 +1178,9 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
             next_links = time.monotonic() + LINKS_EVERY_S
         metrics.report_due()
         remaining = max(0.0, work.deadline - time.monotonic())
+        deferred_due = next_deferred_repair(boards)
+        if deferred_due is not None:
+            remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
         wait_for_work(wake, [p for _s, p in boards], remaining, keep_running)
 
 
