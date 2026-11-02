@@ -42,6 +42,10 @@ def build_kanban_policy(connection, params, config):
             if bound and json.loads(bound[0])['request_id'] != 'kanban:' + json.dumps([board, task.id, task.current_run_id], separators=(',', ':')):
                 raise RuntimeStoreError('stale_kanban_claim')
             context = kb.build_worker_context(conn, task.id)
+            # [daveey] The run before this one lost to an owner restart: resume its conversation.
+            from gateway.session_kanban_resume import restart_candidate
+            resume_from = restart_candidate(conn, task.id, task.current_run_id)
+            resume_base = kb.build_worker_context(conn, task.id, recovery_tail=False) if resume_from else None
             # [daveey] The dispatcher's model tier for this run (in-memory pin + model_tier event), class → auto.
             from hermes_cli.kanban_model_tier import owner_model_pin
             pinned_model, pinned_provider = owner_model_pin(conn, task)
@@ -67,6 +71,14 @@ def build_kanban_policy(connection, params, config):
         goal_text='\n\n'.join(p for p in (task.title, task.body) if p), context=context,
         max_runtime_seconds=task.max_runtime_seconds, accept_hooks=True)
     context['db'] = str(path)
+    if resume_from is not None:
+        from gateway.session_kanban_resume import compaction_threshold_tokens, plan_resume, resume_context
+        db = getattr(authority, 'db', None)
+        plan = plan_resume(resume_from, task=task, run_id=task.current_run_id, session_db=db,
+                           owner_db=getattr(db, 'db_path', None), threshold_tokens=lambda: compaction_threshold_tokens(policy))
+        context['restart_resume'] = plan
+        if plan.get('resumed_session_id'):
+            context['resume_context'] = resume_context(resume_base, plan)
     request = json.loads(policy.request_json)
     request.update(source='kanban', board=board, task_id=task.id, run_id=task.current_run_id)
     return replace(policy, source='kanban', platform='cli', toolsets=tuple(sorted(set(policy.toolsets) | {'kanban'})),
@@ -104,6 +116,8 @@ async def run_task(connection, params):
         policy, private = build_kanban_policy(connection, params, _load_gateway_config())
         ref = create_local_session(authority, connection.actor, {'request_id': request_id},
                                    trusted_policy=policy, trusted_secrets=private)
+    resume_plan = json.loads(policy.kanban_json or '{}').get('restart_resume') if not saved else None
+    copied = await _seed_restart_resume(authority, ref.session_id, resume_plan)
     from hermes_cli.kanban_db_connect import connect_closing
     from hermes_cli import kanban_db as kb
     import os
@@ -127,10 +141,14 @@ async def run_task(connection, params):
                 task = kb.get_task(conn, params['task_id'])
                 if not (task and task.status == 'running' and task.current_run_id == params['run_id'] and task.claim_lock == params['claim_lock']):
                     raise RuntimeStoreError('stale_kanban_claim')
-                kb._append_event(conn, task.id, 'owner_admitted',
-                    {'db': owner_db, 'session_id': ref.session_id,
-                     'request_id': request_id, 'pid': os.getpid(), 'birth': worker_birth(psutil.Process())},
-                    run_id=task.current_run_id)
+                admitted = {'db': owner_db, 'session_id': ref.session_id,
+                            'request_id': request_id, 'pid': os.getpid(), 'birth': worker_birth(psutil.Process())}
+                if copied:
+                    admitted['resumed_session_id'] = resume_plan['resumed_session_id']
+                kb._append_event(conn, task.id, 'owner_admitted', admitted, run_id=task.current_run_id)
+                if resume_plan:
+                    from gateway.session_kanban_resume import record_resume_event
+                    record_resume_event(conn, task.id, task.current_run_id, resume_plan, copied)
     from gateway.session_runtime_workers import tracked_write
     await tracked_write(authority, admit_claim)
     await connection.resume(ref, {})
@@ -153,6 +171,23 @@ async def run_task(connection, params):
     receipt = await authority.submit(connection.actor, Submission(request_id, ref, payload, 'queue'),
                                      _kanban_card=card)
     return {'session_id': ref.session_id, 'receipt': asdict(receipt)}
+
+
+async def _seed_restart_resume(authority, session_id, plan):
+    """[daveey] Copy a restart-lost run's transcript into this run's fresh session; 0 on any failure
+    (the worker then sees an empty history and runs today's transcript-tail context)."""
+    if not plan or not plan.get('resumed_session_id'):
+        return 0
+    from functools import partial
+    from gateway.session_kanban_resume import seed_resumed_session
+    from gateway.session_runtime_workers import tracked_write
+    try:
+        return await tracked_write(authority, partial(seed_resumed_session, authority.db, session_id, plan))
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning('Kanban restart resume: copying %s failed; fresh session',
+                                            plan.get('resumed_session_id'), exc_info=True)
+        return 0
 
 
 def bind_worker_context(frame):
@@ -447,7 +482,9 @@ def _run_task_turns(agent, frame, history, context):
     if warning:
         import logging
         logging.getLogger(__name__).warning('%s', warning)
-    prompt = '\n\n'.join(p for p in (skills, warning, context['context'], frame['text']) if p)
+    from gateway.session_kanban_resume import worker_prompt_context
+    card = worker_prompt_context(context, history)  # [daveey] resumed after an owner restart, or the tail
+    prompt = '\n\n'.join(p for p in (skills, warning, card, frame['text']) if p)
     result = agent.run_conversation(prompt, conversation_history=history, turn_author=KANBAN_TURN_AUTHOR)
 
     def recover(nudge):

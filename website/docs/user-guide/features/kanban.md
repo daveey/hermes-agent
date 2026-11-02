@@ -406,6 +406,19 @@ retrying them; it does not replay tools or reopen the old session. Existing
 iteration and failure limits still apply. Older runs without registration, deleted
 transcripts and cross-profile handoffs do not receive transcript recovery.
 
+A run requeued because a gateway restart cut off the run immediately before it
+(`owner_restart_lost`, exit 76) instead continues that run's whole conversation.
+The owner copies the lost run's persisted active transcript into the new run's own
+fresh session before its first turn, and the prompt says the run resumed after a
+restart in place of the transcript tail. The new run keeps its own run id, claim,
+session and `owner_admitted` marker; the old session is only read. A trailing tool
+call with no recorded result gets a synthetic "interrupted by gateway restart"
+result rather than being replayed. The run falls back to the transcript tail when
+the lost session is missing, empty or unreadable, belongs to another home or
+profile, or already exceeds the model's compaction threshold. Each such run logs a
+`restart_resume` event carrying `resumed_session_id` (also on `owner_admitted`) or
+its `fallback` reason. Crash, timeout and other requeues are unchanged.
+
 #### Runtime caps: checkpoint and continue
 
 A card with `max_runtime_seconds` is still hard-killed at the cap (`timed_out`,
@@ -1741,6 +1754,7 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 | `worker_registered` | `{pid, started_at}` | The dispatcher died after starting the worker but before recording its pid, so the worker recorded it itself before its first model call. Liveness checks then see it and an expired claim is extended instead of spawning a second worker. A worker whose run was reclaimed before it got that far exits without working the card. |
 | `heartbeat` | `{note?}` | Worker called `hermes kanban heartbeat $TASK` to signal liveness during long operations. |
 | `reclaimed` | `{stale_lock}` | Claim TTL expired without a completion; task goes back to `ready`. An automatic reclaim counts as one non-successful attempt toward the `gave_up` breaker (a claim that never spawned a worker would otherwise loop claim → reclaim → claim forever); an operator `reclaim` resets the counter instead. |
+| `restart_resume` | `{prior_run_id, prior_session_id, resumed_session_id?, copied_messages?, interrupted_calls?, fallback?, messages?, tokens?, threshold?}` | The owner admitted a run whose previous run was lost to a gateway restart (`owner_restart_lost`). With `resumed_session_id` the lost run's transcript was copied into this run's session; with `fallback` (`prior_session_missing`, `prior_session_empty`, `prior_session_unreadable`, `foreign_home`, `foreign_profile`, `over_compaction_threshold`, `threshold_unknown`, `seed_failed`) the run started fresh with the transcript tail. |
 | `crashed` | `{pid, claimer, exit_kind?, exit_code?, worker_output?}` | Worker PID no longer alive but TTL hadn't expired yet. `worker_output` is the tail of the worker's own log (its final response or the rendered provider error, chrome stripped, ≤ 400 chars) and is also appended to the task's `last_failure_error`, so the board shows *why* instead of only the exit code. |
 | `timed_out` | `{pid, elapsed_seconds, limit_seconds, sigkill}` | `max_runtime_seconds` exceeded; dispatcher SIGTERM'd (then SIGKILL'd after 5 s grace) and re-queued. |
 | `stale` | `{elapsed_seconds, last_heartbeat_at, heartbeat_age_seconds, timeout_seconds, pid, terminated}` | Task ran longer than `kanban.dispatch_stale_timeout_seconds` (default 4 h) AND no `kanban_heartbeat` arrived in the last hour. Dispatcher SIGTERM'd the host-local worker (if any), reset the task to `ready` for re-dispatch. Does NOT tick the failure counter (stale is dispatcher-side absence detection, not a worker fault). Workers running long operations should call `kanban_heartbeat` at least once an hour to avoid this. |

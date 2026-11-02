@@ -4012,11 +4012,13 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
 
 # --- Worker context builder (what a spawned worker sees) ---
 
-def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
+def build_worker_context(conn: sqlite3.Connection, task_id: str, *, recovery_tail: bool = True) -> str:
     """Everything a worker should read about its task: header, body,
     attachments, prior attempts, done-parent handoffs, the assignee's recent
     work, comments. Lists are tail-capped and fields char-capped
-    (``_CTX_MAX_*``) so the prompt stays bounded on pathological boards."""
+    (``_CTX_MAX_*``) so the prompt stays bounded on pathological boards.
+    ``recovery_tail=False`` omits the interrupted-run transcript tail: a run resumed
+    after an owner restart carries that run's whole conversation instead. [daveey]"""
     task = get_task(conn, task_id)
     if not task:
         raise ValueError(f"unknown task {task_id}")
@@ -4048,8 +4050,11 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     _ctx_parent_results(lines, conn, task_id, now)
     _ctx_role_history(lines, conn, task, now)
     _ctx_comments(lines, list_comments(conn, task_id), now)
+    base = "\n".join(lines).rstrip() + "\n"
+    if not recovery_tail:
+        return base
     from hermes_cli.kanban_worker_recovery import build_recovery_context
-    return "\n".join(lines).rstrip() + "\n" + build_recovery_context(conn, task_id)
+    return base + build_recovery_context(conn, task_id)
 
 
 def _ctx_standing(lines: list[str], task: Task, comments: list[Comment]) -> None:
