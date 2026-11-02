@@ -219,6 +219,28 @@ async def test_committed_switch_reaches_the_next_managed_worker(home, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_class_switch_releases_exact_pin_and_rebuilds(home, monkeypatch):
+    store, db, authority, owner, ref = _owner(home, monkeypatch, _noop)
+    try:
+        _pinned_opus(home, authority, db, ref, monkeypatch)
+        reply = await _mutate(owner, db, ref, 'class-pick', {'model': 'class:deep'})
+        assert reply['result']['model'] == 'class:deep', reply
+        assert _intent(db, ref) is not None
+        agent = _worker_build(authority, db, ref, monkeypatch, 'w-class')
+        recorded = _allocation(home, ref.session_id)
+        assert recorded is not None
+        assert not recorded.get('exact_pin', False)
+        assert recorded['reason'] == 'explicit-switch'
+        assert recorded['selected_model'] == agent.model
+        assert _intent(db, ref) is None
+        again = _worker_build(authority, db, ref, monkeypatch, 'w-class-again')
+        assert (again.model, again.provider) == (agent.model, agent.provider)
+    finally:
+        await owner.close()
+        store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
 async def test_rejected_switch_keeps_the_worker_on_the_original_pin(home, monkeypatch):
     store, db, authority, owner, ref = _owner(home, monkeypatch, _noop)
     try:

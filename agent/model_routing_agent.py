@@ -40,7 +40,11 @@ def prepare_agent_route(agent, model, provider, session_id, api_key, base_url,
     from agent.model_routing_switch_intent import consume, pending
     intent = pending(session_db, session_id, model, provider)
     requested = provider or "auto"
-    if intent is not None and requested == "auto":
+    if intent is not None and is_class_selector(model):
+        # Canonical class picks inherit the prior provider in their stored policy;
+        # that is not an exact-provider pin for the class allocator.
+        requested = "auto"
+    if intent is not None and requested == "auto" and not is_class_selector(model):
         # An ``auto`` build honouring a switch must land on the provider the switch committed, never a
         # sibling route serving the same model name; a provider that cannot serve it refuses below.
         import json
