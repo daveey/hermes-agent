@@ -216,6 +216,14 @@ def _resolve_server_lazy(name: str, config: dict) -> bool:
     return _parse_boolish(config.get("lazy", False), default=False)
 
 
+def _resolve_server_lazy_ignore_ttl(config: dict) -> bool:
+    """True when ``mcp_servers.<name>.lazy_ignore_ttl`` lets a lazy server start from a cache entry
+    past its server-declared ``ttlMs`` (default off). A server that answers ``tools/list`` with
+    ``ttlMs: 0`` (chrome-devtools-mcp) otherwise never registers lazily; the first real call still
+    connects live and write-through refreshes the entry. [daveey]"""
+    return _parse_boolish(config.get("lazy_ignore_ttl", False), default=False)
+
+
 def _note_connect_failure(name: str, exc: BaseException) -> str:
     """Record a failed connect (under ``_lock``): error text for status, cooldown stamp."""
     message = _errors._format_connect_error(exc)
@@ -415,7 +423,8 @@ def _register_lazy_from_cache(new_servers: dict[str, dict]) -> tuple[dict[str, d
     for name, cfg in new_servers.items():
         if not _resolve_server_lazy(name, cfg):
             continue
-        entry = get_cached_entry(name, config_fingerprint(cfg))
+        entry = get_cached_entry(name, config_fingerprint(cfg),
+                                 ignore_ttl=_resolve_server_lazy_ignore_ttl(cfg))
         if not entry:
             continue
         with _core._lock:

@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.tui_gateway import protocol_helpers
+
 _original_stdout = sys.stdout
 
 
@@ -72,12 +74,7 @@ def server():
     mod._live_transports.clear()
 
 
-@pytest.fixture()
-def capture(server):
-    """Redirect server's real stdout to a StringIO and return (server, buf)."""
-    buf = io.StringIO()
-    server._real_stdout = buf
-    return server, buf
+capture = protocol_helpers.capture
 
 
 # ── JSON-RPC envelope ────────────────────────────────────────────────

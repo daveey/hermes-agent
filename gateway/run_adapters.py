@@ -197,6 +197,9 @@ class GatewayAdapterLifecycleMixin:
         task = asyncio.ensure_future(adapter.connect(is_reconnect=is_reconnect))
         if await self._wait_or_detach(task, timeout):
             return bool(await task)
+        # No await after cancel: suspended frames still exist until the loop resumes the task.
+        from gateway.connect_diagnostics import connect_waits
+        logger.warning("Platform connect deadline: platform=%s waits=%s", platform.value, connect_waits(adapter, task))
         raise TimeoutError(f"{platform.value} connect timed out after {timeout:g}s")
 
     async def _connect_initial_adapter_with_timeout(self, adapter, platform) -> bool:

@@ -94,15 +94,50 @@ def test_hold_once_never_shows_or_persists_first_answer(agent):
     assert "Needs you" not in run.shown, run.shown
     assert "Done: I minted it myself." in run.shown
     assert [a for a, *_ in seen] == [0, 1]
-    # Second call: the model saw its held answer and the private nudge.
+    # Second call: the model saw its held answer and the private nudge, told the answer was not shown.
     wire = [m.get("content") for m in run.requests[1]["messages"]]
-    assert "Needs you: please add the token." in wire and "Check first; do it yourself." in wire
+    assert "Needs you: please add the token." in wire
+    assert f"{HELD_NOTICE}\n\nCheck first; do it yourself." in wire
     # Both hold rows are ephemeral (never persisted) and stripped from returned history.
     held_rows = [m for m in seen[1][2] if m.get(FLAG)]
     assert [m["role"] for m in held_rows] == ["assistant", "user"]
     assert all(_is_ephemeral_scaffolding(m) for m in held_rows)
     assert [m["role"] for m in result["messages"]] == ["user", "assistant"]
     assert result["messages"][-1]["content"] == "Done: I minted it myself."
+
+
+HELD_NOTICE = ("[runtime] Your draft above was NOT shown to the user. Your next reply replaces it: include its "
+               "full content; don't refer to it as 'above'.")
+
+
+@pytest.mark.parametrize("nudge", ["Check first; do it yourself.", "[session-outcome] Record the outcome first."])
+def test_buffered_hold_nudge_starts_with_not_shown_notice(agent, nudge):
+    """A held draft never reached the screen, but stays in the model's context. Without a runtime line saying so, the
+    model took its held explanation as delivered and sent only "The explanation ... is complete" (hub
+    20261028_071229_45f849). Every hook's nudge gets the line from core, whatever the hook wrote."""
+    run = Run(agent, ["Full explanation of what we tested.", "Full explanation of what we tested, again."])
+
+    @_buffered
+    def hook(attempt, **kw):
+        return {"hold": True, "nudge": nudge} if attempt == 0 else None
+
+    _run(agent, hook)
+    wire = [m.get("content") for m in run.requests[1]["messages"]]
+    assert f"{HELD_NOTICE}\n\n{nudge}" in wire, wire
+    assert "Full explanation of what we tested." not in run.shown
+
+
+def test_streamed_hold_nudge_has_no_not_shown_notice(agent):
+    """An unbuffered gate holds an answer that already streamed: it WAS shown, so core must not claim otherwise."""
+    run = Run(agent, ["Streamed answer.", "Second answer."])
+
+    def hook(attempt, **kw):
+        return {"hold": True, "nudge": "Add the evidence."} if attempt == 0 else None
+
+    _run(agent, hook)
+    assert "Streamed answer." in run.shown
+    wire = [m.get("content") for m in run.requests[1]["messages"]]
+    assert "Add the evidence." in wire and not any(HELD_NOTICE in str(w) for w in wire)
 
 
 @pytest.mark.parametrize("limit", [0, 2])

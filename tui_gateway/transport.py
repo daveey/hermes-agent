@@ -109,14 +109,20 @@ class StdioTransport:
     """Writes JSON frames to a stream (usually ``sys.stdout``) resolved via a callable, so runtime
     monkey-patches of the stream keep working."""
 
-    __slots__ = ("_lock", "_stream_getter")
+    __slots__ = ("_enabled", "_lock", "_stream_getter")
 
-    def __init__(self, stream_getter: Callable[[], Any], lock: threading.Lock) -> None:
+    def __init__(self, stream_getter: Callable[[], Any], lock: threading.Lock, *,
+                 enabled: Callable[[], bool] = lambda: True) -> None:
         self._stream_getter = stream_getter
         self._lock = lock
+        self._enabled = enabled
 
     def write(self, obj: dict) -> bool:
-        """Return ``True`` on success, ``False`` ONLY when the peer is gone (see :func:`_raise_unless_peer_gone`)."""
+        """Return false for a disabled channel or a gone peer; propagate other I/O failures."""
+        # Session records and lifecycle emitters may hold this sink directly, bypassing
+        # write_json. Enforce protocol ownership here, before serializing any payload.
+        if not self._enabled():
+            return False
         # Serialization is OUTSIDE the lock so a large payload can't block other threads' frames.
         line = serialize_frame(obj, "stdio", logger) + "\n"
         with self._lock:

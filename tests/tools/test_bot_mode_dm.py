@@ -403,21 +403,20 @@ def test_relay_ack_is_queued_with_the_envelope_id(tmp_path, monkeypatch):
     assert result["delivery_id"] == envelope["id"]
 
 
-def test_named_bot_relays_a_qualified_target_through_its_own_folder(tmp_path, monkeypatch):
-    """A named bot messaging its same-named remote counterpart is offered 'researcher@box' (the bare
-    form is reserved locally); that DM must queue in the sender's own relay folder, never the default's."""
+def test_named_bot_relays_a_qualified_target_through_install_mailbox(tmp_path, monkeypatch):
+    """The connection backend drains one install-wide mailbox, even for same-named remote
+    counterparts. Sender identity rides in from_profile, not the mailbox directory."""
     _capture_spawn(monkeypatch)
     home = _managed_home(tmp_path, teammates=("researcher",))
     sender_home = home / "profiles" / "researcher"
     row = {"profile": "researcher", "handle": "researcher", "connection_id": "box", "connection_label": "box"}
-    for folder in (home, sender_home):
-        bot_relay.write_remote_roster(folder, [row])
+    bot_relay.write_remote_roster(home, [row])
     result = json.loads(bot_mode_dm.message_agent_tool(
         target="researcher@box", message="ping", agent=_FakeAgent(sender_home)))
 
     assert result["status"] == "queued", result
-    assert bot_relay.claim_pending_envelopes(home) == []
-    (envelope,) = bot_relay.claim_pending_envelopes(sender_home)
+    assert bot_relay.claim_pending_envelopes(sender_home) == []
+    (envelope,) = bot_relay.claim_pending_envelopes(home)
     assert envelope["from_profile"] == "researcher" and envelope["target_connection"] == "box"
 
 

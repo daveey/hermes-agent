@@ -316,6 +316,7 @@ def test_flaky_test_passes_and_files_a_card_while_a_hard_failure_stays_red(tmp_p
     (root / "scripts" / "ci").mkdir(parents=True)
     shutil.copy2(_ROOT / "scripts" / "run_tests_parallel.py", root / "scripts")
     shutil.copy2(_ROOT / "scripts" / "run_tests_host_slots.py", root / "scripts")
+    shutil.copy2(_ROOT / "scripts" / "run_tests_parallel_rss.py", root / "scripts")
     shutil.copy2(_ROOT / "scripts" / "ci" / "list_os_marked_tests.py", root / "scripts" / "ci")
     marker = tmp_path / "flaked-once"
     suite = tmp_path / "suite"

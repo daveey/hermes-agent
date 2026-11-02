@@ -11,6 +11,7 @@ import contextlib
 import errno
 import logging
 import os
+import sys
 import threading
 import time
 from typing import Any, Coroutine, Optional
@@ -94,7 +95,11 @@ def _try_acquire_mcp_discovery_lock() -> Any:
 
 def _mcp_loop_exception_handler(loop, context):
     """Suppress the benign 'Event loop is closed' RuntimeError httpx finalizers raise against the
-    dead loop during shutdown; forward the rest."""
+    dead loop during shutdown; forward the rest. While the interpreter finalizes, drop everything: the
+    'Task was destroyed but it is pending!' reports for MCP tasks still alive at exit can no longer be logged
+    (each one prints a ``--- Logging error ---`` traceback to stderr, which crash detectors misread)."""
+    if sys.is_finalizing():
+        return
     exc = context.get("exception")
     if not (isinstance(exc, RuntimeError) and "Event loop is closed" in str(exc)):
         loop.default_exception_handler(context)

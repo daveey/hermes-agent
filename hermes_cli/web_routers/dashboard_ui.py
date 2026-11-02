@@ -288,7 +288,9 @@ async def post_agent_plugin_activate(request: Request):
     from hermes_cli.plugins_activation import load_and_go_live
 
     def _run():
-        with _config_profile_scope(None if profile == "default" else profile):
+        # Scope by NAME, "default" included: a backend launched with ``--profile X`` also serves the
+        # root home, and "no scope" there means X's home, so root activations were refused.
+        with _config_profile_scope(profile):
             if hermes_home_key(get_hermes_home()) != hermes_home_key(home):
                 raise HTTPException(status_code=400, detail="Home is not served by this backend.")
             return {"ok": True, "activation": load_and_go_live(name)}

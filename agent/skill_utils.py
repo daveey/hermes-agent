@@ -118,10 +118,16 @@ _ENV_DETECT_CACHE: dict[str, bool] = {}
 
 
 def _detect_kanban() -> bool:
-    # Mirror tools/kanban_tools.py: a dispatcher-spawned worker (env vars, but
-    # only when this execution OWNS the task — delegate children / in-process
-    # cron see the worker's vars) or a profile opted into the kanban toolset.
-    if os.getenv("HERMES_KANBAN_TASK") or os.getenv("HERMES_KANBAN_BOARD"):
+    # Mirror tools/kanban_tools.py::_visible: a dispatcher-spawned worker
+    # (HERMES_KANBAN_TASK, but only when this execution OWNS the task —
+    # delegate children / in-process cron see the worker's vars), a session
+    # started for another gateway's chat (ambient origin), or a profile opted
+    # into the kanban toolset. [daveey] A bare HERMES_KANBAN_BOARD is NOT a
+    # worker signal: every CLI / legacy-TUI chat pins it at boot
+    # (``_pin_kanban_board_env``) and the dispatcher always sets it together
+    # with HERMES_KANBAN_TASK, so counting it alone listed kanban-only skills
+    # in chats that never get the kanban tools.
+    if os.getenv("HERMES_KANBAN_TASK"):
         try:
             from agent.delegation_context import is_dispatcher_owned_worker_context
             owned = is_dispatcher_owned_worker_context()
@@ -129,6 +135,12 @@ def _detect_kanban() -> bool:
             owned = True
         if owned:
             return True
+    try:
+        from hermes_cli.kanban_origin import ambient_origin_ref
+        if ambient_origin_ref():
+            return True
+    except ImportError:
+        pass
     try:
         from tools.kanban_tools import _profile_has_kanban_toolset
         return bool(_profile_has_kanban_toolset())

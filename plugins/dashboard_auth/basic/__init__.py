@@ -79,8 +79,15 @@ def _verify_password(password: str, encoded: str) -> bool:
 
 
 # Verified against when the username is unknown so "no such user" and "wrong
-# password" take comparable time.
-_DUMMY_HASH = hash_password("dummy-password-for-constant-time-verify")
+# password" take comparable time. [daveey] A fixed, well-formed hash with the
+# live cost parameters: verifying against it runs the same scrypt as a real
+# hash, and building it costs nothing at import. Hashing a dummy password here
+# ran a 16 MiB scrypt on every plugin import (each fresh-home plugin discovery
+# re-imports it), which fragmented the allocator enough to put
+# tests/tui_gateway/test_tui_gateway_server.py ~125 MB over its RSS budget.
+# No password derives the all-zero key, so the dummy never verifies.
+_DUMMY_HASH = (f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}$"
+               f"{base64.b64encode(bytes(_SCRYPT_SALT_BYTES)).decode()}${base64.b64encode(bytes(_SCRYPT_DKLEN)).decode()}")
 
 
 # ---- Token signing (stateless HMAC-signed blobs) ----

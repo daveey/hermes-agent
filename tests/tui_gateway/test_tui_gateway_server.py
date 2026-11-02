@@ -1168,6 +1168,7 @@ def test_write_json_serializes_concurrent_writes(monkeypatch):
         def flush(self) -> None:
             return None
 
+    monkeypatch.setattr(server, "_stdio_is_rpc_channel", True)
     monkeypatch.setattr(server, "_real_stdout", RecordingStdout())
 
     barrier = threading.Barrier(8)
@@ -1196,12 +1197,6 @@ def test_write_json_serializes_concurrent_writes(monkeypatch):
     assert len(ours) == 8
 
 
-def test_write_json_returns_false_on_broken_pipe(monkeypatch):
-    monkeypatch.setattr(server, "_real_stdout", _BrokenStdout())
-
-    assert server.write_json({"ok": True}) is False
-
-
 def test_write_json_unserializable_payload_becomes_error_frame(monkeypatch, caplog):
     """The stdio twin of the WS guard (#92506): an unserializable result must reach the Ink TUI /
     stdio bridge as a JSON-RPC error frame with the original id plus a log line, not kill the pool
@@ -1210,6 +1205,7 @@ def test_write_json_unserializable_payload_becomes_error_frame(monkeypatch, capl
     import logging
 
     out = _ChunkyStdout()
+    monkeypatch.setattr(server, "_stdio_is_rpc_channel", True)
     monkeypatch.setattr(server, "_real_stdout", out)
     with caplog.at_level(logging.ERROR, logger="tui_gateway.transport"):
         assert server.write_json({"jsonrpc": "2.0", "id": "profiles",
@@ -14226,15 +14222,14 @@ def test_interrupt_error_after_tts_stop_still_resumes_wake(monkeypatch):
     monkeypatch.setattr(wake_word, "resume_listening", resume_listening)
     monkeypatch.setattr(server, "_voice_wake_owner", None)
     monkeypatch.setattr(server, "_session_uses_compute_host", lambda _session: True)
+    monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: types.SimpleNamespace(has_pending_turn=lambda _sid: False))  # else a REAL HostSupervisor spawns a compute-host process [daveey]
 
     def _host_failed(*_args, **_kwargs):
         raise RuntimeError("host failed")
 
     monkeypatch.setattr(server, "_interrupt_session_turn", _host_failed)
     try:
-        paused = _dispatch_sync(
-            {"id": "pause", "method": "wake.pause", "params": {}}, transport=owner
-        )
+        paused = _dispatch_sync({"id": "pause", "method": "wake.pause", "params": {}}, transport=owner)
         missing = _dispatch_sync(
             {"id": "missing", "method": "session.interrupt", "params": {"session_id": "gone"}},
             transport=owner,

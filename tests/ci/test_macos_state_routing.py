@@ -66,6 +66,7 @@ def test_release_forces_unselected_lane_and_explicit_commit_is_not_masked():
     (['tests/hermes_state/test_state.py'], True), (['tests/conftest.py'], True),
     (['scripts/run_tests.sh'], True), (['scripts/run_tests_parallel.py'], True),
     (['scripts/run_tests_host_slots.py'], True), (['tests/_fixtures/state.py'], True),
+    (['scripts/run_tests_parallel_rss.py'], True),
     (['pyproject.toml'], True), (['uv.lock'], True), (['setup.py'], True),
     (['.github/workflows/ci.yaml'], True), ([], True),
     ([f'docs/{i}.md' for i in range(300)], True),

@@ -26,13 +26,25 @@ def owner(tmp_path):
 def test_scoped_expiring_receipt_and_invalidation(owner, monkeypatch):
     producer, root = owner
     board = root / "board.db"
+    from types import SimpleNamespace
+
+    # Receipt age is the input under test, not time spent descheduled by CI.
+    # Replace only health's clock so pytest and other modules keep real time.
+    clock = [100.0]
+    monkeypatch.setattr(health, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     assert not health.available(root, board, "alice", "ready")
     producer.publish([(str(board.resolve()), ["alice"], ["ready"], health.time.monotonic())])
     assert health.available(root, board, "alice", "ready")
     assert not health.available(root, root / "other.db", "alice", "ready")
     assert not health.available(root, board, "bob", "ready")
     assert not health.available(root, board, "alice", "review")
-    monkeypatch.setattr(health.time, "monotonic", lambda: 10**12)
+    clock[0] += producer.ttl
+    assert health.available(root, board, "alice", "ready")
+    clock[0] += 0.001
+    assert not health.available(root, board, "alice", "ready")
+    producer.publish([(str(board.resolve()), ["alice"], ["ready"], clock[0])])
+    assert health.available(root, board, "alice", "ready")
+    producer.invalidate()
     assert not health.available(root, board, "alice", "ready")
 
 

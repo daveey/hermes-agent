@@ -67,6 +67,12 @@ def build_gateway_parser(
     gateway_subparsers = gateway_parser.add_subparsers(
         dest="gateway_command", parser_class=_GatewayCommandParser)
 
+    gateway_profile = gateway_subparsers.add_parser('profile', help='Sample live gateway thread stacks and CPU')
+    gateway_profile.add_argument('--seconds', type=float, default=20, help='Duration in seconds (1..60; default 20)')
+    gateway_profile.add_argument('--hz', type=float, default=50, help='Sampling frequency (10..200; default 50)')
+    gateway_profile.add_argument('--top', type=int, default=40, help='Top frames per thread (default 40)')
+    gateway_profile.add_argument('--json', action='store_true', help='Print machine-readable profile')
+
     gateway_run = gateway_subparsers.add_parser(
         "run", help="Run gateway in foreground (recommended for WSL and Docker)"
     )

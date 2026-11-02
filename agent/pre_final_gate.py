@@ -8,7 +8,9 @@ a candidate; unbuffered legacy gates run after verification and the kanban guard
 - ``{"hold": True, "nudge": str}`` → the candidate is NOT emitted, NOT streamed (see below) and NOT
   persisted; it is kept only as the budget-exhaustion fallback (``pending_verification_response``).
   The held row plus the nudge (a synthetic user row) stay in the in-memory turn so the model sees
-  them, and are stripped from the returned/live history at turn end. The turn continues.
+  them, and are stripped from the returned/live history at turn end. The turn continues. When the
+  held draft did not stream to the screen, core prefixes the nudge with ``HELD_NOTICE`` ("your
+  draft above was NOT shown ... include its full content"), whatever the hook wrote.
 - ``{"append": str}`` → deliver with ``"\\n\\n" + text`` appended.
 - ``{"replace": str}`` → replace the entire candidate with nonempty safe text, independent of
   hold budget. Clears native replay carriers and the rejected stream buffer; other completion
@@ -71,6 +73,16 @@ HOOK = "pre_final_gate"
 FLAG = "_pre_final_gate_synthetic"
 DEFAULT_MAX_ATTEMPTS = 2
 DEFAULT_TIMEOUT_S = 30.0
+# Prefixed by core to every hold nudge whose draft never reached the screen. The held row stays in the model's
+# context, so without this line a model took its held explanation as delivered and sent only "The explanation and
+# recommendations are complete." (hub 20261028_071229_45f849). Hooks cannot be trusted to say it themselves.
+HELD_NOTICE = ("[runtime] Your draft above was NOT shown to the user. Your next reply replaces it: include its "
+               "full content; don't refer to it as 'above'.")
+
+
+def held_nudge(nudge: str, shown: bool) -> str:
+    """The nudge row for a hold: ``HELD_NOTICE`` first unless the held draft already streamed to the screen."""
+    return nudge if shown else f"{HELD_NOTICE}\n\n{nudge}"
 
 # Explicit plugin compatibility handshake. Publish only with the matching turn
 # consumers: replacement, exhausted-budget kwargs and post-transform emission.
@@ -372,11 +384,13 @@ def _unavailable(pending: Any) -> GateDecision:
 __all__ = [
     "DEFAULT_MAX_ATTEMPTS",
     "FLAG",
+    "HELD_NOTICE",
     "HOOK",
     "GateDecision",
     "UnresolvedFallback",
     "eligible_callbacks",
     "evaluate",
+    "held_nudge",
     "is_background_agent",
     "max_attempts",
     "needs_buffer",
