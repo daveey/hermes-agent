@@ -17,6 +17,7 @@ import json
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_sync_client as ksc
+from hermes_cli.kanban_sync_guard import SyncRoundBusy
 
 
 def _board(args: argparse.Namespace) -> str:
@@ -192,6 +193,6 @@ def cmd_sync(args: argparse.Namespace) -> int:
         return 2
     try:
         return _ACTIONS[action](args)
-    except ksc.SyncUnavailable as exc:
+    except (ksc.SyncUnavailable, SyncRoundBusy) as exc:
         print(str(exc))
         return 2
