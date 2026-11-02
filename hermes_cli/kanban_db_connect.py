@@ -882,6 +882,17 @@ def _refuse_dead_board_resurrection(path: Path, board: Optional[str]) -> None:
         raise ValueError(f"kanban board {slug!r} does not exist; create it with `hermes kanban boards create {slug}`")
 
 
+def _ensure_activity_revision(conn: sqlite3.Connection, resolved: str) -> None:
+    """Content revision for the session-list annotation's caches (``kanban_activity_revision``). Display-only: a
+    failure leaves the readers on their stat fallback and never fails the open. [daveey]"""
+    from hermes_cli import kanban_activity_revision as rev
+    try:
+        rev.ensure_revision(conn, rev.tables_for(resolved))
+    except sqlite3.Error as exc:
+        _kb._log.warning("kanban activity revision not installed on %s (%s); annotation caches stay stat-keyed",
+                         resolved, exc)
+
+
 def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> sqlite3.Connection:
     """Open (and initialize if needed) the kanban DB. WAL is (re)enabled on
     every connection so a re-created file stays robust; the first connection
@@ -949,6 +960,7 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
                 conn.executescript(_kb.SCHEMA_SQL)
                 _migrate_add_optional_columns(conn)
                 _kb._sync.install_or_remove(conn, resolved)
+                _ensure_activity_revision(conn, resolved)
                 _INITIALIZED_PATHS.add(resolved)
 
         conn, _ = _open_configured(path, _init_if_needed)

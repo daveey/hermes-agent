@@ -256,7 +256,10 @@ _last_good: dict[tuple[str, str, str], tuple[list[dict[str, Any]], Optional[floa
 
 
 def _reset_for_tests() -> None:
+    global _owners_memo
     _last_good.clear()
+    _replica_rows.clear()
+    _owners_memo = None
 
 
 def _stale_after_s() -> float:
@@ -279,19 +282,20 @@ def _read_replica(path: Path, gateway: str, profile: str) -> tuple[list[dict[str
     owner's reconcile only manages its own chats' links and the origin's only its own board file. The origin's
     ``shepherd`` link carries the verified release instead, so a done card stayed an ``unknown`` obligation forever
     (sidebar "4 open" naming none, 2026-11-01)."""
-    from hermes_cli.kanban_session_activity import cached_ro  # lazy: that module imports this one
+    from hermes_cli.kanban_activity_revision import SHADOW_TABLES, is_revision
+    from hermes_cli.kanban_session_activity import _board_content_key, cached_ro  # lazy: that module imports this one
+    # [daveey] The link rows only change with the replica's tasks/task_chat_links content; a pull that only moves
+    # ``pulled_at`` (every few seconds) re-reads the stamp, not the ~10k links. Rows are read-only to callers.
+    memo_key = (str(path), gateway, profile)
+    content = _board_content_key(path, SHADOW_TABLES)
+    hit = _replica_rows.get(memo_key)
     with cached_ro(path) as conn:
         conn.row_factory = sqlite3.Row
-        rows = [dict(r) for r in conn.execute(
-            "SELECT l.task_id AS id, t.id AS task_row, t.title, t.status, t.assignee, t.created_at, t.started_at, "
-            "t.priority, t.block_kind, t.human_request, t.created_on, l.chat_session, l.chat_profile, l.kind, "
-            "EXISTS (SELECT 1 FROM task_chat_links r WHERE r.task_id = l.task_id AND r.chat_gateway = l.chat_gateway "
-            "AND r.chat_profile IS l.chat_profile AND r.chat_session = l.chat_session AND r.released = 1) "
-            "AS chat_released "
-            "FROM task_chat_links l LEFT JOIN tasks t ON t.id = l.task_id "
-            "WHERE l.chat_gateway = ? AND l.chat_profile = ? AND l.released = 0 "
-            "AND (t.id IS NULL OR (t.created_on IS NOT NULL AND t.created_on != ?))",
-            (gateway, profile, gateway)).fetchall()]
+        # Only a trigger-backed revision vouches for the rows; a stat key (no counter) always reads.
+        rows = hit[1] if hit is not None and hit[0] == content and is_revision(content) else None
+        if rows is None:
+            rows = _read_replica_links(conn, gateway, profile)
+            _replica_rows[memo_key] = (content, rows)
         try:
             row = conn.execute("SELECT pulled_at FROM kanban_sync_state LIMIT 1").fetchone()
             pulled = float(row[0]) if row and row[0] is not None else None
@@ -300,23 +304,52 @@ def _read_replica(path: Path, gateway: str, profile: str) -> tuple[list[dict[str
     return rows, pulled
 
 
+# (replica path, gateway, profile) -> (content key, link rows) of the last ``_read_replica``.
+_replica_rows: dict[tuple[str, str, str], tuple[tuple, list[dict[str, Any]]]] = {}
+
+
+def _read_replica_links(conn: sqlite3.Connection, gateway: str, profile: str) -> list[dict[str, Any]]:
+    return [dict(r) for r in conn.execute(
+        "SELECT l.task_id AS id, t.id AS task_row, t.title, t.status, t.assignee, t.created_at, t.started_at, "
+        "t.priority, t.block_kind, t.human_request, t.created_on, l.chat_session, l.chat_profile, l.kind, "
+        "EXISTS (SELECT 1 FROM task_chat_links r WHERE r.task_id = l.task_id AND r.chat_gateway = l.chat_gateway "
+        "AND r.chat_profile IS l.chat_profile AND r.chat_session = l.chat_session AND r.released = 1) "
+        "AS chat_released "
+        "FROM task_chat_links l LEFT JOIN tasks t ON t.id = l.task_id "
+        "WHERE l.chat_gateway = ? AND l.chat_profile = ? AND l.released = 0 "
+        "AND (t.id IS NULL OR (t.created_on IS NOT NULL AND t.created_on != ?))",
+        (gateway, profile, gateway)).fetchall()]
+
+
 def _ledger_owners(stale_ok: bool = False) -> dict[tuple[str, str], list[tuple[str, str, str, bool]]]:
     """``(board, id) -> [(owner gateway, owner profile, session, released)]`` from the origin-ledger projection. A
     synced board is one file per gateway with one row per id, shared by that gateway's profiles, so the replica
     row carries no owner profile: the ledger only labels it (``_owner_of``). ``stale_ok`` is ``_remote_links``'s:
     take the last projection instead of waiting on a rebuild."""
     from hermes_cli.kanban_session_activity import _remote_links
+    global _owners_memo
     try:
         cards = _remote_links(stale_ok=True) if stale_ok else _remote_links()
     except Exception as exc:  # health: allow BLE001 -- the profile is a label; a failed ledger read must not hide cards
         _log.info("kanban chat links: owner profiles unavailable (%s: %s)", type(exc).__name__, exc)
         return {}
+    # [daveey] ``_remote_links`` hands out a new list of the SAME read-only card dicts until it re-projects: the same
+    # cards (by identity; the memo holds them, so no id is reused) give the same owners. Rebuilding this index from
+    # ~5k cards was ~15 ms of every count recompute on David-MBP.
+    memo = _owners_memo
+    if memo is not None and len(memo[0]) == len(cards) and all(a is b for a, b in zip(memo[0], cards)):
+        return memo[1]
     out: dict[tuple[str, str], list[tuple[str, str, str, bool]]] = {}
     for c in cards:
         if c.get("gateway") and c.get("board") and c.get("id") and c.get("profile"):
             out.setdefault((str(c["board"]), str(c["id"])), []).append(
                 (str(c["gateway"]), str(c["profile"]), str(c.get("session") or ""), bool(c.get("released"))))
+    _owners_memo = (cards, out)
     return out
+
+
+# (cards, owners) of the last ``_ledger_owners`` build. Callers treat the owners map as read-only.
+_owners_memo: tuple[list[dict[str, Any]], dict[tuple[str, str], list[tuple[str, str, str, bool]]]] | None = None
 
 
 def _owner_of(known: list[tuple[str, str, str, bool]], owner: Optional[str],

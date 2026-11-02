@@ -18,6 +18,9 @@ from hermes_cli import kanban_lockguard as _kanban_lockguard
 from hermes_cli import kanban_activity_identity as _identity
 from hermes_cli import kanban_annotation_disk as _annotation_copy
 from hermes_cli import kanban_annotation_refresh as _bounded
+from hermes_cli import kanban_activity_revision as _revision
+from hermes_cli import kanban_session_activity_hub as _hub_signature
+from hermes_cli.kanban_session_activity_hub import _hub_content_signature
 from hermes_cli import kanban_scope_heartbeat as _scope_hb
 from hermes_cli.kanban_session_activity_release import TERMINAL_STATUSES
 from hermes_cli.kanban_session_activity_release import owner_attests_terminal as _owner_attests_terminal
@@ -849,44 +852,6 @@ def _park_of(task: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
-_HUB_SIGNATURE_SQL = ("SELECT coll, COUNT(*), MAX(seq), TOTAL(seq) FROM replica WHERE coll IN ('tasks', 'gateway') "
-                      "GROUP BY coll")
-_hub_signature_memo: tuple | None = None  # ((path, stat key), signature)
-
-
-def _hub_content_signature(hub: Path) -> tuple:
-    """What the remote-links projection reads from the hub replica (``tasks`` and ``gateway`` rows, ``meta``
-    gateway), not the file's stat: hub-sync rewrites ~10k ``sessions`` rows continuously, so a stat-keyed
-    fingerprint changed on nearly every read and every caller re-projected 2.4k cards (~19% of a Desktop
-    backend's GIL time, 2026-10-27). ``seq`` is the replica's global write sequence, so COUNT + MAX + TOTAL of it
-    moves on any insert, update or delete of those rows. The query (~10 ms) re-runs only when the file's stat
-    moves; an unreadable replica falls back to the stat itself. [daveey]"""
-    global _hub_signature_memo
-    stat_key = []
-    for path in (hub, Path(str(hub) + "-wal")):
-        try:
-            st = path.stat()
-            stat_key.append((st.st_ino, st.st_size, st.st_mtime_ns))
-        except FileNotFoundError:
-            stat_key.append(None)
-    memo_key = (str(hub), tuple(stat_key))
-    memo = _hub_signature_memo
-    if memo is not None and memo[0] == memo_key:
-        return memo[1]
-    try:
-        conn = _open_ro(hub)
-        try:
-            rows = tuple(tuple(r) for r in conn.execute(_HUB_SIGNATURE_SQL).fetchall())
-            meta = conn.execute("SELECT v FROM meta WHERE k = 'gateway'").fetchone()
-        finally:
-            conn.close()
-        signature = (str(hub), stat_key[0][0] if stat_key[0] else None, rows, meta[0] if meta else None)
-    except (sqlite3.Error, OSError):
-        signature = memo_key
-    _hub_signature_memo = (memo_key, signature)
-    return signature
-
-
 def _replica_paths() -> list[Path]:
     """The board replicas the counts read when ``kanban.sync.links_reader`` is ``replica`` (else none), so a pull
     that changes a chat's cards invalidates the cached counts like a local board write does. [daveey]"""
@@ -902,19 +867,19 @@ def _replica_paths() -> list[Path]:
 
 def _activity_fingerprint(*, include_shadows: bool = True) -> tuple:
     """Count inputs include sync shadows; the origin-ledger projection never reads them."""
-    paths = _board_db_paths()
     hub = _hub_db_path()
     signature = [_hub_content_signature(hub)] if hub is not None else []
+    # [daveey] Each board's content revision (``kanban_activity_revision``), not its stat: bookkeeping writes
+    # (sync stamps, dispatch stamps, a replica's pull stamp) rewrite the files ~61x/min with no task change.
+    signature.extend((str(db), _board_content_key(db)) for db in _board_db_paths())
     if include_shadows:
-        paths.extend(_replica_paths())
-    for db in paths:
-        for path in (db, Path(str(db) + "-wal")):
-            try:
-                st = path.stat()
-                signature.append((str(path), st.st_ino, st.st_size, st.st_mtime_ns))
-            except FileNotFoundError:
-                signature.append((str(path), None))
+        signature.extend((str(db), _board_content_key(db, _revision.SHADOW_TABLES)) for db in _replica_paths())
     return tuple(signature)
+
+
+def _board_content_key(path: Path, tables: tuple[str, ...] = _revision.LOCAL_TABLES) -> tuple:
+    """Changes on every write to a row the activity readers read in ``path`` (stat fallback without the counter)."""
+    return _revision.content_key(path, tables, cached_ro)
 
 
 def _remote_snapshot(cards: list[dict[str, Any]] | None = None) -> list[dict[str, Any]] | None:
@@ -1334,16 +1299,26 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
             remote_keys.setdefault(sid, set()).add((str(card.get("key")), "stalled", False))
         if card.get("stale"):
             stale[sid] = stale.get(sid, 0) + 1
+    fresh = ((active, blocked, unseen, stale), {sid: frozenset(ids) for sid, ids in waiting.items()},
+             (parked, held), stalled, {sid: frozenset(keys) for sid, keys in remote_keys.items()},
+             {sid: frozenset(keys) for sid, keys in local_keys.items()})
     with _cache_lock:
+        # [daveey] An unchanged answer keeps the published objects, so the annotation can tell by identity that
+        # nothing moved and reuse its frozen copy (``_read_annotation_parts``). Equal values, same answer.
+        if _cache is not None and _cache_scope == scope:
+            current = (tuple(_cache[1:5]), _waiting_cache[0], _parked_cache[0], _stalled_cache[0],
+                       _remote_keys_cache[0], _local_keys_cache[0])
+            fresh = tuple(old if old == new else new for old, new in zip(current, fresh))
+        counts, waiting_ids, parked_held, stalled, remote_ids, local_ids = fresh
         _cache_scope = scope
-        _cache = (now + _CACHE_TTL_S, active, blocked, unseen, stale)
+        _cache = (now + _CACHE_TTL_S, *counts)
         _cache_fingerprint = fingerprint
         _counts_generation += 1
-        _waiting_cache[0] = {sid: frozenset(ids) for sid, ids in waiting.items()}
-        _parked_cache[0] = (parked, held)
+        _waiting_cache[0] = waiting_ids
+        _parked_cache[0] = parked_held
         _stalled_cache[0] = stalled
-        _remote_keys_cache[0] = {sid: frozenset(keys) for sid, keys in remote_keys.items()}
-        _local_keys_cache[0] = {sid: frozenset(keys) for sid, keys in local_keys.items()}
+        _remote_keys_cache[0] = remote_ids
+        _local_keys_cache[0] = local_ids
         return _cached_count_result(include_waiting, include_snapshot)
 
 
@@ -1360,22 +1335,11 @@ def _read_local_pairs_into(active: dict[str, int], blocked: dict[str, int],
             _pairs_sink = None
 
 
-# [daveey] Per-board read memo: {board path: (stat key, reads)}. A board whose kanban.db and -wal have not moved
-# since its last read holds the same rows, so a write on one board re-reads that board only; the other boards cost
-# a stat. Only the stall verdict depends on the clock, so the memo keeps its rows and re-judges them on each use.
-# Touched only under ``_pairs_lock``.
+# [daveey] Per-board read memo: {board path: (content key, reads)}. A board whose read rows have not changed since
+# its last read (``_board_content_key``: bookkeeping writes do not count) holds the same answer, so a write on one
+# board re-reads that board only; the other boards cost a stat. Only the stall verdict depends on the clock, so the
+# memo keeps its rows and re-judges them on each use. Touched only under ``_pairs_lock``.
 _board_memo: dict[str, tuple[tuple, dict[str, Any]]] = {}
-
-
-def _board_stat(path: Path) -> tuple:
-    out = []
-    for p in (path, Path(str(path) + "-wal")):
-        try:
-            st = p.stat()
-            out.append((st.st_ino, st.st_size, st.st_mtime_ns))
-        except FileNotFoundError:
-            out.append(None)
-    return tuple(out)
 
 
 def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, Any], bool]:
@@ -1430,7 +1394,7 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
         _board_memo.pop(gone, None)
     now = time.time()
     for path in paths:
-        key = _board_stat(path)
+        key = _board_content_key(path)
         hit = _board_memo.get(str(path))
         reads = hit[1] if hit is not None and hit[0] == key else None
         if reads is not None and ((sink is not None and "parked" not in reads)
@@ -1831,8 +1795,22 @@ def _read_annotation_parts() -> tuple:
     except Exception:
         _log.debug("kanban attention unavailable", exc_info=True)
         attention = {}
-    return _identity.freeze_annotation((
-        active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra, attention))
+    raw = (active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra, attention)
+    # [daveey] Nothing moved since the last read of this scope: return that read's frozen copy instead of freezing an
+    # equal one. Safe: frozen parts are never mutated (every poll already shares one), and ``==`` per part (sets and
+    # frozensets compare by members) proves the copy is exactly what freezing ``raw`` would build. The same object
+    # also lets ``_annotation_copy.published`` skip its deep comparison.
+    scope = _origin_scope()
+    previous = _frozen_parts.get(scope)
+    if previous is not None and all(old is new or old == new for old, new in zip(previous, raw)):
+        return previous
+    frozen = _identity.freeze_annotation(raw)
+    _frozen_parts[scope] = frozen
+    return frozen
+
+
+# [daveey] Per origin scope, the last frozen annotation parts (``_read_annotation_parts``).
+_frozen_parts: dict[tuple[str, ...], tuple] = {}
 
 
 def _refresh_annotation_locked(scope: tuple[str, ...]) -> tuple:
@@ -2014,13 +1992,14 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 def _reset_cache_for_tests(keep_remote: bool = False) -> None:
     global _cache, _remote_last, _links_cache, _snapshot_saved, _remote_read_memo
-    global _hub_signature_memo, _annotate_flight_scope, _annotate_flight_result, _annotate_waiters
+    global _annotate_flight_scope, _annotate_flight_result, _annotate_waiters
     _remote_read_memo = None
-    _hub_signature_memo = None
+    _hub_signature.reset()
     _annotate_flight_scope = None
     _annotate_flight_result = None
     _annotate_waiters = 0
     _last_annotation.clear()
+    _frozen_parts.clear()
     _bounded.reset()
     _annotation_copy.reset()
     with _pairs_lock:
