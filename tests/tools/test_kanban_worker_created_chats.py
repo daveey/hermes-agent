@@ -50,16 +50,18 @@ def make_home(tmp_path, monkeypatch):
     return home
 
 
-def create(entry, monkeypatch, capsys, origin=None):
+def create(entry, monkeypatch, capsys, origin=None, parents=()):
     if entry == "tool":
         result = json.loads(tools._handle_create({"title": "child", "assignee": "default", "requires": [],
-                                                "origin_session": origin, "placement": "local"}))
+                                                "origin_session": origin, "placement": "local",
+                                                **({"parents": list(parents)} if parents else {})}))
         assert result.get("ok"), result
         return result["task_id"]
     parser = argparse.ArgumentParser()
     cli.build_parser(parser.add_subparsers())
     args = parser.parse_args(["kanban", "create", "child", "--assignee", "default", "--json"]
-                             + (["--origin-session", origin] if origin else []))
+                             + (["--origin-session", origin] if origin else [])
+                             + [a for p in parents for a in ("--parent", p)])
     assert cli._cmd_create(args) == 0
     return json.loads(capsys.readouterr().out)["id"]
 
@@ -83,6 +85,54 @@ def test_explicit_origin_overrides_worker_inheritance(home, monkeypatch, capsys,
         assert [tuple(r) for r in conn.execute(
             "SELECT chat_gateway,chat_profile,chat_session FROM task_chat_links WHERE task_id=? AND released=0",
             (child,))] == [(gateway, "research", "explicit-chat")]
+
+
+@pytest.mark.parametrize("entry", ["tool", "cli"])
+@pytest.mark.parametrize("ambient", [False, True])
+def test_explicit_origin_keeps_parent_ack_subs(home, monkeypatch, capsys, entry, ambient):
+    """An explicit (or ambient $HERMES_ORIGIN_SESSION) origin replaces the creator's ownership only: a dependency
+    parent's owning chat still hears the child, cursor at the child's latest event; observer subs stay put."""
+    from hermes_cli import kanban_origin
+    monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("here", {"here", "away"}))
+    parent_chat = f"away/research/{CHAT}"
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="default")
+        notify.add_notify_sub(conn, task_id=parent, platform="hub", chat_id=parent_chat,
+                              delivery_metadata={"reason": "origin"})
+        notify.add_notify_sub(conn, task_id=parent, platform="hub", chat_id="away/research/watcher",
+                              delivery_metadata={"reason": "shepherd"})
+    monkeypatch.setenv("HERMES_SESSION_ID", WORKER)
+    origin = "@session:research@away/explicit-chat"
+    if ambient:
+        monkeypatch.setenv("HERMES_ORIGIN_SESSION", origin)
+    child = create(entry, monkeypatch, capsys, origin=None if ambient else origin, parents=[parent])
+    with kbc.connect_closing() as conn:
+        subs = {s["chat_id"]: s for s in notify.list_notify_subs(conn, child)}
+        assert set(subs) == {"away/research/explicit-chat", parent_chat}
+        latest = conn.execute("SELECT MAX(id) FROM task_events WHERE task_id=?", (child,)).fetchone()[0]
+        assert subs[parent_chat]["last_event_id"] == latest
+        assert [tuple(r) for r in conn.execute(
+            "SELECT chat_gateway,chat_profile,chat_session FROM task_chat_links WHERE task_id=? AND released=0",
+            (child,))] == [("away", "research", "explicit-chat")]
+
+
+@pytest.mark.parametrize("entry", ["tool", "cli"])
+@pytest.mark.parametrize("with_creator", [True, False])
+def test_headless_explicit_origin_is_unresolved_not_resolved(home, monkeypatch, capsys, entry, with_creator):
+    """A worker receipt named as origin owns nothing: the card must stay discoverable as unresolved."""
+    from hermes_cli import kanban_origin
+    monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("here", {"here", "away"}))
+    with kbc.connect_closing() as conn:
+        creator = kb.create_task(conn, title="unowned creator", assignee="default", session_id=WORKER)
+    if with_creator:
+        monkeypatch.setenv("HERMES_KANBAN_TASK", creator)
+    monkeypatch.setenv("HERMES_SESSION_ID", WORKER)
+    child = create(entry, monkeypatch, capsys, origin=f"@session:default@away/{WORKER}")
+    with kbc.connect_closing() as conn:
+        kinds = [e.kind for e in kb.list_events(conn, child)]
+        assert "creator_chats_resolved" not in kinds
+        assert kinds.count("creator_chats_unresolved") == 1
+        assert not notify.list_notify_subs(conn, child)
 
 
 @pytest.mark.parametrize("entry", ["tool", "cli"])

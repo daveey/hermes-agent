@@ -8,22 +8,32 @@ MAX_DEPTH = 16
 
 
 def initialize_ownership(conn, task_id, creator_task_id, parents, created_at, chat_origin):
-    """An explicit validated origin wins over ambient worker/ancestor ownership."""
+    """An explicit validated origin wins over ambient worker/ancestor ownership.
+
+    It replaces only the CREATOR's ownership (link, origin sub, ambient session). Dependency parents' owning subs
+    are still inherited (the ACK edge: a parent's chat hears this child block or finish). A headless origin (a
+    worker/cron receipt) owns nothing, so it falls through to normal creator resolution, and a card nothing
+    resolves gets ``creator_chats_unresolved`` so the census and backfill can find it. [daveey]"""
     from hermes_cli.kanban_db_graph import inherit_creator_origin
     from hermes_cli.kanban_db_notify import _inherit_notify_subs, is_headless_session
     from hermes_cli.kanban_db import _append_event
     from hermes_cli.kanban_origin import parse_origin
     from hermes_cli.kanban_chat_links import link_uid
 
-    if not chat_origin:
+    origin = parse_origin(chat_origin) if chat_origin else None
+    if origin is None or is_headless_session(origin.session):
         inherit_creator_origin(conn, task_id, creator_task_id, created_at=created_at)
         _inherit_notify_subs(conn, task_id, parents, created_at=created_at)
+        if origin is not None and not conn.execute(
+                "SELECT 1 FROM task_events WHERE task_id=? AND kind IN "
+                "('creator_chats_resolved','creator_chats_unresolved')", (task_id,)).fetchone():
+            _append_event(conn, task_id, "creator_chats_unresolved",
+                          {"task_id": task_id, "creator_task_id": creator_task_id,
+                           "headless_origin": origin.ref, "max_depth": MAX_DEPTH})
         return
-    origin = parse_origin(chat_origin)
     conn.execute("UPDATE tasks SET session_id=NULL WHERE id=?", (task_id,))
     _append_event(conn, task_id, "creator_chats_resolved", {"explicit_origin": origin.ref})
-    if is_headless_session(origin.session):
-        return
+    _inherit_notify_subs(conn, task_id, parents, created_at=created_at)
     from hermes_cli.kanban_origin import gateway_names
     from hermes_cli.profiles import get_active_profile_name
     local = origin.gateway == gateway_names()[0] and origin.profile == get_active_profile_name()
