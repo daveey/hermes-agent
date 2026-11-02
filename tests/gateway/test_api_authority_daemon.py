@@ -67,7 +67,10 @@ def test_ordinary_daemon_api_ws_fifo_retry(tmp_path):
                                                    for row in rows()), timeout=10, what='the follow-up queued')
                 peer.release.set()
                 completed = json.loads(await pending)
-                assert completed['usage'] == {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}, completed
+                usage = dict(completed['usage'])
+                context_usage = usage.pop('context_usage', None)
+                assert usage == {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}, completed
+                assert context_usage is None or context_usage['version'] == 1, completed
                 before = len(peer.requests)
                 streamed = await follow(True)
                 assert 'LOCAL_ACK' in streamed and 'data: [DONE]' in streamed, streamed
