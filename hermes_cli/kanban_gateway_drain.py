@@ -2,8 +2,9 @@
 from pathlib import Path
 
 
-def claim_if_admitting(conn, task_id, assignee, lane, ttl_seconds):
-    """Recheck the assignee's owner immediately before either ready/review claim."""
+def claim_if_admitting(conn, task_id, assignee, lane, ttl_seconds, admission_check=None):
+    """Recheck the assignee's owner immediately before either ready/review claim. ``admission_check``
+    runs inside the claim transaction (see ``claim_task``)."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.profiles import resolve_profile_env
     try:
@@ -13,7 +14,9 @@ def claim_if_admitting(conn, task_id, assignee, lane, ttl_seconds):
     if dispatch_paused(owner_home):
         return None
     claim = kb.claim_review_task if lane == 'review' else kb.claim_task
-    return claim(conn, task_id, ttl_seconds=ttl_seconds)
+    if admission_check is None:
+        return claim(conn, task_id, ttl_seconds=ttl_seconds)
+    return claim(conn, task_id, ttl_seconds=ttl_seconds, admission_check=admission_check)
 
 
 def dispatch_paused(home=None):

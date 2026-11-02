@@ -51,7 +51,8 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
 
 
 def validate_create_assignment(conn, assignee, *, runs_on, requires, workspace_kind, workspace_path, skills,
-                               validate_skills, require_declaration, model, provider):
+                               validate_skills, require_declaration, model, provider, project_id=None,
+                               project_repo=None):
     """``create_task``'s assignee checks: pinned skills, required tools (here and where ``runs_on`` lands
     it), the model pin and its provider binding. Returns ``(required, model, provider)`` or raises.
 
@@ -62,7 +63,11 @@ def validate_create_assignment(conn, assignee, *, runs_on, requires, workspace_k
     missing-skill note in the landing worker (``missing_pin_note``); the model registry is checked by the
     landing dispatcher (``route_model_mismatch``). A concrete pin must name its provider, since only the
     landing machine's credentials could bind it. [daveey]
+
+    ``host_repo`` comes only from an attestation of the active trusted capsule create scope
+    (:func:`~hermes_cli.kanban_capsule_admission.attest_create`); outside one it is ``None``. [daveey]
     """
+    from hermes_cli.kanban_capsule_admission import attest_create
     from hermes_cli.kanban_capabilities import validate_assignment
     from hermes_cli.kanban_model_assignment import validate_model_assignment
     from hermes_cli.kanban_pin_provider import require_remote_pin_provider, resolve_pin_provider
@@ -73,7 +78,11 @@ def validate_create_assignment(conn, assignee, *, runs_on, requires, workspace_k
     check_task_skills(skills, assignee, enabled=validate_skills and not remote)
     required = validate_assignment(assignee, requires=requires, workspace_kind=workspace_kind,
                                    workspace_path=workspace_path, skills=skills,
-                                   require_declaration=require_declaration, check_profile=not remote)
+                                   require_declaration=require_declaration, check_profile=not remote,
+                                   host_repo_attestation=attest_create(
+                                       conn, assignee=assignee, project_id=project_id, project_repo=project_repo,
+                                       workspace_kind=workspace_kind, workspace_path=workspace_path,
+                                       runs_on=runs_on))
     check_create(conn, runs_on, assignee=assignee, requires=required, workspace_kind=workspace_kind)
     validate_model_assignment(assignee, model, provider, local_profile=not remote)
     if remote:

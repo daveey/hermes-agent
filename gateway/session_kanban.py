@@ -46,6 +46,9 @@ def build_kanban_policy(connection, params, config):
             from gateway.session_kanban_resume import restart_candidate
             resume_from = restart_candidate(conn, task.id, task.current_run_id)
             resume_base = kb.build_worker_context(conn, task.id, recovery_tail=False) if resume_from else None
+            # [daveey] Owner-derived (task row + resolved backend), never caller/config supplied.
+            from gateway.session_kanban_capsule import capsule_requirement
+            capsule = capsule_requirement(task)
             # [daveey] The dispatcher's model tier for this run (in-memory pin + model_tier event), class → auto.
             from hermes_cli.kanban_model_tier import owner_model_pin
             pinned_model, pinned_provider = owner_model_pin(conn, task)
@@ -69,7 +72,7 @@ def build_kanban_policy(connection, params, config):
         profile=task.assignee, workspaces_root=str(kb.workspaces_root(board=board).resolve()),
         skills=skills, goal_mode=task.goal_mode, goal_max_turns=task.goal_max_turns,
         goal_text='\n\n'.join(p for p in (task.title, task.body) if p), context=context,
-        max_runtime_seconds=task.max_runtime_seconds, accept_hooks=True)
+        max_runtime_seconds=task.max_runtime_seconds, accept_hooks=True, capsule=capsule)
     context['db'] = str(path)
     if resume_from is not None:  # [daveey] planned and copied off-loop in run_task, after session creation
         from gateway.session_kanban_resume import resume_context
@@ -90,6 +93,7 @@ async def run_task(connection, params):
     from gateway.session_contract import Submission
     from gateway.session_local_recovery import local_identity, _restore_receipt_policy
     from hermes_state_local import local_receipt
+    from gateway.session_kanban_capsule import require_capsule_transport
     authority = connection.authority
     # Resolved off-loop up front: no await separates the saved-claim check from session
     # creation. The Kanban claim check and its marker share one off-loop transaction; a
@@ -106,10 +110,14 @@ async def run_task(connection, params):
         if (not connection.native_owner or set(params) not in ({'board', 'task_id', 'run_id', 'claim_lock'}, {'board', 'task_id', 'run_id', 'claim_lock', 'db'})
                 or any(params[k] != context.get(k) for k in params)):
             raise RuntimeStoreError('permission_denied')
+        # [daveey] Replayed/old saved policy: re-derived from the board before any resume/admission.
+        await asyncio.to_thread(require_capsule_transport, policy)
         from gateway.session_local_recovery import restore_local_session
         ref = restore_local_session(authority, sid)
     else:
         policy, private = build_kanban_policy(connection, params, _load_gateway_config())
+        # [daveey] Capsule-required card without live run-bound transport refuses before session creation.
+        await asyncio.to_thread(require_capsule_transport, policy)
         ref = create_local_session(authority, connection.actor, {'request_id': request_id},
                                    trusted_policy=policy, trusted_secrets=private)
     candidate = json.loads(policy.kanban_json or '{}').get('restart_candidate') if not saved else None

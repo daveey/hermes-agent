@@ -6,7 +6,7 @@ backends never prove access to a host repository, even when mounts might make it
 """
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import sys
 from pathlib import Path
 from collections.abc import Iterable
@@ -285,9 +285,9 @@ def _cli_toolsets(config: dict, home: Path, needed: set[str] | None) -> set[str]
     return toolsets
 
 
-def _profile_capabilities(assignee: str, required: list[str] | None = None) -> set[str]:
-    """Capabilities ``assignee``'s policy grants. ``required`` (validate_assignment's list) only
-    lets the toolset lookup skip plugin discovery when a recorded one already grants it."""
+@contextmanager
+def _profile_policy(assignee: str):
+    """``(home, effective config, terminal scope)`` of ``assignee``, bound to its scopes while open."""
     from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
     from hermes_cli.config_backend import read_config_doc_readonly
     from hermes_cli.config_effective import load_profile_config_effective
@@ -311,6 +311,24 @@ def _profile_capabilities(assignee: str, required: list[str] | None = None) -> s
         if "backend" in config.get("terminal", {}):
             terminal["TERMINAL_ENV"] = config["terminal"]["backend"]
         stack.callback(reset_terminal_scope, set_terminal_scope(terminal))
+        yield home, config, terminal
+
+
+def _is_local_backend(terminal: dict) -> bool:
+    return terminal.get("TERMINAL_ENV", "").strip().lower() == "local"
+
+
+def profile_is_local(assignee: str) -> bool:
+    """Whether ``assignee``'s effective terminal backend is ``local`` (what grants host_repo). Raises when
+    the policy cannot be read; no toolset discovery. [daveey]"""
+    with _profile_policy(assignee) as (_home, _config, terminal):
+        return _is_local_backend(terminal)
+
+
+def _profile_capabilities(assignee: str, required: list[str] | None = None) -> set[str]:
+    """Capabilities ``assignee``'s policy grants. ``required`` (validate_assignment's list) only
+    lets the toolset lookup skip plugin discovery when a recorded one already grants it."""
+    with _profile_policy(assignee) as (home, config, terminal):
         needed = None
         if required is not None:
             needed = {"terminal"} if {"terminal", "git"} & set(required) else set()
@@ -329,7 +347,7 @@ def _profile_capabilities(assignee: str, required: list[str] | None = None) -> s
             available.add("kanban")
         if "terminal" in available:
             available.add("git")
-        if terminal.get("TERMINAL_ENV", "").strip().lower() == "local":
+        if _is_local_backend(terminal):
             available.add("host_repo")
         return available
 
@@ -337,6 +355,7 @@ def _profile_capabilities(assignee: str, required: list[str] | None = None) -> s
 def validate_assignment(
     assignee: str | None, *, requires=None, workspace_kind: str = "scratch",
     workspace_path=None, skills=None, require_declaration: bool = False, check_profile: bool = True,
+    host_repo_attestation=None,
 ) -> list[str]:
     """Return canonical, deduplicated requirements or raise CapabilityMismatchError.
 
@@ -356,6 +375,10 @@ def validate_assignment(
     ``check_profile=False`` (a card whose ``runs_on`` rules this machine out) validates only the shape and
     returns the declared requirements: this machine's profile of that name, and the skills it resolves, say
     nothing about the landing machine's. [daveey]
+
+    ``host_repo_attestation``: only an attestation ``create_task`` obtained from a live registered
+    capsule transport (:mod:`hermes_cli.kanban_capsule_admission`) for this exact assignee supplies
+    ``host_repo``; anything else is ignored. Every other requirement is still checked. [daveey]
     """
     if require_declaration:
         check_declaration(requires, workspace_kind, skills=skills, assignee=assignee)
@@ -379,6 +402,10 @@ def validate_assignment(
         raise CapabilityMismatchError(assignee, [n for n in required if n in _CAPABILITIES],
                                       reason=f"profile policy unavailable: {exc}") from exc
     missing = [name for name in required if name in _CAPABILITIES and name not in available]
+    if "host_repo" in missing and host_repo_attestation is not None:
+        from hermes_cli.kanban_capsule_admission import attestation_grants_host_repo
+        if attestation_grants_host_repo(host_repo_attestation, assignee):
+            missing.remove("host_repo")
     if missing:
         raise CapabilityMismatchError(assignee, missing)
     return required

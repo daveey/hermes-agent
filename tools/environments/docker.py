@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from hermes_constants import get_hermes_home
+from tools import capsule_workspace
 from tools.environments.base import BaseEnvironment, EnvironmentConnectionError, _SHELL_ENV_NAME_RE, get_sandbox_dir
 from tools.terminal_tool_config import (
     _host_path_key, _is_windows_drive_path, cwd_follows_host_mount, home_profile_name,
@@ -648,6 +649,7 @@ class DockerEnvironment(BaseEnvironment):
 
     _passwordless_sudo_probe_supported = True
     _profile_scoped_passthrough = True
+    _capsule: Optional[capsule_workspace.WorkspaceBinding] = None  # set only by a bound capsule worker
 
     def _additional_profile_scoped_passthrough_names(self) -> tuple[str, ...]:
         """Keep explicit docker_forward_env values out of shared snapshots."""
@@ -675,9 +677,19 @@ class DockerEnvironment(BaseEnvironment):
         shm_size: str = _DEFAULT_SHM_SIZE,
         shared_container_key: str = "",
         snap_compat: bool = False,
-        image_pinned: bool = False):
+        image_pinned: bool = False,
+        capsule: Optional[capsule_workspace.WorkspaceBinding] = None):
         if cwd == "~":
             cwd = "/root"
+        # A bound capsule worker may only build the exact capsule sandbox; an unbound process is unchanged.
+        capsule_workspace.require_binding(capsule)
+        if capsule is not None:
+            capsule_workspace.check_docker_request(
+                capsule, cwd=cwd, host_cwd=host_cwd, auto_mount_cwd=auto_mount_cwd, volumes=volumes, env=env,
+                forward_env=forward_env, extra_args=extra_args, persistent_filesystem=persistent_filesystem,
+                persist_across_processes=persist_across_processes, shared_container_key=shared_container_key,
+                snap_compat=snap_compat)
+        self._capsule = capsule
         super().__init__(cwd=cwd, timeout=timeout)
         self._persistent = persistent_filesystem
         self._persist_across_processes = persist_across_processes
@@ -710,7 +722,10 @@ class DockerEnvironment(BaseEnvironment):
                 mount, cwd)
             cwd = mount
             self.cwd = mount
-        volume_args.extend(_readonly_skill_mount_args())
+        if capsule is None:
+            volume_args.extend(_readonly_skill_mount_args())
+        else:  # no credential/skills/cache mounts: the capsule dir is the only host path
+            self._check_capsule_mounts(capsule, volume_args, writable_args)
         egress_label, egress_volume_args, egress_host_args, env_args, validated_extra = (
             self._egress_and_env_args(extra_args))
         volume_args.extend(egress_volume_args)
@@ -783,6 +798,12 @@ class DockerEnvironment(BaseEnvironment):
         self.init_session()
 
     # --- __init__ helpers ---
+    def _check_capsule_mounts(self, capsule, volume_args: list[str], writable_args: list[str]) -> None:
+        ws = capsule.workspace
+        if (volume_args != ["-v", f"{ws}:{capsule_workspace.CAPSULE_CWD}"] or self.host_cwd != ws
+                or self.host_cwd_mount != capsule_workspace.CAPSULE_CWD or "-v" in writable_args):
+            raise capsule_workspace.CapsuleWorkspaceError("capsule mount plan is not exactly the bound workspace")
+
     def _egress_and_env_args(self, extra_args) -> tuple[str, list[str], list[str], list[str], list[str]]:
         """Egress credential-injection proxy plumbing (CA mount + HTTPS_PROXY/CA-bundle env so
         outbound traffic routes through the host-side proxy and the sandbox receives proxy tokens
@@ -791,6 +812,10 @@ class DockerEnvironment(BaseEnvironment):
         validated_extra)``; sets ``self._run_env_values`` (injected into the docker-client
         subprocess env at run time and reused verbatim by container-recreation recovery)."""
         egress_volume_args, egress_env_overrides, egress_host_args = _egress_proxy_args_for_docker()
+        if self._capsule is not None and (egress_volume_args or egress_env_overrides or egress_host_args):
+            # Refuse rather than drop the firewall: the capsule mounts nothing but its workspace.
+            raise capsule_workspace.CapsuleWorkspaceError(
+                "egress proxy would add mounts/env to a capsule sandbox; capsule workers need egress off")
         egress_label = _egress_reuse_fingerprint(egress_volume_args, egress_env_overrides, egress_host_args)
         enforce_egress = _egress_enforce_on_docker() if egress_env_overrides else True
         critical_egress_names = _critical_egress_env_names(egress_env_overrides)
@@ -1040,6 +1065,7 @@ class DockerEnvironment(BaseEnvironment):
         """Start a fresh container and return its id. A failed ``docker run`` (exit 125, timeout
         mid-pull) can leave a "Created" orphan the exited-only reaper never catches, so it is
         removed by name before re-raising."""
+        capsule_workspace.require_binding(self._capsule)  # re-pins the workspace inode just before the bind
         container_name = f"hermes-{uuid.uuid4().hex[:8]}"
         run_cmd = self._run_command(container_name, cwd)
         logger.debug("Starting container: %s", ' '.join(run_cmd))
@@ -1085,7 +1111,10 @@ class DockerEnvironment(BaseEnvironment):
         return _name_only_env_args(exec_env)
 
     def _resolve_passthrough_env(self) -> tuple[dict[str, str], set[str]]:
-        """See ``remote_common.resolve_passthrough_env``; explicit docker_forward_env bypasses the blocklist."""
+        """See ``remote_common.resolve_passthrough_env``; explicit docker_forward_env bypasses the blocklist.
+        A capsule sandbox gets no credential passthrough at all."""
+        if self._capsule is not None:
+            return {}, set()
         return resolve_passthrough_env(self._forward_env, hermes_env_loader=_load_hermes_env_vars)
 
     def _build_runtime_env_args_with_unsets(self) -> tuple[list[str], tuple[str, ...], dict[str, str]]:
@@ -1103,6 +1132,7 @@ class DockerEnvironment(BaseEnvironment):
         """Spawn bash inside the container. Init seeds the snapshot; profile-scoped passthrough
         values are re-injected on every command because one container can be shared by
         multiple routed profiles in a gateway process."""
+        capsule_workspace.require_binding(self._capsule)  # every spawn: execute, init, probes, fetches
         assert self._container_id, "Container not started"
         cmd = [self._docker_exe, "exec"]
         if stdin_data is not None:
@@ -1136,6 +1166,7 @@ class DockerEnvironment(BaseEnvironment):
         """Recreate a container removed out-of-band: label-based reuse first (another process
         may have recreated it), else a fresh one from the saved image/run-args. False when
         recovery fails so the caller surfaces the original error."""
+        capsule_workspace.require_binding(self._capsule)
         logger.warning("Container %s appears to be gone — attempting recovery", (self._container_id or "")[:12])
         self._container_id = None
 
@@ -1190,6 +1221,7 @@ class DockerEnvironment(BaseEnvironment):
     def execute(self, command: str, cwd: str = "", **kwargs) -> dict:
         """Execute a command; if the container was removed out-of-band (idle reaper,
         docker prune, OOM, daemon restart) recreate it and retry once."""
+        capsule_workspace.require_binding(self._capsule)
         result = super().execute(command, cwd, **kwargs)
         if (
             result.get("returncode", 0) != 0

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# health: allow FILE_LINES -- trusted capsule observation: a one-shot run lets a loaded verified observer settle the exit code (3 lines at the existing exit chokepoint)
 """Hermes CLI - Main entry point.
 
 Usage:
@@ -94,6 +95,9 @@ def _exit_after_oneshot(rc: object) -> None:
         logging.shutdown()
     except Exception:
         pass
+    observer = sys.modules.get("observer_runtime")
+    if observer is not None:
+        rc = observer.finish_oneshot(rc)
     os._exit(rc if isinstance(rc, int) else (0 if rc is None else 1))
 
 

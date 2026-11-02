@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- trusted capsule observation: two decorator hooks at the existing request/summary chokepoints (no-op unless a verified observer is loaded); logic lives in agent/observation_seam.py
 """API-call helpers extracted from :class:`AIAgent`: non-streaming and streaming
 request drivers, request kwargs builder, assistant-message materializer,
 provider-fallback activator, max-iterations handler, per-turn resource cleanup.
@@ -738,6 +739,9 @@ def _bedrock_converse_call(api_kwargs: dict, *, stream: bool, on_stream_denied=N
     return finish(raw_response)
 
 
+from agent.observation_seam import sdk_request as _observe_sdk_request
+
+@_observe_sdk_request
 def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     """Run one non-streaming LLM request for the active api_mode and return it.
 
@@ -2260,6 +2264,9 @@ def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
 _SUMMARY_ATTEMPT_BUILDERS = {"codex_responses": _codex_summary_attempt, "anthropic_messages": _anthropic_summary_attempt}
 
 
+from agent.observation_seam import unsupported_summary as _unsupported_observed_summary
+
+@_unsupported_observed_summary
 def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     """Request a summary when max iterations are reached. Returns the final response text."""
     warning = f"⚠️  Reached maximum iterations ({agent.max_iterations}). Requesting summary..."

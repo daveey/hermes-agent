@@ -340,6 +340,10 @@ def execute(frame, channel):
     store = RuntimeSessionStore(rpc, scope, outbox_dir(frame['home'], scope['execution_id']), adopted)
     from gateway.session_kanban import bind_worker_context
     bind_worker_context(frame)
+    # [daveey] Capsule-required cards: bind the owner-brokered capsule now, before checkpoint recovery,
+    # hooks, MCP and AIAgent import any tool (no-op without an owner-installed channel; raises otherwise).
+    from agent.observation_bind import observation_bind, observation_finish, observation_revoke
+    observation_bind(frame)
     # Background processes a previous admission of this session started outlive that worker
     # (F24); adopt them so process_manage in this turn can poll and kill them.
     from tools.process_registry import process_registry
@@ -359,6 +363,7 @@ def execute(frame, channel):
     controls = WorkerControls(channel, frame['route'])
     register_gateway_notify(frame['route'], controls.approval)
     agent = None
+    completed = False
     try:
         with policy_scope(policy):
             agent = _construct_agent(frame, AIAgent, policy, model=policy.model, provider=policy.provider, base_url=policy.base_url,
@@ -417,7 +422,15 @@ def execute(frame, channel):
                 raise ValueError('managed_finish_timeout')
             store.finish()
             channel.send('finished')
+            completed = True
     finally:
+        # [daveey] Capsule cards: seal the observation on success (observer ``close``), leave a failed run
+        # poisoned and unsealed; None and a no-op for ordinary cards. Revoke runs whatever the seal did.
+        try:
+            if observation_finish(completed) not in (None, 0):
+                logger.warning('capsule observation left unsealed')
+        finally:
+            observation_revoke()
         unregister_gateway_notify(frame['route'])
         if agent is not None:
             retire_agent(agent)
@@ -461,6 +474,9 @@ def main():
     logger.propagate = False
     frame = None
     try:
+        # [daveey] The owner-only ``--observation-fd`` flag (capsule cards); any other argv is refused.
+        from agent.observation_bind import install_from_argv
+        install_from_argv(sys.argv[1:])
         channel.send('hello', **hello())
         frame = validate_bootstrap(read_frame(sys.stdin.buffer))
         execute(frame, channel)
@@ -473,6 +489,11 @@ def main():
         channel.send('error', reason='managed_worker_failed')
         return 1
     finally:
+        from agent.observation_bind import observation_finish, observation_revoke
+        try:
+            observation_finish(False)  # a failure before execute's try: poisoned, never sealed (else no-op)
+        finally:
+            observation_revoke()
         channel.stream.close()
     return 0
 

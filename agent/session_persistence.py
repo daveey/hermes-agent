@@ -560,6 +560,13 @@ class SessionPersistenceMixin:
     _repair_message_sequence = _forward("agent.agent_runtime_helpers", "repair_message_sequence")
 
     def _flush_messages_to_session_db(self, messages: list[dict], conversation_history: Optional[list[dict]] = None):
+        with _persist_lock(self):
+            result = self._flush_messages_to_session_db_retrying(messages, conversation_history)
+            from agent.observation_seam import persisted as observe_persisted
+            observe_persisted(self, result)
+            return result
+
+    def _flush_messages_to_session_db_retrying(self, messages: list[dict], conversation_history: Optional[list[dict]] = None):
         """Serialize flushes and wait out writer contention without replaying tools.
 
         SessionDB's per-operation deadline bounds contention diagnostics, not the lifetime

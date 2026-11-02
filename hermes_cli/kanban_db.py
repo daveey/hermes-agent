@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- trusted capsule admission: create calls the capsule-aware validator and claim takes a write-free admission_check inside the existing claim transaction; logic lives in hermes_cli/kanban_capsule_admission.py
 """SQLite-backed Kanban board shared across profiles (the cross-profile coordination primitive).
 
 Lives under the shared Hermes root: ``default`` board DB at ``<root>/kanban.db`` (pre-boards
@@ -1337,7 +1338,7 @@ def create_task(
 
     from hermes_cli.kanban_db_creation import validate_create_assignment  # [daveey] runs_on-aware
     required, model_override, provider_override = validate_create_assignment(
-        conn, assignee, runs_on=runs_on, requires=requires, workspace_kind=workspace_kind,
+        conn, assignee, project_id=project_id, project_repo=project_repo, runs_on=runs_on, requires=requires, workspace_kind=workspace_kind,
         workspace_path=workspace_path, skills=skills_list, validate_skills=validate_skills,
         require_declaration=require_declaration, model=model_override, provider=provider_override)
     from hermes_cli.kanban_pin_provider import reject_spaced_pin
@@ -2184,12 +2185,14 @@ def unsatisfied_parents(conn: sqlite3.Connection, task_id: str) -> list[tuple[st
 
 def claim_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
+    claimer: Optional[str] = None, admission_check=None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
     Returns the claimed ``Task`` on success, ``None`` if the task was
-    already claimed (or is not in ``ready`` status).
+    already claimed (or is not in ``ready`` status). ``admission_check``: a
+    write-free callable run inside the admitted claim transaction before any
+    write; truthy refuses the claim (the dispatcher's capsule recheck). [daveey]
     """
     now = int(time.time())
     lock = claimer or _claimer_id()
@@ -2202,6 +2205,8 @@ def claim_task(
         return None
     with gate, claim_transaction(conn) as admitted:
         if not admitted:
+            return None
+        if admission_check is not None and admission_check():  # [daveey] same txn as the CAS below
             return None
         # Single enforcement point: never ready -> running with an undone
         # parent, whichever writer set 'ready'. Demote to 'todo';
@@ -2227,11 +2232,11 @@ def claim_task(
 
 def claim_review_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
+    claimer: Optional[str] = None, admission_check=None,
 ) -> Optional[Task]:
     """Atomic ``review -> running`` (None when lost). Parents are re-checked
     (one may have reopened meanwhile) and a NEW run tracks the reviewer
-    separately from the implementer."""
+    separately from the implementer. ``admission_check``: as :func:`claim_task`."""
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
@@ -2242,6 +2247,8 @@ def claim_review_task(
         return None
     with gate, claim_transaction(conn) as admitted:
         if not admitted:
+            return None
+        if admission_check is not None and admission_check():  # [daveey] same txn as the CAS below
             return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
