@@ -5,6 +5,7 @@ and tool deregistration. Origin state and patchable helpers are read through ``_
 
 import asyncio
 import logging
+import sys
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -368,6 +369,11 @@ class MCPServerRunMixin:
                 raise
             except Exception as exc:
                 self.session = None
+                # Late GC closes retained transport coroutines after the loop and
+                # import machinery are gone. Cleanup failures then are not a
+                # reconnect opportunity: classification itself needs live imports.
+                if sys.is_finalizing():
+                    break
                 if not await self._on_transport_error(exc, budget):
                     break
             finally:
