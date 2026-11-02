@@ -16,6 +16,7 @@ KANBAN_OWNER_RESTART_EXIT_CODE = 76
 def exit_code_kind(code: int) -> tuple[str, int]:
     """``(kind, code)`` for a worker's exit code, however it was observed."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_owner_down import KANBAN_OWNER_DOWN_EXIT_CODE
     from hermes_cli.kanban_owner_unavailable import KANBAN_OWNER_UNAVAILABLE_EXIT_CODE
 
     if code == 0:
@@ -26,6 +27,8 @@ def exit_code_kind(code: int) -> tuple[str, int]:
         return ("terminal_provider", code)
     if code == KANBAN_OWNER_UNAVAILABLE_EXIT_CODE:
         return ("owner_unavailable", code)
+    if code == KANBAN_OWNER_DOWN_EXIT_CODE:  # the owner's service is failed/masked/disabled [daveey]
+        return ("owner_down", code)
     if code == KANBAN_OWNER_RESTART_EXIT_CODE:
         return ("owner_restart", code)
     return ("nonzero_exit", code)

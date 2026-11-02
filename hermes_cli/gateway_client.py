@@ -48,6 +48,8 @@ def gateway_ws_target(endpoint, ticket):
 class GatewayClientError(ValueError):
     # [daveey] Set by kanban_worker_client: the owner never admitted the claim (no turn ran).
     owner_unavailable = False
+    # [daveey] Set by kanban_worker_client: the owner's service is failed/masked/disabled (kanban_owner_down).
+    owner_down = False
 
 
 DISCONNECTED = ("Gateway disconnected; turn outcome is unknown. "

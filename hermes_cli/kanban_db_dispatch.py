@@ -190,6 +190,7 @@ class DispatchResult:
     on multi-lane setups, NOT operator-actionable; tracked apart so health
     telemetry can tell "stuck" from "correctly idle"."""
     skipped_per_profile_capped: list[tuple[str, str, int]] = field(default_factory=list)
+    owner_down: list[tuple[str, str, str]] = field(default_factory=list)  # (task, profile, code) held, unclaimed [daveey]
     """``(task_id, assignee, current_running_count)`` deferred because the
     assignee is at ``kanban.max_in_progress_per_profile``. Picked up on a later
     tick; separate bucket so dashboards show "profile busy" vs "stuck"."""
@@ -1279,7 +1280,7 @@ def _classify_dead_worker_exit(
             {"pid": pid, "claimer": claimer, "exit_kind": kind, "exit_code": code, "terminal_provider": True},
             terminal_provider=True,
         )
-    if kind in ("nonzero_exit", "owner_unavailable"):  # owner_unavailable: kanban_owner_unavailable.note rebooks it
+    if kind in ("nonzero_exit", "owner_unavailable", "owner_down"):  # owner_*: kanban_owner_unavailable.note rebooks it
         error_text = f"pid {pid} exited with code {code}"
     elif kind == "signaled":
         error_text = f"pid {pid} killed by signal {code}"
@@ -2100,19 +2101,8 @@ def _dispatch_lane_task(
     profile_exists = _profile_exists_fn()
     if profile_exists is not None and not profile_exists(assignee):
         result.skipped_nonspawnable.append(task_id)
-        # Per-task diagnostic so ``show``/``tail`` name the missing profile instead of leaving
-        # the card in ``ready`` with zero board evidence (#122422). Unlike a respawn guard the
-        # condition never expires on its own, so write it once: a repeat only when something
-        # else happened on the card since (reassign, comment) — not one row per tick forever,
-        # and not one row per foreign home per tick on a shared board (#101015).
-        if not dry_run:
-            with _kb.write_txn(conn):
-                last = conn.execute(
-                    "SELECT kind, payload FROM task_events WHERE task_id = ? "
-                    "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id,)).fetchone()
-                if (last is None or last["kind"] != "skipped_nonspawnable"
-                        or last["payload"] != _kb._json_or_null({"assignee": assignee})):
-                    _kb._append_event(conn, task_id, "skipped_nonspawnable", {"assignee": assignee})
+        from hermes_cli.kanban_db_dispatch_preclaim import note_nonspawnable
+        note_nonspawnable(conn, task_id, assignee, dry_run=dry_run)
         return False
     # Per-profile cap: one profile's local model / API quota / browser pool
     # must not be overwhelmed by a fan-out even with global headroom.
@@ -2144,6 +2134,13 @@ def _dispatch_lane_task(
         result.spawned.append((task_id, assignee, ""))
         _count_spawn(assignee)
         return True
+    # The assignee's own gateway service is failed/masked/disabled: claim nothing, hold the card and
+    # file the owner-down card (``kanban_owner_down``). Before it, every claim crashed on it. [daveey]
+    from hermes_cli.kanban_owner_down import preflight as _owner_down_preflight
+    down = _owner_down_preflight(conn, task_id, assignee)
+    if down is not None:
+        result.owner_down.append((task_id, assignee, down.code))
+        return False
     from hermes_cli.kanban_gateway_drain import claim_if_admitting
     _kb._sync.pop_claim_deferral(task_id)
     claimed = claim_if_admitting(conn, task_id, assignee, lane, ttl_seconds)
