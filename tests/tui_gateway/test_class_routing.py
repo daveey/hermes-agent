@@ -14,7 +14,7 @@ streaming_route = test_model_routing_agent.streaming_route
 @pytest.fixture
 def native_transport(monkeypatch):
     import json
-    import anthropic
+    anthropic = pytest.importorskip("anthropic", reason="Native Anthropic wire tests require the anthropic SDK")
     import httpx
     sent = []
 
@@ -111,6 +111,7 @@ def test_desktop_readiness_uses_native_fence_without_allocation(routing_home, st
 
 
 def test_desktop_exhaustion_cannot_enter_paid_fallback(routing_home, streaming_route, monkeypatch):
+    pytest.importorskip("anthropic", reason="Native Anthropic fallback guard requires the anthropic SDK")
     from agent.model_routing import ModelRoutingError
     monkeypatch.setattr(server, "_resolve_startup_runtime", lambda: ("class:deep", "auto"))
     monkeypatch.setattr(server, "_agent_cbs", lambda sid: {})

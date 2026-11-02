@@ -172,7 +172,7 @@ def _api_sub(chat_id=SESSION, profile="builder"):
 def test_served_profile_wake_runs_in_process_only_for_the_session_it_owns(served, monkeypatch):
     """Owned session → in-process wake in the owner's scope; everything else fails closed; the
     default profile keeps its HTTP self-post."""
-    import aiohttp
+    aiohttp = pytest.importorskip("aiohttp", reason="API server wake transport requires aiohttp")
 
     _own_session(served.builder, SESSION, "builder")
     _FakeHttpSession.calls = []
@@ -229,6 +229,7 @@ def test_served_profile_wake_runs_in_process_only_for_the_session_it_owns(served
 def test_internal_session_turn_targets_the_live_session_under_the_owner_profile(served, monkeypatch):
     """Adapter-level: the in-process turn binds the proven profile, adopts the compression tip,
     and never runs against a session the owner's store does not hold."""
+    pytest.importorskip("aiohttp", reason="API server error responses require aiohttp")
     from gateway.platforms.api_server import APIServerAdapter, _api_request_profile
 
     parent, tip = "20260918_010000_parent", "20260918_020000_tip"

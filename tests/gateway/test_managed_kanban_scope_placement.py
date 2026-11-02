@@ -1,5 +1,6 @@
 """A managed Kanban worker and its descendants land in the run's real, finite systemd scope."""
 import asyncio
+import errno
 import json
 import os
 import shutil
@@ -78,7 +79,73 @@ def _reap(process):
         process.stdout.close()
 
 
-def test_child_and_descendant_inherit_run_scope_and_limit(run_scope):
+def _probe_migration(target):
+    """Scope creation does not grant migration across a nondelegated common ancestor.
+
+    Probe the kernel directly, not migrate(): a production placement regression must
+    still fail on capable hosts. Only move our disposable child, never the test runner.
+    """
+    process = _spawn()
+    try:
+        path = target / 'cgroup.procs'
+        try:
+            with path.open('wb', buffering=0) as stream:
+                stream.write(f'{process.pid}\n'.encode())
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EPERM, errno.EROFS):
+                raise
+            pytest.skip(f'needs cgroup migration permission from {_cgroup(process.pid)} to {path}: {exc}')
+    finally:
+        _reap(process)
+
+
+@pytest.mark.parametrize('error', [None, errno.EACCES, errno.EPERM, errno.EROFS, errno.EIO])
+def test_migration_probe_classifies_kernel_errors_and_reaps(tmp_path, monkeypatch, error):
+    from contextlib import contextmanager, nullcontext
+
+    made = []
+    real_spawn = _spawn
+
+    def spawn():
+        process = real_spawn()
+        made.append(process)
+        return process
+
+    real_open = Path.open
+
+    @contextmanager
+    def open_control(path, *args, **kwargs):
+        if path != tmp_path / 'cgroup.procs':
+            with real_open(path, *args, **kwargs) as stream:
+                yield stream
+            return
+
+        def write(value):
+            assert value == f'{made[0].pid}\n'.encode()
+            if error is not None:
+                raise OSError(error, os.strerror(error))
+        yield SimpleNamespace(write=write)
+
+    monkeypatch.setattr(sys.modules[__name__], '_spawn', spawn)
+    monkeypatch.setattr(Path, 'open', open_control)
+    expected = nullcontext()
+    if error == errno.EIO:
+        expected = pytest.raises(OSError, match='Input/output error')
+    elif error is not None:
+        expected = pytest.raises(pytest.skip.Exception, match='needs cgroup migration permission')
+    with expected:
+        _probe_migration(tmp_path)
+    assert len(made) == 1 and made[0].poll() is not None
+    assert made[0].stdin.closed and made[0].stdout.closed
+
+
+@pytest.fixture
+def migration_access(run_scope):
+    target = scope_mod.CGROUP_ROOT / _cgroup(run_scope.submitter.pid).lstrip('/')
+    _probe_migration(target)
+
+
+def test_child_and_descendant_inherit_run_scope_and_limit(run_scope, migration_access):
     process = scope_mod.placing_spawn(_spawn, run_scope.policy)()
     try:
         process.stdin.write(b'go\n')
@@ -211,7 +278,9 @@ def test_migration_failure_kills_and_reaps_child(run_scope, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('cancel_early', [True, False])
-async def test_cancel_interleaving_leaves_no_child(run_scope, monkeypatch, cancel_early):
+async def test_cancel_interleaving_leaves_no_child(run_scope, monkeypatch, cancel_early, request):
+    if not cancel_early:
+        request.getfixturevalue('migration_access')
     from gateway.session_worker_spawn import acquire_process
     made = []
 
@@ -247,7 +316,7 @@ async def test_cancel_interleaving_leaves_no_child(run_scope, monkeypatch, cance
 
 
 @pytest.mark.asyncio
-async def test_spawn_registered_worker_places_real_child(run_scope, monkeypatch):
+async def test_spawn_registered_worker_places_real_child(run_scope, monkeypatch, migration_access):
     """The production spawn path (not just the helper) lands the Popen child in the run scope."""
     from gateway import session_managed_worker as managed
     authority = SimpleNamespace(profile_id='p', pending_results={}, _managed_spawning={})
