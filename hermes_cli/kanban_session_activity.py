@@ -1353,6 +1353,12 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
     now = time.time()
     for path in paths:
         key = _board_content_key(path)
+        if key[:1] == ("stat",):
+            # A same-mtime commit must not survive the counts TTL through this
+            # row memo. data_version observes commits on the retained reader;
+            # bind it to that connection because its sequence is connection-local.
+            with cached_ro(path) as conn:
+                key = (key, conn, conn.execute("PRAGMA data_version").fetchone()[0])
         hit = _board_memo.get(str(path))
         reads = hit[1] if hit is not None and hit[0] == key else None
         if reads is not None and ((sink is not None and "parked" not in reads)

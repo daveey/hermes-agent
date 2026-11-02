@@ -9,7 +9,9 @@ connected check may read its own state).
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -108,6 +110,88 @@ def test_a_home_switch_or_the_max_age_reloads(home, loads, tmp_path, monkeypatch
     now["mono"] += wsg._PLATFORMS_MAX_AGE_S + 1
     wsg._load_configured_gateway_platforms()
     assert len(loads) == 3
+
+
+def test_a_legacy_gateway_json_write_shows_on_the_next_poll(home, loads):
+    h, _now = home
+    gateway = h / "gateway.json"
+    for enabled, expected_loads in ((True, 1), (False, 2)):
+        _write(gateway, json.dumps({"platforms": {"telegram": {
+            "enabled": enabled, "token": "abc123real",
+        }}}))
+        platforms = wsg._load_configured_gateway_platforms()
+        assert ("telegram" in platforms) is enabled
+        assert len(loads) == expected_loads
+        assert wsg._load_configured_gateway_platforms() == platforms
+        assert len(loads) == expected_loads
+
+
+@pytest.fixture
+def request_scopes(home, tmp_path, monkeypatch):
+    from agent import secret_scope
+    from tui_gateway import launch_profile_policy
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(secret_scope, "_MULTIPLEX_ACTIVE", False)
+    monkeypatch.setattr(launch_profile_policy, "_snapshot", None)
+    monkeypatch.delenv("HERMES_MANAGED_DIR", raising=False)
+
+
+@pytest.mark.parametrize("filename", ["config.yaml", ".env"])
+def test_a_managed_layer_write_shows_on_the_next_request(
+    home, loads, tmp_path, monkeypatch, request_scopes, filename,
+):
+    from hermes_cli.web_server_profiles import _config_profile_scope, _hermes_home_scope
+
+    h, _now = home
+    profile = h / "profiles" / "managed-client"
+    profile.mkdir(parents=True)
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+    contents = {
+        "config.yaml": (
+            "platforms:\n  telegram:\n    enabled: true\n    token: abc123real\n",
+            "platforms:\n  telegram:\n    enabled: false\n    token: abc123real\n",
+        ),
+        ".env": ("TELEGRAM_BOT_TOKEN=abc123real\n", "TELEGRAM_BOT_TOKEN=\n"),
+    }
+    environ = dict(os.environ)
+    for index, content in enumerate(contents[filename], start=1):
+        _write(managed / filename, content)
+        # A native request binds its home before the config scope builds fresh secrets.
+        with _hermes_home_scope(profile), _config_profile_scope(None):
+            platforms = wsg._load_configured_gateway_platforms()
+            assert ("telegram" in platforms) is (index == 1)
+            assert len(loads) == index
+            assert wsg._load_configured_gateway_platforms() == platforms
+            assert len(loads) == index
+        assert dict(os.environ) == environ
+
+
+def test_request_home_switch_with_identical_environ_and_missing_files(
+    home, loads, monkeypatch, request_scopes,
+):
+    from hermes_cli.web_server_profiles import _config_profile_scope, _hermes_home_scope
+    from hermes_constants import get_hermes_home
+
+    h, _now = home
+    other = h / "profiles" / "empty"
+    other.mkdir(parents=True)
+    # Only the launch profile owns this injected token; a secondary scope must not borrow it.
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "abc123real")
+    environ = dict(os.environ)
+    for index, (directory, connected) in enumerate(((h, True), (other, False), (h, True)), start=1):
+        assert all(not (directory / name).exists() for name in ("config.yaml", "gateway.json", ".env"))
+        with _hermes_home_scope(directory), _config_profile_scope(None):
+            assert get_hermes_home() == directory
+            assert dict(os.environ) == environ
+            platforms = wsg._load_configured_gateway_platforms()
+            assert ("telegram" in platforms) is connected
+            assert len(loads) == index
+            assert wsg._load_configured_gateway_platforms() == platforms
+            assert len(loads) == index
+        assert dict(os.environ) == environ
 
 
 def test_a_failed_load_is_not_cached(home, monkeypatch):
