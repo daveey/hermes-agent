@@ -1330,10 +1330,16 @@ def _processes_with_hermes_home_under(roots) -> list[int]:
 
     Linux only (``/proc/<pid>/environ``; unreadable entries are another user's and skipped).
     Elsewhere the scan is empty: a test-spawned daemon there is the per-test guard's problem.
+
+    Membership is decided lexically: another process's ``HERMES_HOME`` is never resolved, because
+    the host's live gateways (the hub's ``~/.hermes/profiles/<p>``) name the real Hermes home and
+    ``realpath`` would ``lstat`` it, which the real-home I/O guard refuses. Only this session's own
+    roots are resolved, and both their given and resolved spellings are matched, so a child that
+    got either spelling of a root is still found.
     """
     if not sys.platform.startswith("linux") or not os.path.isdir("/proc"):
         return []
-    resolved = [Path(r).resolve() for r in roots if r]
+    resolved = {Path(os.path.abspath(r)) for r in roots if r} | {Path(r).resolve() for r in roots if r}
     found = []
     for entry in os.scandir("/proc"):
         if not entry.name.isdigit() or int(entry.name) == os.getpid():
@@ -1347,9 +1353,12 @@ def _processes_with_hermes_home_under(roots) -> list[int]:
         if not home:
             continue
         try:
-            path = Path(os.fsdecode(home)).resolve()
+            text = os.fsdecode(home)
         except (OSError, ValueError):
             continue
+        if not os.path.isabs(text):  # relative to that process's cwd, not ours
+            continue
+        path = Path(os.path.normpath(text))
         if any(path == root or path.is_relative_to(root) for root in resolved):
             found.append(int(entry.name))
     return found

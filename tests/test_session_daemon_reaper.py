@@ -46,3 +46,35 @@ def test_session_teardown_terminates_daemons_under_the_session_basetemp_only(tmp
             if proc.poll() is None:
                 proc.kill()
             proc.wait(timeout=5)
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.live_system_guard_bypass  # signals nothing: the only child is outside every session root
+def test_session_teardown_skips_a_live_gateway_on_the_real_hermes_home_without_touching_it(tmp_path):
+    # A host's own gateways (hermes-hub: HERMES_HOME=~/.hermes/profiles/<p>) are visible in /proc.
+    # The scan must neither signal them nor resolve their home: realpath lstat()s the real home,
+    # which the real-home I/O guard (active in this test) refuses.
+    assert suite_conftest._REAL_HERMES_ROOT_CANDIDATES, "the real-home guard has no root to refuse"
+    real_profile = suite_conftest._REAL_HERMES_ROOT_CANDIDATES[0] / "profiles" / "live-gateway"
+    basetemp = tmp_path / "basetemp"
+    live = _detached(real_profile, "live")
+    try:
+        wait_until(lambda: _environ_home(live.pid) == os.fsencode(real_profile), timeout=10,
+                   what="the live-gateway stand-in exec'd with its HERMES_HOME")
+        config = SimpleNamespace(_tmp_path_factory=SimpleNamespace(_basetemp=basetemp))
+        assert live.pid not in suite_conftest._reap_session_hermes_processes(config)
+        assert live.poll() is None, "a process on the real Hermes home was signalled"
+    finally:
+        if live.poll() is None:
+            live.kill()
+        live.wait(timeout=5)
+
+
+def _environ_home(pid):
+    # /proc is outside every guarded root; read it the way the reaper does.
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as handle:
+            environ = handle.read().split(b"\0")
+    except OSError:
+        return None
+    return next((item[12:] for item in environ if item.startswith(b"HERMES_HOME=")), None)
