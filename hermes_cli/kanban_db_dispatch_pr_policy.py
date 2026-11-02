@@ -33,8 +33,20 @@ def _says_pull_does_not_block(body: str) -> bool:
 
     # A disclaimer in a mixed-URL comment may refer to a different pull from the
     # publication. Ambiguous prose must not release the duplicate-work guard.
-    urls = {norm_pr(url) for url in dispatch._RESPAWN_GUARD_PR_URL_RE.findall(body)}
-    return len(urls) == 1 and bool(_NONBLOCKING_RE.search(body))
+    urls = dispatch._RESPAWN_GUARD_PR_URL_RE.findall(body)
+    if len(urls) != 1 or re.search(r"\b(?:opened|created|published|pushed)\b", body, re.IGNORECASE):
+        return False
+    disclaimer = _NONBLOCKING_RE.search(body)
+    if disclaimer is None:
+        return False
+    # Recognize a deliberately narrow informational statement: the URL is the
+    # subject, directly or via "<URL> ... . It ...". Unrelated lint/CI subjects,
+    # publication statements, extra clauses and ambiguous prose remain guarded.
+    prefix = body[:disclaimer.start()].replace(urls[0], "PULL")
+    return bool(
+        re.fullmatch(r"\s*(?:See\s+)?PULL(?:\s+[^.!?\n]+\.\s+It)?\s+", prefix, re.IGNORECASE)
+        and re.fullmatch(r"[.!]?\s*", body[disclaimer.end():])
+    )
 
 
 def _own_contract_key(conn: sqlite3.Connection, task_id: str) -> Optional[str]:

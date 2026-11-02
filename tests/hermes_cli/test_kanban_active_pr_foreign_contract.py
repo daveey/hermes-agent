@@ -139,6 +139,20 @@ def test_mixed_comment_disclaimer_does_not_drop_published_pull(disclaimed, live_
         assert _guard(conn, tid) == "active_pr"
 
 
+@pytest.mark.parametrize("body", [
+    f"Opened {OWN}. The flaky lint check doesn't block this card.",
+    f"Opened {OWN}. Opened {OWN}/ again. The CI failure does not block the card.",
+    f"Opened {OWN.upper()} and {OWN}. Lint won't block you.",
+    f"Published {OWN}. It does not block this task.",
+    f"See {OWN}. The CI failure does not block this card.",
+])
+def test_publication_or_unrelated_subject_is_not_a_pull_disclaimer(body):
+    with kbc.connect() as conn:
+        tid = _claimed(conn, "ambiguous disclaimer")
+        worker_comment(conn, tid, "a", body)
+        assert _guard(conn, tid) == "active_pr"
+
+
 def test_nonblocking_comment_does_not_exempt_a_real_open_comment():
     with kbc.connect() as conn:
         tid = _claimed(conn, "opened then disclaimed")
