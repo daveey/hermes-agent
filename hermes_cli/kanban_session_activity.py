@@ -1400,7 +1400,8 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
                 _log.debug("kanban stalled read failed for %s: %s", path, exc)
         keys = getattr(_local_keys_sink, "keys", None)
         if keys is not None:
-            for sid, cards in _identity.local_keys(path, {**reads, "stalled_pairs": stalled_pairs}).items():
+            for sid, cards in _identity.local_keys(path, {**reads, "stalled_pairs": stalled_pairs},
+                                                   board=_board_slug(path)).items():
                 keys.setdefault(sid, set()).update(cards)
 
 
@@ -1925,10 +1926,8 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         # [daveey] The open card ids the chat waits on (lineage-wide, capped): the sidebar's "waiting on N cards".
         open_ids = {tid for sid in ids for tid in waiting.get(sid, ())}
         # Plugin sources (pending close-outs) must not recount local OR scoped remote obligations.
-        extra_ids = {tid for sid in ids for tid in extra.get(sid, ())}
-        counted_remote = {key for sid in ids for key, bucket, _ in remote_keys.get(sid, ())
-                          if bucket in ("active", "blocked")}
-        pending = extra_ids - open_ids - counted_remote
+        pending, extra_ids = _identity.closeout_extra(open_ids, {t for sid in ids for t in extra.get(sid, ())},
+                                                      [remote_keys.get(sid, ()) for sid in ids])
         if pending:
             row["kanban_active"] = int(row.get("kanban_active") or 0) + len(pending)
         # [daveey] Parked/held are subsets of kanban_active. kanban_parked is stamped (even 0) whenever there is open
