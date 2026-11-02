@@ -183,7 +183,7 @@ def _collect_cache_data(jobs: list[dict], repo: str, token: str, test_durations:
             continue
         parsed = parse_cache_log(log, job["steps"])
         entries.extend(dict(entry, job=name, job_id=job_id, job_url=job["html_url"]) for entry in parsed)
-        if test_durations is not None and str(job.get("name", "")).startswith("Run tests ("):
+        if test_durations is not None and _TEST_SLICE_JOB_RE.search(str(job.get("name", ""))):
             files, slow = parse_test_durations(log)
             for bucket, found in (("files", files), ("slow_cases", slow)):
                 into = test_durations.setdefault(bucket, {})
@@ -205,6 +205,10 @@ _PROGRESS_RE = re.compile(r"[✓✗] (\S+\.py) \((?:[^()]*, )?(\d+(?:\.\d+)?)s\)
 _SLOW_CASE_RE = re.compile(r"⏱ slow test case (\d+(?:\.\d+)?)s (\S+)\s*$")
 _TEST_FILE_RE = re.compile(r"(?:^|/)tests?/(?:.*/)?(?:test_[^/]*|[^/]*_test)\.py$")
 _ADDED_TEST_RE = re.compile(r"^\+\s*(?:async\s+)?def\s+(test\w*)\s*\(")
+
+# A test-slice job. The API names a reusable-workflow job in the caller run "Python tests / Run tests (3/8)"
+# (empty workflow_name), so match the last path segment, not the start of the name.
+_TEST_SLICE_JOB_RE = re.compile(r"(?:^|/ )Run tests \(")
 
 # Attribution thresholds: the PR's added/changed test files in total, and one added case.
 _PR_TEST_FILES_WARN_S = 60.0
@@ -271,6 +275,9 @@ def pr_test_attribution(timings: dict) -> dict | None:
         return None
     durations = timings.get("test_durations") or {}
     per_file = durations.get("files") or {}
+    if not per_file:
+        # No slice log yielded a single file duration: collection broke, so the PR's cost is unknown (not 0 s).
+        return None
     pr_files = list(pr.get("test_files") or [])
     file_secs = {f: float(per_file.get(f, 0.0)) for f in pr_files}
     added = pr.get("added_cases") or {}

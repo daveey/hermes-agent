@@ -168,3 +168,34 @@ def test_collect_pr_changes_outside_a_pull_request_is_none(monkeypatch, tmp_path
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
     monkeypatch.setattr(_mod, "api_get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no API call")))
     assert _mod.collect_pr_changes("tok", "daveey/hermes") is None
+
+
+# Regression (2026-11-01, PR #575's own bot comment): the test-slice jobs come back from the API as
+# "Python tests / Run tests (8/8)" (a reusable-workflow job in the caller run, empty workflow_name), so a
+# `startswith("Run tests (")` check skipped every slice and the item said the PR's files took "0.0 s (not run)".
+def test_collect_reads_durations_from_slice_jobs_named_with_the_caller_prefix(monkeypatch):
+    jobs = [{"job_id": 7, "name": "Python tests / Run tests (8/8)", "workflow_name": "", "conclusion": "success",
+             "steps": [], "html_url": "u"},
+            {"job_id": 8, "name": "Run tests (1/8)", "workflow_name": "Python tests", "conclusion": "success",
+             "steps": [], "html_url": "u"},
+            {"job_id": 9, "name": "Python lints / ruff", "workflow_name": "", "conclusion": "success",
+             "steps": [], "html_url": "u"}]
+    logs = {7: _LOG, 8: "2026-11-01T20:05:21Z [ 1% | 1/~9 | ✓1 | ✗0] ✓ tests/ci/test_new.py (9✓, 1.3s)\n",
+            9: "2026-11-01T20:05:21Z ✓ tests/lint_only.py (1✓, 5.0s)\n"}
+    monkeypatch.setattr(_mod, "_job_log", lambda job_id, repo, token: logs[job_id])
+    monkeypatch.setattr(_mod, "parse_cache_log", lambda log, steps: [])
+    durations: dict = {"files": {}, "slow_cases": {}}
+    _mod._collect_cache_data(jobs, "o/r", "t", durations)
+    assert durations["files"]["tests/hermes_cli/test_kanban.py"] == 120.5
+    assert durations["files"]["tests/ci/test_new.py"] == 1.3
+    assert "tests/lint_only.py" not in durations["files"]
+    assert durations["slow_cases"] == {"tests/hermes_cli/test_kanban.py::TestX::test_big[a]": 12.4}
+
+
+def test_no_per_file_durations_at_all_is_unknown_not_zero_seconds():
+    # Durations missing for the whole run means collection broke, not that the PR's tests took 0 s:
+    # the regression must not be waved through as Info.
+    cur, base = _slow_ci({})
+    result = _result(_mod.generate_review_status(cur, base))
+    assert result["kind"] == "warning", result
+    assert "0.0 s" not in result["summary"]
