@@ -4,11 +4,13 @@ from __future__ import annotations
 from collections import Counter
 from functools import lru_cache
 import ctypes
+import inspect
 import os
 import json
 import sys
 import threading
 import time
+import traceback
 
 
 # Darwin <sys/proc_info.h>. PROC_PIDTHREADINFO (5) matches its arg against the
@@ -64,82 +66,179 @@ def _cpu_seconds(native_id):
         return None
 
 
-def _collect(seconds, hz, top):
-    records = {}
-    samples = 0
-    deadline = time.monotonic() + seconds
-    next_tick = time.monotonic()
-    code_keys = {}
-    previous_frames = {}
-    frames = {}
-    previous_stacks = {}
-    while time.monotonic() < deadline:
-        threads = {t.ident: t for t in threading.enumerate()}
-        frames = sys._current_frames()
-        current_stacks = {}
+# Native CPU clocks are read at a thread's first observation, then on refresh
+# ticks at most this often (monotonic seconds), and once at window end.
+_CPU_REFRESH_S = 0.1
+# Frames of these codes can be suspended and resumed under a different caller,
+# so a chain containing one is never reused from a previous snapshot.
+_SUSPENDABLE = inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR | inspect.CO_ITERABLE_COROUTINE
+
+
+def _read_cpu(thread, native_id):
+    cpu = _cpu_seconds(native_id)
+    # Checked AFTER the read: a thread that is still alive still owns its kernel
+    # TID, while a dead thread's value may come from a reused Linux TID.
+    return cpu if cpu is not None and thread.is_alive() else None
+
+
+def _new_row(thread, native_id, sample):
+    return dict(name=thread.name, native_id=native_id, samples=0, first_seen_sample=sample,
+                stack_counts={}, cpu_start=None, cpu_last=None, cpu_last_sample=None, cpu_missed=False)
+
+
+def _record_cpu(row, cpu, sample):
+    if cpu is None:
+        if row['cpu_start'] is None:
+            row['cpu_missed'] = True  # a later first success is still a lower bound
+        return
+    if row['cpu_start'] is None:
+        row['cpu_start'] = cpu
+    row['cpu_last'], row['cpu_last_sample'] = cpu, sample
+
+
+class _Window:
+    """Per-window sampler state. Retains only the last walked frame snapshot."""
+
+    def __init__(self):
+        self.records = {}
+        self.code_keys = {}  # id(code) -> (code, frame key, suspendable); keeps ids valid
+        self.previous_frames = {}
+        self.previous = {}  # ident -> (row, stack_key, reusable)
+        self.batchable = False
+        self.run = 0  # open run of ticks identical to ``previous_frames``
+        self.run_last = 0
+
+    def flush(self):
+        if self.run:
+            for row, stack_key, _ in self.previous.values():
+                row['samples'] += self.run
+                row['last_seen_sample'] = self.run_last
+                row['stack_counts'][stack_key] += self.run
+            self.run = 0
+
+    def walk(self, frame, reusable):
+        stack = []
+        code_keys = self.code_keys
+        while frame is not None:
+            code = frame.f_code
+            code_id = id(code)
+            entry = code_keys.get(code_id)
+            if entry is None:
+                # Avoid expensive structural code-object hashing on every tick.
+                entry = code_keys[code_id] = (
+                    code, f'{code.co_filename}:{code.co_firstlineno}:{code.co_name}',
+                    bool(code.co_flags & _SUSPENDABLE))
+            if entry[2]:
+                reusable = False
+            stack.append(code_id)
+            frame = frame.f_back
+        return tuple(stack), reusable
+
+    def slow_tick(self, sample, cpu_due, no_greenlet, before, frames, after):
+        self.flush()
+        current = {}
+        batchable = no_greenlet
         for ident, frame in frames.items():
-            thread = threads.get(ident)
-            if thread is None or thread.native_id is None:
+            thread = after.get(ident)
+            # The same Thread object on both sides owned this ident at snapshot time.
+            if thread is None or before.get(ident) is not thread or thread.native_id is None:
+                if thread is not None or ident in before:
+                    batchable = False  # transient: re-check next tick
                 continue
-            key = (thread, thread.native_id)
-            cpu = _cpu_seconds(thread.native_id)
-            if key not in records:
-                records[key] = dict(name=thread.name, native_id=thread.native_id,
-                                    samples=0, first_seen_sample=samples,
-                                    stack_counts={},
-                                    cpu_start=cpu, cpu_last=cpu)
-            row = records[key]
-            row['samples'] += 1
-            row['last_seen_sample'] = samples
-            unchanged = cpu is not None and cpu == row['cpu_last'] and previous_frames.get(ident) is frame
-            if cpu is not None:
-                row['cpu_last'] = cpu
-            if unchanged and ident in previous_stacks:
-                stack_key = previous_stacks[ident]
+            native_id = thread.native_id
+            row = self.records.get((thread, native_id))
+            if row is None:
+                row = self.records[thread, native_id] = _new_row(thread, native_id, sample)
+                _record_cpu(row, _read_cpu(thread, native_id), sample)
+            elif cpu_due:
+                _record_cpu(row, _read_cpu(thread, native_id), sample)
+            prior = self.previous.get(ident)
+            if (prior is not None and prior[2] and prior[0] is row and no_greenlet
+                    and self.previous_frames.get(ident) is frame):
+                stack_key, reusable = prior[1], True
             else:
-                stack = []
-                while frame is not None:
-                    code = frame.f_code
-                    code_id = id(code)
-                    if code_id not in code_keys:
-                        # Avoid expensive structural code-object hashing on every tick.
-                        code_keys[code_id] = (code, f'{code.co_filename}:{code.co_firstlineno}:{code.co_name}')
-                    stack.append(code_id)
-                    frame = frame.f_back
-                stack_key = tuple(stack)
-            current_stacks[ident] = stack_key
+                stack_key, reusable = self.walk(frame, no_greenlet)
+            row['samples'] += 1
+            row['last_seen_sample'] = sample
             counts = row['stack_counts']
             counts[stack_key] = counts.get(stack_key, 0) + 1
-        # Retain only the preceding snapshot to compare real frame identity (not
-        # reusable ids). Reuse its stack only if the native CPU clock has not moved:
-        # a resumed generator can keep its leaf frame but acquire a different caller.
-        # No locals/source are read; all frame references are cleared at window end.
-        previous_frames = frames
-        previous_stacks = current_stacks
-        samples += 1
-        next_tick += 1 / hz
-        time.sleep(max(0, min(next_tick, deadline) - time.monotonic()))
-    previous_frames.clear()
-    frames.clear()
-    frame = None
-    output = []
-    for (thread, native_id), row in records.items():
-        end = _cpu_seconds(native_id) if thread.is_alive() else None
-        start = row.pop('cpu_start')
-        last = row.pop('cpu_last') if end is None else end
-        row.pop('cpu_last', None)
-        row['cpu_s'] = max(0, last - start) if start is not None and last is not None else None
-        row['cpu_partial'] = end is None or start is None
-        self_counts, inclusive_counts = Counter(), Counter()
-        for stack, count in row.pop('stack_counts').items():
-            self_counts[code_keys[stack[0]][1]] += count
-            for frame_key in {code_keys[c][1] for c in stack}:
-                inclusive_counts[frame_key] += count
-        row['top_self'] = self_counts.most_common(top)
-        row['top_inclusive'] = inclusive_counts.most_common(top)
-        output.append(row)
-    output.sort(key=lambda r: r['cpu_s'] or 0, reverse=True)
-    return dict(seconds=seconds, hz=hz, samples=samples, threads=output)
+            current[ident] = (row, stack_key, reusable)
+            batchable = batchable and reusable
+        self.previous_frames, self.previous, self.batchable = frames, current, batchable
+
+    def finish(self, samples, top):
+        output = []
+        code_keys = self.code_keys
+        for (thread, native_id), row in self.records.items():
+            end = _read_cpu(thread, native_id) if thread.is_alive() else None
+            if end is not None:
+                if row['cpu_start'] is None:
+                    row['cpu_missed'] = True
+                _record_cpu(row, end, samples)
+            start_cpu, last_cpu, missed = row.pop('cpu_start'), row.pop('cpu_last'), row.pop('cpu_missed')
+            row['cpu_s'] = max(0, last_cpu - start_cpu) if start_cpu is not None else None
+            # Lower bound when the first or the end read is missing (e.g. exited thread).
+            row['cpu_partial'] = end is None or missed or start_cpu is None
+            self_counts, inclusive_counts = Counter(), Counter()
+            for stack, count in row.pop('stack_counts').items():
+                self_counts[code_keys[stack[0]][1]] += count
+                for frame_key in {code_keys[c][1] for c in stack}:
+                    inclusive_counts[frame_key] += count
+            row['top_self'] = self_counts.most_common(top)
+            row['top_inclusive'] = inclusive_counts.most_common(top)
+            output.append(row)
+        output.sort(key=lambda r: r['cpu_s'] or 0, reverse=True)
+        return output
+
+
+def _collect(seconds, hz, top):
+    window = _Window()
+    samples = 0
+    start = time.monotonic()
+    deadline = start + seconds
+    next_tick = next_cpu = start
+    frames = None
+    try:
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                break
+            cpu_due = now >= next_cpu
+            # A refresh always takes the registry-sandwiched snapshot below; do
+            # not first collect a redundant snapshot just to discard it.
+            frames = None if cpu_due else sys._current_frames()
+            no_greenlet = sys.modules.get('greenlet') is None
+            # Batch a whole snapshot whose every chain was safe to reuse; dict ==
+            # compares the frame objects by identity, in C.
+            if window.batchable and no_greenlet and not cpu_due and frames == window.previous_frames:
+                window.run += 1
+                window.run_last = samples
+            else:
+                if cpu_due:
+                    next_cpu += _CPU_REFRESH_S
+                    if next_cpu <= now:  # late tick: skip missed refreshes, no burst
+                        next_cpu = now + _CPU_REFRESH_S
+                # Snapshot here, not in slow_tick: the sampler's own leaf frame
+                # must be the same object as in fast-path snapshots.
+                before = {t.ident: t for t in threading.enumerate()}
+                frames = sys._current_frames()
+                after = {t.ident: t for t in threading.enumerate()}
+                window.slow_tick(samples, cpu_due, no_greenlet, before, frames, after)
+                before = after = None
+            frames = None
+            samples += 1
+            next_tick += 1 / hz
+            time.sleep(max(0, min(next_tick, deadline) - time.monotonic()))
+        window.flush()
+    except BaseException as exc:
+        # Finished callee frames in the traceback (slow_tick, walk) hold frame refs.
+        traceback.clear_frames(exc.__traceback__)
+        raise
+    finally:
+        # No frame reference outlives the window, even via an error traceback.
+        frames = window.previous_frames = None
+    return dict(seconds=seconds, hz=hz, cpu_refresh_s=_CPU_REFRESH_S, samples=samples,
+                threads=window.finish(samples, top))
 
 
 def trim_response(response, limit):

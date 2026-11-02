@@ -16,12 +16,14 @@ Booleans, numeric strings, out-of-range numbers and non-finite numbers are rejec
 {
   "seconds": 20,
   "hz": 100,
+  "cpu_refresh_s": 0.1,
   "samples": 2000,
   "threads": [{
     "name": "example",
     "native_id": 123,
     "cpu_s": 0.01,
     "cpu_partial": false,
+    "cpu_last_sample": 2000,
     "samples": 2000,
     "first_seen_sample": 0,
     "last_seen_sample": 1999,
@@ -35,11 +37,11 @@ This is an illustrative schema, not a captured profile. Frame keys use `co_filen
 
 Stack counts are **wall samples**, not CPU attribution. Sleeping threads can accumulate many samples with almost zero CPU. CPU seconds are independently measured native thread CPU-clock deltas. Sampling is GIL-dependent and can be delayed by busy threads or native extensions; inspect the actual sample count. Threads without an identifiable Python `threading.Thread`/native ID are not reported. Purely native threads without Python frames are outside the stack census.
 
-CPU starts at each thread's first observation, not at its lifetime origin. Exited threads remain in the result; their last readable CPU clock supplies a **partial/lower bound**, explicitly marked `cpu_partial: true`. Unavailable CPU is `null`, never a guessed zero. Work before the first observation and after the last readable observation cannot be recovered. A thread that starts and exits entirely between samples cannot be detected. Thread objects and native IDs distinguish lifetimes even when Python thread identifiers or names are reused.
+CPU starts at each thread's first observation, not at its lifetime origin. Native CPU clocks are read at that first observation, then on refresh ticks at most every `cpu_refresh_s` (0.1) monotonic seconds, and once at window end. A late tick takes one refresh and schedules the next 0.1 s later; missed refreshes are skipped, never replayed in a burst. `cpu_last_sample` is the zero-based sample index of the last successful CPU read, `samples` for the end-of-window read, or `null` if no read succeeded. Every read is followed by `Thread.is_alive()`; a read whose thread is already dead is discarded, because on Linux its numeric TID may already belong to another thread. If the first read fails and a later one succeeds, CPU is measured from the later read and marked `cpu_partial: true`. Exited threads remain in the result; their last readable CPU clock supplies a **partial/lower bound**, explicitly marked `cpu_partial: true`. Unavailable CPU is `null`, never a guessed zero. Work before the first observation and after the last readable observation cannot be recovered. A thread that starts and exits entirely between samples cannot be detected. Thread objects and native IDs distinguish lifetimes even when Python thread identifiers or names are reused.
 
 Linux reads `clock_gettime((~native_id << 3) | 6)`, the kernel `MAKE_THREAD_CPUCLOCK(tid, CPUCLOCK_SCHED)` encoding. This avoids `pthread_getcpuclockid(pthread_t)`, whose userspace pthread pointer may already have been freed when a thread exits; the numeric kernel lookup fails safely for exited IDs. No arbitrary process is queried. macOS uses own-process `proc_pidinfo(PROC_PIDTHREADID64INFO = 15)` through ctypes and sums the user/system nanosecond counters of `struct proc_threadinfo` (112 bytes). On macOS `threading.native_id` is `pthread_threadid_np()`'s 64-bit kernel `thread_id`; XNU (`bsd/kern/proc_info.c`, `osfmk/kern/bsd_kern.c:fill_taskthreadinfo`) matches flavor 15 against `thread->thread_id` but `PROC_PIDTHREADINFO = 5` against `machine.cthread_self` (the TSD handle listed by `PROC_PIDLISTTHREADS`; on arm64 `pthread_self() + 224`). Flavor 5 therefore fails with `ESRCH` for every native ID. Kernel thread IDs are not reused, so an exited thread reads as unavailable and cannot alias a later thread. Other hosts return unavailable CPU.
 
-To reduce idle sampling overhead, identical leaf frame objects reuse their previous stack only when their native CPU clock is unchanged. Code keys use identity rather than structural code-object hashing. Repeated stacks are aggregated before deriving self/inclusive counts. Only the preceding frame snapshot is retained; frame references are cleared at completion. No frame or code objects appear in the result.
+Every tick takes an exact `sys._current_frames()` snapshot, and every accepted frame is counted. A thread's stack is re-walked unless its leaf frame is the same object as in the previous snapshot **and** no frame in its chain is a generator, coroutine or async generator **and** `greenlet` is not imported. A suspended generator anywhere in the chain (not only at the leaf) can be resumed under a different caller, so such chains are always re-walked. When the whole snapshot is identical (same identifiers, same frame objects, all chains reusable) and no CPU refresh is due, the tick extends an open run that is added to every row when the snapshot changes or the window ends, with no per-thread loop. Other ticks enumerate threads before and after the snapshot and accept an identifier only when both enumerations show the same `Thread` object, so an identifier reused mid-snapshot is not attributed to either lifetime. Lifetimes are keyed by `Thread` object plus native ID. Code keys use identity rather than structural code-object hashing. Repeated stacks are aggregated before deriving self/inclusive counts. Only the preceding frame snapshot is retained; frame references are cleared at completion and on errors (including callee frames in the error traceback). No frame or code objects appear in the result.
 
 Responses include the complete envelope and newline in the size budget and stay below the 512 KiB response cap. Oversized results omit whole frame entries or whole threads (including giant names), never rewrite frame keys or names. They add `truncated`, `omitted_threads`, and `omitted_frames`. The request ID is included in the budget. A response whose envelope alone is too large uses the existing `response_too_large` error; socket requests are separately limited to 64 KiB.
 
@@ -80,9 +82,34 @@ Median incremental overhead on macOS: **16.48085% of one core, which misses the 
 | 1 | 16.68482 (16.19497, 16.68482, 16.75607) | 15.42431 (15.15525, 15.43350, 15.42431) |
 | 2 | 16.30566 (16.30566, 16.85843, 16.13515) | 15.14392 (15.03389, 15.14392, 15.26198) |
 
-PyDLL saves about 1.2 points of core, roughly 7%. **macOS still misses the 3% target** at about 15%. Linux after this change measured a **2.18334%** median (`scripts/benchmark_gateway_profile.py --seconds 5 --rounds 3 --threads 150 --hz 100`). Not yet evaluated: one Mach `task_threads` call plus `thread_info` per port (still one syscall per thread, plus port-to-thread-id mapping) and lowering per-thread CPU-read frequency (which changes sample semantics).
+PyDLL saves about 1.2 points of core, roughly 7%. **macOS still misses the 3% target** at about 15%. Linux after this change measured a **2.18334%** median (`scripts/benchmark_gateway_profile.py --seconds 5 --rounds 3 --threads 150 --hz 100`). Not yet evaluated: one Mach `task_threads` call plus `thread_info` per port (still one syscall per thread, plus port-to-thread-id mapping). Lowering the per-thread CPU-read frequency is now implemented (below).
+
+**Snapshot fast path and 10 Hz CPU refresh (current code).** Linux 7.0.0-1014-aws, Python 3.14.9, same parameters (150 idle threads, 100 Hz, 3 × 5 s rounds), interleaved A/B against the previous implementation from isolated copies of the module, host load average about 2–7:
+
+| Implementation | Run 1 rounds % | Run 1 median % | Run 2 rounds % | Run 2 median % |
+| --- | --- | ---: | --- | ---: |
+| Previous (CPU read every tick) | 2.124, 2.220, 2.201 | 2.201 | 2.006, 2.214, 2.213 | 2.213 |
+| Current | 0.733, 0.744, 0.745 | 0.744 | 0.703, 0.954, 0.758 | 0.758 |
+
+Every round had 500 samples and 150 idle threads seen.
+
+Native macOS follow-up (same Mac mini, isolated stdlib probes, 150 idle threads, 100 Hz, 3 × 5 s rounds):
+
+| Python | Implementation | Incremental % core rounds | Median % core |
+| --- | --- | --- | ---: |
+| 3.12.2 | Previous PyDLL | 15.26453, 15.26455, 15.64877 | 15.26455 |
+| 3.12.2 | Snapshot batching / 10 Hz CPU | 3.65624, 3.79617, 3.92824 | 3.79617 |
+| 3.14.9 | Previous PyDLL | 14.36053, 14.31971, 14.92169 | 14.36053 |
+| 3.14.9 | Snapshot batching / 10 Hz CPU | 3.11061, 3.11483, 3.28467 | 3.11483 |
+| 3.14.9 | Also omit redundant pre-refresh snapshot (current) | 3.29556, 3.61991, 3.35109 | 3.35109 |
+
+All rounds collected 500 samples, all 150 idle threads, and readable CPU for every idle thread. **The macOS target remains unmet**; the single-snapshot change has no demonstrated performance gain in these shared-host measurements (load averages ranged about 7–25). The final native functional probe passed: busy Python thread 1.743097 CPU s, GIL-released native worker 0.655284 CPU s, sleeping thread 0.001776 CPU s, short-lived thread 0.1425 CPU s marked partial, exited native ID unavailable. These are stdlib subprocess checks, not a native pytest run or a live gateway measurement.
+
+A separate Python 3.12 attribution probe measured whole-profile CPU at 3.743% with the real reader versus 2.739% with a constant reader; collecting frames alone at 100 Hz measured 1.721%. These are attribution controls, not baseline-subtracted acceptance figures. The initial design coupled native counters to every stack tick and repeated Python bookkeeping for unchanged stacks; native benchmarking caught that cost after Linux-only performance checks passed. Counter refresh decoupling and exact run aggregation address that design, with deterministic cadence/lifetime tests and native A/B measurements preventing a Linux-only performance claim. Remaining native-reader and snapshot cost needs further work rather than rounding 3.11% down to the target.
 
 ## Verification status
+
+`tests/gateway/test_control_profile_fastpath.py` drives `_collect` with a fake clock, frame snapshot and thread registry, and covers: exact batched counts for identical safe snapshots (with recursive dedup and no per-thread work between CPU refreshes), re-walking when an ancestor generator's caller changes under the same leaf frame, re-walking when `greenlet` is imported, CPU cadence without catch-up after a stall, exited-thread lower bounds with a dead-thread read discarded, recovery from a failed first CPU read (marked partial), rejecting an identifier reused between the two enumerations, and no frame references surviving success or an error. A real-thread test checks the fast path engages for idle threads (it failed with 200 enumerations per 100 ticks before the sampler's own frame was kept stable). Each failed on the previous implementation and passes now; existing tests are unchanged. Five profiler test files via `scripts/run_tests.sh`: **35 passed, 1 macOS-only skipped**, three consecutive runs; `python3 scripts/check --base HEAD`: 15 checks ok.
 
 Tests are run only through `scripts/run_tests.sh`. The contract test was first corrected from an erroneous global self table/`cpu_seconds` shape to the approved per-thread shape, then failed on the base with `unknown verb: 'profile'`. Incremental RED→GREEN runs covered the sampler, argument validation, concurrent refusal, response trimming, CLI parser/dispatch and invalid parameter objects. Additional acceptance tests cover recursive inclusive deduplication, real sleeping/burning threads, short-lived threads and successive same-name thread lifetimes. The CLI integration test runs against a real temporary Unix socket, checks JSON and text, and requires identify/status each to answer in under 0.5 seconds while the profile is in progress.
 
