@@ -49,14 +49,10 @@ vi.mock('@/i18n', () => ({
           installDeviceConfirm: 'Install locally',
           installDeviceDesc:
             'This will install Hermes locally, then open a fresh session on this computer. Nothing is installed until you confirm.',
-          installDeviceTitle: 'Switch to This device?',
+          installDeviceTitle: 'Install Hermes on This device?',
           localDevice: 'This device (local backend — installs Hermes if missing, otherwise opens a fresh session)',
           onGateway: (name: string, gateway: string) => `${name} · ${gateway}`,
-          switchDeviceConfirm: 'Switch',
-          switchDeviceDesc:
-            'This opens a fresh session on this computer. The conversation you are in stays on the other gateway.',
-          switchDeviceTitle: 'Switch to This device?',
-          switchTo: (name: string, gateway: string) => `Switch to ${name} on ${gateway}`
+          switchTo: (name: string, gateway: string) => `Open ${name} on ${gateway}`
         },
         importProfile: 'Import profile…',
         manageProfiles: 'Manage profiles…',
@@ -531,7 +527,7 @@ describe('ProfileRail fleet mode', () => {
     expect(builder.getAttribute('aria-busy')).toBeNull()
   })
 
-  it('switches straight to This device without a confirm when already installed', async () => {
+  it('opens an installed This device with no prompt', async () => {
     armFleet()
     await renderFleet()
 
@@ -541,13 +537,8 @@ describe('ProfileRail fleet mode', () => {
       })
     )
 
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-    })
-
-    expect(screen.queryByRole('dialog', { name: 'Switch to This device?' })).toBeNull()
-    expect(selectConnection).toHaveBeenCalledWith('local', { profile: 'default' })
+    await vi.waitFor(() => expect(selectConnection).toHaveBeenCalledWith('local', { profile: 'default' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 
   it('confirms before installing and offers connect-to-existing inline', async () => {

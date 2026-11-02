@@ -21,6 +21,7 @@ import {
   requestComposerDraftSync
 } from '@/store/composer'
 import { recordAction } from '@/store/desktop-metrics'
+import { onKeptRouteOpened } from '@/store/gateway-kept-routes'
 import { $comboIndex } from '@/store/keybinds'
 import { requestMcpInstallFromDeepLink } from '@/store/mcp-deeplink-install'
 import { startMcpHealthChecker, stopMcpHealthChecker } from '@/store/mcp-health'
@@ -607,4 +608,7 @@ export function useDesktopIntegrations({
       void refreshSessions()
     })
   }, [refreshSessions])
+
+  // A gateway that connects after the list was drawn adds its rows to it.
+  useEffect(() => onKeptRouteOpened(() => void refreshSessions()), [refreshSessions])
 }
