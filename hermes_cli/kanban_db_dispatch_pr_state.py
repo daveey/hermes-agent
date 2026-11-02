@@ -420,17 +420,19 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     notices and comments known to come from another card's run or a chat are
     diagnostic/FYI, not new PR publication evidence, and cannot invalidate an
     existing handoff. Missing or unreadable provenance remains fail-closed.
+    Among the remaining candidates, another live card's completion_contract pull and a
+    pull named only as not blocking this card do not hold; this card's own
+    completion_contract always does (:mod:`kanban_db_dispatch_pr_policy`).
     Also lifted once EVERY PR named in publication comments is MERGED or CLOSED (gh, cached; any
     gh failure keeps the hold), or has a completed queue rejection requiring repair. [daveey]
     """
     from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_dispatch as _kbd
+    from hermes_cli.kanban_db_dispatch_pr_policy import holding_urls, norm_pr
 
     foreign_ids = _foreign_pr_comment_ids(conn, task_id)
-    pr_times: list[int] = []
-    pr_urls: list[str] = []
     fyi_urls: list[str] = []
-    latest_pr_comment_id = 0
+    candidates: list[tuple[int, int, str, list[str]]] = []
     for t, c in _kbd._rows_since(conn, "task_comments", task_id, now - _kbd._RESPAWN_GUARD_PR_WINDOW,
                                  cols=", id, body, author", unreadable=now):  # duplicate-PR risk: fail closed
         body = _kb._lossy_text(c["body"]) or ""
@@ -441,9 +443,19 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
             fyi_urls.extend(urls)
             continue
         if urls:
-            latest_pr_comment_id = max(latest_pr_comment_id, c["id"])
+            candidates.append((t, c["id"], body, urls))
+    # Own/unknown candidates only: drop another live card's contract pull and pulls named
+    # only as not blocking this card; only comments that keep a pull order the watermark.
+    holding = holding_urls(conn, task_id, [(u, body) for _, _, body, urls in candidates for u in urls])
+    pr_times: list[int] = []
+    pr_urls: list[str] = []
+    latest_pr_comment_id = 0
+    for t, comment_id, _body, urls in candidates:
+        kept = [u for u in urls if norm_pr(u) in holding]
+        if kept:
+            latest_pr_comment_id = max(latest_pr_comment_id, comment_id)
             pr_times.append(t)
-            pr_urls.extend(urls)
+            pr_urls.extend(kept)
     if not pr_times:
         # Foreign handoffs may still carry queue-rejection repair instructions,
         # but cannot create a duplicate-publication hold.
