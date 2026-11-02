@@ -380,17 +380,12 @@ describe('relay-route socket retention (#93594)', () => {
     await vi.advanceTimersByTimeAsync(0)
     await pushAndSettle()
 
-    // Only the sole remaining connection's one-time roster clear goes out — once per profile
-    // route, since each profile home holds its own roster; the local source is never polled.
+    // Only the sole remaining connection's one-time roster clear goes out, ONCE: relay state is
+    // install-wide on the gateway (every profile home shares one roster), so the connection's
+    // default route speaks for all its profiles; the local source is never polled.
     // Two profiles of one connection are not peers: no profiles.list, nothing pinned.
     expect(calls).toEqual([
-      { connectionId: 'remote-primary', method: 'bot_relay.roster.sync', params: { agents: [] }, route: route('remote-primary', { primary: true }) },
-      {
-        connectionId: 'remote-primary',
-        method: 'bot_relay.roster.sync',
-        params: { agents: [] },
-        route: route('remote-primary', { primary: true, profile: 'research' })
-      }
+      { connectionId: 'remote-primary', method: 'bot_relay.roster.sync', params: { agents: [] }, route: route('remote-primary', { primary: true }) }
     ])
     expect(pins).toHaveLength(0)
 
@@ -432,8 +427,11 @@ describe('relay-route socket retention (#93594)', () => {
       // One profiles.list per connection, however many of its profiles are routed.
       const lists = calls.filter(call => call.method === 'profiles.list').map(call => call.connectionId)
       expect(lists.sort()).toEqual([...new Set(routes.map(item => item.connectionId))].sort())
-      // Every eligible profile route (its own socket scope and outbox) is pinned exactly once.
-      expect(pins.map(pin => pin.route)).toEqual(routes)
+      // Each eligible CONNECTION is pinned exactly once, on its default route (every fixture lists
+      // the default first): a pin per profile held one remote backend per profile warm forever.
+      expect(pins.map(pin => pin.route)).toEqual(
+        routes.filter((item, index) => routes.findIndex(other => other.connectionId === item.connectionId) === index)
+      )
 
       stopBotRelay()
     }
@@ -454,6 +452,61 @@ describe('relay-route socket retention (#93594)', () => {
 
     expect(pins.map(pin => pin.route.connectionId)).toEqual(['a', 'b'])
     expect(pins.every(pin => !pin.released)).toBe(true)
+
+    stopBotRelay()
+  })
+
+  it('pins, roster-syncs and drains a many-profile remote connection through ONE default route', async () => {
+    // The mini incident: a remote with nine profiles kept nine `serve --isolated` backends
+    // (~5 GB) warm because every profile route was pinned. Relay state is install-wide, so the
+    // connection's default route is the only socket the relay needs.
+    const named = ['bb-dev', 'bb-device', 'links', 'bb-voice'].map(profile => route('mini', { profile }))
+    hostMock.profileRoutes = vi.fn(async () => [...named.slice(0, 2), route('mini'), ...named.slice(2), route('peer')])
+    const pins = trackRetention()
+
+    const calls = respondWith(call =>
+      call.method === 'profiles.list' ? { profiles: [{ name: 'default' }] } : { envelopes: [] }
+    )
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    await pushAndSettle(1, {})
+
+    expect(pins.map(pin => pin.route)).toEqual([route('mini'), route('peer')])
+
+    const miniRoutes = calls.filter(call => call.connectionId === 'mini').map(call => call.route)
+    expect(miniRoutes.length).toBeGreaterThan(0)
+    expect(miniRoutes.every(item => item.profile === 'default')).toBe(true)
+    expect(calls.filter(call => call.method === 'bot_relay.roster.sync').map(call => call.route)).toEqual([
+      route('mini'),
+      route('peer')
+    ])
+    expect(calls.filter(call => call.method === 'bot_relay.outbox.drain').map(call => call.route)).toEqual([
+      route('mini'),
+      route('peer')
+    ])
+
+    stopBotRelay()
+    expect(pins.every(pin => pin.released)).toBe(true)
+  })
+
+  it('falls back to the first listed route when a connection exposes no default profile', async () => {
+    hostMock.profileRoutes = vi.fn(async () => [
+      route('a', { profile: 'ops' }),
+      route('a', { profile: 'scout' }),
+      route('b', { profile: 'research' })
+    ])
+    const pins = trackRetention()
+
+    respondWith(() => ({ envelopes: [] }))
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await pushAndSettle()
+
+    expect(pins.map(pin => pin.route)).toEqual([route('a', { profile: 'ops' }), route('b', { profile: 'research' })])
 
     stopBotRelay()
   })
@@ -884,12 +937,14 @@ describe('the drain loop wires drain → deliver → reply', () => {
     stopBotRelay()
   })
 
-  it('drains every sender profile and delivers on the exact target profile', async () => {
+  it('drains a connection once through its default route and delivers on the exact target profile', async () => {
+    // The gateway's outbox is install-wide (tui_gateway/methods_bot_relay._relay_root), so an
+    // envelope a non-default profile ('ops') queued is claimed through the default route.
     const ops = { ...route('a'), profile: 'ops', targetProfile: 'ops' }
-    hostMock.profileRoutes = vi.fn(async () => [route('a'), ops, route('b')])
+    hostMock.profileRoutes = vi.fn(async () => [ops, route('a'), route('b')])
 
     const calls = respondWith(call => {
-      if (call.method === 'bot_relay.outbox.drain') {return { envelopes: call.route.profile === 'ops' ? [envelope] : [] }}
+      if (call.method === 'bot_relay.outbox.drain') {return { envelopes: call.connectionId === 'a' ? [{ ...envelope, from_profile: 'ops' }] : [] }}
 
       if (call.method === 'bot_relay.deliver') {return {status: 'settled', delivery_id: envelope.id, admission_id: 'admission', reply: 'isolated'}}
 
@@ -899,8 +954,10 @@ describe('the drain loop wires drain → deliver → reply', () => {
     const {startBotRelay, stopBotRelay} = await loadRelay()
     startBotRelay()
     await pushAndSettle()
+    expect(calls.filter(call => call.method === 'bot_relay.outbox.drain').map(call => call.route)).toEqual([route('a'), route('b')])
     expect(calls.find(call => call.method === 'bot_relay.deliver')?.route).toEqual({...route('b'), profile: 'ops', targetProfile: 'ops'})
-    expect(calls.find(call => call.method === 'bot_relay.reply')?.route).toEqual(ops)
+    expect(calls.find(call => call.method === 'bot_relay.reply')?.route).toEqual(route('a'))
+    expect(calls.some(call => call.route.profile === 'ops' && call.route.connectionId === 'a')).toBe(false)
     stopBotRelay()
   })
 

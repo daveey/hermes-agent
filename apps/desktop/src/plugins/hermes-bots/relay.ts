@@ -254,9 +254,36 @@ function releaseRelayRetention() {
   relayRouteRetentions.clear()
 }
 
-/** Every relay-eligible profile route, once each. The canonical gateway keeps a
- *  roster and an outbox per profile home, so drain/roster/pins are per ROUTE;
- *  the peer set (is there anything to relay between?) is per connection id. */
+/** One relay route per relay-eligible connection. The gateway's relay doors read
+ *  and write ONE install root whichever profile backend serves them
+ *  (`tui_gateway/methods_bot_relay._relay_root` maps `<root>/profiles/<p>` to
+ *  `<root>`: one roster, one outbox, one replies dir), so any profile's backend
+ *  answers roster.sync / outbox.drain / reply for the whole connection. Pinning a route per PROFILE held one remote
+ *  `hermes serve --isolated` backend per profile warm for the Desktop's whole
+ *  lifetime (~0.5 GB each, never idle-exited; mini memory pressure). The
+ *  representative is the connection's `default` profile route (the warm,
+ *  always-on backend) when listed, else its first route. Delivery still dials
+ *  the exact target profile on demand (deliverRelayEnvelope). */
+export function relayRepresentativeRoutes(routes: ProfileRoute[]): ProfileRoute[] {
+  const byConnection = new Map<string, ProfileRoute>()
+
+  for (const route of routes) {
+    const id = String(route?.connectionId || '')
+
+    if (!id) {
+      continue
+    }
+
+    const current = byConnection.get(id)
+
+    if (!current || (current.profile !== 'default' && route.profile === 'default')) {
+      byConnection.set(id, route)
+    }
+  }
+
+  return [...byConnection.values()]
+}
+
 async function relayConnections(): Promise<RelayConnection[]> {
   if (typeof host.profileRoutes !== 'function' || typeof host.requestProfile !== 'function') {
     return []
@@ -265,19 +292,8 @@ async function relayConnections(): Promise<RelayConnection[]> {
   try {
     const rawRoutes = await host.profileRoutes()
     const routes = relayEligibleRoutes(Array.isArray(rawRoutes) ? rawRoutes : [])
-    const byConnection = new Map<string, ProfileRoute>()
 
-    for (const route of routes) {
-      const id = String(route?.connectionId || '')
-
-      const key = JSON.stringify(route)
-
-      if (id && !byConnection.has(key)) {
-        byConnection.set(key, route)
-      }
-    }
-
-    return [...byConnection.values()].map(route => ({
+    return relayRepresentativeRoutes(routes).map(route => ({
       id: route.connectionId,
       route
     }))

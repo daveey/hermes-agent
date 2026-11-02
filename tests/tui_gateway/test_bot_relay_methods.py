@@ -302,3 +302,39 @@ def test_gateway_drains_the_mailbox_the_tools_write_to(tmp_path, monkeypatch, su
     assert methods_bot_relay._relay_root() == writer_root
     drained = _result(srv._methods["bot_relay.outbox.drain"](1, {}))
     assert [e["id"] for e in drained["envelopes"]] == [env["id"]]
+
+
+@pytest.mark.parametrize("writer,drainer", [("default", "profiles/ops"), ("profiles/ops", "default"),
+                                            ("profiles/ops", "profiles/scout")])
+def test_every_profile_of_one_install_shares_one_relay_mailbox(tmp_path, monkeypatch, writer, drainer):
+    """The Desktop relay pins, roster-syncs and drains ONE route per connection (its default profile;
+    apps/desktop/src/plugins/hermes-bots/relay.ts ``relayRepresentativeRoutes``). That is correct only
+    while the gateway's relay doors (roster.sync / outbox.drain / reply) answer from ONE install root
+    whichever profile's backend serves them: a roster pushed through one profile backend is read back
+    through another, and an envelope queued in the install-root outbox drains through any profile
+    backend. Scope: this pins the gateway doors only. Where a named profile's ``message_agent`` writes
+    (tools/bot_mode_dm.py, its own profile home) is a separate path not covered here."""
+    from tools.bot_mode_probe import _default_home, _hermes_root
+    from tools.bot_relay import read_remote_roster
+    from tui_gateway import methods_bot_relay
+
+    install = tmp_path / ".hermes"
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def as_profile(sub: str) -> None:
+        home = install if sub == "default" else install / sub
+        home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HERMES_HOME", str(home))
+
+    as_profile(writer)
+    target = {"profile": "scout", "handle": "scout", "connection_id": "cloud-1",
+              "connection_label": "", "title": "", "description": ""}
+    env = bot_relay.enqueue_envelope(_hermes_root(Path(_default_home())), target=target, message="m",
+                                     sender_profile="ops", sender_handle="ops")
+    _result(srv._methods["bot_relay.roster.sync"](1, {"agents": [target]}))
+
+    as_profile(drainer)
+    assert methods_bot_relay._relay_root() == install
+    assert [row["profile"] for row in read_remote_roster(methods_bot_relay._relay_root())] == ["scout"]
+    drained = _result(srv._methods["bot_relay.outbox.drain"](2, {}))
+    assert [e["id"] for e in drained["envelopes"]] == [env["id"]]
