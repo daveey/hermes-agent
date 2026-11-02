@@ -16,6 +16,8 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote
 
+from hermes_cli.kanban_pr_merge_time import check_receipt, merge_evidence, timestamp
+
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
 # The way out of a contract that can never pass. A worker can't take it (orchestrator-only),
@@ -179,7 +181,7 @@ def _assignee_profile_home(assignee: str | None) -> str | None:
 def collect_acceptance(contract: str, published_pr: str | None,
                        assignee: str | None = None) -> dict:
     receipt = {"ok": False, "classification": "missing", "head_sha": None,
-               "pr_url": published_pr, "checks": [],
+               "pr_url": published_pr, "checks": [], "post_merge_checks": [],
                "recovery": "Fix required failures, rerun infrastructure checks or wait, then retry completion. "
                            "Use kanban_block if human input is needed; receipts remain on the task event log."}
     # Named in the catch-all detail so a failure says WHICH read broke, not "check gh auth". [daveey]
@@ -197,7 +199,10 @@ def collect_acceptance(contract: str, published_pr: str | None,
         receipt["pr_url"] = url
         owner, name = repo.split("/")
         phase = "reading the PR"
-        query = f'{{repository(owner:{json.dumps(owner)},name:{json.dumps(name)}){{pullRequest(number:{number:d}){{headRefOid baseRefName state\n            baseRef{{branchProtectionRule{{requiredStatusChecks{{context app{{databaseId}}}}}}}}}}}}}}'
+        query = (f'{{repository(owner:{json.dumps(owner)},name:{json.dumps(name)})'
+                 f'{{pullRequest(number:{number:d})'
+                 '{headRefOid baseRefName state mergedAt '
+                 'baseRef{branchProtectionRule{requiredStatusChecks{context app{databaseId}}}}}}}')
         repository = _api("graphql", query=query, profile_home=profile_home)["data"]["repository"]
         if repository is None:
             # A private repo the login cannot read resolves to null, not an error.
@@ -206,6 +211,11 @@ def collect_acceptance(contract: str, published_pr: str | None,
         sha, branch = pr["headRefOid"], pr["baseRefName"]
         receipt["head_sha"] = sha
         receipt["pr_state"] = pr["state"]
+        if pr["state"] == "MERGED":
+            receipt["recovery"] = (
+                "Restore complete exact-head evidence from at or before the merge, then retry completion. "
+                "Later main CI belongs to ci-main-watch; it cannot repair missing or failed pre-merge evidence.")
+            timestamp(pr["mergedAt"])
         if pr["state"] == "CLOSED":
             # Closure is a disposition, not a claim that the change shipped.
             receipt.update(ok=True, classification="closed", detail="PR closed without merging; not delivery.")
@@ -231,7 +241,8 @@ def collect_acceptance(contract: str, published_pr: str | None,
                 where=f"{repo}@{branch}", repoint=_REPOINT_HINT))
             return receipt
         phase = "reading check runs"
-        pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
+        run_filter = "all" if pr["state"] == "MERGED" else "latest"
+        pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter={run_filter}",
                      paginate=True, profile_home=profile_home)
         runs = [run for page in pages for run in page["check_runs"]]
         if len({r["id"] for r in runs}) != pages[0]["total_count"]:
@@ -239,6 +250,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
         phase = "reading commit statuses"
         statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
                                                        paginate=True, profile_home=profile_home) for s in page]
+        runs, statuses = merge_evidence(receipt, pr, repo, runs, statuses)
         outcomes = []
         for context, app_id in sorted(required, key=str):
             matching = [r for r in runs if r["name"] == context and
@@ -250,14 +262,9 @@ def collect_acceptance(contract: str, published_pr: str | None,
                 outcomes.append("missing")
                 receipt["checks"].append({"name": context, "classification": "missing", "head_sha": sha})
             for check in selected:
-                is_run = "conclusion" in check
-                outcome = check.get("conclusion") if is_run else check["state"]
-                classification = _classify(check, sha, outcome, is_run)
-                outcomes.append(classification)
-                receipt["checks"].append({"name": context, "id": check["id"],
-                    "url": check.get("html_url") or check.get("target_url"),
-                    "head_sha": check.get("head_sha", check.get("sha")),
-                    "classification": classification, "conclusion": outcome})
+                evidence = check_receipt(check, sha)
+                outcomes.append(evidence["classification"])
+                receipt["checks"].append(evidence)
         # Re-read after all pages: old-head successes are never transferable.
         phase = "re-reading the PR head"
         current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
@@ -266,6 +273,9 @@ def collect_acceptance(contract: str, published_pr: str | None,
             return receipt
         if current["state"] not in {"open", "closed"}:
             raise ValueError("PR state is unavailable")
+        if bool(current.get("merged")) != (pr["state"] == "MERGED"):
+            receipt.update(classification="stale", detail="PR merge state changed while collecting evidence; retry.")
+            return receipt
         receipt["pr_state"] = "MERGED" if current.get("merged") else current["state"].upper()
         receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")
         receipt["ok"] = receipt["classification"] == "success"

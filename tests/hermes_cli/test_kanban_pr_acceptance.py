@@ -24,12 +24,14 @@ def github(tmp_path, monkeypatch):
                     {"context": "required", "app": {"databaseId": 1}}]}
                 value = {"data": {"repository": {"pullRequest": {
                     "headRefOid": sha, "baseRefName": "main", "state": state.get("pr_state", "MERGED"),
+                    "mergedAt": "2026-11-02T13:10:04Z",
                     "baseRef": {"branchProtectionRule": rule}},
                     "defaultBranchRef": {"name": "main", "branchProtectionRule": rule}}}}
             elif "/rules/branches/" in self.path:
                 value = [[]]
             elif "/check-runs" in self.path:
                 run = {"id": 42, "name": "required", "head_sha": sha,
+                       "started_at": "2026-11-02T12:51:52Z",
                        "app": {"id": 1}, "status": "in_progress" if state["conclusion"] == "pending" else "completed", "conclusion": state["conclusion"],
                        "html_url": "https://github.com/acme/repo/actions/runs/42"}
                 if state.get("stale"):

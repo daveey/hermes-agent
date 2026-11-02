@@ -63,6 +63,8 @@ def prepare_acceptance(conn, task_id, expected_run_id, metadata):
     # the ambient login of whichever process completes the card (#122689).
     assignee = conn.execute("SELECT assignee FROM tasks WHERE id=?", (task_id,)).fetchone()["assignee"]
     receipt = _kpa.collect_acceptance(contract, published_pr, assignee=assignee)
+    from hermes_cli.kanban_pr_merge_time import annotate_main_health_owner
+    annotate_main_health_owner(conn, receipt)
     reason = _kpa.waiver_reason(metadata)
     if reason and receipt.get("classification") == "no_required_checks":
         # The only waivable classification, judged on THIS fresh read: a repo that gained
