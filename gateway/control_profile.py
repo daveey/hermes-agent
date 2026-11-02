@@ -105,18 +105,43 @@ class _Window:
         self.previous_frames = {}
         self.previous = {}  # ident -> (row, stack_key, reusable)
         self.previous_threads = {}
-        self.cpu_rows = []  # active (Thread, native_id, row), rebuilt on snapshot change
+        self.cpu_rows = []  # active (Thread, native_id, row), rebuilt on lifetime/guard changes
         self.batchable = False
-        self.run = 0  # open run of ticks identical to ``previous_frames``
+        self.run = 0  # ticks with deferred histogram updates (per-thread runs may differ)
         self.run_last = 0
+        self.pending_since = {}  # ident -> first unrecorded sample in its stack run
+
+    def flush_thread(self, ident, last):
+        count = last - self.pending_since[ident] + 1
+        if count:
+            row, stack_key, _ = self.previous[ident]
+            row['samples'] += count
+            row['last_seen_sample'] = last
+            counts = row['stack_counts']
+            counts[stack_key] = counts.get(stack_key, 0) + count
+        self.pending_since[ident] = last + 1
 
     def flush(self):
         if self.run:
-            for row, stack_key, _ in self.previous.values():
-                row['samples'] += self.run
-                row['last_seen_sample'] = self.run_last
-                row['stack_counts'][stack_key] += self.run
+            for ident in self.previous:
+                self.flush_thread(ident, self.run_last)
             self.run = 0
+
+    def changed_tick(self, sample, frames):
+        # The registry sandwich and frame-key set were checked by slow_tick.
+        # A retained plain leaf pins its entire caller chain; only changed leaves
+        # need a new walk/histogram run, even when another thread wakes each tick.
+        for ident, frame in frames.items():
+            if frame is self.previous_frames[ident]:
+                continue
+            self.flush_thread(ident, sample - 1)
+            row = self.previous[ident][0]
+            stack_key, reusable = self.walk(frame, True)
+            self.previous[ident] = (row, stack_key, reusable)
+            self.batchable = self.batchable and reusable
+        self.previous_frames = frames
+        self.run += 1
+        self.run_last = sample
 
     def walk(self, frame, reusable):
         stack = []
@@ -137,15 +162,19 @@ class _Window:
         return tuple(stack), reusable
 
     def slow_tick(self, sample, cpu_due, no_greenlet, before, frames, after):
-        if (self.batchable and no_greenlet and frames == self.previous_frames
-                and before == after == self.previous_threads):
-            # CPU refresh does not invalidate a stable stack run. The registry
-            # sandwich still fences lifetime changes before reusing the rows.
+        if (self.batchable and no_greenlet
+                and before == after == self.previous_threads
+                and frames.keys() == self.previous.keys()):
+            # CPU refresh and unrelated stack changes do not invalidate a stable
+            # thread's run. Retain the full registry sandwich for lifetime safety.
             if cpu_due:
                 for thread, native_id, row in self.cpu_rows:
                     _record_cpu(row, _read_cpu(thread, native_id), sample)
-            self.run += 1
-            self.run_last = sample
+            if frames == self.previous_frames:
+                self.run += 1
+                self.run_last = sample
+            else:
+                self.changed_tick(sample, frames)
             return
         self.flush()
         current = {}
@@ -180,6 +209,7 @@ class _Window:
             batchable = batchable and reusable
         self.previous_frames, self.previous, self.batchable = frames, current, batchable
         self.previous_threads, self.cpu_rows = after, cpu_rows
+        self.pending_since = dict.fromkeys(current, sample + 1)
 
     def finish(self, samples, top):
         output = []
@@ -288,7 +318,7 @@ def trim_response(response, limit):
 
 
 def validate_params(params):
-    seconds, hz, top = (params.get('seconds', 20), params.get('hz', 100), params.get('top', 40))
+    seconds, hz, top = (params.get('seconds', 20), params.get('hz', 50), params.get('top', 40))
     for name, value, low, high in [('seconds', seconds, 1, 60), ('hz', hz, 10, 200)]:
         if type(value) not in (int, float) or not low <= value <= high:
             raise ValueError(f'{name} must be a finite number in {low}..{high}')

@@ -31,7 +31,7 @@ def test_profile_rejects_nonobject_params(tmp_path, params, monkeypatch):
 
 def test_parameter_defaults_and_boundaries():
     from gateway.control_profile import validate_params
-    assert validate_params({}) == (20, 100, 40)
+    assert validate_params({}) == (20, 50, 40)
     assert validate_params({'seconds': 60, 'hz': 200, 'top': 1}) == (60, 200, 1)
     assert validate_params({'seconds': 1, 'hz': 10}) == (1, 10, 40)
 

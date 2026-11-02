@@ -5,7 +5,7 @@
 The control verb is `profile`, with `params`:
 
 - `seconds`: finite number, 1–60 inclusive, default 20.
-- `hz`: finite number, 10–200 inclusive, default 100.
+- `hz`: finite number, 10–200 inclusive, default 50 (20 ms wall-stack resolution). Explicit `--hz 100` remains supported.
 - `top`: positive integer, default 40.
 
 Booleans, numeric strings, out-of-range numbers and non-finite numbers are rejected. Only one profile may run process-wide; another request fails immediately. A daemon sampler does the work while one of the four dedicated control workers waits. The CLI timeout is the requested duration plus 10 seconds. It reports a failed/unavailable request rather than silently starting another gateway.
@@ -54,6 +54,28 @@ python3 scripts/benchmark_gateway_profile.py --seconds 5 --rounds 3 --threads 15
 ```
 
 This creates an isolated process with 150 idle event-waiting threads. Each round measures **whole-process** `time.process_time()` and monotonic wall time, once without profiling and once with it; order alternates. Incremental percent of one core is `(profile CPU / profile wall - baseline CPU / baseline wall) * 100`. Thread creation is outside the measured intervals. The script prints raw measurements, Python/OS metadata, samples and idle-thread census; it never contacts a live gateway.
+
+### Active-stack workload and 50 Hz default
+
+```sh
+python3 scripts/benchmark_gateway_profile.py --seconds 10 --rounds 3 --threads 180 --active-threads 180
+```
+
+Active workers alternate two helper waits every 0.037 s, producing changing leaf/caller frames; `active_workers_with_both_helpers` verifies that both were observed. The report includes sampler-thread CPU (`time.thread_time()` around `_collect`) as well as baseline-subtracted process CPU. Optional `--cprofile` reports hot-path statistics separately; instrumented overhead is not an acceptance measurement. Some Python builds emit cross-thread profiling events with invalid thread-clock durations; the output flags detected contamination rather than treating those durations as evidence.
+
+The earlier idle-only benchmark missed the live cost: changing one stack made `_Window.slow_tick` rebuild bookkeeping for every thread. Stable threads now retain independent histogram runs across their neighbours' stack changes, guarded by the same before/after thread registry and suspendable-frame/greenlet checks. The deterministic active-neighbour test failed on the old code (100 histogram writes rather than 2); exact counts, lifetime replacement and unsafe-stack controls cover the new path.
+
+Linux/Python 3.14.9, 180 active workers, three 10-second rounds:
+
+| Implementation | Hz | Sampler % of one core | Baseline-subtracted process % |
+| --- | ---: | --- | --- |
+| Before | 100 | 4.242, 4.342, 4.482 | 5.145, 4.856, 5.245 |
+| Independent per-thread runs | 100 | 3.248, 2.940, 3.815 | 3.515, 3.210, 3.518 |
+| Independent per-thread runs | 50 | 2.451, 2.365, 2.271 | 2.784, 2.711, 2.945 |
+
+Since optimized 100 Hz still exceeded 3%, the CLI and control verb now default to **50 Hz**. CPU refresh remains 10 Hz; explicit frequencies remain available. These synthetic measurements are not a guarantee for every live gateway or OS.
+
+The old sleeping-thread check also lacked a competing CPU load, so a whole-process clock mutation passed. `test_control_profile_cpu_isolation.py` now baselines concurrent sleeping and burning threads, burns at least 0.35 thread-CPU seconds, then requires sleeper CPU below 0.05 s and burner CPU at least 0.2 s. On `9892672e83` with the Linux process-clock mutation it fails with sleeper CPU **0.350335282 s**. The native reader passes; the test is selected on Linux and macOS.
 
 ### Measurement history
 
