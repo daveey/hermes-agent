@@ -528,6 +528,11 @@ def cached_ro(path: Path, *, busy_budget: float = 0.5) -> Iterator[sqlite3.Conne
                 from hermes_cli.kanban_generation import DeletedWalGenerationError
                 raise DeletedWalGenerationError(f"kanban DB {path}: reader was evicted while waiting; retry")
         conn.row_factory = None
+        # [daveey] The budget covers the body's statements too: a warm cached reader otherwise spends its own 500 ms
+        # SQLite busy timeout on a busy board even when the open was asked for less (t_01a19e082c8721b1).
+        lowered = busy_budget < _RO_BUSY_TIMEOUT_S
+        if lowered:
+            conn.execute(f"PRAGMA busy_timeout={max(0, int(busy_budget * 1000))}")
         try:
             yield conn
         except sqlite3.Error:
@@ -536,6 +541,13 @@ def cached_ro(path: Path, *, busy_budget: float = 0.5) -> Iterator[sqlite3.Conne
                     del _RO_CACHE[key]
             _close_quietly(conn)
             raise
+        finally:
+            if lowered and _RO_CACHE.get(key) is entry:
+                conn.execute(f"PRAGMA busy_timeout={int(_RO_BUSY_TIMEOUT_S * 1000)}")
+
+
+# The cached reader's own SQLite busy timeout, set when ``kanban_reader_lifecycle`` opens it.
+_RO_BUSY_TIMEOUT_S = 0.5
 
 
 def _close_quietly(conn: sqlite3.Connection) -> None:
