@@ -108,7 +108,10 @@ def commit_selection(authority, ref, policy, config, model, generation, *, ended
             saved['policy'] = released
             conn.execute('UPDATE state_meta SET value=? WHERE key=?',
                          (_json(saved), POLICY_PREFIX + ref.session_id))
-        selection = json.loads(json.dumps([model, provider, _frozen_pick(expected)]))
+        # Remember the pick the receipt now holds: after an end that is the RELEASED policy, which the
+        # next turn's *expected* is, so an unchanged selection there is not mistaken for a new one.
+        current = released if released is not None else expected
+        selection = json.loads(json.dumps([model, provider, _frozen_pick(current)]))
         key = PREFIX + ref.session_id
         old = _memo(conn.execute('SELECT value FROM state_meta WHERE key=?', (key,)).fetchone())
         if old is not None and old['selection'] == selection:

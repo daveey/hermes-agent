@@ -447,6 +447,64 @@ async def test_managed_unchanged_class_selection_never_rerolls(home, monkeypatch
         store.close_all_db_handles()
 
 
+@pytest.mark.asyncio
+async def test_hold_ending_onto_a_class_default_never_rerolls_after(home, monkeypatch):
+    """A held pick ends on an edit to a class default: the ending turn follows the class once, and the
+    turns after it (no further edit) keep that allocation, its provider and the allocator untouched."""
+    from agent.model_routing_switch_intent import PREFIX as INTENT
+    store, db, authority, owner, ref, built = _bot_chat_owner(home, monkeypatch)
+    try:
+        db.patch_session_model_config(ref.session_id, {
+            'composer_override_profile': {'model': ASTRA, 'provider': 'openai-codex'}})
+        _profile_pick(home, ASTRA, 'openai-codex')
+        await _open(authority, ref)
+        assert (await _turn(authority, owner, ref, built, 'held'))[:2] == (OPUS, 'anthropic'), built
+        _class_default(home)
+        ended = await _turn(authority, owner, ref, built, 'ended')
+        assert ended[0] != 'raised', ended
+        assert 'selection_profile' not in _receipt_model(db, ref)
+        physical = authority.physical_target(ref)
+        ledger = _routing_ledger(home, physical)
+        assert not ledger[0].get('exact_pin', False), ledger
+        for rid in ('c2', 'c3'):
+            assert (await _turn(authority, owner, ref, built, rid))[:2] == ended[:2], built
+            assert _routing_ledger(home, physical) == ledger
+            assert db.get_meta(INTENT + physical) is None
+    finally:
+        await owner.close()
+        store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+async def test_managed_hold_ending_onto_a_class_default_never_rerolls_after(home, monkeypatch):
+    from agent.model_routing_switch_intent import PREFIX as INTENT
+    from tests.gateway.test_model_switch_worker_composed import _noop
+    store, db, authority, owner, ref = _owner(home, monkeypatch, _noop)
+    authority.runner._peek_session_state = lambda key: None
+    authority.runner.session_authority = authority
+    try:
+        db.set_session_title(ref.session_id, 'Bot Chat')
+        db.patch_session_model_config(ref.session_id, {
+            'composer_override_profile': {'model': ASTRA, 'provider': 'openai-codex'}})
+        _profile_pick(home, ASTRA, 'openai-codex')
+        await _open(authority, ref)
+        held, _ = _managed_turn(authority, db, ref, monkeypatch, 'held')
+        assert (held.model, held.provider) == (OPUS, 'anthropic')
+        _class_default(home)
+        ended, scope = _managed_turn(authority, db, ref, monkeypatch, 'ended')
+        assert 'selection_profile' not in _receipt_model(db, ref)
+        ledger = _routing_ledger(home, scope['session_id'])
+        assert not ledger[0].get('exact_pin', False), ledger
+        for rid in ('c2', 'c3'):
+            after, scope = _managed_turn(authority, db, ref, monkeypatch, rid)
+            assert (after.model, after.provider) == (ended.model, ended.provider)
+            assert _routing_ledger(home, scope['session_id']) == ledger
+            assert db.get_meta(INTENT + scope['session_id']) is None
+    finally:
+        await owner.close()
+        store.close_all_db_handles()
+
+
 # ---- owner stale controls -------------------------------------------------------------------------
 
 
