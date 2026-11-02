@@ -1,5 +1,6 @@
 """Real SQLite/flock contention at the Kanban publication boundary."""
 import contextlib
+import logging
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -154,3 +155,35 @@ def test_body_error_rolls_back_before_unlock(board):
     assert kb.get_task(conn, task).status == "ready"
     with af.admission_lock(home, timeout=0):
         pass
+
+
+@pytest.mark.parametrize("review", [False, True])
+def test_busy_admission_lock_defers_quietly(board, caplog, review):
+    """Designed contention (another claimer holds admission.lock for its commit) is a normal defer:
+    INFO, no traceback. A WARNING with exc_info here filed false self-heal defects."""
+    conn, home = board
+    task = _task(conn, review)
+    claim = kb.claim_review_task if review else kb.claim_task
+    caplog.set_level(logging.DEBUG, logger="hermes_cli.kanban_admission")
+    with af.admission_lock(home, timeout=1):  # held from another fd
+        assert claim(conn, task) is None
+    assert kb.get_task(conn, task).status == ("review" if review else "ready")
+    records = [r for r in caplog.records if r.name == "hermes_cli.kanban_admission"]
+    assert not [r for r in records if r.levelno >= logging.WARNING]
+    assert not [r for r in records if r.exc_info]
+    assert any(r.levelno == logging.INFO and "lock busy" in r.getMessage() for r in records)
+
+
+def test_real_admission_failure_stays_loud(board, caplog, monkeypatch):
+    conn, _home = board
+    task = _task(conn, False)
+
+    def broken_lock(root, *, timeout=10):
+        raise PermissionError("admission.lock: permission denied")
+
+    monkeypatch.setattr(af, "admission_lock", broken_lock)
+    caplog.set_level(logging.DEBUG, logger="hermes_cli.kanban_admission")
+    assert kb.claim_task(conn, task) is None
+    assert kb.get_task(conn, task).status == "ready"
+    warns = [r for r in caplog.records if r.name == "hermes_cli.kanban_admission" and r.levelno >= logging.WARNING]
+    assert warns and warns[0].exc_info and isinstance(warns[0].exc_info[1], PermissionError)
