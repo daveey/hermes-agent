@@ -1,6 +1,5 @@
 """External resolution is opt-in; local HTTP and explicit resolver fakes remain usable."""
-if not __name__.startswith("tests."):
-    raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import http.server
 import socket

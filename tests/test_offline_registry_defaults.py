@@ -1,4 +1,5 @@
 """Default registry transport stays offline while explicit responses stay real."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import socket
 from types import SimpleNamespace
 

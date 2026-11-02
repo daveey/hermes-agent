@@ -1,4 +1,5 @@
 """Catalog lookup defaults use transport errors, not real remote DNS."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import socket
 
 import httpx

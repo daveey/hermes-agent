@@ -1,4 +1,5 @@
 """CLI catalog defaults must not consult live manifests or provider inventories."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import socket
 import urllib.error
 import urllib.request
