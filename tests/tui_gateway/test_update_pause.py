@@ -87,7 +87,7 @@ def test_resumable_turn_pauses_and_its_marker_survives_the_turn_end(home):
 
 
 @pytest.mark.parametrize("case", ["resume_on_startup_off", "auto_continue_disabled", "bot_room", "opted_out",
-                                  "attempts_used_up", "stale", "no_marker"])
+                                  "attempts_used_up", "short_window", "no_marker"])
 def test_turn_that_cannot_be_auto_continued_is_untouched(home, monkeypatch, case):
     cfg = {"desktop": {"auto_continue": dict(CFG["desktop"]["auto_continue"])}}
     extra = {}
@@ -101,9 +101,10 @@ def test_turn_that_cannot_be_auto_continued_is_untouched(home, monkeypatch, case
     if case != "no_marker":
         record_turn_start(home, "session-key", "the prompt", auto_continue=case != "opted_out",
                           attempts=2 if case == "attempts_used_up" else 0)
-    if case == "stale":
-        later = time.time() + 4 * 3600  # past the 240-min freshness window
-        monkeypatch.setattr(up, "_now", lambda: later)
+    if case == "short_window":
+        # A window no longer than the update margin cannot outlast the update. A turn's age is no longer a
+        # reason: the pause restarts the clock (test_update_pause_freshness.py).
+        cfg["desktop"]["auto_continue"]["freshness_minutes"] = up.UPDATE_MARGIN_S / 60
     _request_pause(home)
 
     assert up.boundary_pause_hook(_session(profile_home=str(home), **extra), "session-key")() is None

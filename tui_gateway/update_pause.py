@@ -45,6 +45,10 @@ PAUSE_STATUS_TEXT = "Paused for a Hermes update; continues automatically"
 # The update itself takes a few minutes: a turn that would age out of the freshness window meanwhile is
 # not paused (mirrors hermes-sync's AUTO_CONTINUE_UPDATE_MARGIN_S).
 UPDATE_MARGIN_S = 600.0
+# [daveey] Capability flag hermes-sync reads from this file's text (never imports it): a cooperative pause
+# of a live turn restarts the auto-continue freshness clock at ``paused_at`` (turn_marker.freshness_since),
+# so ``not_resumable_reason`` no longer rejects a live turn for the age of its ``started_at``.
+PAUSE_RESTARTS_FRESHNESS = True
 WATCH_POLL_S = 5.0
 WATCH_MAX_S = 6 * 3600.0
 # A skewed backend normally retires once idle and its successor continues the turn. One that is still
@@ -126,8 +130,10 @@ def not_resumable_reason(session: dict, marker_key: str) -> str | None:
         return "turn opted out of auto-continue"
     if marker["attempts"] >= max_attempts:
         return "crash-resume attempts used up"
-    if _now() - marker["started_at"] + UPDATE_MARGIN_S > fresh_s:
-        return "turn older than the auto-continue freshness window"
+    # The pause restarts the freshness clock at ``paused_at`` (PAUSE_RESTARTS_FRESHNESS), so the turn's age
+    # no longer matters; only that the window outlasts the update itself.
+    if fresh_s <= UPDATE_MARGIN_S:
+        return "auto-continue freshness window is shorter than the update margin"
     return None
 
 
@@ -452,7 +458,7 @@ def _keep_parked(session: dict, marker_key: str, *, last: bool = False) -> None:
         prev = session.get("_update_pause_parked_stamp")
         if last:
             if prev is None:
-                return  # never parked: a plain pause keeps its started_at clock
+                return  # never parked: a plain pause's clock is paused_at (turn_marker.freshness_since)
             session.pop("_update_pause_parked_stamp", None)
         elif prev is not None and 0 <= _now() - prev < PARK_STAMP_S:
             return

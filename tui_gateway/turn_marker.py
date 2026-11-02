@@ -54,17 +54,22 @@ def _started_at(entry: dict) -> float:
 
 
 def freshness_since(marker: dict) -> float:
-    """[daveey] When a marker's auto-continue freshness clock starts: ``started_at``, except a core-update
-    pause its live writer kept parked between drain windows (``mark_turn_parked``) counts from the last
-    time it was confirmed parked. Waiting on the drainer is not the turn going stale, and every reader of
-    freshness (in-place continue, startup sweep, notice hold) must agree or a parked turn is dropped."""
+    """[daveey] When a marker's auto-continue freshness clock starts: ``started_at`` for a crash-interrupted
+    turn ("don't resurrect stale turns"). A core-update pause counts from ``max(started_at, parked_at,
+    paused_at)``: the cooperative pause of a live turn restarts the clock at ``paused_at`` (a turn that ran
+    80 minutes is not 80 minutes stale when it pauses), and a pause its live writer kept parked between drain
+    windows (``mark_turn_parked``) counts from the last time it was confirmed parked. Every reader of
+    freshness (in-place continue, startup sweep, notice hold) must agree or a paused turn is dropped."""
     started = _started_at(marker)
     if marker.get("reason") != "core_update_pause":
         return started
-    try:
-        return max(started, float(marker.get("parked_at") or 0))
-    except (TypeError, ValueError):
-        return started
+    stamps = [started]
+    for key in ("parked_at", "paused_at"):
+        try:
+            stamps.append(float(marker.get(key) or 0))
+        except (TypeError, ValueError):
+            pass
+    return max(stamps)
 
 
 def _writer_identity() -> dict:
@@ -158,7 +163,10 @@ def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attemp
         return
     now = time.time()
     entry = {"attempts": max(0, int(attempts)), "prompt": prompt[:_MAX_PROMPT_CHARS], "started_at": now,
-             "auto_continue": bool(auto_continue), **_writer_identity()}
+             "auto_continue": bool(auto_continue), **_writer_identity(),
+             # [daveey] This backend's pause restarts the freshness clock (freshness_since), so hermes-sync may
+             # ask this turn to pause whatever its age. An older backend's marker lacks the field.
+             "pause_restarts_freshness": True}
     if killed_jobs:
         entry["killed_jobs"] = list(killed_jobs)
     if pauses:
