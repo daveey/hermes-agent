@@ -2,15 +2,66 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import time
 from contextlib import closing
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+# SQLite's busy handler is the only retry: it re-attempts a lock until this deadline, before any
+# allocation work or ``prepare`` runs. A whole-transaction retry after ``prepare`` would repeat its
+# credential-pool side effects (account selection/refresh), so none is attempted.
+BUSY_TIMEOUT_SECONDS = 30.0
+# Converting a rollback-journal file to WAL needs a moment with no reader. A long reader must not
+# stall allocation for the full busy deadline here; the next connection simply tries again.
+WAL_CONVERT_TIMEOUT_SECONDS = 1.0
+# Allocation holds the writer lock across ``prepare`` (credential/client readiness). Log when that
+# window is long enough to queue other first allocations behind it.
+SLOW_WRITE_WARNING_SECONDS = 5.0
 
 
 class RoutingState:
     def __init__(self, path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _connect(self):
+        """Writer connection in WAL mode, so readers never block a commit (nor a commit, readers).
+
+        In the default rollback journal a COMMIT needs every reader gone: one long read transaction
+        (a maintenance scan) made each allocator's COMMIT time out, and the PENDING lock it left
+        while waiting refused every new reader, schema check and peek host-wide.
+        """
+        db = sqlite3.connect(self.path, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
+        try:
+            if str(db.execute("PRAGMA journal_mode").fetchone()[0]).lower() != "wal":
+                db.execute(f"PRAGMA busy_timeout={int(WAL_CONVERT_TIMEOUT_SECONDS * 1000)}")
+                try:
+                    db.execute("PRAGMA journal_mode=WAL")
+                except sqlite3.OperationalError as exc:
+                    if exc.sqlite_errorcode & 0xFF not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                        raise
+                    # A reader holds the rollback-journal file: stay in it for this connection.
+                finally:
+                    db.execute(f"PRAGMA busy_timeout={int(BUSY_TIMEOUT_SECONDS * 1000)}")
+        except BaseException:
+            db.close()
+            raise
+        return db
+
+    @staticmethod
+    def _ensure_schema(db):
+        """Autocommit, before the allocation transaction: tables outlive a rolled-back allocation, so a
+        later peek or ``link_continuation`` reads an empty table rather than a missing one. On an
+        existing schema each statement only reads it (no write lock in WAL)."""
+        db.execute("CREATE TABLE IF NOT EXISTS aliases (session TEXT PRIMARY KEY, root TEXT NOT NULL)")
+        db.execute("CREATE TABLE IF NOT EXISTS routes (root TEXT, class TEXT, metadata TEXT NOT NULL, "
+                   "PRIMARY KEY(root, class))")
+        db.execute("CREATE TABLE IF NOT EXISTS counters (pool TEXT PRIMARY KEY, position INTEGER NOT NULL)")
+        db.execute("CREATE TABLE IF NOT EXISTS switch_fences (root TEXT, class TEXT, intent TEXT NOT NULL, "
+                   "PRIMARY KEY(root, class))")
 
     def allocate(self, session_id, parent_session_id, level, candidates, version, excluded, prepare=None,
                  exact_pin=False, replace: bool | str = False):
@@ -22,16 +73,23 @@ class RoutingState:
         The fence is recorded in this transaction, so overlapping builds, a crash retry before the intent
         is consumed and a late build of a superseded intent re-read the honoured allocation instead of
         choosing again; a failed ``prepare`` rolls it back.
+
+        A sticky reuse that writes nothing (the per-turn/re-entry case, never any truthy ``replace``)
+        is read from a snapshot and prepared outside the writer lock: no allocation, counter or route
+        changes, so there is nothing to publish atomically. Every write (first allocation, alias,
+        failover, pin, replacement) still runs ``prepare`` before COMMIT, so a failed credential/client
+        never becomes visible.
         """
-        with closing(sqlite3.connect(self.path, timeout=30, isolation_level=None)) as db:
-            db.execute("PRAGMA busy_timeout=30000")
-            db.execute("CREATE TABLE IF NOT EXISTS aliases (session TEXT PRIMARY KEY, root TEXT NOT NULL)")
-            db.execute("CREATE TABLE IF NOT EXISTS routes (root TEXT, class TEXT, metadata TEXT NOT NULL, "
-                       "PRIMARY KEY(root, class))")
-            db.execute("CREATE TABLE IF NOT EXISTS counters (pool TEXT PRIMARY KEY, position INTEGER NOT NULL)")
-            db.execute("CREATE TABLE IF NOT EXISTS switch_fences (root TEXT, class TEXT, intent TEXT NOT NULL, "
-                       "PRIMARY KEY(root, class))")
+        if not replace:
+            previous = self._sticky(session_id, level, candidates, excluded, exact_pin)
+            if previous is not None:
+                if prepare is not None:
+                    prepare(previous)
+                return previous
+        with closing(self._connect()) as db:
+            self._ensure_schema(db)
             db.execute("BEGIN IMMEDIATE")
+            started = time.monotonic()
             try:
                 result = self._allocate(db, session_id, parent_session_id, level, candidates, version, excluded,
                                         exact_pin, replace)
@@ -40,16 +98,42 @@ class RoutingState:
                 if prepare is not None:
                     prepare(result)
                 db.execute("COMMIT")
-                return result
             except BaseException:
                 db.execute("ROLLBACK")
                 raise
+            held = time.monotonic() - started
+            if held >= SLOW_WRITE_WARNING_SECONDS:
+                logger.warning("model routing allocation held the routing writer lock %.1fs (class %s)", held, level)
+            return result
+
+    def _sticky(self, session, level, candidates, excluded, exact_pin):
+        """The existing allocation when reusing it needs no write, else None (take the write path)."""
+        if not self.path.exists():
+            return None
+        with closing(self._connect()) as db:
+            try:
+                row = db.execute(
+                    "SELECT r.metadata FROM aliases a JOIN routes r ON r.root=a.root "
+                    "WHERE a.session=? AND r.class=?", (session, level)).fetchone()
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):
+                    return None
+                raise
+        if row is None:
+            return None
+        previous = json.loads(row[0])
+        if not _reusable(previous, candidates, excluded):
+            return None
+        if exact_pin and not previous.get("exact_pin"):
+            return None  # upgrading to an exact pin is a write
+        return previous
 
     def peek(self, session, level):
         """Read the latest lineage selection without creating state or advancing it."""
         if not self.path.exists():
             return None
-        with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)) as db:
+        with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True,
+                                     timeout=BUSY_TIMEOUT_SECONDS)) as db:
             row = db.execute(
                 "SELECT r.metadata FROM routes r JOIN aliases a ON a.root=r.root "
                 "WHERE a.session=? AND r.class=?", (session, level)).fetchone()
@@ -64,7 +148,7 @@ class RoutingState:
         """
         from agent.model_routing import ModelRoutingError
 
-        with closing(sqlite3.connect(self.path, timeout=30, isolation_level=None)) as db:
+        with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
                 row = db.execute("SELECT root FROM aliases WHERE session=?", (parent,)).fetchone()
@@ -96,10 +180,7 @@ class RoutingState:
         row = db.execute("SELECT metadata FROM routes WHERE root=? AND class=?", (root, level)).fetchone()
         if row and not replace:
             previous = json.loads(row[0])
-            identity = previous["selected_provider"], previous["selected_model"]
-            allowed = any((r["provider"], r["model"]) == identity and
-                          r["billing"] == previous["billing_group"] for r in candidates)
-            if allowed and identity not in excluded:
+            if _reusable(previous, candidates, excluded):
                 if exact_pin and not previous.get("exact_pin"):
                     previous["exact_pin"] = True
                     db.execute("UPDATE routes SET metadata=? WHERE root=? AND class=?",
@@ -158,6 +239,14 @@ class RoutingState:
         provider = cycle[position % len(cycle)]
         db.execute("INSERT OR REPLACE INTO counters VALUES (?, ?)", (pool, position + 1))
         return sorted(groups[provider], key=lambda r: r["model"])[0]
+
+
+def _reusable(previous, candidates, excluded):
+    """One sticky-reuse rule for the snapshot read and the write transaction."""
+    identity = previous["selected_provider"], previous["selected_model"]
+    allowed = any((r["provider"], r["model"]) == identity and
+                  r["billing"] == previous["billing_group"] for r in candidates)
+    return allowed and identity not in excluded
 
 
 def _allocation_kind(root):
