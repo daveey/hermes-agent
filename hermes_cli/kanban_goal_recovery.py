@@ -52,16 +52,21 @@ def valid_receipt(conn, task_id, run_id, reason, *, before=None):
     """Match the kernel receipt to this run, goal, and exact judge reason."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_resume_exec import _payload
+    from hermes_cli import kanban_recovery_history as history
 
     task = kb.get_task(conn, task_id)
     if not task or not task.goal_mode or run_id is None:
         return False
     row = conn.execute(
-        'SELECT id, payload FROM task_events WHERE task_id=? AND run_id=? AND kind=? '
+        'SELECT * FROM task_events WHERE task_id=? AND run_id=? AND kind=? '
         'ORDER BY id DESC LIMIT 1', (task_id, run_id, EVENT)).fetchone()
-    if not row or (before is not None and row[0] >= before):
+    if not row:
         return False
-    data = _payload(row[1])
+    if before is not None:
+        block = conn.execute('SELECT * FROM task_events WHERE id=?', (before,)).fetchone()
+        if block is None or not history.receipt_precedes(conn, row, block):
+            return False
+    data = _payload(row['payload'])
     expected = {**subject(task, reason), 'run_id': run_id, 'status': 'running'}
     return data.get('subject') == expected and data.get('snapshot') == digest(expected)
 
@@ -93,6 +98,10 @@ def recovery_assignee(task):
 def current_park(conn, task_id):
     """Keep judged goals out of generic triage re-entry, even after recovery ends."""
     from hermes_cli.kanban_resume_exec import _payload
+    from hermes_cli import kanban_recovery_history as history
+    if history.synced(conn):
+        row = history.latest(conn, task_id, ('blocked',))
+        return bool(row and _payload(row['payload']).get('rekind_reason') == EVENT)
     row = conn.execute(
         "SELECT payload FROM task_events WHERE task_id=? AND kind='blocked' ORDER BY id DESC LIMIT 1",
         (task_id,)).fetchone()

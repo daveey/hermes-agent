@@ -10,8 +10,9 @@ Each dispatcher tick, :func:`ensure_recovery_cards` finds home-owned cards whose
 :func:`kanban_resume_exec.exhaustion_refusal` (a continuation_exhausted rekind written by the
 refused run, no human gate, no live run, nothing moved it since) and creates ONE recovery card per
 park: ``creator_task_id=<target>`` (1 hop), ``created_by=kanban-recovery``, idempotency key
-``recovery:<target>:<park blocked event id>``. It is post-park and in scope by construction, so it
-may file ``resume`` through the ordinary supervisor request path; every fence of that path
+``recovery:<target>:<durable park identity>`` (the local event id on unsynced boards). It is
+post-park and in scope by construction, so it may file ``resume`` through the ordinary supervisor
+request path; every fence of that path
 (scope, freshness, human gate, exhaustion, ``MAX_RESUMES``) still runs unchanged at execution.
 
 Not created: for a card whose resume budget is spent (the request would be refused), for a card
@@ -26,13 +27,15 @@ import logging
 import sqlite3
 from typing import Optional
 
+from hermes_cli import kanban_recovery_history as history
+
 logger = logging.getLogger(__name__)
 
 CREATED_BY = "kanban-recovery"
 EVENT = "resume_requester_created"
 
 
-def _key(target: str, park_id: int) -> str:
+def _key(target: str, park_id) -> str:
     return f"recovery:{target}:{park_id}"
 
 
@@ -95,6 +98,8 @@ def _event_for_park(conn: sqlite3.Connection, target: str, park_id: int) -> Opti
     from hermes_cli.kanban_wake_check import foreign_copy
 
     park_uid = _park_uid(conn, target, park_id)
+    park = conn.execute("SELECT * FROM task_events WHERE task_id = ? AND id = ?", (target, park_id)).fetchone()
+    park_identity = history.identity(park) if park is not None and park_uid else None
     foreign = foreign_copy(conn, target)
     for (raw,) in conn.execute(
             "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? ORDER BY id DESC", (target, EVENT)):
@@ -104,7 +109,11 @@ def _event_for_park(conn: sqlite3.Connection, target: str, park_id: int) -> Opti
             continue
         if not isinstance(data, dict):
             continue
-        if data.get("park_event_uid"):
+        if data.get("park_identity"):
+            # Authored with the park's causal identity: survives row-loss restoration,
+            # which re-inserts the same event under a newer local id.
+            matches = park_identity is not None and data["park_identity"] == park_identity
+        elif data.get("park_event_uid"):
             matches = data["park_event_uid"] == park_uid
         else:
             # Pre-UID links are only exact at home. A foreign reader cannot disprove
@@ -163,7 +172,8 @@ def ensure_recovery_cards(conn: sqlite3.Connection) -> list[str]:
                 model_override=task.model_override, provider_override=task.provider_override,
                 requires=['terminal', 'file', 'kanban'] if goal else None,
                 created_by=CREATED_BY, workspace_kind="scratch", tenant=row["tenant"],
-                idempotency_key=_key(target, park_id), creator_task_id=target, runs_on=runs_on,
+                idempotency_key=_key(target, history.park_identity(conn, target) or park_id),
+                creator_task_id=target, runs_on=runs_on,
             )
         except (sqlite3.Error, ValueError):
             logger.exception("kanban: recovery card for %s failed", target)
@@ -172,6 +182,9 @@ def ensure_recovery_cards(conn: sqlite3.Connection) -> list[str]:
         park_uid = _park_uid(conn, target, park_id)
         if park_uid:
             payload["park_event_uid"] = park_uid
+            identity = history.park_identity(conn, target)
+            if identity:
+                payload["park_identity"] = identity
         with kb.write_txn(conn):
             kb._append_event(conn, target, EVENT, payload)
         made.append(rec)

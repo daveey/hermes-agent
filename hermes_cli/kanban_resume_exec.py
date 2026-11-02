@@ -129,10 +129,9 @@ def exhaustion_refusal(conn: sqlite3.Connection, target: str) -> Optional[str]:
         return f"{target} is {status}, not parked in triage/blocked"
     if run is not None:
         return f"{target} still has a live run {run}"
-    marks = ",".join("?" for _ in _LIFECYCLE_KINDS)
-    last = conn.execute(
-        f"SELECT id, kind, run_id, payload FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
-        "ORDER BY id DESC LIMIT 1", (target, *_LIFECYCLE_KINDS)).fetchone()
+    from hermes_cli import kanban_recovery_history as history
+    event = history.latest(conn, target, _LIFECYCLE_KINDS)
+    last = tuple(event[k] for k in ('id', 'kind', 'run_id', 'payload')) if event else None
     payload = _payload(last[3]) if last else {}
     if last and last[1] == 'blocked' and payload.get('rekind_reason') == 'goal_unachievable':
         from hermes_cli.kanban_goal_recovery import valid_receipt
@@ -142,9 +141,9 @@ def exhaustion_refusal(conn: sqlite3.Connection, target: str) -> Optional[str]:
     if not last or last[1] != "blocked" or payload.get("rekind_reason") != "continuation_exhausted":
         return (f"{target}'s current park is not a continuation_exhausted block "
                 f"(newest lifecycle event: {last[1] if last else 'none'})")
-    if last[2] is None or not conn.execute(
-            "SELECT 1 FROM task_events WHERE task_id = ? AND run_id = ? AND kind = 'continuation_exhausted' "
-            "AND id < ?", (target, last[2], last[0])).fetchone():
+    receipts = history.events(conn, target, ('continuation_exhausted',))
+    if last[2] is None or not any(r['run_id'] == last[2] and history.receipt_precedes(conn, r, event)
+                                  for r in receipts):
         return f"{target}'s block was not written by the run the kernel refused a continuation"
     return None
 
@@ -156,6 +155,13 @@ def _created_event_id(conn: sqlite3.Connection, task_id: str) -> int:
 
 
 def _park_event_id(conn: sqlite3.Connection, target: str) -> int:
+    from hermes_cli import kanban_recovery_history as history
+    if history.synced(conn):
+        row = history.latest(conn, target, ('blocked',))
+        if row is not None or history.evidenced(conn, target):
+            return int(row['id']) if row else 0
+        # Legacy history with no causal evidence: authority fails closed elsewhere
+        # (exhaustion_refusal, fresh), but the triage hold keeps its old local anchor.
     row = conn.execute("SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind = 'blocked'",
                        (target,)).fetchone()
     return int(row[0]) if row and row[0] is not None else 0
@@ -165,7 +171,10 @@ def _recovery_refusal(conn: sqlite3.Connection, requester: str, target: str) -> 
     """An ancestor may be resumed only by a card created for THIS park (after its exhaustion block)."""
     if _creator(conn, target) == requester:
         return None  # a card the requester created; the requester owns it
-    if _created_event_id(conn, requester) <= _park_event_id(conn, target):
+    from hermes_cli import kanban_recovery_history as history
+    fresh = (history.fresh(conn, requester, target) if history.synced(conn) else
+             _created_event_id(conn, requester) > _park_event_id(conn, target))
+    if not fresh:
         return (f"{requester} predates {target}'s current continuation_exhausted park; only a recovery "
                 "card created for this park may resume it")
     return None
