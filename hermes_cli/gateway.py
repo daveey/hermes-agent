@@ -53,6 +53,7 @@ from hermes_cli.config import (
     is_managed,
     managed_error,
     read_raw_config,
+    read_raw_config_readonly,
     save_env_value,
     write_platform_config_field,
 )
@@ -3544,7 +3545,9 @@ def _get_restart_drain_timeout() -> float:
     """Return the configured gateway restart drain timeout in seconds."""
     raw = os.getenv("HERMES_RESTART_DRAIN_TIMEOUT", "").strip()
     if not raw:
-        cfg = read_raw_config()
+        # [daveey] Read-only view: every Desktop /api/status poll lands here, and read_raw_config() deep-copies the
+        # whole config for this one key.
+        cfg = read_raw_config_readonly()
         agent_cfg = cfg.get("agent", {}) if isinstance(cfg, dict) else {}
         raw = str(agent_cfg.get("restart_drain_timeout", DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT))
     return parse_restart_drain_timeout(raw)
