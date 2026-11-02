@@ -300,6 +300,10 @@ def test_registry_concurrent_misses_are_single_flight(monkeypatch):
     from threading import Condition, Event, Lock
     condition, release = Condition(), Event()
     arrivals = {'lock': 0, 'fetch': 0}
+    # Freeze before the first fetch: wall time and fractional TTL rounding must
+    # not decide whether concurrent readers share the initial cache entry.
+    clock = SimpleNamespace(monotonic=lambda: 1000.0)
+    monkeypatch.setattr(node, 'time', clock)
 
     class ObservedLock:
         """Report attempts before blocking, without changing lock semantics."""
@@ -340,7 +344,7 @@ def test_registry_concurrent_misses_are_single_flight(monkeypatch):
             values = [future.result(timeout=10) for future in futures]
         assert all('one' in v['machines'] for v in values)
         assert fetch.call_count == 1
-        monkeypatch.setattr(node, 'time', SimpleNamespace(monotonic=lambda: node._REGISTRY['at'] + node.REGISTRY_TTL_S))
+        clock.monotonic = lambda: 1000.0 + node.REGISTRY_TTL_S
         fetch.side_effect = None
         fetch.return_value = {'me': 'local', 'machines': [{'name': 'two'}]}
         assert 'two' in node.registry()['machines']
