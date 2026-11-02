@@ -132,20 +132,21 @@ def test_unreachable_backend_is_named_and_the_other_still_activates(host, tmp_pa
     # A live record whose port answers nothing (backend wedged mid-restart): the host owner fails,
     # the Desktop child must still activate, and the folded answer must say which one failed.
     import socket
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    closed_port = sock.getsockname()[1]
-    sock.close()
-    host(hr.ROLE_SERVE, port=closed_port)
-    desktop = host(hr.ROLE_DESKTOP_SERVE)
+    # Keep ownership without listening: closing a free-port probe lets a fixture listener
+    # (or another process) take the port and turn the expected refusal into HTTP success.
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        closed_port = sock.getsockname()[1]
+        host(hr.ROLE_SERVE, port=closed_port)
+        desktop = host(hr.ROLE_DESKTOP_SERVE)
 
-    answer = plugins_activation.notify_serve_backend("probe", tmp_path)
+        answer = plugins_activation.notify_serve_backend("probe", tmp_path)
 
-    assert len(desktop) == 1
-    assert answer["ok"] is True  # the Desktop child's answer leads
-    assert answer["backend_error"].startswith(f"serve:{closed_port} unreachable")
-    by_role = {b["role"]: b["answer"] for b in answer["backends"]}
-    assert by_role["desktop-serve"]["ok"] is True and "backend_error" in by_role["serve"]
+        assert len(desktop) == 1
+        assert answer["ok"] is True  # the Desktop child's answer leads
+        assert answer["backend_error"].startswith(f"serve:{closed_port} unreachable")
+        by_role = {b["role"]: b["answer"] for b in answer["backends"]}
+        assert by_role["desktop-serve"]["ok"] is True and "backend_error" in by_role["serve"]
 
 
 def test_cli_hint_reports_a_failed_desktop_backend_even_when_the_host_owner_loaded_it(
