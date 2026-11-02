@@ -171,10 +171,10 @@ class Model:
             job.advance_from(t)
 
     def manual(self, name: str, t: float) -> None:
+        """A run-now ahead of the pending slot is an EXTRA fire: the slot and the repeat budget stay
+        put (cron/extra_fire.py, f656543e030). Once the slot is due it IS the scheduled fire."""
         job = self.jobs[name]
         self.fires.append((name, None, t))
-        # Explicit run-now before the pending occurrence is an extra fire (f656543e030):
-        # it preserves both the slot and its repeat budget, for intervals as well as cron.
         if job.pending is not None and job.pending > t:
             return
         job.fired += 1
@@ -573,7 +573,8 @@ class Soak:
                 assert not ok_sent or ok_sent[0]["exec_in_text"], f"{label}: wrong body delivered"
         for exec_id, row in rows.items():
             if exec_id not in starts:  # attempts that never ran must say so truthfully
-                # "missed" is the ledger row cron/missed_runs.py books for collapsed/skipped slots.
+                # "missed": the ledger row cron/missed_runs.py books for slots an outage collapsed
+                # or skipped (ee394bd9213), never a started run.
                 assert row["status"] in ("failed", "unknown", "skipped", "missed"), f"{where} ghost row {row}"
         if hasattr(self, "long_run_exec"):
             row = rows[self.long_run_exec]

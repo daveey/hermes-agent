@@ -259,6 +259,35 @@ def _notif_run_submit(rid, sid, session, text, **kwargs):
     return accepted
 
 
+def _notif_unowned_event(sid: str, evt: dict, deferred) -> None:
+    """Dispose of an addressed event this session cannot prove it owns (never adopt an orphan): park it for its
+    owner's return (``notification_park``). One the park refuses: a delegation is dropped at WARNING with its offer
+    cleared (``return_completion_offer``; the row stays pending) or, during a shutdown drain, goes onto ``deferred``
+    to be requeued; anything else drops."""
+    evt_type, is_delegation = evt.get("type", "completion"), evt.get("type") == "async_delegation"
+    origin, key = str(evt.get("origin_ui_session_id") or ""), str(evt.get("session_key") or "")
+    from tui_gateway import notification_park
+    if notification_park.park(evt):
+        logger.debug("Parked unowned %s notification (origin=%r key=%r) until its owner returns",
+                     evt_type, origin, key)
+    elif deferred is not None:
+        if is_delegation:
+            deferred.append(evt)
+        else:
+            logger.debug("Dropping unowned %s notification during shutdown drain (origin=%r key=%r)",
+                         evt_type, origin, key)
+    else:
+        # A durable replay stays pending: hand it back so the orphan sweep re-offers it once its owner
+        # is live (#97202), and keep that retry out of WARNING.
+        restored = is_delegation and bool(evt.get("restored"))
+        (logger.warning if is_delegation and not restored else logger.debug)(
+            "Dropping unowned %s notification (origin=%r key=%r) instead of delivering to session %s",
+            evt_type, origin, key, sid)
+        if is_delegation:
+            from tools.async_delegation import return_completion_offer
+            return_completion_offer(evt)
+
+
 # A retried notice the canonical ledger refuses (SESSION_NOT_OWNED persists while a gateway owns the
 # chat) waits before its requeue, doubling per session up to the kanban/loop poll period so the
 # poller thread never delays those polls by more than one period.
@@ -1192,17 +1221,25 @@ def _notif_hold_for(owner: dict, evt: dict, queue) -> bool:
     ``owner`` has no running poller (none started, or its shutdown drain already took the list). Every live
     session's poller drains the one process-wide queue, so an event put back there while its owner was mid-turn
     was dequeued, lineage-resolved against state.db and re-queued by every other poller, ten times a second
-    each, for the whole turn (a 22-chat Desktop backend at 300% CPU, 2026-10-27). [daveey]"""
+    each, for the whole turn (a 22-chat Desktop backend at 300% CPU, 2026-10-27). [daveey]
+
+    The list is off every queue, so a delegation result in it is marked held (``async_delegation.mark_copy_held``)
+    while the list owns it; else the orphan sweep reads a result waiting out a turn longer than a claim lease as
+    lost and queues a duplicate. The caller still holds its own mark (in-flight or park) here, so the copy is never
+    unmarked; whoever takes it back out (``_notif_take_held``, the shutdown drain) unmarks after routing."""
+    from tools.async_delegation import completion_copy_id, mark_copy_held
     with _notif_held_lock:
         held = owner.get("_notif_held")
         if held is None:
             return False
+        mark_copy_held(completion_copy_id(evt))
         held.append(evt)
     return True
 
 
 def _notif_take_held(session: dict) -> list:
-    """Remove and return every event held for ``session`` (oldest first)."""
+    """Remove and return every event held for ``session`` (oldest first). Each result's held-copy mark passes to the
+    caller, who MUST pass the list to ``_notif_unhold`` once routing returns (a re-hold takes its own mark)."""
     held = session.get("_notif_held")
     if not held:
         return []
@@ -1212,13 +1249,23 @@ def _notif_take_held(session: dict) -> list:
     return taken
 
 
+def _notif_unhold(events) -> None:
+    """End the held-copy mark ``_notif_hold_for`` took for each of ``events`` (no-op for non-results)."""
+    if events:
+        from tools.async_delegation import completion_copy_id, unmark_copy_held
+        for evt in events:
+            unmark_copy_held(completion_copy_id(evt))
+
+
 def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, completions=None, *, owned=False) -> bool:
     """Route one dequeued event: foreign (another live session owns it) → handed to its owner's poller
     (``_notif_hold_for``; the shared queue only if it has none), or onto ``deferred`` during the shutdown drain;
-    unowned (addressed but unprovable — never adopt an orphan) → dropped, except delegation payloads deferred for a
-    resume; ours (or ownerless legacy, kept process-global) → status.update once, then an agent turn if idle, else
-    held for this session's idle boundary (ownerless legacy: re-queued). False = the drain must stop (session busy). ``owned`` skips the ownership gates for events a caller already
-    drained through ``_session_owns_notification_event`` (the post-turn safety net), so lineage resolves once."""
+    unowned (addressed but unprovable — never adopt an orphan) → a re-adopted orphan's ``park_if_unowned`` exit is
+    parked on the registry for its chat's poller, anything else parks for a bounded window so the owner's resume can
+    still claim it (``_notif_unowned_event``); ours (or ownerless legacy, kept process-global) → status.update once,
+    then an agent turn if idle, else held for this session's idle boundary (ownerless legacy: re-queued). False = the
+    drain must stop (session busy). ``owned`` skips the ownership gates for events a caller already drained through
+    ``_session_owns_notification_event`` (the post-turn safety net), so lineage resolves once."""
     queue = registry.completion_queue
     evt_type, is_delegation = evt.get("type", "completion"), evt.get("type") == "async_delegation"
     owner = None if owned else _notification_event_owner_elsewhere(sid, session, evt)
@@ -1230,26 +1277,12 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, com
             time.sleep(0.1)
         return True
     if not owned and _notification_event_requires_owner(evt) and not _session_owns_notification_event(sid, session, evt):
-        origin, key = str(evt.get("origin_ui_session_id") or ""), str(evt.get("session_key") or "")
         if evt.get("park_if_unowned") and hasattr(registry, "park_unowned_event"):
             # A re-adopted orphan's exit: its chat may simply not be open in this backend yet. Park it
             # for that chat's own poller (take_parked_events) instead of dropping it. [daveey]
             registry.park_unowned_event(evt)
             return True
-        if deferred is None:
-            # A durable replay stays pending: hand it back so the orphan sweep re-offers it once its owner
-            # is live (#97202), and keep that retry out of WARNING.
-            restored = is_delegation and bool(evt.get("restored"))
-            (logger.warning if is_delegation and not restored else logger.debug)(
-                "Dropping unowned %s notification (origin=%r key=%r) instead of delivering to session %s",
-                evt_type, origin, key, sid)
-            if is_delegation:
-                from tools.async_delegation import return_completion_offer
-                return_completion_offer(evt)
-        elif is_delegation:
-            deferred.append(evt)
-        else:
-            logger.debug("Dropping unowned %s notification during shutdown drain (origin=%r key=%r)", evt_type, origin, key)
+        _notif_unowned_event(sid, evt, deferred)
         return True
     if evt_type == "completion" and registry.is_completion_consumed(evt.get("session_id", "")):
         return True
@@ -1355,15 +1388,29 @@ def _notif_dispatch_completions(sid, session, notifications, registry, deferred)
 
 
 def _notif_handle_ready(sid, session, events, emitted, registry, fmt, deferred, *, owned=False):
-    """One ready snapshot: ownership and UI emission per event, one turn per completion run."""
+    """One ready snapshot: ownership and UI emission per event, one turn per completion run. Events this pass
+    does not route (busy session, or an event whose routing raised) go back to ``deferred`` / the queue."""
     completions = []
+    hand_back = deferred.append if deferred is not None else registry.completion_queue.put
     for index, event in enumerate(events):
         if event.get("type", "completion") != "completion":
             _notif_dispatch_completions(sid, session, completions, registry, deferred)
             completions = []
-        if not _notif_handle_event(sid, session, event, emitted, registry, fmt, deferred, completions, owned=owned):
+        try:
+            routed = _notif_handle_event(sid, session, event, emitted, registry, fmt, deferred, completions,
+                                         owned=owned)
+        except Exception:
+            # The snapshot is the only in-memory copy of everything after this event: hand it back, and the
+            # failed delegation's offer to the ledger, before the caller logs the failure.
             for remaining in events[index + 1:]:
-                (deferred.append if deferred is not None else registry.completion_queue.put)(remaining)
+                hand_back(remaining)
+            _notif_dispatch_completions(sid, session, completions, registry, deferred)
+            from tools.async_delegation import return_completion_offer
+            return_completion_offer(event)
+            raise
+        if not routed:
+            for remaining in events[index + 1:]:
+                hand_back(remaining)
             break
     _notif_dispatch_completions(sid, session, completions, registry, deferred)
 
@@ -1556,7 +1603,8 @@ def _notification_poller_loop(stop_event: threading.Event, sid: str, session: di
 
 def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, session: dict) -> None:
     """Daemon thread (started by _init_session()) that drains the process-global completion_queue for this session
-    (ownership routing: _notif_handle_event) and polls ``kanban_notify_subs`` every ``_KANBAN_POLL_SECONDS`` — the
+    (ownership routing: _notif_handle_event), claims the events parked while their owner was not live
+    (``notification_park``), and polls ``kanban_notify_subs`` every ``_KANBAN_POLL_SECONDS`` — the
     delivery path for platform="tui" rows.
 
     Also polls ``kanban_notify_subs`` every ``_KANBAN_POLL_SECONDS`` for this session's TUI kanban
@@ -1566,6 +1614,7 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
     from tools import async_delegation
     from tools.process_registry import process_registry
     from tools.process_registry_awaiting import release as release_in_flight, take_ready
+    from tui_gateway import notification_park
     from tools.process_registry_notifications import format_process_notification
     process_registry.restore_completions()  # first consumer in a TUI process (#123265)
     queue = process_registry.completion_queue
@@ -1598,40 +1647,50 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
             last_parked_poll = now
             _notif_take_parked(sid, session, process_registry, handle)
         if session.get("_notif_held") and not session.get("running") and not session.get("_turn_cancel_requested"):
+            taken = _notif_take_held(session)
             try:
-                handle(_notif_take_held(session), None)  # still busy → held again by the claim gate
+                handle(taken, None)  # still busy → held again by the claim gate
             except Exception as exc:
                 _notif_log_failure("held notification dispatch failed", exc)
+            finally:
+                _notif_unhold(taken)  # after any re-hold or requeue, so the result is never unmarked off-queue
         # Dequeue and in-flight hold are one step: until routing admits a turn, requeues or drops each event, its
         # owner session stays protected from the reapers (it is in neither the queue nor ``running`` meanwhile).
-        ready = take_ready(queue, 0.5)
-        if not ready:
-            continue
+        # Addressed events parked while their owner was not live (notification_park): once this session proves it
+        # owns one, it is this session's to deliver, ahead of the shared queue.
+        parked = notification_park.claim(lambda evt: _session_owns_notification_event(sid, session, evt))
+        ready = []
         try:
-            handle(ready, None)
+            ready = take_ready(queue, 0 if parked else 0.5)
+            if not parked and not ready:
+                continue
+            handle(parked + ready, None)
         except Exception as exc:
             # This thread is the session's only path to notifications, /loop, /heartbeat and its
             # bot mailbox; one bad event must not end all four.
             _notif_log_failure("notification dispatch failed", exc)
         finally:
             release_in_flight(ready)
+            notification_park.unhold(parked)
     # Kanban claims still buffered go back to the board: the process may live on (close, evict). [daveey]
     try:
         _kb_release_claims(session)
     except Exception as exc:
         _notif_log_failure("kanban notice release on poller stop failed", exc)
-    # Drain remaining events after the stop signal so nothing is lost on shutdown; foreign and orphaned-delegation
-    # events are handed back to the shared queue afterwards.
+    # Drain remaining events after the stop signal so nothing is lost on shutdown: events held for this session are
+    # routed with the queued ones; unowned ones park for their owner's return; foreign ones (and delegations the park
+    # refused) go back to the shared queue afterwards, even when routing one of them raised (#140718).
     deferred: list = []
     with _notif_held_lock:  # from here on a handoff to this session falls back to the shared queue
         held = list(session.pop("_notif_held", None) or ())
     ready = take_ready(queue, 0)
     try:
         handle(held + list(ready), deferred)
+    finally:
         for evt in deferred:
             queue.put(evt)
-    finally:
         release_in_flight(ready)
+        _notif_unhold(held)  # after the requeue above
 
 
 def _async_delegation_display_metadata(evt: dict) -> dict:
