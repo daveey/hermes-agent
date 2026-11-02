@@ -21,22 +21,99 @@ adapter's idle guard reserves nothing). The allocator therefore keys the replace
 intent replaces a lineage's class allocation at most once. An overlapping build, or a retry after a crash
 between allocation and consume, re-reads the honoured route; a rolled-back allocation leaves no fence.
 Consume still happens only after the allocation commits, never before it.
+
+The fence is also an order. Builds that read an intent are not serialized against later switches: a build
+can read intent A, a newer switch B can commit and be honoured by another build, and only then the A build
+allocates. Keyed to equality alone, A (a different token) replaced B's allocation, its compare-delete then
+missed, and the next build on B's exact tuple hit "Exact pinned route cannot fail over". And an identical
+intent recorded again (a profile selection A -> B -> A within one runtime generation writes the same raw
+row) was mistaken for the already-honoured one. So every recorded intent carries an ``event``: a store
+nonce plus a sequence number from one counter in the same session store, taken inside the recording
+transaction, so it is unique and follows commit order. The allocator replaces only when the presented
+event is newer than the one the lineage class last honoured; an equal one is a retry or an overlapping
+build (sticky), an older one is a superseded build (sticky: an exact pin then refuses it). Intents without
+an event, or from another store, keep the equality fence.
 """
 import hashlib
 import json
+import uuid
 
 PREFIX = "gateway.route_switch.v1."
+# One counter per session store: {"store": <nonce>, "seq": <last issued>}. Not a session key.
+ORDER_KEY = "gateway.route_switch_order.v1"
+_TOKEN = "switch-intent:"
+_ORDERED = _TOKEN + "v2:"
 
 
 def fence_token(raw):
-    """The allocator's idempotence key for exactly this committed intent (session, tuple, generation)."""
-    return "switch-intent:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    """The allocator's key for exactly this committed intent event, ordered when the intent carries one."""
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    event = _event(raw)
+    if event is None:
+        return _TOKEN + digest
+    store, seq = event
+    return f"{_ORDERED}{store}:{seq:020d}:{digest}"
+
+
+def _event(raw):
+    try:
+        event = json.loads(raw).get("event")
+        store, seq = event["store"], event["seq"]
+    except (TypeError, ValueError, AttributeError, KeyError):
+        return None
+    if not isinstance(store, str) or not store or ":" in store or type(seq) is not int or seq < 1:
+        return None
+    return store, seq
+
+
+def _order(token):
+    if not isinstance(token, str) or not token.startswith(_ORDERED):
+        return None
+    parts = token[len(_ORDERED):].split(":", 2)
+    if len(parts) != 3 or not parts[1].isdigit():
+        return None
+    return parts[0], int(parts[1])
+
+
+def supersedes(token, honoured):
+    """Whether intent ``token`` may replace an allocation that last honoured ``honoured`` (or None).
+
+    Same store: strictly newer events only; an equal token is the same event (retry, overlapping build).
+    Unordered or cross-store tokens keep the equality fence.
+    """
+    if honoured is None:
+        return True
+    if token == honoured:
+        return False
+    mine, theirs = _order(token), _order(honoured)
+    if mine is not None and theirs is not None and mine[0] == theirs[0]:
+        return mine[1] > theirs[1]
+    return True
+
+
+def _next_event(conn):
+    row = conn.execute("SELECT value FROM state_meta WHERE key=?", (ORDER_KEY,)).fetchone()
+    try:
+        order = json.loads(row[0]) if row is not None else {}
+        store, seq = order.get("store"), order.get("seq")
+    except (TypeError, ValueError, AttributeError):
+        store = seq = None
+    if not isinstance(store, str) or not store or ":" in store or type(seq) is not int or seq < 0:
+        store, seq = uuid.uuid4().hex, 0  # first intent in this store (or an unreadable counter)
+    seq += 1
+    conn.execute("INSERT INTO state_meta (key, value) VALUES (?, ?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                 (ORDER_KEY, json.dumps({"store": store, "seq": seq}, sort_keys=True)))
+    return {"store": store, "seq": seq}
 
 
 def record_in_transaction(conn, session_id, model, provider, generation):
-    """Write the intent inside the caller's receipt transaction (never on its own)."""
+    """Write the intent inside the caller's receipt transaction (never on its own).
+
+    Each call is a distinct, ordered event (module docstring), even for an identical tuple and generation.
+    """
     value = json.dumps({"session_id": session_id, "model": model, "provider": provider or "",
-                        "generation": generation}, sort_keys=True)
+                        "generation": generation, "event": _next_event(conn)}, sort_keys=True)
     conn.execute("INSERT INTO state_meta (key, value) VALUES (?, ?) "
                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (PREFIX + session_id, value))
 

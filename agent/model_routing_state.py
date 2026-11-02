@@ -13,13 +13,15 @@ class RoutingState:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def allocate(self, session_id, parent_session_id, level, candidates, version, excluded, prepare=None,
-                 exact_pin=False, replace=False):
+                 exact_pin=False, replace: bool | str = False):
         """Allocate and persist atomically; aliases share one failover decision.
 
         ``replace`` is ``True`` (unconditional, an in-session switch) or a committed switch-intent fence
-        token: that intent replaces this lineage's class allocation at most once. The fence is recorded
-        in this transaction, so overlapping builds and a crash retry before the intent is consumed
-        re-read the honoured allocation instead of choosing again; a failed ``prepare`` rolls it back.
+        token: that intent replaces this lineage's class allocation at most once, and only while it is
+        newer than the intent the allocation last honoured (``model_routing_switch_intent.supersedes``).
+        The fence is recorded in this transaction, so overlapping builds, a crash retry before the intent
+        is consumed and a late build of a superseded intent re-read the honoured allocation instead of
+        choosing again; a failed ``prepare`` rolls it back.
         """
         with closing(sqlite3.connect(self.path, timeout=30, isolation_level=None)) as db:
             db.execute("PRAGMA busy_timeout=30000")
@@ -77,7 +79,8 @@ class RoutingState:
                 db.execute("ROLLBACK")
                 raise
 
-    def _allocate(self, db, session, parent, level, candidates, version, excluded, exact_pin=False, replace=False):
+    def _allocate(self, db, session, parent, level, candidates, version, excluded, exact_pin=False,
+                  replace: bool | str = False):
         from agent.model_routing import ModelRoutingError
 
         root = self._root(db, session, parent)
@@ -85,8 +88,11 @@ class RoutingState:
         if fence is not None:
             honoured = db.execute("SELECT intent FROM switch_fences WHERE root=? AND class=?",
                                   (root, level)).fetchone()
-            if honoured is not None and honoured[0] == fence:
-                replace = False  # this intent already replaced the allocation: ordinary sticky lookup
+            from agent.model_routing_switch_intent import supersedes
+            if not supersedes(fence, honoured[0] if honoured is not None else None):
+                # This event (a retry, an overlapping build) or a newer one already replaced the
+                # allocation: ordinary sticky lookup, so a superseded build cannot move it back.
+                replace = False
         row = db.execute("SELECT metadata FROM routes WHERE root=? AND class=?", (root, level)).fetchone()
         if row and not replace:
             previous = json.loads(row[0])
