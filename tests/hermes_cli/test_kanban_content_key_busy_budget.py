@@ -80,13 +80,13 @@ def test_cached_reader_statement_budget_restored_after_no_wait_key(busy_board):
         assert again.execute("PRAGMA busy_timeout").fetchone()[0] == 500
 
 
-def test_warm_key_read_on_busy_board_does_not_wait_in_sqlite(busy_board):
-    board, blocker = busy_board
+def test_cached_reader_budget_restored_after_non_sqlite_error(busy_board):
+    board, _blocker = busy_board
     with activity.cached_ro(board) as conn:
-        conn.execute("SELECT count(*) FROM marker").fetchone()
-    blocker.execute("BEGIN EXCLUSIVE")
-    # The cached handle is reused; with busy_timeout=0 SQLite raises at once and the key falls back.
-    assert activity._board_content_key(board)[0] == "stat"
-    blocker.rollback()
-    with activity.cached_ro(board) as reopened:
-        assert reopened.execute("PRAGMA busy_timeout").fetchone()[0] == 500
+        pass
+    with pytest.raises(RuntimeError), activity.cached_ro(board, busy_budget=0) as same:
+        assert same is conn
+        raise RuntimeError("body failed outside SQLite")
+    with activity.cached_ro(board) as again:
+        assert again is conn  # still cached: only sqlite errors evict
+        assert again.execute("PRAGMA busy_timeout").fetchone()[0] == 500

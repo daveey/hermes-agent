@@ -543,7 +543,13 @@ def cached_ro(path: Path, *, busy_budget: float = 0.5) -> Iterator[sqlite3.Conne
             raise
         finally:
             if lowered and _RO_CACHE.get(key) is entry:
-                conn.execute(f"PRAGMA busy_timeout={int(_RO_BUSY_TIMEOUT_S * 1000)}")
+                try:
+                    conn.execute(f"PRAGMA busy_timeout={int(_RO_BUSY_TIMEOUT_S * 1000)}")
+                except sqlite3.Error:  # never keep a reader with the probe's budget
+                    with _RO_CACHE_LOCK:
+                        if _RO_CACHE.get(key) is entry:
+                            del _RO_CACHE[key]
+                    _close_quietly(conn)
 
 
 # The cached reader's own SQLite busy timeout, set when ``kanban_reader_lifecycle`` opens it.

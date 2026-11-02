@@ -41,7 +41,7 @@ def _cached_entry_once(path, remaining):
                 stale[2].release()
         if entry is None:
             conn = activity._open_ro(path, check_same_thread=False, timeout=0)
-            conn.execute("PRAGMA busy_timeout=500")
+            conn.execute(f"PRAGMA busy_timeout={int(activity._RO_BUSY_TIMEOUT_S * 1000)}")
             entry = (conn, ident, threading.Lock(), shm_identity(path))
             with activity._RO_CACHE_LOCK:
                 activity._RO_CACHE[key] = entry
