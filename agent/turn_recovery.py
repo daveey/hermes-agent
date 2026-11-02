@@ -1450,6 +1450,12 @@ def reset_hint(api_error: Exception) -> str:
     return f"~{format_duration_compact(remaining)}" if remaining >= 1 else ""
 
 
+def _class_failover_available(agent: Any) -> bool:
+    """True when ``try_activate_fallback`` would try a same-class route (a class selector, not an exact pin)."""
+    routing = getattr(agent, "model_routing", None)
+    return isinstance(routing, dict) and bool(routing) and not routing.get("exact_pin")
+
+
 def compute_error_backoff(
     agent: Any, api_error: Exception, *, retry_count: int, max_retries: int, is_rate_limited: bool,
     is_zai_coding_overload: bool, base_url: Any, model: Any,
@@ -1944,7 +1950,10 @@ def route_classified_error(
         (is_rate_limited and _wrapped_output_cap_budget is None)
         or (_is_transport_failure and retry_count >= 2)
     ) and not (getattr(classified, "error_context", None) or {}).get("usage_window")  # never switch models on a plan limit
-    if _should_fallback and agent._fallback_index < len(agent._fallback_chain):
+    # [daveey] Class routes have no legacy chain; fail over now, not after a backoff + doomed retry (~4 s).
+    _eager_target = agent._fallback_index < len(agent._fallback_chain) or (
+        is_rate_limited and _class_failover_available(agent))
+    if _should_fallback and _eager_target:
         # No eager fallback while credential pool rotation may recover. Exception: an
         # upstream-aggregator 429 — the pool can't help, always fall back.
         # Fixes #11314.

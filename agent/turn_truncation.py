@@ -558,6 +558,19 @@ _CODEX_REPLAY_KEYS = (
 CODEX_FALLBACK_ACTIVATED = "codex_fallback_activated"
 
 
+def _codex_continuation_reason(interim_msg: dict[str, Any], has_content: bool) -> str:
+    """Short label for why a Codex response did not end the turn (log only, never message text)."""
+    if has_content:
+        return "partial_text"
+    phases = {
+        str(item.get("phase") or "").strip().lower()
+        for item in interim_msg.get("codex_message_items") or [] if isinstance(item, dict)
+    }
+    if "commentary" in phases:
+        return "commentary_only"
+    return "reasoning_only" if interim_msg.get("codex_reasoning_items") or interim_msg.get("reasoning") else "empty"
+
+
 def continue_codex_incomplete(
     agent: Any, assistant_message: Any, finish_reason: str, *, messages: list[dict[str, Any]],
     conversation_history: Any, api_call_count: int, response: Any = None,
@@ -600,6 +613,14 @@ def continue_codex_incomplete(
     reasoning_only = not interim_has_content and not getattr(assistant_message, "tool_calls", None)
     agent._codex_reasoning_only_streak = agent._codex_reasoning_only_streak + 1 if reasoning_only else 0
     streak = agent._codex_reasoning_only_streak
+    # [daveey] Every extra model call this path makes is otherwise invisible in agent.log (the _vprint
+    # below is diagnostic-only): name why the turn continued, with no message text.
+    _status = getattr(response, "status", None)
+    logger.info(
+        "%sCodex continuation %d/3: reason=%s response_status=%s tools_offered=%s reasoning_only_streak=%d",
+        getattr(agent, "log_prefix", ""), n, _codex_continuation_reason(interim_msg, interim_has_content),
+        _status if isinstance(_status, str) else None, bool(getattr(agent, "valid_tool_names", None)), streak,
+    )
 
     if interim_has_content or interim_has_reasoning or interim_has_codex_reasoning or interim_has_codex_message_items:
         last_msg = messages[-1] if messages else None

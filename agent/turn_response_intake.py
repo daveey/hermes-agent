@@ -162,6 +162,54 @@ def _relay_thinking(agent: Any, content: str, assistant_message: Any = None) -> 
         pass
 
 
+def promote_toolless_codex_commentary(agent: Any, assistant_message: Any, response: Any) -> bool:
+    """[daveey] A completed Codex response whose only text is ``phase=commentary`` is the answer
+    when the agent offers no tools: commentary is the preamble before a tool call, and a request with
+    no tools has no call to wait for. The normalizer marks it ``incomplete`` (commentary never ends a
+    tool-using turn), which made every such toolless API-server turn re-call the model 1-3 times
+    (bb-aux: 2-4 calls, +4-8 s) and sometimes walk the reasoning-only ladder into a class failover.
+
+    Promotes the commentary text to ``content`` and sets ``finish_reason="stop"`` in place; returns
+    True when it did. Tool-using agents, responses with any non-completed status/item, a final-answer
+    item, tool calls, or visible content keep today's continuation."""
+    if getattr(agent, "valid_tool_names", None):
+        return False
+    if getattr(assistant_message, "tool_calls", None) or (assistant_message.content or "").strip():
+        return False
+    status = getattr(response, "status", None)
+    if not (isinstance(status, str) and status.strip().lower() == "completed"):
+        return False
+    items = getattr(assistant_message, "codex_message_items", None) or []
+    commentary: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            return False
+        phase = str(item.get("phase") or "").strip().lower()
+        if phase != "commentary" or str(item.get("status") or "").strip().lower() != "completed":
+            return False
+        text = "".join(
+            part.get("text") or "" for part in item.get("content") or []
+            if isinstance(part, dict) and part.get("type") == "output_text"
+        ).strip()
+        if text:
+            commentary.append(text)
+    if not commentary:
+        return False
+    content = "\n\n".join(commentary)
+    assistant_message.content = content
+    reasoning = getattr(assistant_message, "reasoning", None)
+    if isinstance(reasoning, str):
+        # The normalizer flattened the commentary into reasoning; keep only real reasoning there.
+        parts = [p for p in reasoning.split("\n\n") if p.strip() and p.strip() not in commentary]
+        assistant_message.reasoning = "\n\n".join(parts) or None
+    assistant_message.finish_reason = "stop"
+    logger.info(
+        "%sCodex response ended on commentary with no tools offered: using %d-char commentary "
+        "(%d item(s)) as the final answer instead of continuing", agent.log_prefix, len(content), len(commentary),
+    )
+    return True
+
+
 def normalize_model_response(
     agent: Any, *, response: Any, messages: Any, api_messages: Any, conversation_history: Any,
     api_call_count: Any, api_duration: Any, api_start_time: Any, api_request_id: Any,
@@ -170,6 +218,9 @@ def normalize_model_response(
     """Normalize ``response`` into ``assistant_message`` (str content, never dict/list) and run
     the post-response hooks and continuation guards, in the original order."""
     assistant_message = normalize_response_for_agent(agent, response)
+    if agent.api_mode == "codex_responses" and assistant_message.finish_reason == "incomplete":
+        # Toolless commentary-only answer becomes a final text response before hooks and guards run.
+        promote_toolless_codex_commentary(agent, assistant_message, response)
     finish_reason = assistant_message.finish_reason
 
     def _verdict(action: str, result: Optional[dict[str, Any]] = None) -> ResponseIntakeVerdict:
