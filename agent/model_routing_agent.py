@@ -15,7 +15,7 @@ def class_requirements(config):
 
 
 def prepare_agent_route(agent, model, provider, session_id, api_key, base_url,
-                        api_mode, credential_pool, fallback_model):
+                        api_mode, credential_pool, fallback_model, session_db=None):
     """Resolve only class selectors; concrete user pins retain legacy semantics.
 
     Parent sessions here can be delegated jobs, not compression continuations, so
@@ -35,11 +35,17 @@ def prepare_agent_route(agent, model, provider, session_id, api_key, base_url,
     config = managed or load_user_config_effective()
     requirements = class_requirements(config)
     session_id = session_id or new_session_id()
+    # A committed explicit switch to exactly this tuple, for exactly this session, replaces the
+    # recorded allocation once; nothing else may move an exact pin.
+    from agent.model_routing_switch_intent import consume, pending
+    intent = pending(session_db, session_id, model, provider)
     runtime = resolve_runtime_provider(
         requested=provider or "auto", target_model=model,
         explicit_api_key=None if managed else api_key, explicit_base_url=None if managed else base_url,
         routing_session_id=session_id, routing_config=config,
-        routing_requirements=requirements)
+        routing_requirements=requirements, routing_replace=intent is not None)
+    if intent is not None:
+        consume(session_db, session_id, intent)
     agent.model_routing = runtime["model_routing"]
     agent._model_routing_requirements = requirements
     return (runtime["model"], runtime["provider"], session_id,

@@ -29,9 +29,11 @@ def _current_route(authority, live, old):
     resolves its own target.
     """
     from agent.model_routing import ModelRoutingError
+    from agent.model_routing_runtime import temporary_resolution
     from gateway.session_policy import profile_read_scope
     from hermes_cli.auth import AuthError
-    with profile_read_scope(old, authority):
+    # A lookup, not a build: it must not allocate (or advance a counter) in the durable store.
+    with profile_read_scope(old, authority), temporary_resolution():
         config = old.config(authority)
         block = config.get('model') or {}
         try:
@@ -63,7 +65,11 @@ async def prepare_model(authority, live, payload, prepared):
         _provider_resolution_config, authority, config, old.ignore_user_config)
 
     def switch(**kwargs):
-        result = switch_model(**kwargs)
+        # Preparation only resolves the target: the allocation moves when the committed switch's
+        # intent is consumed at the next build (agent.model_routing_switch_intent), never here.
+        from agent.model_routing_runtime import temporary_resolution
+        with temporary_resolution():
+            result = switch_model(**kwargs)
         return result, _alias_credential(authority, result)
     result, alias_credential = await asyncio.to_thread(switch, raw_input=payload['model'],
         current_provider=current.provider, current_model=current.model, current_base_url=current.base_url,

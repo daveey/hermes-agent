@@ -1043,7 +1043,8 @@ def _openrouter_fallback(requested_provider, explicit_api_key, explicit_base_url
 def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_key: Optional[str] = None,
                              explicit_base_url: Optional[str] = None, target_model: Optional[str] = None,
                              routing_session_id=None, routing_parent_session_id=None,
-                             routing_requirements=None, routing_config=None, routing_excluded=()) -> dict[str, Any]:
+                             routing_requirements=None, routing_config=None, routing_excluded=(),
+                             routing_replace=False) -> dict[str, Any]:
     """Resolve runtime provider credentials for agent execution. Ladder (order is behavior — each
     rung returns or raises, else falls to the next):
       1. disabled-provider guard (``providers.<name>.enabled: false``)
@@ -1072,7 +1073,8 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
         if explicit_api_key or overrides_endpoint(requested, explicit_base_url, managed):
             raise ModelRoutingError("Managed subscription pins cannot override credentials or endpoint")
         return resolve_managed_runtime(target_model, requested, config=managed,
-                                       session_id=routing_session_id, requirements=routing_requirements)
+                                       session_id=routing_session_id, requirements=routing_requirements,
+                                       replace=routing_replace)
     if is_class_selector(target_model):
         from agent.model_routing_runtime import resolve_class_runtime
         if explicit_api_key or explicit_base_url:
@@ -1080,7 +1082,8 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
         try:
             return resolve_class_runtime(target_model, requested or "auto", config=routing_config,
                                          session_id=routing_session_id, parent_session_id=routing_parent_session_id,
-                                         requirements=routing_requirements, excluded=routing_excluded)
+                                         requirements=routing_requirements, excluded=routing_excluded,
+                                         replace=routing_replace)
         except AuthError as exc:
             raise ModelRoutingError("Class routing credentials unavailable; legacy fallback is prohibited") from exc
     requested_provider = resolve_requested_provider(requested)

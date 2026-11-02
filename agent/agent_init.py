@@ -2114,7 +2114,8 @@ def init_agent(
     _install_safe_stdio()
     from agent.model_routing_agent import prepare_agent_route
     model, provider, session_id, api_key, base_url, api_mode, credential_pool, fallback_model = prepare_agent_route(
-        agent, model, provider, session_id, api_key, base_url, api_mode, credential_pool, fallback_model)
+        agent, model, provider, session_id, api_key, base_url, api_mode, credential_pool, fallback_model,
+        session_db=session_db)
 
     _params = locals()
     for _name in _PASSTHROUGH_PARAMS:

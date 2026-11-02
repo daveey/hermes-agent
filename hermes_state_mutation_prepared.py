@@ -52,7 +52,13 @@ def model_in_transaction(db, conn, session_id, payload, prepared):
     row = conn.execute('SELECT model_config FROM sessions WHERE id=?', (target,)).fetchone()
     model_config = json.loads(row[0] or '{}')
     model_config['provider'] = config['provider']
+    # The recorded allocation belongs to the route this switch leaves: kept, every reader that trusts
+    # the record over the row (restore_route) resumed the OLD model. The committed intent below is what
+    # lets the next build of this exact session replace the allocation (agent.model_routing_switch_intent).
+    model_config['model_routing'] = None
     conn.execute('UPDATE sessions SET model=?,model_config=? WHERE id=?', (model, _json(model_config), target))
+    from agent.model_routing_switch_intent import record_in_transaction
+    record_in_transaction(conn, target, model, config['provider'], generation)
     # This selection is newer than any model pick still waiting for a turn boundary: that pick is superseded.
     # A level deferred beside it stays unless this selection carries its own, as defer_pick keeps it.
     key = DEFERRED_PICK_PREFIX + session_id
