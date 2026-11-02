@@ -275,6 +275,7 @@ from tests._fixtures.live_system_guard import (
     _LIVE_SYSTEM_GUARD_BYPASS_MARK,
     _live_system_guard,
 )
+from tests._fixtures.fake_dns import public_dns  # opt-in offline resolver for SSRF-guard tests
 from tests._fixtures.model_peer import model_peer  # fixture registers here
 from tests._fixtures.offline_catalogs import (
     _offline_metadata_transport, _offline_registry_transport, _offline_video_catalog,

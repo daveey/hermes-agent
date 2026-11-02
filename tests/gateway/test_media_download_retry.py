@@ -338,6 +338,7 @@ def _make_slack_adapter():
 # SlackAdapter._download_slack_file
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("public_dns")  # the Slack file-URL SSRF check resolves files.slack.com
 class TestSlackDownloadSlackFile:
     """Tests for SlackAdapter._download_slack_file"""
 
@@ -400,6 +401,7 @@ class TestSlackDownloadSlackFile:
 # SlackAdapter._download_slack_file_bytes
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("public_dns")
 class TestSlackDownloadSlackFileBytes:
     """Tests for SlackAdapter._download_slack_file_bytes"""
 

@@ -572,7 +572,8 @@ def test_page_navigate_to_private_url_blocked_before_cdp(monkeypatch):
 
 
 @pytest.mark.parametrize(("page_url", "blocked"), [(PRIVATE_URL, True), ("https://93.184.216.34/", False)])
-def test_page_url_probe_reads_the_target_over_the_same_endpoint(monkeypatch, cdp_server, page_url, blocked):
+def test_page_url_probe_reads_the_target_over_the_same_endpoint(monkeypatch, cdp_server, page_url, blocked,
+                                                              public_dns):
     """The private-page probe reads the acted-on page's URL from Target.getTargets on the same CDP
     endpoint: a private page refuses page-reading methods before they are sent; a public one runs."""
     cdp_server.on("Target.getTargets", lambda params, sid: {"targetInfos": [
@@ -604,7 +605,7 @@ PUBLIC_PAGE = "https://93.184.216.34/"
     (None, PRIVATE_URL, True),            # browser-level call spans every page
     ("worker-1", PUBLIC_PAGE, False),     # every page public: the worker runs
 ])
-def test_non_page_target_fails_closed_while_any_page_is_private(monkeypatch, cdp_server, target_id, page_url,
+def test_non_page_target_fails_closed_while_any_page_is_private(public_dns, monkeypatch, cdp_server, target_id, page_url,
                                                                  blocked):
     """A non-page / unknown target carries some page's origin, so page-reading CDP refuses it while any page
     target is private, and runs it when every page is public."""
@@ -628,7 +629,7 @@ def test_non_page_target_fails_closed_while_any_page_is_private(monkeypatch, cdp
         assert result["success"] is True and len(evaluated) == 1
 
 
-def test_frame_id_is_judged_by_its_own_target_not_the_first_page(monkeypatch, cdp_server):
+def test_frame_id_is_judged_by_its_own_target_not_the_first_page(monkeypatch, cdp_server, public_dns):
     """frame_id routing checks the OOPIF's own target (frame id == iframe target id) and fails closed on a
     private page, even when the first page target is public."""
     supervisor_calls = []
@@ -678,7 +679,8 @@ LOCAL_TAB = "http://127.0.0.1:3000/"
     ("Network.getAllCookies", {}, False),  # every other target-less call stays fail-closed
     ("Browser.setDownloadBehavior", {"behavior": "allow", "downloadPath": "/srv"}, False),
 ])
-def test_tab_management_stays_usable_while_a_tab_is_private(monkeypatch, cdp_server, method, params, allowed):
+def test_tab_management_stays_usable_while_a_tab_is_private(monkeypatch, cdp_server, method, params, allowed,
+                                                            public_dns):
     """One private tab (a local dev server) must not stop the model opening, switching or closing tabs; a
     new tab is blank or its url is held to Page.navigate's rule, and every other browser-level call is refused."""
     cdp_server.on("Target.getTargets", lambda params, sid: {"targetInfos": [

@@ -1067,7 +1067,7 @@ class TestExecHybridPrivateUrlRouting:
     LAN = "http://192.168.0.1:9120/login"
 
     @pytest.fixture(autouse=True)
-    def _cloud_with_hybrid(self, monkeypatch, tmp_path):
+    def _cloud_with_hybrid(self, monkeypatch, tmp_path, public_dns):
         monkeypatch.setattr("tools.browser_session_cdp.get_cdp_override", lambda: "")
         monkeypatch.setattr("tools.browser_session_cdp.get_cdp_override_raw", lambda: "")
         monkeypatch.setattr(bs_cloud, "get_cloud_provider", lambda: object())
