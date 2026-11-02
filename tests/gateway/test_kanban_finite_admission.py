@@ -141,8 +141,12 @@ def test_durable_kanban_admission_preserves_headless_policy_in_worker(kanban_own
             assert len(rows) == 1
             policy = policy_for_source(owner.runner, authority.sessions[sid].source)
             assert policy.source == 'kanban'
+            # A real reservation scope always carries the session's runtime generation (the owner's
+            # profile-selection commit is fenced on it); this probe skips reservation, so supply it.
+            generation = authority.db._conn.execute(
+                'SELECT runtime_generation FROM sessions WHERE id=?', (sid,)).fetchone()[0]
             frame = _bootstrap(authority, SessionRef(authority.profile_id, sid), rows[0], policy,
-                               {'execution_id': 'probe'})
+                               {'execution_id': 'probe', 'generation': generation})
             with worker_turn_scope(frame):
                 assert _is_single_query_approval_context(), 'persisted card must reach worker as single-query'
                 result = request_tool_approval('execute_code', 'headless test',
