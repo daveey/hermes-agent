@@ -108,12 +108,13 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
     rows are left alone; links ``want`` already carries keep the ledger's answer. A card reopened after the release
     stays released for that chat: the uid is one row, so the owner's original intent is not recoverable here."""
     from hermes_cli import kanban_sync_client as ksc
+    from hermes_cli.kanban_lockguard import connect
     from hermes_cli.kanban_placement import is_placeholder_session
     path = ksc.shadow_path(board)
     if not path.exists():
         return {}
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        conn = connect(f"file:{path}?mode=ro", uri=True, timeout=5)
         try:
             conn.row_factory = sqlite3.Row
             marks = ",".join("?" * len(TERMINAL_STATUSES))
