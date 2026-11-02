@@ -1044,7 +1044,7 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
                              explicit_base_url: Optional[str] = None, target_model: Optional[str] = None,
                              routing_session_id=None, routing_parent_session_id=None,
                              routing_requirements=None, routing_config=None, routing_excluded=(),
-                             routing_replace=False) -> dict[str, Any]:
+                             routing_replace: bool | str = False) -> dict[str, Any]:
     """Resolve runtime provider credentials for agent execution. Ladder (order is behavior — each
     rung returns or raises, else falls to the next):
       1. disabled-provider guard (``providers.<name>.enabled: false``)
