@@ -50,9 +50,10 @@ def test_unrecognised_verdict_is_repair_not_approval(board, monkeypatch, extra, 
     assert dispatch.check_respawn_guard(board, task) is None
 
 
+@pytest.mark.parametrize("verdict", [None, "approve", "approved"])
 @pytest.mark.parametrize("named", [PR, "https://github.com/daveey/hermes/pull/999"])
-def test_reviewed_pr_binds_without_summary_number(board, monkeypatch, named):
-    task, _ = incident(board, monkeypatch, metadata={"reviewed_sha": SHA, "reviewed_pr": named},
+def test_reviewed_pr_binds_without_summary_number(board, monkeypatch, named, verdict):
+    task, _ = incident(board, monkeypatch, metadata={"reviewed_sha": SHA, "reviewed_pr": named, "verdict": verdict},
                        summary="No blocking defects")
     assert dispatch.check_respawn_guard(board, task) == (None if named == PR else "active_pr")
 

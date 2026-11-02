@@ -170,9 +170,9 @@ def _reviewed_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) 
 def _approval_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) -> set[str]:
     """PRs an exact-head approval authorizes, or empty.
 
-    A named ``pr`` is the only PR that approval covers. With no ``pr``, the
-    authenticated checkpoint is the binding: the review did not name a
-    different head. A short ``head`` is not exact.
+    A named ``pr`` (or ``reviewed_pr`` fallback) is the only PR that approval
+    covers. With neither key, the authenticated checkpoint supplies the PR scope.
+    A short ``head`` is not exact.
     """
     from hermes_cli import kanban_db as kb
 
