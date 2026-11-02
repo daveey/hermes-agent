@@ -575,7 +575,9 @@ class GatewayControlServer:
             # adapter so a fast-polling consumer can't stall heartbeats.
             from gateway.control_diagnostics import safe_verb
             timing.verb = safe_verb(raw, self._handlers.keys() | self.private_handlers.keys() | {"session-ticket"})
-            peer = self._posix_peer_subject(writer)
+            # Only authenticated verbs consume the peer; public polls need no filesystem checks.
+            peer = (self._posix_peer_subject(writer)
+                    if timing.verb == "session-ticket" or timing.verb in self.private_handlers else None)
             timing.enqueue()
             try:
                 future = _control_executor().submit(timing.run, self.handle_request_line, raw.rstrip(b"\n"), peer)
