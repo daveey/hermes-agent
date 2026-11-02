@@ -292,19 +292,8 @@ def _remote_lease_refusal(tool_name: str, args: dict) -> Optional[str]:
         rejection="live_claim", code="remote_live_lease", holder=holder)
 
 
-def _reject_delegated_child_mutation(tool_name: str) -> None:
-    """A delegate_task child shares the parent's process, so inherited HERMES_KANBAN_*
-    env is not proof of ownership: it may report findings but must not mutate."""
-    if _delegation_ctx("is_delegated_child_process_context", False):
-        msg = (f"{tool_name} refused: delegate_task child agents are not Kanban run owners. "
-               "Return findings to the parent agent; the dispatcher worker or an explicitly "
-               "configured Kanban orchestrator must perform board mutations")
-        if not _is_delegated_child_context():
-            # Fenced by an inherited env marker, not an in-process child: a leaked worker env
-            # (a Desktop reopened from a worker) must say so instead. [daveey]
-            from hermes_cli.top_level_env import delegated_child_refusal
-            msg = delegated_child_refusal(msg)
-        raise _Reject(msg if msg.endswith(".") else msg + ".")
+# The delegate-child / worker-subprocess write fence lives in a sibling (line cap); re-exported here. [daveey]
+from tools.kanban_tools_fence import _env_fence_covers_board, _reject_delegated_child_mutation
 
 
 def _default_task_id(arg: Any) -> Optional[str]:
@@ -400,7 +389,7 @@ def _worker_guard(tool_name: str, args: dict) -> str:
     worker tools (heartbeat / attach / attach_url) do not terminate a run and are
     not gated here.
     """
-    _reject_delegated_child_mutation(tool_name)
+    _reject_delegated_child_mutation(tool_name, args)
     tid = _require_task_id(args)
     _enforce_worker_task_ownership(tid)
     if (
@@ -1404,7 +1393,7 @@ def _handle_heartbeat(args: dict, **kw) -> str:
 @_kanban_handler("kanban_comment")
 def _handle_comment(args: dict, **kw) -> str:
     """Append a comment to a task's thread."""
-    _reject_delegated_child_mutation("kanban_comment")
+    _reject_delegated_child_mutation("kanban_comment", args)
     tid = args.get("task_id")
     if not tid:
         # A comment writes to the board, so a bare call must stay an error — but
@@ -1615,7 +1604,11 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
 @_kanban_handler("kanban_create")
 def _handle_create(args: dict, **kw) -> str:
     """Create a (child) task; orchestrator workers use this to fan out."""
-    _reject_delegated_child_mutation("kanban_create")
+    # Only an explicitly local create is board-scoped: any other placement or an origin binding can write a
+    # real card on another gateway, which no local path check covers. [daveey]
+    _reject_delegated_child_mutation(
+        "kanban_create",
+        args if args.get("placement") == "local" and not args.get("origin_session") else None)
     title = _require_text(args, "title")
     assignee = args.get("assignee") or _persisted_identity()
     # Workspace sharing is always explicit: omitted fields mean a fresh scratch workspace
@@ -1956,7 +1949,7 @@ def _maybe_subscribe_on_touch(conn: Any, task_id: str) -> bool:
 @_kanban_handler("kanban_archive")
 def _handle_archive(args: dict, **kw) -> str:
     """Archive an unclaimed or done card this worker's task created, or any card for an orchestrator."""
-    _reject_delegated_child_mutation("kanban_archive")
+    _reject_delegated_child_mutation("kanban_archive")  # may relay to the card's home gateway
     tid = args.get("task_id")
     _check(tid, "task_id is required")
     tid = str(tid)

@@ -16,6 +16,13 @@ from pathlib import Path
 
 _CHILD_REFUSAL = "delegate_task child contexts cannot mutate Kanban tasks or boards"
 _DESCENDANT_HEAD = "Kanban worker and delegate_task descendant processes cannot mutate Kanban tasks or boards"
+# A worker asked for a live tool call (a refusal, a block) on a throwaway board had no route and handed the
+# command back to the user (defect agent-cbb2687c75). The fence covers the lineage's board root only. [daveey]
+SCRATCH_HOME_HINT = (
+    "For a live probe of kanban_* tools or board writes, use a throwaway HERMES_HOME outside the fenced "
+    "root (not TMPDIR, which is under ~/.hermes): H=$(mktemp -d ~/kanban-probe.XXXX); unset HERMES_KANBAN_DB "
+    "HERMES_KANBAN_BOARD HERMES_KANBAN_HOME; HERMES_HOME=$H python3 <probe>; then rm -rf \"$H\"."
+)
 
 
 def assert_not_fenced(path: str | Path) -> None:
@@ -48,5 +55,5 @@ def descendant_refusal_text() -> str:
         f"(the {whose}). Every terminal, background and execute_code subprocess of a Kanban worker is "
         "write-fenced by design, the worker's own terminal included, with or without delegate_task; it "
         "is not a leak. Make the change with the agent's kanban_* tools, or ship board-repair logic as "
-        "code the gateway/dispatcher runs"
+        "code the gateway/dispatcher runs. " + SCRATCH_HOME_HINT
     )

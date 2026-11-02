@@ -21,7 +21,7 @@ def handle_link(args: dict, **kw) -> str:
     from tools.kanban_tools import (
         _board, _check, _maybe_subscribe_on_touch, _ok, _reject_delegated_child_mutation, _worker_run_id)
 
-    _reject_delegated_child_mutation("kanban_link")
+    _reject_delegated_child_mutation("kanban_link", args)
     parent_id = args.get("parent_id")
     child_id = args.get("child_id")
     _check(parent_id and child_id, "both parent_id and child_id are required")
@@ -39,7 +39,7 @@ def handle_unlink(args: dict, **kw) -> str:
     the child or the parent); orchestrators any."""
     from tools.kanban_tools import _board, _check, _ok, _Reject, _reject_delegated_child_mutation
 
-    _reject_delegated_child_mutation("kanban_unlink")
+    _reject_delegated_child_mutation("kanban_unlink", args)
     parent_id = args.get("parent_id")
     child_id = args.get("child_id")
     _check(parent_id and child_id, "both parent_id and child_id are required")
