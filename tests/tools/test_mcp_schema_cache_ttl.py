@@ -49,3 +49,11 @@ def test_cache_scope_round_trips():
         "srv", "fp", tools=[{"name": "t"}], ttl_ms=60_000, cache_scope="private"
     )
     assert sc.get_cached_entry("srv", "fp")["cache_scope"] == "private"
+
+
+def test_ignore_ttl_serves_expired_entry(monkeypatch):
+    sc.write_cache_entry("srv", "fp", tools=[{"name": "t"}], ttl_ms=0)
+    assert sc.get_cached_entry("srv", "fp") is None
+    assert sc.get_cached_entry("srv", "fp", ignore_ttl=True) is not None
+    # Fingerprint still gates the entry.
+    assert sc.get_cached_entry("srv", "other", ignore_ttl=True) is None

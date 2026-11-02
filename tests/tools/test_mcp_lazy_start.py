@@ -369,3 +369,64 @@ class TestLazyMcpStatus:
                 status["playwright"]["connected"]) == ("lazy", len(cached), False)
         assert status["eager"]["status"] == "configured" and status["eager"]["tools"] == 0
         assert status["live"]["status"] == "connected" and status["live"]["tools"] == 2
+
+
+class TestLazyIgnoreTtl:
+    """``lazy_ignore_ttl`` against a real on-disk entry carrying ``ttl_ms: 0`` (chrome-devtools-mcp)."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_cache(self, tmp_path, monkeypatch):
+        from tools import mcp_schema_cache as sc
+        monkeypatch.setattr(sc, "_cache_path", lambda: tmp_path / "cache.json")
+        self.sc = sc
+
+    def _config(self, **extra):
+        return {"chrome-devtools": {"command": "node", "args": ["cdt.js"], "lazy": True, **extra}}
+
+    def _seed(self, config, fingerprint=None):
+        cfg = config["chrome-devtools"]
+        fp = fingerprint or self.sc.config_fingerprint(cfg)
+        self.sc.write_cache_entry("chrome-devtools", fp, tools=_fake_cache_entry()["tools"], ttl_ms=0,
+                                  cache_scope="private")
+
+    def _register(self, config):
+        with patch("tools.mcp_tool._MCP_AVAILABLE", True), \
+             patch("tools.mcp_tool_registration._register_from_cache_sync",
+                   return_value=["mcp_chrome-devtools_browser_navigate"]) as mock_register, \
+             patch("tools.mcp_tool_discovery._discover_and_register_server",
+                   new_callable=AsyncMock) as mock_discover, \
+             patch("tools.mcp_tool_loop._ensure_mcp_loop"), \
+             patch("tools.mcp_tool_loop._run_on_mcp_loop") as mock_run:
+            _mcp_discovery.register_mcp_servers(config)
+        return mock_register, mock_discover, mock_run
+
+    def test_ttl_zero_entry_with_ignore_ttl_registers_lazily(self):
+        config = self._config(lazy_ignore_ttl=True)
+        self._seed(config)
+        mock_register, mock_discover, mock_run = self._register(config)
+        mock_register.assert_called_once()
+        mock_discover.assert_not_called()
+        mock_run.assert_not_called()
+
+    def test_ttl_zero_entry_without_ignore_ttl_stays_eager(self):
+        config = self._config()
+        self._seed(config)
+        mock_register, _mock_discover, mock_run = self._register(config)
+        mock_register.assert_not_called()
+        mock_run.assert_called_once()
+
+    @pytest.mark.parametrize("extra", [{}, {"lazy_ignore_ttl": True}])
+    def test_fingerprint_mismatch_stays_eager(self, extra):
+        config = self._config(**extra)
+        self._seed(config, fingerprint="stale-fingerprint")
+        mock_register, _mock_discover, mock_run = self._register(config)
+        mock_register.assert_not_called()
+        mock_run.assert_called_once()
+
+    def test_ignore_ttl_without_lazy_stays_eager(self):
+        config = self._config(lazy_ignore_ttl=True)
+        config["chrome-devtools"]["lazy"] = False
+        self._seed(config)
+        mock_register, _mock_discover, mock_run = self._register(config)
+        mock_register.assert_not_called()
+        mock_run.assert_called_once()
