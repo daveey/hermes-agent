@@ -18,6 +18,11 @@ CHAT = "20261101_100000_human"
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
+    return make_home(tmp_path, monkeypatch)
+
+
+def make_home(tmp_path, monkeypatch):
+    """A synced scratch Hermes home with one worker transcript and one human chat (shared with sibling tests)."""
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))

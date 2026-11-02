@@ -22,7 +22,7 @@ from hermes_cli.config import cfg_get, load_config
 from hermes_cli.kanban_capabilities import check_tool_create, declaration_required
 from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc
 from tools.kanban_tools_placement import (_local_placement, _machine_placement, _marker_placement_fields, _persisted_session_id,
-                                          _placement_refused, _runs_where)
+                                          _placement_origin, _placement_refused, _runs_where)
 from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_park_args import _blocker_id_arg, _clear_blocker_arg, _blocker_scope_args, _park_guard
 from hermes_cli.kanban_ask_resolved import ask_checks, create_ask_check, filing_context
@@ -1526,7 +1526,7 @@ def _handle_attachments(args: dict, **kw) -> str:
 
 
 def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, session_id, conn=None,
-                  note_local_pin: bool = True) -> tuple[Optional[str], Optional[dict]]:
+                  note_local_pin: bool = True, origin_profile=None) -> tuple[Optional[str], Optional[dict]]:
     """[daveey] Create the card on the gateway ``kanban.placement`` routes this one to.
 
     Returns ``(tool_result, None)`` when the card was queued there or the pin was refused,
@@ -1555,7 +1555,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         self_gw = reg.self_gateway() or "local"
         cfg = kp.config()
         placed = kp.create_remote(view, target=target, origin_session=session_id,
-                                  origin_profile=current_profile_name("default") or "default",
+                                  origin_profile=origin_profile or current_profile_name("default") or "default",
                                   self_gw=self_gw, cfg=cfg, hub_cli=reg.hub_cli_path(cfg.get("hub_cli")))
         if not placed.get("ok"):
             logger.warning("kanban placement: %s refused the card (%s)",
@@ -1680,7 +1680,7 @@ def _handle_create(args: dict, **kw) -> str:
         if project_id is None and workspace_kind is None and workspace_path is None:
             if self_task is not None and self_task.project_id:
                 project_id, project_source_task_id = self_task.project_id, self_task.id
-        marker_placement = None
+        marker_placement, place_origin = None, {"session_id": session_id}
         # Placement on a synced board: ``runs_on`` labels, and a pin to an enrolled machine that advertises
         # pickup becomes ``runs_on=[machine:<name>]`` (created here, run there through the Board lease). Any
         # other pin, a routed gateway included, falls through to the gateway route below. [daveey]
@@ -1705,10 +1705,10 @@ def _handle_create(args: dict, **kw) -> str:
             check_tool_create(args.get("requires"), workspace_kind=workspace_kind, project_id=project_id,
                               skills=skills, assignee=str(assignee))  # before placement routes it away [daveey]
             # Default placement: no local-only need -> the card runs on the routed gateway. [daveey]
+            place_origin = _placement_origin(conn, self_tid, session_id)  # a worker's: its creator's chat
             remote, marker_placement = _place_remote(
-                args, assignee=str(assignee), skills=skills, parents=parents,
-                project_id=project_id, session_id=session_id, conn=conn,
-                note_local_pin=pinned_machine is None)  # a machine pin was rewritten to "local"
+                args, assignee=str(assignee), skills=skills, parents=parents, project_id=project_id, conn=conn,
+                note_local_pin=pinned_machine is None, **place_origin)  # a machine pin was rewritten to "local"
             if remote is not None:
                 return remote
             if marker_placement and marker_placement.get("runs_on") and runs_on is None:
@@ -1761,7 +1761,7 @@ def _handle_create(args: dict, **kw) -> str:
             }}
         if origin is not None:
             extra["origin_binding"] = kanban_origin.bind(conn, new_tid, origin, board=args.get("board"))
-        extra.update(_marker_placement_fields(conn, new_tid, marker_placement, session_id))
+        extra.update(_marker_placement_fields(conn, new_tid, marker_placement, **place_origin))
         after_create(conn, new_tid)
         if origin_intent is None and args.get("requires"):
             # Placement preflight: declared gateway needs this gateway lacks are owned first. [daveey]
