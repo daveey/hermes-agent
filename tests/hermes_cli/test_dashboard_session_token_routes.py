@@ -147,7 +147,7 @@ def test_every_session_header_caller_targets_a_session_token_route():
     senders = _session_header_senders()
     names = {(f, fn) for f, fn, _ in senders}
     # Not vacuous: the two known service callers are found.
-    assert ("hermes_cli/plugins_activation.py", "notify_serve_backend") in names
+    assert ("hermes_cli/plugins_activation.py", "notify_serve_backend_record") in names
     assert ("hermes_cli/dashboard_procs.py", "_retirement_request") in names
     for file, fn, paths in senders:
         if (file, fn) in _EXEMPT:

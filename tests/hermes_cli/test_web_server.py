@@ -3358,7 +3358,7 @@ class TestDesktopHostRendezvousIsolation:
             assert hr.read_record(hr.ROLE_SERVE) is None
             assert _host_backend_attachment() is None
             # ...but a terminal `hermes plugins install` still lights up its open chats.
-            assert notify_serve_backend("demo", tmp_path) == {"ok": True}
+            assert [(b["role"], b["port"], b["answer"]) for b in notify_serve_backend("demo", tmp_path)["backends"]] == [("desktop-serve", 9231, {"ok": True})]
             assert dialed == [("http://127.0.0.1:9231/api/dashboard/agent-plugins/activate",
                                "desktop-spawn-token")]
         finally:

@@ -240,14 +240,32 @@ def _go_live(name: str) -> Optional[dict[str, Any]]:
     return activation
 
 
-def _serve_backend_record():
-    """The host-owner record, else the Desktop child's (a Desktop-only box has no host owner)."""
+def serve_backend_records() -> list:
+    """Every live, token-consistent chat-hosting backend record on this host: the host owner
+    (``serve``) first, then the Desktop child (``desktop-serve``). Both can run at once (a supervised
+    dashboard plus Desktop), and Desktop chats live in the child, so an activation must reach each
+    (t_01a19a63867979de). A stale (dead pid) record is skipped by ``read_record``; one whose token no
+    longer matches is skipped here. Never raises for one bad record."""
     from gateway import host_rendezvous as hr
+    records, seen = [], set()
     for role in (hr.ROLE_SERVE, hr.ROLE_DESKTOP_SERVE):
-        record = hr.read_record(role)
-        if record is not None and record.port and hr.record_token_is_consistent(record):
-            return record
-    return None
+        try:
+            record = hr.read_record(role)
+            usable = record is not None and record.port and hr.record_token_is_consistent(record)
+        except Exception:
+            logger.debug("serve backend record %s unreadable", role, exc_info=True)
+            continue
+        if usable and (record.pid, record.port) not in seen:
+            seen.add((record.pid, record.port))
+            records.append(record)
+    return records
+
+
+def _serve_backend_record():
+    """The first of :func:`serve_backend_records` (host owner, else the Desktop child), or None.
+    Kept for callers that need one backend; activation uses every record."""
+    records = serve_backend_records()
+    return records[0] if records else None
 
 
 def _backend_failure_reason(exc: BaseException) -> str:
@@ -260,18 +278,15 @@ def _backend_failure_reason(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-def notify_serve_backend(name: str, home: Path) -> Optional[dict[str, Any]]:
-    """Ask the running dashboard / Desktop backend (``hermes serve``, found through its host record) to
-    run :func:`load_and_go_live` for ``name`` in ``home``. Returns the backend's answer; None when no
-    backend record exists; ``{"backend_error": "<status> <reason>"}`` (logged at warning) when a
-    record exists but the backend did not answer. Never raises."""
-    try:
-        record = _serve_backend_record()
-    except Exception:
-        logger.debug("serve backend record lookup failed", exc_info=True)
-        return None
-    if record is None:
-        return None
+def backend_label(record) -> str:
+    """``<role>:<port>`` for log lines and hints."""
+    return f"{getattr(record, 'role', 'serve')}:{getattr(record, 'port', '?')}"
+
+
+def notify_serve_backend_record(record, name: str, home: Path) -> dict[str, Any]:
+    """POST ``/api/dashboard/agent-plugins/activate`` for ``name`` in ``home`` to ONE backend record.
+    The backend's answer, or ``{"backend_error": "<status> <reason>"}`` (logged at warning) when it
+    did not answer. Never raises."""
     try:
         import json
         import urllib.request
@@ -297,6 +312,42 @@ def notify_serve_backend(name: str, home: Path) -> Optional[dict[str, Any]]:
         logger.warning("the %s backend activation of plugin %r failed",
                        getattr(record, "role", "serve"), name, exc_info=True)
         return {"backend_error": type(exc).__name__}
+
+
+def notify_serve_backends(name: str, home: Path, records: Optional[list] = None) -> list[dict[str, Any]]:
+    """Ask EVERY running dashboard / Desktop backend (:func:`serve_backend_records`, or ``records``)
+    to run :func:`load_and_go_live` for ``name`` in ``home``. One entry per backend:
+    ``{"role", "port", "pid", "create_time", "answer"}``; a backend that fails does not stop the
+    others. Never raises."""
+    if records is None:
+        try:
+            records = serve_backend_records()
+        except Exception:
+            logger.debug("serve backend record lookup failed", exc_info=True)
+            records = []
+    return [{"role": getattr(record, "role", "serve"), "port": getattr(record, "port", None),
+             "pid": getattr(record, "pid", None), "create_time": getattr(record, "create_time", None),
+             "answer": notify_serve_backend_record(record, name, home)} for record in records]
+
+
+def notify_serve_backend(name: str, home: Path) -> Optional[dict[str, Any]]:
+    """Activate ``name`` in every running backend (:func:`notify_serve_backends`) and fold the answers
+    into one: the first backend that answered (host owner first), with ``backends`` listing each
+    backend's answer. None when no backend record exists. When any backend did not answer,
+    ``backend_error`` says which (``<role>:<port> <reason>`` once there is more than one backend), so
+    a caller never reports a skipped Desktop backend as loaded. Never raises."""
+    backends = notify_serve_backends(name, home)
+    if not backends:
+        return None
+    answers = [entry["answer"] for entry in backends]
+    primary = next((a for a in answers if not a.get("backend_error")), answers[0])
+    failed = [e for e in backends if e["answer"].get("backend_error")]
+    result = {**primary, "backends": backends}
+    if failed:
+        result["backend_error"] = "; ".join(
+            (f"{e['role']}:{e['port']} " if len(backends) > 1 else "") + str(e["answer"]["backend_error"])
+            for e in failed)
+    return result
 
 
 def _gateway_present() -> bool:

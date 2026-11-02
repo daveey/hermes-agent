@@ -47,8 +47,9 @@ def backend(monkeypatch):
         handler = type("H", (_Handler,), {"status": status, "seen_tokens": []})
         server = http.server.HTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        record = SimpleNamespace(role="desktop-serve", host="127.0.0.1", port=server.server_address[1])
-        monkeypatch.setattr(plugins_activation, "_serve_backend_record", lambda: record)
+        record = SimpleNamespace(role="desktop-serve", host="127.0.0.1", port=server.server_address[1],
+                                 pid=1, create_time=None)
+        monkeypatch.setattr(plugins_activation, "serve_backend_records", lambda: [record])
         monkeypatch.setattr("gateway.host_rendezvous.read_token", lambda role: "s3cret-token-value")
         started.append(server)
         return handler
@@ -91,7 +92,7 @@ def test_backend_activation_is_shown(backend):
 
 
 def test_no_backend_record_says_nothing_new(monkeypatch, caplog):
-    monkeypatch.setattr(plugins_activation, "_serve_backend_record", lambda: None)
+    monkeypatch.setattr(plugins_activation, "serve_backend_records", list)
     with caplog.at_level(logging.WARNING, logger="hermes_cli.plugins_activation"):
         result = plugins_activation.activate_plugin_now("probe", in_process=False)
     hint = plugins_activation.activation_hint(result)
