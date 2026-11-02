@@ -204,6 +204,12 @@ os.environ["HERMES_TEST_ISOLATION"] = os.environ.get("HERMES_HOME", "") or "1"
 # ran a real `uv pip install boto3` into the shared venv while other files raced
 # on whether botocore was importable yet.
 os.environ["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
+# [daveey] The hermes-hub replica (hub.db) lives under the real HOME. The per-test fixture below points
+# HERMES_HUB_STATE at an empty per-test dir, but a background thread a test leaves running (session
+# outcome derivation, sidebar counts) reads it after that monkeypatch is undone and would load the host's
+# live replica: ~40 MB of task rows per read on hermes-hub, enough to push a long test file past the
+# per-file RSS budget. Process-wide default = a dir that never exists.
+os.environ["HERMES_HUB_STATE"] = os.path.join(tempfile.gettempdir(), f"hermes-test-no-hub-state-{os.getpid()}")
 
 #: HERMES_HOME as it stood when conftest was imported - i.e. before any test
 #: module could import code that configures logging. Recorded so the guard in
