@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from hermes_cli import kanban_db_sync as _sync
+from hermes_cli.kanban_worker_placement import validate_creation
 from hermes_cli import kanban_placement_forward as _placement_fwd  # stdlib-only at import: no cycle
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
 from hermes_cli.kanban_admission import admission_hold_set, claim_transaction, claim_and_open_run
@@ -659,6 +660,7 @@ class Task:
     human_request: Optional[dict] = None
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
+    placement_policy: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Task:
@@ -692,7 +694,7 @@ _TASK_EPOCH_COLUMNS = ("created_at", "started_at", "completed_at", "claim_expire
 _TASK_OPTIONAL_COLUMNS = (
     "branch_name", "project_id", "tenant", "result", "idempotency_key", "worker_pid",
     "max_runtime_seconds", "current_run_id", "workflow_template_id",
-    "current_step_key", "max_retries", "session_id", "completion_contract",
+    "current_step_key", "max_retries", "session_id", "completion_contract", "placement_policy",
 )
 # Text columns where "" is stored/read as "not set".
 _TASK_EMPTY_IS_NULL_COLUMNS = (
@@ -1055,20 +1057,9 @@ def _validate_model_override(model: Optional[str], provider: Optional[str]) -> t
     provider = (provider or "").strip() or None
     if provider and not model:
         raise ValueError("provider_override requires a model_override")
-    _reject_spaced_pin(model, provider)
+    from hermes_cli.kanban_pin_provider import reject_spaced_pin
+    reject_spaced_pin(model, provider)
     return model, provider
-
-
-def _reject_spaced_pin(model: Optional[str], provider: Optional[str]) -> None:
-    """The ``/model`` whitespace rule for Kanban pins [daveey]. A provider-less pin is checked again
-    once ``resolve_pin_provider`` binds its provider (a ``custom`` profile keeps spaced ids)."""
-    if not model or not provider:
-        return
-    from hermes_cli.models_validate import model_whitespace_error
-
-    message = model_whitespace_error(model, provider)
-    if message:
-        raise ValueError(f"{message} Pin one model per card (got {model!r} on provider {provider!r}).")
 
 
 def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
@@ -1235,6 +1226,7 @@ def create_task(
     origin_intent: Optional[dict] = None, chat_origin: Optional[str] = None,
     requires: Optional[list[str]] = None,
     lint_blocked: bool = True, runs_on: Optional[Iterable[str]] = None, require_declaration: bool = False,
+    placement_policy: Optional[str] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1258,6 +1250,9 @@ def create_task(
     ``workspace_kind=None`` (omitted) inherits a project-scoped board's project;
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
     """
+    validate_creation(placement_policy, runs_on=runs_on, workspace_kind=workspace_kind,
+                      workspace_path=workspace_path, project=project_id,
+                      origin_intent=origin_intent, board=board)
     if origin_intent is not None:
         # Capture all caller options before defaults mutate them, including future options.
         creation_options = dict(locals())
@@ -1309,6 +1304,8 @@ def create_task(
     project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
         conn, project_id, project_source_task_id, workspace_kind, workspace_path
     )
+    validate_creation(placement_policy, runs_on=runs_on, workspace_kind=workspace_kind,
+                      workspace_path=workspace_path, project=project_id, origin_intent=None, board=board)
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
 
@@ -1343,7 +1340,8 @@ def create_task(
         conn, assignee, runs_on=runs_on, requires=requires, workspace_kind=workspace_kind,
         workspace_path=workspace_path, skills=skills_list, validate_skills=validate_skills,
         require_declaration=require_declaration, model=model_override, provider=provider_override)
-    _reject_spaced_pin(model_override, provider_override)
+    from hermes_cli.kanban_pin_provider import reject_spaced_pin
+    reject_spaced_pin(model_override, provider_override)
 
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
@@ -1370,8 +1368,8 @@ def create_task(
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
-                        goal_mode, goal_max_turns, session_id, completion_contract, requires
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, completion_contract, requires, placement_policy
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id, title.strip(), body, assignee, task_status, priority,
@@ -1381,7 +1379,7 @@ def create_task(
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, reasoning_effort,
                         1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
-                        json.dumps(required),
+                        json.dumps(required), placement_policy,
                     ),
                 )
                 _sync.set_runs_on(conn, task_id, runs_on)  # placement labels (RFC "Placement"), synced boards only

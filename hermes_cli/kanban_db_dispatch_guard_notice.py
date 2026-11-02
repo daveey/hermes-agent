@@ -194,10 +194,11 @@ def sweep_remote_guard_holds(conn: sqlite3.Connection, result) -> None:
     """
     from hermes_cli import kanban_db_dispatch as dispatch
     from hermes_cli.kanban_wake_check import foreign_ids
+    from hermes_cli.kanban_worker_node import dispatch_refusals
 
     foreign = foreign_ids(conn)
     for lane in ("ready", "review"):
-        for task_id in dispatch._local_refusals(conn, lane):
+        for task_id in dispatch_refusals(conn, lane):
             if task_id in foreign:
                 continue
             try:

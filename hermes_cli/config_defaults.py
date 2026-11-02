@@ -1952,8 +1952,8 @@ DEFAULT_CONFIG = {
         # local_skill_markers (regex lists), assignees (always placed; any profile the target
         # advertises is placed too), carried_requires (profile tools the target is trusted to
         # satisfy when it publishes no profile-tools; default terminal/file/git/kanban),
-        # hub_live_seconds, wait_seconds, hub_cli.
-        # Empty = upstream behaviour (every card is created here).
+        # hub_live_seconds, wait_seconds, hub_cli; worker_pools maps origins to Board-worker lists.
+        # Empty = upstream behaviour; an enrolled empty pool queues, never overflows locally.
         "placement": {},
         # Per-home claim allowlist for boards shared across Hermes homes (#110995): profile names
         # this home's dispatcher may claim (list or comma-separated string). None = any existing

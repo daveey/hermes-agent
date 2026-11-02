@@ -34,6 +34,17 @@ logger = logging.getLogger(__name__)
 _NO_PREFERENCE = frozenset({"", "auto"})
 
 
+def reject_spaced_pin(model: Optional[str], provider: Optional[str]) -> None:
+    """The ``/model`` whitespace rule; provider-less pins are checked again once bound."""
+    if not model or not provider:
+        return
+    from hermes_cli.models_validate import model_whitespace_error
+
+    message = model_whitespace_error(model, provider)
+    if message:
+        raise ValueError(f"{message} Pin one model per card (got {model!r} on provider {provider!r}).")
+
+
 class PinProviderUnresolvedError(ValueError):
     code = "pin_provider_unresolved"
 

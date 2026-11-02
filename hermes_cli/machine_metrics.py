@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -56,9 +57,47 @@ def _mem_used_pct() -> Optional[float]:
     return None
 
 
+def active_card_runs() -> Optional[int]:
+    """All profiles share the kanban root. Count its execution boards, not replicas.
+
+    Unreadable/schema-unknown boards invalidate the whole sample. Conservative
+    stale local runs consume slots until the normal reaper accounts for them.
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_boards import named_board_db_files
+
+    try:
+        paths = [kb.kanban_home() / "kanban.db", *(p for _, p in named_board_db_files())]
+        total = 0
+        seen = set()
+        for path in paths:
+            stat = path.stat()
+            identity = (stat.st_dev, stat.st_ino)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+            try:
+                cols = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
+                if "lease_holder" in cols:
+                    own = db.execute("SELECT gateway_id FROM kanban_sync_state LIMIT 1").fetchone()
+                    if own is None or not own[0]:
+                        return None
+                    total += db.execute("SELECT count(*) FROM tasks WHERE status='running' AND "
+                                        "(claim_lock IS NOT NULL OR lease_holder IS NULL OR lease_holder=?)",
+                                        (own[0],)).fetchone()[0]
+                else:
+                    total += db.execute("SELECT count(*) FROM tasks WHERE status='running'").fetchone()[0]
+            finally:
+                db.close()
+        return total
+    except (OSError, sqlite3.Error):
+        return None
+
+
 def collect(disk_path: Optional[Path] = None) -> dict[str, Any]:
     """``{cpu_load1, cpus, mem_used_pct, disk_free_gb, disk_total_gb}``; a value that cannot be read is left out."""
-    out: dict[str, Any] = {}
+    out: dict[str, Any] = {"active_card_runs": active_card_runs()}
     try:
         out["cpu_load1"] = round(os.getloadavg()[0], 2)
     except (OSError, AttributeError):

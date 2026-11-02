@@ -485,6 +485,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_ask_resolved import AskFilingRefused, check_create_filing, create_context
         assignee = (args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
                     or _cli_default_assignee(args))
+        from hermes_cli.kanban_worker_placement import cli_policy
         try:
             # [daveey] A blocked ask's resolved_check runs once first, as the sweep will run it for this assignee
             # and workspace: already met or broken refuses the create. A key hit returns the card: no probe.
@@ -516,6 +517,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                                  if in_worker else None),
                 validate_workspace=True, validate_skills=True, runs_on=getattr(args, "runs_on", None),
+                placement_policy=cli_policy(args, body, ws_kind, ws_path, board),
             )
         except WorktreeWorkspaceConfigError as exc:
             return _err(f"kanban: --workspace: {exc}", 2)

@@ -78,6 +78,8 @@ def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_p
     elsewhere without the pin also gets a ``note`` naming that target (the card is still created here).
     """
     why = decision.get("why") or ""
+    if decision.get("placement_policy"):
+        return {"where": "local", "placement_policy": decision["placement_policy"], "why": why}
     if decision.get("defer"):
         # Parents are local links: created here, forwarded to the target once they finish.
         return {"where": "local", "defer": decision["defer"], "why": why}
@@ -112,7 +114,7 @@ def _marker_placement_fields(conn, new_tid: str, marker_placement: Optional[dict
                 "note": (f"Created here as {new_tid} so it can wait on its parents; it runs on "
                          f"{marker_placement['defer']}, not here: when the parents finish the dispatcher "
                          f"forwards it there and this card completes when that one does.")}
-    if marker_placement.get("runs_on"):
+    if marker_placement.get("runs_on") or marker_placement.get("placement_policy"):
         return {"placement": dict(marker_placement)}
     out: dict = {"placement": {"where": marker_placement["where"], "why": marker_placement["why"]}}
     if marker_placement.get("remedy"):
@@ -133,6 +135,8 @@ def _machine_placement(machine: str, runs_on: list[str]) -> dict:
 
 def _runs_where(runs_on, pinned_machine, marker_placement) -> str:
     """Where a card created on this board runs, for the kanban_create result. Never raises."""
+    if marker_placement and marker_placement.get("placement_policy"):
+        return "worker pool (waiting_for_worker_capacity; no local fallback)"
     if runs_on is not None:
         if pinned_machine:
             return f"{pinned_machine} via the board lease (runs_on={runs_on})"

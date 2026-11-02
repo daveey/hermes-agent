@@ -1511,11 +1511,8 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                   note_local_pin: bool = True, origin_profile=None) -> tuple[Optional[str], Optional[dict]]:
     """[daveey] Create the card on the gateway ``kanban.placement`` routes this one to.
 
-    Returns ``(tool_result, None)`` when the card was queued there or the pin was refused,
-    ``(None, None)`` to create it locally for any other reason, or ``(None, placement)`` when a
-    text marker kept it here. ``placement`` is ``{where, why, remedy}`` so the create result can
-    say so, or ``{where, why, runs_on}`` for heavy work created here and run on a worker node through
-    the Board lease (``kanban.placement.heavy_route``). Never raises.
+    Returns a remote result/refusal, or local placement metadata. Worker-policy metadata
+    must reach the initial task INSERT; local storage is not permission to execute.
     """
     try:
         from hermes_cli import kanban_placement as kp
@@ -1716,6 +1713,7 @@ def _handle_create(args: dict, **kw) -> str:
             idempotency_key=args.get("idempotency_key"),
             max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
             requires=args.get("requires"), runs_on=runs_on, max_retries=max_retries,
+            placement_policy=(marker_placement or {}).get("placement_policy"),
             require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
             model_override=model_override, provider_override=provider_override,
             goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),

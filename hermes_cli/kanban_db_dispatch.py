@@ -1825,18 +1825,9 @@ def _profile_exists_fn() -> Optional[Callable[[str], bool]]:
     return _gated
 
 
-def _local_refusals(conn: sqlite3.Connection, status: str) -> dict[str, str]:
-    """Cards in ``status`` this machine cannot lease (``kanban_worker_node.local_refusals``); never raises."""
-    try:
-        from hermes_cli.kanban_worker_node import local_refusals
-        return local_refusals(conn, status)
-    except Exception:  # health: allow BLE001 -- eligibility is advisory; the Board lease still decides
-        _kb._log.debug("kanban dispatch: local eligibility check failed", exc_info=True)
-        return {}
-
-
 def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
-    refused = _local_refusals(conn, status)
+    from hermes_cli.kanban_worker_node import dispatch_refusals
+    refused = dispatch_refusals(conn, status)
     rows = [row for row in conn.execute(
         "SELECT id, assignee FROM tasks "
         "WHERE status = ? AND assignee IS NOT NULL AND claim_lock IS NULL",
@@ -2470,6 +2461,13 @@ def _dispatch_once_locked(
     if dispatch_paused():
         _kb._log.info('kanban dispatcher: scheduling paused — gateway draining or restart requested')
         return result
+    if not dry_run:
+        from hermes_cli.kanban_worker_placement import dispatch_tick
+        try:
+            dispatch_tick(conn)
+        except Exception:
+            logger = _kb._log
+            logger.warning("kanban worker placement failed; continuing local dispatch", exc_info=True)
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
     )
@@ -2576,7 +2574,8 @@ def _dispatch_once_locked(
 
 def _eligible_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row], status: str,
                    result: DispatchResult) -> list[sqlite3.Row]:
-    refused = _local_refusals(conn, status) if rows else {}
+    from hermes_cli.kanban_worker_node import dispatch_refusals
+    refused = dispatch_refusals(conn, status) if rows else {}
     if not refused:
         return rows
     kept = []

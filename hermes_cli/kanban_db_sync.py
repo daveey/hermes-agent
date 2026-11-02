@@ -58,7 +58,7 @@ SYNCED_COLUMNS: dict[str, frozenset[str]] = {
         "consecutive_failures", "last_failure_error", "max_runtime_seconds", "current_run_id",
         "workflow_template_id", "current_step_key", "skills", "requires", "model_override",
         "provider_override", "reasoning_effort", "max_retries", "goal_mode", "goal_max_turns",
-        "block_kind", "human_request", "block_recurrences", "completion_contract", "runs_on",
+        "block_kind", "human_request", "block_recurrences", "completion_contract", "runs_on", "placement_policy",
     }),
     "task_links": frozenset({"parent_id", "child_id"}),
     "task_comments": frozenset({"task_id", "author", "body", "created_at"}),
@@ -233,6 +233,8 @@ _SYNC_COLUMN_DDL = (
     ("kanban_sync_state", "seconds_repaired", "seconds_repaired INTEGER NOT NULL DEFAULT 0"),
     # Wall time of the last successful feed pull into this file (replicas): readers derive staleness from it. [daveey]
     ("kanban_sync_state", "pulled_at", "pulled_at REAL"),
+    # Local-only round-robin position; refused revisions must not monopolize bounded batches.
+    ("kanban_sync_state", "worker_reserve_cursor", "worker_reserve_cursor TEXT"),
 )
 
 # Resolved db paths whose triggers this process installed. Empty = no synced
@@ -747,6 +749,11 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
     """Lease seam before a claim CAS. Only ``primary`` boards ask the service;
     without a grant the card stays ``ready`` (no offline claims: every card is
     at-most-once in v1). A grant bounds the local claim to the lease deadline."""
+    from hermes_cli.kanban_worker_placement import execution_refusal
+    row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is not None and (reason := execution_refusal(conn, row)):
+        _CLAIM_DEFERRALS[task_id] = reason
+        return ClaimGate(expires, deferred=True)
     if board_mode(conn) != "primary":
         return ClaimGate(expires)
     state = _state(conn)
@@ -764,7 +771,15 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
         _CLAIM_DEFERRALS[task_id] = lease.reason or "denied"
         return ClaimGate(expires, deferred=True)
     deadline = lease.expires_ms // 1000 - LEASE_SAFETY_MARGIN_SECONDS
-    return ClaimGate(min(expires, deadline), lease=lease, ids=ids)
+    gate = ClaimGate(min(expires, deadline), lease=lease, ids=ids)
+    if row is not None and row["placement_policy"]:
+        from hermes_cli.kanban_worker_placement import local_admission
+        if not local_admission(conn):
+            with gate:
+                pass  # release the unused grant; no local task/run was started
+            _CLAIM_DEFERRALS[task_id] = "waiting_for_worker_capacity"
+            return ClaimGate(expires, deferred=True)
+    return gate
 
 
 def stage_claim(conn: sqlite3.Connection, task_id: str, gate: Optional[ClaimGate]) -> Optional[str]:

@@ -135,6 +135,35 @@ def test_pinned_executor_hold_gets_home_maintenance_in_full_tick(gws, svc, monke
     assert kb.get_task(home.conn, target).status == "triage"
 
 
+def test_home_maintains_guard_hold_on_worker_queued_policy_card(gws, svc, monkeypatch):
+    """A worker-first card is fenced out of the home's execution lanes (placement-policy refusal),
+    so its guard hold is home maintenance: the full tick sweeps it instead of aborting."""
+    home, _worker = gws
+    home.enter()
+    target = kb.create_task(home.conn, title="queued for worker capacity", assignee="default",
+                            placement_policy="worker-first-v1")
+    assert wn.dispatch_refusals(home.conn, "ready")[target] == "waiting_for_worker_capacity"
+    now = int(time.time()) + 2
+    monkeypatch.setattr(time, "time", lambda: now)
+    monkeypatch.setenv("HERMES_KANBAN_OWNER_RESTART_COOLDOWN_SECONDS", "10000")
+    monkeypatch.setenv("HERMES_KANBAN_GUARD_HOLD_CAP_LONG_SECONDS", "3600")
+    # Executor-shaped evidence: a restart-reclaimed run and its hold event (synced home in production).
+    with kb.write_txn(home.conn):
+        home.conn.execute(
+            "INSERT INTO task_runs (task_id, status, outcome, started_at, ended_at, metadata) "
+            "VALUES (?, 'reclaimed', 'reclaimed', ?, ?, ?)",
+            (target, now - 2, now, '{"owner_restart": true}'),
+        )
+        kb._append_event(home.conn, target, "respawn_guarded", {"reason": "owner_restart_cooldown"})
+    monkeypatch.setattr(time, "time", lambda: now + 4000)
+    result = home.tick(max_spawn=0)
+    assert result.auto_blocked == [target]
+    assert result.spawned == []
+    task = kb.get_task(home.conn, target)
+    assert task is not None and task.status == "triage"
+    assert home.conn.execute("SELECT count(*) FROM task_runs WHERE task_id=?", (target,)).fetchone()[0] == 1
+
+
 @pytest.mark.parametrize("cooldown", [120, 10000])
 def test_home_revalidates_synced_cooldown_without_executor_budget(gws, monkeypatch, cooldown):
     home, worker = gws

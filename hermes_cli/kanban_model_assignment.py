@@ -109,8 +109,7 @@ def _family_mismatch(assignee, model, provider):
 
 def validate_task_pin(conn, task_id, model, provider):
     """Repinning follows create's execution-host policy, including explicit remote providers."""
-    from hermes_cli.kanban_db import _reject_spaced_pin
-    from hermes_cli.kanban_pin_provider import require_remote_pin_provider, resolve_pin_provider
+    from hermes_cli.kanban_pin_provider import reject_spaced_pin, require_remote_pin_provider, resolve_pin_provider
     from hermes_cli.kanban_runs_on_capabilities import runs_elsewhere
 
     row = conn.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
@@ -125,7 +124,7 @@ def validate_task_pin(conn, task_id, model, provider):
     if not provider:
         # Same pin-time binding as create_task: resolve against the card's assignee, or refuse.
         model, provider = resolve_pin_provider(model, None, assignee=assignee)
-        _reject_spaced_pin(model, provider)
+        reject_spaced_pin(model, provider)
     return model, provider
 
 

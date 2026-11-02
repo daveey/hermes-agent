@@ -1,0 +1,127 @@
+"""Durable queue fences survive disabled sync and origin restart."""
+import json
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_sync_client as ksc
+from hermes_cli import kanban_worker_node as wn
+from tests.hermes_cli import kanban_sync_support as support
+
+
+@pytest.fixture
+def conn(tmp_path, monkeypatch):
+    home = support.kanban_home(tmp_path, monkeypatch)
+    support.write_sync_config(home, True)
+    with kbc.connect(home / "kanban.db") as db:
+        ksc.ensure_identity(db, "default", "hub")
+        sync.set_mode(db, "primary")
+        yield db
+
+
+def test_policy_is_captured_in_first_insert_with_parent_and_origin(conn):
+    parent = kb.create_task(conn, title="Parent", assignee="default")
+    tid = kb.create_task(conn, title="Public analysis", assignee="default", parents=[parent],
+                         session_id="origin-session", placement_policy="worker-first-v1")
+    row = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+    assert row["placement_policy"] == "worker-first-v1"
+    assert row["session_id"] == "origin-session"
+    assert row["status"] == "todo"
+    assert conn.execute("SELECT parent_id FROM task_links WHERE child_id=?", (tid,)).fetchone()[0] == parent
+    inserts = conn.execute("SELECT fields FROM kanban_sync_outbox WHERE row_uid=? ORDER BY rowid", (tid,)).fetchall()
+    assert json.loads(inserts[0][0])["placement_policy"] == "worker-first-v1"
+    assert kb.get_task(conn, tid).placement_policy == "worker-first-v1"
+
+
+@pytest.mark.parametrize("mode", ["off", "shadow", "primary"])
+@pytest.mark.parametrize("lane", ["ready", "review"])
+def test_queue_fence_precedes_direct_claim_and_lease_even_without_sync(conn, mode, lane):
+    tid = kb.create_task(conn, title="Public analysis", assignee="default", placement_policy="worker-first-v1")
+    conn.execute("UPDATE tasks SET status=? WHERE id=?", (lane, tid))
+    conn.commit()
+    sync.set_mode(conn, mode)
+    client = support.FakeLeaseClient()  # would grant if accidentally consulted
+    old = sync.set_lease_client(client)
+    try:
+        claim = kb.claim_task if lane == "ready" else kb.claim_review_task
+        assert claim(conn, tid) is None
+        assert client.calls == []
+        assert sync.pop_claim_deferral(tid) == "waiting_for_worker_capacity"
+        assert conn.execute("SELECT count(*) FROM task_runs").fetchone()[0] == 0
+    finally:
+        sync.set_lease_client(old)
+
+
+@pytest.mark.parametrize("mode", ["off", "shadow", "primary"])
+def test_local_dispatch_refusal_survives_registry_failure_and_disabled_policy(conn, mode, monkeypatch):
+    tid = kb.create_task(conn, title="Public analysis", assignee="default", placement_policy="worker-first-v1")
+    sync.set_mode(conn, mode)
+    monkeypatch.setattr(wn, "registry", lambda: None)
+    assert wn.local_refusals(conn, "ready")[tid] == "waiting_for_worker_capacity"
+
+
+
+@pytest.mark.parametrize("sample,capacity,allowed", [
+    ({"cpu_load1": 3, "cpus": 4, "mem_used_pct": 50, "active_card_runs": 1}, 2, True),
+    ({"cpu_load1": 3.4, "cpus": 4, "mem_used_pct": 50, "active_card_runs": 1}, 2, False),
+    ({"cpu_load1": 0, "cpus": 4, "mem_used_pct": 85, "active_card_runs": 1}, 2, False),
+    ({"cpu_load1": 0, "cpus": 4, "mem_used_pct": 50, "active_card_runs": 2}, 2, False),
+    ({"cpu_load1": 0, "cpus": 4, "mem_used_pct": 50, "active_card_runs": None}, 2, False),
+    ({"cpu_load1": float("nan"), "cpus": 4, "mem_used_pct": 50, "active_card_runs": 0}, 2, False),
+    ({"cpu_load1": 0, "cpus": 0, "mem_used_pct": 50, "active_card_runs": 0}, 2, False),
+    ({"cpu_load1": 0, "cpus": 4, "mem_used_pct": 50, "active_card_runs": 0}, None, False),
+    ({"cpu_load1": 0, "cpus": 4, "mem_used_pct": 50, "active_card_runs": 0}, True, False),
+])
+@pytest.mark.parametrize("status", ["ready", "review"])
+def test_worker_local_admission_rechecks_load_and_releases_unused_lease(conn, monkeypatch, sample, capacity, allowed, status):
+    from hermes_cli import machine_metrics
+    tid = kb.create_task(conn, title="Public analysis", assignee="default", placement_policy="worker-first-v1")
+    conn.execute("UPDATE tasks SET runs_on=?, status=? WHERE id=?", ('["machine:hub"]', status, tid))
+    conn.commit()
+    monkeypatch.setattr(machine_metrics, "collect", lambda: sample)
+    monkeypatch.setattr(wn, "registry", lambda: {"machines": {"hub": {"max_card_runs": capacity}}})
+    client = support.FakeLeaseClient()
+    old = sync.set_lease_client(client)
+    try:
+        claimed = (kb.claim_task if status == "ready" else kb.claim_review_task)(conn, tid)
+        assert (claimed is not None) == allowed
+        assert client.count("acquire") == 1
+        assert client.count("release") == (0 if allowed else 1)
+        if not allowed:
+            assert sync.pop_claim_deferral(tid) == "waiting_for_worker_capacity"
+    finally:
+        sync.set_lease_client(old)
+
+
+@pytest.mark.parametrize("fields", [{"runs_on": []}, {"runs_on": ["linux"]}, {"workspace_kind": "dir", "workspace_path": "/work"}])
+def test_policy_cannot_be_combined_with_manual_or_host_placement(conn, fields):
+    with pytest.raises(ValueError, match="worker-first"):
+        kb.create_task(conn, title="Public analysis", placement_policy="worker-first-v1", **fields)
+    assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("broken", ["registry", "metrics"])
+def test_admission_sampling_failure_releases_grant(conn, monkeypatch, broken):
+    from hermes_cli import machine_metrics
+    tid = kb.create_task(conn, title="Public analysis", placement_policy="worker-first-v1")
+    conn.execute("UPDATE tasks SET runs_on=? WHERE id=?", ('["machine:hub"]', tid))
+    conn.commit()
+    def unavailable():
+        raise OSError("sample unavailable")
+    monkeypatch.setattr(wn, "registry", unavailable if broken == "registry" else lambda: {"machines": {}})
+    monkeypatch.setattr(machine_metrics, "collect", unavailable)
+    client = support.FakeLeaseClient()
+    old = sync.set_lease_client(client)
+    try:
+        assert kb.claim_task(conn, tid) is None
+        assert client.count("release") == 1
+    finally:
+        sync.set_lease_client(old)
+
+
+def test_unknown_policy_is_rejected_before_insertion(conn):
+    with pytest.raises(ValueError, match="placement policy"):
+        kb.create_task(conn, title="Public analysis", placement_policy="worker-first-v999")
+    assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0

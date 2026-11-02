@@ -791,11 +791,9 @@ KANBAN_CREATE_SCHEMA = _schema(
                     "if it waits too long. 'machine:<name>' is refused (placement_unavailable) unless that "
                     "machine picks up this board; then use placement='<name>'."},
         "placement": _prop("string", (
-                "Where the card runs. 'auto' (default): on a gateway with a "
-                "kanban.placement route (e.g. the MacBook -> 'hub', the gateway "
-                "on the hermes-hub host; 'hermes-hub' is accepted as an alias), a "
-                "card with no local-only need is created on the target "
-                "gateway, still linked to this chat. 'local' pins it here "
+                "Where the card runs. 'auto' uses configured worker pools for portable work, queueing without hub overflow. "
+                "Without a pool, kanban.placement routes (e.g. MacBook -> hub; hermes-hub aliases hub) create "
+                "portable cards on that gateway, linked to this chat. 'local' pins it here "
                 "(use it when the work needs this machine: its Chrome, "
                 "Keychain, Apple apps, launchd/Desktop state, local "
                 "checkouts). A gateway name pins it there; if the card cannot be "

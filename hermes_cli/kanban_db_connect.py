@@ -1054,6 +1054,7 @@ _LATER_TASK_COLUMNS = (
     ("goal_mode", "goal_mode INTEGER NOT NULL DEFAULT 0"),
     ("goal_max_turns", "goal_max_turns INTEGER"),
     ("completion_contract", "completion_contract TEXT"),
+    ("placement_policy", "placement_policy TEXT"),
     ("session_id", "session_id TEXT"),
     # Typed operational reason; neither NULL nor capability implies a human ask.
     ("block_kind", "block_kind TEXT"),

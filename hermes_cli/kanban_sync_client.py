@@ -128,8 +128,9 @@ class Hub:
     # how long a socket is reused.
     IDLE_REUSE_S = 30.0
 
-    def __init__(self, ident: Identity, timeout: float = HTTP_TIMEOUT_S) -> None:
+    def __init__(self, ident: Identity, timeout: float = HTTP_TIMEOUT_S, *, deadline: Optional[float] = None) -> None:
         self.ident, self.timeout = ident, timeout
+        self.deadline = deadline
         self._local = _hub_threading.local()
         self._ssl_context = None
         self._ssl_lock = _hub_threading.Lock()
@@ -139,16 +140,22 @@ class Hub:
                 "user-agent": "hermes-kanban-sync/1"}
 
     def _call(self, method: str, path: str, body: Optional[dict] = None) -> dict:
+        timeout = self.timeout
+        if self.deadline is not None:
+            timeout = min(timeout, self.deadline - time.monotonic())
+            if timeout <= 0:
+                raise TimeoutError("Board request budget exhausted")
         data = None if body is None else json.dumps(body).encode()
         parts = urllib.parse.urlsplit(self.ident.url)
         if parts.scheme not in ("http", "https") or not parts.hostname or self._proxied(parts):
-            return self._call_urlopen(method, path, data)
-        return self._call_kept_alive(parts, method, path, data)
+            return self._call_urlopen(method, path, data, timeout)
+        return self._call_kept_alive(parts, method, path, data, timeout)
 
-    def _call_urlopen(self, method: str, path: str, data: Optional[bytes]) -> dict:
+    def _call_urlopen(self, method: str, path: str, data: Optional[bytes], timeout: Optional[float] = None) -> dict:
+        timeout = self.timeout if timeout is None else timeout
         req = urllib.request.Request(self.ident.url + path, data=data, method=method, headers=self._headers())
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read() or b"{}")
         except urllib.error.HTTPError as exc:
             text = exc.read().decode("utf-8", "replace")[:500]
@@ -174,8 +181,11 @@ class Hub:
             except OSError:
                 pass
 
-    def _connection(self, parts: urllib.parse.SplitResult):
-        """``(connection, reused)`` for this thread. A connection inherited across ``fork`` is never touched."""
+    def _connection(self, parts: urllib.parse.SplitResult, timeout: Optional[float] = None):
+        """``(connection, reused)`` for this thread. A connection inherited across ``fork`` is never touched.
+
+        ``timeout`` is this request's (deadline-capped) budget; a reused socket takes it too."""
+        timeout = self.timeout if timeout is None else timeout
         loc = self._local
         conn = getattr(loc, "conn", None)
         if conn is not None and loc.pid != os.getpid():
@@ -184,6 +194,14 @@ class Hub:
             self._drop()
             conn = None
         if conn is not None:
+            conn.timeout = timeout
+            try:
+                if getattr(conn, "sock", None) is not None:
+                    conn.sock.settimeout(timeout)
+            except OSError:  # the socket is already dead: nothing was sent on it, so open a fresh one
+                self._drop()
+                conn = None
+        if conn is not None:
             return conn, True
         import http.client
         if parts.scheme == "https":
@@ -191,19 +209,20 @@ class Hub:
                 if self._ssl_context is None:
                     import ssl
                     self._ssl_context = ssl.create_default_context()  # truststore-injected when installed
-            conn = http.client.HTTPSConnection(parts.hostname, parts.port, timeout=self.timeout,
+            conn = http.client.HTTPSConnection(parts.hostname, parts.port, timeout=timeout,
                                                context=self._ssl_context)
         else:
-            conn = http.client.HTTPConnection(parts.hostname, parts.port, timeout=self.timeout)
+            conn = http.client.HTTPConnection(parts.hostname, parts.port, timeout=timeout)
         loc.conn, loc.pid, loc.used = conn, os.getpid(), _hub_monotonic()
         return conn, False
 
-    def _call_kept_alive(self, parts: urllib.parse.SplitResult, method: str, path: str, data: Optional[bytes]) -> dict:
+    def _call_kept_alive(self, parts: urllib.parse.SplitResult, method: str, path: str, data: Optional[bytes],
+                         timeout: Optional[float] = None) -> dict:
         import http.client
         target = (parts.path or "") + path
         headers = self._headers()
         for attempt in (0, 1):
-            conn, reused = self._connection(parts)
+            conn, reused = self._connection(parts, timeout)
             try:
                 conn.request(method, target, body=data, headers=headers)
             except (OSError, http.client.HTTPException) as exc:
@@ -234,7 +253,7 @@ class Hub:
                 self._local.used = _hub_monotonic()
             status = resp.status
             if 300 <= status < 400 and method == "GET":  # the Board service sends none; urlopen follows them
-                return self._call_urlopen(method, path, data)
+                return self._call_urlopen(method, path, data, timeout)
             if 300 <= status < 400:  # never resend a POST the server may have applied
                 raise HubError(status, raw.decode("utf-8", "replace")[:500])
             if not 200 <= status < 300:
@@ -262,6 +281,17 @@ class Hub:
 
     def leases(self, board: str, body: dict) -> dict:
         return self._call("POST", f"/v2/boards/{board}/leases", body)
+
+    def repin(self, board: str, *, task_id: str, expected_revision: int, runs_on: list[str]) -> dict:
+        """Explicit rollback/manual pin; caller must pull the authoritative row afterward."""
+        return self._call("POST", f"/v2/boards/{board}/placement/repin", {
+            "task_id": task_id, "expected_revision": expected_revision, "runs_on": runs_on})
+
+    def reserve(self, board: str, *, task_id: str, expected_revision: int, candidates: list[str]) -> dict:
+        """Atomic Board placement; errors leave the persisted local queue fence intact."""
+        return self._call("POST", f"/v2/boards/{board}/placement/reserve", {
+            "task_id": task_id, "expected_revision": expected_revision,
+            "policy": "worker-first-v1", "candidates": candidates})
 
     def sessions(self, board: str, body: dict) -> dict:
         """Session owners (session handover, :mod:`hermes_cli.session_owner`): ``get`` / ``move``. A 409 refusal
@@ -402,7 +432,8 @@ def _full_row_if_unseen(conn: sqlite3.Connection, row: dict) -> dict:
         return row
     task = conn.execute("SELECT * FROM tasks WHERE id = ?", (row["row_uid"],)).fetchone()
     if task is None or task["sync_version"] is not None:
-        return row
+        from hermes_cli.kanban_worker_placement import acknowledged_outbox
+        return acknowledged_outbox(row, task)
     return {**row, "fields": _row_fields(conn, "tasks", task)}
 
 
@@ -802,6 +833,9 @@ def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
         result.push = push(live, hub, slug, gateway, primary=mode == "primary")
         from hermes_cli.kanban_sync_rejections import resolve_rejections
         result.rejection_resolutions = resolve_rejections(live, hub, slug)
+        if mode == "primary":
+            from hermes_cli.kanban_worker_placement import reevaluate
+            reevaluate(live, hub, slug, gateway)
         return result
     finally:
         live.close()

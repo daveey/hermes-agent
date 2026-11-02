@@ -287,24 +287,35 @@ def evict(conn: sqlite3.Connection) -> list[str]:
     return gone
 
 
+def dispatch_refusals(conn: sqlite3.Connection, status: str) -> dict[str, str]:
+    """Advisory prefilter; the direct claim gate remains authoritative on errors."""
+    try:
+        return local_refusals(conn, status)
+    except Exception:  # health: allow BLE001 -- eligibility is advisory; the Board lease still decides
+        from hermes_cli import kanban_db
+        kanban_db._log.debug("kanban dispatch: local eligibility check failed", exc_info=True)
+        return {}
+
+
 def local_refusals(conn: sqlite3.Connection, status: str) -> dict[str, str]:
     """``{task_id: reason}`` for unclaimed ``status`` cards this gateway cannot lease: the Board's refusal
     (:func:`eligible`) computed before the claim, so local dispatch never spends a slot on them. Only cards with
     ``runs_on`` or another creator can be refused (a held machine is left to the lease). Empty when the board is
     not primary or the registry is unreachable: the lease stays the authority and fails closed."""
+    from hermes_cli.kanban_worker_placement import local_refusals as policy_refusals
+    out = policy_refusals(conn, status)
     if sync.board_mode(conn) != "primary":
-        return {}
+        return out
     own = _own(conn)
     rows = conn.execute(
         "SELECT id, runs_on, created_on, workspace_kind FROM tasks WHERE status = ? AND claim_lock IS NULL "
         "AND (runs_on IS NOT NULL OR (created_on IS NOT NULL AND created_on != ?))", (status, own)).fetchall()
     if not rows:
-        return {}
+        return out
     reg = registry()
     if not reg:
-        return {}
+        return out
     machines = reg["machines"]
-    out: dict[str, str] = {}
     for row in rows:
         reason = eligible(dict(row), own, machines)
         if reason is not None and reason != "held":

@@ -204,9 +204,28 @@ def test_threads_never_share_a_connection(server):
 def test_environment_proxy_keeps_urlopen(server, monkeypatch):
     calls = []
     monkeypatch.setenv("http_proxy", "http://proxy.invalid:3128")
-    monkeypatch.setattr(ksc.Hub, "_call_urlopen", lambda self, m, p, d: calls.append((m, p)) or {"via": "urlopen"})
+    monkeypatch.setattr(ksc.Hub, "_call_urlopen", lambda self, m, p, d, *a: calls.append((m, p)) or {"via": "urlopen"})
     assert _hub(server).machines() == {"via": "urlopen"}
     assert calls == [("GET", "/v2/machines")] and server.requests == []
+
+
+def test_board_deadline_caps_every_kept_alive_request(server, monkeypatch):
+    """The worker-placement request budget (``deadline``) caps a reused socket too, not only the first connect."""
+    from types import SimpleNamespace
+    clock = [100.0]
+    monkeypatch.setattr(ksc, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    host, port = server.server_address
+    hub = ksc.Hub(ksc.Identity(url=f"http://{host}:{port}", key="k" * 16, gateway="gw"), timeout=5, deadline=104.0)
+    hub.machines()
+    assert hub._local.conn.sock.gettimeout() == 4.0
+    clock[0] = 102.5
+    hub.machines()
+    assert server.connections == 1  # reused, yet bound by the remaining budget
+    assert hub._local.conn.sock.gettimeout() == 1.5
+    clock[0] = 104.5
+    with pytest.raises(TimeoutError, match="budget exhausted"):
+        hub.machines()
+    assert len(server.requests) == 2
 
 
 def test_failed_send_on_reused_socket_is_retried_on_a_fresh_one(server, monkeypatch):

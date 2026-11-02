@@ -1379,6 +1379,22 @@ def test_heavy_route_machine_check_reads_the_board_registry(monkeypatch, entry, 
     assert kp._machine_picks_up("worker-1") is ok
 
 
+@pytest.mark.parametrize("title", ["Analyze public data", "Run the full test suite"])
+def test_tool_creates_worker_policy_atomically_and_reports_queue(mac, monkeypatch, title):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db_connect as kbc
+    monkeypatch.setattr(kp, "config", lambda: {"worker_pools": {"macbook": []}})
+    out = json.loads(kt._handle_create({"title": title, "requires": []}))
+    assert out["ok"], out
+    with kbc.connect_closing() as conn:
+        row = conn.execute("SELECT placement_policy FROM tasks WHERE id=?", (out["task_id"],)).fetchone()
+        assert row[0] == "worker-first-v1"
+    assert out["placement"]["placement_policy"] == "worker-first-v1"
+    assert out["placement"]["why"] == "waiting_for_worker_capacity"
+    assert out["runs_where"] == "worker pool (waiting_for_worker_capacity; no local fallback)"
+    assert not mac["calls"]
+
+
 # --- the hub (no route entry) sends portable heavy work to the worker ---------------------------------------
 # Gap: heavy_route was only read after a route target existed, so the hub (routeless) kept every heavy card
 # on itself and worker-1's explicit pickup never saw one.

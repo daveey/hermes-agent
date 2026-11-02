@@ -323,43 +323,52 @@ HOME_GATEWAY_MARKERS = (
 )
 
 
-def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
-                     machine_ok: Optional[Callable[[str], bool]], *, skip: bool = False) -> Optional[dict]:
-    """Placement for heavy, portable work created on a gateway with no ``route`` entry (the hub): None keeps it
-    here on the gateway's own host. Portable means: scratch workspace on the default board, an assignee this
-    config places, no option a worker cannot carry, only carried ``requires`` and no gateway ``needs``, no
-    local-only marker, no marker naming the home gateway's own state (:data:`HOME_GATEWAY_MARKERS`, extended
-    by ``extra_home_markers``), a heavy marker, and a worker that is an active pickup machine."""
-    worker = c.heavy_target(self_gw)
-    if skip or not worker:  # an explicit pin or a courier card is never re-routed
-        return None
+def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
+    """Why a card cannot leave its origin; None means structurally portable, not admitted.
+
+    Keep the conservative legacy routeless-heavy boundary, excluding only its heavy-marker
+    requirement. Worker profile/tool/skill attestations and capacity are Board admission checks.
+    """
+    c = _Cfg(config() if cfg is None else cfg)
+    if args.get("needs"):
+        return "gateway-scoped need"
     if (args.get("workspace_kind") or "scratch") != "scratch":
-        return None
+        return "host workspace"
     board = args.get("board")
     if board and board != "default":
-        return None
+        return "non-default board"
     if (args.get("assignee") or "default") not in c.assignees():
-        return None
+        return "assignee not allowlisted"
     if any(args.get(k) not in (None, "", [], False) for k in UNCARRIED_OPTIONS):
-        return None
+        return "uncarried option"
     reqs = args.get("requires") or []
     reqs = [reqs] if isinstance(reqs, str) else list(reqs)
     if any(reg.is_gateway_need(r) for r in reqs):
-        return None
+        return "gateway-scoped requirement"
     if any(str(r) not in c.carried_requires() for r in reqs):
-        return None
+        return "uncarried requirement"
     title, body = args.get("title") or "", args.get("body") or ""
     if _local_marker(title, body, args.get("skills"), c):
-        return None
+        return "local marker"
     full = f"{title}\n{body}"
     extra = c.raw.get("extra_home_markers")
     pats = list(HOME_GATEWAY_MARKERS) + (list(extra) if isinstance(extra, list) else [])
     for p in pats:
         try:
             if re.search(p, full, re.IGNORECASE):
-                return None
+                return "home gateway marker"
         except re.error:
             continue
+    return None
+
+
+def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
+                     machine_ok: Optional[Callable[[str], bool]], *, skip: bool = False) -> Optional[dict]:
+    """Legacy heavy routing; worker pools reuse portability without changing this opt-out path."""
+    worker = c.heavy_target(self_gw)
+    if skip or not worker or portable_reason(args, c.raw):
+        return None
+    title, body = args.get("title") or "", args.get("body") or ""
     heavy = _heavy_marker(title, body, c)
     if not heavy or not (machine_ok or _machine_picks_up)(worker):
         return None
@@ -590,8 +599,10 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
         c = _Cfg(config() if cfg is None else cfg)
         self_gw = reg.self_gateway() if self_gw is None else self_gw
         pin = canonical_pin(args.get("placement") or "auto", self_gw, c.raw)
-        if pin in ("local", "here", (self_gw or "").lower()):
-            return {"where": "local", "why": PINNED_LOCAL_WHY}
+        from hermes_cli.kanban_worker_placement import creation_decision
+        enrollment = creation_decision(args, c.raw, self_gw, pin, origin_intent)
+        if enrollment is not None:
+            return enrollment
         explicit = pin not in ("", "auto")
         target = c.target(self_gw)
         if explicit and (not target or pin != target.lower()):

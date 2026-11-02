@@ -411,6 +411,11 @@ model:
 # Disable this only when every review is performed manually from the dashboard.
 kanban:
   review_dispatch: true
+  # Optional worker-only portable placement. Requires the matching Board service,
+  # operator allowlist/capability attestations and current clients on every worker.
+  # No entry = legacy routing. An origin mapped to [] queues without local overflow.
+  # placement:
+  #   worker_pools: {hub: [worker-1]}
 
 # =============================================================================
 # Terminal Tool Configuration
