@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -366,17 +367,24 @@ def decompose_task(
     return outcome
 
 
-def list_triage_ids(*, tenant: Optional[str] = None, skip_awaiting_human: bool = False) -> list[str]:
+def list_triage_ids(*, tenant: Optional[str] = None, skip_awaiting_human: bool = False,
+                    min_age_seconds: int = 0, now: Optional[float] = None) -> list[str]:
     """Return the triage task ids that are decomposition candidates.
 
     Every sweep (the dispatcher's auto-decompose and ``decompose --all``) drops
     cards that already ran or that ``block_loop_detected`` escalated, even after
     a human comments on them (:func:`kanban_db.decomposition_refusal`); those wait
     for ``promote``/``unblock``. ``skip_awaiting_human`` is kept for callers and
-    is now implied. [daveey]
+    is now implied. ``min_age_seconds`` drops cards created less than that long
+    ago (the dispatcher's ``kanban.auto_decompose_min_age_seconds`` grace window,
+    so a creator can still ``kanban_schedule`` a triage hold); 0 keeps all. [daveey]
     """
     del skip_awaiting_human
+    cutoff = (time.time() if now is None else now) - max(int(min_age_seconds or 0), 0)
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
+        if min_age_seconds:
+            # An unparseable stamp (None) stays a candidate: excluding it would strand the card.
+            rows = [row for row in rows if row.created_at is None or row.created_at <= cutoff]
         rows = [row for row in rows if kb.decomposition_refusal(conn, row.id) is None]
     return [row.id for row in rows]

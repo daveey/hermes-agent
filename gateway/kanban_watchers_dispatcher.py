@@ -15,7 +15,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from gateway.kanban_watchers_common import _board_slugs, _positive_int_setting, logger
+from gateway.kanban_watchers_common import (
+    _auto_decompose_min_age_seconds, _board_slugs, _positive_int_setting, logger,
+)
 
 
 def _kbc():
@@ -324,12 +326,17 @@ class _KanbanDispatcher:
                     logger.exception("kanban dispatcher: health probe failed on board %s", slug)
         return False
 
-    def auto_decompose_tick(self, auto_decompose_per_tick: int) -> int:
+    def auto_decompose_tick(self, auto_decompose_per_tick: int, min_age_seconds: Optional[int] = None) -> int:
         """Auto-decompose up to N triage tasks across all boards into ready workgraphs.
 
         Runs before dispatch fans out; the per-tick cap keeps a bulk triage
-        load from burst-spending the aux LLM. Returns the number decomposed.
+        load from burst-spending the aux LLM. Triage cards younger than
+        ``min_age_seconds`` (default: ``kanban.auto_decompose_min_age_seconds``)
+        wait for a later tick. Returns the number decomposed.
         """
+        if min_age_seconds is None:
+            min_age_seconds = _auto_decompose_min_age_seconds()
+        self._ad_min_age = max(int(min_age_seconds), 0)
         try:
             from hermes_cli import kanban_decompose as _decomp
         except Exception as exc:  # pragma: no cover
@@ -365,7 +372,8 @@ class _KanbanDispatcher:
 
     def _decompose_board(self, decomp, slug, budget):
         try:
-            triage_ids = decomp.list_triage_ids(skip_awaiting_human=True)
+            triage_ids = decomp.list_triage_ids(
+                skip_awaiting_human=True, min_age_seconds=getattr(self, "_ad_min_age", 0))
         except (sqlite3.Error, OSError, ValueError, RuntimeError) as exc:
             logger.exception("kanban auto-decompose: list_triage_ids failed on board %s (%s)", slug, exc)
             return 0, 0

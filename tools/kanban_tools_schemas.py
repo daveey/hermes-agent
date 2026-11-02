@@ -745,7 +745,11 @@ KANBAN_CREATE_SCHEMA = _schema(
         "triage": _prop("boolean", (
                 "If true, task lands in 'triage' instead of 'todo' "
                 "— a specifier profile is expected to flesh out "
-                "the body before work starts."
+                "the body before work starts. Triage is not a hold: the "
+                "auto-decomposer specifies and dispatches triage cards after "
+                "~2 min (kanban.auto_decompose_min_age_seconds); to keep a "
+                "card from running, park it with kanban_schedule right after "
+                "creating it."
         )),
         "distinct_from": {"type": "array", "items": {"type": "string"}, "description": (
                 "Ids of open cards a create_overlap refusal named that this card is NOT a duplicate of. "

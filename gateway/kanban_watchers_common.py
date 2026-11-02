@@ -87,6 +87,29 @@ def _resolve_auto_decompose_settings(load_config: Callable[[], Any]) -> tuple[bo
     return bool(kcfg.get("auto_decompose", True)), max(per_tick, 1)
 
 
+AUTO_DECOMPOSE_MIN_AGE_DEFAULT = 120
+
+
+def _auto_decompose_min_age_seconds() -> int:
+    """``kanban.auto_decompose_min_age_seconds`` (default 120; 0 = sweep immediately), re-read per tick.
+
+    The auto-decompose sweep skips triage cards younger than this so a creator can park a triage
+    hold with ``kanban_schedule`` before it is specified and dispatched (fixture cards were specified
+    6-16 s after creation and ran, defect kanban-76c77018a6). Manual decompose/specify ignore it.
+    A config read error keeps the default window. [daveey]
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        raw = ((load_config() or {}).get("kanban") or {}).get(
+            "auto_decompose_min_age_seconds", AUTO_DECOMPOSE_MIN_AGE_DEFAULT)
+        return max(int(AUTO_DECOMPOSE_MIN_AGE_DEFAULT if raw is None else raw), 0)
+    except Exception:
+        logger.warning("kanban.auto_decompose_min_age_seconds unreadable; using %ss",
+                       AUTO_DECOMPOSE_MIN_AGE_DEFAULT, exc_info=True)
+        return AUTO_DECOMPOSE_MIN_AGE_DEFAULT
+
+
 def _gc_retention_days() -> int:
     """``kanban.done_sub_retention_days`` (default 30; 0 disables), re-read per sweep; fails safe to 30."""
     try:
