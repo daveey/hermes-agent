@@ -276,7 +276,7 @@ from tests._fixtures.live_system_guard import (
     _live_system_guard,
 )
 from tests._fixtures.model_peer import model_peer  # fixture registers here
-from tests._fixtures.offline_catalogs import _offline_video_catalog
+from tests._fixtures.offline_catalogs import _offline_metadata_transport, _offline_video_catalog
 from tests._fixtures.platform_gating import _platforms_gate_reason, _reject_contradictory_platform_marks
 from tests._fixtures.session_context_reset import _reset_session_context_vars
 

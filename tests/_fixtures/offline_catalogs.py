@@ -35,3 +35,33 @@ def _offline_video_catalog(request, monkeypatch):
         return real_get(url, *args, **kwargs)
 
     monkeypatch.setattr(requests, "get", get)
+
+
+@pytest.fixture(autouse=True)
+def _offline_metadata_transport(request, monkeypatch):
+    """Only incidental metadata clients get an offline remote transport default.
+
+    Explicit client/transport fakes installed by tests win. The production
+    request construction, response handling, caches and fallbacks still run.
+    """
+    if request.node.get_closest_marker("live"):
+        return
+    import httpx
+    from agent import model_metadata_http
+
+    real_client = httpx.Client
+    create_client = model_metadata_http.create_client
+
+    class OfflineTransport(httpx.HTTPTransport):
+        def handle_request(self, request):
+            if not _is_loopback(request.url.host):
+                raise httpx.ConnectError("offline metadata fixture: provide a test transport", request=request)
+            return super().handle_request(request)
+
+    def client(**kwargs):
+        if httpx.Client is real_client and "transport" not in kwargs:
+            kwargs["transport"] = OfflineTransport(verify=kwargs.get("verify", True))
+        return create_client(**kwargs)
+
+    monkeypatch.setattr(model_metadata_http, "create_client", client)
+
