@@ -60,8 +60,14 @@ def test_fresh_process_sweep_books_the_logged_exit_code(kanban_home, rc, event, 
 
         kbd.detect_crashed_workers(conn)
 
+        # The booking event; a 75 is followed by the per-card ``quota_episode`` bookkeeping
+        # row (kanban_quota_episode), which is asserted separately below.
         ev = conn.execute(
-            "SELECT kind FROM task_events WHERE task_id=? ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
+            "SELECT kind FROM task_events WHERE task_id=? AND kind != 'quota_episode' "
+            "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
+        episodes = conn.execute(
+            "SELECT count(*) FROM task_events WHERE task_id=? AND kind='quota_episode'", (tid,)).fetchone()[0]
+        assert episodes == (1 if rc == kb.KANBAN_RATE_LIMIT_EXIT_CODE else 0)
         run = conn.execute(
             "SELECT outcome, error, metadata FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
             (tid,)).fetchone()
