@@ -94,7 +94,7 @@ def _assignment_routes(task) -> bool:
         from hermes_cli.kanban_assignment_routing import supervisor_available
         row = kb.get_task(task[0], task[1])
         return row is not None and supervisor_available(row)
-    except Exception:  # guidance only: an unreadable config or card never offers a route that may fail
+    except (sqlite3.Error, ValueError, OSError):  # an unreadable card or profile never offers a route that may fail
         return False
 
 
