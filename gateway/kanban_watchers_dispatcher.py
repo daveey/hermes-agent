@@ -349,25 +349,19 @@ class _KanbanDispatcher:
             for slug in self._board_slugs():
                 if attempted >= auto_decompose_per_tick:
                     break
-                # Pin the board via env for the call: the decomposer connects
-                # with no board kwarg (same pattern as the dashboard specify endpoint).
-                prev_env = os.environ.get("HERMES_KANBAN_BOARD")
+                # The decomposer connects without a board kwarg. Keep selection
+                # local to this tick: a process-env pin makes concurrent discovery
+                # incorrectly offer environments:[kanban] skills.
                 try:
-                    os.environ["HERMES_KANBAN_BOARD"] = slug
-                    with self._unowned_board_work(slug) as conn:
+                    with _kb.scoped_current_board(slug), self._unowned_board_work(slug) as conn:
                         if conn is not None:
                             used, done = self._decompose_board(_decomp, slug, auto_decompose_per_tick - attempted)
                             attempted += used
                             successes += done
-                except Exception:  # health: allow BLE001 -- per-board isolation boundary logs traceback; finally restores env
+                except Exception:  # health: allow BLE001 -- per-board isolation boundary logs traceback; context manager restores board
                     # Contain connection, callback and cleanup failures per board;
                     # the caller must still reach tick_once for healthy peers.
                     logger.exception("kanban auto-decompose: board %s failed", slug)
-                finally:
-                    if prev_env is None:
-                        os.environ.pop("HERMES_KANBAN_BOARD", None)
-                    else:
-                        os.environ["HERMES_KANBAN_BOARD"] = prev_env
         return successes
 
     def _decompose_board(self, decomp, slug, budget):
