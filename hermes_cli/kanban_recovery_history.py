@@ -41,18 +41,46 @@ def heads(rows):
     return [row for row in rows if identity(row) not in seen]
 
 
-def latest(conn, target, kinds):
-    rows = events(conn, target, kinds)
-    if not synced(conn):
-        return max(rows, key=lambda r: r['id'], default=None)
+def head(conn, target):
+    """The unique evidenced lifecycle head of ``target``, or None (legacy or forked history)."""
     # Include intermediate lifecycle events when finding a blocked head: filtering
     # first would discard the links that supersede an older park.
     from hermes_cli.kanban_resume_exec import _LIFECYCLE_KINDS
-    lifecycle = events(conn, target, _LIFECYCLE_KINDS)
-    tips = heads(lifecycle)
-    if len(tips) != 1 or not metadata(tips[0]):
-        return None
-    return tips[0] if tips[0]['kind'] in kinds else None
+    tips = heads(events(conn, target, _LIFECYCLE_KINDS))
+    return tips[0] if len(tips) == 1 and metadata(tips[0]) else None
+
+
+def latest(conn, target, kinds):
+    if not synced(conn):
+        return max(events(conn, target, kinds), key=lambda r: r['id'], default=None)
+    tip = head(conn, target)
+    return tip if tip is not None and tip['kind'] in kinds else None
+
+
+def nearest(conn, target, kinds):
+    """``(decided, row)``: the causally newest ``kinds`` event at or behind the unique head.
+
+    Undecided (False, None) for legacy or forked history, or when the walk meets an
+    unevidenced ancestor or two candidates at once; callers then keep local order.
+    """
+    from hermes_cli.kanban_resume_exec import _LIFECYCLE_KINDS
+    tip = head(conn, target)
+    if tip is None:
+        return False, None
+    by_id = {identity(r): r for r in events(conn, target, _LIFECYCLE_KINDS)}
+    frontier, seen = [tip], set()
+    while frontier:
+        found = [r for r in frontier if r['kind'] in kinds]
+        if found:
+            return (True, found[0]) if len(found) == 1 else (False, None)
+        if any(not metadata(r) for r in frontier):
+            return False, None
+        seen.update(identity(r) for r in frontier)
+        keys = {k for r in frontier for k in metadata(r).get('predecessors', []) if k not in seen}
+        if any(k not in by_id for k in keys):
+            return False, None
+        frontier = [by_id[k] for k in keys]
+    return True, None
 
 
 def evidenced(conn, target):

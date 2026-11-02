@@ -99,9 +99,11 @@ def current_park(conn, task_id):
     """Keep judged goals out of generic triage re-entry, even after recovery ends."""
     from hermes_cli.kanban_resume_exec import _payload
     from hermes_cli import kanban_recovery_history as history
-    if history.synced(conn):
-        row = history.latest(conn, task_id, ('blocked',))
+    decided, row = history.nearest(conn, task_id, ('blocked',)) if history.synced(conn) else (False, None)
+    if decided:
         return bool(row and _payload(row['payload']).get('rekind_reason') == EVENT)
+    # Unsynced, legacy or forked history: this is a hold, not authority, so it keeps
+    # local order rather than failing open into generic triage.
     row = conn.execute(
         "SELECT payload FROM task_events WHERE task_id=? AND kind='blocked' ORDER BY id DESC LIMIT 1",
         (task_id,)).fetchone()

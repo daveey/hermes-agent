@@ -136,6 +136,62 @@ def test_legacy_synced_history_keeps_triage_hold_but_not_authority(gws):
     assert rx.refusal(home.conn, rec, target) is not None
 
 
+def _goal_park(home):
+    from hermes_cli import kanban_goal_recovery as goal
+    home.enter()
+    target = kb.create_task(home.conn, title='judged goal', assignee='default', goal_mode=True)
+    assert kb.claim_task(home.conn, target)
+    home.round()
+    task = kb.get_task(home.conn, target)
+    assert task is not None
+    assert goal.park(home.conn, task, 'missing prerequisite', expected_run_id=task.current_run_id)
+    parked = kb.get_task(home.conn, target)
+    assert parked is not None and parked.status == 'triage'
+    return target
+
+
+def test_later_lifecycle_event_keeps_goal_specifier_hold(gws):
+    # Main's contract is "the newest block is the goal park", not "the newest lifecycle
+    # event is that block": a later non-block event in triage must not release the hold.
+    from hermes_cli import kanban_goal_recovery as goal
+    home, _ = gws
+    target = _goal_park(home)
+    with kb.write_txn(home.conn):
+        kb._append_event(home.conn, target, 'ask_rechecked', {'note': 'later'})
+    assert goal.current_park(home.conn, target)
+
+
+def test_legacy_synced_goal_park_keeps_specifier_hold(gws):
+    # A judged goal parked before the upgrade carries no causal evidence. The hold that
+    # keeps it out of generic triage must keep main's local-order answer, not fail open.
+    from hermes_cli import kanban_goal_recovery as goal
+    from hermes_cli.kanban_recovery_history import META
+    home, _ = gws
+    target = _goal_park(home)
+    with kb.write_txn(home.conn):
+        home.conn.execute('UPDATE task_events SET payload=json_remove(payload, ?) WHERE task_id=?',
+                          ('$.' + META, target))
+    assert goal.current_park(home.conn, target)
+
+
+def test_forked_lifecycle_heads_keep_goal_specifier_hold(gws):
+    # Two concurrent lifecycle heads (no unique causal tip) must not release the hold either.
+    from hermes_cli import kanban_goal_recovery as goal
+    home, _ = gws
+    target = _goal_park(home)
+    with kb.write_txn(home.conn):
+        kb._append_event(home.conn, target, 'ask_rechecked', {'note': 'peer A'})
+        a = home.conn.execute('SELECT MAX(id) FROM task_events WHERE task_id=?', (target,)).fetchone()[0]
+        kb._append_event(home.conn, target, 'ask_rechecked', {'note': 'peer B'})
+        b = home.conn.execute('SELECT MAX(id) FROM task_events WHERE task_id=?', (target,)).fetchone()[0]
+        # B was authored without seeing A: give it A's predecessors, forking the history.
+        pa = home.conn.execute("SELECT json_extract(payload, '$._recovery_history_v1.predecessors') "
+                               'FROM task_events WHERE id=?', (a,)).fetchone()[0]
+        home.conn.execute("UPDATE task_events SET payload=json_set(payload, "
+                          "'$._recovery_history_v1.predecessors', json(?)) WHERE id=?", (pa, b))
+    assert goal.current_park(home.conn, target)
+
+
 def test_goal_park_and_receipt_restore_without_changing_judge_evidence(gws, svc):
     from hermes_cli import kanban_goal_recovery as goal
     home, _ = gws
