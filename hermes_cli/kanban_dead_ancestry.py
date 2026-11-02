@@ -109,7 +109,7 @@ def _find_patch(repo: str, tip: str, full: str, patch_id: str, deadline: float) 
     finally:
         if log.poll() is None:
             log.kill()
-        log.wait()
+        log.wait(timeout=1)
         if log.stdout:
             log.stdout.close()
 
