@@ -13,7 +13,11 @@ import pytest
 
 from tui_gateway import server, startup_resume as sr, update_pause as up
 from tui_gateway.turn_marker import freshness_since, mark_turn_paused, read_turn_marker, record_turn_start
-from tests.tui_gateway.test_update_pause import CFG, _session, _request_pause, home, schedule_env
+from tests.tui_gateway import test_update_pause as base
+from tests.tui_gateway.test_update_pause import CFG, _session, _request_pause
+
+home = base.home  # reuse the fixtures by assignment (importing them by name trips F811 on every use)
+schedule_env = base.schedule_env
 
 AGE_S = 80 * 60.0
 CFG15 = {"desktop": {"auto_continue": {**CFG["desktop"]["auto_continue"], "freshness_minutes": 15}}}
