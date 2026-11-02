@@ -9,6 +9,19 @@ from tui_gateway import server
 from tui_gateway.transport import StdioTransport, bind_transport, reset_transport
 
 
+def test_write_json_returns_false_on_broken_pipe(monkeypatch):
+    class BrokenStdout:
+        def write(self, text: str) -> int:
+            raise BrokenPipeError
+
+        def flush(self) -> None:
+            return None
+
+    monkeypatch.setattr(server, "_stdio_is_rpc_channel", True)
+    monkeypatch.setattr(server, "_real_stdout", BrokenStdout())
+    assert server.write_json({"ok": True}) is False
+
+
 @pytest.mark.parametrize("frame_kind", ["event", "request", "response"])
 @pytest.mark.parametrize("route", ["fallback", "session", "context"])
 def test_unrouted_rpc_never_reaches_gateway_log(tmp_path, monkeypatch, frame_kind, route):

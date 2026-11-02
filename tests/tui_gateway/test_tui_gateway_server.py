@@ -1197,13 +1197,6 @@ def test_write_json_serializes_concurrent_writes(monkeypatch):
     assert len(ours) == 8
 
 
-def test_write_json_returns_false_on_broken_pipe(monkeypatch):
-    monkeypatch.setattr(server, "_stdio_is_rpc_channel", True)
-    monkeypatch.setattr(server, "_real_stdout", _BrokenStdout())
-
-    assert server.write_json({"ok": True}) is False
-
-
 def test_write_json_unserializable_payload_becomes_error_frame(monkeypatch, caplog):
     """The stdio twin of the WS guard (#92506): an unserializable result must reach the Ink TUI /
     stdio bridge as a JSON-RPC error frame with the original id plus a log line, not kill the pool
