@@ -345,14 +345,20 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
                and (at, e["id"]) > (parked_at, park["id"]) for at, e in timed):
         return False
     # A promotion alone is not proof: the dependency edges must still exist and
-    # be satisfied, rather than having been removed by an operator.
+    # be satisfied, rather than having been removed by an operator. A gate an
+    # operator ADDED after the park only delays the continuation (it must be done
+    # too, and its own review verdict still refuses below); it is not a bypass.
     parents = kb.parent_ids(conn, task_id)
-    if (not parents or sorted(parents) != evidence.get("parents")
+    checkpointed = evidence.get("parents")
+    if (not parents or not isinstance(checkpointed, list) or not checkpointed
+            or not all(isinstance(p, str) for p in checkpointed)
+            or not set(checkpointed).issubset(parents)
             or kb.unsatisfied_parents(conn, task_id)):
         return False
     from hermes_cli.kanban_dependency_review import _awaited_parents, _SUMMARY_VERDICT
     if not _awaited_parents(conn, parents, evidence, parked_at):
         return False
+    awaited = evidence.get("awaited")
     # Review results, including incomplete/invalid verdicts, belong exclusively to
     # resumes_review. An ordering handoff must not bypass its exact-head checks.
     for parent in parents:
@@ -360,6 +366,13 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
             "SELECT metadata, summary FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (parent,),
         ).fetchone()
         if result is None:
+            # A synced parent another gateway owns has no local run to read. When the
+            # owner's checkpoint names it as already done at park time (in parents,
+            # not awaited), its result predates the park and cannot authorize or
+            # refuse this continuation. Anything else stays fail-closed. [daveey]
+            if (isinstance(awaited, list) and parent in checkpointed and parent not in awaited
+                    and kb.get_task(conn, parent) is None):
+                continue
             return False
         metadata = kb._json_dict(result["metadata"])
         if (any(key in metadata for key in ("verdict", "approved", "reviewed_sha"))

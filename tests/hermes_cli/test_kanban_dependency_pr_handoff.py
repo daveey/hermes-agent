@@ -159,6 +159,88 @@ def test_removing_awaited_edge_is_not_parent_completion(board, monkeypatch):
     assert prs.active_pr_reason(board, task, int(time.time())) == "active_pr"
 
 
+def _add_gate(board, task, clock, *, finish=True, metadata=None):
+    clock[0] += 5
+    gate = kb.create_task(board, title="operator-added gate", assignee="dev")
+    kb.link_tasks(board, gate, task)
+    kb.recompute_ready(board)
+    if finish:
+        clock[0] += 5
+        kb.claim_task(board, gate)
+        assert kb.complete_task(board, gate, summary="gate finished", metadata=metadata or {"head": "a" * 40})
+        kb.recompute_ready(board)
+    return gate
+
+
+def test_operator_added_gate_after_owner_park_still_allows_one_continuation(board, monkeypatch,
+                                                                            all_assignees_spawnable):
+    task, _, clock = park(board, monkeypatch)
+    _add_gate(board, task, clock)
+    assert kb.get_task(board, task).status == "ready"
+    assert prs.active_pr_reason(board, task, int(time.time())) is None
+    launched = []
+    dispatch.dispatch_once(board, spawn_fn=lambda task, workspace, **kwargs: launched.append(task.id) or 123456789)
+    assert task in launched
+    assert prs.active_pr_reason(board, task, int(time.time())) == "active_pr"
+
+
+def test_operator_added_gate_still_open_stays_guarded(board, monkeypatch):
+    task, _, clock = park(board, monkeypatch)
+    _add_gate(board, task, clock, finish=False)
+    assert prs.active_pr_reason(board, task, int(time.time())) == "active_pr"
+
+
+def test_operator_added_review_gate_cannot_bypass_review_evidence(board, monkeypatch):
+    task, _, clock = park(board, monkeypatch)
+    _add_gate(board, task, clock, metadata={"verdict": "approved", "head": "a" * 40})
+    assert prs.active_pr_reason(board, task, int(time.time())) == "active_pr"
+
+
+def _remote_parent(board, task, run, status):
+    from hermes_cli import kanban_db_sync as sync
+
+    board.executescript(sync.SYNC_SCHEMA_SQL)
+    with kb.write_txn(board):
+        board.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", ("t_remote_done", task))
+        board.execute("INSERT INTO kanban_sync_remote_parents (parent_id, status, refreshed_at) "
+                      "VALUES ('t_remote_done', ?, 1)", (status,))
+
+
+def _park_with_remote(board, monkeypatch, status):
+    now = int(time.time())
+    clock = [now]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    task = kb.create_task(board, title="finish existing PR", assignee="dev")
+    kb.claim_task(board, task)
+    run = kb.get_task(board, task).current_run_id
+    worker_comment(board, task, "dev", PR)
+    _remote_parent(board, task, run, status)
+    parent = kb.create_task(board, title="ordering prerequisite", assignee="dev")
+    kb.link_tasks(board, parent, task, expected_child_run_id=run)
+    clock[0] += 10
+    assert kb.block_task(board, task, kind="dependency", reason="ordering", expected_run_id=run)
+    clock[0] += 10
+    kb.claim_task(board, parent)
+    assert kb.complete_task(board, parent, summary="ordering work finished")
+    return task, clock
+
+
+def test_synced_parent_done_before_park_does_not_hold_ordering_continuation(board, monkeypatch):
+    task, _ = _park_with_remote(board, monkeypatch, "done")
+    kb.recompute_ready(board)
+    assert kb.get_task(board, task).status == "ready"
+    assert prs.active_pr_reason(board, task, int(time.time())) is None
+
+
+def test_synced_parent_awaited_at_park_stays_guarded(board, monkeypatch):
+    task, _ = _park_with_remote(board, monkeypatch, "running")
+    with kb.write_txn(board):
+        board.execute("UPDATE kanban_sync_remote_parents SET status = 'done' WHERE parent_id = 't_remote_done'")
+    kb.recompute_ready(board)
+    assert kb.get_task(board, task).status == "ready"
+    assert prs.active_pr_reason(board, task, int(time.time())) == "active_pr"
+
+
 def test_prose_review_without_head_still_requires_review_evidence(board, monkeypatch):
     task, _, clock = park(board, monkeypatch, finish=False)
     clock[0] += 10
