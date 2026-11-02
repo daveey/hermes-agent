@@ -317,8 +317,10 @@ class GatewayControlServer:
         # removed on stop only while it is still that inode and empty, never one it found existing.
         self._created_dir: Optional[tuple[Path, tuple[int, int]]] = None
         self._file_identities = {}
+        from gateway.control_profile import profile
         self._handlers: dict[str, Callable[..., dict[str, Any]]] = {
-            "identify": build_identify_payload, "status": build_status_payload, **(verb_handlers or {})}
+            "identify": build_identify_payload, "status": build_status_payload,
+            "profile": profile, **(verb_handlers or {})}
 
     async def start(self) -> bool:
         """Bind and start serving. Returns True on success, False otherwise."""
@@ -454,6 +456,7 @@ class GatewayControlServer:
     def handle_request_line(self, raw: bytes, peer_subject: Optional[str] = None) -> bytes:
         """One JSON request line -> one JSON response line. Never raises (shared by POSIX + pipe)."""
         request_id: Any = None
+        verb = None
         try:
             request = json.loads(raw.decode("utf-8"))
             if not isinstance(request, dict):
@@ -476,6 +479,8 @@ class GatewayControlServer:
             else:
                 # Verbs that carry arguments (e.g. migrate-profile-identity) declare a ``params``
                 # parameter; argument-less verbs (identify/status/rescan) keep their bare signature.
+                if verb == "profile" and "params" in request and not isinstance(request["params"], dict):
+                    raise ValueError("profile params must be an object")
                 params = request.get("params") if isinstance(request.get("params"), dict) else {}
                 wants_params = "params" in inspect.signature(handler).parameters
                 response = {"ok": True, "protocol": CONTROL_PROTOCOL_VERSION,
@@ -486,6 +491,9 @@ class GatewayControlServer:
             response["id"] = request_id
         try:
             encoded = json.dumps(response, default=str).encode("utf-8")
+            if verb == "profile" and response.get("ok") and len(encoded) + 1 >= _MAX_RESPONSE_BYTES:
+                from gateway.control_profile import trim_response
+                encoded = json.dumps(trim_response(response, _MAX_RESPONSE_BYTES), default=str).encode("utf-8")
         except Exception:
             encoded = b'{"ok": false, "error": "response serialization failed"}'
         if len(encoded) > _MAX_RESPONSE_BYTES:
