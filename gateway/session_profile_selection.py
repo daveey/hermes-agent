@@ -28,6 +28,38 @@ def _frozen_pick(saved_policy):
     return [saved_policy.get('model'), block if isinstance(block, dict) else None]
 
 
+def _memo(row):
+    """The remembered ``{'selection': [model, provider, frozen pick], 'physical': id}``, or None when
+    nothing (or only an unreleased earlier format of this branch) is remembered."""
+    try:
+        memo = json.loads(row[0]) if row is not None else None
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(memo, dict) or not isinstance(memo.get('selection'), list) \
+            or not isinstance(memo.get('physical'), str):
+        return None
+    return memo
+
+
+def _already_allocated(physical, model):
+    """No memo yet (first commit after upgrade): whether the lineage already runs a class allocation for
+    the class *model* selects, so an intent would only re-roll it. An exact pin there (the class change
+    this session never committed) or an exact selection (re-pinning the same tuple, never a reroll)
+    still records the intent."""
+    from agent.model_routing import is_class_selector
+    if not is_class_selector(model):
+        return False
+    import sqlite3
+    from agent.model_routing_state import RoutingState
+    from hermes_constants import get_hermes_home
+    try:
+        current = RoutingState(get_hermes_home() / 'model-routing.sqlite3').peek(
+            physical, model.removeprefix('class:'))
+    except sqlite3.Error:
+        return False
+    return bool(current) and not current.get('exact_pin')
+
+
 def commit_selection(authority, ref, policy, config, model, generation, *, ended=False):
     """Authorize this effective selection, not arbitrary exact-pin failover. Returns the policy the
     owner now publishes for the session (*policy*, or its released copy when *ended*).
@@ -40,10 +72,14 @@ def commit_selection(authority, ref, policy, config, model, generation, *, ended
     and that ``reserve_admission_worker`` assigns a worker after compression, through the canonical
     writer (``record_in_transaction``), as ``model_in_transaction`` does for an explicit pick.
 
-    The selection is remembered as (tuple, physical target, the receipt's frozen pick), independently
-    of runtime usage stamps: rebuilding an unchanged selection never re-arms a consumed intent, while a
-    compaction (new physical target) or an explicit pick another build consumed (frozen pick moved)
-    re-arms it. *ended*: the policy's recorded pick no longer holds on that read
+    The selection (tuple + the receipt's frozen pick) is remembered beside the physical target it was
+    committed on, independently of runtime usage stamps. Only a SELECTION change records a new intent:
+    a profile edit, or an explicit pick another build consumed (frozen pick moved). A compaction (new
+    physical target, same selection) is a relocation: a still-pending intent moves to the new id as the
+    same event and a consumed one stays consumed, so a class allocation never re-rolls on it. With
+    nothing remembered (first commit after upgrade) the intent is recorded unless the lineage already
+    runs a class allocation for the selected class (``_already_allocated``).
+    *ended*: the policy's recorded pick no longer holds on that read
     (``LocalSessionPolicy.effective_selection``); the same transaction commits its end to the receipt,
     without a generation bump (nothing this generation runs changes), and the owner's live policy is
     republished from it. A concurrent prepared mutation then fails its snapshot check
@@ -51,7 +87,7 @@ def commit_selection(authority, ref, policy, config, model, generation, *, ended
     """
     if not policy.follows_profile or policy.ignore_user_config:
         return policy
-    from agent.model_routing_switch_intent import record_in_transaction
+    from agent.model_routing_switch_intent import record_in_transaction, relocate_in_transaction
     from hermes_state_local import POLICY_PREFIX
     from hermes_state_local_lineage import local_physical_target
     from hermes_state_runtime import _epoch, _json
@@ -72,14 +108,19 @@ def commit_selection(authority, ref, policy, config, model, generation, *, ended
             saved['policy'] = released
             conn.execute('UPDATE state_meta SET value=? WHERE key=?',
                          (_json(saved), POLICY_PREFIX + ref.session_id))
-        selected = json.dumps([model, provider, physical, _frozen_pick(expected)], sort_keys=True)
+        selection = json.loads(json.dumps([model, provider, _frozen_pick(expected)]))
         key = PREFIX + ref.session_id
-        old = conn.execute('SELECT value FROM state_meta WHERE key=?', (key,)).fetchone()
-        if old is not None and old[0] == selected:
-            return
-        record_in_transaction(conn, physical, model, provider, generation)
+        old = _memo(conn.execute('SELECT value FROM state_meta WHERE key=?', (key,)).fetchone())
+        if old is not None and old['selection'] == selection:
+            if old['physical'] == physical:
+                return
+            # Relocation, not a selection change: carry a still-pending intent as the same event.
+            relocate_in_transaction(conn, old['physical'], physical, model, provider)
+        elif old is not None or not _already_allocated(physical, model):
+            record_in_transaction(conn, physical, model, provider, generation)
         conn.execute('INSERT INTO state_meta (key,value) VALUES (?,?) '
-                     'ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key, selected))
+                     'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                     (key, json.dumps({'selection': selection, 'physical': physical}, sort_keys=True)))
     authority.db._execute_write(write)
     if released is None:
         return policy

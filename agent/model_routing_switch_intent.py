@@ -118,6 +118,27 @@ def record_in_transaction(conn, session_id, model, provider, generation):
                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (PREFIX + session_id, value))
 
 
+def relocate_in_transaction(conn, old_session_id, new_session_id, model, provider):
+    """Carry a still-pending intent for (*model*, *provider*) from *old_session_id* to *new_session_id*
+    (a compaction moved the physical transcript) as the SAME event: no new order number, so an allocation
+    that already honoured it stays sticky (``supersedes`` compares the event). A consumed intent, another
+    tuple's intent, or one already waiting on the new id is left alone."""
+    raw = read_on_conn(conn, old_session_id)
+    if raw is None or old_session_id == new_session_id or read_on_conn(conn, new_session_id) is not None:
+        return
+    try:
+        intent = json.loads(raw)
+    except (TypeError, ValueError):
+        return
+    if not isinstance(intent, dict) or intent.get("session_id") != old_session_id \
+            or intent.get("model") != model or (intent.get("provider") or "") != (provider or ""):
+        return
+    intent["session_id"] = new_session_id
+    conn.execute("INSERT INTO state_meta (key, value) VALUES (?, ?)",
+                 (PREFIX + new_session_id, json.dumps(intent, sort_keys=True)))
+    consume_on_conn(conn, old_session_id, raw)
+
+
 def pending(session_db, session_id, model, provider):
     """The raw intent row when it names exactly this session and tuple, else ``None``."""
     if session_db is None or not session_id or not model:

@@ -222,6 +222,110 @@ async def test_class_profile_default_follows_off_exact_pin(home, monkeypatch):
         store.close_all_db_handles()
 
 
+def _class_default(home):
+    from hermes_cli.config import atomic_config_write, read_user_config_raw
+    config = read_user_config_raw(home / 'config.yaml')
+    config['model'].update(default='class:deep', provider='auto')
+    atomic_config_write(home / 'config.yaml', config)
+
+
+def _routing_ledger(home, sid):
+    """What a reroll would change: the lineage's allocation, the allocator's counters, its honoured fences."""
+    import sqlite3
+    from contextlib import closing
+    with closing(sqlite3.connect(home / 'model-routing.sqlite3')) as db:
+        counters = db.execute('SELECT COALESCE(SUM(position), 0) FROM counters').fetchone()[0]
+        fences = sorted(db.execute('SELECT root, class, intent FROM switch_fences').fetchall())
+    return _allocation(home, sid), counters, fences
+
+
+def _forget_selection(db, ref):
+    """A session no follow-selection writer committed yet (first run after upgrade)."""
+    from gateway.session_profile_selection import PREFIX
+    db._execute_write(lambda c: c.execute('DELETE FROM state_meta WHERE key=?', (PREFIX + ref.session_id,)))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('event', ['compaction', 'missing_memo', 'both'])
+async def test_unchanged_class_selection_never_rerolls(home, monkeypatch, event):
+    """No profile edit, no pick: a compaction (new physical target) or a missing selection memo is not a
+    selection change, so the class allocation keeps its provider and nothing is allocated again."""
+    from agent.model_routing_switch_intent import PREFIX as INTENT
+    store, db, authority, owner, ref, built = _bot_chat_owner(home, monkeypatch)
+    try:
+        await _open(authority, ref)
+        await _turn(authority, owner, ref, built, 'opus')
+        _class_default(home)
+        await _turn(authority, owner, ref, built, 'c1')
+        before = await _turn(authority, owner, ref, built, 'c2')
+        ledger = _routing_ledger(home, authority.physical_target(ref))
+        if event in ('compaction', 'both'):
+            _compress(db, authority, ref, 'tip')
+        if event in ('missing_memo', 'both'):
+            _forget_selection(db, ref)
+        after = await _turn(authority, owner, ref, built, 'c3')
+        physical = authority.physical_target(ref)
+        assert after[:2] == before[:2], built
+        assert _routing_ledger(home, physical) == ledger
+        assert db.get_meta(INTENT + physical) is None
+        # Once re-baselined, a real profile edit still switches.
+        _profile_pick(home, ASTRA, 'openai-codex')
+        assert await _turn(authority, owner, ref, built, 'astra') == (ASTRA, 'openai-codex', physical), built
+    finally:
+        await owner.close()
+        store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+async def test_missing_memo_class_selection_still_corrects_an_exact_pin(home, monkeypatch):
+    """First run after upgrade with the profile on a class and the lineage still exactly pinned: the class
+    selection must move the allocation off the pin (the change the session never committed)."""
+    store, db, authority, owner, ref, built = _bot_chat_owner(home, monkeypatch)
+    try:
+        await _open(authority, ref)
+        assert (await _turn(authority, owner, ref, built, 'opus'))[:2] == (OPUS, 'anthropic'), built
+        assert _allocation(home, ref.session_id)['exact_pin'] is True
+        _forget_selection(db, ref)
+        _class_default(home)
+        result = await _turn(authority, owner, ref, built, 'class')
+        assert result[0] != 'raised', result
+        recorded = _allocation(home, ref.session_id)
+        assert not recorded.get('exact_pin', False), recorded
+    finally:
+        await owner.close()
+        store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+async def test_pending_follow_intent_moves_with_compaction_unconsumed(home, monkeypatch):
+    """A committed profile change whose intent no build consumed yet, then a compaction: the next turn
+    builds on the new physical target with THAT committed event (moved, not minted again)."""
+    import json as _json
+    from agent.model_routing_switch_intent import ORDER_KEY, PREFIX as INTENT
+    from gateway.session_profile_selection import commit_selection
+    store, db, authority, owner, ref, built = _bot_chat_owner(home, monkeypatch)
+    try:
+        await _open(authority, ref)
+        assert (await _turn(authority, owner, ref, built, 'opus'))[:2] == (OPUS, 'anthropic'), built
+        _profile_pick(home, ASTRA, 'openai-codex')
+        policy, config, model, ended = _selection_inputs(authority, ref)
+        commit_selection(authority, ref, policy, config, model,
+                         db.get_session(ref.session_id)['runtime_generation'], ended=ended)
+        old = authority.physical_target(ref)
+        event = _json.loads(db.get_meta(INTENT + old))['event']
+        order = db.get_meta(ORDER_KEY)
+        tip = _compress(db, authority, ref, 'tip')
+        assert await _turn(authority, owner, ref, built, 'astra') == (ASTRA, 'openai-codex', tip), built
+        assert db.get_meta(ORDER_KEY) == order  # no fresh event was minted
+        assert db.get_meta(INTENT + old) is None and db.get_meta(INTENT + tip) is None
+        fences = _routing_ledger(home, tip)[2]
+        assert [f[2].split(':')[2:4] for f in fences] == [[event['store'], f"{event['seq']:020d}"]], fences
+        assert _allocation(home, tip)['selected_model'] == ASTRA
+    finally:
+        await owner.close()
+        store.close_all_db_handles()
+
+
 # ---- managed path: the real admission + reservation ------------------------------------------------
 
 
@@ -308,6 +412,36 @@ async def test_managed_follow_after_compression_uses_the_reserved_physical_targe
         _profile_pick(home, OPUS, 'anthropic')
         agent, scope = _managed_turn(authority, db, ref, monkeypatch, 'back')
         assert (agent.model, agent.provider) == (OPUS, 'anthropic')
+    finally:
+        await owner.close()
+        store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('event', ['compaction', 'missing_memo'])
+async def test_managed_unchanged_class_selection_never_rerolls(home, monkeypatch, event):
+    from agent.model_routing_switch_intent import PREFIX as INTENT
+    from tests.gateway.test_model_switch_worker_composed import _noop
+    store, db, authority, owner, ref = _owner(home, monkeypatch, _noop)
+    authority.runner._peek_session_state = lambda key: None
+    authority.runner.session_authority = authority
+    try:
+        db.set_session_title(ref.session_id, 'Bot Chat')
+        await _open(authority, ref)
+        _managed_turn(authority, db, ref, monkeypatch, 'opus')
+        _class_default(home)
+        _managed_turn(authority, db, ref, monkeypatch, 'c1')
+        before, _ = _managed_turn(authority, db, ref, monkeypatch, 'c2')
+        ledger = _routing_ledger(home, authority.physical_target(ref))
+        if event == 'compaction':
+            _compress(db, authority, ref, 'tip')
+        else:
+            _forget_selection(db, ref)
+        after, scope = _managed_turn(authority, db, ref, monkeypatch, 'c3')
+        assert scope['session_id'] == authority.physical_target(ref)
+        assert (after.model, after.provider) == (before.model, before.provider)
+        assert _routing_ledger(home, scope['session_id']) == ledger
+        assert db.get_meta(INTENT + scope['session_id']) is None
     finally:
         await owner.close()
         store.close_all_db_handles()
