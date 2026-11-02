@@ -174,7 +174,25 @@ def test_claimed_grandchild_is_refused_and_never_stopped(board, monkeypatch):
     assert _status(board["qa"]) == "running"
 
 
-def test_scope_is_rechecked_at_execution(board, monkeypatch):
+def test_reopened_creator_is_refused_at_execution(board, monkeypatch):
+    """An orphan whose creator reopens between submit and drain is no longer in scope."""
+    assert _status(board["owner"]) == "archived"
+    out = _tool(_req(board["qa"]))
+    assert out["ok"] and out["status"] == "pending", out
+    with kbc.connect_closing() as conn:
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (board["owner"],))
+        conn.commit()
+    assert _status(board["owner"]) == "ready"
+    _as_executor(monkeypatch)
+    assert _drain()["processed"] == [(out["request_id"], "rejected")]
+    req = _request(out["request_id"])
+    assert req["status"] == "rejected", req
+    (res,) = req["result"]
+    assert res["outcome"] == "not_applied" and "still open" in res["detail"], res
+    assert _status(board["qa"]) == "todo"
+
+
+def test_claimed_target_is_rechecked_at_execution(board, monkeypatch):
     """A target claimed between submit and drain is not archived."""
     out = _tool(_req(board["qa"]))
     with kbc.connect_closing() as conn:
