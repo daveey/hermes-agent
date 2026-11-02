@@ -128,7 +128,8 @@ def _replica_chats(conn: sqlite3.Connection, creator_task_id: str) -> list[dict]
     try:
         if not path.exists() or path.resolve() == Path(key).resolve():
             return []
-        replica = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        from hermes_cli import kanban_lockguard
+        replica = kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
     except (OSError, sqlite3.Error):
         return []
     try:
