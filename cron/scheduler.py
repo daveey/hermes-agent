@@ -1609,6 +1609,9 @@ def _apply_monitor_gate(
         # Source failure is an ERROR, never a change: alert so a broken monitor can't silently
         # stop watching. Stored hash untouched.
         logger.error("Job '%s': monitor source failed: %s", job_id, _mon.error)
+        # [daveey] Pre-agent: booked last_error_kind="gate", so the next good gate tick (which proves
+        # the source works again) clears a streak made only of these.
+        job["_gate_error"] = True
         _mon_alert = (
             f"⚠ Cron monitor '{job_name}' source failed\n\n"
             f"{_mon.error}\n\n"
@@ -2456,6 +2459,7 @@ def _prepare_job_prompt(
             require_parseable_user_config()
         except InvalidUserConfigError as exc:
             logger.error("Job '%s': refusing to run — %s", job_id, exc)
+            job["_gate_error"] = True  # [daveey] pre-agent: every later gate tick re-checks the config
             return (False, f"# Cron Job: {job_name}\n\nError: {exc}\n", "", str(exc)), None
 
     # no_agent short-circuits BEFORE importing run_agent / opening SessionDB.

@@ -157,7 +157,9 @@ CRON_SESSION_READ_ONLY_SURFACE = {'layer': 'gateway', 'code': 'cron_session_read
 # never-reached model). They cross the authority boundary inside the cron result.
 # [daveey] ``_agent_skipped``: a wake gate or unchanged monitor suppressed the agent, so the tick
 # keeps the job's last real verdict (failure streak, alert-once marker) instead of resetting it.
-RUN_JOB_FLAGS = ('_model_unreachable', '_quota_hold_seconds', '_agent_skipped')
+# [daveey] ``_gate_error``: a pre-agent gate (monitor source, unparseable config) failed; booked as
+# ``last_error_kind = "gate"`` so the next good gate tick may clear the streak.
+RUN_JOB_FLAGS = ('_model_unreachable', '_quota_hold_seconds', '_agent_skipped', '_gate_error')
 
 
 async def operation(authority, name, params, actor=None):

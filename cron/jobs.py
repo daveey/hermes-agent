@@ -2426,15 +2426,22 @@ def release_unadmitted_fire(
     return _with_job(job_id, apply, False)
 
 
+# Failure kinds that never reached the agent: a later gate tick may clear a streak made only of them.
+_PRE_AGENT_ERROR_KINDS = ("fire", "gate")
+
+
 def _record_run_outcome(
     job: dict[str, Any], success: bool, error: Optional[str], delivery_error: Optional[str],
     status: Optional[str], now: str, *, agent_skipped: bool = False, fire_error: bool = False,
+    gate_error: bool = False,
 ) -> None:
     """Stamp one completed run onto *job*: status fields, failure streak, alert markers, claims.
 
     ``last_error_kind`` says what the current failure streak is made of: ``"fire"`` while every
     failure in it was a fire that never reached the agent (*fire_error*: the owner refused or could
-    not be reached before admission), ``"agent"`` once any failure in it is the agent's own."""
+    not be reached before admission), ``"gate"`` once a pre-agent gate failed in it (*gate_error*:
+    monitor source, unparseable config) and every other failure was a fire, ``"agent"`` once any
+    failure in it is the agent's own. A gate tick clears a fire/gate streak. [daveey]"""
     job["last_run_at"] = now
     job.pop("manual_run_at", None)
     job.pop("manual_run_restore_at", None)
@@ -2444,7 +2451,7 @@ def _record_run_outcome(
     cancelled = status == "cancelled"  # an operator stop is not a failure
     # Gated ticks keep the last real verdict, except an infra-only failure streak.
     keep_verdict = agent_skipped and success and job.get("last_status") is not None
-    if keep_verdict and job.get("last_error_kind") == "fire":
+    if keep_verdict and job.get("last_error_kind") in _PRE_AGENT_ERROR_KINDS:
         keep_verdict = False
     if not keep_verdict:
         job["last_status"] = status or (
@@ -2460,9 +2467,11 @@ def _record_run_outcome(
         job["failure_streak"] = 0
         job.pop("last_error_kind", None)
     elif not cancelled:
-        fire_only_so_far = (int(job.get("failure_streak") or 0) == 0
-                            or job.get("last_error_kind") == "fire")
-        job["last_error_kind"] = "fire" if fire_error and fire_only_so_far else "agent"
+        prior = job.get("last_error_kind") if int(job.get("failure_streak") or 0) else None
+        if not (fire_error or gate_error) or prior not in (None, *_PRE_AGENT_ERROR_KINDS):
+            job["last_error_kind"] = "agent"
+        else:
+            job["last_error_kind"] = "gate" if gate_error or prior == "gate" else "fire"
         # Consecutive agent-failure streak; delivery failures do NOT count
         # (scheduler._failure_streak_nudge).
         job["failure_streak"] = int(job.get("failure_streak") or 0) + 1
@@ -2548,6 +2557,7 @@ def mark_job_run(
     recover_consumed_fire: bool = False,
     agent_skipped: bool = False,
     fire_error: bool = False,
+    gate_error: bool = False,
 ) -> bool:
     """Mark a job as run: update last_run_at/last_status, bump completed, recompute next_run_at,
     and retire the record as a terminal completion when the repeat limit is reached. A manual run
@@ -2574,10 +2584,14 @@ def mark_job_run(
     ``agent_skipped``: a gate (``wakeAgent=false`` script, unchanged monitor) suppressed the agent,
     so this successful tick is not evidence of agent health. ``last_status``, ``last_error``,
     ``failure_streak`` and ``preflight_alerted`` keep the last real run's values, unless every
-    failure in the streak was a *fire_error*: then the tick heals the job like a success.
+    failure in the streak was a *fire_error* or *gate_error*: then the tick heals the job like a
+    success.
 
     ``fire_error``: this failed run never reached the agent (the owner gateway refused or could not
     be reached before admission); booked as ``last_error_kind = "fire"``. [daveey]
+
+    ``gate_error``: this failed run stopped at a pre-agent gate (monitor source failure,
+    unparseable config); booked as ``last_error_kind = "gate"``. [daveey]
     """
     def apply(jobs, _i, job):
         if execution_id is not None and execution_id in job.get("canonical_completions", []):
@@ -2593,7 +2607,8 @@ def mark_job_run(
         extra = extra_fire.is_extra(job)  # read before the outcome clears the claim
         held = extra_fire.held_markers(job) if extra else {}
         _record_run_outcome(job, success, error, delivery_error, status, now,
-                            agent_skipped=agent_skipped, fire_error=fire_error)
+                            agent_skipped=agent_skipped, fire_error=fire_error,
+                            gate_error=gate_error)
         job.update(held)  # a run-now queued mid-run is its own fire, not this one
         if execution_id is not None:  # retire ids recovery can no longer replay; latest stays last
             from cron.scheduler_authority import replayable_completions as live
