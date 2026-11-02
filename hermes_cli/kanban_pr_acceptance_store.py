@@ -11,6 +11,16 @@ def _snapshot(conn, task_id):
     return tuple(row) if row else None
 
 
+def malformed_publication_receipt(published_pr) -> dict:
+    """Refusal receipt for a ``metadata.published_pr`` that is not one exact GitHub PR URL."""
+    return {"ok": False, "classification": "malformed_published_pr", "head_sha": None, "pr_url": None,
+            "checks": [], "detail": f"metadata.published_pr must be one exact GitHub PR URL string "
+                                    f"(https://github.com/OWNER/REPO/pull/N); got {type(published_pr).__name__}.",
+            "recovery": "Retry completion with metadata.published_pr=<exact PR URL> for a PR this card "
+                        "published. A review-only card cites the reviewed PR in metadata.pr or "
+                        "metadata.reviewed_pr instead; published_pr binds the card's contract permanently."}
+
+
 def prepare_acceptance(conn, task_id, expected_run_id, metadata):
     snapshot = _snapshot(conn, task_id)
     if snapshot is None:
@@ -22,6 +32,10 @@ def prepare_acceptance(conn, task_id, expected_run_id, metadata):
     if status not in {"running", "ready", "blocked", "review"} or (expected_run_id is not None and run_id != expected_run_id):
         return False
     match = _PR.fullmatch(published_pr) if isinstance(published_pr, str) else None
+    if published_pr is not None and not match:
+        # A shape error is the worker's to fix: never a GitHub read (infra retry) nor a
+        # "does not match the persisted contract" claim against a local-only card.
+        return snapshot, malformed_publication_receipt(published_pr), metadata
     # Publication binds once, including publications from initially local-only work.
     if match and contract in (None, "local-only", match[1]):
         with write_txn(conn):
