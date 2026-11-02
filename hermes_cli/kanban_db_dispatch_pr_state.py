@@ -330,7 +330,10 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
     # The event's run_id identifies the run closed, not the writer: an operator
     # can close that same run. Only the authenticated expected_run_id path stamps
     # this checkpoint (for ordering dependencies as well as reviews).
-    if not isinstance(evidence, dict) or evidence.get("run_id") != run["id"]:
+    # Match by the run's stable UID (strict when present; legacy integer only when no
+    # UID): sync remaps integer run ids but leaves this JSON payload unchanged.
+    from hermes_cli.kanban_dependency_review import _checkpoint_matches_run
+    if not _checkpoint_matches_run(evidence, run):
         return False
     if (parked_at <= since or ended is None or ended < since
             or payload.get("kind") != "dependency" or payload.get("source_status") not in {"ready", "review"}):
