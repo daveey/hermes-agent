@@ -180,11 +180,8 @@ def compaction_threshold_tokens(policy) -> Optional[int]:
     settings = _parse_compression_config(probe, config)
     model_cfg = config.get('model') if isinstance(config, dict) else None
     ctx = model_cfg.get('context_length') if isinstance(model_cfg, dict) else None
-    try:
-        from hermes_cli.config import get_compatible_custom_providers
-        custom = get_compatible_custom_providers(config)
-    except Exception:
-        custom = None
+    from hermes_cli.config import get_compatible_custom_providers
+    custom = get_compatible_custom_providers(config) if isinstance(config, dict) else None
     compressor = ContextCompressor(
         model=model, threshold_percent=settings.threshold, quiet_mode=True, base_url=probe.base_url,
         config_context_length=ctx if isinstance(ctx, int) and ctx > 0 else None, provider=probe.provider,

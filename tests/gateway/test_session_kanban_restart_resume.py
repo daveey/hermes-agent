@@ -189,48 +189,53 @@ def test_a_mid_tool_call_turn_gets_a_synthetic_interrupted_result(env):
     assert run.events['owner_admitted']['resumed_session_id'] == PRIOR
 
 
-@pytest.mark.parametrize('case', ['missing', 'empty', 'foreign_home', 'foreign_profile', 'unreadable', 'over_threshold'])
+def _broken_reader(env):
+    real = env.db.get_messages_as_conversation
+
+    def broken(sid, *a, **kw):
+        if sid == PRIOR:
+            raise ValueError('corrupt transcript')
+        return real(sid, *a, **kw)
+    env.monkeypatch.setattr(env.db, 'get_messages_as_conversation', broken)
+
+
+def _tiny_threshold(env):
+    env.monkeypatch.setattr('gateway.session_kanban_resume.compaction_threshold_tokens', lambda policy: 10)
+
+
+# case -> (prior session setup, owner_admitted db relative to the real one, extra patch, expected fallback,
+#          whether the transcript-tail reader still renders a tail for it)
+_FALLBACKS = {
+    'missing': (None, None, None, 'prior_session_missing', False),  # names a session absent from state.db
+    'empty': ({'messages': []}, None, None, 'prior_session_empty', False),
+    'foreign_home': ({}, 'other-home/state.db', None, 'foreign_home', False),
+    'foreign_profile': ({'profile': 'other'}, None, None, 'foreign_profile', False),
+    'unreadable': ({}, None, _broken_reader, 'prior_session_unreadable', True),
+    'over_threshold': ({}, None, _tiny_threshold, 'over_compaction_threshold', True),
+}
+
+
+@pytest.mark.parametrize('case', sorted(_FALLBACKS))
 def test_each_fallback_keeps_the_tail_only_fresh_session(env, case):
     from gateway.session_kanban_resume import worker_prompt_context
-    state_db = env.db.db_path
-    if case == 'missing':
-        pass  # owner_admitted names a session that is not in state.db
-    elif case == 'empty':
-        _prior_session(env.db, messages=[])
-    elif case == 'foreign_home':
-        _prior_session(env.db)
-        state_db = env.tmp / 'other-home' / 'state.db'
-    elif case == 'foreign_profile':
-        _prior_session(env.db, profile='other')
-    elif case == 'unreadable':
-        _prior_session(env.db)
-        real = env.db.get_messages_as_conversation
-
-        def broken(sid, *a, **kw):
-            if sid == PRIOR:
-                raise ValueError('corrupt transcript')
-            return real(sid, *a, **kw)
-        env.monkeypatch.setattr(env.db, 'get_messages_as_conversation', broken)
-    elif case == 'over_threshold':
-        _prior_session(env.db)
-        env.monkeypatch.setattr('gateway.session_kanban_resume.compaction_threshold_tokens', lambda policy: 10)
+    session, other_db, patch, expected, tail = _FALLBACKS[case]
+    if session is not None:
+        _prior_session(env.db, **session)
+    if patch is not None:
+        patch(env)
+    state_db = env.tmp / other_db if other_db else env.db.db_path
     tid = _task(env)
     _lose_run(tid, code=KANBAN_OWNER_RESTART_EXIT_CODE, state_db=state_db, monkeypatch=env.monkeypatch)
     run = _admit_next(env, tid)
-    expected = {'missing': 'prior_session_missing', 'empty': 'prior_session_empty', 'foreign_home': 'foreign_home',
-                'foreign_profile': 'foreign_profile', 'unreadable': 'prior_session_unreadable',
-                'over_threshold': 'over_compaction_threshold'}[case]
     assert run.events['restart_resume']['fallback'] == expected
     assert 'resumed_session_id' not in run.events['restart_resume']
     assert 'resumed_session_id' not in run.events['owner_admitted']
     assert run.history == []  # a fresh session
     assert 'resume_context' not in run.context
     prompt = worker_prompt_context(run.context, run.history)
-    if case in ('missing', 'empty', 'foreign_home', 'foreign_profile'):
-        # The tail reader applies its own checks; whatever it renders is today's context, unchanged.
-        assert prompt == run.context['context']
-    else:
-        assert 'Interrupted worker continuation' in prompt and 'Resumed after gateway restart' not in prompt
+    # Today's context, unchanged: the tail reader applies its own checks and renders a tail where it can.
+    assert prompt == run.context['context']
+    assert ('Interrupted worker continuation' in prompt) == tail and 'Resumed after gateway restart' not in prompt
 
 
 @pytest.mark.parametrize('kind', ['crash', 'timeout'])
