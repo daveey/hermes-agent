@@ -47,3 +47,32 @@ def test_detach_between_feed_precheck_and_write_preserves_custody(synced_conn, m
         assert kb.get_task(conn, tid).status == "running"
         assert [tuple(r) for r in conn.execute("SELECT * FROM task_runs")] == before
         assert sync.sync_state(conn)["cursor"] != 999
+
+
+def test_detach_refuses_until_whole_sync_round_including_push_finishes(synced_conn, monkeypatch):
+    from hermes_cli import kanban_sync_client as client
+    from tests.hermes_cli.kanban_sync_fake_board import FakeService
+
+    conn = synced_conn
+    path = Path(sync._db_key(conn))
+    client.ensure_identity(conn, "default", "fixture-host")
+    sync.set_mode(conn, "primary")
+    kb.create_task(conn, title="pending publication", assignee="worker")
+    hub = FakeService().hub("fixture-host")
+    real_push = client.push
+    reached = []
+    with kbc.connect_closing(path) as detacher:
+        def push_with_detach(*args, **kwargs):
+            with pytest.raises(RuntimeError, match="sync round is busy"):
+                sync.set_mode(detacher, "off")
+            assert sync.board_mode(conn) == "primary"
+            reached.append(True)
+            return real_push(*args, **kwargs)
+
+        monkeypatch.setattr(client, "push", push_with_detach)
+        result = client.sync_board("default", path, hub, "fixture-host")
+        assert reached and result.push.sent
+        sync.set_mode(detacher, "off")
+        # A round enumerated before detach but starting after it does no I/O.
+        result = client.sync_board("default", path, None, "fixture-host")
+        assert result.mode == "off"

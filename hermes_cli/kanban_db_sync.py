@@ -610,6 +610,19 @@ def set_mode(conn: sqlite3.Connection, mode: str) -> None:
     """Switch the board's sync mode; ``off`` drops the capture triggers."""
     if mode not in MODES:
         raise ValueError(f"unknown kanban sync mode {mode!r}")
+    if mode == "off":
+        from pathlib import Path
+        from hermes_cli.kanban_sync_guard import board_sync_lock
+        path = _db_key(conn)
+        if path is None:
+            raise ValueError("detach requires an on-disk board")
+        with board_sync_lock(Path(path)):
+            _set_mode(conn, mode)
+    else:
+        _set_mode(conn, mode)
+
+
+def _set_mode(conn: sqlite3.Connection, mode: str) -> None:
     from hermes_cli.kanban_db_connect import write_txn
     key = _db_key(conn)
     with write_txn(conn):

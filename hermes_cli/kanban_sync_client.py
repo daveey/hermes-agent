@@ -789,6 +789,13 @@ def _pull_replica(slug: str, hub: Hub, gateway: str) -> int:
 
 
 def sync_board(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
+    """Exclude explicit detach until this round's repairs and sends have ended."""
+    from hermes_cli.kanban_sync_guard import board_sync_lock
+    with board_sync_lock(path):
+        return _sync_board_locked(slug, path, hub, gateway)
+
+
+def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundResult:
     """One round for one board. Both modes keep the replica copy (the whole board) current and push the live
     outbox; ``primary`` also applies this gateway's own cards from the feed into the live board."""
     # Dropped first, so a round that fails or finds nothing to repair never leaves a stale deferral that would
