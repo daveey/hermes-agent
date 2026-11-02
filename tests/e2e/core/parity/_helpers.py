@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -146,7 +147,7 @@ def build_parity_home(root: Path, base_url: str, *, grandchild: bool = True,
     cfg = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
     cfg["agent"]["disabled_toolsets"] = [DISABLED_TOOLSET]
     cfg["hooks"] = {"pre_llm_call": [{
-        "command": f"{sys.executable} {hermes_home / 'agent-hooks' / 'shell_hook.py'}",
+        "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(hermes_home / 'agent-hooks' / 'shell_hook.py'))}",
         "timeout": 30,
     }]}
     cfg["hooks_auto_accept"] = True

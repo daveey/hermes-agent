@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import shlex
 import stat
 import struct
 import sys
@@ -279,7 +280,7 @@ def test_exec_converges_from_repo_script_argv0_to_installed_wrapper(
     repo_script.chmod(0o755)
     wrapper = tmp_path / "installed" / "bin" / "hermes"
     wrapper.parent.mkdir(parents=True)
-    wrapper.write_text(f'#!/usr/bin/env bash\nexec {sys.executable} "$@"\n', encoding="utf-8")
+    wrapper.write_text(f'#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} "$@"\n', encoding="utf-8")
     wrapper.chmod(0o755)
 
     # argv[0] = repo script; PATH lookup finds the installed wrapper.

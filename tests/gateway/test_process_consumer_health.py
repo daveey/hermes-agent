@@ -1,5 +1,6 @@
 """Native gateway watcher + real busy-queue admission; no external transport."""
 import asyncio
+import shlex
 import sys
 from types import SimpleNamespace
 
@@ -41,7 +42,7 @@ async def owned(tmp_path, monkeypatch):
         with bind_subagent_parent(agent), scoped_current_session_id(entry.session_id):
             uid = capture(agent)
             process = registry.spawn_local(
-                f"exec {sys.executable} -c 'import threading; threading.Event().wait(60)'",
+                f"exec {shlex.quote(sys.executable)} -c 'import threading; threading.Event().wait(60)'",
                 session_key=entry.session_key)
             process.notify_on_complete = True
         db = runner.session_store._db

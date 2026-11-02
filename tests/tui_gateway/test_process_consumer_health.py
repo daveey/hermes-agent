@@ -1,4 +1,5 @@
 """Process receipts come from the real queue consumer, not thread existence."""
+import shlex
 import sys
 import threading
 from types import SimpleNamespace
@@ -58,7 +59,7 @@ def consumer(tmp_path, monkeypatch):
     def complete(*, wait_for_delivery=True):
         delivered.clear()
         with scoped_current_session_id("origin"):
-            p = registry.spawn_local(f"exec {sys.executable} -c 'pass'", session_key="origin")
+            p = registry.spawn_local(f"exec {shlex.quote(sys.executable)} -c 'pass'", session_key="origin")
         assert p._completion_event.wait(60)
         assert state["submitted"].wait(60)
         # submit() wakes before its return value is consumed. A negative

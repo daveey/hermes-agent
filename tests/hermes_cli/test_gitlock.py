@@ -17,6 +17,7 @@ process* must never be cleared.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -478,7 +479,7 @@ def _git_in_the_editor(repo: Path, tmp_path: Path, argv: list[str]) -> subproces
                       "Path(sys.argv[1]).write_text('fixture\\n')\n", encoding="utf-8")
     (repo / "a.txt").write_text("changed\n", encoding="utf-8")
     proc = subprocess.Popen(argv, cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            env={**os.environ, "GIT_EDITOR": f"{sys.executable} {editor}"})
+                            env={**os.environ, "GIT_EDITOR": f"{shlex.quote(sys.executable)} {shlex.quote(str(editor))}"})
     msg = repo / ".git" / "COMMIT_EDITMSG"
     deadline = time.monotonic() + 20
     while not Path(f"{msg}.ready").exists():

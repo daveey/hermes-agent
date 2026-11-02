@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import select
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -114,7 +115,7 @@ def test_canonical_safe_launch_is_frozen_policy_executed_in_isolated_worker(tmp_
               'model': {'provider': 'custom', 'default': 'owner-model', 'base_url': url},
               'auxiliary': {'title_generation': {'enabled': False}},
               'plugins': {'enabled': ['sentinel']}, 'hooks_auto_accept': True,
-              'hooks': {'pre_llm_call': [{'command': f'{sys.executable} {shell_witness}'}]},
+              'hooks': {'pre_llm_call': [{'command': f'{shlex.quote(sys.executable)} {shlex.quote(str(shell_witness))}'}]},
               'memory': {'memory_enabled': False, 'user_profile_enabled': False},
               'platform_toolsets': {'cli': ['terminal']}}
     (home / 'config.yaml').write_text(json.dumps(config), encoding='utf-8')

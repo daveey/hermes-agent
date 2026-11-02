@@ -18,6 +18,7 @@ import importlib.util
 import json
 import logging
 import re
+import shlex
 import sys
 import uuid
 from collections import deque
@@ -390,7 +391,7 @@ class TeamsAdapter(BasePlatformAdapter):
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         # Reconnect paths reach here without create_adapter()'s installer — re-run to bind SDK globals.
         check_teams_requirements()
-        pip = f"{sys.executable} -m pip install"
+        pip = f"{shlex.quote(sys.executable)} -m pip install"
         for failed, code, message in (
             (App is None or ClientOptions is None, "MISSING_SDK",
              f"microsoft-teams-apps could not be installed. Run: {pip} microsoft-teams-apps"),

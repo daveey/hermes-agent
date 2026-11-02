@@ -1,5 +1,6 @@
 """Native scope, real local pipe spawn, and non-consuming ownership readback."""
 import dataclasses
+import shlex
 import sys
 from types import SimpleNamespace
 
@@ -27,7 +28,7 @@ def native(tmp_path, monkeypatch):
     with bind_subagent_parent(agent), scoped_current_session_id("origin"):
         uid = capture(agent)
         process = registry.spawn_local(
-            f"exec {sys.executable} -c 'import threading; threading.Event().wait(60)'", session_key="origin")
+            f"exec {shlex.quote(sys.executable)} -c 'import threading; threading.Event().wait(60)'", session_key="origin")
         process.notify_on_complete = True
         try:
             yield registry, process, agent, uid
@@ -98,7 +99,7 @@ def test_new_spawn_requires_current_native_scope(native, change):
         agent._turn_user_intervened = True
     else:
         agent.session_id = "rotated"
-    p = registry.spawn_local(f"exec {sys.executable} -c 'import threading; threading.Event().wait(60)'",
+    p = registry.spawn_local(f"exec {shlex.quote(sys.executable)} -c 'import threading; threading.Event().wait(60)'",
                              session_key="origin")
     p.notify_on_complete = True
     try:

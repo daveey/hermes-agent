@@ -9,6 +9,7 @@ secrets, and none of the launch profile's residue. The same build reaches every 
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -124,7 +125,7 @@ def test_helper_children_resolve_secrets_through_the_served_profile(mux_homes):
     from tools.browser_use_cli import _base_subprocess_env
 
     _a, b = mux_homes
-    helper = (f"{sys.executable} -c \"import os;print(os.environ.get('B_MARKER','-')+'|'"
+    helper = (f"{shlex.quote(sys.executable)} -c \"import os;print(os.environ.get('B_MARKER','-')+'|'"
               f"+os.environ.get('A_MARKER','-')+'|'+os.environ.get('HERMES_HOME',''))\"")
     with _profile_runtime_scope(b, hydrate_secrets=False):
         token, _ttl = _mint(helper, "b-provider")

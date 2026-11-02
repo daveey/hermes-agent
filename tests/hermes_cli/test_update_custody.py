@@ -10,6 +10,7 @@ Real git, real processes, no mocks:
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 import textwrap
@@ -396,7 +397,7 @@ def test_no_build_descendant_outlives_the_build_call(repo, tmp_path, monkeypatch
 
     late = tmp_path / "late"
     writer = f"import os, time; os.closerange(3, 4096); time.sleep(2); __import__('pathlib').Path({str(late)!r}).touch()"
-    node = _held_lock_recorder(tmp_path, "node", f"{sys.executable} -c \"{writer}\" >/dev/null 2>&1 &\nexit 1")
+    node = _held_lock_recorder(tmp_path, "node", f"{shlex.quote(sys.executable)} -c \"{writer}\" >/dev/null 2>&1 &\nexit 1")
     monkeypatch.setenv("HERMES_TEST_LOCK", os.path.realpath(ul.checkout_lock_path(repo)))
     monkeypatch.setenv("HERMES_TEST_OUT", str(tmp_path / "node.out"))
     lock = ul.UpdateLock(path=tmp_path / "marker", install_root=repo)

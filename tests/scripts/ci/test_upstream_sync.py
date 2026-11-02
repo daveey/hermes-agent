@@ -5,6 +5,7 @@ on that exact checkout produced, so "red is refused, green lands" is decided by 
 """
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -462,7 +463,7 @@ def install_guard(checkout):
     script = Path(sync.__file__).resolve()
     hook.write_text("#!/usr/bin/env bash\nstatus=0\nwhile read -r _ l r rs; do\n"
                     "  [ \"$r\" = refs/heads/main ] || continue\n"
-                    f"  {sys.executable} {script} --repo . --guard-push \"$l\" || status=1\n"
+                    f"  {shlex.quote(sys.executable)} {shlex.quote(str(script))} --repo . --guard-push \"$l\" || status=1\n"
                     "done\nexit $status\n")
     hook.chmod(0o755)
 
