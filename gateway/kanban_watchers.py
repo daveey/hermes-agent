@@ -376,7 +376,10 @@ class GatewayKanbanWatchersMixin:
                         any_spawned = _log_spawn_results(results)
                         ready_pending = await _to_thread_process_service(dispatcher.ready_nonempty)
                         capped = _kbd.all_at_capacity(res for _slug, res in (results or []))
-                        bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned and not capped else 0
+                        # Every ready card waiting on a known clock (quota reset, cooldown) is waiting, not stuck. [daveey]
+                        clocked = _kbd.all_clock_held(res for _slug, res in (results or []))
+                        bad_ticks = (bad_ticks + 1 if ready_pending and not any_spawned and not capped and not clocked
+                                     else 0)
                     now = int(time.time())
                     # Only an ungated tick can be "stuck": an estop or drain hold spawns 0 on purpose.
                     if gate is None and bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
