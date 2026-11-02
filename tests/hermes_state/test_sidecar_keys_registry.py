@@ -71,41 +71,58 @@ def _writes(tree):
             yield node.lineno, argtuple.elts[1] if isinstance(argtuple, ast.Tuple) and len(argtuple.elts) > 1 else None, None
 
 
+def _key_ref(key):
+    """Reduce a key AST node to ("str", value), ("ident", name) or None (unresolvable), so no tree is retained."""
+    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+        return ("str", key.value)
+    ident = key.id if isinstance(key, ast.Name) else key.attr if isinstance(key, ast.Attribute) else None
+    return ("ident", ident) if ident is not None else None
+
+
 def _collect():
-    trees = {rel: ast.parse(path.read_text(encoding="utf-8"), str(rel)) for rel, path in _py_files()}
-    constants = {rel: _module_constants(tree) for rel, tree in trees.items()}
+    # Parse one file at a time and keep only its constants and reduced write records. Holding every tree at once
+    # peaked at ~1.6 GB RSS on the self-hosted macOS runner, and each run tipped the shared 16 GB mini into
+    # memory-pressure "warn" (hermes kanban t_01a19beb37e87be6).
+    constants: dict[Path, dict[str, str]] = {}
+    writes: list[tuple[Path, str, list | None]] = []
+    for rel, path in _py_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"), str(rel))
+        constants[rel] = _module_constants(tree)
+        if rel.as_posix() in OWNER_ONLY_WRITERS:
+            continue
+        for lineno, dict_node, key_node in _writes(tree):
+            keys = [key_node] if key_node is not None else (
+                dict_node.keys if isinstance(dict_node, ast.Dict) else None)
+            # ``None`` = non-literal dict or ``**spread``.
+            refs = None if keys is None or any(k is None for k in keys) else [_key_ref(k) for k in keys]
+            writes.append((rel, f"{rel.as_posix()}:{lineno}", refs))
+        del tree
     global_constants: dict[str, set[str]] = {}
     for consts in constants.values():
         for k, v in consts.items():
             global_constants.setdefault(k, set()).add(v)
 
-    def resolve(rel, key):
-        if isinstance(key, ast.Constant) and isinstance(key.value, str):
-            return {key.value}
-        ident = key.id if isinstance(key, ast.Name) else key.attr if isinstance(key, ast.Attribute) else None
-        if ident is None:
+    def resolve(rel, ref):
+        if ref is None:
             return None
-        if ident in constants[rel]:
-            return {constants[rel][ident]}
-        return global_constants.get(ident)
+        kind, value = ref
+        if kind == "str":
+            return {value}
+        if value in constants[rel]:
+            return {constants[rel][value]}
+        return global_constants.get(value)
 
     found, unresolved = {}, []
-    for rel, tree in trees.items():
-        if rel.as_posix() in OWNER_ONLY_WRITERS:
+    for rel, where, refs in writes:
+        if refs is None:
+            unresolved.append(where)
             continue
-        for lineno, dict_node, key_node in _writes(tree):
-            where = f"{rel.as_posix()}:{lineno}"
-            keys = [key_node] if key_node is not None else (
-                dict_node.keys if isinstance(dict_node, ast.Dict) else None)
-            if keys is None or any(k is None for k in keys):  # non-literal dict or ``**spread``
+        for ref in refs:
+            values = resolve(rel, ref)
+            if not values:
                 unresolved.append(where)
-                continue
-            for key in keys:
-                values = resolve(rel, key)
-                if not values:
-                    unresolved.append(where)
-                for value in values or ():
-                    found.setdefault(value, []).append(where)
+            for value in values or ():
+                found.setdefault(value, []).append(where)
     return found, unresolved
 
 
