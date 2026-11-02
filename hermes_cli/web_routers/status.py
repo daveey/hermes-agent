@@ -12,6 +12,7 @@ import re
 import asyncio
 import os
 import sys
+import threading
 import time
 from fastapi import APIRouter
 from hermes_cli.web_deps import LateState, late
@@ -77,20 +78,65 @@ def _safe_call(mod, fn_name: str, default):
 
 def _count_status_active_sessions() -> int:
     """Best-effort status garnish. Opens read-only (via the shared stale-schema heal) so
-    /api/status never routinely writes to state.db while another Hermes process uses it."""
+    /api/status never routinely writes to state.db while another Hermes process uses it.
+
+    [daveey] The rows are kept on the store's settled file signatures (``_state_store_key``): every
+    Desktop status poll re-ran ``list_sessions_rich``. The 5-minute window is applied per call."""
+    global _active_rows_cache
     from hermes_state import _default_db_path
     # The heal helper bootstraps a missing store; this garnish must not — on a fresh install
     # /api/status polls would otherwise create state.db before the user's first session.
-    if not Path(_default_db_path()).exists():
+    path = Path(_default_db_path())
+    if not path.exists():
         return 0
-    db = _open_session_db_for_profile(None, read_only=True)
-    try:
-        sessions = db.list_sessions_rich(limit=50, compact_rows=True)
-        now = time.time()
-        return sum(1 for s in sessions if s.get("ended_at") is None
-                   and (now - s.get("last_active", s.get("started_at", 0))) < 300)
-    finally:
-        db.close()
+    key = _state_store_key(path)
+    with _active_rows_lock:
+        hit = _active_rows_cache
+    if key is not None and hit is not None and hit[0] == key:
+        rows = hit[1]
+    else:
+        db = _open_session_db_for_profile(None, read_only=True)
+        try:
+            sessions = db.list_sessions_rich(limit=50, compact_rows=True)
+        finally:
+            db.close()
+        rows = tuple((s.get("ended_at"), s.get("last_active", s.get("started_at", 0))) for s in sessions)
+        with _active_rows_lock:
+            _active_rows_cache = (key, rows) if key is not None else None
+    now = time.time()
+    return sum(1 for ended_at, last_active in rows if ended_at is None and (now - (last_active or 0)) < 300)
+
+
+# [daveey] (store key, ((ended_at, last_active), ...)) for ``_count_status_active_sessions``.
+_active_rows_lock = threading.Lock()
+_active_rows_cache: Optional[tuple] = None
+
+
+def _reset_active_sessions_cache_for_tests() -> None:
+    global _active_rows_cache
+    with _active_rows_lock:
+        _active_rows_cache = None
+
+
+def _state_store_key(path: Path) -> Optional[tuple]:
+    """``state.db`` and ``-wal`` file signatures, taken BEFORE the read; None (no caching) while either is inside
+    the racy window, where a same-tick write could leave the signature unchanged. Every commit appends to the WAL
+    or, after a checkpoint, rewrites it in a later tick, so a settled signature that still matches proves no
+    write since."""
+    from utils import file_signature, mtime_is_racy
+    sigs = []
+    for p in (path, Path(str(path) + "-wal")):
+        try:
+            sig = file_signature(p.stat())
+        except FileNotFoundError:
+            sigs.append(None)
+            continue
+        except OSError:
+            return None
+        if mtime_is_racy(max(sig[0], sig[3])):
+            return None
+        sigs.append(sig)
+    return (str(path), *sigs)
 
 
 async def _status_active_sessions() -> int:

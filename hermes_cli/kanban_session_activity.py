@@ -48,10 +48,17 @@ ACTIVE_STATUSES = ("todo", "ready", "running", "scheduled", "review")
 BLOCKED_STATUSES = ("blocked", "triage")
 
 _CACHE_TTL_S = 3.0
+# [daveey] Past the TTL, counts read under an unchanged fingerprint stay valid up to this age: the bound on the
+# time-derived states no key sees (stalled after kanban_wait_info.STALL_AFTER_S = 2 h, remote stale after
+# HUB_STALE_AFTER_S = 180 s), so one may show up to this much later than its threshold. A fingerprint that can't
+# prove "no write since" (``_revalidatable``) keeps the TTL bound. See ``_counts_fresh``.
+_COUNTS_MAX_AGE_S = 30.0
 _cache_lock = threading.Lock()
 _cache: tuple[float, dict[str, int], dict[str, int], dict[str, int], dict[str, int]] | None = None
 _cache_scope: tuple[str, ...] | None = None
 _cache_fingerprint: tuple = ()
+_cache_read_at = 0.0  # monotonic time of the read behind ``_cache``
+_cache_revalidatable = False  # its fingerprint proves no write since (``_revalidatable``)
 _waiting_cache: list[dict[str, frozenset[str]]] = [{}]
 # (parked, held) per session from the same snapshot as ``_cache`` (see ``_read_parked``); the sink is set while
 # ``_all_counts`` reads local boards, like ``_pairs_sink``. [daveey]
@@ -867,14 +874,43 @@ def _replica_paths() -> list[Path]:
 
 def _activity_fingerprint(*, include_shadows: bool = True) -> tuple:
     """Count inputs include sync shadows; the origin-ledger projection never reads them."""
+    pinned = getattr(_inputs_pin, "fingerprints", None)
+    if pinned is not None and pinned[int(include_shadows)] is not None:
+        return pinned[int(include_shadows)]
     hub = _hub_db_path()
     signature = [_hub_content_signature(hub)] if hub is not None else []
     # [daveey] Each board's content revision (``kanban_activity_revision``), not its stat: bookkeeping writes
     # (sync stamps, dispatch stamps, a replica's pull stamp) rewrite the files ~61x/min with no task change.
     signature.extend((str(db), _board_content_key(db)) for db in _board_db_paths())
     if include_shadows:
-        signature.extend((str(db), _board_content_key(db, _revision.SHADOW_TABLES)) for db in _replica_paths())
+        signature.extend(_shadow_fingerprint())
     return tuple(signature)
+
+
+def _shadow_fingerprint() -> tuple:
+    """What ``_activity_fingerprint()`` appends to the local one: each sync shadow's content key."""
+    return tuple((str(db), _board_content_key(db, _revision.SHADOW_TABLES)) for db in _replica_paths())
+
+
+_STAT_SETTLED_S = 2.0
+
+
+def _revalidatable(fingerprint: tuple, wall: float) -> bool:
+    """True when ``fingerprint`` (taken at wall time ``wall``) proves no write since: every board is keyed by its
+    content revision, or by a file stat last modified more than ``_STAT_SETTLED_S`` before ``wall``. A stat key can
+    miss a same-size commit inside the mtime tick of the previous one; a write after a settled stat lands in a later
+    tick and moves it. (A board no current writer opened, e.g. ``boards/_archived``, has only its stat.)"""
+    for entry in fingerprint:
+        if isinstance(entry, tuple) and len(entry) == 2 and isinstance(entry[1], tuple) and entry[1][:1] == ("stat",):
+            for st in entry[1][1] if len(entry[1]) > 1 and isinstance(entry[1][1], tuple) else (None,):
+                if st is not None and (not isinstance(st, tuple) or len(st) < 4 or st[3] / 1e9 > wall - _STAT_SETTLED_S):
+                    return False
+    return True
+
+
+# [daveey] Set by ``_annotation_snapshot`` while it re-reads a scope whose inputs it just found unchanged:
+# ``(without shadows or None, with shadows)``, so the readers do not read every board's revision again (per thread).
+_inputs_pin = threading.local()
 
 
 def _board_content_key(path: Path, tables: tuple[str, ...] = _revision.LOCAL_TABLES) -> tuple:
@@ -1239,9 +1275,10 @@ def _all_counts(*, include_waiting: bool = False, include_snapshot: bool = False
     sat in this function, starving ``/api/status`` (2026-10-27). [daveey]"""
     scope = _origin_scope()
     now = time.monotonic()
+    wall = time.time()
     fingerprint = _activity_fingerprint()
     with _cache_lock:
-        if _cache is not None and _cache_scope == scope and now < _cache[0] and fingerprint == _cache_fingerprint:
+        if _counts_fresh(scope, fingerprint, now):
             return _cached_count_result(include_waiting, include_snapshot)
         seen = _counts_generation
     with _counts_flight:
@@ -1249,13 +1286,24 @@ def _all_counts(*, include_waiting: bool = False, include_snapshot: bool = False
             if _counts_generation != seen and _cache is not None and _cache_scope == scope:
                 return _cached_count_result(include_waiting, include_snapshot)
         return _recompute_all_counts(scope, now, fingerprint, include_waiting=include_waiting,
-                                     include_snapshot=include_snapshot)
+                                     include_snapshot=include_snapshot, wall=wall)
+
+
+def _counts_fresh(scope: tuple[str, ...], fingerprint: tuple, now: float) -> bool:
+    """Caller holds ``_cache_lock``. The cached counts answer for ``fingerprint``: same scope and inputs, and either
+    within the TTL or (``_revalidatable`` fingerprint) younger than ``_COUNTS_MAX_AGE_S``. [daveey] A board write moves
+    its content revision, so it is never hidden (read-your-writes); the age bounds the time-derived states."""
+    if _cache is None or _cache_scope != scope or fingerprint != _cache_fingerprint:
+        return False
+    if now < _cache[0]:
+        return True
+    return _cache_revalidatable and now < _cache_read_at + _COUNTS_MAX_AGE_S
 
 
 def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bool,
-                          include_snapshot: bool = False) -> tuple:
+                          include_snapshot: bool = False, wall: float | None = None) -> tuple:
     """Read every local board and the remote links into fresh counts and publish them to the cache."""
-    global _cache, _cache_scope, _cache_fingerprint, _counts_generation
+    global _cache, _cache_scope, _cache_fingerprint, _counts_generation, _cache_read_at, _cache_revalidatable
     active: dict[str, int] = {}
     blocked: dict[str, int] = {}
     unseen: dict[str, int] = {}
@@ -1312,6 +1360,8 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         counts, waiting_ids, parked_held, stalled, remote_ids, local_ids = fresh
         _cache_scope = scope
         _cache = (now + _CACHE_TTL_S, *counts)
+        _cache_read_at = now
+        _cache_revalidatable = wall is not None and _revalidatable(fingerprint, wall)
         _cache_fingerprint = fingerprint
         _counts_generation += 1
         _waiting_cache[0] = waiting_ids
@@ -1702,9 +1752,12 @@ def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED
 # registered = no field, no extra reads (upstream behaviour).
 ATTENTION_WINDOW_S = 24 * 3600
 _ATTENTION_TTL_S = 30.0
+# [daveey] Past the TTL the counts stay valid while the local boards' content revisions are unchanged, up to this age
+# (it bounds the time-derived ATTENTION_WINDOW_S edge). See kanban_session_activity_attention.
+_ATTENTION_MAX_AGE_S = 300.0
 _done_checks: dict[str, Callable[[dict[str, Any]], bool]] = {}
 # [daveey] Per origin scope, with done-check verdicts shared across scopes (see the module).
-_attention = _AttentionCache(_ATTENTION_TTL_S)
+_attention = _AttentionCache(_ATTENTION_TTL_S, max_age_s=_ATTENTION_MAX_AGE_S)
 
 
 def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool]) -> Callable[[], None]:
@@ -1764,6 +1817,10 @@ def attention_task_counts(now: float | None = None) -> dict[str, int]:
     hit = _attention.get(scope, mono)
     if hit is not None:
         return hit
+    inputs = _attention_key()
+    hit = _attention.get(scope, mono, inputs)
+    if hit is not None:
+        return hit
     since = (time.time() if now is None else now) - ATTENTION_WINDOW_S
     checks = list(_done_checks.values())
     paths = list(_board_db_paths())
@@ -1782,8 +1839,22 @@ def attention_task_counts(now: float | None = None) -> dict[str, int]:
     counts: dict[str, int] = {}
     for sid, _tid in pairs:
         counts[sid] = counts.get(sid, 0) + 1
-    _attention.put(scope, mono, counts)
+    _attention.put(scope, mono, counts, inputs)
     return counts
+
+
+def _attention_key(local: tuple | None = None, wall: float | None = None) -> tuple | None:
+    """What the done checks read: the local boards' content keys (``local``, taken at ``wall``, when the caller
+    already has them). None unless ``_revalidatable``, or when the boards can't be read: then only the TTL serves the
+    cache."""
+    if local is None:
+        wall = time.time()
+        try:
+            local = _activity_fingerprint(include_shadows=False)
+        except Exception:  # health: allow BLE001 -- a revalidation input; the recompute surfaces a real read error
+            _log.debug("kanban attention key unavailable", exc_info=True)
+            return None
+    return local if _revalidatable(local, time.time() if wall is None else wall) else None
 
 
 def _read_annotation_parts() -> tuple:
@@ -1813,12 +1884,12 @@ def _read_annotation_parts() -> tuple:
 _frozen_parts: dict[tuple[str, ...], tuple] = {}
 
 
-def _refresh_annotation_locked(scope: tuple[str, ...]) -> tuple:
+def _refresh_annotation_locked(scope: tuple[str, ...], read_at: float | None = None) -> tuple:
     """Read this scope's parts and publish them. Caller holds ``_annotate_refresh_lock``."""
     global _annotate_flight_scope, _annotate_flight_result
     _annotate_flight_scope = scope
     _annotate_flight_result = None
-    read_at = time.time()
+    read_at = time.time() if read_at is None else read_at
     parts = _read_annotation_parts()
     _bounded.record(scope, parts, read_at)
     _last_annotation[scope] = parts
@@ -1868,8 +1939,45 @@ def _annotation_snapshot() -> tuple:
             return _refresh_annotation_locked(scope)
         finally:
             _annotate_refresh_lock.release()
+    try:
+        unchanged = _unchanged_inputs(scope)
+    except Exception:  # health: allow BLE001 -- only a shortcut probe; the bounded refresh reports a real read error
+        _log.debug("kanban annotation input probe failed; refreshing", exc_info=True)
+        unchanged = None
+    if unchanged is not None:
+        # [daveey] Nothing the read depends on moved: re-read inline, where every heavy part is a cache hit (no
+        # refresh thread, no recompute). It still runs the waiting sources and dates a new observation.
+        read_at, fingerprints = unchanged
+        _inputs_pin.fingerprints = fingerprints
+        try:
+            return _refresh_annotation_locked(scope, read_at)
+        finally:
+            _inputs_pin.fingerprints = None
+            _annotate_refresh_lock.release()
     return _bounded.refresh_bounded(lambda: _refresh_annotation_locked(scope), _annotate_refresh_lock, previous,
                                     _REFRESH_WAIT_S)
+
+
+def _unchanged_inputs(scope: tuple[str, ...]) -> tuple[float, tuple] | None:
+    """``(wall time, pinned fingerprints)`` when a read of ``scope`` now would be all cache hits: the counts answer
+    for the boards' current content revisions (``_counts_fresh``) and the attention counts (when checks are
+    registered) for the local boards'. None otherwise, or while nothing is cached. [daveey] On David-MBP a Desktop
+    poll started a refresh thread every ~3 s (20/min) although board content moved in 3 of 60 polls."""
+    with _cache_lock:
+        if _cache is None or _cache_scope != scope:
+            return None
+    read_at = time.time()
+    mono = time.monotonic()
+    local = _activity_fingerprint(include_shadows=False)
+    full = local + _shadow_fingerprint()  # one read of each board serves both keys
+    with _cache_lock:
+        if not _counts_fresh(scope, full, mono):
+            return None
+    if _done_checks and _attention.get(scope, mono) is None:
+        key = _attention_key(local, read_at)
+        if key is None or _attention.get(scope, mono, key) is None:
+            return None
+    return read_at, (local, full)
 
 
 annotation_read_at = _bounded.read_at
