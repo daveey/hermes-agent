@@ -384,7 +384,9 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
         # [daveey] A worker transcript never reads a notice and refuses the wake (4132): no row, and its sub goes.
         worker = skip is None and worker_transcript_reason(db, sub["chat_id"]) is not None
         skip = "worker_transcript" if worker else skip
-        old, new, claimed = _kbn.claim_unseen_events_for_sub(conn, kinds=kinds, durable=skip is None, **ident)
+        from tui_gateway.session_notifications import _KANBAN_EVENT_FORMATTERS  # the kinds that render a notice
+        old, new, claimed = _kbn.claim_unseen_events_for_sub(conn, kinds=kinds, durable=skip is None,
+                                                             deliverable_kinds=_KANBAN_EVENT_FORMATTERS, **ident)
         if worker:
             with contextlib.suppress(Exception):
                 _kbn.remove_notify_sub(conn, **ident)
@@ -398,6 +400,11 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
         with contextlib.suppress(Exception):
             _kbn.remove_notify_sub(conn, **ident)
     if not texts:
+        # Silent kinds only (unblocked/archived): nothing to deliver, so the claim is complete. Returning without
+        # this ack left the range in flight under this live process for good, and the chat's owner could never
+        # claim that sub again (dashboard pid 44404, t_01a199de3003e911). [daveey]
+        with contextlib.suppress(Exception):
+            _kbn.ack_notify_claim(conn, upto=new, from_cursor=old, **ident)
         return None
     text = "\n".join(texts)
     metadata = {"notice_id": f"{slug}:{ident['task_id']}:{old}-{new}", "board": slug, "display_text": text,

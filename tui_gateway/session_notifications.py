@@ -619,6 +619,7 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
             # durable: the claim stays IN FLIGHT (owned by this process) until the notice is in the transcript
             # (_kb_ack_durable acks it); a process that dies first hands it back. [daveey]
             _old, _new, events = _kbn.claim_unseen_events_for_sub(conn, kinds=_KANBAN_NOTIFY_KINDS,
+                                                                   deliverable_kinds=_KANBAN_EVENT_FORMATTERS,
                                                                    durable=claims is not None, **sub_ident)
             if not events:
                 continue
@@ -639,11 +640,18 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
                     sub_texts.append(text)
                     if claim is not None:
                         claim["texts"].append(text)
-            if claim is not None and not claim["texts"]:
-                claims.remove(claim)  # silent kinds only (archived/unblocked): nothing to deliver or hand back
             if not sub_texts:
+                acked = False
                 with contextlib.suppress(Exception):  # nothing to deliver: the claim is complete as is
-                    _kbn.ack_notify_claim(conn, upto=_new, from_cursor=_old, **sub_ident)
+                    acked = _kbn.ack_notify_claim(conn, upto=_new, from_cursor=_old, **sub_ident)
+                if claim is not None and claims is not None:
+                    if acked:
+                        claims.remove(claim)  # silent kinds only (archived/unblocked): nothing left to hand back
+                    else:
+                        # An earlier claim of this process is still pending, so the ack was skipped: keep it as
+                        # delivered, and the next ack run covers it. Dropping it leaked this range in flight with
+                        # nothing in it to deliver, blocking every other consumer (t_01a199de3003e911). [daveey]
+                        claim["durable"] = True
             # Unsubscribe only on archive: ``done`` is reversible in review/controller flows, so keeping the sub lets a
             # later reopen notify the same session. The claimed cursor prevents replay. A sub with notices still in
             # flight is removed by their ack instead, so the claim it records survives until delivery. [daveey]
@@ -778,12 +786,17 @@ _KANBAN_REFUSAL_BACKOFF_S = 15.0
 _KANBAN_REFUSAL_BACKOFF_MAX_S = 300.0
 
 
-def _kb_rewind_refused(session: dict, batch: list) -> None:
+def _kb_rewind_refused(session: dict, batch: list, *, not_owned: bool = False) -> None:
     """The turn for ``batch`` was refused: rewind (CAS) every claim none of whose texts were delivered, newest
     first, and drop those texts from the buffer; whoever owns the chat re-claims them. A claim with some texts
     already delivered keeps its rest buffered here (rewinding it would re-send the delivered part).
     Lost before: the cursor was already claimed and the batch dropped, so a completion that arrived while
-    another backend held the chat never reached the agent (t_05d71bf2, 2026-10-18)."""
+    another backend held the chat never reached the agent (t_05d71bf2, 2026-10-18).
+
+    ``not_owned``: another process owns the chat, so this one can never deliver there. Each subscription it no
+    longer buffers anything for also releases its WHOLE in-flight marker (an earlier claim it never acked
+    included); the CAS rewind alone kept that marker, and the owner stayed blocked behind this live process
+    for hours (t_01a199de3003e911). [daveey]"""
     from hermes_cli import kanban_db_connect as _kbc
     from hermes_cli import kanban_db_notify as _kbn
     claims = session.get("_kanban_claims") or []
@@ -793,7 +806,11 @@ def _kb_rewind_refused(session: dict, batch: list) -> None:
     for claim in reversed(claims):
         texts = claim.get("texts") or []
         if claim.get("durable"):
-            continue  # already in the transcript (written before the turn): nothing to hand back [daveey]
+            # Already in the transcript (written before the turn): nothing to hand back. Unless the chat is owned
+            # elsewhere (the whole marker is released below), an unacked one stays listed for the next ack run.
+            if not claim.get("acked") and not claim.get("remote") and not not_owned:
+                remaining.append(claim)
+            continue  # [daveey]
         if texts and all(id(t) in refused for t in texts):
             if claim.get("remote"):
                 from tui_gateway import kanban_remote_notices as _krn
@@ -816,6 +833,18 @@ def _kb_rewind_refused(session: dict, batch: list) -> None:
         keep_back.update(id(t) for t in texts if id(t) in refused)
         remaining.append(claim)
     session["_kanban_claims"] = list(reversed(remaining))
+    if not_owned:
+        held = {(c["board"], c["task_id"], c["platform"], c["chat_id"], c.get("thread_id") or "")
+                for c in remaining if not c.get("remote")}
+        subs = {(c["board"], c["task_id"], c["platform"], c["chat_id"], c.get("thread_id") or "")
+                for c in claims if not c.get("remote")} - held
+        for board, task_id, platform, chat_id, thread_id in sorted(subs):
+            try:
+                with contextlib.closing(_kbc.connect(board=board)) as conn:
+                    _kbn.release_notify_claim(conn, task_id=task_id, platform=platform, chat_id=chat_id,
+                                              thread_id=thread_id, why="does not own the chat")
+            except Exception:
+                logger.warning("kanban notice claim release failed for %s/%s", board, task_id, exc_info=True)
     rewound = refused - keep_back
     with session["history_lock"]:
         session["_kanban_pending"] = [t for t in batch if id(t) not in rewound] + [
@@ -834,7 +863,9 @@ def _kb_mark_delivered(session: dict, batch: list) -> None:
     claims = []
     for claim in session.get("_kanban_claims") or []:
         claim["texts"] = [t for t in claim.get("texts") or [] if id(t) not in delivered]
-        if claim["texts"]:
+        # A durable claim _kb_ack_durable could not ack yet (an earlier claim of the same sub was still pending)
+        # stays listed so the next ack run covers it; dropping it leaked its range in flight. [daveey]
+        if claim["texts"] or (claim.get("durable") and not claim.get("acked") and not claim.get("remote")):
             claims.append(claim)
     session["_kanban_claims"] = claims
     session.pop("_kanban_refusal_delay", None)
@@ -972,6 +1003,19 @@ def _kb_release_claims(session: dict) -> None:
                     thread_id=claim.get("thread_id") or "", claimed_cursor=claim["new"], old_cursor=claim["old"])
         except Exception as exc:
             _notif_log_failure("kanban notice release on poller stop failed", exc)
+    # This process stops serving the chat: any marker it still holds for these subs (a durable claim never acked,
+    # an earlier claim it lost track of) goes back too, or the chat's next consumer waits behind this live
+    # process (t_01a199de3003e911). [daveey]
+    subs = {(c["board"], c["task_id"], c["platform"], c["chat_id"], c.get("thread_id") or "")
+            for c in session.get("_kanban_claims") or [] if not c.get("remote")}
+    for board, task_id, platform, chat_id, thread_id in sorted(subs):
+        try:
+            with contextlib.closing(_kbc.connect(board=board)) as conn:
+                _kbn.release_notify_claim(conn, task_id=task_id, platform=platform, chat_id=chat_id,
+                                          thread_id=thread_id, why="stopped serving the chat")
+        except Exception:
+            logger.warning("kanban notice claim release on poller stop failed for %s/%s", board, task_id,
+                           exc_info=True)
     session["_kanban_claims"] = []
     session["_kanban_pending"] = []
 
@@ -1030,6 +1074,7 @@ def _notif_poll_kanban_scoped(sid: str, session: dict) -> None:
                             platform="tui", diagnostic=isinstance(text, DiagnosticText))
     if texts:
         session.setdefault("_kanban_pending", []).extend(texts)
+    if claims:  # a silent claim still waiting for its ack has no text but is tracked too
         session.setdefault("_kanban_claims", []).extend(claims)
     if not session.get("_kanban_pending") or not _notif_claim_turn(session):
         return
@@ -1043,7 +1088,7 @@ def _notif_poll_kanban_scoped(sid: str, session: dict) -> None:
     # Only the chat's owner writes the row and acks; a non-owner hands the claims back for the owner's poller.
     if _kb_owner_refusal(sid, session) is not None:
         _notif_release_turn(session)
-        _kb_rewind_refused(session, batch)
+        _kb_rewind_refused(session, batch, not_owned=True)
         return
     # At-least-once (t_01a1835174955959): the notices land in the transcript and the board claim is acked
     # BEFORE the turn runs; until then the claim is in flight and a process that dies first hands it back.
@@ -1067,7 +1112,7 @@ def _notif_poll_kanban_scoped(sid: str, session: dict) -> None:
     except Exception:
         accepted = False
     if accepted is False:
-        _kb_rewind_refused(session, batch)
+        _kb_rewind_refused(session, batch, not_owned=_notif_owner_refused(session))
     else:
         if verdict == "unkeyed":  # the accepted turn's own user row is the record
             _kb_ack_durable(session, {id(t) for t in batch})

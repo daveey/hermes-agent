@@ -996,7 +996,7 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     last_ping_event_id INTEGER NOT NULL DEFAULT 0,
     inflight_from INTEGER,
     inflight_pid  INTEGER,
-    inflight_start INTEGER,
+    inflight_start INTEGER, inflight_at INTEGER,
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 

@@ -185,14 +185,14 @@ def test_live_holder_blocks_other_claimers_and_is_not_recovered():
     _complete(tid)
     conn = kbc.connect()
     try:
-        old, _new, events = kbn.claim_unseen_events_for_sub(conn, task_id=tid, platform="tui", chat_id=KEY,
-                                                           durable=True)
+        _old, _new, events = kbn.claim_unseen_events_for_sub(conn, task_id=tid, platform="tui", chat_id=KEY,
+                                                             durable=True)
         assert events
         with kb.write_txn(conn):  # pretend a different, LIVE process holds it (our parent)
             import os
             conn.execute("UPDATE kanban_notify_subs SET inflight_pid = ?, inflight_start = NULL WHERE task_id = ?",
                          (os.getppid(), tid))
-            conn.execute("UPDATE kanban_notify_subs SET last_event_id = ? WHERE task_id = ?", (old, tid))
+            kb._append_event(conn, tid, "blocked", {})  # something new to claim behind the held completion
         assert kbn.recover_orphaned_notify_claims(conn) == 0
         assert kbn.claim_unseen_events_for_sub(conn, task_id=tid, platform="tui", chat_id=KEY,
                                                durable=True)[2] == []

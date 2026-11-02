@@ -1077,6 +1077,9 @@ _NOTIFY_SUB_COLUMNS = (
     ("inflight_from", "inflight_from INTEGER"),
     ("inflight_pid", "inflight_pid INTEGER"),
     ("inflight_start", "inflight_start INTEGER"),
+    # Epoch seconds of the earliest outstanding claim: a LIVE holder's claim older than NOTIFY_CLAIM_STALE_S no
+    # longer blocks other consumers (t_01a199de3003e911). NULL = none, or written before this column. [daveey]
+    ("inflight_at", "inflight_at INTEGER"),
 )
 
 _TASK_RUN_COLUMNS = (
@@ -1296,7 +1299,7 @@ _REBUILD_SPECS = {
         " delivery_metadata TEXT, created_at INTEGER NOT NULL,"
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
         " last_ping_event_id INTEGER NOT NULL DEFAULT 0,"
-        " inflight_from INTEGER, inflight_pid INTEGER, inflight_start INTEGER,"
+        " inflight_from INTEGER, inflight_pid INTEGER, inflight_start INTEGER, inflight_at INTEGER,"
         " PRIMARY KEY (task_id, platform, chat_id, thread_id))",
         ("CREATE INDEX idx_notify_task ON kanban_notify_subs(task_id)",),
     ),
