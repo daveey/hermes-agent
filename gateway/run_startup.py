@@ -1264,7 +1264,7 @@ class GatewayStartupMixin:
         """Create + wire an adapter per enabled platform (no connects). Returns
         (aborted, enabled_platform_count, multiplex_skipped_platforms, pending_connects)."""
         from gateway.run import _platform_has_bot_credential
-        from gateway.run_adapters import _adapter_unavailable_message
+        from gateway.run_adapter_status import adapter_unavailable_message
         enabled_platform_count = 0
         _multiplex_on = self._multiplex_on()
         _multiplex_skipped_platforms: list[Platform] = []
@@ -1305,7 +1305,7 @@ class GatewayStartupMixin:
                 self._update_platform_runtime_status(
                     platform.value, platform_state="retrying" if heals else "fatal",
                     error_code="adapter_unavailable",
-                    error_message=_adapter_unavailable_message(platform, retrying=heals),
+                    error_message=adapter_unavailable_message(platform, retrying=heals),
                     needs_attention=True,
                 )
                 if heals:

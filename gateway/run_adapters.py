@@ -28,6 +28,7 @@ from gateway.config import (
 from gateway.platforms.base import BasePlatformAdapter
 from gateway.platforms.helpers import carry_inbound_dedup, hand_over_held_inbound
 from gateway.restart import is_global_startup_conflict
+from gateway.run_adapter_status import adapter_unavailable_message
 from gateway.run_shutdown import _log_suppressed
 from gateway.session import SessionSource
 from hermes_cli.observability.shared_metrics_gateway import record_platform_connect, record_platform_disconnect
@@ -42,15 +43,6 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 logger = logging.getLogger("gateway.run")
 _UNSET = object()  # "no per-profile human_delay snapshot": fall back to the primary's value
 _MAX_PLUGIN_LOAD_REARMS = 3  # per queued platform: transient load failures heal, a broken plugin stops re-importing
-
-
-def _adapter_unavailable_message(platform: Platform, *, retrying: bool = True) -> str:
-    """Actionable ``adapter_unavailable`` status text, shared by startup and the reconnect watcher so
-    ``hermes status`` keeps the plugin/deps/credentials hint after the first retry."""
-    message = (
-        f"No adapter available for enabled {platform.value}; check the plugin, dependencies, and credentials."
-    )
-    return f"{message} Retrying in the background." if retrying else message
 
 
 class _UnresolvedProfileHome:
@@ -831,7 +823,7 @@ class GatewayAdapterLifecycleMixin:
                     # Became builtin/registered-but-None: a config change is needed, so stop retrying.
                     self._update_platform_runtime_status(
                         platform.value, platform_state="fatal", error_code="adapter_unavailable",
-                        error_message=_adapter_unavailable_message(platform, retrying=False),
+                        error_message=adapter_unavailable_message(platform, retrying=False),
                         needs_attention=True,
                     )
                     self._drop_from_reconnect_queue(platform, "adapter creation returned None")
@@ -844,7 +836,7 @@ class GatewayAdapterLifecycleMixin:
                         get_plugin_manager().rearm_failed_platform, platform.value):
                     info["load_rearms"] = rearms + 1
                 backoff = self._bump_reconnect_backoff(
-                    platform, info, attempt, "adapter_unavailable", _adapter_unavailable_message(platform),
+                    platform, info, attempt, "adapter_unavailable", adapter_unavailable_message(platform),
                 )
                 logger.info("Reconnect %s: no adapter yet, next retry in %ds", platform.value, backoff)
                 return
