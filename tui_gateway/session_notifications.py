@@ -173,6 +173,49 @@ _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0
 
 
+# [daveey] Completion events (process id → event) a claimed notice turn is about to carry. The turn's start
+# (``start_synthesized_turn``) moves them to ``_completion_delivered`` + ``COMPLETION_UNSECURED``; until then
+# they stay in the poller's in-flight custody (backend-exit journal: exit_job_receipts).
+NOTIF_OFFERED_COMPLETIONS = "_notif_offered_completions"
+# Delivered to a started turn whose crash marker is not written yet: the exit journal still reports these.
+# ``_record_turn_marker`` drops them once the marker (whose prompt carries the notice) is on disk.
+COMPLETION_UNSECURED = "_completion_unsecured"
+
+
+def admit_synthesized_turn(session: dict) -> bool:
+    """Caller holds ``history_lock``. Early refusal only: a synthesized (automatic) turn is refused once a backend
+    exit fenced notices. Nothing is marked delivered here; the commit point is the turn's start."""
+    return not (session.get("_synthesized_turn") and session.get("_exit_notices_pending"))
+
+
+def start_synthesized_turn(session: dict, start):
+    """[daveey] The single commit point for the completions a notice turn carries. Caller holds the server's
+    ``_sessions_lock``, under which alone ``fence_exit_notices`` raises the exit fence, so the fence check, the
+    delivered mark and the worker start are one step with respect to the exit journal (which fences first):
+    fenced → refused (the events are still in custody and get journaled); started → delivered, and unsecured
+    until the turn's crash marker is on disk; start refused or raised → the mark is rolled back before the
+    lock is released. Returns ``start()``'s result (None = not started)."""
+    with session["history_lock"]:
+        synthesized = bool(session.get("_synthesized_turn"))
+        if synthesized and session.get("_exit_notices_pending"):
+            return None
+        offered = dict(session.pop(NOTIF_OFFERED_COMPLETIONS, None) or {}) if synthesized else {}
+        if offered:  # before the start: the started turn may secure them at once (_record_turn_marker)
+            session.setdefault("_completion_delivered", set()).update(offered)
+            session.setdefault(COMPLETION_UNSECURED, {}).update(offered)
+    started = None
+    try:
+        started = start()
+        return started
+    finally:
+        if offered and started is None:
+            with session["history_lock"]:
+                session.get("_completion_delivered", set()).difference_update(offered)
+                unsecured = session.get(COMPLETION_UNSECURED) or {}
+                for pid in offered:
+                    unsecured.pop(pid, None)
+
+
 def _notif_release_turn(session: dict) -> None:
     from tui_gateway.turn_admission import settle
     with session["history_lock"]:
@@ -191,7 +234,8 @@ def _notif_claim_turn(session: dict) -> bool:
     if continuation_due(session):
         return False  # [daveey] a core-update-paused turn continues first; callers requeue (update_pause)
     with _session_turn_admission(session) as admitted:
-        if not admitted or session.get("running") or session.get("_turn_cancel_requested"):
+        if (not admitted or session.get("running") or session.get("_turn_cancel_requested")
+                or session.get("_exit_notices_pending")):
             return False
         session["running"] = True
         return True
@@ -1202,13 +1246,16 @@ def _notif_hold_for(owner: dict, evt: dict, queue) -> bool:
 
 
 def _notif_take_held(session: dict) -> list:
-    """Remove and return every event held for ``session`` (oldest first)."""
+    """Remove and return every event held for ``session`` (oldest first), in in-flight custody (taken in the same
+    critical section): the caller MUST ``process_registry_awaiting.release`` them once routing returns."""
+    from tools.process_registry_awaiting import hold
     held = session.get("_notif_held")
     if not held:
         return []
     with _notif_held_lock:
         taken = list(held)
         held.clear()
+        hold(taken)
     return taken
 
 
@@ -1288,6 +1335,12 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, com
     return True
 
 
+def _notif_undeliver(session, claimed) -> None:
+    """[daveey] Completions going back to custody were not delivered, whatever admission marked."""
+    with session["history_lock"]:
+        session.get("_completion_delivered", set()).difference_update(e.get("session_id") for e, _t, _c in claimed)
+
+
 def _notif_retry_completions(claimed, registry, deferred):
     """A delegation claim release cannot restore a dequeued native completion."""
     from tools.async_delegation import release_event_delivery
@@ -1335,12 +1388,23 @@ def _notif_dispatch_completions(sid, session, notifications, registry, deferred)
         _notif_release_turn(session)
     try:
         if text is not None:
-            accepted = _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text,
-                                     "completion batch dispatch failed", display_kind=PROCESS_COMPLETE_DISPLAY_KIND,
-                                     display_metadata={"display_text": batch.display_text(registry)})
+            # [daveey] The turn's start marks these delivered atomically with the exit fence check
+            # (start_synthesized_turn; exit_job_receipts: a fenced start is refused instead).
+            from tui_gateway.session_notifications import NOTIF_OFFERED_COMPLETIONS
+            session[NOTIF_OFFERED_COMPLETIONS] = {e.get("session_id"): e for e, _t, _c in claimed
+                                                  if e.get("type", "completion") == "completion"
+                                                  and e.get("session_id")}
+            try:
+                accepted = _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text,
+                                         "completion batch dispatch failed", display_kind=PROCESS_COMPLETE_DISPLAY_KIND,
+                                         display_metadata={"display_text": batch.display_text(registry)})
+            finally:
+                session.pop(NOTIF_OFFERED_COMPLETIONS, None)
             from tui_gateway.process_consumer_health import delivered
             delivered(sid, session, registry, [event for event, _, _ in claimed], accepted, delivery_token)
             if not accepted:
+                from tui_gateway.session_notifications import _notif_undeliver
+                _notif_undeliver(session, claimed)
                 for event, _text, claim in claimed:
                     _notif_defer_event(event, claim,
                         deferred.append if deferred is not None else registry.completion_queue.put)
@@ -1348,10 +1412,15 @@ def _notif_dispatch_completions(sid, session, notifications, registry, deferred)
                     _notif_refusal_backoff(session)
                 return
     except Exception:
+        from tui_gateway.session_notifications import _notif_undeliver
+        _notif_undeliver(session, claimed)
         _notif_retry_completions(claimed, registry, deferred)
         return
     for event, _text, claim in claimed:
         complete_event_delivery(event, claim)
+        if event.get("type", "completion") == "completion":
+            with session["history_lock"]:
+                session.setdefault("_completion_delivered", set()).add(event.get("session_id"))
 
 
 def _notif_handle_ready(sid, session, events, emitted, registry, fmt, deferred, *, owned=False):
@@ -1598,10 +1667,13 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
             last_parked_poll = now
             _notif_take_parked(sid, session, process_registry, handle)
         if session.get("_notif_held") and not session.get("running") and not session.get("_turn_cancel_requested"):
+            taken = _notif_take_held(session)
             try:
-                handle(_notif_take_held(session), None)  # still busy → held again by the claim gate
+                handle(taken, None)  # still busy → held again by the claim gate
             except Exception as exc:
                 _notif_log_failure("held notification dispatch failed", exc)
+            finally:
+                release_in_flight(taken)
         # Dequeue and in-flight hold are one step: until routing admits a turn, requeues or drops each event, its
         # owner session stays protected from the reapers (it is in neither the queue nor ``running`` meanwhile).
         ready = take_ready(queue, 0.5)
@@ -1623,15 +1695,20 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
     # Drain remaining events after the stop signal so nothing is lost on shutdown; foreign and orphaned-delegation
     # events are handed back to the shared queue afterwards.
     deferred: list = []
+    from tools.process_registry_awaiting import hold as hold_in_flight
     with _notif_held_lock:  # from here on a handoff to this session falls back to the shared queue
         held = list(session.pop("_notif_held", None) or ())
-    ready = take_ready(queue, 0)
+        hold_in_flight(held)  # [daveey] in custody until handed back (backend-exit journal reads it)
     try:
-        handle(held + list(ready), deferred)
-        for evt in deferred:
-            queue.put(evt)
+        ready = take_ready(queue, 0)
+        try:
+            handle(held + list(ready), deferred)
+            for evt in deferred:
+                queue.put(evt)
+        finally:
+            release_in_flight(ready)
     finally:
-        release_in_flight(ready)
+        release_in_flight(held)
 
 
 def _async_delegation_display_metadata(evt: dict) -> dict:
