@@ -32,6 +32,7 @@ def _warm_names(api):
 
 def prewarm_boards(api) -> None:
     """``api`` is the kanban plugin_api module (key and read come from the same code as GET /board)."""
+    from plugins.kanban.dashboard import board_rows
     from plugins.kanban.dashboard.board_snapshot import file_sig, prewarm
 
     # Desktop's blocked-task loader reads these boards too, not only the selected
@@ -46,6 +47,7 @@ def prewarm_boards(api) -> None:
             if key in seen:
                 continue
             seen.add(key)
+            board_rows.version(path)  # before file_sig: a first observer open can create the -wal
             prewarm(lambda r=resolved: api._get_board_uncached(None, False, r, None, None, api._BOARD_DONE_LIMIT),
                     key, file_sig(path))
             log.info("kanban board prewarm finished board=%s elapsed_s=%.3f", name, time.monotonic() - started)

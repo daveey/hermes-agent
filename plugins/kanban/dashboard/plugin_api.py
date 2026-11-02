@@ -40,6 +40,9 @@ from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_diagnostics as kd
 from plugins.kanban.dashboard.board_diagnostics import _attach_diagnostics, _warnings_summary_from_diagnostics
+from plugins.kanban.dashboard import board_read
+from plugins.kanban.dashboard.board_read import (  # BOARD_COLUMNS: the documented column list
+    BOARD_COLUMNS, diagnostic_inputs as _diagnostic_inputs, diagnostics_from_inputs as _diagnostics_from_inputs)
 from plugins.kanban.dashboard.plugin_api_human_request import ask_filing_refusal, classify_request
 from hermes_cli.kanban_db_attachment_names import _collision_free_path, _safe_attachment_name
 
@@ -177,11 +180,8 @@ def _errors_to_500(prefix: str) -> Iterator[None]:
 
 # --- Serialization helpers --------------------------------------------------
 
-# Dashboard columns, left-to-right ("archived" is a filter toggle, not a column), from the
-# one workflow definition. A status missing here gets mis-bucketed into ``todo``.
-BOARD_COLUMNS: list[str] = list(kanban_workflow.DEFAULT_WORKFLOW.keys())
+# Board columns, card preview length, row materialization and projection: board_read.
 
-_CARD_SUMMARY_PREVIEW_CHARS = 200
 # Newest done cards on the board poll. A busy board's done column is history
 # (thousands of cards, multi-MB bodies). Shipping all of it encodes megabytes
 # on the request and cannot cross an SSH tunnel inside the Desktop's 6s
@@ -219,40 +219,7 @@ def _placeholders(ids: list) -> str:
 def _compute_task_diagnostics(conn: sqlite3.Connection, task_ids: Optional[list[str]] = None) -> dict[str, list[dict]]:
     """``{task_id: [diagnostic_dict, ...]}`` (tasks with none omitted) via three aggregate
     queries (tasks, events, runs) — slurps the board; paginate if profiling shows a hotspot."""
-    from hermes_cli.config import load_config
-
-    if task_ids is not None and not task_ids:
-        return {}
-    diag_config = kd.config_from_runtime_config(load_config())
-    if task_ids is not None:
-        rows = conn.execute(f"SELECT * FROM tasks WHERE id IN ({_placeholders(task_ids)})", tuple(task_ids)).fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM tasks WHERE status != 'archived'").fetchall()
-    if not rows:
-        return {}
-    row_ids = [r["id"] for r in rows]
-
-    def _rows_by_task(table: str) -> dict[str, list]:
-        by_task: dict[str, list] = {tid: [] for tid in row_ids}
-        for row in conn.execute(
-            f"SELECT * FROM {table} WHERE task_id IN ({_placeholders(row_ids)}) ORDER BY id", tuple(row_ids)):
-            by_task.setdefault(row["task_id"], []).append(row)
-        return by_task
-
-    events_by_task = _rows_by_task("task_events")
-    runs_by_task = _rows_by_task("task_runs")
-    graph_by_task = kanban_db.task_graph_contexts(conn, row_ids)
-    from hermes_cli import kanban_wake_check as kwc
-    wake_by_task = kwc.load_states(conn, row_ids)
-    out: dict[str, list[dict]] = {}
-    for r in rows:
-        tid = r["id"]
-        diags = kd.compute_task_diagnostics(
-            r, events_by_task[tid], runs_by_task[tid], config=diag_config, graph=graph_by_task.get(tid),
-            wake_check=wake_by_task.get(tid))
-        if diags:
-            out[tid] = [d.to_dict() for d in diags]
-    return out
+    return _diagnostics_from_inputs(_diagnostic_inputs(conn, task_ids))
 
 
 def _links_for(conn: sqlite3.Connection, task_id: str) -> dict[str, list[str]]:
@@ -276,19 +243,6 @@ def _link_tasks(conn: sqlite3.Connection, links: dict[str, list[str]]) -> list[d
 
 # --- GET /board -------------------------------------------------------------
 
-def _managing_sessions(conn: sqlite3.Connection) -> dict[str, str]:
-    """``{task_id: chat session id}`` of each card's most recent ``tui`` notify
-    subscriber — a session asked to shepherd someone else's card subscribes to
-    it, so the latest subscriber is the one managing it now. [daveey]"""
-    try:
-        rows = conn.execute(
-            "SELECT task_id, chat_id FROM kanban_notify_subs "
-            "WHERE platform = 'tui' AND chat_id != '' ORDER BY created_at, rowid").fetchall()
-    except sqlite3.Error:  # board predates notify subscriptions
-        return {}
-    return {str(r[0]): str(r[1]) for r in rows}
-
-
 def get_board(
     tenant: Optional[str] = Query(None, description="Filter to a single tenant"),
     include_archived: bool = Query(False),
@@ -303,6 +257,7 @@ def get_board(
     A signature hit is reused. A miss that already has a snapshot returns it and
     refreshes off this request so a slow read cannot time out the Desktop poll.
     """
+    from plugins.kanban.dashboard import board_rows
     from plugins.kanban.dashboard.board_snapshot import file_sig, serve
 
     resolved = _resolve_board(board)
@@ -310,6 +265,9 @@ def get_board(
     try:
         path = str(kanban_db.kanban_db_path(board=resolved))
         key = (path, tenant, include_archived, workflow_template_id, current_step_key, int(done_limit))
+        # Open the row observer first: on a board without a -wal it creates one, which
+        # would move the signature taken before this read.
+        board_rows.version(path)
         sig = file_sig(path)  # before the read: a commit during it is read again next time
     except Exception:
         pass
@@ -321,93 +279,27 @@ def get_board(
     return serve(key, sig, read, now=time.monotonic())
 
 
-def _preview_list_body(task: dict) -> None:
-    """List cards carry a short body. The drawer loads the full text from /tasks/:id."""
-    body = task.get("body")
-    if isinstance(body, str) and len(body) > _CARD_SUMMARY_PREVIEW_CHARS:
-        task["body"] = body[:_CARD_SUMMARY_PREVIEW_CHARS]
-        task["body_truncated"] = True
-
-
 def _get_board_uncached(tenant, include_archived, board, workflow_template_id, current_step_key, done_limit=_BOARD_DONE_LIMIT):
-    with _board_conn(board) as (board, conn):
-        tasks = kanban_db.list_tasks(
-            conn, tenant=tenant, include_archived=include_archived,
-            workflow_template_id=workflow_template_id, current_step_key=current_step_key)
-        # Link / comment / progress rollups are each one aggregate query rather than N per-task lookups.
-        link_counts: dict[str, dict[str, int]] = {}
-        for row in conn.execute("SELECT parent_id, child_id FROM task_links").fetchall():
-            link_counts.setdefault(row["parent_id"], {"parents": 0, "children": 0})["children"] += 1
-            link_counts.setdefault(row["child_id"], {"parents": 0, "children": 0})["parents"] += 1
-        comment_counts: dict[str, int] = {
-            r["task_id"]: r["n"] for r in conn.execute("SELECT task_id, COUNT(*) AS n FROM task_comments GROUP BY task_id")}
-        progress: dict[str, dict[str, int]] = {}  # per parent: children done / total, rendered as "N/M"
-        for row in conn.execute(
-            "SELECT l.parent_id AS pid, t.status AS cstatus FROM task_links l JOIN tasks t ON t.id = l.child_id").fetchall():
-            p = progress.setdefault(row["pid"], {"done": 0, "total": 0})
-            p["total"] += 1
-            p["done"] += row["cstatus"] == "done"
-        # Done cards past ``done_limit`` never reach the payload: trim them before the per-card
-        # work (diagnostics alone were ~1.2 of the 1.5 s cold read on a 1.2k-card board).
-        # Same order as the done column below: completed_at DESC NULLS LAST, id DESC.
-        done_all = sorted(sorted((t for t in tasks if t.status == "done"), key=lambda t: t.id, reverse=True),
-                          key=lambda t: (t.completed_at is None, -(t.completed_at or 0)))
-        done_total = len(done_all)
-        done_cap = int(done_limit or 0)
-        dropped = {t.id for t in done_all[done_cap:]} if 0 < done_cap < done_total else set()
-        tasks = [t for t in tasks if t.id not in dropped]
-        diagnostics_per_task = _compute_task_diagnostics(
-            conn, task_ids=[t.id for t in tasks if t.status != "archived"])
-        latest_event_id = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM task_events").fetchone()["m"]
-        columns: dict[str, list[dict]] = {c: [] for c in BOARD_COLUMNS}
-        if include_archived:
-            columns["archived"] = []
-        # One window-function query for latest summaries (avoids N+1); cards get a
-        # truncated preview, the full text comes from /tasks/:id.
-        summary_map = kanban_db.latest_summaries(conn, [t.id for t in tasks])
-        # One query for the active run's start per card (avoids N+1); the run
-        # clock ticks from this, not the task's first-ever start.
-        run_start_map = kanban_db.current_run_started_ats(conn, [t.id for t in tasks])
-        managers = _managing_sessions(conn)
-        for t in tasks:
-            full = summary_map.get(t.id)
-            d = _task_dict(t, latest_summary=(full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None),
-                           current_run_started_at=run_start_map.get(t.id))
-            d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
-            d["comment_count"] = comment_counts.get(t.id, 0)
-            d["progress"] = progress.get(t.id)  # None when the task has no children
-            # [daveey] The chat shepherding the card: its latest ``tui`` notify
-            # subscriber, else the session that created it.
-            d["managing_session_id"] = managers.get(t.id) or (t.session_id or None)
-            _attach_diagnostics(d, diagnostics_per_task.get(t.id))
-            _preview_list_body(d)
-            columns[t.status if t.status in columns else "todo"].append(d)
+    """Board payload: retained SQL rows (re-read only after a commit, see board_rows) projected
+    with the current clock, config, profiles on disk and hub replica."""
+    from plugins.kanban.dashboard import board_rows
 
-        # Queue lanes keep the list_tasks dispatch order; the done column is
-        # history, so order it newest-completed-first. Two stable sorts compose
-        # into the "completed_at DESC NULLS LAST, id DESC" SQL key.
-        columns["done"].sort(key=lambda d: d["id"], reverse=True)
-        columns["done"].sort(key=lambda d: (d["completed_at"] is None, -(d["completed_at"] or 0)))
+    board = _resolve_board(board)
+    done_limit = int(done_limit or 0)
 
-        # Queue columns keep list_tasks' dispatch order (priority DESC, created_at ASC).
-        tenants = [r["tenant"] for r in conn.execute("SELECT DISTINCT tenant FROM tasks WHERE tenant IS NOT NULL ORDER BY tenant")]
-        # List of known assignees for the lane-by-profile sub-grouping.
-        # Uses kanban_db.known_assignees so the lane set unions profiles
-        # currently holding non-archived tasks with profiles configured on
-        # disk — a freshly-added profile shows up as a (possibly empty)
-        # lane immediately, matching the assignee picker at /assignees
-        # which already uses this helper.
-        assignees = [entry["name"] for entry in kanban_db.known_assignees(conn)]
-        columns_out = []
-        for name, tasks in columns.items():
-            col = {"name": name, "tasks": tasks}
-            if name == "done":
-                col["total"] = done_total
-                col["omitted"] = done_total - len(tasks)
-            columns_out.append(col)
-        return {
-            "columns": columns_out, "tenants": tenants,
-            "assignees": assignees, "latest_event_id": int(latest_event_id), "now": int(time.time())}
+    def build():
+        with closing(_conn(board=board)) as conn:
+            return board_read.materialize(conn, tenant, include_archived, workflow_template_id, current_step_key,
+                                          done_limit, diagnostic_inputs=_diagnostic_inputs)
+
+    try:
+        path = str(kanban_db.kanban_db_path(board=board))
+    except Exception:  # health: allow BLE001 -- no path to observe: read uncached, as before
+        rows = build()
+    else:
+        rows = board_rows.materialized(
+            (path, tenant, bool(include_archived), workflow_template_id, current_step_key, done_limit), path, build)
+    return board_read.project(rows, include_archived, _diagnostics_from_inputs)
 
 
 _read_board = coalesced_read(get_board, admission_key=lambda a: (a.get("board") or "").strip().lower(), max_concurrent=2)  # one read per board, at most 2 boards: hub A/B, a cap of 4 made the default board's cold read time out

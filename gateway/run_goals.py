@@ -539,7 +539,7 @@ class GatewayGoalsMixin:
         profile's store is scanned under its own runtime scope (same shape as ``_handoff_watcher``),
         and each hit is fired against that profile's adapters."""
         from gateway.run import _async_profile_runtime_scope, _resolve_handoff_watch_scopes
-        from gateway.run_idle_gates import profile_has_active_loop
+        from gateway.run_idle_gates import current_store_may_have_active_loop, profile_has_active_loop
         await asyncio.sleep(5)  # let platforms finish connecting
         warned_no_route: set = set()
 
@@ -557,6 +557,10 @@ class GatewayGoalsMixin:
             # Warm once per scan: the scan reads every persisted loop and a cold cache would
             # run the state.db init on the loop thread before the first read.
             await self._warm_goals_session_db("loop wakeup")
+            # The root scan has no scope-entry gate, but a store proven to hold no active loop at its
+            # current revision has nothing to list (run_idle_gates).
+            if not await self._run_in_executor_with_context(current_store_may_have_active_loop):
+                return
             # Off-loop too: the read is lock-free under WAL but convoys on the writer lock without it.
             active_loops = await self._run_in_executor_with_context(list_active_loops)
             now = time.time()
