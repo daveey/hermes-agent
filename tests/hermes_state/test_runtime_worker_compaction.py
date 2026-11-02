@@ -98,3 +98,14 @@ def test_micro_compaction_live_dicts_persist_through_the_worker_like_direct(work
         durable[sid] = [r['content'] for r in db.get_messages_as_conversation(sid)]
     assert store.failure is None and store.journal['pending'] == []
     assert durable['owned'] == durable['direct'] == ['u1', 'micro summary', 'u2', 'after']
+
+
+def test_a_kanban_restart_resume_fallback_drops_the_copied_rows_through_the_worker_store(worker):
+    """[daveey] A failed compaction of a resumed Kanban transcript empties the run's session from inside the
+    managed worker (``gateway.session_kanban_resume.drop_copied_rows``): the rows are soft-archived, not lost."""
+    from gateway.session_kanban_resume import drop_copied_rows
+    db, store = worker
+    store.append_messages_batch('owned', [{'role': 'user', 'content': 'copied'}, {'role': 'assistant', 'content': 'old'}])
+    assert drop_copied_rows(store, 'owned') == 0
+    assert store.get_messages_as_conversation('owned') == []
+    assert db._read_one("SELECT COUNT(*) FROM messages WHERE session_id='owned' AND active=0")[0] == 2

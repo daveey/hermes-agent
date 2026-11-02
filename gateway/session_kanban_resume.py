@@ -13,10 +13,16 @@ read, never written, resumed or leased.
 
 Fallback (today's fresh session with the transcript tail) whenever the copy cannot be proven safe:
 the previous session is missing, empty or unreadable; it lives in another home/state.db or belongs to
-another profile; or its transcript already exceeds the model's compaction threshold (a fresh session
-with the tail is cheaper than a resume whose first act is a lossy compaction). A previous turn that
-stopped mid-tool-call with no recorded result is still resumed, but each unanswered call gets a synthetic
-"interrupted by gateway restart" result instead of being replayed.
+another profile. A previous turn that stopped mid-tool-call with no recorded result is still resumed, but
+each unanswered call gets a synthetic "interrupted by gateway restart" result instead of being replayed.
+
+A transcript past ``RESUME_HEADROOM`` of the model's compaction threshold is still resumed, then compacted
+by the worker before its first model call (``compact_resumed_history``: the agent's own ``_compress_context``,
+as a resumed chat's turn-start compaction runs it). The admission's ``restart_resume`` event carries
+``compaction: 'pending'``; the worker appends the outcome as a second ``restart_resume`` event for the same
+run (``compacted: true``, or ``fallback: 'compaction_failed'`` / ``'compaction_unavailable'``, after which the
+copied rows are dropped and the run starts from today's transcript-tail context). The latest
+``restart_resume`` event of a run is its outcome.
 """
 from __future__ import annotations
 
@@ -40,7 +46,8 @@ INTERRUPTED_TOOL_RESULT = (
 RESUME_NOTE = (
     '\n## Resumed after gateway restart\n'
     'The previous run of this card (run {prior_run}) was cut off by a gateway restart and requeued without '
-    'counting a failure. Its full conversation above is restored into this run\'s session; continue that work '
+    'counting a failure. Its conversation above (summarized by context compaction when it was too long) is '
+    'restored into this run\'s session; continue that work '
     'instead of starting over. Tool calls interrupted by the restart may or may not have taken effect: verify '
     'files, running processes and remote side effects before repeating them. Use only THIS run\'s claim '
     '(run {run_id}); the old run\'s ownership is gone. The card state below is current.\n'
@@ -165,8 +172,8 @@ def plan_resume(candidate: Optional[dict], *, task, run_id: int, session_db, own
     if not threshold:
         return fallback('threshold_unknown', **{k: plan[k] for k in ('messages', 'tokens')})
     plan['threshold'] = int(threshold)
-    if tokens >= threshold * RESUME_HEADROOM:
-        return fallback('over_compaction_threshold')
+    if tokens >= threshold * RESUME_HEADROOM:  # no room for the first turn: the worker compacts it first
+        plan['compaction'] = 'pending'
     return {**plan, 'resumed_session_id': sid, 'interrupted_calls': _unanswered_tool_calls(history)}
 
 
@@ -263,9 +270,85 @@ def record_resume_event(conn, task_id: str, run_id: int, plan: dict, copied: Opt
         if copied:
             payload.update(resumed_session_id=plan['resumed_session_id'], copied_messages=copied,
                            interrupted_calls=len(plan.get('interrupted_calls') or ()))
+            if plan.get('compaction'):
+                payload['compaction'] = plan['compaction']
         else:
             payload['fallback'] = 'seed_failed'
     kb._append_event(conn, task_id, EVENT_KIND, payload, run_id=run_id)
+
+
+def _latest_resume_event(context: dict) -> dict:
+    with closing(sqlite3.connect(Path(context['db']).resolve().as_uri() + '?mode=ro', uri=True, timeout=5)) as conn:
+        row = conn.execute('SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind=? '
+                           'ORDER BY id DESC LIMIT 1', (context['task_id'], context['run_id'], EVENT_KIND)).fetchone()
+    return _json_dict(row[0] if row else None)
+
+
+def _record_compaction(context: dict, payload: dict) -> None:
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect_closing
+    with connect_closing(Path(context['db'])) as conn, kb.write_txn(conn):
+        kb._append_event(conn, context['task_id'], EVENT_KIND, payload, run_id=context['run_id'])
+
+
+def compact_resumed_history(agent, context: dict, history: list) -> list:
+    """Worker side, before the first model call: when the admission resumed an over-headroom transcript
+    (``compaction: 'pending'``), compact it through the agent's own ``_compress_context`` (in place, into this
+    run's session) and return the compacted history. When compaction is unavailable or fails (raises, or makes
+    no progress), the copied rows are dropped and ``[]`` is returned, so the run falls back to the fresh
+    session with the transcript-tail context. Any other history is returned unchanged."""
+    if not history or not context.get('resume_context'):
+        return history
+    try:
+        admitted = _latest_resume_event(context)
+    except (OSError, sqlite3.Error, KeyError, TypeError):
+        logger.warning('Kanban restart resume: admission event unreadable; resuming uncompacted', exc_info=True)
+        return history
+    if admitted.get('compaction') != 'pending' or not admitted.get('resumed_session_id'):
+        return history
+    from agent.model_metadata import estimate_messages_tokens_rough
+    outcome = {k: admitted[k] for k in ('prior_run_id', 'prior_session_id', 'resumed_session_id', 'messages',
+                                        'tokens', 'threshold') if admitted.get(k) is not None}
+    before = estimate_messages_tokens_rough(history)
+    compressed, error = history, None
+    compress: Any = getattr(agent, '_compress_context', None)
+    if getattr(agent, 'compression_enabled', True) is not True or not callable(compress):
+        reason = 'compaction_unavailable'
+    else:
+        reason = 'compaction_failed'
+        try:
+            compressed = compress(history, None, approx_tokens=admitted.get('tokens') or before,
+                                  task_id=agent.session_id or 'default', trigger='turn_start_threshold')[0]
+        except Exception as exc:  # a failed compaction is a fallback, never a dead run
+            logger.warning('Kanban restart resume: compacting %s failed', agent.session_id, exc_info=True)
+            compressed, error = history, f'{type(exc).__name__}: {exc}'[:200]
+    after = estimate_messages_tokens_rough(compressed) if compressed else 0
+    if compressed is not history and compressed and (len(compressed) < len(history) or after < before):
+        outcome.update(compacted=True, compacted_messages=len(compressed), compacted_tokens=int(after))
+        _record_compaction_safely(context, outcome)
+        return compressed
+    try:
+        drop_copied_rows(agent._session_db, agent.session_id)  # the tail-only fresh session, as on any fallback
+    except Exception:
+        logger.warning('Kanban restart resume: dropping the copied rows of %s failed', agent.session_id, exc_info=True)
+    outcome.pop('resumed_session_id', None)
+    outcome.update(fallback=reason, **({'error': error} if error else {}))
+    _record_compaction_safely(context, outcome)
+    return []
+
+
+def drop_copied_rows(session_db, session_id: str) -> int:
+    """Soft-archive every active row of ``session_id`` (the copied transcript), leaving the session empty for
+    the tail-only fallback. ``archive_and_compact`` with nothing to insert: the one in-place rewrite both the
+    owner's ``SessionDB`` and the managed worker's ``RuntimeSessionStore`` expose; the rows stay searchable."""
+    return int(session_db.archive_and_compact(session_id, [], watermark=None, lock_holder=None, tail_count=0))
+
+
+def _record_compaction_safely(context: dict, payload: dict) -> None:
+    try:
+        _record_compaction(context, payload)
+    except Exception:  # telemetry only: the run proceeds either way
+        logger.warning('Kanban restart resume: recording the compaction outcome failed', exc_info=True)
 
 
 def resume_context(base_context: str, plan: dict) -> str:
