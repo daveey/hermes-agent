@@ -29,7 +29,12 @@ def norm_pr(url: str) -> str:
 
 
 def _says_pull_does_not_block(body: str) -> bool:
-    return bool(_NONBLOCKING_RE.search(body))
+    from hermes_cli import kanban_db_dispatch as dispatch
+
+    # A disclaimer in a mixed-URL comment may refer to a different pull from the
+    # publication. Ambiguous prose must not release the duplicate-work guard.
+    urls = {norm_pr(url) for url in dispatch._RESPAWN_GUARD_PR_URL_RE.findall(body)}
+    return len(urls) == 1 and bool(_NONBLOCKING_RE.search(body))
 
 
 def _own_contract_key(conn: sqlite3.Connection, task_id: str) -> Optional[str]:

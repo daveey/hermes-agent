@@ -129,6 +129,16 @@ def test_foreign_url_does_not_drop_an_own_url_in_the_same_comment():
         assert _guard(conn, tid) == "active_pr"
 
 
+@pytest.mark.parametrize("disclaimed,live_contract", [(OTHER, False), (FOREIGN, True)])
+def test_mixed_comment_disclaimer_does_not_drop_published_pull(disclaimed, live_contract):
+    with kbc.connect() as conn:
+        if live_contract:
+            kb.create_task(conn, title="other owner", assignee="b", completion_contract=disclaimed)
+        tid = _claimed(conn, "new publication with informational reference")
+        worker_comment(conn, tid, "a", f"Opened {OWN}. {disclaimed} does not block this card.")
+        assert _guard(conn, tid) == "active_pr"
+
+
 def test_nonblocking_comment_does_not_exempt_a_real_open_comment():
     with kbc.connect() as conn:
         tid = _claimed(conn, "opened then disclaimed")
