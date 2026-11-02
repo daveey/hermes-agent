@@ -1047,6 +1047,11 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 outgoing = max(0, (getattr(agent, 'session_completion_tokens', 0) or 0) - before[1])
                 captured['usage'] = {'input_tokens': incoming, 'output_tokens': outgoing,
                                      'total_tokens': incoming + outgoing}
+                if api is not None:
+                    # The canonical API admission's twin of ``_finish_turn_result``: the turn's
+                    # per-response context accounting rides the committed usage to the wire.
+                    from gateway.platforms.api_server_usage import with_context_usage
+                    with_context_usage(captured['usage'], result)
                 _settle_api_runtime_lock(agent, result, captured)
             return result
         finally:

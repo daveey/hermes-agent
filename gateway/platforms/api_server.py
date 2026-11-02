@@ -116,6 +116,8 @@ from gateway.platforms import api_server_room_grants as _room_grants
 from gateway.platforms import api_server_runs as _api_runs
 from gateway.platforms.api_server_openai_routes import OpenAICompatRoutesMixin
 from gateway.platforms.api_server_thread_hops import ThreadSafeAsyncQueue, _ThreadHops
+# Re-exported: the route mixins import these wire serializers from this module.
+from gateway.platforms.api_server_usage import _chat_usage_payload, _responses_usage_payload, with_context_usage
 from gateway.platforms.api_server_memory_sessions import ApiServerMemorySessions
 from gateway.platforms.api_server_bot_chat import reset_local_title_owner
 from gateway.platforms.base import (
@@ -577,20 +579,6 @@ def _request_turn_author(body: dict[str, Any]) -> Optional[dict[str, Any]]:
         raise ValueError("author must be an object")
     from agent.turn_author import parse_turn_author
     return parse_turn_author(raw)
-
-
-_USAGE_TOKEN_KEYS = ("input_tokens", "output_tokens", "total_tokens")
-
-
-def _chat_usage_payload(usage: dict[str, Any]) -> dict[str, int]:
-    """OpenAI Chat Completions ``usage`` block (prompt/completion/total) from the agent's usage."""
-    values = (usage.get(key, 0) for key in _USAGE_TOKEN_KEYS)
-    return dict(zip(("prompt_tokens", "completion_tokens", "total_tokens"), values))
-
-
-def _responses_usage_payload(usage: dict[str, Any]) -> dict[str, int]:
-    """OpenAI Responses ``usage`` block from the agent's usage dict."""
-    return {key: usage.get(key, 0) for key in _USAGE_TOKEN_KEYS}
 
 
 async def _abandon_agent_task(
@@ -3613,6 +3601,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         _session_rotated = isinstance(_eff_sid, str) and isinstance(session_id, str) and _eff_sid != session_id
         if getattr(agent, "_last_compaction_in_place", False) or _session_rotated:
             result["_compressed"] = True
+        with_context_usage(usage, result)  # per-response context accounting, beside the billing sums
         result["served_runtime"] = {k: self._clean_runtime_id(getattr(agent, k, ""), max_len=80) for k in ("provider", "model")}  # who served; a class selector names neither
         if requested_runtime or route or confirmed_runtime_lock or (route_source and route_source != "global"):
             runtime = self._turn_runtime_metadata(

@@ -1831,6 +1831,7 @@ def run_conversation(
     addresses, after every history rewrite including post-turn micro-compaction.
     """
     from agent.turn_context import export_current_turn_boundary
+    from agent.context_usage import begin_turn_context_usage, export_turn_context_usage
     from agent.turn_finalizer import settle_held_final
     from agent.voice_turn_route import end_voice_turn_route
     from tools.vision_tools_history_budget import native_turn_images
@@ -1838,6 +1839,8 @@ def run_conversation(
     # Steer / redirect / interrupt set this mid-turn; the result reports whether the turn ran untouched.
     agent._turn_user_intervened = False
     vars(agent).pop("_step_boundary_paused", None)  # [daveey] per-turn core-update pause verdict
+    # Per-provider-response context accounting starts empty every turn (agent/context_usage.py).
+    begin_turn_context_usage(agent)
     # Images attached natively to this user turn stay visible to vision_analyze for the turn, so
     # it does not embed the same pixels a second time into the same request (#76411).
     with native_turn_images(user_message):
@@ -1866,6 +1869,8 @@ def run_conversation(
     result = export_current_turn_boundary(agent, result, user_message)
     if isinstance(result, dict):
         result["user_intervened"] = bool(getattr(agent, "_turn_user_intervened", False))
+        # Plain JSON types so managed worker transports can carry it unchanged.
+        result["context_usage"] = export_turn_context_usage(agent)
     _close_durable_failed_turn(agent, result)
     return result
 
