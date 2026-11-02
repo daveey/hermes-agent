@@ -131,13 +131,21 @@ def evict(path: str) -> None:
     locks held): a borrowed observer raises ``DeletedWalGenerationError`` and the caller retries."""
     from hermes_cli.kanban_generation import DeletedWalGenerationError
 
-    with _lock:
-        for key in [p for p in _observers if os.path.realpath(p) == path]:
-            obs = _observers[key]
-            if not obs.lock.acquire(blocking=False):
-                raise DeletedWalGenerationError(f"kanban DB {path}: board rows observer is borrowed; retry")
-            try:
+    # Unpublish under ``_lock`` but close only after releasing it: closing a board connection takes
+    # that board's lifecycle lock, and a locked connect() holds the lifecycle lock while recover()
+    # calls this hook (lock-order inversion otherwise). Each observer stays under its own lock.
+    taken: list = []
+    try:
+        with _lock:
+            for key in [p for p in _observers if os.path.realpath(p) == path]:
+                obs = _observers[key]
+                if not obs.lock.acquire(blocking=False):
+                    raise DeletedWalGenerationError(f"kanban DB {path}: board rows observer is borrowed; retry")
+                taken.append(obs)
                 _drop_observer(key)
+    finally:
+        for obs in taken:
+            try:
                 obs.close()
             finally:
                 obs.lock.release()

@@ -544,3 +544,60 @@ def test_drop_waits_for_the_borrower_before_closing(env):
     assert not dropper.is_alive()
     with pytest.raises(sqlite3.ProgrammingError):
         obs.conn.execute("SELECT 1")
+
+
+_LOCK_ORDER_PROBE = r'''
+import os, sys, threading, time
+from pathlib import Path
+from hermes_cli import kanban_db as kb, kanban_lockguard as lg, kanban_generation as gen
+from hermes_cli.kanban_sync_connections import _Pool
+from plugins.kanban.dashboard import board_rows
+
+kb.init_db()
+path = str(kb.kanban_db_path())
+assert board_rows.version(path) is not None
+y_in_recover, x_started = threading.Event(), threading.Event()
+
+def fake_stranded(p):
+    if threading.current_thread().name == "Y" and not y_in_recover.is_set():
+        y_in_recover.set()        # Y holds the board lifecycle lock inside recover()
+        x_started.wait(2)
+        time.sleep(0.2)           # let X enter board_rows.evict first
+    return [p + "-shm"]           # a deleted WAL generation is stranded
+lg.stranded_sidecars = fake_stranded
+gen._poisoned.add(os.path.realpath(path))
+
+def X():
+    y_in_recover.wait(2); x_started.set()
+    try:
+        _Pool(2).take(Path(path), lambda: lg.connect(path))
+    except Exception:
+        pass
+
+def Y():
+    try:
+        lg.connect(path, timeout=2.0).close()
+    except Exception:
+        pass
+
+ts = [threading.Thread(target=f, name=f.__name__, daemon=True) for f in (Y, X)]
+for t in ts: t.start()
+for t in ts: t.join(8)
+alive = [t.name for t in ts if t.is_alive()]
+print("ALIVE", alive, "LOCKED", board_rows._lock.locked())
+os._exit(3 if alive else 0)
+'''
+
+
+def test_evict_never_closes_under_module_lock_against_lifecycle_lock(env, tmp_path):
+    """recover() without the lifecycle lock (sync pool) racing a locked connect() must not
+    deadlock: evict unpublishes under ``_lock`` and closes after releasing it."""
+    _mod, _reads, home = env
+    repo_root = Path(__file__).resolve().parents[2]
+    proc = subprocess.run(
+        [sys.executable, "-c", _LOCK_ORDER_PROBE],
+        cwd=repo_root, capture_output=True, text=True, timeout=60, check=False,
+        env={**os.environ, "HERMES_HOME": str(home), "HOME": str(tmp_path),
+             "PYTHONPATH": os.pathsep.join([str(repo_root), os.environ.get("PYTHONPATH", "")])},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
