@@ -31,9 +31,24 @@ def test_profile_rejects_nonobject_params(tmp_path, params, monkeypatch):
 
 def test_parameter_defaults_and_boundaries():
     from gateway.control_profile import validate_params
-    assert validate_params({}) == (20, 50, 40)
+    assert validate_params({}) == (20, 25, 40)
     assert validate_params({'seconds': 60, 'hz': 200, 'top': 1}) == (60, 200, 1)
     assert validate_params({'seconds': 1, 'hz': 10}) == (1, 10, 40)
+
+
+@pytest.mark.parametrize('params, hz', [({'seconds': 1}, 25), ({'seconds': 1, 'hz': 50}, 50)])
+def test_control_verb_omitted_hz_uses_default_and_explicit_hz_overrides(tmp_path, params, hz):
+    raw = json.dumps({'verb': 'profile', 'params': params}).encode()
+    response = json.loads(GatewayControlServer(tmp_path).handle_request_line(raw))
+    assert response['ok'], response
+    result = response['result']
+    assert result['hz'] == hz and result['seconds'] == 1
+    assert result['cpu_refresh_s'] == pytest.approx(0.1)
+    # Ticks fall at start + k/hz before the 1 s deadline, so at most hz samples
+    # (+1 for float rounding); the 50 Hz override must sample beyond 25 Hz's cap.
+    assert 0 < result['samples'] <= hz + 1
+    if hz == 50:
+        assert result['samples'] > 26
 
 
 def test_process_wide_concurrent_refusal_and_lock_release(tmp_path, monkeypatch):

@@ -45,7 +45,8 @@ def main():
     parser.add_argument('--seconds', type=float, default=10)
     parser.add_argument('--rounds', type=int, default=3)
     parser.add_argument('--threads', type=int, default=150)
-    parser.add_argument('--hz', type=float, default=50)
+    parser.add_argument('--hz', type=float, default=None,
+                        help='Sampling frequency (default: omit hz, i.e. the control verb default)')
     parser.add_argument('--active-threads', type=int, default=0,
                         help='Workers alternating real helper stacks (remaining workers idle)')
     parser.add_argument('--active-interval', type=float, default=0.037,
@@ -54,7 +55,9 @@ def main():
     args = parser.parse_args()
     if not 0 <= args.active_threads <= args.threads or args.rounds < 1 or args.active_interval <= 0:
         parser.error('require 0 <= active-threads <= threads, rounds >= 1 and active-interval > 0')
-    profiler.validate_params({'seconds': args.seconds, 'hz': args.hz})
+    # Omitting hz takes the same default path as a live request without --hz.
+    request = {'seconds': args.seconds} if args.hz is None else {'seconds': args.seconds, 'hz': args.hz}
+    profiler.validate_params(request)
     stop = threading.Event()
     barrier = threading.Barrier(args.threads + 1)
     workers = [threading.Thread(target=_worker,
@@ -106,12 +109,13 @@ def main():
             order = ('baseline', 'profile') if index % 2 == 0 else ('profile', 'baseline')
             for mode in order:
                 wall, cpu = time.monotonic(), time.process_time()
-                payload = profiler.profile({'seconds': args.seconds, 'hz': args.hz}) if mode == 'profile' else None
+                payload = profiler.profile(request) if mode == 'profile' else None
                 if mode == 'baseline':
                     stop.wait(args.seconds)
                 cpu, wall = time.process_time() - cpu, time.monotonic() - wall
                 measurements[mode] = dict(cpu_s=cpu, wall_s=wall, core_percent=100 * cpu / wall)
                 if payload:
+                    measurements[mode]['hz'] = payload['hz']
                     measurements[mode]['samples'] = payload['samples']
                     measurements[mode]['workers_seen'] = sum(t['name'].startswith(('idle-', 'active-')) for t in payload['threads'])
                     active = [t for t in payload['threads'] if t['name'].startswith('active-')]
@@ -126,7 +130,7 @@ def main():
         for worker in workers:
             worker.join()
         profiler._collect = collect
-    print(json.dumps(dict(platform=platform.platform(), python=sys.version, params=vars(args), rounds=results,
+    print(json.dumps(dict(platform=platform.platform(), python=sys.version, params=vars(args), request=request, rounds=results,
                           median_incremental_core_percent=statistics.median(r['incremental_core_percent'] for r in results),
                           median_sampler_core_percent=statistics.median(r['profile']['sampler']['core_percent'] for r in results)), indent=2))
 

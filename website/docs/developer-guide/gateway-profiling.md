@@ -5,7 +5,7 @@
 The control verb is `profile`, with `params`:
 
 - `seconds`: finite number, 1–60 inclusive, default 20.
-- `hz`: finite number, 10–200 inclusive, default 50 (20 ms wall-stack resolution). Explicit `--hz 100` remains supported.
+- `hz`: finite number, 10–200 inclusive, default 25 (40 ms wall-stack resolution; `DEFAULT_HZ` in `gateway/control_profile.py`). Explicit `--hz 50` or `--hz 100` remains supported and overrides the default.
 - `top`: positive integer, default 40.
 
 Booleans, numeric strings, out-of-range numbers and non-finite numbers are rejected. Only one profile may run process-wide; another request fails immediately. A daemon sampler does the work while one of the four dedicated control workers waits. The CLI timeout is the requested duration plus 10 seconds. It reports a failed/unavailable request rather than silently starting another gateway.
@@ -55,7 +55,7 @@ python3 scripts/benchmark_gateway_profile.py --seconds 5 --rounds 3 --threads 15
 
 This creates an isolated process with 150 idle event-waiting threads. Each round measures **whole-process** `time.process_time()` and monotonic wall time, once without profiling and once with it; order alternates. Incremental percent of one core is `(profile CPU / profile wall - baseline CPU / baseline wall) * 100`. Thread creation is outside the measured intervals. The script prints raw measurements, Python/OS metadata, samples and idle-thread census; it never contacts a live gateway.
 
-### Active-stack workload and 50 Hz default
+### Active-stack workload (50 Hz, later lowered to 25 Hz)
 
 ```sh
 python3 scripts/benchmark_gateway_profile.py --seconds 10 --rounds 3 --threads 180 --active-threads 180
@@ -73,7 +73,31 @@ Linux/Python 3.14.9, 180 active workers, three 10-second rounds:
 | Independent per-thread runs | 100 | 3.248, 2.940, 3.815 | 3.515, 3.210, 3.518 |
 | Independent per-thread runs | 50 | 2.451, 2.365, 2.271 | 2.784, 2.711, 2.945 |
 
-Since optimized 100 Hz still exceeded 3%, the CLI and control verb now default to **50 Hz**. CPU refresh remains 10 Hz; explicit frequencies remain available. These synthetic measurements are not a guarantee for every live gateway or OS.
+Since optimized 100 Hz still exceeded 3%, the CLI and control verb were then set to default to 50 Hz. CPU refresh remained 10 Hz; explicit frequencies remained available. These synthetic measurements were not a guarantee for every live gateway or OS, and the live check below failed.
+
+### Live 50 Hz shortfall and 25 Hz default
+
+Acceptance is the `gateway-profiler` thread's own `cpu_s` / `seconds` below **3% of one core**, from a post-deploy 10-second `hermes gateway profile` against the running gateway with **no `--hz` override**. After the 50 Hz default deployed, that check failed on two of three runs:
+
+| Live run (50 Hz default) | Threads | Samples | Profiler % of one core |
+| --- | ---: | ---: | ---: |
+| 1 | 123 | 500 | 1.3854 |
+| 2 | 166 | 500 | **3.6331** |
+| 3 | 149 | 500 | **3.3729** |
+
+Explicit `--hz 25` probes against the same live gateway passed: 147 threads 1.7418%, 152 threads 1.8144%, 171 threads 2.1481% (250 samples each). These were override probes, not the required no-override acceptance; that acceptance must be repeated after this default ships.
+
+The CLI and control verb now default to **25 Hz**. The cost is stack-time resolution: one wall sample per 40 ms instead of 20 ms, so a 10-second window holds 250 samples rather than 500, and stacks shorter than about 40 ms are proportionally more likely to be missed or attributed coarsely. CPU seconds are unaffected: native CPU refresh stays at 0.1 s (10 Hz) independent of `hz`. Pass `--hz 50` (or up to 200) when finer stack resolution is worth the extra cost.
+
+Synthetic check of the new default, Linux/Python 3.14.9, 180 active workers, 10-second windows, request with `hz` omitted (benchmark default), shared host with load average about 16–25. Each run collected 250 samples, saw all 180 workers and both helpers on all 180. An interleaved 50 Hz control ran in the same period:
+
+| Request | Sampler % of one core | Baseline-subtracted process % |
+| --- | --- | --- |
+| `hz` omitted (25), runs 1–3 | 2.407, 2.570, 2.479 | 3.378, 3.136, 3.183 |
+| `hz` omitted (25), interleaved A/B | 2.254, 2.262, 2.091 | 2.318, 2.740, 2.269 |
+| explicit `--hz 50`, interleaved A/B | 2.851, 3.213, 2.870 | 3.441, 4.284, 3.915 |
+
+On this synthetic workload halving `hz` cut sampler CPU by roughly a fifth, not by half. A likely but unmeasured contributor is the 10 Hz CPU refresh, which reads every thread's clock regardless of `hz`. The high, varying host load inflated the absolute figures relative to the earlier quiet-host table, and the baseline-subtracted process figure (which includes all 180 workers' wakeups) exceeded 3% in the first three runs. These synthetic numbers are not the acceptance measurement; the live no-override check is.
 
 The old sleeping-thread check also lacked a competing CPU load, so a whole-process clock mutation passed. `test_control_profile_cpu_isolation.py` now baselines concurrent sleeping and burning threads, burns at least 0.35 thread-CPU seconds, then requires sleeper CPU below 0.05 s and burner CPU at least 0.2 s. On `9892672e83` with the Linux process-clock mutation it fails with sleeper CPU **0.350335282 s**. The native reader passes; the test is selected on Linux and macOS.
 
@@ -150,6 +174,8 @@ Both optimized medians meet the under-3% target for this measured workload; one 
 Why the remaining overhead existed: the previous CPU-refresh tick unconditionally flushed all histograms and rebuilt per-thread dictionaries even for identical stacks (`_Window.slow_tick`). The new deterministic test failed on that implementation with repeated flushes instead of one final 99-tick run. Registry-change and before/after mismatch controls guard lifetime attribution; the existing exact-histogram/cadence/generator/cleanup tests exercise the optimized path too. This closes the remaining unnecessary-bookkeeping design gap, not by lowering sampling or CPU refresh frequency. Independent review found no correctness blockers.
 
 ## Verification status
+
+25 Hz default change: **49 passed, 1 macOS-only skipped** across the six profiler gateway files and the CLI file via `scripts/run_tests.sh`. `test_parameter_defaults_and_boundaries`, the new `test_control_verb_omitted_hz_uses_default_and_explicit_hz_overrides[params0-25]` (a real control-socket request without `hz`; at most 26 samples per second) and `test_cli_and_control_defaults_agree` failed on the 50 Hz code. The explicit `hz: 50` case requires more than 26 samples, so the override really samples faster.
 
 Final stable-refresh change: **38 passed, 1 macOS-only skipped** across the five profiler files via `scripts/run_tests.sh`; all **15 checks** passed via `python3 scripts/check --base HEAD`. The refresh-run test was RED on the preceding implementation and GREEN after; registry replacement and both sides of the lifetime sandwich have explicit controls. Earlier verification stages follow.
 
