@@ -92,9 +92,10 @@ def _completed_review_run(conn, parent_id, parked_at, owner_run_id):
 
 def _named_prs(data, captured: set[str]) -> set[str] | None:
     """Absent is checkpoint-bound; present must resolve uniquely, or fail closed."""
-    if "pr" not in data:
+    key = "pr" if "pr" in data else "reviewed_pr"
+    if key not in data:
         return None
-    pr = data["pr"]
+    pr = data[key]
     if type(pr) is int and pr > 0:
         ref = f"#{pr}"
     elif isinstance(pr, str):
@@ -142,7 +143,7 @@ def _requests_changes(row, data) -> bool:
 def _reviewed_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) -> set[str]:
     """Repair evidence: changes or an unknown verdict at an exact head, PR-bound.
 
-    A named ``pr`` is the only PR covered. With none, the authenticated checkpoint
+    A named ``pr`` (or ``reviewed_pr`` fallback) is the only PR covered. With none, the authenticated checkpoint
     is the binding, unless the summary names ``PR #N`` that matches none of it.
     """
     from hermes_cli import kanban_db as kb
@@ -273,7 +274,7 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     reviewed = set().union(*(_reviewed_prs(conn, p, parked_at, row["id"], captured_set) for p in parents))
     if urls.issubset(reviewed):
         return True
-    # Every awaited parent must authorize. One exact-head approval does not cover a
+    # Without repair evidence, every awaited parent must approve. One approval does not cover a
     # sibling that never reviewed, and a named unrelated PR does not cover
     # the checkpoint set.
     return all(
