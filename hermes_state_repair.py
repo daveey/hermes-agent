@@ -381,6 +381,14 @@ def _persistent_repair_attempts_exhausted(db_path: Path) -> bool:
     in-process claim and cross-process lock still bound one run). Fingerprint unavailable (live connection) ->
     compare the SIZE the ledger recorded, otherwise a peer connection hides an exhausted budget on every pass."""
     ledger = _read_repair_ledger(db_path)
+    # Count first, fingerprint only when it could matter: this runs BEFORE the cross-process repair lock, and
+    # the fingerprint's raw read holds state.db open, which a concurrent repairer's foreign-holder preflight
+    # (hermes_state_holders) correctly counts as a live writer and skips surgery (two repairers at startup).
+    try:
+        if int(ledger.get("failed_attempts", 0)) < _MAX_PERSISTENT_REPAIR_ATTEMPTS:
+            return False
+    except (TypeError, ValueError):
+        return False
     recorded = ledger.get("fingerprint")
     fp = _db_fingerprint(db_path)
     try:  # size is the one key component that needs no raw read
@@ -388,7 +396,7 @@ def _persistent_repair_attempts_exhausted(db_path: Path) -> bool:
             isinstance(recorded, str) and recorded.startswith(f"{db_path.stat().st_size}:"))
     except OSError:
         return False
-    return same and int(ledger.get("failed_attempts", 0)) >= _MAX_PERSISTENT_REPAIR_ATTEMPTS
+    return same
 
 
 def _persistent_repair_exhausted_error(db_path: Path) -> str:

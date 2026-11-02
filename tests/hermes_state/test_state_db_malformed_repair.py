@@ -563,6 +563,42 @@ def test_two_processes_repairing_at_once_perform_surgery_once(tmp_path):
         conn.close()
 
 
+def test_repair_does_not_read_state_db_before_taking_the_repair_lock(tmp_path, monkeypatch):
+    """A queued repairer must hold no state.db fd while a peer runs its foreign-holder preflight.
+
+    The pre-lock budget check fingerprinted the file (a raw open) even with no recorded failures. A
+    second repairer starved mid-read was then seen by the lock winner's holder scan as a live writer,
+    so the winner skipped surgery (the flake in
+    test_two_processes_repairing_at_once_perform_surgery_once).
+    """
+    db_path = tmp_path / "state.db"
+    _build_healthy_db(db_path)
+    _corrupt_duplicate_fts(db_path)
+
+    events: list[str] = []
+    real_fingerprint = hermes_state_repair._db_fingerprint
+    real_lock = hermes_state_repair._cross_process_repair_lock
+
+    def spy_fingerprint(path):
+        events.append("fingerprint")
+        return real_fingerprint(path)
+
+    @contextlib.contextmanager
+    def spy_lock(path):
+        with real_lock(path) as held:
+            events.append("lock")
+            yield held
+
+    monkeypatch.setattr(hermes_state_repair, "_db_fingerprint", spy_fingerprint)
+    monkeypatch.setattr(hermes_state_repair, "_cross_process_repair_lock", spy_lock)
+
+    report = repair_state_db_schema(db_path)
+
+    assert report["repaired"] is True, report
+    assert "lock" in events
+    assert "fingerprint" not in events[: events.index("lock")], events
+
+
 def test_schema_surgery_bumps_the_schema_cookie(tmp_path):
     """Live connections in other processes must be told to reload the schema.
 
