@@ -754,8 +754,12 @@ def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, 
                 # [daveey] Same failure, another producer: the card this park awaits is done but the probe can't
                 # see it (a `hermes kanban show` of another gateway's card). No write txn is open here (ssh).
                 producer = finished_producer(conn, task_id, cmd)
+            dead_ancestry = None
+            if rc == 1 and not output_error(out) and not answered and not producer:
+                from hermes_cli.kanban_dead_ancestry import detect
+                dead_ancestry = detect(cmd, cwd)
             apply_result(conn, task_id, cmd, rc, out, now=now, generation=generation, diagnostics=diag,
-                         answered=answered, producer=producer)
+                         answered=answered, producer=producer, dead_ancestry=dead_ancestry)
         finally:
             conn.close()
         return rc
@@ -767,7 +771,7 @@ def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, 
 def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out: str,
                  *, generation: str, now: Optional[int] = None,
                  diagnostics: Optional[dict] = None, answered: Optional[dict] = None,
-                 producer: Optional[dict] = None) -> Optional[str]:
+                 producer: Optional[dict] = None, dead_ancestry: Optional[list[dict]] = None) -> Optional[str]:
     """Record one probe result; wake the card on success or a broken probe. Returns the event
     kind appended (``condition_met`` / ``wake_check_broken``) or None. A result for a probe
     that is no longer the card's (re-parked, unblocked) is dropped."""
@@ -806,6 +810,11 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                 kb.add_comment(conn, task_id, "kanban-dispatcher", note)
             return woke
         if rc == 1 and not output_error(out):
+            if dead_ancestry:
+                from hermes_cli.kanban_dead_ancestry import wake_once
+                woke = wake_once(conn, task_id, cmd, dead_ancestry)
+                if woke:
+                    return woke
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = 1, last_out = ?, fails = 0, "
                 "next_at = ? WHERE task_id = ?", (now, tail, now + int(state["every"]), task_id))
