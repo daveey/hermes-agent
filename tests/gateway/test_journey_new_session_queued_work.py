@@ -28,8 +28,9 @@ A_FOLLOWERS = ('A_FOLLOWER_1', 'A_FOLLOWER_2')
 
 
 @pytest.mark.platforms('linux')
-@pytest.mark.parametrize('restart', [False, True], ids=['live', 'restart'])
-def test_new_session_never_absorbs_or_drops_earlier_queued_work(tmp_path, restart):
+@pytest.mark.parametrize(('restart', 'publication_gap'), [(False, False), (True, False), (False, True)],
+                         ids=['live', 'restart', 'delayed-publication'])
+def test_new_session_never_absorbs_or_drops_earlier_queued_work(tmp_path, restart, publication_gap):
     from hermes_cli.gateway_chat_commands import run_command
     from hermes_cli.gateway_chat_view import GatewayChatView
     from hermes_cli.gateway_client import GatewayClient
@@ -104,8 +105,22 @@ def test_new_session_never_absorbs_or_drops_earlier_queued_work(tmp_path, restar
             peer.release.set()
             await until(lambda: all(r['status'] == 'terminal' for r in admissions().values()))
             # The viewer that stayed on A saw A's work finish; the /new view was rebound to B only.
-            events = (await rpc(other, 'session.events.since', session_id=a, replay_epoch=a_snapshot['replay_epoch'],
-                                last_sequence=a_snapshot['last_sequence']))['result']['events']
+            # SQLite terminality precedes completion publication on the worker thread. Replay
+            # from the same cursor until the viewer's actual contract is visible, not merely
+            # the admission commit. Each RPC yields to the owner; the bound is only for hangs.
+            expected = {'RECOVERY_ACK_' + n for n in A_FOLLOWERS}
+            async with asyncio.timeout(30):
+                while True:
+                    events = (await rpc(other, 'session.events.since', session_id=a,
+                                        replay_epoch=a_snapshot['replay_epoch'],
+                                        last_sequence=a_snapshot['last_sequence']))['result']['events']
+                    if publication_gap and not (home / 'release-publication').exists():
+                        assert 'RECOVERY_ACK_A_FOLLOWER_2' not in {
+                            e.get('payload', {}).get('text') for e in events if e['type'] == 'message.complete'}
+                        (home / 'release-publication').touch()
+                    if {e.get('payload', {}).get('text') for e in events
+                            if e['type'] == 'message.complete'} >= expected:
+                        break
             assert {e.get('payload', {}).get('text') for e in events if e['type'] == 'message.complete'} >= {
                 'RECOVERY_ACK_' + n for n in A_FOLLOWERS}, events
             assert view.session_id == b
@@ -128,7 +143,8 @@ def test_new_session_never_absorbs_or_drops_earlier_queued_work(tmp_path, restar
             await until(lambda: all(r['status'] == 'terminal' for r in admissions().values()))
 
     try:
-        with daemon(root, home, env, barrier=False) as (owner, desc):
+        with daemon(root, home, env, barrier=publication_gap,
+                    fixture='queued_work_publication_daemon.py') as (owner, desc):
             asyncio.run(first(desc, owner))
         if restart:
             with daemon(root, home, env, barrier=False) as (_, desc):
