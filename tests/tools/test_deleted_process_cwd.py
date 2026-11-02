@@ -80,6 +80,22 @@ def test_process_cwd_helper_returns_live_cwd(tmp_path):
         os.chdir(original)
 
 
+def test_skill_lock_refuses_unknown_cwd_without_losing_explicit_scope(deleted_cwd, tmp_path, monkeypatch):
+    from tools import skill_lock
+
+    locked = tmp_path / "locked-skill"
+    locked.mkdir()
+    monkeypatch.setattr(skill_lock, "locked_skill_dirs", lambda: [("locked-skill", str(locked))])
+    monkeypatch.setattr(skill_lock, "_record_path", lambda: str(tmp_path / ".usage.json"))
+    refusal = skill_lock.command_refusal("touch SKILL.md", "")
+    assert refusal and "working directory" in refusal
+    refusal = skill_lock.command_refusal("touch SKILL.md", str(locked))
+    assert refusal and "locked by the user" in refusal
+    assert skill_lock.command_refusal("cat SKILL.md", str(locked)) is None
+    monkeypatch.setattr(skill_lock, "locked_skill_dirs", list)
+    assert skill_lock.command_refusal("touch notes.txt", "") is None
+
+
 # --- detection guard -------------------------------------------------------------------------
 
 _REPO = Path(__file__).resolve().parents[2]
