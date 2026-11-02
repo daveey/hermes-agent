@@ -8,14 +8,27 @@ from copy import deepcopy
 from agent.model_routing import ModelRoutingError, eligible_routes, is_class_selector, validate_policy
 
 
+class HostRoutingConfigError(ModelRoutingError):
+    """The host's ``model_routing`` registry could not be read or validated (``managed_config``). [daveey]
+
+    Raised only where the host config is read and validated, so it names the host's registry, never
+    a card's pin: ``hermes_cli.kanban_host_refusal`` reads it to keep a Kanban start failure off the
+    card. Still a ``ModelRoutingError``: every caller that fails closed on one keeps doing so."""
+
+
 def managed_config(config=None):
     if config is None:
         from hermes_cli.config_effective import load_user_config_effective
         config = load_user_config_effective()
     policy = config.get("model_routing", {})
+    if not isinstance(policy, dict):
+        raise HostRoutingConfigError("model_routing must be a mapping")
     if not policy.get("enabled") or not policy.get("enforce_subscription_only"):
         return None
-    validate_policy(policy)
+    try:
+        validate_policy(policy)
+    except ModelRoutingError as exc:
+        raise HostRoutingConfigError(str(exc)) from exc
     return config
 
 
@@ -36,10 +49,15 @@ def overrides_endpoint(provider, base_url, config):
 
 
 class ManagedPinRejectedError(ModelRoutingError):
-    """A concrete pin the registry cannot serve. Config, not a transient: a retry never heals it. [daveey]"""
+    """A concrete pin the registry cannot serve. Config, not a transient: a retry never heals it. [daveey]
+
+    ``registry_empty``: the registry served no eligible subscription pin at all, so no pin of any
+    card could pass. That is the host's registry, not this pin (a config outage that emptied the
+    routes); ``hermes_cli.kanban_host_refusal`` reads it to keep such a start failure off the card."""
 
     def __init__(self, model, provider, allowed):
         self.model, self.provider, self.allowed = model, provider, list(allowed)
+        self.registry_empty = not self.allowed
         super().__init__("Managed subscription policy rejects unregistered or ambiguous concrete pin")
 
 

@@ -295,13 +295,20 @@ def _run_worker_turns(agent, frame, history):
 
 def record_start_failure(frame, exc):
     """The worker died before any turn ran (agent construction resolves credentials): book the
-    one-shot CLI's credential exit (75 quota wall / 78 re-login / 1) instead of a bare crash."""
+    one-shot CLI's credential exit (75 quota wall / 78 re-login / 1) instead of a bare crash.
+    An empty, unreadable or invalid host routing registry books the owner-unavailable exit with its
+    typed proof (``kanban_host_refusal``): no pin of any card could have started, so the card is not at fault."""
     context = json.loads(frame['policy'].get('kanban_json') or 'null')
     if context is None:
         return
     from hermes_cli.turn_exit import credential_failure_flags, turn_exit_code
-    _record_worker_result(context, turn_exit_code(None, kanban_worker=True, **credential_failure_flags(exc)),
-                          start_failure_line(exc), exc)
+    from hermes_cli.kanban_host_refusal import PROOF_KEY, startup_proof
+    proof = startup_proof(exc)
+    if proof is None:
+        code = turn_exit_code(None, kanban_worker=True, **credential_failure_flags(exc))
+    else:
+        from hermes_cli.kanban_owner_unavailable import KANBAN_OWNER_UNAVAILABLE_EXIT_CODE as code
+    _record_worker_result(context, code, start_failure_line(exc), exc, extra={PROOF_KEY: proof} if proof else None)
     exc._kanban_failure_booked = True
 
 
@@ -337,7 +344,7 @@ def start_failure_line(exc):
     return failure_line(exc, 'Worker could not start')
 
 
-def _record_worker_result(context, code, last_output, failure=None):
+def _record_worker_result(context, code, last_output, failure=None, extra=None):
     _TURNS_DONE.set()
     import os
     from hermes_cli.kanban_db_connect import connect_closing
@@ -349,7 +356,7 @@ def _record_worker_result(context, code, last_output, failure=None):
             # result in the immutable attempt event stream instead.
             kb._append_event(conn, context['task_id'], 'worker_result',
                 {'pid': os.getpid(), 'claim_lock': context['claim_lock'], 'exit_code': code,
-                 'last_output': last_output, **quota_fields(failure)}, run_id=context['run_id'])
+                 'last_output': last_output, **quota_fields(failure), **(extra or {})}, run_id=context['run_id'])
 
 
 def record_worker_loss(policy, reason, *, pid=None, bound=False):

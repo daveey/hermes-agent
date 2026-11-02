@@ -157,7 +157,7 @@ def _run_receipt_output(conn, task_id, run_id, pid, claim_lock):
     return bound_row is not None, None
 
 
-def record_submitter_result(conn, params, pid, exit_code, last_output) -> bool:
+def record_submitter_result(conn, params, pid, exit_code, last_output, extra=None) -> bool:
     """Book a managed submitter's own refusal/error exit as its run's ``worker_result``. [daveey]
 
     The submitter (``kanban_worker_client``) is the run's ``tasks.worker_pid``; when the owner refuses
@@ -183,7 +183,7 @@ def record_submitter_result(conn, params, pid, exit_code, last_output) -> bool:
         return False
     kb._append_event(conn, task_id, 'worker_result', {
         'pid': pid, 'claim_lock': claim_lock, 'exit_code': int(exit_code),
-        'last_output': str(last_output)[-500:], 'submitter': True}, run_id=run_id)
+        'last_output': str(last_output)[-500:], **(extra or {}), 'submitter': True}, run_id=run_id)
     return True
 
 

@@ -10,7 +10,9 @@ and spent the card's whole failure budget (triage), while the next run after the
 Such a run is booked ``owner_unavailable`` and requeued WITHOUT counting a failure, unless:
 
 - the board holds an ``owner_admitted`` marker for the run (the owner did admit it, so a turn may
-  have run and its loss is a real failure), or
+  have run and its loss is a real failure), unless the run's bound interpreter proved it died
+  constructing its agent on the host's routing registry (empty, or unreadable/invalid:
+  ``kanban_host_refusal.proven``: no turn ran, and no card's pin could have passed), or
 - the card's last ``NEUTRAL_STREAK_LIMIT`` closed runs were all ``owner_unavailable`` (an owner that
   never comes back must still reach the breaker instead of respawning forever).
 
@@ -20,6 +22,8 @@ from __future__ import annotations
 
 import re
 import sqlite3
+
+from hermes_cli.kanban_host_refusal import PROOF_KEY, proven, run_error
 
 OWNER_UNAVAILABLE_OUTCOME = "owner_unavailable"
 EXIT_KIND = "owner_unavailable"
@@ -83,9 +87,14 @@ def _note_legacy(dead, conn, task_id, run_id, log) -> None:
 
 
 def noted(dead, conn, task_id, run_id, log=None):
-    """``note`` then return *dead* (one expression at the call site)."""
+    """``note`` then return *dead* (one expression at the call site). A requeued host refusal (a
+    startup registry refusal, or a pre-admission ``storage_unavailable``) is surfaced here, in the
+    sweep's transaction: once per window per host, never once per card."""
     _note_legacy(dead, conn, task_id, run_id, log)
     note(dead, conn, task_id, run_id)
+    if dead.owner_unavailable and dead.event_payload.get(PROOF_KEY):
+        from hermes_cli.kanban_host_refusal import notify
+        notify(conn, task_id, dead.event_payload[PROOF_KEY])
     return dead
 
 
@@ -95,13 +104,19 @@ def note(dead, conn, task_id, run_id) -> None:
     any other exit."""
     if dead.kind != EXIT_KIND:
         return
-    reason = None
+    reason = proof = None
     if conn is None or not task_id:
         reason = "no board connection to check the admission"
-    elif _owner_admitted(conn, task_id, run_id):
-        reason = "the owner had admitted this run"
-    elif _neutral_streak(conn, task_id) >= NEUTRAL_STREAK_LIMIT:
-        reason = f"{NEUTRAL_STREAK_LIMIT} runs in a row found no owner"
+    else:
+        admitted = _owner_admitted(conn, task_id, run_id)
+        # Admitted: only a bound interpreter's startup proof excuses it. Not admitted: requeued as
+        # before; a submitter's pre-admission proof only names the host fault for the notice.
+        proof = proven(conn, task_id, run_id, dead.event_payload.get("claimer"), admitted=admitted,
+                       pid=dead.event_payload.get("pid"))
+        if admitted and not proof:
+            reason = "the owner had admitted this run"
+        elif _neutral_streak(conn, task_id) >= NEUTRAL_STREAK_LIMIT:
+            reason = f"{NEUTRAL_STREAK_LIMIT} runs in a row found no owner"
     if reason is not None:
         dead.kind = "nonzero_exit"
         dead.event_payload["exit_kind"] = "nonzero_exit"
@@ -110,6 +125,10 @@ def note(dead, conn, task_id, run_id) -> None:
     dead.owner_unavailable = True
     dead.event_kind = OWNER_UNAVAILABLE_OUTCOME
     dead.event_payload["owner_unavailable"] = True
+    if proof:
+        dead.event_payload[PROOF_KEY] = proof
+        dead.error_text = run_error(dead.event_payload.get("pid"), proof)
+        return
     dead.error_text = (
         f"pid {dead.event_payload.get('pid')}: the profile owner never answered the claim "
         "(restarting or draining); no turn ran, requeued without counting a failure"

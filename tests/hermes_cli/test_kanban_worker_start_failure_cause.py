@@ -12,7 +12,7 @@ def test_start_failure_books_a_redacted_one_line_cause(monkeypatch):
     from agent.model_routing import ModelRoutingError
     from gateway import session_kanban
     booked = []
-    monkeypatch.setattr(session_kanban, '_record_worker_result', lambda ctx, code, out, failure=None: booked.append((code, out)))
+    monkeypatch.setattr(session_kanban, '_record_worker_result', lambda ctx, code, out, failure=None, extra=None: booked.append((code, out)))
     frame = {'policy': {'kanban_json': json.dumps({'db': '/nonexistent', 'task_id': 't', 'run_id': 1})}}
     session_kanban.record_start_failure(frame, ModelRoutingError('Class selectors require provider auto;\nuse a concrete model'))
     (code, out), = booked
@@ -56,7 +56,7 @@ def test_start_failure_is_not_booked_twice(monkeypatch):
     from agent.model_routing import ModelRoutingError
     from gateway import session_kanban
     booked = []
-    monkeypatch.setattr(session_kanban, '_record_worker_result', lambda ctx, code, out, failure=None: booked.append(out))
+    monkeypatch.setattr(session_kanban, '_record_worker_result', lambda ctx, code, out, failure=None, extra=None: booked.append(out))
     frame = {'policy': {'kanban_json': json.dumps({'db': '/nonexistent', 'task_id': 't', 'run_id': 1})}}
     exc = ModelRoutingError('boom')
     session_kanban.record_start_failure(frame, exc)

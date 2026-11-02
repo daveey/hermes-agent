@@ -182,6 +182,9 @@ async def run(params, board_db):
                 # the owner did admit it (t_82f0fe15 runs 7630/7649: two restart_wait refusals
                 # spent its failure budget and sent it to triage).
                 error.owner_unavailable = claim.admission_id is None
+                # [daveey] An owner that kept refusing on its own host state (not silent): the sweep
+                # files the host notice from this typed reason (``kanban_host_refusal``).
+                error.host_refusal = str(exc) if host_refusal else None
                 raise error from exc
         else:
             if receipt['status'] == 'unknown' and claim.restarted:
@@ -279,18 +282,23 @@ def main():
     return rc
 
 
-def _book_refusal(params, board_db, rc, line):
+def _book_refusal(params, board_db, rc, line, proof=None):
     """Book this submitter's refusal as its run's receipt (``record_submitter_result``): a bound
     run's crash diagnosis never trusts the shared task log, so the line printed below would
-    otherwise be lost to the owner-death classifier. Never raises: the exit must not depend on it. [daveey]"""
+    otherwise be lost to the owner-death classifier. *proof*: a pre-admission host refusal
+    (``kanban_host_refusal.preadmission_proof``), stored on the receipt. Never raises: the exit must
+    not depend on it. [daveey]"""
     if params is None or not board_db:
         return
     try:
         from hermes_cli import kanban_db as kb
         from hermes_cli.kanban_db_connect import connect_closing
+        from hermes_cli.kanban_host_refusal import PROOF_KEY
         from hermes_cli.kanban_worker_log import record_submitter_result
+        # The proof only when there is one: the plain refusal keeps its call shape.
+        extra = {'extra': {PROOF_KEY: proof}} if proof else {}
         with connect_closing(Path(board_db)) as conn, kb.write_txn(conn):
-            record_submitter_result(conn, params, os.getpid(), rc, line)
+            record_submitter_result(conn, params, os.getpid(), rc, line, **extra)
     except Exception as exc:  # health: allow BLE001 -- preserve the original refusal exit on receipt-store failure
         print(f'Kanban refusal receipt could not be recorded: {type(exc).__name__}', file=sys.stderr)
 
@@ -318,10 +326,13 @@ def _submit():
         line = f'Kanban owner refused: {exc}'
         print(line, file=sys.stderr)
         rc = 1
+        proof = None
         if getattr(exc, 'owner_unavailable', False):
             from hermes_cli.kanban_owner_unavailable import KANBAN_OWNER_UNAVAILABLE_EXIT_CODE
+            from hermes_cli.kanban_host_refusal import preadmission_proof
             rc = KANBAN_OWNER_UNAVAILABLE_EXIT_CODE
-        _book_refusal(params, board_db, rc, line)
+            proof = preadmission_proof(getattr(exc, 'host_refusal', None))
+        _book_refusal(params, board_db, rc, line, proof)
         return rc
 
 
