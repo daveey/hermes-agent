@@ -220,7 +220,7 @@ def test_turn_start_failure_releases_the_prepared_admission_outside_sessions_loc
         turn_env, request, tmp_path, monkeypatch, failure):
     """A failure under ``_sessions_lock`` (routing-row reopen, or the thread spawn itself) propagates and
     gives the prepared admission back, taking ``history_lock`` only after ``_sessions_lock`` is released."""
-    import agent.memory_provider as memory_provider
+    from agent import memory_provider
     from hermes_cli import backend_retirement
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
