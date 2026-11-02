@@ -77,6 +77,7 @@ def test_unchanged_polls_past_the_ttl_reuse_one_read_without_a_refresh_thread(cl
     conn = _board(tmp_path / "kanban.db", [("t1", "running", "s1")])
     try:
         assert _poll()["kanban_active"] == 1
+        cold_threads = spies["threads"]
         dates = []
         for _ in range(4):  # a Desktop poll every 3 s: past _CACHE_TTL_S each time
             _advance(clock, ksa._CACHE_TTL_S + 0.5)
@@ -84,7 +85,7 @@ def test_unchanged_polls_past_the_ttl_reuse_one_read_without_a_refresh_thread(cl
             assert row["kanban_active"] == 1 and "kanban_unknown" not in row
             dates.append(row["kanban_observed_at"])
         assert spies["recompute"] == 1
-        assert spies["threads"] == 0
+        assert spies["threads"] == cold_threads  # no additional warm refresh worker
         # Each revalidation is a new observation: the Desktop's freshness checks see a current date.
         assert dates == sorted(dates) and len(set(dates)) == 4
         assert dates[-1] >= clock["wall"] - ksa._CACHE_TTL_S
@@ -141,9 +142,10 @@ def test_a_settled_stat_keyed_board_revalidates_until_it_is_written(clock, spies
         old = int((clock["wall"] - 3600) * 1e9)
         os.utime(path, ns=(old, old))
         assert _poll()["kanban_active"] == 1
+        cold_threads = spies["threads"]
         _advance(clock, ksa._CACHE_TTL_S + 0.5)
         assert _poll()["kanban_active"] == 1
-        assert spies == {"recompute": 1, "threads": 0}
+        assert spies == {"recompute": 1, "threads": cold_threads}
         conn.execute("INSERT INTO tasks VALUES ('t2', 'ready', 's1')")
         _advance(clock, 0.1)
         assert _poll()["kanban_active"] == 2

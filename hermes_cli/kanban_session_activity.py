@@ -1792,21 +1792,22 @@ def _refresh_annotation_locked(scope: tuple[str, ...], read_at: float | None = N
     return parts
 
 
-def _annotation_snapshot() -> tuple:
+def _annotation_snapshot() -> tuple | None:
     """One in-flight annotation read, shared by overlapping polls.
 
     Returns the last good parts when a refresh is already running, so those polls
     do not occupy an AnyIO worker for the whole waiting-source and attention pass.
-    A cold start (nothing served yet) waits for that pass. Raises the read's own
-    error when it fails; the caller stamps ``kanban_unknown``.
+    A cold start waits only its refresh budget, then returns None (unknown).
+    Completed failures raise their own error; neither case invents counts.
 
     [daveey] One server process serves several profiles and the result is per scope.
     A cold poll that waited behind another scope's read, or behind a read that failed,
     used to get None and mark every row unknown (kanban-d0ba67426d). It now reads its
-    own scope while it holds the lock; same-scope overlapping polls still share one read.
+    own scope within the remaining budget; overlapping same-scope polls share one read.
     """
     global _annotate_waiters
     scope = _origin_scope()
+    deadline = time.monotonic() + _REFRESH_WAIT_S
     if not _annotate_refresh_lock.acquire(blocking=False):
         _annotate_waiters += 1
         try:
@@ -1814,25 +1815,23 @@ def _annotation_snapshot() -> tuple:
             stale = stale or _annotation_copy.seed(scope, _last_annotation, _identity.freeze_annotation)
             if stale is not None:
                 return stale
-            _annotate_refresh_lock.acquire()
+            if not _annotate_refresh_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                return None
         finally:
             _annotate_waiters -= 1
-        try:
-            if _annotate_flight_scope == scope and _annotate_flight_result is not None:
-                return _annotate_flight_result
-            cached = _last_annotation.get(scope)
-            if cached is not None:
-                return cached
-            # No usable result for this scope: another profile's flight, or a failed one.
-            return _refresh_annotation_locked(scope)
-        finally:
+        cached = (_annotate_flight_result if _annotate_flight_scope == scope
+                  else None)
+        cached = cached if cached is not None else _last_annotation.get(scope)
+        if cached is not None:
             _annotate_refresh_lock.release()
+            return cached
+        # No usable result: transfer lock ownership to a bounded read of this scope.
+        return _bounded.refresh_bounded(lambda: _refresh_annotation_locked(scope), _annotate_refresh_lock,
+                                        None, max(0.0, deadline - time.monotonic()))
     previous = _last_annotation.get(scope)
     if previous is None:
-        try:
-            return _refresh_annotation_locked(scope)
-        finally:
-            _annotate_refresh_lock.release()
+        return _bounded.refresh_bounded(lambda: _refresh_annotation_locked(scope), _annotate_refresh_lock,
+                                        None, max(0.0, deadline - time.monotonic()))
     try:
         parts = _revalidate.refresh_if_unchanged(scope, _refresh_annotation_locked)
     except BaseException:

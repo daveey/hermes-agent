@@ -125,11 +125,15 @@ def test_slow_refresh_error_keeps_previous_and_releases_lock(scoped, caplog):
     assert ksa._annotation_snapshot()[0] == {"s1": 4}
 
 
-def test_cold_scope_still_reads_inline(scoped):
+def test_fast_cold_scope_returns_counts_with_caller_context(scoped):
+    from contextvars import ContextVar
+
+    scope = ContextVar("cold_scope", default="wrong")
+    scope.set("caller")
     reads = []
-    scoped.setattr(ksa, "_read_annotation_parts", lambda: reads.append(threading.current_thread().name) or _parts(1))
+    scoped.setattr(ksa, "_read_annotation_parts", lambda: reads.append(scope.get()) or _parts(1))
     assert ksa._annotation_snapshot()[0] == {"s1": 1}
-    assert reads == [threading.current_thread().name]
+    assert reads == ["caller"]
 
 
 def test_refresh_runs_on_a_real_thread_when_thread_is_stubbed(scoped):
