@@ -4,16 +4,17 @@ from copy import deepcopy
 import pytest
 
 from hermes_cli import kanban_pr_acceptance as acceptance
+from tests.hermes_cli.check_suite_fake import check_api
 
 SHA = "850d52075dc59a3e842e123c9d986f864f370762"
 MERGED = "2026-11-02T13:10:04Z"
 NAME = "All required checks pass (v2)"
 PRE = {"id": 125286307833, "name": NAME, "head_sha": SHA, "app": {"id": 15368},
        "status": "completed", "conclusion": "success", "started_at": "2026-11-02T12:51:52Z",
-       "completed_at": "2026-11-02T12:52:08Z"}
+       "completed_at": "2026-11-02T12:52:08Z", "check_suite": {"id": 112312466991}}
 POST = {"id": 125304345962, "name": NAME, "head_sha": SHA, "app": {"id": 15368},
         "status": "completed", "conclusion": "failure", "started_at": "2026-11-02T13:30:23Z",
-        "completed_at": "2026-11-02T13:30:38Z"}
+        "completed_at": "2026-11-02T13:30:38Z", "check_suite": {"id": 112327246670}}
 
 
 @pytest.fixture
@@ -26,16 +27,17 @@ def evidence(monkeypatch):
         if endpoint == "graphql":
             return {"data": {"repository": {"pullRequest": {
                 "headRefOid": SHA, "baseRefName": "main", "state": state["state"],
-                "mergedAt": state["merged_at"], "baseRef": {"branchProtectionRule": {
+                "mergedAt": state["merged_at"], "mergeCommit": {"oid": state["landed"]},
+                "baseRef": {"branchProtectionRule": {
                     "requiredStatusChecks": [{"context": NAME, "app": {"databaseId": state["app"]}}]}}}}}}
         if "/rules/branches/" in endpoint:
             return [[]]
-        if "/check-runs?" in endpoint:
+        if "/commits/" in endpoint and "/check-runs?" in endpoint and "filter=all" in endpoint:
             runs = state["runs"]
-            if "filter=latest" in endpoint:
-                # Reduced single-suite history; latest retains other suites in real responses.
-                runs = [max(runs, key=lambda r: r["id"])] if runs else []
             return [{"total_count": len(runs) + state.get("omitted", 0), "check_runs": runs}]
+        checks = check_api(endpoint, state["runs"], SHA)
+        if checks is not None:
+            return checks
         if "/statuses?" in endpoint:
             return [state["statuses"]]
         if "/pulls/" in endpoint:
@@ -71,13 +73,17 @@ def test_run_finishing_after_merge_remains_pending_at_merge(evidence, conclusion
     assert not receipt["ok"] and receipt["classification"] == "pending"
 
 
-def test_open_still_uses_latest_without_cutoff(evidence):
+def test_open_uses_latest_view_without_cutoff(evidence):
+    # PR #656's pre- and post-merge runs live in different suites: both are latest.
     evidence["state"] = "OPEN"
     receipt = collect()
     assert not receipt["ok"] and receipt["classification"] == "failure"
-    assert receipt["checks"][0]["id"] == POST["id"]
+    assert {c["id"]: c["classification"] for c in receipt["checks"]} == {
+        PRE["id"]: "success", POST["id"]: "failure"}
     assert receipt["post_merge_checks"] == []
-    assert any("filter=latest" in url for url in evidence["requests"])
+    assert [u for u in evidence["requests"] if "/check-" in u] == [
+        f"repos/acme/repo/commits/{SHA}/check-runs?per_page=100&filter=latest",
+        f"repos/acme/repo/commits/{SHA}/check-suites?per_page=100"]
 
 
 @pytest.mark.parametrize("result", ["failure", "missing", "pending"])
@@ -123,6 +129,17 @@ def test_rebased_landing_still_uses_original_head(evidence):
     assert receipt["ok"] and receipt["head_sha"] == SHA
     assert not receipt["post_merge_checks"]
     assert not any(evidence["landed"] in url for url in evidence["requests"])
+
+
+@pytest.mark.parametrize("landed", ["rebased", "missing"])
+def test_post_merge_red_on_unlanded_head_is_not_main_health(evidence, landed):
+    # A rebase landed another SHA: a later red run on the PR head is not base CI.
+    evidence["landed"] = "b" * 40 if landed == "rebased" else None
+    receipt = collect()
+    assert receipt["ok"] and receipt["classification"] == "success"
+    assert [c["id"] for c in receipt["post_merge_checks"]] == [POST["id"]]
+    assert receipt["post_merge_checks"][0]["classification"] == "failure"
+    assert "main_health" not in receipt
 
 
 def status(check, result):
@@ -221,7 +238,8 @@ def test_completion_receipt_names_main_health_owner(evidence, owner_state):
     with connect() as conn:
         owner = None
         if owner_state:
-            owner = kb.create_task(conn, title="Main health", idempotency_key=f"ci-red:acme/repo:{SHA}")
+            owner = kb.create_task(conn, title="Main health", created_by="ci-main-watch",
+                                   idempotency_key=f"ci-red:acme/repo:{SHA}")
             conn.execute("UPDATE tasks SET status=? WHERE id=?", (owner_state, owner))
         task = kb.create_task(conn, title="Publish", completion_contract="acme/repo")
         assert kb.complete_task(conn, task, summary="verified", metadata={
@@ -229,7 +247,8 @@ def test_completion_receipt_names_main_health_owner(evidence, owner_state):
         receipt = json.loads(conn.execute(
             "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (task,)).fetchone()[0])
         assert receipt["ok"]
-        assert receipt["main_health"].get("owner_card") == owner
+        active_owner = owner if owner_state == "ready" else None
+        assert receipt["main_health"].get("owner_card") == active_owner
         assert "ci-main-watch" in receipt["main_health"]["detail"]
-        if owner:
-            assert owner in receipt["main_health"]["detail"]
+        if active_owner:
+            assert active_owner in receipt["main_health"]["detail"]

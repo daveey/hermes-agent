@@ -56,23 +56,68 @@ def merge_evidence(receipt, pr, repo, runs, statuses):
     statuses, post_statuses = partition_at_merge(statuses, merged_at, runs=False)
     sha = receipt["head_sha"]
     receipt["post_merge_checks"] = [check_receipt(c, sha) for c in post_runs + post_statuses]
-    if any(c["conclusion"] in {"failure", "error", "timed_out", "action_required"}
-           for c in receipt["post_merge_checks"]):
+    landed = pr.get("mergeCommit")
+    if (isinstance(landed, dict) and landed.get("oid") == sha
+            and any(c["conclusion"] in {"failure", "error", "timed_out", "action_required"}
+                    for c in receipt["post_merge_checks"])):
+        branch = pr["baseRefName"]
+        label = repo if branch == "main" else f"{repo}@{branch}"
         receipt["main_health"] = {
-            "idempotency_key": f"ci-red:{repo}:{sha}",
-            "detail": f"Main CI is red for {repo}@{sha}; owned by ci-main-watch, not this PR's acceptance."}
+            "idempotency_key": f"ci-red:{label}:{sha}",
+            "detail": f"Base branch {branch} CI is red for {repo}@{sha}; "
+                      "ci-main-watch owns base health, not this PR's acceptance."}
     return runs, statuses
 
 
+def _health_owner_rows(conn, exact_key):
+    # ci-main-watch keys a continuing episode by FIRST red SHA, not current SHA.
+    # Off main its producer label is repo@branch. Match the whole label, not LIKE
+    # (repo/branch names may contain SQL wildcard characters).
+    prefix = exact_key.rsplit(":", 1)[0] + ":"
+    return conn.execute(
+        "SELECT id, status, idempotency_key, created_at FROM tasks "
+        "WHERE created_by='ci-main-watch' "
+        "AND status IN ('triage','todo','scheduled','ready','running','blocked','review') "
+        "AND substr(idempotency_key,1,?)=? "
+        "ORDER BY created_at DESC, id DESC", (len(prefix), prefix)).fetchall()
+
+
 def annotate_main_health_owner(conn, receipt):
-    """Use the lifecycle's board scope, never open/write a global board implicitly."""
+    """Diagnostic only: discover existing owners across boards without creating any.
+
+    Other board handles are mode=ro (never the initializing/migrating connect()).
+    Missing, old-schema or unreadable boards cannot change acceptance or prevent
+    its receipt from being persisted. No profile switching or global mutations.
+    """
+    import re
+    import sqlite3
+    from hermes_cli import kanban_lockguard
+    from hermes_cli.kanban_db_workspace import _sibling_board_db_files
+
     health = receipt.get("main_health")
     if not health:
         return
-    row = conn.execute(
-        "SELECT id, status FROM tasks WHERE idempotency_key=? "
-        "ORDER BY created_at DESC, id DESC LIMIT 1", (health["idempotency_key"],)).fetchone()
-    if row:
-        health["owner_card"] = row["id"]
-        health["owner_status"] = row["status"]
-        health["detail"] += f" Main-health owner card: {row['id']} ({row['status']})."
+    key = health["idempotency_key"]
+    rows = []
+    try:
+        rows.extend(_health_owner_rows(conn, key))
+        paths = _sibling_board_db_files(conn)
+    except (OSError, sqlite3.Error):
+        paths = []
+    for path in paths:
+        try:
+            other = kanban_lockguard.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.1)
+            try:
+                other.row_factory = sqlite3.Row
+                rows.extend(_health_owner_rows(other, key))
+            finally:
+                other.close()
+        except (OSError, sqlite3.Error):
+            continue
+    rows = [row for row in rows if re.fullmatch(r"[0-9a-f]{40}", row["idempotency_key"].rsplit(":", 1)[-1])]
+    if not rows:
+        return
+    row = max(rows, key=lambda r: (r["idempotency_key"] == key, r["created_at"], r["id"]))
+    health["owner_card"] = row["id"]
+    health["owner_status"] = row["status"]
+    health["detail"] += f" Main-health owner card: {row['id']} ({row['status']})."

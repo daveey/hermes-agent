@@ -201,7 +201,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
         phase = "reading the PR"
         query = (f'{{repository(owner:{json.dumps(owner)},name:{json.dumps(name)})'
                  f'{{pullRequest(number:{number:d})'
-                 '{headRefOid baseRefName state mergedAt '
+                 '{headRefOid baseRefName state mergedAt mergeCommit{oid} '
                  'baseRef{branchProtectionRule{requiredStatusChecks{context app{databaseId}}}}}}}')
         repository = _api("graphql", query=query, profile_home=profile_home)["data"]["repository"]
         if repository is None:
@@ -241,12 +241,18 @@ def collect_acceptance(contract: str, published_pr: str | None,
                 where=f"{repo}@{branch}", repoint=_REPOINT_HINT))
             return receipt
         phase = "reading check runs"
+        # OPEN: GitHub's latest view (each suite's latest attempt), proven complete
+        # against every suite's latest_check_runs_count. MERGED: every run, cut at merge.
+        from hermes_cli.kanban_pr_check_runs import complete_runs, proven_latest_runs
         run_filter = "all" if pr["state"] == "MERGED" else "latest"
         pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter={run_filter}",
                      paginate=True, profile_home=profile_home)
-        runs = [run for page in pages for run in page["check_runs"]]
-        if len({r["id"] for r in runs}) != pages[0]["total_count"]:
-            raise ValueError("Incomplete check-run pagination")
+        if run_filter == "latest":
+            suites = _api(f"repos/{repo}/commits/{sha}/check-suites?per_page=100",
+                          paginate=True, profile_home=profile_home)
+            runs = proven_latest_runs(pages, suites, sha)
+        else:
+            runs = complete_runs(pages)
         phase = "reading commit statuses"
         statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
                                                        paginate=True, profile_home=profile_home) for s in page]
