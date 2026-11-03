@@ -149,3 +149,24 @@ def _runs_where(runs_on, pinned_machine, marker_placement) -> str:
     except Exception:
         gw = None
     return f"here ({gw})" if gw else "here"
+
+
+def _create_session_id(args: dict, origin_intent: Optional[dict], self_task) -> Optional[str]:
+    """The new card's session. The worker/API runtime may be transient; the owning task's origin is durable.
+    The ambient id is the request-scoped ContextVar binding, not the process-global os.environ: in a
+    multi-session gateway the env holds the LAST agent built, and an id that never reached its ``sessions``
+    row is provenance pointing at nothing."""
+    if origin_intent is not None:
+        # Courier retries use only their durable envelope, never the receiving
+        # process's current session/tenant/project. Creator provenance remains
+        # unchanged even if its session is compressed or subsequently removed.
+        return args.get("session_id")
+    from gateway.session_context import get_session_env
+    from tools.async_delegation import _current_origin_session_id
+    return (_persisted_session_id(args.get("session_id"))
+            # The parent card's session too: a card placed from another gateway carries
+            # a placeholder (or a chat that lives elsewhere), and handing that on as a
+            # child's origin made the owner's bind fail (kanban-69709bcf16). [daveey]
+            or _persisted_session_id(self_task.session_id if self_task else None)
+            or _persisted_session_id(_current_origin_session_id())
+            or _persisted_session_id(get_session_env("HERMES_SESSION_ID", "")))

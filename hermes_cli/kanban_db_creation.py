@@ -91,3 +91,21 @@ def validate_create_assignment(conn, assignee, *, runs_on, requires, workspace_k
     # Bind a provider-less concrete pin now (or refuse), never late-bind it to config at spawn.
     model, provider = resolve_pin_provider(model, provider, assignee=assignee)
     return required, model, provider
+
+
+def run_insert_guard(conn, guard) -> None:
+    """Run ``create_task(insert_guard=...)`` inside the INSERT's write transaction, before the row exists. The
+    guard raises to roll the create back: ``kanban_overlap.AfterCreate.guard`` re-runs the overlap match under the
+    board's write lock, so a concurrent create that passed the same first check is refused. [daveey]"""
+    if guard is not None:
+        guard(conn)
+
+
+def project_branch_name(project_obj, task_id: str, title) -> "str | None":
+    """A project worktree card's deterministic branch (moved from ``kanban_db``)."""
+    from hermes_cli import projects_db as _pdb
+
+    try:
+        return _pdb.branch_name_for(project_obj, task_id, title=title or "")
+    except Exception:  # health: allow BLE001 -- moved unchanged from kanban_db; no branch = worker wt/<id> fallback
+        return None

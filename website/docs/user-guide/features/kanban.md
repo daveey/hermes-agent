@@ -55,6 +55,15 @@ when the proposed work is genuinely separate. Set `kanban.create_overlap_check` 
 `false` to disable this check. Missing or unreadable replicas are skipped and logged;
 the check cannot guarantee uniqueness against unavailable boards.
 
+Two creates that run at the same moment both pass the first check before either card
+exists. So every entry (the `kanban_create` tool, `hermes kanban create`, and the
+dashboard REST API) runs the match again inside the write transaction that inserts the
+card. That second pass reads only open cards on the target board that were created
+since the first check began. Of two concurrent owners of one piece of work on one
+board, exactly one lands and the other gets the same `create_overlap` refusal. A
+concurrent create on another board or another gateway is not re-checked under that
+lock, so that race remains.
+
 Every refusal is recorded with each match's `why`: as a `create_overlap` event on the
 creator's card or the best local match, or, when every match is on another gateway, as a
 line in `<kanban home>/logs/create_overlap.jsonl` (rotated to `.1` at 1 MiB).

@@ -413,6 +413,19 @@ def _cmd_assignees(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_overlap_refusal(args: argparse.Namespace, refused: str) -> int:
+    """Print a ``create_overlap`` refusal (JSON with ``--json``, else a summary on stderr); exit code 2."""
+    if getattr(args, "json", False):
+        print(refused)
+    else:
+        ref = json.loads(refused)
+        print(f"kanban: {ref['code']}: {ref['note']}", file=sys.stderr)
+        for m in ref["matches"]:
+            print(f"  {m['id']}  {m['gateway']}/{m['board']}  ({m['status']})  {m['title']}  — {m['why']}",
+                  file=sys.stderr)
+    return 2
+
+
 def _cmd_create(args: argparse.Namespace) -> int:
     from agent.delegation_context import is_dispatcher_owned_worker_context
 
@@ -480,15 +493,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             self_tid=os.environ.get("HERMES_KANBAN_TASK") if in_worker else None,
             parents=list(args.parent or ()), entry="cli")
         if refused:
-            if getattr(args, "json", False):
-                print(refused)
-            else:
-                ref = json.loads(refused)
-                print(f"kanban: {ref['code']}: {ref['note']}", file=sys.stderr)
-                for m in ref["matches"]:
-                    print(f"  {m['id']}  {m['gateway']}/{m['board']}  ({m['status']})  {m['title']}  — {m['why']}",
-                          file=sys.stderr)
-            return 2
+            return _print_overlap_refusal(args, refused)
         from hermes_cli.kanban_db_workspace import WorktreeWorkspaceConfigError
         from hermes_cli.kanban_capabilities import CapabilityMismatchError
         from hermes_cli.kanban_pin_provider import PinProviderUnresolvedError
@@ -532,7 +537,10 @@ def _cmd_create(args: argparse.Namespace) -> int:
                                  if in_worker else None),
                 validate_workspace=True, validate_skills=True, runs_on=getattr(args, "runs_on", None),
                 placement_policy=cli_policy(args, body, ws_kind, ws_path, board),
+                insert_guard=after_create.guard,  # re-checks overlap under the write lock [daveey]
             )
+        except kanban_overlap.OverlapRefused as exc:  # landed under the write lock after the first check
+            return _print_overlap_refusal(args, exc.settle())
         except WorktreeWorkspaceConfigError as exc:
             return _err(f"kanban: --workspace: {exc}", 2)
         except (CapabilityMismatchError, UnknownSkillError, RequiresDeclarationMissing, MachinePinRefused,
