@@ -4,6 +4,7 @@
 // ACTIVE_USE_HOLD_MS).
 import fs from 'node:fs'
 
+import { backendScopeKey } from './connection-registry'
 import { prewarmTargetKey, prewarmTargets, RecentRemoteProfiles } from './remote-prewarm'
 import { type SshKeepaliveHoldDeps, SshKeepaliveHolds } from './ssh-keepalive-hold'
 
@@ -39,5 +40,38 @@ export function createRemoteWarmSet(deps: RemoteWarmSetDeps) {
     log: deps.log
   })
 
-  return { holds, listTargets, recent }
+  // The one door that counts as use: it stamps the recent set (prewarm) and the 30-min keep-alive hold together.
+  // Only an SSH connection in the registry and a valid profile name count; anything else is a no-op.
+  const noteUse = (connectionId: unknown, profile: unknown): boolean => {
+    const id = String(connectionId ?? '').trim()
+    const name = String(profile ?? '').trim() || 'default'
+
+    if (!id || !USE_PROFILE_NAME_RE.test(name) || !sshConnectionIds().includes(id)) {
+      return false
+    }
+
+    recent.touch(id, name)
+    holds.noteUse(backendScopeKey(id, name))
+
+    return true
+  }
+
+  // ensureRegistryBackend's call for every SSH dial: stamps only when the dial was made for a user action.
+  const noteDial = (connectionId: unknown, profile: unknown, opts: RegistryDialUseOpts = {}): boolean =>
+    registryDialCountsAsUse(opts) && noteUse(connectionId, profile)
+
+  return { holds, listTargets, noteDial, noteUse, recent }
+}
+
+const USE_PROFILE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/
+
+export type RegistryDialUseOpts = { forceProbe?: boolean; passive?: boolean; use?: boolean }
+
+// Whether an ensureRegistryBackend dial counts as the user using that profile. Only callers acting on a user's
+// action set `use` (opening a terminal on it). Every other dial is plumbing: a renderer socket (re)connect, a
+// sidebar/roster/session-list read, a media load, a post-resume redial, the prewarm probe. Those once counted, so
+// one reconnect sweep over a host's profiles stamped them all into the cap-4 prewarm set and pinned each for
+// 30 min. Renderer user actions (open, new chat, send) report use through `hermes:remote:note-use` instead.
+export function registryDialCountsAsUse(opts: RegistryDialUseOpts = {}): boolean {
+  return opts.use === true && !opts.passive && !opts.forceProbe
 }

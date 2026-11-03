@@ -271,10 +271,11 @@ describe('main.ts wiring', () => {
     expect(warmSet).toMatch(/HERMES_DESKTOP_REMOTE_PREWARM === '0' \? \[\] : prewarmTargets\(sshConnectionIds\(\), recent\)/)
   })
 
-  it('records a named profile on every user dispatch to an SSH connection, not on prewarm or passive calls', () => {
-    expect(main).toMatch(
-      /if \(source\.kind === 'ssh' && !passive && !opts\.forceProbe\) \{\n\s+remoteWarmSet\.recent\.touch\(id, profileKey\)\n\s+remoteWarmSet\.holds\.noteUse\(backendScopeKey\(id, profileKey\)\)/
-    )
+  it('records a named profile only for a dial flagged as use (never a sweep, prewarm or passive call)', () => {
+    // A plain non-passive dial used to count, so a post-reconnect sweep stamped every listed profile
+    // (remote-warm-use.test.ts). The gate lives in remote-warm-set.ts noteDial/registryDialCountsAsUse.
+    expect(main).toMatch(/if \(source\.kind === 'ssh'\) \{\n\s+remoteWarmSet\.noteDial\(id, profileKey, opts\)/)
+    expect(warmSet).toMatch(/return opts\.use === true && !opts\.passive && !opts\.forceProbe/)
   })
 
   it('pooled dispatch skips the probe from the shared answer ledger unless forced', () => {

@@ -44,6 +44,9 @@ declare global {
         connectionId?: null | string
         profile?: null | string
       }) => Promise<HermesConnection>
+      // A user action (open, new chat, send) on a registry route: the one renderer signal Desktop main counts as
+      // use of that remote profile (prewarm recent set + 30-min keep-alive hold). Plain dials and reads never count.
+      noteRemoteUse?: (payload: { connectionId: string; profile: string }) => Promise<boolean>
       // Registry-scoped fresh WS URL (same result contract as getGatewayWsUrl).
       getGatewayWsUrlFor?: (payload: {
         connectionId?: null | string

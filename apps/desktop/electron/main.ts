@@ -547,7 +547,7 @@ import { createRemoteOwnerCache } from './remote-owner-cache'
 import { RemotePrewarmer } from './remote-prewarm'
 import { remoteSessionCookies } from './remote-session-cookies'
 import { RemoteUpdatePause, remoteUpdatePauseKey } from './remote-update-pause'
-import { createRemoteWarmSet } from './remote-warm-set'
+import { createRemoteWarmSet, type RegistryDialUseOpts } from './remote-warm-set'
 import {
   applyRemoteRequestHeaders,
   attachRemoteRequestHeaderListener,
@@ -9482,7 +9482,7 @@ async function ensureTerminalBackend(webContentsId: number) {
   // here avoids bootstrapping a second SSH tunnel / remote dashboard.
   if (windowRoute?.registryScoped && windowRoute.connectionId) {
     return backendDialClaims.run(backendDialClaimKey(windowRoute.connectionId, windowRoute.profile), () =>
-      ensureRegistryBackend(windowRoute.connectionId, windowRoute.profile)
+      ensureRegistryBackend(windowRoute.connectionId, windowRoute.profile, '', { use: true })
     )
   }
 
@@ -10644,7 +10644,7 @@ async function ensureRegistryBackend(
   connectionId,
   profile,
   managedUpdateCorrelation = '',
-  opts: { forceProbe?: boolean; passive?: boolean } = {}
+  opts: RegistryDialUseOpts = {}
 ) {
   const passive = Boolean(opts.passive)
   const registry = readDesktopConnectionsRegistry()
@@ -10670,9 +10670,9 @@ async function ensureRegistryBackend(
     throw new Error(`Profile '${profileKey}' does not exist.`)
   }
 
-  if (source.kind === 'ssh' && !passive && !opts.forceProbe) {
-    remoteWarmSet.recent.touch(id, profileKey)
-    remoteWarmSet.holds.noteUse(backendScopeKey(id, profileKey))
+  // Only a dial made for a user action counts as use (prewarm recent set + 30-min hold); see registryDialCountsAsUse.
+  if (source.kind === 'ssh') {
+    remoteWarmSet.noteDial(id, profileKey, opts)
   }
 
   let resolvedRegistrySshConfig
@@ -14144,6 +14144,9 @@ async function connectDesktopProfileRoute(route: DesktopProfileRoute, sender?: E
 // ensureBackend when the v1 route is local, and attaches to this machine's
 // canonical gateway when the v1 global mode is remote (the registry 'local'
 // entry always means this machine) unless the profile is remote-only.
+// A renderer user action (open, new chat, send) on a registry route: the only renderer signal that counts as use.
+ipcMain.handle('hermes:remote:note-use', (_event, payload) => remoteWarmSet.noteUse(payload?.connectionId, payload?.profile))
+
 ipcMain.handle('hermes:connection:for', async (event, payload) => {
   const { connectionId, profile } = payload && typeof payload === 'object' ? (payload as any) : ({} as any)
   const registry = readDesktopConnectionsRegistry()
@@ -17247,7 +17250,7 @@ const terminalIpc = registerTerminalIpc({
   gatewayTarget: owner => terminalGatewayTarget(owner, readDesktopConnectionsRegistry(), sshConnections),
   ensureGatewayBackend: owner =>
     backendDialClaims.run(backendScopeKey(owner.connectionId, owner.profile), () =>
-      ensureRegistryBackend(owner.connectionId, owner.profile)
+      ensureRegistryBackend(owner.connectionId, owner.profile, '', { use: true })
     )
 })
 

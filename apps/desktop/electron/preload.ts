@@ -55,6 +55,8 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   getEmbedHostOrigin: () => ipcRenderer.invoke('hermes:embed-host:origin'),
   // Registry-scoped backend resolution: { connectionId, profile } → descriptor.
   getConnectionFor: payload => ipcRenderer.invoke('hermes:connection:for', payload),
+  // A user action (open, new chat, send) on a registry route: stamps the remote warm set (counts as use).
+  noteRemoteUse: payload => ipcRenderer.invoke('hermes:remote:note-use', payload),
   getProfileRoutes: profiles => ipcRenderer.invoke('hermes:plugin-profile-routes', profiles),
   revalidateConnection: () => ipcRenderer.invoke('hermes:connection:revalidate'),
   // [daveey] Sidebar boot snapshot (cold start): read once, synchronously, before the backend is up.

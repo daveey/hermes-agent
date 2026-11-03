@@ -31,6 +31,7 @@ import {
 import { notifyError } from '@/store/notifications'
 import { notifyRemoteOverrideAuthFailure } from '@/store/profile-remote-override'
 import { exitProjectScope } from '@/store/project-scope'
+import { noteRemoteUse } from '@/store/remote-use'
 import { $connection, clearComposerSelectionOwner, setComposerSelectionOwner, setConnection } from '@/store/session'
 import type { SessionOwnerRoute } from '@/store/session-request-router'
 import { reloadOpenStarmapGraph, resetStarmapGraph } from '@/store/starmap'
@@ -890,6 +891,9 @@ export async function ensureGatewayAgent(
 
     // Descriptor resolves concurrently with the dial, same as the profile
     // path, so no await sits between the activation and the publication.
+    // An activation the user chose counts as use of that remote profile (store/remote-use); a redial does not.
+    noteRemoteUse(connection, target)
+
     const activation = signal
       ? ensureGatewayForAgent(connection, target, { signal })
       : ensureGatewayForAgent(connection, target)
