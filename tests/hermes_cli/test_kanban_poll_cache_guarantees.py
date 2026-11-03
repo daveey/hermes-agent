@@ -28,6 +28,31 @@ def test_recent_stat_board_same_tick_write_is_read_after_ttl(clock, spies, tmp_p
         conn.close()
 
 
+def test_replaced_reader_cannot_reuse_same_stat_board_row(clock, spies, tmp_path):
+    # PRAGMA data_version is connection-local: a reader opened after a commit can report the value the evicted one
+    # saw before it, so only the reader's identity in the memo key tells the two apart (fix-F3, t_01a19ec10011d888).
+    path = tmp_path / "kanban.db"
+    conn = helpers._board(path, [("t1", "running", "s1")], counted=False)
+    try:
+        recent = int((clock["wall"] - 0.5) * 1e9)
+        os.utime(path, ns=(recent, recent))
+        assert helpers._poll()["kanban_active"] == 1
+        before = ksa._activity_fingerprint()
+        with ksa.cached_ro(path) as reader:
+            evicted = reader
+        conn.execute("UPDATE tasks SET status = 'archived'")
+        os.utime(path, ns=(recent, recent))
+        ksa.evict_readers(os.path.realpath(path))
+        assert ksa._activity_fingerprint() == before
+        with ksa.cached_ro(path) as reader:
+            assert reader is not evicted
+        helpers._advance(clock, ksa._CACHE_TTL_S + 0.5)
+        assert "kanban_active" not in helpers._poll()
+        assert spies["recompute"] == 2
+    finally:
+        conn.close()
+
+
 def test_recent_stat_attention_rechecks_verdict_after_ttl(clock, tmp_path):
     path = tmp_path / "kanban.db"
     conn = helpers._board(path, [], counted=False)
