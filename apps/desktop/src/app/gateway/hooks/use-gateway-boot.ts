@@ -68,6 +68,7 @@ import {
 } from '@/store/gateway-switch'
 import { watchLocalRuntimeJobs } from '@/store/local-runtime-jobs'
 import { dismissNotification, notify, notifyError, RECOVERY_ACTIONS } from '@/store/notifications'
+import { registerPrimaryGatewayRecovery } from '@/store/primary-gateway-recovery'
 import {
   $activeGatewayProfile,
   currentProfileSelectionRevision,
@@ -376,6 +377,10 @@ export function useGatewayBoot({
     // switch and the renderer's own bounded retry (#82679).
     let bootFailed = false
     let reconnecting = false
+    // One redial per outage may be brought forward by a request waiting on the
+    // closed primary (registerPrimaryGatewayRecovery below); later waiters ride
+    // the backoff. Cleared when the socket opens.
+    let redialExpedited = false
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let reconnectAttempt = 0
     // Wall-clock of the current socket's 'open'; null while not open.
@@ -593,8 +598,19 @@ export function useGatewayBoot({
         // A manual retry may finish after the user has moved to another route.
         if (!manual || (isActivePrimary() && gatewayActivationEpoch() === manual.activationEpoch)) {
           reconcileBusyStatesOnReconnect()
-          await callbacksRef.current.refreshHermesConfig().catch(() => undefined)
-          await callbacksRef.current.refreshSessions().catch(() => undefined)
+          // Bounded: `reconnecting` stays set until these settle, and while it
+          // is set a drop of the socket just reopened is not redialed. A hung
+          // refresh would latch the primary closed until a reload.
+          await withTimeout(
+            callbacksRef.current.refreshHermesConfig(),
+            RECONNECT_ATTEMPT_TIMEOUT_MS,
+            'Timed out refreshing config after reconnect'
+          ).catch(() => undefined)
+          await withTimeout(
+            callbacksRef.current.refreshSessions(),
+            RECONNECT_ATTEMPT_TIMEOUT_MS,
+            'Timed out refreshing sessions after reconnect'
+          ).catch(() => undefined)
         }
       } catch (err) {
         // OAuth session expired mid-reconnect: surface the actionable "sign in
@@ -845,6 +861,7 @@ export function useGatewayBoot({
       }
 
       let switchToken: null | ReturnType<typeof beginGatewaySwitch> = null
+      let switchCompleted = false
 
       try {
         // Barrier up + machine-context reset + session wipe, in one synchronous
@@ -945,6 +962,7 @@ export function useGatewayBoot({
 
         completeDesktopBoot()
         bootCompleted = true
+        switchCompleted = true
         // Rediscover local-runtime jobs (model downloads, runtime installs)
         // that were running before a reload — the backend registry is the
         // authority; this just resumes following it.
@@ -973,7 +991,14 @@ export function useGatewayBoot({
         // returning. Never use token-less teardown here: it would force down a
         // newer switch started synchronously by error recovery/notification UI.
         if (switchToken !== null) {
+          const owned = isCurrentGatewaySwitch(switchToken)
           endGatewaySwitch(switchToken)
+
+          // A drop while the switch held the barrier was not redialed (the
+          // close handler defers to the switch). Arm the backoff now.
+          if (owned && switchCompleted) {
+            scheduleReconnect()
+          }
         }
       }
     }
@@ -1155,6 +1180,7 @@ export function useGatewayBoot({
         reauthNotified = false
         primaryReauthError = null
         livenessProbeFailures = 0
+        redialExpedited = false
         clearReconnectTimer()
         clearLivenessReprobeTimer()
 
@@ -1260,6 +1286,22 @@ export function useGatewayBoot({
 
     const offPowerResume = desktop.onPowerResume?.(() => void forceReconnectNow())
     const offConnectionApplied = desktop.onConnectionApplied?.(() => void softSwitch())
+
+    // Owner-pinned store requests on the closed primary wait for THIS redial
+    // (fresh descriptor and ticket) instead of failing or dialing on their own.
+    const offPrimaryRecovery = registerPrimaryGatewayRecovery(gateway, () => {
+      if (cancelled || !bootCompleted || primaryReauthError || $gatewaySwitching.get()) {
+        return false
+      }
+
+      if (!reconnecting && !gatewayOpen() && !redialExpedited) {
+        redialExpedited = true
+        clearReconnectTimer()
+        void attemptReconnect()
+      }
+
+      return true
+    })
 
     const offGatewayReconnect = registerGatewayReconnect(async (options?: GatewayReconnectOptions) => {
       if (cancelled || !bootCompleted || $gatewaySwitching.get()) {
@@ -1670,6 +1712,8 @@ export function useGatewayBoot({
         completeDesktopBoot()
         bootCompleted = true
         bootRetryAttempt = 0
+        // A drop before bootCompleted was not redialed by the close handler.
+        scheduleReconnect()
         // A Docker/SSH terminal backend that fails its probe means shell
         // commands silently cannot run — say so once, with a way out. Cold
         // launch is the common path, so it must warn too, not only softSwitch.
@@ -1755,6 +1799,7 @@ export function useGatewayBoot({
 
     return () => {
       cancelled = true
+      offPrimaryRecovery()
       offSwitchLifecycle()
       endGatewaySwitch()
       clearReconnectTimer()
