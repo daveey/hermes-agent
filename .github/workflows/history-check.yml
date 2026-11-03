@@ -39,6 +39,9 @@ jobs:
         with:
           ref: ${{ inputs.commit }}
           fetch-depth: 0 # full history both sides for merge-base
+          # [daveey] merge-base needs only the commit graph; a full-blob clone of
+          # the ~1 GB fork outran the 10-min fast-lane cap on fresh runners.
+          filter: blob:none
 
       - id: merge-base-check
         name: Reject PRs with no common ancestor on main
