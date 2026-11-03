@@ -91,6 +91,13 @@ def test_courier_and_host_work_bypass_worker_policy():
     "hermes-hub client: retry a 409 from the Board",
     "Fix a typo in ~/code/_wtf/notes.md",
     "Read the hermes-agent tree under ~/.hermes for context",
+    # Near-misses of the home-rooted .worktrees marker stay portable.
+    "Fix the parser bug in ~/code/babybear/src/parser.py and open a PR",
+    "Patch /home/ubuntu/code/askeve/app/routes.py and push",
+    "Document ~/code/askeve/.worktrees-notes.md cleanup",
+    "Rename ~/code/babybear/worktrees/README.md",
+    "Add .worktrees to ~/code/askeve/.gitignore",
+    "Clean /tmp/scratch/.worktrees in the test fixture",
 ])
 def test_ordinary_repo_work_enrolls_worker_first(title):
     """Repo paths, the Board CLI name and a bare ~/.hermes are not host needs: workers provision checkouts."""
@@ -118,6 +125,12 @@ def test_hub_state_work_stays_local(title):
     "Continue in ~/code/_wt-remote/fix-x and push",
     "Finish the agent tree at ~/code/hermes-mods/.claude/worktrees/agent-a1 and open a PR",
     "Rebase /home/ubuntu/.hermes/hermes-agent/.worktrees/fix-y onto main",
+    # Any home-rooted per-repo .worktrees (kanban t_* trees): 11-03 hub had babybear 1 unpushed commit,
+    # askeve 12 trees with dirty files. Follow-up cards name the path in text, not a worktree workspace.
+    "Continue in ~/code/babybear/.worktrees/t_50dec368 and push",
+    "Finish /home/ubuntu/code/askeve/.worktrees/t_01a18c8d53dc31b2 and open a PR",
+    "Commit the dirty files in `~/code/askeve/.worktrees/t_01a18c8d53dc31b2`.",
+    "List the trees under /home/ubuntu/code/babybear/.worktrees",
     # hermes-hub commands act with this gateway's key and replica; a worker has neither.
     "Run hermes-hub create-task hub --title x", "hermes-hub adopt-task t_1 --session s", "Run `hermes-hub sync`",
     "Check hermes-hub requests for the stuck ask",

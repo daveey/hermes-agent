@@ -350,13 +350,18 @@ def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
 # and the Board CLI name ``hermes-hub`` kept ~3 of every 4 ready hub cards off the worker pool, so the hub's
 # local execution cap throttled the whole queue. What stays local: an existing worktree on this host
 # (``~/code/_wt/<slug>``, ``~/code/_wt-remote/<slug>``, ``<repo>/.claude/worktrees/<x>``,
-# ``~/.hermes/hermes-agent/.worktrees/<x>`` hold unpushed work), Hermes state under ``~/.hermes`` other than the
-# code checkout (``~/.hermes/skills`` is host state: curator ledger, usage counts, live-patched skills), a
+# ``~/code/<repo>/.worktrees/<x>``, ``~/.hermes/hermes-agent/.worktrees/<x>`` hold unpushed work), Hermes
+# state under ``~/.hermes`` other than the code checkout (``~/.hermes/skills`` is host state: curator ledger,
+# usage counts, live-patched skills), a
 # ``hermes-hub <subcommand>`` run (it acts with this gateway's key and replica), and a card that declares
 # ``requires: [host_repo]`` or a ``dir``/``worktree`` workspace.
 HERMES_STATE_PATH = r"(?:~|/home/[^/\s]+)/\.hermes/(?!(?:hermes-agent|repos|bin)(?:/|\b))[\w.-]"
 HOST_WORKTREE_PATH = r"(?:~|/home/[^/\s]+)/code/_wt(?:-[\w-]+)?(?:/|\b)"
-LOCAL_WORKTREE_PATH = r"/\.claude/worktrees\b|(?:~|/home/[^/\s]+)/\.hermes/hermes-agent/\.worktrees\b"
+# Any home-rooted ``<dir>/.worktrees`` (``~/code/<repo>/.worktrees/t_*``, ``~/.hermes/hermes-agent/.worktrees``):
+# kanban worktrees there hold host-only commits and dirty files. ``.worktrees-notes.md`` and ``/tmp/.../.worktrees``
+# are not matches.
+LOCAL_WORKTREE_PATH = (r"/\.claude/worktrees\b|"
+                       r"(?:~|/home/[^/\s]+)/(?:[^/\s`'\"]+/)*\.worktrees(?![\w-]|\.\w)")
 HUB_CLI_COMMAND = (r"\bhermes-hub\s+(?:sync|status|sessions|inbox|tasks|where|links|requests?|inspect-legacy|"
                    r"reconcile-legacy|inspect-alias|retire-alias|adopt-task|create-task|depend|outcomes|"
                    r"install-watch|watch|diff-shared)\b")
