@@ -147,6 +147,19 @@ def _peer_closed(conn) -> bool:
         return True
 
 
+class _DeadlineRequests(urllib.request.BaseHandler):
+    """urllib invokes request processors again for each redirect, before sending."""
+
+    def __init__(self, remaining: Callable[[float], float]) -> None:
+        self.remaining = remaining
+
+    def http_request(self, request):
+        request.timeout = self.remaining(request.timeout)
+        return request
+
+    https_request = http_request
+
+
 class Hub:
     """The Board service's HTTP API for one gateway.
 
@@ -172,12 +185,17 @@ class Hub:
         return {"authorization": f"Bearer {self.ident.key}", "content-type": "application/json",
                 "user-agent": "hermes-kanban-sync/1"}
 
-    def _call(self, method: str, path: str, body: Optional[dict] = None) -> dict:
-        timeout = self.timeout
+    def _remaining(self, timeout: Optional[float] = None) -> float:
+        """Recompute the shared absolute budget immediately before each HTTP attempt."""
+        timeout = self.timeout if timeout is None else timeout
         if self.deadline is not None:
             timeout = min(timeout, self.deadline - time.monotonic())
             if timeout <= 0:
                 raise TimeoutError("Board request budget exhausted")
+        return timeout
+
+    def _call(self, method: str, path: str, body: Optional[dict] = None) -> dict:
+        timeout = self._remaining()
         data = None if body is None else json.dumps(body).encode()
         parts = urllib.parse.urlsplit(self.ident.url)
         if parts.scheme not in ("http", "https") or not parts.hostname or self._proxied(parts):
@@ -185,10 +203,14 @@ class Hub:
         return self._call_kept_alive(parts, method, path, data, timeout)
 
     def _call_urlopen(self, method: str, path: str, data: Optional[bytes], timeout: Optional[float] = None) -> dict:
-        timeout = self.timeout if timeout is None else timeout
+        timeout = self._remaining(timeout)
         req = urllib.request.Request(self.ident.url + path, data=data, method=method, headers=self._headers())
+        # A per-call opener leaves global urllib users alone. Its processor also caps
+        # urllib's internal redirect follows, not merely the initial fallback send.
+        open_request = (urllib.request.build_opener(_DeadlineRequests(self._remaining)).open
+                        if self.deadline is not None else urllib.request.urlopen)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with open_request(req, timeout=timeout) as resp:
                 return json.loads(resp.read() or b"{}")
         except urllib.error.HTTPError as exc:
             text = exc.read().decode("utf-8", "replace")[:500]
@@ -255,7 +277,7 @@ class Hub:
         target = (parts.path or "") + path
         headers = self._headers()
         for attempt in (0, 1):
-            conn, reused = self._connection(parts, timeout)
+            conn, reused = self._connection(parts, self._remaining(timeout))
             try:
                 conn.request(method, target, body=data, headers=headers)
             except (OSError, http.client.HTTPException) as exc:
