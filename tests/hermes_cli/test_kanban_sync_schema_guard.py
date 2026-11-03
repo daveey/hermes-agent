@@ -230,3 +230,158 @@ def test_every_rename_source_column_is_declared_retired():
     sources = {src for _new, _ddl, src, _copy in kbc._RENAMED_TASK_COLUMNS if src}
     assert sources and sources == sync.RETIRED_COLUMNS["tasks"]
     assert not sync.RETIRED_COLUMNS["tasks"] & (sync.SYNCED_COLUMNS["tasks"] | sync.LOCAL_COLUMNS["tasks"])
+
+
+# Incident (2026-11-02, MacBook), the detection half: after that refusal the loop never respun, every claim went
+# through the Board lease, and the board stalled (52 outbox ops unpushed, 15 ready, 0 running). The stuck warning
+# named only ``claim_deferred`` counts, ``sync status`` printed ``last_error: None`` and ``kanban_create`` kept
+# returning local ``runs_on`` rows. ``run_forever`` now records why it is not running (kanban_sync_runstate).
+
+def _runstate():
+    from hermes_cli import kanban_sync_runstate
+    return kanban_sync_runstate
+
+
+def _run_sync_loop(kanban_home, svc, monkeypatch, rounds=1):
+    """``run_forever`` against the fake Board for ``rounds`` completed rounds (or its start refusal). Returns the
+    recorded sync state seen while the loop was still running, one per round."""
+    from hermes_cli import machine_metrics
+
+    hub = svc.hub(ME)
+    monkeypatch.setattr(ksc, "load_identity", lambda: hub.ident)
+    monkeypatch.setattr(ksc, "Hub", lambda ident: hub)
+    monkeypatch.setattr(ksc.sync, "set_lease_client", lambda value: None)
+    monkeypatch.setattr(ksc, "board_paths", lambda: [(BOARD, kanban_home / "kanban.db")])
+    monkeypatch.setattr(ksc, "reconcile_links", lambda *args, **kwargs: None)
+    monkeypatch.setattr(machine_metrics, "Reporter", lambda *args: type("R", (), {"report_due": lambda self: None})())
+    monkeypatch.setattr(hub, "report_metrics", lambda *args: None, raising=False)
+
+    class Feed:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self):
+            return None
+
+    monkeypatch.setattr(ksc, "FeedWatcher", Feed)
+    left = [rounds]
+    seen = []
+
+    def wait(*args):
+        seen.append(_runstate().describe())
+        left[0] -= 1
+
+    monkeypatch.setattr(ksc, "wait_for_work", wait)
+    ksc.run_forever(lambda: left[0] > 0, interval=1)
+    return seen
+
+
+def _deferred_tick():
+    """The stuck line of a tick shaped like the MacBook's (claims deferred, cards not leasable here)."""
+    from hermes_cli import kanban_db_dispatch as kbd
+    res = kbd.DispatchResult()
+    res.claim_deferred.append(("t_a", "not_found"))
+    res.claim_deferred.append(("t_b", "not_claimable"))
+    res.skipped_ineligible.append(("t_c", "labels_mismatch"))
+    return kbd.stuck_warning(6, [res])
+
+
+def _refuse_start(kanban_home, pre_rename_live, svc, monkeypatch):
+    with kbc.write_txn(pre_rename_live):
+        pre_rename_live.execute("ALTER TABLE tasks ADD COLUMN upstream_new_field TEXT")
+    assert _run_sync_loop(kanban_home, svc, monkeypatch) == []  # refused: no round ran
+
+
+def test_refused_sync_start_is_named_by_the_stuck_dispatcher_warning(kanban_home, pre_rename_live, svc, monkeypatch):
+    _refuse_start(kanban_home, pre_rename_live, svc, monkeypatch)
+    msg = _deferred_tick()
+    assert "claim_deferred(not_found)=1" in msg
+    assert "kanban sync not running since " in msg
+    assert "upstream_new_field" in msg and "board default" in msg, msg
+
+
+def test_refused_sync_start_is_named_by_sync_status(kanban_home, pre_rename_live, svc, monkeypatch, capsys):
+    import argparse
+    from hermes_cli import kanban_sync_cli
+    _refuse_start(kanban_home, pre_rename_live, svc, monkeypatch)
+    assert ksc.status(pre_rename_live)["running"].startswith("no: kanban sync not running since ")
+    assert kanban_sync_cli._status(argparse.Namespace(board=BOARD, json=False)) == 0
+    out = capsys.readouterr().out
+    assert "running: no: kanban sync not running since" in out and "upstream_new_field" in out, out
+
+
+def test_healthy_round_clears_the_sync_state(kanban_home, pre_rename_live, svc, monkeypatch):
+    _refuse_start(kanban_home, pre_rename_live, svc, monkeypatch)
+    assert "kanban sync not running" in _deferred_tick()
+    with kbc.write_txn(pre_rename_live):
+        pre_rename_live.execute("ALTER TABLE tasks DROP COLUMN upstream_new_field")  # the newer core's column gone
+    assert _run_sync_loop(kanban_home, svc, monkeypatch) == [""]  # cleared by the round, while the loop runs
+    _runstate().clear()  # drop the loop's own exit record (covered below): this asserts the running state
+    msg = _deferred_tick()
+    assert "kanban sync not running" not in msg and "runs_on / placement" in msg
+    assert ksc.status(pre_rename_live)["running"].startswith("yes")
+
+
+def test_sync_loop_exit_while_enabled_is_recorded(kanban_home, pre_rename_live, svc, monkeypatch):
+    _run_sync_loop(kanban_home, svc, monkeypatch)
+    assert "stopped" in _runstate().describe()
+
+
+def test_sync_state_is_ignored_when_sync_is_off(kanban_home, pre_rename_live, svc, monkeypatch):
+    _refuse_start(kanban_home, pre_rename_live, svc, monkeypatch)
+    support.write_sync_config(kanban_home, False)
+    assert _runstate().describe() == ""
+    assert "kanban sync not running" not in _deferred_tick()
+
+
+@pytest.fixture
+def machine_pin_create(kanban_home, pre_rename_live, monkeypatch):
+    """A primary board whose registry lists worker-1 as a machine that picks up other gateways' cards."""
+    from hermes_cli import kanban_capability_registry as reg
+    from hermes_cli import kanban_worker_node as wn
+    monkeypatch.setattr(reg, "self_gateway", lambda: ME)
+    wn.set_registry_fetch(lambda: {"me": ME, "machines": [
+        {"name": "worker-1", "state": "active", "labels": ["linux"], "pickup": "all"}]})
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(kanban_home / "kanban.db"))
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", BOARD)
+    monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
+    from tools import kanban_tools as kt
+    try:
+        yield kt
+    finally:
+        wn.set_registry_fetch(None)
+
+
+def _runs_on_rows(conn):
+    return conn.execute("SELECT id, runs_on FROM tasks WHERE runs_on IS NOT NULL").fetchall()
+
+
+def test_machine_pin_create_with_sync_running_makes_a_runs_on_row(machine_pin_create, pre_rename_live):
+    out = json.loads(machine_pin_create._handle_create({"title": "Summarize public data", "assignee": "default",
+                                                        "placement": "worker-1", "requires": []}))
+    assert out.get("runs_on") == ["machine:worker-1"], out
+
+
+@pytest.mark.parametrize("pin", [{"placement": "worker-1"}, {"runs_on": ["machine:worker-1"]}])
+def test_machine_pin_create_while_sync_is_down_never_returns_a_stranded_row(machine_pin_create, pre_rename_live,
+                                                                            pin):
+    _runstate().record_down("not starting: board default: SchemaAhead(test)")
+    out = json.loads(machine_pin_create._handle_create({"title": "Summarize public data", "assignee": "default",
+                                                        "requires": [], **pin}))
+    assert _runs_on_rows(pre_rename_live) == [], out
+    assert "error" in out, out
+
+
+def test_machine_pin_create_while_sync_is_down_takes_the_gateway_relay(machine_pin_create, pre_rename_live,
+                                                                      monkeypatch):
+    """A name that is both a gateway and an enrolled machine (``hub``) goes through the placement relay."""
+    from hermes_cli import kanban_placement as kp
+    sent = []
+    monkeypatch.setattr(kp, "target_live", lambda target, **kw: None)  # the gateway answers the relay
+    monkeypatch.setattr(kp, "create_remote", lambda view, **kw: sent.append(kw["target"]) or
+                        {"ok": True, "request_id": "r_1", "queued_only": True})
+    _runstate().record_down("not starting: board default: SchemaAhead(test)")
+    out = json.loads(machine_pin_create._handle_create({"title": "Summarize public data", "assignee": "default",
+                                                        "requires": [], "placement": "worker-1"}))
+    assert sent == ["worker-1"] and out.get("status") == "queued", out
+    assert _runs_on_rows(pre_rename_live) == []

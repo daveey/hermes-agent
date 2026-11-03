@@ -1494,14 +1494,17 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                 "project_id": project_id}
         from hermes_cli import kanban_worker_node as _wn
         # runs_on only works on a board that syncs as primary; the machine check is kp._machine_picks_up.
-        machine_ok = ((lambda m: _wn.sync.board_mode(conn) == "primary" and kp._machine_picks_up(m))
-                      if conn is not None else None)
+        from hermes_cli import kanban_sync_runstate as _runstate  # down: a machine pin takes the gateway route
+        machine_ok = ((lambda m: _wn.sync.board_mode(conn) == "primary" and kp._machine_picks_up(m)
+                       and not _runstate.down()) if conn is not None else None)
         decision = kp.decide(view, machine_ok=machine_ok)
         target = decision["where"]
         if target == "refuse":
             return _placement_refused(decision["pin"], decision.get("why", "")), None
         if target == "local":
-            return None, _local_placement(kp, view, decision, machine_ok=machine_ok, note_local_pin=note_local_pin)
+            local = _local_placement(kp, view, decision, machine_ok=machine_ok, note_local_pin=note_local_pin)
+            stranded = _runstate.stranded_create((local or {}).get("runs_on"))
+            return (tool_error(stranded, rejection="sync_not_running"), None) if stranded else (None, local)
         self_gw = reg.self_gateway() or "local"
         cfg = kp.config()
         placed = kp.create_remote(view, target=target, origin_session=session_id,
@@ -1634,14 +1637,14 @@ def _handle_create(args: dict, **kw) -> str:
         # Placement on a synced board: ``runs_on`` labels, and a pin to an enrolled machine that advertises
         # pickup becomes ``runs_on=[machine:<name>]`` (created here, run there through the Board lease). Any
         # other pin, a routed gateway included, falls through to the gateway route below. [daveey]
-        from hermes_cli import kanban_worker_node as _wn
+        from hermes_cli import kanban_sync_runstate as _runstate  # runs_on rows need this host's sync [daveey]
         try:
-            runs_on = _wn.explicit_runs_on(conn, args.get("runs_on"))  # machine pins need pickup
+            runs_on = _runstate.explicit_runs_on(conn, args.get("runs_on"), courier=origin_intent is not None)
         except ValueError as exc:
             return tool_error(str(exc))
         pinned_machine = None
         if runs_on is None and origin_intent is None:
-            runs_on = _wn.placement_runs_on(conn, args.get("placement"))
+            runs_on = _runstate.placement_runs_on(conn, args.get("placement"))
             if runs_on is not None:
                 pinned_machine = str(args.get("placement")).strip()
                 args = {**args, "placement": "local"}

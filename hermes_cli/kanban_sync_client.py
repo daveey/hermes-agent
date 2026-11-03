@@ -1339,12 +1339,26 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
     feed socket per synced board. Connected boards pull on feed/local invalidation; disconnected boards and
     failed pulls retain the poll period. An independent full recovery audits all boards at least every 60s
     (or the configured period if longer), subject to in-flight IO and the next poll tick."""
+    from hermes_cli import kanban_sync_runstate as runstate
+    # Record why the loop is not running, so the stuck-dispatcher warning, ``sync status`` and create name it
+    # instead of a board that silently stalls behind the Board lease (MacBook, 2026-11-02). [daveey]
+    try:
+        _run_forever(keep_running, interval, runstate)
+    except BaseException as exc:
+        runstate.record_down(f"kanban sync loop crashed: {type(exc).__name__}: {exc}")
+        raise
+
+
+def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], runstate: Any) -> None:
     try:
         ident = load_identity()
     except SyncUnavailable as exc:
         _log.warning("%s; kanban sync not started", exc)
+        runstate.record_down(f"not starting: {exc}")
         return
-    if _schema_ahead_boards(board_paths()):
+    ahead = _schema_ahead_boards(board_paths())
+    if ahead:
+        runstate.record_down("not starting: " + "; ".join(f"board {slug}: {why}" for slug, why in ahead))
         return  # give the host sync role up: a current core's gateway can take it [daveey]
     hub = Hub(ident)
     sync.set_lease_client(HubLeaseClient(hub))
@@ -1368,9 +1382,12 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
         selected = work.select(boards, time.monotonic(), outbox_pending)
         selected += [b for b in deferred_repairs_due(boards, _repair_clock()) if b not in selected]
         results = sync_all_once(hub, boards=selected)
-        if any((r.error or "").startswith("SchemaAhead") for r in results):
+        ahead = [r for r in results if (r.error or "").startswith("SchemaAhead")]
+        if ahead:
             _log.error("kanban sync: a newer core migrated this host's board; giving up the sync role")
+            runstate.record_down("gave up the sync role: " + "; ".join(f"board {r.board}: {r.error}" for r in ahead))
             return
+        runstate.clear()  # a completed round: the loop runs
         for r in results:
             work.finished(r.board, not r.error)
             if r.push and (r.push.sent or r.push.rejected):
@@ -1385,10 +1402,12 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
         if deferred_due is not None:
             remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
         wait_for_work(wake, [p for _s, p in boards], remaining, keep_running)
+    runstate.record_down("stopped (gateway stopping, or the host sync lease went to another gateway)")
 
 
-def _schema_ahead_boards(boards: list[tuple[str, Path]]) -> list[str]:
-    """Boards a newer core migrated (logged at ERROR). An unreadable board is left to the round's own errors."""
+def _schema_ahead_boards(boards: list[tuple[str, Path]]) -> list[tuple[str, str]]:
+    """``(slug, refusal)`` per board a newer core migrated (logged at ERROR). An unreadable board is left to the
+    round's own errors."""
     ahead = []
     for slug, path in boards:
         try:
@@ -1398,7 +1417,7 @@ def _schema_ahead_boards(boards: list[tuple[str, Path]]) -> list[str]:
             cols = {}
         if cols:
             _log.error("kanban sync: not starting: board %s: %s", slug, SchemaAhead(cols))
-            ahead.append(slug)
+            ahead.append((slug, str(SchemaAhead(cols))))
     return ahead
 
 
@@ -1567,9 +1586,16 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
         r = conn.execute("SELECT last_error FROM kanban_sync_outbox WHERE last_error IS NOT NULL "
                          "ORDER BY created_at DESC LIMIT 1").fetchone()
         last_error = r[0] if r else None
-    return {"mode": sync.board_mode(conn), "board_id": st.get("board_id"), "gateway": st.get("gateway_id"),
-            "cursor": st.get("cursor"), "pending": counts.get("pending", 0), "rejected": counts.get("rejected", 0),
-            "last_error": last_error}
+    mode = sync.board_mode(conn)
+    out = {"mode": mode, "board_id": st.get("board_id"), "gateway": st.get("gateway_id"),
+           "cursor": st.get("cursor"), "pending": counts.get("pending", 0), "rejected": counts.get("rejected", 0),
+           "last_error": last_error}
+    if mode != "off":
+        # A refused start writes no outbox row, so ``last_error`` alone read a stalled board as healthy. [daveey]
+        from hermes_cli import kanban_sync_runstate as runstate
+        stopped = runstate.describe()
+        out["running"] = f"no: {stopped}" if stopped else "yes (no stop recorded)"
+    return out
 
 
 _DIFF_SKIP = {"current_run_id"}  # compared as run uids instead

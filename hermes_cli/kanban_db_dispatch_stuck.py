@@ -91,6 +91,12 @@ def stuck_warning(bad_ticks: int, results: Iterable[Optional[Any]]) -> str:
            f"spawned.{f' Last tick held back: {held}.' if held else ''}")
     lease_bound = any(res is not None and (res.claim_deferred or res.skipped_ineligible) for res in results)
     if lease_bound:
+        # With sync enabled every claim goes through the Board lease: a stopped sync loop explains them all. [daveey]
+        from hermes_cli import kanban_sync_runstate as runstate
+        stopped = runstate.describe()
+        if stopped:
+            return (msg + f" The Board lease refused or deferred claims and {stopped}. Restart the gateway once "
+                    "the cause is fixed (`hermes kanban sync status` shows the same state).")
         return (msg + " The Board lease refused or deferred claims: check the cards' runs_on / placement "
                 "(`hermes kanban show <id>`) and which machine holds or may take their Board lease.")
     return msg + " Check profile health (venv, PATH, credentials) and `hermes kanban list --status ready`."
