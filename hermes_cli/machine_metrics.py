@@ -1,7 +1,10 @@
-"""This machine's load, reported to the Board's machine registry for display (Desktop Runners panel).
+"""This machine's load, reported to the Board's machine registry (Desktop Runners panel and worker-first placement).
 
-``collect()`` reads CPU load, memory in use and free disk with a few cheap OS calls; the kanban sync loop
-sends it with ``report_due()`` at most every :data:`REPORT_EVERY_S`. Display only: placement never reads it.
+``collect()`` reads CPU load, memory in use, free disk and whole-host ``active_card_runs`` with a few cheap OS
+calls; the kanban sync loop sends it with ``report_due()`` at most every :data:`REPORT_EVERY_S`. Not display-only
+since worker-first-v1 (docs/worker-first-v1.md): the Board's worker-pool admission scores the reported sample, and
+``kanban_worker_placement.local_admission`` takes a fresh ``collect()`` before turning a policy card's grant into a
+local run. Cards without ``placement_policy`` are still placed without it.
 """
 from __future__ import annotations
 

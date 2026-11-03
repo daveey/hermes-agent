@@ -347,7 +347,8 @@ class Hub:
         return self._call("GET", "/v2/machines")
 
     def report_metrics(self, metrics: dict) -> dict:
-        """This machine's own load for the registry (display only; see hermes_cli.machine_metrics)."""
+        """This machine's own load for the registry: Runners display and worker-first pool admission
+        (see hermes_cli.machine_metrics). Sending stays best-effort."""
         return self._call("POST", "/v2/machines/me/metrics", metrics)
 
     def report_pickup(self, pickup: Optional[str]) -> dict:
