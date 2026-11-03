@@ -46,6 +46,8 @@ def build_kanban_policy(connection, params, config):
             from gateway.session_kanban_resume import restart_candidate
             resume_from = restart_candidate(conn, task.id, task.current_run_id)
             resume_base = kb.build_worker_context(conn, task.id, recovery_tail=False) if resume_from else None
+            from hermes_cli.kanban_db_context import ctx_workspace_span
+            context_workspace = ctx_workspace_span(task)  # [daveey] the capsule rewrite's exact header span
             # [daveey] Owner-derived (task row + resolved backend), never caller/config supplied.
             from gateway.session_kanban_capsule import capsule_requirement
             capsule = capsule_requirement(task)
@@ -72,6 +74,7 @@ def build_kanban_policy(connection, params, config):
         profile=task.assignee, workspaces_root=str(kb.workspaces_root(board=board).resolve()),
         skills=skills, goal_mode=task.goal_mode, goal_max_turns=task.goal_max_turns,
         goal_text='\n\n'.join(p for p in (task.title, task.body) if p), context=context,
+        context_workspace=context_workspace,
         max_runtime_seconds=task.max_runtime_seconds, accept_hooks=True, capsule=capsule)
     context['db'] = str(path)
     if resume_from is not None:  # [daveey] planned and copied off-loop in run_task, after session creation
@@ -79,6 +82,8 @@ def build_kanban_policy(connection, params, config):
         context['restart_candidate'] = {**resume_from, 'assignee': task.assignee}
         context['resume_context'] = resume_context(resume_base, {'prior_run_id': resume_from['prior_run_id'],
                                                                  'run_id': task.current_run_id})
+        from gateway.session_kanban_capsule import resume_workspace_span
+        context['resume_context_workspace'] = resume_workspace_span(context, resume_base)
     request = json.loads(policy.request_json)
     request.update(source='kanban', board=board, task_id=task.id, run_id=task.current_run_id)
     return replace(policy, source='kanban', platform='cli', toolsets=tuple(sorted(set(policy.toolsets) | {'kanban'})),
@@ -488,12 +493,12 @@ def _run_task_turns(agent, frame, history, context):
     if warning:
         import logging
         logging.getLogger(__name__).warning('%s', warning)
-    from gateway.session_kanban_resume import compact_resumed_history, worker_prompt_context
-    from gateway.session_kanban_capsule import capsule_worker_context
+    from gateway.session_kanban_resume import compact_resumed_history
+    from gateway.session_kanban_capsule import capsule_prompt_context
     # [daveey] An over-headroom resumed transcript is compacted before the first model call (or dropped).
     history = compact_resumed_history(agent, context, history)
-    card = worker_prompt_context(context, history)  # [daveey] resumed after an owner restart, or the tail
-    prompt = '\n\n'.join(p for p in (skills, warning, capsule_worker_context(context, card), frame['text']) if p)
+    card = capsule_prompt_context(context, history)  # [daveey] resumed after an owner restart, or the tail
+    prompt = '\n\n'.join(p for p in (skills, warning, card, frame['text']) if p)
     result = agent.run_conversation(prompt, conversation_history=history, turn_author=KANBAN_TURN_AUTHOR)
 
     def recover(nudge):

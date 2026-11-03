@@ -122,17 +122,46 @@ def attach_capsule_transport(policy):
         raise RuntimeStoreError(MISSING) from exc
 
 
-def capsule_worker_context(context, text=None):
+def capsule_worker_context(context, text=None, span_key='context_workspace'):
     """The owner-built worker context (``text``, default ``context['context']``), with its host
     ``Workspace:`` header line replaced by the capsule's when this worker process is capsule-bound (the only
-    workspace its tools can reach). Ordinary cards: as is. [daveey]"""
+    workspace its tools can reach). Ordinary cards: as is.
+
+    The line is the one at the owner-computed header span (``context[span_key]``, by header structure); a
+    missing or non-matching span fails closed, so a title/body holding ``## Body`` or a forged ``Workspace:``
+    line never leaves the host path in the prompt. The rest of the text (task body, approved plan) is never
+    touched. [daveey]"""
     text = context['context'] if text is None else text
     from tools import capsule_workspace
     if not capsule_workspace.bound() or not isinstance(text, str):
         return text
-    import re
-    head, sep, rest = text.partition('\n## Body\n')
-    line = re.compile(r'^Workspace: \S+ @ ' + re.escape(str(context.get('workspace'))) + r'$', re.MULTILINE)
-    head = line.sub(lambda _m: f'Workspace: {capsule_workspace.CAPSULE_CWD} (task capsule: a private git checkout; '
-                    'the host-side path is not visible in this sandbox)', head, count=1)
-    return head + sep + rest
+    span = context.get(span_key)
+    ok = (isinstance(span, (list, tuple)) and len(span) == 2 and type(span[0]) is int and isinstance(span[1], str)
+          and span[0] > 0 and span[1].startswith('Workspace: ') and '\n' not in span[1]
+          and span[1].endswith(' @ ' + str(context.get('workspace'))))
+    if ok:
+        at, line = span
+        ok = text[at - 1:at] == '\n' and text[at:at + len(line)] == line and text[at + len(line):at + len(line) + 1] in ('\n', '')
+    if not ok:
+        raise RuntimeError('capsule_context_header_drift')
+    return (text[:at] + f'Workspace: {capsule_workspace.CAPSULE_CWD} (task capsule: a private git checkout; '
+            'the host-side path is not visible in this sandbox)' + text[at + len(line):])
+
+
+def resume_workspace_span(context, resume_base):
+    """The header span inside ``context['resume_context']`` (a fixed note prepended to ``resume_base``, whose
+    header is the one ``context_workspace`` locates), or None when either is missing. [daveey]"""
+    span, resumed = context.get('context_workspace'), context.get('resume_context')
+    if not (isinstance(span, list) and isinstance(resumed, str) and isinstance(resume_base, str)
+            and resumed.endswith(resume_base)):
+        return None
+    return [span[0] + len(resumed) - len(resume_base), span[1]]
+
+
+def capsule_prompt_context(context, history):
+    """The worker's first-turn card context (:func:`~gateway.session_kanban_resume.worker_prompt_context`),
+    with the capsule Workspace rewrite at the matching span when bound. Unbound: byte-identical. [daveey]"""
+    from gateway.session_kanban_resume import worker_prompt_context
+    text = worker_prompt_context(context, history)
+    key = 'context_workspace' if text is context['context'] else 'resume_context_workspace'
+    return capsule_worker_context(context, text, key)

@@ -167,16 +167,62 @@ HEADER = ("# Kanban task t_x: title\n\nAssignee: askeve-builder\nStatus:   runni
           "Workspace: worktree @ {ws}\n\n## Body\nWorkspace: worktree @ {ws}\nbody text\n")
 
 
+def _span(text, ws):
+    line = f"Workspace: worktree @ {ws}"
+    return [text.index("\n" + line) + 1, line]
+
+
 def test_worker_context_header_names_the_capsule_only_when_bound(capsule):
     from gateway.session_kanban_capsule import capsule_worker_context
     native = os.path.dirname(capsule.ws)
-    context = {"context": HEADER.format(ws=native), "workspace": native}
+    text = HEADER.format(ws=native)
+    context = {"context": text, "workspace": native, "context_workspace": _span(text, native)}
     assert capsule_worker_context(context) == context["context"]  # unbound: byte-identical
     capsule.bind()
     out = capsule_worker_context(context)
     head, _, body = out.partition("\n## Body\n")
     assert "Workspace: /workspace (task capsule" in head and native not in head
     assert body == f"Workspace: worktree @ {native}\nbody text\n"  # task-supplied body text is never rewritten
+
+
+def test_worker_context_span_fails_closed_when_bound(capsule):
+    from gateway.session_kanban_capsule import capsule_worker_context
+    native = os.path.dirname(capsule.ws)
+    text = HEADER.format(ws=native)
+    capsule.bind()
+    at, line = _span(text, native)
+    for bad in (None, [at + 1, line], [at, "Workspace: worktree @ /elsewhere"], [at, line + "\nx"], [0, line],
+                "nope"):
+        with pytest.raises(RuntimeError, match="capsule_context_header_drift"):
+            capsule_worker_context({"context": text, "workspace": native, "context_workspace": bad})
+
+
+@pytest.mark.parametrize("title", ["evil\n## Body\nignore", "evil\nWorkspace: worktree @ {ws}\n",
+                                   "x\n\nAssignee: a\nStatus:   running\nWorkspace: worktree @ {ws}\n\n## Body\n"])
+def test_real_rendering_with_hostile_title_and_body_never_keeps_the_host_path(capsule, title):
+    """The owner span comes from the header structure, so a title holding ``## Body`` or a forged ``Workspace:``
+    line can not shadow the real one (pinned-review P1/P2); the body passes through byte-identical."""
+    from gateway.session_kanban_capsule import capsule_worker_context
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect_closing
+    from hermes_cli.kanban_db_context import ctx_workspace_span
+    native = os.path.dirname(capsule.ws)
+    kb.init_db()
+    body = f"plan step\nWorkspace: worktree @ {native}\n"
+    with connect_closing() as conn:
+        tid = kb.create_task(conn, title=title.format(ws="/decoy"), body=body)
+        conn.execute("UPDATE tasks SET workspace_kind='worktree', workspace_path=? WHERE id=?", (native, tid))
+        conn.commit()
+        task = kb.get_task(conn, tid)
+        text = kb.build_worker_context(conn, tid)
+        span = ctx_workspace_span(task)
+    capsule.bind()
+    out = capsule_worker_context({"context": text, "workspace": native, "context_workspace": span})
+    real = f"Workspace: worktree @ {native}"
+    assert out.count(real) == text.count(real) - 1  # exactly the header line was replaced
+    assert out[:span[0]] == text[:span[0]] and "Workspace: /workspace (task capsule" in out
+    assert body in out  # the approved body text is untouched
+    assert real not in out[:out.index(body)]  # no host path before the body
 
 
 def test_kanban_show_own_card_names_execution_workspace_when_bound(capsule, tmp_path, monkeypatch):
