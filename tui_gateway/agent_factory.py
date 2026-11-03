@@ -179,7 +179,7 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
     if service_tier:  # None = "inherit the profile" at _make_agent; "" = real override "no priority tier"
         overrides["service_tier_override"] = "" if service_tier.lower() == "normal" else service_tier
     from tui_gateway.class_routing import restore_class_overrides
-    return restore_class_overrides(model, model_config, overrides)
+    return restore_class_overrides(model, model_config, overrides, session_id=row.get("id"))
 
 
 def _scoped_session_provider(agent, session: dict) -> str:

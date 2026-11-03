@@ -63,7 +63,7 @@ def stored_route(runner, session_key):
     row = db.get_session(entry.session_id)
     if not isinstance(row, dict):
         return None
-    return restore_route(row.get("model"), row.get("model_config"))
+    return restore_route(row.get("model"), row.get("model_config"), session_id=entry.session_id)
 
 
 def class_context_length(model, *, config=None, runner=None, session_key=None, provider="auto"):

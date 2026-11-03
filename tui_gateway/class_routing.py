@@ -34,9 +34,9 @@ def probe_class_runtime(model, provider, config):
     return runtime["model"], runtime
 
 
-def restore_class_overrides(model, config, overrides):
+def restore_class_overrides(model, config, overrides, session_id=None):
     from agent.model_routing_restore import restore_route, stale_managed_pin
-    restored = restore_route(model, config)
+    restored = restore_route(model, config, session_id=session_id)
     if restored is not None:
         model, provider = restored
         overrides["model_override"] = {"model": model, "provider": provider}
