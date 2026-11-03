@@ -191,10 +191,10 @@ def _bounded_call(ident: Identity, method: str, path: str, body: Optional[dict],
         def _connection(self, parts, timeout=None):
             pair = super()._connection(parts, timeout)
             conn = pair[0]
-            connect = conn.connect
+            open_socket = conn.connect
 
             def connect_then_check() -> None:
-                connect()
+                open_socket()
                 with expiry:
                     if box.get("expired"):
                         cut(conn)
