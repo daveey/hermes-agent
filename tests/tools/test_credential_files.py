@@ -727,3 +727,83 @@ class TestMasterCredentialStoresAreNeverMountable:
             assert cf.get_credential_file_mounts() == []
         rec = next(r for r in caplog.records if "read guard raised" in r.message)
         assert rec.exc_info is not None, "traceback must be attached (logger.exception)"
+
+
+class TestConfigCredentialFilesHonorReadDenyList:
+    """``terminal.credential_files`` in config.yaml is a second mount route.
+
+    It used to check only HERMES_HOME containment, so ``credential_files:
+    [".env"]`` bind-mounted the master key file into every docker sandbox
+    while ``register_credential_file(".env")`` refused the same file. Both
+    routes must apply the same fail-closed read deny-list.
+    """
+
+    _home = staticmethod(TestMasterCredentialStoresAreNeverMountable._home)
+
+    @staticmethod
+    def _write_config(home: Path, cred_files: list):
+        import hermes_yaml as yaml
+        (home / "config.yaml").write_text(
+            yaml.safe_dump({"terminal": {"credential_files": cred_files}}))
+
+    @pytest.mark.parametrize(
+        "rel_path",
+        [
+            ".env",
+            "auth.json",
+            ".anthropic_oauth.json",
+            "webhook_subscriptions.json",
+            "cache/bws_cache.json",
+            "mcp-tokens/srv.json",
+        ],
+    )
+    def test_config_master_store_yields_no_mount(self, tmp_path, rel_path, caplog):
+        home = self._home(tmp_path)
+        self._write_config(home, [rel_path])
+        with patch.dict(os.environ, {"HERMES_HOME": str(home)}):
+            with caplog.at_level("WARNING", logger="tools.credential_files"):
+                mounts = get_credential_file_mounts()
+        assert mounts == [], f"config {rel_path} would be bind-mounted into the sandbox"
+        assert any("refused" in r.message and rel_path in r.message
+                   for r in caplog.records), "a denied config entry is logged"
+
+    def test_config_non_store_file_still_mounts(self, tmp_path):
+        home = self._home(tmp_path)
+        self._write_config(home, ["google_token.json"])
+        with patch.dict(os.environ, {"HERMES_HOME": str(home)}):
+            mounts = get_credential_file_mounts()
+        assert mounts == [{"host_path": str((home / "google_token.json").resolve()),
+                           "container_path": "/root/.hermes/google_token.json"}]
+
+    def test_config_denied_entry_is_skipped_not_fatal(self, tmp_path):
+        home = self._home(tmp_path)
+        self._write_config(home, [".env", "google_token.json", "auth.json"])
+        with patch.dict(os.environ, {"HERMES_HOME": str(home)}):
+            paths = [m["container_path"] for m in get_credential_file_mounts()]
+        assert paths == ["/root/.hermes/google_token.json"]
+
+    def test_config_missing_guard_fails_closed(self, tmp_path, caplog):
+        import tools.credential_files as cf
+
+        home = self._home(tmp_path)
+        self._write_config(home, ["google_token.json"])
+        with patch.dict(os.environ, {"HERMES_HOME": str(home)}), \
+                patch.object(cf, "get_read_block_error", None):
+            with caplog.at_level("ERROR", logger="tools.credential_files"):
+                assert cf.get_credential_file_mounts() == []
+        assert any("deny-list cannot be consulted" in r.message for r in caplog.records)
+
+    def test_config_guard_exception_fails_closed(self, tmp_path, caplog):
+        import tools.credential_files as cf
+
+        def _boom(path):
+            raise RuntimeError("guard exploded")
+
+        home = self._home(tmp_path)
+        self._write_config(home, ["google_token.json"])
+        with patch.dict(os.environ, {"HERMES_HOME": str(home)}), \
+                patch.object(cf, "get_read_block_error", _boom):
+            with caplog.at_level("ERROR", logger="tools.credential_files"):
+                assert cf.get_credential_file_mounts() == []
+        rec = next(r for r in caplog.records if "read guard raised" in r.message)
+        assert rec.exc_info is not None
