@@ -169,11 +169,11 @@ describe('default board event notifications', () => {
       cursor: 102,
       events: [
         { id: 99, kind: 'completed' },
-        { id: 102, kind: 'blocked', task_id: 'task', payload: { reason: 'Need approval' } }
+        { id: 102, kind: 'blocked', task_id: 'task', payload: { reason: 'Need approval', human_request: { action: 'Reply in chat with yes or no.' } } }
       ]
     })
     await vi.waitFor(() => expect(doors.notify).toHaveBeenCalledTimes(1))
-    expect(doors.notify).toHaveBeenCalledWith(expect.objectContaining({ message: 'Need approval' }))
+    expect(doors.notify).toHaveBeenCalledWith(expect.objectContaining({ message: 'Reply in chat with yes or no.' }))
     callbacks[0]({ cursor: 102, events: [{ id: 102, kind: 'blocked' }] })
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(doors.notify).toHaveBeenCalledTimes(1)
