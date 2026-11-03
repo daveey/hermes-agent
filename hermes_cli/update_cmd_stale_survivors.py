@@ -25,6 +25,18 @@ def stale_fleet_survivor_pids(fleet: list, already_signalled: set) -> list[int]:
     return pids
 
 
+def _profile_home(profile: str | None) -> str | None:
+    """Home of *profile* on this install, or None when it names none. Never raises."""
+    if not profile:
+        return None
+    try:
+        from hermes_cli.update_receipt import _profile_homes
+        return next((str(home) for name, home in _profile_homes() if name == profile), None)
+    except Exception:
+        logger.debug("Could not resolve the home of profile %s", profile, exc_info=True)
+        return None
+
+
 def signal_stale_fleet_survivors(fleet: list, restart, drain_budget: float) -> list[int]:
     """Drain-first restart every proven-stale gateway; returns the PIDs signalled.
 
@@ -44,15 +56,23 @@ def signal_stale_fleet_survivors(fleet: list, restart, drain_budget: float) -> l
     from hermes_cli import gateway_supervised_restart
 
     labels = {row.get("pid"): str(row.get("profile") or "gateway") for row in fleet if isinstance(row, dict)}
+    row_profiles = {row.get("pid"): row.get("profile") for row in fleet if isinstance(row, dict)}
     print()
     print(f"  ⚠ {len(pids)} gateway process(es) still run the pre-update code — requesting a restart")
     signalled: list[int] = []
     manual: list[int] = []
+    homes: dict[int, str] = {}
     for pid in pids:
         label = f"{labels.get(pid, 'gateway')} (PID {pid})"
         try:
             # Read before the signal: the declaration comes from the live process.
             external = pid not in service_pids and gateway_supervised_restart.gateway_declares_external_supervisor(pid)
+            if pid not in service_pids and not external:
+                # The fleet row came from walking that profile's own home: its home is exact,
+                # where the process-environment read can only agree with it or guess.
+                from hermes_cli.update_cmd_fleet import _stopped_gateway_home
+                if home := _profile_home(row_profiles.get(pid)) or _stopped_gateway_home(pid):
+                    homes[pid] = home
             if _drain_or_signal_gateway_for_update(pid, drain_budget, label):
                 signalled.append(pid)
                 restart.killed_pids.add(pid)
@@ -72,6 +92,9 @@ def signal_stale_fleet_survivors(fleet: list, restart, drain_budget: float) -> l
         stopped = getattr(restart, "stopped_unmapped_pids", None)
         if isinstance(stopped, set):
             stopped.update(manual)
+        stopped_homes = getattr(restart, "stopped_unmapped_homes", None)
+        if isinstance(stopped_homes, dict):
+            stopped_homes.update({pid: homes[pid] for pid in manual if pid in homes})
         print(f"  → Stopped {len(manual)} manual gateway process(es) that had no supervisor to respawn them")
         print("    Restart manually: hermes gateway run")
         if len(manual) > 1:

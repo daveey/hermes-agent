@@ -904,6 +904,16 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     if kanban_path_is_fenced(path):
         # Reads must not enter schema/backfill write transactions. Never create a
         # missing board or migrate on a descendant's behalf; the owner initializes it.
+        if not path.exists():
+            # Name the fence: a bare ``?mode=ro`` open of a missing file only says SQLite's
+            # "unable to open database file", which reads like a lockguard/filesystem bug.
+            from agent.delegation_context import DELEGATED_CHILD_ENV_MARKER
+            marker = os.environ.get(DELEGATED_CHILD_ENV_MARKER, "") or "<in-process delegate>"
+            raise PermissionError(
+                f"kanban board {path} is fenced for this delegated/worker process "
+                f"({DELEGATED_CHILD_ENV_MARKER}={marker}) and has no database; "
+                "descendants cannot create boards"
+            )
         conn = _kanban_lockguard.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         conn.text_factory = _kb._lossy_text

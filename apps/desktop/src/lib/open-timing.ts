@@ -32,6 +32,8 @@ export interface OpenTimingRecord {
   /** ms from click to each step of the open path (owner resolved, gateway ready, REST page back). */
   stages?: Record<string, number>
   startedBy: 'click' | 'resume'
+  /** [daveey] `tile`: a session tile/tab open (`@session` ref clicks), timed apart from main-pane opens. */
+  surface?: 'tile'
 }
 
 const CLICK_WINDOW_MS = 2_000
@@ -118,7 +120,10 @@ export function markOpenReconciled(id: string, outcome: OpenOutcome, changed?: b
   }
 
   open.delete(id)
+  writeRecord(record)
+}
 
+function writeRecord(record: OpenTimingRecord): void {
   const list = history()
   list.push(record)
   list.splice(0, Math.max(0, list.length - KEEP))
@@ -130,6 +135,46 @@ export function markOpenReconciled(id: string, outcome: OpenOutcome, changed?: b
     window.hermesDesktop?.logLine?.(line)
   } catch {
     // logging must never break an open
+  }
+}
+
+/**
+ * [daveey] Timing for one tile open (`@session` ref click, tab restore). Kept out
+ * of the main-pane `open` map: a tile resuming beside the main chat must not
+ * mark the main open abandoned. Writes the same `[open-timing]` line, tagged
+ * `"surface":"tile"`, once reconciled; an open never reconciled writes nothing.
+ */
+export function startTileOpenTiming(id: string, connection?: string) {
+  const record: OpenTimingRecord = { clickAt: now(), connection, id, startedBy: 'resume', surface: 'tile' }
+
+  return {
+    record,
+    stage(name: string) {
+      if (!record.outcome && record.stages?.[name] === undefined) {
+        record.stages = { ...record.stages, [name]: Math.round(now() - record.clickAt) }
+      }
+    },
+    paint(source: OpenPaintSource, rows: number) {
+      if (!record.paint && !record.outcome) {
+        record.paint = source
+        record.paintMs = Math.round(now() - record.clickAt)
+        record.paintRows = rows
+      }
+    },
+    reconciled(outcome: OpenOutcome, changed?: boolean) {
+      if (record.outcome) {
+        return
+      }
+
+      record.outcome = outcome
+      record.reconciledMs = Math.round(now() - record.clickAt)
+
+      if (changed !== undefined) {
+        record.changed = changed
+      }
+
+      writeRecord(record)
+    }
   }
 }
 

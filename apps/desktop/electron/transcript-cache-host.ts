@@ -11,6 +11,7 @@
  *   hermes:transcript-cache:migrate-profile  send      {connectionId, from, to}
  *   hermes:transcript-cache:clear            send
  *   hermes:transcript-cache:stats            invoke    -> {bytes, sessions}
+ *   hermes:transcript-cache:prefetch         send      {connectionId, profile, sessionId}  ([daveey] @session ref warm-up)
  */
 import path from 'node:path'
 
@@ -267,6 +268,15 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
     },
     log: deps.log,
     store
+  })
+
+  // [daveey] An `@session` ref chip rendered/hovered: warm that session so its first click paints from cache.
+  deps.ipcMain.on('hermes:transcript-cache:prefetch', (_event, raw) => {
+    const key = normalizeKey(raw)
+
+    if (key) {
+      void prefetcher.prefetchKey(key).catch(error => deps.log(`transcript prefetch (ref) failed: ${error}`))
+    }
   })
 
   return {

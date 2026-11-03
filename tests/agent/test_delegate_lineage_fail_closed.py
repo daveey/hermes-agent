@@ -1,6 +1,5 @@
 """Unknown process ancestry must not grant board mutation rights."""
 import os
-import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -75,8 +74,9 @@ def test_unknown_lineage_keeps_fence_and_allows_isolated_db(tmp_path, monkeypatc
         assert dc.kanban_path_is_fenced(pinned)
         with pytest.raises(PermissionError):
             kb._assert_not_delegated_child_mutation(pinned)
-        # Fenced connection initialization is read-only and cannot create a DB.
-        with pytest.raises(sqlite3.OperationalError, match="unable to open database"):
+        # Fenced connection initialization is read-only and cannot create a DB; the refusal
+        # names the fence instead of SQLite's bare "unable to open database file".
+        with pytest.raises(PermissionError, match="is fenced .* has no database"):
             kb.init_db(pinned)
         assert not pinned.exists()
         assert not dc.kanban_path_is_fenced(scratch)

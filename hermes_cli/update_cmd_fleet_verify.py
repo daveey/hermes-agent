@@ -184,7 +184,7 @@ def _settle_units_proven_current(restart, fleet_rows: list) -> bool:
     return True
 
 
-def _record_owed_gateway_inventory(plan, stopped_unmapped_pids=()) -> None:
+def _record_owed_gateway_inventory(plan, stopped_unmapped_pids=(), stopped_homes=None, fleet_snapshot=()) -> None:
     """Name the pre-update gateways on the obligation once their restart is owed.
 
     The pull arms the obligation before the restart phase knows what it owes. An inventory-less
@@ -192,11 +192,18 @@ def _record_owed_gateway_inventory(plan, stopped_unmapped_pids=()) -> None:
     (nothing live, nothing named), which would silence the owed-restart warning that replaces a
     failed update under contract C3. A named inventory keeps it until those gateways run HEAD.
     A gateway stopped with no known profile is recorded as an unmapped row for the same reason: it
-    has no ``gateway_state.json`` the gateway-less probe could see, so absence would settle it.
+    has no ``gateway_state.json`` the gateway-less probe could see, so absence would settle it. Its
+    ``home`` (read before the stop, *stopped_homes*) rides along when known, so that home's live
+    gateway can settle it (``_marker_owed_gateways``).
+    A profile the post-restart *fleet_snapshot* shows serving ANOTHER checkout (``external``, e.g.
+    an Ask Eve runtime pinned to its own core) owes this checkout nothing and is not recorded:
+    named, it was owed a row that only its own checkout's update can produce, and while that
+    runtime was down or restarting the obligation could not settle.
     A readable inventory (a same-SHA catch-up keeps the standing record) only GROWS: rows this run
     newly owes are appended, so a mapped successor cannot discharge a newly stopped unmapped one.
     """
     from hermes_cli import update_cmd_fleet as fleet
+    from hermes_cli.update_receipt import row_is_external
     armed = fleet._fleet_restart_obligation_armed()
     fields = fleet._obligation_fields() if armed else {}
     if fields is None:
@@ -209,13 +216,17 @@ def _record_owed_gateway_inventory(plan, stopped_unmapped_pids=()) -> None:
         except ValueError:
             return
         recorded = inventory["runtimes"]
+    external = {row.get("profile") for row in fleet_snapshot or () if row_is_external(row)}
+    stopped_homes = stopped_homes or {}
     from dataclasses import asdict
     rows = [
         asdict(runtime) for runtime in getattr(plan, "runtimes", ()) or ()
         if getattr(runtime, "kind", None) == "gateway"
         and isinstance(getattr(runtime, "profile", None), str)
         and runtime.profile.strip() and runtime.profile != "unknown"
-    ] + [{"kind": "gateway", "profile": None, "pid": pid, "stopped_unmapped": True}
+        and runtime.profile not in external
+    ] + [{"kind": "gateway", "profile": None, "pid": pid, "stopped_unmapped": True,
+          **({"home": stopped_homes[pid]} if stopped_homes.get(pid) else {})}
          for pid in sorted(stopped_unmapped_pids)]
     rows = [row for row in rows if row not in recorded]
     if rows:
@@ -498,7 +509,9 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
             restart, stopped, gateway_owed=_gateway_owed, stale_serves=_stale_serves_owed,
             down_serves=set(_dashboards_down or ())))
         with _best_effort('Fleet restart inventory not recorded: %s'):
-            _record_owed_gateway_inventory(_pre_update_plan, stopped)
+            _record_owed_gateway_inventory(_pre_update_plan, stopped,
+                                           stopped_homes=getattr(restart, "stopped_unmapped_homes", None),
+                                           fleet_snapshot=_fleet_snapshot)
     if _units_settled:
         # Credited units changed the restart result; save it with the final verdict so it agrees with
         # the follow-up above.

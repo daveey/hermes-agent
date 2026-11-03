@@ -16,6 +16,13 @@ export const PER_GATEWAY = 200
 export const MIN_REFETCH_MS = 30_000
 /** A gateway that failed is skipped for this long before it is tried again. */
 export const GATEWAY_BACKOFF_MS = 60_000
+/** [daveey] On-demand (`@session` ref) fetches in flight per gateway (on top of the tick's two), and the most
+ *  queued behind them. */
+export const DEMAND_CONCURRENCY = 1
+export const DEMAND_QUEUE_MAX = 50
+/** [daveey] A cached session the hub listing does not cover is refetched on demand at most this often. */
+export const UNLISTED_REFETCH_MS = 10 * 60_000
+const DEMAND_MISSED_MAX = 500
 
 export interface HubSessionRecord {
   activity?: null | number
@@ -56,6 +63,11 @@ export interface PrefetchDeps {
 }
 
 const profileOf = (value: unknown) => String(value ?? '').trim() || 'default'
+const keyString = (key: TranscriptCacheKey) => `${key.connectionId}\u0000${key.profile}\u0000${key.sessionId}`
+
+/** What one on-demand prefetch did: fetched/empty/failed ran a fetch; the rest skipped it. */
+export type PrefetchKeyOutcome =
+  'backoff' | 'current' | 'dropped' | 'empty' | 'failed' | 'fetched' | 'invalid' | 'queued'
 
 /**
  * Per gateway, the PER_GATEWAY most recently active session tips: open Inbox cards' sessions first, then people's
@@ -151,7 +163,21 @@ export class TranscriptPrefetcher {
    * The cache has no row for them, so without this needsRefresh() saw "never fetched" and every tick refetched
    * them. They are retried once their activity/message_count moves (and MIN_REFETCH_MS passed).
    */
-  private readonly unstored = new Map<string, { activity: null | number; messageCount: null | number; savedAt: number }>()
+  private readonly unstored = new Map<
+    string,
+    { activity: null | number; messageCount: null | number; savedAt: number }
+  >()
+  /** [daveey] Hub meta of every session the last pass listed, so an on-demand fetch can tell a current cache. */
+  private readonly listed = new Map<string, { activity: null | number; messageCount: null | number }>()
+  /** [daveey] On-demand fetches: queued/in-flight keys (with their waiters), per-gateway queues, active counts. */
+  private readonly demandWaiters = new Map<string, ((outcome: PrefetchKeyOutcome) => void)[]>()
+  private readonly demandQueues = new Map<string, TranscriptCacheKey[]>()
+  private readonly demandActive = new Map<string, number>()
+  /** [daveey] On-demand keys whose fetch stored nothing (404, empty): not retried within MIN_REFETCH_MS. */
+  private readonly demandMissed = new Map<
+    string,
+    { activity: null | number; messageCount: null | number; savedAt: number }
+  >()
   private running: null | Promise<PrefetchTickResult> = null
   private timer: null | ReturnType<typeof setTimeout> = null
   private stopped = true
@@ -169,6 +195,154 @@ export class TranscriptPrefetcher {
     }
 
     return this.running
+  }
+
+  /**
+   * [daveey] Warm one session the renderer is about to open (an `@session` ref chip rendered or was hovered).
+   * Such refs mostly point at old sessions outside the PER_GATEWAY window, so without this the first click waited
+   * on REST. Fire-and-forget for the caller; the promise settles when this key is done (tests, logs). Deduped
+   * against queued/in-flight keys; skipped while the cache is current (the hub's activity/message_count when the
+   * last pass listed the session, else a copy younger than UNLISTED_REFETCH_MS) or the gateway is backed off; at most
+   * DEMAND_CONCURRENCY fetches per gateway at a time and DEMAND_QUEUE_MAX queued behind them.
+   */
+  prefetchKey(raw: TranscriptCacheKey): Promise<PrefetchKeyOutcome> {
+    try {
+      return this.enqueueDemand(raw)
+    } catch (error) {
+      // A store read can throw (closed at quit, SQLITE_BUSY): never out of an IPC listener.
+      this.deps.log?.(`transcript prefetch (ref) skipped: ${(error as Error)?.message || error}`)
+
+      return Promise.resolve('failed')
+    }
+  }
+
+  private enqueueDemand(raw: TranscriptCacheKey): Promise<PrefetchKeyOutcome> {
+    const key: TranscriptCacheKey = {
+      connectionId: String(raw?.connectionId ?? '').trim(),
+      profile: profileOf(raw?.profile),
+      sessionId: String(raw?.sessionId ?? '').trim()
+    }
+
+    const id = keyString(key)
+    const now = this.deps.now?.() ?? Date.now()
+
+    if (!key.connectionId || !key.sessionId) {
+      return Promise.resolve('invalid')
+    }
+
+    if (this.demandWaiters.has(id)) {
+      return Promise.resolve('queued')
+    }
+
+    if ((this.downUntil.get(key.connectionId) ?? 0) > now) {
+      return Promise.resolve('backoff')
+    }
+
+    if (!this.demandDue(key, now)) {
+      return Promise.resolve('current')
+    }
+
+    const queue = this.demandQueues.get(key.connectionId) ?? []
+
+    if (queue.length >= DEMAND_QUEUE_MAX) {
+      return Promise.resolve('dropped')
+    }
+
+    return new Promise<PrefetchKeyOutcome>(resolve => {
+      this.demandWaiters.set(id, [resolve])
+      queue.push(key)
+      this.demandQueues.set(key.connectionId, queue)
+      this.pumpDemand(key.connectionId)
+    })
+  }
+
+  private demandDue(key: TranscriptCacheKey, now: number): boolean {
+    const id = keyString(key)
+    const cached = this.deps.store.meta(key) ?? this.unstored.get(id) ?? this.demandMissed.get(id) ?? null
+    const listed = this.listed.get(id)
+
+    if (!cached) {
+      return true
+    }
+
+    if (listed) {
+      return needsRefresh(cached, { automated: false, key, meta: listed }, now)
+    }
+
+    // Not in the hub listing (past its limit, or hub-sync unreadable): nothing says it moved. Refs mostly name
+    // such old sessions, and the open's own REST read refreshes the cache, so only a long-stale copy is refetched.
+    return now - cached.savedAt >= UNLISTED_REFETCH_MS
+  }
+
+  private pumpDemand(connectionId: string): void {
+    const queue = this.demandQueues.get(connectionId) ?? []
+
+    while (queue.length > 0 && (this.demandActive.get(connectionId) ?? 0) < DEMAND_CONCURRENCY) {
+      const key = queue.shift()!
+      this.demandActive.set(connectionId, (this.demandActive.get(connectionId) ?? 0) + 1)
+
+      void this.fetchDemand(key).then(outcome => {
+        this.demandActive.set(connectionId, Math.max(0, (this.demandActive.get(connectionId) ?? 1) - 1))
+        const waiters = this.demandWaiters.get(keyString(key)) ?? []
+        this.demandWaiters.delete(keyString(key))
+        waiters.forEach(resolve => resolve(outcome))
+        this.pumpDemand(connectionId)
+      })
+    }
+
+    if (queue.length === 0) {
+      this.demandQueues.delete(connectionId)
+    }
+  }
+
+  private async fetchDemand(key: TranscriptCacheKey): Promise<PrefetchKeyOutcome> {
+    const id = keyString(key)
+    const meta = this.listed.get(id) ?? { activity: null, messageCount: null }
+    const stamp = () => this.deps.now?.() ?? Date.now()
+
+    const markMissed = () => {
+      this.demandMissed.delete(id)
+      this.demandMissed.set(id, { ...meta, savedAt: stamp() })
+
+      // Bounded: drop the oldest misses past the cap (Map keeps insertion order).
+      for (const stale of this.demandMissed.keys()) {
+        if (this.demandMissed.size <= DEMAND_MISSED_MAX) {
+          break
+        }
+
+        this.demandMissed.delete(stale)
+      }
+    }
+
+    if ((this.downUntil.get(key.connectionId) ?? 0) > stamp()) {
+      return 'backoff'
+    }
+
+    try {
+      const rows = await this.deps.fetchLatest(key, LATEST_ROWS)
+
+      if (rows.length > 0 && this.deps.store.putLatest(key, rows, meta)) {
+        this.demandMissed.delete(id)
+        this.deps.log?.(`transcript prefetch (ref): cached ${key.connectionId}/${key.profile}/${key.sessionId}`)
+
+        return 'fetched'
+      }
+
+      markMissed()
+
+      return 'empty'
+    } catch (error) {
+      if (isGatewayFailure(error)) {
+        this.downUntil.set(key.connectionId, stamp() + GATEWAY_BACKOFF_MS)
+        this.deps.log?.(
+          `transcript prefetch (ref): ${key.connectionId} unreachable (${(error as Error)?.message || error}); backing off`
+        )
+      } else {
+        markMissed() // a 4xx for this one session
+      }
+
+      return 'failed'
+    }
   }
 
   start(intervalMs = 5_000): void {
@@ -209,6 +383,8 @@ export class TranscriptPrefetcher {
     const records = await this.deps.listHubSessions()
 
     if (!records) {
+      this.listed.clear() // stale hub meta must not keep a moved session reading as current
+
       return result
     }
 
@@ -225,8 +401,21 @@ export class TranscriptPrefetcher {
     const targets = selectPrefetchTargets(records, gateway => names.get(gateway))
     result.targets = targets.length
 
-    const keyOf = (target: PrefetchTarget) =>
-      `${target.key.connectionId}\u0000${target.key.profile}\u0000${target.key.sessionId}`
+    // [daveey] Every listed session's hub meta (not just the targets), for on-demand freshness checks.
+    this.listed.clear()
+
+    for (const record of records) {
+      const connectionId = record?.id && record.gateway ? names.get(record.gateway) : undefined
+
+      if (connectionId) {
+        this.listed.set(keyString({ connectionId, profile: profileOf(record.profile), sessionId: record.id }), {
+          activity: record.activity ?? null,
+          messageCount: record.message_count ?? null
+        })
+      }
+    }
+
+    const keyOf = (target: PrefetchTarget) => keyString(target.key)
 
     // Forget memo entries for sessions no longer targeted, so the map stays bounded by the target set.
     const live = new Set(targets.map(keyOf))
@@ -240,6 +429,7 @@ export class TranscriptPrefetcher {
     const due = targets.filter(target =>
       needsRefresh(this.deps.store.meta(target.key) ?? this.unstored.get(keyOf(target)) ?? null, target, now)
     )
+
     result.skipped = targets.length - due.length
 
     const markUnstored = (target: PrefetchTarget) =>

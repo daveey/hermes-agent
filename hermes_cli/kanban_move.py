@@ -149,20 +149,32 @@ def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: s
     except MoveRefused as exc:
         return {"ok": False, "reason_code": exc.code, "error": str(exc)}
 
+    # A worker-first card's runs_on is Board-owned: a local write is stripped from the push
+    # (kanban_worker_placement.acknowledged_outbox) and the origin would just reserve it for the pool again. The
+    # moved event is the request; the origin applies it with the Board's creator repin (worker_placement.reevaluate).
+    policy = conn.execute("SELECT placement_policy FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    requested = bool(policy and policy[0])
+
     def _in_txn(c: sqlite3.Connection, run_id: int) -> None:
-        wn.set_runs_on(c, task_id, plan["runs_on"])
+        if not requested:
+            wn.set_runs_on(c, task_id, plan["runs_on"])
         kb._append_event(c, task_id, MOVED_EVENT, {
             "from_machine": plan["me"], "runs_on": plan["runs_on"], "previous_runs_on": plan["previous"],
             "reason": reason[:500], "move_no": plan["move_no"], "forced": plan["forced"],
-            "matches": plan["matches"]}, run_id=run_id)
+            "matches": plan["matches"], **({"repin_requested": True} if requested else {})}, run_id=run_id)
 
     note = f"Moving to {plan['runs_on']} ({', '.join(plan['matches'])}): {reason}"
     res = continue_task(conn, task_id, checkpoint=f"{checkpoint.strip()}\n\n[{note}]",
                         expected_run_id=expected_run_id, in_txn=_in_txn)
     if not res.get("ok"):
         return {"ok": False, "reason_code": res.get("reason_code") or "not_running", "error": res.get("error")}
-    return {"ok": True, "runs_on": plan["runs_on"], "matches": plan["matches"], "move_no": plan["move_no"],
-            "run_id": res.get("run_id"), "status": res.get("status")}
+    out = {"ok": True, "runs_on": plan["runs_on"], "matches": plan["matches"], "move_no": plan["move_no"],
+           "run_id": res.get("run_id"), "status": res.get("status")}
+    if requested:
+        out["repin"] = "requested"
+        out["note"] = ("worker-first card: its origin applies this move with the Board repin on its next placement "
+                       "tick (the policy is then cleared and runs_on set)")
+    return out
 
 
 def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: str, force: bool = False,
@@ -219,21 +231,27 @@ def move_reclaim(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason
         plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg)
     except MoveRefused as exc:
         return {"ok": False, "reason_code": exc.code, "error": str(exc)}
-    row = conn.execute("SELECT t.status, t.claim_lock, r.uid AS run_uid FROM tasks t LEFT JOIN task_runs r "
+    row = conn.execute("SELECT t.status, t.claim_lock, t.placement_policy, r.uid AS run_uid FROM tasks t "
+                       "LEFT JOIN task_runs r "
                        "ON r.id = t.current_run_id WHERE t.id = ?", (task_id,)).fetchone()
     if row["status"] != "running" or row["claim_lock"] is None:
         return {"ok": False, "reason_code": "not_running_here",
                 "error": f"task {task_id} is not running under a claim on this gateway"}
+    requested = bool(row["placement_policy"])  # Board-owned runs_on: the origin repins it (see move_task)
     with kb.write_txn(conn):
-        wn.set_runs_on(conn, task_id, plan["runs_on"])
+        if not requested:
+            wn.set_runs_on(conn, task_id, plan["runs_on"])
         kb._append_event(conn, task_id, MOVED_EVENT, {
             "from_machine": plan["me"], "runs_on": plan["runs_on"], "previous_runs_on": plan["previous"],
             "reason": reason[:500], "move_no": plan["move_no"], "forced": plan["forced"],
-            "matches": plan["matches"], "reclaimed": True})
+            "matches": plan["matches"], "reclaimed": True, **({"repin_requested": True} if requested else {})})
     if not kb.reclaim_task(conn, task_id, reason=f"moved to {plan['runs_on']}: {reason}"[:400]):
         return {"ok": False, "reason_code": "reclaim_failed",
                 "error": f"labels set to {plan['runs_on']} but the run could not be reclaimed; it ends on its own"}
     sync.release_lease(conn, task_id, row["run_uid"])
     status = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()["status"]
-    return {"ok": True, "runs_on": plan["runs_on"], "matches": plan["matches"], "move_no": plan["move_no"],
-            "status": status}
+    out = {"ok": True, "runs_on": plan["runs_on"], "matches": plan["matches"], "move_no": plan["move_no"],
+           "status": status}
+    if requested:
+        out["repin"] = "requested"
+    return out

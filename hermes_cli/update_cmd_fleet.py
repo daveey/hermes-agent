@@ -299,6 +299,21 @@ def _live_fleet_covers_receipt(expected_sha: str | None, receipt: dict, owed: se
 _UNMAPPED_GATEWAY = ("gateway", "")
 
 
+def _profile_for_home(home: object) -> str | None:
+    """The profile whose home is *home* (resolved), or None when it names no profile of this install."""
+    if not isinstance(home, str) or not home.strip():
+        return None
+    try:
+        from hermes_cli.update_receipt import _profile_homes
+        target = Path(home).expanduser().resolve()
+        for profile, profile_home in _profile_homes():
+            if Path(profile_home).expanduser().resolve() == target:
+                return profile
+    except Exception as exc:
+        logger.debug("Could not map stopped gateway home %s to a profile: %s", home, exc, exc_info=True)
+    return None
+
+
 def _marker_owed_gateways(inventory: object) -> set[tuple[str, str]] | None:
     """The ``("gateway", profile)`` set a marker's inventory owes; None when it recorded none.
 
@@ -320,7 +335,12 @@ def _marker_owed_gateways(inventory: object) -> set[tuple[str, str]] | None:
         if runtime_outside_gateway_evidence(runtime):
             continue
         if runtime.get("kind") == "gateway" and runtime.get("stopped_unmapped"):
-            owed.add(_UNMAPPED_GATEWAY)
+            # A stopped gateway whose home was read at the stop is owed to THAT home's profile: one
+            # gateway per home holds ``gateway.lock``, so a live current gateway there is its
+            # successor, however it was launched (a lock loser or a pre-lock `gateway run` never
+            # served anything the home's gateway does not). No readable home keeps the old rule.
+            profile = _profile_for_home(runtime.get("home"))
+            owed.add(("gateway", profile) if profile else _UNMAPPED_GATEWAY)
             continue
         profile = runtime.get("profile")
         if runtime.get("kind") != "gateway" or not isinstance(profile, str) or not profile.strip() or profile == "unknown":
@@ -1460,6 +1480,10 @@ class _GatewayRestartOutcome:
     #: the summary tells the user to restart them by hand, so the fleet probe must not expect
     #: a row for them.
     stopped_unmapped_pids: set = field(default_factory=set)
+    #: ``{pid: home}`` for the unmapped stops whose home was readable BEFORE the signal (live
+    #: environment or spawn ledger); the owed inventory keeps it so that home's live gateway can
+    #: settle the debt. Read before the stop: a dead process has no environment left to read.
+    stopped_unmapped_homes: dict = field(default_factory=dict)
     #: ``scope/name`` of every settled systemd unit; the fleet probe stops waiting for a state stamp
     #: once none of them is active or activating any more (the successor died, nothing will publish).
     restarted_scoped_units: set = field(default_factory=set)
@@ -1491,6 +1515,16 @@ class _GatewayRestartOutcome:
                 killed_pids=sorted(self.killed_pids), failed_units=self.failed_or_stale_units,
                 incomplete=self.incomplete, **extra,
             )
+
+
+def _stopped_gateway_home(pid: int) -> str | None:
+    """Home gateway *pid* runs on, read before it is stopped; None when unreadable. Never raises."""
+    try:
+        from hermes_cli.update_fleet_scope import gateway_pid_home
+        return gateway_pid_home(pid)
+    except Exception as exc:
+        logger.debug("Could not read the home of gateway PID %s: %s", pid, exc, exc_info=True)
+        return None
 
 
 def _restart_manual_gateways(out: _GatewayRestartOutcome, _drain_budget) -> None:
@@ -1554,10 +1588,13 @@ def _restart_manual_gateways(out: _GatewayRestartOutcome, _drain_budget) -> None
     for pid in manual_pids:
         if pid in profile_processes and pid not in unrestartable_pids:
             continue
+        home = _stopped_gateway_home(pid)
         with suppress(ProcessLookupError, PermissionError):
             os.kill(pid, _signal.SIGTERM)
             out.killed_pids.add(pid)
             out.stopped_unmapped_pids.add(pid)
+            if home:
+                out.stopped_unmapped_homes[pid] = home
 
     if out.restarted_services or out.killed_pids:
         print()

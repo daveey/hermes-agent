@@ -26,7 +26,10 @@ async def test_maintenance_routes_refuse_live_owner_without_changing_rows(tmp_pa
                         ('DELETE', 'empty', None), ('POST', 'owner-backfill', {}),
                         ('POST', 'prune', {'older_than_days': 1})]:
                     response = await client.request(method, '/api/sessions/' + path, json=body)
-                    assert response.status_code == 409, (path, response.text)
+                    # owner-backfill is an owner write: an owner it can't reach answers a retryable 503
+                    # naming discovery's state (as session.mutate does), never the bare offline 409.
+                    expected = 503 if path == 'owner-backfill' else 409
+                    assert response.status_code == expected, (path, response.text)
                     assert 'maintenance' in response.json()['detail'].lower()
                     assert db.get_session('ended-empty') == before
         finally:

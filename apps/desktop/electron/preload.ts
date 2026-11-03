@@ -72,7 +72,9 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     migrateProfile: (connectionId, from, to) =>
       ipcRenderer.send('hermes:transcript-cache:migrate-profile', { connectionId, from, to }),
     clear: () => ipcRenderer.send('hermes:transcript-cache:clear'),
-    stats: () => ipcRenderer.invoke('hermes:transcript-cache:stats')
+    stats: () => ipcRenderer.invoke('hermes:transcript-cache:stats'),
+    // [daveey] Fire-and-forget: warm an `@session`-referenced session before it is clicked.
+    prefetch: key => ipcRenderer.send('hermes:transcript-cache:prefetch', key)
   },
   getGatewayWsUrl: profile => ipcRenderer.invoke('hermes:gateway:ws-url', profile),
   // Registry-scoped fresh WS URL: { connectionId, profile } → result shape of
