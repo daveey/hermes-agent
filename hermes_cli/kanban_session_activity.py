@@ -20,6 +20,9 @@ from hermes_cli import kanban_annotation_disk as _annotation_copy
 from hermes_cli import kanban_annotation_refresh as _bounded
 from hermes_cli import kanban_activity_revision as _revision
 from hermes_cli import kanban_session_activity_hub as _hub_signature
+from hermes_cli import kanban_session_activity_revalidate as _revalidate
+from hermes_cli import kanban_session_activity_recent_done as _recent_done
+from hermes_cli.kanban_session_activity_origin_snapshot import remote_snapshot as _remote_snapshot
 from hermes_cli.kanban_session_activity_hub import _hub_content_signature
 from hermes_cli import kanban_scope_heartbeat as _scope_hb
 from hermes_cli.kanban_session_activity_release import TERMINAL_STATUSES
@@ -48,10 +51,15 @@ ACTIVE_STATUSES = ("todo", "ready", "running", "scheduled", "review")
 BLOCKED_STATUSES = ("blocked", "triage")
 
 _CACHE_TTL_S = 3.0
+# [daveey] Max age of counts under an unchanged fingerprint (kanban_session_activity_revalidate): bounds the
+# time-derived states no key sees (stalled after STALL_AFTER_S = 2 h, remote stale after HUB_STALE_AFTER_S = 180 s).
+_COUNTS_MAX_AGE_S = 30.0
 _cache_lock = threading.Lock()
 _cache: tuple[float, dict[str, int], dict[str, int], dict[str, int], dict[str, int]] | None = None
 _cache_scope: tuple[str, ...] | None = None
 _cache_fingerprint: tuple = ()
+_cache_read_at = 0.0  # monotonic time of the read behind ``_cache``
+_cache_revalidatable = False  # its fingerprint proves no write since (``_revalidate.revalidatable``)
 _waiting_cache: list[dict[str, frozenset[str]]] = [{}]
 # (parked, held) per session from the same snapshot as ``_cache`` (see ``_read_parked``); the sink is set while
 # ``_all_counts`` reads local boards, like ``_pairs_sink``. [daveey]
@@ -506,33 +514,14 @@ register_reader_cache(evict_readers)
 
 
 @contextlib.contextmanager
-def cached_ro(path: Path) -> Iterator[sqlite3.Connection]:
+def cached_ro(path: Path, *, busy_budget: float = 0.5) -> Iterator[sqlite3.Connection]:
     """A shared read-only connection to ``path``, held exclusively for the ``with`` body. Reopened when the file is
     replaced (new inode: a rebuilt replica), after any sqlite error, or when its ``-shm`` generation is gone (the
     connection is stranded on a deleted WAL index and would fail with ``disk I/O error`` or read stale rows until
     restart; kanban-759104eb56). Raises ``sqlite3.OperationalError`` when the file is missing, like ``_open_ro``."""
-    _recover_generation(path)
-    key = str(path)
-    try:
-        st = os.stat(path)
-    except OSError as exc:
-        raise sqlite3.OperationalError(f"unable to open database file {path}: {exc}") from exc
-    ident = (st.st_dev, st.st_ino)
-    stale = None
-    with _RO_CACHE_LOCK:
-        entry = _RO_CACHE.get(key)
-        if entry is not None and entry[1] != ident:
-            stale = _RO_CACHE.pop(key)[0]
-            entry = None
-        if stale is not None:
-            # Close BEFORE reopening: a new connection in this process would otherwise share SQLite's
-            # per-inode WAL-index mapping with the stranded one and inherit its dead -shm.
-            _close_quietly(stale)
-            stale = None
-        if entry is None:
-            conn = _open_ro(path, check_same_thread=False)
-            entry = (conn, ident, threading.Lock(), _kanban_lockguard.shm_identity(path))
-            _RO_CACHE[key] = entry
+    from hermes_cli.kanban_reader_lifecycle import cached_entry
+
+    key, entry = cached_entry(path, busy_budget)
     conn, _ident, lock, _shm = entry
     with lock:  # bodies read every result they start: an unfinished cursor would pin a WAL snapshot
         with _RO_CACHE_LOCK:
@@ -540,6 +529,11 @@ def cached_ro(path: Path) -> Iterator[sqlite3.Connection]:
                 from hermes_cli.kanban_generation import DeletedWalGenerationError
                 raise DeletedWalGenerationError(f"kanban DB {path}: reader was evicted while waiting; retry")
         conn.row_factory = None
+        # [daveey] The budget covers the body's statements too: a warm cached reader otherwise spends its own 500 ms
+        # SQLite busy timeout on a busy board even when the open was asked for less (t_01a19e082c8721b1).
+        lowered = busy_budget < _RO_BUSY_TIMEOUT_S
+        if lowered:
+            conn.execute(f"PRAGMA busy_timeout={max(0, int(busy_budget * 1000))}")
         try:
             yield conn
         except sqlite3.Error:
@@ -548,6 +542,19 @@ def cached_ro(path: Path) -> Iterator[sqlite3.Connection]:
                     del _RO_CACHE[key]
             _close_quietly(conn)
             raise
+        finally:
+            if lowered and _RO_CACHE.get(key) is entry:
+                try:
+                    conn.execute(f"PRAGMA busy_timeout={int(_RO_BUSY_TIMEOUT_S * 1000)}")
+                except sqlite3.Error:  # never keep a reader with the probe's budget
+                    with _RO_CACHE_LOCK:
+                        if _RO_CACHE.get(key) is entry:
+                            del _RO_CACHE[key]
+                    _close_quietly(conn)
+
+
+# The cached reader's own SQLite busy timeout, set when ``kanban_reader_lifecycle`` opens it.
+_RO_BUSY_TIMEOUT_S = 0.5
 
 
 def _close_quietly(conn: sqlite3.Connection) -> None:
@@ -867,61 +874,28 @@ def _replica_paths() -> list[Path]:
 
 def _activity_fingerprint(*, include_shadows: bool = True) -> tuple:
     """Count inputs include sync shadows; the origin-ledger projection never reads them."""
+    pinned = getattr(_revalidate.inputs_pin, "fingerprints", None)
+    if pinned is not None and pinned[int(include_shadows)] is not None:
+        return pinned[int(include_shadows)]
     hub = _hub_db_path()
     signature = [_hub_content_signature(hub)] if hub is not None else []
     # [daveey] Each board's content revision (``kanban_activity_revision``), not its stat: bookkeeping writes
     # (sync stamps, dispatch stamps, a replica's pull stamp) rewrite the files ~61x/min with no task change.
     signature.extend((str(db), _board_content_key(db)) for db in _board_db_paths())
     if include_shadows:
-        signature.extend((str(db), _board_content_key(db, _revision.SHADOW_TABLES)) for db in _replica_paths())
+        signature.extend(_shadow_fingerprint())
     return tuple(signature)
 
 
+def _shadow_fingerprint() -> tuple:
+    """What ``_activity_fingerprint()`` appends to the local one: each sync shadow's content key."""
+    return tuple((str(db), _board_content_key(db, _revision.SHADOW_TABLES)) for db in _replica_paths())
+
+
 def _board_content_key(path: Path, tables: tuple[str, ...] = _revision.LOCAL_TABLES) -> tuple:
-    """Changes on every write to a row the activity readers read in ``path`` (stat fallback without the counter)."""
-    return _revision.content_key(path, tables, cached_ro)
-
-
-def _remote_snapshot(cards: list[dict[str, Any]] | None = None) -> list[dict[str, Any]] | None:
-    """Durable last-known origin obligations, separate from the replaceable hub replica.
-
-    A transaction replaces the snapshot atomically; failed writes propagate rather than
-    claiming a durable association. This is a projection cache, not a second transport.
-    """
-    from hermes_cli import kanban_db
-
-    path = kanban_db.kanban_home() / "origin-work.db"
-    if cards is None:
-        if not path.exists():
-            return None
-        conn = _open_ro(path)
-    else:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        conn = _kanban_lockguard.connect(path, timeout=0.5)
-    try:
-        scope = json.dumps(_origin_scope())
-        if cards is not None:
-            with conn:
-                conn.execute("CREATE TABLE IF NOT EXISTS scoped_snapshot (scope TEXT PRIMARY KEY, data TEXT NOT NULL)")
-                conn.execute("INSERT OR REPLACE INTO scoped_snapshot VALUES (?, ?)", (scope, json.dumps(cards)))
-            return cards
-        # Historical snapshots omitted the origin profile. Never adopt or erase
-        # their obligations merely because a new scoped projection is available.
-        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='snapshot'").fetchone():
-            old = conn.execute("SELECT data FROM snapshot WHERE id=1").fetchone()
-            if old is None or json.loads(old[0]) != []:
-                raise ValueError("unqualified origin-work snapshot requires explicit reconciliation")
-        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scoped_snapshot'").fetchone():
-            return None
-        row = conn.execute("SELECT data FROM scoped_snapshot WHERE scope=?", (scope,)).fetchone()
-        if row is None:
-            return None
-        saved = json.loads(row[0])
-        if not isinstance(saved, list) or any(not isinstance(c, dict) or not c.get("session") or not c.get("id") for c in saved):
-            raise ValueError("invalid origin-work snapshot")
-        return saved
-    finally:
-        conn.close()
+    """Changes on every write to a row the activity readers read in ``path`` (stat fallback without the counter, or
+    at once while the board is busy: this probe precedes the real read and must never spend its busy budget)."""
+    return _revision.content_key(path, tables, lambda p: cached_ro(p, busy_budget=0))
 
 
 def _without_local_open_duplicates(rows: list[dict[str, Any]], *, gateway: str,
@@ -1239,9 +1213,10 @@ def _all_counts(*, include_waiting: bool = False, include_snapshot: bool = False
     sat in this function, starving ``/api/status`` (2026-10-27). [daveey]"""
     scope = _origin_scope()
     now = time.monotonic()
+    wall = time.time()
     fingerprint = _activity_fingerprint()
     with _cache_lock:
-        if _cache is not None and _cache_scope == scope and now < _cache[0] and fingerprint == _cache_fingerprint:
+        if _revalidate.counts_fresh(scope, fingerprint, now):
             return _cached_count_result(include_waiting, include_snapshot)
         seen = _counts_generation
     with _counts_flight:
@@ -1249,13 +1224,13 @@ def _all_counts(*, include_waiting: bool = False, include_snapshot: bool = False
             if _counts_generation != seen and _cache is not None and _cache_scope == scope:
                 return _cached_count_result(include_waiting, include_snapshot)
         return _recompute_all_counts(scope, now, fingerprint, include_waiting=include_waiting,
-                                     include_snapshot=include_snapshot)
+                                     include_snapshot=include_snapshot, wall=wall)
 
 
 def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bool,
-                          include_snapshot: bool = False) -> tuple:
+                          include_snapshot: bool = False, wall: float | None = None) -> tuple:
     """Read every local board and the remote links into fresh counts and publish them to the cache."""
-    global _cache, _cache_scope, _cache_fingerprint, _counts_generation
+    global _cache, _cache_scope, _cache_fingerprint, _counts_generation, _cache_read_at, _cache_revalidatable
     active: dict[str, int] = {}
     blocked: dict[str, int] = {}
     unseen: dict[str, int] = {}
@@ -1312,6 +1287,8 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         counts, waiting_ids, parked_held, stalled, remote_ids, local_ids = fresh
         _cache_scope = scope
         _cache = (now + _CACHE_TTL_S, *counts)
+        _cache_read_at = now
+        _cache_revalidatable = wall is not None and _revalidate.revalidatable(fingerprint, wall)
         _cache_fingerprint = fingerprint
         _counts_generation += 1
         _waiting_cache[0] = waiting_ids
@@ -1394,7 +1371,7 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
         _board_memo.pop(gone, None)
     now = time.time()
     for path in paths:
-        key = _board_content_key(path)
+        key = _revalidate.board_memo_key(path)
         hit = _board_memo.get(str(path))
         reads = hit[1] if hit is not None and hit[0] == key else None
         if reads is not None and ((sink is not None and "parked" not in reads)
@@ -1423,7 +1400,8 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
                 _log.debug("kanban stalled read failed for %s: %s", path, exc)
         keys = getattr(_local_keys_sink, "keys", None)
         if keys is not None:
-            for sid, cards in _identity.local_keys(path, {**reads, "stalled_pairs": stalled_pairs}).items():
+            for sid, cards in _identity.local_keys(path, {**reads, "stalled_pairs": stalled_pairs},
+                                                   board=_board_slug(path)).items():
                 keys.setdefault(sid, set()).update(cards)
 
 
@@ -1702,9 +1680,12 @@ def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED
 # registered = no field, no extra reads (upstream behaviour).
 ATTENTION_WINDOW_S = 24 * 3600
 _ATTENTION_TTL_S = 30.0
+# [daveey] Past the TTL the counts stay valid while the local boards' content revisions are unchanged, up to this age
+# (it bounds the time-derived ATTENTION_WINDOW_S edge). See kanban_session_activity_attention.
+_ATTENTION_MAX_AGE_S = 300.0
 _done_checks: dict[str, Callable[[dict[str, Any]], bool]] = {}
 # [daveey] Per origin scope, with done-check verdicts shared across scopes (see the module).
-_attention = _AttentionCache(_ATTENTION_TTL_S)
+_attention = _AttentionCache(_ATTENTION_TTL_S, max_age_s=_ATTENTION_MAX_AGE_S)
 
 
 def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool]) -> Callable[[], None]:
@@ -1724,34 +1705,7 @@ def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool]) -> Call
 
 def _read_recent_done(path: Path, since: float) -> list[tuple[str, dict[str, Any]]]:
     """``(session_id, card)`` for done cards completed since ``since`` that a session created or shepherds."""
-    conn = _kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
-    conn.row_factory = sqlite3.Row
-    try:
-        has_runs = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_runs'").fetchone() is not None
-        summary = ("COALESCE((SELECT r.summary FROM task_runs r WHERE r.task_id = t.id AND r.summary IS NOT NULL "
-                   "AND r.summary != '' ORDER BY r.id DESC LIMIT 1), t.result)") if has_runs else "t.result"
-        fields = f"t.id AS id, t.title AS title, t.completed_at AS completed_at, {summary} AS summary"
-        cond = "t.status = 'done' AND t.completed_at >= ?"
-        pairs = [(str(r["session_id"]), dict(r)) for r in conn.execute(
-            f"SELECT t.session_id AS session_id, {fields} FROM tasks t WHERE t.session_id IS NOT NULL "
-            f"AND t.session_id != '' AND {cond}", (since,))]
-        try:
-            pairs.extend((str(r["chat_id"]), dict(r)) for r in conn.execute(
-                f"SELECT s.chat_id AS chat_id, {fields} FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
-                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {cond}",
-                (since,)))
-        except sqlite3.Error:  # board predates notify subscriptions
-            pass
-    finally:
-        conn.close()
-    board = _board_slug(path)
-    out = []
-    for sid, card in pairs:
-        card.pop("session_id", None)
-        card.pop("chat_id", None)
-        out.append((sid, {**card, "board": board, "board_path": str(path)}))
-    return out
+    return _recent_done.read_recent_done(path, since, _counted_sub_clause, _board_slug)
 
 
 def attention_task_counts(now: float | None = None) -> dict[str, int]:
@@ -1762,6 +1716,10 @@ def attention_task_counts(now: float | None = None) -> dict[str, int]:
     scope = _origin_scope()
     mono = time.monotonic()
     hit = _attention.get(scope, mono)
+    if hit is not None:
+        return hit
+    inputs = _revalidate.attention_key()
+    hit = _attention.get(scope, mono, inputs)
     if hit is not None:
         return hit
     since = (time.time() if now is None else now) - ATTENTION_WINDOW_S
@@ -1782,7 +1740,7 @@ def attention_task_counts(now: float | None = None) -> dict[str, int]:
     counts: dict[str, int] = {}
     for sid, _tid in pairs:
         counts[sid] = counts.get(sid, 0) + 1
-    _attention.put(scope, mono, counts)
+    _attention.put(scope, mono, counts, inputs)
     return counts
 
 
@@ -1813,12 +1771,12 @@ def _read_annotation_parts() -> tuple:
 _frozen_parts: dict[tuple[str, ...], tuple] = {}
 
 
-def _refresh_annotation_locked(scope: tuple[str, ...]) -> tuple:
+def _refresh_annotation_locked(scope: tuple[str, ...], read_at: float | None = None) -> tuple:
     """Read this scope's parts and publish them. Caller holds ``_annotate_refresh_lock``."""
     global _annotate_flight_scope, _annotate_flight_result
     _annotate_flight_scope = scope
     _annotate_flight_result = None
-    read_at = time.time()
+    read_at = time.time() if read_at is None else read_at
     parts = _read_annotation_parts()
     _bounded.record(scope, parts, read_at)
     _last_annotation[scope] = parts
@@ -1827,21 +1785,22 @@ def _refresh_annotation_locked(scope: tuple[str, ...]) -> tuple:
     return parts
 
 
-def _annotation_snapshot() -> tuple:
+def _annotation_snapshot() -> tuple | None:
     """One in-flight annotation read, shared by overlapping polls.
 
     Returns the last good parts when a refresh is already running, so those polls
     do not occupy an AnyIO worker for the whole waiting-source and attention pass.
-    A cold start (nothing served yet) waits for that pass. Raises the read's own
-    error when it fails; the caller stamps ``kanban_unknown``.
+    A cold start waits only its refresh budget, then returns None (unknown).
+    Completed failures raise their own error; neither case invents counts.
 
     [daveey] One server process serves several profiles and the result is per scope.
     A cold poll that waited behind another scope's read, or behind a read that failed,
     used to get None and mark every row unknown (kanban-d0ba67426d). It now reads its
-    own scope while it holds the lock; same-scope overlapping polls still share one read.
+    own scope within the remaining budget; overlapping same-scope polls share one read.
     """
     global _annotate_waiters
     scope = _origin_scope()
+    deadline = time.monotonic() + _REFRESH_WAIT_S
     if not _annotate_refresh_lock.acquire(blocking=False):
         _annotate_waiters += 1
         try:
@@ -1849,25 +1808,31 @@ def _annotation_snapshot() -> tuple:
             stale = stale or _annotation_copy.seed(scope, _last_annotation, _identity.freeze_annotation)
             if stale is not None:
                 return stale
-            _annotate_refresh_lock.acquire()
+            if not _annotate_refresh_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                return None
         finally:
             _annotate_waiters -= 1
-        try:
-            if _annotate_flight_scope == scope and _annotate_flight_result is not None:
-                return _annotate_flight_result
-            cached = _last_annotation.get(scope)
-            if cached is not None:
-                return cached
-            # No usable result for this scope: another profile's flight, or a failed one.
-            return _refresh_annotation_locked(scope)
-        finally:
+        cached = (_annotate_flight_result if _annotate_flight_scope == scope
+                  else None)
+        cached = cached if cached is not None else _last_annotation.get(scope)
+        if cached is not None:
             _annotate_refresh_lock.release()
+            return cached
+        # No usable result: transfer lock ownership to a bounded read of this scope.
+        return _bounded.refresh_bounded(lambda: _refresh_annotation_locked(scope), _annotate_refresh_lock,
+                                        None, max(0.0, deadline - time.monotonic()))
     previous = _last_annotation.get(scope)
     if previous is None:
-        try:
-            return _refresh_annotation_locked(scope)
-        finally:
-            _annotate_refresh_lock.release()
+        return _bounded.refresh_bounded(lambda: _refresh_annotation_locked(scope), _annotate_refresh_lock,
+                                        None, max(0.0, deadline - time.monotonic()))
+    try:
+        parts = _revalidate.refresh_if_unchanged(scope, _refresh_annotation_locked)
+    except BaseException:
+        _annotate_refresh_lock.release()
+        raise
+    if parts is not None:
+        _annotate_refresh_lock.release()
+        return parts
     return _bounded.refresh_bounded(lambda: _refresh_annotation_locked(scope), _annotate_refresh_lock, previous,
                                     _REFRESH_WAIT_S)
 
@@ -1960,8 +1925,9 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
                 row.pop(key, None)
         # [daveey] The open card ids the chat waits on (lineage-wide, capped): the sidebar's "waiting on N cards".
         open_ids = {tid for sid in ids for tid in waiting.get(sid, ())}
-        # Plugin sources (pending close-outs): count the ids the boards don't already count as open.
-        pending = {tid for sid in ids for tid in extra.get(sid, ())} - open_ids
+        # Plugin sources (pending close-outs) must not recount local OR scoped remote obligations.
+        pending, extra_ids = _identity.closeout_extra(open_ids, {t for sid in ids for t in extra.get(sid, ())},
+                                                      [remote_keys.get(sid, ()) for sid in ids])
         if pending:
             row["kanban_active"] = int(row.get("kanban_active") or 0) + len(pending)
         # [daveey] Parked/held are subsets of kanban_active. kanban_parked is stamped (even 0) whenever there is open
@@ -1982,7 +1948,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             row["kanban_stalled"] = n_stalled
         else:
             row.pop("kanban_stalled", None)
-        ids_waiting = sorted(open_ids | pending)
+        ids_waiting = sorted(open_ids | extra_ids)
         if ids_waiting:
             row["kanban_waiting_on"] = ids_waiting[:WAITING_ON_CAP]
         else:

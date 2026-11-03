@@ -54,10 +54,7 @@ from utils import base_url_host_matches, is_truthy_value
 logger = logging.getLogger("run_agent")
 
 
-def _provider_default_routes(provider: str) -> set[str]:
-    """Return known exact default routes for a canonical provider id."""
-    from agent.agent_init_routes import provider_default_routes
-    return provider_default_routes(provider)
+from agent.agent_init_routes import provider_default_routes as _provider_default_routes
 
 
 def _context_route_mismatch(
@@ -2114,7 +2111,8 @@ def init_agent(
     _install_safe_stdio()
     from agent.model_routing_agent import prepare_agent_route
     model, provider, session_id, api_key, base_url, api_mode, credential_pool, fallback_model = prepare_agent_route(
-        agent, model, provider, session_id, api_key, base_url, api_mode, credential_pool, fallback_model)
+        agent, model, provider, session_id, api_key, base_url, api_mode, credential_pool, fallback_model,
+        session_db=session_db)
 
     _params = locals()
     for _name in _PASSTHROUGH_PARAMS:

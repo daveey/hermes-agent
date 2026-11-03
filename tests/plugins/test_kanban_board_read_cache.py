@@ -170,15 +170,20 @@ def test_cold_read_computes_diagnostics_only_for_cards_in_the_payload(board, mon
         live = kb.create_task(conn, title="live", assignee="w")
     finally:
         conn.close()
-    seen = []
-    real = mod._compute_task_diagnostics
-    monkeypatch.setattr(mod, "_compute_task_diagnostics", lambda c, task_ids=None: seen.append(task_ids) or real(c, task_ids))
+    seen, ruled = [], []
+    # The board reads the diagnostics rows (SQL) and runs the rules in separate steps, so
+    # retained rows can be re-ruled on each refresh; both must be limited to payload cards.
+    real = mod._diagnostic_inputs
+    monkeypatch.setattr(mod, "_diagnostic_inputs", lambda c, task_ids=None: seen.append(task_ids) or real(c, task_ids))
+    real_rules = mod.kd.compute_task_diagnostics
+    monkeypatch.setattr(mod.kd, "compute_task_diagnostics", lambda r, *a, **k: ruled.append(r["id"]) or real_rules(r, *a, **k))
     body = client.get("/api/plugins/kanban/board?done_limit=2").json()
     done = next(c for c in body["columns"] if c["name"] == "done")
     assert [t["title"] for t in done["tasks"]] == ["done-5", "done-4"]
     assert (done["total"], done["omitted"]) == (6, 4)
     assert len(seen) == 1 and seen[0] is not None
     assert set(seen[0]) == {live, ids[5], ids[4]}
+    assert sorted(ruled) == sorted([live, ids[5], ids[4]])
 
 
 def test_first_read_runs_once_when_prewarm_and_poll_overlap(board, monkeypatch):

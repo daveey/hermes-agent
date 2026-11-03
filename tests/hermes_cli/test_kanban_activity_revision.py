@@ -251,3 +251,23 @@ def test_an_unchanged_annotation_reuses_its_frozen_parts(board, monkeypatch):
     kb.complete_task(board, tid, result="ok")
     changed = ksa._read_annotation_parts()
     assert changed is not first and changed[0] == {} and len(freezes) == 2
+
+
+def test_an_unchanged_schema_checks_trigger_coverage_once(board, monkeypatch):
+    """[daveey] Every Desktop poll keys each board; re-scanning ``sqlite_master`` for the triggers each time was most
+    of the fingerprint's cost on David-MBP. The coverage verdict is kept per file and ``schema_version`` (a dropped
+    or added trigger moves it), so later keys read only the counter row."""
+    kb.create_task(board, title="work", assignee="worker", session_id="s_chat")
+    path = ksa._board_db_paths()[0]
+    scans = []
+    real = rev.read_key
+    monkeypatch.setattr(rev, "read_key", lambda conn, tables: scans.append(1) or real(conn, tables))
+    first = ksa._board_content_key(path)
+    assert [ksa._board_content_key(path) for _ in range(4)] == [first] * 4
+    assert len(scans) == 1
+    kb.create_task(board, title="more", assignee="worker", session_id="s_chat")
+    moved = ksa._board_content_key(path)
+    assert rev.is_revision(moved) and moved != first and len(scans) == 1
+    board.execute("DROP TRIGGER kanban_activity_rev_tasks_update")
+    board.commit()
+    assert ksa._board_content_key(path)[0] == "stat" and len(scans) == 2

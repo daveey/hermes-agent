@@ -608,6 +608,8 @@ class ProcessSession:
     # Set by the _move_to_finished call that moved the session out of _running; only that call
     # publishes the completion, so a duplicate finisher must not release waiters early.
     _finish_claimed: bool = field(default=False, repr=False)
+    # [daveey] Its completion event, built at that claim (process_registry_awaiting.claim_completion_event).
+    _completion_notice: Optional[dict] = field(default=None, repr=False)
     # The last stop of ``systemd_unit`` failed, so its descendants may still be alive; bulk
     # cleanup retries the stop even after the session finished.
     _scope_stop_pending: bool = field(default=False, repr=False)
@@ -1518,6 +1520,9 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
                 # Keep the session tracked until its result is durable. A finite
                 # parent must not observe completion and exit during this write.
                 save_completed_result(session)
+                if session.notify_on_complete:
+                    from tools.process_registry_awaiting import claim_completion_event
+                    claim_completion_event(session)
                 self._running.pop(session.id)
                 self._ownership_bindings.pop(session.id, None)
             self._finished[session.id] = session
@@ -1544,23 +1549,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
         self._release_finished_handles(session)
         self._write_checkpoint(settled_id=session.id if was_running else None)
         if was_running and session.notify_on_complete:
-            notification = {
-                "type": "completion",
-                "session_id": session.id,
-                "session_key": session.session_key,
-                "task_id": session.task_id,
-                "owner_task_id": session.owner_task_id,
-                "command": session.command,
-                **({"handoff_note": session.handoff_note} if session.handoff_note else {}),
-                **self._exit_fields(session),
-                # A consumer that relays the output (a bot DM's reply) must know it is not whole.
-                **_completion_output(session),
-                # Stable producer identity across checkpoint recovery (unlike a
-                # consumer-observed completion timestamp).
-                "started_at": session.started_at,
-            }
-            _redact_process_result(notification)
-            self._put_completion(session, notification)
+            from tools.process_registry_awaiting import completion_event, publishable
+            self._put_completion(session, publishable(session._completion_notice or completion_event(session)))
 
     @staticmethod
     def _exit_fields(session: ProcessSession) -> dict:

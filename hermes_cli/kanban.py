@@ -741,6 +741,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
         latest_summary = kb.latest_summary(conn, args.task_id)
         from hermes_cli import kanban_wake_check as kwc
         wake_check = kwc.get_state(conn, args.task_id)
+        from hermes_cli import kanban_queue_reason as kqr
+        queue_reason = kqr.latest(conn, args.task_id)
         if not want_json:
             graph = kb.task_graph_context(conn, task.id)
 
@@ -751,6 +753,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
             "events": [_obj_dict(e, ("kind", "payload", "created_at", "run_id")) for e in events],
             "runs": [_obj_dict(r, _SHOW_RUN_FIELDS) for r in runs],
             "wake_check": wake_check,
+            "queue_reason": queue_reason,
         })
         return 0
 
@@ -760,6 +763,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
     print(f"Task {task.id}: {task.title}")
     field("status", task.status)
     field("assignee", task.assignee or "-")
+    kqr.print_field(queue_reason, field)
     if task.tenant:
         field("tenant", task.tenant)
     field("workspace", f"{task.workspace_kind}" + (f" @ {task.workspace_path}" if task.workspace_path else ""))
@@ -880,6 +884,8 @@ def _cmd_move(args: argparse.Namespace) -> int:
     elif res.get("ok"):
         print(f"Moved {args.task_id} to {res['runs_on']} (eligible: {', '.join(res['matches'])}; "
               f"move {res['move_no']}; now {res['status']})")
+        if res.get("note"):
+            print(res["note"])
     else:
         print(f"kanban move: {res.get('error')} [{res.get('reason_code')}]", file=sys.stderr)
     return 0 if res.get("ok") else 1

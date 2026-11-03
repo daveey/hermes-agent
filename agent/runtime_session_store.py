@@ -514,6 +514,15 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
         self._apply('session.model', {'model': model, 'provider': provider, 'base_url': base_url,
                                       'api_mode': api_mode, 'clear_model_routing': bool(clear_model_routing)})
 
+    def route_switch_intent(self, session_id):
+        """The committed model-switch intent for this worker's own session (the owner reads it in-receipt)."""
+        self._session(session_id)
+        return self._apply('route_switch.pending', {})['value']
+
+    def consume_route_switch_intent(self, session_id, raw):
+        self._session(session_id)
+        return self._apply('route_switch.consume', {'raw': raw})['value']
+
     def _session_turn_lease_key(self, session_id):
         # The stand-down latch compares lineage keys; the owner answers only within this lineage.
         if not session_id:

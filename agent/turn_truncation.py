@@ -794,4 +794,5 @@ def handle_content_policy_refusal(
     return RefusalVerdict("return", _content_policy_blocked_result(
         messages, api_call_count, final_response=_refusal_response,
         error_detail=_refusal_text or "model declined (content_filter)",
+        refusal_category=_stop_details.get("category") if isinstance(_stop_details, dict) else None,
     ), active_system_prompt)

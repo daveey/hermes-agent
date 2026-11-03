@@ -41,26 +41,6 @@ def _osascript_exec_argv(program_args: list[str]) -> list[str]:
     return argv
 
 
-class TestUserSystemdPrivateSocketPreflight:
-    def test_preflight_accepts_private_socket_without_dbus_bus(self, monkeypatch):
-        monkeypatch.setattr(gateway_cli, "_ensure_user_systemd_env", lambda: None)
-        monkeypatch.setattr(gateway_cli, "_user_dbus_socket_path", lambda: Path("/tmp/missing-bus"))
-        monkeypatch.setattr(gateway_cli, "_user_systemd_private_socket_path", lambda: Path("/tmp/private-socket"))
-        monkeypatch.setattr(Path, "exists", lambda self: str(self) == "/tmp/private-socket")
-
-        gateway_cli._preflight_user_systemd(auto_enable_linger=False)
-
-    def test_wait_for_user_dbus_socket_accepts_private_socket(self, monkeypatch):
-        calls = []
-        monkeypatch.setattr(gateway_cli, "_ensure_user_systemd_env", lambda: calls.append("env"))
-        monkeypatch.setattr(gateway_cli, "_user_dbus_socket_path", lambda: Path("/tmp/missing-bus"))
-        monkeypatch.setattr(gateway_cli, "_user_systemd_private_socket_path", lambda: Path("/tmp/private-socket"))
-        monkeypatch.setattr(Path, "exists", lambda self: str(self) == "/tmp/private-socket")
-
-        assert gateway_cli._wait_for_user_dbus_socket(timeout=0.1) is True
-        assert calls == ["env"]
-
-
 class TestSystemdServiceRefresh:
 
     def test_systemd_restart_timeout_prints_status_guidance(self, monkeypatch, capsys):
@@ -2985,9 +2965,15 @@ class TestUnitAnchoredServiceIdentity:
         monkeypatch.setattr(gateway_cli, "_SYSTEM_UNIT_DIR", unit_dir)
         monkeypatch.setattr(os, "geteuid", lambda: 0)
         monkeypatch.setattr(hermes_constants, "_get_platform_default_hermes_home", lambda: root_home)
+        # Service identity follows the passwd account, not a runner's scratch HOME.
+        monkeypatch.setattr(hermes_constants, "_account_home", lambda: root_home.parent)
+        monkeypatch.setattr(Path, "home", lambda: root_home.parent)
+        monkeypatch.delenv("SUDO_USER", raising=False)
         monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.setattr(gateway_cli, "_systemctl_show", lambda *a, **kw: pytest.fail("must read fixture unit"))
 
         pre_sync_name = gateway_cli.get_service_name()
+        assert pre_sync_name == gateway_cli._SERVICE_BASE
         gateway_cli._sync_hermes_home_from_systemd_unit(system=True)
 
         assert os.environ["HERMES_HOME"] == str(alice_home)  # the sync really ran

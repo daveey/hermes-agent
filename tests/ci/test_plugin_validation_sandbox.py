@@ -336,18 +336,18 @@ def test_unstatable_secret_paths_do_not_crash_the_path_policy(work, python):
     ("pypi.org", 22, "port 22 not allowed"),
     ("bad host", 443, "malformed"),
 ])
-def test_egress_policy_denies_internal_targets_and_other_ports(host, port, reason):
+def test_egress_policy_denies_internal_targets_and_other_ports(host, port, reason, public_dns):
     verdict = sandbox.EgressPolicy({443}, []).resolve(host, port)
     assert isinstance(verdict, str) and reason in verdict, verdict
 
 
-def test_nat64_of_a_public_ipv4_stays_allowed():
+def test_nat64_of_a_public_ipv4_stays_allowed(public_dns):
     """The embedded-IPv4 rule judges the IPv4, it does not ban NAT64 outright."""
     verdict = sandbox.EgressPolicy({443}, []).resolve("[64:ff9b::808:808]", 443)  # 8.8.8.8
     assert verdict == [("64:ff9b::808:808", 443)], verdict
 
 
-def test_a_dial_that_lands_on_this_host_is_refused():
+def test_a_dial_that_lands_on_this_host_is_refused(public_dns):
     """Policy is judged on addresses; a runner whose public address sits on its own
     interface would still be 'public'. The dial itself is refused when the kernel
     routed it to a local address (src == dst)."""
@@ -371,8 +371,10 @@ def test_a_dial_that_lands_on_this_host_is_refused():
         listener.close()
 
 
-@pytest.mark.skipif(not _public_https_reachable(), reason="host has no route to pypi.org:443")
+@pytest.mark.live  # Dials the real pypi.org: a live canary for the self-connection check.
 def test_a_dial_to_a_public_host_is_not_mistaken_for_this_host():
+    if not _public_https_reachable():
+        pytest.skip("host has no route to pypi.org:443")
     addresses = sandbox.EgressPolicy({443}, []).resolve("pypi.org", 443)
     assert isinstance(addresses, list), addresses
     upstream = sandbox._dial(addresses)
@@ -704,8 +706,10 @@ def test_no_route_to_host_loopback_or_metadata_and_proxy_refuses_them(work):
 
 
 @needs_isolation
-@pytest.mark.skipif(not _public_https_reachable(), reason="host has no route to pypi.org:443")
+@pytest.mark.live  # Downloads from the real pypi.org through the sandbox proxy.
 def test_dependency_downloads_reach_public_https_through_the_proxy(work):
+    if not _public_https_reachable():
+        pytest.skip("host has no route to pypi.org:443")
     probe = """
         import urllib.request
         with urllib.request.urlopen("https://pypi.org/simple/six/", timeout=30) as resp:

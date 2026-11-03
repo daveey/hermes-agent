@@ -149,10 +149,13 @@ def _subdir_install(tmp_path, monkeypatch):
     return repo, plugin, target
 
 
-def test_subdirectory_update_asks_before_a_caution_scan_and_never_accepts_dangerous(tmp_path, monkeypatch):
+def test_subdirectory_update_asks_before_a_caution_scan_and_never_accepts_dangerous(admission_env, tmp_path,
+                                                                                   monkeypatch):
     """The re-clone path used to accept a caution verdict without asking, because replacing the tree and
     accepting the scan were one ``force``. Now it follows the git-pull rule: caution needs ``force``,
-    dangerous is refused even with it, and a refusal leaves the installed tree and record alone."""
+    dangerous is refused even with it, and a refusal leaves the installed tree and record alone.
+    ``admission_env`` runs publication's dependency sync against a fake core with the host toolchain,
+    so it never downloads PM's pinned Python."""
     from hermes_cli import plugins_cmd as pc
 
     repo, plugin, target = _subdir_install(tmp_path, monkeypatch)

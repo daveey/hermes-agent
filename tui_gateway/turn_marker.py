@@ -153,14 +153,18 @@ def _update(home: Path | str, session_key: str, mutate, what: str) -> bool:
 def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attempts: int = 0,
                       auto_continue: bool = True, notification_category: str | None = None,
                       pauses: int = 0, killed_jobs: list | None = None, until_tool: bool = False,
-                      reason: str | None = None) -> None:
+                      reason: str | None = None, carried_job_ids=()) -> bool:
     """Persist the marker for a turn that is about to run. ``attempts`` = how many auto-continues led to
     this run (0 for a user-initiated turn); the crash-loop breaker reads it back on the next resume.
     ``pauses`` = core-update pauses this logical turn already took (``mark_turn_paused``), counted apart
     from crash attempts so a pause never uses one up. ``until_tool`` [daveey]: the turn is continuable only
-    until its first tool starts (``mark_turn_tool_started``); used by at-most-once admitted decisions."""
+    until its first tool starts (``mark_turn_tool_started``); used by at-most-once admitted decisions.
+    [daveey] An exit-journal receipt marker already on disk for this key (a backend exit journaled while this
+    turn was starting) keeps its receipts in the same locked write, except ``carried_job_ids`` (notices this
+    turn's prompt already carries); the receipts ``killed_jobs`` passes win on a shared id.
+    True only when the marker write landed."""
     if not session_key or not prompt:
-        return
+        return False
     now = time.time()
     entry = {"attempts": max(0, int(attempts)), "prompt": prompt[:_MAX_PROMPT_CHARS], "started_at": now,
              "auto_continue": bool(auto_continue), **_writer_identity(),
@@ -179,7 +183,73 @@ def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attemp
         entry["reason"] = str(reason)
     # Identity only — never the prompt: this log is read on crash triage and must not carry turn content.
     logger.debug("turn marker recorded for session %s by writer pid %s", session_key, entry["writer_pid"])
-    _update(home, session_key, lambda entries: {**_prune(entries, now), session_key: entry}, "record")
+    carried = {str(i) for i in carried_job_ids or ()}
+
+    def mutate(entries):
+        prior = entries.get(session_key)
+        if isinstance(prior, dict) and prior.get("reason") == _JOBS_REASON:
+            own = {str(j.get("session_id")) for j in entry.get("killed_jobs", ()) if isinstance(j, dict)}
+            kept = [j for j in prior.get("killed_jobs") or () if isinstance(j, dict)
+                    and str(j.get("session_id") or "") not in own | carried]
+            if kept:
+                entry["killed_jobs"] = kept + list(entry.get("killed_jobs") or ())
+                entry["exit_receipt_ids"] = [str(j.get("session_id")) for j in kept]
+        return {**_prune(entries, now), session_key: entry}
+
+    return _update(home, session_key, mutate, "record")
+
+
+# Mirrors exit_job_receipts.JOBS_REASON (imported there; kept literal here to avoid an import cycle).
+_JOBS_REASON = "background_jobs_stopped"
+
+
+def retire_cancelled_turn_marker(home: Path | str, session_key: str) -> bool:
+    """[daveey] A turn Stopped before its marker landed: drop the turn, but exit-journal receipts its marker
+    absorbed (``exit_receipt_ids``) go back to a receipt marker instead of being deleted with it."""
+    def mutate(entries):
+        entry = entries.get(session_key)
+        if not isinstance(entry, dict):
+            return None
+        ids = set(entry.get("exit_receipt_ids") or ())
+        kept = [j for j in entry.get("killed_jobs") or () if isinstance(j, dict) and j.get("session_id") in ids]
+        rest = {k: v for k, v in entries.items() if k != session_key}
+        if not kept:
+            return rest
+        from tui_gateway.exit_job_receipts import JOBS_PROMPT
+        rest[session_key] = {"attempts": 0, "prompt": JOBS_PROMPT, "started_at": time.time(), "auto_continue": True,
+                             **_writer_identity(), "pause_restarts_freshness": True, "reason": _JOBS_REASON,
+                             "paused_at": time.time(), "killed_jobs": kept}
+        return rest
+
+    return bool(session_key) and _update(home, session_key, mutate, "retire")
+
+
+def merge_receipts(home: Path | str, session_key: str, jobs: list, merge, *, create: bool,
+                   prompt: str) -> bool:
+    """[daveey] One locked load → merge → store of exit receipts into the session's marker (no read/write gap a
+    concurrent ``record_turn_start`` could fall into). No marker: a receipt marker is created only when
+    ``create``. True when the write landed."""
+    def mutate(entries):
+        entry = entries.get(session_key)
+        if not isinstance(entry, dict):
+            if not create:
+                return None
+            now = time.time()
+            entry = entries[session_key] = {"attempts": 0, "prompt": prompt, "started_at": now,
+                                             "auto_continue": True, **_writer_identity(),
+                                             "pause_restarts_freshness": True, "reason": _JOBS_REASON,
+                                             "paused_at": now}
+        prior = _paused_killed_jobs(entry)
+        merged = merge(prior, jobs)
+        entry["killed_jobs"] = merged
+        if entry.get("reason") != _JOBS_REASON:
+            prior_ids = {j["session_id"] for j in prior}
+            extra = [j["session_id"] for j in jobs if j["session_id"] not in prior_ids]
+            if entry.get("exit_receipt_ids") is not None or extra:
+                entry["exit_receipt_ids"] = sorted(set(entry.get("exit_receipt_ids") or ()) | set(extra))
+        return entries
+
+    return bool(session_key) and _update(home, session_key, mutate, "journal jobs")
 
 
 def clear_turn_marker(home: Path | str, session_key: str) -> None:
@@ -250,7 +320,7 @@ def record_killed_jobs(home: Path | str, session_key: str, killed_jobs: list) ->
 
 
 def _paused_killed_jobs(entry: dict) -> list[dict]:
-    """Jobs a core-update pause actually stopped, or [] when the marker has none / junk."""
+    """Exit/pause receipts, including ``kill_state=completed`` pending notices; [] for junk."""
     raw = entry.get("killed_jobs")
     if not isinstance(raw, list):
         return []

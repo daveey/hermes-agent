@@ -66,6 +66,10 @@ def _cpu_seconds(native_id):
         return None
 
 
+# Sampling frequency when a request omits ``hz``: 25 Hz (40 ms wall-stack
+# resolution). 50 Hz exceeded the 3%-of-one-core budget on a live 166-thread
+# gateway. An explicit ``hz`` in 10..200 still overrides it.
+DEFAULT_HZ = 25
 # Native CPU clocks are read at a thread's first observation, then on refresh
 # ticks at most this often (monotonic seconds), and once at window end.
 _CPU_REFRESH_S = 0.1
@@ -318,7 +322,7 @@ def trim_response(response, limit):
 
 
 def validate_params(params):
-    seconds, hz, top = (params.get('seconds', 20), params.get('hz', 50), params.get('top', 40))
+    seconds, hz, top = (params.get('seconds', 20), params.get('hz', DEFAULT_HZ), params.get('top', 40))
     for name, value, low, high in [('seconds', seconds, 1, 60), ('hz', hz, 10, 200)]:
         if type(value) not in (int, float) or not low <= value <= high:
             raise ValueError(f'{name} must be a finite number in {low}..{high}')

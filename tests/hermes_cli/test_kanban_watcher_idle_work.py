@@ -36,6 +36,13 @@ def test_registry_failure_waits_for_ttl_and_recovers(monkeypatch):
         fetch.return_value = {'me': 'local', 'machines': [{'name': 'new'}]}
         assert 'new' in node.registry()['machines']
         assert fetch.call_count == 2
+        recovered_at = clock.monotonic()
+        clock.monotonic = lambda: recovered_at + node.REGISTRY_RETRY_S
+        assert 'new' in node.registry()['machines']
+        assert fetch.call_count == 2
+        clock.monotonic = lambda: recovered_at + node.REGISTRY_TTL_S
+        assert 'new' in node.registry()['machines']
+        assert fetch.call_count == 3
     finally:
         node.set_registry_fetch(None)
 
@@ -88,7 +95,8 @@ def test_notifier_scan_filters_idle_and_disconnected_subscriptions(board):
     assert len(notify.list_notify_subs(board)) == 2
 
 
-def test_no_guard_candidates_avoids_registry_then_new_hold_runs(board, monkeypatch):
+@pytest.mark.parametrize('status', ['ready', 'review'])
+def test_no_guard_candidates_avoids_registry_then_new_hold_runs(board, monkeypatch, status):
     calls = Mock(return_value={})
     monkeypatch.setattr(node, 'dispatch_refusals', calls)
     for _ in range(20):
@@ -96,7 +104,7 @@ def test_no_guard_candidates_avoids_registry_then_new_hold_runs(board, monkeypat
     assert calls.call_count == 0
     task = kb.create_task(board, title='new hold', assignee='default')
     with kbc.write_txn(board):
-        board.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (task,))
+        board.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task))
         kb._append_event(board, task, 'respawn_guarded', {'reason': 'blocker_auth'})
     guards.sweep_remote_guard_holds(board, dispatch.DispatchResult())
     assert calls.call_count == 2
@@ -199,7 +207,9 @@ def test_owner_archive_candidate_scan_is_not_repeated(board, monkeypatch):
         board.set_trace_callback(None)
 
 
-def test_remote_archive_empty_sources_skipped_but_pending_source_retried(board, monkeypatch):
+@pytest.mark.parametrize('status', ['done', 'archived'])
+@pytest.mark.parametrize('event_kind', ['cancel', 'forwarded'])
+def test_remote_archive_empty_sources_skipped_but_pending_source_retried(board, monkeypatch, status, event_kind):
     from hermes_cli import kanban_owner_archive_relay as relay
     from hermes_cli import kanban_remote_stop as stop
     from hermes_cli import kanban_placement_forward as placement
@@ -212,8 +222,9 @@ def test_remote_archive_empty_sources_skipped_but_pending_source_retried(board, 
     assert (stop_call.call_count, owner_call.call_count, placement_call.call_count) == (0, 0, 0)
     task = kb.create_task(board, title='remote archive', assignee='default')
     with kbc.write_txn(board):
-        board.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (task,))
-        kb._append_event(board, task, placement.CANCEL_INTENT, {})
+        board.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task))
+        kind = placement.CANCEL_INTENT if event_kind == 'cancel' else placement.ARCHIVE_FORWARDED
+        kb._append_event(board, task, kind, {})
     # A pending source can resolve in the remote replica without a local write.
     for _ in range(3):
         relay.apply_remote_archives(board)
@@ -277,24 +288,64 @@ def test_candidate_key_failure_falls_back_to_real_query(board, monkeypatch):
     import sqlite3
     from hermes_cli import kanban_idle_candidates as candidates
     monkeypatch.setattr(candidates.revision, 'read_key', Mock(side_effect=sqlite3.OperationalError('key unavailable')))
-    assert not candidates.event_candidates(board, ('ready',), ('respawn_guarded',))
+    task = kb.create_task(board, title='candidate despite key failure', assignee='default')
+    with kbc.write_txn(board):
+        board.execute("UPDATE tasks SET status='ready' WHERE id=?", (task,))
+        kb._append_event(board, task, 'respawn_guarded', {})
+    assert candidates.event_candidates(board, ('ready',), ('respawn_guarded',))
 
 
 def test_registry_concurrent_misses_are_single_flight(monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
-    from threading import Barrier
-    barrier = Barrier(8)
-    fetch = Mock(return_value={'me': 'local', 'machines': [{'name': 'one'}]})
+    from threading import Condition, Event, Lock
+    condition, release = Condition(), Event()
+    arrivals = {'lock': 0, 'fetch': 0}
+    # Freeze before the first fetch: wall time and fractional TTL rounding must
+    # not decide whether concurrent readers share the initial cache entry.
+    clock = SimpleNamespace(monotonic=lambda: 1000.0)
+    monkeypatch.setattr(node, 'time', clock)
+
+    class ObservedLock:
+        """Report attempts before blocking, without changing lock semantics."""
+        def __init__(self):
+            self.lock = Lock()
+
+        def __enter__(self):
+            with condition:
+                arrivals['lock'] += 1
+                condition.notify_all()
+            self.lock.acquire()
+
+        def __exit__(self, *exc):
+            self.lock.release()
+
+    def blocked_fetch():
+        with condition:
+            arrivals['fetch'] += 1
+            condition.notify_all()
+        assert release.wait(timeout=10)
+        return {'me': 'local', 'machines': [{'name': 'one'}]}
+
+    fetch = Mock(side_effect=blocked_fetch)
     node.set_registry_fetch(fetch)
+    monkeypatch.setattr(node, '_REGISTRY_LOCK', ObservedLock())
     try:
-        def read():
-            barrier.wait(timeout=10)
-            return node.registry()
         with ThreadPoolExecutor(max_workers=8) as pool:
-            values = list(pool.map(lambda _: read(), range(8)))
+            futures = [pool.submit(node.registry) for _ in range(8)]
+            try:
+                with condition:
+                    # Every caller has reached the lock, or an unprotected fetch.
+                    assert condition.wait_for(
+                        lambda: (arrivals['lock'] == 8 and arrivals['fetch'] >= 1)
+                        or arrivals['fetch'] == 8, timeout=10)
+                    assert arrivals['fetch'] >= 1
+            finally:
+                release.set()
+            values = [future.result(timeout=10) for future in futures]
         assert all('one' in v['machines'] for v in values)
         assert fetch.call_count == 1
-        monkeypatch.setattr(node, 'time', SimpleNamespace(monotonic=lambda: node._REGISTRY['at'] + node.REGISTRY_TTL_S))
+        clock.monotonic = lambda: 1000.0 + node.REGISTRY_TTL_S
+        fetch.side_effect = None
         fetch.return_value = {'me': 'local', 'machines': [{'name': 'two'}]}
         assert 'two' in node.registry()['machines']
         assert fetch.call_count == 2
@@ -302,9 +353,11 @@ def test_registry_concurrent_misses_are_single_flight(monkeypatch):
         node.set_registry_fetch(None)
 
 
-def test_candidate_memo_bypassed_for_transactions_and_missing_triggers(board):
+@pytest.mark.parametrize('public', [False, True])
+def test_candidate_memo_bypassed_for_transactions_and_missing_triggers(board, public):
     from hermes_cli import kanban_activity_revision as revision
-    from hermes_cli.kanban_idle_candidates import _on_connection as event_candidates
+    from hermes_cli import kanban_idle_candidates as candidates
+    event_candidates = candidates.event_candidates if public else candidates._on_connection
     assert not event_candidates(board, ('ready',), ('respawn_guarded',))
     board.execute('BEGIN')
     try:
@@ -316,6 +369,8 @@ def test_candidate_memo_bypassed_for_transactions_and_missing_triggers(board):
         board.rollback()
     assert not event_candidates(board, ('ready',), ('respawn_guarded',))
     revision.drop_triggers(board)
+    # Trace the caller connection rather than the retained reader for this check.
+    event_candidates = candidates._on_connection
     queries = []
     board.set_trace_callback(queries.append)
     try:

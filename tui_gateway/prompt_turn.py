@@ -182,6 +182,12 @@ def _admit_prompt_turn(
                 # the session already held stays for close's own handoff (_settle_isolated_turn_before_close).
                 _release_active_session_slot(session)
             return None
+        if not admit_synthesized_turn(session):
+            # [daveey] A backend exit fenced automatic turns after this one's claim: its notice is journaled
+            # for the next backend (exit_job_receipts), so it must not also run here. Delivery itself is
+            # committed only at the start below (start_synthesized_turn).
+            session["running"] = False
+            return None
         images = list(session.get("attached_images", []) if image_paths is None else image_paths)
         if image_paths is None:
             session["attached_images"] = []
@@ -276,7 +282,10 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
             session["_active_turn_marker_key"] = marker_key
             # [daveey] _on_tool_start switches an at-most-once turn's marker off before its first tool runs.
             session["_until_tool_marker_key"] = marker_key if until_tool and auto_continue else ""
-        record_turn_start(marker_home, marker_key, marker_text, attempts=marker_attempt,
+            from tui_gateway.session_notifications import COMPLETION_UNSECURED
+            carried = list(session.get(COMPLETION_UNSECURED) or ())
+        recorded = record_turn_start(marker_home, marker_key, marker_text, attempts=marker_attempt,
+                          carried_job_ids=carried,
                           auto_continue=auto_continue,
                           **({"until_tool": True} if until_tool and auto_continue else {}),
                           **({"killed_jobs": killed_jobs} if killed_jobs else {}),
@@ -284,9 +293,20 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
                           **({"notification_category": "diagnostic"}
                              if notification_category == "diagnostic" else {}))
         with session["history_lock"]:
-            marker_cancelled = bool(session.get("_turn_cancel_requested"))
+            # [daveey] The backend exit's own interrupt is not a Stop: like _retire_turn_marker, keep the marker
+            # it raced (only a user Stop before the exit drops it). That marker's prompt now carries any notice
+            # this turn was started with, so the exit journal stops reporting those separately.
+            exit_keeps = session.get("_exit_keeps_turn_marker") and not session.get("_user_stop_at_exit")
+            marker_cancelled = bool(session.get("_turn_cancel_requested")) and not exit_keeps
+            if recorded:  # only verified persistence secures the carried notices; a failed write keeps custody
+                unsecured = session.get(COMPLETION_UNSECURED) or {}
+                for pid in carried:
+                    unsecured.pop(pid, None)
+                if not unsecured:
+                    session.pop(COMPLETION_UNSECURED, None)
         if marker_cancelled:
-            clear_turn_marker(marker_home, marker_key)
+            from tui_gateway.turn_marker import retire_cancelled_turn_marker
+            retire_cancelled_turn_marker(marker_home, marker_key)
     return marker_key
 
 
@@ -1419,6 +1439,11 @@ def _run_admitted_prompt(
                 with session["history_lock"]:
                     if session.get(SESSION_KEY) is segments:
                         session.pop(SESSION_KEY)
+                    if not session.get("_exit_keeps_turn_marker"):
+                        # [daveey] The turn ran; a notice it carried without a marker of its own (one carried
+                        # a core-update pause) is delivered. A backend exit's interrupt keeps it reportable.
+                        from tui_gateway.session_notifications import COMPLETION_UNSECURED
+                        session.pop(COMPLETION_UNSECURED, None)
                 # Closing bookend of "tui prompt accepted" — exactly one per accepted prompt.
                 # agent.session_id is re-read because compression may have rotated it (an
                 # accepted/finished pair whose id changed IS a rotation trace).
@@ -1467,20 +1492,25 @@ def _run_admitted_prompt(
     # state registry, and _sessions_lock gates every create/close/prompt on this backend. The worker's
     # admission is retained before it too: that takes history_lock, and session.resume/activate hold
     # history_lock while they take _sessions_lock (a resume racing this submit deadlocked the backend).
+    # [daveey] The notice commit (start_synthesized_turn) marks before _sessions_lock for the same reason.
     work = _prepare_session_work(run, name=f"prompt-turn-{sid}", session=session)
     spawning = started = False
     try:
-        with _routing_provenance_db(session) as routing_db, _sessions_lock:
-            registered = _sessions.get(sid)
-            can_start = work is not None and not session.get("_closing") and (registered is None or registered is session)
-            if can_start:
-                # Only a registered session is proof the conversation is routed here; an unregistered one may
-                # still run its turn, but its stamp stays (#106459).
-                if registered is session:
-                    _reopen_routed_session_row(routing_db, sid, session)
-                spawning = True
-                work.start(abort_on_error=False)  # spawns only; the close-race check above stays atomic
-                started = True
+        with start_synthesized_turn(session) as commit:
+            with _routing_provenance_db(session) as routing_db, _sessions_lock:
+                registered = _sessions.get(sid)
+                can_start = (work is not None and not session.get("_closing")
+                             and (registered is None or registered is session))
+                if can_start:
+                    # Only a registered session is proof the conversation is routed here; an unregistered one may
+                    # still run its turn, but its stamp stays (#106459).
+                    if registered is session:
+                        _reopen_routed_session_row(routing_db, sid, session)
+                    # Under _sessions_lock: the exit fence check and the start are one commit (exit_job_receipts);
+                    # spawns only, so the close-race check above stays atomic.
+                    spawning = True
+                    started = commit(lambda: work.start(abort_on_error=False)) is not None
+                    can_start = started
     except BaseException:
         # Out here _sessions_lock is released: both clean-ups take history_lock. A started worker owns its own.
         if spawning and not started:

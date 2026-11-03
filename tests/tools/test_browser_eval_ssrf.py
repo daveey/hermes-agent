@@ -105,7 +105,7 @@ def test_raw_cdp_keeps_the_metadata_floor_when_the_private_guard_is_off(monkeypa
 
 
 @pytest.fixture
-def cdp_guard(monkeypatch, local_backend):
+def cdp_guard(monkeypatch, local_backend, public_dns):
     """The raw CDP guard with a public page open: private guard on for a remote backend, off for a local one."""
     from tools import browser_cdp_tool
     monkeypatch.setattr(browser_session_cloud, "is_local_backend", lambda: local_backend)

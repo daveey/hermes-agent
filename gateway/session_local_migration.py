@@ -97,6 +97,15 @@ def legacy_launch_params(row):
         route.setdefault('provider', 'custom')
     if row['source'] == 'acp' and 'cwd' not in params and Path(str(saved.get('cwd') or '')).is_absolute():
         params['cwd'] = saved['cwd']
+    from agent.model_routing_restore import restore_route
+    restored = restore_route(row.get('model'), saved)
+    if restored:
+        model, provider = restored
+        if (model, provider) != (row.get('model'), route.get('provider')):
+            # The recorded route wins, but the displaced provider's endpoint and
+            # wire protocol must not travel with it.
+            route = {'provider': provider}
+        params['model'] = model
     params.update({key: route[key] for key in ('provider', 'base_url') if key in route})
     reasoning = saved.get('reasoning_config')
     if isinstance(reasoning, dict):

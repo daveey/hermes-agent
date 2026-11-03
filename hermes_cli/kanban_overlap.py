@@ -11,9 +11,11 @@ An open card matches when:
   the hundreds of cards on ``bb`` or ``hermes`` is chance, not overlap), or
 - both titles share at least half of the longer title's significant words (3 or more).
 
-The hermes-mods core mirror is a singleton job: titles naming ``mirror``, ``hermes-mods``
-and ``core`` match regardless of score or heuristic exemptions below. Exact-key retries
-still return the existing card; an intentional second owner requires a recorded override.
+The hermes-mods core mirror is a singleton job: a whole ``mirror`` token plus
+``hermes-mods``, ``core``, or both ``fork`` and ``backlog`` matches regardless of score
+or heuristic exemptions below. Exact-key retries still return the existing card;
+a capability owner serves its quoted waiting card, not a second pass. An intentional
+second owner requires a recorded override.
 
 Naming a board means an explicit reference in the title or body: ``board <slug>``, ``--board <slug>``,
 ``<slug> board``, ``@task:<slug>@...`` / ``@task:<slug>/...`` or ``<gateway>/<slug>`` for a known gateway
@@ -23,8 +25,9 @@ A slug that is not one plain word (``unconventional-collab``) is specific enough
 or the slug itself in the title still names it (``Metta-AI/unconventional-collab``). A bare plain word that
 equals a board slug does not count.
 
-Never matched: closed cards (a replica's stale legacy ``<board>/<id>`` row never outvotes its qualified
-``<profile>/<board>/<id>`` twin), the creator's own card, the new card's parents, cards the same chat or the same
+Closed cards never match (a replica's stale legacy ``<board>/<id>`` row never outvotes its qualified
+``<profile>/<board>/<id>`` twin). Heuristic exemptions (singletons ignore these except the capability
+waiting card): the creator's own card, the new card's parents, cards the same chat or the same
 worker created (fan-out), the waiting card a capability-owner create quotes, and another capability-owner
 card for that same waiting card, a card the new one parks/waits/depends on (:func:`waits_on`), a card whose failed
 execution the new one recovers (:func:`recovers`: ``self-heal: kanban card t_X ... failed 2x``), and a card that
@@ -119,7 +122,7 @@ def _names_board(slug: str, title: str, body: str, gateways: Iterable[str] = ())
 def singleton_job(title: str) -> Optional[str]:
     """Explicit single-writer jobs, not a change to general title similarity. [daveey]"""
     tokens = set(re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", (title or "").lower()))
-    if {"mirror", "hermes-mods", "core"} <= tokens:
+    if "mirror" in tokens and (tokens & {"hermes-mods", "core"} or {"fork", "backlog"} <= tokens):
         return "hermes-mods core mirror"
     return None
 
@@ -528,7 +531,11 @@ def find(*, title: str, body: str, target_board: str, session_id: Optional[str],
             singleton = bool(job and job == singleton_job(card.get("title") or ""))
             if (card["gateway"], card["id"]) in seen:
                 continue
-            if not singleton and (card["id"] in skip or card["id"] == waiting
+            # The capability owner executes this exact waiting card, even for a singleton.
+            # Keep other mirror owners visible; do not exempt a whole family or envelope.
+            if card["id"] == waiting:
+                continue
+            if not singleton and (card["id"] in skip
                     or (waiting and _sibling_owner(card.get("title") or "", waiting))
                     or (session_id and card["session_id"] == session_id)
                     or (self_tid and card["creator_task_id"] == self_tid)

@@ -144,8 +144,6 @@ def notify_guard_hold(conn: sqlite3.Connection, task_id: str, reason: str) -> bo
     if started is None:
         return False
     held = int(time.time()) - started
-    if held < _kbd._env_seconds("HERMES_KANBAN_GUARD_HOLD_NOTIFY_SECONDS", DEFAULT_GUARD_HOLD_NOTIFY_SECONDS):
-        return False
     if any(
         stamp >= started
         for row in conn.execute(
@@ -155,7 +153,11 @@ def notify_guard_hold(conn: sqlite3.Connection, task_id: str, reason: str) -> bo
         if (stamp := _kb._to_epoch(row[0])) is not None
     ):
         return False
-    detail = ""
+    from hermes_cli.kanban_dependency_review_notice import finished_review_hold
+    review_detail = finished_review_hold(conn, task_id) if reason == "active_pr" else ""
+    if not review_detail and held < _kbd._env_seconds("HERMES_KANBAN_GUARD_HOLD_NOTIFY_SECONDS", DEFAULT_GUARD_HOLD_NOTIFY_SECONDS):
+        return False
+    detail = review_detail
     if reason == "active_pr":
         urls = [m.group(0) for r in conn.execute(
             "SELECT body FROM task_comments WHERE task_id = ? ORDER BY id DESC", (task_id,))
@@ -166,9 +168,9 @@ def notify_guard_hold(conn: sqlite3.Connection, task_id: str, reason: str) -> bo
                 checks = "failing checks unavailable"
             elif not checks:
                 checks = "0 failing checks"
-            detail = f" PR: {urls[0]} ({checks})."
-    minutes = max(1, held // 60)
-    body = (f"{GUARD_HOLD_NOTE_MARKER} Held in ready by the respawn guard ({reason}) for {minutes} min "
+            detail += f" PR: {urls[0]} ({checks})."
+    duration = "less than 1 min" if held < 60 else f"{held // 60} min"
+    body = (f"{GUARD_HOLD_NOTE_MARKER} Held in ready by the respawn guard ({reason}) for {duration} "
             f"without running.{detail} It will be auto-blocked at the hold cap; fix the cause "
             f"(the guard binding, or the PR's failing checks) before then. "
             f"The dispatcher releases the hold on the next tick once the guard no longer matches.")
@@ -217,12 +219,13 @@ def sweep_remote_guard_holds(conn: sqlite3.Connection, result) -> None:
 
 
 def record_guard_hold(conn: sqlite3.Connection, task_id: str, reason: str) -> None:
-    """Per held tick: the hold notice (past the threshold), then a ``respawn_guarded`` event only
-    when the hold is new or its reason changed — one event per unbroken hold, not one per tick
-    (~1400 per card before). [daveey]"""
+    """Record a new/changed hold before checking its notice (immediate for finished reviews).
+
+    Otherwise notify past the threshold; unchanged holds do not add an event each tick.
+    """
     from hermes_cli import kanban_db as _kb
 
-    notify_guard_hold_safely(conn, task_id, reason)
     if guard_hold_reason(conn, task_id) != reason:
         with _kb.write_txn(conn):
             _kb._append_event(conn, task_id, "respawn_guarded", {"reason": reason})
+    notify_guard_hold_safely(conn, task_id, reason)

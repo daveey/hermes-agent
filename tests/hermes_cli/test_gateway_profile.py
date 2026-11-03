@@ -24,7 +24,7 @@ def test_cli_and_control_defaults_agree():
     from gateway.control_profile import validate_params
     args = _parser().parse_args(['gateway', 'profile'])
     assert (args.seconds, args.hz, args.top) == validate_params({})
-    assert args.hz == 50
+    assert args.hz == 25
 
 
 @pytest.mark.platforms('posix')

@@ -261,9 +261,62 @@ def _collect_profile_gateway_topology_cached() -> dict[str, Any]:
 def _load_configured_gateway_platforms() -> set[str]:
     """Connected platform names; synchronous by design — the first ``load_gateway_config()`` does
     platform discovery and can outlast Desktop's WS connect timeout on Windows, so ``get_status``
-    runs this in Starlette's worker pool."""
+    runs this in Starlette's worker pool.
+
+    [daveey] Kept on ``_platform_inputs()`` (file signatures, environment, home) up to
+    ``_PLATFORMS_MAX_AGE_S``: every Desktop ``/api/status`` poll used to reload the whole gateway config."""
     from gateway.config import load_gateway_config
-    return {platform.value for platform in load_gateway_config().get_connected_platforms()}
+    global _platforms_cache
+    key = _platform_inputs()
+    now = time.monotonic()
+    with _platforms_lock:
+        hit = _platforms_cache
+    if hit is not None and hit[0] == key and now < hit[1] + _PLATFORMS_MAX_AGE_S:
+        return set(hit[2])
+    platforms = frozenset(platform.value for platform in load_gateway_config().get_connected_platforms())
+    with _platforms_lock:
+        _platforms_cache = (key, now, platforms)
+    return set(platforms)
+
+
+# [daveey] (inputs key, monotonic read time, platforms). The key is taken BEFORE the load: a write during it costs
+# one more load next poll instead of pinning the older result. The max age bounds what no key sees: a platform's
+# ``is_connected`` check may read its own state, and plugin YAML hooks run only on a load.
+_PLATFORMS_MAX_AGE_S = 60.0
+_platforms_lock = threading.Lock()
+_platforms_cache: Optional[tuple[tuple, float, frozenset]] = None
+
+
+def _reset_platforms_cache_for_tests() -> None:
+    global _platforms_cache
+    with _platforms_lock:
+        _platforms_cache = None
+
+
+def _platform_inputs() -> tuple:
+    """What ``load_gateway_config()`` reads: the home's ``config.yaml`` (through its backend), ``gateway.json`` and
+    ``.env``, the managed layer's ``config.yaml``/``.env``, and the process environment (env overrides)."""
+    from hermes_cli.config_backend import config_cache_version_or_none
+    from hermes_cli.managed_scope import get_managed_dir
+    from utils import file_cache_version
+
+    def sig(path: Path):
+        try:
+            return file_cache_version(path)
+        except OSError:
+            return None
+
+    home = get_hermes_home()
+    managed = get_managed_dir()
+    return (
+        str(home),
+        config_cache_version_or_none(home / "config.yaml"),
+        sig(home / "gateway.json"),
+        sig(home / ".env"),
+        str(managed) if managed is not None else None,
+        tuple(sig(managed / name) for name in ("config.yaml", ".env")) if managed is not None else (),
+        hash(frozenset(os.environ.items())),
+    )
 
 
 _WINDOWS_11_MIN_BUILD = 22000

@@ -1140,7 +1140,8 @@ def _invalid_tool_name_error_content(name: str, valid_tool_names) -> str:
 
 
 def _content_policy_blocked_result(
-    messages: list[dict], api_call_count: int, *, final_response: str, error_detail: str
+    messages: list[dict], api_call_count: int, *, final_response: str, error_detail: str,
+    refusal_category: Any = None,
 ) -> dict[str, Any]:
     """Terminal turn result for a content-policy block (deterministic for the unchanged
     prompt, so no retry); shared by the HTTP-200 and exception paths."""
@@ -1148,6 +1149,7 @@ def _content_policy_blocked_result(
         "final_response": final_response, "messages": messages, "api_calls": api_call_count,
         "completed": False, "failed": True, "error": f"content_policy_blocked: {error_detail}",
         "failure_reason": "content_policy_blocked", "failure_retryable": False,
+        "refusal_category": refusal_category,
     }
 
 
@@ -1829,6 +1831,7 @@ def run_conversation(
     addresses, after every history rewrite including post-turn micro-compaction.
     """
     from agent.turn_context import export_current_turn_boundary
+    from agent.context_usage import begin_turn_context_usage, export_turn_context_usage
     from agent.turn_finalizer import settle_held_final
     from agent.voice_turn_route import end_voice_turn_route
     from tools.vision_tools_history_budget import native_turn_images
@@ -1836,6 +1839,8 @@ def run_conversation(
     # Steer / redirect / interrupt set this mid-turn; the result reports whether the turn ran untouched.
     agent._turn_user_intervened = False
     vars(agent).pop("_step_boundary_paused", None)  # [daveey] per-turn core-update pause verdict
+    # Per-provider-response context accounting starts empty every turn (agent/context_usage.py).
+    begin_turn_context_usage(agent)
     # Images attached natively to this user turn stay visible to vision_analyze for the turn, so
     # it does not embed the same pixels a second time into the same request (#76411).
     with native_turn_images(user_message):
@@ -1864,6 +1869,8 @@ def run_conversation(
     result = export_current_turn_boundary(agent, result, user_message)
     if isinstance(result, dict):
         result["user_intervened"] = bool(getattr(agent, "_turn_user_intervened", False))
+        # Plain JSON types so managed worker transports can carry it unchanged.
+        result["context_usage"] = export_turn_context_usage(agent)
     _close_durable_failed_turn(agent, result)
     return result
 
@@ -1954,7 +1961,7 @@ def _close_durable_failed_turn(agent, result: Any) -> None:
         # hedge over the whole list rather than under-report a possible side effect.
         start = result.get("current_turn_user_idx")
         turn_messages = messages[start:] if isinstance(start, int) and 0 <= start < len(messages) else messages
-        content = failed_turn_notice(turn_messages, restarted=_stopped_by_backend_exit(agent, result))
+        content = failed_turn_notice(turn_messages, restarted=_stopped_by_backend_exit(agent, result), result=result)
         # [daveey] A turn nobody typed (a Kanban notice, a background-job report) is never "sent again" by a
         # person: its host supplies copy that says what failed and what happens next (TUI: automation replay).
         override = getattr(agent, "_failed_turn_notice_override", None)
@@ -1965,7 +1972,7 @@ def _close_durable_failed_turn(agent, result: Any) -> None:
                 logger.debug("failed-turn copy override raised", exc_info=True)
                 custom = None
             if isinstance(custom, str) and custom.strip():
-                partial = content == PARTIAL_FAILED_TURN_NOTICE
+                partial = failed_turn_notice(turn_messages) == PARTIAL_FAILED_TURN_NOTICE
                 custom = custom.strip() + (" Some actions may already have run; verify their effects." if partial else "")
                 content = _redact_display_metadata({"content": custom})["content"]
         boundary = {"role": "assistant", "display_kind": FAILED_TURN_DISPLAY_KIND, "content": content}

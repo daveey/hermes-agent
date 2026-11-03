@@ -1691,6 +1691,17 @@ class SessionDB(
 
     # ── Meta key/value (scheduler bookkeeping) ──
 
+    def route_switch_intent(self, session_id: str) -> Optional[str]:
+        """The committed model-switch intent for ``session_id`` (``agent.model_routing_switch_intent``)."""
+        from agent.model_routing_switch_intent import read_on_conn
+        with self._lock:
+            return read_on_conn(self._conn, session_id)
+
+    def consume_route_switch_intent(self, session_id: str, raw: str) -> bool:
+        """Compare-and-delete the intent this build honoured; a newer switch survives."""
+        from agent.model_routing_switch_intent import consume_on_conn
+        return self._execute_write(lambda conn: consume_on_conn(conn, session_id, raw))
+
     def get_meta(self, key: str) -> Optional[str]:
         """Read state_meta[key] on self._lock (not _read_ctx): fts_rebuild_step reads progress before its
         write transaction and a WAL reader would not see it."""

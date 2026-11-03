@@ -8,7 +8,7 @@ produce it until a consumer has finished routing it:
 
 1. a notifying process is still running;
 2. its exit is recorded but the completion is not yet published (``_completion_event`` unset; the registry keeps
-   such entries out of pruning);
+   such entries out of pruning; the claim already snapshotted the event, ``unpublished_completions``);
 3. the event sits in ``completion_queue``;
 4. a consumer has taken it off the queue and is still routing it (an in-flight hold, taken atomically with the
    dequeue under the queue's own lock and released only after routing returns).
@@ -21,13 +21,19 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import logging
 import threading
+
+logger = logging.getLogger("tools.process_registry")
 
 # Owner task id → number of dequeued-but-unrouted events. take_ready increments it under the queue's mutex in the same
 # critical section as the dequeue, and awaits_notification reads queue and counter under that mutex too, so a reader
 # sees each event either queued or held, never neither. Decrements (release) happen only after any requeue.
 _in_flight: collections.Counter = collections.Counter()
 _in_flight_lock = threading.Lock()  # always taken after the queue mutex, never before
+# The dequeued-but-unrouted events themselves (same custody as ``_in_flight``), so an orderly backend exit can
+# journal a notice a poller holds mid-routing (``pending_events``) instead of only knowing its owner is busy.
+_in_flight_events: list = []
 
 
 def _owner(evt) -> str:
@@ -42,6 +48,20 @@ def _adjust(owners, delta: int) -> None:
             _in_flight[owner] += delta
             if _in_flight[owner] <= 0:
                 del _in_flight[owner]
+
+
+def _hold_events(events) -> None:
+    with _in_flight_lock:
+        _in_flight_events.extend(events)
+
+
+def _release_events(events) -> None:
+    with _in_flight_lock:
+        for evt in events:
+            for index, held in enumerate(_in_flight_events):
+                if held is evt:
+                    del _in_flight_events[index]
+                    break
 
 
 def take_ready(queue, timeout: float) -> list:
@@ -59,9 +79,23 @@ def take_ready(queue, timeout: float) -> list:
         if events:
             queue.not_full.notify_all()
             _adjust((_owner(e) for e in events), +1)
+            _hold_events(events)
             for evt in events:
                 mark_copy_held(completion_copy_id(evt))
     return events
+
+
+def hold(events) -> None:
+    """Take the in-flight hold for events a consumer removed from somewhere other than the queue (a session's held
+    list). Call it inside the critical section that removes them, so they are never in neither place; ``release``
+    once routing returns. Like ``take_ready`` it takes its own held-copy mark per delegation result, which
+    ``release`` ends (a mark the source list held stays the source's to end)."""
+    if events:
+        from tools.async_delegation import completion_copy_id, mark_copy_held
+        _adjust((_owner(e) for e in events), +1)
+        _hold_events(events)
+        for evt in events:
+            mark_copy_held(completion_copy_id(evt))
 
 
 def release(events) -> None:
@@ -69,8 +103,32 @@ def release(events) -> None:
     if events:
         from tools.async_delegation import completion_copy_id, unmark_copy_held
         _adjust((_owner(e) for e in events), -1)
+        _release_events(events)
         for evt in events:
             unmark_copy_held(completion_copy_id(evt))
+
+
+def pending_events(queue) -> list:
+    """Every event still owed to a consumer: queued, or dequeued and still being routed. Read under the queue mutex
+    with the in-flight hold, like ``awaits_notification``, so an event moving between the two is seen at least once
+    (callers dedupe by process id). Historical result files are never included."""
+    with queue.mutex:
+        with _in_flight_lock:
+            return [*queue.queue, *_in_flight_events]
+
+
+def unpublished_completions(registry) -> list:
+    """[daveey] Completion events whose finish is claimed but not yet published to ``completion_queue`` (state 2):
+    the unredacted event the claiming ``_move_to_finished`` snapshotted under ``registry._lock`` (copies; the
+    caller redacts). Read this BEFORE
+    ``pending_events``: publication queues the event before it sets ``_completion_event``, so an event is seen
+    here, or already in the queue by the time that is read. Re-adopt-sink jobs are excluded (they never reach
+    the queue)."""
+    with registry._lock:
+        return [dict(s._completion_notice) for store in (registry._running, registry._finished) for s in store.values()
+                if s.notify_on_complete and retained_for_delivery(s)
+                and not getattr(s, "_completion_via_readopt_sink", False)
+                and isinstance(getattr(s, "_completion_notice", None), dict)]
 
 
 @contextlib.contextmanager
@@ -122,3 +180,43 @@ def awaits_notification(registry, owner_task_ids) -> bool:
             if any(_in_flight.get(o) for o in owners):
                 return True
         return any(_owner(evt) in owners for evt in queue.queue)
+
+
+def completion_event(session) -> dict:
+    """The completion event a finished notifying session publishes (exit fields and output as recorded now),
+    unredacted: redaction runs hooks and may look the session up in the registry, so it must happen outside
+    ``registry._lock`` (``publishable``)."""
+    from tools.process_registry import ProcessRegistry, _completion_output
+    return {
+        "type": "completion",
+        "session_id": session.id,
+        "session_key": session.session_key,
+        "task_id": session.task_id,
+        "owner_task_id": session.owner_task_id,
+        "command": session.command,
+        **({"handoff_note": session.handoff_note} if session.handoff_note else {}),
+        **ProcessRegistry._exit_fields(session),
+        # A consumer that relays the output (a bot DM's reply) must know it is not whole.
+        **_completion_output(session),
+        # Stable producer identity across checkpoint recovery (unlike a consumer-observed completion timestamp).
+        "started_at": session.started_at,
+    }
+
+
+def publishable(event: dict) -> dict:
+    """A redacted copy of a claim's event (the claim's own snapshot stays unchanged for concurrent readers)."""
+    from tools.process_registry import _redact_process_result
+    event = dict(event)
+    _redact_process_result(event)
+    return event
+
+
+def claim_completion_event(session) -> None:
+    """[daveey] Called by the claiming ``_move_to_finished`` under ``registry._lock``: snapshot the event it will
+    publish, so an orderly backend exit reads the real event while the claim is unpublished
+    (``unpublished_completions``; its reader redacts) instead of waiting for the publisher. Never raises (the
+    claim must not be left half-done); on failure publication builds the event itself."""
+    try:
+        session._completion_notice = completion_event(session)
+    except Exception:
+        logger.warning("completion event for %s not built at its claim", session.id, exc_info=True)

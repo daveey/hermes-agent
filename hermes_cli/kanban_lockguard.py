@@ -25,6 +25,7 @@ true last close still checkpoints and removes the sidecars normally.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import logging
 import os
 import sqlite3
@@ -52,6 +53,28 @@ def _release(conn: Any) -> None:
     if fin is not None:
         conn._hermes_lockguard_finalizer = None
         fin()  # runs hermes_state_lockguard.release(held) exactly once
+
+
+_lifecycle_factory_cache: dict[type, type] = {}
+
+
+def lifecycle_factory(factory: type) -> type:
+    # Inherited lifecycle support is not enough: a tracking wrapper may now
+    # precede it. Always put this method outside any newly composed wrappers.
+    if factory.__dict__.get("_hermes_outer_lifecycle", False):
+        return factory
+    cached = _lifecycle_factory_cache.get(factory)
+    if cached is None:
+        class LifecycleConnection(factory):
+            _hermes_outer_lifecycle = True
+
+            def close(self) -> None:
+                with getattr(self, "_hermes_lifecycle_lock", nullcontext()):
+                    super().close()
+
+        cached = LifecycleConnection
+        _lifecycle_factory_cache[factory] = cached
+    return cached
 
 
 class _GuardMixin:
@@ -108,7 +131,7 @@ def unguard(conn: sqlite3.Connection) -> None:
         conn._hermes_lockguard = None
 
 
-def _apply(conn: Any, held_path: Optional[str] = None) -> bool:
+def _apply(conn: Any, held_path: Optional[str] = None, *, strict=False) -> bool:
     path = held_path or _db_file(conn)
     if not path:
         return False
@@ -116,6 +139,8 @@ def _apply(conn: Any, held_path: Optional[str] = None) -> bool:
         # Also the first read: it opens -wal/-shm, so hold() can lock SQLite's own -shm descriptor.
         mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
     except sqlite3.Error:
+        if strict:
+            raise
         return False
     if str(mode).lower() != "wal":
         return False
@@ -134,29 +159,41 @@ def _apply(conn: Any, held_path: Optional[str] = None) -> bool:
     return True
 
 
-def guard(conn: sqlite3.Connection) -> bool:
+def guard(conn: sqlite3.Connection, *, strict=False) -> bool:
     """(Re)apply the guard to *conn* (idempotent; extends it to a ``-shm`` minted after open).
-    Returns whether the connection is guarded. Never raises: an unguardable connection (rollback
+    Returns whether the connection is guarded. With strict=True SQL errors propagate so an opener
+    retries instead of returning a partially configured handle. Otherwise an unguardable connection (rollback
     journal, in-memory, unsupported platform, plain ``sqlite3.Connection`` instance) is left as is."""
     if not isinstance(conn, _GuardMixin) or not _lockguard.supported():
         return False
     try:
-        return _apply(conn)
-    except Exception:  # the guard is protection, never a new failure mode for the caller
+        return _apply(conn, strict=strict)
+    except Exception as exc:  # the guard is protection, never a new failure mode for the caller
+        if strict and isinstance(exc, sqlite3.Error):
+            raise
         logger.debug("kanban lock guard unavailable", exc_info=True)
         return False
 
 
 def connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
     """Drop-in ``sqlite3.connect`` for Kanban board files: same arguments, guarded result."""
-    from hermes_cli.kanban_generation import recover, remember
-    recover(database)
-    kwargs["factory"] = guarded_factory(kwargs.get("factory", sqlite3.Connection))
-    conn = sqlite3.connect(database, *args, **kwargs)
-    guard(conn)
-    if isinstance(conn, _GuardMixin):
-        remember(conn)
-    return conn
+    from hermes_cli.kanban_generation import lifecycle_access, prepare_connection, recover, retry_open
+    timeout = args[0] if args else kwargs.get("timeout", 5.0)
+    kwargs["factory"] = lifecycle_factory(guarded_factory(kwargs.get("factory", sqlite3.Connection)))
+
+    def open_once(remaining):
+        with lifecycle_access(database, remaining) as lock:
+            recover(database)
+            conn = sqlite3.connect(database, *args, **kwargs)
+            conn._hermes_lifecycle_lock = lock
+            try:
+                prepare_connection(conn, timeout)
+                return conn
+            except BaseException:
+                conn.close()
+                raise
+
+    return retry_open(open_once, timeout)
 
 
 def _canonical(path: Any) -> str:

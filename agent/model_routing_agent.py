@@ -15,7 +15,7 @@ def class_requirements(config):
 
 
 def prepare_agent_route(agent, model, provider, session_id, api_key, base_url,
-                        api_mode, credential_pool, fallback_model):
+                        api_mode, credential_pool, fallback_model, session_db=None):
     """Resolve only class selectors; concrete user pins retain legacy semantics.
 
     Parent sessions here can be delegated jobs, not compression continuations, so
@@ -35,11 +35,30 @@ def prepare_agent_route(agent, model, provider, session_id, api_key, base_url,
     config = managed or load_user_config_effective()
     requirements = class_requirements(config)
     session_id = session_id or new_session_id()
+    # A committed explicit switch to exactly this tuple, for exactly this session, replaces the
+    # recorded allocation once; nothing else may move an exact pin.
+    from agent import model_routing_switch_intent as switch_intent
+    intent = switch_intent.pending(session_db, session_id, model, provider)
+    requested = provider or "auto"
+    if intent is not None and is_class_selector(model):
+        # Canonical class picks inherit the prior provider in their stored policy;
+        # that is not an exact-provider pin for the class allocator.
+        requested = "auto"
+    if intent is not None and requested == "auto" and not is_class_selector(model):
+        # An ``auto`` build honouring a switch must land on the provider the switch committed, never a
+        # sibling route serving the same model name; a provider that cannot serve it refuses below.
+        import json
+        requested = json.loads(intent).get("provider") or requested
     runtime = resolve_runtime_provider(
-        requested=provider or "auto", target_model=model,
+        requested=requested, target_model=model,
         explicit_api_key=None if managed else api_key, explicit_base_url=None if managed else base_url,
         routing_session_id=session_id, routing_config=config,
-        routing_requirements=requirements)
+        routing_requirements=requirements,
+        # Keyed to this committed intent: the allocator honours it at most once per lineage class, so an
+        # overlapping same-session build or a retry after a lost consume cannot replace twice.
+        routing_replace=switch_intent.fence_token(intent) if intent is not None else False)
+    if intent is not None:
+        switch_intent.consume(session_db, session_id, intent)  # only after the allocation committed
     agent.model_routing = runtime["model_routing"]
     agent._model_routing_requirements = requirements
     return (runtime["model"], runtime["provider"], session_id,

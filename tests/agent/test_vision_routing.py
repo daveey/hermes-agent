@@ -175,6 +175,13 @@ model:
   provider: deepseek
   default: deepseek-v4-pro
 """)
+        import json
+
+        # This scenario owns its text-only capability; never read the live registry.
+        with open(os.path.join(isolated_home, "models_dev_cache.json"), "w") as fp:
+            json.dump({"deepseek": {"models": {
+                "deepseek-v4-pro": {"id": "deepseek-v4-pro", "attachment": False},
+            }}}, fp)
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
         _fresh_modules()
 

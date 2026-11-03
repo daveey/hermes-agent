@@ -3,7 +3,8 @@
 Neither a promotion nor comment prose is permission to retry an implementation.
 Only an authenticated park can capture the PRs and dependency edges being awaited.
 A completed review then authorizes one continuation of those same PRs: a repair
-when it records ``changes_required`` with ``reviewed_sha``/``head``, or a landing
+when it records changes or an absent/unrecognised verdict with an exact
+``reviewed_sha``/``head``, or a landing
 continuation when it records an exact-head approval. The next claim consumes it.
 A later comment that repeats a captured PR does not re-arm the hold; a new PR,
 a review naming a different PR, or a crash/reclaim does.
@@ -91,9 +92,10 @@ def _completed_review_run(conn, parent_id, parked_at, owner_run_id):
 
 def _named_prs(data, captured: set[str]) -> set[str] | None:
     """Absent is checkpoint-bound; present must resolve uniquely, or fail closed."""
-    if "pr" not in data:
+    key = "pr" if "pr" in data else "reviewed_pr"
+    if key not in data:
         return None
-    pr = data["pr"]
+    pr = data[key]
     if type(pr) is int and pr > 0:
         ref = f"#{pr}"
     elif isinstance(pr, str):
@@ -139,9 +141,9 @@ def _requests_changes(row, data) -> bool:
 
 
 def _reviewed_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) -> set[str]:
-    """Repair evidence: a change request at an exact head, bound to one PR.
+    """Repair evidence: changes or an unknown verdict at an exact head, PR-bound.
 
-    A named ``pr`` is the only PR covered. With none, the authenticated checkpoint
+    A named ``pr`` (or ``reviewed_pr`` fallback) is the only PR covered. With none, the authenticated checkpoint
     is the binding, unless the summary names ``PR #N`` that matches none of it.
     """
     from hermes_cli import kanban_db as kb
@@ -150,7 +152,11 @@ def _reviewed_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) 
     if row is None:
         return set()
     data = kb._json_dict(row["metadata"])
-    if not _exact_head(data) or not _requests_changes(row, data):
+    verdict = data.get("verdict")
+    approval = isinstance(verdict, str) and verdict.strip().lower() in _APPROVALS
+    # Respawn is not merge approval. An unrecognised/absent verdict still hands
+    # findings back to the parked owner; keep explicit approvals on their all-parent path.
+    if not _exact_head(data) or (approval and not _requests_changes(row, data)):
         return set()
     named = _named_prs(data, captured)
     if named is not None:
@@ -164,9 +170,9 @@ def _reviewed_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) 
 def _approval_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) -> set[str]:
     """PRs an exact-head approval authorizes, or empty.
 
-    A named ``pr`` is the only PR that approval covers. With no ``pr``, the
-    authenticated checkpoint is the binding: the review did not name a
-    different head. A short ``head`` is not exact.
+    A named ``pr`` (or ``reviewed_pr`` fallback) is the only PR that approval
+    covers. With neither key, the authenticated checkpoint supplies the PR scope.
+    A short ``head`` is not exact.
     """
     from hermes_cli import kanban_db as kb
 
@@ -268,7 +274,7 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     reviewed = set().union(*(_reviewed_prs(conn, p, parked_at, row["id"], captured_set) for p in parents))
     if urls.issubset(reviewed):
         return True
-    # Every awaited parent must authorize. One exact-head approval does not cover a
+    # Without repair evidence, every awaited parent must approve. One approval does not cover a
     # sibling that never reviewed, and a named unrelated PR does not cover
     # the checkpoint set.
     return all(

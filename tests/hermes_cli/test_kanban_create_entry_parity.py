@@ -413,13 +413,17 @@ def test_rest_create_refuses_a_duplicate_owner(chat):
 
 
 @pytest.mark.parametrize("surface", ["tool", "cli", "rest"])
-def test_mirror_singleton_refused_on_every_create_path(chat, monkeypatch, capsys, surface):
-    from tests.tools.test_kanban_create_overlap_singleton import NEW, OPEN_TITLE
+@pytest.mark.parametrize("historical", [False, True])
+def test_mirror_singleton_refused_on_every_create_path(chat, monkeypatch, capsys, surface, historical):
+    from tests.tools.test_kanban_create_overlap_singleton import MISSED, NEW, OPEN_TITLE
+    if historical:
+        NEW = MISSED[0]
     with kbc.connect_closing() as conn:
         live = kb.create_task(conn, title=OPEN_TITLE, assignee="default", session_id="other-chat",
                               idempotency_key="core-mirror:a")
     payload = {"title": NEW, "assignee": "default", "requires": [], "idempotency_key": "core-mirror:b"}
     if surface == "tool":
+        from tools import kanban_tools  # registers the tool for standalone selection
         from tools.registry import registry
         out = json.loads(registry.dispatch("kanban_create", payload))
     elif surface == "cli":

@@ -298,13 +298,13 @@ def board_slug_for_path(db_path: str) -> str:
     return "default"
 
 
-def board_selected(db_path: str) -> bool:
+def board_selected(db_path: str, config: Optional[Mapping[str, Any]] = None) -> bool:
     """``kanban.sync.boards`` lists the boards that sync (absent = every board). A shadow copy and a link-only board
-    always do."""
+    always do. ``config``: an already-read ``sync_config()`` (a caller checking many boards reads it once)."""
     from pathlib import Path
     if Path(db_path).parent.name in (SHADOW_DIR, LINKS_DIR):
         return True
-    boards = sync_config().get("boards")
+    boards = (sync_config() if config is None else config).get("boards")
     if not isinstance(boards, (list, tuple)):
         return True
     return board_slug_for_path(db_path) in {str(b) for b in boards}

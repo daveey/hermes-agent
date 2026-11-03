@@ -20,7 +20,7 @@ def temporary_resolution():
 
 def resolve_class_runtime(model, provider, *, config=None, session_id=None,
                           parent_session_id=None, requirements=None, excluded=(), state_path=None,
-                          prepare_runtime=None, exact_pin=False, replace=False):
+                          prepare_runtime=None, exact_pin=False, replace: bool | str = False):
     from agent.credential_pool import load_pool
     from hermes_cli import runtime_provider as runtime
 

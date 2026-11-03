@@ -186,7 +186,7 @@ def stop_owned_jobs_for_update_pause(jobs: list[dict], save: Callable[[], bool],
     ``source``/``reason`` name who stopped the job (the backend-exit journal passes its own)."""
     from tools.process_registry import process_registry, _redact_process_result
     for job in jobs:
-        if job.get("kill_state") == "killed":
+        if job.get("kill_state") in {"killed", "completed"}:
             continue
         sid = job["session_id"]
         if source != PAUSE_REASON:
@@ -330,10 +330,14 @@ def killed_jobs_report(killed_jobs: list | None, heading: str) -> str:
     jobs = [job for job in (killed_jobs or []) if isinstance(job, dict) and job.get("session_id")]
     if not jobs:
         return ""
-    lines = [heading]
+    lines = ["Background job results at interruption:" if any(
+        job.get("kill_state") == "completed" for job in jobs) else heading]
     for job in jobs:
         command = job.get("command") or "(no command)"
         state = job.get("kill_state", "killed")
+        if state == "completed":
+            lines.append(job.get("notice") or "")
+            continue
         if state != "killed":
             lines.append(f"- {job['session_id']} started {_format_start(job.get('started_at'))}: {command} "
                          f"— interruption outcome {state}; inspect its result before restarting")

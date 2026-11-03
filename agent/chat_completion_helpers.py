@@ -31,6 +31,7 @@ from agent.error_classifier import (
     _extract_status_code)
 from agent.sdk_transform_bypass import bypass_chat_sdk_request_transform
 from agent.errors import EmptyStreamError
+from agent.context_usage import capture_summary_context
 from agent.chat_completion_local import _streams_llamacpp, stale_giveup
 from agent.chat_completion_headers import _chat_completion_capturing_headers
 from agent.chat_completion_stream_monitor import StreamingWaitMonitor, StreamLifetimeExceeded
@@ -2194,14 +2195,14 @@ def _managed_summary_call(agent, api_request_id: str, request, callback, *, retr
 
 
 def _summary_text(agent, response, **normalize_kwargs) -> str:
+    capture_summary_context(agent, response)  # a main-runtime request outside record_response_usage
     if is_router_timeout_shim(response):
         # Router failure in a 200 envelope (#68396): an empty summary takes the retry slot.
         logger.warning("Iteration summary returned a router timeout shim; retrying")
         return ""
     normalized = agent._get_transport().normalize_response(response, **normalize_kwargs)
     if normalized.tool_calls:
-        # No summary path executes tool calls; log so a tool-only response that falls into the
-        # empty-summary retry is diagnosable.
+        # No summary path executes tool calls; logged so a tool-only reply in the empty-summary retry is diagnosable.
         logger.warning("Iteration summary emitted tool calls; discarding them")
     return (normalized.content or "").strip()
 
@@ -2248,8 +2249,7 @@ def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
         summary_kwargs["_moa_prepared_request"] = agent.client.chat.completions.prepare(api_messages)
 
     def _attempt(retry_count: int) -> str:
-        # Use the ordinary request-local lifecycle: a summary can be interrupted
-        # during a long prefill without closing the shared primary client.
+        # Ordinary request-local lifecycle: a summary interrupted mid-prefill never closes the shared primary client.
         response = _managed_summary_call(
             agent, api_request_id, summary_kwargs, agent._interruptible_api_call,
             retry_count=retry_count)

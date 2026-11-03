@@ -122,11 +122,16 @@ def _cache_path() -> Path:
     return get_hermes_home() / "cache" / "model_catalog.json"
 
 
+def _open_manifest_request(req: urllib.request.Request, *, timeout: float):
+    """Manifest transport boundary, separate from parsing and fallback policy."""
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
 def _fetch_manifest(url: str, timeout: float) -> dict[str, Any] | None:
     """HTTP GET the manifest URL and return a validated dict, or None on failure."""
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": hermes_user_agent()})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _open_manifest_request(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
         logger.info("model catalog fetch failed (%s): %s", url, exc)

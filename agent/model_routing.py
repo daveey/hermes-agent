@@ -105,7 +105,7 @@ def eligible_routes(policy, level, requirements=None, excluded=(), eligible=None
 
 def resolve_model_route(model, provider="auto", *, config=None, session_id=None,
                         parent_session_id=None, requirements=None, excluded=(), state_path=None,
-                        eligible=None, prepare=None, exact_pin=False, replace=False):
+                        eligible=None, prepare=None, exact_pin=False, replace: bool | str = False):
     """Return concrete model/provider and durable metadata, or unchanged exact pin.
 
     ``excluded`` is a sequence of failed (provider, model) pairs for a new attempt,

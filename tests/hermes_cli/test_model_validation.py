@@ -739,7 +739,10 @@ class TestValidateRequestedModelNousPortalRecommendations:
         with patch("hermes_cli.models.fetch_api_models", return_value=["some/other-model"]), \
              patch("hermes_cli.models.probe_api_models", return_value=probe_payload), \
              patch("hermes_cli.models.fetch_nous_recommended_models") as mock_portal, \
-             patch("hermes_cli.models._model_in_provider_catalog", return_value=False):
+             patch("hermes_cli.models._model_in_provider_catalog", return_value=False), \
+             patch("hermes_cli.models.provider_model_ids", return_value=["some/other-model"]):
+            # Pin the OpenRouter picker catalog: the bundled snapshot lists this model, and the
+            # test used to pass only because the live docs manifest had dropped it.
             result = validate_requested_model("inclusionai/ling-3.0-flash:free", "openrouter")
         mock_portal.assert_not_called()
         assert result["accepted"] is False

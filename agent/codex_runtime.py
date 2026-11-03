@@ -153,6 +153,10 @@ def _record_codex_app_server_usage(agent, turn, messages=None) -> dict[str, Any]
     the main loop's capture, and the mirror is never compacted natively, so without an anchor the rough
     estimate grows monotonically and hermes-mode fires thread compaction on tiny threads (#100381)."""
     agent.session_api_calls += 1
+    # The app-server runs the whole turn's model calls in its subprocess and reports only the
+    # last/summed usage: per-response context accounting cannot list them individually.
+    from agent.context_usage import mark_turn_context_incomplete
+    mark_turn_context_incomplete(agent, "codex app-server aggregates internal model calls")
     usage = getattr(turn, "token_usage_last", None)
     compressor = getattr(agent, "context_compressor", None)
 

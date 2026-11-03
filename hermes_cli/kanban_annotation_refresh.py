@@ -42,7 +42,7 @@ def _real_thread_class() -> type:
     return next(c for c in type(threading.main_thread()).__mro__ if c.__name__ == "Thread")
 
 
-def refresh_bounded(refresh: Callable[[], tuple], lock: Any, previous: tuple, wait_s: float) -> tuple:
+def refresh_bounded(refresh: Callable[[], tuple], lock: Any, previous: tuple | None, wait_s: float) -> tuple | None:
     """Run ``refresh`` on a helper thread that owns the already-held ``lock`` and releases it. Return its result
     (or raise its error) when it finishes within ``wait_s``; otherwise return ``previous``."""
     done = threading.Event()

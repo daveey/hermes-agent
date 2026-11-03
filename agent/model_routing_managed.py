@@ -85,7 +85,7 @@ def pin_policy(model, provider, config):
 
 
 def resolve_managed_runtime(model, provider, *, config, session_id=None, requirements=None,
-                            prepare_runtime=None, replace=False):
+                            prepare_runtime=None, replace: bool | str = False):
     from agent.model_routing_runtime import resolve_class_runtime
     from hermes_state_ids import new_session_id
     level, restricted = pin_policy(model, provider, config)

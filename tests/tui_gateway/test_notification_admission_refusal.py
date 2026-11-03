@@ -42,7 +42,7 @@ def test_refused_notification_retains_result_without_spending_attempts(tmp_path,
     # too, else the rebound dispatcher dies on a NameError instead of exercising the refusal.
     for name in ('_notif_run_submit', '_notif_owner_refused', '_notif_owner_preflight', '_notif_note_owner_refusal',
                  '_notif_refusal_backoff', '_notif_hold_for', '_notif_retry_completions',
-                 '_notification_event_requires_owner'):
+                 '_notification_event_requires_owner', 'start_synthesized_turn', 'admit_synthesized_turn'):
         if hasattr(session_notifications, name):
             namespace[name] = rebind(getattr(session_notifications, name), namespace)
     for name in ('_OWNER_REFUSAL_CODES', '_NOTIF_REFUSAL_BACKOFF_S', '_NOTIF_REFUSAL_BACKOFF_MAX_S',

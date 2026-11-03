@@ -167,13 +167,23 @@ def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: s
 
 def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: str, force: bool = False,
                 machines: Optional[Mapping[str, Mapping[str, Any]]] = None, me: Optional[str] = None,
-                cfg: Optional[dict] = None) -> dict[str, Any]:
-    """Move a card that is NOT running (ready/todo/scheduled/blocked/triage): same guards, no run to end."""
+                cfg: Optional[dict] = None, hub: Any = None) -> dict[str, Any]:
+    """Move a card that is NOT running (ready/todo/scheduled/blocked/triage): same guards, no run to end.
+    A worker-first policy card instead takes the explicit Board repin path (``hub`` is for tests)."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_worker_node as wn
     reason = (reason or "").strip()
     if not reason:
         return {"ok": False, "reason_code": "reason_required", "error": "reason is required (why this card must move)"}
+    from hermes_cli import kanban_worker_repin as repin
+    if repin.applies(conn, task_id):
+        # A worker-first card's placement is Board-owned: a local relabel would be stripped, so only the Board's
+        # explicit repin to the origin is supported (kanban_worker_repin); every other target refuses.
+        try:
+            labels = wn.normalize_runs_on(runs_on)
+        except ValueError as exc:
+            return {"ok": False, "reason_code": "invalid_runs_on", "error": str(exc)}
+        return repin.repin_to_origin(conn, task_id, list(labels or []), reason, hub=hub)
     try:
         plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg)
     except MoveRefused as exc:

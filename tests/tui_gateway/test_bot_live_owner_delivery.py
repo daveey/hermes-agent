@@ -60,6 +60,9 @@ def test_refused_input_commits_failed_mailbox_receipt(tmp_path):
         "_reopen_routed_session_row": noop,
         # Every dispatch binds the session's own row before the turn writes (#111999).
         "_ensure_session_db_row": noop,
+        # [daveey] Server-bound commit point for synthesized turns (exit_job_receipts); a user turn passes through.
+        "start_synthesized_turn": session_notifications.start_synthesized_turn,
+        "admit_synthesized_turn": session_notifications.admit_synthesized_turn,
     })
     def terminal(outcome):
         mailbox.complete_delivery(tmp_path, queued["id"], status=outcome["status"],

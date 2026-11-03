@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -152,6 +153,38 @@ def file_stat(path: Path) -> tuple:
     return tuple(out)
 
 
+# [daveey] ``(path, device, inode, tables) -> schema_version`` at which ``read_key`` found the counter covering
+# ``tables``. Every Desktop poll keys each board; the ``sqlite_master`` scan was most of that cost on David-MBP
+# (t_01a19d0bcab45558). Any trigger or table change bumps ``schema_version`` (and a replaced file has a new inode),
+# so a matching version proves the same coverage; one statement reads both, in one snapshot.
+_COVERED: dict[tuple, int] = {}
+_COVERED_LOCK = threading.Lock()
+_COVERED_MAX = 256
+
+
+def _covered_read(conn: sqlite3.Connection, path: Path, db: tuple | None, tables: tuple[str, ...]) -> tuple | None:
+    memo_key = (str(path), db[0], db[1], tables) if db is not None else None
+    with _COVERED_LOCK:
+        version = _COVERED.get(memo_key) if memo_key is not None else None
+    if version is not None:
+        try:
+            row = conn.execute(_READ_SQL).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        if row is not None and int(row[1]) == version:
+            return (int(row[0]), int(row[1]))
+    revision = read_key(conn, tables)
+    if memo_key is not None:
+        with _COVERED_LOCK:
+            if revision is None:
+                _COVERED.pop(memo_key, None)
+            else:
+                if len(_COVERED) >= _COVERED_MAX:
+                    _COVERED.clear()
+                _COVERED[memo_key] = revision[1]
+    return revision
+
+
 def content_key(path: Path, tables: Iterable[str], open_ro: Callable) -> tuple:
     """A key that changes whenever any row of ``tables`` that the readers read changes in ``path`` (and on file
     replacement or schema change), but not on bookkeeping-only writes. ``open_ro(path)`` is a context manager
@@ -160,12 +193,12 @@ def content_key(path: Path, tables: Iterable[str], open_ro: Callable) -> tuple:
     mtime tick that leaves the WAL size unchanged would otherwise hide a task write from the next read."""
     tables = tuple(tables)
     stat = file_stat(path)
+    db = stat[0]
     try:
         with open_ro(path) as conn:
-            revision = read_key(conn, tables)
+            revision = _covered_read(conn, path, db, tables)
     except sqlite3.Error:
         revision = None
-    db = stat[0]
     if revision is None or db is None:
         return ("stat", stat)
     return ("revision", db[0], db[1], *revision)

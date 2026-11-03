@@ -25,6 +25,13 @@ def resolve_verify(base_url: str = ""):
     )
 
 
+def create_client(**kwargs):
+    """Build metadata/probe clients through one transport-injection boundary."""
+    import httpx
+
+    return httpx.Client(**kwargs)
+
+
 @contextmanager
 def stream(url: str, *, headers=None, params=None, timeout=10.0, verify=None):
     import httpx
@@ -43,7 +50,7 @@ def stream(url: str, *, headers=None, params=None, timeout=10.0, verify=None):
     if isinstance(timeout, tuple):
         connect, read = timeout
         timeout = httpx.Timeout(read, connect=connect)
-    with httpx.Client(
+    with create_client(
         verify=resolve_verify() if verify is None else verify,
         timeout=timeout,
         follow_redirects=True,

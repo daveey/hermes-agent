@@ -14,6 +14,7 @@ import time
 from typing import Any, Dict, Optional
 
 from agent.error_classifier import FailoverReason
+from agent.context_usage import mark_turn_context_incomplete, note_request_features
 from agent.turn_api_call import stop_thinking_spinner
 from agent.turn_failure_copy import invalid_response_failure_reason, provider_label_for, site_copy, stamp_failure
 from agent.turn_truncation import handle_content_policy_refusal, recover_from_truncation
@@ -130,6 +131,10 @@ def check_api_response(
 
     response_invalid, error_details = validate_response_shape(agent, response)
     if response_invalid:
+        if response is not None:
+            # A provider reply that is never measured (retried or terminal) leaves the turn's
+            # per-response context accounting incomplete.
+            mark_turn_context_incomplete(agent, "invalid provider response not measured")
         _iv = retry_invalid_response(
             agent, response=response, error_details=error_details, _retry=_retry,
             thinking_spinner=thinking_spinner, messages=messages, api_messages=api_messages,
@@ -154,6 +159,7 @@ def check_api_response(
 
     # HTTP-200 refusals are deterministic: one fallback try, else return the refusal.
     if finish_reason == "content_filter":
+        mark_turn_context_incomplete(agent, "content-filter response diverted before measurement")
         _rv = handle_content_policy_refusal(
             agent, response, _retry, thinking_spinner=thinking_spinner, messages=messages,
             api_messages=api_messages, api_kwargs=api_kwargs,
@@ -188,14 +194,16 @@ def check_api_response(
         retry_count = _tv.retry_count
         compression_attempts = _tv.compression_attempts
         if _tv.action in ("return", "break", "continue"):
+            mark_turn_context_incomplete(agent, "truncated response diverted before measurement")
             return _verdict(_tv.action, _tv.result)
 
+    _context_measurable = note_request_features(agent, api_kwargs)
     # Fold provider usage into compressor / anchors / session counters / state.db
     # (agent/turn_usage.py). A rearmed budget also clears the preflight-block latch.
     _usage_outcome = record_response_usage(
         agent, response, messages=messages, api_call_count=api_call_count,
         api_duration=api_duration, compression_attempts=compression_attempts,
-        max_compression_attempts=max_compression_attempts,
+        max_compression_attempts=max_compression_attempts, context_measurable=_context_measurable,
     )
     compression_attempts = _usage_outcome.compression_attempts
     if _usage_outcome.rearmed:

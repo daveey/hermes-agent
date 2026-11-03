@@ -1,14 +1,38 @@
 """Card identity helpers for local and remote session activity snapshots."""
 
 
-def local_keys(path, reads):
-    """Board-qualified identities from the count transaction, also retained by its memo."""
+def local_keys(path, reads, board=None):
+    """Board-qualified identities from the count transaction, also retained by its memo.
+
+    ``board`` (the board slug) keys a card ``<board>/<task id>``: the local key core's ``parked_waits`` and the
+    chat-closeout plugin's ``card_key`` use, so a pending close-out of a card the boards already count is
+    recognised as the same card. Remote keys have at least three parts (``gateway/[profile/]board/id``) and a slug
+    has no ``/``, so the two never collide. Without a slug the key falls back to the board's path."""
+    label = board or path
     parked = reads.get("parked_pairs", set())
     out = {}
     for bucket in ("active", "blocked", "held", "stalled"):
         for sid, tid in reads.get(bucket + "_pairs", ()):
-            out.setdefault(sid, set()).add((f"{path}/{tid}", bucket, (sid, tid) in parked and bucket == "active"))
+            out.setdefault(sid, set()).add((f"{label}/{tid}", bucket, (sid, tid) in parked and bucket == "active"))
     return out
+
+
+def is_local_board_key(key):
+    """A ``<board slug>/<task id>`` key (see ``local_keys``), as opposed to a remote ``gateway/.../id`` key."""
+    return key.count("/") == 1
+
+
+def closeout_extra(open_ids, extra_ids, card_keys):
+    """``(pending, listed)`` for plugin closeout ids against what the boards already count.
+
+    ``open_ids``: the bare local ids counted (a legacy bare closeout id matches these). ``card_keys``: per-session
+    ``(key, bucket, parked)`` sets, remote ``gateway/.../id`` and local ``<board>/<id>`` keys (the chat-closeout
+    ``card_key`` form). ``pending`` are closeouts no counted card covers (they add to ``kanban_active``);
+    ``listed`` are the closeout ids to show in ``kanban_waiting_on``: a counted local card is already listed under
+    its bare id, so its scoped alias is dropped."""
+    counted = {key for keys in card_keys for key, bucket, _ in keys if bucket in ("active", "blocked")}
+    pending = set(extra_ids) - set(open_ids) - counted
+    return pending, set(extra_ids) - {key for key in counted if is_local_board_key(key)}
 
 
 def merge_keys(*sources):

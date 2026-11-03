@@ -336,7 +336,8 @@ def board_paths() -> list[tuple[str, Path]]:
     links_dir = root / "kanban" / sync.LINKS_DIR
     if links_dir.is_dir():  # boards only another gateway has, where this gateway's chats have cards
         found += [(p.stem, p) for p in sorted(links_dir.glob("*.db")) if BOARD_ID_RE.match(p.stem) and p.stem not in local]
-    return [(slug, path) for slug, path in found if sync.board_selected(str(path))]
+    config = sync.sync_config()  # [daveey] once, not per board: every Desktop session-list poll lands here
+    return [(slug, path) for slug, path in found if sync.board_selected(str(path), config)]
 
 
 def ensure_link_boards(slugs: Iterable[str], gateway: str) -> list[str]:

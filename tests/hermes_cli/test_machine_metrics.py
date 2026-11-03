@@ -30,8 +30,11 @@ def test_collect_reads_this_machine(tmp_path: Path):
     assert out["cpus"] >= 1 and out["cpu_load1"] >= 0
     assert 0 < out["disk_free_gb"] <= out["disk_total_gb"]
     assert 0 <= out["mem_used_pct"] <= 100  # this platform's reader (linux or macos)
-    assert set(out) <= {"cpu_load1", "cpus", "mem_used_pct", "disk_free_gb", "disk_total_gb", "active_card_runs"}
+    assert set(out) <= {"cpu_load1", "cpus", "mem_used_pct", "disk_free_gb", "disk_total_gb", "active_card_runs",
+                        "drain_active", "drain_until_ms"}
     assert out["active_card_runs"] is None or out["active_card_runs"] >= 0
+    assert out.get("drain_active") in (None, 0, 1)  # omitted when the hold marker cannot be read
+    assert "drain_until_ms" not in out or out.get("drain_active") == 1
 
 
 def test_reporter_sends_at_most_every_30s_and_backs_off_on_old_board():

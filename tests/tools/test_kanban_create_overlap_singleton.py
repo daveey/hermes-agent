@@ -23,6 +23,74 @@ HISTORICAL = (
 )
 
 
+MISSED = (
+    "Mirror merged post-turn secret scope repair PR678 into public core patches",
+    "Mirror trailing core commits after ordinal1539 (PR540/555/556 and landed outcome fixes) [replacement, Claude-routed]",
+    "Mirror trailing core commits after ordinal1539 (PR540/555/556 and landed outcome fixes)",
+    "Mirror core through e572a3832043: composable metadata-only ask classification",
+    "Mirror fork backlog through composer Escape origin fix d9e0c56cb2",
+    "Mirror contiguous core backlog through offline DNS wait PR429",
+    "Mirror fork backlog after frozen 1368 snapshot (next ordinals 1369+)",
+    "Mirror contiguous core range after patch1253 including PR309 cancellation lock fix",
+    "Reconcile public core mirror through frozen-decision reset fence PR296",
+    "Reconcile public core mirror past 1202, including frozen-decision reset fence PR296",
+    "Publish outstanding fork core mirror through auxiliary OAuth rotation cb1aa70f614",
+    "Mirror PR160 review admission lifecycle patch and documentation to hermes-mods",
+    "Mirror daveey/hermes commits after hermes-mods 0688",
+    "Mirror remaining unmirrored daveey/hermes commits after hermes-mods 0670",
+    "Mirror unexported Hermes core range after 0248 through continuation guard",
+)
+WIDE_OWNER = "Mirror core commits 1703+ into hermes-mods core/"
+
+
+@pytest.mark.parametrize("title", MISSED)
+@pytest.mark.parametrize("remote", [False, True])
+def test_historical_mirror_variants(home, tmp_path, title, remote):
+    if remote:
+        tid = "t_12345678"
+        helpers._fake_replica(tmp_path / "hub-state" / "hub.db", [
+            ("macbook", {"id": tid, "board": "default", "title": WIDE_OWNER, "status": "ready"})])
+    else:
+        tid = owner(WIDE_OWNER)
+    result = check(title)
+    assert result and result["code"] == "create_overlap"
+    assert [m["id"] for m in result["matches"]] == [tid]
+    assert "same singleton job: hermes-mods core mirror" in result["matches"][0]["why"]
+
+
+@pytest.mark.parametrize("envelope", [False, True])
+@pytest.mark.parametrize("remote", [False, True])
+def test_capability_owner_serves_waiter_but_not_other_mirror(home, tmp_path, envelope, remote):
+    a = "t_12345678" if remote else owner(WIDE_OWNER)
+    if remote:
+        helpers._fake_replica(tmp_path / "hub-state" / "hub.db", [
+            ("macbook", {"id": a, "board": "default", "title": WIDE_OWNER, "status": "ready"})])
+    title = f"Capability owner: ssh:hub for macbook/{a} ({WIDE_OWNER})"
+    args: dict = {"body": f"Capability owner card for waiting card macbook/{a}"}
+    if envelope:
+        args.update(distinct_from=[a], distinct_reason="Execution of waiting card, not a second pass")
+    assert check(title, **args) is None
+    b = owner("Mirror fork backlog through independent snapshot", key="other:b")
+    result = check(title, **args)
+    assert result and [m["id"] for m in result["matches"]] == [b]
+    assert "singleton" in result["matches"][0]["why"]
+
+
+@pytest.mark.parametrize("title", [
+    "BB-499: Brain freshness: brain:hub_mirror",
+    "Validate and independently review libtirpc mirror repair PR63 (exact derivation + Nix CI)",
+    "hermes-sync breaks when an agent checks out a fork branch in ~/code/hermes (mirror must stay on `state`)",
+    "Complete native Bluesky mirrors for original threads and media; durable retry",
+    "Check whether core PR#48 (goal-disposition fallback) needs a numbered-patch-mirror entry",
+    "kanban_create lets a second hermes-mods core-mirror card through when titles carry different SHAs (11-02 pair scored 0.40)",
+    "kanban_overlap: widen the core-mirror singleton identity (15 real core-mirror cards in 14 days lack 'hermes-mods' or 'core', incl. PR678 card 11-02)",
+    "hermes-mods main red: …",
+    "Merge upstream 557254faa2 into fork main",
+])
+def test_real_non_mirror_identities(title):
+    assert ko.singleton_job(title) is None
+
+
 def owner(title=OPEN_TITLE, status="ready", session="other", key="core-mirror:a"):
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title=title, assignee="default", session_id=session, idempotency_key=key)
@@ -75,7 +143,7 @@ def test_closed_mirror_not_an_owner(home, tmp_path, status, remote):
 @pytest.mark.parametrize("title", [
     "hermes-mods main red: test_no_bare_ro_open flags plugins/coach/origin_authority.py:80",
     "Merge upstream 557254faa2 into fork main",
-    "Mirror core commits into another-repo core/",
+    "Validate and independently review libtirpc mirror repair PR63 (exact derivation + Nix CI)",
 ])
 def test_non_mirror_titles_do_not_match_singleton(home, title):
     owner(title)

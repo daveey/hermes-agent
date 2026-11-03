@@ -991,7 +991,20 @@ def _scoped_reader(monkeypatch, *, slow_scope=None, fail_scopes=()):
     import threading
     import time
 
-    local = threading.local()
+    from contextvars import ContextVar
+
+    scope_var = ContextVar("annotation_test_scope", default="A")
+
+    class Scope:
+        @property
+        def scope(self):
+            return scope_var.get()
+
+        @scope.setter
+        def scope(self, value):
+            scope_var.set(value)
+
+    local = Scope()
     monkeypatch.setattr(ksa, "_origin_scope", lambda: (getattr(local, "scope", "A"),))
     reads: list[str] = []
     fails = dict(fail_scopes)

@@ -123,6 +123,11 @@ def _stop_turns_before_exit(budget_s: float | None = None) -> None:
     group and would outlive the gateway, reparented to init. One still alive halfway through the budget
     ignored the interrupt's SIGTERM: SIGKILL it then, early enough for its result to land as well (the
     interrupt's own TERM, 1s, KILL outlasts the SIGTERM path's ~1s grace)."""
+    # [daveey] Before the backend_exit interrupt below sets _turn_cancel_requested: keep a prior user Stop
+    # distinguishable, and fence notification wakes so a journaled notice is not also delivered here.
+    with contextlib.suppress(Exception):
+        from tui_gateway.exit_job_receipts import fence_exit_notices
+        fence_exit_notices()
     with _sessions_lock:
         running = [(sid, s) for sid, s in _sessions.items() if s.get("running")]
     threads = []

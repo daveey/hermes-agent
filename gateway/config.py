@@ -200,16 +200,32 @@ _Platform__bundled_plugin_names: Optional[set] = None  # cached outside the enum
 _Platform__bundled_plugin_aliases: Optional[dict] = None  # manifest ``name:`` (lower) -> directory name
 
 
+# [daveey] Parsed manifest ``name:`` per (path, device, inode, size, mtime_ns). Every Desktop ``/api/status`` poll
+# loads the gateway config, whose env fallbacks scan every bundled platform manifest: re-parsing ~27 YAML files was
+# ~10 ms of a ~12 ms load on David-MBP (t_01a19d0bcab45558). Bounded by the number of bundled platforms.
+_MANIFEST_NAMES: dict[str, tuple[tuple, Optional[str]]] = {}
+
+
 def _bundled_platform_manifest_name(plugin_dir: Path) -> Optional[str]:
     """Lowercased ``name:`` from a bundled platform's plugin manifest (None when absent/unreadable)."""
     try:
-        manifest_file = next(
-            (plugin_dir / m for m in ("plugin.yaml", "plugin.yml") if (plugin_dir / m).exists()), None)
-        if manifest_file is None:
-            return None
-        data = fast_safe_load(manifest_file.read_text(encoding="utf-8-sig")) or {}
-        name = data.get("name") if isinstance(data, dict) else None
-        return str(name).strip().lower() or None
+        for m in ("plugin.yaml", "plugin.yml"):
+            manifest_file = plugin_dir / m
+            try:
+                st = manifest_file.stat()
+            except FileNotFoundError:
+                continue
+            key = str(manifest_file)
+            signature = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+            memo = _MANIFEST_NAMES.get(key)
+            if memo is not None and memo[0] == signature:
+                return memo[1]
+            data = fast_safe_load(manifest_file.read_text(encoding="utf-8-sig")) or {}
+            name = data.get("name") if isinstance(data, dict) else None
+            name = str(name).strip().lower() or None
+            _MANIFEST_NAMES[key] = (signature, name)
+            return name
+        return None
     except Exception:
         return None
 

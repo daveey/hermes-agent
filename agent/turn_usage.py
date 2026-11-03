@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from agent.image_token_cost import calibrate_from_usage
+from agent.context_usage import capture_context_request, mark_turn_context_incomplete
 from agent.usage_anchor import capture_usage_anchor, set_usage_anchor
 from agent.usage_pricing import estimate_usage_cost, normalize_usage, with_served_service_tier
 
@@ -56,6 +57,9 @@ def _fold_moa_usage(agent, canonical_usage):
             _ref_usage, _moa_ref_cost = _moa_client.consume_reference_usage()
             if _ref_usage is not None:
                 canonical_usage = canonical_usage + _ref_usage
+                if _ref_usage.prompt_tokens or _ref_usage.output_tokens:
+                    # Advisor calls arrive as one summed figure: not individually measurable.
+                    mark_turn_context_incomplete(agent, "MoA advisor usage is aggregated")
         except Exception as _moa_acct_exc:  # pragma: no cover - defensive
             logger.debug("MoA reference usage accounting failed: %s", _moa_acct_exc)
     if _moa_client is not None and hasattr(_moa_client, "consume_and_save_trace"):
@@ -70,13 +74,40 @@ def _fold_moa_usage(agent, canonical_usage):
     return _moa_client, canonical_usage, _moa_ref_cost
 
 
+def _capture_context_request(agent, response, aggregator_usage, measurable: bool) -> None:
+    """Per-response context accounting (``agent/context_usage.py``), from the PRE-fold usage of the
+    response the main loop received, under the identity that served it (MoA: the aggregator slot).
+    ``aggregator_usage`` None = a response without usage (an unmeasured request); ``measurable``
+    False = its usage may aggregate provider-executed passes, so it gets no entry."""
+    if not measurable:
+        return
+    if aggregator_usage is None:
+        capture_context_request(agent, response)
+        return
+    context_prompt = aggregator_usage.prompt_tokens
+    initial = getattr(response.usage, "initial_prompt_tokens", None)
+    if isinstance(initial, int) and initial > 0:
+        # Multi-hop long decode: hop 1 is the context held; later hops are adapter-internal
+        # requests summed into the reported prompt, so they cannot be listed one by one.
+        if initial != context_prompt:
+            mark_turn_context_incomplete(agent, "multi-hop long decode aggregates internal requests")
+        context_prompt = initial
+    moa_slot = None
+    if str(getattr(agent, "provider", "") or "").strip().lower() == "moa":
+        moa_slot = getattr(getattr(agent, "client", None), "last_aggregator_slot", None)
+    capture_context_request(agent, response, context_prompt_tokens=context_prompt, moa_slot=moa_slot)
+
+
 def record_response_usage(
     agent: Any, response: Any, *, messages: list[dict[str, Any]], api_call_count: int,
     api_duration: float, compression_attempts: int, max_compression_attempts: int,
+    context_measurable: bool = True,
 ) -> ResponseUsageOutcome:
     """Fold ``response.usage`` into compressor, anchors, session counters, state.db
     and the API-call log line (see module docstring). No-usage responses only
-    consume a pending compaction verdict. Returns the loop-visible outcome."""
+    consume a pending compaction verdict. Returns the loop-visible outcome. ``context_measurable=False``
+    (this response's usage may aggregate provider-executed passes) skips only its per-request context
+    entry; billing and compaction folding are unchanged."""
     rearmed = False
     compressor = agent.context_compressor
     # Count every completed provider attempt, including providers that omit usage.
@@ -96,6 +127,7 @@ def record_response_usage(
             "API call #%d: model=%s provider=%s in=? out=? total=? latency=%.1fs usage=unavailable",
             agent.session_api_calls, agent.model, agent.provider or "unknown", api_duration,
         )
+        _capture_context_request(agent, response, None, context_measurable)
         return ResponseUsageOutcome(compression_attempts=compression_attempts, rearmed=rearmed)
 
     canonical_usage = with_served_service_tier(
@@ -103,6 +135,7 @@ def record_response_usage(
     # Aggregator-only usage kept for pricing: advisor tokens are priced at each advisor's
     # OWN model rate and added as dollars below.
     aggregator_usage = canonical_usage
+    _capture_context_request(agent, response, aggregator_usage, context_measurable)
     _moa_client, canonical_usage, _moa_ref_cost = _fold_moa_usage(agent, canonical_usage)
     prompt_tokens = canonical_usage.prompt_tokens
     completion_tokens = canonical_usage.output_tokens

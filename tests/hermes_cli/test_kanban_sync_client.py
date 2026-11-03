@@ -940,3 +940,21 @@ def test_board_discovery_skips_the_archive_folder(kanban_home):
         d.mkdir(parents=True, exist_ok=True)
         sqlite3.connect(d / "kanban.db").close()
     assert [s for s, _ in ksc.board_paths()] == ["runners"]
+
+
+def test_board_discovery_reads_the_sync_config_once(kanban_home, monkeypatch):
+    """[daveey] Every Desktop session-list poll enumerates the replicas (``kanban_session_activity._replica_paths``):
+    one ``kanban.sync`` read per board re-read the kanban config 8x per poll on David-MBP (t_01a19d0bcab45558)."""
+    support.write_sync_config(kanban_home, True)
+    for slug in ("alpha", "beta", "gamma"):
+        d = kanban_home / "kanban" / "boards" / slug
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "board.json").write_text("{}", encoding="utf-8")
+        sqlite3.connect(d / "kanban.db").close()
+    reads = []
+    real = sync.sync_config
+    monkeypatch.setattr(sync, "sync_config", lambda: reads.append(1) or real())
+    assert [s for s, _ in ksc.board_paths()] == ["alpha", "beta", "gamma"]
+    assert len(reads) == 1
+    monkeypatch.setattr(sync, "sync_config", lambda: {**real(), "boards": ["beta"]})
+    assert [s for s, _ in ksc.board_paths()] == ["beta"]

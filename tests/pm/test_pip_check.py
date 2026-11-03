@@ -46,6 +46,16 @@ source = { registry = "https://pypi.org/simple" }
 OVERRIDDEN = "The package `pinned-parent` requires `shared-dep==1.0`, but `2.0` is installed"
 
 
+@pytest.fixture(autouse=True)
+def _host_toolchain(monkeypatch):
+    """PM's own runtime resolves pinned uv/Python through ``_toolchain``, which in a fresh test home
+    downloads python-build-standalone. Builds here are offline (``UV_OFFLINE``): use the host uv and
+    this interpreter, as the other environment-build tests do."""
+    uv = shutil.which("uv")
+    if uv:
+        monkeypatch.setattr("pm._uv._toolchain", lambda **kwargs: (Path(uv), Path(sys.executable)))
+
+
 def _report(*lines: str) -> str:
     plural = "incompatibility" if len(lines) == 1 else "incompatibilities"
     return f"Checked 3 packages in 1ms\nFound {len(lines)} {plural}\n" + "\n".join(lines) + "\n"

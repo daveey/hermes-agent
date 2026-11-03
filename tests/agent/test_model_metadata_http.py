@@ -29,6 +29,10 @@ def servers():
 
 
 def test_redirect_credentials_and_proxy_routing_are_preserved(servers, monkeypatch):
+    import httpx
+
+    # This test owns both loopback peers, including the proxy for probe.invalid.
+    monkeypatch.setattr(model_metadata_http, "create_client", httpx.Client)
     seen = []
     sink_url = ""
 
