@@ -149,3 +149,24 @@ def test_failed_cpu_report_is_never_replayed_next_round_takes_a_fresh_sample():
 def test_worker_load_fields_unchanged_by_cpu_gate(tmp_path):
     out = mm.collect(disk_path=tmp_path)
     assert not CPU_KEYS & set(out)  # collect() never blocks on a CPU sample; only the hub reporter adds it
+
+
+def test_active_card_runs_absent_default_board_counts_named_but_vanished_named_board_fails_closed(tmp_path, monkeypatch):
+    """A never-created default board holds no runs (it must not blind the hub cap gate); a listed named board that
+    cannot be read still makes the whole-host count unknown."""
+    import sqlite3
+
+    from hermes_cli import kanban_db_boards as kbb
+
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
+    named = tmp_path / "kanban" / "boards" / "proj" / "kanban.db"
+    named.parent.mkdir(parents=True)
+    db = sqlite3.connect(named)
+    db.executescript("CREATE TABLE tasks (id TEXT, status TEXT); INSERT INTO tasks VALUES ('a','running'),('b','ready');")
+    db.commit()
+    db.close()
+    assert not (tmp_path / "kanban.db").exists()
+    assert mm.active_card_runs() == 1
+    gone = tmp_path / "kanban" / "boards" / "gone" / "kanban.db"
+    monkeypatch.setattr(kbb, "named_board_db_files", lambda: [("proj", named), ("gone", gone)])
+    assert mm.active_card_runs() is None

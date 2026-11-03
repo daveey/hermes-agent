@@ -76,11 +76,19 @@ def active_card_runs() -> Optional[int]:
     from hermes_cli.kanban_db_boards import named_board_db_files
 
     try:
-        paths = [kb.kanban_home() / "kanban.db", *(p for _, p in named_board_db_files())]
+        default = kb.kanban_home() / "kanban.db"
+        paths = [default, *(p for _, p in named_board_db_files())]
         total = 0
         seen = set()
         for path in paths:
-            stat = path.stat()
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                # [daveey] A never-created default board holds no runs. Named boards are listed only when present,
+                # so a vanished one still invalidates the sample (fails closed) like any other unreadable board.
+                if path == default:
+                    continue
+                raise
             identity = (stat.st_dev, stat.st_ino)
             if identity in seen:
                 continue
