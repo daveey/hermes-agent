@@ -162,7 +162,13 @@ function bodyFor(kind: string, ev: CompletionEvent): string {
     return trimmed(payload?.summary)
   }
 
-  if (kind === 'blocked' || kind === 'block_loop_detected') {
+  // [daveey] A block's user-facing step comes only from its structured ask (human_request.action). The
+  // payload `reason` is the agent's own status note ("Architecture choice settled; …") and is never the body.
+  if (kind === 'blocked') {
+    return humanAsk(payload)?.action ?? t('notify.pausedBody')
+  }
+
+  if (kind === 'block_loop_detected') {
     return trimmed(payload?.reason)
   }
 
@@ -171,6 +177,36 @@ function bodyFor(kind: string, ev: CompletionEvent): string {
   }
 
   return ''
+}
+
+const ASK_MAX = 300
+
+/** [daveey] The block's structured ask: `human_request.action` (+ `why_human`), clipped for a notification.
+ *  A dict or JSON text; anything without a string action is no ask. */
+export function humanAsk(payload: Record<string, unknown> | null | undefined): { action: string; why: string } | null {
+  let r: unknown = payload?.human_request
+
+  if (typeof r === 'string') {
+    try {
+      r = JSON.parse(r)
+    } catch {
+      return null
+    }
+  }
+
+  if (!r || typeof r !== 'object' || Array.isArray(r)) {
+    return null
+  }
+
+  const clip = (v: unknown) => {
+    const s = trimmed(v).replace(/\s+/g, ' ')
+
+    return s.length > ASK_MAX ? `${s.slice(0, ASK_MAX - 1).trimEnd()}\u2026` : s
+  }
+
+  const action = clip((r as Record<string, unknown>).action)
+
+  return action ? { action, why: clip((r as Record<string, unknown>).why_human) } : null
 }
 
 /** Raw machine text that must never be the toast body — surfaced muted in `detail`. */
@@ -201,8 +237,10 @@ function notifyOne(
         ? t('notify.artifacts', artifacts.length)
         : ''
 
-  const detail = [taskId, artifactText, rawErrorFor(kind, ev)].filter(Boolean).join(' · ')
-  const title = t(spec.titleKey)
+  const ask = kind === 'blocked' ? humanAsk(ev.payload) : null
+  const why = ask?.why ? t('notify.whyYou', ask.why) : ''
+  const detail = [why, taskId, artifactText, rawErrorFor(kind, ev)].filter(Boolean).join(' · ')
+  const title = kind === 'blocked' && !ask ? t('notify.pausedTitle') : t(spec.titleKey)
   const message = body || taskId || title
 
   if (!toastlessKinds.has(kind)) {

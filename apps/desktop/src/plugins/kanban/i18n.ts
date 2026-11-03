@@ -237,6 +237,11 @@ type KanbanMessages = {
   notify: {
     completedTitle: string
     blockedTitle: string
+    /** blocked with no structured ask (human_request): the agent paused it and named no step for the user. */
+    pausedTitle: string
+    pausedBody: string
+    /** Detail line carrying the ask's why_human. */
+    whyYou: (why: string) => string
     blockLoopTitle: string
     gaveUpTitle: string
     /** Body for gave_up — the raw worker error rides in the toast `detail`. */
@@ -485,6 +490,9 @@ export const en: KanbanMessages = {
   notify: {
     completedTitle: 'Task completed',
     blockedTitle: 'Task blocked — needs your input',
+    pausedTitle: 'Task paused',
+    pausedBody: 'The agent paused this task without naming a step for you. Ask it in chat if you’re unsure.',
+    whyYou: why => `Why you: ${why}`,
     blockLoopTitle: 'Task routed to triage — needs a decision',
     gaveUpTitle: 'Task stopped',
     gaveUpBody: 'Hermes couldn’t finish this task. Open Kanban to see why and reassign it.',
@@ -731,6 +739,9 @@ const ja: KanbanMessages = {
   notify: {
     completedTitle: 'タスク完了',
     blockedTitle: 'タスクがブロック中 — 入力が必要です',
+    pausedTitle: 'タスクを一時停止',
+    pausedBody: 'エージェントはあなたへの手順を示さずにこのタスクを一時停止しました。不明な場合はチャットで尋ねてください。',
+    whyYou: why => `あなたが必要な理由: ${why}`,
     blockLoopTitle: 'タスクをトリアージへ移動 — 判断が必要です',
     gaveUpTitle: 'タスクが停止しました',
     gaveUpBody: 'Hermes はこのタスクを完了できませんでした。かんばんを開いて原因を確認し、再割り当てしてください。',
@@ -973,6 +984,9 @@ const zh: KanbanMessages = {
   notify: {
     completedTitle: '任务已完成',
     blockedTitle: '任务受阻 — 需要你的输入',
+    pausedTitle: '任务已暂停',
+    pausedBody: '代理暂停了此任务，但没有说明需要你做什么。如不确定，请在聊天中询问。',
+    whyYou: why => `为什么需要你：${why}`,
     blockLoopTitle: '任务已转入分类 — 需要人工决定',
     gaveUpTitle: '任务已停止',
     gaveUpBody: 'Hermes 无法完成这个任务。打开看板查看原因并重新分配。',
@@ -1215,6 +1229,9 @@ const zhHant: KanbanMessages = {
   notify: {
     completedTitle: '任務已完成',
     blockedTitle: '任務受阻 — 需要你的輸入',
+    pausedTitle: '任務已暫停',
+    pausedBody: '代理暫停了此任務，但沒有說明需要你做什麼。如不確定，請在聊天中詢問。',
+    whyYou: why => `為什麼需要你：${why}`,
     blockLoopTitle: '任務已轉入分類 — 需要人工決定',
     gaveUpTitle: '任務已停止',
     gaveUpBody: 'Hermes 無法完成這個任務。開啟看板查看原因並重新指派。',

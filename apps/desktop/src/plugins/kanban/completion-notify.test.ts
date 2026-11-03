@@ -418,18 +418,68 @@ describe('notification failure isolation', () => {
 })
 
 describe('terminal kinds beyond completed', () => {
-  it('blocked notifies with the payload reason and a warning toast', async () => {
+  // Regression: card t_b857cd9d's toast/OS notification read only its status note "Architecture choice settled;
+  // retain only existing primary portal authentication gate." although the event carried a structured ask.
+  const ASK = {
+    action: 'Sign in to the Telnyx portal through the agent browser when opened.',
+    why_human: 'Primary portal authentication is absent from the vault.',
+    interaction: 'external'
+  }
+
+  it('blocked with a human_request shows the requested step and why, never the agent reason', async () => {
     const m = await loadModule()
     m.bindCompletionNotify(makeRest(() => 100) as never)
 
-    const fired = await m.onKanbanEventsFrame('smoke', [ev(101, 'blocked', { reason: 'needs API key' })])
+    const fired = await m.onKanbanEventsFrame('smoke', [
+      ev(101, 'blocked', { reason: 'Architecture choice settled; retain only existing primary portal authentication gate.', human_request: ASK })
+    ])
 
     expect(fired).toBe(true)
     expect(lastNotify()).toMatchObject({
       kind: 'warning',
-      message: 'needs API key',
-      detail: 't101'
+      title: 'Task blocked — needs your input',
+      message: 'Sign in to the Telnyx portal through the agent browser when opened.',
+      detail: 'Why you: Primary portal authentication is absent from the vault. · t101'
     })
+    expect(JSON.stringify(lastNotify())).not.toContain('settled')
+  })
+
+  it('blocked human_request as JSON text (replica shape) is read the same way', async () => {
+    const m = await loadModule()
+    m.bindCompletionNotify(makeRest(() => 100) as never)
+
+    await m.onKanbanEventsFrame('smoke', [ev(101, 'blocked', { reason: 'x', human_request: JSON.stringify(ASK) })])
+
+    expect(lastNotify().message).toBe(ASK.action)
+  })
+
+  it('blocked without a usable ask says the agent paused it and named no step — no invented action, no reason', async () => {
+    const m = await loadModule()
+    m.bindCompletionNotify(makeRest(() => 100) as never)
+
+    for (const [i, hr] of [undefined, null, {}, { action: '  ' }, { action: 7 }, '[1]', 'not json'].entries()) {
+      await m.onKanbanEventsFrame('smoke', [ev(101 + i, 'blocked', { reason: 'needs API key; gate settled', human_request: hr })])
+      expect(lastNotify()).toMatchObject({
+        kind: 'warning',
+        title: 'Task paused',
+        message: 'The agent paused this task without naming a step for you. Ask it in chat if you’re unsure.',
+        detail: `t${101 + i}`
+      })
+      expect(JSON.stringify(lastNotify())).not.toContain('settled')
+    }
+  })
+
+  it('blocked: long asks are clipped with an ellipsis; markup stays plain text', async () => {
+    const m = await loadModule()
+    m.bindCompletionNotify(makeRest(() => 100) as never)
+    const long = `<img src=x onerror=alert(1)> Open https://example.com/billing and ${'check each line carefully '.repeat(30)}`
+
+    await m.onKanbanEventsFrame('smoke', [ev(101, 'blocked', { human_request: { action: long } })])
+
+    const msg = lastNotify().message as string
+    expect(msg.length).toBe(300)
+    expect(msg.endsWith('\u2026')).toBe(true)
+    expect(msg.startsWith('<img src=x onerror=alert(1)> Open https://example.com/billing')).toBe(true)
   })
 
   it('block_loop_detected notifies that a decision is needed', async () => {
@@ -484,7 +534,7 @@ describe('terminal kinds beyond completed', () => {
     // Cursor moved past 103: a replayed blocked at 102 stays silent, 104 fires.
     await m.onKanbanEventsFrame('smoke', [ev(102, 'blocked'), ev(104, 'blocked')])
     expect(hostMock.notify).toHaveBeenCalledTimes(1)
-    expect(lastNotify().message).toBe('t104')
+    expect(lastNotify().detail).toBe('t104')
   })
 })
 
@@ -514,10 +564,10 @@ describe('native OS door', () => {
     const m = await loadModule()
     m.bindCompletionNotify(makeRest(() => 100) as never, undefined, os)
 
-    await m.onKanbanEventsFrame('smoke', [ev(101, 'blocked', { reason: 'needs input' })])
+    await m.onKanbanEventsFrame('smoke', [ev(101, 'blocked', { reason: 'gate settled', human_request: { action: 'Reply in chat with the budget.', why_human: 'Spend needs you.' } })])
 
     expect(os.notify).toHaveBeenCalledTimes(1)
-    expect(os.notify.mock.calls[0][0]).toMatchObject({ body: 'needs input\nt101' })
+    expect(os.notify.mock.calls[0][0]).toMatchObject({ body: 'Reply in chat with the budget.\nWhy you: Spend needs you. · t101' })
   })
 
   it('an os door that throws never breaks the toast or the frame result', async () => {
@@ -572,11 +622,11 @@ describe('quiet kinds', () => {
     const m = await loadModule()
     m.bindCompletionNotify(makeRest(() => 100) as never, undefined, os, { toastless: ['blocked'] })
 
-    const fired = await m.onKanbanEventsFrame('smoke', [ev(101, 'blocked', { reason: 'needs input' })])
+    const fired = await m.onKanbanEventsFrame('smoke', [ev(101, 'blocked', { reason: 'gate settled', human_request: { action: 'Reply in chat with the budget.' } })])
     expect(fired).toBe(true)
     expect(hostMock.notify).not.toHaveBeenCalled()
     expect(os.notify).toHaveBeenCalledTimes(1)
-    expect(os.notify.mock.calls[0][0]).toMatchObject({ body: 'needs input\nt101' })
+    expect(os.notify.mock.calls[0][0]).toMatchObject({ body: 'Reply in chat with the budget.\nt101' })
   })
 })
 
