@@ -576,8 +576,52 @@ def _infer(conn, task_id, *, reason, wake_check, clock_only, op, wake_in) -> dic
         probe = None if short or not parked_by_own_worker(task_id) else opaque_probe(wake_check)
         if probe:
             raise opaque_probe_error(probe)
-        return {"kind": "external", "ref": wake_check[:200], "inferred": True}
+        return {"kind": "external", "ref": probe_ref(wake_check), "inferred": True}
     return {"kind": "clock", "inferred": True}
+
+
+_INTERPRETER = re.compile(r"(?:python[\d.]*|bash|sh|zsh|node|ruby|perl|uv|nice|nohup|timeout|exec)$")
+
+
+def probe_ref(wake_check: str, limit: int = 200) -> str:
+    """A readable name for an inferred probe wait: the script basename plus its args.
+
+    ``wake_check[:200]`` cut long absolute paths mid-word (``.../hosts/daveey-min``), which read as a
+    host process that does not exist (bb t_01a19f806a228604). Leading ``env``, ``VAR=val`` and
+    interpreter words are dropped; an unparseable or interpreter-only command keeps the old prefix."""
+    try:
+        words = shlex.split(wake_check)
+    except ValueError:
+        return wake_check[:limit]
+    i = 0
+    while i < len(words) and (words[i] == "env" or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[i])
+                              or _INTERPRETER.match(os.path.basename(words[i])) or words[i].startswith("-")
+                              and i and _INTERPRETER.match(os.path.basename(words[i - 1]))):
+        i += 1
+    if i >= len(words) or "/" not in words[i]:
+        return wake_check[:limit]
+    return shlex.join([os.path.basename(words[i]), *words[i + 1:]])[:limit]
+
+
+# A declared clock window that states when it ends (an ISO-8601 time in ``ref``, e.g. a quota
+# reset) is not a stuck premise until that time passes: re-parks inside it never escalate.
+_ISO_TIME = re.compile(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})")
+CLOCK_WINDOW_MAX_SECONDS = 14 * 86400
+
+
+def clock_window_end(record: dict, now: float) -> Optional[float]:
+    """End of a declared ``clock`` wait whose ref names a future time (at most 14 days out), else None."""
+    if record.get("kind") != "clock" or record.get("inferred"):
+        return None
+    from datetime import datetime
+    for m in _ISO_TIME.finditer(record.get("ref") or ""):
+        try:
+            end = datetime.fromisoformat(m.group(0)).timestamp()
+        except ValueError:
+            continue
+        if now < end <= now + CLOCK_WINDOW_MAX_SECONDS:
+            return end
+    return None
 
 
 def probe_premise(wake_check: Optional[str], *, op: str = "schedule", wake_in: Optional[int] = None) -> Optional[str]:
@@ -629,6 +673,11 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
     if record["kind"] == "card" or (record["kind"] == "clock" and record.get("inferred")):
         return record
     record["premise"] = premise_hash(record, reason)
+    if clock_window_end(record, time.time()) is not None:
+        # A stated window (a weekly quota reset) ends by itself; an escalation card cannot shorten it
+        # and, for a Claude-pool hold, burns the quota it waits on (bb t_01a19f847b7f5abb). No ``probe``
+        # key either, so a later non-window park on the same probe starts its own count.
+        return record
     probe = probe_premise(wake_check, op=op, wake_in=wake_in)
     if probe:
         record["probe"] = probe
