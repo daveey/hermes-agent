@@ -186,6 +186,18 @@ def test_pr_owner_reopen_resumes_its_pr_once(kanban_home, clock, spawns, open_pr
     assert _guard(tid) == "active_pr"
 
 
+def test_same_second_reopen_keeps_pr_guard(kanban_home, clock, open_pr):
+    """active_pr alone (success window over): a reopen in the PR comment's second stays guarded."""
+    with kbc.connect_closing() as conn:
+        tid = _ran_and_completed(conn, pr_comment=True)
+        clock[0] += 3700
+        worker_comment(conn, tid, "default", f"Merged state of {PR} noted")
+    _reopen(tid)
+    assert _guard(tid) == "active_pr"
+    clock[0] += 1
+    assert _guard(tid) == "active_pr"
+
+
 def test_reopen_without_newer_reopen_keeps_pr_guard(kanban_home, clock, open_pr):
     """No reopen: a done card's open PR still guards a ready row (the ordinary hold)."""
     with kbc.connect_closing() as conn:

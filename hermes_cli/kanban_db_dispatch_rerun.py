@@ -13,7 +13,8 @@ def reopened_after(conn: sqlite3.Connection, task_id: str, since: int) -> bool:
     """A supported operator reopen (:func:`kanban_db_operator.reopen_done_task`: ``done`` -> ready/todo,
     payload ``previous_status: done``) strictly after ``since``: a deliberate "run it again". A same-second
     tie, an older reopen, or a ``reopened`` event without that payload fails closed. One reopen authorizes
-    one rerun: that rerun's own completion or PR comment is newer and guards again. [daveey]"""
+    a rerun until that rerun completes or posts a PR comment (newer, so it guards again); a rerun that
+    ends without either retries like any reclaimed run. [daveey]"""
     from hermes_cli import kanban_db as _kb
     from hermes_cli.kanban_db_dispatch import _rows_since
 
