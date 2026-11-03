@@ -163,8 +163,6 @@ import {
   knownProjectsOf,
   orderProjectsByIds,
   overlayLiveLanes,
-  overlayLivePreviews,
-  PROJECT_PREVIEW_COUNT,
   ProjectBackRow,
   ProjectMenu,
   projectTreeCwd,
@@ -195,6 +193,7 @@ import { buildSessionByAnyId, resolvePinnedSessions, useOfflineFallback } from '
 import { SidebarSessionsSection, VIRTUALIZE_THRESHOLD } from './sessions-section'
 import { CONTEXT_SPLIT_KIT, SplitSubmenu } from './split-submenu'
 import { useEnteredProjectSessions } from './use-entered-project-sessions'
+import { useOverviewPreviews } from './use-overview-previews'
 import { useServerSessionSearch } from './use-server-session-search'
 
 export { mergeSearchResults, searchResultToSession, stripFtsMarkers } from './search-results'
@@ -261,33 +260,6 @@ interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
   onNewSessionSplit: NewSessionSplitHandler
   onManageCronJob: (jobId: string) => void
   onTriggerCronJob: (jobId: string) => Promise<void>
-}
-
-type OverviewPreviewOptions = NonNullable<Parameters<typeof overlayLivePreviews>[4]>
-
-// Preview rows come from the backend tree (each project carries its most-recent sessions), overlaid
-// with live $sessions so a just-created session shows under its project instantly (and with its
-// working arc), matching the flat Recents list. Keyed by project id for the rows. `rank` applies
-// before the trim, so "3 priciest in this project" isn't "3 most recent, priciest first".
-// Its own hook so ChatSidebar stays under its size/complexity ratchet.
-function useOverviewPreviews(
-  projectOverview: SidebarProjectTree[] | undefined,
-  agentSessions: SessionInfo[],
-  projects: Parameters<typeof overlayLivePreviews>[2],
-  showAllSessions: boolean,
-  { ownerKey, removed, owners, known, rank }: OverviewPreviewOptions
-): Record<string, SessionInfo[]> {
-  return useMemo(
-    () =>
-      overlayLivePreviews(
-        projectOverview ?? [],
-        agentSessions,
-        projects,
-        showAllSessions ? Infinity : PROJECT_PREVIEW_COUNT,
-        { ownerKey, removed, owners, known, rank }
-      ),
-    [projectOverview, agentSessions, projects, showAllSessions, ownerKey, removed, owners, known, rank]
-  )
 }
 
 export function ChatSidebar({
