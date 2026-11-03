@@ -134,9 +134,11 @@ def singleton_job(title: str) -> Optional[str]:
 # failing test (``test_busy_board_open_does_not_block_session_poll``) or the same Actions run (41516070553), but their
 # titles shared too few words for the overlap above. A card NAMES a failing test when its title carries a pytest
 # function name (``test_\w+``), its body's opening paragraph carries a node id (``tests/…py::test_…``) in a sentence
-# that says it fails, or its body has a pytest ``FAILED <node id>`` line (ci_main_watch lists them). A node id
-# elsewhere in a body is context or a verification step ("the regression test tests/…::test_x checks …"), not the
-# failure. A card names a run by ``actions/runs/<id>`` anywhere in its title or body.
+# that says it fails. A body whose only tests are pytest ``FAILED <node id>`` lines (ci_main_watch lists them) has
+# them as ``listed`` tests: they match a card naming one of them, but they are the run's failures, not a test the card
+# names, so that card still owns its run (t_01a1a05806da4ef0). A node id elsewhere in a body is context or a
+# verification step ("the regression test tests/…::test_x checks …"), not the failure. A card names a run by
+# ``actions/runs/<id>`` anywhere in its title or body.
 _NODE = re.compile(r"(?<![\w-])(?:[\w.-]+/)*(test_\w+)\.py::(?:[A-Za-z_]\w*::)*(test_\w+)")
 _BARE_TEST = re.compile(r"(?<![\w/.:-])(test_\w*[a-z0-9])(?![\w.:/-])")
 _RUN = re.compile(r"\bactions/runs/(\d{6,})\b")
@@ -155,6 +157,9 @@ class FailureIdentity(NamedTuple):
     modules: frozenset  # test modules of the node ids named
     bare: frozenset  # test names in the title without a module (may be a module: "test_kanban_db spawn tests fail")
     runs: frozenset  # GitHub Actions run ids
+    # True when ``tests`` came only from ``FAILED <node id>`` lines (ci_main_watch's ``failed tests:`` block): the whole
+    # run's failures, not a test the card is about, so the card still owns the run (t_01a1a05806da4ef0).
+    listed: bool = False
 
 
 def _node_names(text: str) -> tuple[set[str], set[str]]:
@@ -179,28 +184,36 @@ def failure_identity(title: str, body: str) -> FailureIdentity:
             if "::" in sentence and _FAILING.search(_NODE.sub(" ", sentence)):
                 f, m = _node_names(sentence)
                 funcs, mods = funcs | f, mods | m
-    if "FAILED" in body and not funcs:
+    from_list = "FAILED" in body and not funcs
+    if from_list:
         # Only a card whose subject is the log list (ci_main_watch: "main is red", then FAILED lines). A card that
         # already named its test pastes a job tail whose FAILED lines include OTHER tests of that job.
         for line in _FAILED_LINE.findall(body):
             f, m = _node_names(line)
             funcs, mods = funcs | f, mods | m
     runs = set(_RUN.findall(title)) | (set(_RUN.findall(body)) if "actions/runs/" in body else set())
-    return FailureIdentity(frozenset(f for f in funcs if len(f) >= _MIN_TEST_NAME), frozenset(mods),
-                           frozenset(bare), frozenset(runs))
+    tests = frozenset(f for f in funcs if len(f) >= _MIN_TEST_NAME)
+    return FailureIdentity(tests, frozenset(mods), frozenset(bare), frozenset(runs), listed=from_list and bool(tests))
 
 
 def same_failure(new: FailureIdentity, card: FailureIdentity) -> Optional[str]:
     """Why two cards own one failure, else None: the same failing test function (a title's bare name may be the
-    other card's test module), or the same Actions run when neither card names a failing test. One run fails many
-    tests, so two cards naming different tests of one run are different failures."""
+    other card's test module), or the same Actions run when neither card names its own failing test. One run fails
+    many tests, so two cards naming different tests of one run are different failures. A run's FAILED list
+    (``listed``) is not a test the card names: it matches a card naming one of those tests, and the card still owns
+    the run."""
     tests = (new.tests & card.tests) | (new.bare & card.modules) | (card.bare & new.modules)
     if tests:
         return "same failing test " + ", ".join(sorted(tests)[:3])
     runs = new.runs & card.runs
-    if runs and not new.tests and not card.tests:
+    if runs and not _names_own_test(new) and not _names_own_test(card):
         return "same CI run " + ", ".join(f"actions/runs/{r}" for r in sorted(runs)[:3])
     return None
+
+
+def _names_own_test(fi: FailureIdentity) -> bool:
+    """The card names a failing test of its own (title, or a failing sentence of its opening), not only a FAILED list."""
+    return bool(fi.tests) and not fi.listed
 
 
 def _failure_reason(why: str) -> bool:
@@ -237,8 +250,10 @@ def _reasons(card: dict, new_words: set[str], title: str, body: str, target_boar
             and _names_board(card["board"], title, body, gateways)):
         reasons.append(f"the new card names board {card['board']!r}")
     if new_words and theirs:
-        score = max(score, len(shared) / max(len(new_words), len(theirs)))
-        if len(shared) >= MIN_SHARED and score >= 0.5:
+        ratio = len(shared) / max(len(new_words), len(theirs))
+        score = max(score, ratio)
+        # The title ratio alone: a failure match sets score to 1.0 without any title overlap.
+        if len(shared) >= MIN_SHARED and ratio >= 0.5:
             reasons.append(f"titles share {len(shared)} words ({', '.join(sorted(shared))})")
     return reasons, score
 
