@@ -3,10 +3,20 @@
 Provider transport tests can replace requests.get themselves; real loopback HTTP
 fixtures are deliberately left intact. This is not a general HTTP/network fence.
 """
+from importlib.util import find_spec
 from ipaddress import ip_address
 from urllib.parse import urlsplit
 
 import pytest
+
+
+def _transport_absent(name):
+    """No client library in this interpreter means no in-process client to fence.
+
+    Isolated acceptance lanes (bootstrap installer) run with only pytest
+    installed and exercise Hermes in subprocesses.
+    """
+    return find_spec(name) is None
 
 
 def _is_loopback(host):
@@ -21,7 +31,7 @@ def _is_loopback(host):
 @pytest.fixture(autouse=True)
 def _offline_video_catalog(request, monkeypatch):
     """Unrelated agent tests use the provider's bundled video catalog fallback."""
-    if request.node.get_closest_marker("live"):
+    if request.node.get_closest_marker("live") or _transport_absent("requests"):
         return
     import requests
 
@@ -40,7 +50,7 @@ def _offline_video_catalog(request, monkeypatch):
 @pytest.fixture(autouse=True)
 def _offline_registry_transport(request, monkeypatch):
     """Keep registry fetch/cache logic real, with an offline transport default."""
-    if request.node.get_closest_marker("live"):
+    if request.node.get_closest_marker("live") or _transport_absent("requests"):
         return
     import requests
     from agent import models_dev
@@ -63,7 +73,7 @@ def _offline_metadata_transport(request, monkeypatch):
     Explicit client/transport fakes installed by tests win. The production
     request construction, response handling, caches and fallbacks still run.
     """
-    if request.node.get_closest_marker("live"):
+    if request.node.get_closest_marker("live") or _transport_absent("httpx"):
         return
     import httpx
     from agent import model_metadata_http
