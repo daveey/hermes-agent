@@ -46,7 +46,7 @@ import os
 import re
 import sqlite3
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, NamedTuple, Optional
 
 _log = logging.getLogger(__name__)
 
@@ -127,12 +127,99 @@ def singleton_job(title: str) -> Optional[str]:
     return None
 
 
+# Failure identity (t_01a19ea9f1739df6). One red-CI failure, five owners in 23 min on 11-02: the cards named the same
+# failing test (``test_busy_board_open_does_not_block_session_poll``) or the same Actions run (41516070553), but their
+# titles shared too few words for the overlap above. A card NAMES a failing test when its title carries a pytest
+# function name (``test_\w+``), its body's opening paragraph carries a node id (``tests/…py::test_…``) in a sentence
+# that says it fails, or its body has a pytest ``FAILED <node id>`` line (ci_main_watch lists them). A node id
+# elsewhere in a body is context or a verification step ("the regression test tests/…::test_x checks …"), not the
+# failure. A card names a run by ``actions/runs/<id>`` anywhere in its title or body.
+_NODE = re.compile(r"(?<![\w-])(?:[\w.-]+/)*(test_\w+)\.py::(?:[A-Za-z_]\w*::)*(test_\w+)")
+_BARE_TEST = re.compile(r"(?<![\w/.:-])(test_\w*[a-z0-9])(?![\w.:/-])")
+_RUN = re.compile(r"\bactions/runs/(\d{6,})\b")
+_FAILING = re.compile(
+    r"FAILED|\bfail(?:s|ed|ing|ure|ures)?\b|[a-z]Error\b|\btime[sd]?[ -]?out\b|\btiming out\b"
+    r"|flak(?:e|es|y|iness)\b|\bred\b|\bbroken\b|\bregress\w*|\bhangs?\b", re.IGNORECASE)
+_FAILED_LINE = re.compile(r"^[\s|║>*`-]*FAILED\s+(.*)$", re.MULTILINE)
+_SENTENCE = re.compile(r"(?<=[.!?])\s+|\n+")
+_FAILURE_LEAD = 800  # the opening states the failure; later sections are context, history and verification steps
+_MIN_TEST_NAME = 10  # "test_" + 5: "test_main" or "test_ok" names too many unrelated tests
+_CARD_ID = re.compile(r"\bt_[0-9a-f]{8,16}\b")
+
+
+class FailureIdentity(NamedTuple):
+    tests: frozenset  # failing test functions (parameters dropped)
+    modules: frozenset  # test modules of the node ids named
+    bare: frozenset  # test names in the title without a module (may be a module: "test_kanban_db spawn tests fail")
+    runs: frozenset  # GitHub Actions run ids
+
+
+def _node_names(text: str) -> tuple[set[str], set[str]]:
+    funcs, mods = set(), set()
+    if "::" in text:
+        for m in _NODE.finditer(text):
+            mods.add(m.group(1))
+            funcs.add(m.group(2))
+    return funcs, mods
+
+
+def failure_identity(title: str, body: str) -> FailureIdentity:
+    """The failing tests and CI runs a card is about (see the comment above). Pure; never raises on text."""
+    title, body = title or "", (body or "")[:_BODY_SCAN]
+    funcs, mods = _node_names(title)
+    bare = {t for t in _BARE_TEST.findall(_NODE.sub(" ", title) if "::" in title else title)
+            if len(t) >= _MIN_TEST_NAME}
+    funcs |= bare
+    lead = body.strip().split("\n\n", 1)[0][:_FAILURE_LEAD]
+    if "::" in lead:
+        for sentence in _SENTENCE.split(lead):
+            if "::" in sentence and _FAILING.search(_NODE.sub(" ", sentence)):
+                f, m = _node_names(sentence)
+                funcs, mods = funcs | f, mods | m
+    if "FAILED" in body and not funcs:
+        # Only a card whose subject is the log list (ci_main_watch: "main is red", then FAILED lines). A card that
+        # already named its test pastes a job tail whose FAILED lines include OTHER tests of that job.
+        for line in _FAILED_LINE.findall(body):
+            f, m = _node_names(line)
+            funcs, mods = funcs | f, mods | m
+    runs = set(_RUN.findall(title)) | (set(_RUN.findall(body)) if "actions/runs/" in body else set())
+    return FailureIdentity(frozenset(f for f in funcs if len(f) >= _MIN_TEST_NAME), frozenset(mods),
+                           frozenset(bare), frozenset(runs))
+
+
+def same_failure(new: FailureIdentity, card: FailureIdentity) -> Optional[str]:
+    """Why two cards own one failure, else None: the same failing test function (a title's bare name may be the
+    other card's test module), or the same Actions run when neither card names a failing test. One run fails many
+    tests, so two cards naming different tests of one run are different failures."""
+    tests = (new.tests & card.tests) | (new.bare & card.modules) | (card.bare & new.modules)
+    if tests:
+        return "same failing test " + ", ".join(sorted(tests)[:3])
+    runs = new.runs & card.runs
+    if runs and not new.tests and not card.tests:
+        return "same CI run " + ", ".join(f"actions/runs/{r}" for r in sorted(runs)[:3])
+    return None
+
+
+def _failure_reason(why: str) -> bool:
+    return why.startswith(("same failing test ", "same CI run "))
+
+
+def cites(card_id: str, title: str, body: str) -> bool:
+    """The new card names ``card_id``: written knowing that card (a follow-up, an unstick, a split of its scope)."""
+    return card_id in set(_CARD_ID.findall(f"{title}\n{(body or '')[:_BODY_SCAN]}"))
+
+
 def _reasons(card: dict, new_words: set[str], title: str, body: str, target_board: str,
-             gateways: Iterable[str] = ()) -> tuple[list[str], float]:
+             gateways: Iterable[str] = (), failure: Optional[FailureIdentity] = None) -> tuple[list[str], float]:
     reasons, score = [], 0.0
     job = singleton_job(title)
     if job and job == singleton_job(card.get("title") or ""):
         reasons.append(f"same singleton job: {job}")
+    if failure is not None and (failure.tests or failure.runs):
+        why = same_failure(failure, failure_identity(card.get("title") or "", card.get("body") or ""))
+        if why:
+            reasons.append(why)
+            score = 1.0
     theirs = words(card.get("title") or "")
     shared = new_words & theirs
     # A board named in passing (a path, a log line) is not enough: the titles must share a word too. A plain-word
@@ -147,7 +234,7 @@ def _reasons(card: dict, new_words: set[str], title: str, body: str, target_boar
             and _names_board(card["board"], title, body, gateways)):
         reasons.append(f"the new card names board {card['board']!r}")
     if new_words and theirs:
-        score = len(shared) / max(len(new_words), len(theirs))
+        score = max(score, len(shared) / max(len(new_words), len(theirs)))
         if len(shared) >= MIN_SHARED and score >= 0.5:
             reasons.append(f"titles share {len(shared)} words ({', '.join(sorted(shared))})")
     return reasons, score
@@ -522,6 +609,7 @@ def find(*, title: str, body: str, target_board: str, session_id: Optional[str],
         waiting = capability_owner_waiting_id(title, body)
         new_words = words(title)
         job = singleton_job(title)
+        failure = failure_identity(title, body)
         out, seen, mine = [], set(), None
         cards = [*_local_cards(self_gw), *_replica_cards(self_gw)]
         gateways = {g for g in (self_gw, *(c["gateway"] for c in cards)) if g}
@@ -542,13 +630,16 @@ def find(*, title: str, body: str, target_board: str, session_id: Optional[str],
                     or (family and card.get("key_family") == family)):
                 continue
             seen.add((card["gateway"], card["id"]))
-            reasons, score = _reasons(card, new_words, title, body, target_board, gateways)
+            reasons, score = _reasons(card, new_words, title, body, target_board, gateways, failure)
             if not reasons:
                 continue
             if mine is None:
                 mine = _identity(title, body, gateways)
             admit = (f"waits on {card['id']}" if waits_on(card["id"], title, body)
                      else f"recovers {card['id']}" if recovers(card["id"], title, card.get("title") or "")
+                     # A failure-only match the new card cites by id was written knowing that owner.
+                     else f"cites {card['id']}" if (all(_failure_reason(r) for r in reasons)
+                                                    and cites(card["id"], title, body))
                      else _distinct(mine, _identity(card.get("title") or "", card.get("body") or "", gateways)))
             if admit and not singleton:
                 # Logged so an audit can tell an admitted look-alike from a missed one.
