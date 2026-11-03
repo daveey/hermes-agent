@@ -393,8 +393,8 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
     if not _awaited_parents(conn, parents, evidence, parked_at):
         return False
     awaited = evidence.get("awaited")
-    # Review results, including incomplete/invalid verdicts, belong exclusively to
-    # resumes_review. An ordering handoff must not bypass its exact-head checks.
+    # Results is_review_result calls reviews (incomplete or invalid verdicts included)
+    # belong to resumes_review: this handoff must not bypass its exact-head checks. [daveey]
     for parent in parents:
         result = conn.execute(
             "SELECT metadata, summary FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (parent,),

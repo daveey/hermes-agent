@@ -194,24 +194,34 @@ def _approval_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) 
     return named if named is not None else set(captured)
 
 
-_REVIEW_KEYS = ("verdict", "approved", "reviewed_sha", "reviewed_pr")
+_REVIEW_KEYS = ("verdict", "approved", "reviewed_sha")
+# Keys a result can carry without its worker describing any work: a PR reference, the
+# session id kanban_complete stamps on a dispatcher worker's own result, and artifacts
+# (files the worker lists, by artifacts= or by hand, plus scratch-workspace files
+# complete_task finds named in the summary or result). Any other key routes by
+# _REVIEW_KEYS alone, so hub reviews that record review_outcome or reviewer_checks, and
+# size-judge rulings, take the ordering continuation as they did before #728. [daveey]
+_LOST_REVIEW_KEYS = frozenset({"pr", "reviewed_pr", "worker_session_id", "artifacts"})
 
 
 def is_review_result(metadata, summary, captured) -> bool:
     """True when a parent's result belongs to the review rules, not the ordering handoff.
 
     Verdict keys or a ``VERDICT:`` line mark a review (a bare ``head`` does not:
-    operator gates record one). So does a result that
-    names a checkpointed PR (``pr``/summary ``PR #N`` or URL) with none of them: a
-    review whose metadata was lost must fail closed on the exact-head check rather
-    than pass as an ordering prerequisite once the park is a second past the PR.
+    operator gates record one). So does a result with only ``_LOST_REVIEW_KEYS`` that
+    names a checkpointed PR (``pr``/``reviewed_pr`` key, summary ``PR #N`` or URL): it may
+    be a review whose verdict was lost, so it fails closed on the exact-head check rather
+    than passing as an ordering prerequisite once the park is a second past the PR.
+    This fallback is a heuristic both ways: a prerequisite that reports its work only in
+    prose and names the PR is held too, and a review that keeps its outcome under other
+    keys is treated as a prerequisite. [daveey]
     """
     if any(key in metadata for key in _REVIEW_KEYS) or _SUMMARY_VERDICT.search(summary or ""):
         return True
     prs = {u.rstrip("/").lower() for u in captured or () if isinstance(u, str)}
-    if not prs:
+    if not prs or not set(metadata) <= _LOST_REVIEW_KEYS:
         return False
-    if "pr" in metadata and _named_prs(metadata, prs):
+    if _named_prs(metadata, prs):
         return True
     text = (summary or "").lower()
     nums = set(_SUMMARY_PR_NUM.findall(text))
