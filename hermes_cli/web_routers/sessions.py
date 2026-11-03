@@ -19,6 +19,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 
 from hermes_cli.session_listing import stamp_automated, subagent_listing_scope
+from hermes_cli.session_list_flight import SESSION_LIST_CACHE, data_stamp
 from hermes_cli.web_deps import late
 from hermes_cli.kanban_session_activity import annotate_kanban_activity, session_tasks as session_kanban_tasks
 from hermes_cli.cron_session_activity import annotate_cron_activity
@@ -214,6 +215,21 @@ def get_sessions(
             status_code=400, detail="archived must be one of: exclude, only, include")
     if order not in ("created", "recent"):
         raise HTTPException(status_code=400, detail="order must be one of: created, recent")
+    args = (limit, offset, min_messages, archived, order, source, sources, exclude_sources, cwd_prefix, full, profile)
+    try:
+        db_path = _session_db_path_for_profile(profile)
+    except HTTPException:  # an unknown profile: the uncached path raises the same 400/404
+        return _list_sessions_payload(*args)
+    # Identical concurrent calls (a Desktop reconnect fans out ~15) share one computation, and a result is
+    # reused for a moment while state.db is unchanged (session_list_flight; t_01a19f5af20a19f6). [daveey]
+    return SESSION_LIST_CACHE.get(
+        (str(db_path),) + args, data_stamp(db_path), lambda: _list_sessions_payload(*args))
+
+
+def _list_sessions_payload(
+    limit, offset, min_messages, archived, order, source, sources, exclude_sources, cwd_prefix, full, profile,
+) -> dict:
+    """The ``GET /api/sessions`` body for already-validated params (uncached)."""
     profile_name = _cron_profile_home(profile)[0] if profile else None
     try:
         db = _open_session_db_for_profile(profile, read_only=True)
@@ -293,7 +309,7 @@ def get_sessions(
         # RuntimeError family, not sqlite3: same 503 payload as the analytics reads (#110054).
         with corrupt_store_as_status(_session_db_path_for_profile(profile)):
             raise
-    except Exception:
+    except Exception:  # health: allow BLE001 -- the route's 500 boundary (moved from get_sessions); logs the traceback
         _log.exception("GET /api/sessions failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
