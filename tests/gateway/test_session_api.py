@@ -11,6 +11,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from gateway.config import PlatformConfig
+from gateway.platforms import api_server as api_server_module
 from gateway.platforms.api_server import APIServerAdapter
 from hermes_state import SessionDB
 
@@ -1331,6 +1332,90 @@ async def test_session_stream_records_reply_text_for_post_disconnect_recovery(
     response = await adapter._handle_get_run(get_request)
     assert response.status == 200
     assert "the answer worth keeping" in response.text
+
+
+@pytest.mark.asyncio
+async def test_session_stream_disconnect_during_worker_teardown_keeps_the_reply(
+    adapter, session_db
+):
+    """A disconnect that lands after the agent finished, while its worker is still tearing
+    down, must not cancel the turn and discard the reply.
+
+    The worker unregisters the run's agent in its ``finally`` before the loop sees the result,
+    so the disconnect drain found no agent and cancelled the task as if the turn had never
+    started: the run read "cancelled" with no output and the handler raised CancelledError.
+    CI hit this window on a throttled runner (the flake of the recovery test above); here the
+    worker is held inside it so the order is fixed.
+    """
+    session_id = session_db.create_session("teardown-disconnect-session", "api_server")
+    in_teardown = threading.Event()
+    release_teardown = threading.Event()
+    real_clear = api_server_module._clear_turn_process_ownership
+
+    def held_clear(agent):
+        # Runs in the worker's finally, right after it unregistered the run's agent.
+        in_teardown.set()
+        release_teardown.wait(timeout=30)
+        real_clear(agent)
+
+    class FakeAgent:
+        session_prompt_tokens = 0
+        session_completion_tokens = 0
+        session_total_tokens = 0
+
+        def __init__(self, stream_delta_callback):
+            self._stream_delta_callback = stream_delta_callback
+            self.session_id = session_id
+
+        def interrupt(self, _message=None):
+            pass
+
+        def run_conversation(self, user_message, conversation_history, task_id):
+            del user_message, conversation_history, task_id
+            self._stream_delta_callback("partial ")
+            return {"final_response": "finished before the socket died", "session_id": session_id}
+
+    class DisconnectAfterTurnResponse:
+        writes = 0
+
+        async def prepare(self, request):
+            del request
+
+        async def write(self, payload):
+            del payload
+            self.writes += 1
+            if self.writes >= 3:
+                assert await asyncio.to_thread(in_teardown.wait, 30)
+                # Let the worker finish; the loop cannot see its result before this
+                # handler yields, so the drain below still runs inside the window.
+                release_teardown.set()
+                raise ConnectionResetError("client gone just as the turn finished")
+
+    request = MagicMock()
+    request.headers = {}
+    request.match_info = {"session_id": session_id}
+
+    with patch.object(
+        adapter, "_get_existing_session_or_404", return_value=({"id": session_id}, None)
+    ), patch.object(
+        adapter, "_read_json_body", return_value=({"message": "stream please"}, None)
+    ), patch.object(
+        adapter, "_create_agent", side_effect=lambda **kw: FakeAgent(kw["stream_delta_callback"])
+    ), patch.object(
+        api_server_module, "_clear_turn_process_ownership", held_clear
+    ), patch(
+        "gateway.platforms.api_server.web.StreamResponse",
+        return_value=DisconnectAfterTurnResponse(),
+    ):
+        try:
+            await asyncio.wait_for(adapter._handle_session_chat_stream(request), timeout=30)
+        finally:
+            release_teardown.set()
+
+    run_id = next(iter(adapter._run_statuses))
+    record = adapter._run_statuses[run_id]
+    assert record["status"] == "completed"
+    assert record.get("output") == "finished before the socket died"
 
 
 @pytest.mark.asyncio

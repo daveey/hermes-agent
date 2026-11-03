@@ -114,6 +114,7 @@ from gateway.display_config import resolve_display_setting
 from gateway.platforms import api_server_room_dispatch as _room_dispatch
 from gateway.platforms import api_server_room_grants as _room_grants
 from gateway.platforms import api_server_runs as _api_runs
+from gateway.platforms import api_server_session_stream as _session_stream
 from gateway.platforms.api_server_openai_routes import OpenAICompatRoutesMixin
 from gateway.platforms.api_server_thread_hops import ThreadSafeAsyncQueue, _ThreadHops
 # Re-exported: the route mixins import these wire serializers from this module.
@@ -3091,6 +3092,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     "message_id": message_id, "text": text, "already_streamed": bool(already_streamed)})
 
         approval_notify = self._register_session_stream_approval(run_id, events, message_id)
+        # Set once the worker built the agent and never cleared: the disconnect drain reads it to
+        # tell "not started" (cancel) from "already ran" (the worker unregisters the agent before
+        # the loop sees its result, so the registry alone can't).
+        agent_ref: list = [None]
 
         async def _run_and_signal() -> None:
             try:
@@ -3104,7 +3109,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     conversation_history=history, stream_delta_callback=_delta,
                     tool_progress_callback=_tool_progress, interim_assistant_callback=_commentary,
                     active_run_id=run_id, approval_notify_callback=approval_notify,
-                    approval_session_key=run_id, **ctx["run_kwargs"])
+                    approval_session_key=run_id, agent_ref=agent_ref, **ctx["run_kwargs"])
                 # The worker's last commentary/tool hops must land before assistant.completed.
                 await events.flush_hops()
                 is_dict = isinstance(result, dict)
@@ -3159,12 +3164,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 name, payload = item
                 await response.write(_sse_frame(payload, event=name, ensure_ascii=False))
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
-            await self._drain_session_stream_task_on_disconnect(
-                run_id, task, interrupt_message="SSE client disconnected", shield_wait=False)
+            await _session_stream.drain_task_on_disconnect(
+                self._active_run_agents, run_id, task, agent_ref,
+                interrupt_message="SSE client disconnected", shield_wait=False)
             logger.info("Session SSE client disconnected; interrupted live run %s", run_id)
         except asyncio.CancelledError:
-            await self._drain_session_stream_task_on_disconnect(
-                run_id, task, interrupt_message="SSE task cancelled", shield_wait=True)
+            await _session_stream.drain_task_on_disconnect(
+                self._active_run_agents, run_id, task, agent_ref,
+                interrupt_message="SSE task cancelled", shield_wait=True)
             logger.info("Session SSE task cancelled; drained live run %s", run_id)
             raise
         except Exception as exc:
@@ -3182,23 +3189,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             self._set_run_status(run_id, "waiting_for_approval", last_event="approval.request", approval=event)
             events.enqueue("approval.request", event)  # executor thread -> loop hop inside
         return _approval_notify
-
-    async def _drain_session_stream_task_on_disconnect(
-        self, run_id: str, task: asyncio.Task, *, interrupt_message: str, shield_wait: bool
-    ) -> None:
-        """Preserve live run control refs until the executor-backed turn actually exits."""
-        agent = self._active_run_agents.get(run_id)
-        if agent is None:
-            if not task.done():
-                task.cancel()
-                with suppress(Exception):
-                    await task
-            return
-        with suppress(Exception):
-            agent.interrupt(interrupt_message)
-        if not task.done():
-            with suppress(Exception):
-                await (asyncio.shield(task) if shield_wait else task)
 
     @_require_auth
     async def _handle_session_model_lock(self, request: web.Request) -> web.Response:
