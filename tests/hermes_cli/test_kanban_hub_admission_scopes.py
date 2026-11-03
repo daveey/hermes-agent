@@ -270,3 +270,29 @@ def test_reclaim_of_a_started_run_is_not_released_as_unused(install):
     assert kb.reclaim_task(conn, t, reason="operator")
     releases = [kw for kind, kw in install.client.calls if kind == "release"]
     assert releases and all(not kw.get("unused_grant") for kw in releases)
+
+
+@pytest.mark.parametrize("pct", [50.0, 80.0])
+def test_rollback_hub_review_continuation_board_grant_is_still_cpu_gated_by_the_root(install, pct):
+    """Review ruling 11 (core half): after ``worker_overflow={}`` the Board admits the origin hub's review continuation
+    of a card it already ran on its non-CPU admission alone (Board worker-review-ready.test.ts "after rollback"), so
+    the root ``cpu_busy_below_pct`` gate is the only CPU check. With the Board granting, a sample at or above the limit
+    refuses the review claim: no new run, the card stays in review, and the grant is released as unused."""
+    conn = install.connect("default", "primary")
+    install.advisory(10.0)
+    sampled = install.final_sample(10.0)
+    t = card(conn, "policy", "ready")
+    started = claim(conn, t, "ready")
+    assert started is not None and runs(conn, t) == 1
+    assert kb.request_review(conn, t, summary="done", expected_run_id=started.current_run_id)
+    assert kb.get_task(conn, t).status == "review"
+    install.client.calls.clear()
+    install.final_sample(pct)
+    assert claim(conn, t, "review") is None
+    assert kb.get_task(conn, t).status == "review" and runs(conn, t) == 1
+    assert sync.pop_claim_deferral(t) == "hub_cpu_at_or_above_limit"
+    (acquired,) = [kw for kind, kw in install.client.calls if kind == "acquire"]
+    (released,) = [kw for kind, kw in install.client.calls if kind == "release"]
+    assert acquired["lane"] == "review"
+    assert released["run_uid"] == acquired["run_uid"] and released["unused_grant"] is True
+    assert sampled == [10.0]
