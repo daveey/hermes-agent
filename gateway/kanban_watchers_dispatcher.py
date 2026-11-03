@@ -39,7 +39,7 @@ class _DispatcherSettings:
     """``kanban.*`` dispatch settings, read once at boot (restart to apply).
 
     Exception: ``max_in_progress`` is re-read every tick (``_KanbanDispatcher.live_max_in_progress``);
-    this field is only its boot value / fallback."""
+    this field is only its fallback until a tick has run."""
 
     interval: float
     max_spawn: Any
@@ -153,11 +153,18 @@ class _KanbanDispatcher:
         The host cap is the one dispatch setting an operator lowers to contain load, and the
         dashboard and ``hermes kanban daemon`` already read it live. Freezing it at boot let a
         hub gateway booted at 16 keep claiming to 16/16 for an hour after config said 7, while
-        the dashboard showed 15/7. An explicit positive value wins; an unset or unreadable key
-        keeps the boot value (the memory-derived default when it was unset at boot).
+        the dashboard showed 15/7. An explicit positive value wins; an unset, invalid or
+        unreadable key keeps the cap the previous tick used (the boot value on the first tick),
+        never the boot value: boot 16 -> config 7 -> one bad read must not reopen 16. Raising the
+        cap takes an explicit value; restoring the memory-derived default takes a restart.
         """
         configured = _kbd().configured_max_in_progress()
-        effective = configured if configured is not None else self.settings.max_in_progress
+        if configured is not None:
+            effective = configured
+        elif self._logged_max_in_progress is not _UNSET:
+            effective = self._logged_max_in_progress
+        else:
+            effective = self.settings.max_in_progress
         if effective != self._logged_max_in_progress:
             if self._logged_max_in_progress is not _UNSET:
                 logger.info("kanban dispatcher: max_in_progress=%s (was %s; config re-read live)",
