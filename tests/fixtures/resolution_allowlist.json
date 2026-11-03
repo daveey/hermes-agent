@@ -564,6 +564,12 @@
     "kind": "bare_which"
   },
   {
+    "path": "tools/process_registry_persist_scope.py",
+    "symbol": "persisted_job_scope_argv",
+    "kind": "bare_which",
+    "reason": "systemd-run is a host system binary (not a Hermes-managed runtime); same lookup as process_registry._build_systemd_scope_argv."
+  },
+  {
     "path": "tools/read_extract.py",
     "symbol": "_pdf_page_texts",
     "kind": "bare_which"
