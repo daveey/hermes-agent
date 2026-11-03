@@ -6,11 +6,18 @@ import re
 
 from .method_ctx import bind_module
 
+
+def _client_failure(session: dict):
+    """The RPC error ``data`` a client sees: ``agent_failure`` minus the replay-only ``failure_resets_at``."""
+    from tui_gateway.credential_failure import client_failure_fields
+    return client_failure_fields(session.get("agent_failure"))
+
+
 def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:
     ready = session.get("agent_ready")
     if ready is not None and not ready.wait(timeout=timeout):
         return _err(rid, 5032, AGENT_STILL_STARTING)
-    return _err(rid, 5032, err, data=session.get("agent_failure")) if (err := session.get("agent_error")) else None
+    return _err(rid, 5032, err, data=_client_failure(session)) if (err := session.get("agent_error")) else None
 
 
 # The deferred prompt path waits in short slices so a cancel is honored promptly and a slow
@@ -69,7 +76,7 @@ def _wait_agent_for_prompt(session: dict, rid: str, sid: str) -> dict | None:
         if build_thread is not None and not build_thread.is_alive() and not ready.is_set():
             # _build's finally guarantees ready.set(); dead thread + unset ready = died hard.
             return _err(rid, 5032, session.get("agent_error") or "agent initialization failed before completing",
-                        data=session.get("agent_failure"))
+                        data=_client_failure(session))
         if not notified_slow and waited >= _AGENT_BUILD_SLOW_NOTICE_AFTER:
             notified_slow = True  # one keyed, replace-in-place notice (toast / status bar)
             _emit("notification.show", sid, {
@@ -78,7 +85,7 @@ def _wait_agent_for_prompt(session: dict, rid: str, sid: str) -> dict | None:
                 "key": _AGENT_BUILD_SLOW_NOTICE_KEY, "id": _AGENT_BUILD_SLOW_NOTICE_KEY})
     if notified_slow:
         _emit("notification.clear", sid, {"key": _AGENT_BUILD_SLOW_NOTICE_KEY})
-    return _err(rid, 5032, err, data=session.get("agent_failure")) if (err := session.get("agent_error")) else None
+    return _err(rid, 5032, err, data=_client_failure(session)) if (err := session.get("agent_error")) else None
 
 
 def _bind_build_profile_scopes(profile_home: str | None) -> _TurnScopes | None:
@@ -291,7 +298,8 @@ def _start_agent_build(sid: str, session: dict) -> None:
             notify_registered = _wire_session_agent(sid, key, agent)
             _announce_built_agent(sid, key, current, agent)
         except (Exception, ConfigBackendUnavailable) as e:  # health: allow BLE001 -- reported as agent_error + error event
-            from tui_gateway.credential_failure import build_failure_fields, provider_not_configured
+            from tui_gateway.credential_failure import (
+                build_failure_fields, client_failure_fields, provider_not_configured)
             current["agent_failure"] = build_failure_fields(e, current)
             # [daveey] A typed quota/route exhaustion knows when it clears: an automation replay waits for it.
             resets_at = getattr(e, "resets_at", None)
@@ -307,7 +315,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
             # error toast — but only if it can tell. The sentence is for the reader, the code is
             # for the client; older clients keep matching the text.
             _emit("error", sid, {
-                "message": agent_init_failed_message(e), **current["agent_failure"],
+                "message": agent_init_failed_message(e), **client_failure_fields(current["agent_failure"]),
                 **({"code": "provider_not_configured"} if provider_not_configured(e)
                    and current["agent_failure"].get("failure_kind") != "exhausted" else {})})
         finally:
