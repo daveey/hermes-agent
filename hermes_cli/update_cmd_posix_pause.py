@@ -642,21 +642,51 @@ def _pause(token: dict) -> str | None:
 
 # --------------------------------------------------------------------------- resume
 
+def _root_first(entries: list[dict]) -> tuple[list[dict], dict | None]:
+    """*entries* with the root gateway's systemd unit first, plus that entry when profile gateways follow it.
+
+    The host-wide Kanban dispatcher/sync locks go to whichever gateway reaches them first, and a pinned
+    profile gateway on an older core never hands them back: on hermes-hub (2026-11-02) askeve-reviewer
+    won every joint restart by ~20 s and synced/dispatched for the whole host with its own caps and
+    columns. Starting the root first and waiting for its locks is the one ordering that core can't undo. [daveey]"""
+    from gateway.kanban_singleton import is_root_home
+    root = [e for e in entries if e.get("kind") != "launchd" and is_root_home(e.get("home"))]
+    if not root:
+        return list(entries), None
+    rest = [e for e in entries if e is not root[0]]
+    return [root[0], *rest], (root[0] if rest else None)
+
+
+def _await_root_locks(name: str, pid: int) -> None:
+    """Wait (bounded) for the just-started root gateway to hold the host Kanban locks it takes."""
+    from gateway.kanban_singleton import ROOT_LOCK_WAIT_SECONDS, wait_for_root_locks
+    with suppress(Exception):
+        missing = wait_for_root_locks(pid)
+        if missing:
+            print(f"  ⚠ {name} (PID {pid}) does not hold {', '.join(missing)} after "
+                  f"{int(ROOT_LOCK_WAIT_SECONDS)}s; starting the profile gateways anyway "
+                  "(`hermes kanban stats` names the holder)")
+
+
 def resume_paused_set(token: dict) -> None:
     """Start every paused runtime again; each leaves *token* only on its own verified start."""
     failures: list[str] = []
     restarted: list[str] = []
     kept_units = []
-    for entry in token.get("posix_units") or []:
+    entries, root_pending = _root_first(token.get("posix_units") or [])
+    for entry in entries:
         try:
             if entry.get("kind") == "launchd":
                 _start_job(entry)
                 _RESTARTED["labels"].add(entry["label"])
                 name = entry["label"]
             else:
-                _RESTARTED["pids"].add(_start_unit(entry))
+                new_pid = _start_unit(entry)
+                _RESTARTED["pids"].add(new_pid)
                 _RESTARTED["units"].add(f"{entry['scope']}/{entry['unit']}")
                 name = entry["unit"]
+                if entry is root_pending:
+                    _await_root_locks(name, new_pid)
             restarted.append(name)
             token.setdefault("restarted_services", []).append(name)
         except Exception as exc:  # health: allow BLE001 -- one failed unit never keeps the others stopped

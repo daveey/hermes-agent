@@ -301,3 +301,61 @@ class SingletonLease:
             self._clear_own_root_claim()
         self.state = "idle"
         self._yield_cache = (float("-inf"), False)
+
+
+# --- restart ordering ----------------------------------------------------------------------------
+# A pinned profile gateway running an older core neither defers nor yields, so on a joint restart the
+# only lever is order: start the root gateway, wait until it holds the host locks it takes, then start
+# the profile gateways (``hermes_cli.update_cmd_posix_pause.resume_paused_set``). [daveey]
+
+ROOT_LOCK_WAIT_SECONDS = 90.0
+
+
+def is_root_home(home: Optional[str]) -> bool:
+    if not home:
+        return False
+    try:
+        from hermes_cli.kanban_db import kanban_home
+        return _resolve(Path(home)) == _resolve(kanban_home())
+    except Exception:
+        return False
+
+
+def root_expected_locks() -> list[Path]:
+    """The host locks a root gateway takes under the kanban root's own config.yaml."""
+    from hermes_cli.kanban_db import kanban_home
+    root = kanban_home() / "kanban"
+    locks: list[Path] = []
+    try:
+        from hermes_cli.config_backend import config_exists, read_config_doc_readonly
+        path = kanban_home() / "config.yaml"
+        kanban = ((read_config_doc_readonly(path) if config_exists(path) else None) or {}).get("kanban") or {}
+    except Exception:
+        kanban = {}
+    if kanban.get("dispatch_in_gateway", True):
+        locks.append(root / ".dispatcher.lock")
+    if (kanban.get("sync") or {}).get("enabled"):
+        locks.append(root / ".sync.lock")
+    return locks
+
+
+def wait_for_root_locks(pid: int, *, timeout: float = ROOT_LOCK_WAIT_SECONDS, locks: Optional[list] = None,
+                        sleep: Optional[Callable[[float], None]] = None,
+                        clock: Optional[Callable[[], float]] = None) -> list[str]:
+    """Block until *pid* holds every expected host lock, or *timeout*; returns the lock names it lacks.
+
+    Never raises: a lock held by another live process is reported (that holder will not yield if it runs
+    an older core) and the caller carries on.
+    """
+    try:
+        paths = root_expected_locks() if locks is None else [Path(p) for p in locks]
+    except Exception:
+        return []
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    deadline = clock() + timeout
+    while True:
+        missing = [p for p in paths if (holder_info(p) or {}).get("pid") != pid]
+        if not missing or clock() >= deadline or not _pid_alive(pid):
+            return [p.name for p in missing]
+        sleep(1.0)

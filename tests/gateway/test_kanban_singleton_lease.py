@@ -252,3 +252,71 @@ def test_sync_watcher_profile_gateway_yields_to_root_and_waits(root, monkeypatch
     finally:
         root_lease.release()
     assert loops == ["start"] and sleeps == [ks.DEFAULT_RETRY_SECONDS]
+
+
+# --- entry path 4: joint restart order in `hermes update` (posix pause resume) --------------------
+
+
+def _unit(name, home, pid):
+    return {"kind": "systemd", "scope": "user", "unit": name, "pid": pid, "home": str(home)}
+
+
+def test_update_resume_starts_root_first_and_waits_for_its_locks(root, monkeypatch):
+    """A pinned profile gateway (older core) never yields, so resume must start the root gateway, wait
+    until the root's new pid holds the host locks, and only then start the profile gateways."""
+    from hermes_cli import update_cmd_posix_pause as pause
+    (root / "config.yaml").write_text("kanban:\n  sync:\n    enabled: true\n")
+    order = []
+    leases = {}
+
+    def start(entry):
+        order.append(("start", entry["unit"]))
+        if entry["unit"] == "hermes-gateway.service":
+            # The root gateway's watchers take both locks a moment later (simulated by this process).
+            for name in ("dispatcher", "sync"):
+                leases[name] = _lease(root, is_root=True, clock=Clock(), name=name)
+        return os.getpid() if entry["unit"] == "hermes-gateway.service" else 99999
+
+    import os
+    monkeypatch.setattr(pause, "_start_unit", start)
+    waits = []
+
+    def fake_sleep(_s):
+        waits.append(len(order))
+        for lease in leases.values():
+            lease.try_acquire()
+    monkeypatch.setattr(ks.time, "sleep", fake_sleep)
+    monkeypatch.setattr(pause, "_RESTARTED", {"pids": set(), "units": set(), "labels": set()})
+    token = {"posix_units": [
+        _unit("hermes-gateway-askeve-reviewer.service", root / "profiles" / "askeve-reviewer", 11),
+        _unit("hermes-gateway.service", root, 12),
+        _unit("hermes-gateway-askeve-builder.service", root / "profiles" / "askeve-builder", 13),
+    ]}
+    try:
+        pause.resume_paused_set(token)
+    finally:
+        for lease in leases.values():
+            lease.release()
+    assert [u for _k, u in order] == ["hermes-gateway.service", "hermes-gateway-askeve-reviewer.service",
+                                      "hermes-gateway-askeve-builder.service"]
+    assert waits and all(n == 1 for n in waits), "profile units started before the root held its locks"
+
+
+def test_update_resume_root_lock_wait_is_bounded(root):
+    """A lock another process keeps (an older core never yields) costs at most the timeout, then resume goes on."""
+    from hermes_cli import update_cmd_posix_pause as pause
+    clock = Clock()
+    path = root / "kanban" / ".dispatcher.lock"
+    other, state = _acquire_singleton_lock(path)
+    assert state == "held"
+
+    def sleep(_s):
+        clock.now += 30
+    try:
+        # pid 1 is alive and is not the holder (this test process is).
+        assert ks.wait_for_root_locks(1, timeout=90.0, sleep=sleep, clock=clock, locks=[path]) == [".dispatcher.lock"]
+        assert 90 <= clock.now - 1000.0 <= 120
+    finally:
+        _release_singleton_lock(other)
+    lone = [_unit("hermes-gateway-x.service", root / "profiles" / "x", 1)]
+    assert pause._root_first(lone) == (lone, None)
