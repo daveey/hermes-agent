@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { type TranscriptCacheKey, TranscriptCacheStore } from './transcript-cache'
 import {
   DEMAND_CONCURRENCY,
+  DEMAND_QUEUE_MAX,
   GATEWAY_BACKOFF_MS,
   type HubSessionRecord,
   MIN_REFETCH_MS,
@@ -351,4 +352,30 @@ describe('[daveey] on-demand prefetch of an @session-referenced session', () => 
     await expect(h.prefetcher.prefetchKey({ ...old, connectionId: '' })).resolves.toBe('invalid')
     expect(h.fetchLatest).toHaveBeenCalledTimes(1)
   })
+
+  it('drops keys past DEMAND_QUEUE_MAX queued on one gateway', async () => {
+    const h = harness()
+    const gate = deferredRows()
+    h.fetchLatest.mockImplementation(() => gate.promise)
+
+    const keys = Array.from({ length: DEMAND_CONCURRENCY + DEMAND_QUEUE_MAX + 1 }, (_, index) => ({
+      ...old,
+      sessionId: `q${index}`
+    }))
+
+    const outcomes = keys.map(key => h.prefetcher.prefetchKey(key))
+
+    await expect(outcomes[outcomes.length - 1]).resolves.toBe('dropped')
+    gate.resolve([{ content: 'ok', id: 1 }])
+    const settled = await Promise.all(outcomes)
+    expect(settled.filter(outcome => outcome === 'dropped')).toHaveLength(1)
+    expect(h.fetchLatest).toHaveBeenCalledTimes(DEMAND_CONCURRENCY + DEMAND_QUEUE_MAX)
+  })
 })
+
+function deferredRows() {
+  let resolve!: (rows: { content: string; id: number }[]) => void
+  const promise = new Promise<{ content: string; id: number }[]>(done => (resolve = done))
+
+  return { promise, resolve }
+}

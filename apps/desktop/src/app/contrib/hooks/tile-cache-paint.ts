@@ -38,13 +38,15 @@ export function trackSettled<T>(promise: Promise<T>): TrackedPromise<T> {
   }
 }
 
-/** Cached transcript a tile may paint while its REST page is still in flight, or null. */
+/** Cached transcript a tile may paint while its REST page is still in flight, or null (no scope, REST already
+ *  landed, or an explicit refresh whose caller awaits fresh rows). */
 export function tileCachedPaint(
   storedSessionId: string,
   scope: TranscriptTailScope | undefined,
-  rest: TrackedPromise<unknown>
+  rest: TrackedPromise<unknown>,
+  refresh = false
 ): ChatMessage[] | null {
-  if (rest.settled || !scope) {
+  if (refresh || rest.settled || !scope) {
     return null
   }
 

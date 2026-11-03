@@ -144,4 +144,72 @@ describe('[daveey] a tile (the @session ref click) paints from the transcript ca
 
     expect(texts(states.get('runtime-other'))).toEqual(['right'])
   })
+
+  it('rows that landed after the cache paint are merged with the REST page, not overwritten', async () => {
+    setSessionOwnerHint('busy-ref', ROUTE)
+    saveTranscriptTail('busy-ref', rows('cached question', 'cached answer'), SCOPE)
+    const rest = deferred<{ messages: SessionMessage[]; session_id: string }>()
+    vi.mocked(getLatestSessionMessages).mockReturnValue(rest.promise as never)
+    vi.mocked(requestGatewayForAgent).mockResolvedValue({ session_id: 'runtime-busy' } as never)
+    const { states } = renderTile()
+
+    await sessionTileDelegate()!.resumeTile('busy-ref')
+    const painted = states.get('runtime-busy')!
+    const local = { id: 'user-local-send', parts: [{ text: 'just sent', type: 'text' }], role: 'user' }
+    states.set('runtime-busy', { ...painted, messages: [...painted.messages, local as never] })
+
+    // The page has nothing newer than the paint: replacing (not merging) would drop the local send.
+    rest.resolve({ messages: rows('cached question', 'cached answer edited'), session_id: 'busy-ref' })
+
+    await vi.waitFor(() => expect(texts(states.get('runtime-busy'))).toContain('cached answer edited'))
+    expect(texts(states.get('runtime-busy'))).toContain('just sent')
+  })
+
+  it('a REST failure after the cache paint keeps the cached rows and logs outcome "failed"', async () => {
+    setSessionOwnerHint('fail-ref', ROUTE)
+    saveTranscriptTail('fail-ref', rows('cached only'), SCOPE)
+    const rest = deferred<null>()
+    vi.mocked(getLatestSessionMessages).mockReturnValue(rest.promise as never)
+    vi.mocked(requestGatewayForAgent).mockResolvedValue({ session_id: 'runtime-fail' } as never)
+    const { states } = renderTile()
+
+    await sessionTileDelegate()!.resumeTile('fail-ref')
+    rest.resolve(null)
+
+    await vi.waitFor(() =>
+      expect(tileLines()).toEqual([expect.objectContaining({ outcome: 'failed', paint: 'cache' })])
+    )
+    expect(texts(states.get('runtime-fail'))).toEqual(['cached only'])
+  })
+
+  it('an explicit refresh (refreshTranscript) still waits on REST and never paints the cache', async () => {
+    setSessionOwnerHint('refresh-ref', ROUTE)
+    saveTranscriptTail('refresh-ref', rows('stale cached'), SCOPE)
+    const rest = deferred<{ messages: SessionMessage[]; session_id: string }>()
+    vi.mocked(getLatestSessionMessages).mockReturnValue(rest.promise as never)
+    vi.mocked(requestGatewayForAgent).mockResolvedValue({ session_id: 'runtime-refresh' } as never)
+    const { states } = renderTile()
+
+    let resolved = false
+
+    const open = sessionTileDelegate()!
+      .resumeTile('refresh-ref', { refreshTranscript: true })
+      .then(id => {
+        resolved = true
+
+        return id
+      })
+
+    // REST pending: the resume has bound, but an explicit refresh neither resolves nor paints the cache.
+    await vi.waitFor(() => expect(requestGatewayForAgent).toHaveBeenCalled())
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(resolved).toBe(false)
+    expect(texts(states.get('runtime-refresh'))).toEqual([])
+
+    rest.resolve({ messages: rows('fresh'), session_id: 'refresh-ref' })
+    await expect(open).resolves.toBe('runtime-refresh')
+
+    expect(texts(states.get('runtime-refresh'))).toEqual(['fresh'])
+    expect(tileLines()).toEqual([expect.objectContaining({ paint: 'rest' })])
+  })
 })

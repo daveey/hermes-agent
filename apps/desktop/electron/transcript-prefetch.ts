@@ -202,7 +202,7 @@ export class TranscriptPrefetcher {
    * Such refs mostly point at old sessions outside the PER_GATEWAY window, so without this the first click waited
    * on REST. Fire-and-forget for the caller; the promise settles when this key is done (tests, logs). Deduped
    * against queued/in-flight keys; skipped while the cache is current (the hub's activity/message_count when the
-   * last pass listed the session, else a copy younger than MIN_REFETCH_MS) or the gateway is backed off; at most
+   * last pass listed the session, else a copy younger than UNLISTED_REFETCH_MS) or the gateway is backed off; at most
    * DEMAND_CONCURRENCY fetches per gateway at a time and DEMAND_QUEUE_MAX queued behind them.
    */
   prefetchKey(raw: TranscriptCacheKey): Promise<PrefetchKeyOutcome> {

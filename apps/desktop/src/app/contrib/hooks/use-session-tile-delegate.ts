@@ -563,8 +563,13 @@ export function useSessionTileDelegate({
         )
 
         // [daveey] REST still in flight: paint the cached transcript now and reconcile when the page lands.
-        const cachedPaint =
-          outcome.mode === 'read-only' ? null : tileCachedPaint(storedSessionId, tileRestScope(owner), rest)
+        // An explicit refresh (callers await fresh rows) and a read-only fallback wait on REST as before.
+        const cachedPaint = tileCachedPaint(
+          storedSessionId,
+          outcome.mode === 'read-only' ? undefined : tileRestScope(owner),
+          rest,
+          refreshTranscript
+        )
 
         const prefetch = cachedPaint ? null : await prefetchPromise
 
