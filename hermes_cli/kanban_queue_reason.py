@@ -152,7 +152,7 @@ def describe(value):
              "capability_mismatch": "Candidate capabilities do not match",
              "board_error": "Board observation failed",
              "board_refused": "Board placement request refused",
-             "mixed": "Candidates have different exclusions",
+             "mixed": "Candidates excluded for multiple reasons",
              "observation_unavailable": "Queue detail observation unavailable"}.get(value.get("code"), "Queue observation")
     details = []
     for c in value.get("candidates", []):
@@ -181,18 +181,34 @@ def print_field(value, field):
         field("queue", describe(value))
 
 
-def _record(conn, task_id, gateway, value):
+def snapshot(conn, task_id):
+    """The row and lifecycle a Board request was made against, to fence a later record on (see ``_record``)."""
+    row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    return None if row is None else {"row": dict(row), "lifecycle": _lifecycle(conn, task_id, row)}
+
+
+def _record(conn, task_id, gateway, value, *, fence=None):
+    """Append one change-only observation and its thread comment.
+
+    ``fence`` (from ``snapshot``) checks the row the Board request was made from instead of the current one: a
+    refusal answered against that row stays recorded after a feed pull moved the row on, exactly as it was before
+    the placement tick learned to pull on ``not_claimable``.
+    """
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_sync as sync
 
     with kb.write_txn(conn):
         row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is not None and fence is not None:
+            if fence["row"]["id"] != task_id:
+                raise ValueError("fence snapshot is for another task")
+            row = fence["row"]
         if (not row or sync.board_mode(conn) != "primary" or row["created_on"] != gateway
                 or (sync.sync_state(conn) or {}).get("gateway_id") != gateway
                 or row["placement_policy"] != "worker-first-v1" or row["status"] != "ready"
                 or row["claim_lock"] or row["lease_holder"]):
             return False
-        value = {**value, "lifecycle": _lifecycle(conn, task_id, row)}
+        value = {**value, "lifecycle": fence["lifecycle"] if fence is not None else _lifecycle(conn, task_id, row)}
         previous = _stored(conn, task_id)
         if previous and _signature(previous) == _signature(value):
             return False
@@ -230,7 +246,7 @@ def record_pull_error(conn, gateway, *, status=None, error=None):
         try_record(record_error, conn, row["id"], gateway, status=status, error=error)
 
 
-def record_error(conn, task_id, gateway, *, status=None, error=None):
+def record_error(conn, task_id, gateway, *, status=None, error=None, fence=None):
     value = {"version": 1, "code": "board_error", "candidates": []}
     from hermes_cli.kanban_sync_client import HubError, Resync, SyncUnavailable
     if isinstance(error, Resync):
@@ -255,4 +271,4 @@ def record_error(conn, task_id, gateway, *, status=None, error=None):
             value.update(code="board_refused", rejection_code=code)
     if type(status) is int and 100 <= status <= 599:
         value["http_status"] = status
-    return _record(conn, task_id, gateway, value)
+    return _record(conn, task_id, gateway, value, fence=fence)

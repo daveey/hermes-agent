@@ -126,6 +126,10 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
 
     attempted = 0
     last = None
+    pulled = []  # at most one feed pull per tick for not_claimable pickups (shared network budget)
+    # Every reserve below is made from this pre-loop copy, so a refusal is judged against it even after an in-loop
+    # pull moved a later row on: the refused row (fence) and the reservation it was waiting on.
+    before = {r["id"]: (queue.snapshot(conn, r["id"]), _reserved_machine(queue, conn, r["id"])) for r in rows}
     now = time.monotonic()
     try:
         for row in rows:
@@ -159,10 +163,14 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                 queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc)
                 return attempted
             except client.HubError as exc:
+                fence = None
                 if rejection_code(exc) == "not_claimable":
                     # The Board already has it leased or not ready: our copy is behind. Back off at this revision.
                     _refused[key] = (row["sync_version"], now + NOT_CLAIMABLE_BACKOFF_S)
-                queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc)
+                    fence, machine = before[row["id"]]
+                    if picked_up(conn, hub, board, gateway, row["id"], machine, pulled):
+                        continue  # the worker we reserved already claimed it: a pickup, not a refusal
+                queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc, fence=fence)
                 # Refused revisions still advance the local cursor, but never the feed.
                 continue
     finally:
@@ -174,6 +182,43 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
     if attempted:
         client.pull(conn, hub, board, observers=True, partition=gateway)
     return attempted
+
+
+def _reserved_machine(queue, conn, task_id):
+    """The machine of the current assignment observation (the Board's reserve reply), or None."""
+    value = queue.latest(conn, task_id) or {}
+    return value.get("machine") if value.get("state") == "assigned" and value.get("current") else None
+
+
+def picked_up(conn, hub, board, gateway, task_id, machine, pulled):
+    """Whether a ``not_claimable`` reserve only lost the race to ``machine``, the worker this origin reserved.
+
+    The Board leases the card to its reserved worker and drops the reservation in one write, so a reserve made from
+    a copy that has not pulled that lease is refused. Pull the feed (once per tick: ``pulled`` remembers it) and
+    look for the lease, or a Board ``claimed`` event newer than the reservation, held by the reserved machine.
+    Anything else (no current reservation, a failed pull, another holder) stays a refusal.
+    """
+    from hermes_cli import kanban_queue_reason as queue
+    from hermes_cli import kanban_sync_client as client
+
+    if not machine:
+        return False
+    if not pulled:
+        pulled.append(True)
+        try:
+            client.pull(conn, hub, board, observers=True, partition=gateway)
+        except Exception as exc:  # health: allow BLE001 -- a failed pull keeps the refusal; never abort the batch
+            logger.warning("feed pull after not_claimable failed (%s)", type(exc).__name__)
+            return False
+    row = conn.execute("SELECT lease_holder FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is not None and row["lease_holder"] == machine:
+        return True
+    since = conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events WHERE task_id=? AND kind=?",
+                         (task_id, queue.EVENT)).fetchone()[0]
+    claim = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='claimed' AND id>? AND json_valid(payload) "
+        "AND json_extract(payload, '$.holder') IS NOT NULL ORDER BY id DESC LIMIT 1", (task_id, since)).fetchone()
+    return bool(claim and json.loads(claim[0]).get("holder") == machine)
 
 
 def rejection_code(exc):

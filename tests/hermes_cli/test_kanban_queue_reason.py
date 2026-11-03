@@ -185,3 +185,17 @@ def test_comment_failure_rolls_back_observation(conn, monkeypatch):
     with pytest.raises(RuntimeError, match="synthetic"):
         qr.record_reply(conn, tid, "hub", reply())
     assert qr.latest(conn, tid) is None
+
+
+@pytest.mark.parametrize("candidates", [
+    [{"machine": "worker-1", "reasons": ["last_seen_stale", "metrics_stale"]}],  # probe t_01a19fd990770095, 11-03
+    [{"machine": "worker-1", "reasons": ["load_threshold"]}, {"machine": "worker-2", "reasons": ["draining"]}],
+])
+def test_mixed_wording_is_true_for_one_or_many_candidates(conn, candidates):
+    tid = fixtures.acknowledged(conn)
+    r = reply("mixed")
+    r["observation"]["candidates"] = candidates
+    assert qr.record_reply(conn, tid, "hub", r)
+    body = kb.list_comments(conn, tid)[-1].body
+    assert body.startswith("Candidates excluded for multiple reasons — worker-1: ")
+    assert "different exclusions" not in body
