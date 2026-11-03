@@ -26,6 +26,7 @@ WINDOW_S = 1.0
 MIN_WINDOW_MS = 1000
 MAX_WINDOW_MS = 2000
 CONFIG_KEY = ("kanban", "admission", "cpu_busy_below_pct")
+FIELDS = ("cpu_busy_pct", "cpu_busy_window_ms", "cpu_busy_sample_end_ms")
 
 
 def parse_proc_stat(text: str) -> Optional[tuple[int, int]]:
