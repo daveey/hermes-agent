@@ -87,8 +87,9 @@ def test_courier_and_host_work_bypass_worker_policy():
     "Fix flaky test in ~/code/hermes/tests/test_x.py",
     "Patch /home/ubuntu/code/fabric-play and open a PR",
     "Branch off ~/.hermes/hermes-agent: git -C ~/.hermes/hermes-agent log origin/main",
-    "Update the skill at ~/.hermes/skills/devops/foo/SKILL.md in hermes-mods",
+    "Update skills/devops/foo/SKILL.md in ~/code/hermes-mods and push",
     "hermes-hub client: retry a 409 from the Board",
+    "Fix a typo in ~/code/_wtf/notes.md",
     "Read the hermes-agent tree under ~/.hermes for context",
 ])
 def test_ordinary_repo_work_enrolls_worker_first(title):
@@ -106,6 +107,25 @@ def test_ordinary_repo_work_enrolls_worker_first(title):
 ])
 def test_hub_state_work_stays_local(title):
     result = placement.decide({"title": title}, cfg={"worker_pools": {"hub": ["worker-1"]}}, self_gw="hub")
+    assert "placement_policy" not in result
+
+
+@pytest.mark.parametrize("title", [
+    # ~/.hermes/skills is host state, not a checkout: curator ledger, usage counts, locks, live-patched skills.
+    "Patch ~/.hermes/skills/devops/kanban-orchestrator/SKILL.md (live edit)",
+    "Sum use_count from /home/ubuntu/.hermes/skills/.usage.json",
+    # Existing worktrees on this host hold unpushed work a worker cannot see.
+    "Continue in ~/code/_wt-remote/fix-x and push",
+    "Finish the agent tree at ~/code/hermes-mods/.claude/worktrees/agent-a1 and open a PR",
+    "Rebase /home/ubuntu/.hermes/hermes-agent/.worktrees/fix-y onto main",
+    # hermes-hub commands act with this gateway's key and replica; a worker has neither.
+    "Run hermes-hub create-task hub --title x", "hermes-hub adopt-task t_1 --session s", "Run `hermes-hub sync`",
+    "Check hermes-hub requests for the stuck ask",
+])
+def test_host_specific_state_and_identity_stay_local(title):
+    assert placement.portable_reason({"title": title, "requires": ["terminal", "file", "git"]}, {}) is not None
+    result = placement.decide({"title": title, "requires": ["terminal", "file", "git"]},
+                              cfg={"worker_pools": {"hub": ["worker-1"]}}, self_gw="hub")
     assert "placement_policy" not in result
 
 
