@@ -8,7 +8,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createRemoteWarmSet } from './remote-warm-set'
 import { createSshIsolatedKeepaliveRegistry } from './ssh-isolated-keepalive'
@@ -156,6 +156,60 @@ describe('SSH keep-alive retention bound', () => {
     expect(holds.shouldHold('conn:mini::bb-shadow')).toBe(false)
   })
 
+  it('a release cancels a pending reconnect; noteUse and a republish re-hold at once', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const { holds, instances, keepalives, openSocket } = setup()
+      const scope = 'conn:mini::bb-device'
+      const [socket] = openSocket(scope)
+
+      socket.emit('error', new Error('tunnel blip')) // schedules a reconnect
+      holds.reconcile()
+      const dialled = instances.length
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(instances).toHaveLength(dialled)
+      expect(keepalives.openUrl(scope)).toBeNull()
+
+      holds.noteUse(scope) // no reconcile tick needed
+      expect(keepalives.isHeld(scope)).toBe(true)
+      expect(instances).toHaveLength(dialled + 1)
+      expect(keepalives.openUrl(scope)).toBe(instances.at(-1).url)
+
+      keepalives.setHeld('conn:mini::bb-voice', false)
+      keepalives.start('conn:mini::bb-voice', { baseUrl: 'http://127.0.0.1:50004', token: 't' })
+      expect(keepalives.isHeld('conn:mini::bb-voice')).toBe(true)
+      expect(openSocket('conn:mini::bb-voice')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('post-resume: retires a dead unheld scope without redialling it; held scopes are redialled', async () => {
+    const { holds, log } = setup()
+    const redial = vi.fn(async () => {})
+
+    holds.noteUse('conn:mini::bb-dev')
+
+    for (const scope of [
+      '',
+      'work',
+      'conn:local::work',
+      'conn:https-remote::work',
+      'conn:mini::default',
+      'conn:mini::bb-aux',
+      'conn:mini::bb-dev',
+      'conn:hub::work'
+    ]) {
+      expect(await holds.rebuildIfHeld(scope, redial)).toBe(true)
+    }
+
+    expect(redial).toHaveBeenCalledTimes(8)
+    expect(await holds.rebuildIfHeld('conn:mini::bb-device', redial)).toBe(false)
+    expect(redial).toHaveBeenCalledTimes(8)
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('retired conn:mini::bb-device without rebuild'))
+  })
+
   it('start/stop drive a periodic reconcile', () => {
     const timers: Array<() => void> = []
     const clearTimer = vi.fn()
@@ -182,8 +236,17 @@ describe('SSH keep-alive retention bound', () => {
 })
 
 describe('remote warm set wiring', () => {
+  const dirs: string[] = []
+
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) {
+      fs.rmSync(dir, { force: true, recursive: true })
+    }
+  })
+
   function warmSet(recent: Record<string, Record<string, number>>, env: Record<string, string> = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'warm-set-'))
+    dirs.push(dir)
     const statePath = path.join(dir, 'remote-prewarm-profiles.json')
     fs.writeFileSync(statePath, JSON.stringify(recent))
     const { FakeWs } = makeFakeWs()

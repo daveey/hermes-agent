@@ -56,6 +56,23 @@ export class SshKeepaliveHolds {
   /** A non-passive dial for real use (same signal remote-prewarm's recent set records). */
   noteUse(scope: string) {
     this.#lastUse.set(scope, this.#now())
+    // Re-hold now, not at the next reconcile: a released backend near the end of its idle grace must not exit
+    // between this dial and the next tick.
+    this.#deps.keepalives.setHeld(scope, true)
+  }
+
+  /** Post-resume rebuild of a retired pool scope: a dead scope outside the warm/in-use set is only retired, since
+   * rebuilding it would re-pin it. */
+  async rebuildIfHeld(scope: string, redial: (scope: string) => Promise<unknown>): Promise<boolean> {
+    if (this.shouldHold(scope)) {
+      await redial(scope)
+
+      return true
+    }
+
+    this.#deps.log?.(`[ssh] resume: retired ${scope} without rebuild (outside warm/in-use set)`)
+
+    return false
   }
 
   shouldHold(scope: string, prewarm: ReadonlySet<string> = new Set(this.#deps.prewarmKeys())): boolean {

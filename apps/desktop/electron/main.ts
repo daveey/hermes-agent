@@ -14266,9 +14266,7 @@ function revalidateSuspectPoolAfterResume() {
       entries: backendPool.entries(),
       log: rememberLog,
       probe: (connection, path, options) => fetchJsonForBackend(connection, path, options),
-      // A dead scope outside the warm/in-use set is only retired: rebuilding it would re-pin it.
-      rebuild: async poolKey =>
-        remoteWarmSet.holds.shouldHold(poolKey) ? redialPoolBackendAfterResume(poolKey) : undefined,
+      rebuild: poolKey => remoteWarmSet.holds.rebuildIfHeld(poolKey, redialPoolBackendAfterResume),
       retire: async poolKey => {
         await stopPoolBackend(poolKey, 'resume')
         // The pool key doubles as the SSH scope for registry SSH backends and
