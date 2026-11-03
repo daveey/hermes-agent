@@ -253,6 +253,8 @@ describe('recently used named profiles stay warm', () => {
 describe('main.ts wiring', () => {
   // The Electron main process cannot boot under vitest; pin the call sites the behaviour above depends on.
   const main = readFileSync(join(__dirname, 'main.ts'), 'utf8')
+  // The warm set (registry SSH filter + prewarmTargets + recent-profile ledger) lives in remote-warm-set.ts.
+  const warmSet = readFileSync(join(__dirname, 'remote-warm-set.ts'), 'utf8')
 
   it('starts the prewarmer when the app is ready and stops it on quit', () => {
     const ready = main.slice(main.indexOf('app.whenReady().then(() => {'))
@@ -261,15 +263,17 @@ describe('main.ts wiring', () => {
   })
 
   it('prewarms registry SSH connections through ensureRegistryBackend with a forced keepalive probe', () => {
-    expect(main).toMatch(/connection\.kind === 'ssh'/)
     // Upstream retired spawn priorities with the local-backend pool (c63d465dbc2).
     expect(main).toMatch(/ensureRegistryBackend\(connectionId, profile, '', \{ forceProbe \}\)/)
-    expect(main).toMatch(/prewarmTargets\(\n\s+readDesktopConnectionsRegistry\(\)/)
+    expect(main).toMatch(/createRemoteWarmSet\(\{[^}]*readRegistry: readDesktopConnectionsRegistry,/)
+    expect(main).toMatch(/new RemotePrewarmer\(\{\n\s+listTargets: remoteWarmSet\.listTargets,/)
+    expect(warmSet).toMatch(/connection\.kind === 'ssh'/)
+    expect(warmSet).toMatch(/HERMES_DESKTOP_REMOTE_PREWARM === '0' \? \[\] : prewarmTargets\(sshConnectionIds\(\), recent\)/)
   })
 
   it('records a named profile on every user dispatch to an SSH connection, not on prewarm or passive calls', () => {
     expect(main).toMatch(
-      /if \(source\.kind === 'ssh' && !passive && !opts\.forceProbe\) \{\n\s+recentRemoteProfiles\.touch\(id, profileKey\)/
+      /if \(source\.kind === 'ssh' && !passive && !opts\.forceProbe\) \{\n\s+remoteWarmSet\.recent\.touch\(id, profileKey\)\n\s+remoteWarmSet\.holds\.noteUse\(backendScopeKey\(id, profileKey\)\)/
     )
   })
 
