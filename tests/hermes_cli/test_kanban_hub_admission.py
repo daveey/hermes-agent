@@ -321,3 +321,29 @@ def test_real_sample_is_entirely_under_lock_bounded_and_measures_chat_turn_cost(
 def test_queue_reason_codes_cover_the_eight_overflow_reasons():
     assert {"workers_unknown", "no_eligible_worker", "workers_saturated", "hub_cpu_at_or_above_limit",
             "hub_cpu_unknown", "hub_capacity_full", "hub_sample_already_used", "hub_overflow_reserved"} <= queue.CODES
+
+
+@pytest.mark.parametrize("review", [False, True])
+def test_full_cap_refuses_before_the_sample_so_the_lock_is_not_held_for_it(board, monkeypatch, review):
+    """Review F6: the cheap whole-host cap check runs first; a claim at the cap never holds admission.lock ~1 s."""
+    conn, home = board
+    configure(home, cap=2)
+    advisory(home)
+    monkeypatch.setattr(mm, "active_card_runs", lambda: 2)
+    monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("at the cap: refuse before sampling"))
+    t = task(conn, review)
+    assert claim(conn, t, review) is None
+    refused(conn, t, review, "hub_capacity_full")
+
+
+def test_deadline_already_passed_refuses_before_the_sample(board, monkeypatch):
+    conn, home = board
+    configure(home)
+    advisory(home, age_ms=-10 ** 10)  # fresh against the shifted clock below, so the advisory admits
+    real_time = time.time
+    monkeypatch.setattr(sync, "claim_gate", lambda conn, task_id, expires, lane="ready": sync.ClaimGate(expires))
+    monkeypatch.setattr(ka, "_now", lambda: real_time() + 10 ** 7)
+    monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("deadline passed: refuse before sampling"))
+    t = task(conn)
+    assert kb.claim_task(conn, t) is None
+    refused(conn, t, False, "hub_cpu_unknown")

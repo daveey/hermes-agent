@@ -74,15 +74,34 @@ def _root_max_in_progress():
     return True, resolve_max_in_progress(raw)
 
 
-def _final_hub_gate(gate):
-    """Under admission.lock: ``(reason, evidence)``; reason None admits. Never touches the network."""
-    from hermes_cli import machine_cpu_metrics as cpu
+def _expired(gate):
+    return gate is not None and getattr(gate, "expires", None) is not None and gate.expires <= int(_now())
+
+
+def _cap_full():
     from hermes_cli import machine_metrics
+
+    ok, cap = _root_max_in_progress()
+    active = machine_metrics.active_card_runs()
+    return not ok or type(active) is not int or active < 0 or (cap is not None and active >= cap)
+
+
+def _final_hub_gate(gate):
+    """Under admission.lock: ``(reason, evidence)``; reason None admits. Never touches the network.
+
+    Cheap checks (whole-host cap, lease deadline) run BEFORE the ~1 s sample so a claim that must be refused anyway
+    never holds the lock for a sample (review F6); the deadline and the whole-host count are checked again after
+    sampling, immediately before the commit."""
+    from hermes_cli import machine_cpu_metrics as cpu
 
     state, limit = cpu.root_limit()
     if state == cpu.OFF:
         return None, None
     if state != cpu.ON:
+        return "hub_cpu_unknown", None
+    if _cap_full():
+        return "hub_capacity_full", None
+    if _expired(gate):
         return "hub_cpu_unknown", None
     measured = cpu.sample()
     if not measured or not all(k in measured for k in cpu.FIELDS):
@@ -91,11 +110,9 @@ def _final_hub_gate(gate):
         return "hub_cpu_unknown", None
     if not cpu.below(measured["cpu_busy_pct"], limit):
         return "hub_cpu_at_or_above_limit", None
-    if gate is not None and getattr(gate, "expires", None) is not None and gate.expires <= int(_now()):
+    if _expired(gate):
         return "hub_cpu_unknown", None  # the claim/lease deadline passed while sampling: never start
-    ok, cap = _root_max_in_progress()
-    active = machine_metrics.active_card_runs()
-    if not ok or type(active) is not int or active < 0 or (cap is not None and active >= cap):
+    if _cap_full():  # the spec's recount immediately before commit
         return "hub_capacity_full", None
     return None, {**{k: measured[k] for k in cpu.FIELDS}, "limit_pct": limit}
 
