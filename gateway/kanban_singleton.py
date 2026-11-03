@@ -64,19 +64,15 @@ def _pid_alive(pid: int) -> bool:
     if not isinstance(pid, int) or pid <= 0:
         return False
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        from gateway.status import _pid_exists
+        return bool(_pid_exists(pid))
+    except Exception:
         return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
 
 
 def _read_json(path: Path) -> Optional[dict]:
     with contextlib.suppress(OSError, ValueError):
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) else None
     return None
 
