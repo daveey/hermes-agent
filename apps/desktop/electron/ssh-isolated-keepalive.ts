@@ -11,6 +11,11 @@
  * If the socket drops the registry reconnects with capped exponential backoff;
  * while it is down the backend may idle-exit as before. This module never consults
  * nonce/lock/token files.
+ *
+ * `setHeld(scope, false)` closes the socket of a scope Desktop no longer needs
+ * warm (ssh-keepalive-hold.ts) without tearing the scope down: a renderer
+ * socket or a running turn still keeps the backend alive, otherwise it
+ * idle-exits on its own. `setHeld(scope, true)` redials it.
  */
 import { buildGatewayWsUrl } from './connection-config'
 
@@ -28,6 +33,7 @@ export type SshIsolatedKeepaliveOptions = {
 
 type KeepaliveEntry = {
   failures: number
+  held: boolean
   reconnectTimer: ReturnType<typeof setTimeout> | null
   scope: string
   socket: { close?: () => void; url?: string } | null
@@ -83,7 +89,7 @@ export function createSshIsolatedKeepaliveRegistry(options: SshIsolatedKeepalive
   }
 
   function scheduleReconnect(entry: KeepaliveEntry) {
-    if (entries.get(entry.scope) !== entry || entry.reconnectTimer != null) {
+    if (entries.get(entry.scope) !== entry || !entry.held || entry.reconnectTimer != null) {
       return
     }
 
@@ -97,7 +103,7 @@ export function createSshIsolatedKeepaliveRegistry(options: SshIsolatedKeepalive
   }
 
   function connect(entry: KeepaliveEntry) {
-    if (entries.get(entry.scope) !== entry) {
+    if (entries.get(entry.scope) !== entry || !entry.held) {
       return
     }
 
@@ -155,6 +161,7 @@ export function createSshIsolatedKeepaliveRegistry(options: SshIsolatedKeepalive
 
     const entry: KeepaliveEntry = {
       failures: 0,
+      held: true,
       reconnectTimer: null,
       scope,
       socket: null,
@@ -177,6 +184,35 @@ export function createSshIsolatedKeepaliveRegistry(options: SshIsolatedKeepalive
     closeSocket(entry)
   }
 
+  // Returns true when the hold state changed.
+  function setHeld(scope: string, held: boolean) {
+    const entry = entries.get(scope)
+
+    if (!entry || entry.held === held) {
+      return false
+    }
+
+    entry.held = held
+    entry.failures = 0
+    clearTimer(entry)
+
+    if (held) {
+      connect(entry)
+    } else {
+      closeSocket(entry)
+    }
+
+    return true
+  }
+
+  function isHeld(scope: string) {
+    return entries.get(scope)?.held === true
+  }
+
+  function scopes() {
+    return [...entries.keys()]
+  }
+
   function stopAll() {
     for (const scope of [...entries.keys()]) {
       stop(scope)
@@ -193,5 +229,5 @@ export function createSshIsolatedKeepaliveRegistry(options: SshIsolatedKeepalive
     return typeof url === 'string' ? url : null
   }
 
-  return { isArmed, openUrl, start, stop, stopAll }
+  return { isArmed, isHeld, openUrl, scopes, setHeld, start, stop, stopAll }
 }
