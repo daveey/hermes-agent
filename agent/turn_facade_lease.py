@@ -469,6 +469,20 @@ def session_was_taken_over(agent, session_id: str) -> bool:
     return db._session_turn_lease_key(taken) == db._session_turn_lease_key(session_id)
 
 
+def refuses_held_lease_at_once(agent, platform) -> bool:
+    """True for a Desktop/TUI turn its own client submitted: a lease another writer holds is refused
+    at once, because that client still has the text and offers Take over.
+
+    A gateway-hosted turn (``gateway_session_key`` set by the gateway's agent build) differs even when
+    its session's surface is ``desktop``/``tui`` (``session_policy.SURFACES``): the gateway's FIFO
+    already accepted the input (a typed send forwarded to the owner, a cross-session relay), so no
+    composer holds it any more. It waits for the holder like every other gateway turn, which queues
+    the message behind the running turn instead of failing it ``session_busy`` and dropping it."""
+    if platform not in {"desktop", "tui"}:
+        return False
+    return not getattr(agent, "_gateway_session_key", None)
+
+
 def admit_durable_turn_lease(
     agent, *, session_id: str, relay_turn_id: str, task_context: dict[str, Any],
     conversation_history: Optional[list[dict[str, Any]]],
@@ -531,7 +545,7 @@ def admit_durable_turn_lease(
     authority_floor = time.time()  # every acquisition attempt stamps its expiry after this instant
     if not db.acquire_session_turn_lease(
         session_id, holder, ttl_seconds=LEASE_TTL_SECONDS,
-        wait_seconds=0.0 if task_context['platform'] in {"desktop", "tui"} else LEASE_WAIT_SECONDS,
+        wait_seconds=0.0 if refuses_held_lease_at_once(agent, task_context['platform']) else LEASE_WAIT_SECONDS,
         on_wait=_on_wait, on_contended=_on_contended,
         should_abort=lambda: getattr(agent, "_interrupt_requested", False),
         # A busy state.db is not another writer: Desktop/TUI skip the holder wait but must not
@@ -671,7 +685,7 @@ def _lease_not_acquired_result(agent, session_id: str, conversation_history, *, 
         "⏳ Another Hermes process kept this session busy too long. Your message was not "
         "processed - wait for the other process to finish, then send it again."
     )
-    if getattr(agent, "platform", None) in {"desktop", "tui"}:
+    if refuses_held_lease_at_once(agent, getattr(agent, "platform", None)):
         timeout_msg = (
             "This chat has another active writer. Use session.take_over (Take over here), "
             "then retry your message. Your message was not processed."
