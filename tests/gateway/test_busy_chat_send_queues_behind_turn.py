@@ -81,7 +81,7 @@ def _user_rows(db):
 def _assert_queued_then_processed(db, agent, holder, text):
     with patch("model_tools.get_tool_definitions", return_value=[]):
         thread, outcome = _send(agent, text)
-        time.sleep(2.5)  # a refusing admission returns at once; a queued one is still waiting
+        thread.join(2.5)  # a refusing admission ends the turn at once; a queued one is still waiting
         assert thread.is_alive(), f"refused while the turn ran: {outcome.get('result', {}).get('final_response')}"
         assert db.session_turn_lease_owner(SID)["holder"] == holder, "the running turn kept the chat"
         assert text not in _user_rows(db), "nothing of the queued send ran beside the running turn"
