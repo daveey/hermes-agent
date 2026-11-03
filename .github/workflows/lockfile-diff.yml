@@ -41,7 +41,10 @@ jobs:
   diff:
     name: package-lock.json semantic diff
     runs-on: [self-hosted, ci-fast]
-    timeout-minutes: 5
+    # fork: a full-history fetch of this ~1 GB private repo on a fresh ci-fast runner can exceed
+    # 5 min; a cancel here fails the required aggregate (execution is required even though the
+    # findings are advisory). 10 is the fast-lane cap (tests/ci/test_fast_runner_routing.py).
+    timeout-minutes: 10
     outputs:
       changed: ${{ steps.diff.outputs.changed }}
       review_status: ${{ steps.emit-status.outputs.review_status }}
@@ -51,6 +54,8 @@ jobs:
         with:
           ref: ${{ inputs.commit }}
           fetch-depth: 0 # need history for the merge base
+          # fork: commits+trees only; the two lockfile blobs are fetched lazily (credentials persist).
+          filter: blob:none
 
       - name: Generate semantic lockfile diff
         id: diff
