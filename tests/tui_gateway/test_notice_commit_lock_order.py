@@ -15,8 +15,7 @@ import threading
 
 import pytest
 
-from tests.tui_gateway.test_prompt_start_lock_order import (  # turn_env is a fixture
-    _OrderCheckedLock, _registered_session, turn_env)
+from tests.tui_gateway.test_prompt_start_lock_order import _OrderCheckedLock, _registered_session
 from tui_gateway import server
 from tui_gateway.exit_job_receipts import EXIT_FENCE, fence_exit_notices
 from tui_gateway.session_notifications import (
@@ -27,7 +26,20 @@ pytestmark = pytest.mark.platforms("posix")
 EVENT = {"type": "completion", "session_id": "proc_done", "output": "CI passed"}
 
 
-def test_notice_turn_start_marks_delivery_without_history_lock_under_sessions_lock(turn_env, request):
+@pytest.fixture()
+def turn_env(monkeypatch, tmp_path):
+    """The model-free turn harness of test_prompt_start_lock_order."""
+    for name, value in (("_emit", lambda *a, **k: None), ("_wire_callbacks", lambda sid: None),
+                        ("_sync_agent_model_with_config", lambda sid, session: None),
+                        ("_session_cwd", lambda session: str(tmp_path)), ("_register_session_cwd", lambda s: None),
+                        ("_tts_stream_begin", lambda: None), ("_sync_session_key_after_compress", lambda *a, **k: None),
+                        ("_get_usage", lambda agent: {}),
+                        ("_submit_row_target_key", lambda session: session["session_key"])):
+        monkeypatch.setattr(server, name, value)
+
+
+@pytest.mark.usefixtures("turn_env")
+def test_notice_turn_start_marks_delivery_without_history_lock_under_sessions_lock(request):
     sid = f"noticelock-{request.node.name}"[:60]
     lock, completed = _OrderCheckedLock(), threading.Event()
     session = _registered_session(sid, lock, completed)
