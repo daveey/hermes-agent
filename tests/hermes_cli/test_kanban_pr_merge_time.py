@@ -103,6 +103,39 @@ def test_failed_premerge_rerun_overrides_earlier_success(evidence):
     assert not receipt["post_merge_checks"]
 
 
+@pytest.mark.parametrize("conclusion", ["success", "failure", None])
+def test_same_second_unfinished_run_after_concluded_premerge_is_post_merge(evidence, conclusion):
+    # mergedAt has 1 s resolution: a post-merge push run can start in the merge's second.
+    # It was not concluded at the merge, and an earlier same-key run was: that earlier
+    # conclusion gated the merge, so the tie run is later main health, not pending evidence.
+    tie = {**POST, "started_at": MERGED, "completed_at": "2026-11-02T13:10:20Z",
+           "conclusion": conclusion}
+    if conclusion is None:
+        tie.update(status="in_progress", completed_at=None)
+    evidence["runs"] = [PRE, tie]
+    receipt = collect()
+    assert receipt["ok"] and receipt["classification"] == "success", receipt
+    assert [c["id"] for c in receipt["checks"]] == [PRE["id"]]
+    assert [c["id"] for c in receipt["post_merge_checks"]] == [POST["id"]]
+    assert receipt["post_merge_checks"][0]["conclusion"] == conclusion
+
+
+@pytest.mark.parametrize("earlier", ["none", "unfinished", "same_second"])
+def test_same_second_unfinished_run_stays_pending_without_earlier_conclusion(evidence, earlier):
+    # No earlier conclusion at the merge to have gated it: ambiguous, fail closed.
+    tie = {**POST, "started_at": MERGED, "completed_at": "2026-11-02T13:10:20Z",
+           "conclusion": "success"}
+    runs = [tie]
+    if earlier == "unfinished":
+        runs.append({**PRE, "completed_at": "2026-11-02T13:10:30Z"})
+    elif earlier == "same_second":
+        runs.append({**PRE, "started_at": MERGED, "completed_at": MERGED})
+    evidence["runs"] = runs
+    receipt = collect()
+    assert not receipt["ok"] and receipt["classification"] == "pending", receipt
+    assert not receipt["post_merge_checks"]
+
+
 def test_successful_premerge_rerun_overrides_earlier_failure(evidence):
     evidence["runs"] = [{**PRE, "conclusion": "failure"},
                         {**POST, "started_at": MERGED, "completed_at": MERGED, "conclusion": "success"}]

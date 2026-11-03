@@ -30,17 +30,35 @@ def partition_at_merge(checks, merged_at, *, runs):
     failed run behind a success. Legacy statuses have only their context identity.
     """
     cutoff = timestamp(merged_at)
+
+    def start(check):
+        return timestamp(check.get("started_at") if runs else check.get("created_at"))
+
+    def key_of(check):
+        return (check["name"], check["app"]["id"]) if runs else check["context"]
+
+    def concluded_at_merge(check):
+        done = check.get("completed_at")
+        return check.get("status") == "completed" and bool(done) and timestamp(done) <= cutoff
+
+    # mergedAt has 1 s resolution, so a run started in the merge's own second is
+    # unordered against it. If it had not concluded by then while an earlier same-key
+    # run had, that earlier conclusion is what gated the merge: the tie run is later
+    # (post-merge) evidence. With no earlier conclusion it stays pending (fail closed).
+    gated = {key_of(c) for c in checks if start(c) < cutoff and concluded_at_merge(c)} if runs else set()
     latest = {}
     post = []
     for check in checks:
-        started = timestamp(check.get("started_at") if runs else check.get("created_at"))
-        if started > cutoff:
+        started = start(check)
+        tie_after_gate = (runs and started == cutoff and not concluded_at_merge(check)
+                          and key_of(check) in gated)
+        if started > cutoff or tie_after_gate:
             post.append(check)
             continue
         # A pre-merge start does not make its later conclusion evidence at merge.
         if runs and check.get("completed_at") and timestamp(check["completed_at"]) > cutoff:
             check = {**check, "status": "in_progress", "conclusion": None}
-        key = (check["name"], check["app"]["id"]) if runs else check["context"]
+        key = key_of(check)
         order = (started, check["id"])
         if key not in latest or order > latest[key][0]:
             latest[key] = (order, check)

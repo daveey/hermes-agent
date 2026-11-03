@@ -268,9 +268,20 @@ def test_main_health_requires_proven_landed_head(replay, landed):
     assert check_requests(replay) == [f"repos/acme/repo/commits/{SHA}/check-runs?per_page=100&filter=all"]
 
 
-def test_same_second_red_start_is_ambiguous_not_postmerge(replay):
+@pytest.mark.parametrize("earlier_concluded", [True, False])
+def test_same_second_red_start_follows_earlier_conclusion(replay, earlier_concluded):
+    # The red run starts in the merge's second and finishes after it. The earlier
+    # success concluded before the merge and gated it, so the red run is post-merge
+    # main health; without that earlier conclusion the tie stays pending (fail closed).
     replay.update(state="MERGED")
     replay["runs"][0]["started_at"] = "2026-11-02T13:10:04Z"
+    if not earlier_concluded:
+        replay["runs"] = replay["runs"][:1]
     receipt = collect()
-    assert not receipt["ok"] and receipt["classification"] == "pending"
-    assert not receipt["post_merge_checks"]
+    if earlier_concluded:
+        assert receipt["ok"] and receipt["classification"] == "success"
+        assert [c["classification"] for c in receipt["post_merge_checks"]] == ["failure"]
+        assert "main_health" in receipt
+    else:
+        assert not receipt["ok"] and receipt["classification"] == "pending"
+        assert not receipt["post_merge_checks"]
