@@ -27,7 +27,7 @@ from agent.served_model import result_model_fields
 # real content and is not flagged. (#65919)
 # ``_pre_final_gate_synthetic`` [daveey] marks BOTH rows of a silent hold (the held answer too).
 _VERIFICATION_CONTINUATION_FLAGS = (
-    "_verification_stop_synthetic", "_pre_verify_synthetic", "_pre_final_gate_synthetic",
+    "_verification_stop_synthetic", "_pre_verify_synthetic", "_pre_final_gate_synthetic", "_kanban_stop_synthetic",
 )
 
 _SENTENCE_END = {".", "!", "?", "。", "！", "？", "`", ")"}
