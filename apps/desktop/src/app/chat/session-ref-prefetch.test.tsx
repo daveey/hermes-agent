@@ -8,7 +8,15 @@ import { $sessions, _resetSessionOwnerHintsForTests } from '@/store/session'
 import { $sessionTiles } from '@/store/session-states'
 import type { SessionInfo } from '@/types/hermes'
 
-import { prefetchSessionRef, REF_PREFETCH_MIN_MS, resetSessionRefPrefetch } from './session-ref-prefetch'
+import { transcriptRestScope } from '../session/hooks/use-session-actions/provisional-transcript'
+
+import { resolveSessionRefOwner } from './session-ref-owner'
+import {
+  prefetchSessionRef,
+  REF_PREFETCH_MIN_MS,
+  resetSessionRefPrefetch,
+  sessionRefPrefetchKey
+} from './session-ref-prefetch'
 
 const row = (over: Partial<SessionInfo>): SessionInfo => over as SessionInfo
 
@@ -121,5 +129,19 @@ describe('@session ref chips warm the transcript cache', () => {
     await settle()
 
     expect(prefetch).not.toHaveBeenCalled()
+  })
+
+  it('the warmed key is exactly the scope the open reads its cache paint from', () => {
+    $sessions.set([row({ connection_id: 'hermes-hub', id: 's1', profile: 'work' })])
+
+    for (const value of ['work/s1', 'work@mac-mini/s1']) {
+      const owner = resolveSessionRefOwner(value)
+      const key = sessionRefPrefetchKey(value)
+
+      expect(owner).toBeDefined()
+      expect({ connectionId: key!.connectionId, profile: key!.profile }).toEqual(
+        transcriptRestScope(owner, undefined, '')
+      )
+    }
   })
 })

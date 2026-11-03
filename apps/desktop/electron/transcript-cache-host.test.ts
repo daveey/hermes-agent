@@ -105,10 +105,10 @@ describe('transcript cache host', () => {
     // A session the tick already cached at the hub's meta is current too; '' means the primary.
     await host.prefetcher.tick()
     const before = messageReads()
+    const prefetchKey = vi.spyOn(host.prefetcher, 'prefetchKey')
     on.get('hermes:transcript-cache:prefetch')!({}, { connectionId: '', profile: '', sessionId: 'l1' })
-    await expect(
-      host.prefetcher.prefetchKey({ connectionId: 'local', profile: 'default', sessionId: 'l1' })
-    ).resolves.toBe('current')
+    expect(prefetchKey).toHaveBeenCalledWith({ connectionId: 'local', profile: 'default', sessionId: 'l1' })
+    await expect(prefetchKey.mock.results[0].value).resolves.toBe('current')
     expect(messageReads()).toBe(before)
     host.stop()
   })

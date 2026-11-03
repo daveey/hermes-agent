@@ -7,7 +7,8 @@ import {
   type HubSessionRecord,
   MIN_REFETCH_MS,
   selectPrefetchTargets,
-  TranscriptPrefetcher
+  TranscriptPrefetcher,
+  UNLISTED_REFETCH_MS
 } from './transcript-prefetch'
 
 const CONNECTIONS: Record<string, string> = { hub: 'hermes-hub', macbook: 'local', mini: 'mac-mini' }
@@ -255,16 +256,28 @@ describe('[daveey] on-demand prefetch of an @session-referenced session', () => 
 
   const old = { connectionId: 'hermes-hub', profile: 'default', sessionId: '20261018_114650_7ed013' }
 
-  it('fetches a session outside the PER_GATEWAY window into the cache, once per MIN_REFETCH_MS', async () => {
+  it('fetches a session outside the hub listing into the cache, then only once the copy is UNLISTED_REFETCH_MS old', async () => {
     const h = harness()
 
     await expect(h.prefetcher.prefetchKey(old)).resolves.toBe('fetched')
     expect(h.store.read(old)?.messages).toHaveLength(1)
     await expect(h.prefetcher.prefetchKey(old)).resolves.toBe('current')
+
+    // Old sessions don't move: a hover after MIN_REFETCH_MS is still served by the cache.
+    h.advance(MIN_REFETCH_MS)
+    await expect(h.prefetcher.prefetchKey(old)).resolves.toBe('current')
     expect(h.fetchLatest).toHaveBeenCalledTimes(1)
 
-    h.advance(MIN_REFETCH_MS)
+    h.advance(UNLISTED_REFETCH_MS)
     await expect(h.prefetcher.prefetchKey(old)).resolves.toBe('fetched')
+  })
+
+  it('a store that throws (closed at quit) resolves failed instead of throwing out of the IPC listener', async () => {
+    const h = harness()
+    h.store.close()
+
+    await expect(h.prefetcher.prefetchKey(old)).resolves.toBe('failed')
+    expect(h.fetchLatest).not.toHaveBeenCalled()
   })
 
   it('dedupes a key already queued or in flight', async () => {

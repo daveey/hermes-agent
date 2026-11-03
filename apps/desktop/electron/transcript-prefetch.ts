@@ -16,9 +16,12 @@ export const PER_GATEWAY = 200
 export const MIN_REFETCH_MS = 30_000
 /** A gateway that failed is skipped for this long before it is tried again. */
 export const GATEWAY_BACKOFF_MS = 60_000
-/** [daveey] On-demand (`@session` ref) fetches in flight per gateway, and the most queued behind them. */
-export const DEMAND_CONCURRENCY = 2
+/** [daveey] On-demand (`@session` ref) fetches in flight per gateway (on top of the tick's two), and the most
+ *  queued behind them. */
+export const DEMAND_CONCURRENCY = 1
 export const DEMAND_QUEUE_MAX = 50
+/** [daveey] A cached session the hub listing does not cover is refetched on demand at most this often. */
+export const UNLISTED_REFETCH_MS = 10 * 60_000
 const DEMAND_MISSED_MAX = 500
 
 export interface HubSessionRecord {
@@ -203,6 +206,17 @@ export class TranscriptPrefetcher {
    * DEMAND_CONCURRENCY fetches per gateway at a time and DEMAND_QUEUE_MAX queued behind them.
    */
   prefetchKey(raw: TranscriptCacheKey): Promise<PrefetchKeyOutcome> {
+    try {
+      return this.enqueueDemand(raw)
+    } catch (error) {
+      // A store read can throw (closed at quit, SQLITE_BUSY): never out of an IPC listener.
+      this.deps.log?.(`transcript prefetch (ref) skipped: ${(error as Error)?.message || error}`)
+
+      return Promise.resolve('failed')
+    }
+  }
+
+  private enqueueDemand(raw: TranscriptCacheKey): Promise<PrefetchKeyOutcome> {
     const key: TranscriptCacheKey = {
       connectionId: String(raw?.connectionId ?? '').trim(),
       profile: profileOf(raw?.profile),
@@ -255,8 +269,9 @@ export class TranscriptPrefetcher {
       return needsRefresh(cached, { automated: false, key, meta: listed }, now)
     }
 
-    // Not in the hub listing: nothing says it moved, so only a copy older than MIN_REFETCH_MS is refreshed.
-    return now - cached.savedAt >= MIN_REFETCH_MS
+    // Not in the hub listing (past its limit, or hub-sync unreadable): nothing says it moved. Refs mostly name
+    // such old sessions, and the open's own REST read refreshes the cache, so only a long-stale copy is refetched.
+    return now - cached.savedAt >= UNLISTED_REFETCH_MS
   }
 
   private pumpDemand(connectionId: string): void {
@@ -368,6 +383,8 @@ export class TranscriptPrefetcher {
     const records = await this.deps.listHubSessions()
 
     if (!records) {
+      this.listed.clear() // stale hub meta must not keep a moved session reading as current
+
       return result
     }
 
