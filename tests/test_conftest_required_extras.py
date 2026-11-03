@@ -1,6 +1,7 @@
 """HERMES_TEST_REQUIRE_EXTRAS: a listed optional extra fails instead of skipping (tests/_fixtures/required_extras.py)."""
-
 from __future__ import annotations
+
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import os
 import shutil
