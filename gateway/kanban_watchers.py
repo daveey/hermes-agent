@@ -38,6 +38,10 @@ from gateway.kanban_watchers_dispatcher import (
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"}
 _GC_INTERVAL_SECONDS = 3600.0
+# Host Kanban sync ownership (``_kanban_sync_watcher``): a contended lock is retried this often, and a named-profile
+# gateway re-checks for the root profile's gateway this often. [daveey]
+_SYNC_LOCK_RETRY_S = 5.0
+_SYNC_OWNER_RECHECK_S = 30.0
 _HEALTH_WINDOW = 6
 
 
@@ -407,11 +411,48 @@ class GatewayKanbanWatchersMixin:
             return
         from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_sync_client as _ksc
-        lock_handle, lock_state = _acquire_singleton_lock(_kb.kanban_home() / "kanban" / ".sync.lock")
-        if lock_state == "contended":
-            logger.info("kanban sync: another gateway on this host already syncs; not starting")
-            return
-        try:
-            await asyncio.to_thread(_ksc.run_forever, lambda: self._running)
-        finally:
-            _release_singleton_lock(lock_handle)
+        from gateway import kanban_watchers_common as _kwc
+        # [daveey] The sync loop reconciles chat links with THIS process's profile (its origin ledger, its
+        # state.db, its core's rules), so it belongs to the kanban root profile's gateway. A named-profile gateway
+        # sharing the root's boards (hub: hermes-gateway-askeve-reviewer on a pinned core) won the first-come lock
+        # and released every root-profile chat's remote-card and inherited links each pass, while the root gateway
+        # logged "already syncs" and never retried. Now a named profile leaves sync to a live root gateway (and
+        # hands the lock back when one starts), and a contended root keeps retrying instead of giving up.
+        root = _kwc._is_kanban_root_profile()
+        said = None
+        while self._running:
+            if not root and _kwc._root_gateway_alive():
+                if said != "defer":
+                    logger.info("kanban sync: the root profile's gateway runs on this host; this profile "
+                                "gateway leaves host sync to it")
+                    said = "defer"
+                await asyncio.sleep(_SYNC_OWNER_RECHECK_S)
+                continue
+            lock_handle, lock_state = _acquire_singleton_lock(_kb.kanban_home() / "kanban" / ".sync.lock")
+            if lock_state == "contended":
+                if said != "contended":
+                    logger.info("kanban sync: another gateway on this host already syncs; retrying every %.0fs",
+                                _SYNC_LOCK_RETRY_S)
+                    said = "contended"
+                await asyncio.sleep(_SYNC_LOCK_RETRY_S)
+                continue
+            said = None
+            checked = [0.0, False]
+
+            def keep_running() -> bool:
+                if not self._running:
+                    return False
+                if root:
+                    return True
+                now = time.monotonic()
+                if now - checked[0] >= _SYNC_OWNER_RECHECK_S:
+                    checked[0], checked[1] = now, _kwc._root_gateway_alive()
+                return not checked[1]
+
+            try:
+                await asyncio.to_thread(_ksc.run_forever, keep_running)
+            finally:
+                _release_singleton_lock(lock_handle)
+            if root or not checked[1] or not self._running:
+                return  # the loop ended on its own (shutdown, no identity): never respin it
+            logger.info("kanban sync: the root profile's gateway started; handed host sync to it")

@@ -178,6 +178,30 @@ def _acquire_singleton_lock(lock_path) -> tuple[Optional[object], str]:
     return handle, "held"
 
 
+def _is_kanban_root_profile() -> bool:
+    """True when this process's HERMES_HOME is the kanban root (the default profile), not a named profile whose
+    home only borrows the root's boards. [daveey]"""
+    try:
+        from hermes_cli import kanban_db
+        from hermes_constants import get_hermes_home
+        return Path(get_hermes_home()).resolve() == Path(kanban_db.kanban_home()).resolve()
+    except Exception:  # health: allow BLE001 -- an unresolvable home keeps today's behaviour (may sync)
+        return True
+
+
+def _root_gateway_alive() -> bool:
+    """True when the kanban root profile's gateway runs on this host (its lock held, its PID live).
+
+    Read-only probe of the root's identity files (``cleanup_stale=False``): a named-profile process never unlinks
+    the root's records. [daveey]"""
+    try:
+        from gateway.status import get_running_pid
+        from hermes_cli import kanban_db
+        return get_running_pid(Path(kanban_db.kanban_home()) / "gateway.pid", cleanup_stale=False) is not None
+    except Exception:  # health: allow BLE001 -- unknown reads as absent: the profile gateway may keep syncing
+        return False
+
+
 def _release_singleton_lock(handle) -> None:
     """Release a lock acquired via :func:`_acquire_singleton_lock`."""
     if handle is None:

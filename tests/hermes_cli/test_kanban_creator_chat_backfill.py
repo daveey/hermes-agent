@@ -45,3 +45,44 @@ def test_reconcile_backfills_worker_created_links_without_replay(tmp_path, monke
         with kb.write_txn(conn):
             kb._append_event(conn, child, "completed", {"summary": "future result"})
         assert len(notify.unseen_events_for_sub(conn, task_id=child, platform="tui", chat_id="human")[1]) == 1
+
+
+def test_a_released_inherited_link_on_an_open_card_is_wanted_again(tmp_path, monkeypatch):
+    """Hub chat 20261016_123957_6212f7 handed work to worker-created t_01a19084a3b36956 (todo), yet its outcome read
+    unresolved: a named-profile gateway on an older core held the host sync lock, did not want inherited ``created``
+    links and released it. Reconcile kept the stored flag, so the chat never got its card back. [daveey]"""
+    home = support.kanban_home(tmp_path, monkeypatch)
+    support.write_sync_config(home, True)
+    with kbc.connect_closing(home / "kanban.db") as conn:
+        sync.ensure_identity(conn, "default", "here")
+        parent = kb.create_task(conn, title="parent", session_id="human")
+        links.reconcile(conn, "default", "here", ledger=False)
+        child = kb.create_task(conn, title="legacy", session_id=WORKER)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='created'",
+                         (json.dumps({"creator_task_id": parent}), child))
+        links.reconcile(conn, "default", "here", ledger=False)
+        uid = links.link_uid(child, "here", None, "human", "created")
+        with kb.write_txn(conn):  # what the foreign reconcile did
+            conn.execute("UPDATE task_chat_links SET released=1 WHERE uid=?", (uid,))
+        assert links.reconcile(conn, "default", "here", ledger=False)["changed"] == 1
+        assert conn.execute("SELECT released FROM task_chat_links WHERE uid=?", (uid,)).fetchone()[0] == 0
+        queued = [r[0] for r in conn.execute("SELECT row_uid FROM kanban_sync_outbox WHERE table_name='task_chat_links'")]
+        assert uid in queued  # pushed, so the Board replica (links_reader=replica) answers the chat again
+
+
+def test_a_picked_up_foreign_cards_inherited_link_keeps_the_owners_answer(tmp_path, monkeypatch):
+    """Only cards this gateway owns are healed: a foreign copy's released link stays the owner's call. [daveey]"""
+    home = support.kanban_home(tmp_path, monkeypatch)
+    support.write_sync_config(home, True)
+    with kbc.connect_closing(home / "kanban.db") as conn:
+        sync.ensure_identity(conn, "default", "here")
+        child = kb.create_task(conn, title="foreign", session_id=WORKER)
+        uid = links.link_uid(child, "here", None, "human", "created")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET created_on='elsewhere' WHERE id=?", (child,))
+            kb._append_event(conn, child, "creator_chats_resolved", {"creator_task_id": "t_gone"})
+            conn.execute("INSERT INTO task_chat_links (uid,task_id,chat_gateway,chat_session,kind,released,created_at) "
+                         "VALUES (?,?,'here','human','created',1,1)", (uid, child))
+        links.reconcile(conn, "default", "here", ledger=False)
+        assert conn.execute("SELECT released FROM task_chat_links WHERE uid=?", (uid,)).fetchone()[0] == 1
