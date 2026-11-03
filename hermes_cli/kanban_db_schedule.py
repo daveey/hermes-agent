@@ -6,6 +6,7 @@ tests still reaches this code. Re-exported from ``kanban_db``.
 from __future__ import annotations
 
 import sqlite3
+import time as _time
 from typing import Any, Optional
 
 
@@ -46,7 +47,10 @@ def schedule_task(
         why = kaw.park_cycle_error(conn, task_id, record, wake_check)
         if why:
             raise kaw.AwaitingError(kaw.INVALID_AWAITING, why)
+        from hermes_cli import kanban_deploy_window as kdw
         payload = scheduled_payload(reason)
+        payload["wake_at"], reason = kdw.apply(record, payload["wake_at"], reason, now=int(_time.time()))
+        payload["reason"] = reason
         wake_check, check_every = kwc.validate_park(
             wake_at=payload["wake_at"], wake_check=wake_check,
             check_every=check_every, clock_only=clock_only)

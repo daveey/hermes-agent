@@ -158,6 +158,9 @@ def continue_task(
                     return {"ok": False, "error": "task changed state concurrently"}
                 return {"ok": True, "status": "todo", "run_id": None, "continuation": streak,
                         "wake_at": None, "escalated_to": owner}
+            from hermes_cli import kanban_deploy_window as kdw
+            wake_at, noted = kdw.apply(record, wake_at, checkpoint, now=now)
+            checkpoint = noted or checkpoint
             wake_check = wake_check or kaw.card_probe(record)
             why = kaw.park_cycle_error(conn, task_id, record, wake_check)
             if why:

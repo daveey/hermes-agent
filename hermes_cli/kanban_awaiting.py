@@ -592,7 +592,9 @@ def probe_premise(wake_check: Optional[str], *, op: str = "schedule", wake_in: O
 def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str, *,
                        probe: Optional[str] = None) -> int:
     """Trailing parks of this card on ``premise`` (or on the same opaque ``probe``), newest first,
-    stopping at the first other premise or at the last escalation (the supervisor acted since)."""
+    stopping at the first other premise or at the last escalation (the supervisor acted since).
+    A deploy park behind a healthy core update window (``kanban_deploy_window``) is not counted."""
+    from hermes_cli.kanban_deploy_window import is_healthy
     count = 0
     for kind, payload in conn.execute(
             "SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ('scheduled','continued',?) "
@@ -607,7 +609,8 @@ def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str, *,
             continue  # a continuation with no wait, or a legacy park
         if got["premise"] != premise and not (probe and got.get("probe") == probe):
             break
-        count += 1
+        if not is_healthy(got):
+            count += 1
     return count
 
 
@@ -617,7 +620,10 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
     """``resolve`` plus re-park escalation: the record to store on the parking event.
 
     Raises ``RepeatedPark`` on the third park in a row on one premise. Card waits (their producer
-    is accountable) and inferred clock waits (pacing continues, operator drags) never escalate."""
+    is accountable) and inferred clock waits (pacing continues, operator drags) never escalate,
+    nor does a deploy wait behind a healthy core update window (``kanban_deploy_window``), whose
+    evidence lands on the record as ``deploy_window`` for the caller's wake floor."""
+    from hermes_cli import kanban_deploy_window as kdw
     record = resolve(conn, task_id, awaiting=awaiting, reason=reason, wake_check=wake_check,
                      clock_only=clock_only, op=op, wake_in=wake_in)
     if record["kind"] == "card" or (record["kind"] == "clock" and record.get("inferred")):
@@ -626,7 +632,9 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
     probe = probe_premise(wake_check, op=op, wake_in=wake_in)
     if probe:
         record["probe"] = probe
-    if prior_same_premise(conn, task_id, record["premise"], probe=probe) >= REPARK_LIMIT:
+    kdw.annotate(conn, task_id, record, now=int(time.time()))
+    if (not kdw.is_healthy(record)
+            and prior_same_premise(conn, task_id, record["premise"], probe=probe) >= REPARK_LIMIT):
         raise RepeatedPark(record)
     return record
 
