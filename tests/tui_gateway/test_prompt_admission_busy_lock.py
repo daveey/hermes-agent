@@ -10,9 +10,12 @@ import time
 import pytest
 
 from hermes_cli import admission_fence as af
-from tests.tui_gateway.test_prompt_admission import call, owner
+from tests.tui_gateway import test_prompt_admission as _shared
 from tests.waiting import wait_until
 from tui_gateway import server
+
+call = _shared.call
+owner = _shared.owner  # the shared real-RPC + SQLite fixture, requested by name below
 
 pytestmark = pytest.mark.platforms("posix")
 
@@ -29,8 +32,8 @@ def _hold_lock(release, m):
         m["released"] = time.monotonic()
 
 
-def test_busy_update_lock_admits_once_after_the_hold_without_holding_the_resume_lock(owner):
-    db, _session, params, started = owner
+def test_busy_update_lock_admits_once_after_the_hold_without_holding_the_resume_lock(request):
+    db, _session, params, started = request.getfixturevalue("owner")
     release, m = threading.Event(), {"held": threading.Event()}
     holder = threading.Thread(target=_hold_lock, args=(release, m))
     holder.start()
@@ -60,9 +63,9 @@ def test_busy_update_lock_admits_once_after_the_hold_without_holding_the_resume_
     assert len(started) == 1
 
 
-def test_lock_busy_past_the_budget_still_refuses_with_5035_and_nothing_admitted(owner, monkeypatch):
+def test_lock_busy_past_the_budget_still_refuses_with_5035_and_nothing_admitted(request, monkeypatch):
     from hermes_cli import backend_retirement
-    db, _session, params, started = owner
+    db, _session, params, started = request.getfixturevalue("owner")
     monkeypatch.setattr(backend_retirement, "BUSY_WAIT_S", 0.3)
     release, m = threading.Event(), {"held": threading.Event()}
     holder = threading.Thread(target=_hold_lock, args=(release, m))
