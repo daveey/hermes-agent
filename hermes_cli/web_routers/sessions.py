@@ -1006,23 +1006,37 @@ async def backfill_session_owner_profiles(body: SessionOwnerBackfill, request: R
     """
     stamp = _serving_profile(body.profile)
 
+    def answer(stamped):
+        if stamped:
+            _log.info(
+                "owner-backfill: stamped %d legacy NULL-profile session row(s) with profile %r",
+                stamped, stamp)
+        return {"ok": True, "stamped": stamped, "profile": stamp}
+
+    def offline_stamp():
+        with http_failure(
+            "POST /api/sessions/owner-backfill failed", 500, detail="Internal server error"):
+            return _with_db(body.profile, lambda db: db.backfill_null_session_profiles(stamp),
+                            read_only=False)
+
+    if getattr(request.app.state, "gateway_runner", None) is None:
+        # A backend not composed with the gateway (Desktop's SSH-isolated serve): the live owner
+        # stamps its own store; with no owner the offline maintenance-lock write runs.
+        async def offline():
+            return answer(await asyncio.to_thread(offline_stamp))
+        return await _on_live_owner(request, body.profile, offline)
+
     with http_failure(
         "POST /api/sessions/owner-backfill failed", 500, detail="Internal server error"):
         owner_db = _owner_db_for(request, body.profile)
-        if owner_db is not None:
-            # A live gateway owns this store: it is the only writer (the offline maintenance lock
-            # would 409 every Desktop boot), so the idempotent stamp runs on its own connection.
-            stamped = await asyncio.to_thread(owner_db.backfill_null_session_profiles, stamp)
-        else:
-            stamped = await asyncio.to_thread(
-                _with_db, body.profile, lambda db: db.backfill_null_session_profiles(stamp),
-                read_only=False)
-
-    if stamped:
-        _log.info(
-            "owner-backfill: stamped %d legacy NULL-profile session row(s) with profile %r",
-            stamped, stamp)
-    return {"ok": True, "stamped": stamped, "profile": stamp}
+    if owner_db is None:
+        return answer(await asyncio.to_thread(offline_stamp))
+    # A live gateway owns this store: it is the only writer (the offline maintenance lock
+    # would 409 every Desktop boot), so the idempotent stamp runs on its own connection.
+    with http_failure(
+        "POST /api/sessions/owner-backfill failed", 500, detail="Internal server error"):
+        stamped = await asyncio.to_thread(owner_db.backfill_null_session_profiles, stamp)
+    return answer(stamped)
 
 
 @manage_router.patch("/api/sessions/{session_id}")
@@ -1036,14 +1050,103 @@ async def rename_session_endpoint(session_id: str, body: SessionRename, request:
         expected_generation=body.expected_generation, operation='sidebar', payload=payload)
 
 
+def _own_profile_name_for_multiplexer(home: Path, control_home: Optional[str]) -> Optional[str]:
+    """[daveey] The profile name a forward must carry when a multiplexer (another home) serves *home*,
+    else None. The owner routes on the request's ``profile`` and takes its own default store without
+    one, so a named-profile backend names itself; a home no profile name resolves to refuses (503)."""
+    if Path(control_home or home).resolve() == home.resolve():
+        return None
+    name = _cron_default_profile()
+    try:
+        named = Path(_cron_profile_home(name)[1]).resolve() == home.resolve()
+    except (HTTPException, ValueError, OSError):
+        named = False
+    if not named:
+        _log.warning("owner forward: no profile name resolves to %s (served by %s)", home, control_home)
+        raise HTTPException(status_code=503, detail="owner_unreachable")
+    return name
+
+
+async def _on_live_owner(request: Request, profile: Optional[str], offline: Callable):
+    """[daveey] Run a session write on the live gateway owner from a backend not composed with it.
+
+    Desktop's SSH-isolated ``serve`` (and a standalone dashboard) has no owner store to write on, and
+    the offline maintenance lock always loses to a running gateway, so every write there 409'd
+    ("Exclusive maintenance refused"). The owner serves the same route on its own store: this replays
+    the request on its HTTP API with a single-use ``native-http`` ticket minted on the control socket
+    that just identified it (pinned to the profile's home, as ``_mutate_via_gateway_owner`` does).
+    With no endpoint, ``offline()`` (the maintenance-lock path) decides; when that loses to an owner
+    discovery saw but could not reach (starting, draining, a control timeout), it answers a retryable
+    503 with discovery's reason rather than the bare 409. A composed gateway never forwards (no loop).
+    An owner 401/403 is a refusal of this forward, never of the caller's credentials: Desktop
+    rotates its token on a 401/403, so it answers 503 too."""
+    from dataclasses import replace
+    from fastapi.responses import JSONResponse, Response
+    from gateway.runtime_ownership import OwnershipConflict
+    from hermes_cli.gateway_client import _session_ticket
+    from hermes_cli.gateway_runtime import discover_gateway_endpoint, gateway_profile_home
+    from hermes_constants import get_hermes_home
+    from hermes_state import _default_db_path
+    import httpx
+
+    home = Path(_cron_profile_home(profile)[1]) if profile else Path(_default_db_path()).parent
+    discovery = await asyncio.to_thread(discover_gateway_endpoint, home, timeout=1.5)
+    endpoint = discovery.endpoint
+    if endpoint is None:
+        try:
+            return await offline()
+        except HTTPException as exc:
+            if discovery.state == "absent" or not isinstance(exc.__cause__, OwnershipConflict):
+                raise
+            reason = discovery.reason_code or discovery.state
+            raise HTTPException(status_code=503, detail=f"owner_unavailable: {reason}: {exc.detail}") from exc
+    if not getattr(endpoint, "control_home", True):
+        # A standalone profile gateway answered on its own socket: mint there, never on the launch home's.
+        endpoint = replace(endpoint, control_home=str(home.expanduser().resolve()))
+    params, content = dict(request.query_params), await request.body()
+    name = None if profile is not None else await asyncio.to_thread(
+        _own_profile_name_for_multiplexer, home, endpoint.control_home)
+    if name is not None:
+        if request.method == "GET":
+            params["profile"] = name
+        else:
+            content = json.dumps({**json.loads(content or b"{}"), "profile": name}).encode()
+    try:
+        ticket = await asyncio.to_thread(
+            _session_ticket, gateway_profile_home(get_hermes_home()), endpoint, purpose="native-http")
+        async with httpx.AsyncClient(trust_env=False, timeout=30) as client:
+            answer = await client.request(
+                request.method, endpoint.api_origin + request.url.path, params=params, content=content,
+                headers={"X-Hermes-Gateway-Ticket": ticket, "Content-Type": "application/json"})
+    except Exception as exc:  # transport or mint failure on an owner discovery just identified
+        _log.warning("owner forward %s %s failed: %s", request.method, request.url.path, exc)
+        raise HTTPException(status_code=503, detail="owner_unreachable") from exc
+    if answer.status_code in (401, 403):
+        _log.warning("owner forward %s %s refused by the owner: %s %s", request.method, request.url.path,
+                     answer.status_code, answer.text[:200])
+        raise HTTPException(status_code=503, detail="owner_unreachable")
+    try:
+        return JSONResponse(status_code=answer.status_code, content=answer.json())
+    except ValueError:
+        return Response(status_code=answer.status_code, content=answer.content,
+                        media_type=answer.headers.get("content-type"))
+
+
 async def _write_on_owner(request: Request, profile: Optional[str], fn: Callable):
     """[daveey] A single-row write: on the live owner's own store when a composed gateway serves the
-    profile, else under the offline maintenance lock. A running gateway always holds that lock, so
-    taking it there 409s every write ("Exclusive maintenance refused") — same split as owner-backfill."""
+    profile, forwarded to the live owner from a backend that isn't composed with it, else under the
+    offline maintenance lock. A running gateway always holds that lock, so taking it there 409s
+    every write ("Exclusive maintenance refused") — same split as owner-backfill."""
     owner_db = _owner_db_for(request, profile)
     if owner_db is not None:
         return await asyncio.to_thread(fn, owner_db)
-    return await asyncio.to_thread(_with_db, profile, fn, read_only=False)
+
+    async def offline():
+        return await asyncio.to_thread(_with_db, profile, fn, read_only=False)
+
+    if getattr(request.app.state, "gateway_runner", None) is not None:
+        return await offline()
+    return await _on_live_owner(request, profile, offline)
 
 
 @manage_router.post("/api/sessions/{session_id}/mute")
