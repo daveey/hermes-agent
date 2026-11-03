@@ -71,6 +71,38 @@ class Resync(Exception):
     """The cursor is below the service's retention floor: rebuild from a snapshot."""
 
 
+class SchemaAhead(RuntimeError):
+    """The board holds columns this core neither syncs nor keeps local: a newer core migrated it. Pushing would
+    silently drop those columns from every op (``_wire_fields``), so this core must not sync the board. [daveey]"""
+
+    def __init__(self, columns: dict[str, set[str]]) -> None:
+        self.columns = columns
+        named = "; ".join(f"{t}: {', '.join(sorted(c))}" for t, c in sorted(columns.items()))
+        super().__init__(f"this core does not declare columns a newer core added ({named}); refusing to sync "
+                         "so their values are not dropped. Run a current core in the gateway that holds the "
+                         "host sync role")
+
+
+# (db file, schema_version, identity of the declared tasks columns) -> undeclared columns.
+_SCHEMA_SEEN: dict[tuple[str, int, int], dict[str, set[str]]] = {}
+
+
+def schema_ahead(conn: sqlite3.Connection) -> dict[str, set[str]]:
+    """Per synced table, the columns this core does not know (``undeclared_columns``), cached per schema version
+    so a round costs one PRAGMA, not one per table. [daveey]"""
+    version = conn.execute("PRAGMA schema_version").fetchone()[0]
+    key = (str(sync._db_key(conn)), int(version), id(sync.SYNCED_COLUMNS["tasks"]))
+    if key not in _SCHEMA_SEEN:
+        _SCHEMA_SEEN[key] = sync.undeclared_columns(conn)
+    return _SCHEMA_SEEN[key]
+
+
+def refuse_if_schema_ahead(conn: sqlite3.Connection) -> None:
+    ahead = schema_ahead(conn)
+    if ahead:
+        raise SchemaAhead(ahead)
+
+
 @dataclass(frozen=True)
 class Identity:
     url: str
@@ -516,6 +548,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
          max_batches: int = MAX_BATCHES_PER_ROUND) -> PushResult:
     """Drain pending outbox rows in FIFO batches. A transport failure leaves them pending (retried next round)."""
     from hermes_cli.kanban_db_connect import write_txn
+    refuse_if_schema_ahead(conn)  # an older core would strip the newer columns; the ops stay pending [daveey]
     out = PushResult()
     for _ in range(max_batches):
         rows = [dict(r) for r in conn.execute(
@@ -808,6 +841,7 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
         result = RoundResult(board=slug, mode=mode)
         if mode == "off":
             return result
+        refuse_if_schema_ahead(live)  # before pull/repair: an older core must not act on a newer board [daveey]
         ensure_identity(live, slug, gateway)
         with _pulled_replica(slug, hub, gateway) as (replica, pulled, rebuilt):
             result.pulled = pulled
@@ -903,6 +937,9 @@ def sync_all_once(hub: Optional[Hub] = None, *,
     for slug, path in board_paths() if boards is None else boards:
         try:
             results.append(sync_board(slug, path, hub, ident.gateway))
+        except SchemaAhead as exc:
+            _log.error("kanban sync: %s not synced: %s", slug, exc)
+            results.append(RoundResult(board=slug, mode="?", error=f"SchemaAhead: {exc}"))
         except (HubError, OSError, Resync, sqlite3.Error, SyncUnavailable, SyncRoundBusy) as exc:
             _log.warning("kanban sync: round for %s failed (%s: %s)", slug, type(exc).__name__, exc)
             results.append(RoundResult(board=slug, mode="?", error=f"{type(exc).__name__}: {exc}"))
@@ -1284,6 +1321,8 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
     except SyncUnavailable as exc:
         _log.warning("%s; kanban sync not started", exc)
         return
+    if _schema_ahead_boards(board_paths()):
+        return  # give the host sync role up: a current core's gateway can take it [daveey]
     hub = Hub(ident)
     sync.set_lease_client(HubLeaseClient(hub))
     period = float(interval or sync.sync_config().get("interval_seconds") or DEFAULT_INTERVAL_S)
@@ -1305,7 +1344,11 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
                 watchers[slug].start()
         selected = work.select(boards, time.monotonic(), outbox_pending)
         selected += [b for b in deferred_repairs_due(boards, _repair_clock()) if b not in selected]
-        for r in sync_all_once(hub, boards=selected):
+        results = sync_all_once(hub, boards=selected)
+        if any((r.error or "").startswith("SchemaAhead") for r in results):
+            _log.error("kanban sync: a newer core migrated this host's board; giving up the sync role")
+            return
+        for r in results:
             work.finished(r.board, not r.error)
             if r.push and (r.push.sent or r.push.rejected):
                 _log.info("kanban sync: %s %s pulled=%d pushed=%d rejected=%d", r.board, r.mode, r.pulled,
@@ -1319,6 +1362,21 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
         if deferred_due is not None:
             remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
         wait_for_work(wake, [p for _s, p in boards], remaining, keep_running)
+
+
+def _schema_ahead_boards(boards: list[tuple[str, Path]]) -> list[str]:
+    """Boards a newer core migrated (logged at ERROR). An unreadable board is left to the round's own errors."""
+    ahead = []
+    for slug, path in boards:
+        try:
+            with connection(path, lambda p=path: _connect(p)) as conn:
+                cols = schema_ahead(conn)
+        except (sqlite3.Error, OSError):
+            cols = {}
+        if cols:
+            _log.error("kanban sync: not starting: board %s: %s", slug, SchemaAhead(cols))
+            ahead.append(slug)
+    return ahead
 
 
 # --- import ---------------------------------------------------------------------------------------
