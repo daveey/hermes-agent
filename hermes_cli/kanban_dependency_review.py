@@ -47,6 +47,12 @@ def checkpoint(conn, task_id, expected_run_id):
     # leaves its JSON payload unchanged. Carry the run's stable identity as well.
     if "uid" in row.keys() and row["uid"]:
         evidence["run_uid"] = row["uid"]
+    # Server-derived ordering proof for PR comments sharing the park's second (an owner
+    # posts its state comment and parks in one turn). Same contract as the continuation
+    # checkpoint's comment_id_at_checkpoint: a host-local row id, mapped back on read.
+    evidence["comment_id_at_checkpoint"] = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM task_comments WHERE task_id = ?", (task_id,),
+    ).fetchone()[0]
     return evidence
 
 
