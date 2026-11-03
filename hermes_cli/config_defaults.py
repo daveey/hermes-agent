@@ -1933,14 +1933,14 @@ DEFAULT_CONFIG = {
         # Assignee when the orchestrator can't match one to an installed profile; "" = default
         # profile. A task never ends up with assignee=None.
         "default_assignee": "",
-        # Global concurrency cap (#33488): when set to a positive int, the HOST never has more than N tasks
-        # in 'running' at once — counted across every active board and across both the ready and review
-        # dispatch lanes (workers are OS processes sharing one machine's memory, so the cap bounds the
-        # machine, not each board; OOF-30). Unset (None) means "derive from system memory" (OOF-30/OOF-77):
-        # the dispatcher caps concurrency at roughly MemTotal / 512 MiB, clamped to [2, 8] — e.g. 2 workers
-        # on a 1 GiB VM. On hosts where total memory can't be read (macOS/Windows), unset falls back to no
-        # cap. Set an explicit value to override the derived default in either direction.
+        # Global concurrency cap (#33488): a positive int caps the HOST's 'running' tasks across every active board
+        # and both ready/review lanes (workers share one machine's memory; OOF-30). Unset (None) derives it from
+        # memory (OOF-30/OOF-77): about MemTotal / 512 MiB clamped to [2, 8]; no cap where memory can't be read
+        # (macOS/Windows). An explicit value overrides the derived default in either direction.
         "max_in_progress": None,
+        # [daveey] Hub CPU gate (docs/worker-first-v1.md; installation-root config only): 0 < value <= 100 = every new
+        # claim here needs measured CPU busy strictly below it (~1 s sample under admission.lock). None/absent = off.
+        "admission": {"cpu_busy_below_pct": None},
         # Per-profile cap: positive int = no single profile runs more than N workers even if the
         # global caps allow; blocked tasks defer to the next tick. None = no per-profile cap. Useful
         # when fan-out would saturate one profile's model/API quota/browser pool. See #21582.
