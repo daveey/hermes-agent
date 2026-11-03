@@ -37,6 +37,9 @@ const COMPARED_FIELDS = [
   // Structured failure layer — drives the error card's title and action row,
   // so a change (e.g. resume replay attaching the descriptor) must repaint.
   'errorSurface',
+  // A busy-chat refusal hands the user's words back to the composer, which reads this marker
+  // from the published transcript: a resume that only attaches it must still publish.
+  'refusedSend',
   'hidden',
   'branchGroupId',
   'interim',

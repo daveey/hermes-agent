@@ -5,6 +5,7 @@ import { splitLeadingAttachmentRefs } from '@/components/assistant-ui/reference-
 import { extractImageRefs } from '@/lib/embedded-images'
 import { parseErrorSurface } from '@/lib/error-surface'
 import { dedupeGeneratedImageEchoesInParts } from '@/lib/generated-images'
+import { isSessionBusyRefusal } from '@/lib/session-busy-refusal'
 import { isTodoToolName } from '@/lib/todos'
 import type { MessageReaction, SessionMessage } from '@/types/hermes'
 
@@ -219,9 +220,20 @@ function isPainted(message: SessionMessage): boolean {
 // kept on its boundary row so a reopened session shows it after the live frame is gone.
 function failedTurnError(
   metadata: SessionMessage['display_metadata']
-): null | Pick<ChatMessage, 'error' | 'errorSurface'> {
+): null | Pick<ChatMessage, 'error' | 'errorSurface' | 'refusedSend'> {
   const parsed = parseDisplayMetadata(metadata)
-  const errorSurface = parseErrorSurface(parsed?.error_surface)
+  const parsedSurface = parseErrorSurface(parsed?.error_surface)
+
+  // A busy-chat refusal never processed the user's message: the composer offers it back
+  // (store/refused-sends.ts). A row naming only its `failure_reason` still gets its card.
+  const refused = isSessionBusyRefusal({
+    error: parsed?.error,
+    failureReason: parsed?.failure_reason,
+    surfaceCode: parsedSurface?.code
+  })
+
+  const errorSurface =
+    parsedSurface ?? (refused ? { layer: 'gateway' as const, code: 'session_busy', retryable: true } : null)
 
   if (!errorSurface) {
     return null
@@ -229,7 +241,7 @@ function failedTurnError(
 
   const error = typeof parsed?.error === 'string' && parsed.error.trim() ? parsed.error : errorSurface.code
 
-  return { error, errorSurface }
+  return { error, errorSurface, ...(refused ? { refusedSend: true } : {}) }
 }
 
 function timelineTaskCount(metadata: SessionMessage['display_metadata']): number | undefined {

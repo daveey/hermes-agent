@@ -2,6 +2,7 @@ import { useAui, useAuiState, useComposerRuntime } from '@assistant-ui/react'
 import { SLASH_COMMAND_RE } from '@hermes/shared'
 import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
+import type { ClientSessionState } from '@/app/types'
 import { isElementInHiddenPane } from '@/components/pane-shell/pane-visibility'
 import { translateNow } from '@/i18n'
 import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
@@ -12,6 +13,7 @@ import {
   adoptNewSessionDraft,
   type ComposerAttachment,
   type ComposerDraftSyncMode,
+  draftKey,
   freshDraftScope,
   isFreshDraftScope,
   onComposerDraftSyncRequest,
@@ -34,6 +36,14 @@ import { adoptInterruptedSend, type InterruptedSendHandlers, restoreInterruptedS
 import { $composerPopout } from '@/store/composer-popout'
 import { migrateQueuedPrompts } from '@/store/composer-queue'
 import { notify } from '@/store/notifications'
+import {
+  claimRefusedSendOffer,
+  mergeRefusedText,
+  onRefusedSendWithdraw,
+  releaseRefusedSendOffers,
+  tailUserTurn
+} from '@/store/refused-sends'
+import { $sessionStates } from '@/store/session-states'
 
 import { type ComposerStoreWriter, createComposerStoreWriter } from '../composer-store-writer'
 import {
@@ -867,6 +877,86 @@ export function useComposerDraft({
       }),
     [target]
   )
+
+  // A send the owner admitted but never ran because another writer held the chat
+  // (failure_reason session_busy, store/refused-sends.ts): Enter already cleared the words, so
+  // they come back here, once, after anything the user typed since. As a NEW message: the
+  // refused submission id is settled, so reusing it would be deduplicated and run nothing.
+  const offerRefusedSend = () => {
+    const scope = draftScopeRef.current
+    const runtimeId = sessionIdRef.current
+    const states: Record<string, ClientSessionState> = $sessionStates.get()
+
+    const state =
+      (runtimeId ? states[runtimeId] : undefined) ??
+      (scope ? Object.values(states).find(candidate => candidate.storedSessionId === scope) : undefined)
+
+    const tail = state?.messages ? tailUserTurn(state.messages) : null
+
+    if (tail && !tail.refused) {
+      releaseRefusedSendOffers(scope)
+    }
+
+    const refused = tail?.refused && tail.text ? { text: tail.text } : null
+
+    if (
+      !refused ||
+      inputDisabled ||
+      queueEditStateRef.current?.sessionKey === scope ||
+      isBrowsingHistory(runtimeId) ||
+      !claimRefusedSendOffer(scope, refused)
+    ) {
+      return
+    }
+
+    const current = syncDraftFromEditor()
+    const next = mergeRefusedText(current, refused.text)
+
+    if (next === current) {
+      return
+    }
+
+    if (draftRetryRef.current) {
+      draftRetryRef.current = undefined
+      writeDraftRetry(scope, undefined)
+    }
+
+    const attachments = attachmentScope.$attachments.get()
+    stashAt(scope, next, attachments)
+    loadIntoComposer(next, attachments, true)
+  }
+
+  // A re-run of the refused turn from its card (Take over here, Retry) takes back an offer the
+  // user has not touched, so one Enter more cannot run the same message twice.
+  const withdrawRefusedSend = (detail: { handled: boolean; scope: string; text: string }) => {
+    if (draftKey(draftScopeRef.current) !== detail.scope) {
+      return
+    }
+
+    detail.handled = true
+
+    if (syncDraftFromEditor().trim() !== detail.text.trim()) {
+      return
+    }
+
+    const attachments = attachmentScope.$attachments.get()
+    stashAt(draftScopeRef.current, '', attachments)
+    loadIntoComposer('', attachments)
+  }
+
+  const refusedSendRef = useRef({ offer: offerRefusedSend, withdraw: withdrawRefusedSend })
+  refusedSendRef.current = { offer: offerRefusedSend, withdraw: withdrawRefusedSend }
+
+  useEffect(() => {
+    refusedSendRef.current.offer()
+    const stopOffers = $sessionStates.listen(() => refusedSendRef.current.offer())
+    const stopWithdraws = onRefusedSendWithdraw(detail => refusedSendRef.current.withdraw(detail))
+
+    return () => {
+      stopOffers()
+      stopWithdraws()
+    }
+  }, [activeQueueSessionKey, sessionId])
 
   // pagehide is load-bearing: React skips effect cleanups on reload, so Cmd+R
   // inside the debounce/rAF window would drop trailing keystrokes without this.
