@@ -67,10 +67,17 @@ def _in_process_handler(built):
 
 
 async def _turn(authority, owner, ref, built, rid):
+    """One turn, returned only once it has SETTLED: the handler records its build before it returns, and
+    the drain then commits the turn's settlement (lease release, runtime revision). A caller that mutates
+    the session right after must not race that commit (a deferred pick or a revision conflict)."""
     from gateway.session_contract import Submission
+    from hermes_state_runtime import get_session_admission
     count = len(built)
-    await authority.submit(owner.actor, Submission(rid, ref, {'text': rid}, 'queue'))
+    receipt = await authority.submit(owner.actor, Submission(rid, ref, {'text': rid}, 'queue'))
     await async_wait_until(lambda: len(built) > count, timeout=30, what=f'turn {rid}')
+    await async_wait_until(
+        lambda: (get_session_admission(authority.db, admission_id=receipt.admission_id) or {}).get('status') == 'terminal',
+        timeout=30, what=f'turn {rid} settled')
     return built[-1]
 
 
