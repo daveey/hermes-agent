@@ -70,6 +70,15 @@ import { $hiddenGatewayIds } from './gateway-visibility'
 import { hubGatewayForConnection, hubGatewayProjects, hubRequest, learnHubGatewayName } from './hub-sync'
 import { type OfflineReplicaRecord, offlineSessionsFromReplica } from './offline-sessions'
 import { fetchRemoteProjectTree, type ProjectTreePayload } from './project-tree-background'
+import {
+  DUPLICATE_FOLDER_RE,
+  homeRelativePath,
+  labelKey,
+  MISSING_WORKDIR_RE,
+  newProjectFolder,
+  shellPath,
+  type ShellResult
+} from './projects-move-paths'
 import { repoDiscoveryPolicyFromConfig, repoDiscoveryPolicySignature } from './projects-repo-discovery'
 
 export {
@@ -1108,33 +1117,7 @@ function expireRemoteProjectTree(connectionId: string): void {
   }
 }
 
-const labelKey = (label: string): string => label.trim().toLowerCase()
-
-/** `session.workspace.move`'s refusal of a folder that doesn't exist on that host. */
-const MISSING_WORKDIR_RE = /working directory does not exist/
-
-/** Shell word for a path; a `~/` prefix stays expandable. */
-function shellPath(path: string): string {
-  const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
-
-  return path.startsWith('~/') ? `"$HOME"/${quote(path.slice(2))}` : quote(path)
-}
-
-/**
- * `/Users/x/code/a`, `/home/x/code/a`, `/root/code/a` or `/opt/data/code/a`
- * (the Docker image's home) → `~/code/a`, so it lands in the other host's home.
- */
-export function homeRelativePath(path: string): string {
-  const m = path.match(/^(?:\/Users|\/home)\/[^/]+(\/.*)?$/) ?? path.match(/^\/(?:root|opt\/data)(\/.*)?$/)
-
-  return m ? `~${m[1] ?? ''}` : path
-}
-
-interface ShellResult {
-  code: number
-  stderr: string
-  stdout: string
-}
+export { homeRelativePath, newProjectFolder }
 
 /** Where the destination project lives on some gateway other than `target`. */
 function projectSourceFor(node: SidebarProjectTree | undefined): null | { connectionId: string; path: string } {
@@ -1225,11 +1208,36 @@ async function createProjectFolderOn(target: MoveTarget, name: string, path: str
   // Projects only organize the sidebar here, so the folder just has to exist.
   await makeFolderOn(target, path)
 
-  const created = await moveTargetRequest<{ project: null | ProjectInfo }>(target, 'projects.create', {
-    name,
-    primary_path: path,
-    profile
-  })
+  let created: { project: null | ProjectInfo }
+
+  try {
+    created = await moveTargetRequest<{ project: null | ProjectInfo }>(target, 'projects.create', {
+      name,
+      primary_path: path,
+      profile
+    })
+  } catch (error) {
+    // The gateway already has this folder under ANOTHER name (e.g. the Mac's
+    // "infra" is the hub's "focus"): that project is the destination.
+    const owner = DUPLICATE_FOLDER_RE.exec(String((error as Error)?.message ?? error))?.[1]
+
+    if (!owner) {
+      throw error
+    }
+
+    const found = await moveTargetRequest<{ project: null | ProjectInfo }>(target, 'projects.get', {
+      id: owner,
+      profile
+    })
+
+    const ownerPath = found.project?.primary_path || found.project?.folders?.[0]?.path
+
+    if (!ownerPath) {
+      throw error
+    }
+
+    return ownerPath
+  }
 
   if (target.remote) {
     expireRemoteProjectTree(target.connectionId)
@@ -1281,18 +1289,6 @@ export async function moveSessionToProject(
   }
 
   await moveSessionToCwd(target, sessionId, cwd)
-}
-
-/** Default folder for a project created by name alone: `~/code/<slug>`. */
-export function newProjectFolder(name: string): string {
-  const slug =
-    name
-      .trim()
-      .toLowerCase()
-      .replace(/[^\p{L}\p{N}._-]+/gu, '-')
-      .replace(/^[-.]+|-+$/g, '') || 'project'
-
-  return `~/code/${slug}`
 }
 
 // [daveey] ⌘⇧P "+ Create project": a new project named `name` with an empty

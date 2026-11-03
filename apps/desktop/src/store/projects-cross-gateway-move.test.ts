@@ -175,6 +175,71 @@ describe('moveSessionToProject across gateways', () => {
     expect(remoteCalls.at(-1)?.[2]).toMatchObject({ cwd: '/home/me/code/babybear' })
   })
 
+  it("reuses the remote's differently-named project that already owns the folder", async () => {
+    // The Mac calls ~/code/babybear "babybear"; the remote registered the same
+    // folder under another name, so projects.create refuses the duplicate.
+    setup(localDefault, (method, params) => {
+      if (method === 'projects.list') {
+        return {
+          active_id: null,
+          projects: [{ id: 'p_ad616738', name: 'focus', slug: 'focus', primary_path: '/home/me/code/babybear' }]
+        }
+      }
+
+      if (method === 'shell.exec') {
+        return { code: 0, stderr: '', stdout: '' }
+      }
+
+      if (method === 'projects.create') {
+        throw new Error(
+          "folder already belongs to project 'focus' (p_ad616738); switch to it instead of creating a duplicate"
+        )
+      }
+
+      if (method === 'projects.get') {
+        expect(params).toMatchObject({ id: 'p_ad616738' })
+
+        return { project: { id: 'p_ad616738', name: 'focus', primary_path: '/home/me/code/babybear' } }
+      }
+
+      return method === 'session.workspace.move'
+        ? { branch: null, cwd: '/home/me/code/babybear', git_repo_root: null }
+        : {}
+    })
+
+    await moveSessionToProject('remote-s', 'p_local')
+
+    expect(remoteCalls.map(([, m]) => m)).toEqual([
+      'projects.list',
+      'shell.exec',
+      'projects.create',
+      'projects.get',
+      'session.workspace.move'
+    ])
+    expect(remoteCalls.at(-1)?.[2]).toMatchObject({ cwd: '/home/me/code/babybear', session_key: 'remote-s' })
+  })
+
+  it('still surfaces any other projects.create error', async () => {
+    setup(localDefault, method => {
+      if (method === 'projects.list') {
+        return { active_id: null, projects: [] }
+      }
+
+      if (method === 'shell.exec') {
+        return { code: 0, stderr: '', stdout: '' }
+      }
+
+      if (method === 'projects.create') {
+        throw new Error('project name must not be empty')
+      }
+
+      return {}
+    })
+
+    await expect(moveSessionToProject('remote-s', 'p_local')).rejects.toThrow('project name must not be empty')
+    expect(remoteCalls.some(([, m]) => m === 'session.workspace.move')).toBe(false)
+  })
+
   it('surfaces a failed mkdir instead of moving', async () => {
     setup(localDefault, method =>
       method === 'projects.list'
