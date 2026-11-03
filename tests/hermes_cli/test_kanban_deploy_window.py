@@ -25,6 +25,7 @@ AWAITING = {"kind": "deploy", "ref": "abcdef123", "why": "core release"}
 REASON = "SCHEDULED_UNTIL=2026-11-02T22:01:00Z core release pending"
 PROBE = "test -f /nonexistent-core-release-receipt"
 OPS = ["schedule", "block", "continue"]
+DAY = 24 * 3600  # the healthy-exemption bound (kanban_deploy_window.HEALTHY_MAX_SECONDS)
 
 
 @pytest.fixture
@@ -60,16 +61,16 @@ def running(conn, tid=None):
     return tid
 
 
-def park(conn, tid, op, awaiting=AWAITING):
+def park(conn, tid, op, awaiting=AWAITING, probe=PROBE):
     """One real park; returns (last event, closed run summary)."""
     if op == "schedule":
-        assert kb.schedule_task(conn, tid, reason=REASON, awaiting=awaiting, wake_check=PROBE, check_every=300)
+        assert kb.schedule_task(conn, tid, reason=REASON, awaiting=awaiting, wake_check=probe, check_every=300)
     elif op == "block":
         assert kb.block_task(conn, tid, reason=REASON, kind="time", awaiting=awaiting,
-                             wake_check=PROBE, check_every=300)
+                             wake_check=probe, check_every=300)
     else:
-        result = kc.continue_task(conn, tid, checkpoint=REASON, resume_after_seconds=60, max_continuations=20,
-                                  awaiting=awaiting, wake_check=PROBE, check_every=300)
+        result = kc.continue_task(conn, tid, checkpoint=REASON, resume_after_seconds=60, max_continuations=40,
+                                  awaiting=awaiting, wake_check=probe, check_every=300)
         assert result["ok"], result
     run = kb.latest_run(conn, tid)
     return kb.list_events(conn, tid)[-1], run.summary if run else None
@@ -199,6 +200,79 @@ def test_malformed_or_unusable_window_changes_nothing(board, bad):
         assert "core update window" not in summary
     running(conn, tid)
     assert park_until_escalated(conn, tid, "schedule")[-1] == kaw.ESCALATED_EVENT
+
+
+def _at(monkeypatch, home, t):
+    """Move the clock to ``t`` and publish a fresh, healthy batch whose window is still ahead."""
+    monkeypatch.setattr("time.time", lambda: t)
+    publish(home, observed_at=t, window_at=t + 3600, state_since=t - 100)
+
+
+@pytest.mark.parametrize("op", OPS)
+def test_healthy_exemption_expires_after_bound_then_escalates_on_third_park(board, monkeypatch, op):
+    """A ref that never reaches main: other commits keep the window ahead, so every park is
+    'healthy'. Once the run is older than the bound, parks count and the third one escalates."""
+    from hermes_cli import kanban_deploy_window as kdw
+
+    assert kdw.HEALTHY_MAX_SECONDS == DAY
+    home, conn = board
+    tid = running(conn)
+    # 22 hourly healthy parks: more than the 20 events prior_same_premise looks at, so the
+    # run's start must come from the full history, not the last 20 parks.
+    for h in range(22):
+        _at(monkeypatch, home, NOW + 3600 * h)
+        event, _summary = park(conn, tid, op)
+        assert event.kind != kaw.ESCALATED_EVENT
+        assert event.payload["awaiting"]["deploy_window"]["healthy"] is True
+        assert event.payload["awaiting"]["deploy_window"]["streak_since"] == NOW
+        running(conn, tid)
+    late = NOW + DAY + 1
+    kinds = []
+    for i in range(3):
+        _at(monkeypatch, home, late + 60 * i)
+        event, _summary = park(conn, tid, op)
+        kinds.append(event.kind)
+        if event.kind == kaw.ESCALATED_EVENT:
+            break
+        seen = event.payload["awaiting"]["deploy_window"]
+        assert seen["healthy"] is False and seen["healthy_expired"] is True
+        assert event.payload["wake_at"] == late + 60 * i + 3600 + 900  # floor is kept
+        running(conn, tid)
+    assert kinds == ["scheduled" if op != "continue" else "continued"] * 2 + [kaw.ESCALATED_EVENT]
+
+
+@pytest.mark.parametrize("op", OPS)
+def test_healthy_exemption_holds_inside_bound(board, monkeypatch, op):
+    """Control: just inside the bound, healthy parks stay exempt and never escalate."""
+    home, conn = board
+    tid = running(conn)
+    for t in (NOW, NOW + 3600, NOW + DAY - 60, NOW + DAY, NOW + DAY):
+        _at(monkeypatch, home, t)
+        event, _summary = park(conn, tid, op)
+        assert event.kind != kaw.ESCALATED_EVENT
+        assert event.payload["awaiting"]["deploy_window"]["healthy"] is True
+        running(conn, tid)
+
+
+@pytest.mark.parametrize("op", OPS)
+def test_bound_counts_from_the_run_after_another_premise(board, monkeypatch, op):
+    """A park on another premise ends the run: the bound restarts from the next deploy park."""
+    home, conn = board
+    tid = running(conn)
+    _at(monkeypatch, home, NOW)
+    park(conn, tid, op)
+    running(conn, tid)
+    restart = NOW + DAY
+    _at(monkeypatch, home, restart)
+    park(conn, tid, op, awaiting={"kind": "external", "ref": "vendor-1234", "why": "vendor queue"},
+         probe="test -f /nonexistent-vendor-receipt")
+    running(conn, tid)
+    for t in (restart + 60, restart + 120, restart + 180):
+        _at(monkeypatch, home, t)
+        event, _summary = park(conn, tid, op)
+        seen = event.payload["awaiting"]["deploy_window"]
+        assert seen["healthy"] is True and seen["streak_since"] == restart + 60
+        running(conn, tid)
 
 
 @pytest.mark.parametrize("op", OPS)
