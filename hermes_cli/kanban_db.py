@@ -2808,21 +2808,7 @@ from hermes_cli.kanban_completion_evidence import gate_empty_completion as _gate
 
 
 
-def _stage_completion_artifacts(
-    conn: sqlite3.Connection, task_id: str, metadata: dict, now: int, *,
-    uploaded_by: str = "kanban_complete",
-) -> list[Path]:
-    """Copy scratch artifacts to the attachments dir and record each as an
-    attachment row; returns the copies so the caller can discard them if its
-    transaction rolls back."""
-    _persist_scratch_completion_artifacts(conn, task_id, metadata)
-    staged = [Path(stored_path) for stored_path in metadata.pop("_staged_artifacts", [])]
-    for path in staged:
-        _insert_completion_attachment(
-            conn, task_id, filename=path.name, stored_path=str(path),
-            size=path.stat().st_size, created_at=now, uploaded_by=uploaded_by,
-        )
-    return staged
+from hermes_cli.kanban_metadata_files import stage_completion_artifacts as _stage_completion_artifacts
 
 
 def _cleaned_artifact_paths(metadata: Any) -> list[str]:
