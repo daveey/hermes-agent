@@ -97,6 +97,11 @@ LOCAL_COLUMNS: dict[str, frozenset[str]] = {
 # Set by the service, never by a gateway: applied from the feed, never captured.
 # ``ready_since``: when the card last became ready (ms), for the Board's ``home_grace`` placement rule.
 SERVER_COLUMNS: dict[str, frozenset[str]] = {"tasks": frozenset({"created_on", "ready_since"})}
+# Old columns an ADD-first rename migration keeps (``kanban_db_connect._RENAMED_TASK_COLUMNS``: the new column is
+# added and filled from the old one, which stays). Every board older than the rename holds them; only
+# ``Task.from_row``'s pre-migration fallbacks read them, and they never travel. Known, so the schema-ahead guard
+# (``undeclared_columns``) does not read an OLDER schema's leftovers as a newer core's columns. [daveey]
+RETIRED_COLUMNS: dict[str, frozenset[str]] = {"tasks": frozenset({"spawn_failures", "last_spawn_error"})}
 KEY_COLUMNS: dict[str, frozenset[str]] = {
     "tasks": frozenset({"id"}),
     "task_links": frozenset(),
@@ -466,11 +471,12 @@ def captured_columns(conn: sqlite3.Connection, table: str) -> list[str]:
 
 
 def undeclared_columns(conn: sqlite3.Connection) -> dict[str, set[str]]:
-    """Per synced table, columns that are neither synced, local-only nor a key:
+    """Per synced table, columns that are neither synced, local-only, a key nor retired:
     a migration added them and nobody decided whether they leave the gateway."""
     out: dict[str, set[str]] = {}
     for table in SYNCED_TABLES:
-        known = SYNCED_COLUMNS[table] | LOCAL_COLUMNS[table] | KEY_COLUMNS[table] | SERVER_COLUMNS.get(table, frozenset())
+        known = (SYNCED_COLUMNS[table] | LOCAL_COLUMNS[table] | KEY_COLUMNS[table]
+                 | SERVER_COLUMNS.get(table, frozenset()) | RETIRED_COLUMNS.get(table, frozenset()))
         extra = set(table_columns(conn, table)) - known
         if extra:
             out[table] = extra
