@@ -38,7 +38,8 @@ A card stays local when any of these holds:
   live on the hub and the MacBook" — is not a local-only need. A product name (Baby Bear) in the
   title pins only when the card names no Linux, or also names Apple/device work;
 * the target is not live: this gateway's hermes-hub sync has not succeeded recently, or the
-  target's capability record is stale.
+  target's capability record is stale. A name hermes-hub has no record of at all is refused as
+  unknown, with the gateway names it does know.
 
 Heavy work (tests, builds, benchmarks, installs: :data:`DEFAULT_HEAVY_MARKERS`, replaced by
 ``kanban.placement.heavy_markers``) with no local-only need goes to a worker node instead of the target
@@ -148,6 +149,8 @@ DEFAULT_HEAVY_MARKERS = (
 )
 # The routed target's own host named in the card: that work belongs on the target, not a worker.
 TARGET_HOST_MARKERS = (r"\bhermes-hub\b", r"\bon the hub\b", r"\bthe hub's\b")
+# target_live()'s reason for a pin hermes-hub has no gateway record of (a wrong name, not a dead gateway).
+UNKNOWN_GATEWAY = "no gateway is named"
 # kanban_create options hermes-hub create-task cannot carry: a card using them stays local.
 UNCARRIED_OPTIONS = ("initial_status", "human_request", "workspace_path", "project", "project_id", "tenant",
                      "max_retries")  # hermes-hub create-task has no retry breaker option [daveey]
@@ -428,6 +431,12 @@ def target_live(target: str, *, now: float, live_seconds: int,
         return "this gateway's hermes-hub sync has not succeeded recently"
     remote = reg.remote_records() if remote is None else remote
     rec = remote.get(target)
+    if rec is None and remote:
+        # A name hermes-hub has no record of is a wrong name, not an outage. "stale or missing" read as one, so
+        # callers dropped the pin instead of fixing it: the Desktop calls the hub 'hub-ec2' and the mini
+        # 'mac-mini' (22 refusals, 10-28..11-02). An empty registry can't tell the two apart. [daveey]
+        return (f"{UNKNOWN_GATEWAY} {target!r}: hermes-hub knows {', '.join(sorted(remote))}. Pin one of those, "
+                f"or map this name in kanban.placement.aliases")
     try:
         at = float((rec or {}).get("refreshed_at") or 0)
     except (TypeError, ValueError):
@@ -729,6 +738,8 @@ def _target_not_live_why(target: str, dead: str) -> str:
         dead = (f"this gateway has no hermes-hub replica (a Board worker node), so it cannot place cards on other "
                 f"gateways. Use kanban_block(needs=[...]): a worker node relays the need to the card's home "
                 f"gateway, which opens the owner card on {target}")
+    if dead.startswith(UNKNOWN_GATEWAY):
+        return dead  # a wrong name, not a dead gateway: "not live" sent callers to drop the pin
     return f"{target} not live: {dead}"
 
 

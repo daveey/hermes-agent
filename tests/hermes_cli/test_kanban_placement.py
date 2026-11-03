@@ -392,6 +392,19 @@ def test_target_live_needs_a_recent_sync_and_a_fresh_target_record():
     assert "missing" in kp.target_live("hub", now=now, live_seconds=600, meta={"last_ok": now - 30}, remote={})
 
 
+def test_target_live_names_the_known_gateways_for_a_name_it_has_no_record_of():
+    # The Desktop calls the hub 'hub-ec2' and the mini 'mac-mini'. "stale or missing" read as an outage, so
+    # callers dropped the pin instead of fixing the name (22 refusals, 10-28..11-02). [daveey]
+    now = 1_000_000.0
+    fresh = {"hub": {"refreshed_at": now - 60}, "mini": {"refreshed_at": now - 60}, "macbook": {"refreshed_at": now}}
+    why = kp.target_live("hub-ec2", now=now, live_seconds=600, meta={"last_ok": now - 30}, remote=fresh) or ""
+    assert why.startswith("no gateway is named 'hub-ec2'") and "hub, macbook, mini" in why, why
+    assert "stale" not in why and "kanban.placement.aliases" in why, why
+    # An empty registry can't tell a wrong name from an unreadable registry: the old reason stays.
+    empty = kp.target_live("hub-ec2", now=now, live_seconds=600, meta={"last_ok": now - 30}, remote={}) or ""
+    assert "missing" in empty and not empty.startswith("no gateway"), empty
+
+
 # --- kanban_create end to end -------------------------------------------------------------------
 
 HUB_SCHEMA = """
@@ -1303,6 +1316,27 @@ def test_hermes_hub_pin_on_the_hub_itself_creates_locally(mac, monkeypatch):
     out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "placement": "hermes-hub"}))
     assert out.get("ok") and out["task_id"] and "placed" not in out, out
     assert _local_count() == 1
+
+
+def test_desktop_gateway_name_through_the_tool_is_refused_with_the_names_to_use(mac):
+    # cross_session/cross_task and @task refs name the hub 'hub-ec2'. With no alias for it, the refusal must
+    # say which names exist, not "hub-ec2 not live: ... stale or missing". [daveey]
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "placement": "hub-ec2"}))
+    assert out.get("code") == "placement_unavailable" and out.get("created") is False, out
+    assert "no gateway is named 'hub-ec2': hermes-hub knows hub" in out["error"], out
+    assert "not live" not in out["error"] and "stale" not in out["error"], out
+    assert _local_count() == 0 and not mac["calls"]
+
+
+def test_desktop_gateway_name_with_a_configured_alias_creates_on_the_hub(mac, monkeypatch):
+    # The shipped policy maps the Desktop's names: kanban.placement.aliases {hub-ec2: hub, mac-mini: mini}. [daveey]
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: {**ROUTE, "wait_seconds": 0, "aliases": {"hub-ec2": "hub"}})
+    out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "placement": "hub-ec2"}))
+    assert out.get("ok"), out
+    assert out["placed"]["gateway"] == "hub" and mac["calls"], out
+    assert _local_count() == 0
 
 
 # --- heavy work goes to a worker node (kanban.placement.heavy_route) ------------------------------------
