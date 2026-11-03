@@ -96,6 +96,8 @@ def test_assembly_publishes_facts_as_termux_uid_and_returns_host_owned_output(pa
     result = subprocess.run(
         ["bash", "-c", r'''
 set -euo pipefail
+# Ubuntu's default user-private-group umask (CI runners use it): output must not inherit it.
+umask 0002
 IMAGE="$1"; PAYLOAD_ABS="$2"; REPO="$3"
 source "$REPO/scripts/termux/assembly_permissions.sh"
 prepare_assembly
