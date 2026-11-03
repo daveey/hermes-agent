@@ -342,7 +342,7 @@ class GatewayKanbanWatchersMixin:
                     pids = await _to_thread_process_service(_kbd.reap_worker_zombies)
                     if pids:
                         logger.info("kanban dispatcher: reaped %d zombie worker(s), pids=%s", len(pids), pids)
-                except Exception:
+                except Exception:  # health: allow BLE001 -- moved unchanged: zombie reaper failure is logged with traceback
                     logger.exception("kanban dispatcher: zombie reaper failed")
 
                 try:
@@ -406,7 +406,7 @@ class GatewayKanbanWatchersMixin:
                 except asyncio.CancelledError:
                     logger.debug("kanban dispatcher: cancelled")
                     raise
-                except Exception:
+                except Exception:  # health: allow BLE001 -- moved unchanged: one tick's failure never stops the next (logged with traceback)
                     health.invalidate()
                     logger.exception("kanban dispatcher: unexpected watcher error")
 

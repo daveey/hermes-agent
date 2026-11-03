@@ -49,7 +49,7 @@ def is_root_gateway() -> bool:
         from hermes_cli.kanban_db import kanban_home
         from hermes_constants import get_hermes_home
         return _resolve(get_hermes_home()) == _resolve(kanban_home())
-    except Exception:
+    except Exception:  # health: allow BLE001 -- cannot tell -> pre-lease behaviour (no deference)
         return True  # can't tell -> behave like the pre-lease code (no deference)
 
 
@@ -66,7 +66,7 @@ def _pid_alive(pid: int) -> bool:
     try:
         from gateway.status import _pid_exists
         return bool(_pid_exists(pid))
-    except Exception:
+    except Exception:  # health: allow BLE001 -- liveness probe: any failure reads as not alive
         return False
 
 
@@ -313,7 +313,7 @@ def is_root_home(home: Optional[str]) -> bool:
     try:
         from hermes_cli.kanban_db import kanban_home
         return _resolve(Path(home)) == _resolve(kanban_home())
-    except Exception:
+    except Exception:  # health: allow BLE001 -- an unresolvable home is simply not the root
         return False
 
 
@@ -326,7 +326,7 @@ def root_expected_locks() -> list[Path]:
         from hermes_cli.config_backend import config_exists, read_config_doc_readonly
         path = kanban_home() / "config.yaml"
         kanban = ((read_config_doc_readonly(path) if config_exists(path) else None) or {}).get("kanban") or {}
-    except Exception:
+    except Exception:  # health: allow BLE001 -- an unreadable root config means default locks; never block resume
         kanban = {}
     if kanban.get("dispatch_in_gateway", True):
         locks.append(root / ".dispatcher.lock")
@@ -345,7 +345,7 @@ def wait_for_root_locks(pid: int, *, timeout: float = ROOT_LOCK_WAIT_SECONDS, lo
     """
     try:
         paths = root_expected_locks() if locks is None else [Path(p) for p in locks]
-    except Exception:
+    except Exception:  # health: allow BLE001 -- probe must never raise into the updater's resume
         return []
     sleep = sleep or time.sleep
     clock = clock or time.monotonic

@@ -68,7 +68,7 @@ def cap_source(capacity: str) -> str:
     try:
         from hermes_constants import get_hermes_home
         config = f"{get_hermes_home()}/config.yaml"
-    except Exception:
+    except Exception:  # health: allow BLE001 -- cap source is decoration on a warning line; never break the warning
         config = "config.yaml"
     if capacity.startswith("max_in_progress="):
         from hermes_cli.kanban_db_dispatch import configured_max_in_progress

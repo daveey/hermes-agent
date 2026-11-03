@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import logging
 import os
 import re
 import shlex
@@ -141,8 +142,8 @@ def _check_dispatcher_presence(hermes_home: Optional[Path] = None) -> tuple[bool
         holder = holder_info(kanban_home() / "kanban" / ".dispatcher.lock")
         if holder:
             return (True, f"host dispatcher: {describe_holder(holder)}")
-    except Exception:
-        pass
+    except Exception:  # health: allow BLE001 -- fails open like the rest of this probe
+        logging.getLogger(__name__).debug("dispatcher presence: host lock probe failed", exc_info=True)
     try:
         from gateway.status import resolve_gateway_liveness  # type: ignore
 
@@ -1614,8 +1615,8 @@ def _host_lock_holders() -> dict:
         root = kb.kanban_home() / "kanban"
         for name in ("dispatcher", "sync"):
             out[name] = holder_info(root / f".{name}.lock")
-    except Exception:
-        pass
+    except Exception:  # health: allow BLE001 -- stats must print even when the lock probe can't run
+        logging.getLogger(__name__).debug("kanban stats: host lock probe failed", exc_info=True)
     return out
 
 
