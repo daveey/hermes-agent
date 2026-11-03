@@ -27,7 +27,8 @@ def partition_at_merge(checks, merged_at, *, runs):
     """Latest pre-merge execution per producer, plus every later execution.
 
     App identities stay distinct: an unpinned context must not hide another app's
-    failed run behind a success. Legacy statuses have only their context identity.
+    failed run behind a success. Legacy statuses key on context + creator, so a
+    later status by someone else never hides the pinned app's own status.
     """
     cutoff = timestamp(merged_at)
 
@@ -35,7 +36,9 @@ def partition_at_merge(checks, merged_at, *, runs):
         return timestamp(check.get("started_at") if runs else check.get("created_at"))
 
     def key_of(check):
-        return (check["name"], check["app"]["id"]) if runs else check["context"]
+        if runs:
+            return (check["name"], check["app"]["id"])
+        return (check["context"], (check.get("creator") or {}).get("id"))
 
     def concluded_at_merge(check):
         done = check.get("completed_at")
