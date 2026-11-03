@@ -105,6 +105,28 @@ def test_a_worker_move_back_to_the_origin_is_repinned_there_and_the_origin_runs_
     assert svc.board(BOARD)["leases"][tid]["holder"] == HUB
 
 
+def test_a_reclaimed_move_of_a_policy_card_is_a_request_too(gws, svc, monkeypatch):
+    origin, worker = gws
+    monkeypatch.setattr(wp, "local_admission", lambda conn_: True)
+    monkeypatch.setitem(node_fixtures.MACHINES[HUB], "pickup", "explicit")
+    tid, _ = _worker_runs_policy_card(origin, worker, svc)
+    # The fixture's spawner records this test process as the worker pid; reclaim must not SIGTERM it.
+    monkeypatch.setattr(kb, "_terminate_reclaimed_worker", lambda pid, lock, **kw: {
+        "prev_pid": pid, "host_local": True, "termination_attempted": True, "terminated": True, "sigkill": False})
+    worker.enter()
+    before = worker.conn.execute("SELECT runs_on FROM tasks WHERE id=?", (tid,)).fetchone()[0]
+    res = km.move_reclaim(worker.conn, tid, runs_on=[f"machine:{HUB}"], reason="needs the hub", force=True)
+    assert res["ok"] and res.get("repin") == "requested", res
+    assert worker.conn.execute("SELECT runs_on FROM tasks WHERE id=?", (tid,)).fetchone()[0] == before
+    assert _moved(worker.conn, tid)[-1].get("repin_requested") is True
+    worker.round()
+    origin.round()
+    hub = PlacementHub(svc, HUB)
+    origin.enter()
+    wp.reevaluate(origin.conn, hub, BOARD, HUB, cfg=POOLS)
+    assert hub.reserves == [] and [r["runs_on"] for r in hub.repins] == [[f"machine:{HUB}"]]
+
+
 class RecordingHub:
     def __init__(self, *, refuse=None):
         self.reserves, self.repins, self.refuse = [], [], refuse
@@ -159,6 +181,20 @@ def test_an_applied_repin_is_not_replayed(conn, no_pull):
     hub = RecordingHub()
     wp.reevaluate(conn, hub, "default", "hub", cfg=POOLS)
     assert hub.repins == [] and len(hub.reserves) == 1
+
+
+def test_a_local_record_failure_after_a_board_repin_does_not_abort_the_batch(conn, no_pull, monkeypatch):
+    first, second = _acknowledged(conn), _acknowledged(conn)
+    for tid in (first, second):
+        kb._append_event(conn, tid, km.MOVED_EVENT, {"from_machine": WORKER, "runs_on": ["machine:hub"]})
+    conn.commit()
+
+    def broken(*a, **kw):
+        raise __import__("sqlite3").OperationalError("database is locked")
+    monkeypatch.setattr(wp, "_record_repin", broken)
+    hub = RecordingHub()
+    wp.reevaluate(conn, hub, "default", "hub", cfg=POOLS)
+    assert sorted(r["task_id"] for r in hub.repins) == sorted([first, second])
 
 
 def test_not_claimable_backs_off_until_the_revision_changes(conn, no_pull):

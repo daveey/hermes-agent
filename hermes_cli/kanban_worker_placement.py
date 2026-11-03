@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
+import sqlite3
 import time
+
+logger = logging.getLogger(__name__)
 
 POLICY = "worker-first-v1"
 WAITING = "waiting_for_worker_capacity"
@@ -131,13 +135,20 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
             if held and held[0] == row["sync_version"] and now < held[1]:
                 continue  # refused not_claimable at this revision: wait for the feed, don't re-ask every tick
             _refused.pop(key, None)
+            if len(_refused) > 1024:  # cards that left the query never come back to clear their entry
+                for stale in [k for k, (_, until) in _refused.items() if until <= now]:
+                    del _refused[stale]
             labels = requested_move(conn, row["id"])
             try:
                 if labels is not None:
                     # A run moved this card (kanban_move). Its runs_on is Board-owned, so only the origin's
                     # creator repin can apply that move; reserving would hand it straight back to the pool.
                     reply = hub.repin(board, task_id=row["id"], expected_revision=row["sync_version"], runs_on=labels)
-                    _record_repin(conn, row["id"], gateway, labels, reply)
+                    try:
+                        _record_repin(conn, row["id"], gateway, labels, reply)
+                    except sqlite3.Error:
+                        logger.warning("repinned %s on the Board but could not record it locally", row["id"],
+                                       exc_info=True)
                 else:
                     reply = hub.reserve(board, task_id=row["id"], expected_revision=row["sync_version"],
                                         candidates=candidates)

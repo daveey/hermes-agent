@@ -231,21 +231,27 @@ def move_reclaim(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason
         plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg)
     except MoveRefused as exc:
         return {"ok": False, "reason_code": exc.code, "error": str(exc)}
-    row = conn.execute("SELECT t.status, t.claim_lock, r.uid AS run_uid FROM tasks t LEFT JOIN task_runs r "
+    row = conn.execute("SELECT t.status, t.claim_lock, t.placement_policy, r.uid AS run_uid FROM tasks t "
+                       "LEFT JOIN task_runs r "
                        "ON r.id = t.current_run_id WHERE t.id = ?", (task_id,)).fetchone()
     if row["status"] != "running" or row["claim_lock"] is None:
         return {"ok": False, "reason_code": "not_running_here",
                 "error": f"task {task_id} is not running under a claim on this gateway"}
+    requested = bool(row["placement_policy"])  # Board-owned runs_on: the origin repins it (see move_task)
     with kb.write_txn(conn):
-        wn.set_runs_on(conn, task_id, plan["runs_on"])
+        if not requested:
+            wn.set_runs_on(conn, task_id, plan["runs_on"])
         kb._append_event(conn, task_id, MOVED_EVENT, {
             "from_machine": plan["me"], "runs_on": plan["runs_on"], "previous_runs_on": plan["previous"],
             "reason": reason[:500], "move_no": plan["move_no"], "forced": plan["forced"],
-            "matches": plan["matches"], "reclaimed": True})
+            "matches": plan["matches"], "reclaimed": True, **({"repin_requested": True} if requested else {})})
     if not kb.reclaim_task(conn, task_id, reason=f"moved to {plan['runs_on']}: {reason}"[:400]):
         return {"ok": False, "reason_code": "reclaim_failed",
                 "error": f"labels set to {plan['runs_on']} but the run could not be reclaimed; it ends on its own"}
     sync.release_lease(conn, task_id, row["run_uid"])
     status = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()["status"]
-    return {"ok": True, "runs_on": plan["runs_on"], "matches": plan["matches"], "move_no": plan["move_no"],
-            "status": status}
+    out = {"ok": True, "runs_on": plan["runs_on"], "matches": plan["matches"], "move_no": plan["move_no"],
+           "status": status}
+    if requested:
+        out["repin"] = "requested"
+    return out
