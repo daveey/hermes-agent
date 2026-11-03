@@ -29,12 +29,17 @@ def _kbd():
     from hermes_cli import kanban_db_dispatch
     return kanban_db_dispatch
 
+_UNSET = object()
+
 _CORRUPT_DB_MARKERS = ("file is not a database", "database disk image is malformed")
 
 
 @dataclass
 class _DispatcherSettings:
-    """``kanban.*`` dispatch settings, read once at boot (restart to apply)."""
+    """``kanban.*`` dispatch settings, read once at boot (restart to apply).
+
+    Exception: ``max_in_progress`` is re-read every tick (``_KanbanDispatcher.live_max_in_progress``);
+    this field is only its boot value / fallback."""
 
     interval: float
     max_spawn: Any
@@ -137,9 +142,28 @@ class _KanbanDispatcher:
         self.successful_scopes: list = []
         self.disabled_corrupt_boards: dict[str, tuple[tuple[str, int | None, int | None], float]] = {}
         self._rr_offset = 0  # round-robin start board for spawning ticks (_fair_board_order)
+        self._logged_max_in_progress: Any = _UNSET  # last host cap a tick used (live_max_in_progress)
 
     def _board_slugs(self) -> list:
         return _board_slugs(self.kb)
+
+    def live_max_in_progress(self) -> Optional[int]:
+        """``kanban.max_in_progress`` re-read for this tick (config load is mtime-cached). [daveey]
+
+        The host cap is the one dispatch setting an operator lowers to contain load, and the
+        dashboard and ``hermes kanban daemon`` already read it live. Freezing it at boot let a
+        hub gateway booted at 16 keep claiming to 16/16 for an hour after config said 7, while
+        the dashboard showed 15/7. An explicit positive value wins; an unset or unreadable key
+        keeps the boot value (the memory-derived default when it was unset at boot).
+        """
+        configured = _kbd().configured_max_in_progress()
+        effective = configured if configured is not None else self.settings.max_in_progress
+        if effective != self._logged_max_in_progress:
+            if self._logged_max_in_progress is not _UNSET:
+                logger.info("kanban dispatcher: max_in_progress=%s (was %s; config re-read live)",
+                            effective, self._logged_max_in_progress)
+            self._logged_max_in_progress = effective
+        return effective
 
     def board_db_fingerprint(self, slug: str) -> tuple[str, int | None, int | None]:
         from hermes_cli import kanban_db as _kb
@@ -189,6 +213,7 @@ class _KanbanDispatcher:
         if not self._quarantine_lifted(slug, fingerprint):
             return None
         kwargs = {k: v for k, v in asdict(self.settings).items() if k != "interval"}
+        kwargs["max_in_progress"] = self.live_max_in_progress()
         if suppress_spawn:
             kwargs["max_spawn"] = 0  # budget gate refuses every claim; bookkeeping phases still run
         try:
