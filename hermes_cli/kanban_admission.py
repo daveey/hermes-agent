@@ -186,7 +186,7 @@ def claim_transaction(conn, *, task_id=None, gate=None):
     process's installation root, not the board path. Hooks run after both locks.
     """
     from hermes_constants import get_default_hermes_root
-    from hermes_cli.admission_fence import AdmissionBusy, admission_lock, is_held, HOLD_MESSAGE, SUPPORTED
+    from hermes_cli.admission_fence import AdmissionBusy, admission_lock, is_held, turns_waiting, HOLD_MESSAGE, SUPPORTED
     from hermes_cli.kanban_db import write_txn
 
     if conn.in_transaction:
@@ -206,6 +206,7 @@ def claim_transaction(conn, *, task_id=None, gate=None):
             try:
                 root = stack.enter_context(admission_lock(get_default_hermes_root(), timeout=0))
                 held = is_held(root)
+                waiting = not held and turns_waiting(root)
             except AdmissionBusy:
                 # [daveey] Designed contention: another claimer (or hermes-sync) holds admission.lock
                 # through its commit. A normal defer, not a failure: no WARNING/traceback, which the
@@ -219,6 +220,12 @@ def claim_transaction(conn, *, task_id=None, gate=None):
                 return
             if held:
                 logging.getLogger(__name__).info(HOLD_MESSAGE)
+                yield False
+                return
+            if waiting:
+                # [daveey] A chat/notification/review turn is waiting out this lock: claims retry next tick, turns
+                # cannot, so the claim yields before its ~1 s sample (review F1).
+                logging.getLogger(__name__).info("A turn is waiting for update admission; deferring Kanban claim")
                 yield False
                 return
             # Frozen contract: an independent full CPU sample is taken HERE, with admission.lock held, and the

@@ -76,15 +76,16 @@ def test_reservation_survives_lock_briefly_busy_without_hold(tmp_path, caplog):
 def test_reservation_refuses_long_busy_lock_with_one_warning(tmp_path, caplog):
     import logging
     import time
+    from hermes_cli.backend_retirement import BUSY_WAIT_S
     caplog.set_level(logging.DEBUG, logger="hermes_cli.backend_retirement")
-    child = _spawn_lock_holder(tmp_path, 2.0)
+    child = _spawn_lock_holder(tmp_path, BUSY_WAIT_S + 1.5)  # held past the whole busy-wait budget
     try:
         fence = RetirementFence()
         started = time.monotonic()
         with fence.reservation(tmp_path) as admitted:
             elapsed = time.monotonic() - started
             assert not admitted
-        assert 0.45 <= elapsed < 1.5
+        assert BUSY_WAIT_S - 0.05 <= elapsed < BUSY_WAIT_S + 1.0
         records = _busy_records(caplog)
         assert len(records) == 1, [r.getMessage() for r in records]
         message = records[0].getMessage()
@@ -150,7 +151,7 @@ def test_busy_refusal_text_says_briefly_busy(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_retirement, "retirement", fence)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     session = {"history_lock": threading.RLock(), "profile_home": str(tmp_path), "session_key": "k"}
-    child = _spawn_lock_holder(tmp_path, 2.0)
+    child = _spawn_lock_holder(tmp_path, backend_retirement.BUSY_WAIT_S + 1.5)  # past the busy-wait budget
     try:
         error, _ = server._lock_in_submit_turn("r", "s", session, "hi", {}, False, None, None, None)
     finally:

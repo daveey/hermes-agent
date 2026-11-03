@@ -4,6 +4,7 @@ The gate belongs to the process, not a profile or transport. Diagnostic ledgers 
 close the check/use race: every source of new work must reserve admission before dispatch.
 """
 
+import contextlib
 from contextlib import contextmanager
 from contextvars import ContextVar
 import logging
@@ -16,7 +17,13 @@ import time
 # dropped a typed message, notification or goal turn. Turn sources retry a busy lock (50 ms tries) for up
 # to BUSY_WAIT_S; a real hold or a retiring backend still refuses at once. The one caller that reserves
 # under the session resume lock (prompt.admit) passes busy_wait_s=0 and keeps a single try.
-BUSY_WAIT_S = 0.5
+# A hub Kanban claim holds the lock for its ~1 s CPU sample (worker-first overflow, frozen contract): the budget
+# outlasts that longest designed hold, and a waiting turn makes further claims defer (admission_fence.turn_waiting),
+# so a chat turn waits at most about one hold and is never refused by one (review F1). prompt.admit waits outside
+# the resume lock instead (methods_prompt_admission).
+from hermes_cli.admission_fence import CLAIM_MAX_HOLD_S
+
+BUSY_WAIT_S = CLAIM_MAX_HOLD_S + 0.5
 _refusal: ContextVar = ContextVar("update_admission_refusal", default=None)
 _busy_wait_override: ContextVar = ContextVar("update_admission_busy_wait", default=None)
 _log = logging.getLogger(__name__)
@@ -40,6 +47,38 @@ def last_refusal():
     return _refusal.get()
 
 
+@contextmanager
+def admission_waiter(home=None, busy_wait_s=None):
+    """Wait, registered as a waiting turn, until admission.lock is free (at most ``busy_wait_s``, default BUSY_WAIT_S).
+
+    For a caller whose reservation must take one short try because it holds the session resume lock (prompt.admit):
+    it waits here with that lock RELEASED, then retries its admission inside this block, so claims keep deferring to
+    it until it has reserved. Yields True once the lock came free, False when the budget ran out. [daveey]"""
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+    from hermes_cli import admission_fence
+
+    root = get_default_hermes_root(home=home or get_hermes_home())
+    budget = BUSY_WAIT_S if busy_wait_s is None else busy_wait_s
+    with contextlib.ExitStack() as waiting:
+        try:
+            waiting.enter_context(admission_fence.turn_waiting(root))
+        except OSError:
+            _log.debug("could not register as a waiting turn", exc_info=True)
+        deadline = time.monotonic() + budget
+        free = False
+        while not free:
+            try:
+                with admission_fence.admission_lock(root, timeout=0.05):
+                    free = True
+            except admission_fence.AdmissionBusy:
+                if time.monotonic() >= deadline:
+                    break
+            except (OSError, TimeoutError):
+                _log.warning("update admission unavailable while waiting for a busy lock", exc_info=True)
+                break
+        yield free
+
+
 def refusal_text():
     """The 5035 text for the latest refusal in this context."""
     if _refusal.get() == "busy":
@@ -56,23 +95,30 @@ def _reserve(root, busy_wait_s, what):
 
     started = time.monotonic()
     tries = 0
-    while True:
-        tries += 1
-        try:
-            pending = admission_fence.reserve(root)
-        except admission_fence.AdmissionBusy:
-            waited = time.monotonic() - started
-            if waited >= busy_wait_s:
-                _log.warning("%s unavailable: update admission lock busy for %.1fs (no update hold)", what, waited)
-                return None, "busy"
-            continue
-        except (OSError, TimeoutError):
-            _log.warning("%s unavailable", what, exc_info=True)
-            return None, "unavailable"
-        if tries > 1:
-            _log.debug("update admission lock was busy for %.2fs; %s after %d tries",
-                       time.monotonic() - started, "admitted" if pending is not None else "held", tries)
-        return pending, (None if pending is not None else "held")
+    with contextlib.ExitStack() as waiting:
+        while True:
+            tries += 1
+            try:
+                pending = admission_fence.reserve(root)
+            except admission_fence.AdmissionBusy:
+                waited = time.monotonic() - started
+                if waited >= busy_wait_s:
+                    _log.warning("%s unavailable: update admission lock busy for %.1fs (no update hold)", what, waited)
+                    return None, "busy"
+                if tries == 1:
+                    try:  # claims defer to a waiting turn; failing to register only loses that priority
+                        waiting.enter_context(admission_fence.turn_waiting(root))
+                    except OSError:
+                        _log.debug("could not register as a waiting turn", exc_info=True)
+                continue
+            except (OSError, TimeoutError):
+                _log.warning("%s unavailable", what, exc_info=True)
+                return None, "unavailable"
+            break
+    if tries > 1:
+        _log.debug("update admission lock was busy for %.2fs; %s after %d tries",
+                   time.monotonic() - started, "admitted" if pending is not None else "held", tries)
+    return pending, (None if pending is not None else "held")
 
 # [daveey] Background reviews (the post-turn memory/skill review fork) run on a daemon thread with
 # no session turn lease and no admission reservation, so the idle proof read a backend mid-review

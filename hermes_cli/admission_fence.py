@@ -19,6 +19,15 @@ CAPABILITY = {"version": 1, "supported": SUPPORTED, "scope": "installation-root"
 HOLD_MESSAGE = "Hermes update admission is paused or busy; retry shortly (or after the update completes)."
 
 
+# [daveey] The longest designed admission.lock hold: a hub Kanban claim's independent ~1 s CPU sample (window <= 2 s,
+# else refused) plus its commit, taken entirely under this lock (worker-first overflow, docs/worker-first-v1.md).
+# Turn sources wait longer than this (backend_retirement.BUSY_WAIT_S), so a hold never refuses a chat turn.
+CLAIM_MAX_HOLD_S = 2.5
+# A turn source waiting out a busy lock registers here; a Kanban claim that sees a waiter defers to its next tick
+# (claims retry; a typed message, notification or review turn has nowhere else to go), so waits stay one hold long.
+TURN_WAITERS = "turn-waiters"
+
+
 class AdmissionBusy(TimeoutError):
     """admission.lock is held by another process past the caller's timeout; no hold is implied.
 
@@ -76,6 +85,57 @@ class Reservation:
                 finally:
                     os.close(self.fd)
                     self.fd = None
+
+
+@contextmanager
+def turn_waiting(home):
+    """Mark a turn source as waiting for admission.lock while the block runs (never takes the lock).
+
+    The marker is flocked before it becomes visible (dotfile, then rename), so a reader never mistakes a
+    half-created marker for a crashed one; a crashed owner's marker is unlocked and is reaped by the reader."""
+    import fcntl
+
+    directory = Path(home) / "core-update" / TURN_WAITERS
+    directory.mkdir(parents=True, exist_ok=True)
+    name = uuid.uuid4().hex
+    tmp, path = directory / f".{name}", directory / name
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.rename(tmp, path)
+        yield
+    finally:
+        try:
+            path.unlink(missing_ok=True)
+            tmp.unlink(missing_ok=True)
+        finally:
+            os.close(fd)
+
+
+def turns_waiting(root):
+    """True while a live turn source waits for admission.lock (``root`` = the ``core-update`` directory)."""
+    import fcntl
+
+    try:
+        paths = [p for p in (Path(root) / TURN_WAITERS).iterdir() if not p.name.startswith(".")]
+    except FileNotFoundError:
+        return False
+    for path in paths:
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except FileNotFoundError:
+            continue
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno not in (errno.EAGAIN, errno.EACCES):
+                    raise
+                return True
+            path.unlink(missing_ok=True)  # crashed owner
+        finally:
+            os.close(fd)
+    return False
 
 
 def reserve(home):
