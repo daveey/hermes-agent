@@ -547,3 +547,77 @@ def test_a_declared_wait_on_a_cron_is_still_honoured(db):
     so.declare_outcome("chat", {"kind": "waiting", "on": [{"kind": "cron", "id": "j1"}]}, db=db)
     say(db, "tool", "ok", tool_name="session_outcome", tool_call_id="c1")
     assert so.derive_outcome("chat", db=db)["kind"] == "waiting"
+
+
+# ── unviewed completion notes (#134889 LC-7) ───────────────────────────────
+
+
+def note(db, display_text, kind="async_delegation_complete"):
+    """What ``append_completion_note`` writes when a completion arrives with no viewer: a user row, no turn."""
+    say(db, "user", "[ASYNC DELEGATION BATCH COMPLETE — d1] ...", display_kind=kind,
+        display_metadata={"completion_note": ['["async_delegation","d1",""]'], "display_text": display_text,
+                          "completion_admission": "a1"})
+
+
+def test_a_finished_completion_note_leaves_the_chats_own_last_turn_as_its_word(db):
+    turn(db)
+    note(db, "Subagent Task Completed: implement the fix")
+    note(db, "Finished: make", kind="process_complete")
+    out = so.refresh_outcome("chat", "notice", db=db)
+    assert (out["kind"], out["summary"]) == ("done", SUMMARY)
+
+
+def test_an_unfinished_delegation_note_is_a_stopped_subagent_not_an_interrupted_turn(db):
+    turn(db)
+    note(db, "Subagent Task Interrupted: implement the fix")
+    out = so.refresh_outcome("chat", "notice", db=db)
+    assert (out["kind"], out["reason"]) == ("unresolved", "subagent_killed")
+
+
+def test_an_unfinished_note_under_a_finished_one_still_names_the_stopped_subagent(db):
+    turn(db)
+    note(db, "Subagent Tasks Finished with Issues: fan-out (2 tasks)")
+    note(db, "Subagent Task Completed: other")
+    out = so.refresh_outcome("chat", "notice", db=db)
+    assert (out["kind"], out["reason"]) == ("unresolved", "subagent_killed")
+
+
+def test_a_finished_note_does_not_break_a_declaration_or_hide_a_lost_request(db):
+    say(db, "user", "do it")
+    so.declare_outcome("chat", {"kind": "done", "summary": "Shipped."}, db=db)
+    say(db, "assistant", "ok")
+    note(db, "Subagent Task Completed: x")
+    out = so.refresh_outcome("chat", "notice", db=db)
+    assert (out["kind"], out["source"]) == ("done", "declared")
+    say(db, "user", "and the docs?")
+    note(db, "Subagent Task Completed: y")
+    assert so.refresh_outcome("chat", "notice", db=db)["reason"] == "interrupted"
+
+
+def test_a_typed_row_that_merely_mentions_completion_note_is_still_a_request(db):
+    turn(db)
+    say(db, "user", "what is a completion_note?")
+    assert so.refresh_outcome("chat", "turn_end", db=db)["reason"] == "interrupted"
+
+
+@pytest.mark.parametrize("text, unfinished", [
+    ("Subagent Task Completed: a", False), ("Subagent Tasks Completed: a (2 tasks)", False),
+    ("Subagent Task Interrupted: a", True), ("Subagent Task Failed: a", True), ("Subagent Task Incomplete: a", True),
+    ("Subagent Tasks Finished with Issues: a (2 tasks)", True), ("Subagent Task Timed Out: a", True),
+    ("Finished: make", False), ("", False),
+])
+def test_unfinished_reads_the_producers_own_titles(text, unfinished):
+    from tools.process_registry_notifications import async_delegation_display_unfinished
+    assert async_delegation_display_unfinished(text) is unfinished
+
+
+@pytest.mark.parametrize("result, unfinished", [
+    ({"status": "completed", "summary": "ok"}, False), ({"status": "interrupted"}, True),
+    ({"status": "error", "error": "boom"}, True), ({"status": "timeout"}, True),
+    ({"status": "completed", "summary": "ok", "exit_reason": "max_iterations"}, True),
+])
+def test_unfinished_agrees_with_the_title_producer(result, unfinished):
+    from tools.process_registry_notifications import (async_delegation_display_text,
+                                                      async_delegation_display_unfinished)
+    for evt in ({"goal": "g", **result}, {"is_batch": True, "goals": ["g"], "results": [{"task_index": 0, **result}]}):
+        assert async_delegation_display_unfinished(async_delegation_display_text(evt)) is unfinished

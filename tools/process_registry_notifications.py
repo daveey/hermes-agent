@@ -349,6 +349,17 @@ def async_delegation_display_text(evt: dict) -> str:
     return f"Subagent Tasks {outcome}: {_short_title(title)} ({len(results)} tasks)"
 
 
+_FINISHED_DISPLAY_PREFIXES = ("Subagent Task Completed:", "Subagent Tasks Completed:")
+
+
+def async_delegation_display_unfinished(display_text: str) -> bool:
+    """True when ``async_delegation_display_text`` titled a result whose work did not finish (failed,
+    interrupted, timed out, truncated...). [daveey] Read by the stored chat outcome off an unviewed completion's
+    note (``hermes_state_outcome``), which keeps only this title; kept next to its producer so the two can't drift."""
+    text = str(display_text or "")
+    return text.startswith("Subagent Task") and not text.startswith(_FINISHED_DISPLAY_PREFIXES)
+
+
 def _short_title(title: str) -> str:
     # A goal is free text: the card's title stays one line (and within an admission's display limit).
     return title[:197] + "..." if len(title) > 200 else title

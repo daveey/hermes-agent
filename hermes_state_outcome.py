@@ -441,8 +441,46 @@ def _lost_request(tail: list[dict]) -> Optional[str]:
     return None
 
 
+def _completion_note(row: dict) -> Optional[dict]:
+    """The display metadata of a completion written into the chat as a note because no viewer was attached
+    (``gateway/session_completion_notes.py``, #134889 LC-7), else None. A note never runs a turn by design, so it
+    is not a request awaiting an answer: a chat that ends on one was not interrupted."""
+    if row.get("role") != "user":
+        return None
+    meta = row.get("display_metadata")
+    if isinstance(meta, str):
+        with contextlib.suppress(ValueError, TypeError):
+            meta = json.loads(meta)
+    return meta if isinstance(meta, dict) and meta.get("completion_note") else None
+
+
+def _unfinished_note(row: dict) -> bool:
+    """An async delegation's note whose subagent did not finish (failed, interrupted by a restart, timed out)."""
+    meta = _completion_note(row)
+    if meta is None or row.get("display_kind") != "async_delegation_complete":
+        return False
+    from tools.process_registry_notifications import async_delegation_display_unfinished
+
+    return async_delegation_display_unfinished(str(meta.get("display_text") or ""))
+
+
+def _without_finished_notes(tail: list[dict]) -> list[dict]:
+    """[daveey] ``tail`` with its trailing completion notes for finished work dropped: the chat's own last turn is
+    then its last word. The newest note for unfinished work stops the drop and heads the tail, so ``_tail_reason``
+    names it."""
+    i = 0
+    while i < len(tail) and _completion_note(tail[i]) is not None:
+        if _unfinished_note(tail[i]):
+            return tail[i:]
+        i += 1
+    return tail[i:] if 0 < i < len(tail) else tail
+
+
 def _tail_reason(tail: list[dict]) -> Optional[str]:
     last = tail[0]
+    if _unfinished_note(last):
+        # A subagent the chat was waiting on stopped before it finished; with no viewer the note ran no turn.
+        return "subagent_killed"
     if last.get("display_kind") == _NOTICE_KIND:
         # The orphan reap's notice to a parent whose subagent a restart killed (tui_gateway/reap_notices.py).
         return "subagent_killed" if '"subagent_killed"' in str(last.get("display_metadata") or "") else "notice_tail"
@@ -520,7 +558,7 @@ def _derive(db: Any, sid: str, *, ignore_live_turn: bool = False,
     if not ignore_live_turn and _live_turn(db, sid):
         return _outcome("running", now)
     decisions, waits = _live_work(db, sid, _lineage_ids(db, sid))
-    tail = _tail(db, sid)
+    tail = _without_finished_notes(_tail(db, sid))
     if pending_reply is not None:  # the unsaved final reply is the last assistant message
         tail.insert(0, {"role": "assistant", "content": pending_reply, "timestamp": now})
     declared = _declared(stored)
