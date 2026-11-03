@@ -400,6 +400,7 @@ _UPDATE_DEPENDENCIES = (
     "hermes_cli/github_api.py",  # source_check's release lookup
     "hermes_cli/build_info.py",
     "hermes_cli/image_provenance.py",
+    "gateway/kanban_singleton.py",  # update_cmd_posix_pause waits for the root's host Kanban locks
     "hermes_cli/backup.py",  # pre-update backup
     "hermes_cli/backup_cron_prompts.py",  # restore_cron_prompt_fields_if_degraded (update_cmd_config)
     "hermes_cli/backup_restore.py",
