@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from tests.gateway.test_normal_runtime_boot import control
+from tests.child_log import ChildLog
 
 
 def _seed(home: Path, sid: str) -> None:
@@ -43,7 +44,7 @@ def test_mute_and_outcome_refresh_run_on_the_live_owner(tmp_path):
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED') if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
                PYTHONUNBUFFERED='1')
-    with (tmp_path / 'gateway.log').open('w+') as log:
+    with ChildLog(tmp_path / 'gateway.log') as log:
         process = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=root, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
@@ -56,8 +57,7 @@ def test_mute_and_outcome_refresh_run_on_the_live_owner(tmp_path):
                 except (OSError, ValueError):
                     pass
                 time.sleep(.1)
-            log.seek(0)
-            assert descriptor.get('state') == 'ready', (descriptor, log.read())
+            assert descriptor.get('state') == 'ready', (descriptor, log.text())
 
             def headers():
                 # A native grant ticket is single-use: mint one per request, as Desktop does.

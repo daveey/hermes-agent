@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from tests.gateway.test_normal_runtime_boot import control
+from tests.child_log import ChildLog
 
 
 @pytest.mark.platforms('linux')
@@ -33,7 +34,7 @@ def test_owner_backfill_runs_on_the_live_owner(tmp_path):
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED') if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
                PYTHONUNBUFFERED='1')
-    with (tmp_path / 'gateway.log').open('w+') as log:
+    with ChildLog(tmp_path / 'gateway.log') as log:
         process = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=root, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
@@ -46,8 +47,7 @@ def test_owner_backfill_runs_on_the_live_owner(tmp_path):
                 except (OSError, ValueError):
                     pass
                 time.sleep(.1)
-            log.seek(0)
-            assert descriptor.get('state') == 'ready', (descriptor, log.read())
+            assert descriptor.get('state') == 'ready', (descriptor, log.text())
 
             def headers(profile_home):
                 # The Desktop mints each profile's own native grant (the profile its body names).

@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from tests.gateway.test_normal_runtime_boot import control
+from tests.child_log import ChildLog
 
 
 @pytest.mark.platforms("linux")
@@ -35,7 +36,7 @@ def test_secondary_native_ticket_implicit_selectors_touch_only_the_secondary_hom
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED') if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
                PYTHONUNBUFFERED='1', HERMES_DASHBOARD_SESSION_TOKEN='normal-http-owner')
-    with (tmp_path / 'gateway.log').open('w+') as log:
+    with ChildLog(tmp_path / 'gateway.log') as log:
         process = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=root, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
@@ -49,8 +50,7 @@ def test_secondary_native_ticket_implicit_selectors_touch_only_the_secondary_hom
                 except (OSError, ValueError):
                     pass
                 time.sleep(.1)
-            log.seek(0)
-            assert descriptor.get('state') == 'ready', (descriptor, log.read())
+            assert descriptor.get('state') == 'ready', (descriptor, log.text())
             served = {p['profile_id'] for p in descriptor['served_profiles']}
             assert str(beta.resolve()) in served and str(home.resolve()) in served, descriptor
 

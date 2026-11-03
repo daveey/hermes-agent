@@ -12,6 +12,7 @@ import time
 import pytest
 from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
+from tests.child_log import ChildLog
 
 
 def control(home, verb, params=None):
@@ -142,7 +143,7 @@ def test_normal_entrypoint_earns_authenticated_authority_readiness(tmp_path, mod
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home),
                PYTHONPATH=str(root), PYTHONUNBUFFERED='1',
                OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=model_url)
-    with (tmp_path / 'gateway.log').open('w+') as log:
+    with ChildLog(tmp_path / 'gateway.log') as log:
         process = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=root, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         descriptor = {}
@@ -156,9 +157,7 @@ def test_normal_entrypoint_earns_authenticated_authority_readiness(tmp_path, mod
                 except (OSError, ValueError):
                     pass
                 time.sleep(.1)
-            log.flush()
-            log.seek(0)
-            assert descriptor.get('state') == 'ready', (descriptor, log.read())
+            assert descriptor.get('state') == 'ready', (descriptor, log.text())
             assert descriptor['authority_epoch'] > 0
             import sqlite3
             with sqlite3.connect(f"file:{home / 'state.db'}?mode=ro", uri=True) as db:

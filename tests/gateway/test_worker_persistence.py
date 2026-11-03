@@ -10,6 +10,7 @@ import sys
 import pytest
 
 from tests.gateway.fixtures.local_recovery_probe import daemon, rpc, websocket
+from tests.child_log import ChildLog
 
 
 @pytest.mark.platforms("linux")
@@ -28,7 +29,7 @@ def test_worker_survives_owner_restart_without_repeating_tool(tmp_path):
             response = await rpc(ws, 'session.create', request_id='worker-session', source='cli')
             assert 'result' in response, response
             return response['result']['session_id']
-    with (tmp_path / 'worker.log').open('w+') as log:
+    with ChildLog(tmp_path / 'worker.log') as log:
         worker = subprocess.Popen([sys.executable, str(root / 'tests/gateway/fixtures/persistence_worker.py')],
             cwd=root, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True)
         def command(op, **params):
@@ -37,8 +38,7 @@ def test_worker_survives_owner_restart_without_repeating_tool(tmp_path):
             import select
             assert select.select([worker.stdout], [], [], 30)[0], 'worker response timeout'
             raw = worker.stdout.readline()
-            log.flush(); log.seek(0)
-            assert raw, log.read()
+            assert raw, log.text()
             result = json.loads(raw)
             assert 'fatal' not in result, result
             return result
