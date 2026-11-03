@@ -154,9 +154,10 @@ def test_ordering_handoff_does_not_absorb_unreadable_review(board, monkeypatch, 
     assert dispatch.check_respawn_guard(board, task) == expected
 
 
-def test_lost_review_citing_its_report_file_stays_held(board, monkeypatch):
-    """Completion adds an artifacts list when the summary names a scratch-workspace file, so a
-    review whose verdict was lost but which cites its report file must still be held."""
+@pytest.mark.parametrize("where", ["summary", "result"])
+def test_lost_review_citing_its_report_file_stays_held(board, monkeypatch, where):
+    """Completion adds an artifacts list when the summary or the result names a scratch-workspace
+    file, so a review whose verdict was lost but which cites its report file must still be held."""
     from hermes_cli import kanban_db_workspace as kbw
     task, parents = incident(board, monkeypatch, finish=False)
     stored_keys = []
@@ -168,7 +169,11 @@ def test_lost_review_citing_its_report_file_stays_held(board, monkeypatch):
         kbw.set_workspace_path(board, parent, workspace)
         report = workspace / "review.md"
         report.write_text("No blocking defects.\n")
-        assert kb.complete_task(board, parent, summary=f"Reviewed PR #682. No blocking defects; report: {report}",
+        if where == "summary":
+            summary, result = f"Reviewed PR #682. No blocking defects; report: {report}", None
+        else:  # the PR in the summary, the report path only in the result
+            summary, result = "Reviewed PR #682. No blocking defects.", f"Report: {report}"
+        assert kb.complete_task(board, parent, summary=summary, result=result,
                                 expected_run_id=row.current_run_id, metadata={})
         stored = kb._json_dict(board.execute(
             "SELECT metadata FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (parent,)).fetchone()[0])

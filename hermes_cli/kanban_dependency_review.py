@@ -219,11 +219,12 @@ def _approval_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) 
 
 _REVIEW_KEYS = ("verdict", "approved", "reviewed_sha")
 # Keys a result can carry without its worker describing any work: a PR reference, the
-# session id kanban_complete stamps on a dispatcher worker's own result, and artifacts
-# (files the worker lists, by artifacts= or by hand, plus scratch-workspace files
-# complete_task finds named in the summary or result). Any other key routes by
-# _REVIEW_KEYS alone, so hub reviews that record review_outcome or reviewer_checks, and
-# size-judge rulings, take the ordering continuation as they did before #728. [daveey]
+# session id the worker tools (kanban_complete, kanban_continue, kanban_request_review)
+# stamp on a dispatcher worker's own result, and artifacts (files the worker lists, by
+# artifacts= or by hand, plus scratch-workspace files complete_task finds named in the
+# summary or result). Any other key routes by _REVIEW_KEYS alone, so hub reviews that
+# record review_outcome or reviewer_checks, and size-judge rulings, take the ordering
+# continuation as they did before #728. [daveey]
 _LOST_REVIEW_KEYS = frozenset({"pr", "reviewed_pr", "worker_session_id", "artifacts"})
 
 
