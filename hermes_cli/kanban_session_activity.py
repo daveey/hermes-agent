@@ -1823,8 +1823,13 @@ def _annotation_snapshot() -> tuple | None:
                                         None, max(0.0, deadline - time.monotonic()))
     previous = _last_annotation.get(scope)
     if previous is None:
+        # [daveey] An uncontended cold read (a fresh process such as the session-idle-check collector, or a
+        # restarted backend before any poll overlapped) passed no fallback, so one read slower than the budget
+        # marked every row unknown even with a recent copy on disk: ~400 hub rows under load 24
+        # (t_01a19eee6379cea9). Serve that copy, dated by its own time, when the read overruns.
+        fallback = _annotation_copy.seed(scope, _last_annotation, _identity.freeze_annotation)
         return _bounded.refresh_bounded(lambda: _refresh_annotation_locked(scope), _annotate_refresh_lock,
-                                        None, max(0.0, deadline - time.monotonic()))
+                                        fallback, max(0.0, deadline - time.monotonic()))
     try:
         parts = _revalidate.refresh_if_unchanged(scope, _refresh_annotation_locked)
     except BaseException:

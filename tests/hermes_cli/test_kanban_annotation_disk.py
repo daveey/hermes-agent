@@ -148,3 +148,38 @@ def test_cold_poll_without_a_copy_still_waits_for_the_read(copy_on, monkeypatch)
         first.join(5)
     waiter.join(5)
     assert got and got[0][0] == {"s1": 9}
+
+
+def test_uncontended_cold_read_past_budget_serves_the_copy(copy_on, monkeypatch):
+    """A fresh process's only poll (session-idle-check's collector) on an overloaded host: the read overruns the
+    budget with nobody else holding the lock. It used to mark every row unknown (t_01a19eee6379cea9)."""
+    assert disk.save(SCOPE, _parts({"s1": 7}))
+    saved_at = _load()[1]
+    release = threading.Event()
+    monkeypatch.setattr(ksa, "_REFRESH_WAIT_S", 0.2)
+    monkeypatch.setattr(ksa, "_read_annotation_parts", lambda: (release.wait(10), _parts({"s1": 9}))[1])
+    try:
+        rows = ksa.annotate_kanban_activity([{"id": "s1"}])
+        assert "kanban_unknown" not in rows[0]
+        assert rows[0]["kanban_active"] == 7
+        assert rows[0]["kanban_observed_at"] <= saved_at
+    finally:
+        release.set()
+    assert ksa._annotate_refresh_lock.acquire(timeout=5)
+    ksa._annotate_refresh_lock.release()
+    rows = ksa.annotate_kanban_activity([{"id": "s1"}])
+    assert rows[0]["kanban_active"] == 9
+
+
+def test_uncontended_cold_read_past_budget_without_a_copy_is_unknown(copy_on, monkeypatch):
+    release = threading.Event()
+    monkeypatch.setattr(ksa, "_REFRESH_WAIT_S", 0.2)
+    monkeypatch.setattr(ksa, "_read_annotation_parts", lambda: (release.wait(10), _parts({"s1": 9}))[1])
+    try:
+        rows = ksa.annotate_kanban_activity([{"id": "s1"}])
+        assert rows[0]["kanban_unknown"] is True
+        assert "kanban_active" not in rows[0]
+    finally:
+        release.set()
+    assert ksa._annotate_refresh_lock.acquire(timeout=5)
+    ksa._annotate_refresh_lock.release()
