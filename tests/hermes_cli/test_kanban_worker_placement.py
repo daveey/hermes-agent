@@ -14,7 +14,8 @@ def test_portable_reason_accepts_light_and_heavy_scratch_work(title):
     {"board": "another"}, {"assignee": "unlisted"}, {"project": "project"},
     {"requires": ["host_repo"]}, {"requires": ["ssh:host"]}, {"requires": ["unknown"]},
     {"needs": ["ssh:host"]},
-    {"title": "Read ~/code/example"}, {"title": "Inspect kanban.db"},
+    {"title": "Edit ~/.hermes/config.yaml"}, {"title": "Inspect kanban.db"},
+    {"title": "Tail /home/ubuntu/.hermes/logs/agent.log"},
     {"title": "Restart the gateway"}, {"title": "Use token-broker"},
     {"title": "Run launchd"}, {"title": "Inspect Chrome on my Mac"},
     {"human_request": {"action": "approve"}}, {"max_retries": 2}, {"tenant": "x"},
@@ -78,4 +79,50 @@ def test_hub_bound_work_keeps_legacy_route(fields):
 def test_courier_and_host_work_bypass_worker_policy():
     cfg = {"worker_pools": {"hub": ["worker-1"]}}
     assert "placement_policy" not in placement.decide({"title": "Analyze data"}, origin_intent=object(), cfg=cfg, self_gw="hub")
-    assert "placement_policy" not in placement.decide({"title": "Inspect ~/code/repo"}, cfg=cfg, self_gw="hub")
+    assert "placement_policy" not in placement.decide({"title": "Inspect ~/code/repo", "requires": ["host_repo"]},
+                                                      cfg=cfg, self_gw="hub")
+
+
+@pytest.mark.parametrize("title", [
+    "Fix flaky test in ~/code/hermes/tests/test_x.py",
+    "Patch /home/ubuntu/code/fabric-play and open a PR",
+    "Branch off ~/.hermes/hermes-agent: git -C ~/.hermes/hermes-agent log origin/main",
+    "Update the skill at ~/.hermes/skills/devops/foo/SKILL.md in hermes-mods",
+    "hermes-hub client: retry a 409 from the Board",
+    "Read the hermes-agent tree under ~/.hermes for context",
+])
+def test_ordinary_repo_work_enrolls_worker_first(title):
+    """Repo paths, the Board CLI name and a bare ~/.hermes are not host needs: workers provision checkouts."""
+    assert placement.portable_reason({"title": title, "requires": ["terminal", "file", "git"]}, {}) is None
+    result = placement.decide({"title": title, "requires": ["terminal", "file", "git"]},
+                              cfg={"worker_pools": {"hub": ["worker-1"]}}, self_gw="hub")
+    assert result["placement_policy"] == "worker-first-v1"
+
+
+@pytest.mark.parametrize("title", [
+    "Edit ~/.hermes/config.yaml on this gateway", "Rotate /home/ubuntu/.hermes/.env",
+    "Prune ~/.hermes/kanban/workspaces", "Fix the hermes-hub ssh config", "Restart the gateway",
+    "Continue in worktree ~/code/_wt/fix-x and push", "cd /home/ubuntu/code/_wt/foo then pytest",
+])
+def test_hub_state_work_stays_local(title):
+    result = placement.decide({"title": title}, cfg={"worker_pools": {"hub": ["worker-1"]}}, self_gw="hub")
+    assert "placement_policy" not in result
+
+
+
+def test_placement_note_from_the_origin_is_not_a_host_need():
+    """A card the MacBook placed on the hub carries remote_body's note naming Chrome, launchd and ssh as
+    the MacBook's own things; the note must not make the card look host-bound on the hub."""
+    args = {"title": "Fix flaky kanban test", "requires": ["terminal", "file", "git"]}
+    args["body"] = placement.remote_body({"body": "Deflake tests/x.py and open a PR."}, self_gw="macbook", target="hub")
+    assert "Chrome" in args["body"] and "launchd" in args["body"]
+    assert placement.portable_reason(args, {}) is None
+    result = placement.decide(args, cfg={"worker_pools": {"hub": ["worker-1"]}}, self_gw="hub")
+    assert result["placement_policy"] == "worker-first-v1"
+
+
+def test_placement_note_does_not_hide_a_real_host_need_in_the_card_text():
+    args = {"title": "Fix flaky kanban test"}
+    args["body"] = placement.remote_body({"body": "Reproduce with launchctl list on the Mac."},
+                                         self_gw="macbook", target="hub")
+    assert placement.portable_reason(args, {}) == "local marker"

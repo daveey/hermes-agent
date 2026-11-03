@@ -1491,8 +1491,17 @@ def test_hub_origin_explicit_pins_and_courier_cards_win_over_heavy_routing():
 
 @pytest.mark.parametrize("body", [
     "Run pytest in ~/code/hermes-mods",
-    "cd /home/ubuntu/code/_wt/foo then pytest",
     "cd /home/alice/code/project then pytest",
+])
+def test_hub_origin_heavy_repo_work_goes_to_the_worker(body):
+    """A repo path is not a host need (the worker provisions its own checkout); an existing ~/code/_wt
+    worktree is, below."""
+    assert _hub({"title": "Maintenance", "body": body})["runs_on"] == ["machine:worker-1"]
+
+
+@pytest.mark.parametrize("body", [
+    "cd /home/ubuntu/code/_wt/foo then pytest",
+    "Run pytest in ~/.hermes/kanban/workspaces/t_x",
     "ssh ubuntu@mini then pytest",
     "Run pytest then restart the gateway",
     "Run pytest before restarting gateway",

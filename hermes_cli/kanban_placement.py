@@ -344,13 +344,33 @@ def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
 
 # Work that only makes sense on the gateway that owns it (the hub, for a routeless gateway): its checkout and
 # state, credentials broker, cron control plane, Kanban DB, Board/gateway admin. Used only for ``_routeless_heavy``.
+#
+# Repository paths are not markers: a worker provisions its own checkout (``~/code/<repo>``, a worktree of
+# ``~/.hermes/hermes-agent``), so ordinary repo work is portable. Before 11-03 ``~/code/``, a bare ``~/.hermes``
+# and the Board CLI name ``hermes-hub`` kept ~3 of every 4 ready hub cards off the worker pool, so the hub's
+# local execution cap throttled the whole queue. What stays local: an existing worktree on this host
+# (``~/code/_wt/<slug>`` holds unpushed work), Hermes state under ``~/.hermes`` other than the code checkout and
+# skills, and a card that declares ``requires: [host_repo]`` or a ``dir``/``worktree`` workspace.
+HERMES_STATE_PATH = r"(?:~|/home/[^/\s]+)/\.hermes/(?!(?:hermes-agent|skills|repos|bin)(?:/|\b))[\w.-]"
+HOST_WORKTREE_PATH = r"(?:~|/home/[^/\s]+)/code/_wt"
 HOME_GATEWAY_MARKERS = (
-    r"~/\.hermes\b", r"/home/ubuntu/\.hermes\b", r"\bkanban\.db\b", r"\bcron ?(job|jobs|tab)?\b",
-    r"\btoken-broker\b", r"\bhermes-sync\b", r"\bhermes-hub\b", r"\bon the hub\b", r"\bthe hub's\b",
-    r"\bgateway (restart|config|service)\b", r"\bsystemctl\b", r"\blaunchd\b",
-    r"~/code/", r"/home/[^/\s]+/code/", r"\bssh\b",
+    HERMES_STATE_PATH, HOST_WORKTREE_PATH, r"\bkanban\.db\b", r"\bcron ?(job|jobs|tab)?\b",
+    r"\btoken-broker\b", r"\bhermes-sync\b", r"\bon the hub\b", r"\bthe hub's\b",
+    r"\bgateway (restart|config|service)\b", r"\bsystemctl\b", r"\blaunchd\b", r"\bssh\b",
     r"\brestart(ing)? (the )?gateway\b", r"\bhermes config (set|edit|unset)\b",
 )
+
+
+# The note :func:`remote_body` appends when another gateway places a card here. It lists the origin's own
+# host-only things (Chrome, Keychain, launchd, ssh) as what to block on, so scanning it as card text made
+# every card a MacBook placed on the hub look Mac-bound, and none of them reached the worker pool.
+_PLACEMENT_NOTE = re.compile(
+    r"Placed on \S+ by \S+'s default placement rule \(kanban\.placement\):.*?don't park or ask David\.", re.DOTALL)
+
+
+def without_placement_note(body: str) -> str:
+    """``body`` minus the system-written placement note: it is routing advice, not the card's work."""
+    return _PLACEMENT_NOTE.sub("", body or "")
 
 
 def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
@@ -377,7 +397,7 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
         return "gateway-scoped requirement"
     if any(str(r) not in c.carried_requires() for r in reqs):
         return "uncarried requirement"
-    title, body = args.get("title") or "", args.get("body") or ""
+    title, body = args.get("title") or "", without_placement_note(args.get("body") or "")
     if _local_marker(title, body, args.get("skills"), c):
         return "local marker"
     full = f"{title}\n{body}"
