@@ -3371,6 +3371,22 @@ kanban:
 
 `kanban.sync.enabled` is off by default. When enabled, boards opened afterwards gain the sync tables and outbox triggers used by the central-sync client seams. Existing boards are unaffected until reopened.
 
+## Kanban hub CPU admission gate
+
+```yaml
+# installation-root config.yaml only (a profile's config.yaml is ignored for this key)
+kanban:
+  admission:
+    cpu_busy_below_pct: 50   # absent/null = gate off (default)
+```
+
+`kanban.admission.cpu_busy_below_pct` (default unset: off) turns on the measured-CPU admission gate on a host that takes overflow work from the Board's worker-first placement. It is read only from the installation-root `config.yaml`, never from a profile override. When set:
+
+- the metrics reporter attaches a measured CPU busy percentage (two `/proc/stat` snapshots about 1 s apart) to its 10 s Board report, with a 2 s total budget and no replay;
+- every new ready/review claim on the host takes an independent full ~1 s sample while `admission.lock` is held, and claims only when busy is strictly below the limit and the host's running count is below the root `kanban.max_in_progress`.
+
+Any unknown (an unreadable config, a non-numeric or out-of-range value, a failed sample, a window outside 1-2 s) refuses the claim rather than admitting it. The Board-side `worker_overflow` setting decides whether the hub is offered overflow at all; with it absent or `{}` nothing is sent to the hub.
+
 ## Kanban duplicate-work check
 
 `kanban.create_overlap_check` (default `true`) makes `kanban_create` check open cards across local boards and other gateways' replicated boards before creating another owner for overlapping work. A match refuses creation with `code=create_overlap` and identifies the existing cards. For genuinely separate work, pass `distinct_from` with those card IDs and a `distinct_reason`; set this configuration key to `false` to disable the check entirely. Missing or unreadable remote replicas are skipped and logged rather than blocking creation.

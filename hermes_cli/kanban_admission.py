@@ -86,12 +86,27 @@ def _cap_full():
     return not ok or type(active) is not int or active < 0 or (cap is not None and active >= cap)
 
 
-def _final_hub_gate(gate):
+COMMIT_RESERVE_S = 0.25  # lock time left for the SQL commit after the gate admits
+
+
+def _hold_budget_s():
+    from hermes_cli.admission_fence import CLAIM_MAX_HOLD_S
+    return CLAIM_MAX_HOLD_S - COMMIT_RESERVE_S
+
+
+def _over_budget(started, needed_s=0.0):
+    return started is not None and time.monotonic() - started + needed_s > _hold_budget_s()
+
+
+def _final_hub_gate(gate, started=None):
     """Under admission.lock: ``(reason, evidence)``; reason None admits. Never touches the network.
 
     Cheap checks (whole-host cap, lease deadline) run BEFORE the ~1 s sample so a claim that must be refused anyway
     never holds the lock for a sample (review F6); the deadline and the whole-host count are checked again after
-    sampling, immediately before the commit."""
+    sampling, immediately before the commit. ``started`` (monotonic, taken when admission.lock was acquired) enforces
+    the designed hold: a gate that cannot fit its sample inside ``CLAIM_MAX_HOLD_S`` minus the commit
+    reserve refuses before sampling when not even a nominal 1 s sample fits, and one that overran it (slow board scan, stall) refuses instead of committing, so
+    a waiting turn's BUSY_WAIT_S budget is never outlasted by an admitted claim (final review N1)."""
     from hermes_cli import machine_cpu_metrics as cpu
 
     state, limit = cpu.root_limit()
@@ -103,6 +118,8 @@ def _final_hub_gate(gate):
         return "hub_capacity_full", None
     if _expired(gate):
         return "hub_cpu_unknown", None
+    if _over_budget(started, cpu.WINDOW_S):
+        return "hub_cpu_unknown", None  # no room left for even a nominal sample inside the designed hold
     measured = cpu.sample()
     if not measured or not all(k in measured for k in cpu.FIELDS):
         return "hub_cpu_unknown", None
@@ -114,6 +131,8 @@ def _final_hub_gate(gate):
         return "hub_cpu_unknown", None  # the claim/lease deadline passed while sampling: never start
     if _cap_full():  # the spec's recount immediately before commit
         return "hub_capacity_full", None
+    if _over_budget(started):
+        return "hub_cpu_unknown", None  # the hold overran its budget: refuse rather than outlast waiting turns
     return None, {**{k: measured[k] for k in cpu.FIELDS}, "limit_pct": limit}
 
 
@@ -222,6 +241,7 @@ def claim_transaction(conn, *, task_id=None, gate=None):
         with write_txn(conn):
             try:
                 root = stack.enter_context(admission_lock(get_default_hermes_root(), timeout=0))
+                started = time.monotonic()
                 held = is_held(root)
                 waiting = not held and turns_waiting(root)
             except AdmissionBusy:
@@ -247,7 +267,7 @@ def claim_transaction(conn, *, task_id=None, gate=None):
                 return
             # Frozen contract: an independent full CPU sample is taken HERE, with admission.lock held, and the
             # claim commits before the lock is released, so a concurrent claimer sees this run in its recount.
-            reason, evidence = _final_hub_gate(gate)
+            reason, evidence = _final_hub_gate(gate, started)
             if reason is not None:
                 logging.getLogger(__name__).info("Hub admission refused Kanban claim %s: %s", task_id, reason)
                 _defer(task_id, reason)

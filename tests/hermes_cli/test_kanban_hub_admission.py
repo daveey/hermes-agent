@@ -347,3 +347,51 @@ def test_deadline_already_passed_refuses_before_the_sample(board, monkeypatch):
     t = task(conn)
     assert kb.claim_task(conn, t) is None
     refused(conn, t, False, "hub_cpu_unknown")
+
+
+def _shrink_hold_budget(monkeypatch, budget_s):
+    """The designed hold is CLAIM_MAX_HOLD_S - COMMIT_RESERVE_S; shrink it so an overrun is cheap to provoke."""
+    monkeypatch.setattr(ka, "COMMIT_RESERVE_S", af.CLAIM_MAX_HOLD_S - budget_s)
+
+
+@pytest.mark.parametrize("review", [False, True])
+def test_hold_that_overruns_its_budget_refuses_instead_of_committing(board, monkeypatch, review):
+    """Final review N1: a sample + recount that outlast the designed hold must not commit (turn budget would lose)."""
+    conn, home = board
+    configure(home)
+    advisory(home)
+    _shrink_hold_budget(monkeypatch, 0.2)
+    monkeypatch.setattr(cm, "sample", fake_sample(10.0, check=lambda: time.sleep(0.3)))  # health: allow HX013 -- a sample that overruns the shrunken hold
+    t = task(conn, review)
+    assert claim(conn, t, review) is None
+    refused(conn, t, review, "hub_cpu_unknown")
+
+
+@pytest.mark.parametrize("review", [False, True])
+def test_slow_pre_sample_checks_leave_no_room_so_it_refuses_before_sampling(board, monkeypatch, review):
+    """Final review N1: when the cheap checks already ate the room a nominal 1 s sample needs, never start sampling."""
+    conn, home = board
+    configure(home)
+    advisory(home)
+    _shrink_hold_budget(monkeypatch, cm.WINDOW_S + 0.2)
+
+    def slow_count():
+        time.sleep(0.3)  # health: allow HX013 -- a slow board scan before the sample
+        return 0
+    monkeypatch.setattr(mm, "active_card_runs", slow_count)
+    monkeypatch.setattr(cm, "sample", lambda *a, **k: pytest.fail("no room for the sample: refuse before sampling"))
+    t = task(conn, review)
+    assert claim(conn, t, review) is None
+    refused(conn, t, review, "hub_cpu_unknown")
+
+
+def test_claim_inside_the_hold_budget_still_admits(board, monkeypatch):
+    """Control for the N1 bound: the default budget admits a normal sample (the bound is not a blanket refusal)."""
+    conn, home = board
+    configure(home)
+    advisory(home)
+    assert ka._hold_budget_s() == pytest.approx(af.CLAIM_MAX_HOLD_S - ka.COMMIT_RESERVE_S)
+    assert ka._hold_budget_s() >= cm.WINDOW_S + 1.0
+    monkeypatch.setattr(cm, "sample", fake_sample(10.0, check=lambda: time.sleep(0.1)))  # health: allow HX013 -- a short stand-in sample
+    t = task(conn)
+    assert kb.claim_task(conn, t) is not None
