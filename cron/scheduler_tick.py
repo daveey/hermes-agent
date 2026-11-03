@@ -117,11 +117,18 @@ def update_admission():
     update gave up while the restart still went ahead on the old code (David-MBP 2026-10-29 15:29-15:47,
     t_01a189db034f3b2b). While the hold stands this yields False and the tick dispatches nothing; runs
     registered inside it take their own reservation (``scheduler._take_run_reservation``) before this
-    one is released. A reservation error (lock busy past 50 ms, unwritable root) fails open: cron must
-    not stop because the fence file is unavailable, and the drainer reads such a root as busy anyway.
+    one is released. The reservation waits out a busy admission.lock for up to
+    ``backend_retirement.BUSY_WAIT_S`` (a hub Kanban claim holds it up to CLAIM_MAX_HOLD_S; the tick holds no
+    session lock, and it does not register as a waiting turn, so claims don't defer to cron). A lock still
+    busy after that yields False like the hold: dispatching would run with no reservation, invisible to the
+    drain (N3, t_01a1a375eb4f4c4c); due jobs fire once on a later tick. Any other reservation error
+    (unwritable root) fails open: cron must not stop because the fence file is unavailable, and the drainer
+    reads such a root as busy anyway.
     """
     try:
-        from hermes_cli.admission_fence import reserve, SUPPORTED
+        from hermes_cli import admission_fence
+        from hermes_cli.admission_fence import AdmissionBusy, SUPPORTED
+        from hermes_cli.backend_retirement import BUSY_WAIT_S
     except ImportError:
         yield True
         return
@@ -135,7 +142,12 @@ def update_admission():
     root = None
     try:
         root = get_default_hermes_root(home=_sched._get_hermes_home())
-        pending = reserve(root)
+        pending = admission_fence.reserve(root, timeout=BUSY_WAIT_S)
+    except AdmissionBusy:  # before OSError: AdmissionBusy is a TimeoutError, i.e. an OSError
+        logger.info("cron dispatch deferred: core update admission lock still busy after %.1fs under %s; "
+                    "due jobs fire on a later tick", BUSY_WAIT_S, root)
+        yield False
+        return
     except (OSError, TimeoutError) as exc:
         logger.debug("Cron update admission unavailable (%s); dispatching", exc)
         yield True

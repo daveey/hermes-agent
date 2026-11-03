@@ -138,12 +138,14 @@ def turns_waiting(root):
     return False
 
 
-def reserve(home):
+def reserve(home, *, timeout=0.05):
     import fcntl
 
     # Some callers hold the backend session-map lock. Absorb ordinary short
     # commits, but bound contention to 50ms rather than an updater's timeout.
-    with admission_lock(home, timeout=0.05) as root:
+    # [daveey] Callers holding no such lock (cron's tick) pass a longer ``timeout`` to outwait a claim's
+    # designed hold (backend_retirement.BUSY_WAIT_S > CLAIM_MAX_HOLD_S).
+    with admission_lock(home, timeout=timeout) as root:
         if is_held(root):
             return None
         directory = root / "reservations"
@@ -159,13 +161,14 @@ def reserve(home):
             raise
 
 
-def extend(home):
+def extend(home, *, timeout=0.05):
     """A reservation taken WITHOUT the hold check, for work already admitted under a live reservation
     the caller still holds (a cron run registered inside its tick's reservation). The updater reads
-    reservations after setting the hold, so it sees the caller's or this one: never neither. [daveey]"""
+    reservations after setting the hold, so it sees the caller's or this one: never neither. [daveey]
+    ``timeout`` as for ``reserve``."""
     import fcntl
 
-    with admission_lock(home, timeout=0.05) as root:
+    with admission_lock(home, timeout=timeout) as root:
         directory = root / "reservations"
         directory.mkdir(exist_ok=True)
         path = directory / uuid.uuid4().hex

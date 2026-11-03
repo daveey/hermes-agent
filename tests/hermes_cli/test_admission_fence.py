@@ -393,3 +393,21 @@ def test_standalone_capability_uses_only_stdlib():
     result = subprocess.run([sys.executable, "-S", str(Path(af.__file__)), "capability"],
                             check=True, capture_output=True, text=True)
     assert json.loads(result.stdout) == af.CAPABILITY
+
+
+
+def test_reserve_and_extend_default_to_one_short_try_and_accept_a_longer_timeout(tmp_path):
+    """[daveey] N3: callers holding the session-map lock keep the 50 ms default; lock-free callers (cron) may wait."""
+    import time
+
+    child = _spawn_lock_holder(tmp_path, 1.5)
+    try:
+        for fn in (af.reserve, af.extend):
+            started = time.monotonic()
+            with pytest.raises(af.AdmissionBusy):
+                fn(tmp_path)
+            assert time.monotonic() - started < 0.5
+        af.reserve(tmp_path, timeout=10).close()
+        af.extend(tmp_path, timeout=10).close()
+    finally:
+        _reap(child)

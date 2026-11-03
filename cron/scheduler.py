@@ -863,14 +863,17 @@ def _take_run_reservation(key) -> None:
     gateway restarted on the old code (t_01a189db034f3b2b). Taken with ``extend`` (no hold check): a
     tick-dispatched run registers inside its tick's reservation, so the updater sees one or the other.
     A manual run during a hold also counts, so the window waits for it instead of restarting under it.
+    Waits out a busy admission.lock for up to ``backend_retirement.BUSY_WAIT_S`` (a hub claim holds it up to
+    CLAIM_MAX_HOLD_S; ``_running_lock`` is cron's own, not a session lock, and no turn-waiter is registered).
     Best-effort: an unavailable fence never blocks a run. The flock dies with this process.
     """
     try:
         from hermes_cli.admission_fence import extend, SUPPORTED
         if not SUPPORTED:
             return
+        from hermes_cli.backend_retirement import BUSY_WAIT_S
         from hermes_constants import get_default_hermes_root
-        _running_reservations[key] = extend(get_default_hermes_root(home=key[0]))
+        _running_reservations[key] = extend(get_default_hermes_root(home=key[0]), timeout=BUSY_WAIT_S)
     except (ImportError, OSError, TimeoutError) as exc:
         logger.debug("cron run %s: no update admission reservation (%s)", key[1], exc)
 
