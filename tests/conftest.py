@@ -283,6 +283,11 @@ from tests._fixtures.offline_catalogs import (
 from tests._fixtures.offline_cli_catalogs import _offline_cli_catalog_transport
 from tests._fixtures.platform_gating import _platforms_gate_reason, _reject_contradictory_platform_marks
 from tests._fixtures.session_context_reset import _reset_session_context_vars
+from tests._fixtures import required_extras as _required_extras
+
+# HERMES_TEST_REQUIRE_EXTRAS (set by the CI lanes that install the extras): a listed optional
+# extra's ``pytest.importorskip`` fails collection instead of skipping. Unset = plain skip.
+_required_extras.install()
 
 
 @pytest.fixture(autouse=True)
