@@ -42,7 +42,7 @@ import {
 } from '@/store/gateway-shared-route'
 import { notifyError, RECOVERY_ACTIONS } from '@/store/notifications'
 import { markNativeNotifyBaseline } from '@/store/notify-baseline'
-import { waitForPrimaryGateway } from '@/store/primary-gateway-recovery'
+import { requestAfterPrimaryRecovery } from '@/store/primary-gateway-recovery'
 import { setConnection, setGatewayState } from '@/store/session'
 import { stampSecondaryProfileOwner } from '@/store/session-event-provenance'
 export { useGatewayActivationEpoch } from '@/store/gateway-activation-epoch'
@@ -537,17 +537,11 @@ async function requestOnPrimaryGateway<T>(
 ): Promise<T> {
   const gateway = g.primaryGateway
 
-  const ready = gateway && (await waitForPrimaryGateway(gateway, timeoutMs, signal))
-
-  if (!gateway || !ready || !isOpen(gateway)) {
+  if (!gateway) {
     throw new Error('Hermes gateway unavailable')
   }
 
-  const { remainingMs } = ready
-
-  return remainingMs === undefined && signal === undefined
-    ? gateway.request<T>(method, params)
-    : gateway.request<T>(method, params, remainingMs, signal)
+  return requestAfterPrimaryRecovery<T>(gateway, method, params, timeoutMs, signal, true)
 }
 
 export function isActivePrimary(): boolean {
@@ -1239,20 +1233,14 @@ export async function requestGatewayForProfile<T>(
     }
 
     const routedParams = route.scopeProfile ? { ...params, profile: route.key } : params
-    const gateway = route.gateway
 
     // A closed primary is redialed by its one owner (useGatewayBoot), never
-    // here: wait for that redial before the first send. With no owner able to
-    // redial, send as before and let the closed client reject it.
-    const ready = gateway === g.primaryGateway ? await waitForPrimaryGateway(gateway, timeoutMs, signal) : null
-    const remainingMs = ready ? ready.remainingMs : timeoutMs
-
-    // Same arity contract as the ambient path in session-request-router: only
-    // pass the deadline args through when the caller set them, so a plain
-    // profile-routed RPC keeps its two-argument call shape.
-    const result = await (remainingMs === undefined && signal === undefined
-      ? gateway.request<T>(method, routedParams)
-      : gateway.request<T>(method, routedParams, remainingMs, signal))
+    // here: wait for that redial before the first send.
+    const result = await (route.gateway === g.primaryGateway
+      ? requestAfterPrimaryRecovery<T>(route.gateway, method, routedParams, timeoutMs, signal, false)
+      : timeoutMs === undefined && signal === undefined
+        ? route.gateway.request<T>(method, routedParams)
+        : route.gateway.request<T>(method, routedParams, timeoutMs, signal))
 
     // A served RPC proves the backend answers, not just accepts, so it clears the dial history.
     // Lease requests dispose their entry right after, before a close could prove the socket stable.

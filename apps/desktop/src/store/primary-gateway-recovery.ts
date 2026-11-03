@@ -112,3 +112,29 @@ export function waitForPrimaryGateway(
     }
   })
 }
+
+/**
+ * Send on `gateway` after waiting for its owner's redial. `strict` (the
+ * owner-pinned primary path) fails when no owner can redial a closed client;
+ * otherwise the closed client rejects the send as before.
+ */
+export async function requestAfterPrimaryRecovery<T>(
+  gateway: HermesGateway,
+  method: string,
+  params: Record<string, unknown> | undefined,
+  timeoutMs: number | undefined,
+  signal: AbortSignal | undefined,
+  strict: boolean
+): Promise<T> {
+  const ready = await waitForPrimaryGateway(gateway, timeoutMs, signal)
+
+  if (strict && (!ready || gateway.connectionState !== 'open')) {
+    throw new Error('Hermes gateway unavailable')
+  }
+
+  const remainingMs = ready ? ready.remainingMs : timeoutMs
+
+  return remainingMs === undefined && signal === undefined
+    ? gateway.request<T>(method, params)
+    : gateway.request<T>(method, params, remainingMs, signal)
+}
