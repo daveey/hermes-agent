@@ -967,3 +967,19 @@ def test_board_discovery_reads_the_sync_config_once(kanban_home, monkeypatch):
     assert len(reads) == 1
     monkeypatch.setattr(sync, "sync_config", lambda: {**real(), "boards": ["beta"]})
     assert [s for s, _ in ksc.board_paths()] == ["beta"]
+
+
+def test_hub_lease_client_release_marks_an_unused_grant_only_when_asked(svc, monkeypatch):
+    """Wire contract with the Board (review F2): ``unused_grant: true`` only for a grant released before any local
+    start; an ordinary release sends no new field (old Boards ignore unknown lease fields either way)."""
+    svc.board(BOARD)
+    client = ksc.HubLeaseClient(svc.hub(ME))
+    bodies = []
+    real = client.hub.leases
+    monkeypatch.setattr(client.hub, "leases", lambda board, body: bodies.append(body) or real(board, body))
+    for run, unused in (("run-me-0002", True), ("run-me-0003", False)):
+        assert client.acquire(board_id=BOARD, task_uid="t_u", run_uid=run, gateway_id=ME, ttl_s=60).granted
+        client.release(board_id=BOARD, task_uid="t_u", run_uid=run, gateway_id=ME, unused_grant=unused)
+        assert "t_u" not in svc.board(BOARD)["leases"]
+    releases = [b for b in bodies if b["action"] == "release"]
+    assert releases[0]["unused_grant"] is True and "unused_grant" not in releases[1]

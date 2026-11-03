@@ -702,7 +702,8 @@ class LeaseClient(Protocol):
 
     def renew(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int) -> Lease: ...
 
-    def release(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str) -> None: ...
+    def release(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str,
+                unused_grant: bool = False) -> None: ...
 
 
 _LEASE_CLIENT: Optional[LeaseClient] = None
@@ -749,8 +750,9 @@ class ClaimGate:
         if self.lease is None or self.consumed:
             return
         board_id, gateway_id, task_id = self._ids
-        try:
-            _client().release(board_id=board_id, task_uid=task_id, run_uid=self.lease.run_uid, gateway_id=gateway_id)
+        try:  # never consumed = nothing started locally: the Board keeps the card first-start (review F2)
+            _client().release(board_id=board_id, task_uid=task_id, run_uid=self.lease.run_uid, gateway_id=gateway_id,
+                              unused_grant=True)
         except _CLIENT_ERRORS as err:  # the lease then simply expires on the server
             _log.info("kanban sync: release of unused lease for %s failed: %s", task_id, err)
 

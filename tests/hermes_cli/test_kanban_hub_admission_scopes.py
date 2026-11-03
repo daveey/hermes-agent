@@ -241,3 +241,32 @@ def test_unsynced_local_board_does_not_blind_the_host_cap(tmp_path, monkeypatch)
         assert sync.pop_claim_deferral(t) == "hub_capacity_full"
     finally:
         inst.close()
+
+
+@pytest.mark.parametrize("lane", ["ready", "review"])
+@pytest.mark.parametrize("reason,pct,cap", [("hub_cpu_at_or_above_limit", 80.0, 7), ("hub_capacity_full", 10.0, 0)])
+def test_grant_refused_by_the_final_gate_is_released_as_unused(install, lane, reason, pct, cap, monkeypatch):
+    """Review F2 (wire contract with the Board, ``unused_grant: true``): a grant the core gate refused never started
+    locally, so its release says so and the Board keeps the card first-start (overflow is evaluated again)."""
+    conn = install.connect("default", "primary")
+    install.advisory(10.0)
+    install.final_sample(pct)
+    if cap == 0:
+        monkeypatch.setattr(mm, "active_card_runs", lambda: 7)
+    t = card(conn, "policy", lane)
+    assert claim(conn, t, lane) is None
+    assert sync.pop_claim_deferral(t) == reason
+    (acquired,) = [kw for kind, kw in install.client.calls if kind == "acquire"]
+    (released,) = [kw for kind, kw in install.client.calls if kind == "release"]
+    assert released["run_uid"] == acquired["run_uid"] and released["unused_grant"] is True
+
+
+def test_reclaim_of_a_started_run_is_not_released_as_unused(install):
+    conn = install.connect("default", "primary")
+    install.advisory(10.0)
+    install.final_sample(10.0)
+    t = card(conn, "policy", "ready")
+    assert claim(conn, t, "ready") is not None
+    assert kb.reclaim_task(conn, t, reason="operator")
+    releases = [kw for kind, kw in install.client.calls if kind == "release"]
+    assert releases and all(not kw.get("unused_grant") for kw in releases)

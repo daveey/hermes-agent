@@ -1960,5 +1960,8 @@ class HubLeaseClient:
     def renew(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int) -> sync.Lease:
         return self._lease(board_id, {"action": "renew", "task": task_uid, "run_uid": run_uid, "ttl_s": ttl_s}, run_uid)
 
-    def release(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str) -> None:
-        self._lease(board_id, {"action": "release", "task": task_uid, "run_uid": run_uid}, run_uid)
+    def release(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str,
+                unused_grant: bool = False) -> None:
+        # ``unused_grant``: released before anything started locally (the Board does not count it as a start).
+        self._lease(board_id, {"action": "release", "task": task_uid, "run_uid": run_uid,
+                               **({"unused_grant": True} if unused_grant else {})}, run_uid)
