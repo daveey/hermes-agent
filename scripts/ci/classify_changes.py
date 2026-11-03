@@ -262,6 +262,21 @@ _PY_TEST_HARNESS = (
 # hermes_state.py and every hermes_state_* sibling, their tests, the shared pytest harness
 # that runs them, and the dependency manifests they import through.
 _HERMES_STATE_PATHS = ("hermes_state", "tests/hermes_state/", *_PY_TEST_HARNESS, *_DEP_MANIFESTS)
+# The bootstrap lane's own inputs beyond the installer it guards: the scripts its
+# steps run, its pytest suite and the helper that suite imports, and the shared
+# pytest harness. That suite runs in a bare interpreter (four packages, none of
+# Hermes' dependencies), so a harness edit the full suite tolerates can break
+# this lane alone; when only main's push ran it, an autouse fixture that
+# imported httpx turned main red. tests/ci/test_classify_changes.py derives the
+# list from bootstrap-installer.yml and fails until each file starts the lane.
+_BOOTSTRAP_LANE_INPUTS = (
+    "scripts/gen-bootstrap-pins.py",
+    "scripts/verify-bootstrap-version-stamp.py",
+    "scripts/ci/python_packages.py",
+    "tests/scripts/test_fresh_source_install.py",
+    "tests/pm/_fixtures.py",
+    *_PY_TEST_HARNESS,
+)
 # The compare API returns at most this many files, so a list this long may be truncated.
 COMPARE_FILE_CAP = 300
 # Both Desktop suites package the app and share this harness (the update
@@ -682,7 +697,8 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
         "uv_lock": any(f in ("pyproject.toml", "uv.lock") for f in files),
         "npm_lock": npm_lock,
         "bootstrap": any(
-            f.startswith(_BOOTSTRAP_PATHS) or f in _BOOTSTRAP_FILES for f in files
+            f.startswith(_BOOTSTRAP_PATHS + _BOOTSTRAP_LANE_INPUTS) or f in _BOOTSTRAP_FILES
+            for f in files
         ),
         "desktop_updater": any(_is_desktop_updater(f) for f in files),
         "rust": any(_is_rust(f) for f in files),
