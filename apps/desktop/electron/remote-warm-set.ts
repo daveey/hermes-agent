@@ -56,7 +56,7 @@ export function createRemoteWarmSet(deps: RemoteWarmSetDeps) {
     return true
   }
 
-  // ensureRegistryBackend's call for every SSH dial: stamps only when the dial was made for a user action.
+  // ensureRegistryBackend's call for every dial: stamps only an SSH dial made for a user action.
   const noteDial = (connectionId: unknown, profile: unknown, opts: RegistryDialUseOpts = {}): boolean =>
     registryDialCountsAsUse(opts) && noteUse(connectionId, profile)
 

@@ -274,7 +274,7 @@ describe('main.ts wiring', () => {
   it('records a named profile only for a dial flagged as use (never a sweep, prewarm or passive call)', () => {
     // A plain non-passive dial used to count, so a post-reconnect sweep stamped every listed profile
     // (remote-warm-use.test.ts). The gate lives in remote-warm-set.ts noteDial/registryDialCountsAsUse.
-    expect(main).toMatch(/if \(source\.kind === 'ssh'\) \{\n\s+remoteWarmSet\.noteDial\(id, profileKey, opts\)/)
+    expect(main).toContain('  remoteWarmSet.noteDial(id, profileKey, opts)')
     expect(warmSet).toMatch(/return opts\.use === true && !opts\.passive && !opts\.forceProbe/)
   })
 

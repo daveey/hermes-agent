@@ -10670,10 +10670,7 @@ async function ensureRegistryBackend(
     throw new Error(`Profile '${profileKey}' does not exist.`)
   }
 
-  // Only a dial made for a user action counts as use (prewarm recent set + 30-min hold); see registryDialCountsAsUse.
-  if (source.kind === 'ssh') {
-    remoteWarmSet.noteDial(id, profileKey, opts)
-  }
+  remoteWarmSet.noteDial(id, profileKey, opts) // counts as use only for a user-action dial (registryDialCountsAsUse)
 
   let resolvedRegistrySshConfig
   let registryEffectiveFingerprintPromise: null | Promise<string> = null
@@ -14145,8 +14142,7 @@ async function connectDesktopProfileRoute(route: DesktopProfileRoute, sender?: E
 // canonical gateway when the v1 global mode is remote (the registry 'local'
 // entry always means this machine) unless the profile is remote-only.
 // A renderer user action (open, new chat, send) on a registry route: the only renderer signal that counts as use.
-ipcMain.handle('hermes:remote:note-use', (_event, payload) => remoteWarmSet.noteUse(payload?.connectionId, payload?.profile))
-
+ipcMain.handle('hermes:remote:note-use', (_e, p) => remoteWarmSet.noteUse(p?.connectionId, p?.profile))
 ipcMain.handle('hermes:connection:for', async (event, payload) => {
   const { connectionId, profile } = payload && typeof payload === 'object' ? (payload as any) : ({} as any)
   const registry = readDesktopConnectionsRegistry()

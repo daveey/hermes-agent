@@ -42,7 +42,7 @@ import type { Secondary } from '@/store/gateway-socket-entry'
 import { notifyError, RECOVERY_ACTIONS } from '@/store/notifications'
 import { markNativeNotifyBaseline } from '@/store/notify-baseline'
 import { requestAfterPrimaryRecovery } from '@/store/primary-gateway-recovery'
-import { noteRemoteUse } from '@/store/remote-use'
+import { noteForegroundUse, noteRemoteUse } from '@/store/remote-use'
 import { setConnection, setGatewayState } from '@/store/session'
 import { stampSecondaryProfileOwner } from '@/store/session-event-provenance'
 export { useGatewayActivationEpoch } from '@/store/gateway-activation-epoch'
@@ -65,15 +65,6 @@ const normKey = (profile: string | null | undefined): string => (profile ?? '').
 // Settings scopes and session creation pass so an explicit user gesture stays
 // distinguishable from ambient hydration at the call site.
 export type SpawnPriority = 'foreground' | 'background'
-
-// [daveey] 'foreground' marks a user gesture (open, new chat, Bot Chat open): that, not the dial it may cause, is
-// what counts as use of a remote profile (store/remote-use). Background reads and reconnect sweeps never count.
-// A null connection id is a plain profile route on the window's own source: a use of the primary's connection.
-function noteForegroundUse(connectionId: null | string, profile: string, spawnPriority: SpawnPriority): void {
-  if (spawnPriority === 'foreground') {
-    noteRemoteUse(connectionId ?? primaryConnectionId(), normKey(profile))
-  }
-}
 
 // Read connection state through a call so TS control-flow analysis doesn't
 // narrow the getter to a constant across guards (it genuinely changes).
@@ -1173,8 +1164,7 @@ export async function requestGatewayForAgent<T>(
 ): Promise<T> {
   const key = normKey(profile)
   const scope = registryBackendScopeKey(connectionId, key)
-
-  noteForegroundUse(connectionId, key, spawnPriority)
+  noteForegroundUse(connectionId ?? primaryConnectionId(), key, spawnPriority)
 
   if (scope === key) {
     return requestGatewayForProfile<T>(key, method, params, timeoutMs, signal, { spawnPriority })
@@ -1406,8 +1396,7 @@ export async function retainGatewayForAgent(
 ): Promise<() => void> {
   const key = normKey(profile)
   const scope = registryBackendScopeKey(connectionId, key)
-
-  noteForegroundUse(connectionId, key, spawnPriority)
+  noteForegroundUse(connectionId ?? primaryConnectionId(), key, spawnPriority)
 
   if (scope === key) {
     // Plain-profile route: gatewayForProfile's request lease IS the retain —
@@ -1529,9 +1518,7 @@ export async function retainGatewayForSessionTurn(
   profile: string,
   sessionId: string
 ): Promise<() => void> {
-  // Only a prompt.submit reaches here (session-request-router): the user's send counts as use of the route. A
-  // send on the window's own gateway arrives with a null connection id; it is a use of the primary's route.
-  noteRemoteUse(connectionId ?? primaryConnectionId(), normKey(profile))
+  noteRemoteUse(connectionId ?? primaryConnectionId(), normKey(profile)) // a prompt.submit: the user's send is use
 
   // Primary events do not flow through a Secondary's terminal-event listener.
   // Registering a no-op lease here would leave a phantom key that can suppress
@@ -1683,8 +1670,7 @@ export async function openGatewayForAgent(
   }: { activationLease?: boolean; spawnPriority?: SpawnPriority } = {}
 ): Promise<void> {
   const scope = registryBackendScopeKey(connectionId, profile)
-
-  noteForegroundUse(connectionId, profile, spawnPriority)
+  noteForegroundUse(connectionId ?? primaryConnectionId(), profile, spawnPriority)
 
   if (scope === normKey(profile) || isPrimaryRegistryRoute(connectionId, profile)) {
     return openGatewayForProfile(profile, { spawnPriority })

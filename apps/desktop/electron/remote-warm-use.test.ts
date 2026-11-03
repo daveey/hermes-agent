@@ -87,6 +87,7 @@ describe('remote warm set: what counts as use', () => {
     const before = stateBytes()
 
     expect(set.noteUse('local', 'research')).toBe(false)
+    expect(set.noteDial('local', 'research', { use: true })).toBe(false)
     expect(set.noteUse('nope', 'research')).toBe(false)
     expect(set.noteUse('hermes-hub', 'default@hermes-hub')).toBe(false)
     expect(set.noteUse('', 'research')).toBe(false)
@@ -114,8 +115,8 @@ describe('main.ts wiring', () => {
   })
 
   it('the renderer note-use door is wired to the warm set', () => {
-    expect(main).toMatch(
-      /ipcMain\.handle\('hermes:remote:note-use',[^\n]*remoteWarmSet\.noteUse\(payload\?\.connectionId, payload\?\.profile\)/
+    expect(main).toContain(
+      "ipcMain.handle('hermes:remote:note-use', (_e, p) => remoteWarmSet.noteUse(p?.connectionId, p?.profile))"
     )
   })
 

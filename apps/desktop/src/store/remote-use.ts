@@ -38,6 +38,18 @@ export function noteRemoteUse(connectionId: null | string | undefined, profile: 
   }
 }
 
+/** A 'foreground' spawn priority marks a user gesture (open, new chat, Bot Chat open): that, not the dial it may
+ * cause, is use. Callers resolve a plain profile route (null connection) to the window primary's connection. */
+export function noteForegroundUse(
+  connectionId: null | string | undefined,
+  profile: null | string | undefined,
+  spawnPriority: string
+): void {
+  if (spawnPriority === 'foreground') {
+    noteRemoteUse(connectionId, profile)
+  }
+}
+
 export function _resetRemoteUseForTests(): void {
   lastNoted.clear()
 }
