@@ -1641,7 +1641,8 @@ def _handle_create(args: dict, **kw) -> str:
         try:
             runs_on = _runstate.explicit_runs_on(conn, args.get("runs_on"), courier=origin_intent is not None)
         except ValueError as exc:
-            return tool_error(str(exc))
+            sync_down = isinstance(exc, _runstate.SyncNotRunning)
+            return tool_error(str(exc), **({"rejection": "sync_not_running"} if sync_down else {}))
         pinned_machine = None
         if runs_on is None and origin_intent is None:
             runs_on = _runstate.placement_runs_on(conn, args.get("placement"))

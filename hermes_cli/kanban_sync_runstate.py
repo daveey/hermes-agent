@@ -17,9 +17,17 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-__all__ = ["clear", "describe", "down", "explicit_runs_on", "path", "placement_runs_on", "record_down", "stranded_create"]
+__all__ = [
+    "SyncNotRunning", "clear", "describe", "down", "explicit_runs_on", "path", "placement_runs_on", "record_down",
+    "stranded_create",
+]
 
 _FILE = ".sync-state.json"
+
+
+class SyncNotRunning(ValueError):
+    """A create refused because its ``runs_on`` row would strand behind the stopped sync (``rejection:
+    sync_not_running``, the same as the placement path)."""
 
 
 def path() -> Path:
@@ -109,7 +117,7 @@ def explicit_runs_on(conn: Any, value: Any, *, courier: bool = False) -> Optiona
     labels = wn.explicit_runs_on(conn, value)
     stranded = stranded_create(labels, courier=courier)
     if stranded:
-        raise ValueError(stranded)
+        raise SyncNotRunning(stranded)
     return labels
 
 

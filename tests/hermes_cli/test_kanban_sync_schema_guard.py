@@ -385,3 +385,116 @@ def test_machine_pin_create_while_sync_is_down_takes_the_gateway_relay(machine_p
                                                         "requires": [], "placement": "worker-1"}))
     assert sent == ["worker-1"] and out.get("status") == "queued", out
     assert _runs_on_rows(pre_rename_live) == []
+
+
+# #779 follow-up: each test below kills a mutant of the sync-down paths that the tests above let survive. [daveey]
+
+def test_sync_start_refused_for_no_identity_is_recorded(kanban_home, pre_rename_live, monkeypatch):
+    """``load_identity`` → ``SyncUnavailable``: the start refusal names the reason (mutant: no record)."""
+    def no_identity():
+        raise ksc.SyncUnavailable("kanban sync has no Board key on this host")
+
+    monkeypatch.setattr(ksc, "load_identity", no_identity)
+    monkeypatch.setattr(ksc, "FeedWatcher", lambda *a, **k: pytest.fail("feed started without an identity"))
+    ksc.run_forever(lambda: True, interval=1)
+    described = _runstate().describe()
+    assert "not starting: kanban sync has no Board key on this host" in described, described
+    assert "not starting: kanban sync has no Board key on this host" in _deferred_tick()
+
+
+def test_mid_loop_schema_ahead_give_up_is_recorded_and_not_overwritten(kanban_home, pre_rename_live, svc,
+                                                                       monkeypatch):
+    """A round that returns ``SchemaAhead`` mid-loop gives the role up; the record says so, not ``stopped``."""
+    from types import SimpleNamespace
+    rounds = []
+    monkeypatch.setattr(ksc, "sync_all_once", lambda hub, boards: rounds.append(boards) or [
+        SimpleNamespace(board=BOARD, error="SchemaAhead: tasks: upstream_new_field", push=None, mode="primary",
+                        pulled=0)])
+    assert _run_sync_loop(kanban_home, svc, monkeypatch, rounds=3) == []  # gave up after the first round
+    assert len(rounds) == 1
+    described = _runstate().describe()
+    assert "gave up the sync role: board default: SchemaAhead: tasks: upstream_new_field" in described, described
+    assert "stopped" not in described
+
+
+def test_sync_loop_crash_is_recorded_and_reraised(kanban_home, pre_rename_live, svc, monkeypatch):
+    boom = RuntimeError("board exploded")
+
+    def crash(hub, boards):
+        raise boom
+
+    monkeypatch.setattr(ksc, "sync_all_once", crash)
+    with pytest.raises(RuntimeError) as err:
+        _run_sync_loop(kanban_home, svc, monkeypatch)
+    assert err.value is boom
+    described = _runstate().describe()
+    assert "crashed: RuntimeError: board exploded" in described, described
+
+
+def _heavy_create(kt, monkeypatch):
+    """A heavy-marker card with no placement on a routeless gateway whose ``heavy_route`` names worker-1."""
+    from hermes_cli import kanban_placement as kp
+    monkeypatch.setattr(kp, "config", lambda: {"heavy_route": {ME: "worker-1"}})
+    return json.loads(kt._handle_create({"title": "Run the pytest regression suite", "assignee": "default",
+                                         "requires": []}))
+
+
+def test_heavy_create_with_sync_running_makes_a_runs_on_row(machine_pin_create, pre_rename_live, monkeypatch):
+    out = _heavy_create(machine_pin_create, monkeypatch)
+    assert out.get("runs_on") == ["machine:worker-1"], out
+    assert len(_runs_on_rows(pre_rename_live)) == 1
+
+
+def test_heavy_create_while_sync_is_down_never_returns_a_runs_on_row(machine_pin_create, pre_rename_live,
+                                                                     monkeypatch):
+    """``decide`` → ``_routeless_heavy`` → ``runs_on=[machine:worker-1]``: both the machine check and the stranded
+    check after ``_local_placement`` must keep that row off a board whose sync is down."""
+    _runstate().record_down("not starting: board default: SchemaAhead(test)")
+    out = _heavy_create(machine_pin_create, monkeypatch)
+    assert _runs_on_rows(pre_rename_live) == [], out
+    assert not out.get("runs_on"), out
+
+
+def _courier_intent():
+    return {"request_id": "request-sync-down-001",
+            "owner": {"gateway": ME, "profile": "default", "board": BOARD},
+            "origin": {"gateway": "origin", "profile": "work", "session": "s_origin"}}
+
+
+def test_courier_runs_on_create_while_sync_is_down_is_created(machine_pin_create, pre_rename_live):
+    """A courier create keeps its own retry, so a stopped sync does not refuse it."""
+    _runstate().record_down("not starting: board default: SchemaAhead(test)")
+    args = {"title": "Summarize public data", "assignee": "default", "requires": [],
+            "runs_on": ["machine:worker-1"]}
+    out = json.loads(machine_pin_create._handle_create(args, origin_intent=_courier_intent()))
+    assert out.get("task_id"), out
+    assert [json.loads(r[1]) for r in _runs_on_rows(pre_rename_live)] == [["machine:worker-1"]], out
+
+
+def test_non_courier_runs_on_create_while_sync_is_down_is_refused(machine_pin_create, pre_rename_live):
+    _runstate().record_down("not starting: board default: SchemaAhead(test)")
+    out = json.loads(machine_pin_create._handle_create({"title": "Summarize public data", "assignee": "default",
+                                                        "requires": [], "runs_on": ["machine:worker-1"]}))
+    assert out.get("rejection") == "sync_not_running", out
+    assert "kanban sync not running since" in out.get("error", ""), out
+    assert _runs_on_rows(pre_rename_live) == []
+
+
+def test_record_down_keeps_since_for_the_same_reason_and_resets_it_for_a_new_one(kanban_home, pre_rename_live,
+                                                                                 monkeypatch):
+    import time as _time
+    rs = _runstate()
+    now = [1000.0]
+    monkeypatch.setattr(_time, "time", lambda: now[0])
+
+    def since():
+        return json.loads(rs.path().read_text())["since"]
+
+    rs.record_down("not starting: board default: SchemaAhead(a)")
+    assert since() == 1000.0
+    now[0] = 2000.0
+    rs.record_down("not starting: board default: SchemaAhead(a)")  # a respun refusal: same reason
+    assert since() == 1000.0
+    now[0] = 3000.0
+    rs.record_down("not starting: board default: SchemaAhead(b)")  # a different reason
+    assert since() == 3000.0
