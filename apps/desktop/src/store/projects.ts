@@ -9,12 +9,11 @@ import {
   projectOwnerBySessionId,
   type SidebarProjectTree
 } from '@/app/chat/sidebar/projects/workspace-groups'
-import { withKanbanEvidence } from '@/app/session/hooks/refresh-retained-kanban'
 import type { HermesGitBaseBranch, HermesGitBranch } from '@/global'
 import { getHermesConfig, hermesApi, type HermesGateway, type SessionInfo } from '@/hermes'
 import { translateNow } from '@/i18n'
 import { desktopDefaultCwd, isDesktopFsRemoteMode, selectDesktopPaths, writeDesktopFileText } from '@/lib/desktop-fs'
-import { desktopGit } from '@/lib/desktop-git'
+import { desktopGit, desktopGitFor, type GitOwnerRoute } from '@/lib/desktop-git'
 import { isMissingRestEndpoint, isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { isUnderPath } from '@/lib/path-compare'
 import { stampRowsWithOwningConnection } from '@/lib/session-owner-stamp'
@@ -27,6 +26,7 @@ import {
   isActivePrimary,
   requestGatewayForAgent
 } from '@/store/gateway'
+import { setGatewayProjectAppearance } from '@/store/gateway-project-looks'
 import { $sidebarShowAllSessions, setSidebarAgentsGrouped } from '@/store/layout'
 import { notify } from '@/store/notifications'
 import {
@@ -38,6 +38,7 @@ import {
   normalizeProfileKey,
   requestFreshSession
 } from '@/store/profile'
+import { carryKanbanEvidence, rememberKanbanEvidence } from '@/store/project-kanban-evidence'
 import { $projectScope, ALL_PROJECTS } from '@/store/project-scope'
 import {
   $currentCwd,
@@ -598,69 +599,6 @@ async function fillFromReplica(connectionId: string, entry: RemoteTreeEntry): Pr
   }
 }
 
-// [daveey] The last task evidence (kanban_* annotations) each gateway's rows carried, by (connection, profile,
-// session). Hub replica records have no task annotations, so a gateway whose rows fall back to the replica (cold
-// start before its first live tree, or a failed background refresh) would paint every row with an empty kanban
-// badge and no waiting/stuck stripe. Its rows keep the last counts it reported instead; their original
-// `kanban_observed_at` stays, so freshness checks still treat the evidence as expired until a live answer lands.
-const knownKanbanEvidence = new Map<string, SessionInfo>()
-
-const kanbanEvidenceKey = (connectionId: string, row: SessionInfo) =>
-  `${connectionId}\u0000${normalizeProfileKey(row.profile || 'default')}\u0000${row.id}`
-
-const hasKanbanEvidence = (row: SessionInfo) =>
-  typeof row.kanban_observed_at === 'number' && Number.isFinite(row.kanban_observed_at)
-
-function treeRows(node: SidebarProjectTree): SessionInfo[] {
-  return [
-    ...(node.previewSessions ?? []),
-    ...(node.repos ?? []).flatMap(repo => (repo.groups ?? []).flatMap(group => group.sessions ?? []))
-  ]
-}
-
-function rememberKanbanEvidence(
-  nodes: readonly SidebarProjectTree[],
-  connectionOf: (row: SessionInfo) => string | undefined
-): void {
-  for (const row of nodes.flatMap(treeRows)) {
-    const connectionId = row?.id && hasKanbanEvidence(row) ? connectionOf(row) : undefined
-
-    if (!connectionId) {
-      continue
-    }
-
-    const key = kanbanEvidenceKey(connectionId, row)
-    const known = knownKanbanEvidence.get(key)
-
-    if (!known || (known.kanban_observed_at ?? 0) <= (row.kanban_observed_at ?? 0)) {
-      knownKanbanEvidence.set(key, row)
-    }
-  }
-}
-
-function withKnownKanban(rows: SessionInfo[], connectionId: string): SessionInfo[] {
-  return rows.map(row => {
-    const known = hasKanbanEvidence(row) ? undefined : knownKanbanEvidence.get(kanbanEvidenceKey(connectionId, row))
-
-    return known ? withKanbanEvidence(row, known) : row
-  })
-}
-
-function carryKanbanEvidence(node: SidebarProjectTree, connectionId: string): SidebarProjectTree {
-  return {
-    ...node,
-    ...(node.previewSessions ? { previewSessions: withKnownKanban(node.previewSessions, connectionId) } : {}),
-    ...(node.repos
-      ? {
-          repos: node.repos.map(repo => ({
-            ...repo,
-            groups: (repo.groups ?? []).map(group => ({ ...group, sessions: withKnownKanban(group.sessions ?? [], connectionId) }))
-          }))
-        }
-      : {})
-  }
-}
-
 async function refreshRemoteProjectTree(connectionId: string, profile: string): Promise<void> {
   const now = Date.now()
   const entry = remoteTrees.get(connectionId) ?? { projects: [], fetchedAt: 0, failedAt: 0, inFlight: false }
@@ -719,7 +657,7 @@ $hiddenGatewayIds.listen(() => {
 
 function applyProjectTreePayload(res: ProjectTreePayload, owner: ProjectRowOwner): void {
   // [daveey] Rows about to be replaced (the boot snapshot's on the first apply) are the last task evidence their
-  // gateway reported; a replica fallback for that gateway reuses it (see knownKanbanEvidence).
+  // gateway reported; a replica fallback for that gateway reuses it (see store/project-kanban-evidence).
   const previousOwner = lastLocalTree ? ownerGatewayId(lastLocalTree.owner) : undefined
   rememberKanbanEvidence($projectTree.get(), row => row.connection_id?.trim() || previousOwner)
   lastLocalTree = { res, owner }
@@ -1826,9 +1764,21 @@ async function updateRemoteProject(target: { connectionId: string; id: string },
 // Returns true when an adoption happened, so an incremental picker can close
 // (the node's id changes on adopt, and a second stale write would double-create).
 export async function setProjectAppearance(
-  project: Pick<SidebarProjectTree, 'color' | 'icon' | 'id' | 'isAuto' | 'label' | 'path' | 'remoteProject'>,
+  project: Pick<
+    SidebarProjectTree,
+    'color' | 'connectionId' | 'icon' | 'id' | 'isAuto' | 'label' | 'path' | 'profile' | 'remoteProject'
+  >,
   patch: { color?: null | string; icon?: null | string }
 ): Promise<boolean> {
+  // Another gateway's project: its look is that gateway's record, never one on this window's.
+  if (project.connectionId && project.path) {
+    const route = { connectionId: project.connectionId, profile: project.profile || 'default' }
+
+    await setGatewayProjectAppearance(route, project.path, patch)
+
+    return false
+  }
+
   if (!project.isAuto || project.remoteProject) {
     await updateProject(project.id, patch)
 
@@ -2019,14 +1969,18 @@ export function refreshWorktrees(): void {
   bumpWorktrees()
 }
 
+// A repo another gateway owns is on that machine: its git, never this window's.
+const gitFor = (owner?: GitOwnerRoute) => (owner ? desktopGitFor(owner) : desktopGit())
+
 // Spin up a fresh worktree the lightest way (`git worktree add -b`) under the
 // repo, returning where Hermes should start working. Git is the source of
 // truth; the caller starts a session in the returned path.
 export async function startWorkInRepo(
   repoPath: string,
-  options?: { name?: string; branch?: string; base?: string; existingBranch?: string }
+  options?: { name?: string; branch?: string; base?: string; existingBranch?: string },
+  owner?: GitOwnerRoute
 ): Promise<null | { path: string; branch: string }> {
-  const git = desktopGit()
+  const git = gitFor(owner)
 
   if (!git || !repoPath) {
     return null
@@ -2041,7 +1995,7 @@ export async function startWorkInRepo(
     // backend's /api/git mirror, and an older backend may predate it. The raw
     // failure ("Expected JSON … but got HTML" / a bare 404) reads like a git
     // error — name the real remedy instead of degrading silently.
-    if (isDesktopFsRemoteMode() && isMissingRestEndpoint(err)) {
+    if ((owner || isDesktopFsRemoteMode()) && isMissingRestEndpoint(err)) {
       throw new Error(translateNow('sidebar.projects.worktreeStaleBackend'))
     }
 
@@ -2059,8 +2013,8 @@ export async function startWorkInRepo(
 // by hand first.
 // Empty on a non-repo. On a remote gateway the list comes from the backend's
 // /api/git/branches mirror, so it acts on the repo where sessions actually run.
-export async function listRepoBranches(repoPath: string): Promise<HermesGitBranch[]> {
-  const git = desktopGit()
+export async function listRepoBranches(repoPath: string, owner?: GitOwnerRoute): Promise<HermesGitBranch[]> {
+  const git = gitFor(owner)
 
   if (!git?.branchList || !repoPath) {
     return []
@@ -2073,8 +2027,8 @@ export async function listRepoBranches(repoPath: string): Promise<HermesGitBranc
 // new-worktree dialog. The remote default (origin/HEAD) is flagged so the
 // UI can preselect it. Empty on a non-repo; remote gateways serve it from the
 // backend's /api/git/base-branches mirror.
-export async function listBaseBranches(repoPath: string): Promise<HermesGitBaseBranch[]> {
-  const git = desktopGit()
+export async function listBaseBranches(repoPath: string, owner?: GitOwnerRoute): Promise<HermesGitBaseBranch[]> {
+  const git = gitFor(owner)
 
   if (!git?.baseBranchList || !repoPath) {
     return []
@@ -2083,8 +2037,8 @@ export async function listBaseBranches(repoPath: string): Promise<HermesGitBaseB
   return git.baseBranchList(repoPath)
 }
 
-export async function switchBranchInRepo(repoPath: string, branch: string): Promise<void> {
-  const git = desktopGit()
+export async function switchBranchInRepo(repoPath: string, branch: string, owner?: GitOwnerRoute): Promise<void> {
+  const git = gitFor(owner)
 
   if (!git || !repoPath || !branch.trim()) {
     return
@@ -2104,6 +2058,8 @@ export interface StartWorkSessionRequest {
   draft?: string
   /** Stack the fresh session as a tab when main already holds a chat (palette/⌘O opens-from-nowhere). */
   openTab?: boolean
+  /** The gateway the worktree was made on, when it is not the window's: the session starts there. */
+  owner?: GitOwnerRoute
   path: string
   token: number
 }
@@ -2146,6 +2102,8 @@ export interface WorktreeDialogState {
   repoPath: string
   /** The base branch selected in a "branch off from X" menu. */
   base?: string
+  /** The gateway owning `repoPath` when it is another gateway's project: git runs there. */
+  owner?: GitOwnerRoute
 }
 
 export const $worktreeDialog = atom<null | WorktreeDialogState>(null)
@@ -2156,7 +2114,11 @@ export function closeWorktreeDialog(): void {
 
 let startWorkToken = 0
 
-export function requestStartWorkSession(path: string, draft?: string, options?: { openTab?: boolean }): void {
+export function requestStartWorkSession(
+  path: string,
+  draft?: string,
+  options?: { openTab?: boolean; owner?: GitOwnerRoute }
+): void {
   const target = path.trim()
 
   if (!target) {
@@ -2167,6 +2129,7 @@ export function requestStartWorkSession(path: string, draft?: string, options?: 
   $startWorkSessionRequest.set({
     draft: draft?.trim() || undefined,
     openTab: options?.openTab || undefined,
+    owner: options?.owner,
     path: target,
     token: startWorkToken
   })
@@ -2175,9 +2138,10 @@ export function requestStartWorkSession(path: string, draft?: string, options?: 
 export async function removeWorktreePath(
   repoPath: string,
   worktreePath: string,
-  options?: { force?: boolean }
+  options?: { force?: boolean },
+  owner?: GitOwnerRoute
 ): Promise<void> {
-  const git = desktopGit()
+  const git = gitFor(owner)
 
   if (!git) {
     return

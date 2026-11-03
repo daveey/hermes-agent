@@ -569,10 +569,12 @@ def admit_durable_turn_lease(
         # Read the row only now: the previous holder may have created or deleted it while this
         # turn waited, so an answer from before admission can be stale either way.
         durable = _durable_session_exists(db, session_id)
-        if durable:
+        if durable and getattr(agent, "_session_db_reserved", False) is not True:
             # Row proven to exist — suppress the redundant create attempt. A missing row leaves
             # the flag alone: the flush heals a row deleted under a live agent (#123583). So does
             # an unknown one: the create is an upsert that never overwrites an existing row.
+            # A child reserved only its identity for transcript readers. Its first turn must
+            # still persist constructor config (including lineage) and the completed prompt.
             if not getattr(agent, "_session_db_created", False):
                 # Another writer made the row (the gateway's bare SessionStore row), so the skipped
                 # create was this agent's only chance to record its init model_config: without it a

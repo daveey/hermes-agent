@@ -31,6 +31,7 @@ import os from 'node:os'
 import { READY_IN_MERGED_OUTPUT_RE } from './backend-ready'
 import { parseRemoteProfileListing } from './connection-registry'
 import { backendProfileArg } from './profile-id-guard'
+import { fingerprintToken, logReuseMiss } from './remote-lifecycle-reuse-miss'
 import { REMOTE_MARKER_GATE_PY } from './remote-update-marker-programs'
 import { assertBootstrapNotSuperseded, withRemoteTimeout } from './ssh-connection'
 
@@ -86,16 +87,6 @@ function resolveReadyTimeoutMs(env = process.env) {
 
 function mintToken() {
   return crypto.randomBytes(32).toString('hex')
-}
-
-// Fingerprint a token for the lockfile — never store the raw secret on the
-// remote. SHA256, truncated.
-function fingerprintToken(token) {
-  return crypto
-    .createHash('sha256')
-    .update(String(token || ''))
-    .digest('hex')
-    .slice(0, 32)
 }
 
 function validateOwnershipId(ownershipId) {
@@ -867,48 +858,6 @@ async function release(ssh, ownershipId, log: (line: string) => void = () => {})
   log(`[ssh-lifecycle] released remote dashboard pid=${lock.pid} port=${lock.port}; it exits on its own when idle`)
 }
 
-// Log why a present lockfile was not reused, so reuse misses can be counted from the lifecycle log.
-function logReuseMiss(log: (line: string) => void, lock, ctx) {
-  if (!ctx.reusable) {
-    log(`reuse miss: ${reuseMissReasons(lock, ctx).join('; ') || 'unknown'}`)
-  }
-}
-
-// Why a present lockfile was not reused. Empty when every reuse condition holds.
-function reuseMissReasons(lock, { pidAlive, owned, profile, reuseToken, hermesPath, hermesHome }): string[] {
-  const reasons: string[] = []
-
-  if (!pidAlive) {
-    reasons.push(`pid ${lock.pid} not alive`)
-  } else if (!owned) {
-    reasons.push(`pid ${lock.pid} is not our dashboard`)
-  }
-
-  if (!(lock.port > 0)) {
-    reasons.push('no port recorded')
-  }
-
-  if (lock.profile !== profile) {
-    reasons.push(`profile ${lock.profile || "''"} != ${profile || "''"}`)
-  }
-
-  if (!reuseToken) {
-    reasons.push('no stored token')
-  } else if (lock.tokenFingerprint !== fingerprintToken(reuseToken)) {
-    reasons.push('token fingerprint mismatch')
-  }
-
-  if (lock.hermesPath !== hermesPath) {
-    reasons.push(`hermes path ${lock.hermesPath} != ${hermesPath}`)
-  }
-
-  if (lock.hermesHome !== hermesHome) {
-    reasons.push(`hermes home ${lock.hermesHome} != ${hermesHome}`)
-  }
-
-  return reasons
-}
-
 function buildOwnedStaleTerminationCommand(lock, ownershipId) {
   const pid = Number(lock.pid)
   // expandRemotePath() output is already a shell-quoted fragment; embed it
@@ -1244,9 +1193,14 @@ function buildSpawnCommand(hermesPath, profile, opts: any = {}) {
   // when its owning remote shell is dead.
   const markerAbsent = `[ ! -e ${marker} ]`
 
+  // A dev build's renderer is served from HERMES_DESKTOP_DEV_SERVER, an http origin the backend
+  // trusts only when it inherits the variable, exactly as a locally spawned backend does. A value the
+  // remote login shell exports is cleared first, so a packaged build never hands one on.
+  const devServerEnv = opts.devServer ? ` HERMES_DESKTOP_DEV_SERVER=${shq(opts.devServer)}` : ''
+
   const dashCmd =
-    `ulimit -n ${REMOTE_NOFILE_SOFT_LIMIT} 2>/dev/null || true; ` +
-    `exec env HERMES_DESKTOP=1${desktopClientHostEnv(opts.clientHost ?? os.hostname())} ${hermes} ${profileArgs}${subCmd}`
+    `ulimit -n ${REMOTE_NOFILE_SOFT_LIMIT} 2>/dev/null || true; unset HERMES_DESKTOP_DEV_SERVER; ` +
+    `exec env HERMES_DESKTOP=1${desktopClientHostEnv(opts.clientHost ?? os.hostname())}${devServerEnv} ${hermes} ${profileArgs}${subCmd}`
 
   const detachedShell: string = `eval "exec $1>&-"; ${dashCmd} </dev/null >> ${logPath} 2>&1 & echo $!`
   // The inner shell backgrounds Hermes and reports its PID; backgrounding the
@@ -1388,7 +1342,15 @@ async function scrapeReadyPort(ssh, logPath, { timeoutMs = resolveReadyTimeoutMs
 
 async function spawnRemoteDashboard(
   ssh,
-  { hermesPath, profile, token, ownershipId, hermesHome = '~/.hermes', assertInstallClear = async () => {} }
+  {
+    hermesPath,
+    profile,
+    token,
+    ownershipId,
+    hermesHome = '~/.hermes',
+    devServer = '',
+    assertInstallClear = async () => {}
+  }
 ) {
   if (!(await remoteSupportsSshOwnership(ssh, hermesPath))) {
     const err: any = new Error(
@@ -1458,6 +1420,7 @@ async function spawnRemoteDashboard(
         tokenFilePath,
         logPath,
         hermesHome,
+        devServer,
         ownershipId,
         reservationNonce: spawnNonce,
         lockMetadata: {
@@ -1470,6 +1433,7 @@ async function spawnRemoteDashboard(
           logPath,
           tokenFingerprint: fingerprintToken(token),
           protocolVersion: PROTOCOL_VERSION,
+          devServer,
           startedAt: new Date().toISOString()
         }
       })
@@ -1751,6 +1715,22 @@ async function waitForRemoteSpawnCompletion(ssh, ownershipId, timeoutMs) {
   throw error
 }
 
+// Whether a published backend record serves this connect as-is. The backend trusts a dev
+// renderer's origin only from the HERMES_DESKTOP_DEV_SERVER it was spawned with; one spawned for
+// another renderer (or none, as older records and packaged builds are) would refuse every renderer
+// socket, so it is replaced rather than reused.
+function lockServesConnect(lock, { profile, reuseToken, hermesPath, hermesHome, devServer }) {
+  return (
+    lock.port > 0 &&
+    lock.profile === profile &&
+    Boolean(reuseToken) &&
+    lock.tokenFingerprint === fingerprintToken(reuseToken) &&
+    lock.hermesPath === hermesPath &&
+    lock.hermesHome === hermesHome &&
+    (lock.devServer ?? '') === devServer
+  )
+}
+
 async function connect(deps) {
   const {
     ssh,
@@ -1764,6 +1744,7 @@ async function connect(deps) {
     adoptServedToken,
     rememberLog = () => {},
     readyTimeoutMs = resolveReadyTimeoutMs(),
+    devServer = '',
     signal
   } = deps
 
@@ -1837,14 +1818,7 @@ async function connect(deps) {
       ))
 
     const reusable =
-      pidAlive &&
-      owned &&
-      lock.port > 0 &&
-      lock.profile === profile &&
-      Boolean(reuseToken) &&
-      lock.tokenFingerprint === fingerprintToken(reuseToken) &&
-      lock.hermesPath === hermesPath &&
-      lock.hermesHome === hermesHome
+      pidAlive && owned && lockServesConnect(lock, { profile, reuseToken, hermesPath, hermesHome, devServer })
 
     logReuseMiss(log, lock, { reusable, pidAlive, owned, profile, reuseToken, hermesPath, hermesHome })
 
@@ -1936,6 +1910,7 @@ async function connect(deps) {
     token: spawnToken,
     ownershipId,
     hermesHome,
+    devServer,
     assertInstallClear: () => assertRemoteInstallUpdateClear(ssh, hermesHome, hermesPath)
   })
 
@@ -1973,6 +1948,7 @@ async function connect(deps) {
     logPath,
     tokenFingerprint: fingerprintToken(spawnToken),
     protocolVersion: PROTOCOL_VERSION,
+    devServer,
     startedAt: new Date().toISOString(),
     ...(creationTime ? { creationTime } : {})
   }
@@ -2081,6 +2057,7 @@ export {
   LOCKFILE_SCHEMA_VERSION,
   lockfilePath,
   lockMatchesManagedUpdateScope,
+  lockServesConnect,
   MIN_READY_TIMEOUT_MS,
   mintToken,
   openForward,

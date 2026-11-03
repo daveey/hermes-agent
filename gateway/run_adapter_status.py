@@ -3,17 +3,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Optional
 
-from gateway.config import Platform
-
 logger = logging.getLogger("gateway.run_adapters")
-
-
-def adapter_unavailable_message(platform: Platform, *, retrying: bool = True) -> str:
-    """Keep the plugin/deps/credentials hint after the first reconnect retry."""
-    message = (
-        f"No adapter available for enabled {platform.value}; check the plugin, dependencies, and credentials."
-    )
-    return f"{message} Retrying in the background." if retrying else message
 
 
 class GatewayAdapterStatusMixin:
@@ -21,13 +11,13 @@ class GatewayAdapterStatusMixin:
 
     def _flag_reconnect_needs_attention(
         self, platform, info: dict, now: float, *, status_key: Optional[str] = None
-    ) -> None:
+    ) -> bool:
         """Flag NEEDS_ATTENTION (once) past the threshold — a signal, NOT a circuit breaker. The threshold
         is the bound profile's ``agent.reconnect_attention_after``: secondaries call this inside their
-        ``_profile_runtime_scope`` with their ``<profile>:<platform>`` status key."""
+        ``_profile_runtime_scope`` with their ``<profile>:<platform>`` status key. True = flagged now."""
         from gateway.run import _reconnect_needs_attention
         if info.get("attention_flagged") or not _reconnect_needs_attention(info, now):
-            return
+            return False
         info["attention_flagged"] = True
         queued_for = now - info.get("queued_at", now)
         logger.warning(
@@ -40,6 +30,7 @@ class GatewayAdapterStatusMixin:
             status_key or platform.value, platform_state="retrying", needs_attention=True,
             retrying_since=(datetime.now(UTC) - timedelta(seconds=queued_for)).isoformat(),
         )
+        return True
 
     def _mark_platform_fatal(self, status_key: str, adapter) -> None:
         """Record an adapter's fatal error code/message as ``fatal`` runtime status."""

@@ -3,7 +3,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { dismissAutoProject, restoreAutoProject } from '@/store/layout'
 import { notify } from '@/store/notifications'
-import { openProjectRename } from '@/store/projects'
+import { openProjectRename, revealPath } from '@/store/projects'
 
 import { ProjectMenu } from './project-menu'
 import type { SidebarProjectTree } from './workspace-groups'
@@ -179,5 +179,20 @@ describe('ProjectMenu', () => {
     await screen.findByRole('menuitem', { name: 'Remove from sidebar' })
     expect(screen.queryByRole('menuitem', { name: 'Rename' })).toBeNull()
     expect(screen.queryByRole('menuitem', { name: 'Appearance' })).toBeNull()
+  }, 15000)
+
+  // A file manager here cannot open a folder on another gateway's machine: the
+  // item stays (no layout shift) but cannot reveal a same-path local folder.
+  it("keeps Reveal disabled for another gateway's project", async () => {
+    const studioProject = { ...autoProject, connectionId: 'studio', profile: 'research' } as SidebarProjectTree
+
+    render(<ProjectMenu isActive={false} project={studioProject} />)
+    openTriggerMenu(screen.getByRole('button', { name: 'Actions' }))
+
+    const reveal = await screen.findByRole('menuitem', { name: 'Reveal in file manager' })
+
+    expect(reveal.getAttribute('aria-disabled')).toBe('true')
+    fireEvent.click(reveal)
+    expect(revealPath).not.toHaveBeenCalled()
   }, 15000)
 })
