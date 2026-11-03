@@ -1470,6 +1470,7 @@ DEFAULT_CONFIG = {
         "auto_load": [],
         # Substitute ${HERMES_SKILL_DIR} / ${HERMES_SESSION_ID} in SKILL.md content.
         "template_vars": True,
+        "index_triggers": True,  # index rows show `triggers:` frontmatter (Asks: ... Not for: ...)
         # Pre-execute !`cmd` snippets in SKILL.md, inlining stdout (dates, git state...). Off:
         # host-unapproved skill-author code; community hub installs never auto-execute (#63307).
         "inline_shell": False,
@@ -1489,8 +1490,7 @@ DEFAULT_CONFIG = {
         "write_approval": False,
         # Audit ledger: every skill mutation appends to ~/.hermes/skills/.curator_ledger.jsonl with
         # before/after hashes (blobs under ~/.hermes/.curator_backups/blobs/); powers `hermes
-        # curator ledger` / `rollback <entry-id>`. Never a gate — failures can't block.
-        # See #79686.
+        # curator ledger` / `rollback <entry-id>`. Never a gate — failures can't block. See #79686.
         "ledger": True,
         # Size cap for that ledger: once the file grows past this, the next append rewrites it
         # through the unchanged-file dedup and, if still over, drops the oldest entries (0 = keep

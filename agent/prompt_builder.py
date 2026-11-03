@@ -23,10 +23,10 @@ from agent.model_metadata import CHARS_PER_TOKEN
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.skill_utils import (
     EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS,
-    TIER_LOCAL, clip_skill_description, extract_skill_conditions, extract_skill_description,
+    TIER_LOCAL, extract_skill_conditions, extract_skill_description,
     get_disabled_skill_names, get_skill_search_roots,
-    iter_skill_index_files, parse_frontmatter, skill_matches_apps, skill_matches_environment,
-    skill_matches_platform, skill_matches_platform_list,
+    iter_skill_index_files, parse_frontmatter, skill_index_triggers_enabled, skill_matches_apps,
+    skill_matches_environment, skill_matches_platform, skill_matches_platform_list,
 )
 from tools.threat_patterns import scan_for_threats as _scan_for_threats
 from utils import atomic_json_write, file_cache_version
@@ -1120,8 +1120,9 @@ _SKILLS_PROMPT_CACHE_MAX = 32
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
 # v2 added org provenance fields (org_id/org_author); v4 adds ``rel`` (SKILL.md path relative to its root) for
-# duplicate-name resolution; v5 stores descriptions clipped at a word boundary. Older snapshots are rebuilt.
-_SKILLS_SNAPSHOT_VERSION = 5
+# duplicate-name resolution; v5 stores descriptions clipped at a word boundary; v6 rows carry ``triggers:`` and the
+# snapshot records ``index_triggers`` (the skills.index_triggers value they were built with). Older ones are rebuilt.
+_SKILLS_SNAPSHOT_VERSION = 6
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -1159,12 +1160,14 @@ def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
 
 
 def _load_skills_snapshot(skills_dir: Path, manifest: Optional[dict] = None) -> Optional[dict]:
-    """The disk snapshot if it exists, is current-version, and its manifest still matches."""
+    """The disk snapshot if it exists, is current-version, was built with the current skills.index_triggers, and
+    its manifest still matches."""
     try:
         snapshot = json.loads(_skills_prompt_snapshot_path().read_text(encoding="utf-8-sig"))
     except Exception:  # missing, unreadable or corrupt -> rebuild
         return None
     if (isinstance(snapshot, dict) and snapshot.get("version") == _SKILLS_SNAPSHOT_VERSION
+            and snapshot.get("index_triggers") == skill_index_triggers_enabled()
             and snapshot.get("manifest") == (manifest if manifest is not None else _build_skills_manifest(skills_dir))):
         return snapshot
     return None
@@ -1253,7 +1256,8 @@ def _plugin_skill_prompt_rows(
             if not _skill_should_show(extract_skill_conditions(frontmatter), available_tools,
                                       available_toolsets, session_platform):
                 continue
-            desc = clip_skill_description(str(meta.get("description") or "").strip()) or extract_skill_description(frontmatter)
+            desc = extract_skill_description(
+                {**frontmatter, "description": meta.get("description") or frontmatter.get("description") or ""})
             rows.append((name, desc))
     except Exception:
         logger.debug("Plugin skill prompt rows unavailable", exc_info=True)
@@ -1427,7 +1431,7 @@ def _build_skills_system_prompt_inner(
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
-        _oneshot_prompt_variant(), tuple(plugin_rows),
+        _oneshot_prompt_variant(), tuple(plugin_rows), skill_index_triggers_enabled(),
     )
     snapshot = _load_skills_snapshot(skills_dir, manifest)
     app_gated = snapshot is not None and any(
@@ -1485,7 +1489,8 @@ def _build_skills_system_prompt_inner(
     if snapshot is None:  # persist for fast cold-start reuse (best-effort)
         try:
             atomic_json_write(_skills_prompt_snapshot_path(), {
-                "version": _SKILLS_SNAPSHOT_VERSION, "manifest": _build_skills_manifest(skills_dir),
+                "version": _SKILLS_SNAPSHOT_VERSION, "index_triggers": skill_index_triggers_enabled(),
+                "manifest": _build_skills_manifest(skills_dir),
                 "skills": [entry for entry, _ in candidates],
             })
         except Exception as e:

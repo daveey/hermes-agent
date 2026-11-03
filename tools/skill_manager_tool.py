@@ -484,7 +484,7 @@ def _add_description_prompt_preview(result: dict[str, Any], content: str) -> dic
     fm, _ = _parse_frontmatter(content)
     if is_skill_description_truncated_for_prompt(fm):
         result["system_prompt_preview"] = (
-            f"System prompt will show: \"{extract_skill_description(fm)}\" — shorten the "
+            f"System prompt will show: \"{extract_skill_description(fm, with_triggers=False)}\" — shorten the "
             f"description to {SKILL_PROMPT_DESC_LIMIT} chars so the index shows all of it.")
     return result
 

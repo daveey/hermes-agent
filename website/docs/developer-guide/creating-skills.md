@@ -134,6 +134,22 @@ metadata:
 
 **Use case for `requires_*`:** Create a skill that only makes sense when certain tools are present. For example, a web scraping workflow skill with `requires_toolsets: [web]` won't clutter the prompt when web tools are disabled.
 
+### Trigger Phrases
+
+The system-prompt skill index shows each skill as one row: its name and its description, clipped to 60 characters. A skill whose description is accurate but doesn't sound like what users actually say gets skipped. Add a top-level `triggers:` mapping with up to three phrasings in the user's own words, plus the neighbouring skill to use instead:
+
+```yaml
+description: "Use when my Mac disk is full. Audit, clean, trim OrbStack."
+triggers:
+  asks:
+    - "my disk is full"
+    - "free up space"
+    - "what is eating storage"
+  not_for: "CI runner disk (use ci-runner-disk-recovery)"
+```
+
+The index row then reads `- mac-disk-cleanup: Use when my Mac disk is full. Audit, clean, trim OrbStack. Asks: "my disk is full"; "free up space"; "what is eating storage". Not for: CI runner disk (use ci-runner-disk-recovery).` Only the first three `asks` are shown. Each one costs index tokens on every turn, so add triggers to skills that get missed or confused with a neighbour, not to every skill. Set `skills.index_triggers: false` in `config.yaml` to show descriptions only.
+
 ### Environment Variable Requirements
 
 Skills can declare environment variables they need. When a skill is loaded via `skill_view`, its required vars are automatically registered for passthrough into sandboxed execution environments (terminal, execute_code).
