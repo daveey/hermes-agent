@@ -489,10 +489,11 @@ def _run_task_turns(agent, frame, history, context):
         import logging
         logging.getLogger(__name__).warning('%s', warning)
     from gateway.session_kanban_resume import compact_resumed_history, worker_prompt_context
+    from gateway.session_kanban_capsule import capsule_worker_context
     # [daveey] An over-headroom resumed transcript is compacted before the first model call (or dropped).
     history = compact_resumed_history(agent, context, history)
     card = worker_prompt_context(context, history)  # [daveey] resumed after an owner restart, or the tail
-    prompt = '\n\n'.join(p for p in (skills, warning, card, frame['text']) if p)
+    prompt = '\n\n'.join(p for p in (skills, warning, capsule_worker_context(context, card), frame['text']) if p)
     result = agent.run_conversation(prompt, conversation_history=history, turn_author=KANBAN_TURN_AUTHOR)
 
     def recover(nudge):

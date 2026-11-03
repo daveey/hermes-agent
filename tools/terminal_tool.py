@@ -837,6 +837,12 @@ def _get_env_config() -> dict[str, Any]:
         docker_forward_env, docker_volumes, docker_env, docker_extra_args, docker_shm_size = [], [], {}, [], "1g"
 
     cwd, host_cwd = _resolve_config_cwd(env_type, mount_docker_cwd)
+    # [daveey] A capsule-bound worker's only workspace is the mounted capsule: the profile's
+    # ``terminal.cwd`` (e.g. /root) is a home the capsule never mounts, and every per-command, file-op
+    # and env-creation fallback below reads this value. Docker only: a bound process refuses others.
+    from tools import capsule_workspace
+    if env_type == "docker" and capsule_workspace.bound():
+        cwd, host_cwd = capsule_workspace.CAPSULE_CWD, None
 
     return {
         "env_type": env_type,
@@ -1040,6 +1046,12 @@ def _resolve_command_cwd(
     if workdir:
         return coerce_ssh_remote_cwd(_container_visible_cwd(workdir, env_type, env), env_type)
     recorded = get_session_cwd(session_key)
+    if env_type == "docker":
+        # [daveey] A capsule-bound worker only ever has /workspace: a recorded cwd outside it can only be a
+        # host path (the native worktree the worker process chdir'd to), never a ``cd`` of this session.
+        from tools import capsule_workspace
+        if capsule_workspace.bound():
+            return recorded if recorded and capsule_workspace.inside(recorded) else capsule_workspace.CAPSULE_CWD
     if recorded and _is_container_backend(env_type) and _is_unusable_container_cwd(
         recorded, mounted_host=mounted_host
     ) and not _in_sandbox_home(recorded, env):

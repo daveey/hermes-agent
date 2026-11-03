@@ -170,6 +170,25 @@ def current_binding() -> Optional[WorkspaceBinding]:
     return binding
 
 
+def bound() -> bool:
+    """True once this process installed a capsule binding (live, revoked or closed: it never reverts).
+
+    Model-facing defaults (the container cwd, the worker's workspace contract) read this, never env or
+    config: a bound worker's only workspace is :data:`CAPSULE_CWD`, and a revoked one runs nothing at all,
+    so it never needs a host fallback. Does not validate or latch; execution still goes through
+    :func:`current_binding` / :func:`require_binding`."""
+    with _STATE.lock:
+        return _STATE.binding is not None
+
+
+def inside(path: Any) -> bool:
+    """``path`` is :data:`CAPSULE_CWD` or below it (a container path, compared lexically)."""
+    if not isinstance(path, str) or "\0" in path:
+        return False
+    norm = os.path.normpath(path)
+    return norm == CAPSULE_CWD or norm.startswith(CAPSULE_CWD + "/")
+
+
 def require_binding(handle: Optional[WorkspaceBinding]) -> None:
     """Gate for an environment about to run anything: ``handle`` must be the live binding, and an
     environment without a handle may only run when this process was never bound."""

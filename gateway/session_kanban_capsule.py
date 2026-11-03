@@ -120,3 +120,19 @@ def attach_capsule_transport(policy):
         return attach(context)
     except RendezvousError as exc:
         raise RuntimeStoreError(MISSING) from exc
+
+
+def capsule_worker_context(context, text=None):
+    """The owner-built worker context (``text``, default ``context['context']``), with its host
+    ``Workspace:`` header line replaced by the capsule's when this worker process is capsule-bound (the only
+    workspace its tools can reach). Ordinary cards: as is. [daveey]"""
+    text = context['context'] if text is None else text
+    from tools import capsule_workspace
+    if not capsule_workspace.bound() or not isinstance(text, str):
+        return text
+    import re
+    head, sep, rest = text.partition('\n## Body\n')
+    line = re.compile(r'^Workspace: \S+ @ ' + re.escape(str(context.get('workspace'))) + r'$', re.MULTILINE)
+    head = line.sub(lambda _m: f'Workspace: {capsule_workspace.CAPSULE_CWD} (task capsule: a private git checkout; '
+                    'the host-side path is not visible in this sandbox)', head, count=1)
+    return head + sep + rest

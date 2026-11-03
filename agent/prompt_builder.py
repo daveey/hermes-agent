@@ -378,6 +378,85 @@ KANBAN_GUIDANCE = (
     "own run; board tasks are for cross-agent handoffs that outlive one API loop."
 )
 
+# [daveey] Capsule-bound Kanban worker (tools.capsule_workspace.bound()): the host mounted ONLY the task's
+# private git capsule at /workspace inside a runsc sandbox and publishes the result itself. The generic
+# protocol's host workspace / env var / `git worktree add` / kanban_complete-hands-off-to-review-child lines
+# are false there (run6, t_01a19f6eb64ca98b), so they are replaced, never appended to. Static text: nothing
+# task- or caller-supplied reaches it.
+KANBAN_CAPSULE_CONTRACT = (
+    "## Capsule contract (authoritative runtime context for this run)\n\n"
+    "You run in an isolated sandbox. The task's repository is a private git checkout at `/workspace`: the "
+    "terminal and file tools start there, and relative paths resolve there. `execute_code` starts in a temp "
+    "directory, so use absolute `/workspace/...` paths or `os.chdir('/workspace')` in it. The checkout is the "
+    "base commit the host already fetched and approved for this task; it has no remote and no credentials, by "
+    "design.\n"
+    "- Host paths (`/home/...`, the `.worktrees/...` path in `kanban_show`'s `workspace_path`), the host home, "
+    "`$HERMES_KANBAN_WORKSPACE` and the Docker socket are intentionally not visible here. Their absence is "
+    "expected and is never a reason to block. This contract supersedes any earlier comment, attempt or handoff "
+    "on the card that mentions a host checkout, a host backend, mounts or credentials.\n"
+    "- Never fetch, pull, push, open a PR, or ask for a host backend, a token, an SSH key or a mount. Do not "
+    "request push or GitHub access in `kanban_block`: the host holds publication.\n"
+    "- Git: the sandbox user differs from the checkout's owner, so run `git config --global --add "
+    "safe.directory /workspace` once (sandbox-local) before other git commands. There is no git identity: commit "
+    "with `git -c user.name=<name> -c user.email=<email> commit ...`.\n"
+    "- Do the work in `/workspace`: inspect, edit, run the relevant checks, then commit there. A detached HEAD "
+    "is fine. Do not rewrite or remove the base commit.\n"
+    "- Hand off with `kanban_request_review(summary=..., metadata={\"commit\": \"<full HEAD sha>\", ...})` and "
+    "end your turn. Do NOT call `kanban_complete` for this card: the host seals this run's observation, re-runs "
+    "the required checks on exactly the committed HEAD in its own sandbox, publishes that head, runs review and "
+    "CI, and completes the card. A task that genuinely needs no change still ends with "
+    "`kanban_request_review`, its summary saying why and naming the unchanged HEAD; never fabricate a commit.\n"
+    "- `kanban_block(kind=\"needs_input\")` is only for a real product or task ambiguity a human must decide. "
+    "Missing host paths, credentials or publication access are not that.\n"
+)
+
+
+def _capsule_protocol(generic: str) -> str:
+    """The generic protocol with its host-workspace and completion lines replaced (exact substrings)."""
+    swaps = (
+        ("; your workspace is `$HERMES_KANBAN_WORKSPACE`.",
+         "; your workspace is the task capsule at `/workspace` (see the Capsule contract below)."),
+        ("If you need a human decision you cannot infer (a credential only the user holds, UX choice, paywalled "
+         "source)",
+         "If you need a human decision you cannot infer (a product or task decision only a human can make, UX "
+         "choice, paywalled source; never credentials, mounts or publication access: see the Capsule contract)"),
+        ("2. **Work inside the workspace.** `cd $HERMES_KANBAN_WORKSPACE` before any file operations. The workspace "
+         "is yours for this run.",
+         "2. **Work inside the workspace.** Work in `/workspace` (see the Capsule contract). The workspace is "
+         "yours for this run."),
+        ("- **Workspace.** `cd $HERMES_KANBAN_WORKSPACE` first. For a `worktree` kind with no `.git`, `git worktree "
+         "add <path> ${HERMES_KANBAN_BRANCH:-wt/$HERMES_KANBAN_WORKER_TASK}` from the main repo, then cd there. For "
+         "a project-linked task the workspace is a fresh `<repo>/.worktrees/<task-id>` and `$HERMES_KANBAN_BRANCH` "
+         "a deterministic `<project-slug>/<task-id>` — the main repo is two levels up, so run `git worktree add` "
+         "from there.\n",
+         "- **Workspace.** `/workspace` is already the task's git checkout; do not create worktrees or look for "
+         "a main repo.\n"),
+    )
+    # Step 5 (generic: "call kanban_complete when a review child depends on your task") is replaced whole.
+    start, end = "5. **Finish with the review model encoded by the task graph.**", "6. **If follow-up work appears"
+    if generic.count(start) != 1 or generic.count(end) != 1 or generic.index(start) > generic.index(end):
+        raise RuntimeError("KANBAN_GUIDANCE drifted; capsule step-5 anchors missing")
+    step5 = generic[generic.index(start):generic.index(end)]
+    swaps += ((step5,
+               "5. **Finish with the Capsule contract's hand-off.** Commit in `/workspace`, then call "
+               "`kanban_request_review(summary=..., metadata=...)` with the structured handoff; never put secrets, "
+               "tokens, or raw PII in these durable fields. Do not call `kanban_complete` on this card, even when a "
+               "review or release child depends on it: the host verifies and publishes your committed head and "
+               "completes the card, which is what releases those children.\n"),)
+    text = generic
+    for old, new in swaps:
+        if text.count(old) != 1:  # generic protocol drifted: a capsule worker fails closed (tests catch it first)
+            raise RuntimeError(f"KANBAN_GUIDANCE drifted; capsule swap anchor missing: {old[:60]!r}")
+        text = text.replace(old, new)
+    head, sep, rest = text.partition("\n## Lifecycle\n")
+    return head + "\n" + KANBAN_CAPSULE_CONTRACT + sep + rest
+
+
+def kanban_capsule_guidance() -> str:
+    """Kanban protocol for a capsule-bound worker. Built on use, so a drifted anchor fails only that worker."""
+    return _capsule_protocol(KANBAN_GUIDANCE)
+
+
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do or plan to do without actually doing "
