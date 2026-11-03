@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 from gateway.kanban_watchers_common import (
-    _acquire_singleton_lock,
     _kanban_dispatch_allowed,
     _kanban_dispatch_gate,
     _release_singleton_lock,
@@ -38,10 +37,6 @@ from gateway.kanban_watchers_dispatcher import (
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"}
 _GC_INTERVAL_SECONDS = 3600.0
-# Host Kanban sync ownership (``_kanban_sync_watcher``): a contended lock is retried this often, and a named-profile
-# gateway re-checks for the root profile's gateway this often. [daveey]
-_SYNC_LOCK_RETRY_S = 5.0
-_SYNC_OWNER_RECHECK_S = 30.0
 _HEALTH_WINDOW = 6
 
 
@@ -58,7 +53,26 @@ class GatewayKanbanWatchersMixin:
             health.close()
         handle = getattr(self, "_kanban_dispatcher_lock_handle", None)
         self._kanban_dispatcher_lock_handle = None
-        _release_singleton_lock(handle)
+        lease = getattr(self, "_kanban_dispatcher_lease", None)
+        if lease is not None and lease.handle is handle:
+            lease.release()
+        else:
+            _release_singleton_lock(handle)
+
+    def _kanban_singleton_lease(self, lock_path: Path, name: str):
+        """A retrying, root-preferring lease on a host-wide singleton lock (gateway/kanban_singleton.py)."""
+        from gateway import kanban_singleton as _ks
+        return _ks.SingletonLease(lock_path, name=name, retry_seconds=_ks.DEFAULT_RETRY_SECONDS,
+                                  grace_seconds=_ks.DEFAULT_GRACE_SECONDS,
+                                  warn_after_seconds=_ks.DEFAULT_WARN_AFTER_SECONDS)
+
+    async def _acquire_kanban_lease(self, lease) -> bool:
+        """Retry *lease* every ``lease.retry_seconds`` until held; False when the gateway stops first."""
+        while self._running:
+            if lease.try_acquire():
+                return True
+            await self._sleep_between_ticks(lease.retry_seconds)
+        return False
 
     async def _sleep_between_ticks(self, interval: float) -> None:
         """Sleep *interval* (floored to 1s) in 1s slices so stop() never waits a full interval."""
@@ -270,21 +284,9 @@ class GatewayKanbanWatchersMixin:
             logger.warning("kanban dispatcher: kanban_db not importable; dispatcher disabled")
             return None
 
-        # Single-dispatcher backstop (see _acquire_singleton_lock). The lock
-        # lives at the machine-global kanban root, so it serialises ALL gateways.
-        self._kanban_dispatcher_lock_handle = None
-        _lock_path = _kb.kanban_home() / "kanban" / ".dispatcher.lock"
-        _lock_handle, _lock_state = _acquire_singleton_lock(_lock_path)
-        if _lock_state == "contended":
-            logger.info("kanban dispatcher: another gateway already holds the dispatcher "
-                        "lock (%s); this gateway will NOT dispatch.", _lock_path)
-            return None
-        if _lock_state == "held":
-            self._kanban_dispatcher_lock_handle = _lock_handle  # hold for process lifetime
-            logger.info("kanban dispatcher: holding singleton dispatcher lock (%s)", _lock_path)
-        else:
-            logger.warning("kanban dispatcher: advisory lock unavailable at %s; proceeding "
-                           "on config control alone.", _lock_path)
+        # The single-dispatcher lock (machine-global kanban root) is taken by the watcher through a
+        # retrying, root-preferring SingletonLease (gateway/kanban_singleton.py), not here: a gateway
+        # that lost the boot race used to stay non-dispatching until it restarted. [daveey]
         return _load_config, _kb, kanban_cfg
 
     async def _kanban_dispatcher_watcher(self) -> None:
@@ -301,8 +303,19 @@ class GatewayKanbanWatchersMixin:
             return
         _load_config, _kb, kanban_cfg = boot
         settings = _resolve_dispatcher_settings(kanban_cfg, _kb)
-        interval = settings.interval
+        lease = self._kanban_singleton_lease(_kb.kanban_home() / "kanban" / ".dispatcher.lock", "dispatcher")
+        self._kanban_dispatcher_lease = lease
+        # A gateway that finds the lock held keeps retrying; a profile gateway hands it back when the
+        # root gateway asks (lease.should_yield), then waits to take it again. [daveey]
+        while self._running:
+            if not await self._acquire_kanban_lease(lease):
+                return
+            self._kanban_dispatcher_lock_handle = lease.handle
+            await self._kanban_dispatch_while_held(settings, _load_config, _kb, lease)
 
+    async def _kanban_dispatch_while_held(self, settings, _load_config, _kb, lease) -> None:
+        """The dispatch loop for one tenure of the singleton lock; releases it on exit."""
+        interval = settings.interval
         from gateway.kanban_dispatcher_health import DispatcherHealth
         health = DispatcherHealth(getattr(self, "_kanban_dispatcher_lock_handle", None), interval=interval)
         self._kanban_dispatcher_health = health
@@ -320,7 +333,7 @@ class GatewayKanbanWatchersMixin:
             dispatcher = _KanbanDispatcher(_kb, settings)
 
             logger.info("kanban dispatcher: embedded in gateway (interval=%.1fs)", interval)
-            while self._running:
+            while self._running and not lease.should_yield():
                 health.invalidate()
                 try:
                     # Reap zombies before per-board work so a board DB failure
@@ -411,48 +424,17 @@ class GatewayKanbanWatchersMixin:
             return
         from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_sync_client as _ksc
-        from gateway import kanban_watchers_common as _kwc
-        # [daveey] The sync loop reconciles chat links with THIS process's profile (its origin ledger, its
-        # state.db, its core's rules), so it belongs to the kanban root profile's gateway. A named-profile gateway
-        # sharing the root's boards (hub: hermes-gateway-askeve-reviewer on a pinned core) won the first-come lock
-        # and released every root-profile chat's remote-card and inherited links each pass, while the root gateway
-        # logged "already syncs" and never retried. Now a named profile leaves sync to a live root gateway (and
-        # hands the lock back when one starts), and a contended root keeps retrying instead of giving up.
-        root = _kwc._is_kanban_root_profile()
-        said = None
+        # Same retrying, root-preferring lease as the dispatcher: a gateway that loses the boot race
+        # keeps retrying, and a profile gateway hands the lock back when the root gateway asks. [daveey]
+        lease = self._kanban_singleton_lease(_kb.kanban_home() / "kanban" / ".sync.lock", "sync")
+        self._kanban_sync_lease = lease
         while self._running:
-            if not root and _kwc._root_gateway_alive():
-                if said != "defer":
-                    logger.info("kanban sync: the root profile's gateway runs on this host; this profile "
-                                "gateway leaves host sync to it")
-                    said = "defer"
-                await asyncio.sleep(_SYNC_OWNER_RECHECK_S)
-                continue
-            lock_handle, lock_state = _acquire_singleton_lock(_kb.kanban_home() / "kanban" / ".sync.lock")
-            if lock_state == "contended":
-                if said != "contended":
-                    logger.info("kanban sync: another gateway on this host already syncs; retrying every %.0fs",
-                                _SYNC_LOCK_RETRY_S)
-                    said = "contended"
-                await asyncio.sleep(_SYNC_LOCK_RETRY_S)
-                continue
-            said = None
-            checked = [0.0, False]
-
-            def keep_running() -> bool:
-                if not self._running:
-                    return False
-                if root:
-                    return True
-                now = time.monotonic()
-                if now - checked[0] >= _SYNC_OWNER_RECHECK_S:
-                    checked[0], checked[1] = now, _kwc._root_gateway_alive()
-                return not checked[1]
-
+            if not await self._acquire_kanban_lease(lease):
+                return
             try:
-                await asyncio.to_thread(_ksc.run_forever, keep_running)
+                await asyncio.to_thread(_ksc.run_forever, lambda: self._running and not lease.should_yield())
+                yielded = self._running and lease.should_yield()
             finally:
-                _release_singleton_lock(lock_handle)
-            if root or not checked[1] or not self._running:
-                return  # the loop ended on its own (shutdown, no identity): never respin it
-            logger.info("kanban sync: the root profile's gateway started; handed host sync to it")
+                lease.release()
+            if not yielded:
+                return  # the loop ended on its own (stop, or sync unavailable): don't spin on it

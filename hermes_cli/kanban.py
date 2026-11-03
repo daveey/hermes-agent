@@ -131,6 +131,19 @@ def _check_dispatcher_presence(hermes_home: Optional[Path] = None) -> tuple[bool
     keep the existing process-level behavior.
     """
     try:
+        # The dispatcher is host-wide: one gateway holds ``<kanban root>/kanban/.dispatcher.lock`` and
+        # dispatches every board for every profile. Ask who holds it before judging this home's own
+        # gateway/config, or a profile CLI with dispatch_in_gateway=false warns "task will sit in ready"
+        # while the root gateway dispatches it fine. [daveey]
+        from gateway.kanban_singleton import describe_holder, holder_info
+        from hermes_cli.kanban_db import kanban_home
+
+        holder = holder_info(kanban_home() / "kanban" / ".dispatcher.lock")
+        if holder:
+            return (True, f"host dispatcher: {describe_holder(holder)}")
+    except Exception:
+        pass
+    try:
         from gateway.status import resolve_gateway_liveness  # type: ignore
 
         # Same ladder as the dashboard status endpoints so PID-file-less / cross-container gateways
@@ -1593,9 +1606,23 @@ def _cmd_archive(args: argparse.Namespace) -> int:
         return _bulk_apply(ids, _one, _ok_line, lambda tid: refusals.get(tid) or f"cannot archive {tid}")
 
 
+def _host_lock_holders() -> dict:
+    """``{"dispatcher": info|None, "sync": info|None}``: who holds the host-wide singleton locks. [daveey]"""
+    out: dict = {}
+    try:
+        from gateway.kanban_singleton import holder_info
+        root = kb.kanban_home() / "kanban"
+        for name in ("dispatcher", "sync"):
+            out[name] = holder_info(root / f".{name}.lock")
+    except Exception:
+        pass
+    return out
+
+
 def _cmd_stats(args: argparse.Namespace) -> int:
     with kbc.connect_closing() as conn:
         stats = kb.board_stats(conn)
+    stats["host_locks"] = _host_lock_holders()
     if _json_out(args, stats):
         return 0
     print("By status:")
@@ -1610,6 +1637,18 @@ def _cmd_stats(args: argparse.Namespace) -> int:
     age = stats["oldest_ready_age_seconds"]
     if age is not None:
         print(f"\nOldest ready task age: {int(age)}s")
+    locks = stats.get("host_locks") or {}
+    if locks:
+        from gateway.kanban_singleton import describe_holder
+        print("\nHost locks:")
+        for name, info in locks.items():
+            if not info:
+                print(f"  {name:10s}  free (nothing on this host {'dispatches' if name == 'dispatcher' else 'syncs'})")
+                continue
+            since = info.get("since")
+            held = f", held {int(time.time() - since)}s" if isinstance(since, (int, float)) else ""
+            flag = "" if info.get("root") else "  ⚠ not the root gateway: its config's kanban caps apply"
+            print(f"  {name:10s}  {describe_holder(info)}{held}{flag}")
     return 0
 
 

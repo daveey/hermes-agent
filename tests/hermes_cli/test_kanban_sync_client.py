@@ -431,61 +431,21 @@ def test_gateway_watcher_runs_the_loop_once_per_host_and_not_when_disabled(kanba
     assert calls == [True]
     from gateway.kanban_watchers_common import _acquire_singleton_lock, _release_singleton_lock
     held, state = _acquire_singleton_lock(kb.kanban_home() / "kanban" / ".sync.lock")
-    assert state == "held"
-    slept = []
+    waits = []
 
-    async def fake_sleep(seconds):
-        slept.append(seconds)
-        _release_singleton_lock(held)  # the other gateway exits
-
-    monkeypatch.setattr(watchers.asyncio, "sleep", fake_sleep)
-    asyncio.run(runner._kanban_sync_watcher())  # another gateway on this host holds it: retried, never given up
-    assert slept == [watchers._SYNC_LOCK_RETRY_S] and calls == [True, True]
-
-
-def test_a_named_profile_gateway_leaves_host_sync_to_the_root_gateway(kanban_home, monkeypatch):
-    """Hub 2026-11-02: hermes-gateway-askeve-reviewer (a named profile on a pinned older core) won the host sync lock
-    first; its reconcile released root-profile chats' card links every pass, and the root gateway logged "another
-    gateway already syncs" and never retried. A named profile now defers to a live root gateway and hands the loop
-    back when one starts. [daveey]"""
-    import asyncio
-    from gateway import kanban_watchers as watchers
-    from gateway import kanban_watchers_common as kwc
-    support.write_sync_config(kanban_home, True)
-    root_alive = [True]
-    monkeypatch.setattr(kwc, "_is_kanban_root_profile", lambda: False)
-    monkeypatch.setattr(kwc, "_root_gateway_alive", lambda: root_alive[0])
-    monkeypatch.setattr(watchers, "_SYNC_OWNER_RECHECK_S", 0.0)
-    runner = watchers.GatewayKanbanWatchersMixin()
-    runner._running = True
-    ran, slept = [], []
-
-    async def fake_sleep(seconds):
-        slept.append(seconds)
-        root_alive[0] = False  # the root gateway stops: this profile may sync
-
-    def fake_run_forever(keep_running, interval=None, sleep=None):
-        ran.append(keep_running())
-        root_alive[0] = True  # the root gateway starts again
-        ran.append(keep_running())
-        runner._running = False
-    monkeypatch.setattr(watchers.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(ksc, "run_forever", fake_run_forever)
-    asyncio.run(runner._kanban_sync_watcher())
-    assert slept == [0.0] and ran == [True, False]  # deferred, then ran, then handed back
-    from gateway.kanban_watchers_common import _acquire_singleton_lock, _release_singleton_lock
-    held, state = _acquire_singleton_lock(kb.kanban_home() / "kanban" / ".sync.lock")
-    _release_singleton_lock(held)
-    assert state == "held"  # released on hand-back
-
-
-def test_root_profile_detection_reads_hermes_home_against_the_kanban_root(kanban_home, monkeypatch, tmp_path):
-    from gateway import kanban_watchers_common as kwc
-    assert kwc._is_kanban_root_profile()
-    monkeypatch.setenv("HERMES_HOME", str(kb.kanban_home() / "profiles" / "askeve-reviewer"))
-    monkeypatch.setattr(kb, "kanban_home", lambda: kanban_home)
-    assert not kwc._is_kanban_root_profile()
-    assert not kwc._root_gateway_alive()  # no root gateway.pid
+    async def other_gateway_exits(interval):  # the retry sleep: the holder goes away meanwhile
+        waits.append(calls[:])
+        _release_singleton_lock(held)
+    runner._sleep_between_ticks = other_gateway_exits
+    try:
+        assert state == "held"
+        # Another gateway on this host holds it: this one waits instead of giving up for its lifetime,
+        # and syncs once the holder lets go.
+        asyncio.run(runner._kanban_sync_watcher())
+        assert waits == [[True]]
+        assert calls == [True, True]
+    finally:
+        _release_singleton_lock(held)
 
 
 def test_import_skips_events_older_than_the_service_retention(live):

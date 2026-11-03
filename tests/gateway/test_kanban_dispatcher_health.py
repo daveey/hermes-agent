@@ -100,11 +100,8 @@ def test_native_loop_publishes_only_actual_board_success(tmp_path, monkeypatch, 
     monkeypatch.setattr(kbc, "connect", connect)
     board = kb.kanban_db_path("default")
     root = tmp_path / "kanban"
-    lock, state = _acquire_singleton_lock(root / ".dispatcher.lock")
-    assert state == "held"
     runner = watchers.GatewayKanbanWatchersMixin()
     runner._running = True
-    runner._kanban_dispatcher_lock_handle = lock
     cfg = {"auto_decompose": False, "dispatch_interval_seconds": 1}
     monkeypatch.setattr(runner, "_kanban_dispatcher_boot", lambda: (lambda: {"kanban": cfg}, kb, cfg))
     async def no_sleep(delay):
@@ -135,7 +132,11 @@ def test_native_loop_publishes_only_actual_board_success(tmp_path, monkeypatch, 
     else:
         asyncio.run(runner._kanban_dispatcher_watcher())
     assert not health.available(root, board, "default", "ready")
-    assert lock.closed
+    # The watcher took the lock itself (SingletonLease) and released it on every ending.
+    assert runner._kanban_dispatcher_lock_handle is None
+    lock, state = _acquire_singleton_lock(root / ".dispatcher.lock")
+    assert state == "held"
+    _release_singleton_lock(lock)
 
 
 def test_one_shot_and_dry_run_never_publish(tmp_path, monkeypatch):
