@@ -155,6 +155,7 @@ COMPLETE_REJECTION_CLASSES = frozenset({
     "empty",          # no summary/result, or an evidence-free completion
     "live_claim",     # another live dispatcher worker owns the card
     "stale_run",      # run superseded, card already terminal, or unknown id
+    "foreign_card",   # card exists here only as a Board replica copy; its owner gateway must write it [daveey]
     "pr_acceptance",  # completion contract's PR CI acceptance refused (pr_acceptance event ok=false)
     "parents",        # unsatisfied parent dependencies
     "not_owner",      # delegate child / other task / unbound run id
@@ -895,6 +896,10 @@ def _handle_complete(args: dict, **kw) -> str:
     _require_dict_metadata(metadata)
     metadata = _stamp_worker_session_metadata(tid, metadata)
     with _board(args.get("board")) as (kb, conn):
+        from hermes_cli import kanban_foreign_card as _kfc
+        foreign = _kfc.refusal(conn, tid)  # [daveey] only a replica copy here: name the owner, not "stale run"
+        if foreign:
+            raise _Reject(foreign, _kfc.REJECTION)
         # Goal-mode pre-completion judge gate (Issue #38367). Prevent workers from bypassing the auxiliary
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
@@ -1366,6 +1371,10 @@ def _handle_comment(args: dict, **kw) -> str:
     # with what reads as a system directive. See #19713.
     author = _persisted_identity()
     with _board(args.get("board")) as (kb, conn):
+        from hermes_cli import kanban_foreign_card as _kfc
+        foreign = _kfc.refusal(conn, str(tid))  # [daveey] only a replica copy here: name the owner
+        if foreign:
+            raise _Reject(foreign, _kfc.REJECTION)
         cid = kb.add_comment(conn, tid, author=author, body=str(body))
         subscribed = _maybe_subscribe_on_touch(conn, str(tid))
         live = kb.live_run_id(conn, str(tid))
@@ -1896,8 +1905,12 @@ def _handle_archive(args: dict, **kw) -> str:
     tid = str(tid)
     with _board(args.get("board")) as (_kb, conn):
         # [daveey] Scope rule, stop request for a card leased elsewhere, relayed owner card forwarded home.
+        from hermes_cli import kanban_foreign_card as _kfc
         from hermes_cli.kanban_owner_archive_relay import worker_archive
-        refusal, out = worker_archive(conn, tid, run_id_fn=_worker_run_id)
+        try:
+            refusal, out = worker_archive(conn, tid, run_id_fn=_worker_run_id)
+        except _kfc.ForeignCardError as exc:
+            raise _Reject(str(exc), _kfc.REJECTION) from None
         if refusal:
             raise _Reject(refusal)
         _check(out, f"cannot archive {tid}")

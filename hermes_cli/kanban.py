@@ -27,6 +27,7 @@ from hermes_cli import kanban_db_operator as kbo
 from hermes_cli import kanban_swarm as ks
 from hermes_cli import kanban_workflow
 from hermes_cli import kanban_contract_cli as _contract_cli
+from hermes_cli import kanban_foreign_card as _foreign_card
 from hermes_cli.kanban_output import (
     _ATTACHMENT_FIELDS, _RUNS_RUN_FIELDS, _SHOW_RUN_FIELDS, _bulk_apply, _err,
     _fmt_counts, _fmt_task_line, _fmt_ts, _json_out, _obj_dict, _print_json,
@@ -1261,6 +1262,10 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 fail_msg[tid] = gate_err
                 return False
             fail_msg[tid] = f"cannot complete {tid} (unknown id or terminal state)"
+            foreign = _foreign_card.refusal(conn, tid)  # [daveey] only a replica copy here: name the owner
+            if foreign:
+                fail_msg[tid] = f"cannot complete {tid}: {_foreign_card.REJECTION}: {foreign}"
+                return False
             try:
                 done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
                                         goal_verification=verified[0] if verified else None,
@@ -1586,6 +1591,9 @@ def _cmd_archive(args: argparse.Namespace) -> int:
                                lambda tid: f"cannot delete {tid} (must already be archived)")
         vias: dict[str, Optional[str]] = {}
         for tid in ids:
+            foreign = _foreign_card.refusal(conn, tid)  # [daveey] only a replica copy here: name the owner
+            if foreign:
+                return _err(f"cannot archive {tid}: {_foreign_card.REJECTION}: {foreign}")
             refusal, vias[tid] = worker_archive_scope(conn, tid)
             if refusal:
                 return _err(refusal)

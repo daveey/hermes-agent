@@ -212,7 +212,8 @@ def worker_archive(conn: sqlite3.Connection, tid: str, *,
 
     A ``relay=home`` owner card this board lacks is forwarded home (:func:`forward`). Any other card gets the local
     scope rule, then :func:`hermes_cli.kanban_remote_stop.archive`: a card another machine runs under its live
-    Board lease gets a stop request, since the Board would reject the status write (live_claim).
+    Board lease gets a stop request, since the Board would reject the status write (live_claim). A card this
+    gateway has only as a replica copy raises :class:`hermes_cli.kanban_foreign_card.ForeignCardError`.
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban import worker_archive_scope
@@ -227,6 +228,8 @@ def worker_archive(conn: sqlite3.Connection, tid: str, *,
                 return str(out.get("error") or f"cannot archive {tid}"), None
             out.pop("task_id", None)
             return None, out
+    from hermes_cli import kanban_foreign_card as kfc
+    kfc.check(conn, tid)  # [daveey] a card only in the Board replica: raise ForeignCardError naming its owner
     refusal, via = worker_archive_scope(conn, tid)
     if refusal:
         return refusal, None

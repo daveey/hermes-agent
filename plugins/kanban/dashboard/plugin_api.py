@@ -390,34 +390,66 @@ def get_task(
     board: Optional[str] = Query(None),
     run_state_type: Optional[str] = Query(None, description="With run_state_name: filter runs by column 'status' or 'outcome'"),
     run_state_name: Optional[str] = Query(None, description="With run_state_type: exact value for that run column")):
+    if (run_state_type is None) ^ (run_state_name is None):
+        raise HTTPException(status_code=400, detail="run_state_type and run_state_name must be passed together or omitted")
+    if run_state_type not in (None, "status", "outcome"):
+        raise HTTPException(status_code=400, detail="run_state_type must be 'status' or 'outcome'")
+    from hermes_cli import kanban_foreign_card as kfc
     with _board_conn(board) as (board, conn):
-        if (run_state_type is None) ^ (run_state_name is None):
-            raise HTTPException(status_code=400, detail="run_state_type and run_state_name must be passed together or omitted")
-        if run_state_type not in (None, "status", "outcome"):
-            raise HTTPException(status_code=400, detail="run_state_type must be 'status' or 'outcome'")
-        task = _require_task(conn, task_id)
-        # Drawer returns the FULL summary (cards on /board carry a 200-char preview).
-        task_d = _task_dict(
-            task, latest_summary=kanban_db.latest_summary(conn, task_id),
-            current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id))
-        links = _links_for(conn, task_id)
-        child_summaries = kanban_db.latest_summaries(conn, links["children"])
-        children = filter(None, (kanban_db.get_task(conn, cid) for cid in links["children"]))
-        _attach_diagnostics(task_d, _compute_task_diagnostics(conn, task_ids=[task_id]).get(task_id) or [])
-        from hermes_cli import kanban_wake_check as kwc
-        task_d["wake_check"] = kwc.get_state(conn, task_id)  # condition wake probe [daveey]
-        return {
-            "task": task_d,
-            "comments": [asdict(c) for c in kanban_db.list_comments(conn, task_id)],
-            "events": [asdict(e) for e in kanban_db.list_events(conn, task_id)],
-            "attachments": [_attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id)],
-            "links": links,
-            "link_tasks": _link_tasks(conn, links),
-            "child_results": [
-                {"id": c.id, "title": c.title, "status": c.status, "latest_summary": child_summaries.get(c.id), "result": c.result}
-                for c in children],
-            "runs": _runs_with_worker_sessions(
-                conn, task_id, kanban_db.list_runs(conn, task_id, state_type=run_state_type, state_name=run_state_name))}
+        task = kanban_db.get_task(conn, task_id)
+        if task is not None:
+            out = _task_detail(conn, task, run_state_type, run_state_name)
+            from hermes_cli import kanban_queue_position as kqp
+            queue = kqp.position(conn, task, board)  # [daveey] a long wait reads as queued, not stuck
+            if queue is not None:
+                out["queue"] = queue
+            return {**out, "source": "live"}
+        live_file = kbc._main_db_file(conn)
+    # [daveey] A synced board's live file holds only this gateway's own cards; a card another gateway created
+    # (a Board worker node no Desktop reaches) is read from the board replica, named with its owner.
+    with kfc.open_replica(live_file) as replica:
+        task = kanban_db.get_task(replica, task_id) if replica is not None else None
+        if replica is not None and task is not None:
+            owner = kfc.created_on(replica, task_id)
+            out = _task_detail(replica, task, run_state_type, run_state_name)
+            return {**out, "source": "replica", "owner": None if owner is kfc._UNSET else owner}
+    raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+
+
+def _task_detail(conn: sqlite3.Connection, task: kanban_db.Task, run_state_type: Optional[str],
+                 run_state_name: Optional[str]) -> dict[str, Any]:
+    """The GET /tasks/:id payload for ``task`` read from ``conn`` (the live file or the board replica)."""
+    task_id = task.id
+    # Drawer returns the FULL summary (cards on /board carry a 200-char preview).
+    task_d = _task_dict(
+        task, latest_summary=kanban_db.latest_summary(conn, task_id),
+        current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id))
+    links = _links_for(conn, task_id)
+    child_summaries = kanban_db.latest_summaries(conn, links["children"])
+    children = filter(None, (kanban_db.get_task(conn, cid) for cid in links["children"]))
+    _attach_diagnostics(task_d, _compute_task_diagnostics(conn, task_ids=[task_id]).get(task_id) or [])
+    from hermes_cli import kanban_wake_check as kwc
+    task_d["wake_check"] = kwc.get_state(conn, task_id)  # condition wake probe [daveey]
+    return {
+        "task": task_d,
+        "comments": [asdict(c) for c in kanban_db.list_comments(conn, task_id)],
+        "events": [asdict(e) for e in kanban_db.list_events(conn, task_id)],
+        "attachments": [_attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id)],
+        "links": links,
+        "link_tasks": _link_tasks(conn, links),
+        "child_results": [
+            {"id": c.id, "title": c.title, "status": c.status, "latest_summary": child_summaries.get(c.id), "result": c.result}
+            for c in children],
+        "runs": _runs_with_worker_sessions(
+            conn, task_id, kanban_db.list_runs(conn, task_id, state_type=run_state_type, state_name=run_state_name))}
+
+
+def _foreign_card_409(conn: sqlite3.Connection, task_id: str) -> None:
+    """409 ``foreign_card: <message naming the owner>`` when ``task_id`` exists only in the board replica. [daveey]"""
+    from hermes_cli import kanban_foreign_card as kfc
+    msg = kfc.refusal(conn, task_id)
+    if msg:
+        raise HTTPException(status_code=409, detail=f"{kfc.REJECTION}: {msg}")
 
 
 # --- POST /tasks ------------------------------------------------------------
@@ -778,6 +810,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
 
     actor = classification_actor(request) if payload.metadata_only else ""
     with _board_conn(board) as (board, conn):
+        _foreign_card_409(conn, task_id)
         _require_task(conn, task_id)
         if (refusal := ask_filing_refusal(conn, task_id, payload)):
             raise _conflict(refusal)
@@ -897,6 +930,7 @@ def add_comment(task_id: str, payload: CommentBody, board: Optional[str] = Query
     if not payload.body.strip():
         raise HTTPException(status_code=400, detail="body is required")
     with _board_conn(board) as (board, conn):
+        _foreign_card_409(conn, task_id)
         _require_task(conn, task_id)
         kanban_db.add_comment(conn, task_id, author=payload.author or "dashboard", body=payload.body)
         return {"ok": True}

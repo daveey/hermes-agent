@@ -254,7 +254,7 @@ def _lock_state(home):
 def test_real_sample_is_entirely_under_lock_bounded_and_measures_chat_turn_cost(board):
     """Frozen contract: an independent FULL real ~1 s /proc/stat sample is taken entirely while admission.lock is held
     (held at its first and last read), the hold stays <= ~2 s, and a chat/notification turn reserving the lock with
-    BUSY_WAIT_S=0.5 s during the sample is measured (its outcome must match the measured hold interval)."""
+    BUSY_WAIT_S (3.0 s) during the sample is measured (its outcome must match the measured hold interval)."""
     from hermes_cli import backend_retirement
 
     conn, home = board
