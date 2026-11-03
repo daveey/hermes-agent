@@ -85,7 +85,7 @@ def test_a_browser_credential_that_is_not_text_is_replaced_and_served(tmp_path):
     credential: like a malformed one it is replaced, and the Webapp is served with the new one."""
     report = _run(tmp_path, {"webapp": {"enabled": True, "port": _free_port()}, "credential": "not-utf8"})
     assert report["start_error"] is None, report.get("start_traceback")
-    assert report["status"]["state"] == "serving"
+    assert report["status"]["state"] == "serving", report["status"]
     assert report["state"]["session_token_is_browser_credential"] is True
 
 
