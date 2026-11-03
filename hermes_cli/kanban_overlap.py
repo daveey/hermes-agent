@@ -122,7 +122,10 @@ def _names_board(slug: str, title: str, body: str, gateways: Iterable[str] = ())
 def singleton_job(title: str) -> Optional[str]:
     """Explicit single-writer jobs, not a change to general title similarity. [daveey]"""
     tokens = set(re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", (title or "").lower()))
-    if "mirror" in tokens and (tokens & {"hermes-mods", "core"} or {"fork", "backlog"} <= tokens):
+    # "core"/"fork backlog" name the mirror pass only outside hermes-sync bug cards: "a core pass of hermes-sync
+    # crashed … hosts without a mirror checkout" is a hermes-sync fix, not a second mirror pass (t_01a19ddcef566978).
+    mirror_words = {"hermes-mods"} if "hermes-sync" in tokens else {"hermes-mods", "core"}
+    if "mirror" in tokens and (tokens & mirror_words or ("hermes-sync" not in tokens and {"fork", "backlog"} <= tokens)):
         return "hermes-mods core mirror"
     return None
 
