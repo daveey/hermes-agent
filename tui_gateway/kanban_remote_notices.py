@@ -220,8 +220,8 @@ def format_notice(gw: str, key: str, task: dict) -> str:
         handoff = _first_line(run.get("summary") or task.get("result"), 200)
         return f"✔ {prefix}Kanban {tid} done — {title}{handoff}\n(ran on {gw}; read it with cross_task @task:{board}@{gw}/{tid})"
     reason = run.get("summary") or task.get("block_kind") or ""
-    return (f"⏸ {prefix}Kanban {tid} blocked" + (f": {str(reason)[:160]}" if reason else "")
-            + f" — {title}\n(on {gw}; read it with cross_task @task:{board}@{gw}/{tid})")
+    from hermes_cli.kanban_block_notice import block_notice
+    return f"⏸ {prefix}Kanban {tid} " + block_notice(task, tid, board, gateway=gw, reason=str(reason))
 
 
 def _event_key(owner: str, key: str, notice: dict) -> str:

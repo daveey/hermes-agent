@@ -368,6 +368,25 @@ def test_hooks_take_the_pm_composed_environment_minus_its_checkout(tmp_path, whe
     assert not record.exists()
 
 
+@pytest.mark.parametrize("output", ["", "not json\n", "[1, 2]\n"])
+def test_hooks_skip_a_pm_environment_that_yields_no_json_without_a_traceback(tmp_path, output):
+    """An interpreter that cannot run pm.environments (the mini's CLT python3.9 in a checkout
+    with no virtualenv) prints nothing, or garbage: the hook skips that composing checkout
+    quietly instead of printing a JSONDecodeError traceback that reads as a failed push."""
+    repo = _engine_repo(tmp_path)
+    assert _check(repo, "--install-hook", "pre-commit").returncode == 0
+    (repo / ".venv").symlink_to(Path(sys.prefix), target_is_directory=True)
+    env = _env()
+    env["HERMES_HOME"] = str(tmp_path / "hermes-home")
+    _write(repo, {"pm/environments.py": (
+        f"import sys\nsys.stdout.write({output!r})\nraise SystemExit(1)\n")})
+    _write(repo, {"pkg/b.py": "def b():\n    return 2\n"})
+    _git(repo, "add", "--", "pkg/b.py")
+    proc = _sh(repo, "git", "commit", "-q", "-m", "pm", env=env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr and "Error" not in proc.stderr, proc.stderr
+
+
 def test_check_refuses_old_python_before_importing_anything():
     # The guard reads sys.version_info; a 3.10 interpreter is emulated by overriding it before
     # scripts/check runs (tomllib, imported via ruff_runner, would otherwise crash it).

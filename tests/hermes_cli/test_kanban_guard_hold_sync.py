@@ -13,6 +13,7 @@ from hermes_cli import kanban_db_dispatch as dispatch
 from hermes_cli import kanban_db_dispatch_guard_notice as notice
 from hermes_cli import kanban_model_assignment as assignment
 from hermes_cli import kanban_worker_node as wn
+from hermes_cli import kanban_worker_placement as placement
 from tests.hermes_cli import test_kanban_worker_node as worker_node
 
 gws = worker_node.gws
@@ -162,6 +163,41 @@ def test_home_maintains_guard_hold_on_worker_queued_policy_card(gws, svc, monkey
     task = kb.get_task(home.conn, target)
     assert task is not None and task.status == "triage"
     assert home.conn.execute("SELECT count(*) FROM task_runs WHERE task_id=?", (target,)).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("prefilter", [True, False], ids=["both_fences", "claim_gate_only"])
+def test_full_tick_with_spawn_budget_never_runs_worker_queued_policy_card(gws, svc, monkeypatch, prefilter):
+    """The guard-hold test above ticks with max_spawn=0, where no spawn is trivial. Here the home has budget and
+    spends it on a plain control card in the same tick, yet the worker-first card stays queued: no spawn, no run
+    row (locally or on the Board) and its policy fence intact. ``claim_gate_only`` drops the advisory prefilter
+    (``dispatch_refusals``) so the claim gate's own policy check must hold the line alone."""
+    home, _worker = gws
+    home.enter()
+    target = kb.create_task(home.conn, title="queued for worker capacity", assignee="default",
+                            placement_policy="worker-first-v1")
+    control = kb.create_task(home.conn, title="ordinary home card", assignee="default")
+    # Admit local capacity so the policy fence, not host pressure or fixture shape, is what keeps the card off.
+    monkeypatch.setattr(placement, "local_admission", lambda conn: True)
+    if not prefilter:
+        monkeypatch.setattr(wn, "dispatch_refusals", lambda conn, status: {})
+    result = home.tick(max_spawn=4)
+    assert [tid for tid, *_ in result.spawned] == [control]  # the budget was real and was spent
+    if prefilter:
+        assert (target, "waiting_for_worker_capacity") in result.skipped_ineligible
+    else:
+        assert (target, "waiting_for_worker_capacity") in result.claim_deferred
+    task = kb.get_task(home.conn, target)
+    assert task is not None and task.status == "ready"
+    assert task.placement_policy == "worker-first-v1"
+    assert task.claim_lock is None and task.current_run_id is None
+    row = home.conn.execute("SELECT runs_on, lease_holder FROM tasks WHERE id=?", (target,)).fetchone()
+    assert (row["runs_on"], row["lease_holder"]) == (None, None)
+    assert home.conn.execute("SELECT count(*) FROM task_runs WHERE task_id=?", (target,)).fetchone()[0] == 0
+    home.round()
+    board_runs = [r for r in svc.board(worker_node.BOARD)["rows"].get("task_runs", {}).values()
+                  if r.get("task_id") in (target, control)]
+    assert [r["task_id"] for r in board_runs] == [control]  # the Board sees runs; none for the queued card
+    assert placement.local_refusals(home.conn, "ready") == {target: "waiting_for_worker_capacity"}
 
 
 @pytest.mark.parametrize("cooldown", [120, 10000])

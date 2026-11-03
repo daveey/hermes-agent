@@ -7,8 +7,9 @@ protocol peers, real staging I/O."""
 import asyncio
 import base64
 
-import acp
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
+import acp
 from acp.schema import ImageContentBlock
 
 from acp_adapter.gateway_commands import run_command

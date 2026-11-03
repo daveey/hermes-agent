@@ -130,6 +130,37 @@ def test_stale_socket_get_is_retried_once(server, monkeypatch):
     assert server.connections == 2
 
 
+@pytest.mark.parametrize("elapsed", [1.5, 2.1])
+def test_get_resend_recomputes_remaining_budget(server, monkeypatch, elapsed):
+    """A real reused connection closes after spending part (or all) of the budget."""
+    from types import SimpleNamespace
+    clock = [100.0]
+    monkeypatch.setattr(ksc, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    hub = _hub(server)
+    hub.machines()
+    hub.deadline = 102.0
+    original = _Handler._serve
+
+    def close_once(handler):
+        clock[0] += elapsed
+        monkeypatch.setattr(_Handler, "do_GET", original)
+        handler.close_connection = True
+        handler.connection.shutdown(socket.SHUT_RDWR)
+
+    monkeypatch.setattr(_Handler, "do_GET", close_once)
+    try:
+        if elapsed > 2:
+            with pytest.raises(TimeoutError, match="budget exhausted"):
+                hub.machines()
+            assert server.connections == 1
+        else:
+            assert hub.machines()["path"] == "/v2/machines"
+            assert hub._local.conn.sock.gettimeout() <= 0.5
+            assert server.connections == 2
+    finally:
+        hub.close()
+
+
 def test_post_whose_answer_is_lost_is_not_resent(server):
     hub = _hub(server)
     hub.machines()
@@ -290,6 +321,50 @@ class _Redirect(http.server.BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     do_GET = do_POST = _serve
+
+
+@pytest.mark.parametrize("proxied", [False, True])
+@pytest.mark.parametrize("step", [0.4, 2.1])
+def test_redirect_chain_recomputes_budget(server, monkeypatch, proxied, step):
+    """Every actual HTTP send, including urllib's own follows, gets remaining time."""
+    import http.client
+    from types import SimpleNamespace
+    clock = [100.0]
+    monkeypatch.setattr(ksc, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(ksc.Hub, "_proxied", staticmethod(lambda parts: proxied))
+    sent = []
+    request = http.client.HTTPConnection.request
+
+    def observed_request(conn, *args, **kwargs):
+        sent.append((clock[0], conn.timeout))
+        return request(conn, *args, **kwargs)
+
+    def redirect(handler):
+        clock[0] += step
+        server.requests.append((handler.command, handler.path))
+        handler.send_response(302 if handler.path != "/end" else 200)
+        handler.send_header("location", "/end" if handler.path == "/hop" else "/hop")
+        handler.send_header("content-length", "2" if handler.path == "/end" else "0")
+        handler.end_headers()
+        if handler.path == "/end":
+            handler.wfile.write(b"{}")
+
+    monkeypatch.setattr(http.client.HTTPConnection, "request", observed_request)
+    monkeypatch.setattr(_Handler, "do_GET", redirect)
+    hub = _hub(server)
+    hub.deadline = 102.0
+    try:
+        if step > 2:
+            with pytest.raises(TimeoutError, match="budget exhausted"):
+                hub.machines()
+            assert len(sent) == 1
+        else:
+            assert hub.machines() == {}
+            assert len(sent) >= 3
+            for now, timeout in sent:
+                assert 0 < timeout <= 102.0 - now
+    finally:
+        hub.close()
 
 
 def test_redirects_follow_for_get_and_never_resend_a_post(monkeypatch):

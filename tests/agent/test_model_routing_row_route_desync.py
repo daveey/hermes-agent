@@ -80,3 +80,58 @@ def test_matching_row_is_unchanged(tmp_path):
     _, recorded = _recorded(cfg, tmp_path, "openai-codex-deep")
     assert restore_route("openai-codex-deep", {"model_routing": recorded}, policy_config=cfg) == (
         "openai-codex-deep", "openai-codex")
+
+
+def _switched(cfg, tmp_path, old, new):
+    """An honoured explicit switch: the store moved old -> new, the session's model_config copy still says old."""
+    path, recorded = _recorded(cfg, tmp_path, old)
+    level, restricted = pin_policy(new, None, cfg)
+    moved = resolve_model_route("class:" + level, config=restricted, session_id="s", state_path=path,
+                                exact_pin=True, replace=True)
+    assert moved["metadata"]["selected_model"] == new
+    return path, recorded, moved["metadata"]
+
+
+def test_repro_stale_copy_after_honoured_switch_is_refused(tmp_path):
+    """MacBook chat 20261026_205117_f67f0d (11-02): restoring the lagging model_config copy collides with the store."""
+    cfg = _managed(policy())
+    path, stale_copy, _ = _switched(cfg, tmp_path, "anthropic-deep", "openai-codex-deep")
+    restored = restore_route("openai-codex-deep", {"model_routing": stale_copy}, policy_config=cfg)
+    assert restored == ("anthropic-deep", "anthropic")  # without the session id: the copy wins
+    with pytest.raises(ModelRoutingError, match="Exact pinned route cannot fail over"):
+        _pin(cfg, restored[0], path)
+
+
+def test_allocation_store_wins_over_a_lagging_model_config_copy(tmp_path):
+    cfg = _managed(policy())
+    path, stale_copy, current = _switched(cfg, tmp_path, "anthropic-deep", "openai-codex-deep")
+    restored = restore_route("openai-codex-deep", {"model_routing": stale_copy}, policy_config=cfg,
+                             session_id="s", state_path=path)
+    assert restored == ("openai-codex-deep", "openai-codex")
+    again = _pin(cfg, restored[0], path)
+    assert again["metadata"] == current  # sticky reuse, no refusal, no reallocation
+
+
+def test_store_wins_even_when_the_row_still_names_the_old_model(tmp_path):
+    cfg = _managed(policy())
+    path, stale_copy, _ = _switched(cfg, tmp_path, "anthropic-deep", "openai-codex-deep")
+    assert restore_route("anthropic-deep", {"model_routing": stale_copy}, policy_config=cfg,
+                         session_id="s", state_path=path) == ("openai-codex-deep", "openai-codex")
+
+
+def test_no_allocation_row_falls_back_to_the_copy(tmp_path):
+    cfg = _managed(policy())
+    _, recorded = _recorded(cfg, tmp_path, "anthropic-deep")
+    assert restore_route("anthropic-deep", {"model_routing": recorded}, policy_config=cfg,
+                         session_id="other", state_path=tmp_path / "routes.db") == ("anthropic-deep", "anthropic")
+    assert restore_route("anthropic-deep", {"model_routing": recorded}, policy_config=cfg,
+                         session_id="s", state_path=tmp_path / "missing.db") == ("anthropic-deep", "anthropic")
+
+
+def test_store_pin_policy_no_longer_approves_is_not_restored(tmp_path):
+    cfg = _managed(policy())
+    path, stale_copy, _ = _switched(cfg, tmp_path, "anthropic-deep", "openai-codex-deep")
+    cfg["model_routing"]["routes"]["deep"] = [
+        r for r in cfg["model_routing"]["routes"]["deep"] if r["model"] != "openai-codex-deep"]
+    assert restore_route("openai-codex-deep", {"model_routing": stale_copy}, policy_config=cfg,
+                         session_id="s", state_path=path) is None

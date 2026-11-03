@@ -16,9 +16,9 @@ import stat
 import sys
 from pathlib import Path
 
-import keyring
-from cryptography.fernet import Fernet
 import pytest
+keyring = pytest.importorskip("keyring", reason="optional 'keychain' extra not installed")
+from cryptography.fernet import Fernet
 from keyring.backend import KeyringBackend
 from keyring.backends import fail
 from keyring.errors import PasswordDeleteError

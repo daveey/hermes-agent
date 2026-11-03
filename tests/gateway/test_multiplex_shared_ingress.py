@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 pytest.importorskip("aiohttp")
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 

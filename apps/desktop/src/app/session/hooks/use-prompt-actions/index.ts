@@ -30,6 +30,7 @@ import { confirm } from '@/store/confirm'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { clearPreviewArtifacts } from '@/store/preview-status'
 import { clearAllPrompts } from '@/store/prompts'
+import { withdrawRefusedSend } from '@/store/refused-sends'
 import {
   $busy,
   $currentCwd,
@@ -1121,6 +1122,9 @@ export function usePromptActions({
       clearPreviewArtifacts(sessionId)
 
       clearNotifications()
+      // Re-running a refused send (Take over here, Retry): the composer must not keep the copy it
+      // was offered back, or one more Enter would run the same message twice.
+      withdrawRefusedSend($sessionStates.get()[sessionId]?.storedSessionId ?? sessionId, plan.text)
       updateSessionState(sessionId, state => applyReloadOptimistic(state, plan))
 
       try {

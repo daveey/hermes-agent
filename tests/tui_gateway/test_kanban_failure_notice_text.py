@@ -75,8 +75,11 @@ def test_terminal_provider_config_is_the_one_actionable_ask():
 
 def test_human_input_block_is_untouched():
     text = _text("blocked", {"kind": "needs_input", "reason": "Which account should I use?"})
-    assert text.endswith("blocked: Which account should I use?")
+    # Blocks bypass the failure classifier; the shared block presenter keeps the reason verbatim.
+    # Without a validated human_request it must not claim the user owns the next step.
+    assert "Reason: Which account should I use?" in text
     assert "Hermes needs to recover" not in text
+    assert "actor: user" not in text
 
 
 def test_poller_marks_failure_notices_diagnostic():

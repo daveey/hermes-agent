@@ -369,7 +369,7 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
             or not set(checkpointed).issubset(parents)
             or kb.unsatisfied_parents(conn, task_id)):
         return False
-    from hermes_cli.kanban_dependency_review import _awaited_parents, _SUMMARY_VERDICT
+    from hermes_cli.kanban_dependency_review import _awaited_parents, is_review_result
     if not _awaited_parents(conn, parents, evidence, parked_at):
         return False
     awaited = evidence.get("awaited")
@@ -388,9 +388,7 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
                     and kb.get_task(conn, parent) is None):
                 continue
             return False
-        metadata = kb._json_dict(result["metadata"])
-        if (any(key in metadata for key in ("verdict", "approved", "reviewed_sha"))
-                or _SUMMARY_VERDICT.search(result["summary"] or "")):
+        if is_review_result(kb._json_dict(result["metadata"]), result["summary"], evidence.get("prs")):
             return False
     return True
 

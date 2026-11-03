@@ -718,3 +718,100 @@ def test_inferred_wait_on_a_running_card_does_not_excuse_a_human_wait(kanban_hom
         out = _tool("schedule", {"reason": f"Waiting on David's approval; {other} merges after.",
                                  "wake_check": f"hermes kanban wait-check task {other}"})
         assert kaw.HUMAN_WAIT in out.get("error", ""), out
+
+
+# -- bb-gate Claude-pool holds: a stated quota window never escalates (bb t_01a19f847b7f5abb) ---------
+
+# The mini's bb_gate.py parks ready bb-queue cards as an operator (`hermes kanban schedule`, no worker env)
+# on this probe. On 11-03 three such parks of one card in 40 min escalated twice into Opus "relieve the
+# pool" cards, which burned the last Opus account the pool waits on.
+BB_GATE_PROBE = ("env BB_DEV_HOME=/Users/daveey/.bb-hermes/bb-dev BB_HERMES_HOME=/Users/daveey/.bb-hermes "
+                 "'/Users/daveey/Applications/Hermes Python.app/Contents/MacOS/python3' "
+                 "/Users/daveey/code/hermes/hosts/daveey-mini/bb-dev/bb_gate.py wake-ready")
+
+
+def _cli():
+    from hermes_cli import kanban as kcli
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    kcli.build_parser(parser.add_subparsers(dest="command"))
+    return lambda *argv: kcli.kanban_command(parser.parse_args(["kanban", *argv]))
+
+
+def _bb_gate_parks(conn, tid, holds_reasons, awaiting=None, why=None) -> list[str]:
+    """Park ``tid`` once per reason the way bb_gate.Env.park does, waking it (unblock) in between."""
+    run = _cli()
+    for reason in holds_reasons:
+        extra = ["--awaiting", json.dumps(awaiting), "--awaiting-why", why] if awaiting else []
+        assert run("schedule", tid, reason, "--wake-check", BB_GATE_PROBE, "--check-every", "600", *extra) == 0
+        if kb.get_task(conn, tid).status == "scheduled":
+            assert kb.unblock_task(conn, tid)
+    return [e.kind for e in kb.list_events(conn, tid)]
+
+
+def _ready(conn) -> str:
+    tid = kb.create_task(conn, title="BB-1 fix", assignee="bb-queue")
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+    return tid
+
+
+def test_bb_gate_pool_parks_with_a_stated_reset_never_escalate(kanban_home, monkeypatch) -> None:
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    reset = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 9 * 3600))
+    awaiting = {"kind": "clock", "ref": f"claude-pool weekly reset {reset}"}
+    why = "Claude pool at 89% of 6 accounts' weekly quota (self-fix holds at 75%)"
+    reasons = ["bb-gate: governor: Claude pool at 88% (self-fix waits at 75%; talking to BB is unaffected)",
+               "bb-gate: governor: memory pressure warn; Claude pool at 89% (self-fix waits at 75%; talking "
+               "to BB is unaffected)"] * 2
+    with kbc.connect_closing() as conn:
+        tid = _ready(conn)
+        kinds = _bb_gate_parks(conn, tid, reasons, awaiting, why)
+        assert kaw.ESCALATED_EVENT not in kinds and kinds.count("scheduled") == 4, kinds
+        rec = _park_payload(conn, tid)["awaiting"]
+        assert rec["kind"] == "clock" and rec["ref"] == f"claude-pool weekly reset {reset}" and rec["why"] == why
+        assert "probe" not in rec and not conn.execute(
+            "SELECT 1 FROM tasks WHERE title LIKE 'Unstick%'").fetchone()
+        # Then the pool drops and a memory-only hold persists: that premise counts from its own first park.
+        mem = "bb-gate: governor: memory pressure critical"
+        kinds = _bb_gate_parks(conn, tid, [mem, mem])
+        assert kaw.ESCALATED_EVENT not in kinds, kinds
+        assert _bb_gate_parks(conn, tid, [mem])[-1] == kaw.ESCALATED_EVENT
+
+
+@pytest.mark.parametrize("reason", [
+    "bb-gate: governor: memory pressure critical",
+    "bb-gate: governor: 5-min load 4.8/core",
+    "bb-gate: governor: free disk 8 GB < 15.0 GB",
+])
+def test_bb_gate_host_holds_still_escalate_on_the_third_park(kanban_home, monkeypatch, reason) -> None:
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    with kbc.connect_closing() as conn:
+        tid = _ready(conn)
+        kinds = _bb_gate_parks(conn, tid, [reason] * 3)
+        assert kinds[-1] == kaw.ESCALATED_EVENT and kinds.count("scheduled") == 2, kinds
+        rec = [e for e in kb.list_events(conn, tid) if e.kind == kaw.ESCALATED_EVENT][-1].payload["awaiting"]
+        # The inferred ref names the script, not an absolute path cut mid-word (".../hosts/daveey-min").
+        assert rec["inferred"] is True and rec["ref"] == "bb_gate.py wake-ready", rec
+
+
+def test_a_past_or_far_clock_window_still_escalates(kanban_home, monkeypatch) -> None:
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    for offset in (-3600, 30 * 86400):
+        when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + offset))
+        with kbc.connect_closing() as conn:
+            tid = _ready(conn)
+            kinds = _bb_gate_parks(conn, tid, ["bb-gate: governor: Claude pool at 88%"] * 3,
+                                   {"kind": "clock", "ref": f"claude-pool weekly reset {when}"}, "pool 88%")
+            assert kinds[-1] == kaw.ESCALATED_EVENT, (offset, kinds)
+
+
+@pytest.mark.parametrize("cmd,ref", [
+    (BB_GATE_PROBE, "bb_gate.py wake-ready"),
+    ("python3 -B /x/y/probe.py --card t_1 'a b'", "probe.py --card t_1 'a b'"),
+    ("bash /home/u/ws/check.sh", "check.sh"),
+    ("test -f /tmp/marker", "test -f /tmp/marker"),
+    ("python3 -c 'import sys; sys.exit(1)'", "python3 -c 'import sys; sys.exit(1)'"),
+    ("echo 'unterminated", "echo 'unterminated"),
+])
+def test_inferred_probe_ref_names_the_script(cmd, ref) -> None:
+    assert kaw.probe_ref(cmd) == ref

@@ -8,6 +8,7 @@ import { coerceGatewayText, coerceThinkingText } from '@/lib/chat-runtime'
 import { playCompletionSound } from '@/lib/completion-sound'
 import { parseErrorSurface } from '@/lib/error-surface'
 import { triggerHaptic } from '@/lib/haptics'
+import { isSessionBusyRefusal } from '@/lib/session-busy-refusal'
 import { billingCtaLabel, clearBillingBlock, runBillingRecovery, setBillingBlock } from '@/store/billing-block'
 import { clearSettledClarifyRequest } from '@/store/clarify'
 import { setSessionCompacting } from '@/store/compaction'
@@ -16,6 +17,7 @@ import { notify } from '@/store/notifications'
 import { flashPetActivity, markPetUnread, setPetActivity } from '@/store/pet'
 import { clearAllPrompts } from '@/store/prompts'
 import { providerWaitText, setSessionProviderWait } from '@/store/provider-wait'
+import { markRefusedSendTail } from '@/store/refused-sends'
 import { setCurrentUsage, setTurnStartedAt } from '@/store/session'
 import { refreshSupportedSessionControlAfterTurn } from '@/store/session-control'
 import { $focusedStoredSessionId } from '@/store/session-focus'
@@ -431,6 +433,23 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
 
     if (payload?.status === 'complete') {
       noteFreeTierTurnComplete()
+    }
+
+    // Another writer held the chat, so the turn never ran (failure_reason session_busy): mark its
+    // error bubble so the composer gives the refused words back (store/refused-sends.ts).
+    if (
+      payload?.status === 'error' &&
+      isSessionBusyRefusal({
+        error: payload.error,
+        failureReason: payload.failure_reason,
+        surfaceCode: parseErrorSurface(payload.error_surface)?.code
+      })
+    ) {
+      deps.updateSessionState(sessionId, state => {
+        const messages = markRefusedSendTail(state.messages)
+
+        return messages === state.messages ? state : { ...state, messages }
+      })
     }
 
     // Structured billing wall forwarded by the gateway (out of credits /

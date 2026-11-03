@@ -894,19 +894,19 @@ class TestStatusEndpointTopology:
                 "gateways": [{"profile": "default", "ports": {"webhook": 8644}}],
             },
         )
+        # One setattr; monkeypatch's undo restores it. A second setattr in a
+        # `finally` breaks on pytest >= 9.2: it reads the old value from the
+        # instance __dict__, but Starlette's State keeps attributes in
+        # `_state`, so both calls record "absent" and undo deletes twice
+        # (KeyError: 'auth_required' at teardown).
         monkeypatch.setattr(web_server.app.state, "auth_required", True, raising=False)
-        try:
-            resp = self.client.get("/api/status")
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["profiles"] == ["default", "coder"]
-            assert data["gateway_mode"] == "multiplex"
-            # But the per-gateway detail (host ports = recon) stays gated,
-            # alongside hermes_home / gateway_pid.
-            assert "gateways" not in data
-            assert "hermes_home" not in data
-            assert "gateway_pid" not in data
-        finally:
-            monkeypatch.setattr(
-                web_server.app.state, "auth_required", False, raising=False
-            )
+        resp = self.client.get("/api/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["profiles"] == ["default", "coder"]
+        assert data["gateway_mode"] == "multiplex"
+        # But the per-gateway detail (host ports = recon) stays gated,
+        # alongside hermes_home / gateway_pid.
+        assert "gateways" not in data
+        assert "hermes_home" not in data
+        assert "gateway_pid" not in data

@@ -19,6 +19,7 @@ import httpx
 import pytest
 
 from tests.gateway.test_normal_runtime_boot import control
+from tests.child_log import ChildLog
 
 
 @pytest.mark.platforms('linux')
@@ -36,7 +37,7 @@ def test_registry_grant_renames_and_deletes_only_its_own_served_profile(tmp_path
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED') if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
                PYTHONUNBUFFERED='1')
-    with (tmp_path / 'gateway.log').open('w+') as log:
+    with ChildLog(tmp_path / 'gateway.log') as log:
         process = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=root, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
@@ -49,8 +50,7 @@ def test_registry_grant_renames_and_deletes_only_its_own_served_profile(tmp_path
                 except (OSError, ValueError):
                     pass
                 time.sleep(.1)
-            log.seek(0)
-            assert descriptor.get('state') == 'ready', (descriptor, log.read())
+            assert descriptor.get('state') == 'ready', (descriptor, log.text())
 
             def home_of(profile):
                 return str(home.resolve() if profile == 'default' else (home / 'profiles' / profile).resolve())

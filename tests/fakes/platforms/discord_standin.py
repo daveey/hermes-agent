@@ -29,6 +29,8 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+import pytest
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp import WSMsgType, web
 
 from tests.fakes.platforms._standin import StandinServer, Visible

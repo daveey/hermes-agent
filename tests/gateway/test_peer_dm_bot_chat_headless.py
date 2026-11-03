@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 

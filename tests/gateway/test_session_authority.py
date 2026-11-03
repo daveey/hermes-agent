@@ -8,6 +8,7 @@ import sys
 import time
 
 import pytest
+from tests.child_log import ChildLog
 
 
 def test_messaging_then_authenticated_ws_reuses_live_agent(tmp_path):
@@ -44,15 +45,14 @@ def test_native_queue_survives_owner_kill_without_replaying_unknown(tmp_path):
     env.update(HOME=str(home), USERPROFILE=str(home), HERMES_HOME=str(state),
                PYTHONPATH=str(repo), PYTHONUNBUFFERED='1', AUTHORITY_PROBE_MODE='crash')
     command = [sys.executable, str(Path(__file__).parent / 'fixtures' / 'shared_authority_peer.py')]
-    with (state / 'owner.log').open('w+') as log:
+    with ChildLog(state / 'owner.log') as log:
         child = subprocess.Popen(command, cwd=repo, env=env, stdin=subprocess.DEVNULL,
                                  stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 90
             while not (state / 'crash-ready.json').exists():
                 if child.poll() is not None or time.monotonic() > deadline:
-                    log.seek(0)
-                    pytest.fail(log.read())
+                    pytest.fail(log.text())
                 time.sleep(0.05)
             child.kill()
             assert child.wait(timeout=10) < 0

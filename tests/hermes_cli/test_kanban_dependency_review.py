@@ -1,4 +1,6 @@
 """Dependency-review continuation must repair the same PR, not defeat respawn guards."""
+import time
+
 import pytest
 
 from hermes_cli import kanban_db as kb
@@ -19,16 +21,29 @@ def board(tmp_path, monkeypatch):
         yield conn
 
 
-def parked(conn, *, authenticated=True):
-    task = kb.create_task(conn, title="implementation", assignee="dev")
-    kb.claim_task(conn, task)
-    run = kb.get_task(conn, task).current_run_id
-    worker_comment(conn, task, "dev", PR)
-    reviews = [kb.create_task(conn, title="review", assignee="reviewer") for _ in range(2)]
-    for review in reviews:
-        kb.link_tasks(conn, review, task, expected_child_run_id=run)
-    assert kb.block_task(conn, task, kind="dependency", reason="Independent review",
-                         expected_run_id=run if authenticated else None)
+def parked(conn, *, authenticated=True, park_delay=1):
+    """Owner publishes its PR, then parks ``park_delay`` whole seconds later.
+
+    The clock is pinned, not wall-clock: the ordering-dependency handoff only
+    considers a park strictly after the PR comment, so an unpinned fixture
+    flipped between that path and the same-second tie with runner load. 1 s is
+    production's usual ordering; both stamps are at or before real "now", so
+    later events (review completion, promotion) still sort after the park.
+    """
+    parked_at = int(time.time())
+    published = parked_at - park_delay
+    with pytest.MonkeyPatch.context() as clock:
+        clock.setattr(time, "time", lambda: published)
+        task = kb.create_task(conn, title="implementation", assignee="dev")
+        kb.claim_task(conn, task)
+        run = kb.get_task(conn, task).current_run_id
+        worker_comment(conn, task, "dev", PR)
+        clock.setattr(time, "time", lambda: parked_at)
+        reviews = [kb.create_task(conn, title="review", assignee="reviewer") for _ in range(2)]
+        for review in reviews:
+            kb.link_tasks(conn, review, task, expected_child_run_id=run)
+        assert kb.block_task(conn, task, kind="dependency", reason="Independent review",
+                             expected_run_id=run if authenticated else None)
     return task, reviews
 
 

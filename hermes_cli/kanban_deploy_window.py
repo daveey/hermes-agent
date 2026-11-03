@@ -16,6 +16,10 @@ The record (schema ``version`` 1) is evidence only when it is fresh (``observed_
   the batch is ``batching``/``draining`` AND either the window is still ahead or the publisher's
   semantic state (``state``, ``state_since``) moved since the previous park on this premise. A
   newer ``observed_at`` alone is not progress: an overdue batch nobody is running escalates.
+  The exemption is also bounded in time: once the card's first park in its trailing run on this
+  premise is more than :data:`HEALTHY_MAX_SECONDS` old, parks count again (``healthy_expired``).
+  Nothing checks that the awaited ref is in the batch, so a ref that never reaches main would
+  otherwise re-park as healthy forever while other commits keep the window moving.
 
 Anything else (missing, stale, foreign, malformed) changes nothing: the park escalates as before.
 """
@@ -31,6 +35,7 @@ WINDOW_FILE = Path("cache", "core-update", "window.json")
 VERSION = 1
 FRESH_SECONDS = 1200
 HEALTHY_STATES = ("batching", "draining")
+HEALTHY_MAX_SECONDS = 24 * 3600  # a deploy-park run older than this is no longer exempt
 DISPLAY_ZONE = "America/Los_Angeles"
 _INT_FIELDS = ("observed_at", "window_at", "state_since", "drain_bound_s")
 
@@ -85,6 +90,31 @@ def _previous(conn, task_id: str, premise: str) -> Optional[dict]:
     return None
 
 
+def _streak_since(conn, task_id: str, premise: str, probe: Optional[str]) -> Optional[int]:
+    """``created_at`` of the first park in this card's trailing run of parks on ``premise`` (or on
+    the same opaque ``probe``), with the same stop rules as ``kanban_awaiting.prior_same_premise``:
+    another premise or the last escalation ends the run. Unbounded on purpose: a 20-event window
+    would keep the run's start under a day old however long the card has really waited."""
+    from hermes_cli.kanban_awaiting import ESCALATED_EVENT
+
+    first = None
+    for kind, payload, created_at in conn.execute(
+            "SELECT kind, payload, created_at FROM task_events WHERE task_id = ? "
+            "AND kind IN ('scheduled','continued',?) ORDER BY id DESC", (task_id, ESCALATED_EVENT)):
+        if kind == ESCALATED_EVENT:
+            break
+        try:
+            got = json.loads(payload or "{}").get("awaiting") or {}
+        except (ValueError, AttributeError):
+            got = {}
+        if not isinstance(got, dict) or got.get("premise") is None:
+            continue
+        if got["premise"] != premise and not (probe and got.get("probe") == probe):
+            break
+        first = created_at
+    return first
+
+
 def annotate(conn, task_id: str, record: dict, *, now: int) -> None:
     """Attach ``deploy_window`` (with its ``healthy`` verdict) to a deploy park's record, in place."""
     if record.get("kind") != "deploy" or not record.get("premise"):
@@ -94,7 +124,14 @@ def annotate(conn, task_id: str, record: dict, *, now: int) -> None:
         return
     prev = _previous(conn, task_id, record["premise"])
     moved = bool(prev) and (prev.get("state"), prev.get("state_since")) != (window["state"], window["state_since"])
+    since = _streak_since(conn, task_id, record["premise"], record.get("probe"))
+    window["streak_since"] = int(since) if since is not None else now
     window["healthy"] = window["state"] in HEALTHY_STATES and (window["window_at"] > now or moved)
+    if window["healthy"] and now - window["streak_since"] > HEALTHY_MAX_SECONDS:
+        # Nothing ties the awaited ref to the pending batch, so other commits can keep a window
+        # ahead forever. Past the bound the exemption ends and REPARK_LIMIT escalates as usual.
+        window["healthy"] = False
+        window["healthy_expired"] = True
     record["deploy_window"] = window
 
 

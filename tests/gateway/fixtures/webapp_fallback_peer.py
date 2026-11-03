@@ -30,6 +30,7 @@ import errno
 import json
 import os
 from pathlib import Path
+import random
 import socket
 import subprocess
 import sys
@@ -39,10 +40,37 @@ SEEDED_TOKEN = "seeded-browser-credential-from-an-earlier-0"  # 43 URL-safe char
 INDEX = "<!doctype html><html><body>WEBAPP_BUNDLE</body></html>"
 
 
+def _ephemeral_floor() -> int:
+    """The lowest port the OS hands out for ``bind(0)`` and outgoing connections (Linux reads its
+    configured range; macOS and Windows start at 49152)."""
+    try:
+        return int(Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return 49152
+
+
 def free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+    """A free loopback port for the Webapp's fixed ``webapp.port``, chosen below the OS's ephemeral range.
+
+    The peer binds it seconds later, after its imports. A port from ``bind(0)`` sits in the ephemeral
+    range, where any other process (the parallel test workers' servers and clients) may get it in the
+    meantime, and the Webapp then reports ``could not listen ... (Address already in use)``. Ports
+    below that range are only ever taken by a program that asks for one by number."""
+    floor = min(_ephemeral_floor(), 32768)
+    if floor <= 20000:  # an unusual ephemeral range leaves no room below it: take one from the OS
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            return probe.getsockname()[1]
+    rng = random.SystemRandom()
+    for _ in range(200):
+        port = rng.randrange(20000, floor)
+        with socket.socket() as probe:
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    raise AssertionError(f"no free loopback port in 20000-{floor - 1}")
 
 
 def run(tmp_path, spec) -> dict:

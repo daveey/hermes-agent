@@ -4,6 +4,8 @@ import importlib
 import sys
 import types
 
+import pytest
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 import aiohttp.web_request
 from aiohttp import web
 

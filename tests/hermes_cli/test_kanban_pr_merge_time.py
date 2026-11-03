@@ -40,6 +40,11 @@ def evidence(monkeypatch):
             return checks
         if "/statuses?" in endpoint:
             return [state["statuses"]]
+        if endpoint.startswith("apps/"):
+            apps = {"github-actions": 15368, "other-ci": 99}
+            if endpoint[5:] not in apps:
+                raise acceptance._GateAuthError(f"HTTP 404 on {endpoint}")
+            return {"id": apps[endpoint[5:]], "slug": endpoint[5:]}
         if "/pulls/" in endpoint:
             # rest_state overrides model a PR whose state moved between the GraphQL and REST reads.
             rest = state.get("rest_state", state["state"])
@@ -100,6 +105,39 @@ def test_failed_premerge_rerun_overrides_earlier_success(evidence):
     receipt = collect()
     assert not receipt["ok"] and receipt["classification"] == "failure"
     assert receipt["checks"][0]["id"] == POST["id"]
+    assert not receipt["post_merge_checks"]
+
+
+@pytest.mark.parametrize("conclusion", ["success", "failure", None])
+def test_same_second_unfinished_run_after_concluded_premerge_is_post_merge(evidence, conclusion):
+    # mergedAt has 1 s resolution: a post-merge push run can start in the merge's second.
+    # It was not concluded at the merge, and an earlier same-key run was: that earlier
+    # conclusion gated the merge, so the tie run is later main health, not pending evidence.
+    tie = {**POST, "started_at": MERGED, "completed_at": "2026-11-02T13:10:20Z",
+           "conclusion": conclusion}
+    if conclusion is None:
+        tie.update(status="in_progress", completed_at=None)
+    evidence["runs"] = [PRE, tie]
+    receipt = collect()
+    assert receipt["ok"] and receipt["classification"] == "success", receipt
+    assert [c["id"] for c in receipt["checks"]] == [PRE["id"]]
+    assert [c["id"] for c in receipt["post_merge_checks"]] == [POST["id"]]
+    assert receipt["post_merge_checks"][0]["conclusion"] == conclusion
+
+
+@pytest.mark.parametrize("earlier", ["none", "unfinished", "same_second"])
+def test_same_second_unfinished_run_stays_pending_without_earlier_conclusion(evidence, earlier):
+    # No earlier conclusion at the merge to have gated it: ambiguous, fail closed.
+    tie = {**POST, "started_at": MERGED, "completed_at": "2026-11-02T13:10:20Z",
+           "conclusion": "success"}
+    runs = [tie]
+    if earlier == "unfinished":
+        runs.append({**PRE, "completed_at": "2026-11-02T13:10:30Z"})
+    elif earlier == "same_second":
+        runs.append({**PRE, "started_at": MERGED, "completed_at": MERGED})
+    evidence["runs"] = runs
+    receipt = collect()
+    assert not receipt["ok"] and receipt["classification"] == "pending", receipt
     assert not receipt["post_merge_checks"]
 
 
@@ -170,6 +208,39 @@ def test_legacy_latest_premerge_failure_wins(evidence):
 def test_pinned_app_cannot_borrow_legacy_success(evidence):
     evidence.update(runs=[], statuses=[status(PRE, "success")])
     assert collect()["classification"] == "missing"
+
+
+ACTIONS_BOT = {"id": 41898282, "login": "github-actions[bot]", "type": "Bot"}
+
+
+def test_pinned_app_accepts_its_own_legacy_status(evidence):
+    # Metta-AI/fabric-research#199: "Human review approval" is pinned to integration 15368
+    # and satisfied by a commit status github-actions[bot] posted; GitHub merged it CLEAN.
+    evidence.update(runs=[], statuses=[{**status(PRE, "success"), "creator": ACTIONS_BOT}])
+    receipt = collect()
+    assert receipt["ok"] and receipt["classification"] == "success", receipt
+    assert [c["id"] for c in receipt["checks"]] == [PRE["id"]]
+    assert evidence["requests"].count("apps/github-actions") == 1
+
+
+@pytest.mark.parametrize("creator", [
+    {"id": 7, "login": "other-ci[bot]", "type": "Bot"},       # a different app
+    {"id": 8, "login": "ghost-bot[bot]", "type": "Bot"},      # no app behind the bot (404)
+    {"id": 9, "login": "github-actions[bot]", "type": "User"},  # not a bot user
+    {"id": 10, "login": "someone", "type": "User"}])
+def test_pinned_app_rejects_legacy_status_from_anyone_else(evidence, creator):
+    evidence.update(runs=[], statuses=[{**status(PRE, "success"), "creator": creator}])
+    assert collect()["classification"] == "missing"
+
+
+def test_pinned_app_status_not_hidden_by_later_status_from_another_creator(evidence):
+    # The latest pre-merge status per context belongs to someone else: the app's own
+    # failure is still the evidence, never borrowed success nor "missing".
+    late = {**PRE, "id": PRE["id"] + 1, "started_at": "2026-11-02T13:00:00Z"}
+    evidence.update(runs=[], statuses=[
+        {**status(PRE, "failure"), "creator": ACTIONS_BOT},
+        {**status(late, "success"), "creator": {"id": 10, "login": "someone", "type": "User"}}])
+    assert collect()["classification"] == "failure"
 
 
 def test_unpinned_context_retains_each_app_failure(evidence):

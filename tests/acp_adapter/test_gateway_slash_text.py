@@ -2,8 +2,9 @@
 import asyncio
 from unittest.mock import AsyncMock
 
-import acp
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
+import acp
 
 from acp_adapter.gateway_server import GatewayACPAgent
 from hermes_cli.gateway_client import GatewayClientError

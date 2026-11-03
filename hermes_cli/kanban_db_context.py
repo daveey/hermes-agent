@@ -84,6 +84,17 @@ def _ctx_tail(items: list, cap: int, noun: str) -> tuple[list, Optional[str]]:
     )
 
 
+def ctx_workspace_span(task: Task) -> list:
+    """``[offset, line]`` of the header's ``Workspace:`` line in ``build_worker_context(task)``: located by
+    header STRUCTURE (the line list ``_ctx_header`` emits; the title is one element even when it holds
+    newlines), never by searching the text, so a title or body that contains a ``## Body`` heading or a
+    ``Workspace:`` line can not move or shadow it. [daveey]"""
+    lines: list[str] = []
+    _ctx_header(lines, task)
+    k = next(i for i, line in enumerate(lines) if i > 0 and line.startswith("Workspace: "))
+    return [len("\n".join(lines[:k])) + 1, lines[k]]
+
+
 def _ctx_header(lines: list[str], task: Task) -> None:
     lines.append(f"# Kanban task {task.id}: {task.title}")
     lines.append("")

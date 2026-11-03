@@ -3,6 +3,7 @@
 
 import pytest
 
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp_adapter.edit_approval import EditProposal
 from acp_adapter.tools import (
     build_tool_complete,

@@ -71,6 +71,38 @@ class Resync(Exception):
     """The cursor is below the service's retention floor: rebuild from a snapshot."""
 
 
+class SchemaAhead(RuntimeError):
+    """The board holds columns this core neither syncs nor keeps local: a newer core migrated it. Pushing would
+    silently drop those columns from every op (``_wire_fields``), so this core must not sync the board. [daveey]"""
+
+    def __init__(self, columns: dict[str, set[str]]) -> None:
+        self.columns = columns
+        named = "; ".join(f"{t}: {', '.join(sorted(c))}" for t, c in sorted(columns.items()))
+        super().__init__(f"this core does not declare columns a newer core added ({named}); refusing to sync "
+                         "so their values are not dropped. Run a current core in the gateway that holds the "
+                         "host sync role")
+
+
+# (db file, schema_version, identity of the declared tasks columns) -> undeclared columns.
+_SCHEMA_SEEN: dict[tuple[str, int, int], dict[str, set[str]]] = {}
+
+
+def schema_ahead(conn: sqlite3.Connection) -> dict[str, set[str]]:
+    """Per synced table, the columns this core does not know (``undeclared_columns``), cached per schema version
+    so a round costs one PRAGMA, not one per table. [daveey]"""
+    version = conn.execute("PRAGMA schema_version").fetchone()[0]
+    key = (str(sync._db_key(conn)), int(version), id(sync.SYNCED_COLUMNS["tasks"]))
+    if key not in _SCHEMA_SEEN:
+        _SCHEMA_SEEN[key] = sync.undeclared_columns(conn)
+    return _SCHEMA_SEEN[key]
+
+
+def refuse_if_schema_ahead(conn: sqlite3.Connection) -> None:
+    ahead = schema_ahead(conn)
+    if ahead:
+        raise SchemaAhead(ahead)
+
+
 @dataclass(frozen=True)
 class Identity:
     url: str
@@ -115,6 +147,19 @@ def _peer_closed(conn) -> bool:
         return True
 
 
+class _DeadlineRequests(urllib.request.BaseHandler):
+    """urllib invokes request processors again for each redirect, before sending."""
+
+    def __init__(self, remaining: Callable[[float], float]) -> None:
+        self.remaining = remaining
+
+    def http_request(self, request):
+        request.timeout = self.remaining(request.timeout)
+        return request
+
+    https_request = http_request
+
+
 class Hub:
     """The Board service's HTTP API for one gateway.
 
@@ -140,12 +185,17 @@ class Hub:
         return {"authorization": f"Bearer {self.ident.key}", "content-type": "application/json",
                 "user-agent": "hermes-kanban-sync/1"}
 
-    def _call(self, method: str, path: str, body: Optional[dict] = None) -> dict:
-        timeout = self.timeout
+    def _remaining(self, timeout: Optional[float] = None) -> float:
+        """Recompute the shared absolute budget immediately before each HTTP attempt."""
+        timeout = self.timeout if timeout is None else timeout
         if self.deadline is not None:
             timeout = min(timeout, self.deadline - time.monotonic())
             if timeout <= 0:
                 raise TimeoutError("Board request budget exhausted")
+        return timeout
+
+    def _call(self, method: str, path: str, body: Optional[dict] = None) -> dict:
+        timeout = self._remaining()
         data = None if body is None else json.dumps(body).encode()
         parts = urllib.parse.urlsplit(self.ident.url)
         if parts.scheme not in ("http", "https") or not parts.hostname or self._proxied(parts):
@@ -153,10 +203,14 @@ class Hub:
         return self._call_kept_alive(parts, method, path, data, timeout)
 
     def _call_urlopen(self, method: str, path: str, data: Optional[bytes], timeout: Optional[float] = None) -> dict:
-        timeout = self.timeout if timeout is None else timeout
+        timeout = self._remaining(timeout)
         req = urllib.request.Request(self.ident.url + path, data=data, method=method, headers=self._headers())
+        # A per-call opener leaves global urllib users alone. Its processor also caps
+        # urllib's internal redirect follows, not merely the initial fallback send.
+        open_request = (urllib.request.build_opener(_DeadlineRequests(self._remaining)).open
+                        if self.deadline is not None else urllib.request.urlopen)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with open_request(req, timeout=timeout) as resp:
                 return json.loads(resp.read() or b"{}")
         except urllib.error.HTTPError as exc:
             text = exc.read().decode("utf-8", "replace")[:500]
@@ -223,7 +277,7 @@ class Hub:
         target = (parts.path or "") + path
         headers = self._headers()
         for attempt in (0, 1):
-            conn, reused = self._connection(parts, timeout)
+            conn, reused = self._connection(parts, self._remaining(timeout))
             try:
                 conn.request(method, target, body=data, headers=headers)
             except (OSError, http.client.HTTPException) as exc:
@@ -315,7 +369,8 @@ class Hub:
         return self._call("GET", "/v2/machines")
 
     def report_metrics(self, metrics: dict) -> dict:
-        """This machine's own load for the registry (display only; see hermes_cli.machine_metrics)."""
+        """This machine's own load for the registry: Runners display and worker-first pool admission
+        (see hermes_cli.machine_metrics). Sending stays best-effort."""
         return self._call("POST", "/v2/machines/me/metrics", metrics)
 
     def report_pickup(self, pickup: Optional[str]) -> dict:
@@ -516,6 +571,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
          max_batches: int = MAX_BATCHES_PER_ROUND) -> PushResult:
     """Drain pending outbox rows in FIFO batches. A transport failure leaves them pending (retried next round)."""
     from hermes_cli.kanban_db_connect import write_txn
+    refuse_if_schema_ahead(conn)  # an older core would strip the newer columns; the ops stay pending [daveey]
     out = PushResult()
     for _ in range(max_batches):
         rows = [dict(r) for r in conn.execute(
@@ -808,6 +864,7 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
         result = RoundResult(board=slug, mode=mode)
         if mode == "off":
             return result
+        refuse_if_schema_ahead(live)  # before pull/repair: an older core must not act on a newer board [daveey]
         ensure_identity(live, slug, gateway)
         with _pulled_replica(slug, hub, gateway) as (replica, pulled, rebuilt):
             result.pulled = pulled
@@ -903,6 +960,9 @@ def sync_all_once(hub: Optional[Hub] = None, *,
     for slug, path in board_paths() if boards is None else boards:
         try:
             results.append(sync_board(slug, path, hub, ident.gateway))
+        except SchemaAhead as exc:
+            _log.error("kanban sync: %s not synced: %s", slug, exc)
+            results.append(RoundResult(board=slug, mode="?", error=f"SchemaAhead: {exc}"))
         except (HubError, OSError, Resync, sqlite3.Error, SyncUnavailable, SyncRoundBusy) as exc:
             _log.warning("kanban sync: round for %s failed (%s: %s)", slug, type(exc).__name__, exc)
             results.append(RoundResult(board=slug, mode="?", error=f"{type(exc).__name__}: {exc}"))
@@ -1279,11 +1339,27 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
     feed socket per synced board. Connected boards pull on feed/local invalidation; disconnected boards and
     failed pulls retain the poll period. An independent full recovery audits all boards at least every 60s
     (or the configured period if longer), subject to in-flight IO and the next poll tick."""
+    from hermes_cli import kanban_sync_runstate as runstate
+    # Record why the loop is not running, so the stuck-dispatcher warning, ``sync status`` and create name it
+    # instead of a board that silently stalls behind the Board lease (MacBook, 2026-11-02). [daveey]
+    try:
+        _run_forever(keep_running, interval, runstate)
+    except BaseException as exc:
+        runstate.record_down(f"kanban sync loop crashed: {type(exc).__name__}: {exc}")
+        raise
+
+
+def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], runstate: Any) -> None:
     try:
         ident = load_identity()
     except SyncUnavailable as exc:
         _log.warning("%s; kanban sync not started", exc)
+        runstate.record_down(f"not starting: {exc}")
         return
+    ahead = _schema_ahead_boards(board_paths())
+    if ahead:
+        runstate.record_down("not starting: " + "; ".join(f"board {slug}: {why}" for slug, why in ahead))
+        return  # give the host sync role up: a current core's gateway can take it [daveey]
     hub = Hub(ident)
     sync.set_lease_client(HubLeaseClient(hub))
     period = float(interval or sync.sync_config().get("interval_seconds") or DEFAULT_INTERVAL_S)
@@ -1305,7 +1381,14 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
                 watchers[slug].start()
         selected = work.select(boards, time.monotonic(), outbox_pending)
         selected += [b for b in deferred_repairs_due(boards, _repair_clock()) if b not in selected]
-        for r in sync_all_once(hub, boards=selected):
+        results = sync_all_once(hub, boards=selected)
+        ahead = [r for r in results if (r.error or "").startswith("SchemaAhead")]
+        if ahead:
+            _log.error("kanban sync: a newer core migrated this host's board; giving up the sync role")
+            runstate.record_down("gave up the sync role: " + "; ".join(f"board {r.board}: {r.error}" for r in ahead))
+            return
+        runstate.clear()  # a completed round: the loop runs
+        for r in results:
             work.finished(r.board, not r.error)
             if r.push and (r.push.sent or r.push.rejected):
                 _log.info("kanban sync: %s %s pulled=%d pushed=%d rejected=%d", r.board, r.mode, r.pulled,
@@ -1319,6 +1402,23 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
         if deferred_due is not None:
             remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
         wait_for_work(wake, [p for _s, p in boards], remaining, keep_running)
+    runstate.record_down("stopped (gateway stopping, or the host sync lease went to another gateway)")
+
+
+def _schema_ahead_boards(boards: list[tuple[str, Path]]) -> list[tuple[str, str]]:
+    """``(slug, refusal)`` per board a newer core migrated (logged at ERROR). An unreadable board is left to the
+    round's own errors."""
+    ahead = []
+    for slug, path in boards:
+        try:
+            with connection(path, lambda p=path: _connect(p)) as conn:
+                cols = schema_ahead(conn)
+        except (sqlite3.Error, OSError):
+            cols = {}
+        if cols:
+            _log.error("kanban sync: not starting: board %s: %s", slug, SchemaAhead(cols))
+            ahead.append((slug, str(SchemaAhead(cols))))
+    return ahead
 
 
 # --- import ---------------------------------------------------------------------------------------
@@ -1486,9 +1586,16 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
         r = conn.execute("SELECT last_error FROM kanban_sync_outbox WHERE last_error IS NOT NULL "
                          "ORDER BY created_at DESC LIMIT 1").fetchone()
         last_error = r[0] if r else None
-    return {"mode": sync.board_mode(conn), "board_id": st.get("board_id"), "gateway": st.get("gateway_id"),
-            "cursor": st.get("cursor"), "pending": counts.get("pending", 0), "rejected": counts.get("rejected", 0),
-            "last_error": last_error}
+    mode = sync.board_mode(conn)
+    out = {"mode": mode, "board_id": st.get("board_id"), "gateway": st.get("gateway_id"),
+           "cursor": st.get("cursor"), "pending": counts.get("pending", 0), "rejected": counts.get("rejected", 0),
+           "last_error": last_error}
+    if mode != "off":
+        # A refused start writes no outbox row, so ``last_error`` alone read a stalled board as healthy. [daveey]
+        from hermes_cli import kanban_sync_runstate as runstate
+        stopped = runstate.describe()
+        out["running"] = f"no: {stopped}" if stopped else "yes (no stop recorded)"
+    return out
 
 
 _DIFF_SKIP = {"current_run_id"}  # compared as run uids instead

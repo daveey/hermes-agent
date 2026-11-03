@@ -431,10 +431,19 @@ def test_gateway_watcher_runs_the_loop_once_per_host_and_not_when_disabled(kanba
     assert calls == [True]
     from gateway.kanban_watchers_common import _acquire_singleton_lock, _release_singleton_lock
     held, state = _acquire_singleton_lock(kb.kanban_home() / "kanban" / ".sync.lock")
+    waits = []
+
+    async def other_gateway_exits(interval):  # the retry sleep: the holder goes away meanwhile
+        waits.append(calls[:])
+        _release_singleton_lock(held)
+    runner._sleep_between_ticks = other_gateway_exits
     try:
         assert state == "held"
-        asyncio.run(runner._kanban_sync_watcher())  # another gateway on this host holds it
-        assert calls == [True]
+        # Another gateway on this host holds it: this one waits instead of giving up for its lifetime,
+        # and syncs once the holder lets go.
+        asyncio.run(runner._kanban_sync_watcher())
+        assert waits == [[True]]
+        assert calls == [True, True]
     finally:
         _release_singleton_lock(held)
 

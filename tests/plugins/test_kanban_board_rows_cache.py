@@ -95,9 +95,20 @@ def _strip_now(body):
     return {k: v for k, v in body.items() if k != "now"}
 
 
-def test_unchanged_board_materializes_rows_once(env):
+def _freeze_wall(monkeypatch):
+    """Pin time.time() so reads compared for equality share one clock second.
+
+    Task ages are whole seconds of time.time(); on a CPU-throttled runner two reads a few
+    milliseconds apart can straddle a second boundary and differ only in created_age_seconds.
+    """
+    t = float(int(time.time()))
+    monkeypatch.setattr(time, "time", lambda: t)
+
+
+def test_unchanged_board_materializes_rows_once(env, monkeypatch):
     mod, sql_reads, _home = env
     tid = _create("first")
+    _freeze_wall(monkeypatch)
     bodies = [_read(mod) for _ in range(5)]
     assert len(sql_reads) == 1
     assert tid in _cards(bodies[0])
@@ -391,7 +402,7 @@ def test_snapshot_refresh_cadence_reprojects_unchanged_board(env, monkeypatch):
     assert len(sql_reads) == 1
 
 
-def test_board_payload_matches_a_cold_read(env):
+def test_board_payload_matches_a_cold_read(env, monkeypatch):
     """A projection over retained rows equals a read with no retained rows."""
     mod, _sql_reads, _home = env
     parent = _create("parent", skills=["a"])
@@ -401,6 +412,7 @@ def test_board_payload_matches_a_cold_read(env):
         kb.add_comment(conn, parent, "me", "hello")
     finally:
         conn.close()
+    _freeze_wall(monkeypatch)
     _read(mod)
     warm = _read(mod)
     _clear_rows()

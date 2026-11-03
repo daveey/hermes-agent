@@ -14,6 +14,7 @@ import time
 import pytest
 from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
+from tests.child_log import ChildLog
 
 
 @pytest.mark.asyncio
@@ -118,7 +119,7 @@ def test_ordinary_daemon_keeps_control_auth_and_loop_witness(tmp_path, layout):
             temp = tmp_path / ('t' * 120)
             temp.mkdir()
             env['TMPDIR'] = str(temp)
-        with (tmp_path / 'daemon.log').open('w+') as log:
+        with ChildLog(tmp_path / 'daemon.log') as log:
             process = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=root, env=env,
                                        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
             control_path = None
@@ -130,8 +131,7 @@ def test_ordinary_daemon_keeps_control_auth_and_loop_witness(tmp_path, layout):
                     if descriptor.get('state') == 'ready':
                         break
                     time.sleep(.05)
-                log.seek(0)
-                assert descriptor.get('state') == 'ready', (descriptor, log.read())
+                assert descriptor.get('state') == 'ready', (descriptor, log.text())
                 assert descriptor['pid'] == process.pid
                 control_path = resolve_client_socket_path(home)
                 assert control_path is not None

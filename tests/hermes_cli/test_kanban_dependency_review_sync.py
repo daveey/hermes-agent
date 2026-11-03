@@ -90,7 +90,8 @@ def review_clock(monkeypatch):
 @pytest.mark.parametrize("mode", ["other_pr", "short_head", "other_assignee", "unowned"])
 def test_synced_invalid_review_or_owner_stays_held(boards, review_clock, mode):
     source, target = boards
-    task, reviews = parked(source, authenticated=mode != "unowned")
+    # Publication, park and reassignment share review_clock's second.
+    task, reviews = parked(source, authenticated=mode != "unowned", park_delay=0)
     finish_reviews(source, reviews, metadata={"verdict": "changes_required",
                    "head": HEAD[:8] if mode == "short_head" else HEAD,
                    "pr": PR + "1" if mode == "other_pr" else PR})
@@ -103,7 +104,8 @@ def test_synced_invalid_review_or_owner_stays_held(boards, review_clock, mode):
 @pytest.mark.parametrize("assignment_delay", [0, 1])
 def test_synced_reassignment_separates_review_from_operator_handoff(boards, review_clock, assignment_delay):
     source, target = boards
-    task, reviews = parked(source)
+    # assignment_delay is measured from publication, so park in the same second.
+    task, reviews = parked(source, park_delay=0)
     finish_reviews(source, reviews, metadata={"verdict": "changes_required", "head": HEAD, "pr": PR})
     assert resumes_review(source, task, [PR])
     review_clock[0] += assignment_delay

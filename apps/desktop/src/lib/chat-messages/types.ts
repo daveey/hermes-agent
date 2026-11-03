@@ -53,6 +53,10 @@ export type ChatMessage = {
    *  Drives the error card's layer label + actions; absent on older
    *  backends, where the card falls back to generic copy. */
   errorSurface?: ErrorSurface
+  /** The failed turn was refused because another writer held the chat (`failure_reason:
+   *  session_busy`): the user's message was never processed, so the composer offers it back
+   *  (store/refused-sends.ts). */
+  refusedSend?: boolean
   branchGroupId?: string
   hidden?: boolean
   /** Sealed mid-turn commentary (`message.interim`) — rendered without the

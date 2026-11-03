@@ -54,6 +54,10 @@ def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, 
         "SELECT l.* FROM task_chat_links l WHERE l.chat_gateway=? AND l.kind='created' "
         "AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=l.task_id "
         "AND e.kind='creator_chats_resolved')", (gateway,))] if has_links else []
+    # Cards this gateway owns (a picked-up foreign copy keeps the owner's answer, see _owner_written_releases).
+    foreign = {r[0] for r in conn.execute(
+        "SELECT id FROM tasks WHERE created_on IS NOT NULL AND created_on != '' AND created_on != ?", (gateway,))} \
+        if created and any(c[1] == "created_on" for c in conn.execute("PRAGMA table_info(tasks)")) else set()
     sessions = [tuple(r) for r in conn.execute(
         "SELECT id, session_id, created_at FROM tasks WHERE session_id IS NOT NULL AND session_id != ''")]
     try:
@@ -75,7 +79,12 @@ def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, 
 
     for row in created:
         if not _worker_shepherd(row["chat_session"], row["kind"]) and row["chat_session"] not in machine:
-            out[row["uid"]] = row
+            # [daveey] Wanted unreleased, like a ``tasks.session_id`` creator link: creator-chat ownership has no
+            # release on this gateway but the machine/placeholder rules above. Keeping the stored flag let one
+            # foreign reconcile (a named-profile gateway on an older core holding the host sync lock) release it
+            # for good, and the shepherd link this link replaces was then released too: the chat lost an open
+            # card it handed work to (hub chat 20261016_123957_6212f7 -> t_01a19084a3b36956, 2026-11-02).
+            out[row["uid"]] = row if row["task_id"] in foreign else {**row, "released": 0}
     for task_id, session, created_at in sessions:
         add(task_id, session, "created", created_at)
     for task_id, session in shepherds:

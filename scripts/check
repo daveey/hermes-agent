@@ -70,7 +70,15 @@ for pm_root in "$common" "${HERMES_HOME:-$HOME/.hermes}/hermes-agent"; do
   pm_env="$(cd "$pm_root" && PYTHONHOME= PYTHONPATH="$pm_root" "$py" -m pm.environments --format json \
       2>/dev/null | "$py" -c '
 import json, os, shlex, sys
-env, root = json.load(sys.stdin), os.path.realpath(sys.argv[1])
+# empty or non-object output = this python cannot compose the environment (e.g. a 3.9
+# python3 in a checkout with no virtualenv): skip it quietly, a traceback reads as a failed push
+try:
+    env = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+if not isinstance(env, dict):
+    sys.exit(1)
+root = os.path.realpath(sys.argv[1])
 pp = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p and os.path.realpath(p) != root]
 if env.get("PATH") and pp:
     print("export PATH=" + shlex.quote(env["PATH"]))

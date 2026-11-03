@@ -95,3 +95,80 @@ def test_cli_json_text_tool_and_thread_share_observation(conn, monkeypatch, caps
     assert kanban._cmd_show(args) == 0
     assert qr.describe(cli["queue_reason"]) in capsys.readouterr().out
     assert kb.list_comments(conn, tid)[-1].body == original
+
+
+ORIGIN_REASON = "no pool worker can run it: missing capability:file, capability:git"
+
+
+def origin_reply(reason=ORIGIN_REASON):
+    return {"state": "origin", "machine": "hub", "reservation_id": None, "expires_at": None, "reason": reason,
+            "observation": {"version": 1, "code": "no_pool_worker", "observed_at_ms": 1000, "candidates": [
+                {"machine": "worker-1", "reasons": ["missing_labels"],
+                 "missing_labels": ["capability:file", "capability:git"]}]}}
+
+
+def _apply_board_repin(conn, tid):
+    """What the authoritative feed carries after the Board's structural CAS repin."""
+    conn.execute("UPDATE kanban_sync_state SET applying=1")
+    conn.execute("UPDATE tasks SET placement_policy=NULL, runs_on=? WHERE id=?", (json.dumps(["machine:hub"]), tid))
+    conn.execute("UPDATE kanban_sync_state SET applying=0")
+    conn.commit()
+
+
+def test_origin_return_records_reason_and_unfences_origin(conn, monkeypatch, capsys):
+    """Board state=origin: the reason is durable, shown, and the origin may run the card in the same pass."""
+    from hermes_cli import kanban
+
+    tid = fixtures.acknowledged(conn, requires=json.dumps(["terminal", "file", "git"]))
+    hub = Mock()
+    hub.reserve.return_value = origin_reply()
+    monkeypatch.setattr(client, "pull", lambda *a, **kw: _apply_board_repin(conn, tid))
+    assert wp.reevaluate(conn, hub, "default", "hub", cfg={"worker_pools": {"hub": ["worker-1"]}}) == 1
+    value = qr.latest(conn, tid)
+    assert value["code"] == "no_pool_worker" and value["state"] == "origin" and value["machine"] == "hub"
+    assert value["reason"] == ORIGIN_REASON
+    assert value["current"] is True
+    assert value["candidates"] == [{"machine": "worker-1", "reasons": ["missing_labels"],
+                                    "missing_labels": ["capability:file", "capability:git"]}]
+    assert ORIGIN_REASON in kb.list_comments(conn, tid)[-1].body
+    row = dict(conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
+    assert wp.execution_refusal(conn, row) is None
+    assert tid not in wp.local_refusals(conn, "ready")
+
+    @contextmanager
+    def closing():
+        yield conn
+
+    monkeypatch.setattr(kanban.kbc, "connect_closing", closing)
+    assert kanban._cmd_show(argparse.Namespace(task_id=tid, json=False)) == 0
+    assert ORIGIN_REASON in capsys.readouterr().out
+    # The reason stays current through the origin's own run; only a later re-placement makes it historical.
+    conn.execute("UPDATE tasks SET status='running' WHERE id=?", (tid,))
+    conn.commit()
+    assert qr.latest(conn, tid)["current"] is True
+    conn.execute("UPDATE tasks SET runs_on=? WHERE id=?", (json.dumps(["machine:worker-1"]), tid))
+    conn.commit()
+    assert "[historical]" in qr.describe(qr.latest(conn, tid))
+
+
+def test_origin_reason_text_is_allowlisted(conn):
+    tid = fixtures.acknowledged(conn)
+    assert qr.record_reply(conn, tid, "hub", origin_reply(reason="no pool worker can run it: missing x; injected text"))
+    value = qr.latest(conn, tid)
+    assert value["code"] == "no_pool_worker" and "reason" not in value
+    assert "injected" not in kb.list_comments(conn, tid)[-1].body
+
+
+def test_origin_reason_is_current_before_feed_and_survives_pull_error(conn):
+    """Between the reserve reply and the feed applying the repin, the return is decided: it is shown as current,
+    and a failed feed read in that window must not supersede it with a board_error."""
+    tid = fixtures.acknowledged(conn, requires=json.dumps(["terminal", "file", "git"]))
+    assert qr.record_reply(conn, tid, "hub", origin_reply())
+    pending = qr.latest(conn, tid)
+    assert pending["state"] == "origin" and pending["current"] is True
+    assert "[historical]" not in qr.describe(pending)
+    qr.record_pull_error(conn, "hub", status=503)
+    assert qr.latest(conn, tid)["state"] == "origin"
+    _apply_board_repin(conn, tid)
+    applied = qr.latest(conn, tid)
+    assert applied["state"] == "origin" and applied["current"] is True and applied["reason"] == ORIGIN_REASON

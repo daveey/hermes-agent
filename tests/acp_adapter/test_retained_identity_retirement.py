@@ -8,8 +8,9 @@ One row per sweep site (SWEEP_retained-identity-retirement.md), each over a real
 import asyncio
 from types import SimpleNamespace
 
-import acp
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
+import acp
 import pytest_asyncio
 
 from hermes_cli.gateway_client import GatewayClientError, GatewayRPCError

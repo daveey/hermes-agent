@@ -19,7 +19,7 @@ def restore_session_route(adapter, session_id, session_model, confirmed_runtime_
         return None
     if session_model and session_model != row.get("model"):
         return None
-    return restore_route(row.get("model"), row.get("model_config"))
+    return restore_route(row.get("model"), row.get("model_config"), session_id=session_id)
 
 
 def initial_runtime(adapter, *, default_model, requested_model,

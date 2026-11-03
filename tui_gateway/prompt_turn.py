@@ -1105,6 +1105,24 @@ def _persisted_turn_receipt(st: _TurnRun, raw: Any, status: str) -> dict | None:
             committed_row_id(before) is not None and committed_row_id(before) == committed_row_id(after)))
 
 
+def _structured_outcome_fields(result: dict) -> dict:
+    """Machine-readable outcome fields message.complete carries next to the text."""
+    fields: dict = {}
+    # transform_llm_output may rewrite the final after streaming: the renderer must treat
+    # this payload as the authoritative replacement even without a prefix relationship.
+    if result.get("response_transformed"):
+        fields["response_transformed"] = True
+    # Structured billing-wall descriptor: the client renders recovery without re-parsing text.
+    if _billing_block := result.get("billing_block"):
+        fields["billing"] = _billing_block
+        fields["failure_reason"] = result.get("failure_reason")
+    if result.get("failure_reason") == "session_busy":
+        # Another writer held the chat and the message never ran: Desktop gives the words back
+        # to the composer (apps/desktop/src/store/refused-sends.ts).
+        fields["failure_reason"] = "session_busy"
+    return fields
+
+
 def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None, cols: int):
     """``(payload, raw, status)`` for message.complete; retains/clears the inflight turn and
     settles the hosted-room terminal receipt."""
@@ -1144,14 +1162,7 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     # Only the agent's reuse site sets this; never inferred from equal text (a model may say the same words twice).
     if raw and result.get("response_reused"):
         payload["response_reused"] = True
-    # transform_llm_output may rewrite the final after streaming: the renderer must treat
-    # this payload as the authoritative replacement even without a prefix relationship.
-    if result.get("response_transformed"):
-        payload["response_transformed"] = True
-    # Structured billing-wall descriptor: the client renders recovery without re-parsing text.
-    if _billing_block := result.get("billing_block"):
-        payload["billing"] = _billing_block
-        payload["failure_reason"] = result.get("failure_reason")
+    payload.update(_structured_outcome_fields(result))
     if rendered := render_message(raw, cols):
         payload["rendered"] = rendered
     error_value = result.get("error")

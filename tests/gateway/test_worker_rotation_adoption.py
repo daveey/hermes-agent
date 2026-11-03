@@ -14,6 +14,7 @@ import pytest
 
 from tests.gateway.fixtures.local_recovery_probe import daemon, rpc, websocket
 from tests.gateway.test_worker_agent_execution import Model
+from tests.child_log import ChildLog
 
 
 @pytest.mark.platforms("linux")
@@ -49,7 +50,7 @@ def test_rotated_agent_survives_owner_kill_and_explicit_adoption(tmp_path):
             assert time.monotonic() < deadline, 'worker receipt deadline'
             time.sleep(0.05)
     try:
-        with (tmp_path / 'worker.log').open('w+') as log:
+        with ChildLog(tmp_path / 'worker.log') as log:
             ready, outage, receipt = (tmp_path / name for name in ('ready.json', 'outage', 'receipt.json'))
             with daemon(root, home, env, barrier=False) as (owner, desc):
                 sid = asyncio.run(create(desc, 'compressed'))
@@ -71,8 +72,7 @@ def test_rotated_agent_survives_owner_kill_and_explicit_adoption(tmp_path):
             with daemon(root, home, env, barrier=False):
                 send('adopt')
                 worker.wait(timeout=60)
-                log.seek(0)
-                assert worker.returncode == 0, log.read()
+                assert worker.returncode == 0, log.text()
                 proof = json.loads(receipt.read_text())
                 assert proof['opens'] == proof['fds'] == [], proof['opens']
                 assert proof['restart']['pid'] == worker.pid

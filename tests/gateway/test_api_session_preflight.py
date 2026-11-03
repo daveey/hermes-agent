@@ -3,6 +3,7 @@
 import secrets
 
 import pytest
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp import ClientSession
 
 from gateway.config import PlatformConfig

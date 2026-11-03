@@ -8,6 +8,8 @@ import socket
 import sqlite3
 import threading
 
+import pytest
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 import aiohttp
 
 from tests.gateway.fixtures.local_recovery_probe import child_env, daemon, Model

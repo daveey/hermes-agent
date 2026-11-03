@@ -89,7 +89,15 @@ def _kanban_loss_recorder(monkeypatch, policy, started, release, write_s):
     monkeypatch.setattr(session_kanban, 'record_worker_loss', record)
     monkeypatch.setattr(session_worker_reservation, 'lose_admission_worker',
                         lambda *a, **kw: (order.append('settled'), settle(*a, **kw))[1])
-    return dataclasses.replace(policy, kanban_json='{"task_id": "t"}'), order
+    # A real ordinary (scratch) card on a real board, as build_kanban_policy freezes it: the capsule gate
+    # re-derives the requirement from that row, and an unreadable/absent board fails closed. [daveey]
+    import json
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect_closing
+    board = kb.init_db()
+    with connect_closing() as conn:
+        task_id = kb.create_task(conn, title='lost worker')
+    return dataclasses.replace(policy, kanban_json=json.dumps({'task_id': task_id, 'db': str(board)})), order
 
 
 @pytest.mark.platforms("linux")

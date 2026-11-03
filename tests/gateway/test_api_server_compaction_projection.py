@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from aiohttp.test_utils import TestClient, TestServer
 import pytest
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
+from aiohttp.test_utils import TestClient, TestServer
 
 from agent.compaction_display import project_compaction_message_for_display
 from agent.context_compressor import (

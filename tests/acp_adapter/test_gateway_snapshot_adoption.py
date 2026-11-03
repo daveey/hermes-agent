@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp_adapter.gateway_commands import run_command
 from acp_adapter.gateway_server import GatewayACPAgent
 

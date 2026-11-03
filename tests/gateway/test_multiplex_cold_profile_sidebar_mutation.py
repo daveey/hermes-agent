@@ -30,6 +30,7 @@ import pytest
 from websockets.asyncio.client import connect
 
 from tests.gateway.test_normal_runtime_boot import control
+from tests.child_log import ChildLog
 
 
 @contextmanager
@@ -52,7 +53,7 @@ def multiplex_daemon(tmp_path, profiles=('warm', 'cold')):
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED') if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
                PYTHONUNBUFFERED='1')
-    with (tmp_path / 'gateway.log').open('w+') as log:
+    with ChildLog(tmp_path / 'gateway.log') as log:
         process = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=root, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
@@ -66,8 +67,7 @@ def multiplex_daemon(tmp_path, profiles=('warm', 'cold')):
                 except (OSError, ValueError):
                     pass
                 time.sleep(.1)
-            log.seek(0)
-            assert descriptor.get('state') == 'ready', (descriptor, log.read())
+            assert descriptor.get('state') == 'ready', (descriptor, log.text())
             yield home, descriptor, env
         finally:
             if process.poll() is None:

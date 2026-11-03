@@ -38,7 +38,8 @@ A card stays local when any of these holds:
   live on the hub and the MacBook" — is not a local-only need. A product name (Baby Bear) in the
   title pins only when the card names no Linux, or also names Apple/device work;
 * the target is not live: this gateway's hermes-hub sync has not succeeded recently, or the
-  target's capability record is stale.
+  target's capability record is stale. A name hermes-hub has no record of at all is refused as
+  unknown, with the gateway names it does know.
 
 Heavy work (tests, builds, benchmarks, installs: :data:`DEFAULT_HEAVY_MARKERS`, replaced by
 ``kanban.placement.heavy_markers``) with no local-only need goes to a worker node instead of the target
@@ -148,6 +149,8 @@ DEFAULT_HEAVY_MARKERS = (
 )
 # The routed target's own host named in the card: that work belongs on the target, not a worker.
 TARGET_HOST_MARKERS = (r"\bhermes-hub\b", r"\bon the hub\b", r"\bthe hub's\b")
+# target_live()'s reason for a pin hermes-hub has no gateway record of (a wrong name, not a dead gateway).
+UNKNOWN_GATEWAY = "no gateway is named"
 # kanban_create options hermes-hub create-task cannot carry: a card using them stays local.
 UNCARRIED_OPTIONS = ("initial_status", "human_request", "workspace_path", "project", "project_id", "tenant",
                      "max_retries")  # hermes-hub create-task has no retry breaker option [daveey]
@@ -341,13 +344,46 @@ def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
 
 # Work that only makes sense on the gateway that owns it (the hub, for a routeless gateway): its checkout and
 # state, credentials broker, cron control plane, Kanban DB, Board/gateway admin. Used only for ``_routeless_heavy``.
+#
+# Repository paths are not markers: a worker provisions its own checkout (``~/code/<repo>``, a worktree of
+# ``~/.hermes/hermes-agent``), so ordinary repo work is portable. Before 11-03 ``~/code/``, a bare ``~/.hermes``
+# and the Board CLI name ``hermes-hub`` kept ~3 of every 4 ready hub cards off the worker pool, so the hub's
+# local execution cap throttled the whole queue. What stays local: an existing worktree on this host
+# (``~/code/_wt/<slug>``, ``~/code/_wt-remote/<slug>``, ``<repo>/.claude/worktrees/<x>``,
+# ``~/code/<repo>/.worktrees/<x>``, ``~/.hermes/hermes-agent/.worktrees/<x>`` hold unpushed work), Hermes
+# state under ``~/.hermes`` other than the code checkout (``~/.hermes/skills`` is host state: curator ledger,
+# usage counts, live-patched skills), a
+# ``hermes-hub <subcommand>`` run (it acts with this gateway's key and replica), and a card that declares
+# ``requires: [host_repo]`` or a ``dir``/``worktree`` workspace.
+HERMES_STATE_PATH = r"(?:~|/home/[^/\s]+)/\.hermes/(?!(?:hermes-agent|repos|bin)(?:/|\b))[\w.-]"
+HOST_WORKTREE_PATH = r"(?:~|/home/[^/\s]+)/code/_wt(?:-[\w-]+)?(?:/|\b)"
+# Any home-rooted ``<dir>/.worktrees`` (``~/code/<repo>/.worktrees/t_*``, ``~/.hermes/hermes-agent/.worktrees``):
+# kanban worktrees there hold host-only commits and dirty files. ``.worktrees-notes.md`` and ``/tmp/.../.worktrees``
+# are not matches.
+LOCAL_WORKTREE_PATH = (r"/\.claude/worktrees\b|"
+                       r"(?:~|/home/[^/\s]+)/(?:[^/\s`'\"]+/)*\.worktrees(?![\w-]|\.\w)")
+HUB_CLI_COMMAND = (r"\bhermes-hub\s+(?:sync|status|sessions|inbox|tasks|where|links|requests?|inspect-legacy|"
+                   r"reconcile-legacy|inspect-alias|retire-alias|adopt-task|create-task|depend|outcomes|"
+                   r"install-watch|watch|diff-shared)\b")
 HOME_GATEWAY_MARKERS = (
-    r"~/\.hermes\b", r"/home/ubuntu/\.hermes\b", r"\bkanban\.db\b", r"\bcron ?(job|jobs|tab)?\b",
-    r"\btoken-broker\b", r"\bhermes-sync\b", r"\bhermes-hub\b", r"\bon the hub\b", r"\bthe hub's\b",
-    r"\bgateway (restart|config|service)\b", r"\bsystemctl\b", r"\blaunchd\b",
-    r"~/code/", r"/home/[^/\s]+/code/", r"\bssh\b",
+    HERMES_STATE_PATH, HOST_WORKTREE_PATH, LOCAL_WORKTREE_PATH, HUB_CLI_COMMAND,
+    r"\bkanban\.db\b", r"\bcron ?(job|jobs|tab)?\b",
+    r"\btoken-broker\b", r"\bhermes-sync\b", r"\bon the hub\b", r"\bthe hub's\b",
+    r"\bgateway (restart|config|service)\b", r"\bsystemctl\b", r"\blaunchd\b", r"\bssh\b",
     r"\brestart(ing)? (the )?gateway\b", r"\bhermes config (set|edit|unset)\b",
 )
+
+
+# The note :func:`remote_body` appends when another gateway places a card here. It lists the origin's own
+# host-only things (Chrome, Keychain, launchd, ssh) as what to block on, so scanning it as card text made
+# every card a MacBook placed on the hub look Mac-bound, and none of them reached the worker pool.
+_PLACEMENT_NOTE = re.compile(
+    r"Placed on \S+ by \S+'s default placement rule \(kanban\.placement\):.*?don't park or ask David\.", re.DOTALL)
+
+
+def without_placement_note(body: str) -> str:
+    """``body`` minus the system-written placement note: it is routing advice, not the card's work."""
+    return _PLACEMENT_NOTE.sub("", body or "")
 
 
 def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
@@ -374,7 +410,7 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
         return "gateway-scoped requirement"
     if any(str(r) not in c.carried_requires() for r in reqs):
         return "uncarried requirement"
-    title, body = args.get("title") or "", args.get("body") or ""
+    title, body = args.get("title") or "", without_placement_note(args.get("body") or "")
     if _local_marker(title, body, args.get("skills"), c):
         return "local marker"
     full = f"{title}\n{body}"
@@ -428,6 +464,12 @@ def target_live(target: str, *, now: float, live_seconds: int,
         return "this gateway's hermes-hub sync has not succeeded recently"
     remote = reg.remote_records() if remote is None else remote
     rec = remote.get(target)
+    if rec is None and remote:
+        # A name hermes-hub has no record of is a wrong name, not an outage. "stale or missing" read as one, so
+        # callers dropped the pin instead of fixing it: the Desktop calls the hub 'hub-ec2' and the mini
+        # 'mac-mini' (22 refusals, 10-28..11-02). An empty registry can't tell the two apart. [daveey]
+        return (f"{UNKNOWN_GATEWAY} {target!r}: hermes-hub knows {', '.join(sorted(remote))}. Pin one of those, "
+                f"or map this name in kanban.placement.aliases")
     try:
         at = float((rec or {}).get("refreshed_at") or 0)
     except (TypeError, ValueError):
@@ -729,6 +771,8 @@ def _target_not_live_why(target: str, dead: str) -> str:
         dead = (f"this gateway has no hermes-hub replica (a Board worker node), so it cannot place cards on other "
                 f"gateways. Use kanban_block(needs=[...]): a worker node relays the need to the card's home "
                 f"gateway, which opens the owner card on {target}")
+    if dead.startswith(UNKNOWN_GATEWAY):
+        return dead  # a wrong name, not a dead gateway: "not live" sent callers to drop the pin
     return f"{target} not live: {dead}"
 
 

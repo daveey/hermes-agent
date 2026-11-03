@@ -1337,8 +1337,8 @@ def create_task(
 
     from hermes_cli.kanban_db_creation import validate_create_assignment  # [daveey] runs_on-aware
     required, model_override, provider_override = validate_create_assignment(
-        conn, assignee, runs_on=runs_on, requires=requires, workspace_kind=workspace_kind,
-        workspace_path=workspace_path, skills=skills_list, validate_skills=validate_skills,
+        conn, assignee, runs_on=runs_on, requires=requires, workspace_kind=workspace_kind, project_id=project_id,
+        workspace_path=workspace_path, skills=skills_list, validate_skills=validate_skills, project_repo=project_repo,
         require_declaration=require_declaration, model=model_override, provider=provider_override)
     from hermes_cli.kanban_pin_provider import reject_spaced_pin
     reject_spaced_pin(model_override, provider_override)
@@ -2184,12 +2184,12 @@ def unsatisfied_parents(conn: sqlite3.Connection, task_id: str) -> list[tuple[st
 
 def claim_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
+    claimer: Optional[str] = None, admission_check=None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
-    Returns the claimed ``Task`` on success, ``None`` if the task was
-    already claimed (or is not in ``ready`` status).
+    Returns the claimed ``Task``; ``None`` if already claimed, not ``ready``, or the write-free
+    ``admission_check()`` (run in the claim txn before any write) refused it. [daveey]
     """
     now = int(time.time())
     lock = claimer or _claimer_id()
@@ -2201,7 +2201,7 @@ def claim_task(
     if gate.deferred:
         return None
     with gate, claim_transaction(conn) as admitted:
-        if not admitted:
+        if not admitted or (admission_check is not None and admission_check()):  # [daveey] same txn as the CAS
             return None
         # Single enforcement point: never ready -> running with an undone
         # parent, whichever writer set 'ready'. Demote to 'todo';
@@ -2227,11 +2227,11 @@ def claim_task(
 
 def claim_review_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
+    claimer: Optional[str] = None, admission_check=None,
 ) -> Optional[Task]:
     """Atomic ``review -> running`` (None when lost). Parents are re-checked
     (one may have reopened meanwhile) and a NEW run tracks the reviewer
-    separately from the implementer."""
+    separately from the implementer. ``admission_check``: as :func:`claim_task`."""
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
@@ -2241,7 +2241,7 @@ def claim_review_task(
     if gate.deferred:
         return None
     with gate, claim_transaction(conn) as admitted:
-        if not admitted:
+        if not admitted or (admission_check is not None and admission_check()):  # [daveey] same txn as the CAS
             return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
@@ -2808,21 +2808,7 @@ from hermes_cli.kanban_completion_evidence import gate_empty_completion as _gate
 
 
 
-def _stage_completion_artifacts(
-    conn: sqlite3.Connection, task_id: str, metadata: dict, now: int, *,
-    uploaded_by: str = "kanban_complete",
-) -> list[Path]:
-    """Copy scratch artifacts to the attachments dir and record each as an
-    attachment row; returns the copies so the caller can discard them if its
-    transaction rolls back."""
-    _persist_scratch_completion_artifacts(conn, task_id, metadata)
-    staged = [Path(stored_path) for stored_path in metadata.pop("_staged_artifacts", [])]
-    for path in staged:
-        _insert_completion_attachment(
-            conn, task_id, filename=path.name, stored_path=str(path),
-            size=path.stat().st_size, created_at=now, uploaded_by=uploaded_by,
-        )
-    return staged
+from hermes_cli.kanban_metadata_files import stage_completion_artifacts as _stage_completion_artifacts
 
 
 def _cleaned_artifact_paths(metadata: Any) -> list[str]:

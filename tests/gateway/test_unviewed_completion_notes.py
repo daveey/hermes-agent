@@ -401,3 +401,45 @@ async def test_closed_tip_lookup_defers_only_a_failed_read():
         assert await lookup(db(error), entry, 'lc7-root', {'end_reason': 'compression'}) == ''
     with pytest.raises(AttributeError):
         await lookup(db(AttributeError('bug')), entry, 'lc7-root', {'end_reason': 'compression'})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('display_text, expected', [
+    ('Subagent Task Interrupted: implement the fix', ('unresolved', 'subagent_killed')),
+    ('Subagent Task Completed: implement the fix', ('done', None)),
+])
+async def test_a_note_refreshes_the_stored_outcome_without_reading_as_an_interrupted_turn(
+        tmp_path, monkeypatch, display_text, expected):
+    """[daveey] A note runs no turn, so no turn-end refresh fires: the note path refreshes the chat's stored
+    outcome itself, and the outcome reads the note for what it is (a finished result, or a subagent stopped
+    before it finished), never ``unresolved{interrupted}``."""
+    import json
+    import threading
+    from gateway import session_completion_notes as notes_mod
+    from gateway.platforms.event import MessageEvent
+    from hermes_state_outcome import get_outcome
+    runner, authority, ref, _actor = await _local(tmp_path, monkeypatch)
+    started = []
+    real = notes_mod._refresh_outcome_after_note
+    monkeypatch.setattr(notes_mod, '_refresh_outcome_after_note',
+                        lambda db, target: started.append(real(db, target)) or started[-1])
+    try:
+        target = _target(runner, authority, ref)
+        authority.db.append_message(target, role='user', content='ship the fix')
+        authority.db.append_message(target, role='assistant', content=(
+            'Shipped the fix; a background worker is double-checking the live UI and will report back.'))
+        live = authority.sessions[ref.session_id]
+        event = MessageEvent(text='[ASYNC DELEGATION BATCH COMPLETE — deleg_note] RESULT_deleg_note',
+                             source=live.source, internal=True, metadata={
+                                 'gateway_session_key': live.route, 'gateway_session_id': target,
+                                 'display_kind': 'async_delegation_complete', 'display_text': display_text})
+        await authority.admit_automation(runner._adapter_for_source(live.source), event,
+                                         json.dumps(['async_delegation', 'deleg_note', ''], separators=(',', ':')))
+        await authority._drain(ref)
+        assert len(_notes(authority, target)) == 1
+        assert started and isinstance(started[0], threading.Thread)
+        started[0].join(10)
+        stored = get_outcome(target, db=authority.db) or {}
+        assert (stored.get('kind'), stored.get('reason')) == expected
+    finally:
+        authority.db.close()

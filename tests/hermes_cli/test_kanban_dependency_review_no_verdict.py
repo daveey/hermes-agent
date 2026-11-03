@@ -15,9 +15,9 @@ PR = "https://github.com/daveey/hermes/pull/682"
 SHA = "80a1696031723d5f0ece4c3f5adda458729a560e"
 
 
-def incident(board, monkeypatch, *, finish=True, metadata=None, summary=None):
+def incident(board, monkeypatch, *, finish=True, metadata=None, summary=None, park_delay=1):
     monkeypatch.setattr(helpers, "PR", PR)
-    task, parents = helpers.parked(board)
+    task, parents = helpers.parked(board, park_delay=park_delay)
     data = {"reviewed_pr": PR, "reviewed_sha": SHA, "base_sha": "b" * 40,
             "tests_run": 274, "live_probe": {"ok": True}, "findings": [{}] * 6,
             "parent_comment_id": 1, "worker_session_id": "review-session"}
@@ -58,8 +58,9 @@ def test_reviewed_pr_binds_without_summary_number(board, monkeypatch, named, ver
     assert dispatch.check_respawn_guard(board, task) == (None if named == PR else "active_pr")
 
 
+@pytest.mark.parametrize("park_delay", [0, 1])
 @pytest.mark.parametrize("mode", ["short", "missing", "before", "own", "pending", "outcome", "pr", "summary", "uid"])
-def test_other_refusals_survive(board, monkeypatch, mode):
+def test_other_refusals_survive(board, monkeypatch, mode, park_delay):
     data = {"reviewed_sha": SHA}
     if mode == "short":
         data["reviewed_sha"] = SHA[:8]
@@ -69,7 +70,7 @@ def test_other_refusals_survive(board, monkeypatch, mode):
         data["pr"] = PR + "1"
     task, parents = incident(board, monkeypatch, metadata=data,
                              summary="Reviewed PR #999" if mode == "summary" else None,
-                             finish=mode != "pending")
+                             finish=mode != "pending", park_delay=park_delay)
     event = board.execute("SELECT * FROM task_events WHERE task_id=? AND kind='dependency_wait'", (task,)).fetchone()
     if mode in {"before", "outcome", "uid"}:
         with kb.write_txn(board):
@@ -115,3 +116,20 @@ def test_finished_unreadable_review_notices_immediately(board, monkeypatch, fini
         assert not notice.notify_guard_hold(board, task, "active_pr")
         monkeypatch.setattr(notice.time, "time", lambda: start + 1800)
         assert notice.notify_guard_hold(board, task, "active_pr")
+
+
+@pytest.mark.parametrize("metadata,summary,expected", [
+    # A review whose metadata was lost still names the checkpointed PR: review rules own it.
+    ({}, "Reviewed PR #682. No blocking defects; one medium finding.", "active_pr"),
+    ({}, "Looked at " + PR + " and found nothing blocking", "active_pr"),
+    ({"pr": PR}, "Review complete", "active_pr"),
+    # A finished ordering prerequisite that names no checkpointed PR keeps its one continuation.
+    ({}, "ordering work finished", None),
+    ({"head": SHA}, "gate finished", None),
+    ({}, "Unrelated PR #999 merged", None),
+])
+def test_ordering_handoff_does_not_absorb_unreadable_review(board, monkeypatch, metadata, summary, expected):
+    """Park a second after the PR comment (production order): the ordering handoff
+    releases only parents that are not reviews of the checkpointed PR."""
+    task, _ = incident(board, monkeypatch, metadata=metadata, summary=summary, park_delay=1)
+    assert dispatch.check_respawn_guard(board, task) == expected

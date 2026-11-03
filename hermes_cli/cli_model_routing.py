@@ -72,7 +72,8 @@ def restore_class_route(cli, session_meta):
     if getattr(cli, "_explicit_model_override", False):
         return False
     from agent.model_routing_restore import restore_route
-    restored = restore_route(session_meta.get("model"), session_meta.get("model_config"))
+    restored = restore_route(session_meta.get("model"), session_meta.get("model_config"),
+                             session_id=session_meta.get("id") or getattr(cli, "session_id", None))
     if restored is None:
         return False
     cli.model, cli.requested_provider = restored

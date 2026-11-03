@@ -1020,8 +1020,18 @@ async def rename_session_endpoint(session_id: str, body: SessionRename, request:
         expected_generation=body.expected_generation, operation='sidebar', payload=payload)
 
 
+async def _write_on_owner(request: Request, profile: Optional[str], fn: Callable):
+    """[daveey] A single-row write: on the live owner's own store when a composed gateway serves the
+    profile, else under the offline maintenance lock. A running gateway always holds that lock, so
+    taking it there 409s every write ("Exclusive maintenance refused") — same split as owner-backfill."""
+    owner_db = _owner_db_for(request, profile)
+    if owner_db is not None:
+        return await asyncio.to_thread(fn, owner_db)
+    return await asyncio.to_thread(_with_db, profile, fn, read_only=False)
+
+
 @manage_router.post("/api/sessions/{session_id}/mute")
-async def mute_session_endpoint(session_id: str, body: SessionMute):
+async def mute_session_endpoint(session_id: str, body: SessionMute, request: Request):
     """[daveey] Server-side mute (Desktop ⌘B park): stored on the lineage and reflected in the outcome."""
     from hermes_state_outcome import set_muted
 
@@ -1031,11 +1041,12 @@ async def mute_session_endpoint(session_id: str, body: SessionMute):
             raise HTTPException(status_code=404, detail=_NOT_FOUND)
         return {"ok": True, "muted": body.muted, "outcome": set_muted(sid, body.muted, db=db)}
 
-    return await asyncio.to_thread(_with_db, body.profile, _mute, read_only=False)
+    return await _write_on_owner(request, body.profile, _mute)
 
 
 @manage_router.get("/api/sessions/{session_id}/outcome")
-async def get_session_outcome_endpoint(session_id: str, refresh: bool = False, profile: Optional[str] = None):
+async def get_session_outcome_endpoint(session_id: str, request: Request, refresh: bool = False,
+                                       profile: Optional[str] = None):
     """[daveey] The chat's stored outcome; ``refresh=1`` re-derives and stores it first."""
     from hermes_state_outcome import get_outcome, refresh_outcome
 
@@ -1050,7 +1061,9 @@ async def get_session_outcome_endpoint(session_id: str, refresh: bool = False, p
         outcome = refresh_outcome(sid, "manual", db=db) if refresh else get_outcome(sid, db=db)
         return {"session_id": sid, "outcome": outcome}
 
-    return await asyncio.to_thread(_with_db, profile, _read, read_only=not refresh)
+    if refresh:
+        return await _write_on_owner(request, profile, _read)
+    return await asyncio.to_thread(_with_db, profile, _read, read_only=True)
 
 
 def _compact_json(obj) -> str:

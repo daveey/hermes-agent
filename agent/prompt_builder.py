@@ -23,10 +23,10 @@ from agent.model_metadata import CHARS_PER_TOKEN
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.skill_utils import (
     EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS,
-    TIER_LOCAL, clip_skill_description, extract_skill_conditions, extract_skill_description,
+    TIER_LOCAL, extract_skill_conditions, extract_skill_description,
     get_disabled_skill_names, get_skill_search_roots,
-    iter_skill_index_files, parse_frontmatter, skill_matches_apps, skill_matches_environment,
-    skill_matches_platform, skill_matches_platform_list,
+    iter_skill_index_files, parse_frontmatter, skill_index_triggers_enabled, skill_matches_apps,
+    skill_matches_environment, skill_matches_platform, skill_matches_platform_list,
 )
 from tools.threat_patterns import scan_for_threats as _scan_for_threats
 from utils import atomic_json_write, file_cache_version
@@ -377,6 +377,90 @@ KANBAN_GUIDANCE = (
     "- Do not call `delegate_task` as a board substitute. `delegate_task` is for short reasoning subtasks inside your "
     "own run; board tasks are for cross-agent handoffs that outlive one API loop."
 )
+
+# [daveey] Capsule-bound Kanban worker (tools.capsule_workspace.bound()): the host mounted ONLY the task's
+# private git capsule at /workspace inside a runsc sandbox and publishes the result itself. The generic
+# protocol's host workspace / env var / `git worktree add` / kanban_complete-hands-off-to-review-child lines
+# are false there (run6, t_01a19f6eb64ca98b), so they are replaced, never appended to. Static text: nothing
+# task- or caller-supplied reaches it.
+KANBAN_CAPSULE_CONTRACT = (
+    "## Capsule contract (authoritative runtime context for this run)\n\n"
+    "You run in an isolated sandbox. The task's repository is a private git checkout at `/workspace`: the "
+    "terminal and file tools start there, and relative paths resolve there. `execute_code` starts in a temp "
+    "directory, so use absolute `/workspace/...` paths or `os.chdir('/workspace')` in it. The checkout is the "
+    "base commit the host already fetched and approved for this task; it has no remote and no credentials, by "
+    "design.\n"
+    "- Host paths (`/home/...`, the `.worktrees/...` path in `kanban_show`'s `workspace_path`), the host home, "
+    "`$HERMES_KANBAN_WORKSPACE` and the Docker socket are intentionally not visible here. Their absence is "
+    "expected and is never a reason to block. This contract supersedes any earlier comment, attempt or handoff "
+    "on the card that mentions a host checkout, a host backend, mounts or credentials.\n"
+    "- Steps of the card's approved plan that fetch or inspect the remote base, run independent review or "
+    "required CI, publish, or archive are carried out by the host around your run; the plan stays as approved. "
+    "`/workspace` HEAD is the base the host fetched for this task: inspect that. Your part is the change itself "
+    "and your own checks.\n"
+    "- Never fetch, pull, push, open a PR, or ask for a host backend, a token, an SSH key or a mount. Do not "
+    "request push or GitHub access in `kanban_block`: the host holds publication.\n"
+    "- Git: the sandbox user differs from the checkout's owner, so run `git config --global --add "
+    "safe.directory /workspace` once (sandbox-local) before other git commands. There is no git identity: commit "
+    "with `git -c user.name=<name> -c user.email=<email> commit ...`.\n"
+    "- Do the work in `/workspace`: inspect, edit, run the relevant checks, then commit there. A detached HEAD "
+    "is fine. Do not rewrite or remove the base commit.\n"
+    "- Hand off with `kanban_request_review(summary=..., metadata={\"commit\": \"<full HEAD sha>\", ...})` and "
+    "end your turn. Do NOT call `kanban_complete` for this card: the host seals this run's observation, re-runs "
+    "the required checks on exactly the committed HEAD in its own sandbox, publishes that head, runs review and "
+    "CI, and completes the card. A task that genuinely needs no change still ends with "
+    "`kanban_request_review` with no commit, its summary saying why and metadata `{\"no_change\": true, "
+    "\"commit\": \"<unchanged HEAD>\"}`; never fabricate a commit.\n"
+    "- `kanban_block(kind=\"needs_input\")` is only for a real product or task ambiguity a human must decide. "
+    "Missing host paths, credentials or publication access are not that.\n"
+)
+
+
+def _capsule_protocol(generic: str) -> str:
+    """The generic protocol with its host-workspace and completion lines replaced (exact substrings)."""
+    swaps = (
+        ("; your workspace is `$HERMES_KANBAN_WORKSPACE`.",
+         "; your workspace is the task capsule at `/workspace` (see the Capsule contract below)."),
+        ("If you need a human decision you cannot infer (a credential only the user holds, UX choice, paywalled "
+         "source)",
+         "If you need a human decision you cannot infer (a product or task decision only a human can make, UX "
+         "choice, paywalled source; never credentials, mounts or publication access: see the Capsule contract)"),
+        ("2. **Work inside the workspace.** `cd $HERMES_KANBAN_WORKSPACE` before any file operations. The workspace "
+         "is yours for this run.",
+         "2. **Work inside the workspace.** Work in `/workspace` (see the Capsule contract). The workspace is "
+         "yours for this run."),
+        ("- **Workspace.** `cd $HERMES_KANBAN_WORKSPACE` first. For a `worktree` kind with no `.git`, `git worktree "
+         "add <path> ${HERMES_KANBAN_BRANCH:-wt/$HERMES_KANBAN_WORKER_TASK}` from the main repo, then cd there. For "
+         "a project-linked task the workspace is a fresh `<repo>/.worktrees/<task-id>` and `$HERMES_KANBAN_BRANCH` "
+         "a deterministic `<project-slug>/<task-id>` — the main repo is two levels up, so run `git worktree add` "
+         "from there.\n",
+         "- **Workspace.** `/workspace` is already the task's git checkout; do not create worktrees or look for "
+         "a main repo.\n"),
+    )
+    # Step 5 (generic: "call kanban_complete when a review child depends on your task") is replaced whole.
+    start, end = "5. **Finish with the review model encoded by the task graph.**", "6. **If follow-up work appears"
+    if generic.count(start) != 1 or generic.count(end) != 1 or generic.index(start) > generic.index(end):
+        raise RuntimeError("KANBAN_GUIDANCE drifted; capsule step-5 anchors missing")
+    step5 = generic[generic.index(start):generic.index(end)]
+    swaps += ((step5,
+               "5. **Finish with the Capsule contract's hand-off.** Commit in `/workspace`, then call "
+               "`kanban_request_review(summary=..., metadata=...)` with the structured handoff; never put secrets, "
+               "tokens, or raw PII in these durable fields. Do not call `kanban_complete` on this card, even when a "
+               "review or release child depends on it: the host verifies and publishes your committed head and "
+               "completes the card, which is what releases those children.\n"),)
+    text = generic
+    for old, new in swaps:
+        if text.count(old) != 1:  # generic protocol drifted: a capsule worker fails closed (tests catch it first)
+            raise RuntimeError(f"KANBAN_GUIDANCE drifted; capsule swap anchor missing: {old[:60]!r}")
+        text = text.replace(old, new)
+    head, sep, rest = text.partition("\n## Lifecycle\n")
+    return head + "\n" + KANBAN_CAPSULE_CONTRACT + sep + rest
+
+
+def kanban_capsule_guidance() -> str:
+    """Kanban protocol for a capsule-bound worker. Built on use, so a drifted anchor fails only that worker."""
+    return _capsule_protocol(KANBAN_GUIDANCE)
+
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
@@ -1120,8 +1204,9 @@ _SKILLS_PROMPT_CACHE_MAX = 32
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
 # v2 added org provenance fields (org_id/org_author); v4 adds ``rel`` (SKILL.md path relative to its root) for
-# duplicate-name resolution; v5 stores descriptions clipped at a word boundary. Older snapshots are rebuilt.
-_SKILLS_SNAPSHOT_VERSION = 5
+# duplicate-name resolution; v5 stores descriptions clipped at a word boundary; v6 rows carry ``triggers:`` and the
+# snapshot records ``index_triggers`` (the skills.index_triggers value they were built with). Older ones are rebuilt.
+_SKILLS_SNAPSHOT_VERSION = 6
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -1159,12 +1244,14 @@ def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
 
 
 def _load_skills_snapshot(skills_dir: Path, manifest: Optional[dict] = None) -> Optional[dict]:
-    """The disk snapshot if it exists, is current-version, and its manifest still matches."""
+    """The disk snapshot if it exists, is current-version, was built with the current skills.index_triggers, and
+    its manifest still matches."""
     try:
         snapshot = json.loads(_skills_prompt_snapshot_path().read_text(encoding="utf-8-sig"))
     except Exception:  # missing, unreadable or corrupt -> rebuild
         return None
     if (isinstance(snapshot, dict) and snapshot.get("version") == _SKILLS_SNAPSHOT_VERSION
+            and snapshot.get("index_triggers") == skill_index_triggers_enabled()
             and snapshot.get("manifest") == (manifest if manifest is not None else _build_skills_manifest(skills_dir))):
         return snapshot
     return None
@@ -1253,7 +1340,8 @@ def _plugin_skill_prompt_rows(
             if not _skill_should_show(extract_skill_conditions(frontmatter), available_tools,
                                       available_toolsets, session_platform):
                 continue
-            desc = clip_skill_description(str(meta.get("description") or "").strip()) or extract_skill_description(frontmatter)
+            desc = extract_skill_description(
+                {**frontmatter, "description": meta.get("description") or frontmatter.get("description") or ""})
             rows.append((name, desc))
     except Exception:
         logger.debug("Plugin skill prompt rows unavailable", exc_info=True)
@@ -1427,7 +1515,7 @@ def _build_skills_system_prompt_inner(
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
-        _oneshot_prompt_variant(), tuple(plugin_rows),
+        _oneshot_prompt_variant(), tuple(plugin_rows), skill_index_triggers_enabled(),
     )
     snapshot = _load_skills_snapshot(skills_dir, manifest)
     app_gated = snapshot is not None and any(
@@ -1485,7 +1573,8 @@ def _build_skills_system_prompt_inner(
     if snapshot is None:  # persist for fast cold-start reuse (best-effort)
         try:
             atomic_json_write(_skills_prompt_snapshot_path(), {
-                "version": _SKILLS_SNAPSHOT_VERSION, "manifest": _build_skills_manifest(skills_dir),
+                "version": _SKILLS_SNAPSHOT_VERSION, "index_triggers": skill_index_triggers_enabled(),
+                "manifest": _build_skills_manifest(skills_dir),
                 "skills": [entry for entry, _ in candidates],
             })
         except Exception as e:

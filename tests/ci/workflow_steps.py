@@ -6,6 +6,7 @@ with argv receipts. No setup actions, installs, E2E tests or native hosts run he
 from __future__ import annotations
 
 import fnmatch
+import functools
 import json
 import os
 import subprocess
@@ -64,6 +65,69 @@ def _interpreter_dirs(root: Path) -> tuple[str, ...]:
     return str(interpreter), str(shims)
 
 
+#: Where a bash 4+ lives when PATH's is too old: macOS ships /bin/bash 3.2 and the
+#: replayed steps use ``mapfile`` (bash 4+), so Homebrew's (Apple Silicon, then Intel).
+BASH4_KNOWN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
+
+
+def _bash_major(bash: str) -> int | None:
+    """``BASH_VERSINFO[0]`` of ``bash``, or None when it does not run or answer."""
+    try:
+        probe = subprocess.run(
+            [bash, "--noprofile", "--norc", "-c", 'echo "${BASH_VERSINFO[0]}"'],
+            stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8", errors="replace",
+            timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    answer = probe.stdout.strip()
+    return int(answer) if probe.returncode == 0 and answer.isdigit() else None
+
+
+def find_replay_bash(ctx: LookupContext | None = None,
+                     known_dirs: tuple[str, ...] | None = None) -> tuple[str | None, str]:
+    """(first bash 4+: PATH's, else one in ``known_dirs``; or None, what was found).
+
+    The steps run in CI under Linux's bash 5 and Git for Windows' bash 5; only a
+    stock Mac has a bash too old for them, which used to fail every replay with
+    ``mapfile: command not found``.
+    """
+    known_dirs = BASH4_KNOWN_DIRS if known_dirs is None else known_dirs
+    seen = []
+    for candidate in locate_command("bash", ctx, known_dirs=known_dirs).present:
+        if candidate.value in (path for path, _ in seen):
+            continue
+        major = _bash_major(candidate.value)
+        if major is not None and major >= 4:
+            return candidate.value, ""
+        seen.append((candidate.value, major))
+    found = ", ".join(f"{path} (bash {major if major is not None else 'unknown version'})"
+                      for path, major in seen) or "no bash at all"
+    return None, (f"replayed workflow steps need bash >= 4 (they use mapfile); found {found}; "
+                  f"install one on PATH or in {' or '.join(known_dirs)}")
+
+
+@functools.cache
+def _replay_bash_cached(path: str | None, known_dirs: tuple[str, ...]) -> tuple[str | None, str]:
+    return find_replay_bash(LookupContext(path=path), known_dirs)
+
+
+def replay_bash() -> str:
+    """The bash to replay steps with, or skip the test saying which (too old) bash was found.
+
+    One probe per (PATH, known dirs): steps are replayed hundreds of times per file.
+    """
+    bash, reason = _replay_bash_cached(os.environ.get("PATH"), BASH4_KNOWN_DIRS)
+    if bash is None:
+        # Lazy: steps are also replayed from bare interpreters with no pytest installed.
+        try:
+            import pytest
+        except ImportError:
+            raise AssertionError(reason) from None
+        pytest.skip(reason)
+    return bash
+
+
 def _run(step: dict, ctx: dict, cwd: Path | None = None, *, receipt: bool = False) -> tuple[dict, list]:
     required(step, ctx)
     assert step.get("shell", "bash") == "bash", "only safe Bash selection steps are replayed"
@@ -72,7 +136,7 @@ def _run(step: dict, ctx: dict, cwd: Path | None = None, *, receipt: bool = Fals
         output, calls = root / "outputs", root / "calls"
         output.touch()
         calls.touch()
-        bash = locate_command("bash").command[0]
+        bash = replay_bash()
         # Steps call git too. Linux reaches it through os.defpath; on Windows the bash found
         # first may be Git's usr\bin (no git.exe), so git's own dir rides along like bash's.
         git = locate_command("git").command[0]

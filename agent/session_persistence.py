@@ -58,7 +58,7 @@ _EPHEMERAL_SCAFFOLDING_FLAGS = (
     "_verification_stop_synthetic",  # verify-on-stop nudge; the assistant candidate itself is NOT synthetic
     "_pre_verify_synthetic",
     "_pre_final_gate_synthetic",  # silent hold: held answer AND its nudge are never persisted [daveey]
-    "_kanban_stop_synthetic",  # kanban worker stop-guard
+    "_kanban_stop_synthetic",  # kanban worker stop-guard nudge; the assistant answer itself is NOT synthetic
     "_dropped_toolcall_nudge",  # internal retry instruction; must not replay as user context
 )
 
@@ -560,6 +560,14 @@ class SessionPersistenceMixin:
     _repair_message_sequence = _forward("agent.agent_runtime_helpers", "repair_message_sequence")
 
     def _flush_messages_to_session_db(self, messages: list[dict], conversation_history: Optional[list[dict]] = None):
+        # Class-qualified: ``object.__new__``/namespace test stubs call this unbound and lack the helper. [daveey]
+        with _persist_lock(self):
+            result = SessionPersistenceMixin._flush_messages_to_session_db_retrying(self, messages, conversation_history)
+            from agent.observation_seam import persisted as observe_persisted
+            observe_persisted(self, result)
+            return result
+
+    def _flush_messages_to_session_db_retrying(self, messages: list[dict], conversation_history: Optional[list[dict]] = None):
         """Serialize flushes and wait out writer contention without replaying tools.
 
         SessionDB's per-operation deadline bounds contention diagnostics, not the lifetime

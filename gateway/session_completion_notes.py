@@ -73,5 +73,23 @@ async def note_if_unviewed(authority, ref, row):
     refresh = getattr(authority.runner, '_refresh_agent_cache_message_count', None)
     if refresh is not None:  # the owner's own row: a cached agent stays, as after a turn's writes
         await refresh(live.route, target)
+    _refresh_outcome_after_note(authority.db, target)
     authority.pending_results[row['admission_id']] = {'result': {'final_response': '', 'messages': []}, 'usage': {}}
     return ''
+
+
+def _refresh_outcome_after_note(db, target):
+    """[daveey] A note runs no turn, so no turn-end refresh restores the chat's stored outcome: refresh it here, off
+    the admission loop (the judge may call a model), as ``gateway/turn_outcome.py`` does for a turn. Best-effort."""
+    from agent.memory_provider import spawn_context_thread
+    from hermes_state_outcome import refresh_outcomes_quietly
+    try:
+        thread = spawn_context_thread(refresh_outcomes_quietly, name='completion-note-outcome',
+                                      args=([target], 'notice'), kwargs={'db': db})
+        thread.start()
+        return thread
+    except Exception:  # health: allow BLE001 -- a thread that can't start skips one refresh; the next refresh heals
+        import logging
+        logging.getLogger(__name__).warning('completion-note outcome refresh did not start for %s', target,
+                                            exc_info=True)
+        return None

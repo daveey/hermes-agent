@@ -252,14 +252,15 @@ CASES = {
     ),
     # conftest.py owns the _OS_MARKS skip logic, so it re-arms the
     # desktop_updater integration tests too (fail-open).
-    # The shared harness can break every Python E2E suite.
+    # The shared harness can break every Python E2E suite, and the bootstrap
+    # lane's bare-interpreter pytest step loads it as well.
     "conftest → python + desktop_updater + python e2e": (
         ["tests/conftest.py"],
-        _lanes(python=True, python_prod=False, scan=True, desktop_updater=True, e2e=True, e2e_upgrade=True, hermes_state=True),
+        _lanes(python=True, python_prod=False, scan=True, bootstrap=True, desktop_updater=True, e2e=True, e2e_upgrade=True, hermes_state=True),
     ),
     "conftest fixture module → python + desktop_updater + python e2e": (
         ["tests/_fixtures/platform_gating.py"],
-        _lanes(python=True, python_prod=False, scan=True, desktop_updater=True, e2e=True, e2e_upgrade=True, hermes_state=True),
+        _lanes(python=True, python_prod=False, scan=True, bootstrap=True, desktop_updater=True, e2e=True, e2e_upgrade=True, hermes_state=True),
     ),
     "tests + prod source → both lanes": (
         ["tests/agent/test_foo.py", "agent/x.py"],
@@ -271,7 +272,7 @@ CASES = {
     # .py/.pth payloads are what it scans for).
     "test runner script → python_prod stays on": (
         ["scripts/run_tests_parallel.py"],
-        _lanes(python=True, scan=True, e2e=True, e2e_upgrade=True, hermes_state=True),
+        _lanes(python=True, scan=True, bootstrap=True, e2e=True, e2e_upgrade=True, hermes_state=True),
     ),
     # Supply-chain lanes
     ".pth file → scan": (["evil.pth"], _lanes(python=True, scan=True)),
@@ -654,6 +655,38 @@ def test_remote_backends_lane_runs_test_files_that_exist_and_start_it():
     # A skip there is a missing host, not a pass; the runner, not a grep over its
     # progress line, decides that.
     assert "scripts/run_tests.sh --fail-on-skip" in text
+
+
+def _repo_imports(rel: str) -> list[str]:
+    """Repo files behind the top-level ``tests.*`` / ``scripts.*`` imports of ``rel``."""
+    text = (_REPO / rel).read_text(encoding="utf-8")
+    paths = []
+    for module in re.findall(r"^(?:from|import)\s+((?:tests|scripts)(?:\.\w+)+)", text, re.MULTILINE):
+        base = module.replace(".", "/")
+        paths.append(f"{base}.py" if (_REPO / f"{base}.py").is_file() else f"{base}/__init__.py")
+    return paths
+
+
+def test_bootstrap_lane_starts_on_every_file_its_own_steps_run():
+    """The lane's pytest step runs in a bare interpreter (four packages, none of
+    Hermes' dependencies), so a harness edit the full suite tolerates can break
+    this lane alone. An autouse fixture in tests/_fixtures/ that imported httpx
+    did: its PR skipped the lane, since nothing it touched started it, and main
+    went red on the next push. So every script the lane's steps run, its pytest
+    files, the modules those import, and the conftest harness start it.
+    """
+    text = (_REPO / ".github/workflows/bootstrap-installer.yml").read_text(encoding="utf-8-sig")
+    suites = sorted(set(re.findall(r"scripts/run_tests\.sh\s+(tests/[\w/.-]+\.py)", text)))
+    assert suites, "found no pytest file in the lane: the parse is broken, not the routing"
+    scripts = set(re.findall(r"(?<![\w/.-])(scripts/[\w/.-]+\.(?:py|sh))", text))
+    scripts |= {m.replace(".", "/") + ".py" for m in re.findall(r"python3? -m (scripts(?:\.\w+)+)", text)}
+    runner = (_REPO / "scripts/run_tests.sh").read_text(encoding="utf-8")
+    scripts |= set(re.findall(r"(scripts/run_tests\w*\.py)", runner))
+    loaded = {*suites, *scripts, "tests/conftest.py"}
+    loaded |= {p for rel in [*suites, "tests/conftest.py"] for p in _repo_imports(rel)}
+    assert "tests/_fixtures/offline_catalogs.py" in loaded, "the conftest walk is broken"
+    assert [p for p in sorted(loaded) if not (_REPO / p).is_file()] == []
+    assert [p for p in sorted(loaded) if not classify([p])["bootstrap"]] == []
 
 
 def test_windows_venv_e2e_runs_only_test_files_that_exist():

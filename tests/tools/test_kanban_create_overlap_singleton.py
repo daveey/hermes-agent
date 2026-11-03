@@ -181,3 +181,18 @@ def test_mirror_override_is_recorded(home):
     assert len(events) == 1
     assert events[0]["outcome"] == "override" and events[0]["reason"] == args["distinct_reason"]
     assert events[0]["matches"][0]["id"] == tid
+
+
+HERMES_SYNC_BUG = ("hermes-sync on the hub: a core pass run outside hub-core-update crashed with ENOENT writing its "
+                   "deferral marker under the missing ~/code/hermes/.git (19:57:04Z 11-02); make host-state paths "
+                   "valid on hosts without a mirror checkout")
+
+
+def test_hermes_sync_bug_card_is_not_the_mirror_singleton(home):
+    """Real hub t_01a19ddcef566978: a hermes-sync bug that mentions its core pass and a mirror checkout. Over 30 days
+    of hub titles it was the only singleton match containing ``hermes-sync`` (74 matches; 73 after this rule)."""
+    assert ko.singleton_job(HERMES_SYNC_BUG) is None
+    assert ko.singleton_job("hermes-sync: fork backlog mirror pass") is None
+    assert ko.singleton_job("hermes-sync: hermes-mods core mirror pass") == "hermes-mods core mirror"
+    owner()
+    assert check(title=HERMES_SYNC_BUG) is None

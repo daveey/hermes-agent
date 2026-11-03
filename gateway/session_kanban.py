@@ -46,6 +46,11 @@ def build_kanban_policy(connection, params, config):
             from gateway.session_kanban_resume import restart_candidate
             resume_from = restart_candidate(conn, task.id, task.current_run_id)
             resume_base = kb.build_worker_context(conn, task.id, recovery_tail=False) if resume_from else None
+            from hermes_cli.kanban_db_context import ctx_workspace_span
+            context_workspace = ctx_workspace_span(task)  # [daveey] the capsule rewrite's exact header span
+            # [daveey] Owner-derived (task row + resolved backend), never caller/config supplied.
+            from gateway.session_kanban_capsule import capsule_requirement
+            capsule = capsule_requirement(task)
             # [daveey] The dispatcher's model tier for this run (in-memory pin + model_tier event), class → auto.
             from hermes_cli.kanban_model_tier import owner_model_pin
             pinned_model, pinned_provider = owner_model_pin(conn, task)
@@ -69,13 +74,16 @@ def build_kanban_policy(connection, params, config):
         profile=task.assignee, workspaces_root=str(kb.workspaces_root(board=board).resolve()),
         skills=skills, goal_mode=task.goal_mode, goal_max_turns=task.goal_max_turns,
         goal_text='\n\n'.join(p for p in (task.title, task.body) if p), context=context,
-        max_runtime_seconds=task.max_runtime_seconds, accept_hooks=True)
+        context_workspace=context_workspace,
+        max_runtime_seconds=task.max_runtime_seconds, accept_hooks=True, capsule=capsule)
     context['db'] = str(path)
     if resume_from is not None:  # [daveey] planned and copied off-loop in run_task, after session creation
         from gateway.session_kanban_resume import resume_context
         context['restart_candidate'] = {**resume_from, 'assignee': task.assignee}
         context['resume_context'] = resume_context(resume_base, {'prior_run_id': resume_from['prior_run_id'],
                                                                  'run_id': task.current_run_id})
+        from gateway.session_kanban_capsule import resume_workspace_span
+        context['resume_context_workspace'] = resume_workspace_span(context, resume_base)
     request = json.loads(policy.request_json)
     request.update(source='kanban', board=board, task_id=task.id, run_id=task.current_run_id)
     return replace(policy, source='kanban', platform='cli', toolsets=tuple(sorted(set(policy.toolsets) | {'kanban'})),
@@ -90,6 +98,7 @@ async def run_task(connection, params):
     from gateway.session_contract import Submission
     from gateway.session_local_recovery import local_identity, _restore_receipt_policy
     from hermes_state_local import local_receipt
+    from gateway.session_kanban_capsule import require_capsule_transport
     authority = connection.authority
     # Resolved off-loop up front: no await separates the saved-claim check from session
     # creation. The Kanban claim check and its marker share one off-loop transaction; a
@@ -106,10 +115,14 @@ async def run_task(connection, params):
         if (not connection.native_owner or set(params) not in ({'board', 'task_id', 'run_id', 'claim_lock'}, {'board', 'task_id', 'run_id', 'claim_lock', 'db'})
                 or any(params[k] != context.get(k) for k in params)):
             raise RuntimeStoreError('permission_denied')
+        # [daveey] Replayed/old saved policy: re-derived from the board before any resume/admission.
+        await asyncio.to_thread(require_capsule_transport, policy)
         from gateway.session_local_recovery import restore_local_session
         ref = restore_local_session(authority, sid)
     else:
         policy, private = build_kanban_policy(connection, params, _load_gateway_config())
+        # [daveey] Capsule-required card without live run-bound transport refuses before session creation.
+        await asyncio.to_thread(require_capsule_transport, policy)
         ref = create_local_session(authority, connection.actor, {'request_id': request_id},
                                    trusted_policy=policy, trusted_secrets=private)
     candidate = json.loads(policy.kanban_json or '{}').get('restart_candidate') if not saved else None
@@ -480,10 +493,11 @@ def _run_task_turns(agent, frame, history, context):
     if warning:
         import logging
         logging.getLogger(__name__).warning('%s', warning)
-    from gateway.session_kanban_resume import compact_resumed_history, worker_prompt_context
+    from gateway.session_kanban_resume import compact_resumed_history
+    from gateway.session_kanban_capsule import capsule_prompt_context
     # [daveey] An over-headroom resumed transcript is compacted before the first model call (or dropped).
     history = compact_resumed_history(agent, context, history)
-    card = worker_prompt_context(context, history)  # [daveey] resumed after an owner restart, or the tail
+    card = capsule_prompt_context(context, history)  # [daveey] resumed after an owner restart, or the tail
     prompt = '\n\n'.join(p for p in (skills, warning, card, frame['text']) if p)
     result = agent.run_conversation(prompt, conversation_history=history, turn_author=KANBAN_TURN_AUTHOR)
 

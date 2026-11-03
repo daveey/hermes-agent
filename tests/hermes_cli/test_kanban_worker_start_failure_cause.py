@@ -97,6 +97,8 @@ def test_managed_worker_main_books_the_cause_of_a_late_failure(monkeypatch):
     monkeypatch.setattr(mw, 'hello', dict)
     monkeypatch.setattr(mw, 'read_frame', lambda stream: frame)
     monkeypatch.setattr(mw, 'validate_bootstrap', lambda f: f)
+    # main() strictly parses its own argv (``--observation-fd`` only); under pytest sys.argv is pytest's.
+    monkeypatch.setattr(mw.sys, 'argv', [mw.__file__])
 
     def execute(f, channel):
         raise WorkerPersistenceError('invalid_params')

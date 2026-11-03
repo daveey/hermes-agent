@@ -259,11 +259,15 @@ def collect_acceptance(contract: str, published_pr: str | None,
         phase = "selecting merge-time evidence"
         runs, statuses = merge_evidence(receipt, pr, repo, runs, statuses)
         outcomes = []
+        app_of_bot: dict[str, int | None] = {}
         for context, app_id in sorted(required, key=str):
             matching = [r for r in runs if r["name"] == context and
                         (app_id in (None, -1) or r["app"]["id"] == app_id)]
-            # A legacy status can satisfy an unpinned context, but never a check pinned to an app.
-            legacy = [s for s in statuses if s["context"] == context] if app_id in (None, -1) else []
+            # A legacy status satisfies an unpinned context, and a pinned one only when that
+            # app posted it (GitHub does the same: Actions' status passes integration 15368).
+            phase = "resolving status creators"
+            legacy = [s for s in statuses if s["context"] == context and (
+                app_id in (None, -1) or _status_app_id(s, app_of_bot, profile_home) == app_id)]
             selected = matching + ([max(legacy, key=lambda s: s["id"])] if legacy else [])
             if not selected:
                 outcomes.append("missing")
@@ -305,6 +309,26 @@ def collect_acceptance(contract: str, published_pr: str | None,
                        detail=f"GitHub acceptance evidence unavailable or incomplete while {phase} "
                               f"({type(exc).__name__}); retry completion.")
         return receipt
+
+
+def _status_app_id(status: dict, cache: dict, profile_home: str | None) -> int | None:
+    """The GitHub App that posted a legacy commit status, else None.
+
+    The statuses API names only the creator user; an app posts as its bot user
+    ``<slug>[bot]`` (type Bot), and ``apps/<slug>`` gives that app's id. Any other
+    creator, or a slug GitHub doesn't know, is no app: the pinned context stays
+    missing (fail closed). [daveey]"""
+    creator = status.get("creator") or {}
+    login = creator.get("login") or ""
+    slug = login[:-len("[bot]")] if login.endswith("[bot]") else ""
+    if creator.get("type") != "Bot" or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", slug):
+        return None
+    if slug not in cache:
+        try:
+            cache[slug] = _api(f"apps/{slug}", profile_home=profile_home)["id"]
+        except _GateAuthError:
+            cache[slug] = None  # 404: a bot with no public app behind it
+    return cache[slug]
 
 
 def pr_closed_unmerged(url: str, assignee: str | None = None) -> bool:

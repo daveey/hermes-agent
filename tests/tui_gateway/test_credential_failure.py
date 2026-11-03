@@ -162,3 +162,52 @@ def test_session_events_share_metadata(tmp_path, monkeypatch, event):
     assert result["provider"] == "anthropic"
     assert result["reset_at"] == 4102444800
 
+
+
+def _strict_build(monkeypatch, exc):
+    """Run the deferred build through the REAL ``_emit`` (contract-checked under test isolation)."""
+    import threading
+    from tui_gateway import server
+    from tests.tui_gateway.test_provider_not_configured_code import _fail_build, _run_build
+    monkeypatch.setattr(server, "_resolve_startup_runtime", lambda: ("m", "openai-codex"))
+    monkeypatch.setattr(server, "_load_cfg", dict)
+    frames, crashes = [], []
+    monkeypatch.setattr(server, "write_json", lambda frame: frames.append(frame) or True)
+    monkeypatch.setattr(threading, "excepthook", lambda args: crashes.append(args.exc_value))
+    session = _fail_build(monkeypatch, exc)
+    _run_build(session)
+    return session, [f["params"]["payload"] for f in frames if f["params"]["type"] == "error"], crashes
+
+
+def test_quota_walled_build_error_event_honours_its_contract(tmp_path, monkeypatch):
+    """A typed quota failure knows its reset: the replay keeps it, the client reads it as ``reset_at``."""
+    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    from tui_gateway import server
+    from tui_gateway.contracts import registry
+    assert registry.STRICT  # the contract check raises here instead of only logging
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    reset = 1793774268.0
+    session, payloads, crashes = _strict_build(
+        monkeypatch, SubscriptionQuotaUnavailable("openai-codex", "gpt-6-astra", reset))
+    assert crashes == []
+    assert len(payloads) == 1
+    payload = payloads[0]
+    assert "failure_resets_at" not in payload
+    assert payload["reset_at"] == reset
+    assert session["agent_failure"]["failure_resets_at"] == reset  # what the automation replay reads
+    assert "failure_resets_at" not in (server._wait_agent(session, "r")["error"]["data"] or {})
+
+
+def test_agent_init_failed_error_enrichment_honours_its_contract(tmp_path, monkeypatch):
+    """``session_failure_payload`` folds ``agent_failure`` into later ``agent_init_failed`` events too."""
+    from tui_gateway import server
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    frames = []
+    monkeypatch.setattr(server, "write_json", lambda frame: frames.append(frame) or True)
+    monkeypatch.setitem(server._sessions, "quota-test", {"agent_failure": {"failure_resets_at": 1793774268.0}})
+    for event, payload in (("error", {"message": "opaque"}), ("message.complete", {"text": "opaque", "status": "error"})):
+        server._emit(event, "quota-test", {**payload, "error_surface": {
+            "layer": "runtime", "code": "agent_init_failed", "retryable": False}})
+        result = frames[-1]["params"]["payload"]
+        assert "failure_resets_at" not in result
+        assert result["reset_at"] == 1793774268.0

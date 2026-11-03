@@ -1,6 +1,7 @@
 """ACP controls retain generation fences and reject unavailable mutations."""
 import pytest
 
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp_adapter.server import HermesACPAgent
 from hermes_cli.gateway_client import GatewayClientError
 from hermes_state import SessionDB

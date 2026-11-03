@@ -2,6 +2,7 @@
 import base64
 
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp.schema import ImageContentBlock, ResourceContentBlock, TextContentBlock
 
 from acp_adapter.gateway_server import GatewayACPAgent

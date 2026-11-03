@@ -876,9 +876,40 @@ def clip_skill_description(desc: str) -> str:
     return _CLIP_TRAIL_RE.sub("", head[:boundary.start()]) + "..."
 
 
-def extract_skill_description(frontmatter: dict[str, Any]) -> str:
-    """Extract a system-prompt-length description from parsed frontmatter."""
-    return clip_skill_description(_normalize_skill_description(frontmatter))
+def skill_index_triggers_enabled() -> bool:
+    """``skills.index_triggers`` (default true): index rows carry each skill's ``triggers:`` frontmatter."""
+    from utils import is_truthy_value
+    return is_truthy_value(_skills_cfg_get("index_triggers"), default=True)
+
+
+def _one_line(value: Any) -> str:
+    return " ".join(str(value).split())
+
+
+def render_skill_triggers(frontmatter: dict[str, Any]) -> str:
+    """`` Asks: "a"; "b"; "c". Not for: x.`` from a ``triggers:`` mapping (``asks``: up to three of the user's own
+    phrasings, ``not_for``: str naming the neighbour skill to use instead); "" when absent or malformed.
+
+    Measured by hermes-mods tools/skill-trigger-eval: on the 30 weakest skills recall 0.67 -> 0.83 (a description
+    rewrite alone reached 0.73), at ~72 index tokens per skill that declares triggers."""
+    trig = frontmatter.get("triggers")
+    if not isinstance(trig, dict):
+        return ""
+    raw_asks = trig.get("asks")
+    raw_asks = [raw_asks] if isinstance(raw_asks, str) else raw_asks if isinstance(raw_asks, list) else []
+    asks = [a for a in (_one_line(a).replace('"', "'") for a in raw_asks) if a][:3]
+    not_for = _one_line(trig.get("not_for") or "").rstrip(".")
+    out = (" Asks: " + "; ".join(f'"{a}"' for a in asks) + ".") if asks else ""
+    return out + (f" Not for: {not_for}." if not_for else "")
+
+
+def extract_skill_description(frontmatter: dict[str, Any], *, with_triggers: bool | None = None) -> str:
+    """The skill's system-prompt index row text: the description clipped to SKILL_PROMPT_DESC_LIMIT, then its
+    ``triggers:`` (``with_triggers`` None = the ``skills.index_triggers`` config). Every index row is built here."""
+    desc = clip_skill_description(_normalize_skill_description(frontmatter))
+    if with_triggers is None:
+        with_triggers = skill_index_triggers_enabled()
+    return desc + render_skill_triggers(frontmatter) if with_triggers else desc
 
 
 def is_skill_description_truncated_for_prompt(frontmatter: dict[str, Any]) -> bool:

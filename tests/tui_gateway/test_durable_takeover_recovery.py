@@ -58,6 +58,8 @@ def test_takeover_retry_preserves_the_accepted_followup_once(monkeypatch, tmp_pa
             server._absorb_turn_result("ui", session, st, "follow up", None, None)
             payload, _, status = server._complete_turn_payload(session, st, None, 80)
             assert status == "error"
+            # Desktop gives the refused words back to the composer on this marker.
+            assert payload["failure_reason"] == "session_busy"
             assert agent._pending_cli_user_message is None
         else:
             monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *a: ActiveSessionRefusal(

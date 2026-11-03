@@ -36,7 +36,11 @@ async def _legacy_ws_snapshot(root, home, env, requests):
         shutil.copytree(home / directory, legacy_home / directory)
     legacy_env = {**env, 'HERMES_HOME': str(legacy_home),
                   'HERMES_DASHBOARD_SESSION_TOKEN': 'disposable-discovery-token'}
-    with (home.parent / 'legacy-serve.log').open('w+') as log:
+    log_path = home.parent / 'legacy-serve.log'
+    # The child writes through an O_APPEND handle and the poll reads by path. A shared 'w+'
+    # handle shares its file offset with the child, so a poll's seek(0) made the child's next
+    # line overwrite the READY sentinel and the wait never saw it.
+    with log_path.open('ab') as log:
         process = subprocess.Popen([sys.executable, '-m', 'hermes_cli.main', 'serve',  # noqa: ASYNC220 -- Popen returns immediately; the test drives the child through its handle
                                     '--host', '127.0.0.1', '--port', '0', '--skip-build', '--isolated'],
                                    cwd=root, env=legacy_env, stdin=subprocess.DEVNULL,
@@ -46,8 +50,7 @@ async def _legacy_ws_snapshot(root, home, env, requests):
             port = None
             output = ''
             while process.poll() is None and time.monotonic() < deadline:
-                log.seek(0)
-                output = log.read()
+                output = log_path.read_text(errors='replace')
                 if match := re.search(r'HERMES_BACKEND_READY port=(\d+)', output):
                     port = int(match.group(1))
                     break
@@ -140,7 +143,8 @@ sys.__stdout__.write(json.dumps(results) + '\\n')
                 'skill_count': expected[0]['skill_count'], 'compared_requests': len(requests),
                 'unauthenticated_ws': 'rejected', 'foreign_profile': 'rejected'}
 
-    with (tmp_path / 'gateway.log').open('w+') as log:
+    gateway_log = tmp_path / 'gateway.log'
+    with gateway_log.open('ab') as log:  # O_APPEND, read by path: see _legacy_ws_snapshot
         process = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=root, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
@@ -154,8 +158,7 @@ sys.__stdout__.write(json.dumps(results) + '\\n')
                 except (OSError, ValueError):
                     pass
                 time.sleep(.1)
-            log.seek(0)
-            assert descriptor.get('state') == 'ready', (descriptor, log.read())
+            assert descriptor.get('state') == 'ready', (descriptor, gateway_log.read_text(errors='replace'))
             # Ordinary startup syncs bundled skills; compare both transports on that same snapshot.
             legacy = subprocess.run([sys.executable, '-c', legacy_code, json.dumps(requests)],
                                     cwd=root, env=env, stdin=subprocess.DEVNULL,

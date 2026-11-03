@@ -319,8 +319,12 @@ def _apply_verification_gates(agent, final_msg, final_response, messages, conver
     if _kanban_nudge:
         agent._kanban_stop_nudges = getattr(agent, "_kanban_stop_nudges", 0) + 1
         final_msg["finish_reason"] = "kanban_terminal_required"
-        final_msg["_kanban_stop_synthetic"] = True
-        append_message(messages, final_msg)
+        # Like verify-on-stop/pre_verify, only the nudge is scaffolding: the answer is a real model
+        # response and must be durable before the next request (an observed managed worker binds
+        # each SDK response to one durable assistant row and faults closed otherwise).
+        _append_interim_answer(
+            agent, final_msg, messages, conversation_history, "kanban stop interim flush failed"
+        )
         verdict = _continue(_kanban_nudge, "_kanban_stop_synthetic")
         logger.info(
             "kanban stop-loop nudge issued (attempt %d) task=%s",

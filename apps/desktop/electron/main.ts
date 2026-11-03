@@ -538,9 +538,10 @@ import {
 } from './remote-liveness'
 import { resolveRemoteOauthTicket, rosterSourceEnumerationTimeoutMs } from './remote-oauth-ticket'
 import { createRemoteOwnerCache } from './remote-owner-cache'
-import { prewarmTargets, RecentRemoteProfiles, RemotePrewarmer } from './remote-prewarm'
+import { RemotePrewarmer } from './remote-prewarm'
 import { remoteSessionCookies } from './remote-session-cookies'
 import { RemoteUpdatePause, remoteUpdatePauseKey } from './remote-update-pause'
+import { createRemoteWarmSet } from './remote-warm-set'
 import {
   applyRemoteRequestHeaders,
   attachRemoteRequestHeaderListener,
@@ -10602,24 +10603,17 @@ async function ensureBackend(
 // lifecycle as per-profile local descriptors.
 // Part B (instant session loads): dial every SSH gateway at startup and keep it warm (remote-prewarm.ts): its
 // default profile plus each named profile dispatched to in the last 24 h (one remote backend per profile).
-const recentRemoteProfiles = new RecentRemoteProfiles({
-  load: () => JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'remote-prewarm-profiles.json'), 'utf8')),
-  save: data =>
-    fs.writeFileSync(path.join(app.getPath('userData'), 'remote-prewarm-profiles.json'), JSON.stringify(data), {
-      mode: 0o600
-    })
+// Warm set + the keep-alive bound to it (remote-warm-set.ts).
+const remoteWarmSet = createRemoteWarmSet({
+  statePath: () => path.join(app.getPath('userData'), 'remote-prewarm-profiles.json'),
+  readRegistry: readDesktopConnectionsRegistry,
+  keepalives: sshIsolatedKeepalives,
+  isPrimaryScope: scope => sshConnections.get(scope)?.primaryRegistryScope === true,
+  log: line => sshRememberLog(line)
 })
 
 const remotePrewarmer = new RemotePrewarmer({
-  listTargets: () =>
-    process.env.HERMES_DESKTOP_REMOTE_PREWARM === '0'
-      ? []
-      : prewarmTargets(
-          readDesktopConnectionsRegistry()
-            .connections.filter(connection => connection.kind === 'ssh')
-            .map(connection => connection.id),
-          recentRemoteProfiles
-        ),
+  listTargets: remoteWarmSet.listTargets,
   ensure: ({ connectionId, profile }, { forceProbe }) =>
     ensureRegistryBackend(connectionId, profile, '', { forceProbe }),
   log: line => rememberLog(line)
@@ -10656,7 +10650,8 @@ async function ensureRegistryBackend(
   }
 
   if (source.kind === 'ssh' && !passive && !opts.forceProbe) {
-    recentRemoteProfiles.touch(id, profileKey)
+    remoteWarmSet.recent.touch(id, profileKey)
+    remoteWarmSet.holds.noteUse(backendScopeKey(id, profileKey))
   }
 
   let resolvedRegistrySshConfig
@@ -14271,7 +14266,7 @@ function revalidateSuspectPoolAfterResume() {
       entries: backendPool.entries(),
       log: rememberLog,
       probe: (connection, path, options) => fetchJsonForBackend(connection, path, options),
-      rebuild: poolKey => redialPoolBackendAfterResume(poolKey),
+      rebuild: poolKey => remoteWarmSet.holds.rebuildIfHeld(poolKey, redialPoolBackendAfterResume),
       retire: async poolKey => {
         await stopPoolBackend(poolKey, 'resume')
         // The pool key doubles as the SSH scope for registry SSH backends and
@@ -18111,6 +18106,7 @@ app.whenReady().then(() => {
   }
 
   void remotePrewarmer.start().catch(error => rememberLog(`[remote-prewarm] start failed: ${String(error)}`))
+  remoteWarmSet.holds.start()
 
   app.on('activate', () => {
     // Recreate the primary window if it's gone. Guard on mainWindow directly
@@ -18315,6 +18311,7 @@ app.on('before-quit', event => {
   minimizeToTray.beginQuit()
   mainProcessLagWatchdog.stop()
   remotePrewarmer.stop()
+  remoteWarmSet.holds.stop()
 
   // A detached remote updater can outlive this Electron process. Do not tear
   // down its SSH observer/restore transaction at the generic SSH shutdown

@@ -20,3 +20,19 @@ def note_nonspawnable(conn: sqlite3.Connection, task_id: str, assignee: str, *, 
         if (last is None or last["kind"] != "skipped_nonspawnable"
                 or last["payload"] != kb._json_or_null({"assignee": assignee})):
             kb._append_event(conn, task_id, "skipped_nonspawnable", {"assignee": assignee})
+
+
+def eligible_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row], status: str,
+                   result) -> list[sqlite3.Row]:
+    from hermes_cli.kanban_worker_node import dispatch_refusals
+    refused = dispatch_refusals(conn, status) if rows else {}
+    if not refused:
+        return rows
+    kept = []
+    for row in rows:
+        reason = refused.get(row["id"])
+        if reason is None:
+            kept.append(row)
+        else:
+            result.skipped_ineligible.append((row["id"], reason))
+    return kept

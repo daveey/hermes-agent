@@ -1291,7 +1291,8 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         verify_main_sdk(agent, active_client, next_api_kwargs)
         stream_kwargs = _sanitize_consumer_codex_request(agent, next_api_kwargs)
         stream_kwargs["stream"] = True
-        return active_client.responses.create(**bypass_sdk_request_transform(stream_kwargs))
+        from agent.observation_seam import open_codex_stream as open_observed_codex_stream
+        return open_observed_codex_stream(agent, active_client, bypass_sdk_request_transform(stream_kwargs))
 
     def _log_failure(exc: BaseException) -> None:
         request_body_bytes, exception_chain = _codex_request_failure_details(exc)

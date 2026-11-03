@@ -46,7 +46,7 @@ def test_http_budget_is_shared_across_requests(monkeypatch):
         timeouts.append(timeout)
         clock[0] += 1.0
         yield BytesIO(b"{}")
-    monkeypatch.setattr(client.urllib.request, "urlopen", open_response)
+    monkeypatch.setattr(client.urllib.request, "build_opener", lambda *handlers: SimpleNamespace(open=open_response))
     hub = client.Hub(client.Identity("http://example.invalid", "synthetic", "hub"), deadline=102.0)
     hub.changes("default", 0)
     hub.reserve("default", task_id="one", expected_revision=1, candidates=["worker-1"])

@@ -41,6 +41,7 @@ except ImportError:  # mid-update: an older process cached agent.interrupt_contr
         reason = getattr(agent, "_tool_interrupt_reason", None)
         return "Turn interrupted" if not reason else str(reason).replace("_", " ").capitalize()
 from agent.message_sanitization import coalesce_tool_call_id
+from agent.observation_seam import terminal as _observe_terminal, terminal_commit as _observe_terminal_commit
 from agent.onboarding import observe_tool_result as observe_onboarding_result
 from agent import plugin_live_notes
 from agent.lsp import deferred as lsp_deferred
@@ -1079,6 +1080,7 @@ def _emit_tool_complete_and_risk(agent, ref: _ToolCallRef, result, risk_metadata
         )
 
 
+@_observe_terminal_commit
 def _commit_tool_result(
     agent,
     messages: list,
@@ -1105,6 +1107,7 @@ def _commit_tool_result(
     pre-persist content for UI previews) or ``None`` when the flush failed (stop the batch).
     """
     function_name, function_args, tool_call_id, effective_task_id = ref.name, ref.args, ref.call_id, ref.task_id
+    _observed_raw_result = function_result  # Before guardrail/hints/spill rewriting.
     from hermes_cli.observability.shared_metrics_harness import observe_tool_outcome
 
     observe_tool_outcome(agent, function_name, is_error)
@@ -1182,6 +1185,7 @@ def _commit_tool_result(
     messages.append(tool_message)
     if not _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}"):
         return None
+    _observe_terminal(agent, function_name, tool_call_id, _observed_raw_result, observed, blocked)
 
     if not blocked:
         # ``tool.completed`` projects AFTER the canonical append + flush so resume can

@@ -13,12 +13,12 @@ import asyncio
 import contextlib
 import functools
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
 
 from gateway.kanban_watchers_common import (
-    _acquire_singleton_lock,
     _kanban_dispatch_allowed,
     _kanban_dispatch_gate,
     _release_singleton_lock,
@@ -54,7 +54,26 @@ class GatewayKanbanWatchersMixin:
             health.close()
         handle = getattr(self, "_kanban_dispatcher_lock_handle", None)
         self._kanban_dispatcher_lock_handle = None
-        _release_singleton_lock(handle)
+        lease = getattr(self, "_kanban_dispatcher_lease", None)
+        if lease is not None and lease.handle is handle:
+            lease.release()
+        else:
+            _release_singleton_lock(handle)
+
+    def _kanban_singleton_lease(self, lock_path: Path, name: str):
+        """A retrying, root-preferring lease on a host-wide singleton lock (gateway/kanban_singleton.py)."""
+        from gateway import kanban_singleton as _ks
+        return _ks.SingletonLease(lock_path, name=name, retry_seconds=_ks.DEFAULT_RETRY_SECONDS,
+                                  grace_seconds=_ks.DEFAULT_GRACE_SECONDS,
+                                  warn_after_seconds=_ks.DEFAULT_WARN_AFTER_SECONDS)
+
+    async def _acquire_kanban_lease(self, lease) -> bool:
+        """Retry *lease* every ``lease.retry_seconds`` until held; False when the gateway stops first."""
+        while self._running:
+            if lease.try_acquire():
+                return True
+            await self._sleep_between_ticks(lease.retry_seconds)
+        return False
 
     async def _sleep_between_ticks(self, interval: float) -> None:
         """Sleep *interval* (floored to 1s) in 1s slices so stop() never waits a full interval."""
@@ -266,21 +285,9 @@ class GatewayKanbanWatchersMixin:
             logger.warning("kanban dispatcher: kanban_db not importable; dispatcher disabled")
             return None
 
-        # Single-dispatcher backstop (see _acquire_singleton_lock). The lock
-        # lives at the machine-global kanban root, so it serialises ALL gateways.
-        self._kanban_dispatcher_lock_handle = None
-        _lock_path = _kb.kanban_home() / "kanban" / ".dispatcher.lock"
-        _lock_handle, _lock_state = _acquire_singleton_lock(_lock_path)
-        if _lock_state == "contended":
-            logger.info("kanban dispatcher: another gateway already holds the dispatcher "
-                        "lock (%s); this gateway will NOT dispatch.", _lock_path)
-            return None
-        if _lock_state == "held":
-            self._kanban_dispatcher_lock_handle = _lock_handle  # hold for process lifetime
-            logger.info("kanban dispatcher: holding singleton dispatcher lock (%s)", _lock_path)
-        else:
-            logger.warning("kanban dispatcher: advisory lock unavailable at %s; proceeding "
-                           "on config control alone.", _lock_path)
+        # The single-dispatcher lock (machine-global kanban root) is taken by the watcher through a
+        # retrying, root-preferring SingletonLease (gateway/kanban_singleton.py), not here: a gateway
+        # that lost the boot race used to stay non-dispatching until it restarted. [daveey]
         return _load_config, _kb, kanban_cfg
 
     async def _kanban_dispatcher_watcher(self) -> None:
@@ -297,8 +304,19 @@ class GatewayKanbanWatchersMixin:
             return
         _load_config, _kb, kanban_cfg = boot
         settings = _resolve_dispatcher_settings(kanban_cfg, _kb)
-        interval = settings.interval
+        lease = self._kanban_singleton_lease(_kb.kanban_home() / "kanban" / ".dispatcher.lock", "dispatcher")
+        self._kanban_dispatcher_lease = lease
+        # A gateway that finds the lock held keeps retrying; a profile gateway hands it back when the
+        # root gateway asks (lease.should_yield), then waits to take it again. [daveey]
+        while self._running:
+            if not await self._acquire_kanban_lease(lease):
+                return
+            self._kanban_dispatcher_lock_handle = lease.handle
+            await self._kanban_dispatch_while_held(settings, _load_config, _kb, lease)
 
+    async def _kanban_dispatch_while_held(self, settings, _load_config, _kb, lease) -> None:
+        """The dispatch loop for one tenure of the singleton lock; releases it on exit."""
+        interval = settings.interval
         from gateway.kanban_dispatcher_health import DispatcherHealth
         health = DispatcherHealth(getattr(self, "_kanban_dispatcher_lock_handle", None), interval=interval)
         self._kanban_dispatcher_health = health
@@ -316,7 +334,7 @@ class GatewayKanbanWatchersMixin:
             dispatcher = _KanbanDispatcher(_kb, settings)
 
             logger.info("kanban dispatcher: embedded in gateway (interval=%.1fs)", interval)
-            while self._running:
+            while self._running and not lease.should_yield():
                 health.invalidate()
                 try:
                     # Reap zombies before per-board work so a board DB failure
@@ -325,7 +343,7 @@ class GatewayKanbanWatchersMixin:
                     pids = await _to_thread_process_service(_kbd.reap_worker_zombies)
                     if pids:
                         logger.info("kanban dispatcher: reaped %d zombie worker(s), pids=%s", len(pids), pids)
-                except Exception:
+                except Exception:  # health: allow BLE001 -- moved unchanged: zombie reaper failure is logged with traceback
                     logger.exception("kanban dispatcher: zombie reaper failed")
 
                 try:
@@ -389,7 +407,7 @@ class GatewayKanbanWatchersMixin:
                 except asyncio.CancelledError:
                     logger.debug("kanban dispatcher: cancelled")
                     raise
-                except Exception:
+                except Exception:  # health: allow BLE001 -- moved unchanged: one tick's failure never stops the next (logged with traceback)
                     health.invalidate()
                     logger.exception("kanban dispatcher: unexpected watcher error")
 
@@ -407,11 +425,30 @@ class GatewayKanbanWatchersMixin:
             return
         from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_sync_client as _ksc
-        lock_handle, lock_state = _acquire_singleton_lock(_kb.kanban_home() / "kanban" / ".sync.lock")
-        if lock_state == "contended":
-            logger.info("kanban sync: another gateway on this host already syncs; not starting")
-            return
-        try:
-            await asyncio.to_thread(_ksc.run_forever, lambda: self._running)
-        finally:
-            _release_singleton_lock(lock_handle)
+        # Same retrying, root-preferring lease as the dispatcher: a gateway that loses the boot race
+        # keeps retrying, and a profile gateway hands the lock back when the root gateway asks. [daveey]
+        lease = self._kanban_singleton_lease(_kb.kanban_home() / "kanban" / ".sync.lock", "sync")
+        self._kanban_sync_lease = lease
+        while self._running:
+            if not await self._acquire_kanban_lease(lease):
+                return
+            # Each tenure gets its own latching stop flag: after release the lease is idle again and
+            # should_yield() reads False, so a bare lambda would revive this tenure's daemon FeedWatcher
+            # threads beside the next tenure's set. [daveey]
+            stopped = threading.Event()
+
+            def keep_running(stopped=stopped):
+                if stopped.is_set():
+                    return False
+                if not self._running or lease.should_yield():
+                    stopped.set()
+                    return False
+                return True
+            try:
+                await asyncio.to_thread(_ksc.run_forever, keep_running)
+                yielded = self._running and lease.should_yield()
+            finally:
+                stopped.set()
+                lease.release()
+            if not yielded:
+                return  # the loop ended on its own (stop, or sync unavailable): don't spin on it

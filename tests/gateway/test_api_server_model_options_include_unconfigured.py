@@ -7,6 +7,7 @@ unconfigured-row path must honor ``model_catalog.excluded_providers``
 from unittest.mock import patch
 
 import pytest
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
