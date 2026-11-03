@@ -1277,7 +1277,7 @@ def _post_turn_housekeeping(sid: str, session: dict, st: _TurnRun) -> None:
         from hermes_cli.mem_trim import trim_memory
         # Every OTHER session must be idle (#58576).
         if _sessions_quiescent(exclude=sid):
-            trim_memory(reason="tui turn completion")
+            trim_memory(reason="tui turn completion", collect=False)
     except Exception:
         logger.debug("post-turn memory trim failed", exc_info=True)
     if st.scopes.home is not None:
@@ -1500,19 +1500,37 @@ def _run_admitted_prompt(
         if followup is not None:
             _run_post_turn_followups(rid, sid, session, *followup)
     # The handle is resolved BEFORE _sessions_lock: a profile session opens its own SessionDB through the
-    # state registry, and _sessions_lock gates every create/close/prompt on this backend.
-    with _routing_provenance_db(session) as routing_db, _sessions_lock:
-        registered = _sessions.get(sid)
-        can_start = not session.get("_closing") and (registered is None or registered is session)
-        if can_start:
-            # Only a registered session is proof the conversation is routed here; an unregistered one may
-            # still run its turn, but its stamp stays (#106459).
-            if registered is session:
-                _reopen_routed_session_row(routing_db, sid, session)
-            # [daveey] Under _sessions_lock: the exit fence check, the notice's delivered mark and the start
-            # are one commit (a refused or raising start rolls the mark back; exit_job_receipts).
-            can_start = start_synthesized_turn(session, lambda: _start_session_work(
-                run, name=f"prompt-turn-{sid}", session=session)) is not None
+    # state registry, and _sessions_lock gates every create/close/prompt on this backend. The worker's
+    # admission is retained before it too: that takes history_lock, and session.resume/activate hold
+    # history_lock while they take _sessions_lock (a resume racing this submit deadlocked the backend).
+    # [daveey] The notice commit (start_synthesized_turn) marks before _sessions_lock for the same reason.
+    work = _prepare_session_work(run, name=f"prompt-turn-{sid}", session=session)
+    spawning = started = False
+    try:
+        with start_synthesized_turn(session) as commit:
+            with _routing_provenance_db(session) as routing_db, _sessions_lock:
+                registered = _sessions.get(sid)
+                can_start = (work is not None and not session.get("_closing")
+                             and (registered is None or registered is session))
+                if can_start:
+                    # Only a registered session is proof the conversation is routed here; an unregistered one may
+                    # still run its turn, but its stamp stays (#106459).
+                    if registered is session:
+                        _reopen_routed_session_row(routing_db, sid, session)
+                    # Under _sessions_lock: the exit fence check and the start are one commit (exit_job_receipts);
+                    # spawns only, so the close-race check above stays atomic.
+                    spawning = True
+                    started = commit(lambda: work.start(abort_on_error=False)) is not None
+                    can_start = started
+    except BaseException:
+        # Out here _sessions_lock is released: both clean-ups take history_lock. A started worker owns its own.
+        if spawning and not started:
+            work.abort()
+        elif work is not None and not started:
+            work.cancel()
+        raise
+    if work is not None and not can_start:
+        work.cancel()
     if not can_start:
         from tui_gateway.turn_admission import owns
         with session["history_lock"]:

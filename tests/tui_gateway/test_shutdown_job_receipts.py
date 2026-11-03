@@ -557,16 +557,22 @@ def _slow_notice_turn(monkeypatch, *, block_in, start=None):
         starts.append(name)
         return (start or (lambda: object()))()
 
+    def prepare_work(target, *, name, session=None, **kw):
+        # The prompt turn retains admission before _sessions_lock and spawns under it (``PreparedWork``).
+        return types.SimpleNamespace(start=lambda **_k: start_work(target, name=name, session=session),
+                                     cancel=lambda: None, abort=lambda: None)
+
     monkeypatch.setattr(server, "_ensure_session_db_row", lambda session: True)
     monkeypatch.setattr(server, "_session_moved_refusal", lambda session: None)
     monkeypatch.setattr(server, "_ensure_active_session_slot", slot)
     monkeypatch.setattr(server, "_admit_prompt_turn", admit)
-    real_start = server._start_session_work
+    real_start, real_prepare = server._start_session_work, server._prepare_session_work
     monkeypatch.setattr(server, "_start_session_work", start_work)
+    monkeypatch.setattr(server, "_prepare_session_work", prepare_work)
     monkeypatch.setattr(server, "_emit", lambda *a, **k: None)
     monkeypatch.setattr(server, "_notif_refusal_backoff", lambda s: None)
     return types.SimpleNamespace(entered=entered, go=go, outcomes=outcomes, texts=texts, starts=starts,
-                                 real_start=real_start)
+                                 real_start=real_start, real_prepare=real_prepare)
 
 
 def _closing_backend(monkeypatch, backend):
@@ -580,6 +586,7 @@ def _closing_backend(monkeypatch, backend):
 
 def _next_backend_text(monkeypatch, home, turn) -> str:
     monkeypatch.setattr(server, "_start_session_work", turn.real_start)  # the next backend's own start
+    monkeypatch.setattr(server, "_prepare_session_work", turn.real_prepare)
     monkeypatch.setattr("tools.process_registry.process_registry", ProcessRegistry())
     return _resume_text(monkeypatch, home)
 
@@ -641,8 +648,8 @@ def test_notice_turn_claimed_before_exit_fence_but_not_started_is_journaled(home
 
 @pytest.mark.parametrize("start", ["refused", "raises"])
 def test_notice_turn_start_refused_or_raising_is_not_delivered(home, registry, backend, monkeypatch, start):
-    """No exit in progress: a start that is refused or raises rolls back the delivered mark it made under
-    _sessions_lock, the event goes back to the queue, and a later orderly exit journals it."""
+    """No exit in progress: a start that is refused or raises rolls back the delivered mark it made before the
+    start, the event goes back to the queue, and a later orderly exit journals it."""
     from tools.process_registry_notifications import format_process_notification
     from tui_gateway.session_notifications import COMPLETION_UNSECURED
     _, event = _finished_event(registry, exit_code=4)
