@@ -179,7 +179,7 @@ def _worker_memory_max_bytes() -> int:
     return min(override_bound, safe_bound) if override_bound else safe_bound
 
 
-def _systemd_scope_argv(binary: str, unit_name: str, *argv: str) -> list[str]:
+def _systemd_scope_argv(binary: str, unit_name: str, *argv: str, memory_max: int = 0, slice_name: str = "") -> list[str]:
     """``systemd-run --user --scope`` argv shared by the probe and real spawns.
     ``--collect`` self-cleans the scope after exit; ``--unit`` names it for systemctl.
     No ``OOMPolicy=``: transient scopes reject it on systemd <253 (#102486).
@@ -187,8 +187,9 @@ def _systemd_scope_argv(binary: str, unit_name: str, *argv: str) -> list[str]:
     no_expand = ["--expand-environment=no"] if _SYSTEMD_RUN_NO_EXPAND else []
     return [
         binary, "--user", "--scope", "--quiet", *no_expand, "--unit", unit_name, "--collect",
+        *([f"--slice={slice_name}"] if slice_name else []),
         "--property", "MemoryAccounting=yes",
-        "--property", f"MemoryMax={_worker_memory_max_bytes()}",
+        "--property", f"MemoryMax={memory_max or _worker_memory_max_bytes()}",
         "--", *argv,
     ]
 
@@ -508,15 +509,7 @@ def _stop_systemd_unit(unit_name: str) -> bool:
         return False
 
 
-def format_uptime_short(seconds: int) -> str:
-    s = max(0, int(seconds))
-    if s < 60:
-        return f"{s}s"
-    mins, secs = divmod(s, 60)
-    if mins < 60:
-        return f"{mins}m {secs}s"
-    hours, mins = divmod(mins, 60)
-    return f"{hours}h {mins}m"
+from tools.process_registry_uptime import format_uptime_short  # re-export
 
 
 def _not_found(session_id: str) -> dict:
@@ -1128,6 +1121,9 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
         if in_supervised_gateway and _systemd_run_user_scope_available():
             session.systemd_unit = f"hermes-worker-{unit_suffix}.scope"
             return _build_systemd_scope_argv(argv, unit_suffix=unit_suffix)
+        from tools.process_registry_persist_scope import persisted_job_scope_argv  # leave a Kanban run scope [daveey]
+        if (scoped := persisted_job_scope_argv(session, argv, unit_suffix)) is not argv:
+            return scoped
         if in_supervised_gateway:
             # Under a supervisor but no private cgroup: a worker OOM can still take
             # the whole gateway down.
@@ -2426,8 +2422,9 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
     # Kill sources that are agent-lifecycle cleanup (session end / compression / error
     # recovery / turn abandon), not a deliberate stop: those must skip persist_on_release
     # sessions. An explicit stop (process_manage kill, CLI /stop) passes its own source and still reaches them.
+    # ``gateway_restart``: not host exit; the next gateway re-adopts the job from the checkpoint. [daveey]
     _LIFECYCLE_KILL_SOURCES = frozenset({"kill_all", "gateway_turn_timeout", "agent_close", "core_update_pause",
-                                         "backend_shutdown"})
+                                         "backend_shutdown", "gateway_restart"})
 
     def kill_started_since(self, task_id: str, baseline_ids, *, source: str) -> int:
         """Kill ``task_id`` processes created after ``baseline_ids``. Output is
@@ -2444,17 +2441,18 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
 
         Sessions with ``persist_on_release=True`` are skipped when ``source`` is an
         agent-lifecycle sweep (the default ``kill_all`` release path, a gateway turn
-        timeout, or ``agent_close``): an explicitly persisted background job must survive
-        session end / compression / error recovery (#41225). An explicit operator stop
+        timeout, ``agent_close``, a gateway restart): an explicitly persisted background job must survive
+        session end / compression / error recovery / restart (#41225). ``gateway_shutdown`` reaches only the
+        persisted jobs it spawned, never one it adopted (a Kanban worker's) [daveey]. An explicit operator stop
         (``process.kill`` via process_manage, CLI /stop) passes its own source and still
         reaches them, so the user can always stop a persisted process on purpose."""
-        lifecycle = source in self._LIFECYCLE_KILL_SOURCES
+        lifecycle, host_exit = source in self._LIFECYCLE_KILL_SOURCES, source == "gateway_shutdown"
         with self._lock:
             targets = [
                 s for s in (*self._running.values(), *self._finished.values())
                 if (task_id is None or s.owner_task_id == task_id)
                 and s.id not in exclude_ids and (not s.exited or s._scope_stop_pending)
-                and not (lifecycle and s.persist_on_release)
+                and not (s.persist_on_release and (lifecycle or (host_exit and s.detached)))
             ]
         results = [self.kill_process(s.id, source=source, consume_output=consume_output) for s in targets]
         return sum(
