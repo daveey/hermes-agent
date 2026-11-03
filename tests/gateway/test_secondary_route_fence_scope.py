@@ -15,8 +15,8 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-from aiohttp import web
 pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from tests.gateway.test_session_authorities_multiplex import _reserve_homes, _runner

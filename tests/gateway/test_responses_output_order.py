@@ -3,8 +3,8 @@ import asyncio
 import json
 
 import pytest
-from aiohttp import web
 pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from tests.waiting import async_wait_until
 
