@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { type TranscriptCacheKey, TranscriptCacheStore } from './transcript-cache'
 import {
+  DEMAND_CONCURRENCY,
   GATEWAY_BACKOFF_MS,
   type HubSessionRecord,
   MIN_REFETCH_MS,
@@ -232,5 +233,109 @@ describe('prefetch refresh on activity change', () => {
 
     expect(await prefetcher.tick()).toMatchObject({ fetched: 0, targets: 0 })
     expect(fetchLatest).not.toHaveBeenCalled()
+  })
+})
+
+describe('[daveey] on-demand prefetch of an @session-referenced session', () => {
+  function harness(records: HubSessionRecord[] = []) {
+    let clock = 1_000_000
+    const store = new TranscriptCacheStore(':memory:', { now: () => clock })
+    const fetchLatest = vi.fn(async (key: TranscriptCacheKey) => [{ content: `${key.sessionId}@${clock}`, id: clock }])
+
+    const prefetcher = new TranscriptPrefetcher({
+      connectionForGateway: gateway => CONNECTIONS[gateway],
+      fetchLatest,
+      listHubSessions: async () => records,
+      now: () => clock,
+      store
+    })
+
+    return { advance: (ms: number) => (clock += ms), fetchLatest, prefetcher, store }
+  }
+
+  const old = { connectionId: 'hermes-hub', profile: 'default', sessionId: '20261018_114650_7ed013' }
+
+  it('fetches a session outside the PER_GATEWAY window into the cache, once per MIN_REFETCH_MS', async () => {
+    const h = harness()
+
+    await expect(h.prefetcher.prefetchKey(old)).resolves.toBe('fetched')
+    expect(h.store.read(old)?.messages).toHaveLength(1)
+    await expect(h.prefetcher.prefetchKey(old)).resolves.toBe('current')
+    expect(h.fetchLatest).toHaveBeenCalledTimes(1)
+
+    h.advance(MIN_REFETCH_MS)
+    await expect(h.prefetcher.prefetchKey(old)).resolves.toBe('fetched')
+  })
+
+  it('dedupes a key already queued or in flight', async () => {
+    const h = harness()
+    const first = h.prefetcher.prefetchKey(old)
+
+    await expect(h.prefetcher.prefetchKey(old)).resolves.toBe('queued')
+    await expect(first).resolves.toBe('fetched')
+    expect(h.fetchLatest).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses the hub meta from the last pass: unchanged is current, moved is refetched', async () => {
+    // Hidden: listed by the hub but never a tick target, so only the on-demand path fetches it.
+    const records = [record('hub', 'listed', 5, { hidden: true })]
+    const h = harness(records)
+    const key = { connectionId: 'hermes-hub', profile: 'default', sessionId: 'listed' }
+
+    await h.prefetcher.tick()
+    expect(h.fetchLatest).not.toHaveBeenCalled()
+    await expect(h.prefetcher.prefetchKey(key)).resolves.toBe('fetched')
+    expect(h.store.meta(key)).toMatchObject({ activity: 5, messageCount: 10 })
+
+    h.advance(MIN_REFETCH_MS)
+    await expect(h.prefetcher.prefetchKey(key)).resolves.toBe('current')
+
+    records[0] = record('hub', 'listed', 9, { hidden: true })
+    await h.prefetcher.tick()
+    await expect(h.prefetcher.prefetchKey(key)).resolves.toBe('fetched')
+    expect(h.fetchLatest).toHaveBeenCalledTimes(2)
+    expect(h.store.meta(key)).toMatchObject({ activity: 9 })
+  })
+
+  it('backs off a gateway that failed (shared with the tick) and runs at most DEMAND_CONCURRENCY per gateway', async () => {
+    const h = harness()
+    let inFlight = 0
+    let peak = 0
+
+    h.fetchLatest.mockImplementation(async key => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      await new Promise(resolve => setTimeout(resolve, 5))
+      inFlight -= 1
+
+      if (key.connectionId === 'mac-mini') {
+        throw new Error('connect ECONNREFUSED')
+      }
+
+      return [{ content: 'ok', id: 1 }]
+    })
+
+    const keys = Array.from({ length: 6 }, (_, index) => ({ ...old, sessionId: `s${index}` }))
+    await expect(Promise.all(keys.map(key => h.prefetcher.prefetchKey(key)))).resolves.toEqual(Array(6).fill('fetched'))
+    expect(peak).toBeLessThanOrEqual(DEMAND_CONCURRENCY)
+
+    const dead = { connectionId: 'mac-mini', profile: 'default', sessionId: 'x' }
+    await expect(h.prefetcher.prefetchKey(dead)).resolves.toBe('failed')
+    h.fetchLatest.mockClear()
+    await expect(h.prefetcher.prefetchKey({ ...dead, sessionId: 'y' })).resolves.toBe('backoff')
+    expect(h.fetchLatest).not.toHaveBeenCalled()
+
+    h.advance(GATEWAY_BACKOFF_MS)
+    await expect(h.prefetcher.prefetchKey({ ...dead, sessionId: 'y' })).resolves.toBe('failed')
+  })
+
+  it('does not refetch a missing session within MIN_REFETCH_MS, and rejects a key without an owner', async () => {
+    const h = harness()
+    h.fetchLatest.mockRejectedValue(Object.assign(new Error('not found'), { status: 404 }))
+
+    await expect(h.prefetcher.prefetchKey(old)).resolves.toBe('failed')
+    await expect(h.prefetcher.prefetchKey(old)).resolves.toBe('current')
+    await expect(h.prefetcher.prefetchKey({ ...old, connectionId: '' })).resolves.toBe('invalid')
+    expect(h.fetchLatest).toHaveBeenCalledTimes(1)
   })
 })

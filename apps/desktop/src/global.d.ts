@@ -114,6 +114,8 @@ declare global {
         migrateProfile: (connectionId: string, from: string, to: string) => void
         clear: () => void
         stats: () => Promise<{ bytes: number; sessions: number }>
+        /** [daveey] Warm a session's latest page in main (fire-and-forget; main dedupes and backs off). */
+        prefetch?: (key: TranscriptCacheBridgeKey) => void
       }
       getGatewayWsUrl: (profile?: null | string) => Promise<GatewayWsUrlResult>
       // Browser host only: before a pick routes `profile`, re-read the served
