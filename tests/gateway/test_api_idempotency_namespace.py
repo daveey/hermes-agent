@@ -1,5 +1,6 @@
 """Canonical OpenAI-compat idempotency is scoped to the authenticated key namespace."""
 import pytest
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 

@@ -1,5 +1,6 @@
 """One API Idempotency-Key names one admission: a second session target never runs it again."""
 import pytest
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 

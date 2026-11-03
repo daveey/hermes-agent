@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp_adapter.server import HermesACPAgent
 from acp_adapter.session import SessionState
 

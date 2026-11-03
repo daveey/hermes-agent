@@ -3,6 +3,7 @@ its ``api_content`` (memory prefetch, plugin context), not a synthetic row rebui
 request text."""
 import pytest
 from aiohttp import web
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp.test_utils import TestClient, TestServer
 
 

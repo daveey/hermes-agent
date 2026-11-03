@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager, suppress
 
 import pytest
 from aiohttp import web
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp.test_utils import TestClient, TestServer
 
 from gateway.config import PlatformConfig

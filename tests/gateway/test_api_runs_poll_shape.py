@@ -1,5 +1,6 @@
 """GET /v1/runs/{id} keeps the documented poll shape when the canonical admission answers."""
 import pytest
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp.schema import AgentPlanUpdate, AllowedOutcome, DeniedOutcome
 
 from acp_adapter.gateway_server import GatewayACPAgent

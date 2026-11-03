@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp_adapter.model_catalog import _named_custom_provider_catalogs
 from acp_adapter.server import HermesACPAgent
 from acp_adapter.session import SessionManager

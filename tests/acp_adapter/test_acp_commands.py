@@ -4,6 +4,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp.schema import TextContentBlock
 
 from acp_adapter.server import HermesACPAgent

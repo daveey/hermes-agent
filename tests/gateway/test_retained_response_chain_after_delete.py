@@ -7,6 +7,7 @@ import sqlite3
 
 import pytest
 from aiohttp import web
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp.test_utils import TestClient, TestServer
 
 _API_KEY = 'test-key'

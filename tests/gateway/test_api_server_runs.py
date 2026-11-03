@@ -17,9 +17,9 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-
 from gateway.config import PlatformConfig
 from gateway.platforms.api_server_runs import _RunStream
 from gateway.platforms.api_server import (

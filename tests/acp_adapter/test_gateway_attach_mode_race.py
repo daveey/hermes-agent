@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp_adapter.gateway_server import GatewayACPAgent
 
 ASK, DONT_ASK = {'edit_approval_policy': 'ask'}, {'edit_approval_policy': 'session'}

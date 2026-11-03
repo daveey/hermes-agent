@@ -1,5 +1,6 @@
 """Responses chaining preserves a turn's compressed replacement, while ordinary receipts stay compact."""
 import pytest
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 

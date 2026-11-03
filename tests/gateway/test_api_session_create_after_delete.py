@@ -6,6 +6,7 @@ at once (409 ``session_deleted``), and the client mints a new id. An explicit id
 own name for the conversation, so it is never remapped to another session behind its back.
 """
 import pytest
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 

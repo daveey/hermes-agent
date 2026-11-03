@@ -3,6 +3,7 @@ phrase typed into a LOCAL session whose owner /voice mode is on: the voice chat 
 admitted). The ACP adapter settles that prompt as an ended turn with the stop notice instead of
 reading a missing ``admission_id``."""
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp.schema import TextContentBlock
 
 from acp_adapter.gateway_server import GatewayACPAgent

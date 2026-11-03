@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from acp_adapter.gateway_commands import run_command
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp_adapter.gateway_server import GatewayACPAgent
 
 OWNER = {'edit_approval_policy': 'session'}  # another viewer already chose Don't Ask (seq 11)

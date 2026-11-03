@@ -1,5 +1,6 @@
 """Zed renders its model and effort pickers only from ``configOptions`` (#143547 ACP-24)."""
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp.schema import ModelInfo, SessionModelState
 
 from acp_adapter.server import HermesACPAgent

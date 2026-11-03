@@ -4,6 +4,7 @@ Deleting the session used to drop the admission row ``_one_target`` consults, so
 key aimed at another session ran the work a second time.
 """
 import pytest
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
