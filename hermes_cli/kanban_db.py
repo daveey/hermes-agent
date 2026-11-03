@@ -1,4 +1,3 @@
-# health: allow FILE_LINES -- trusted capsule admission: create calls the capsule-aware validator and claim takes a write-free admission_check inside the existing claim transaction; logic lives in hermes_cli/kanban_capsule_admission.py
 """SQLite-backed Kanban board shared across profiles (the cross-profile coordination primitive).
 
 Lives under the shared Hermes root: ``default`` board DB at ``<root>/kanban.db`` (pre-boards
@@ -1338,8 +1337,8 @@ def create_task(
 
     from hermes_cli.kanban_db_creation import validate_create_assignment  # [daveey] runs_on-aware
     required, model_override, provider_override = validate_create_assignment(
-        conn, assignee, project_id=project_id, project_repo=project_repo, runs_on=runs_on, requires=requires, workspace_kind=workspace_kind,
-        workspace_path=workspace_path, skills=skills_list, validate_skills=validate_skills,
+        conn, assignee, runs_on=runs_on, requires=requires, workspace_kind=workspace_kind, project_id=project_id,
+        workspace_path=workspace_path, skills=skills_list, validate_skills=validate_skills, project_repo=project_repo,
         require_declaration=require_declaration, model=model_override, provider=provider_override)
     from hermes_cli.kanban_pin_provider import reject_spaced_pin
     reject_spaced_pin(model_override, provider_override)
@@ -2189,10 +2188,8 @@ def claim_task(
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
-    Returns the claimed ``Task`` on success, ``None`` if the task was
-    already claimed (or is not in ``ready`` status). ``admission_check``: a
-    write-free callable run inside the admitted claim transaction before any
-    write; truthy refuses the claim (the dispatcher's capsule recheck). [daveey]
+    Returns the claimed ``Task``; ``None`` if already claimed, not ``ready``, or the write-free
+    ``admission_check()`` (run in the claim txn before any write) refused it. [daveey]
     """
     now = int(time.time())
     lock = claimer or _claimer_id()
@@ -2204,9 +2201,7 @@ def claim_task(
     if gate.deferred:
         return None
     with gate, claim_transaction(conn) as admitted:
-        if not admitted:
-            return None
-        if admission_check is not None and admission_check():  # [daveey] same txn as the CAS below
+        if not admitted or (admission_check is not None and admission_check()):  # [daveey] same txn as the CAS
             return None
         # Single enforcement point: never ready -> running with an undone
         # parent, whichever writer set 'ready'. Demote to 'todo';
@@ -2246,9 +2241,7 @@ def claim_review_task(
     if gate.deferred:
         return None
     with gate, claim_transaction(conn) as admitted:
-        if not admitted:
-            return None
-        if admission_check is not None and admission_check():  # [daveey] same txn as the CAS below
+        if not admitted or (admission_check is not None and admission_check()):  # [daveey] same txn as the CAS
             return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(

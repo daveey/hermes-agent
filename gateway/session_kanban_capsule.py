@@ -19,6 +19,7 @@ that can make it ready.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -40,7 +41,9 @@ def capsule_requirement(task) -> dict:
     # when the assignee's own policy does not grant host_repo (non-local backend).
     try:
         granted = 'host_repo' in kanban_capabilities._profile_capabilities(task.assignee, ['host_repo'])
-    except Exception:  # health: allow BLE001 -- an unreadable policy cannot prove the grant: require
+    except Exception:  # an unreadable policy cannot prove the grant: require
+        logging.getLogger(__name__).warning('capsule requirement: %s policy unreadable; requiring a capsule',
+                                            task.assignee, exc_info=True)
         granted = False
     return dict(NOT_REQUIRED) if granted else dict(REQUIRED)
 

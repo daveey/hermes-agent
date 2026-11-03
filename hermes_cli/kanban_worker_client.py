@@ -154,7 +154,7 @@ async def run(params, board_db):
             # waits for the NEXT owner, and a worker polling its receipt inside the wait keeps the
             # turn it waits on alive, holding `hermes update` until restart_after_turn_timeout.
             with outside_restart_wait():
-                async with connect_gateway(owner_check=check) as client:
+                async with connect_gateway(**({'owner_check': check} if check else {})) as client:
                     # kanban.run subscribes this socket to the card's session, but only receipts
                     # matter here: discard the turn's events, or they fill the client's bounded
                     # queue and its reader stops, with the next receipt behind it.

@@ -14,6 +14,7 @@ without revoking.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from typing import Any, Callable, Optional
@@ -104,7 +105,8 @@ def _check_worker_identity(task_id: str, run_id: str) -> None:
 def _is_true(is_live: Callable[[], Any]) -> bool:
     try:
         return is_live() is True
-    except Exception:  # health: allow BLE001 -- any liveness failure means not live: fail closed
+    except Exception:  # any liveness failure means not live: fail closed
+        logging.getLogger(__name__).debug("capsule liveness check raised; not live", exc_info=True)
         return False
 
 

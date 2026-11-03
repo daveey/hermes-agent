@@ -1,4 +1,3 @@
-# health: allow FILE_LINES -- trusted capsule observation: one decorator and one call at the existing tool-commit chokepoint (no-op unless a verified observer is loaded); logic lives in agent/observation_seam.py
 """Tool-call execution: sequential and concurrent dispatch, extracted from AIAgent.
 
 Functions take the parent ``AIAgent`` first; ``run_agent`` keeps thin wrappers and is
@@ -42,6 +41,7 @@ except ImportError:  # mid-update: an older process cached agent.interrupt_contr
         reason = getattr(agent, "_tool_interrupt_reason", None)
         return "Turn interrupted" if not reason else str(reason).replace("_", " ").capitalize()
 from agent.message_sanitization import coalesce_tool_call_id
+from agent.observation_seam import terminal as _observe_terminal, terminal_commit as _observe_terminal_commit
 from agent.onboarding import observe_tool_result as observe_onboarding_result
 from agent import plugin_live_notes
 from agent.lsp import deferred as lsp_deferred
@@ -1080,8 +1080,6 @@ def _emit_tool_complete_and_risk(agent, ref: _ToolCallRef, result, risk_metadata
         )
 
 
-from agent.observation_seam import terminal_commit as _observe_terminal_commit
-
 @_observe_terminal_commit
 def _commit_tool_result(
     agent,
@@ -1187,8 +1185,7 @@ def _commit_tool_result(
     messages.append(tool_message)
     if not _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}"):
         return None
-    from agent.observation_seam import terminal as observe_terminal
-    observe_terminal(agent, function_name, tool_call_id, _observed_raw_result, observed, blocked)
+    _observe_terminal(agent, function_name, tool_call_id, _observed_raw_result, observed, blocked)
 
     if not blocked:
         # ``tool.completed`` projects AFTER the canonical append + flush so resume can

@@ -2136,15 +2136,10 @@ def _dispatch_lane_task(
     if down is not None:
         result.owner_down.append((task_id, assignee, down.code))
         return False
-    from hermes_cli.kanban_gateway_drain import claim_if_admitting
-    from hermes_cli.kanban_db_dispatch_admission import capsule_claim_check, record_claim_refusal
+    from hermes_cli.kanban_db_dispatch_admission import admitted_claim  # + capsule recheck in the claim txn [daveey]
     _kb._sync.pop_claim_deferral(task_id)
-    recheck, capsule_refusals = capsule_claim_check(conn, task_id, assignee, spawn_fn)
-    claimed = claim_if_admitting(conn, task_id, assignee, lane, ttl_seconds, admission_check=recheck)
+    claimed = admitted_claim(conn, task_id, assignee, lane, ttl_seconds, spawn_fn, result)
     if claimed is None:
-        if capsule_refusals:  # changed since the early check: refused inside the claim txn [daveey]
-            record_claim_refusal(conn, task_id, assignee, capsule_refusals[-1], result)
-            return False
         deferral = _kb._sync.pop_claim_deferral(task_id)
         if deferral is not None:  # the Board said no this tick: the caller moves on to the next candidate
             result.claim_deferred.append((task_id, deferral))
@@ -2358,7 +2353,6 @@ def _tick_spawn_budget(
     return True, spawn_budget
 
 
-
 def _any_spawnable_review(
     conn: sqlite3.Connection,
     review_rows: list[sqlite3.Row],
@@ -2479,6 +2473,7 @@ def _dispatch_once_locked(
     # review card pinned to the hub sat first in the MacBook's review lane, took the review reservation every
     # tick, and the Board refused its lease every tick, so the eligible ready queue never started.
     all_ready = lane_rows(conn, "ready")
+    from hermes_cli.kanban_db_dispatch_preclaim import eligible_rows as _eligible_rows
     ready_rows = _eligible_rows(conn, all_ready, "ready", result)
     # Review rows are enumerated up front so the budget split can see whether
     # review work exists at all.
@@ -2564,22 +2559,6 @@ def _dispatch_once_locked(
     # back to the ready rows still waiting this tick.
     _run_ready(spawn_budget)
     return result
-
-
-def _eligible_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row], status: str,
-                   result: DispatchResult) -> list[sqlite3.Row]:
-    from hermes_cli.kanban_worker_node import dispatch_refusals
-    refused = dispatch_refusals(conn, status) if rows else {}
-    if not refused:
-        return rows
-    kept = []
-    for row in rows:
-        reason = refused.get(row["id"])
-        if reason is None:
-            kept.append(row)
-        else:
-            result.skipped_ineligible.append((row["id"], reason))
-    return kept
 
 
 def _positive_int(value: Any, default: int, *, minimum: int = 1) -> int:

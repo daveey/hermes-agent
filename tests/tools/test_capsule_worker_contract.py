@@ -20,9 +20,7 @@ import pytest
 
 from tools import capsule_workspace
 
-from tests.tools.test_capsule_workspace import (  # pytest fixtures
-    IMAGE, RUN, TASK, VALID_CC, capsule, fake_docker,
-)
+from tests.tools.capsule_fixtures import IMAGE, RUN, TASK, VALID_CC  # capsule/fake_docker: conftest
 
 
 @pytest.fixture
@@ -223,6 +221,31 @@ def test_real_rendering_with_hostile_title_and_body_never_keeps_the_host_path(ca
     assert out[:span[0]] == text[:span[0]] and "Workspace: /workspace (task capsule" in out
     assert body in out  # the approved body text is untouched
     assert real not in out[:out.index(body)]  # no host path before the body
+
+
+def test_resumed_first_turn_rewrites_the_resume_context_header_only_when_bound(capsule):
+    """After an owner-restart loss the first turn uses ``resume_context`` (a note + the base context): the
+    capsule rewrite follows the header to its shifted span there; unbound it is the same object as before."""
+    from gateway.session_kanban_capsule import capsule_prompt_context, resume_workspace_span
+    from gateway.session_kanban_resume import resume_context, worker_prompt_context
+    native = os.path.dirname(capsule.ws)
+    text = HEADER.format(ws=native)
+    context = {"context": text + "## tail\n", "workspace": native, "context_workspace": _span(text, native)}
+    context["resume_context"] = resume_context(text, {"prior_run_id": 1, "run_id": 2})
+    context["resume_context_workspace"] = resume_workspace_span(context, text)
+    history = [{"role": "user", "content": "earlier"}]
+    for hist in (history, []):  # resumed, and the transcript-tail fallback
+        assert capsule_prompt_context(context, hist) is worker_prompt_context(context, hist)  # unbound
+    capsule.bind()
+    resumed = capsule_prompt_context(context, history)
+    assert resumed.startswith(context["resume_context"][:len(context["resume_context"]) - len(text)])
+    assert f"Workspace: worktree @ {native}\n\n## Body" not in resumed and "Workspace: /workspace (task capsule" in resumed
+    assert resumed.endswith(f"## Body\nWorkspace: worktree @ {native}\nbody text\n")  # body untouched
+    tail = capsule_prompt_context(context, [])
+    assert "Workspace: /workspace (task capsule" in tail and tail.endswith("## tail\n")
+    context["resume_context_workspace"] = None  # a resume context without its span fails closed
+    with pytest.raises(RuntimeError, match="capsule_context_header_drift"):
+        capsule_prompt_context(context, history)
 
 
 def test_kanban_show_own_card_names_execution_workspace_when_bound(capsule, tmp_path, monkeypatch):

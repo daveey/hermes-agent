@@ -53,3 +53,16 @@ def record_claim_refusal(conn: sqlite3.Connection, task_id: str, assignee: str, 
 
     record_refusal(conn, task_id, assignee, code)
     result.capsule_refused.append((task_id, code))
+
+
+def admitted_claim(conn: sqlite3.Connection, task_id: str, assignee: str, lane, ttl_seconds, spawn_fn, result):
+    """``claim_if_admitting`` with the capsule recheck inside the claim transaction. A row refused there
+    (changed since :func:`lane_admission_refused`) is recorded on ``result`` and returns None, like any lost
+    claim; it leaves no claim deferral, so the caller's deferral pop finds none."""
+    from hermes_cli.kanban_gateway_drain import claim_if_admitting
+
+    recheck, refusals = capsule_claim_check(conn, task_id, assignee, spawn_fn)
+    claimed = claim_if_admitting(conn, task_id, assignee, lane, ttl_seconds, admission_check=recheck)
+    if claimed is None and refusals:
+        record_claim_refusal(conn, task_id, assignee, refusals[-1], result)
+    return claimed

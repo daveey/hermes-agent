@@ -1,4 +1,3 @@
-# health: allow FILE_LINES -- trusted capsule observation: two decorator hooks at the existing request/summary chokepoints (no-op unless a verified observer is loaded); logic lives in agent/observation_seam.py
 """API-call helpers extracted from :class:`AIAgent`: non-streaming and streaming
 request drivers, request kwargs builder, assistant-message materializer,
 provider-fallback activator, max-iterations handler, per-turn resource cleanup.
@@ -32,6 +31,7 @@ from agent.error_classifier import (
     _extract_status_code)
 from agent.sdk_transform_bypass import bypass_chat_sdk_request_transform
 from agent.errors import EmptyStreamError
+from agent.observation_seam import sdk_request as _observe_sdk_request, unsupported_summary as _unsupported_observed_summary
 from agent.context_usage import capture_summary_context
 from agent.chat_completion_local import _streams_llamacpp, stale_giveup
 from agent.chat_completion_headers import _chat_completion_capturing_headers
@@ -739,8 +739,6 @@ def _bedrock_converse_call(api_kwargs: dict, *, stream: bool, on_stream_denied=N
     return finish(raw_response)
 
 
-from agent.observation_seam import sdk_request as _observe_sdk_request
-
 @_observe_sdk_request
 def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     """Run one non-streaming LLM request for the active api_mode and return it.
@@ -776,7 +774,6 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     # MoA facade above and the suite's stand-in clients are unaffected.
     api_kwargs = bypass_chat_sdk_request_transform(api_kwargs, request_client)
     return _chat_completion_capturing_headers(agent, request_client, api_kwargs)
-
 
 
 def should_use_direct_api_call(agent) -> bool:
@@ -1241,7 +1238,6 @@ def _codex_silent_hang_hint(agent, api_kwargs: dict) -> Optional[str]:
     return None
 
 
-
 def interruptible_api_call(agent, api_kwargs: dict):
     """Run the API call on a worker thread so the caller can detect interrupts
     without waiting for the full HTTP round-trip. Each worker gets its own
@@ -1418,7 +1414,6 @@ def _build_codex_kwargs(agent, api_messages, tools_for_api, reasoning_config, re
         context_management=context_management, text_verbosity=getattr(agent, "text_verbosity", None))
 
 
-
 def _build_chat_completions_kwargs(agent, api_messages, tools_for_api, reasoning_config, request_overrides, cache_scope_id):
     transport = agent._get_transport()
     tools_for_api = _alias_tool_search_bridge_for_xai(agent, transport, tools_for_api)
@@ -1542,26 +1537,6 @@ def _dump_if_model(value):
     return _model_dump_safe(value) if hasattr(value, "model_dump") else value
 
 
-def _assistant_reasoning_text(agent, assistant_message) -> Optional[str]:
-    """Structured reasoning, else inline ``<think>`` blocks embedded in content."""
-    reasoning_text = agent._extract_reasoning(assistant_message)
-    if not reasoning_text:
-        content = flatten_message_text(getattr(assistant_message, "content", None))
-        think_blocks = re.findall(r'<think>(.*?)</think>', content, flags=re.DOTALL)
-        if think_blocks:
-            reasoning_text = "\n\n".join(b.strip() for b in think_blocks if b.strip()) or None
-    if reasoning_text and agent.verbose_logging:
-        logging.debug(f"Captured reasoning ({len(reasoning_text)} chars): {reasoning_text}")
-    # When streaming is active the reasoning was already displayed during the
-    # stream (structured deltas or <think> tag extraction); fire only for
-    # non-streaming modes (gateway, batch, quiet). Anything not shown during
-    # streaming is caught by the CLI post-response fallback.
-    if reasoning_text and agent.reasoning_callback and not agent.stream_delta_callback and not agent._stream_callback:
-        with contextlib.suppress(Exception):
-            agent.reasoning_callback(reasoning_text)
-    return _sanitize_surrogates(reasoning_text) if reasoning_text else reasoning_text
-
-
 def _assistant_content_for_storage(agent, assistant_message):
     # Sanitize surrogates (Kimi/GLM via Ollama emit code points that crash json.dumps),
     # strip inline <think> tags at the storage boundary (they leaked to platforms and
@@ -1632,7 +1607,8 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     single owner — write-time padding broke codex commentary turns and cannot
     survive ``_rows_to_conversation``."""
     assistant_tool_calls = getattr(assistant_message, "tool_calls", None)
-    reasoning_text = _assistant_reasoning_text(agent, assistant_message)
+    from agent.chat_completion_helpers_reasoning import assistant_reasoning_text
+    reasoning_text = assistant_reasoning_text(agent, assistant_message)
     msg = stamp_message_timestamp({"role": "assistant",
         "content": _assistant_content_for_storage(agent, assistant_message), "reasoning": reasoning_text,
         "finish_reason": finish_reason})
@@ -2263,8 +2239,6 @@ def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
 
 _SUMMARY_ATTEMPT_BUILDERS = {"codex_responses": _codex_summary_attempt, "anthropic_messages": _anthropic_summary_attempt}
 
-
-from agent.observation_seam import unsupported_summary as _unsupported_observed_summary
 
 @_unsupported_observed_summary
 def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:

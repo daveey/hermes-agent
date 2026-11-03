@@ -18,6 +18,7 @@ host_repo task off any dispatcher that is not the registered owner passing the r
 """
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import threading
@@ -337,7 +338,8 @@ def claim_refusal(conn: sqlite3.Connection, task_id: str, assignee: str, spawn_f
     try:
         if profile_is_local(assignee):
             return None
-    except Exception:  # health: allow BLE001 -- an unreadable policy cannot prove locality: refuse
+    except Exception:  # an unreadable policy cannot prove locality: refuse
+        logging.getLogger(__name__).warning("capsule claim: %s policy unreadable; refusing", assignee, exc_info=True)
         return "capsule_profile_policy_unavailable"
     return _scope_refusal(conn, task, row, assignee, spawn_fn)
 

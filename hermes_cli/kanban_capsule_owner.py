@@ -42,10 +42,11 @@ class CapsuleOwnerRefused(GatewayUnavailableError):
 def card_requires_capsule(board_db, task_id) -> bool:
     """The owner's own derivation (``capsule_requirement``) on a read-only board row; unreadable -> True."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_lockguard
     from gateway.session_kanban_capsule import capsule_requirement
     try:
         uri = Path(board_db).resolve(strict=True).as_uri() + '?mode=ro'
-        with closing(sqlite3.connect(uri, uri=True, timeout=5)) as conn:
+        with closing(kanban_lockguard.connect(uri, uri=True, timeout=5)) as conn:
             conn.row_factory = sqlite3.Row
             task = kb.get_task(conn, task_id)
     except (OSError, ValueError, TypeError, sqlite3.Error):
