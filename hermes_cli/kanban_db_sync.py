@@ -792,7 +792,10 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
         return ClaimGate(expires, deferred=True)
     deadline = lease.expires_ms // 1000 - LEASE_SAFETY_MARGIN_SECONDS
     gate = ClaimGate(min(expires, deadline), lease=lease, ids=ids)
-    if row is not None and row["placement_policy"]:
+    # Review ruling 2: the worker load formula guards a WORKER's claim of someone else's card. The origin claiming
+    # its own card (hub overflow, review continuation) is gated by the measured-CPU/cap gate in claim_transaction
+    # instead; normalized load is never a substitute for that measurement.
+    if row is not None and row["placement_policy"] and row["created_on"] != ids[1]:
         from hermes_cli.kanban_worker_placement import local_admission
         if not local_admission(conn):
             with gate:

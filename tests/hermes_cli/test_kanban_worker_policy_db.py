@@ -78,7 +78,8 @@ def test_local_dispatch_refusal_survives_registry_failure_and_disabled_policy(co
 def test_worker_local_admission_rechecks_load_and_releases_unused_lease(conn, monkeypatch, sample, capacity, allowed, status):
     from hermes_cli import machine_metrics
     tid = kb.create_task(conn, title="Public analysis", assignee="default", placement_policy="worker-first-v1")
-    conn.execute("UPDATE tasks SET runs_on=?, status=? WHERE id=?", ('["machine:hub"]', status, tid))
+    # A worker ("hub" in this fixture) claiming another origin's card keeps the load formula (review ruling 2).
+    conn.execute("UPDATE tasks SET runs_on=?, status=?, created_on=? WHERE id=?", ('["machine:hub"]', status, "origin-x", tid))
     conn.commit()
     monkeypatch.setattr(machine_metrics, "collect", lambda: sample)
     monkeypatch.setattr(wn, "registry", lambda: {"machines": {"hub": {"max_card_runs": capacity}}})
@@ -106,7 +107,7 @@ def test_policy_cannot_be_combined_with_manual_or_host_placement(conn, fields):
 def test_admission_sampling_failure_releases_grant(conn, monkeypatch, broken):
     from hermes_cli import machine_metrics
     tid = kb.create_task(conn, title="Public analysis", placement_policy="worker-first-v1")
-    conn.execute("UPDATE tasks SET runs_on=? WHERE id=?", ('["machine:hub"]', tid))
+    conn.execute("UPDATE tasks SET runs_on=?, created_on=? WHERE id=?", ('["machine:hub"]', "origin-x", tid))
     conn.commit()
     def unavailable():
         raise OSError("sample unavailable")
@@ -125,3 +126,22 @@ def test_unknown_policy_is_rejected_before_insertion(conn):
     with pytest.raises(ValueError, match="placement policy"):
         kb.create_task(conn, title="Public analysis", placement_policy="worker-first-v999")
     assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("status", ["ready", "review"])
+def test_origin_claiming_its_own_card_skips_worker_load_formula(conn, monkeypatch, status):
+    """Review ruling 2: hub overflow is gated by measured CPU (claim_transaction), never by load1/CPUs."""
+    from hermes_cli import machine_metrics
+    tid = kb.create_task(conn, title="Public analysis", assignee="default", placement_policy="worker-first-v1")
+    conn.execute("UPDATE tasks SET runs_on=?, status=?, created_on=? WHERE id=?", ('["machine:hub"]', status, "hub", tid))
+    conn.commit()
+    monkeypatch.setattr(machine_metrics, "collect", lambda: {"cpu_load1": 400, "cpus": 4, "mem_used_pct": 50,
+                                                             "active_card_runs": 0})
+    monkeypatch.setattr(wn, "registry", lambda: {"machines": {"hub": {"max_card_runs": 7}}})
+    client = support.FakeLeaseClient()
+    old = sync.set_lease_client(client)
+    try:
+        assert (kb.claim_task if status == "ready" else kb.claim_review_task)(conn, tid) is not None
+        assert client.count("release") == 0
+    finally:
+        sync.set_lease_client(old)

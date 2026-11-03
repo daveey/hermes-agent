@@ -33,7 +33,7 @@ from hermes_cli import kanban_db_sync as _sync
 from hermes_cli.kanban_worker_placement import validate_creation
 from hermes_cli import kanban_placement_forward as _placement_fwd  # stdlib-only at import: no cycle
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
-from hermes_cli.kanban_admission import admission_hold_set, claim_transaction, claim_and_open_run
+from hermes_cli.kanban_admission import admission_hold_set, claim_transaction, claim_and_open_run, hub_cpu_advisory
 from hermes_cli.kanban_workflow import DEFAULT_STATUSES as VALID_STATUSES
 from toolsets import get_toolset_names
 from utils import unlink_files_older_than
@@ -2197,10 +2197,12 @@ def claim_task(
     # [daveey] Refuse a held fence before the Board-service lease, not after it.
     if admission_hold_set():
         return None
+    if hub_cpu_advisory(task_id):  # lock-free, before the Board lease; the locked gate stays authoritative
+        return None
     gate = _sync.claim_gate(conn, task_id, expires)
     if gate.deferred:
         return None
-    with gate, claim_transaction(conn) as admitted:
+    with gate, claim_transaction(conn, task_id=task_id, gate=gate) as admitted:
         if not admitted:
             return None
         # Single enforcement point: never ready -> running with an undone
@@ -2237,10 +2239,12 @@ def claim_review_task(
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     if admission_hold_set():  # [daveey] before the Board-service lease (see claim_task)
         return None
+    if hub_cpu_advisory(task_id):
+        return None
     gate = _sync.claim_gate(conn, task_id, expires, lane="review")
     if gate.deferred:
         return None
-    with gate, claim_transaction(conn) as admitted:
+    with gate, claim_transaction(conn, task_id=task_id, gate=gate) as admitted:
         if not admitted:
             return None
         if not _parents_satisfied(conn, task_id):

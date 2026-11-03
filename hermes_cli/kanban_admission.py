@@ -1,7 +1,108 @@
-"""Kanban claim publication boundary for the POSIX updater fence."""
+"""Kanban claim publication boundary for the POSIX updater fence, and the hub CPU/cap admission gate.
+
+Hub CPU gate (worker-first overflow, docs/worker-first-v1.md): on a host whose installation-root config sets
+``kanban.admission.cpu_busy_below_pct`` every new ready/review claim (legacy, host-bound and policy cards alike) must
+pass, while ``admission.lock`` is held and before the claim commits: an independent full ~1 s CPU busy sample strictly
+below the limit, a whole-host running count below the root ``kanban.max_in_progress`` cap, and a lease deadline that
+is still ahead after sampling. Any unknown refuses. No network happens under the lock. A lock-free advisory read of the
+reporter's latest sample runs earlier, before any Board lease, so a busy hub causes no grant/release churn.
+"""
 import contextlib
 import logging
+import threading
+import time
 from pathlib import Path
+
+ADVISORY_MAX_AGE_MS = 15_000
+_consumed = threading.local()
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _defer(task_id, reason):
+    if task_id is None:
+        return
+    from hermes_cli import kanban_db_sync as sync
+    sync._CLAIM_DEFERRALS[task_id] = reason
+
+
+def hub_cpu_advisory(task_id=None):
+    """Lock-free pre-check before a Board lease (review ruling 5). Returns a refusal reason or None.
+
+    Off unless the root limit is set. Uses the metrics reporter's latest complete sample: missing, stale (>15 s),
+    future or malformed reads as unknown and defers; a fresh value at or above the limit defers. Advisory only."""
+    from hermes_cli import machine_cpu_metrics as cpu
+    from hermes_cli import machine_metrics
+
+    state, limit = cpu.root_limit()
+    if state == cpu.OFF:
+        return None
+    reason = "hub_cpu_unknown"
+    if state == cpu.ON:
+        last = machine_metrics.read_hub_cpu_sample() or {}
+        end = last.get("cpu_busy_sample_end_ms")
+        age = _now() * 1000 - end if type(end) in (int, float) else None
+        if age is not None and 0 <= age <= ADVISORY_MAX_AGE_MS:
+            pct = last.get("cpu_busy_pct")
+            if cpu.below(pct, limit):
+                return None
+            if type(pct) in (int, float) and 0 <= pct <= 100:
+                reason = "hub_cpu_at_or_above_limit"
+    _defer(task_id, reason)
+    return reason
+
+
+def _root_max_in_progress():
+    """Root ``kanban.max_in_progress`` resolved like the dispatcher (unset → memory-derived default).
+
+    ``(ok, cap)``: ok False when the root config is unreadable or the value is invalid (refuses)."""
+    from hermes_constants import get_default_hermes_root
+    from hermes_cli.config_backend import read_config_doc_readonly
+    from hermes_cli.kanban_db_dispatch import resolve_max_in_progress
+
+    try:
+        doc = read_config_doc_readonly(Path(get_default_hermes_root()) / "config.yaml")
+    except FileNotFoundError:
+        doc = None
+    except Exception:  # health: allow BLE001 -- unreadable root config refuses the claim
+        return False, None
+    raw = ((doc or {}).get("kanban") or {}).get("max_in_progress") if isinstance(doc, dict) else None
+    if raw is not None and (type(raw) is not int or raw < 1):
+        return False, None
+    return True, resolve_max_in_progress(raw)
+
+
+def _final_hub_gate(gate):
+    """Under admission.lock: ``(reason, evidence)``; reason None admits. Never touches the network."""
+    from hermes_cli import machine_cpu_metrics as cpu
+    from hermes_cli import machine_metrics
+
+    state, limit = cpu.root_limit()
+    if state == cpu.OFF:
+        return None, None
+    if state != cpu.ON:
+        return "hub_cpu_unknown", None
+    measured = cpu.sample()
+    if not measured or not all(k in measured for k in cpu.FIELDS):
+        return "hub_cpu_unknown", None
+    if not cpu.MIN_WINDOW_MS <= measured["cpu_busy_window_ms"] <= cpu.MAX_WINDOW_MS:
+        return "hub_cpu_unknown", None
+    if not cpu.below(measured["cpu_busy_pct"], limit):
+        return "hub_cpu_at_or_above_limit", None
+    if gate is not None and getattr(gate, "expires", None) is not None and gate.expires <= int(_now()):
+        return "hub_cpu_unknown", None  # the claim/lease deadline passed while sampling: never start
+    ok, cap = _root_max_in_progress()
+    active = machine_metrics.active_card_runs()
+    if not ok or type(active) is not int or active < 0 or (cap is not None and active >= cap):
+        return "hub_capacity_full", None
+    return None, {**{k: measured[k] for k in cpu.FIELDS}, "limit_pct": limit}
+
+
+def consumed_hub_cpu():
+    """The sample the final gate admitted this claim with (for the ``claimed`` event), or None."""
+    return getattr(_consumed, "evidence", None)
 
 
 def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, event_extra=None, gate=None):
@@ -52,9 +153,11 @@ def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, even
         )
         run_id = run_cur.lastrowid
     conn.execute("UPDATE tasks SET current_run_id = ? WHERE id = ?", (run_id, task_id))
+    hub_cpu = consumed_hub_cpu()
     kb._append_event(
         conn, task_id, "claimed",
-        {"lock": lock, "expires": expires, "run_id": run_id, **(event_extra or {})}, run_id=run_id,
+        {"lock": lock, "expires": expires, "run_id": run_id, **(event_extra or {}),
+         **({"hub_cpu": hub_cpu} if hub_cpu else {})}, run_id=run_id,
     )
     return run_id
 
@@ -76,8 +179,8 @@ def admission_hold_set():
 
 
 @contextlib.contextmanager
-def claim_transaction(conn):
-    """Fence check and real SQL commit share admission.lock (never a savepoint).
+def claim_transaction(conn, *, task_id=None, gate=None):
+    """Fence check, the hub CPU/cap gate and real SQL commit share admission.lock (never a savepoint).
 
     Board storage may be overridden independently of the installation. Use the
     process's installation root, not the board path. Hooks run after both locks.
@@ -117,5 +220,17 @@ def claim_transaction(conn):
             if held:
                 logging.getLogger(__name__).info(HOLD_MESSAGE)
                 yield False
-            else:
+                return
+            # Frozen contract: an independent full CPU sample is taken HERE, with admission.lock held, and the
+            # claim commits before the lock is released, so a concurrent claimer sees this run in its recount.
+            reason, evidence = _final_hub_gate(gate)
+            if reason is not None:
+                logging.getLogger(__name__).info("Hub admission refused Kanban claim %s: %s", task_id, reason)
+                _defer(task_id, reason)
+                yield False
+                return
+            _consumed.evidence = evidence
+            try:
                 yield True
+            finally:
+                _consumed.evidence = None

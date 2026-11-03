@@ -130,6 +130,37 @@ def collect(disk_path: Optional[Path] = None) -> dict[str, Any]:
     return out
 
 
+HUB_CPU_SAMPLE_FILE = "hub-cpu-sample.json"
+
+
+def _hub_cpu_path(root: Optional[Path] = None) -> Path:
+    if root is None:
+        from hermes_constants import get_default_hermes_root
+        root = Path(get_default_hermes_root())
+    return Path(root) / "cache" / HUB_CPU_SAMPLE_FILE
+
+
+def record_hub_cpu_sample(sample: dict, root: Optional[Path] = None) -> None:
+    """Keep the reporter's latest complete CPU triple for the lock-free advisory pre-check
+    (``kanban_admission.hub_cpu_advisory``). Advisory only: the final gate always measures again under the lock."""
+    import json
+    path = _hub_cpu_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps({k: sample[k] for k in ("cpu_busy_pct", "cpu_busy_window_ms",
+                                                       "cpu_busy_sample_end_ms")}), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_hub_cpu_sample(root: Optional[Path] = None) -> Optional[dict]:
+    import json
+    try:
+        doc = json.loads(_hub_cpu_path(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
 class Reporter:
     """Sends ``collect()`` to the Board at most every REPORT_EVERY_S; never raises into the sync loop."""
 
@@ -149,6 +180,10 @@ class Reporter:
             measured = (self.cpu_sample_fn or cpu.sample)()
             if measured and all(k in measured for k in cpu.FIELDS):
                 sample.update({k: measured[k] for k in cpu.FIELDS})
+                try:
+                    record_hub_cpu_sample(measured)
+                except OSError as exc:
+                    _log.debug("hub CPU advisory sample not recorded: %s", exc)
         return sample
 
     def report_due(self) -> bool:

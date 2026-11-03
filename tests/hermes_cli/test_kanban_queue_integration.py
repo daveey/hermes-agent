@@ -115,8 +115,9 @@ def _apply_board_repin(conn, tid):
     conn.commit()
 
 
-def test_origin_return_records_reason_and_unfences_origin(conn, monkeypatch, capsys):
-    """Board state=origin: the reason is durable, shown, and the origin may run the card in the same pass."""
+def test_legacy_board_origin_return_records_reason_and_unfences_origin(conn, monkeypatch, capsys):
+    """LEGACY Board (pre-overflow, hermes-hub#69) state=origin reply: still recorded and shown during a rolling deploy.
+    Overflow Boards no longer send it (review ruling 9): see test_no_eligible_worker_queues_and_keeps_fence."""
     from hermes_cli import kanban
 
     tid = fixtures.acknowledged(conn, requires=json.dumps(["terminal", "file", "git"]))
@@ -172,3 +173,23 @@ def test_origin_reason_is_current_before_feed_and_survives_pull_error(conn):
     _apply_board_repin(conn, tid)
     applied = qr.latest(conn, tid)
     assert applied["state"] == "origin" and applied["current"] is True and applied["reason"] == ORIGIN_REASON
+
+
+def test_no_eligible_worker_queues_and_keeps_fence(conn, monkeypatch):
+    """Overflow Board (ruling 9): no automatic origin return. A card no pool worker can run is queued with
+    `no_eligible_worker`; its fence stays and the origin may NOT run it until an explicit owner repin."""
+    tid = fixtures.acknowledged(conn, requires=json.dumps(["terminal", "file", "git"]))
+    hub = Mock()
+    hub.reserve.return_value = {"state": "queued", "machine": None, "reservation_id": None, "expires_at": None,
+                                "reason": "waiting_for_worker_capacity",
+                                "observation": {"version": 1, "code": "no_eligible_worker", "observed_at_ms": 1000,
+                                                "candidates": [{"machine": "worker-1", "reasons": ["missing_labels"],
+                                                                "missing_labels": ["capability:file"]}]}}
+    monkeypatch.setattr(client, "pull", lambda *a, **kw: None)
+    assert wp.reevaluate(conn, hub, "default", "hub", cfg={"worker_pools": {"hub": ["worker-1"]}}) == 1
+    value = qr.latest(conn, tid)
+    assert value["code"] == "no_eligible_worker" and value["state"] == "queued"
+    row = dict(conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
+    assert row["placement_policy"] == "worker-first-v1"
+    assert wp.execution_refusal(conn, row) == wp.WAITING
+    assert tid in wp.local_refusals(conn, "ready")

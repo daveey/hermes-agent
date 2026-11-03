@@ -1,6 +1,14 @@
 # Worker-first portable cards (opt-in, disabled by default)
 
-`kanban.placement.worker_pools` maps an origin Board machine name to worker names, for example `{hub: [worker-1]}`. This is a pool, **not** an AND-list of `machine:*` labels. The default `placement: {}` is unchanged. `heavy_route` remains the legacy behavior only when the origin has no pool entry. A configured empty/unavailable pool queues portable work; it never overflows onto the hub.
+`kanban.placement.worker_pools` maps an origin Board machine name to worker names, for example `{hub: [worker-1]}`. This is a pool, **not** an AND-list of `machine:*` labels. The default `placement: {}` is unchanged. `heavy_route` remains the legacy behavior only when the origin has no pool entry. A configured empty/unavailable pool queues portable work; it never overflows onto the hub unless the operator enables worker-first overflow (below).
+
+## Worker-first hub overflow (off by default)
+
+Workers always win. The Board reserves the origin hub for a portable card only when **every** compatible member of the origin's *configured* pool (never the request subset) is known, fresh and refused solely for pressure (score >= .85) or full slots, AND the hub's reported measured CPU busy is fresh (conservative end within 15 s) and strictly below the operator's threshold, AND hub capacity/memory/drain allow it, AND no other hub overflow reservation is outstanding, AND the sample's conservative start is after the last hub overflow grant. Unknown, stale, held, draining or offline workers veto overflow and the card queues. Zero compatible workers queues with `no_eligible_worker`: the automatic structural origin repin was removed (only the explicit owner repin clears the fence). Prior runs, host-bound cards and running leases are never moved.
+
+* Board: operator-owned `worker_overflow` setting, e.g. `{"hub": {"machine": "hub", "cpu_busy_below_pct": 50}}`; `{}`/absent disables it. The lease grant re-runs the decision with the current registry and records the consumed sample; a worker freeing up, a CPU rise, a used sample or a disabled setting refuses the grant.
+* Core: `kanban.admission.cpu_busy_below_pct` in the **installation-root** config enables (a) a 10 s metrics report carrying `cpu_busy_pct`/`cpu_busy_window_ms`/`cpu_busy_sample_end_ms` (2 s hard total, never replayed), (b) a lock-free advisory pre-check before any Board lease, and (c) the final gate: with `admission.lock` held and before the claim commits, an independent full ~1 s `/proc/stat` sample must be strictly below the limit and the host running count below the root `kanban.max_in_progress`. Any unknown (unreadable config, bad value, failed sample, window outside 1-2 s, passed deadline) refuses. The gate applies to every new ready/review claim on that host (legacy, host-bound and policy cards); the worker load formula is not used for the origin's own cards.
+* Rollout order: deploy Boards and clients first; set root `cpu_busy_below_pct`; verify reports; only then enable Board `worker_overflow`. Rollback: set Board `worker_overflow` to `{}` (outstanding hub reservations become unclaimable), then remove the root key.
 
 ## Creation and schema
 
@@ -53,5 +61,8 @@ No configuration is activated by these code changes. Deployment, actual hostname
 | Two-worker ready rebalance, immovable running lease, capabilities/pickup at claim | server `worker/test/worker-placement.test.ts` |
 | Same-card review continuity, forged review-pin refusal, reserved-capacity exclusion | server `worker/test/worker-placement.test.ts` |
 | Operator settings, schema, rollback retains fences/leases and explicit CAS repin | server `worker/test/machines.test.ts`, `worker-placement.test.ts` |
+| Hub overflow selection, one-reservation/one-sample fences, grant re-check, rollback | server `worker/test/worker-overflow.test.ts` |
+| CPU sampler, root-only limit, reporter cadence/budget | `test_machine_cpu_metrics.py`, `test_machine_metrics.py`, `test_kanban_sync_metrics_budget.py` |
+| Final hub gate under admission.lock (ready/review, advisory, cap, deadline) | `test_kanban_hub_admission.py`, `test_kanban_worker_policy_db.py` |
 
 Server implementation/evidence and its deployment API are documented in `daveey/hermes-hub:docs/worker-first-v1.md`. Server integration tests execute real HTTP requests against Cloudflare's SQLite Durable Object test runtime; Python fake-service tests separately prove client sequencing and do not substitute for server atomicity tests.
