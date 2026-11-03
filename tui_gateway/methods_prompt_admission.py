@@ -5,7 +5,7 @@ and readback work without a live owner. An accepted operation is never dispatche
 again, even if the process died between the SQLite commit and thread start.
 """
 from pathlib import Path
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import threading
 import time
 import logging
@@ -15,6 +15,7 @@ from hermes_state_prompt_admission import admit_prompt, mark_dispatch_failed, pr
 
 _operations_lock = threading.Lock()
 _operations = {}
+_BUSY = object()
 
 
 @contextmanager
@@ -135,6 +136,31 @@ def _dispatch(server, rid, sid, session, text, profile):
         raise RuntimeError("backend retired after durable acceptance")
 
 
+def _claim_turn(server, rid, params, home, text):
+    """Under the resume lock: ``(refusal | _BUSY | None, sid, session)``; None = the turn is claimed (running)."""
+    with server._session_resume_lock:
+        sid, session = _live_owner(server, params, home)
+        # busy_wait_s=0: never wait out a busy update lock while holding the resume lock (_BUSY: wait outside it).
+        with server._session_turn_admission(session, busy_wait_s=0) as admitted:
+            if not admitted:
+                from hermes_cli.backend_retirement import last_refusal
+                return (_BUSY if last_refusal() == "busy" else server._err(rid, 5035, "backend is retiring")), sid, session
+            _live_owner(server, params, home)
+            refusal = server._reattach_refusal(rid, sid, session)
+            if refusal is not None:
+                return refusal, sid, session
+            if server._ws_session_is_detached(session):
+                raise ValueError("exact session is detached; reattach its owner first")
+            refusal = server._legacy_group_fence_error(rid, session, params)
+            if refusal is not None:
+                return refusal, sid, session
+            session["running"] = True
+            session["_turn_cancel_requested"] = False
+            session["last_active"] = time.time()
+            server._start_inflight_turn(session, text)
+    return None, sid, session
+
+
 def submit_admission(rid, params):
     from tui_gateway import server
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
@@ -155,25 +181,19 @@ def submit_admission(rid, params):
             prior = _read(server, params, home)
             if prior is not None:
                 return _reply(server, rid, params, prior)
-            with server._session_resume_lock:
-                sid, session = _live_owner(server, params, home)
-                # busy_wait_s=0: never wait out a busy update lock while holding the resume lock.
-                with server._session_turn_admission(session, busy_wait_s=0) as admitted:
-                    if not admitted:
-                        return server._err(rid, 5035, "backend is retiring")
-                    _live_owner(server, params, home)
-                    refusal = server._reattach_refusal(rid, sid, session)
-                    if refusal is not None:
-                        return refusal
-                    if server._ws_session_is_detached(session):
-                        raise ValueError("exact session is detached; reattach its owner first")
-                    refusal = server._legacy_group_fence_error(rid, session, params)
-                    if refusal is not None:
-                        return refusal
-                    session["running"] = True
-                    session["_turn_cancel_requested"] = False
-                    session["last_active"] = time.time()
-                    server._start_inflight_turn(session, text)
+            with ExitStack() as waiting:
+                outcome, sid, session = _claim_turn(server, rid, params, home, text)
+                if outcome is _BUSY:
+                    # [daveey] A briefly busy update lock (a hub Kanban claim's ~1 s sample, review F1) is waited out
+                    # with the resume lock released, then admission is retried once. Nothing durable happened yet
+                    # and the operation lock is still held, so the retry cannot duplicate this turn.
+                    from hermes_cli.backend_retirement import admission_waiter, refusal_text
+                    if waiting.enter_context(admission_waiter(session.get("profile_home"))):
+                        outcome, sid, session = _claim_turn(server, rid, params, home, text)
+                    if outcome is _BUSY:
+                        return server._err(rid, 5035, refusal_text())
+                if outcome is not None:
+                    return outcome
             return _accept_claimed(server, rid, sid, session, params, text)
     except ValueError as exc:
         return server._err(rid, 4092, str(exc))

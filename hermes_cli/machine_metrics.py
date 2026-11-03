@@ -5,6 +5,12 @@ calls; the kanban sync loop sends it with ``report_due()`` at most every :data:`
 since worker-first-v1 (docs/worker-first-v1.md): the Board's worker-pool admission scores the reported sample, and
 ``kanban_worker_placement.local_admission`` takes a fresh ``collect()`` before turning a policy card's grant into a
 local run. Cards without ``placement_policy`` are still placed without it.
+
+Hub overflow: on a host whose installation-root config sets ``kanban.admission.cpu_busy_below_pct`` the reporter
+also takes a measured ~1 s CPU busy sample (``machine_cpu_metrics.sample``) immediately before each send and attaches
+the complete triple ``cpu_busy_pct``/``cpu_busy_window_ms``/``cpu_busy_sample_end_ms``. ``collect()`` itself never
+samples CPU busy. A CPU-bearing report has a hard 2 s total transport budget and is never replayed: a failed round
+drops its sample and the next round measures again.
 """
 from __future__ import annotations
 
@@ -21,8 +27,8 @@ from typing import Any, Callable, Optional
 
 _log = logging.getLogger(__name__)
 
-REPORT_EVERY_S = 30.0
-# A Board without the route (older deploy) answers 404/405: ask again rarely, not every 30 s.
+REPORT_EVERY_S = 10.0
+# A Board without the route (older deploy) answers 404/405: ask again rarely, not every 10 s.
 UNSUPPORTED_RETRY_S = 600.0
 _GB = 1024 ** 3
 
@@ -70,11 +76,19 @@ def active_card_runs() -> Optional[int]:
     from hermes_cli.kanban_db_boards import named_board_db_files
 
     try:
-        paths = [kb.kanban_home() / "kanban.db", *(p for _, p in named_board_db_files())]
+        default = kb.kanban_home() / "kanban.db"
+        paths = [default, *(p for _, p in named_board_db_files())]
         total = 0
         seen = set()
         for path in paths:
-            stat = path.stat()
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                # [daveey] A never-created default board holds no runs. Named boards are listed only when present,
+                # so a vanished one still invalidates the sample (fails closed) like any other unreadable board.
+                if path == default:
+                    continue
+                raise
             identity = (stat.st_dev, stat.st_ino)
             if identity in seen:
                 continue
@@ -124,13 +138,61 @@ def collect(disk_path: Optional[Path] = None) -> dict[str, Any]:
     return out
 
 
+HUB_CPU_SAMPLE_FILE = "hub-cpu-sample.json"
+
+
+def _hub_cpu_path(root: Optional[Path] = None) -> Path:
+    if root is None:
+        from hermes_constants import get_default_hermes_root
+        root = Path(get_default_hermes_root())
+    return Path(root) / "cache" / HUB_CPU_SAMPLE_FILE
+
+
+def record_hub_cpu_sample(sample: dict, root: Optional[Path] = None) -> None:
+    """Keep the reporter's latest complete CPU triple for the lock-free advisory pre-check
+    (``kanban_admission.hub_cpu_advisory``). Advisory only: the final gate always measures again under the lock."""
+    import json
+    path = _hub_cpu_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps({k: sample[k] for k in ("cpu_busy_pct", "cpu_busy_window_ms",
+                                                       "cpu_busy_sample_end_ms")}), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_hub_cpu_sample(root: Optional[Path] = None) -> Optional[dict]:
+    import json
+    try:
+        doc = json.loads(_hub_cpu_path(root).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
 class Reporter:
     """Sends ``collect()`` to the Board at most every REPORT_EVERY_S; never raises into the sync loop."""
 
     def __init__(self, send: Callable[[dict], Any], *, collect_fn: Optional[Callable[[], dict]] = None,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 cpu_limit_fn: Optional[Callable[[], tuple]] = None,
+                 cpu_sample_fn: Optional[Callable[[], Optional[dict]]] = None) -> None:
         self.send, self.collect_fn, self.clock = send, collect_fn, clock
+        self.cpu_limit_fn, self.cpu_sample_fn = cpu_limit_fn, cpu_sample_fn
         self.next_at = 0.0
+
+    def _sample(self) -> dict:
+        from hermes_cli import machine_cpu_metrics as cpu
+        sample = dict((self.collect_fn or collect)())
+        state, _limit = (self.cpu_limit_fn or cpu.root_limit)()
+        if state == cpu.ON:  # only the gated hub pays the ~1 s measurement, taken last: right before sending
+            measured = (self.cpu_sample_fn or cpu.sample)()
+            if measured and all(k in measured for k in cpu.FIELDS):
+                sample.update({k: measured[k] for k in cpu.FIELDS})
+                try:
+                    record_hub_cpu_sample(measured)
+                except OSError as exc:
+                    _log.debug("hub CPU advisory sample not recorded: %s", exc)
+        return sample
 
     def report_due(self) -> bool:
         now = self.clock()
@@ -139,7 +201,7 @@ class Reporter:
         self.next_at = now + REPORT_EVERY_S
         try:
             from hermes_cli.machine_drain_metrics import send_compatible
-            send_compatible(self.send, (self.collect_fn or collect)())
+            send_compatible(self.send, self._sample())
             return True
         except Exception as exc:  # health: allow BLE001 -- load reporting must never stop kanban sync
             status = getattr(exc, "status", None)

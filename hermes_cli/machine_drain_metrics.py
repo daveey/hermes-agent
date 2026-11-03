@@ -31,13 +31,21 @@ def collect():
     return result
 
 
+# Fields newer Boards accept and older Boards reject (400, atomically). CPU busy fields are never resent: the
+# compatibility retry strips them, so an old CPU sample is never re-stamped as fresh.
+ADDITIVE_FIELDS = ("drain_active", "drain_until_ms", "cpu_busy_pct", "cpu_busy_window_ms", "cpu_busy_sample_end_ms")
+
+
 def send_compatible(send, sample):
-    """Old Boards reject unknown metrics atomically; retry only additive drain fields."""
+    """Old Boards reject unknown metrics atomically; retry once with every additive field removed.
+
+    Only a 400 on a sample that carried an additive field is retried; any other error (timeouts included) is raised
+    and the sample is dropped. An unrelated validation error simply fails again on the retry and is raised."""
     from hermes_cli.kanban_sync_client import HubError
 
     try:
         return send(sample)
     except HubError as exc:
-        if exc.status != 400 or not any(k in sample for k in ("drain_active", "drain_until_ms")):
+        if exc.status != 400 or not any(k in sample for k in ADDITIVE_FIELDS):
             raise
-        return send({k: v for k, v in sample.items() if k not in ("drain_active", "drain_until_ms")})
+        return send({k: v for k, v in sample.items() if k not in ADDITIVE_FIELDS})

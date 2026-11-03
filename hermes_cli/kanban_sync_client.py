@@ -160,6 +160,73 @@ class _DeadlineRequests(urllib.request.BaseHandler):
     https_request = http_request
 
 
+CPU_REPORT_BUDGET_S = 2.0
+_CPU_FIELDS = ("cpu_busy_pct", "cpu_busy_window_ms", "cpu_busy_sample_end_ms")
+
+
+def _bounded_call(ident: Identity, method: str, path: str, body: Optional[dict], budget_s: float) -> dict:
+    """One request with a hard total wall-clock budget, on a private connection that is closed afterwards.
+
+    The request runs on a daemon thread whose own Hub carries the absolute deadline (every attempt's socket timeout
+    is recomputed by ``Hub._remaining``). Waiting for that thread is bounded by the same deadline, so a response
+    that trickles in byte by byte, each recv inside its timeout, still cannot hold the caller past ``budget_s``.
+    A trickle never trips a socket timeout, so on expiry the caller also shuts the request's socket down (or, if it
+    is still connecting, the connect does so itself): the abandoned thread's blocked recv returns at once and the
+    thread closes its connection. A POST is never resent, so nothing is retried on that socket. Name resolution
+    (getaddrinfo) cannot be interrupted; it is bounded by the system resolver's own timeouts."""
+    deadline = time.monotonic() + budget_s
+    box: dict = {}
+    expiry = _hub_threading.Lock()
+
+    def cut(conn) -> None:
+        import socket
+        sock = getattr(conn, "sock", None)
+        if sock is not None:
+            try:  # the base method: never touches an SSL object another thread is reading through
+                socket.socket.shutdown(sock, socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    class _Bounded(Hub):
+        def _connection(self, parts, timeout=None):
+            pair = super()._connection(parts, timeout)
+            conn = pair[0]
+            open_socket = conn.connect
+
+            def connect_then_check() -> None:
+                open_socket()
+                with expiry:
+                    if box.get("expired"):
+                        cut(conn)
+            conn.connect = connect_then_check
+            with expiry:
+                box["conn"] = conn
+            return pair
+
+    hub = _Bounded(ident, timeout=budget_s, deadline=deadline)
+
+    def run() -> None:
+        try:
+            box["result"] = hub._call(method, path, body)
+        except BaseException as exc:  # health: allow BLE001 -- re-raised in the caller's thread below
+            box["error"] = exc
+        finally:
+            hub.close()
+
+    worker = _hub_threading.Thread(target=run, daemon=True, name="kanban-bounded-call")
+    worker.start()
+    worker.join(max(0.0, deadline - time.monotonic()))
+    if worker.is_alive():
+        with expiry:
+            box["expired"] = True
+            if "conn" in box:
+                cut(box["conn"])
+        raise TimeoutError(f"Board request exceeded its {budget_s:g} s total budget")
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
+
 class Hub:
     """The Board service's HTTP API for one gateway.
 
@@ -370,8 +437,16 @@ class Hub:
 
     def report_metrics(self, metrics: dict) -> dict:
         """This machine's own load for the registry: Runners display and worker-first pool admission
-        (see hermes_cli.machine_metrics). Sending stays best-effort."""
-        return self._call("POST", "/v2/machines/me/metrics", metrics)
+        (see hermes_cli.machine_metrics). Sending stays best-effort.
+
+        A report carrying a CPU busy sample (hub overflow gate) gets a hard :data:`CPU_REPORT_BUDGET_S` total: its
+        own Hub whose per-attempt budget comes from ``_remaining`` (connect, resend, redirect), plus a wall-clock
+        bound on the whole exchange so a trickling response cannot stretch it. On expiry it raises
+        ``TimeoutError``; the sample is dropped, never resent (the Board also rejects a stale sample by its end
+        stamp, since a client timeout does not prove the server never processes the request)."""
+        if not any(k in metrics for k in _CPU_FIELDS):
+            return self._call("POST", "/v2/machines/me/metrics", metrics)
+        return _bounded_call(self.ident, "POST", "/v2/machines/me/metrics", metrics, CPU_REPORT_BUDGET_S)
 
     def report_pickup(self, pickup: Optional[str]) -> dict:
         """Publish this machine's ``kanban.sync.pickup`` (None → null) on its own registry row."""
@@ -1885,5 +1960,8 @@ class HubLeaseClient:
     def renew(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int) -> sync.Lease:
         return self._lease(board_id, {"action": "renew", "task": task_uid, "run_uid": run_uid, "ttl_s": ttl_s}, run_uid)
 
-    def release(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str) -> None:
-        self._lease(board_id, {"action": "release", "task": task_uid, "run_uid": run_uid}, run_uid)
+    def release(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str,
+                unused_grant: bool = False) -> None:
+        # ``unused_grant``: released before anything started locally (the Board does not count it as a start).
+        self._lease(board_id, {"action": "release", "task": task_uid, "run_uid": run_uid,
+                               **({"unused_grant": True} if unused_grant else {})}, run_uid)

@@ -7,6 +7,12 @@ import pytest
 from hermes_cli import kanban_sync_client as client
 
 
+@pytest.fixture(autouse=True)
+def _boards_in_tmp_cwd(tmp_path, monkeypatch):
+    """Board paths here are relative names: keep their SQLite files out of the checkout."""
+    monkeypatch.chdir(tmp_path)
+
+
 def test_feed_wake_only_pulls_changed_board_and_local_outbox(monkeypatch):
     boards = [(name, Path(name)) for name in ('one', 'two', 'three')]
     wake_by_board = {}
