@@ -7,6 +7,12 @@ import pytest
 from hermes_cli import kanban_sync_client as client
 
 
+@pytest.fixture(autouse=True)
+def _boards_in_tmp_cwd(tmp_path, monkeypatch):
+    """Board paths here are relative names: keep their SQLite files out of the checkout."""
+    monkeypatch.chdir(tmp_path)
+
+
 def test_real_feed_publishes_connected_and_disconnected_state():
     from websockets.sync.server import serve
     close_socket = threading.Event()
