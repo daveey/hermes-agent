@@ -463,6 +463,12 @@ def _fmt_block_loop_detected(ev, n) -> tuple:
     return msg, None, None
 
 
+def _fmt_blocked(ev, n) -> tuple:
+    from hermes_cli.kanban_block_notice import block_notice
+    body = block_notice(n.task, n.task_id, n.board_slug, reason=str(_payload(ev, "reason") or ""))
+    return f"⏸ {n.head} {body}", body, None
+
+
 def _fmt_failure(kind: str):
     """gave_up / crashed notice via the shared classifier: real cause, recorded retry state, no
     unsupported promises. [daveey]"""
@@ -494,10 +500,7 @@ def _fmt_timed_out(ev, n) -> tuple:
 # never wake the creator.
 _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
     "completed": _fmt_completed,
-    "blocked": lambda ev, n: (
-        t("gateway.kanban.ping.blocked", head=n.head, reason=_clip(ev, "reason", "gateway.kanban.ping.reason_suffix", 160)),
-        None, None,
-    ),
+    "blocked": _fmt_blocked,
     "gave_up": _fmt_failure("gave_up"),
     "crashed": _fmt_failure("crashed"),
     "timed_out": _fmt_timed_out,

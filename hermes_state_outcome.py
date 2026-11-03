@@ -312,7 +312,7 @@ def _card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
         status = str(card.get("status") or "")
         wait = card.get("wait") if isinstance(card.get("wait"), dict) else {}
         human = status in ("blocked", "triage") and (
-            needs_human(request, kind=card.get("block_kind")) or wait.get("wait_state") == "human")
+            needs_human(request, kind=card.get("block_kind")))
         if human:
             req = request if isinstance(request, dict) else {}
             decisions.append({"id": f"card:{tid}", "question": _str(req.get("action")) or _str(card.get("title")),
