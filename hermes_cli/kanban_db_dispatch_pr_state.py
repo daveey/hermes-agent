@@ -423,6 +423,8 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     merge is resumed by that unblock to ship/verify THAT PR. So does an orderly park AFTER the
     PR comment (``continued`` checkpoint or ``scheduled`` timed wait): the owner parked knowing
     its PR, and the wake resumes it from that checkpoint, not a context-free respawn.
+    So does a supported operator reopen of the done card (``reopened``, strictly after): the
+    rerun resumes THAT PR; its ``REOPENED:`` note carries chat provenance, so it is FYI here.
     An ordering ``dependency_wait`` strictly after the newest PR comment also permits
     one continuation after parent completion/promotion: it must belong to the latest
     claimed run of this card and assignee, ended orderly as blocked, with no subsequent
@@ -449,6 +451,7 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_dispatch as _kbd
     from hermes_cli.kanban_db_dispatch_pr_policy import holding_urls, norm_pr
+    from hermes_cli.kanban_db_dispatch_rerun import is_handoff_event, reopened_after
 
     foreign_ids = _foreign_pr_comment_ids(conn, task_id)
     fyi_urls: list[str] = []
@@ -492,12 +495,14 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     if _immediate_checkpoint_after(conn, task_id, max(pr_times), latest_pr_comment_id):
         return None
     # Strictly after: a same-second handoff tie stays guarded (fail closed).
-    if any(_kbd._is_handoff_event(e["kind"], e["payload"]) for _, e in _kbd._rows_since(
+    if any(is_handoff_event(e["kind"], e["payload"]) for _, e in _kbd._rows_since(
             conn, "task_events", task_id, max(pr_times),
             "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked', "
             "'continued', 'scheduled')",
             cols=", kind, payload", strict=True)):
         return None
+    if reopened_after(conn, task_id, max(pr_times)):
+        return None  # operator reopen of the PR owner: it resumes THAT PR (its comments are in context)
     if _dependency_handoff_after(conn, task_id, max(pr_times), latest_pr_comment_id):
         return None
     from hermes_cli.kanban_dependency_review import resumes_review

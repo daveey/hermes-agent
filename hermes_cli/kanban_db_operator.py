@@ -132,7 +132,6 @@ def reopen_done_task(
     actor = (actor or "").strip() or "operator"
     if not reason:
         raise KanbanEditRefused("reopen requires a reason")
-    now = int(time.time())
     with _kb.write_txn(conn):
         if _kb._task_status(conn, task_id) != "done":
             return None
@@ -148,7 +147,9 @@ def reopen_done_task(
         _kb._append_event(conn, task_id, "reopened", {
             "reason": reason[:2000], "actor": actor, "previous_status": "done", "status": new_status,
         })
-        _kb._insert_comment(conn, task_id, actor, f"REOPENED: {reason}", now)
+        # add_comment (nested) stamps the ``commented`` provenance: an operator note naming the PR is FYI to
+        # active_pr, not a fresh publication that would hold the reopen it records. [daveey]
+        _kb.add_comment(conn, task_id, actor, f"REOPENED: {reason}")
         result = _kb.invalidate_descendants_for_parent_reopen(conn, task_id, author=actor)
     for pid, claim_lock, started_at in result["terminations"]:
         _kb._terminate_reclaimed_worker(pid, claim_lock, started_at=started_at)
