@@ -149,20 +149,32 @@ def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: s
     except MoveRefused as exc:
         return {"ok": False, "reason_code": exc.code, "error": str(exc)}
 
+    # A worker-first card's runs_on is Board-owned: a local write is stripped from the push
+    # (kanban_worker_placement.acknowledged_outbox) and the origin would just reserve it for the pool again. The
+    # moved event is the request; the origin applies it with the Board's creator repin (worker_placement.reevaluate).
+    policy = conn.execute("SELECT placement_policy FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    requested = bool(policy and policy[0])
+
     def _in_txn(c: sqlite3.Connection, run_id: int) -> None:
-        wn.set_runs_on(c, task_id, plan["runs_on"])
+        if not requested:
+            wn.set_runs_on(c, task_id, plan["runs_on"])
         kb._append_event(c, task_id, MOVED_EVENT, {
             "from_machine": plan["me"], "runs_on": plan["runs_on"], "previous_runs_on": plan["previous"],
             "reason": reason[:500], "move_no": plan["move_no"], "forced": plan["forced"],
-            "matches": plan["matches"]}, run_id=run_id)
+            "matches": plan["matches"], **({"repin_requested": True} if requested else {})}, run_id=run_id)
 
     note = f"Moving to {plan['runs_on']} ({', '.join(plan['matches'])}): {reason}"
     res = continue_task(conn, task_id, checkpoint=f"{checkpoint.strip()}\n\n[{note}]",
                         expected_run_id=expected_run_id, in_txn=_in_txn)
     if not res.get("ok"):
         return {"ok": False, "reason_code": res.get("reason_code") or "not_running", "error": res.get("error")}
-    return {"ok": True, "runs_on": plan["runs_on"], "matches": plan["matches"], "move_no": plan["move_no"],
-            "run_id": res.get("run_id"), "status": res.get("status")}
+    out = {"ok": True, "runs_on": plan["runs_on"], "matches": plan["matches"], "move_no": plan["move_no"],
+           "run_id": res.get("run_id"), "status": res.get("status")}
+    if requested:
+        out["repin"] = "requested"
+        out["note"] = ("worker-first card: its origin applies this move with the Board repin on its next placement "
+                       "tick (the policy is then cleared and runs_on set)")
+    return out
 
 
 def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: str, force: bool = False,
