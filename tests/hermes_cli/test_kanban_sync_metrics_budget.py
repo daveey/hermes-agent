@@ -92,3 +92,43 @@ def test_cpu_report_succeeds_inside_budget_and_plain_report_keeps_normal_path(se
 
 def test_cpu_report_budget_is_two_seconds():
     assert ksc.CPU_REPORT_BUDGET_S == 2.0
+
+
+@pytest.mark.parametrize("server", ["stall", "trickle"], indirect=True)
+def test_abandoned_bounded_call_thread_ends_promptly_after_the_budget(server, monkeypatch):
+    """HX012 trace: a trickling response keeps every recv inside its socket timeout, so the abandoned request thread
+    is not ended by a timeout. The caller's expiry must end it (and close its socket), or one thread and connection
+    leaks per 10 s report for as long as the server trickles."""
+    monkeypatch.setattr(ksc.urllib.request, "getproxies", dict)
+    before = {t for t in threading.enumerate() if t.name == "kanban-bounded-call"}
+    with pytest.raises(TimeoutError):
+        ksc._bounded_call(ksc.Identity(url=server.url, key="k" * 16, gateway="gw"), "POST",
+                          "/v2/machines/me/metrics", {"cpus": 4, **CPU}, 1.0)
+    expired = time.monotonic()
+    left = [t for t in threading.enumerate() if t.name == "kanban-bounded-call" and t not in before]
+    for t in left:
+        t.join(1.0)
+    assert not any(t.is_alive() for t in left), "abandoned request thread outlived the budget by > 1 s"
+    assert time.monotonic() - expired <= 1.0
+
+
+@pytest.mark.parametrize("server", ["trickle"], indirect=True)
+def test_connect_finishing_after_expiry_cuts_its_own_socket(server, monkeypatch):
+    """Race arm: the budget expires while the request thread is still connecting (no socket for the caller to cut).
+    The connect must then shut its new socket itself, so the trickle cannot keep the thread alive."""
+    import http.client
+    monkeypatch.setattr(ksc.urllib.request, "getproxies", dict)
+    real_connect = http.client.HTTPConnection.connect
+
+    def slow_connect(self):
+        time.sleep(1.3)  # health: allow HX013 -- a connect still in progress when the 1 s budget expires
+        real_connect(self)
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", slow_connect)
+    before = {t for t in threading.enumerate() if t.name == "kanban-bounded-call"}
+    with pytest.raises(TimeoutError):
+        ksc._bounded_call(ksc.Identity(url=server.url, key="k" * 16, gateway="gw"), "POST",
+                          "/v2/machines/me/metrics", {"cpus": 4, **CPU}, 1.0)
+    left = [t for t in threading.enumerate() if t.name == "kanban-bounded-call" and t not in before]
+    for t in left:
+        t.join(1.5)
+    assert not any(t.is_alive() for t in left), "a connect that finished after expiry left a trickling thread alive"

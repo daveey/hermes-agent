@@ -170,10 +170,40 @@ def _bounded_call(ident: Identity, method: str, path: str, body: Optional[dict],
     The request runs on a daemon thread whose own Hub carries the absolute deadline (every attempt's socket timeout
     is recomputed by ``Hub._remaining``). Waiting for that thread is bounded by the same deadline, so a response
     that trickles in byte by byte, each recv inside its timeout, still cannot hold the caller past ``budget_s``.
-    An abandoned thread ends at its next socket timeout (<= budget_s) and closes its connection."""
+    A trickle never trips a socket timeout, so on expiry the caller also shuts the request's socket down (or, if it
+    is still connecting, the connect does so itself): the abandoned thread's blocked recv returns at once and the
+    thread closes its connection. A POST is never resent, so nothing is retried on that socket. Name resolution
+    (getaddrinfo) cannot be interrupted; it is bounded by the system resolver's own timeouts."""
     deadline = time.monotonic() + budget_s
-    hub = Hub(ident, timeout=budget_s, deadline=deadline)
     box: dict = {}
+    expiry = _hub_threading.Lock()
+
+    def cut(conn) -> None:
+        import socket
+        sock = getattr(conn, "sock", None)
+        if sock is not None:
+            try:  # the base method: never touches an SSL object another thread is reading through
+                socket.socket.shutdown(sock, socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    class _Bounded(Hub):
+        def _connection(self, parts, timeout=None):
+            pair = super()._connection(parts, timeout)
+            conn = pair[0]
+            connect = conn.connect
+
+            def connect_then_check() -> None:
+                connect()
+                with expiry:
+                    if box.get("expired"):
+                        cut(conn)
+            conn.connect = connect_then_check
+            with expiry:
+                box["conn"] = conn
+            return pair
+
+    hub = _Bounded(ident, timeout=budget_s, deadline=deadline)
 
     def run() -> None:
         try:
@@ -187,6 +217,10 @@ def _bounded_call(ident: Identity, method: str, path: str, body: Optional[dict],
     worker.start()
     worker.join(max(0.0, deadline - time.monotonic()))
     if worker.is_alive():
+        with expiry:
+            box["expired"] = True
+            if "conn" in box:
+                cut(box["conn"])
         raise TimeoutError(f"Board request exceeded its {budget_s:g} s total budget")
     if "error" in box:
         raise box["error"]
