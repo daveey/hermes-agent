@@ -54,7 +54,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: state-contract-dispatch
+  # One group per event, so a scheduled or manual run never cancels a push run: ci_main_watch reads the newest
+  # push run on main, and a cancelled one with no newer push run reads as red.
+  group: state-contract-dispatch-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
