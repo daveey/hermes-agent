@@ -25,7 +25,7 @@ class Server:
                 n = int(self.headers.get("content-length") or 0)
                 outer.requests.append((self.path, self.rfile.read(n)))
                 if mode == "stall":
-                    time.sleep(4)
+                    time.sleep(4)  # health: allow HX013 -- the stalled server is the behaviour under test
                     body = b"{}"
                     self.send_response(200)
                     self.send_header("content-length", str(len(body)))
@@ -42,7 +42,7 @@ class Server:
                             self.wfile.flush()
                         except OSError:
                             return
-                        time.sleep(0.4)
+                        time.sleep(0.4)  # health: allow HX013 -- trickling bytes is the behaviour under test
                 else:
                     body = b'{"ok": true}'
                     self.send_response(200)

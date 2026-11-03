@@ -226,7 +226,7 @@ def test_simultaneous_claimers_at_6_of_7_start_at_most_one(board, monkeypatch):
         with gate_lock:
             return count["running"]
     monkeypatch.setattr(mm, "active_card_runs", active)
-    monkeypatch.setattr(cm, "sample", fake_sample(10.0, check=lambda: time.sleep(0.2)))
+    monkeypatch.setattr(cm, "sample", fake_sample(10.0, check=lambda: time.sleep(0.2)))  # health: allow HX013 -- stands in for the ~1 s sample held under the lock
     tasks = [task(conn, title=f"t{i}") for i in range(4)]
 
     def go(t):
@@ -266,7 +266,7 @@ def test_real_sample_is_entirely_under_lock_bounded_and_measures_chat_turn_cost(
 
     def chat_turn():
         started.wait(5)
-        time.sleep(0.2)  # inside the claim's ~1 s sample
+        time.sleep(0.2)  # health: allow HX013 -- positions the chat turn inside the claim's real ~1 s sample
         m["chat_try"] = time.monotonic()
         try:
             with af.admission_lock(home, timeout=backend_retirement.BUSY_WAIT_S):

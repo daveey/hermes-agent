@@ -155,7 +155,7 @@ def record_hub_cpu_sample(sample: dict, root: Optional[Path] = None) -> None:
 def read_hub_cpu_sample(root: Optional[Path] = None) -> Optional[dict]:
     import json
     try:
-        doc = json.loads(_hub_cpu_path(root).read_text(encoding="utf-8"))
+        doc = json.loads(_hub_cpu_path(root).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
     return doc if isinstance(doc, dict) else None
