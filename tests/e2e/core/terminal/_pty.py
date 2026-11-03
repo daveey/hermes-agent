@@ -305,9 +305,11 @@ class PtyHermes:
     def stop_gateway(self) -> None:
         """End this sandbox's shared runtime after its viewer exits.
 
-        /exit closes a viewer, not the gateway or its owner-death supervisor. End the actual
-        owner before asserting that its whole tree exited; never exempt the supervisor or
-        kill it directly, since it must remain alive to reap registered groups.
+        /exit closes a viewer, not the gateway or its owner-death supervisor: ``hermes chat``
+        attaches to the profile's ``gateway run``, which keeps serving (cron, messaging, the next
+        client), and its supervisor stays for an idle grace on purpose (``_SUPERVISOR_IDLE_EXIT_S``).
+        End the actual owner before asserting that its whole tree exited; never exempt the
+        supervisor or kill it directly, since it must remain alive to reap registered groups.
         """
         from gateway.status import looks_like_gateway_command_line
 

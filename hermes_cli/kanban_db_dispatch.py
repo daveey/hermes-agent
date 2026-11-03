@@ -203,6 +203,7 @@ class DispatchResult:
     ``offline``). The tick moves on to the next candidate; the stuck warning names these. [daveey]"""
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
+    capsule_refused: list[tuple[str, str]] = field(default_factory=list)  # (task_id, code): kanban_capsule_admission [daveey]
     remote_archived: list[str] = field(default_factory=list)
     """Task ids archived on a stop request from another gateway (``kanban_remote_stop``)."""
     auto_blocked: list[str] = field(default_factory=list)
@@ -2094,15 +2095,9 @@ def _dispatch_lane_task(
     skip is recorded on ``result``.
     """
     task_id = row["id"]
-    # Non-profile assignees (control-plane lanes that pull via ``claim_task``)
-    # would fail ``hermes -p <assignee>`` at startup and loop ready→crash→ready
-    # forever. Bucketed apart from skipped_unassigned: the operator cannot fix
-    # it by assigning a profile, and health telemetry suppresses "stuck" for it.
-    profile_exists = _profile_exists_fn()
-    if profile_exists is not None and not profile_exists(assignee):
-        result.skipped_nonspawnable.append(task_id)
-        from hermes_cli.kanban_db_dispatch_preclaim import note_nonspawnable
-        note_nonspawnable(conn, task_id, assignee, dry_run=dry_run)
+    from hermes_cli.kanban_db_dispatch_admission import lane_admission_refused  # nonspawnable, capsule [daveey]
+    if lane_admission_refused(conn, task_id, assignee, result, profile_exists=_profile_exists_fn(),
+                              spawn_fn=spawn_fn, dry_run=dry_run):
         return False
     # Per-profile cap: one profile's local model / API quota / browser pool
     # must not be overwhelmed by a fan-out even with global headroom.
@@ -2141,9 +2136,9 @@ def _dispatch_lane_task(
     if down is not None:
         result.owner_down.append((task_id, assignee, down.code))
         return False
-    from hermes_cli.kanban_gateway_drain import claim_if_admitting
+    from hermes_cli.kanban_db_dispatch_admission import admitted_claim  # + capsule recheck in the claim txn [daveey]
     _kb._sync.pop_claim_deferral(task_id)
-    claimed = claim_if_admitting(conn, task_id, assignee, lane, ttl_seconds)
+    claimed = admitted_claim(conn, task_id, assignee, lane, ttl_seconds, spawn_fn, result)
     if claimed is None:
         deferral = _kb._sync.pop_claim_deferral(task_id)
         if deferral is not None:  # the Board said no this tick: the caller moves on to the next candidate
@@ -2358,7 +2353,6 @@ def _tick_spawn_budget(
     return True, spawn_budget
 
 
-
 def _any_spawnable_review(
     conn: sqlite3.Connection,
     review_rows: list[sqlite3.Row],
@@ -2479,6 +2473,7 @@ def _dispatch_once_locked(
     # review card pinned to the hub sat first in the MacBook's review lane, took the review reservation every
     # tick, and the Board refused its lease every tick, so the eligible ready queue never started.
     all_ready = lane_rows(conn, "ready")
+    from hermes_cli.kanban_db_dispatch_preclaim import eligible_rows as _eligible_rows
     ready_rows = _eligible_rows(conn, all_ready, "ready", result)
     # Review rows are enumerated up front so the budget split can see whether
     # review work exists at all.
@@ -2564,22 +2559,6 @@ def _dispatch_once_locked(
     # back to the ready rows still waiting this tick.
     _run_ready(spawn_budget)
     return result
-
-
-def _eligible_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row], status: str,
-                   result: DispatchResult) -> list[sqlite3.Row]:
-    from hermes_cli.kanban_worker_node import dispatch_refusals
-    refused = dispatch_refusals(conn, status) if rows else {}
-    if not refused:
-        return rows
-    kept = []
-    for row in rows:
-        reason = refused.get(row["id"])
-        if reason is None:
-            kept.append(row)
-        else:
-            result.skipped_ineligible.append((row["id"], reason))
-    return kept
 
 
 def _positive_int(value: Any, default: int, *, minimum: int = 1) -> int:
@@ -2907,7 +2886,7 @@ def _restart_safe_worker_argv(task: Task, command: list[str], board: Optional[st
     return _aggregate_scope.bounded_scope(_worker_scope.apply_oom_recovery(argv, task.id, board))
 
 
-def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -> Optional[int]:
+def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, observation=None) -> Optional[int]:
     """Fire-and-forget ``hermes -p <profile> chat -q ...`` subprocess.
 
     Returns the child's PID so the dispatcher can detect crashes before the
@@ -2916,6 +2895,9 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     ``HERMES_KANBAN_DB`` / ``HERMES_KANBAN_BOARD`` / workspaces_root to the
     board the task was claimed from, so workers cannot see other boards.
     """
+    if observation is not None:
+        from native_attestations import host_only
+        host_only()
     if not task.assignee:
         raise ValueError(f"task {task.id} has no assignee")
 
@@ -3038,7 +3020,7 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     env = systemd_user_bus_env(env)
     log_f = _open_worker_log(task, board)
     try:
-        proc = subprocess.Popen(
+        proc = (observation or subprocess.Popen)(
             cmd,
             cwd=workspace if os.path.isdir(workspace) else None,
             stdin=subprocess.DEVNULL,
@@ -3048,6 +3030,9 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
             start_new_session=True,  # detached-spawn: ok — restart-safe kanban worker, must survive the dispatcher
             creationflags=subprocess.CREATE_NO_WINDOW if _kb._IS_WINDOWS else 0,
         )
+    except PermissionError:
+        log_f.close()
+        raise
     except FileNotFoundError:
         log_f.close()
         raise RuntimeError(

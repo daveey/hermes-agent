@@ -159,7 +159,7 @@ class GatewayStartupMixin:
                 source = getattr(event, "source", None)
                 adapter = self._intake_adapter_for(source)
                 if adapter is None:
-                    logger.debug(
+                    logger.warning(
                         "Dropping startup-restore queued message: adapter unavailable for %s",
                         getattr(getattr(source, "platform", None), "value", None),
                     )
@@ -1264,7 +1264,7 @@ class GatewayStartupMixin:
         """Create + wire an adapter per enabled platform (no connects). Returns
         (aborted, enabled_platform_count, multiplex_skipped_platforms, pending_connects)."""
         from gateway.run import _platform_has_bot_credential
-        from gateway.run_adapters import _adapter_unavailable_message
+        from gateway.run_adapter_status import adapter_unavailable_message
         enabled_platform_count = 0
         _multiplex_on = self._multiplex_on()
         _multiplex_skipped_platforms: list[Platform] = []
@@ -1305,7 +1305,7 @@ class GatewayStartupMixin:
                 self._update_platform_runtime_status(
                     platform.value, platform_state="retrying" if heals else "fatal",
                     error_code="adapter_unavailable",
-                    error_message=_adapter_unavailable_message(platform, retrying=heals),
+                    error_message=adapter_unavailable_message(platform, retrying=heals),
                     needs_attention=True,
                 )
                 if heals:
@@ -1874,6 +1874,9 @@ class GatewayStartupMixin:
             user_name="Handoff", thread_id=effective_thread_id, profile=profile_name,
             scope_id=scope_id,
         )
+        # The handoff turn answers through the queuing profile's own bot; naming it keeps the
+        # turn's authorization home and the saved receiving bot on that profile, not a primary guess.
+        self._canonicalize(dest_source, transport_profile=profile_name)
         return self._HandoffDestination(
             platform=platform, platform_name=platform_name, transport=transport, home=home,
             home_chat_id=home_chat_id, effective_thread_id=effective_thread_id, source=dest_source,

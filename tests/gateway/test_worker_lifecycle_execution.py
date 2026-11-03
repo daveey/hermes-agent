@@ -16,6 +16,7 @@ import pytest
 from tests.gateway.fixtures.local_recovery_probe import daemon, rpc, websocket
 from tests.gateway.test_worker_agent_execution import Model
 from tests.waiting import async_wait_until
+from tests.child_log import ChildLog
 
 
 @pytest.mark.platforms("linux")
@@ -66,7 +67,7 @@ def test_worker_lifecycle_then_owner_successor_refuses_late_mutations(tmp_path):
         with daemon(root, home, env, barrier=False) as (_, desc):
             sid, foreign = asyncio.run(create(desc))
             ready, receipt = tmp_path / 'ready.json', tmp_path / 'receipt.json'
-            with (tmp_path / 'worker.log').open('w+') as log:
+            with ChildLog(tmp_path / 'worker.log') as log:
                 proc = subprocess.Popen([sys.executable, str(root / 'tests/gateway/fixtures/lifecycle_persistence_worker.py')],
                     cwd=root, env=env, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT, text=True)
                 try:
@@ -76,8 +77,7 @@ def test_worker_lifecycle_then_owner_successor_refuses_late_mutations(tmp_path):
                     deadline = time.monotonic() + 60
                     while not ready.exists() and proc.poll() is None and time.monotonic() < deadline:
                         time.sleep(.05)
-                    log.seek(0)
-                    assert ready.exists(), log.read()
+                    assert ready.exists(), log.text()
                     before = rows(sid)
                     assert before['end_reason'] == 'agent_close' and before['title'] == 'worker-title'
                     asyncio.run(successor(desc, sid))
@@ -86,8 +86,7 @@ def test_worker_lifecycle_then_owner_successor_refuses_late_mutations(tmp_path):
                     proc.stdin.write('successor-settled\n')
                     proc.stdin.flush()
                     proc.wait(timeout=30)
-                    log.seek(0)
-                    assert proc.returncode == 0, log.read()
+                    assert proc.returncode == 0, log.text()
                     proof = json.loads(receipt.read_text())
                     assert proof['opens'] == [] and proof['fds'] == [], proof
                     assert set(proof['foreign'].values()) == {'permission_denied'}, proof

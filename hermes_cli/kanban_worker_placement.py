@@ -2,13 +2,21 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
+import sqlite3
 import time
+
+logger = logging.getLogger(__name__)
 
 POLICY = "worker-first-v1"
 WAITING = "waiting_for_worker_capacity"
 MAX_RESERVES_PER_TICK = 4
 DISPATCH_NETWORK_BUDGET_S = 2.0
+# A 409 not_claimable means the Board row moved on (leased, or not ready) and this copy has not pulled it yet.
+# Re-asking at the same revision every dispatcher tick only repeats the refusal; wait for a new revision instead.
+NOT_CLAIMABLE_BACKOFF_S = 600.0
+_refused: dict[tuple[str, str], tuple[int, float]] = {}  # (board, task) -> (refused revision, retry after)
 
 
 def creation_decision(args, cfg, gateway, pin, origin_intent):
@@ -118,19 +126,51 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
 
     attempted = 0
     last = None
+    pulled = []  # at most one feed pull per tick for not_claimable pickups (shared network budget)
+    # Every reserve below is made from this pre-loop copy, so a refusal is judged against it even after an in-loop
+    # pull moved a later row on: the refused row (fence) and the reservation it was waiting on.
+    before = {r["id"]: (queue.snapshot(conn, r["id"]), _reserved_machine(queue, conn, r["id"])) for r in rows}
+    now = time.monotonic()
     try:
         for row in rows:
             last = row["id"]
+            key = (board, row["id"])
+            held = _refused.get(key)
+            if held and held[0] == row["sync_version"] and now < held[1]:
+                continue  # refused not_claimable at this revision: wait for the feed, don't re-ask every tick
+            _refused.pop(key, None)
+            if len(_refused) > 1024:  # cards that left the query never come back to clear their entry
+                for stale in [k for k, (_, until) in _refused.items() if until <= now]:
+                    del _refused[stale]
+            labels = requested_move(conn, row["id"])
             try:
-                reply = hub.reserve(board, task_id=row["id"], expected_revision=row["sync_version"], candidates=candidates)
-                queue.try_record(queue.record_reply, conn, row["id"], gateway, reply)
+                if labels is not None:
+                    # A run moved this card (kanban_move). Its runs_on is Board-owned, so only the origin's
+                    # creator repin can apply that move; reserving would hand it straight back to the pool.
+                    reply = hub.repin(board, task_id=row["id"], expected_revision=row["sync_version"], runs_on=labels)
+                    try:
+                        _record_repin(conn, row["id"], gateway, labels, reply)
+                    except sqlite3.Error:
+                        logger.warning("repinned %s on the Board but could not record it locally", row["id"],
+                                       exc_info=True)
+                else:
+                    reply = hub.reserve(board, task_id=row["id"], expected_revision=row["sync_version"],
+                                        candidates=candidates)
+                    queue.try_record(queue.record_reply, conn, row["id"], gateway, reply)
                 attempted += 1
             except OSError as exc:
                 # An unavailable transport applies to the entire batch, not just this card.
                 queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc)
                 return attempted
             except client.HubError as exc:
-                queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc)
+                fence = None
+                if rejection_code(exc) == "not_claimable":
+                    # The Board already has it leased or not ready: our copy is behind. Back off at this revision.
+                    _refused[key] = (row["sync_version"], now + NOT_CLAIMABLE_BACKOFF_S)
+                    fence, machine = before[row["id"]]
+                    if picked_up(conn, hub, board, gateway, row["id"], machine, pulled):
+                        continue  # the worker we reserved already claimed it: a pickup, not a refusal
+                queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc, fence=fence)
                 # Refused revisions still advance the local cursor, but never the feed.
                 continue
     finally:
@@ -142,6 +182,90 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
     if attempted:
         client.pull(conn, hub, board, observers=True, partition=gateway)
     return attempted
+
+
+def _reserved_machine(queue, conn, task_id):
+    """The machine of the current assignment observation (the Board's reserve reply), or None."""
+    value = queue.latest(conn, task_id) or {}
+    return value.get("machine") if value.get("state") == "assigned" and value.get("current") else None
+
+
+def picked_up(conn, hub, board, gateway, task_id, machine, pulled):
+    """Whether a ``not_claimable`` reserve only lost the race to ``machine``, the worker this origin reserved.
+
+    The Board leases the card to its reserved worker and drops the reservation in one write, so a reserve made from
+    a copy that has not pulled that lease is refused. Pull the feed (once per tick: ``pulled`` remembers it) and
+    look for the lease, or a Board ``claimed`` event newer than the reservation, held by the reserved machine.
+    Anything else (no current reservation, a failed pull, another holder) stays a refusal.
+    """
+    from hermes_cli import kanban_queue_reason as queue
+    from hermes_cli import kanban_sync_client as client
+
+    if not machine:
+        return False
+    if not pulled:
+        pulled.append(True)
+        try:
+            client.pull(conn, hub, board, observers=True, partition=gateway)
+        except Exception as exc:  # health: allow BLE001 -- a failed pull keeps the refusal; never abort the batch
+            logger.warning("feed pull after not_claimable failed (%s)", type(exc).__name__)
+            return False
+    row = conn.execute("SELECT lease_holder FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is not None and row["lease_holder"] == machine:
+        return True
+    since = conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events WHERE task_id=? AND kind=?",
+                         (task_id, queue.EVENT)).fetchone()[0]
+    claim = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='claimed' AND id>? AND json_valid(payload) "
+        "AND json_extract(payload, '$.holder') IS NOT NULL ORDER BY id DESC LIMIT 1", (task_id, since)).fetchone()
+    return bool(claim and json.loads(claim[0]).get("holder") == machine)
+
+
+def rejection_code(exc):
+    """The Board's rejection code from a HubError body (``{"error": "<code>"}``), or None."""
+    try:
+        body = json.loads(exc.detail)
+    except (TypeError, ValueError):
+        return None
+    code = body.get("error") if isinstance(body, dict) else None
+    return code if isinstance(code, str) else None
+
+
+def requested_move(conn, task_id):
+    """Labels of the latest unapplied ``kanban_move`` of a policy card, or None.
+
+    A pool worker's run cannot change a worker-first card's ``runs_on`` (Board-owned: the outbox strips it and the
+    Board fences the edit), so its ``moved`` event is the request; the origin applies it with the creator repin,
+    which writes a ``moved`` event flagged ``repinned``. The latest event decides, so an applied move never replays.
+    """
+    from hermes_cli import kanban_move as km
+    from hermes_cli import kanban_worker_node as node
+
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind=? AND json_valid(payload) "
+        "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id, km.MOVED_EVENT)).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row[0])
+        if not isinstance(payload, dict) or payload.get("repinned"):
+            return None
+        labels = node.normalize_runs_on(payload.get("runs_on"))
+    except (TypeError, ValueError):
+        return None
+    return labels or None
+
+
+def _record_repin(conn, task_id, gateway, labels, reply):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_move as km
+    from hermes_cli.kanban_worker_repin import REPINNED_EVENT_FLAG
+
+    version = reply.get("version") if isinstance(reply, dict) else None
+    with kb.write_txn(conn):
+        kb._append_event(conn, task_id, km.MOVED_EVENT, {
+            "from_machine": gateway, "runs_on": labels, "reason": "applied the run's kanban_move as the creator repin",
+            "queued": True, REPINNED_EVENT_FLAG: True, "board_version": version})
 
 
 def acknowledged_outbox(row, task):

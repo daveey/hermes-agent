@@ -2,8 +2,9 @@
 un-acked prompt's input_id, and a slash control's retry keeps its prepared request_id."""
 import asyncio
 
-import acp
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
+import acp
 
 from hermes_cli.gateway_client import GatewayClientError
 from hermes_state_runtime import list_session_admissions

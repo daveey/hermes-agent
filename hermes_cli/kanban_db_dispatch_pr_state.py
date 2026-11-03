@@ -303,11 +303,29 @@ def _foreign_pr_comment_ids(conn: sqlite3.Connection, task_id: str) -> set[int]:
     return foreign
 
 
-def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int) -> bool:
+def _park_watermark_covers(conn: sqlite3.Connection, task_id: str, evidence: object,
+                           latest_pr_comment_id: int) -> bool:
+    """True when the park's authenticated comment watermark includes the newest PR comment.
+
+    The watermark is a row id on the host that parked; map it to the local row first
+    (replica cards). A watermark naming no single local row proves nothing.
+    """
+    watermark = evidence.get("comment_id_at_checkpoint") if isinstance(evidence, dict) else None
+    if type(watermark) is not int or watermark <= 0 or latest_pr_comment_id <= 0:
+        return False
+    local = _local_comment_id(conn, task_id, watermark)
+    return local is not None and local >= latest_pr_comment_id
+
+
+def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int,
+                              latest_pr_comment_id: int = 0) -> bool:
     """A claimed owner's orderly dependency park permits exactly one continuation.
 
     Operator links/synthetic runs are not owner intent. Compare occurrence times,
     not insertion order: synced history can append older events after promotion.
+    A park in the same second as the newest PR comment counts only when the park's
+    server-stamped comment watermark covers that comment (the owner reported, then
+    parked); without it the tie stays guarded.
     """
     from hermes_cli import kanban_db as kb
 
@@ -346,9 +364,11 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
     from hermes_cli.kanban_dependency_review import _checkpoint_matches_run
     if not _checkpoint_matches_run(evidence, run):
         return False
-    if (parked_at <= since or ended is None or ended < since
+    if (parked_at < since or ended is None or ended < since
             or payload.get("kind") != "dependency" or payload.get("source_status") not in {"ready", "review"}):
         return False
+    if parked_at == since and not _park_watermark_covers(conn, task_id, evidence, latest_pr_comment_id):
+        return False  # same-second tie with no ordering proof stays guarded (fail closed)
     if not any(e["kind"] == "claimed" and e["run_id"] == run["id"] and at <= parked_at
                for at, e in timed):
         return False
@@ -373,8 +393,8 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
     if not _awaited_parents(conn, parents, evidence, parked_at):
         return False
     awaited = evidence.get("awaited")
-    # Review results, including incomplete/invalid verdicts, belong exclusively to
-    # resumes_review. An ordering handoff must not bypass its exact-head checks.
+    # Results is_review_result calls reviews (incomplete or invalid verdicts included)
+    # belong to resumes_review: this handoff must not bypass its exact-head checks. [daveey]
     for parent in parents:
         result = conn.execute(
             "SELECT metadata, summary FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (parent,),
@@ -407,7 +427,8 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     one continuation after parent completion/promotion: it must belong to the latest
     claimed run of this card and assignee, ended orderly as blocked, with no subsequent
     crash/reclaim/timeout. Operator-only links or synthetic unclaimed runs do not count;
-    the next claim consumes the handoff. Same-second dependency parks stay guarded.
+    the next claim consumes the handoff. A same-second dependency park counts only when
+    its server-stamped comment watermark covers the newest PR comment; otherwise it stays guarded.
     This does not change the separate review-checkpoint exception below. So does
     a completed exact-head review of the checkpointed PRs (repair metadata, including
     absent/unrecognised verdicts, or an approval
@@ -477,7 +498,7 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
             "'continued', 'scheduled')",
             cols=", kind, payload", strict=True)):
         return None
-    if _dependency_handoff_after(conn, task_id, max(pr_times)):
+    if _dependency_handoff_after(conn, task_id, max(pr_times), latest_pr_comment_id):
         return None
     from hermes_cli.kanban_dependency_review import resumes_review
     if resumes_review(conn, task_id, pr_urls):

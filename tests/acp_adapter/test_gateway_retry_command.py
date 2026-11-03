@@ -8,8 +8,9 @@ import asyncio
 import contextlib
 from types import SimpleNamespace
 
-import acp
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
+import acp
 
 from acp_adapter.gateway_server import GatewayACPAgent
 from gateway.config import GatewayConfig

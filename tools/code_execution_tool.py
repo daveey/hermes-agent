@@ -783,6 +783,15 @@ def execute_code(
     if _guard.get("user_approved"):
         from tools.interrupt import clear_current_thread_interrupt
         clear_current_thread_interrupt()
+    # Local session kernels bypass environment construction; enforce capsule revocation
+    # before choosing either dispatch path, not only at the Docker constructor.
+    from tools.capsule_workspace import CapsuleWorkspaceError, current_binding
+    try:
+        binding = current_binding()
+    except CapsuleWorkspaceError as exc:
+        return tool_error(f"execute_code refused: {exc}")
+    if binding is not None and env_type == "local":
+        return tool_error("execute_code refused: capsule workers cannot use the local host kernel")
     from hermes_cli.observability.shared_metrics_loop import record_execution_backend
     if env_type != "local":
         return record_execution_backend("code", "remote", _execute_remote(code, task_id, enabled_tools, reset=bool(reset)))

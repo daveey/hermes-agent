@@ -21,6 +21,7 @@ from hermes_cli.gateway_session_store import GatewaySessionStore
 from hermes_cli.profiles import parked_marker_path
 from tests.gateway.fixtures.local_recovery_probe import Model, child_env
 from tests.waiting import wait_until
+from tests.child_log import ChildLog
 
 
 @pytest.fixture
@@ -47,7 +48,7 @@ def local_gateway(tmp_path, monkeypatch):
                    PYTHONPATH=str(root), OPENAI_API_KEY="loopback-only", OPENAI_BASE_URL=url,
                    # This child owns a disposable default root; it is reaped below.
                    HERMES_STATE_DB_GUARD_BYPASS="1")
-        log = (home / f"fixture-gateway-{len(children)}.log").open("w+", encoding="utf-8")
+        log = ChildLog(home / f"fixture-gateway-{len(children)}.log")
         logs.append(log)
         process = subprocess.Popen([sys.executable, "-m", "gateway.run"], cwd=root, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
@@ -80,14 +81,12 @@ def local_gateway(tmp_path, monkeypatch):
         for process in children:
             if process.poll() is not None and process.returncode:
                 log = logs[children.index(process)]
-                log.seek(0)
-                print(log.read())
+                print(log.text())
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=10)
         for log in logs:
-            log.seek(0)
-            print(log.read()[-6000:])
+            print(log.text()[-6000:])
             log.close()
         peer.release.set()
         peer.shutdown()

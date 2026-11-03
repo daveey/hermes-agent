@@ -1,8 +1,9 @@
 """The ACP transport owns neither MCP discovery nor a surviving client socket."""
 import asyncio
 
-import acp
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
+import acp
 
 from acp_adapter import entry
 from acp_adapter.gateway_server import GatewayACPAgent

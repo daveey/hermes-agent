@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import time
+from tests.child_log import ChildLog
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -40,7 +41,7 @@ def running_owner(tmp_path: Path, model_peer, *, prepare=None, extra_env=None):
     if prepare is not None:
         prepare(home)
     env = {**owner_env(home, user, model_url), **(extra_env or {})}
-    with (tmp_path / 'gateway.log').open('w+') as log:
+    with ChildLog(tmp_path / 'gateway.log') as log:
         process = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=ROOT, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
@@ -53,9 +54,7 @@ def running_owner(tmp_path: Path, model_peer, *, prepare=None, extra_env=None):
                 except (OSError, ValueError, AssertionError):
                     pass
                 time.sleep(.1)
-            log.flush()
-            log.seek(0)
-            assert descriptor.get('state') == 'ready', (descriptor, log.read())
+            assert descriptor.get('state') == 'ready', (descriptor, log.text())
             yield home, descriptor, env
         finally:
             if process.poll() is None:

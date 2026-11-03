@@ -1227,6 +1227,7 @@ def create_task(
     requires: Optional[list[str]] = None,
     lint_blocked: bool = True, runs_on: Optional[Iterable[str]] = None, require_declaration: bool = False,
     placement_policy: Optional[str] = None,
+    insert_guard: Optional[Callable[[sqlite3.Connection], None]] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1236,6 +1237,7 @@ def create_task(
     ``validate_workspace=True`` (agent/CLI create surfaces) rejects a non-project ``worktree`` workspace
     that could never resolve at spawn (``WorktreeWorkspaceConfigError``); ``validate_skills=True`` rejects
     a pinned skill the assignee cannot load (``UnknownSkillError``). [daveey] ``runs_on``: placement labels.
+    ``insert_guard``: see ``kanban_db_creation.run_insert_guard`` (the overlap re-check under the write lock).
 
     Status: ``ready`` unless a parent is not ``done`` (``todo``); ``triage=True``
     forces ``triage``; ``initial_status="blocked"`` parks it for human ops.
@@ -1335,10 +1337,10 @@ def create_task(
         if board_default:
             workspace_path = str(board_default)
 
-    from hermes_cli.kanban_db_creation import validate_create_assignment  # [daveey] runs_on-aware
+    from hermes_cli.kanban_db_creation import project_branch_name, run_insert_guard, validate_create_assignment
     required, model_override, provider_override = validate_create_assignment(
-        conn, assignee, runs_on=runs_on, requires=requires, workspace_kind=workspace_kind,
-        workspace_path=workspace_path, skills=skills_list, validate_skills=validate_skills,
+        conn, assignee, runs_on=runs_on, requires=requires, workspace_kind=workspace_kind, project_id=project_id,
+        workspace_path=workspace_path, skills=skills_list, validate_skills=validate_skills, project_repo=project_repo,
         require_declaration=require_declaration, model=model_override, provider=provider_override)
     from hermes_cli.kanban_pin_provider import reject_spaced_pin
     reject_spaced_pin(model_override, provider_override)
@@ -1350,6 +1352,7 @@ def create_task(
             # allow_nested: graph builders compose create_task under one outer
             # commit so the dispatcher never sees a half-built graph.
             with write_txn(conn, allow_nested=True):
+                run_insert_guard(conn, insert_guard)
                 task_status, tenant = initial_task_state(conn, parents, initial_status, triage, tenant)
                 # Project worktree: fresh dir under the repo + deterministic
                 # branch, instead of the random ``wt/<id>`` worker fallback.
@@ -1357,7 +1360,7 @@ def create_task(
                     if project_repo and not workspace_path:
                         workspace_path = os.path.join(project_repo, ".worktrees", task_id)
                     if not branch_name:
-                        branch_name = _project_branch_name(project_obj, task_id, title)
+                        branch_name = project_branch_name(project_obj, task_id, title)
 
                 conn.execute(
                     """
@@ -1405,15 +1408,6 @@ def create_task(
 
 def _board_meta_for(board: Optional[str]) -> dict:
     return read_board_metadata(board if board else get_current_board())
-
-
-def _project_branch_name(project_obj: Any, task_id: str, title: Optional[str]) -> Optional[str]:
-    from hermes_cli import projects_db as _pdb
-
-    try:
-        return _pdb.branch_name_for(project_obj, task_id, title=title or "")
-    except Exception:
-        return None
 
 
 def _link(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
@@ -2184,12 +2178,12 @@ def unsatisfied_parents(conn: sqlite3.Connection, task_id: str) -> list[tuple[st
 
 def claim_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
+    claimer: Optional[str] = None, admission_check=None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
-    Returns the claimed ``Task`` on success, ``None`` if the task was
-    already claimed (or is not in ``ready`` status).
+    Returns the claimed ``Task``; ``None`` if already claimed, not ``ready``, or the write-free
+    ``admission_check()`` (run in the claim txn before any write) refused it. [daveey]
     """
     now = int(time.time())
     lock = claimer or _claimer_id()
@@ -2201,7 +2195,7 @@ def claim_task(
     if gate.deferred:
         return None
     with gate, claim_transaction(conn, task_id=task_id, gate=gate) as admitted:
-        if not admitted:
+        if not admitted or (admission_check is not None and admission_check()):  # [daveey] same txn as the CAS
             return None
         # Single enforcement point: never ready -> running with an undone
         # parent, whichever writer set 'ready'. Demote to 'todo';
@@ -2227,11 +2221,11 @@ def claim_task(
 
 def claim_review_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
+    claimer: Optional[str] = None, admission_check=None,
 ) -> Optional[Task]:
     """Atomic ``review -> running`` (None when lost). Parents are re-checked
     (one may have reopened meanwhile) and a NEW run tracks the reviewer
-    separately from the implementer."""
+    separately from the implementer. ``admission_check``: as :func:`claim_task`."""
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
@@ -2241,7 +2235,7 @@ def claim_review_task(
     if gate.deferred:
         return None
     with gate, claim_transaction(conn, task_id=task_id, gate=gate) as admitted:
-        if not admitted:
+        if not admitted or (admission_check is not None and admission_check()):  # [daveey] same txn as the CAS
             return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(

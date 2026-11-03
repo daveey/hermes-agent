@@ -6,6 +6,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp.schema import ImageContentBlock, TextContentBlock
 
 from acp_adapter.gateway_server import GatewayACPAgent

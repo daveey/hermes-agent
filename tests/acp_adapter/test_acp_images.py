@@ -1,4 +1,5 @@
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp.schema import (
     ImageContentBlock,
     ResourceContentBlock,

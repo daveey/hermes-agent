@@ -1,6 +1,7 @@
 """Regression for #139165: ACP picker identity reaches canonical model mutations."""
 import pytest
 
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp_adapter.gateway_server import GatewayACPAgent
 
 

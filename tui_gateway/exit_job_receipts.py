@@ -76,14 +76,16 @@ def fence_exit_notices(sessions=None) -> None:
     notice journaled for the next backend is not also delivered by this one. One-way; only the exit calls it."""
     from tui_gateway import server
     # Raised only under ``_sessions_lock`` (reentrant): a notice turn's start commits under it
-    # (``start_synthesized_turn``), so each start lands wholly before the fence or is refused after it.
+    # (``start_synthesized_turn``), so each start lands wholly before the fence or is refused after it. Lock order
+    # is ``history_lock`` -> ``_sessions_lock`` (session.resume holds history_lock while it takes _sessions_lock),
+    # so each session is fenced under its own history_lock first.
     with server._sessions_lock:
         if sessions is None:
             sessions = list(server._sessions.items())
-        for _sid, session in sessions:
-            with session.get("history_lock") or contextlib.nullcontext():
-                session.setdefault(USER_STOP_AT_EXIT, bool(session.get("_turn_cancel_requested")))
-                session[EXIT_FENCE] = True
+    for _sid, session in sessions:
+        with session.get("history_lock") or contextlib.nullcontext(), server._sessions_lock:
+            session.setdefault(USER_STOP_AT_EXIT, bool(session.get("_turn_cancel_requested")))
+            session[EXIT_FENCE] = True
 
 
 def _user_stopped(session: dict) -> bool:

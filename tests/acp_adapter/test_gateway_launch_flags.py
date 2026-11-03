@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp_adapter.gateway_server import GatewayACPAgent
 
 _ENV = ('HERMES_YOLO_MODE', 'HERMES_SAFE_MODE', 'HERMES_IGNORE_USER_CONFIG', 'HERMES_IGNORE_RULES',

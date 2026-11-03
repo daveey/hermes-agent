@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 
 import pytest
 from websockets.asyncio.client import connect
+from tests.child_log import ChildLog
 
 ROOT = Path(__file__).resolve().parents[2]
 # Windows children need the system environment (Winsock, temp, PATHEXT) that the
@@ -164,7 +165,7 @@ def planned_stop(home, proc, desc):
 @contextmanager
 def daemon(home, env, log_name, *, fixture=None, expect_ready=True):
     command = [sys.executable, str(ROOT / 'tests/gateway/fixtures' / fixture)] if fixture else [sys.executable, '-m', 'gateway.run']
-    with (home.parent / log_name).open('w+', encoding='utf-8', errors='replace') as log:
+    with ChildLog(home.parent / log_name) as log:
         proc = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
             desc = {}
@@ -178,7 +179,6 @@ def daemon(home, env, log_name, *, fixture=None, expect_ready=True):
                     pass
                 time.sleep(.1)
             if expect_ready:
-                log.flush(); log.seek(0)
                 detail = {name: (home / 'logs' / name).read_text(encoding='utf-8', errors='replace')[-6000:]
                           for name in ('gateway.log',) if (home / 'logs' / name).exists()}
                 stacks = home / 'logs' / 'stacks.txt'
@@ -188,7 +188,7 @@ def daemon(home, env, log_name, *, fixture=None, expect_ready=True):
                     artifacts.mkdir(parents=True, exist_ok=True)
                     (artifacts / f'stacks-{proc.pid}.txt').write_text(stacks.read_text(encoding='utf-8', errors='replace'), encoding='utf-8')
                     detail['stacks.txt'] = stacks.read_text(encoding='utf-8', errors='replace')
-                assert desc.get('state') == 'ready', (json.dumps(desc, default=str), proc.poll(), log.read()[-3000:], detail)
+                assert desc.get('state') == 'ready', (json.dumps(desc, default=str), proc.poll(), log.text()[-3000:], detail)
             yield proc, desc, log
         finally:
             if proc.poll() is None:
@@ -382,7 +382,7 @@ def test_native_gateway_runtime_live(harness):
         with pytest.raises(OwnershipConflict):
             with exclusive_maintenance([home]):
                 pass
-        with (home.parent / 'second.log').open('w+', encoding='utf-8', errors='replace') as log:
+        with ChildLog(home.parent / 'second.log') as log:
             second = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=ROOT, env=env,
                                       stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
             try:
@@ -390,8 +390,7 @@ def test_native_gateway_runtime_live(harness):
             except subprocess.TimeoutExpired:
                 second.kill(); second.wait(timeout=20)
                 raise AssertionError('second gateway did not refuse while the first owns gateway.lock')
-            log.flush(); log.seek(0)
-            text = log.read()
+            text = log.text()
         # One gateway per host: a second `gateway run` for a profile the live owner already serves
         # ATTACHES (exit 0, spawns nothing) rather than starting a second process; only a launch the
         # owner cannot serve is refused non-zero. Either way the owner keeps the lock and its identity.

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp.schema import AllowedOutcome
 from websockets.exceptions import ConnectionClosed
 

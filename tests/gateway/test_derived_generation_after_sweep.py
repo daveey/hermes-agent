@@ -9,6 +9,7 @@ and split the conversation across two sessions.
 from types import SimpleNamespace
 
 import pytest
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 

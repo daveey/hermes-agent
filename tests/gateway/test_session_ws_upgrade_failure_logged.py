@@ -18,6 +18,7 @@ import pytest
 
 from tests.gateway.test_normal_runtime_boot import control
 from tests.waiting import wait_until
+from tests.child_log import ChildLog
 
 # The owner, with ``tui_gateway.ws.handle_ws`` failing the way the unimportable onboarding module did.
 _BROKEN_OWNER = textwrap.dedent('''
@@ -65,7 +66,7 @@ def test_a_failed_session_upgrade_is_logged_with_its_cause(tmp_path):
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED') if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home),
                PYTHONPATH=str(root), PYTHONUNBUFFERED='1', OPENAI_API_KEY='loopback-only')
-    with (tmp_path / 'owner.out').open('w+') as out:
+    with ChildLog(tmp_path / 'owner.out') as out:
         owner = subprocess.Popen([sys.executable, '-c', _BROKEN_OWNER], cwd=root, env=env,
                                  stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
         try:
@@ -84,9 +85,7 @@ def test_a_failed_session_upgrade_is_logged_with_its_cause(tmp_path):
                 outcome = wait_until(ready_or_exited, timeout=35, what='the owner to be ready')
             except AssertionError as exc:
                 outcome = str(exc)
-            out.flush()
-            out.seek(0)
-            assert outcome == 'ready', (outcome, descriptor, out.read())
+            assert outcome == 'ready', (outcome, descriptor, out.text())
             dialed = subprocess.run([sys.executable, '-c', _DIALS], cwd=root, env=env, capture_output=True,
                                     text=True, timeout=60, check=False)
             assert dialed.returncode == 0, dialed.stderr

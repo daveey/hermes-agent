@@ -94,6 +94,9 @@ def _exit_after_oneshot(rc: object) -> None:
         logging.shutdown()
     except Exception:
         pass
+    observer = sys.modules.get("observer_runtime")
+    if observer is not None:
+        rc = observer.finish_oneshot(rc)
     os._exit(rc if isinstance(rc, int) else (0 if rc is None else 1))
 
 
@@ -617,21 +620,15 @@ if sys.argv[1:2] == ["pm"]:
 
     raise SystemExit(_pm_main(sys.argv[2:]))
 
-# Windows launcher self-heal — the ``hermes`` command is a COPY of the venv
-# console script staged into the managed bin dir (outside the checkout, since
-# ``hermes update``'s autostash once swept ``<checkout>\bin`` copies off disk;
-# venv\Scripts must stay off PATH as it shadows the user's ``python``).
-# Re-staging at process start reaches already-broken installs via the desktop
-# app's ``python -m hermes_cli.main`` spawn. Gates fail toward inaction. Sits
-# AFTER the profile override on purpose — no hermes module may import before
-# profiles resolve; the helper anchors on the DEFAULT root, so profile
-# sessions heal the same shared dir.
-# That dir lives OUTSIDE the git checkout precisely because an earlier layout staged the copies at
-# ``<checkout>\bin``, where ``hermes update``'s autostash (``git stash push --include-untracked``) swept
-# them off disk; with the desktop updater's ``--keep-stash`` nothing restored them and ``hermes`` stopped
-# resolving in every new terminal (venv\Scripts itself must stay off PATH — it shadows the user's
-# ``python``, #83797). Costs a few stat calls when healthy; gates fail toward inaction so source checkouts
-# are untouched.
+# Windows launcher self-heal: the ``hermes`` command is a COPY of the venv console script staged into
+# the managed bin dir, outside the checkout because ``hermes update``'s autostash (``git stash push
+# --include-untracked``) once swept ``<checkout>\bin`` copies off disk, the desktop updater's
+# ``--keep-stash`` never restored them, and ``hermes`` stopped resolving (venv\Scripts must stay off
+# PATH: it shadows the user's ``python``, #83797). Re-staging at process start reaches already-broken
+# installs via the desktop app's ``python -m hermes_cli.main`` spawn. Sits AFTER the profile override
+# on purpose (no hermes module may import before profiles resolve); the helper anchors on the DEFAULT
+# root, so profile sessions heal the same shared dir. A few stat calls when healthy; gates fail toward
+# inaction so source checkouts are untouched.
 if sys.platform == "win32":
     try:
         from hermes_cli import _install_repair as _install_repair_mod
@@ -678,6 +675,11 @@ try:
     del _cfg_path
 except Exception:
     pass  # best-effort — redaction stays at default (enabled) on config errors
+
+# Servers cap glibc malloc arenas HERE, before any thread exists: glibc latches its limit later.
+from hermes_cli.resource_limits import apply_malloc_arena_max, server_process_argv
+if server_process_argv(sys.argv[1:]):
+    apply_malloc_arena_max()
 
 # Centralized file logging for every subcommand (agent.log + errors.log).
 # Dashboard entrypoints use GUI mode so gui.log captures pre-dispatch failures.
@@ -1066,29 +1068,6 @@ def _has_any_provider_configured(*, strict_profile_scope: bool = False) -> bool:
     return False
 
 
-def _reject_startup_spaced_model(explicit_model: str, explicit_provider: str, model_cfg: dict) -> None:
-    """``-m`` gets the ``/model`` whitespace rule before any API call [daveey].
-
-    A shell loop that fails to split a list passes every id as one ``-m`` value; a cloud provider
-    then 404s it (or a fallback chain answers on a different model and the probe "passes").
-    The configured base_url only counts when it belongs to the provider being used.
-    """
-    if not explicit_model or not any(ch.isspace() for ch in explicit_model):
-        return
-    cfg_provider = str(model_cfg.get("provider") or "").strip()
-    provider = explicit_provider or cfg_provider
-    base_url = str(model_cfg.get("base_url") or "").strip()
-    if explicit_provider and explicit_provider != cfg_provider:
-        base_url = ""
-    from hermes_cli.models_validate import model_whitespace_error
-
-    if model_whitespace_error(explicit_model, provider, base_url or None):
-        sys.stderr.write(
-            f"Model names cannot contain spaces. Pass one model per run.\n  got: -m {explicit_model!r}\n"
-        )
-        raise SystemExit(2)
-
-
 def _confirm_startup_expensive_model_override(args) -> None:
     """Guard startup -m/--provider overrides before the first API call."""
     explicit_model = (getattr(args, "model", None) or "").strip()
@@ -1115,7 +1094,8 @@ def _confirm_startup_expensive_model_override(args) -> None:
     config = _dict(config)
     model_cfg = _dict(config.get("model"))
     security_cfg = _dict(config.get("security"))
-    _reject_startup_spaced_model(explicit_model, explicit_provider, model_cfg)
+    from hermes_cli.main_model_arg import reject_startup_spaced_model
+    reject_startup_spaced_model(explicit_model, explicit_provider, model_cfg)
 
     model = explicit_model or (model_cfg.get("default") or "").strip()
     if not model:
@@ -2370,7 +2350,6 @@ def cmd_update(args):
     finally:
         _update_lock.release()
         _finalize_update_output(_update_io_state)
-
 
 
 def _coalesce_session_name_args(argv: list) -> list:

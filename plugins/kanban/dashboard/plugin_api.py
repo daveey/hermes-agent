@@ -465,7 +465,11 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             raise HTTPException(status_code=409, detail=json.loads(refused))
         from plugins.kanban.dashboard.plugin_api_human_request import check_create_ask
         check_create_ask(conn, payload)
-        task_id = kanban_db.create_task(conn, created_by="dashboard", board=board, **fields)
+        try:  # the guard re-checks overlap under the write lock [daveey]
+            task_id = kanban_db.create_task(conn, created_by="dashboard", board=board,
+                                            insert_guard=after_create.guard, **fields)
+        except kanban_overlap.OverlapRefused as exc:
+            raise HTTPException(status_code=409, detail=json.loads(exc.settle()))
         after_create(conn, task_id)
         task = kanban_db.get_task(conn, task_id)
         body: dict[str, Any] = {"task": _task_dict(

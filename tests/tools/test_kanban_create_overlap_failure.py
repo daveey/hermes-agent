@@ -38,11 +38,11 @@ def owner(cid: str, *, status: str = "ready", body_field: str = "body") -> str:
     return tid
 
 
-def remote(tmp_path, cids, status="ready"):
+def remote(tmp_path, cids, status="ready", body_field="body"):
     """The real cards as other-gateway rows of the hermes-hub replica, under their real ids."""
     (tmp_path / "hub-state" / "hub.db").unlink(missing_ok=True)
     helpers._fake_replica(tmp_path / "hub-state" / "hub.db", [
-        ("macbook", {"id": cid, "board": "default", "title": CASES[cid]["title"], "body": CASES[cid]["body"],
+        ("macbook", {"id": cid, "board": "default", "title": CASES[cid]["title"], "body": CASES[cid][body_field],
                      "status": status, "gateway": "macbook", "sessions": [{"session": f"chat-{cid}", "rel": "created"}]})
         for cid in cids])
 
@@ -137,6 +137,92 @@ def test_real_non_duplicate_pairs_have_no_failure_match(home, tmp_path, new, old
     else:
         remote(tmp_path, [old])
     assert failure_whys(check(new)) == []
+
+
+# --- A ci-main-watch FAILED list keeps the same-CI-run rule (t_01a1a05806da4ef0) ----------------------------------
+# ci_main_watch writes the run's ``failed tests:`` block into every red-main card. That list is the whole run's
+# failures, not a test the card is about, so the owner still owns the run: the five same-run duplicates #732's replay
+# refused must stay refused once the owner carries it. ``body_listed`` blocks: run 40785006949 from its real job log
+# (ci_main_watch.failed_tests); run 39886244584's logs are gone (HTTP 410), so its node ids are the ones
+# t_7cf84718, t_e37a86df and t_62ce7dc1 quote for that run.
+SAME_RUN_DUPLICATES = [
+    ("t_01a18505110a5892", "t_01a18504581b2063", "40785006949"),  # flaky test of the streak card's run
+    ("t_01a18507649f5425", "t_01a18504581b2063", "40785006949"),  # "finish the CI green-run watch" = its goal
+    ("t_88f89e55", "t_bdb6c497", "39886244584"),  # JS & TS job of the red-main run
+    ("t_ebcc8f52", "t_bdb6c497", "39833033437"),  # Nix job of the red run
+    ("t_4129a258", "t_bdb6c497", "39833033372"),  # Docker job of the red run
+]
+
+
+@pytest.mark.parametrize("body_field", ["body", "body_listed"])
+@pytest.mark.parametrize("where", ["local", "replica"])
+@pytest.mark.parametrize("new,old,run", SAME_RUN_DUPLICATES)
+def test_same_run_duplicate_is_refused_whether_or_not_the_owner_lists_failed_tests(home, tmp_path, new, old, run,
+                                                                                    where, body_field):
+    if where == "local":
+        tid = owner(old, body_field=body_field)
+    else:
+        remote(tmp_path, [old], body_field=body_field)
+        tid = old
+    result = check(new)
+    assert result and result["code"] == "create_overlap", (new, body_field)
+    assert [m["id"] for m in result["matches"]] == [tid]
+    assert result["matches"][0]["why"] == f"same CI run actions/runs/{run}"  # no claimed title overlap
+
+
+def test_listed_tests_are_marked_and_still_match_a_card_naming_one():
+    listed = ko.failure_identity(CASES["t_01a18504581b2063"]["title"], CASES["t_01a18504581b2063"]["body_listed"])
+    assert listed.listed and "test_session_resume_deferred_history_close_cancels_build" in listed.tests
+    assert not ko.failure_identity(CASES["t_47d51eb4"]["title"], CASES["t_47d51eb4"]["body"]).listed
+    named = ko.failure_identity("Fix tests/tui_gateway/test_tui_gateway_server.py::"
+                                "test_session_resume_deferred_history_close_cancels_build", "")
+    assert ko.same_failure(named, listed) == "same failing test test_session_resume_deferred_history_close_cancels_build"
+
+
+@pytest.mark.parametrize("where", ["local", "replica"])
+def test_listed_owner_admits_a_card_naming_another_test_of_its_run(home, tmp_path, where):
+    """A card that names its own test, not in the owner's FAILED list, is a different failure of the same run."""
+    if where == "local":
+        owner("t_01a18504581b2063", body_field="body_listed")
+    else:
+        remote(tmp_path, ["t_01a18504581b2063"], body_field="body_listed")
+    run = "https://github.com/daveey/hermes/actions/runs/40785006949"
+    assert check(title="Fix tests/tools/test_other_mod.py::test_unlisted_other_case on main",
+                 body=f"tests/tools/test_other_mod.py::test_unlisted_other_case fails in {run}.") is None
+
+
+@pytest.mark.parametrize("where", ["local", "replica"])
+def test_a_same_run_card_citing_the_listed_owner_is_admitted(home, tmp_path, where):
+    """With no claimed title overlap, a same-run match is failure-only, so a card that cites the owner by id (a
+    follow-up written knowing it) is admitted, as #732's cites rule says."""
+    if where == "local":
+        tid = owner("t_01a18504581b2063", body_field="body_listed")
+    else:
+        remote(tmp_path, ["t_01a18504581b2063"], body_field="body_listed")
+        tid = "t_01a18504581b2063"
+    assert check("t_01a18507649f5425")  # refused without the citation
+    body = CASES["t_01a18507649f5425"]["body"] + f"\n\nFollow-up of {tid}."
+    assert check("t_01a18507649f5425", body=body) is None
+
+
+@pytest.mark.parametrize("body_field", ["body", "body_listed"])
+def test_red_main_card_vs_deflake_card_naming_its_own_test_has_no_run_match(body_field):
+    """t_fa55aeb4 (ci-main-watch, run 40399486841) vs t_47d51eb4 (deflake of a flake seen in that run): the deflake
+    card names its own test, so the shared run is not one failure in either ci-main-watch body format. (Run
+    40399486841's logs are gone; the only node id quoted for it is t_47d51eb4's flake, so the listed body names that
+    flake and the unchanged test rule matches it, as on main.)"""
+    new = ko.failure_identity(CASES["t_fa55aeb4"]["title"], CASES["t_fa55aeb4"][body_field])
+    old = ko.failure_identity(CASES["t_47d51eb4"]["title"], CASES["t_47d51eb4"]["body"])
+    assert not (ko.same_failure(new, old) or "").startswith("same CI run")
+
+
+@pytest.mark.parametrize("where", ["local", "replica"])
+def test_red_main_card_as_filed_is_admitted_against_the_deflake_card(home, tmp_path, where):
+    if where == "local":
+        owner("t_47d51eb4")
+    else:
+        remote(tmp_path, ["t_47d51eb4"])
+    assert check("t_fa55aeb4") is None
 
 
 def test_a_test_named_only_as_a_verification_step_is_not_a_failure(home):

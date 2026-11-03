@@ -57,6 +57,7 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
         raise OriginError("origin_creation_invalid", "invalid owner/origin creation intent") from None
 
     options = dict(options)
+    options.pop("insert_guard", None)  # a courier create was overlap-checked on the gateway that asked for it
     # The sender gated its own declaration; kept out of the stored envelope so an intent recorded
     # before the option existed still matches on retry. [daveey]
     options.pop("require_declaration", None)

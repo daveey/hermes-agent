@@ -12,6 +12,12 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.tools import capsule_fixtures as _capsule_fixtures
+
+# Capsule-workspace fixtures shared by test_capsule_workspace and test_capsule_worker_contract. [daveey]
+capsule = _capsule_fixtures.capsule
+fake_docker = _capsule_fixtures.fake_docker
+
 
 @pytest.fixture(autouse=True)
 def _no_host_browser_use_cli():

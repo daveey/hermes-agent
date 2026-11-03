@@ -4,8 +4,9 @@ from contextlib import asynccontextmanager
 import json
 from unittest.mock import AsyncMock
 
-import acp
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
+import acp
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 

@@ -22,7 +22,7 @@ from hermes_cli.config import cfg_get, load_config
 from hermes_cli.kanban_capabilities import check_tool_create, declaration_required
 from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc
 from tools.kanban_tools_placement import (_local_placement, _machine_placement, _marker_placement_fields, _persisted_session_id,
-                                          _placement_origin, _placement_refused, _runs_where)
+                                          _create_session_id, _placement_origin, _placement_refused, _runs_where)
 from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_park_args import _blocker_id_arg, _clear_blocker_arg, _blocker_scope_args, _park_guard
 from hermes_cli.kanban_ask_resolved import ask_checks, create_ask_check, filing_context
@@ -1608,28 +1608,10 @@ def _handle_create(args: dict, **kw) -> str:
                    "If a human really can act now despite the unfinished parents, set "
                    "human_action_now=true and explain that present action in body. Nothing changed.",
                    rejection="invalid_args")
-        from gateway.session_context import get_session_env
-        from tools.async_delegation import _current_origin_session_id
         self_tid = (os.environ.get("HERMES_KANBAN_TASK")
                     if origin_intent is None and _is_dispatcher_owned_worker() else None)
         self_task = kb.get_task(conn, self_tid) if self_tid else None
-        # The worker/API runtime may be transient; the owning task's origin is durable.
-        # The ambient id is the request-scoped ContextVar binding, not the process-global
-        # os.environ: in a multi-session gateway the env holds the LAST agent built, and an
-        # id that never reached its ``sessions`` row is provenance pointing at nothing.
-        if origin_intent is not None:
-            # Courier retries use only their durable envelope, never the receiving
-            # process's current session/tenant/project. Creator provenance remains
-            # unchanged even if its session is compressed or subsequently removed.
-            session_id = args.get("session_id")
-        else:
-            session_id = (_persisted_session_id(args.get("session_id"))
-                          # The parent card's session too: a card placed from another gateway carries
-                          # a placeholder (or a chat that lives elsewhere), and handing that on as a
-                          # child's origin made the owner's bind fail (kanban-69709bcf16). [daveey]
-                          or _persisted_session_id(self_task.session_id if self_task else None)
-                          or _persisted_session_id(_current_origin_session_id())
-                          or _persisted_session_id(get_session_env("HERMES_SESSION_ID", "")))
+        session_id = _create_session_id(args, origin_intent, self_task)
         if project_id is None and workspace_kind is None and workspace_path is None:
             if self_task is not None and self_task.project_id:
                 project_id, project_source_task_id = self_task.project_id, self_task.id
@@ -1641,7 +1623,8 @@ def _handle_create(args: dict, **kw) -> str:
         try:
             runs_on = _runstate.explicit_runs_on(conn, args.get("runs_on"), courier=origin_intent is not None)
         except ValueError as exc:
-            return tool_error(str(exc))
+            sync_down = isinstance(exc, _runstate.SyncNotRunning)
+            return tool_error(str(exc), **({"rejection": "sync_not_running"} if sync_down else {}))
         pinned_machine = None
         if runs_on is None and origin_intent is None:
             runs_on = _runstate.placement_runs_on(conn, args.get("placement"))
@@ -1673,32 +1656,36 @@ def _handle_create(args: dict, **kw) -> str:
             _pin = _kp.explicit_foreign_pin(args, _reg.self_gateway())
             if _pin:
                 return _placement_refused(_pin, "an origin-bound card is created on this gateway")
-        new_tid = kb.create_task(
-            conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
-            parents=tuple(parents), tenant=(args.get("tenant") if origin_intent is not None
-                                           else args.get("tenant") or os.environ.get("HERMES_TENANT")),
-            priority=_opt_int(args.get("priority"), 0),
-            workspace_kind=workspace_kind, workspace_path=workspace_path, project_id=project_id,
-            # Board-project inheritance must read the board this call opened, not the
-            # session's current board.
-            board=args.get("board"),
-            project_source_task_id=project_source_task_id, triage=triage,
-            creator_task_id=self_tid,
-            idempotency_key=args.get("idempotency_key"),
-            max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
-            requires=args.get("requires"), runs_on=runs_on, max_retries=max_retries,
-            placement_policy=(marker_placement or {}).get("placement_policy"),
-            require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
-            model_override=model_override, provider_override=provider_override,
-            goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
-            completion_contract=args.get("completion_contract"),
-            initial_status=str(args.get("initial_status") or "running"),
-            human_request=kb.redact_review_value(args.get("human_request")),
-            created_by=_persisted_identity(), session_id=session_id,
-            origin_intent=origin_intent, chat_origin=origin.ref if origin else args.get("origin_session"),
-            # Reject a worktree path the dispatcher could never resolve now, to the
-            # creator, instead of burning spawn retries on it later. [daveey]
-            validate_workspace=True, validate_skills=True)
+        try:
+            new_tid = kb.create_task(
+                conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
+                parents=tuple(parents), tenant=(args.get("tenant") if origin_intent is not None
+                                               else args.get("tenant") or os.environ.get("HERMES_TENANT")),
+                priority=_opt_int(args.get("priority"), 0),
+                workspace_kind=workspace_kind, workspace_path=workspace_path, project_id=project_id,
+                # Board-project inheritance must read the board this call opened, not the
+                # session's current board.
+                board=args.get("board"),
+                project_source_task_id=project_source_task_id, triage=triage,
+                creator_task_id=self_tid,
+                idempotency_key=args.get("idempotency_key"),
+                max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
+                requires=args.get("requires"), runs_on=runs_on, max_retries=max_retries,
+                placement_policy=(marker_placement or {}).get("placement_policy"),
+                require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
+                model_override=model_override, provider_override=provider_override,
+                goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
+                completion_contract=args.get("completion_contract"),
+                initial_status=str(args.get("initial_status") or "running"),
+                human_request=kb.redact_review_value(args.get("human_request")),
+                created_by=_persisted_identity(), session_id=session_id,
+                origin_intent=origin_intent, chat_origin=origin.ref if origin else args.get("origin_session"),
+                # Reject a worktree path the dispatcher could never resolve now, to the
+                # creator, instead of burning spawn retries on it later. [daveey]
+                validate_workspace=True, validate_skills=True,
+                insert_guard=after_create.guard)  # re-checks overlap under the write lock [daveey]
+        except kanban_overlap.OverlapRefused as exc:  # landed under the write lock after the first check
+            return exc.settle()
         landed = _fields(kb.get_task(conn, new_tid), _ca.CREATED_FIELDS)
         wait = [e for e in kb.list_events(conn, new_tid) if e.kind == "dependency_wait"]
         gate = {"gated": True, "gated_by": wait[-1].payload["parent"]} if wait else {"gated": False}

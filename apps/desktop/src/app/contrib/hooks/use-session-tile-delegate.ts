@@ -64,6 +64,17 @@ import type { useSessionStateCache } from '../../session/hooks/use-session-state
 import type { ClientSessionState } from '../../types'
 import type { GatewayRequester } from '../types'
 
+import {
+  noteTileOwner,
+  settleTileOpen,
+  startTileTiming,
+  tileCachedPaint,
+  tileFirstMessages,
+  type TilePaint,
+  tilePaintSource,
+  trackSettled
+} from './tile-cache-paint'
+
 type SessionStateCache = ReturnType<typeof useSessionStateCache>
 
 /** Runtime a stored session is bound to: the primary reverse lookup, else a retained tile. */
@@ -437,13 +448,17 @@ export function useSessionTileDelegate({
         // reading messages) without a profile lets the gateway fall back to the
         // launch-profile DB and fork the conversation into the wrong profile —
         // the same cross-profile bleed the recovery resumes had (#67603).
+        const timing = startTileTiming(storedSessionId, authoritativeSnapshot)
         let owner = await ownerForStoredSession(storedSessionId)
 
+        noteTileOwner(timing, owner)
         const restScope = tileRestScope(owner)
 
         let prefetchPromise = authoritativeSnapshot
           ? Promise.resolve(null)
           : getLatestSessionMessages(storedSessionId, restScope).catch(() => null)
+
+        let rest = trackSettled(prefetchPromise)
 
         if (!authoritativeSnapshot && existing && isWarmTileState(cached, storedSessionId)) {
           const prefetch = await prefetchPromise
@@ -524,6 +539,7 @@ export function useSessionTileDelegate({
                     prefetchPromise = getLatestSessionMessages(storedSessionId, tileRestScope(foreignOwner)).catch(
                       () => null
                     )
+                    rest = trackSettled(prefetchPromise)
                   }
 
                   return resumed
@@ -546,9 +562,19 @@ export function useSessionTileDelegate({
           }
         )
 
-        const prefetch = await prefetchPromise
+        // [daveey] REST still in flight: paint the cached transcript now and reconcile when the page lands.
+        // An explicit refresh (callers await fresh rows) and a read-only fallback wait on REST as before.
+        const cachedPaint = tileCachedPaint(
+          storedSessionId,
+          outcome.mode === 'read-only' ? undefined : tileRestScope(owner),
+          rest,
+          refreshTranscript
+        )
+
+        const prefetch = cachedPaint ? null : await prefetchPromise
 
         if (outcome.mode === 'read-only') {
+          timing?.reconciled('asleep')
           const readOnlyId = readOnlyRuntimeIdFor(storedSessionId)
 
           updateSessionState(
@@ -588,11 +614,14 @@ export function useSessionTileDelegate({
         }
 
         const info = resumed?.info
+        let painted: TilePaint = 'kept'
 
         updateSessionState(
           runtimeId,
           state => {
             const previousMessages = state.messages.length > 0 ? state.messages : resumeRequestBaselineMessages
+
+            painted = tilePaintSource(authoritativeSnapshot, previousMessages, cachedPaint)
 
             const messages = authoritativeSnapshot
               ? resumed.messages.length > 0
@@ -608,7 +637,7 @@ export function useSessionTileDelegate({
                 : previousMessages
               : previousMessages.length > 0
                 ? previousMessages
-                : toChatMessages(prefetch?.messages ?? resumed.messages ?? [])
+                : tileFirstMessages(cachedPaint, prefetch, resumed)
 
             const busyChangedWhileResuming = cached
               ? Boolean(
@@ -637,6 +666,44 @@ export function useSessionTileDelegate({
           },
           storedSessionId
         )
+
+        settleTileOpen({
+          cachedPaint,
+          painted,
+          prefetch,
+          prefetchPromise,
+          scope: tileRestScope(owner),
+          storedSessionId,
+          timing,
+          // Replace the cached paint while it is all that is on screen, else merge as the warm
+          // refresh does (deltas may have streamed in). The tile records its runtime only after
+          // this resolves, so unbound is still ours; a tile rebound meanwhile is left alone.
+          publish: (fresh, paint) => {
+            const bound = boundTileRuntimeId(runtimeIdByStoredSessionIdRef, storedSessionId)
+
+            if (bound && bound !== runtimeId) {
+              return { changed: false, ours: false }
+            }
+
+            let changed = false
+
+            updateSessionState(
+              runtimeId,
+              state => {
+                const next = chatMessageArraysEquivalent(state.messages, paint)
+                  ? fresh
+                  : mergeTileTranscript(state.messages, fresh, state.streamId)
+
+                changed = !chatMessageArraysEquivalent(state.messages, next)
+
+                return changed ? { ...state, messages: next } : state
+              },
+              storedSessionId
+            )
+
+            return { changed, ours: true }
+          }
+        })
 
         return runtimeId
       },

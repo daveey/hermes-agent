@@ -560,6 +560,25 @@ function useOriginStoredId(): null | string {
   return useStore(useTileSessionView()?.$storedId ?? NO_STORED_ID)
 }
 
+/** [daveey] Warm the referenced session's transcript cache so its first click
+ *  paints from cache, not a hub REST round trip. Lazy for the same reason as
+ *  `openSessionRef`; main dedupes, this only throttles one key per window. */
+export function warmSessionRef(value: string, originStoredId?: null | string): Promise<unknown> {
+  return import('@/app/chat/session-ref-prefetch')
+    .then(({ prefetchSessionRef }) => prefetchSessionRef(value, originStoredId))
+    .catch(() => null)
+}
+
+/** Warm on render (and on value/origin change); returns the pointer-enter retry,
+ *  which catches an owner the session list only learned after the render. */
+function useWarmSessionRef(value: string, originStoredId: null | string): () => void {
+  useEffect(() => {
+    void warmSessionRef(value, originStoredId)
+  }, [value, originStoredId])
+
+  return () => void warmSessionRef(value, originStoredId)
+}
+
 /** A `@session:<profile>/<id>` reference in the user transcript (directive
  *  segments), rendered as a chip like the other composer refs. Clicking it
  *  opens the session as a tab. */
@@ -569,9 +588,16 @@ export const SessionRefChip: FC<{
 }> = ({ label, value }) => {
   const resolved = useSessionLinkTitle(value, label)
   const originStoredId = useOriginStoredId()
+  const warm = useWarmSessionRef(value, originStoredId)
 
   return (
-    <DirectiveChip id={value} label={resolved} onClick={() => openSessionRef(value, originStoredId)} type="session" />
+    <DirectiveChip
+      id={value}
+      label={resolved}
+      onClick={() => openSessionRef(value, originStoredId)}
+      onPointerEnter={warm}
+      type="session"
+    />
   )
 }
 
@@ -584,6 +610,7 @@ export const SessionRefLink: FC<{
 }> = ({ label, value }) => {
   const resolved = useSessionLinkTitle(value, label)
   const originStoredId = useOriginStoredId()
+  const warm = useWarmSessionRef(value, originStoredId)
 
   return (
     <a
@@ -594,6 +621,7 @@ export const SessionRefLink: FC<{
         event.stopPropagation()
         openSessionRef(value, originStoredId)
       }}
+      onPointerEnter={warm}
       title={value}
     >
       <DirectiveIcon type="session" />
@@ -621,7 +649,8 @@ const DirectiveChip: FC<{
   label: string
   id: string
   onClick?: () => void
-}> = ({ type, label, id, onClick }) => {
+  onPointerEnter?: () => void
+}> = ({ type, label, id, onClick, onPointerEnter }) => {
   const { t } = useI18n()
   // An `onClick` override is a bespoke activation, not the kind's link action —
   // an override must not turn its carrier into a link.
@@ -654,7 +683,7 @@ const DirectiveChip: FC<{
   }
 
   return activate ? (
-    <button {...props} onClick={activate} type="button">
+    <button {...props} onClick={activate} onPointerEnter={onPointerEnter} type="button">
       {body}
     </button>
   ) : (

@@ -1029,11 +1029,12 @@ class ClientLifecycleMixin:
         from agent.model_routing_managed import verify_main_sdk
         verify_main_sdk(self, client or self._anthropic_client, api_kwargs)
         # Strips Responses-only kwargs that leak in under an api_mode-flip race.
+        from agent.observation_seam import active as observation_active
         from agent.anthropic_adapter import create_anthropic_message
         # on_response: rate-limit + credits state live in response headers, which the parsed Message drops.
         return create_anthropic_message(
             client or self._anthropic_client, api_kwargs, log_prefix=getattr(self, "log_prefix", ""),
-            prefer_stream=not bool(getattr(self, "_disable_streaming", False)),
+            prefer_stream=not bool(getattr(self, "_disable_streaming", False)) and not observation_active(),
             on_response=self._capture_anthropic_response_headers,
         )
 

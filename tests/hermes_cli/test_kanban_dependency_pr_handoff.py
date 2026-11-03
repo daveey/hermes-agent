@@ -75,8 +75,57 @@ def test_park_before_new_publication_then_crash_stays_guarded(board, monkeypatch
     assert prs.active_pr_reason(board, task, int(time.time())) == "active_pr"
 
 
-def test_same_second_park_stays_guarded(board, monkeypatch):
+def test_same_second_park_after_own_pr_report_resumes_once(board, monkeypatch, all_assignees_spawnable):
+    # The owner posts its state comment (with the PR URL) and parks in the same second.
+    # The park's server-stamped comment watermark orders the two, so this is the
+    # orderly handoff, not a duplicate-publication risk.
     task, _, _ = park(board, monkeypatch, delta=0)
+    evidence = kb._json_dict(board.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'dependency_wait' "
+        "ORDER BY id DESC LIMIT 1", (task,)).fetchone()[0])["review_checkpoint"]
+    latest = board.execute("SELECT MAX(id) FROM task_comments WHERE task_id = ?", (task,)).fetchone()[0]
+    assert evidence["comment_id_at_checkpoint"] == latest
+    assert prs.active_pr_reason(board, task, int(time.time())) is None
+    result = dispatch.dispatch_once(board, spawn_fn=lambda task, workspace, **kwargs: 123456789)
+    assert len(result.spawned) == 1
+    assert prs.active_pr_reason(board, task, int(time.time())) == "active_pr"
+
+
+def test_same_second_pr_comment_after_park_stays_guarded(board, monkeypatch):
+    # A PR comment in the park's second but after it is beyond the watermark.
+    now = int(time.time())
+    clock = [now]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    task = kb.create_task(board, title="finish existing PR", assignee="dev")
+    kb.claim_task(board, task)
+    run = kb.get_task(board, task).current_run_id
+    parent = kb.create_task(board, title="ordering prerequisite", assignee="dev")
+    kb.link_tasks(board, parent, task, expected_child_run_id=run)
+    clock[0] += 10
+    worker_comment(board, task, "dev", PR)
+    assert kb.block_task(board, task, kind="dependency", reason="ordering prerequisite", expected_run_id=run)
+    worker_comment(board, task, "dev", "https://github.com/example/repo/pull/11")
+    clock[0] += 10
+    kb.claim_task(board, parent)
+    assert kb.complete_task(board, parent, summary="ordering work finished")
+    kb.recompute_ready(board)
+    assert kb.get_task(board, task).status == "ready"
+    assert prs.active_pr_reason(board, task, int(time.time())) == "active_pr"
+
+
+@pytest.mark.parametrize("watermark", [None, 0, "7", 10**9])
+def test_same_second_park_without_valid_watermark_stays_guarded(board, monkeypatch, watermark):
+    task, _, _ = park(board, monkeypatch, delta=0)
+    row = board.execute("SELECT id, payload FROM task_events WHERE task_id = ? AND kind = 'dependency_wait' "
+                        "ORDER BY id DESC LIMIT 1", (task,)).fetchone()
+    payload = kb._json_dict(row["payload"])
+    if watermark is None:
+        payload["review_checkpoint"].pop("comment_id_at_checkpoint")
+    else:
+        payload["review_checkpoint"]["comment_id_at_checkpoint"] = watermark
+    import json
+    with kb.write_txn(board):
+        board.execute("UPDATE task_events SET payload = ? WHERE id = ?", (json.dumps(payload), row["id"]))
     assert prs.active_pr_reason(board, task, int(time.time())) == "active_pr"
 
 

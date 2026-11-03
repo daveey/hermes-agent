@@ -112,20 +112,52 @@ def migrate(pid, target):
         raise ScopePlacementError('kanban_scope_unconfirmed')
 
 
+def _deliver(rendezvous, process):
+    from gateway.session_kanban_capsule import MISSING
+    from gateway.session_kanban_rendezvous import RendezvousError
+    from hermes_state_runtime import RuntimeStoreError
+    try:
+        rendezvous.deliver(process)
+    except RendezvousError as exc:
+        raise RuntimeStoreError(MISSING) from exc
+    finally:
+        rendezvous.close()
+
+
 def placing_spawn(spawn, policy):
     """``spawn`` wrapped to run synchronously: resolve scope, spawn, migrate, or kill+reap and raise.
 
     Meant for ``acquire_process``'s worker thread, which owns the returned handle afterwards.
     """
     def run(*args, **kwargs):
-        target = resolve_run_scope(policy)  # validated before anything is spawned
-        process = spawn(*args, **kwargs)
-        if target is None:
+        # [daveey] Launch-time recheck (covers admissions queued by an older owner): fail closed. A
+        # capsule-required card gets its authenticated, single-use rendezvous here (None: ordinary card,
+        # launch unchanged); the child's channel is brokered only after the spawn and scope placement.
+        from gateway.session_kanban_capsule import attach_capsule_transport, check_capsule_transport
+        from gateway.session_kanban_rendezvous import observing_spawn
+        # [daveey] run27: a missing transport refuses first (non-consuming probe), then the run scope is
+        # resolved, and only then is the single-use rendezvous consumed, so a scope failure (stale claim,
+        # scope not ready) refuses without burning the run.
+        check_capsule_transport(policy)
+        target = resolve_run_scope(policy)  # validated before anything is spawned or consumed
+        rendezvous = attach_capsule_transport(policy)
+        try:
+            process = observing_spawn(spawn, rendezvous)(*args, **kwargs)
+        except BaseException:
+            if rendezvous is not None:
+                rendezvous.close()
+            raise
+        if target is None and rendezvous is None:
             return process
         try:
-            migrate(process.pid, target)
+            if target is not None:
+                migrate(process.pid, target)
+            if rendezvous is not None:
+                _deliver(rendezvous, process)
         except BaseException:
             from gateway.session_managed_worker import ManagedWorker
+            if rendezvous is not None:
+                rendezvous.close()
             try:
                 ManagedWorker(process).close()
             finally:

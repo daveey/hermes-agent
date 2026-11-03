@@ -16,6 +16,7 @@ from io import StringIO
 
 import pytest
 
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp.exceptions import RequestError
 
 from acp_adapter.entry import _BenignProbeMethodFilter

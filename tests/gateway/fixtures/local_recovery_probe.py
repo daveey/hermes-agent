@@ -15,6 +15,7 @@ import time
 from websockets.asyncio.client import connect
 from tests.gateway.test_normal_runtime_boot import control
 from tests.waiting import async_wait_until
+from tests.child_log import ChildLog
 
 
 class Model(BaseHTTPRequestHandler):
@@ -105,7 +106,7 @@ def seed_offline_models_dev(home):
 def daemon(root, home, env, *, barrier, fixture='local_recovery_daemon.py'):
     seed_offline_models_dev(env.get('HERMES_HOME', home))
     command = [sys.executable, str(root / 'tests/gateway/fixtures' / fixture)] if barrier else [sys.executable, '-m', 'gateway.run']
-    with (home / ('first.log' if barrier else 'restart.log')).open('w+') as log:
+    with ChildLog(home / ('first.log' if barrier else 'restart.log')) as log:
         proc = subprocess.Popen(command, cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 120
@@ -118,9 +119,7 @@ def daemon(root, home, env, *, barrier, fixture='local_recovery_daemon.py'):
                 except (OSError, ValueError):
                     pass
                 time.sleep(.05)
-            log.flush()
-            log.seek(0)
-            assert desc.get('state') == 'ready', log.read()
+            assert desc.get('state') == 'ready', log.text()
             yield proc, desc
         finally:
             stop_child(proc)

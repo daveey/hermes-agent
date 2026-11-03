@@ -283,6 +283,12 @@ from tests._fixtures.offline_catalogs import (
 from tests._fixtures.offline_cli_catalogs import _offline_cli_catalog_transport
 from tests._fixtures.platform_gating import _platforms_gate_reason, _reject_contradictory_platform_marks
 from tests._fixtures.session_context_reset import _reset_session_context_vars
+from tests._fixtures.state_monkeypatch import _state_aware_monkeypatch
+from tests._fixtures import required_extras as _required_extras
+
+# HERMES_TEST_REQUIRE_EXTRAS (set by the CI lanes that install the extras): a listed optional
+# extra's ``pytest.importorskip`` fails collection instead of skipping. Unset = plain skip.
+_required_extras.install()
 
 
 @pytest.fixture(autouse=True)
@@ -1080,6 +1086,12 @@ def _reset_tui_gateway_server_state():
         obj = getattr(mod, name, None)
         if isinstance(obj, dict):
             obj.clear()
+    # Addressed notifications parked for an absent session: a leak would let a
+    # later test's session claim a stale event, or spend the cap and refuse its
+    # own park.
+    park = sys.modules.get("tui_gateway.notification_park")
+    if park is not None:
+        park.clear()
 
     if snapshot is not None:
         mod._methods.clear()

@@ -1,6 +1,7 @@
 """The normal ACP constructor is a transport client, not an embedded owner."""
 import pytest
 
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
 from acp_adapter.server import HermesACPAgent
 
 

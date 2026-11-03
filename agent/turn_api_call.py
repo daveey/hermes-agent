@@ -46,6 +46,9 @@ class ApiCallVerdict:
 def _should_stream(agent: Any) -> bool:
     """Prefer streaming for liveness even without display consumers. Process providers
     must opt in; ACP transports and explicit session/provider disables stay non-streaming."""
+    from agent.observation_seam import active as observation_active
+    if observation_active():
+        return False  # Require original non-streaming SDK response IDs.
     if getattr(agent, "_disable_streaming", False):
         return False
     _base = str(agent.base_url or "").lower()

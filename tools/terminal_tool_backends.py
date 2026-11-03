@@ -9,6 +9,7 @@ import logging
 import subprocess
 from typing import Any, Dict, Optional
 
+from tools import capsule_workspace
 from tools.environments.docker import DockerEnvironment as _DockerEnvironment
 from tools.environments.local import LocalEnvironment as _LocalEnvironment
 from tools.environments.managed_modal import ManagedModalEnvironment as _ManagedModalEnvironment
@@ -279,6 +280,13 @@ def _build_plugin_env(*, env_type, image, cwd, timeout, cc, task_id, **_):
     raise ValueError(f"Unknown environment type: {env_type}. Use {known}{terminal_backend_install_hint(env_type)}")
 
 
+def _build_capsule_env(binding, env_type, *, image, timeout, cc, task_id):
+    """A bound capsule worker's only environment: runsc Docker with the bound workspace at /workspace.
+    The requested cwd/host_cwd and backend config never widen it; a drifted config is refused."""
+    return _DockerEnvironment(image=image, timeout=timeout, task_id=task_id,
+                              **capsule_workspace.docker_kwargs(binding, env_type, cc))
+
+
 # Built-in backend -> builder. Anything else is looked up in the plugin registry.
 _ENV_BUILDERS = {"local": _build_local_env, "docker": _build_docker_env, "modal": _build_modal_env,
                  "daytona": _build_daytona_env, "vercel_sandbox": _build_vercel_env,
@@ -292,11 +300,16 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     """Create an execution environment (instance with ``execute()``) for *env_type*. ``image`` is ignored
     for local/ssh/vercel; ``container_config`` carries the container_*/docker_* resource keys; ``host_cwd`` is
     the host dir bound into Docker when cwd mounting is enabled. ``probe_only`` asks ssh for a throwaway
-    connection with no remote setup/sync (the prompt-time probe). Unknown types fall through to plugin backends."""
+    connection with no remote setup/sync (the prompt-time probe). Unknown types fall through to plugin backends.
+    A process holding a capsule binding (``tools.capsule_workspace``) gets only the capsule sandbox, and a
+    revoked binding refuses every backend."""
+    binding = capsule_workspace.current_binding()
     builder = _ENV_BUILDERS.get(env_type)
     kwargs = dict(image=image, cwd=cwd, timeout=timeout, cc=container_config or {}, task_id=task_id,
                   ssh_config=ssh_config, local_config=local_config, host_cwd=host_cwd, probe_only=probe_only)
-    if builder is not None:
+    if binding is not None:
+        env = _build_capsule_env(binding, env_type, image=image, timeout=timeout, cc=kwargs["cc"], task_id=task_id)
+    elif builder is not None:
         env = builder(**kwargs)
     else:
         env = _build_plugin_env(env_type=env_type, **kwargs)

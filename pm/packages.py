@@ -352,6 +352,13 @@ def _copy_seed_file(src: str | os.PathLike, dst: str | os.PathLike) -> str | os.
     return dst
 
 
+def uv_cache_path() -> Path:
+    """Where the hermes-owned uv cache lives; unlike uv_cache_dir(), never seeds or writes."""
+    from hermes_constants import get_default_hermes_root
+
+    return get_default_hermes_root() / "cache" / "uv"
+
+
 def uv_cache_dir() -> Path:
     """The hermes-owned uv cache: machine-scoped and shared (keyed by
     content — two profiles reuse one cache), anchored to the DEFAULT
@@ -362,11 +369,11 @@ def uv_cache_dir() -> Path:
     from it is near-free (probed: 0.4s vs 1.2s cold) — the blow-away-
     on-update contract depends on it. uv's default cache location is
     per-user/platform-opinionated and never used by pm."""
-    from hermes_constants import ensure_spotlight_noindex_dir, get_default_hermes_root
+    from hermes_constants import ensure_spotlight_noindex_dir
 
     from pm.paths import repo_root, store_root
 
-    machine_cache = get_default_hermes_root() / "cache" / "uv"
+    machine_cache = uv_cache_path()
     # [daveey] a symlink to cache/uv.noindex on macOS, so uv's churn stays out of Spotlight
     ensure_spotlight_noindex_dir(machine_cache)
     marker = machine_cache / ".seeded"

@@ -48,7 +48,7 @@ function install() {
     userDataDir: dir
   })
 
-  return { backendFor, host, on }
+  return { backendFor, getJson, host, on }
 }
 
 describe('transcript cache host', () => {
@@ -74,6 +74,42 @@ describe('transcript cache host', () => {
     const event: { returnValue?: any } = {}
     on.get('hermes:transcript-cache:read')!(event, { connectionId: '', profile: '', sessionId: 'l1' })
     expect(event.returnValue?.messages).toEqual([{ content: 'row of local', id: 1, role: 'user' }])
+    host.stop()
+  })
+
+  it("[daveey] prefetch IPC stores an @session ref's latest rows under its key and skips the fetch when current", async () => {
+    const { getJson, host, on } = install()
+
+    const messageReads = () =>
+      getJson.mock.calls.filter(([, requestPath]) => String(requestPath).includes('/messages')).length
+
+    const key = { connectionId: 'mac-mini', profile: 'default', sessionId: 'old-ref' }
+
+    on.get('hermes:transcript-cache:prefetch')!({}, key)
+
+    await vi.waitFor(() =>
+      expect(host.store.read(key)?.messages).toEqual([{ content: 'row of mac-mini', id: 1, role: 'user' }])
+    )
+    expect(messageReads()).toBe(1)
+    expect(getJson).toHaveBeenCalledWith(
+      { connectionId: 'mac-mini' },
+      expect.stringMatching(/^\/api\/sessions\/old-ref\/messages\?.*order=latest/),
+      expect.anything()
+    )
+
+    // Cache current (fresh copy, session not listed as moved): a second ask fetches nothing.
+    on.get('hermes:transcript-cache:prefetch')!({}, key)
+    await expect(host.prefetcher.prefetchKey(key)).resolves.toBe('current')
+    expect(messageReads()).toBe(1)
+
+    // A session the tick already cached at the hub's meta is current too; '' means the primary.
+    await host.prefetcher.tick()
+    const before = messageReads()
+    const prefetchKey = vi.spyOn(host.prefetcher, 'prefetchKey')
+    on.get('hermes:transcript-cache:prefetch')!({}, { connectionId: '', profile: '', sessionId: 'l1' })
+    expect(prefetchKey).toHaveBeenCalledWith({ connectionId: 'local', profile: 'default', sessionId: 'l1' })
+    await expect(prefetchKey.mock.results[0].value).resolves.toBe('current')
+    expect(messageReads()).toBe(before)
     host.stop()
   })
 })
@@ -104,7 +140,7 @@ describe('[daveey] open Inbox cards in prefetch', () => {
     expect(marked).toHaveLength(2)
   })
 
-  it('reads the replica Inbox on the primary and fetches a card\'s session first', async () => {
+  it("reads the replica Inbox on the primary and fetches a card's session first", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'transcript-cache-host-inbox-'))
     dirs.push(dir)
     const fetched: string[] = []

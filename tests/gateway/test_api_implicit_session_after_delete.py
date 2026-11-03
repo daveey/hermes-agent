@@ -8,6 +8,7 @@ An explicit X-Hermes-Session-Id and a spent Idempotency-Key are never moved.
 import json
 
 import pytest
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 

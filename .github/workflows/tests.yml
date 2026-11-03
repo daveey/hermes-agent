@@ -185,6 +185,10 @@ jobs:
           HERMES_TEST_SLICE: ${{ matrix.slice }}/${{ strategy.job-total }}
           HERMES_TEST_FILE_TIMEOUT: 600
           HERMES_TEST_FLAKY_REPORT: ${{ runner.temp }}/flaky-tests/slice-${{ matrix.slice }}.json
+          # This lane installs these extras (setup step above), so their importorskip guards must
+          # import: a dropped extra fails collection instead of skipping files with CI green
+          # (tests/_fixtures/required_extras.py).
+          HERMES_TEST_REQUIRE_EXTRAS: keyring,aiohttp,acp
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
@@ -585,6 +589,8 @@ jobs:
           SHARD: ${{ matrix.shard }}
           HERMES_E2E_STRICT_ACCEPTANCE: ${{ inputs.strict_acceptance }}
           HERMES_TEST_FILE_TIMEOUT: "3000"
+          # uv sync above installs --extra all ... --extra keychain (tests/_fixtures/required_extras.py).
+          HERMES_TEST_REQUIRE_EXTRAS: keyring,aiohttp,acp
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""

@@ -7,6 +7,7 @@ import sys
 import time
 
 import pytest
+from tests.child_log import ChildLog
 
 
 def _peer(tmp_path, mode):
@@ -23,15 +24,14 @@ def _peer(tmp_path, mode):
 @pytest.mark.platforms("linux")
 def test_accepted_media_survives_mutation_cleanup_and_owner_kill(tmp_path):
     command, env, repo, state = _peer(tmp_path, 'capture')
-    with (state / 'owner.log').open('w+') as log:
+    with ChildLog(state / 'owner.log') as log:
         child = subprocess.Popen(command, cwd=repo, env=env, stdin=subprocess.DEVNULL,
                                  stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 45
             while not (state / 'accepted.json').exists():
                 if child.poll() is not None or time.monotonic() > deadline:
-                    log.seek(0)
-                    pytest.fail(log.read())
+                    pytest.fail(log.text())
                 time.sleep(0.05)
             child.kill()
             assert child.wait(timeout=10) < 0

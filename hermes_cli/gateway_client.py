@@ -319,7 +319,7 @@ def outside_restart_wait():
 
 
 @asynccontextmanager
-async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 1024):
+async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 1024, owner_check=None):
     """Attach to this home's owner. ``endpoint``: an already-discovered ready owner to dial as-is
     (maintenance that must never start a gateway); default ensures one, starting it if needed.
     ``subject``: mint the ticket for this principal (the caller's authenticated dashboard user)
@@ -327,7 +327,9 @@ async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 10
     ``max_size``: the largest frame accepted; a ``session.resume`` answer carries the whole history.
     Inside ``outside_restart_wait()`` an owner in a restart's after-turn wait is refused as
     ``draining`` (``restart_wait``) instead of attached, and the ticket carries that policy so the
-    owner also refuses the socket when the wait opens between discovery and the dial."""
+    owner also refuses the socket when the wait opens between discovery and the dial.
+    ``owner_check``: called with the discovered (or given) endpoint before any ticket is minted or
+    socket dialed; it raises to refuse that owner (a capsule card's owner binding). [daveey]"""
     from websockets.asyncio.client import connect
     from hermes_constants import get_hermes_home
     from hermes_cli.gateway_runtime import attachable, ensure_gateway_runtime, gateway_profile_home
@@ -337,10 +339,14 @@ async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 10
     remote = "" if endpoint is not None else os.environ.get("HERMES_TUI_GATEWAY_URL", "").strip()
     protocols = None
     if endpoint is not None:
+        if owner_check is not None:
+            owner_check(endpoint)
         ticket = await asyncio.to_thread(_session_ticket, gateway_profile_home(get_hermes_home()), endpoint,
                                          subject=subject)
         url, protocols = gateway_ws_target(endpoint, ticket)
     elif remote:
+        if owner_check is not None:
+            raise GatewayClientError("An explicit gateway URL cannot prove the owner binding; no local fallback")
         parsed = urlsplit(remote)
         if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
             raise GatewayClientError("Invalid explicit gateway WebSocket URL; no local fallback")
@@ -360,6 +366,8 @@ async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 10
             raise GatewayUnavailableError(f"Gateway {result.state}: {result.reason_code or 'not_ready'}{detail}",
                                           result.state, result.reason_code)
         endpoint = result.endpoint
+        if owner_check is not None:
+            owner_check(endpoint)
         try:
             policy: dict = {"refuse_restart_wait": True} if _REFUSE_RESTART_WAIT.get() else {}
             ticket = await asyncio.to_thread(_session_ticket, home, endpoint, **policy)

@@ -17,8 +17,11 @@ def show(args: dict) -> str:
         })
     with kt._granted_board(args.get("board"), tid) as (kb, conn, _):
         task = kt._existing_task(kb, conn, tid)
+        from tools.kanban_tools_capsule import own_card_view
+        worker_context, capsule = own_card_view(task, tid, kb.build_worker_context(conn, tid))
         return json.dumps({
             "task": kt._fields(task, kt._TASK_FIELDS),
+            **capsule,
             "queue_reason": kqr.latest(conn, tid),
             "parents": kb.parent_ids(conn, tid),
             "unsatisfied_parents": [
@@ -29,4 +32,4 @@ def show(args: dict) -> str:
             "events": [kt._fields(e, kt._EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
             "runs": [kt._fields(r, kt._RUN_FIELDS) for r in kb.list_runs(conn, tid)],
             "supervisor_requests": kt._graph.supervisor_requests(conn, tid),
-            "worker_context": kb.build_worker_context(conn, tid)})
+            "worker_context": worker_context})

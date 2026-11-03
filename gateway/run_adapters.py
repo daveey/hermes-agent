@@ -18,7 +18,7 @@ import time
 import weakref as _weakref
 from agent.async_utils import consume_detached_task_result
 from contextvars import Context
-from datetime import datetime, timedelta, timezone, UTC
+from datetime import datetime, timezone, UTC
 from gateway.config import (
     ON_ALL_ADAPTERS_DOWN_POLICIES,
     SHARED_LISTENER_MIRROR_PLATFORMS,
@@ -28,6 +28,7 @@ from gateway.config import (
 from gateway.platforms.base import BasePlatformAdapter
 from gateway.platforms.helpers import carry_inbound_dedup, hand_over_held_inbound
 from gateway.restart import is_global_startup_conflict
+from gateway.run_adapter_status import GatewayAdapterStatusMixin, adapter_unavailable_message
 from gateway.run_shutdown import _log_suppressed
 from gateway.session import SessionSource
 from hermes_cli.observability.shared_metrics_gateway import record_platform_connect, record_platform_disconnect
@@ -44,15 +45,6 @@ _UNSET = object()  # "no per-profile human_delay snapshot": fall back to the pri
 _MAX_PLUGIN_LOAD_REARMS = 3  # per queued platform: transient load failures heal, a broken plugin stops re-importing
 
 
-def _adapter_unavailable_message(platform: Platform, *, retrying: bool = True) -> str:
-    """Actionable ``adapter_unavailable`` status text, shared by startup and the reconnect watcher so
-    ``hermes status`` keeps the plugin/deps/credentials hint after the first retry."""
-    message = (
-        f"No adapter available for enabled {platform.value}; check the plugin, dependencies, and credentials."
-    )
-    return f"{message} Retrying in the background." if retrying else message
-
-
 class _UnresolvedProfileHome:
     """A NAMED routed profile whose home does not resolve — never the same thing as ``None``
     ("this body is the launch profile's own work"). Overloading ``None`` for both let an inbound
@@ -67,7 +59,7 @@ class _UnresolvedProfileHome:
 UNRESOLVED_PROFILE_HOME = _UnresolvedProfileHome()
 
 
-class GatewayAdapterLifecycleMixin:
+class GatewayAdapterLifecycleMixin(GatewayAdapterStatusMixin):
     """Adapter lifecycle: connect/teardown, fatal recovery, reconnect watcher, multiplex profiles."""
 
     @staticmethod
@@ -747,34 +739,6 @@ class GatewayAdapterLifecycleMixin:
             if not await _idle(10):  # re-check every 10 seconds
                 return
 
-    def _flag_reconnect_needs_attention(
-        self, platform, info: dict, now: float, *, status_key: Optional[str] = None
-    ) -> None:
-        """Flag NEEDS_ATTENTION (once) past the threshold — a signal, NOT a circuit breaker. The threshold
-        is the bound profile's ``agent.reconnect_attention_after``: secondaries call this inside their
-        ``_profile_runtime_scope`` with their ``<profile>:<platform>`` status key."""
-        from gateway.run import _reconnect_needs_attention
-        if info.get("attention_flagged") or not _reconnect_needs_attention(info, now):
-            return
-        info["attention_flagged"] = True
-        queued_for = now - info.get("queued_at", now)
-        logger.warning(
-            "%s has been failing/reconnecting continuously for %.1f hours (%d attempts) — flagging "
-            "NEEDS_ATTENTION. Retries continue, but this usually means a permanent problem (revoked "
-            "credentials, missing intents, broken sidecar). Check `hermes status` / `/platform list`.",
-            status_key or platform.value, queued_for / 3600.0, info.get("attempts", 0),
-        )
-        self._update_platform_runtime_status(
-            status_key or platform.value, platform_state="retrying", needs_attention=True,
-            retrying_since=(datetime.now(UTC) - timedelta(seconds=queued_for)).isoformat(),
-        )
-
-    def _mark_platform_fatal(self, status_key: str, adapter) -> None:
-        """Record an adapter's fatal error code/message as ``fatal`` runtime status."""
-        self._update_platform_runtime_status(
-            status_key, platform_state="fatal", error_code=adapter.fatal_error_code,
-            error_message=adapter.fatal_error_message,
-        )
 
     def _bump_reconnect_backoff(
         self, platform, info: dict, attempt: int, error_code, error_message: str
@@ -834,7 +798,7 @@ class GatewayAdapterLifecycleMixin:
                     # Became builtin/registered-but-None: a config change is needed, so stop retrying.
                     self._update_platform_runtime_status(
                         platform.value, platform_state="fatal", error_code="adapter_unavailable",
-                        error_message=_adapter_unavailable_message(platform, retrying=False),
+                        error_message=adapter_unavailable_message(platform, retrying=False),
                         needs_attention=True,
                     )
                     self._drop_from_reconnect_queue(platform, "adapter creation returned None")
@@ -847,7 +811,7 @@ class GatewayAdapterLifecycleMixin:
                         get_plugin_manager().rearm_failed_platform, platform.value):
                     info["load_rearms"] = rearms + 1
                 backoff = self._bump_reconnect_backoff(
-                    platform, info, attempt, "adapter_unavailable", _adapter_unavailable_message(platform),
+                    platform, info, attempt, "adapter_unavailable", adapter_unavailable_message(platform),
                 )
                 logger.info("Reconnect %s: no adapter yet, next retry in %ds", platform.value, backoff)
                 return
@@ -1739,14 +1703,24 @@ class GatewayAdapterLifecycleMixin:
         register_transport_home(self, profile_name, transport_home)
 
         async def _handler(_runner, event):
-            self._canonicalize(getattr(event, "source", None), transport_profile=profile_name)
+            identity = self._canonicalize(getattr(event, "source", None), transport_profile=profile_name)
             if transport_home is not None:
                 event.source._authorization_profile_home = transport_home
             with native_callback(self, event, transport_home, profile_name):
-                async with self._async_scope_or_null(_async_profile_runtime_scope, profile_home):
+                async with self._async_scope_or_null(
+                        _async_profile_runtime_scope, self._routed_runtime_home(identity, profile_home)):
                     return await self._handle_message(event)
 
         return _handler.__get__(self)
+
+    @staticmethod
+    def _routed_runtime_home(identity, profile_home):
+        """A secondary bot's event runs in its ``bot_profile`` route's runtime scope (as the primary's handler
+        does), so that runtime's authority admits the turn and later completion wakes find it on the same
+        ledger (#139726). Authorization still reads the transport home (``_under_authorization_profile``)."""
+        if identity is None or profile_home is UNRESOLVED_PROFILE_HOME:
+            return profile_home
+        return identity.runtime_home
 
     def _make_profile_busy_session_handler(self, profile_name: str):
         """Busy-path twin: canonicalize FIRST, then resolve busy policy under the profile scope
@@ -1755,8 +1729,9 @@ class GatewayAdapterLifecycleMixin:
         profile_home = self._routed_profile_home(profile_name)
 
         async def _handler(event, _session_key):
-            self._canonicalize(event.source, transport_profile=profile_name)
-            async with self._async_scope_or_null(_async_profile_runtime_scope, profile_home):
+            identity = self._canonicalize(event.source, transport_profile=profile_name)
+            async with self._async_scope_or_null(
+                    _async_profile_runtime_scope, self._routed_runtime_home(identity, profile_home)):
                 return await self._handle_active_session_busy_message(event, self._session_key_for_source(event.source))
 
         return _handler

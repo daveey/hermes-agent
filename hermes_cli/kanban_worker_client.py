@@ -136,6 +136,10 @@ async def run(params, board_db):
     from websockets.exceptions import WebSocketException
     if os.environ.get('HERMES_TUI_GATEWAY_URL'):
         raise GatewayClientError('Kanban requires the assigned local profile owner')
+    # [daveey] A capsule card may only reach an owner running this submitter's own capsule-gated core;
+    # any other owner is refused here, before ``kanban.run`` (no session, admission, model or tool work).
+    from hermes_cli.kanban_capsule_owner import card_requires_capsule, owner_check
+    check = owner_check(await asyncio.to_thread(card_requires_capsule, board_db, params['task_id']))
     # A lost socket is not a lost attempt, and exiting here would let ``_watch_submitter`` end the
     # owner's in-flight turn, so the next connection resumes whatever the last one reached. The
     # wait is bounded from the owner's last answer: an owner that keeps answering keeps the
@@ -150,7 +154,7 @@ async def run(params, board_db):
             # waits for the NEXT owner, and a worker polling its receipt inside the wait keeps the
             # turn it waits on alive, holding `hermes update` until restart_after_turn_timeout.
             with outside_restart_wait():
-                async with connect_gateway() as client:
+                async with connect_gateway(**({'owner_check': check} if check else {})) as client:
                     # kanban.run subscribes this socket to the card's session, but only receipts
                     # matter here: discard the turn's events, or they fill the client's bounded
                     # queue and its reader stops, with the next receipt behind it.

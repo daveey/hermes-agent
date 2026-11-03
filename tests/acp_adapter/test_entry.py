@@ -1,7 +1,8 @@
 """Tests for acp_adapter.entry startup wiring."""
 
-import acp
 import pytest
+pytest.importorskip("acp", reason="optional 'acp' extra not installed")
+import acp
 
 from acp_adapter import entry
 
