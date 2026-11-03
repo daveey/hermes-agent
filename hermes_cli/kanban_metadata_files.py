@@ -68,7 +68,13 @@ def _rewrite(value: Any, mapping: dict[str, str], top: bool = True) -> Any:
 
 
 def _candidates(metadata: dict, prefixes: list[str]) -> list[str]:
-    """Workspace paths named by metadata strings, in first-seen order."""
+    """Workspace paths named by metadata strings, in first-seen order.
+
+    A string whose whole value is one existing file under the workspace names
+    only that file: it may contain spaces, and tokenizing it as well would
+    yield its leading fragment (``<ws>/replay`` from ``<ws>/replay report.md``)
+    as a phantom path that is then recorded as skipped. [daveey]
+    """
     pattern = re.compile(
         "(?:" + "|".join(re.escape(p) for p in prefixes) + r")[/\\][^\s`\"'<>]+"
     )
@@ -78,6 +84,7 @@ def _candidates(metadata: dict, prefixes: list[str]) -> list[str]:
         # A value that is exactly one path may contain spaces the regex stops at.
         if any(whole.startswith(p + "/") for p in prefixes) and Path(whole).is_file():
             seen.setdefault(whole)
+            continue
         for match in pattern.finditer(text):
             seen.setdefault(match.group(0).rstrip(_TRAILING_PUNCT))
     return list(seen)
