@@ -23300,6 +23300,11 @@
             ],
             "default": null,
             "title": "Plugin"
+          },
+          "needs_auth": {
+            "default": false,
+            "title": "Needs Auth",
+            "type": "boolean"
           }
         },
         "required": [
