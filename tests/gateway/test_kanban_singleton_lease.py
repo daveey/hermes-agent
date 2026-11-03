@@ -254,6 +254,39 @@ def test_sync_watcher_profile_gateway_yields_to_root_and_waits(root, monkeypatch
     assert loops == ["start"] and sleeps == [ks.DEFAULT_RETRY_SECONDS]
 
 
+def test_sync_watcher_old_tenure_keep_running_stays_false_after_yield(root, monkeypatch):
+    """After a yield the lease is idle/deferred again, so should_yield() is False. The old tenure's
+    keep_running must stay False anyway, or run_forever's daemon FeedWatcher threads (which loop on
+    it) keep running beside the next tenure's set."""
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_sync_client as ksc
+    monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "askeve-reviewer"))
+    monkeypatch.setattr(ks, "DEFAULT_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(ks, "_YIELD_CACHE_SECONDS", 0.0)
+    monkeypatch.setattr(sync, "sync_enabled", lambda: True)
+    runner = _runner()
+    root_lease = _lease(root, is_root=True, clock=Clock(), name="sync")
+    tenures = []
+
+    def fake_run_forever(keep_running, interval=None, sleep=None):
+        tenures.append(keep_running)
+        assert keep_running()
+        assert not root_lease.try_acquire()  # root gateway asks
+        assert not keep_running()
+    monkeypatch.setattr(ksc, "run_forever", fake_run_forever)
+    after_release = []
+
+    async def between(interval):
+        # Root gateway takes the lock, then goes away: the profile's lease is no longer asked to yield.
+        assert root_lease.try_acquire()
+        root_lease.release()
+        after_release.append(tenures[0]())
+        runner._running = False
+    monkeypatch.setattr(runner, "_sleep_between_ticks", between)
+    asyncio.run(runner._kanban_sync_watcher())
+    assert after_release == [False]
+
+
 # --- entry path 4: joint restart order in `hermes update` (posix pause resume) --------------------
 
 

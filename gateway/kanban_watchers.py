@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import functools
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -431,10 +432,23 @@ class GatewayKanbanWatchersMixin:
         while self._running:
             if not await self._acquire_kanban_lease(lease):
                 return
+            # Each tenure gets its own latching stop flag: after release the lease is idle again and
+            # should_yield() reads False, so a bare lambda would revive this tenure's daemon FeedWatcher
+            # threads beside the next tenure's set. [daveey]
+            stopped = threading.Event()
+
+            def keep_running(stopped=stopped):
+                if stopped.is_set():
+                    return False
+                if not self._running or lease.should_yield():
+                    stopped.set()
+                    return False
+                return True
             try:
-                await asyncio.to_thread(_ksc.run_forever, lambda: self._running and not lease.should_yield())
+                await asyncio.to_thread(_ksc.run_forever, keep_running)
                 yielded = self._running and lease.should_yield()
             finally:
+                stopped.set()
                 lease.release()
             if not yielded:
                 return  # the loop ended on its own (stop, or sync unavailable): don't spin on it
