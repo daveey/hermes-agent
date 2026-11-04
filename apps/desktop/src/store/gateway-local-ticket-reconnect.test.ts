@@ -35,6 +35,11 @@ class Socket extends EventTarget {
       if (this.readyState !== 0) { return }
       this.readyState = 1
       this.dispatchEvent(new Event('open'))
+      // A real gateway's first frame after accept; empty = a legacy (non-authority) peer.
+      // A native dial is canonical by provenance and ignores it.
+      this.dispatchEvent(new MessageEvent('message', {
+        data: JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: {} } })
+      }))
     }, 1)
   }
 
