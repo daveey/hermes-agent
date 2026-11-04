@@ -492,6 +492,9 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
             if pr_state(url) == "REJECTED":
                 comment_rejection(conn, task_id, url, _rejections[url.rstrip("/").lower()])
         return None
+    from hermes_cli.kanban_hold_release import released_after
+    if released_after(conn, task_id, max(pr_times), pr_urls):
+        return None
     if _immediate_checkpoint_after(conn, task_id, max(pr_times), latest_pr_comment_id):
         return None
     # Strictly after: a same-second handoff tie stays guarded (fail closed).

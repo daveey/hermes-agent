@@ -105,7 +105,7 @@ def handle_unblock(args: dict, **kw) -> str:
                 def precondition(current):
                     task = kb.get_task(current, tid)
                     if via == "owner-wake-requeue" and (
-                            task is None or task.status not in OWNER_WAKE_REQUEUE_STATUSES):
+                            task is None or task.status not in (*OWNER_WAKE_REQUEUE_STATUSES, "ready")):
                         return "owner-wake target must be triage or blocked"
                     if owner:
                         from hermes_cli.kanban_requeue import owner_wake_listed_refs
@@ -118,6 +118,12 @@ def handle_unblock(args: dict, **kw) -> str:
                                 return "owner-wake grant or run was revoked"
                     return None
 
+                task = kb.get_task(conn, tid)
+                if owner and task is not None and task.status == "ready":
+                    from hermes_cli.kanban_hold_release import release
+                    release(conn, tid, supervisor=owner, supervisor_board=kb.get_current_board(),
+                            precondition=precondition)
+                    return kt._ok(task_id=tid, via="owner-wake-hold-release", status="ready")
                 ok = kb.unblock_task(conn, tid, precondition=precondition)
                 kt._check(ok, f"could not unblock {tid} (not blocked/triage/scheduled, or unknown)")
                 _log_requeue(conn, kb, tid, env_tid, via, source)
