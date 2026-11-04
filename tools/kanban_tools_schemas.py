@@ -450,7 +450,10 @@ KANBAN_MOVE_SCHEMA = _schema(
         "card's runs_on to the labels you give and re-queues it, so ONLY a machine carrying every label claims "
         "the next run (the Board enforces it). Refused when no other active machine matches, after "
         "kanban.move.max_moves moves, when moving back to a machine the card already left (pass force), and "
-        "for dir/worktree cards. After it returns, end your turn with a one-line reply; do not call more tools."
+        "for dir/worktree cards. After it returns, end your turn with a one-line reply; do not call more tools. "
+        "Exception: task_id = a worker-first card YOUR task created that no pool worker can run (its "
+        "'No pool worker can run this card' notice) and runs_on = [\"machine:<origin>\"] repins that card to the "
+        "origin instead; your own run continues. Every other card is refused."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),

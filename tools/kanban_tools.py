@@ -1240,7 +1240,11 @@ def _handle_continue(args: dict, **kw) -> str:
 
 @_kanban_handler("kanban_move")
 def _handle_move(args: dict, **kw) -> str:
-    """[daveey] Checkpoint, end this run and re-queue the card with new runs_on labels (hermes_cli.kanban_move)."""
+    """[daveey] Checkpoint, end this run and re-queue the card with new runs_on labels (hermes_cli.kanban_move).
+    Another card: only the origin repin of a worker-first card the caller's task created (kanban_creator_repin)."""
+    from hermes_cli import kanban_creator_repin as kcr
+    if kcr.other_card(args):
+        return kcr.tool_repin(args, board=_board, check=_check, ok=_ok, reject_child=_reject_delegated_child_mutation)
     tid = _worker_guard("kanban_move", args)
     checkpoint = _redact(_require_text(
         args, "checkpoint", "checkpoint is required — write what is done, what is not portable and the next "

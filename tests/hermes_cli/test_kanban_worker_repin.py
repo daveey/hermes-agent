@@ -136,13 +136,53 @@ def test_board_offline_reports_unknown_outcome_with_local_copy_intact(gws, svc):
 
 
 def test_board_revision_conflict_leaves_policy_intact(gws, svc):
+    # The Board row changes on every attempt (a queued card's row is rewritten by each reservation reply): every
+    # CAS loses, so after the bounded pull-and-retry the move is refused and the policy is untouched everywhere.
+    origin, _ = gws
+    tid, _ = _policy_card(origin)
+    b = svc.board(BOARD)
+    n = iter(range(9_999_999_999_990, 9_999_999_999_900, -1))
+    churn = lambda: svc._put(b, "tasks", tid, {"priority": 3}, "worker-1", None, f"{next(n):013d}-0000-x")
+    hub = RepinHub(svc, HUB, during=churn)
+    res = km.move_queued(origin.conn, tid, runs_on=["machine:hub"], reason="x", hub=hub)
+    assert res["reason_code"] == "revision_conflict", res
+    assert len(hub.repins) == repin.CONFLICT_ATTEMPTS
+    assert _local(origin.conn, tid)[0] == wp.POLICY and b["rows"]["tasks"][tid]["placement_policy"] == wp.POLICY
+
+
+def test_repin_after_one_unseen_board_edit_pulls_and_retries(gws, svc):
+    # Live: fixture t_01a1a46cbd08b275's printed move was refused revision_conflict because the Board rewrote the
+    # row between the local read and the POST. One unseen edit: pull, re-check, CAS again at the new revision.
     origin, _ = gws
     tid, _ = _policy_card(origin)
     b = svc.board(BOARD)
     svc._put(b, "tasks", tid, {"priority": 3}, "worker-1", None, f"{9_999_999_999_996:013d}-0000-x")  # unseen edit
-    res = km.move_queued(origin.conn, tid, runs_on=["machine:hub"], reason="x", hub=RepinHub(svc, HUB))
-    assert res["reason_code"] == "revision_conflict", res
-    assert _local(origin.conn, tid)[0] == wp.POLICY and b["rows"]["tasks"][tid]["placement_policy"] == wp.POLICY
+    hub = RepinHub(svc, HUB)
+    res = km.move_queued(origin.conn, tid, runs_on=["machine:hub"], reason="x", hub=hub)
+    assert res.get("ok") is True and res["readback"] == "confirmed", res
+    assert len(hub.repins) == 2 and hub.repins[1]["expected_revision"] > hub.repins[0]["expected_revision"]
+    assert _local(origin.conn, tid) == (None, ["machine:hub"], "ready")
+
+
+def test_repin_retry_rechecks_preconditions_on_the_pulled_row(gws, svc, monkeypatch):
+    # The conflicting edit blocked the card: the pulled row is no longer ready, so no second CAS is sent.
+    origin, _ = gws
+    tid, _ = _policy_card(origin)
+    b = svc.board(BOARD)
+    svc._put(b, "tasks", tid, {"priority": 3}, "worker-1", None, f"{9_999_999_999_996:013d}-0000-x")  # unseen edit
+    real_pull = ksc.pull
+
+    def pull_sees_block(conn_, *a, **kw):
+        out = real_pull(conn_, *a, **kw)
+        with conn_:
+            conn_.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
+        return out
+
+    monkeypatch.setattr(ksc, "pull", pull_sees_block)
+    hub = RepinHub(svc, HUB)
+    res = km.move_queued(origin.conn, tid, runs_on=["machine:hub"], reason="x", hub=hub)
+    assert res.get("ok") is not True and res["reason_code"] == "repin_unavailable", res
+    assert len(hub.repins) == 1 and b["rows"]["tasks"][tid]["placement_policy"] == wp.POLICY
 
 
 # --- CLI entry path ------------------------------------------------------------------------------------------------
