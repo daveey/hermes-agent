@@ -44,6 +44,12 @@ def test_compress_preserves_configured_history_and_admission_owner(tmp_path, mod
     run_compress_case(tmp_path, mode, in_place)
 
 
+# A hang bound, not a delay: the poll returns as soon as the admission is terminal. A managed turn
+# spawns a fresh agent.managed_worker interpreter, which is CPU-bound: ~7-14 s per turn on a loaded
+# hub, 25-28 s when the tree only gets 25% of the CPU, so a 30 s bound flaked on throttled runners.
+TURN_DEADLINE = 180
+
+
 def run_compress_case(tmp_path, mode, in_place):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'
@@ -92,7 +98,7 @@ def run_compress_case(tmp_path, mode, in_place):
                     with closing(sqlite3.connect(f'file:{home / "state.db"}?mode=ro', uri=True)) as db:
                         row = db.execute('SELECT status FROM session_admissions WHERE request_id=?', (text,)).fetchone()
                     return row and row[0] == 'terminal'
-                await async_wait_until(terminal, timeout=30, what=f'{text} terminal')
+                await async_wait_until(terminal, timeout=TURN_DEADLINE, what=f'{text} terminal')
                 return await call('session.resume', session_id=sid)
             history_count = 16
             for i in range(history_count):
