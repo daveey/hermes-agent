@@ -4,7 +4,7 @@ Neither a promotion nor comment prose is permission to retry an implementation.
 Only an authenticated park can capture the PRs and dependency edges being awaited.
 A completed review then authorizes one continuation of those same PRs: a repair
 when it records changes or an absent/unrecognised verdict with an exact
-``reviewed_sha``/``head``, or a landing
+``reviewed_sha``/``head``/``exact_head``, or a landing
 continuation when it records an exact-head approval. The next claim consumes it.
 A later comment that repeats a captured PR does not re-arm the hold; a new PR,
 a review naming a different PR, or a crash/reclaim does.
@@ -123,7 +123,7 @@ def _named_prs(data, captured: set[str]) -> set[str] | None:
 def _exact_head(data) -> bool:
     return any(
         isinstance(data.get(key), str) and _SHA.fullmatch(data.get(key))
-        for key in ("reviewed_sha", "head")
+        for key in ("reviewed_sha", "head", "exact_head")
     )
 
 

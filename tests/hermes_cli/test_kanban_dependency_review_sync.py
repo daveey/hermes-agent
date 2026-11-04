@@ -40,7 +40,7 @@ def checkpoint_row(conn, task):
                         (task,)).fetchone()
 
 
-@pytest.mark.parametrize("key", ["reviewed_sha", "head"])
+@pytest.mark.parametrize("key", ["reviewed_sha", "head", "exact_head"])
 @pytest.mark.parametrize("verdict", ["changes_required", "approved"])
 def test_sync_remap_preserves_one_review_continuation(boards, key, verdict):
     source, target = boards
@@ -57,7 +57,7 @@ def test_sync_remap_preserves_one_review_continuation(boards, key, verdict):
     assert dispatch.check_respawn_guard(target, task) == "active_pr"
 
 
-@pytest.mark.parametrize("key", ["reviewed_sha", "head"])
+@pytest.mark.parametrize("key", ["reviewed_sha", "head", "exact_head"])
 def test_local_change_request_accepts_either_exact_head_key(boards, key):
     source, _ = boards
     task, reviews = parked(source)
