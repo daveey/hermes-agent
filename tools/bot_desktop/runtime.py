@@ -774,6 +774,12 @@ def start(*, wait_seconds: float = 15.0) -> DesktopStatus:
             raise
 
 
+def _env_has_display(env_file: Path) -> bool:
+    """The launcher's env file names a DISPLAY (the publish is complete as far as status() can tell)."""
+    return any(key.strip() == "DISPLAY" and value.strip()
+               for key, sep, value in (line.partition("=") for line in (_read(env_file) or "").splitlines()) if sep)
+
+
 def _spawn_and_wait(sd: Path, wait_seconds: float) -> DesktopStatus:
     """Caller holds ``start.lock``. Takes ``_ALLOC_LOCK`` itself, from picking the number to Xvnc's claim."""
     with contextlib.ExitStack() as alloc:
@@ -837,7 +843,10 @@ def _spawn_and_wait(sd: Path, wait_seconds: float) -> DesktopStatus:
             if proc.poll() is not None:
                 tail = (sd / "launcher.log").read_bytes()[-2000:].decode("utf-8", "replace")
                 raise RuntimeError(f"Bot Desktop launcher exited with {proc.returncode}:\n{tail}")
-            if env_file.exists() and (sd / "rfb.sock").exists():
+            # Ready means what status() reports as running: DISPLAY published, not merely an env file present.
+            # A launcher that writes it in place (open/truncate, then write) shows an existing, still-empty file
+            # for a moment; returning then handed the caller a "stopped" status with the launcher alive.
+            if (sd / "rfb.sock").exists() and _env_has_display(env_file):
                 logger.info("Bot Desktop for profile %s up on :%s", _profile_name(), num)
                 touch_activity()
                 return status()

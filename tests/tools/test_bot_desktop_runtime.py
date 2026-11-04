@@ -262,6 +262,28 @@ def test_orphaned_x_server_of_a_dead_launcher_is_reaped_on_next_start(in_process
     assert runtime.stop() is True
 
 
+_IN_PLACE_ENV_LAUNCHER = """#!/usr/bin/env bash
+# Writes the env file in place with the open/truncate -> write window held open: the file exists, empty,
+# for 0.5 s. Under CPU throttling the fakes' plain `printf > env` showed start() the same empty file.
+sleep 30 &
+echo $! > "$HERMES_BD_XLOCK_DIR/.X${HERMES_BD_DISPLAY_NUM}-lock"
+: > "$HERMES_BD_SOCKET"
+{ sleep 0.5; printf 'DISPLAY=:%s\\n' "$HERMES_BD_DISPLAY_NUM"; } > "$HERMES_BD_ENV_FILE"
+wait
+"""
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.live_system_guard_bypass  # the launcher's group must really be signalled at teardown
+def test_start_waits_for_the_published_display_not_just_the_env_file(in_process_runtime):
+    """start() used to return as soon as the env file existed; status() reads DISPLAY from it, so an
+    existing-but-empty file came back as running=False, display=None beside a live launcher."""
+    (in_process_runtime / "launcher.sh").write_text(_IN_PLACE_ENV_LAUNCHER, encoding="utf-8")
+    up = runtime.start(wait_seconds=10)
+    assert up.running and up.display == f":{(runtime.state_dir() / 'display').read_text()}", up
+    assert runtime.stop() is True
+
+
 @pytest.mark.platforms("linux")
 @pytest.mark.live_system_guard_bypass  # the orphan is reparented to init: signalling it is the point
 def test_orphaned_x_server_is_found_by_its_socket_when_the_lock_file_is_gone(tmp_path, monkeypatch):
