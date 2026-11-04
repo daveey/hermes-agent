@@ -450,7 +450,14 @@ def test_supervisor_may_not_move_a_target_no_longer_in_a_no_pool_worker_wait(con
     tid, owner = _orphan(conn)
     reply = notices._queued()
     reply['observation']['code'] = 'workers_saturated'
-    wp.reevaluate(conn, notices._hub(reply), 'default', 'hub', cfg=notices.CFG)
+    # Capacity-only changes arrive on the next keepalive, not an immediate cached tick.
+    after_keepalive = wp.time.monotonic() + wp.RESERVE_KEEPALIVE_S + 1
+    monkeypatch.setattr(wp.time, 'monotonic', lambda: after_keepalive)
+    hub = notices._hub(reply)
+    wp.reevaluate(conn, hub, 'default', 'hub', cfg=notices.CFG)
+    hub.reserve.assert_called_once()
+    from hermes_cli import kanban_queue_reason as queue
+    assert queue.latest(conn, tid)['code'] == 'workers_saturated'
     out = _tool_move(monkeypatch, owner, tid)
     assert out.get('ok') is not True and 'no-pool-worker wait' in out['error'], out
     assert repin_calls == []
