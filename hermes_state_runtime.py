@@ -1035,7 +1035,11 @@ def apply_worker_receipt(db, *, epoch, execution_id, session_id, generation, seq
         if row['status'] not in ('registered', 'running'):
             raise RuntimeStoreError('stale_generation')
         if sequence != row['last_sequence'] + 1:
-            raise RuntimeStoreError('invalid_params')
+            # Named, so the gateway logs it at warning and the worker can say which write it lost:
+            # a bare code is a debug line, and a skipped sequence once killed two workers with no
+            # owner-side trace (t_01a1a264e0987946 run 36008: journal at 194, owner at 192).
+            raise RuntimeStoreError('invalid_params', field='sequence',
+                                    detail=f"expected {row['last_sequence'] + 1}, got {sequence}")
         # Each SQLite retry gets fresh rows; rolled-back annotations must not escape.
         changes = conn.total_changes
         result = handlers[operation](db, conn, session_id, json.loads(encoded))

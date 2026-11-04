@@ -231,7 +231,15 @@ class WorkerRPC:
                 self._drop()
                 raise
             if 'error' in response:
-                raise WorkerPersistenceError(response['error'].get('message', 'persistence_failed'))
+                error = response['error']
+                data = error.get('data') if isinstance(error.get('data'), dict) else {}
+                if data.get('field') or data.get('detail'):
+                    # The raised reason stays the bare wire code (callers compare it); the check that
+                    # fired goes to the log, where a sticky failure otherwise names nothing.
+                    logger.warning('worker owner refused %s operation=%s sequence=%s: %s field=%s detail=%s',
+                                   method, params.get('operation'), params.get('sequence'),
+                                   error.get('message'), data.get('field'), data.get('detail'))
+                raise WorkerPersistenceError(error.get('message', 'persistence_failed'))
             if method in ('worker.register', 'worker.adopt') and params.get('pid') == os.getpid():
                 global _worker_process
                 _worker_process = True
