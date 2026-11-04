@@ -17,6 +17,10 @@ DISPATCH_NETWORK_BUDGET_S = 2.0
 # Re-asking at the same revision every dispatcher tick only repeats the refusal; wait for a new revision instead.
 NOT_CLAIMABLE_BACKOFF_S = 600.0
 _refused: dict[tuple[str, str], tuple[int, float]] = {}  # (board, task) -> (refused revision, retry after)
+# No assigned keepalive exists here. Sixty seconds bounds queue probes while still discovering
+# registry-only capacity changes without waiting for a task revision. Assigned renewals are unchanged.
+RESERVE_KEEPALIVE_S = 60.0
+_queued: dict[tuple[str, str], tuple[int, float]] = {}
 
 
 def creation_decision(args, cfg, gateway, pin, origin_intent):
@@ -144,6 +148,10 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                     del _refused[stale]
             labels = requested_move(conn, row["id"])
             stage = "reserve" if labels is None else "repin"  # provenance for a failure below
+            held = _queued.get(key)
+            if labels is None and held and held[0] == row["sync_version"] and now < held[1]:
+                continue
+            _queued.pop(key, None)
             try:
                 if labels is not None:
                     # A run moved this card (kanban_move). Its runs_on is Board-owned, so only the origin's
@@ -157,6 +165,12 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                 else:
                     reply = hub.reserve(board, task_id=row["id"], expected_revision=row["sync_version"],
                                         candidates=candidates)
+                    if reply.get("state") == "queued":
+                        # Never adopt an arbitrary post-pull revision: it may be somebody else's edit.
+                        version = reply.get("task_version", row["sync_version"])
+                        _queued[key] = (version, time.monotonic() + RESERVE_KEEPALIVE_S)
+                        if len(_queued) > 1024:
+                            del _queued[next(iter(_queued))]
                     queue.try_record(queue.record_reply, conn, row["id"], gateway, reply, candidates)
                 attempted += 1
             except OSError as exc:
