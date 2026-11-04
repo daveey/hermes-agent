@@ -19,7 +19,7 @@ def _write_backend(home, backend):
 def _board(tmp_path, monkeypatch, *, workspace_kind='dir', local=False):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect
-    from gateway.session_contract import Principal
+    from gateway.session_contract import SessionActor
     monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     monkeypatch.setenv('HOME', str(tmp_path / 'home'))
@@ -45,7 +45,7 @@ def _board(tmp_path, monkeypatch, *, workspace_kind='dir', local=False):
         from hermes_cli import kanban_db_workspace as kbw
         kbw.set_workspace_path(conn, task.id, str(kbw.resolve_workspace(task, board='owned')))
     _write_backend(tmp_path, 'local' if local else 'docker')
-    actor = Principal('owner', str(tmp_path), frozenset({'session:create'}), 'transport')
+    actor = SessionActor('owner', str(tmp_path), frozenset({'session:create'}), 'transport')
     connection = SimpleNamespace(authority=SimpleNamespace(profile_id=str(tmp_path)), actor=actor, native_owner=True)
     params = dict(board='owned', task_id=task.id, run_id=task.current_run_id, claim_lock=task.claim_lock)
     config = {'model': {'default': 'm', 'provider': 'custom'}, 'platform_toolsets': {'cli': ['terminal', 'file']}}
