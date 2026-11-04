@@ -86,13 +86,41 @@ def pin_policy(model, provider, config):
 
 def resolve_managed_runtime(model, provider, *, config, session_id=None, requirements=None,
                             prepare_runtime=None, replace: bool | str = False):
-    from agent.model_routing_runtime import resolve_class_runtime
+    from agent import model_routing_walls as walls
+    from agent.model_routing_runtime import is_temporary_resolution, resolve_class_runtime
+    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
     from hermes_state_ids import new_session_id
     level, restricted = pin_policy(model, provider, config)
-    runtime = resolve_class_runtime("class:" + level, "auto", config=restricted,
-                                    session_id=session_id or new_session_id(), requirements=requirements,
-                                    exact_pin=True, replace=replace, prepare_runtime=prepare_runtime)
-    return runtime
+    durable = bool(session_id) and not is_temporary_resolution()
+    session_id = session_id or new_session_id()
+    source = walls.request_pin_source(model, provider, config, replace)
+    if durable and not replace:
+        # [daveey] A rerouted default pin stays on its reroute: the session's stored model still
+        # names the walled one, and resolving that again must not move the chat back mid-episode.
+        followed = walls.follows_reroute(walls.peek_route(session_id, level), model)
+        if followed is not None:
+            try:
+                level, restricted = pin_policy(followed[1], followed[0], config)
+            except ModelRoutingError:
+                pass  # the reroute left the registry: resolve the session's own pin
+    try:
+        return resolve_class_runtime("class:" + level, "auto", config=restricted, session_id=session_id,
+                                     requirements=requirements, exact_pin=True, replace=replace,
+                                     prepare_runtime=prepare_runtime, pin_source=source)
+    except SubscriptionQuotaUnavailable as wall:
+        # The pre-build lookup (temporary) never reroutes: its caller defers to the agent build.
+        if not durable or replace or not walls.may_reroute(wall, walls.peek_route(session_id, level), source):
+            raise
+        walled_from = {"provider": wall.provider, "model": wall.model, "resets_at": wall.resets_at}
+        try:
+            runtime = resolve_class_runtime("class:" + level, "auto", config=walls.class_config(config, level),
+                                            session_id=session_id, requirements=requirements,
+                                            excluded=[(wall.provider, wall.model)], walled_from=walled_from,
+                                            prepare_runtime=prepare_runtime, pin_source="default")
+        except ModelRoutingError:
+            raise wall from None  # nothing else in the class can serve: the wall is the answer
+        walls.log_reroute(wall, runtime["model_routing"])
+        return runtime
 
 
 def verify_selected_route(model, provider, metadata, config):

@@ -64,7 +64,7 @@ class RoutingState:
                    "PRIMARY KEY(root, class))")
 
     def allocate(self, session_id, parent_session_id, level, candidates, version, excluded, prepare=None,
-                 exact_pin=False, replace: bool | str = False):
+                 exact_pin=False, replace: bool | str = False, pin_source=None, walled_from=None):
         """Allocate and persist atomically; aliases share one failover decision.
 
         ``replace`` is ``True`` (unconditional, an in-session switch) or a committed switch-intent fence
@@ -80,8 +80,8 @@ class RoutingState:
         failover, pin, replacement) still runs ``prepare`` before COMMIT, so a failed credential/client
         never becomes visible.
         """
-        if not replace:
-            previous = self._sticky(session_id, level, candidates, excluded, exact_pin)
+        if not replace and walled_from is None:
+            previous = self._sticky(session_id, level, candidates, excluded)
             if previous is not None:
                 if prepare is not None:
                     prepare(previous)
@@ -92,7 +92,7 @@ class RoutingState:
             started = time.monotonic()
             try:
                 result = self._allocate(db, session_id, parent_session_id, level, candidates, version, excluded,
-                                        exact_pin, replace)
+                                        exact_pin, replace, pin_source=pin_source, walled_from=walled_from)
                 # Credentials/client must be usable before another process can
                 # observe the replacement. Failure rolls back counters as well.
                 if prepare is not None:
@@ -106,7 +106,7 @@ class RoutingState:
                 logger.warning("model routing allocation held the routing writer lock %.1fs (class %s)", held, level)
             return result
 
-    def _sticky(self, session, level, candidates, excluded, exact_pin):
+    def _sticky(self, session, level, candidates, excluded):
         """The existing allocation when reusing it needs no write, else None (take the write path)."""
         if not self.path.exists():
             return None
@@ -124,8 +124,6 @@ class RoutingState:
         previous = json.loads(row[0])
         if not _reusable(previous, candidates, excluded):
             return None
-        if exact_pin and not previous.get("exact_pin"):
-            return None  # upgrading to an exact pin is a write
         return previous
 
     def peek(self, session, level):
@@ -164,7 +162,7 @@ class RoutingState:
                 raise
 
     def _allocate(self, db, session, parent, level, candidates, version, excluded, exact_pin=False,
-                  replace: bool | str = False):
+                  replace: bool | str = False, pin_source=None, walled_from=None):
         from agent.model_routing import ModelRoutingError
 
         root = self._root(db, session, parent)
@@ -180,16 +178,20 @@ class RoutingState:
         row = db.execute("SELECT metadata FROM routes WHERE root=? AND class=?", (root, level)).fetchone()
         if row and not replace:
             previous = json.loads(row[0])
-            if _reusable(previous, candidates, excluded):
-                if exact_pin and not previous.get("exact_pin"):
-                    previous["exact_pin"] = True
-                    db.execute("UPDATE routes SET metadata=? WHERE root=? AND class=?",
-                               (json.dumps(previous), root, level))
+            if walled_from is not None:
+                # [daveey] A quota-walled router/default pin moves within its class; David's own
+                # pin never does (``is_explicit_pin``).
+                if is_explicit_pin(previous):
+                    raise ModelRoutingError("Exact pinned route cannot fail over")
+            elif _reusable(previous, candidates, excluded):
+                # [daveey] An echo of this session's own selection (the gateway resolving the concrete
+                # model the router picked) is not David naming it: it never upgrades the allocation to
+                # an exact pin, so a quota wall can still move it within its class.
                 return previous
             # A sticky class selection is a preference, not an exact-model pin.
             # Re-select only from the current class's filtered candidates; prepare
             # still runs before commit, so failed credentials cannot publish it.
-            if previous.get("exact_pin") or exact_pin:
+            elif previous.get("exact_pin") or exact_pin:
                 raise ModelRoutingError("Exact pinned route cannot fail over")
         if not candidates:
             raise ModelRoutingError(f"No eligible {level} routes under billing/capability policy")
@@ -199,8 +201,12 @@ class RoutingState:
                     "billing_group": route["billing"], "reason": "same-class-failover" if row else "allocation"}
         if exact_pin:
             metadata["exact_pin"] = True
+        metadata["pin_source"] = "explicit" if replace or (exact_pin and pin_source == "explicit") else "default"
         if replace:
             metadata["reason"] = "explicit-switch"
+        if walled_from is not None:
+            metadata.pop("exact_pin", None)
+            metadata.update(reason="same-class-failover", walled_from=dict(walled_from))
         db.execute("INSERT OR REPLACE INTO routes VALUES (?, ?, ?)", (root, level, json.dumps(metadata)))
         if replace and fence is not None:
             db.execute("INSERT OR REPLACE INTO switch_fences VALUES (?, ?, ?)", (root, level, fence))
@@ -239,6 +245,18 @@ class RoutingState:
         provider = cycle[position % len(cycle)]
         db.execute("INSERT OR REPLACE INTO counters VALUES (?, ?)", (pool, position + 1))
         return sorted(groups[provider], key=lambda r: r["model"])[0]
+
+
+def is_explicit_pin(metadata):
+    """True for a route David chose (an honoured switch, a model he named); a router pick, the config
+    default or an echo of either is ``default``. Rows written before ``pin_source`` count as explicit
+    only when they record an honoured switch: their ``exact_pin`` was also set by echoes. [daveey]"""
+    if not metadata:
+        return False
+    source = metadata.get("pin_source")
+    if source in ("explicit", "default"):
+        return source == "explicit"
+    return metadata.get("reason") == "explicit-switch"
 
 
 def _reusable(previous, candidates, excluded):

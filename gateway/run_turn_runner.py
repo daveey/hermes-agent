@@ -172,6 +172,12 @@ def _resolution_failure_reply(exc: Exception, platform: Platform) -> tuple[str, 
         # Quota cap with valid credentials: /login cannot help; name the reset window (#89401).
         from gateway.run import _gateway_provider_error_reply
         return _gateway_provider_error_reply(str(exc)), auth_permanent, False
+    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    if isinstance(exc, SubscriptionQuotaUnavailable):
+        # [daveey] A pinned route's subscription wall: name the reset in PT and the way out (/model),
+        # not an epoch timestamp. Router/default pins never get here for a long wall (rerouted).
+        from agent.model_routing_walls import held_reply
+        return held_reply(exc), "route_refused" if platform == Platform.LOCAL else auth_permanent, False
     if platform == Platform.LOCAL:
         # The local operator reads the terminal: the resolver's own sentence ("provider 'custom'
         # resolved without credentials ...") is the diagnosis; /login is not.
@@ -1290,9 +1296,13 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             max_iterations = room.max_iterations
             ctx.enabled_toolsets = list(room.enabled_toolsets)
         try:
-            model, runtime_kwargs = runner._resolve_session_agent_runtime(
-                source=ctx.source, session_key=ctx.session_key, user_config=ctx.user_config,
-            )
+            # [daveey] The pre-build lookup reads this session's standing route (a walled router pick
+            # defers to the agent build's same-class reroute instead of refusing the turn).
+            from agent.model_routing_runtime import routing_session
+            with routing_session(getattr(ctx, "session_id", None)):
+                model, runtime_kwargs = runner._resolve_session_agent_runtime(
+                    source=ctx.source, session_key=ctx.session_key, user_config=ctx.user_config,
+                )
             # Stashed by _resolve_session_agent_runtime when the primary's credentials failed and a
             # fallback was resolved before any agent exists (#74349); one-shot per turn.
             pending_fallback_notice = getattr(runner, "_pre_agent_fallback_notice", None)

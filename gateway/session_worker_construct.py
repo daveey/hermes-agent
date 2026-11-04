@@ -175,8 +175,22 @@ def route_runtime(policy, frozen, model, key, *, fallback=True):
     mints a random one), so it must not record a standing allocation. The agent's own
     ``prepare_agent_route`` allocates under the real session id."""
     from agent.model_routing_runtime import temporary_resolution
+    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
     with temporary_resolution():
-        return _route_runtime(policy, frozen, model, key, fallback=fallback)
+        try:
+            return _route_runtime(policy, frozen, model, key, fallback=fallback)
+        except SubscriptionQuotaUnavailable as wall:
+            # [daveey] A router-picked pin walled for hours is rerouted within its class by the agent
+            # build (``resolve_managed_runtime``); this lookup has no standing allocation to do it, so
+            # it defers to the build instead of refusing the turn. David's own pins still refuse here.
+            from agent.model_routing_walls import gateway_deferral
+            if key or json.loads(policy.request_json).get('base_url'):
+                raise
+            deferred = gateway_deferral(wall, model or (frozen.get('model') or {}).get('default'),
+                                        (frozen.get('model') or {}).get('provider'), None)
+            if deferred is None:
+                raise
+            return deferred, None
 
 
 def _route_runtime(policy, frozen, model, key, *, fallback=True):

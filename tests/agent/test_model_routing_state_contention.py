@@ -220,12 +220,12 @@ def test_sticky_snapshot_never_advances_counters_and_writes_still_go_through_the
     with pytest.raises(RuntimeError):
         route(path, "s", prepare=lambda metadata: (_ for _ in ()).throw(RuntimeError("client failed")))
     assert route(path, "s") == first and rows(path, "SELECT * FROM counters") == counters
-    # Exact-pin upgrade is a write: recorded durably.
-    pinned = route(path, "s", exact_pin=True)
-    assert pinned["metadata"]["exact_pin"] is True
-    assert RoutingState(path).peek("s", "deep")["exact_pin"] is True
-    with pytest.raises(ModelRoutingError, match="cannot fail over"):
-        route(path, "s", excluded=[(first["provider"], first["model"])])
+    # An exact-pin echo of the sticky class route is not David pinning it: no upgrade, no write
+    # (tests/agent/test_walled_default_pin.py), so a quota wall can still move it within its class.
+    echoed = route(path, "s", exact_pin=True)
+    assert echoed == first and "exact_pin" not in RoutingState(path).peek("s", "deep")
+    assert RoutingState(path).peek("s", "deep")["pin_source"] == "default"
+    assert rows(path, "SELECT * FROM counters") == counters
     # Failover of an unpinned sticky route advances the counter once, under the writer lock.
     other = route(path, "t")
     failed = route(path, "t", excluded=[(other["provider"], other["model"])])

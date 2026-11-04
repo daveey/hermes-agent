@@ -64,6 +64,8 @@ def _resolve_policy_agent_runtime(runner, policy, *, fallback=True) -> tuple[str
             fallback_entry.get('model') or 'default')
         return fallback_entry['model'], _runtime_agent_kwargs(runtime)
     if runtime.get('class_deferred'):
+        if runtime.get('walled_notice'):
+            runner._pre_agent_fallback_notice = runtime['walled_notice']
         return runtime['model'], _runtime_agent_kwargs(runtime)
     return model, _runtime_agent_kwargs(runtime)
 

@@ -105,7 +105,8 @@ def eligible_routes(policy, level, requirements=None, excluded=(), eligible=None
 
 def resolve_model_route(model, provider="auto", *, config=None, session_id=None,
                         parent_session_id=None, requirements=None, excluded=(), state_path=None,
-                        eligible=None, prepare=None, exact_pin=False, replace: bool | str = False):
+                        eligible=None, prepare=None, exact_pin=False, replace: bool | str = False,
+                        pin_source=None, walled_from=None):
     """Return concrete model/provider and durable metadata, or unchanged exact pin.
 
     ``excluded`` is a sequence of failed (provider, model) pairs for a new attempt,
@@ -141,5 +142,6 @@ def resolve_model_route(model, provider="auto", *, config=None, session_id=None,
         state_path = get_hermes_home() / "model-routing.sqlite3"
     metadata = RoutingState(state_path).allocate(session_id, parent_session_id, level,
                                                 routes, policy.get("policy_version", 1), excluded, prepare,
-                                                exact_pin=exact_pin, replace=replace)
+                                                exact_pin=exact_pin, replace=replace,
+                                                pin_source=pin_source, walled_from=walled_from)
     return {"model": metadata["selected_model"], "provider": metadata["selected_provider"], "metadata": metadata}
