@@ -125,13 +125,13 @@ async def test_a_refused_receipt_names_its_failing_check_in_the_log(tmp_path, mo
     logged forever; identity/lineage/outer JSON failures retain their old behavior.
     """
     import logging
-    from gateway.session_contract import Principal
+    from gateway.session_contract import SessionActor
     from gateway.session_local import create_local_session
     from gateway.session_local_recovery import restore_local_session
     from hermes_state_runtime import RuntimeStoreError
 
     served, db, secondary = await _served_authority(tmp_path, monkeypatch, 'first')
-    actor = Principal('owner', str(secondary), frozenset({'session:create', 'session:read'}), 'socket')
+    actor = SessionActor('owner', str(secondary), frozenset({'session:create', 'session:read'}), 'socket')
     ref = create_local_session(served, actor, {'request_id': damage, 'source': 'gui',
                                                'cwd': str(tmp_path), 'model': 'frozen', 'toolsets': []})
     _RECEIPT_DAMAGE[damage](db, ref.session_id)
