@@ -159,7 +159,7 @@ CRON_SESSION_READ_ONLY_SURFACE = {'layer': 'gateway', 'code': 'cron_session_read
 # keeps the job's last real verdict (failure streak, alert-once marker) instead of resetting it.
 # [daveey] ``_gate_error``: a pre-agent gate (monitor source, unparseable config) failed; booked as
 # ``last_error_kind = "gate"`` so the next good gate tick may clear the streak.
-RUN_JOB_FLAGS = ('_model_unreachable', '_quota_hold_seconds', '_agent_skipped', '_gate_error')
+RUN_JOB_FLAGS = ('_model_unreachable', '_quota_hold_seconds', '_quota_hold_route', '_agent_skipped', '_gate_error')
 
 
 async def operation(authority, name, params, actor=None):

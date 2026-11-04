@@ -2855,10 +2855,14 @@ def run_job(
                 job["_model_unreachable"] = True
             # Provider usage window closed for a known duration (cron/quota_hold.py): flag it so the
             # bookkeeping tail parks the job past the window instead of re-firing into it (#89376).
-            from cron.quota_hold import classify_failure_hold
+            from cron.quota_hold import ROUTE_FLAG, classify_failure_hold, route_from_failure
             _hold_s = classify_failure_hold(job, e)
             if _hold_s:
                 job["_quota_hold_seconds"] = _hold_s
+                # The refusing route lets the due scan release the hold once that pool serves.
+                _hold_route = route_from_failure(e)
+                if _hold_route:
+                    job[ROUTE_FLAG] = _hold_route
         except Exception:  # classification must never mask the real failure
             logger.debug("Job '%s': unreachable-failure classification failed", job_id)
         # No audit row when we failed before the agent existed; the audit write must never raise.

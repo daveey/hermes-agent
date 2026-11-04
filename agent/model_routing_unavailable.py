@@ -117,6 +117,28 @@ def quota_wait_seconds(exc, now=None):
     return None if error is None else _route_wait(error, time.time() if now is None else now)
 
 
+def quota_refusal_route(exc):
+    """``(provider, model)`` of the route whose quota refusal ended *exc*'s cause chain, else None.
+
+    The pool refusal names its own route; for a fallback chain it is the terminal (last-tried)
+    route. A refusal that does not name both (the Codex ``AuthError`` carries no model) gives None.
+    Typed only, like ``quota_wait_seconds``."""
+    from hermes_cli.fallback_errors import ProviderFallbackError
+
+    error = _terminal_refusal(exc)
+    if isinstance(error, ProviderFallbackError):
+        if not error.failures:
+            return None
+        provider, model, _ = error.failures[-1]
+    elif error is not None and _is_quota_type(error):
+        provider, model = getattr(error, "provider", None), getattr(error, "model", None)
+    else:
+        return None
+    if not (isinstance(provider, str) and provider.strip() and isinstance(model, str) and model.strip()):
+        return None
+    return provider.strip().lower(), model.strip()
+
+
 def is_quota_failure(exc):
     """True when *exc*'s cause chain ends in a quota refusal (every fallback route one, too),
     whether or not it carries a usable deadline."""

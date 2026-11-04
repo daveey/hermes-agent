@@ -74,9 +74,12 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
         # A re-run of an occurrence that already counted: must not spend another repeat slot.
         mark_kwargs["ladder_rung"] = True
     _hold_s = job.pop("_quota_hold_seconds", None)
+    _hold_route = job.pop("_quota_hold_route", None)
     if not d.success and _hold_s:
         # Provider window closed for a known duration: park past it (cron/quota_hold.py, #89376).
         mark_kwargs["quota_hold_seconds"] = _hold_s
+        if _hold_route:
+            mark_kwargs["quota_hold_route"] = _hold_route
         mark_kwargs["recover_consumed_fire"] = bool(job.get("_scheduled_instant"))
     if d.success and not d.delivery_error and d.should_deliver and job.get("last_delivery_queued"):
         mark_kwargs["status"] = "delivery_queued"

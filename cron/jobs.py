@@ -2555,6 +2555,7 @@ def mark_job_run(
     ladder_rung: bool = False,
     quota_hold_seconds: Optional[float] = None,
     recover_consumed_fire: bool = False,
+    quota_hold_route: Optional[dict[str, str]] = None,
     agent_skipped: bool = False,
     fire_error: bool = False,
     gate_error: bool = False,
@@ -2579,7 +2580,8 @@ def mark_job_run(
     ``retry after <N>s``). Recurring jobs are parked through the window instead of re-firing into
     it on every tick. ``recover_consumed_fire`` lets a scheduled sparse cron recover its
     consumed fire when the provider reopens; manual runs retain the natural schedule
-    (cron/quota_hold.py, #89376).
+    (cron/quota_hold.py, #89376). ``quota_hold_route`` ({provider, model} of the refusing route)
+    is stamped on the hold so the due scan can release it once that pool serves again.
 
     ``agent_skipped``: a gate (``wakeAgent=false`` script, unchanged monitor) suppressed the agent,
     so this successful tick is not evidence of agent health. ``last_status``, ``last_error``,
@@ -2626,7 +2628,8 @@ def mark_job_run(
             # Any run that reached the model (either outcome) resets the re-run ladder.
             clear_state(job)
         if not success and quota_hold_seconds and not is_terminal_job(job):
-            quota_hold.plan_hold(job, quota_hold_seconds, recover_consumed_fire=recover_consumed_fire)
+            quota_hold.plan_hold(job, quota_hold_seconds, recover_consumed_fire=recover_consumed_fire,
+                                 route=quota_hold_route)
         else:
             quota_hold.clear_state(job)
         save_jobs(jobs)
@@ -3148,6 +3151,23 @@ def _rearm_stale_error_recurring(d: _DueJob) -> datetime:
     return recovered_next_dt
 
 
+def _release_recovered_quota_hold(d: _DueJob) -> bool:
+    """A cron job parked by a quota hold whose refusing pool is serving again moves to its next
+    natural occurrence (never "now"); True when released, so this tick does not fire it."""
+    if not d.job.get("quota_hold_until"):
+        return False
+    from cron.quota_hold import clear_state, release_if_serving
+
+    natural_next = d.recompute_next()
+    if not release_if_serving(d.job, d.scan.now, natural_next):
+        return False
+    rj = d.scan.find(d.job["id"])
+    if rj is not None:
+        clear_state(rj)
+    d.scan.persist(d.job["id"], next_run_at=natural_next)
+    return True
+
+
 def _reanchor_stale_cron(d: _DueJob) -> bool:
     """Stale-schedule guard for a due cron instant; True when re-anchored without firing.
 
@@ -3293,6 +3313,8 @@ def _evaluate_due_job(job: dict[str, Any], scan: _DueScan, run_claim_ttl: float)
     # change. A pinned job's instant legitimately carries its own offset, so repair can only
     # misfire on it — skip it entirely.
     if kind == "cron" and not manual_run and zone is None and _repair_timezone_shifted_cron(d):
+        return False
+    if kind == "cron" and not manual_run and _release_recovered_quota_hold(d):
         return False
     d.next_run_dt = _rearm_stale_error_recurring(d)
     if _instant_after(d.next_run_dt, now):
