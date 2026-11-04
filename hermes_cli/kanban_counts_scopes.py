@@ -29,7 +29,11 @@ def remember_locked() -> None:
 def restore_locked(scope: tuple[str, ...]) -> None:
     from hermes_cli import kanban_session_activity as ksa
 
-    if ksa._cache is not None and ksa._cache_scope == scope:
+    if ksa._cache is None:
+        # Dropping the active slot is an explicit invalidation, not a scope miss.
+        _entries.clear()
+        return
+    if ksa._cache_scope == scope:
         if scope in _entries:
             _entries.move_to_end(scope)
         return
