@@ -10,6 +10,11 @@ docker refresh tick re-runs the copy, so the race could be retried without limit
 Each test swaps deterministically from inside the walk's deny predicate, i.e. after the
 entry was enumerated and vetted and before it is opened, and asserts no secret byte ever
 reaches the copy.
+
+The race tests run twice: through the POSIX anchored walk, and through the Windows pinned
+walk driven by a Linux emulation of its handle API (``pinned_handles_emulation``). The
+emulation cannot hold a rename off (no share modes on Linux), so there the swap really
+happens and the walk's reparse, identity and final-path checks must catch it.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from pathlib import Path
 import pytest
 
 import tools.credential_files as cf
+from tests.tools import pinned_handles_emulation as emulation
 
 SECRET = "TOP-SECRET-HOST-TOKEN"
 
@@ -29,6 +35,18 @@ def posix_only(test):
     """Runs on the Linux suite and the macOS ``-m platforms`` lane (real O_NOFOLLOW semantics)."""
     return pytest.mark.platforms("posix")(
         pytest.mark.skipif(not cf._ANCHORED_COPY_SUPPORTED, reason="needs O_NOFOLLOW + dir_fd opens")(test))
+
+
+@pytest.fixture(params=["anchored", "pinned"])
+def walker(request, monkeypatch):
+    """Which race-free walk the copy uses: POSIX dir_fd anchoring, or Windows handle pinning
+    (emulated on Linux; real pinning is in test_skills_copy_windows.py, Windows-only)."""
+    if request.param == "pinned":
+        if not emulation.AVAILABLE:
+            pytest.skip("the pinned-handle emulation needs Linux /proc and O_PATH")
+        monkeypatch.setattr(cf, "_ANCHORED_COPY_SUPPORTED", False)
+        monkeypatch.setattr(cf, "_WINDOWS_HANDLE_API", emulation.LinuxPinnedHandles())
+    return request.param
 
 
 @pytest.mark.platforms("posix")
@@ -85,19 +103,6 @@ def test_copy_key_uses_the_callers_single_resolution(home, monkeypatch):
     assert (copy / "s" / "SKILL.md").is_file()
 
 
-@pytest.mark.platforms("windows")
-def test_windows_withholds_skills_copy_for_real(tmp_path, monkeypatch):
-    home = tmp_path / "hh"
-    (home / "skills" / "s").mkdir(parents=True)
-    (home / "skills" / "s" / "SKILL.md").write_text("# s")
-    monkeypatch.setenv("HERMES_HOME", str(home))
-
-    copy = Path(cf._safe_skills_path(home / "skills"))
-
-    assert not cf._ANCHORED_COPY_SUPPORTED
-    assert not any(p.is_file() for p in copy.rglob("*"))
-
-
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     home = tmp_path / "hh"
@@ -142,7 +147,7 @@ def _copied_text(copy: Path) -> str:
 
 
 @posix_only
-def test_file_swapped_for_symlink_after_vetting_is_not_followed(home, secret, monkeypatch):
+def test_file_swapped_for_symlink_after_vetting_is_not_followed(home, secret, monkeypatch, walker):
     victim = home / "skills" / "s" / "zz_payload.md"
     victim.write_text("benign")
 
@@ -159,7 +164,7 @@ def test_file_swapped_for_symlink_after_vetting_is_not_followed(home, secret, mo
 
 
 @posix_only
-def test_parent_dir_swapped_for_symlink_after_file_vetting_is_not_followed(home, tmp_path, monkeypatch):
+def test_parent_dir_swapped_for_symlink_after_file_vetting_is_not_followed(home, tmp_path, monkeypatch, walker):
     """The file is fine; its *parent directory* is swapped for a link to a host dir holding a
     same-named secret between vetting the file and opening it."""
     sub = home / "skills" / "s" / "sub"
@@ -182,7 +187,7 @@ def test_parent_dir_swapped_for_symlink_after_file_vetting_is_not_followed(home,
 
 
 @posix_only
-def test_dir_swapped_for_symlink_before_descent_is_not_walked(home, tmp_path, monkeypatch):
+def test_dir_swapped_for_symlink_before_descent_is_not_walked(home, tmp_path, monkeypatch, walker):
     sub = home / "skills" / "s" / "sub"
     sub.mkdir()
     (sub / "a.md").write_text("benign")
@@ -202,7 +207,7 @@ def test_dir_swapped_for_symlink_before_descent_is_not_walked(home, tmp_path, mo
 
 
 @posix_only
-def test_root_ancestor_swapped_after_vetting_withholds_the_tree(tmp_path, monkeypatch):
+def test_root_ancestor_swapped_after_vetting_withholds_the_tree(tmp_path, monkeypatch, walker):
     """A project skills root's own ancestor (``<cwd>/.hermes``) is container-writable too."""
     home = tmp_path / "hh"
     home.mkdir()
@@ -235,7 +240,7 @@ def test_root_ancestor_swapped_after_vetting_withholds_the_tree(tmp_path, monkey
 
 @posix_only
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
-def test_file_swapped_for_fifo_after_vetting_neither_hangs_nor_copies(home, monkeypatch):
+def test_file_swapped_for_fifo_after_vetting_neither_hangs_nor_copies(home, monkeypatch, walker):
     victim = home / "skills" / "s" / "zz_pipe.md"
     victim.write_text("benign")
 
@@ -258,7 +263,7 @@ def test_file_swapped_for_fifo_after_vetting_neither_hangs_nor_copies(home, monk
 
 
 @posix_only
-def test_symlinked_skills_root_is_still_copied(tmp_path, monkeypatch):
+def test_symlinked_skills_root_is_still_copied(tmp_path, monkeypatch, walker):
     """Portability: a user's ``skills`` that is itself a symlink to their real skills dir
     (dotfiles setups) keeps working; only links *inside* the tree are refused."""
     home = tmp_path / "hh"
@@ -279,13 +284,15 @@ def test_symlinked_skills_root_is_still_copied(tmp_path, monkeypatch):
 
 
 def test_platform_without_anchored_opens_withholds_the_copy(home, monkeypatch, caplog):
-    """Fail closed: without O_NOFOLLOW/dir_fd there is no race-free copy, so nothing is copied
-    (and a previous copy is emptied) rather than falling back to a path-following copy."""
+    """Fail closed: with neither O_NOFOLLOW/dir_fd nor Win32 handles there is no race-free
+    copy, so nothing is copied (and a previous copy is emptied) rather than falling back to a
+    path-following copy."""
     (home / "skills" / "s" / "notes.md").write_text("# notes")
     copy = Path(cf._safe_skills_path(home / "skills"))
-    assert (copy / "s" / "notes.md").exists() or not cf._ANCHORED_COPY_SUPPORTED
+    assert (copy / "s" / "notes.md").exists()
 
     monkeypatch.setattr(cf, "_ANCHORED_COPY_SUPPORTED", False)
+    monkeypatch.setattr(cf, "_WINDOWS_HANDLE_API", None)
     with caplog.at_level(logging.WARNING, logger=cf.logger.name):
         copy = Path(cf._safe_skills_path(home / "skills"))
 

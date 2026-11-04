@@ -8,6 +8,7 @@ dirs, and host cache dirs to mount or sync in, at creation and before each comma
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import os
 import posixpath
@@ -23,6 +24,7 @@ from hermes_constants import get_hermes_dir, get_hermes_home
 
 from agent.provider_media import GENERATED_SUBDIR, MEDIA_CACHE_MAX_AGE_HOURS
 from agent.skill_utils import EXCLUDED_SKILL_DIRS
+from tools import credential_files_windows as _winwalk
 
 try:  # pragma: no cover - exercised via the fail-closed test below
     from agent.file_safety import get_read_block_error, read_deny_candidate_names
@@ -323,6 +325,7 @@ def _remove_entry(path: Path) -> None:
     if path.is_dir() and not path.is_symlink():
         shutil.rmtree(path, ignore_errors=True)
     else:
+        _clear_readonly(str(path))
         path.unlink(missing_ok=True)
 
 
@@ -362,9 +365,11 @@ def _anchored_copy_supported() -> bool:
     )
 
 
-# Without these (Windows) there is no race-free way to read a sandbox-writable tree, so the
-# sanitized copy is withheld (fails closed) instead of falling back to a path-following copy.
 _ANCHORED_COPY_SUPPORTED = _anchored_copy_supported()
+# Windows has none of those; it reads through handles pinned without delete sharing instead
+# (tools/credential_files_windows.py). A platform with neither gets no copy (fails closed),
+# never a path-following one.
+_WINDOWS_HANDLE_API = None if _ANCHORED_COPY_SUPPORTED else _winwalk.load_api()
 _withheld_roots_warned: set[str] = set()
 
 
@@ -448,13 +453,57 @@ def _walk_skill_tree_anchored(root: Path, *, skip_dir: Optional[Path] = None
         os.close(root_fd)
 
 
-def _copy_if_stale(dir_fd: int, name: str, listed: os.stat_result, dst: str) -> None:
-    """Copy the regular file *name* under *dir_fd* over *dst* unless it already matches
+def _walk_skill_tree_pinned(root: Path, api: _winwalk.HandleApi, *,
+                            skip_dir: Optional[Path] = None) -> Iterator[_winwalk.TreeItem]:
+    """The Windows counterpart of :func:`_walk_skill_tree_anchored`: same pruning and deny
+    rules, read through pinned handles (see :mod:`tools.credential_files_windows`)."""
+    denied = _skill_entry_denier(root)  # vetted before pinning: a swap after this fails the pin
+    if denied is None:
+        logger.warning("credential_files: withholding read-denied skills root from sandbox: %s", root)
+        return
+    skip_id = None
+    if skip_dir is not None:
+        with contextlib.suppress(OSError):
+            skip_st = os.stat(skip_dir)
+            skip_id = (skip_st.st_dev, skip_st.st_ino)
+    yield from _winwalk.walk_tree(api, root, denied, EXCLUDED_SKILL_DIRS, skip_id)
+
+
+def _open_anchored_file(dir_fd: int, name: str, _listed: os.stat_result) -> int:
+    return os.open(name, _SOURCE_FILE_FLAGS, dir_fd=dir_fd)
+
+
+def _source_tree(skills_dir: Path, skip_dir: Path) -> Iterator[_winwalk.TreeItem]:
+    """``(rel, open_file(name, listed) -> fd, files)`` from this platform's race-free walk."""
+    if _ANCHORED_COPY_SUPPORTED:
+        return ((rel, functools.partial(_open_anchored_file, dir_fd), files)
+                for rel, dir_fd, files in _walk_skill_tree_anchored(skills_dir, skip_dir=skip_dir))
+    if _WINDOWS_HANDLE_API is not None:
+        return _walk_skill_tree_pinned(skills_dir, _WINDOWS_HANDLE_API, skip_dir=skip_dir)
+    if str(skills_dir) not in _withheld_roots_warned:
+        _withheld_roots_warned.add(str(skills_dir))
+        logger.warning("credential_files: withholding skills %s from the sandbox mount: this platform has"
+                       " neither O_NOFOLLOW/dir_fd opens nor Win32 handles, so a race-free copy is"
+                       " impossible", skills_dir)
+    return iter(())
+
+
+def _clear_readonly(path: str) -> None:
+    """Windows refuses to replace or delete a read-only file; POSIX needs only the dir's write bit."""
+    if os.name == "nt":
+        with contextlib.suppress(OSError):
+            os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+
+
+def _copy_if_stale(open_src: Callable[[str, os.stat_result], int], name: str, listed: os.stat_result,
+                   dst: str) -> None:
+    """Copy the regular file *name*, opened by *open_src*, over *dst* unless it already matches
     (size + ns mtime, which the copy keeps).
 
-    The source is opened ``O_NOFOLLOW`` relative to its directory fd and read from that fd only
-    after ``fstat`` shows a regular file, so a symlink, FIFO or device swapped in after the walk
-    vetted it raises instead of being followed. Written to a sibling temp file and
+    *open_src* never follows a swapped-in link: ``O_NOFOLLOW`` relative to the directory fd on
+    POSIX, a pinned and verified handle on Windows. The fd is read only after ``fstat`` shows a
+    regular file, so a symlink, FIFO or device swapped in after the walk vetted it raises
+    instead of being followed. Written to a sibling temp file and
     ``os.replace``d in: a live container never reads a half-written file, and a read-only
     (0444) previous copy can still be replaced.
     """
@@ -469,7 +518,7 @@ def _copy_if_stale(dir_fd: int, name: str, listed: os.stat_result, dst: str) -> 
         pass
     if os.path.isdir(dst) and not os.path.islink(dst):
         shutil.rmtree(dst, ignore_errors=True)
-    src_fd = os.open(name, _SOURCE_FILE_FLAGS, dir_fd=dir_fd)
+    src_fd = open_src(name, listed)
     try:
         src_st = os.fstat(src_fd)
         if not stat.S_ISREG(src_st.st_mode):
@@ -477,11 +526,13 @@ def _copy_if_stale(dir_fd: int, name: str, listed: os.stat_result, dst: str) -> 
         tmp = os.path.join(os.path.dirname(dst), f".{os.path.basename(dst)}.hermes-tmp")
         _remove_entry(Path(tmp))
         try:
-            out_fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o600)
+            out_fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC
+                             | getattr(os, "O_BINARY", 0), 0o600)  # O_BINARY: no CRLF rewrite on Windows
             with open(out_fd, "wb") as fdst, open(src_fd, "rb", closefd=False) as fsrc:
                 shutil.copyfileobj(fsrc, fdst, 1 << 20)
             os.chmod(tmp, stat.S_IMODE(src_st.st_mode) & 0o777)  # never carry setuid/setgid into a mount
             os.utime(tmp, ns=(src_st.st_atime_ns, src_st.st_mtime_ns))
+            _clear_readonly(dst)
             os.replace(tmp, dst)
         except OSError:
             _remove_entry(Path(tmp))
@@ -495,21 +546,13 @@ def _refresh_sanitized_copy(skills_dir: Path, safe_dir: Path) -> Path:
 
     Runs on every docker refresh tick, so it keys on plain path strings: the ``Path``
     arithmetic (``relative_to``, hashing) cost more than the syscalls on a 5k-file tree.
-    Reads go through :func:`_walk_skill_tree_anchored` (see there for why); where that is
-    unavailable the copy is emptied and stays empty rather than copied by path.
+    Reads go through :func:`_source_tree` (see there for why); where no race-free walk exists
+    the copy is emptied and stays empty rather than copied by path.
     """
     dst_root = str(safe_dir)
     wanted_dirs: set[str] = set()
     wanted_files: set[str] = set()
-    if _ANCHORED_COPY_SUPPORTED:
-        tree = _walk_skill_tree_anchored(skills_dir, skip_dir=safe_dir.parent)
-    else:
-        if str(skills_dir) not in _withheld_roots_warned:
-            _withheld_roots_warned.add(str(skills_dir))
-            logger.warning("credential_files: withholding skills %s from the sandbox mount: this platform has"
-                           " no O_NOFOLLOW/dir_fd opens, so a race-free copy is impossible", skills_dir)
-        tree = iter(())
-    for rel, dir_fd, files in tree:
+    for rel, open_src, files in _source_tree(skills_dir, safe_dir.parent):
         dst_dir = dst_root + rel
         wanted_dirs.add(dst_dir)
         if os.path.islink(dst_dir) or (os.path.lexists(dst_dir) and not os.path.isdir(dst_dir)):
@@ -518,7 +561,7 @@ def _refresh_sanitized_copy(skills_dir: Path, safe_dir: Path) -> Path:
         for name, listed in files:
             dst = os.path.join(dst_dir, name)
             try:
-                _copy_if_stale(dir_fd, name, listed, dst)
+                _copy_if_stale(open_src, name, listed, dst)
             except OSError as exc:  # unreadable, vanished or swapped mid-walk: skip it, don't drop every mount
                 logger.warning("credential_files: skipping unreadable skills file %s%s/%s: %s",
                                skills_dir, rel, name, exc)
@@ -529,6 +572,7 @@ def _refresh_sanitized_copy(skills_dir: Path, safe_dir: Path) -> Path:
         for name in filenames:
             path = os.path.join(dirpath, name)
             if path not in wanted_files:
+                _clear_readonly(path)
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(path)
         if dirpath != dst_root and dirpath not in wanted_dirs:
