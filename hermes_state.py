@@ -38,9 +38,10 @@ from hermes_state_holders import read_only_db_uri
 from hermes_state_pidns import holder_pid_checkable
 from hermes_state_health import (
     STORAGE_CORRUPT, corruption_detail as _corruption_detail, is_structural_corruption_error,
-    mark_storage_corrupt, note_storage_error, storage_corrupt_reason, storage_state,
+    mark_storage_corrupt, note_storage_error, note_unconfirmed_corruption, storage_corrupt_reason, storage_state,
     write_op_name as _write_op_name,
 )
+import hermes_state_corruption_confirm as _corrupt_confirm
 from hermes_state_errors import (
     _DELETED_WAL_GENERATION_MSG, _DISK_IO_ERROR_MARKER, _STATE_DB_CORRUPT_MSG, _STATE_DB_GENERATION_KEY,
     _STATE_DB_REPLACED_MSG, DeletedWalGenerationError, SessionCompressionInProgressError, StateDbCorruptError,
@@ -1076,6 +1077,8 @@ class SessionDB(
         # healthy file for an hour). Nothing of the failed attempt is durable, so the replay is the
         # same contract as the lock / FTS fail-open replays below. A second structural error latches.
         # COMMIT itself is never replayed: its settlement is unknown (a durable receipt would apply twice).
+        # The replay also needs a clean scoped read-only quick_check first (_replay_or_halt_corrupt):
+        # `scope` records, per attempt, the tables the attempt's statements touched (names only).
         first_corrupt: Optional[BaseException] = None
         while True:
             self._raise_if_db_corrupt(storage=True)
@@ -1091,31 +1094,33 @@ class SessionDB(
             # stable post-close state (identity cleared → adopt / reopen path).
             fn_started = False
             stage = "open"
+            scope = _corrupt_confirm.TouchedTables()
             try:
                 with self._lock:
                     self._raise_if_db_replaced()
                     if self._conn is None:  # close() raced this writer
                         self._reopen_after_close_locked(context="write")
                     stage = "begin"
-                    self._conn.execute("BEGIN IMMEDIATE")
-                    held_since = time.monotonic()
-                    try:
-                        fn_started = True
-                        stage = "callback"
-                        result = fn(self._conn)
-                        stage = "commit"
-                        self._conn.commit()
-                        stage = "committed"
-                        held_s = time.monotonic() - held_since
-                        if held_s >= _WRITE_HOLD_WARN_S:  # the log names waiters; this names the holder's code
-                            logger.warning("state.db write lock held %.1fs by %s (pid %d)", held_s,
-                                           getattr(fn, "__qualname__", repr(fn)), os.getpid())
-                    except BaseException:
+                    with scope.recording(self._conn):
+                        self._conn.execute("BEGIN IMMEDIATE")
+                        held_since = time.monotonic()
                         try:
-                            self._conn.rollback()
-                        except Exception:
-                            pass
-                        raise
+                            fn_started = True
+                            stage = "callback"
+                            result = fn(self._conn)
+                            stage = "commit"
+                            self._conn.commit()
+                            stage = "committed"
+                            held_s = time.monotonic() - held_since
+                            if held_s >= _WRITE_HOLD_WARN_S:  # the log names waiters; this names the holder's code
+                                logger.warning("state.db write lock held %.1fs by %s (pid %d)", held_s,
+                                               getattr(fn, "__qualname__", repr(fn)), os.getpid())
+                        except BaseException:
+                            try:
+                                self._conn.rollback()
+                            except Exception:
+                                pass
+                            raise
                 # Success — periodic best-effort checkpoint + FTS merge.
                 self._note_unconfirmed_corruption(fn, first_corrupt)
                 self._write_count += 1
@@ -1185,7 +1190,8 @@ class SessionDB(
                         continue
                     # What survives both checks is structural damage: confirm once, then quarantine.
                     if self._is_structural_corruption_error(exc):
-                        first_corrupt = self._replay_or_halt_corrupt(exc, fn, stage, first_corrupt)
+                        first_corrupt = self._replay_or_halt_corrupt(
+                            exc, fn, stage, first_corrupt, scope=scope, deadline=deadline)
                         continue  # the helper raised unless this one replay is safe
                 raise
 
@@ -1228,9 +1234,14 @@ class SessionDB(
         ioerr_attempts = 0
         first_corrupt: Optional[BaseException] = None
         while True:
+            scope = _corrupt_confirm.TouchedTables()
             try:
                 with self._read_ctx() as conn:
-                    result = fn(conn)
+                    if conn is self._conn:  # non-WAL fallback: the writer's authorizer slot is not ours
+                        result = fn(conn)
+                    else:
+                        with scope.recording(conn):
+                            result = fn(conn)
             except sqlite3.OperationalError as exc:
                 if ioerr_attempts >= _READ_ONLY_IOERR_RETRY_ATTEMPTS or _DISK_IO_ERROR_MARKER not in str(exc).lower():
                     note_storage_error(self.db_path, exc)
@@ -1239,23 +1250,40 @@ class SessionDB(
                 time.sleep(_READ_ONLY_IOERR_RETRY_BACKOFF_S)
                 continue
             except sqlite3.DatabaseError as exc:
-                # One unconfirmed structural error is replayed before it latches the process
-                # (a SELECT has no effect to duplicate); a recurrence is published as before.
-                if first_corrupt is None and is_structural_corruption_error(exc):
+                # One structural error that a bounded read-only quick_check of the tables the read
+                # touched does NOT confirm is replayed before it latches the process (a SELECT has
+                # no effect to duplicate); a confirmed one, a check timeout/error or a recurrence
+                # is published as before.
+                outcome = self._read_corrupt_replay_blocker(exc, scope, first_corrupt)
+                if outcome is None:
                     first_corrupt = exc
-                    logger.warning("state.db %s: a read raised structural corruption (%s); replaying it "
-                                   "once before latching.", self.db_path, _corruption_detail(exc))
                     continue
                 # A reader is often the only observer (the sidebar poll on a store nobody is
                 # writing to): publish structural damage so the list is not read as empty.
-                note_storage_error(self.db_path, exc, context=(
-                    f"{_corruption_detail(exc)}; op=read; "
-                    + ("recurred on replay" if first_corrupt is not None else "no replay")))
+                note_storage_error(self.db_path, exc, context=f"{_corruption_detail(exc)}; op=read; {outcome}")
                 raise
             if first_corrupt is not None:
                 logger.warning("state.db %s: read corruption (%s) did not recur on replay; storage is NOT "
                                "latched (unconfirmed corruption).", self.db_path, _corruption_detail(first_corrupt))
             return result
+
+    def _read_corrupt_replay_blocker(self, exc: BaseException, scope: "_corrupt_confirm.TouchedTables",
+                                     first_corrupt: Optional[BaseException]) -> Optional[str]:
+        """None when a read that raised *exc* may be replayed once (structural, first time, and a
+        clean scoped read-only quick_check); otherwise the outcome for the latch reason."""
+        if first_corrupt is not None:
+            return "recurred on replay"
+        if not is_structural_corruption_error(exc):
+            return "no replay"
+        confirm = _corrupt_confirm.confirm_corruption(
+            self.db_path, scope.tables(), _corrupt_confirm.confirm_budget(None))
+        if not confirm.clean:
+            return f"no replay: {confirm.describe()}"
+        logger.warning(
+            "state.db %s: a read raised structural corruption (%s), NOT confirmed (%s; unconfirmed "
+            "this process: %d); replaying it once before latching.", self.db_path,
+            _corruption_detail(exc), confirm.describe(), note_unconfirmed_corruption(self.db_path))
+        return None
 
     def _ensure_db_file_generation(self) -> None:
         """Mint a once-per-file generation stamp (state_meta + application_id). First opener wins (INSERT
@@ -1447,16 +1475,31 @@ class SessionDB(
         return None
 
     def _replay_or_halt_corrupt(self, exc: BaseException, fn: Callable[..., Any], stage: str,
-                                first_corrupt: Optional[BaseException]) -> BaseException:
-        """Return *exc* (the caller replays the write once) or quarantine and raise."""
+                                first_corrupt: Optional[BaseException], *,
+                                scope: "_corrupt_confirm.TouchedTables",
+                                deadline: float) -> BaseException:
+        """Return *exc* (the caller replays the write once) or quarantine and raise.
+
+        The replay needs, after the rollback/stage blockers, a CLEAN bounded read-only
+        quick_check of the tables the attempt touched (fresh process, timeout = remaining
+        patience); damage, a timeout or any check error quarantines instead."""
         replay_blocker = self._corrupt_replay_blocker(stage, first_corrupt)
+        confirm = None
+        if replay_blocker is None:
+            confirm = _corrupt_confirm.confirm_corruption(
+                self.db_path, scope.tables(), _corrupt_confirm.confirm_budget(deadline))
+            if not confirm.clean:
+                replay_blocker = f"no replay: {confirm.describe()}"
         if replay_blocker is not None:
             self._halt_db_corrupt(exc, context=(
                 f"{_corruption_detail(exc)}; op={_write_op_name(fn)}; stage={stage}; {replay_blocker}"))
+        count = note_unconfirmed_corruption(self.db_path)
         logger.warning(
-            "state.db %s: %s raised structural corruption (%s) at stage=%s; the transaction rolled "
-            "back, replaying it once on the same connection before quarantining.", self.db_path,
+            "state.db %s: %s raised structural corruption (%s) at stage=%s, NOT confirmed (%s; "
+            "unconfirmed this process: %d); the transaction rolled back, replaying it once on the "
+            "same connection before quarantining.", self.db_path,
             _write_op_name(fn), _corruption_detail(exc), stage,
+            confirm.describe() if confirm is not None else "unchecked", count,
         )
         return exc
 

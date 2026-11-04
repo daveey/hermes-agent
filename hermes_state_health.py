@@ -18,11 +18,14 @@ the process restarts, which is the recovery boundary ``StateDbCorruptError`` alr
 documents (stop Hermes, recover or restore, start again). No marker is written to disk:
 the file it would describe is the one that is damaged.
 
-Because it never clears, it must not be set on one unconfirmed error: the writer
-(``SessionDB._execute_write``) and the pooled reader replay a rolled-back statement once on
-the same connection and latch only when the corruption recurs (2026-11-03: one misread on a
-healthy file refused every write for an hour). A COMMIT is never replayed (its settlement is
-unknown), and the latched reason names the SQLite code, operation, stage and replay outcome.
+Because it never clears, it must not be set on one unconfirmed error (2026-11-03: one error on
+a file that later passed ``quick_check`` refused every write for an hour). The writer
+(``SessionDB._execute_write``) and the pooled reader first run a bounded ``quick_check`` of the
+tables the failing statement touched, read-only in a fresh process
+(``hermes_state_corruption_confirm``). Only a clean check allows ONE replay of the rolled-back
+statement on the same connection, counted by ``note_unconfirmed_corruption``; damage, a timeout
+or any check error latches, and so does a recurrence. A COMMIT is never replayed (its settlement
+is unknown). The latched reason names the SQLite code, operation, stage and check outcome.
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ STORAGE_CORRUPT = "corrupt"
 
 _lock = threading.Lock()
 _corrupt: dict[str, str] = {}  # resolved db path -> first error text (log only, never served)
+_unconfirmed: dict[str, int] = {}  # resolved db path -> structural errors a clean check did not confirm
 
 
 def _key(db_path) -> str:
@@ -114,14 +118,31 @@ def storage_corrupt_reason(db_path) -> Optional[str]:
         return _corrupt.get(_key(db_path))
 
 
+def note_unconfirmed_corruption(db_path) -> int:
+    """Count one structural error that a scoped read-only ``quick_check`` did NOT confirm (the
+    caller replays once instead of latching); returns this process's total for *db_path*."""
+    key = _key(db_path)
+    with _lock:
+        _unconfirmed[key] = _unconfirmed.get(key, 0) + 1
+        return _unconfirmed[key]
+
+
+def unconfirmed_corruption_count(db_path) -> int:
+    """How many structural errors on *db_path* this process saw but did not confirm."""
+    with _lock:
+        return _unconfirmed.get(_key(db_path), 0)
+
+
 def reset_storage_state(db_path=None) -> None:
-    """Forget the latch for *db_path* (all paths when None). For tests and a verified in-process
-    recovery; nothing in the runtime clears it on its own."""
+    """Forget the latch (and the unconfirmed-error count) for *db_path* (all paths when None).
+    For tests and a verified in-process recovery; nothing in the runtime clears it on its own."""
     with _lock:
         if db_path is None:
             _corrupt.clear()
+            _unconfirmed.clear()
         else:
             _corrupt.pop(_key(db_path), None)
+            _unconfirmed.pop(_key(db_path), None)
 
 
 __all__ = [
@@ -131,8 +152,10 @@ __all__ = [
     "is_structural_corruption_error",
     "mark_storage_corrupt",
     "note_storage_error",
+    "note_unconfirmed_corruption",
     "reset_storage_state",
     "storage_corrupt_reason",
     "storage_state",
+    "unconfirmed_corruption_count",
     "write_op_name",
 ]
