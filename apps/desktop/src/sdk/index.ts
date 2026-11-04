@@ -130,6 +130,7 @@ export type { PluginGateway } from './gateways'
 export * from './hub-sync'
 /** The plugin authoring contract (`HermesPlugin`, `PluginContext`, `ctx.*` door types). */
 export type * from './plugin-contract'
+export type { PluginProfileRequestOptions, PluginProfileRoute } from './profile-request'
 
 // -- state: readonly views over the app's live atoms -------------------------
 
@@ -1542,8 +1543,8 @@ export const host = {
 
 // -- react bridge -------------------------------------------------------------
 
-export type { PluginProfileRequestOptions, PluginProfileRoute } from './profile-request'
 export type { DesktopSettingKey, DesktopSettingValues } from './settings'
+export * from './sidebar-sections'
 
 // -- ui: the design language --------------------------------------------------
 
@@ -1600,19 +1601,6 @@ export { SidebarRowLead } from '@/app/chat/sidebar/chrome'
  *  switcher, the fleet profile rail and any plugin rail listing gateways share
  *  it, so a connection looks the same wherever it is named. */
 export { ConnectionGlyph } from '@/app/chat/sidebar/connection-glyph'
-/** [daveey] Chrome for a `SIDEBAR_SECTIONS_AREA` contribution (left pane,
- *  between Pinned and Projects): the collapsible header + capped body of the
- *  core sections, and a clickable row on the session-row grid. */
-export {
-  SidebarSection,
-  type SidebarSectionProps,
-  SidebarSectionRow,
-  type SidebarSectionRowProps
-} from '@/app/chat/sidebar/contributed-sections'
-/** [daveey] The sidebar session row's "which machine" glyph (laptop / Mac
- *  mini / cloud) for a registry connection id. Renders nothing with fewer
- *  than two gateways, so single-gateway users see no change. */
-export { GatewayDeviceIcon } from '@/app/chat/sidebar/gateway-device-icon'
 export { SIDEBAR_ROW_LEAD, SIDEBAR_TRUNCATED_LEADING } from '@/app/chat/sidebar/row-geometry'
 export { PALETTE_AREA, type PaletteContribution } from '@/app/command-palette/contrib'
 /** Page-owned header control (the kanban board switcher): projected into the
