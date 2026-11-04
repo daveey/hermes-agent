@@ -219,12 +219,19 @@ def _record(conn, task_id, gateway, value, *, fence=None):
         recorded_ms = max(int(time.time() * 1000), int(previous_ms) + 1 if _number(previous_ms) else 0)
         value = {**value, "recorded_at_ms": recorded_ms}
         kb._append_event(conn, task_id, EVENT, value)
-        kb.add_comment(conn, task_id, "worker-placement", describe(value), origin_gateway=gateway)
+        if value.get("code") != "no_eligible_worker":  # its thread comment is the owner's repin notice instead
+            kb.add_comment(conn, task_id, "worker-placement", describe(value), origin_gateway=gateway)
         return True
 
 
 def record_reply(conn, task_id, gateway, reply):
-    return _record(conn, task_id, gateway, normalize(reply))
+    from hermes_cli import kanban_repin_notice as repin
+
+    value = normalize(reply)
+    recorded = _record(conn, task_id, gateway, value)
+    # Every reply, not only a changed one: a card queued before the notice existed gets it on the next pass.
+    repin.maybe_notify(conn, task_id, gateway, value)
+    return recorded
 
 
 def try_record(writer, *args, **kwargs):

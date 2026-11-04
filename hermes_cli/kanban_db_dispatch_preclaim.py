@@ -28,11 +28,15 @@ def eligible_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row], status: str
     refused = dispatch_refusals(conn, status) if rows else {}
     if not refused:
         return rows
+    from hermes_cli import kanban_repin_notice as repin
+    from hermes_cli.kanban_worker_placement import WAITING
     kept = []
     for row in rows:
         reason = refused.get(row["id"])
         if reason is None:
             kept.append(row)
         else:
+            if reason == WAITING and repin.awaiting(conn, row["id"]):
+                reason = repin.MANUAL_REPIN  # no pool worker can run it: its creator must repin, not a lease
             result.skipped_ineligible.append((row["id"], reason))
     return kept

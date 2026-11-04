@@ -7,8 +7,16 @@ from __future__ import annotations
 from typing import Any, Iterable, Optional
 
 from hermes_cli.kanban_db_dispatch_clock import all_clock_held, deadline_suffixes
+from hermes_cli.kanban_repin_notice import MANUAL_REPIN
 
-__all__ = ["all_at_capacity", "all_clock_held", "cap_source", "describe_suppression", "stuck_warning"]
+__all__ = ["all_at_capacity", "all_clock_held", "cap_source", "describe_suppression", "manual_repin_ids",
+           "stuck_warning"]
+
+
+def manual_repin_ids(results: Iterable[Optional[Any]]) -> list[str]:
+    """Ready cards no pool worker can run, which wait for their creator's repin (``kanban_repin_notice``)."""
+    return sorted({tid for res in results if res is not None
+                   for tid, reason in res.skipped_ineligible if reason == MANUAL_REPIN})
 
 
 def describe_suppression(results: Iterable[Optional[Any]]) -> str:
@@ -40,6 +48,8 @@ def describe_suppression(results: Iterable[Optional[Any]]) -> str:
             key = f"claim_deferred({reason})"
             counts[key] = counts.get(key, 0) + 1
         for _task_id, reason in res.skipped_ineligible:
+            if reason == MANUAL_REPIN:
+                continue  # named on its own (manual_repin_ids): not a hold this machine's lease explains
             key = f"skipped_ineligible({reason})"
             counts[key] = counts.get(key, 0) + 1
         if res.memory_pressure:
@@ -87,9 +97,14 @@ def stuck_warning(bad_ticks: int, results: Iterable[Optional[Any]]) -> str:
     at the Board leases and ``runs_on``; it only blames profile health when nothing else explains the zero."""
     results = list(results)
     held = describe_suppression(results)
+    repin = manual_repin_ids(results)
     msg = (f"kanban dispatcher stuck: ready queue non-empty for {bad_ticks} consecutive ticks but 0 workers "
            f"spawned.{f' Last tick held back: {held}.' if held else ''}")
-    lease_bound = any(res is not None and (res.claim_deferred or res.skipped_ineligible) for res in results)
+    if repin:
+        # No pool worker can run these (Board ``no_eligible_worker``); each card carries the repin command.
+        msg += f" Not a stall, waiting for a manual repin: {', '.join(repin)}."
+    lease_bound = any(res is not None and (res.claim_deferred or any(
+        reason != MANUAL_REPIN for _tid, reason in res.skipped_ineligible)) for res in results)
     if lease_bound:
         # With sync enabled every claim goes through the Board lease: a stopped sync loop explains them all. [daveey]
         from hermes_cli import kanban_sync_runstate as runstate

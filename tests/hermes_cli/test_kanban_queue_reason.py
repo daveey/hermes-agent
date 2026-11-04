@@ -75,7 +75,7 @@ def test_unknown_payload_never_persists_raw_fields(conn):
     assert "DO_NOT_STORE" not in json.dumps(qr.latest(conn, tid))
 
 
-@pytest.mark.parametrize("code", sorted(qr.CODES - {"board_error"}))
+@pytest.mark.parametrize("code", sorted(qr.CODES - {"board_error", "no_eligible_worker"}))
 def test_each_reason_has_durable_matching_thread_and_change_only_dedupe(conn, code):
     tid = fixtures.acknowledged(conn)
     r = reply(code, reasons=[code])
@@ -90,6 +90,21 @@ def test_each_reason_has_durable_matching_thread_and_change_only_dedupe(conn, co
     assert not qr.record_reply(conn, tid, "hub", r)
     assert len(kb.list_comments(conn, tid)) == 1
     assert not conn.execute("SELECT 1 FROM kanban_sync_outbox WHERE table_name='tasks' AND state='pending'").fetchone()
+
+
+def test_no_eligible_worker_thread_is_the_single_repin_notice(conn):
+    """``no_eligible_worker`` keeps the durable change-only observation, but its one thread comment is the owner's
+    repin notice (kanban_repin_notice), not a second diagnostic line beside it."""
+    tid = fixtures.acknowledged(conn)
+    r = reply("no_eligible_worker", reasons=["missing_labels"])
+    r["observation"]["candidates"][0]["missing_labels"] = ["skill:five-whys"]
+    assert qr.record_reply(conn, tid, "hub", r)
+    assert qr.latest(conn, tid)["code"] == "no_eligible_worker"
+    bodies = [c.body for c in kb.list_comments(conn, tid)]
+    assert len(bodies) == 1 and bodies[0].startswith("No pool worker can run this card (needs: skill:five-whys)")
+    r["observation"]["observed_at_ms"] = 2000
+    assert not qr.record_reply(conn, tid, "hub", r)
+    assert len(kb.list_comments(conn, tid)) == 1
 
 
 @pytest.mark.parametrize("fields", [
