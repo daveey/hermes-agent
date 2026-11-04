@@ -453,7 +453,9 @@ Hermes-managed containers carry labels so subsequent processes (and the orphan r
 - `hermes-agent=1` — marks it as Hermes-managed
 - `hermes-task-id=<sanitized task_id>` — keys the per-task reuse probe
 - `hermes-profile=<sanitized profile name>` — scopes reuse and reaping to the active Hermes profile by default; when `docker_shared_container_key` is set, its sanitized value is used instead
-- `hermes-environment=<digest>` — for containers without an explicit shared key, scopes reuse to the requested image, mount arguments, and active `HERMES_HOME`; host paths and volume sources are hashed rather than exposed in this label. Per-process tempdir-sourced mounts (the symlink-safe skills copy) are hashed by their stable container path, not the random host tempdir, so they don't defeat reuse
+- `hermes-environment=<digest>` — for containers without an explicit shared key, scopes reuse to the requested image, mount arguments, and active `HERMES_HOME`; host paths and volume sources are hashed rather than exposed in this label. Per-process tempdir-sourced mounts are hashed by their stable container path, not the random host tempdir, so they don't defeat reuse
+
+Skills directories are never bind-mounted raw: each root mounts a sanitized copy under `<HERMES_HOME>/cache/sandbox-skills/` (no symlinks, no `skills/.hub` cache, nothing the read deny-list blocks such as a skill's `.env`). Hermes refreshes the copies in place before commands, at most every 5 seconds, so skill edits reach a running container while files created later that the agent may not read on the host never do.
 
 On startup, Hermes runs `docker ps --filter label=hermes-task-id=<id> --filter label=hermes-profile=<identity>` and **attaches to the existing container** when it finds one. The identity is the active profile unless `docker_shared_container_key` explicitly opts trusted profiles into a common value. If the container is `exited` (e.g. after a Docker daemon restart), it's `docker start`'d and reused — filesystem state and any installed packages survive, but in-container background processes do not.
 

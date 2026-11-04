@@ -138,10 +138,10 @@ def _is_volatile_mount_spec(spec: str) -> bool:
     per-process tempdir (a ``mkdtemp`` under the system temp), so its path is random
     per process and must not be hashed into the reuse label.
 
-    The known source is the symlink-safe skills copy from
-    ``credential_files._safe_skills_path``: any symlink under ``skills/`` makes it a
-    fresh ``mkdtemp`` per process. Stable host paths — including a symlink-free
-    skills dir, which mounts directly — never sit under the process tempdir.
+    Historically the symlink-safe skills copy was such a ``mkdtemp``; it now has a stable
+    path under ``HERMES_HOME`` (``credential_files._safe_skills_path``), so this only keeps
+    any other tempdir-sourced mount (user volumes under the system temp) from breaking reuse.
+    Stable host paths never sit under the process tempdir.
     """
     if spec in ("-v", "--mount") or ":" not in spec:
         return False  # the flag element itself, or a non-bind arg (tmpfs modes etc.)
@@ -162,10 +162,9 @@ def _reuse_environment_fingerprint(*, image: str, mount_args: list[str], hermes_
 
     Hash requested values rather than exposing profile paths and volume sources in labels.
     Keep mount order: later arguments can override earlier mount destinations.
-    Per-process tempdir-sourced mounts (the symlink-safe skills copy) have their volatile
-    host path replaced by a stable placeholder: the path is random per process, so hashing
-    it made the label differ across processes and cross-process container reuse never
-    matched for users with any symlink under ``skills/``. The container path stays in the
+    Per-process tempdir-sourced mounts have their volatile host path replaced by a stable
+    placeholder: the path is random per process, so hashing it would make the label differ
+    across processes and cross-process container reuse never match. The container path stays in the
     hash, so moving where that mount lands still forces a fresh container.
     """
     normalized_home = os.path.normcase(os.path.abspath(os.path.expanduser(hermes_home)))
@@ -550,6 +549,10 @@ _RO_MOUNT_SOURCES = (
     ("get_cache_directory_mounts", False, "cache dir"))
 
 
+# Same cadence as remote backends' FileSyncManager tick (file_sync._SYNC_INTERVAL_SECONDS).
+_SKILLS_REFRESH_INTERVAL_SECONDS = 5.0
+
+
 def _readonly_skill_mount_args() -> list[str]:
     """``-v host:container:ro`` args for credential files, skill dirs and cache dirs. Read-only so the
     container can authenticate/read but never modify host state. Missing or wrong-kind sources are
@@ -656,6 +659,8 @@ class DockerEnvironment(BaseEnvironment):
     _passwordless_sudo_probe_supported = True
     _profile_scoped_passthrough = True
     _capsule: Optional[capsule_workspace.WorkspaceBinding] = None  # set only by a bound capsule worker
+    # Monotonic time of the last skills-copy refresh; None = no skills mounts to keep live.
+    _skills_refreshed_at: Optional[float] = None
 
     def _additional_profile_scoped_passthrough_names(self) -> tuple[str, ...]:
         """Keep explicit docker_forward_env values out of shared snapshots."""
@@ -730,6 +735,7 @@ class DockerEnvironment(BaseEnvironment):
             self.cwd = mount
         if capsule is None:
             volume_args.extend(_readonly_skill_mount_args())
+            self._skills_refreshed_at = time.monotonic()
         else:  # no credential/skills/cache mounts: the capsule dir is the only host path
             self._check_capsule_mounts(capsule, volume_args, writable_args)
         egress_label, egress_volume_args, egress_host_args, env_args, validated_extra = (
@@ -1223,6 +1229,20 @@ class DockerEnvironment(BaseEnvironment):
         if not self._container_id:
             return None
         return {"backend": "docker", "docker_exe": self._docker_exe, "container_id": self._container_id}
+
+    def _before_execute(self) -> None:
+        """The skills mounts are sanitized copies (``credential_files.get_skills_directory_mount``):
+        refresh them in place at most once per file-sync interval so a live container sees skill
+        edits, and never a ``.hub`` or ``.env`` created after it started."""
+        last = self._skills_refreshed_at
+        if last is None or time.monotonic() - last < _SKILLS_REFRESH_INTERVAL_SECONDS:
+            return
+        self._skills_refreshed_at = time.monotonic()
+        try:
+            from tools.credential_files import refresh_skills_directory_mounts
+            refresh_skills_directory_mounts()
+        except Exception as e:  # health: allow BLE001 -- a refresh failure must not fail the command
+            logger.warning("Docker: skills mount refresh failed: %s", e, exc_info=True)
 
     def execute(self, command: str, cwd: str = "", **kwargs) -> dict:
         """Execute a command; if the container was removed out-of-band (idle reaper,

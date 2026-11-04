@@ -746,11 +746,10 @@ def test_sandbox_dir_name_never_resolves_to_the_sandbox_root():
 
 @pytest.mark.require_symlinks
 def test_symlinked_skills_tree_reuses_container_across_processes(monkeypatch, tmp_path):
-    """A symlink under ``skills/`` makes the skills mount a fresh mkdtemp copy per
-    process (and even per DockerEnvironment construction — ``_safe_skills_path``
-    rmtree+mkdtemps on every call). The reuse label must stay stable anyway, or
-    the persistent container is never reused and users silently lose the
-    installed packages / filesystem state of their long-lived sandbox."""
+    """A symlink under ``skills/`` must not break cross-process reuse: the skills mount
+    source has to give the same reuse label on every construction, or the persistent
+    container is never reused and users silently lose the installed packages /
+    filesystem state of their long-lived sandbox."""
     monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
     monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "default")
     hermes_home = tmp_path / "alpha"
@@ -765,8 +764,7 @@ def test_symlinked_skills_tree_reuses_container_across_processes(monkeypatch, tm
     first = _make_dummy_env(**config)
     second = _make_dummy_env(**config)
     assert first._labels["hermes-environment"] == second._labels["hermes-environment"]
-    # The safe copy really is per-construction volatile: proof the stability above
-    # comes from canonicalization, not from the mount happening to be stable.
+    # The skills mount is really there (from the sanitized copy).
     mounts = []
     for entry in docker_env._readonly_skill_mount_args():
         if entry not in ("-v",) and ":/root/.hermes/skills" in entry:

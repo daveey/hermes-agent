@@ -75,7 +75,9 @@ class TestSkillsDirectoryMount:
             mounts = get_skills_directory_mount()
 
         assert len(mounts) >= 1
-        assert mounts[0]["host_path"] == str(skills_dir)
+        view = Path(mounts[0]["host_path"])
+        assert view != skills_dir, "a raw bind mount is live; later .hub/.env files would leak"
+        assert (view / "test-skill" / "SKILL.md").read_text() == "# test"
         assert mounts[0]["container_path"] == "/root/.hermes/skills"
 
 
@@ -143,17 +145,21 @@ class TestSkillsDirectoryMount:
         for excluded in (".hub", ".curator_backups", "node_modules"):
             assert not (safe_path / excluded).exists(), excluded
 
-    def test_no_symlinks_returns_original_dir(self, tmp_path):
-        """When no symlinks exist, the original dir is returned (no copy)."""
+    def test_clean_dir_still_mounts_a_copy_with_a_stable_path(self, tmp_path):
+        """No hazards today is no guarantee for the container's lifetime: a clean dir mounts its
+        sanitized copy too, at the same path on every call (in-place refresh)."""
         hermes_home = tmp_path / ".hermes"
         skills_dir = hermes_home / "skills"
         skills_dir.mkdir(parents=True)
         (skills_dir / "skill.md").write_text("ok")
 
         with patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}):
-            mounts = get_skills_directory_mount()
+            first = get_skills_directory_mount()[0]["host_path"]
+            (skills_dir / ".env").write_text("TOKEN=x")
+            second = get_skills_directory_mount()[0]["host_path"]
 
-        assert mounts[0]["host_path"] == str(skills_dir)
+        assert first == second != str(skills_dir)
+        assert _tree_files(Path(first)) == {"skill.md"}
 
 
 class TestIterSkillsFiles:

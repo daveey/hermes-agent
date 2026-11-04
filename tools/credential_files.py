@@ -37,8 +37,7 @@ _registered_files_var: ContextVar[dict[str, str]] = ContextVar("_registered_file
 
 # Cache for config-based file list, one entry per profile home (tests reset it).
 _config_files: dict[str, list[dict[str, str]]] = {}
-# Sanitized skill copies, one per source skills dir, refreshed in place across calls.
-_safe_skills_tempdirs: dict[str, Path] = {}
+# Serializes in-place refreshes of the sanitized skill copies within this process.
 _safe_skills_lock = threading.Lock()
 
 
@@ -231,7 +230,7 @@ def _skill_entry_denier(root: Path) -> Optional[Callable[[Path], bool]]:
     return lambda path: path.name.casefold() in names and _skill_path_read_denied(path)
 
 
-def _walk_skill_tree(root: Path) -> Iterator[tuple[Path, list[Path]]]:
+def _walk_skill_tree(root: Path, *, skip_dir: Optional[Path] = None) -> Iterator[tuple[Path, list[Path]]]:
     """Yield ``(dir, regular_non_symlink_files)`` for every directory a sandbox should receive.
 
     Prunes ``EXCLUDED_SKILL_DIRS`` *before* descending so bookkeeping/dependency trees (``.hub``,
@@ -241,14 +240,19 @@ def _walk_skill_tree(root: Path) -> Iterator[tuple[Path, list[Path]]]:
     ``scripts/`` — progressive-disclosure files and bundled scripts the sandbox does execute.
     Paths the read deny-list blocks (a skill's ``.env``, ``.envrc``, a denied dir, a denied root)
     are dropped too: the sandbox must not receive what the agent may not read on the host.
+    *skip_dir* (the sanitized-copy store) is pruned too, so a skills root that contains it
+    (an external dir pointed at ``HERMES_HOME``) never copies the copies into themselves.
     """
     denied = _skill_entry_denier(root)
     if denied is None:
         logger.warning("credential_files: withholding read-denied skills root from sandbox: %s", root)
         return
+    skip = os.path.realpath(skip_dir) if skip_dir is not None else None
+    skip_name = os.path.basename(skip) if skip else None
     for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
-        dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDED_SKILL_DIRS and not denied(base / d))
+        dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDED_SKILL_DIRS and not denied(base / d)
+                             and not (d == skip_name and os.path.realpath(base / d) == skip))
         yield base, [f for f in (base / n for n in filenames)
                      if not f.is_symlink() and f.is_file() and not denied(f)]
 
@@ -256,82 +260,51 @@ def _walk_skill_tree(root: Path) -> Iterator[tuple[Path, list[Path]]]:
 def get_skills_directory_mount(container_base: str = "/root/.hermes") -> list[dict[str, str]]:
     """Directory mount entries for all skill dirs (local + external + project).
 
-    Bind mounts follow symlinks and expose everything, so a dir containing any symlink, a
-    ``.hub`` cache or a read-denied file is replaced by a sanitized temp copy (the sync view);
-    clean dirs are returned directly, zero overhead. The choice is made per call (i.e. at
-    container creation): a clean dir mounted raw shows a ``.hub`` or ``.env`` created later
-    to that live container until its next creation.
+    Every root mounts its sanitized copy (the sync view: no symlinks, no ``.hub``, nothing the
+    read deny-list blocks), never the raw dir. A raw bind mount is live, so a ``.hub`` or a
+    skill ``.env`` created after container start would reach the sandbox at once; the copy
+    only ever receives files the guard allows. Each call refreshes the copies in place, so a
+    running container that keeps calling :func:`refresh_skills_directory_mounts` (docker does,
+    before commands) tracks its source in both directions.
     """
     return [_mount(_safe_skills_path(d), cp) for d, cp in _skill_dir_roots(container_base)]
 
 
-# Excluded dirs whose mere presence forces the sanitized copy: they hold read-denied content
-# (``skills/.hub`` is a prompt-injection carrier the read guard blocks), so a raw bind mount
-# would hand the sandbox what the read surface denies. Other EXCLUDED_SKILL_DIRS are only
-# skipped for size, so they don't force a copy on their own.
-_MOUNT_SANITIZE_DIRS = frozenset((".hub",))
-
-
-def _skills_mount_hazards(skills_dir: Path) -> tuple[list[Path], list[Path]]:
-    """Walk the raw tree once: ``(symlinks, read-denied entries)`` a direct bind mount would expose."""
-    denied = _skill_entry_denier(skills_dir)
-    if denied is None:
-        return [], [skills_dir]
-    symlinks: list[Path] = []
-    withheld: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(skills_dir):
-        base = Path(dirpath)
-        keep = []
-        for name in dirnames:
-            path = base / name
-            if path.is_symlink():
-                symlinks.append(path)  # os.walk lists but never follows these
-            elif name in _MOUNT_SANITIZE_DIRS or denied(path):
-                withheld.append(path)
-            else:
-                keep.append(name)
-        dirnames[:] = keep
-        for name in filenames:
-            path = base / name
-            if path.is_symlink():
-                symlinks.append(path)
-            elif denied(path):
-                withheld.append(path)
-    return symlinks, withheld
+def refresh_skills_directory_mounts() -> None:
+    """Bring every skills root's mounted copy up to date with its source (one sync tick)."""
+    for skills_dir, _container_root in _skill_dir_roots("/root/.hermes"):
+        _safe_skills_path(skills_dir)
 
 
 def _safe_skills_path(skills_dir: Path) -> str:
-    """Return *skills_dir* if a direct mount exposes nothing the sync view drops for safety
-    (symlinks, ``.hub``, read-denied files), else a sanitized temp copy (same view as sync).
+    """Refresh and return the sanitized copy of *skills_dir* (the same view as sync).
 
-    Each source dir keeps ONE copy per process, refreshed in place on later calls: replacing
-    it (the old rmtree + mkdtemp) emptied the bind mount of any container started from an
-    earlier call, and a single shared tempdir let a second skills root's sanitize delete the
-    first root's copy while its mount still pointed at it.
+    The copy has a stable per-source path under ``<HERMES_HOME>/cache/sandbox-skills`` and is
+    updated in place, never replaced: a container started by an earlier call, or by another
+    process and reused here, keeps its bind mount and sees each refresh. (A per-process
+    ``mkdtemp`` copy was deleted at that process's exit, emptying the mount of any container
+    a later process reused.) Refreshes of one copy are serialized across threads and processes.
     """
-    symlinks, withheld = _skills_mount_hazards(skills_dir)
-    if not symlinks and not withheld:
-        return str(skills_dir)
-    for link in symlinks:
-        logger.warning("credential_files: skipping symlink in skills dir: %s -> %s", link, os.readlink(link))
-    for path in withheld:
-        # The hub cache is routine (every hub-installed skill leaves one); a denied file is not.
-        (logger.debug if path.name in _MOUNT_SANITIZE_DIRS else logger.warning)(
-            "credential_files: withholding read-denied skills entry from sandbox mount: %s", path)
-    with _safe_skills_lock:
-        return str(_refresh_sanitized_copy(skills_dir))
+    from tools.skill_usage import skill_file_lock
+
+    safe_dir = _sanitized_copy_dir(skills_dir)
+    with _safe_skills_lock, skill_file_lock(safe_dir.with_name(f"{safe_dir.name}.lock")):
+        return str(_refresh_sanitized_copy(skills_dir, safe_dir))
+
+
+def _sanitized_copy_store() -> Path:
+    """Where the per-source sanitized skills copies live (stable across processes)."""
+    return get_hermes_home() / "cache" / "sandbox-skills"
 
 
 def _sanitized_copy_dir(skills_dir: Path) -> Path:
-    import atexit
-    import shutil
-    import tempfile
+    import hashlib
 
-    safe_dir = _safe_skills_tempdirs.get(str(skills_dir))
-    if safe_dir is None or not safe_dir.is_dir():
-        safe_dir = _safe_skills_tempdirs[str(skills_dir)] = Path(tempfile.mkdtemp(prefix="hermes-skills-safe-"))
-        atexit.register(lambda d=safe_dir: d.is_dir() and shutil.rmtree(d, ignore_errors=True))
-        logger.info("credential_files: created sanitized skills copy at %s", safe_dir)
+    key = hashlib.sha256(os.path.realpath(skills_dir).encode("utf-8")).hexdigest()[:16]
+    safe_dir = _sanitized_copy_store() / key
+    if not safe_dir.is_dir():
+        safe_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("credential_files: created sanitized skills copy of %s at %s", skills_dir, safe_dir)
     return safe_dir
 
 
@@ -371,44 +344,48 @@ def _copy_if_stale(src: Path, dst: Path) -> None:
         raise
 
 
-def _refresh_sanitized_copy(skills_dir: Path) -> Path:
-    """Make the per-source copy hold exactly the sync view of *skills_dir*, updating in place."""
-    safe_dir = _sanitized_copy_dir(skills_dir)
-    wanted_dirs: set[Path] = set()
-    wanted_files: set[Path] = set()
-    for base, files in _walk_skill_tree(skills_dir):
-        rel_dir = base.relative_to(skills_dir)
-        wanted_dirs.add(rel_dir)
-        dst_dir = safe_dir / rel_dir
-        if dst_dir.is_symlink() or (dst_dir.exists() and not dst_dir.is_dir()):
-            _remove_entry(dst_dir)  # was a file, is now a dir (parents were fixed on the way down)
-        dst_dir.mkdir(parents=True, exist_ok=True)
+def _refresh_sanitized_copy(skills_dir: Path, safe_dir: Path) -> Path:
+    """Make *safe_dir* hold exactly the sync view of *skills_dir*, updating in place.
+
+    Runs on every docker refresh tick, so it keys on plain path strings: the ``Path``
+    arithmetic (``relative_to``, hashing) cost more than the syscalls on a 5k-file tree.
+    """
+    src_root, dst_root = str(skills_dir), str(safe_dir)
+    wanted_dirs: set[str] = set()
+    wanted_files: set[str] = set()
+    for base, files in _walk_skill_tree(skills_dir, skip_dir=safe_dir.parent):
+        dst_dir = dst_root + str(base)[len(src_root):]
+        wanted_dirs.add(dst_dir)
+        if os.path.islink(dst_dir) or (os.path.lexists(dst_dir) and not os.path.isdir(dst_dir)):
+            _remove_entry(Path(dst_dir))  # was a file, is now a dir (parents were fixed on the way down)
+        os.makedirs(dst_dir, exist_ok=True)
         for item in files:
-            rel = item.relative_to(skills_dir)
+            dst = os.path.join(dst_dir, item.name)
             try:
-                _copy_if_stale(item, safe_dir / rel)
+                _copy_if_stale(item, Path(dst))
             except OSError as exc:  # unreadable or vanished mid-walk: skip it, don't drop every mount
                 logger.warning("credential_files: skipping unreadable skills file %s: %s", item, exc)
                 continue
-            wanted_files.add(rel)
+            wanted_files.add(dst)
     # Drop what the source no longer has (or now withholds), deepest first; never the root.
-    for dirpath, _dirnames, filenames in os.walk(safe_dir, topdown=False):
-        base = Path(dirpath)
-        rel_dir = base.relative_to(safe_dir)
+    for dirpath, _dirnames, filenames in os.walk(dst_root, topdown=False):
         for name in filenames:
-            if rel_dir / name not in wanted_files:
-                (base / name).unlink(missing_ok=True)
-        if rel_dir != Path(".") and rel_dir not in wanted_dirs:
+            path = os.path.join(dirpath, name)
+            if path not in wanted_files:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(path)
+        if dirpath != dst_root and dirpath not in wanted_dirs:
             with contextlib.suppress(OSError):
-                base.rmdir()
+                os.rmdir(dirpath)
     return safe_dir
 
 
 def iter_skills_files(container_base: str = "/root/.hermes") -> list[dict[str, str]]:
     """Per-file entries for all skills files (for backends that upload individually)."""
+    store = _sanitized_copy_store()
     return [_mount(item, f"{container_root}/{item.relative_to(host_dir).as_posix()}")
             for host_dir, container_root in _skill_dir_roots(container_base)
-            for _base, files in _walk_skill_tree(host_dir) for item in files]
+            for _base, files in _walk_skill_tree(host_dir, skip_dir=store) for item in files]
 
 
 # --- Cache directory mounts (documents, images, audio, videos, screenshots) ---
