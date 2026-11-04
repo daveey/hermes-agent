@@ -67,6 +67,10 @@ class HubError(RuntimeError):
         self.status, self.detail = status, detail
 
 
+class BoardBudgetExhausted(TimeoutError):
+    """The shared Board deadline ran out before this attempt; an earlier attempt may have been sent."""
+
+
 class Resync(Exception):
     """The cursor is below the service's retention floor: rebuild from a snapshot."""
 
@@ -258,7 +262,7 @@ class Hub:
         if self.deadline is not None:
             timeout = min(timeout, self.deadline - time.monotonic())
             if timeout <= 0:
-                raise TimeoutError("Board request budget exhausted")
+                raise BoardBudgetExhausted("Board request budget exhausted")
         return timeout
 
     def _call(self, method: str, path: str, body: Optional[dict] = None, *, replay_safe: bool = False) -> dict:

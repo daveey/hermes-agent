@@ -143,6 +143,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                 for stale in [k for k, (_, until) in _refused.items() if until <= now]:
                     del _refused[stale]
             labels = requested_move(conn, row["id"])
+            stage = "reserve" if labels is None else "repin"  # provenance for a failure below
             try:
                 if labels is not None:
                     # A run moved this card (kanban_move). Its runs_on is Board-owned, so only the origin's
@@ -160,7 +161,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                 attempted += 1
             except OSError as exc:
                 # An unavailable transport applies to the entire batch, not just this card.
-                queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc)
+                queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc, stage=stage)
                 return attempted
             except client.HubError as exc:
                 fence = None
@@ -170,7 +171,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                     fence, machine = before[row["id"]]
                     if picked_up(conn, hub, board, gateway, row["id"], machine, pulled):
                         continue  # the worker we reserved already claimed it: a pickup, not a refusal
-                queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc, fence=fence)
+                queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc, fence=fence, stage=stage)
                 # Refused revisions still advance the local cursor, but never the feed.
                 continue
     finally:

@@ -123,7 +123,9 @@ def _same_lifecycle(conn, task_id, row, value):
 
 
 def _signature(value):
-    signature = {k: v for k, v in value.items() if k not in ("observed_at_ms", "recorded_at_ms", "current")}
+    # stage/transport are provenance only: they never make an otherwise-identical observation a new event.
+    signature = {k: v for k, v in value.items()
+                 if k not in ("observed_at_ms", "recorded_at_ms", "current", "stage", "transport")}
     if value.get("state") == "assigned" and value.get("machine") and "lifecycle" in value:
         # Reading back the assignment promised by this reply is not a transition.
         signature["lifecycle"] = {**value["lifecycle"], "runs_on": value["machine"]}
@@ -243,6 +245,25 @@ def try_record(writer, *args, **kwargs):
         return False
 
 
+STAGES = frozenset({"pull", "reserve", "repin"})
+
+
+def transport_kind(error):
+    """Allowlisted transport subtype from the exception CLASS only; never its message, url or attributes."""
+    import http.client
+    import urllib.error
+    from hermes_cli.kanban_sync_client import BoardBudgetExhausted
+
+    if isinstance(error, urllib.error.URLError) and isinstance(error.reason, BaseException):
+        error = error.reason  # unwrap only an exception reason; a str reason stays "other"
+    for cls, kind in ((BoardBudgetExhausted, "budget_exhausted"), (TimeoutError, "timeout"),
+                      (http.client.RemoteDisconnected, "disconnected"), (ConnectionResetError, "reset"),
+                      (ConnectionRefusedError, "refused")):
+        if isinstance(error, cls):
+            return kind
+    return "other"
+
+
 def record_pull_error(conn, gateway, *, status=None, error=None):
     """A failed feed read affects all origin-owned ready policy observations.
 
@@ -253,10 +274,10 @@ def record_pull_error(conn, gateway, *, status=None, error=None):
         "SELECT id FROM tasks WHERE placement_policy='worker-first-v1' AND status='ready' "
         "AND created_on=? AND claim_lock IS NULL AND lease_holder IS NULL", (gateway,)).fetchall()
     for row in rows:
-        try_record(record_error, conn, row["id"], gateway, status=status, error=error)
+        try_record(record_error, conn, row["id"], gateway, status=status, error=error, stage="pull")
 
 
-def record_error(conn, task_id, gateway, *, status=None, error=None, fence=None):
+def record_error(conn, task_id, gateway, *, status=None, error=None, fence=None, stage=None):
     value = {"version": 1, "code": "board_error", "candidates": []}
     from hermes_cli.kanban_sync_client import HubError, Resync, SyncUnavailable
     if isinstance(error, Resync):
@@ -268,6 +289,10 @@ def record_error(conn, task_id, gateway, *, status=None, error=None, fence=None)
         value["error_class"] = ("HubError" if isinstance(error, HubError) else
                                 "SyncUnavailable" if isinstance(error, SyncUnavailable) else
                                 "OSError" if isinstance(error, OSError) else "unknown")
+        if isinstance(error, OSError):
+            value["transport"] = transport_kind(error)
+    if stage in STAGES:
+        value["stage"] = stage
     if isinstance(error, HubError):
         status = error.status
         try:
