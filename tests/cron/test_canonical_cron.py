@@ -57,6 +57,7 @@ def test_owner_ticker_uses_direct_admission_without_loopback(monkeypatch):
 
 
 def test_lost_cron_ack_retains_identity_instead_of_reporting_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr('cron.observer_reconnect.RECONNECT_SECONDS', 0)
     from cron.scheduler_authority import run_canonical_job, CronExecutionUnknown
     from hermes_cli import gateway_client
     from hermes_constants import get_hermes_home

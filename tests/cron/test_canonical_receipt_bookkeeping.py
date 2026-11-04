@@ -105,6 +105,7 @@ def test_resume_survives_recovery_of_old_unknown_journal(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('initial', [{}, {'execution_id': None}])
 def test_direct_retry_reuses_generated_fire_identity(monkeypatch, initial):
+    monkeypatch.setattr('cron.observer_reconnect.RECONNECT_SECONDS', 0)
     requests = []
     def lose_reply(method, params):
         requests.append(params['request_id'])

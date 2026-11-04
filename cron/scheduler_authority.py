@@ -121,14 +121,23 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
 
     async def observe(call):
         nonlocal attempted
+        recovering = attempted
         attempted = True
         save()
         try:
-            receipt = await call('submit', params)
+            if recovering:
+                state = await call('recover', params)
+                if state['status'] not in {'queued', 'started', 'terminal'}:
+                    raise CronExecutionUnknown('unknown_execution: cron admission was not recovered')
+                receipt = {'session_id': state['session_id'], 'admission_id': state['admission_id']}
+            else:
+                receipt = await call('submit', params)
         except Exception as exc:
             from hermes_cli.gateway_client import GatewayRPCError
             # A returned owner exception is definite; a transport disconnect is not. Even an
             # owner error after commit must retain the admitted identity, so verify its absence.
+            if recovering:
+                raise
             if owner is not None or isinstance(exc, GatewayRPCError):
                 state = await call('recover', params)
                 if state['status'] == 'missing':
@@ -168,8 +177,8 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
             delay = min(delay * 2, 2.0)
 
     async def remote():
-        async with connect_gateway() as client:
-            return await observe(lambda op, data: client.rpc('cron.' + op, **data))
+        from cron.observer_reconnect import observe_remote
+        return await observe_remote(connect_gateway, observe, lambda: attempted)
 
     try:
         if owner is not None:

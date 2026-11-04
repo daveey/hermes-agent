@@ -621,7 +621,8 @@ _running_worker_pids: dict[tuple, int] = {}
 # (``GatewayChildDispatch.mode == "scoped"``). Only that worker outlives a gateway restart: a
 # systemd stop kills the service cgroup, so a ``degraded`` direct subprocess (no reachable user
 # bus) dies with the gateway even though it is external. The gateway's restart after-turn wait
-# skips exactly this set — see ``get_restart_wait_cron_counts``.
+# skips this set only when the worker also executes the job locally. Agent-fire observers
+# depend on the canonical gateway and are never added to this set.
 _scope_isolated_job_ids: set = set()
 _running_lock = threading.Lock()
 
@@ -674,7 +675,7 @@ def get_running_job_ids() -> frozenset[str]:
 
 def get_running_job_details() -> list[dict]:
     """Per in-flight job: ``{"job_id", "elapsed_s", "worker_pid", "restart_safe"}`` (``worker_pid``
-    None for in-process runs; ``restart_safe`` True when the worker owns its own systemd scope). The
+    None for in-process runs; ``restart_safe`` requires isolated scope AND local execution). The
     drain wait publishes this so ``hermes update`` can say WHICH job it is waiting on."""
     now = time.time()
     with _running_lock:
@@ -736,6 +737,8 @@ def get_restart_wait_cron_counts() -> dict:
     ``restart_safe`` (scoped external worker, not wedged). The three are disjoint and sum to the
     number of in-flight runs.
 
+    Only locally executed script fires qualify: canonical agent fires run inside the gateway,
+    even when their observer owns a separate scope. They retain their wait and reservation.
     A ``scoped`` worker runs in a transient user scope outside the gateway cgroup, so a systemd
     stop/restart cannot reach it: the shutdown drain deliberately leaves it unmarked
     (``mark_running_jobs_interrupted``) and its final send rides the durable delivery queue, drained
@@ -775,11 +778,15 @@ def is_job_running(job_id: str, home: Optional[Path | str] = None) -> bool:
         return key in _running_job_ids or key in _running_fire_owners
 
 
-def _record_external_cron_worker(job_id: str, pid: Any, *, scope_isolated: bool) -> None:
+def _record_external_cron_worker(
+    job_id: str, pid: Any, *, scope_isolated: bool, gateway_dependent: bool = False,
+) -> None:
     """Record the external worker holding *job_id* so a drain observer can name it, and whether
     its scope isolates it from this process.
 
-    ``scope_isolated`` is the strong form of restart-safety: only a ``scoped`` dispatch
+    ``gateway_dependent`` marks canonical agent fires: their scoped process only observes work
+    inside the gateway, so it retains the drain wait and update reservation.
+    For locally executed fires, only a ``scoped`` dispatch
     (``GatewayChildDispatch``) puts the worker in its own transient systemd scope, outside the
     gateway cgroup. A ``degraded`` worker is still external but shares the cgroup and dies with a
     systemd stop, so it must NOT be listed as restart-safe. Called once per accepted handoff;
@@ -789,7 +796,7 @@ def _record_external_cron_worker(job_id: str, pid: Any, *, scope_isolated: bool)
     with _running_lock:
         with contextlib.suppress(TypeError, ValueError):
             _running_worker_pids[key] = int(pid)
-        if scope_isolated:
+        if scope_isolated and not gateway_dependent:
             _scope_isolated_job_ids.add(key)
             # A scoped worker outlives a gateway restart, so the restart wait excludes it; the
             # update drain must too, or a long scoped run holds every drain window open. [daveey]
@@ -4012,6 +4019,8 @@ def _launch_external_cron_worker(job: dict) -> bool:
                 job_id,
                 acknowledgement.get("pid") or process.pid,
                 scope_isolated=dispatch.mode == "scoped",
+                # Agent fires execute inside the canonical gateway, not this scoped observer.
+                gateway_dependent=not bool(job.get("no_agent")),
             )
             return _wait_for_external_cron_worker(
                 process,
