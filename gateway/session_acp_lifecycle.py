@@ -64,9 +64,47 @@ async def reopen_if_reattached(authority, session_id, ended):
     return ended
 
 
-def end_idle_acp_sessions(authority):
-    """Gateway shutdown: every ACP session nobody is viewing, attached this run or not."""
+def end_idle_acp_sessions(authority, deadline=None):
+    """Gateway shutdown sweep; stop starting more I/O after the monotonic deadline."""
+    import time
+    def expired():
+        return deadline is not None and time.monotonic() >= deadline
+    if expired():
+        return 0
     with authority.db._read_ctx() as conn:
-        ids = [row[0][len(POLICY_PREFIX):] for row in conn.execute(
-            'SELECT key FROM state_meta WHERE key LIKE ?', (POLICY_PREFIX + '%',))]
-    return sum(end_idle_acp_session(authority, sid) for sid in ids)
+        ids = []
+        for row in conn.execute('SELECT key FROM state_meta WHERE key LIKE ?', (POLICY_PREFIX + '%',)):
+            if expired():
+                return 0
+            ids.append(row[0][len(POLICY_PREFIX):])
+    ended = 0
+    for sid in ids:
+        if expired():
+            break
+        ended += end_idle_acp_session(authority, sid)
+    return ended
+
+
+async def settle_idle_acp_sessions(runner, authorities, remaining):
+    """One small aggregate budget, off-loop in the pool the shutdown DB-close gate joins.
+
+    Cancelling an await cannot stop SQLite. The gateway-owned physical worker remains visible
+    to executor quiesce, which leaves DB handles open if it is still reading/writing. Never use
+    the loop's default executor here: asyncio.run would wait for it again at process exit.
+    """
+    import asyncio
+    import time
+    deadline = time.monotonic() + min(2.0, max(0.0, remaining))
+    for authority in authorities:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        try:
+            await asyncio.wait_for(runner._run_in_executor_with_context(
+                end_idle_acp_sessions, authority, deadline), timeout=left)
+        except TimeoutError:
+            logging.getLogger(__name__).warning('ACP shutdown bookkeeping budget exhausted; left for recovery')
+            break
+        except Exception:
+            logging.getLogger(__name__).warning('ACP sessions of %s not ended at shutdown',
+                                                getattr(authority, 'profile_id', '?'), exc_info=True)

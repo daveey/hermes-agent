@@ -24,6 +24,9 @@ async def test_last_viewer_or_shutdown_ends_only_idle_acp_sessions(tmp_path, mon
     store = SessionStore(tmp_path / 'sessions', GatewayConfig())
     runner = SimpleNamespace(session_store=store, _session_db=store._db, adapters={}, _draining=False,
                              _cached_agent_for=lambda route: None)
+    # Exercise the same owned pool as production; the old duck runner had no executor.
+    runner._get_executor = lambda: run.GatewayRunner._get_executor(runner)
+    runner._run_in_executor_with_context = lambda fn, *args: run.GatewayRunner._run_in_executor_with_context(runner, fn, *args)
     runner._adapter_for_source = lambda source: runner.adapters.get(source.platform)
     authority = await initialize_session_authority(runner, profile_id='fixture', instance_id='owner')
     db = authority.db
@@ -73,6 +76,7 @@ async def test_last_viewer_or_shutdown_ends_only_idle_acp_sessions(tmp_path, mon
         assert ended(unseen_row) == (True, 'acp_disconnect')
         assert ended(busy_row) == (False, None) and ended(gui_row) == (False, None)
     finally:
+        run.GatewayRunner._shutdown_executor(runner, drain_timeout=2)
         store.close_all_db_handles()
 
 
@@ -101,6 +105,9 @@ async def test_acp_session_left_mid_turn_ends_once_its_fifo_drains(tmp_path, mon
     store = SessionStore(tmp_path / 'sessions', GatewayConfig())
     runner = SimpleNamespace(session_store=store, _session_db=store._db, adapters={}, _draining=False,
                              _cached_agent_for=lambda route: None)
+    # Exercise the same owned pool as production; the old duck runner had no executor.
+    runner._get_executor = lambda: run.GatewayRunner._get_executor(runner)
+    runner._run_in_executor_with_context = lambda fn, *args: run.GatewayRunner._run_in_executor_with_context(runner, fn, *args)
     runner._adapter_for_source = lambda source: runner.adapters.get(source.platform)
     authority = await initialize_session_authority(runner, profile_id='fixture', instance_id='owner')
     try:
@@ -125,4 +132,5 @@ async def test_acp_session_left_mid_turn_ends_once_its_fifo_drains(tmp_path, mon
         assert (acp_row['ended_at'] is not None, acp_row['end_reason']) == (True, 'acp_disconnect')
         assert authority.db.get_session(rows['gui'][1])['ended_at'] is None, 'only ACP sessions end on idle'
     finally:
+        run.GatewayRunner._shutdown_executor(runner, drain_timeout=2)
         store.close_all_db_handles()
