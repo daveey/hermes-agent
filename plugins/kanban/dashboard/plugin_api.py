@@ -932,7 +932,8 @@ def add_comment(task_id: str, payload: CommentBody, board: Optional[str] = Query
     with _board_conn(board) as (board, conn):
         _foreign_card_409(conn, task_id)
         _require_task(conn, task_id)
-        kanban_db.add_comment(conn, task_id, author=payload.author or "dashboard", body=payload.body)
+        kanban_db.add_comment(conn, task_id, author=payload.author or "dashboard", body=payload.body,
+                              writer_kind="human")  # [daveey] typed in the dashboard/Desktop
         return {"ok": True}
 
 

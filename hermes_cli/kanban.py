@@ -1079,8 +1079,9 @@ def _cmd_comment(args: argparse.Namespace) -> int:
     author = args.author or _profile_author()
     with kbc.connect_closing() as conn:
         try:
+            # [daveey] The CLI and /kanban slash command are typed by a person; agents use the tool.
             kb.add_comment(conn, args.task_id, author, body,
-                           origin_gateway=getattr(args, "origin_gateway", None))
+                           origin_gateway=getattr(args, "origin_gateway", None), writer_kind="human")
         except ValueError as exc:
             return _err(f"kanban comment: {exc}", 2)
         live = kb.live_run_id(conn, args.task_id)

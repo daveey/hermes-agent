@@ -194,6 +194,8 @@ class Recorder:
 
     def __call__(self, *args, **kwargs):
         self.calls.append((args, kwargs))
+        # Identity of each inherited end at spawn time: fd numbers are reused once the owner closes them.
+        self.passed = {fd: _socket_link(fd) for fd in kwargs.get('pass_fds', ())}
         process = subprocess.Popen(*args, **kwargs)
         self.processes.append(process)
         return process
@@ -248,17 +250,32 @@ def test_authenticated_listener_receives_fd_and_child_gets_start(required, accep
     [(args, kwargs)] = recorder.calls
     assert args[0][:2] == [sys.executable, '-c'] and args[0][-2] == '--observation-fd'
     assert kwargs['pass_fds'] == (int(args[0][-1]),)
-    # The owner keeps no copy of either end once brokered.
-    assert not _fd_open(int(args[0][-1]))
+    # The owner keeps no copy of either end once brokered. Compare socket identities, not fd numbers:
+    # the freed child-end number is reused by the next allocation in this process (the acceptor's
+    # recv_fds, any other thread), which made a number-based check flaky.
+    child_end = recorder.passed[int(args[0][-1])]
+    [channel] = acceptor.fds
+    parent_end = _socket_link(channel.fileno())
+    links = _open_links()
+    assert child_end not in links.values()
+    assert [fd for fd, link in links.items() if link == parent_end] == [channel.fileno()]
     assert (acceptor.dir / f"{context['run_id']}.consumed").exists()
 
 
-def _fd_open(fd):
-    try:
-        os.fstat(fd)
-    except OSError:
-        return False
-    return True
+def _socket_link(fd):
+    link = os.readlink(f'/proc/self/fd/{fd}')
+    assert link.startswith('socket:['), link
+    return link
+
+
+def _open_links():
+    links = {}
+    for name in os.listdir('/proc/self/fd'):
+        try:
+            links[int(name)] = os.readlink(f'/proc/self/fd/{name}')
+        except OSError:
+            pass  # the listdir fd itself, or one closed meanwhile
+    return links
 
 
 def test_fingerprint_matches_worker_bound_shape(required, acceptors):

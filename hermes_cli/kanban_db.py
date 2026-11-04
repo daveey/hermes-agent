@@ -1688,35 +1688,6 @@ def task_graph_context(conn: sqlite3.Connection, task_id: str) -> dict:
 
 # --- Comments & events ---
 
-def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, *,
-                origin_gateway: Optional[str] = None) -> int:
-    """Append a comment. ``origin_gateway``: the gateway it came from (the hermes-hub relay passes the
-    sender); default: the gateway the author spelling names, else this gateway (kanban_comment_origin). [daveey]"""
-    if not body or not body.strip():
-        raise ValueError("comment body is required")
-    if not author or not author.strip():
-        raise ValueError("comment author is required")
-    from hermes_cli.kanban_comment_origin import resolve_origin
-    origin = resolve_origin(author, origin_gateway)
-    now = int(time.time())
-    # [daveey] A comment written from inside a worker run records that run on its
-    # ``commented`` event, so the live comment bridge can skip exactly the run's own notes
-    # by id. Authorship cannot: workers and the chats steering them share a profile.
-    # ``allow_nested=True``: graph builders (kanban_swarm blackboard seeding)
-    # compose comment writes under one outer commit.
-    with write_txn(conn, allow_nested=True):
-        _require_task(conn, task_id)
-        cur = conn.execute(
-            "INSERT INTO task_comments (task_id, author, body, created_at, origin_gateway) "
-            "VALUES (?, ?, ?, ?, ?)", (task_id, author.strip(), body.strip(), now, origin),
-        )
-        cid = int(cur.lastrowid or 0)
-        payload: dict = {"author": author, "len": len(body), "comment_id": cid}
-        payload.update(writer_provenance(conn, task_id))  # writer_run_id + portable writer_run_uid
-        _append_event(conn, task_id, "commented", payload)
-        return cid
-
-
 def record_comment_delivery(conn: sqlite3.Connection, task_id: str, run_id: int,
                             comment_ids: list[int]) -> None:
     """Receipt that the live bridge steered ``comment_ids`` into the running worker of ``run_id``."""
@@ -4214,7 +4185,7 @@ def current_run_started_ats(conn: sqlite3.Connection, task_ids: Iterable[str]) -
 
 # --- Split modules (imported at the tail: they import this module as ``_kb``) ---
 from hermes_cli.kanban_db_comment_ids import (
-    comment_id_before_run_start, delivered_comment_ids, own_comment_ids, writer_provenance)
+    add_comment, agent_comment_ids, comment_id_before_run_start, delivered_comment_ids, own_comment_ids, writer_provenance)
 from hermes_cli.kanban_db_schedule import schedule_task
 from hermes_cli.kanban_db_edit import PriorityLowerRefused, edit_task
 from hermes_cli.kanban_reason_comment import _awaiting_human_answer

@@ -7,10 +7,12 @@ dirs, and host cache dirs to mount or sync in, at creation and before each comma
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import posixpath
 import stat
+import threading
 import time
 from contextvars import ContextVar
 from pathlib import Path
@@ -23,9 +25,10 @@ from agent.provider_media import GENERATED_SUBDIR, MEDIA_CACHE_MAX_AGE_HOURS
 from agent.skill_utils import EXCLUDED_SKILL_DIRS
 
 try:  # pragma: no cover - exercised via the fail-closed test below
-    from agent.file_safety import get_read_block_error
+    from agent.file_safety import get_read_block_error, read_deny_candidate_names
 except ImportError:
     get_read_block_error = None  # type: ignore[assignment]
+    read_deny_candidate_names = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +37,9 @@ _registered_files_var: ContextVar[dict[str, str]] = ContextVar("_registered_file
 
 # Cache for config-based file list, one entry per profile home (tests reset it).
 _config_files: dict[str, list[dict[str, str]]] = {}
-# Reused across calls so sanitized skill copies don't accumulate.
-_safe_skills_tempdir: Path | None = None
+# Sanitized skill copies, one per source skills dir, refreshed in place across calls.
+_safe_skills_tempdirs: dict[str, Path] = {}
+_safe_skills_lock = threading.Lock()
 
 
 def _get_registered() -> dict[str, str]:
@@ -192,6 +196,41 @@ def _skill_dir_roots(container_base: str) -> Iterator[tuple[Path, str]]:
         yield from ((d, f"{base}/{label}/{idx}") for idx, d in enumerate(dirs) if d.is_dir())
 
 
+def _skill_path_read_denied(path: Path) -> bool:
+    """True when the canonical read guard denies *path* (``.env``/``.envrc`` basenames, the
+    ``skills/.hub`` cache, credential stores), so neither the skills mount nor sync may ship it.
+
+    Fails CLOSED like :func:`_is_read_denied`: an unavailable or raising guard withholds the path.
+    """
+    if get_read_block_error is None:
+        return True
+    try:
+        return bool(get_read_block_error(str(path)))
+    except Exception:
+        logger.exception("credential_files: withholding skills path %s — read guard raised", path)
+        return True
+
+
+def _skill_entry_denier(root: Path) -> Optional[Callable[[Path], bool]]:
+    """Per-walk deny predicate for entries under *root*; ``None`` when *root* itself is denied.
+
+    The full guard costs ~ms per path and sync re-walks every few seconds, so only entries whose
+    name is in ``read_deny_candidate_names()`` (computed once per walk) get the full check; an
+    ordinary ``SKILL.md`` can't be denied by name, and its dirs were each checked on the way down.
+    Fails CLOSED: without the pre-filter every entry is withheld.
+    """
+    if _skill_path_read_denied(root):
+        return None
+    if read_deny_candidate_names is None:
+        return lambda _path: True
+    try:
+        names = read_deny_candidate_names()
+    except Exception:
+        logger.exception("credential_files: withholding skills tree %s — deny-name pre-filter raised", root)
+        return lambda _path: True
+    return lambda path: path.name.casefold() in names and _skill_path_read_denied(path)
+
+
 def _walk_skill_tree(root: Path) -> Iterator[tuple[Path, list[Path]]]:
     """Yield ``(dir, regular_non_symlink_files)`` for every directory a sandbox should receive.
 
@@ -200,48 +239,169 @@ def _walk_skill_tree(root: Path) -> Iterator[tuple[Path, list[Path]]]:
     are never even walked; sync thus agrees with discovery on what is skill content. Deliberately
     not ``is_excluded_skill_path()``: that also prunes ``references/``, ``templates/``, ``assets/``,
     ``scripts/`` — progressive-disclosure files and bundled scripts the sandbox does execute.
+    Paths the read deny-list blocks (a skill's ``.env``, ``.envrc``, a denied dir, a denied root)
+    are dropped too: the sandbox must not receive what the agent may not read on the host.
     """
+    denied = _skill_entry_denier(root)
+    if denied is None:
+        logger.warning("credential_files: withholding read-denied skills root from sandbox: %s", root)
+        return
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDED_SKILL_DIRS)
         base = Path(dirpath)
-        yield base, [f for f in (base / n for n in filenames) if not f.is_symlink() and f.is_file()]
+        dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDED_SKILL_DIRS and not denied(base / d))
+        yield base, [f for f in (base / n for n in filenames)
+                     if not f.is_symlink() and f.is_file() and not denied(f)]
 
 
 def get_skills_directory_mount(container_base: str = "/root/.hermes") -> list[dict[str, str]]:
     """Directory mount entries for all skill dirs (local + external + project).
 
-    Bind mounts follow symlinks, so a dir containing any symlink is replaced by a sanitized
-    temp copy (regular files only); symlink-free dirs are returned directly, zero overhead.
+    Bind mounts follow symlinks and expose everything, so a dir containing any symlink, a
+    ``.hub`` cache or a read-denied file is replaced by a sanitized temp copy (the sync view);
+    clean dirs are returned directly, zero overhead. The choice is made per call (i.e. at
+    container creation): a clean dir mounted raw shows a ``.hub`` or ``.env`` created later
+    to that live container until its next creation.
     """
     return [_mount(_safe_skills_path(d), cp) for d, cp in _skill_dir_roots(container_base)]
 
 
-def _safe_skills_path(skills_dir: Path) -> str:
-    """Return *skills_dir* if symlink-free, else a sanitized temp copy (same exclusions as sync)."""
-    global _safe_skills_tempdir
+# Excluded dirs whose mere presence forces the sanitized copy: they hold read-denied content
+# (``skills/.hub`` is a prompt-injection carrier the read guard blocks), so a raw bind mount
+# would hand the sandbox what the read surface denies. Other EXCLUDED_SKILL_DIRS are only
+# skipped for size, so they don't force a copy on their own.
+_MOUNT_SANITIZE_DIRS = frozenset((".hub",))
 
-    symlinks = [p for p in skills_dir.rglob("*") if p.is_symlink()]
-    if not symlinks:
+
+def _skills_mount_hazards(skills_dir: Path) -> tuple[list[Path], list[Path]]:
+    """Walk the raw tree once: ``(symlinks, read-denied entries)`` a direct bind mount would expose."""
+    denied = _skill_entry_denier(skills_dir)
+    if denied is None:
+        return [], [skills_dir]
+    symlinks: list[Path] = []
+    withheld: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(skills_dir):
+        base = Path(dirpath)
+        keep = []
+        for name in dirnames:
+            path = base / name
+            if path.is_symlink():
+                symlinks.append(path)  # os.walk lists but never follows these
+            elif name in _MOUNT_SANITIZE_DIRS or denied(path):
+                withheld.append(path)
+            else:
+                keep.append(name)
+        dirnames[:] = keep
+        for name in filenames:
+            path = base / name
+            if path.is_symlink():
+                symlinks.append(path)
+            elif denied(path):
+                withheld.append(path)
+    return symlinks, withheld
+
+
+def _safe_skills_path(skills_dir: Path) -> str:
+    """Return *skills_dir* if a direct mount exposes nothing the sync view drops for safety
+    (symlinks, ``.hub``, read-denied files), else a sanitized temp copy (same view as sync).
+
+    Each source dir keeps ONE copy per process, refreshed in place on later calls: replacing
+    it (the old rmtree + mkdtemp) emptied the bind mount of any container started from an
+    earlier call, and a single shared tempdir let a second skills root's sanitize delete the
+    first root's copy while its mount still pointed at it.
+    """
+    symlinks, withheld = _skills_mount_hazards(skills_dir)
+    if not symlinks and not withheld:
         return str(skills_dir)
     for link in symlinks:
         logger.warning("credential_files: skipping symlink in skills dir: %s -> %s", link, os.readlink(link))
+    for path in withheld:
+        # The hub cache is routine (every hub-installed skill leaves one); a denied file is not.
+        (logger.debug if path.name in _MOUNT_SANITIZE_DIRS else logger.warning)(
+            "credential_files: withholding read-denied skills entry from sandbox mount: %s", path)
+    with _safe_skills_lock:
+        return str(_refresh_sanitized_copy(skills_dir))
 
+
+def _sanitized_copy_dir(skills_dir: Path) -> Path:
     import atexit
     import shutil
     import tempfile
 
-    if _safe_skills_tempdir and _safe_skills_tempdir.is_dir():
-        shutil.rmtree(_safe_skills_tempdir, ignore_errors=True)
-    safe_dir = _safe_skills_tempdir = Path(tempfile.mkdtemp(prefix="hermes-skills-safe-"))
+    safe_dir = _safe_skills_tempdirs.get(str(skills_dir))
+    if safe_dir is None or not safe_dir.is_dir():
+        safe_dir = _safe_skills_tempdirs[str(skills_dir)] = Path(tempfile.mkdtemp(prefix="hermes-skills-safe-"))
+        atexit.register(lambda d=safe_dir: d.is_dir() and shutil.rmtree(d, ignore_errors=True))
+        logger.info("credential_files: created sanitized skills copy at %s", safe_dir)
+    return safe_dir
 
+
+def _remove_entry(path: Path) -> None:
+    import shutil
+
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _copy_if_stale(src: Path, dst: Path) -> None:
+    """Copy *src* over *dst* unless it already matches (size + ns mtime, which ``copy2`` keeps).
+
+    Written to a sibling temp file and ``os.replace``d in: a live container never reads a
+    half-written file, and a read-only (0444) previous copy can still be replaced.
+    """
+    import shutil
+
+    try:
+        src_st, dst_st = src.stat(), dst.lstat()
+        if (stat.S_ISREG(dst_st.st_mode) and src_st.st_size == dst_st.st_size
+                and src_st.st_mtime_ns == dst_st.st_mtime_ns):
+            return
+    except FileNotFoundError:
+        pass
+    if dst.is_dir() and not dst.is_symlink():
+        shutil.rmtree(dst, ignore_errors=True)
+    tmp = dst.with_name(f".{dst.name}.hermes-tmp")
+    _remove_entry(tmp)
+    try:
+        shutil.copy2(str(src), str(tmp))
+        os.replace(tmp, dst)
+    except OSError:
+        _remove_entry(tmp)
+        raise
+
+
+def _refresh_sanitized_copy(skills_dir: Path) -> Path:
+    """Make the per-source copy hold exactly the sync view of *skills_dir*, updating in place."""
+    safe_dir = _sanitized_copy_dir(skills_dir)
+    wanted_dirs: set[Path] = set()
+    wanted_files: set[Path] = set()
     for base, files in _walk_skill_tree(skills_dir):
-        (safe_dir / base.relative_to(skills_dir)).mkdir(parents=True, exist_ok=True)
+        rel_dir = base.relative_to(skills_dir)
+        wanted_dirs.add(rel_dir)
+        dst_dir = safe_dir / rel_dir
+        if dst_dir.is_symlink() or (dst_dir.exists() and not dst_dir.is_dir()):
+            _remove_entry(dst_dir)  # was a file, is now a dir (parents were fixed on the way down)
+        dst_dir.mkdir(parents=True, exist_ok=True)
         for item in files:
-            shutil.copy2(str(item), str(safe_dir / item.relative_to(skills_dir)))
-
-    atexit.register(lambda: safe_dir.is_dir() and shutil.rmtree(safe_dir, ignore_errors=True))
-    logger.info("credential_files: created symlink-safe skills copy at %s", safe_dir)
-    return str(safe_dir)
+            rel = item.relative_to(skills_dir)
+            try:
+                _copy_if_stale(item, safe_dir / rel)
+            except OSError as exc:  # unreadable or vanished mid-walk: skip it, don't drop every mount
+                logger.warning("credential_files: skipping unreadable skills file %s: %s", item, exc)
+                continue
+            wanted_files.add(rel)
+    # Drop what the source no longer has (or now withholds), deepest first; never the root.
+    for dirpath, _dirnames, filenames in os.walk(safe_dir, topdown=False):
+        base = Path(dirpath)
+        rel_dir = base.relative_to(safe_dir)
+        for name in filenames:
+            if rel_dir / name not in wanted_files:
+                (base / name).unlink(missing_ok=True)
+        if rel_dir != Path(".") and rel_dir not in wanted_dirs:
+            with contextlib.suppress(OSError):
+                base.rmdir()
+    return safe_dir
 
 
 def iter_skills_files(container_base: str = "/root/.hermes") -> list[dict[str, str]]:

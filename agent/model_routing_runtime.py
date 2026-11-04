@@ -6,6 +6,29 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 _temporary_resolution = ContextVar("temporary_model_resolution", default=False)
+_routing_session = ContextVar("model_routing_session", default=None)
+
+
+@contextmanager
+def routing_session(session_id):
+    """[daveey] Name the session a pre-build lookup (``temporary_resolution``) resolves for.
+
+    The pre-build lookup allocates nothing, but it must read that session's standing route: a
+    router-picked pin walled for hours is rerouted by the agent build, so the lookup defers to it
+    instead of refusing the turn (``gateway.session_worker_construct._route_runtime``)."""
+    token = _routing_session.set(session_id or None)
+    try:
+        yield
+    finally:
+        _routing_session.reset(token)
+
+
+def current_routing_session():
+    return _routing_session.get()
+
+
+def is_temporary_resolution():
+    return _temporary_resolution.get()
 
 
 @contextmanager
@@ -20,7 +43,8 @@ def temporary_resolution():
 
 def resolve_class_runtime(model, provider, *, config=None, session_id=None,
                           parent_session_id=None, requirements=None, excluded=(), state_path=None,
-                          prepare_runtime=None, exact_pin=False, replace: bool | str = False):
+                          prepare_runtime=None, exact_pin=False, replace: bool | str = False,
+                          pin_source=None, walled_from=None):
     from agent.credential_pool import load_pool
     from hermes_cli import runtime_provider as runtime
 
@@ -83,7 +107,8 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
             resolve_model_route(model, provider, config=config, session_id=session_id,
                                 parent_session_id=parent_session_id, requirements=requirements,
                                 excluded=failed, eligible=eligible, state_path=state_path, prepare=prepare,
-                                exact_pin=exact_pin, replace=replace)
+                                exact_pin=exact_pin, replace=replace, pin_source=pin_source,
+                                walled_from=walled_from)
             return resolved
         except UnavailableCredential:
             continue

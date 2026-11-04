@@ -7,6 +7,7 @@ clear denial for models that respect tool errors plus a visible audit trail.
 
 from __future__ import annotations
 
+import functools
 import os
 from pathlib import Path
 from contextlib import suppress
@@ -51,6 +52,19 @@ def _resolve_each(paths) -> list[Path]:
         with suppress(Exception):
             out.append(p.resolve())
     return out
+
+
+def _folded_parts(path: Path) -> tuple[str, ...]:
+    return tuple(part.casefold() for part in path.parts)
+
+
+def _is_under_folded(resolved: Path, base: Path) -> bool:
+    """Case-insensitive :func:`_is_under` for the read deny-list: on a case-insensitive FS
+    (macOS APFS/HFS+, Windows) ``resolve()`` keeps the caller's spelling, so ``AUTH.JSON`` or
+    ``.HUB/`` opens the denied file while an exact-case compare lets it through. Over-blocking a
+    differently cased lookalike on a case-sensitive FS is the accepted cost of failing closed."""
+    r, b = _folded_parts(resolved), _folded_parts(base)
+    return r[:len(b)] == b
 
 
 def _is_under(resolved: str | Path, base: str | Path) -> bool:
@@ -401,14 +415,16 @@ def get_read_block_error(path: str) -> Optional[str]:
     if nt_error:
         return nt_error
     resolved = Path(path).expanduser().resolve()
+    folded = _folded_parts(resolved)
     hermes_dirs = _hermes_dirs()
     reason = None
-    if any(_is_under(resolved, hd / "skills" / ".hub") for hd in hermes_dirs):
+    if any(_is_under_folded(resolved, hub) for hub in _resolve_each(hd / "skills" / ".hub" for hd in hermes_dirs)):
         reason = (
             "is an internal Hermes cache file and cannot be read directly to prevent "
             "prompt injection. Use the skills_list or skill_view tools instead."
         )
-    elif any(resolved in _resolve_each(hd / name for hd in hermes_dirs) for name in _CREDENTIAL_FILE_NAMES):
+    elif any(folded == _folded_parts(store)
+             for name in _CREDENTIAL_FILE_NAMES for store in _resolve_each(hd / name for hd in hermes_dirs)):
         reason = (
             "is a Hermes credential store and cannot be read directly. Provider tools "
             "consume these credentials through internal channels." + _DID_SUFFIX
@@ -416,8 +432,9 @@ def get_read_block_error(path: str) -> Optional[str]:
     else:
         for subdir, dir_msg, file_msg in _READ_DENIED_DIRS:
             for blocked_dir in _resolve_each(hd / subdir for hd in hermes_dirs):
-                if _is_under(resolved, blocked_dir):
-                    reason = (dir_msg if resolved == blocked_dir else file_msg) + _DID_SUFFIX
+                if _is_under_folded(resolved, blocked_dir):
+                    same = folded == _folded_parts(blocked_dir)
+                    reason = (dir_msg if same else file_msg) + _DID_SUFFIX
                     break
             if reason:
                 break
@@ -425,7 +442,7 @@ def get_read_block_error(path: str) -> Optional[str]:
             for home in _guard_homes(path):
                 for rel in HOME_READ_DENIED_DIRS:
                     blocked_dir = Path(os.path.realpath(os.path.join(home, *rel.split("/"))))
-                    if _is_under(resolved, blocked_dir):
+                    if _is_under_folded(resolved, blocked_dir):
                         reason = f"is inside ~/{rel} (a credential store) and cannot be read directly." + _DID_SUFFIX
                         break
                 if reason:
@@ -436,6 +453,37 @@ def get_read_block_error(path: str) -> Optional[str]:
                 "leakage. If you need to check the file structure, read .env.example instead." + _DID_SUFFIX
             )
     return f"Access denied: {path} {reason}" if reason else None
+
+
+@functools.lru_cache(maxsize=1)
+def _static_read_deny_names() -> frozenset[str]:
+    names = {os.path.basename(n) for n in _CREDENTIAL_FILE_NAMES}
+    names |= {subdir for subdir, _dir_msg, _file_msg in _READ_DENIED_DIRS}
+    names |= {rel.rsplit("/", 1)[-1] for rel in HOME_READ_DENIED_DIRS}
+    names |= _BLOCKED_PROJECT_ENV_BASENAMES | {".hub"}
+    return frozenset(n.casefold() for n in names)
+
+
+def read_deny_candidate_names() -> frozenset[str]:
+    """Casefolded basenames for a tree walker's cheap pre-filter (sandbox skills mount/sync).
+
+    Every :func:`get_read_block_error` rule either matches a path's own basename or puts the
+    path under a denied target, which the walk must pass through (or start inside). The set holds
+    each rule's literal name plus the basename each target *resolves* to, because the guard
+    compares resolved paths: ``auth.json`` symlinked to ``skills/x/creds.json`` makes ``creds.json``
+    a candidate. A walker that full-checks its root and every entry whose name is in this set
+    (computed once per walk, since targets can move) sees every denial without paying the guard's
+    ~ms per-path cost on ordinary files.
+    """
+    names = set(_static_read_deny_names())
+    hermes_dirs = _hermes_dirs()
+    targets = [hd / name for hd in hermes_dirs for name in _CREDENTIAL_FILE_NAMES]
+    targets += [hd / subdir for hd in hermes_dirs for subdir, _d, _f in _READ_DENIED_DIRS]
+    targets += [hd / "skills" / ".hub" for hd in hermes_dirs]
+    with suppress(Exception):
+        targets += [Path(home, *rel.split("/")) for home in _guard_homes() for rel in HOME_READ_DENIED_DIRS]
+    names |= {p.name.casefold() for p in _resolve_each(targets)}
+    return frozenset(names)
 
 
 def raise_if_read_blocked(path: str) -> None:

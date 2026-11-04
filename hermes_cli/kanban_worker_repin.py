@@ -31,6 +31,8 @@ from typing import Any, Optional
 
 REPINNED_EVENT_FLAG = "repinned"
 _BOARD_CODES = ("revision_conflict", "not_creator", "not_claimable", "invalid_pin", "not_found")
+# Repin CAS attempts on revision_conflict, each after a pull of the newest Board row (see repin_to_origin).
+CONFLICT_ATTEMPTS = 3
 
 
 def _refuse(code: str, message: str) -> dict[str, Any]:
@@ -131,19 +133,34 @@ def repin_to_origin(conn: sqlite3.Connection, task_id: str, labels: list[str], r
     except client.SyncUnavailable as exc:
         return _refuse("board_unavailable", f"no Board identity on this gateway ({exc}); policy unchanged")
 
-    try:
-        reply = hub.repin(board, task_id=task_id, expected_revision=pre["revision"], runs_on=labels)
-    except client.HubError as exc:
-        if exc.status >= 500:
-            return _unknown(f"HTTP {exc.status}")
-        code = _board_code(exc.detail)
-        if code == "revision_conflict":
-            return _refuse("revision_conflict", f"the Board has a newer revision of {task_id} than this copy; "
-                                                "verify placement after the next sync before retrying")
-        return _refuse("repin_refused", f"the Board refused the repin (HTTP {exc.status}"
-                                        + (f", {code}" if code else "") + "); local copy unchanged; verify after sync")
-    except (OSError, client.Resync) as exc:
-        return _unknown(type(exc).__name__)
+    reply: Any = None
+    for attempt in range(CONFLICT_ATTEMPTS):
+        try:
+            reply = hub.repin(board, task_id=task_id, expected_revision=pre["revision"], runs_on=labels)
+            break
+        except client.HubError as exc:
+            if exc.status >= 500:
+                return _unknown(f"HTTP {exc.status}")
+            code = _board_code(exc.detail)
+            if code != "revision_conflict":
+                return _refuse("repin_refused", f"the Board refused the repin (HTTP {exc.status}"
+                                                + (f", {code}" if code else "") + "); local copy unchanged; verify after sync")
+            conflict = _refuse("revision_conflict", f"the Board has a newer revision of {task_id} than this copy; "
+                                                    "verify placement after the next sync before retrying")
+            if attempt + 1 >= CONFLICT_ATTEMPTS:
+                return conflict
+            # A queued policy card's Board row is rewritten by every reservation reply, so the local revision is
+            # often a step behind. Read the newest row, re-check every precondition on it, and CAS again: never a
+            # blind write over an edit this copy has not seen.
+            try:
+                client.pull(conn, hub, board, observers=True, partition=me)
+            except (client.HubError, client.Resync, client.SyncUnavailable, OSError):
+                return conflict
+            pre = eligibility(conn, task_id, labels)
+            if not pre.get("ok"):
+                return pre
+        except (OSError, client.Resync) as exc:
+            return _unknown(type(exc).__name__)
     version = reply.get("version") if isinstance(reply, dict) else None
 
     # The Board has committed. Record the operator's reason as the card's move audit (no runs_on/policy write).
