@@ -14,6 +14,7 @@ Every secret here is synthetic. Nothing reads a real worker outbox.
 
 import json
 import secrets
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -199,7 +200,7 @@ class TestToolEntryPaths:
         pending = _write_outbox(tmp_path)
         script = tmp_path / f"probe_{shape}.py"
         script.write_text(_scripts(pending)[shape])
-        result = terminal_tool(f"{sys.executable} {script}", task_id=f"outbox-redact-{shape}")
+        result = terminal_tool(f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}", task_id=f"outbox-redact-{shape}")
         assert SECRET not in result
         assert ("'secret': '***'" in result) if shape == "repr" else ("TimeoutExpired" in result)
 
