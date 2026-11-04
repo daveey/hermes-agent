@@ -17,6 +17,12 @@ flickers between "ok" and "corrupt" is the silent failure this replaces. It rese
 the process restarts, which is the recovery boundary ``StateDbCorruptError`` already
 documents (stop Hermes, recover or restore, start again). No marker is written to disk:
 the file it would describe is the one that is damaged.
+
+Because it never clears, it must not be set on one unconfirmed error: the writer
+(``SessionDB._execute_write``) and the pooled reader replay a rolled-back statement once on
+the same connection and latch only when the corruption recurs (2026-11-03: one misread on a
+healthy file refused every write for an hour). A COMMIT is never replayed (its settlement is
+unknown), and the latched reason names the SQLite code, operation, stage and replay outcome.
 """
 
 from __future__ import annotations
@@ -72,12 +78,28 @@ def mark_storage_corrupt(db_path, reason: object) -> None:
     )
 
 
-def note_storage_error(db_path, exc: BaseException) -> bool:
-    """Latch *db_path* when *exc* is structural corruption; True when it was."""
+def note_storage_error(db_path, exc: BaseException, *, context: Optional[str] = None) -> bool:
+    """Latch *db_path* when *exc* is structural corruption; True when it was. *context* (code,
+    operation, replay outcome) is appended to the latched reason."""
     if not is_structural_corruption_error(exc):
         return False
-    mark_storage_corrupt(db_path, exc)
+    mark_storage_corrupt(db_path, f"{exc} [{context}]" if context else exc)
     return True
+
+
+def corruption_detail(exc: BaseException) -> str:
+    """``sqlite=<name>(<code>)`` for a latch reason / log line: tells a misread from real damage
+    later, when the logs from the moment have rotated and only the reason text is left."""
+    name = getattr(exc, "sqlite_errorname", None) or "unknown"
+    code = getattr(exc, "sqlite_errorcode", None)
+    return f"sqlite={name}({code if code is not None else '?'})"
+
+
+def write_op_name(fn: object) -> str:
+    """The callback's qualified name, reduced to identifier characters (it lands in an error text
+    that is bucketed by phrase, so nothing free-form may ride along)."""
+    raw = getattr(fn, "__qualname__", None) or type(fn).__name__
+    return "".join(ch for ch in str(raw) if ch.isalnum() or ch in "._<>")[:96] or "unknown"
 
 
 def storage_state(db_path) -> str:
@@ -105,10 +127,12 @@ def reset_storage_state(db_path=None) -> None:
 __all__ = [
     "STORAGE_CORRUPT",
     "STORAGE_OK",
+    "corruption_detail",
     "is_structural_corruption_error",
     "mark_storage_corrupt",
     "note_storage_error",
     "reset_storage_state",
     "storage_corrupt_reason",
     "storage_state",
+    "write_op_name",
 ]
