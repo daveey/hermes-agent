@@ -387,7 +387,8 @@ def test_producer_text_is_not_expanded_as_context_references(monkeypatch):
     monkeypatch.setattr(cr, "preprocess_context_references", _expand)
     for name in ("_set_session_context", "_wire_callbacks", "_apply_pending_model_switch",
                  "_sync_agent_model_with_config", "_sync_agent_compression_with_config",
-                 "_sync_agent_fallback_with_config", "_sync_bot_capabilities", "_adopt_out_of_band_turns",
+                 "_sync_agent_fallback_with_config", "_sync_agent_daybreak", "_sync_bot_capabilities",
+                 "_adopt_out_of_band_turns",
                  "_stage_first_contact_onboarding_note", "_stage_onboarding_turn_note", "_register_session_cwd"):
         monkeypatch.setattr(server, name, lambda *a, **k: None)
     monkeypatch.setattr(server, "_profile_runtime_scope_tokens", lambda home: None)

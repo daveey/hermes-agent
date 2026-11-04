@@ -24,16 +24,20 @@ OTHER = "openai/gpt-5"
 DAY1 = datetime(2026, 9, 27, 9, 0, tzinfo=UTC).timestamp()
 
 
-def _flush(*extra_stores) -> None:
-    """Make every write the test caused readable. A store another writer holds past its 250 ms busy
-    timeout keeps the write in memory for its next write (by design), and a CPU-starved runner makes
-    that contention likely: wait for the export worker, then drain each store's deferred writes."""
+def _flush(*stores) -> None:
+    """Settle every write before the store is read. The fake Relay delivers events inline, but each
+    finished turn starts the background flush/export worker, and a user-path write that meets the
+    worker's write transaction past the short busy timeout is deferred in memory until the next
+    write. Without joining the worker and draining, an assertion can read the store before the
+    day-closing writes land (seen on a loaded CI runner as ``[] == [...]``). The root-profile stores
+    take the same deferred writes, so they are drained too."""
+    _join_export_workers()
     runtimes = list(relay_shared_metrics._RUNTIMES.values())
     for runtime in runtimes:
         runtime.relay.subscribers.flush()
     _join_export_workers()
-    stores = [runtime.subscriber.store for runtime in runtimes] + list(engagement._root_stores.values())
-    for store in (*stores, *extra_stores):
+    live = [r for r in runtimes if isinstance(r, relay_shared_metrics._Runtime)]
+    for store in (*stores, *(r.subscriber.store for r in live), *list(engagement._root_stores.values())):
         store.drain_deferred()
 
 

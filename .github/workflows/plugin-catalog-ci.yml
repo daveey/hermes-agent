@@ -152,7 +152,9 @@ jobs:
     # and fails the image build unless the runner user can start bwrap. The
     # sandbox step below proves it on every run and fails closed if not.
     runs-on: [self-hosted, hermes-hub]
-    timeout-minutes: 30
+    # [daveey] An upstream sync re-validates every catalog entry upstream
+    # touched (126 in the c314285 sync, ~18 s each): 30 min cancelled it at 88.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:

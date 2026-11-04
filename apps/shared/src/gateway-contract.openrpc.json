@@ -23300,6 +23300,11 @@
             ],
             "default": null,
             "title": "Plugin"
+          },
+          "needs_auth": {
+            "default": false,
+            "title": "Needs Auth",
+            "type": "boolean"
           }
         },
         "required": [
@@ -24527,6 +24532,11 @@
           "ultrafast": {
             "default": false,
             "title": "Ultrafast",
+            "type": "boolean"
+          },
+          "daybreak": {
+            "default": false,
+            "title": "Daybreak",
             "type": "boolean"
           },
           "reasoning": {
