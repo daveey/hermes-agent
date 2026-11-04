@@ -19,6 +19,8 @@ beforeEach(() => {
 })
 
 vi.mock('@/hermes', () => ({
+  getApiRequestConnection: () => null,
+  getApiRequestProfile: () => null,
   getLatestSessionMessages: vi.fn(async () => ({ messages: [], session_id: 'session' })),
   getProfiles: vi.fn(async () => ({ profiles: [] })),
   getSession: vi.fn(),
