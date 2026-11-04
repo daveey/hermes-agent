@@ -59,7 +59,7 @@ def _folded_parts(path: Path) -> tuple[str, ...]:
 
 
 def _is_under_folded(resolved: Path, base: Path) -> bool:
-    """Case-insensitive :func:`_is_under` for the read deny-list: on a case-insensitive FS
+    """Case-insensitive :func:`_is_under` for deny-lists: on a case-insensitive FS
     (macOS APFS/HFS+, Windows) ``resolve()`` keeps the caller's spelling, so ``AUTH.JSON`` or
     ``.HUB/`` opens the denied file while an exact-case compare lets it through. Over-blocking a
     differently cased lookalike on a case-sensitive FS is the accepted cost of failing closed."""
@@ -306,12 +306,14 @@ def _classify_resolved_write_denial(homes: set[str], resolved: str) -> Optional[
     """Credential / protected-subpath / safe-root verdict for an already-resolved path."""
     # Approval-gated paths are allowed at this layer so interactive tools can
     # prompt; checked first so the ``.ssh/`` prefix deny doesn't swallow them.
-    if any(resolved in build_write_approval_paths(home) for home in homes):
+    target = Path(resolved)
+    folded = _folded_parts(target)
+    if any(folded == _folded_parts(Path(p)) for home in homes for p in build_write_approval_paths(home)):
         return None
 
     if any(
-        resolved in build_write_denied_paths(home)
-        or any(resolved.startswith(prefix) for prefix in build_write_denied_prefixes(home))
+        any(folded == _folded_parts(Path(p)) for p in build_write_denied_paths(home))
+        or any(_is_under_folded(target, Path(prefix)) for prefix in build_write_denied_prefixes(home))
         for home in homes
     ):
         return "credential"
@@ -319,7 +321,7 @@ def _classify_resolved_write_denial(homes: set[str], resolved: str) -> Optional[
     for base in _hermes_dirs():
         for sub in _HERMES_PROTECTED_SUBPATHS:
             with suppress(Exception):
-                if _is_under(resolved, os.path.realpath(os.path.join(str(base), sub))):
+                if _is_under_folded(target, Path(os.path.realpath(base / sub))):
                     return "credential"
 
     safe_roots = get_safe_write_roots()
@@ -353,7 +355,8 @@ def is_write_approval_required(path: str) -> bool:
     """True if ``path`` is approval-gated (``~/.ssh/config``): interactive callers
     prompt, callers without a channel treat it as a block (fail closed)."""
     homes, resolved = _homes_and_resolved(path)
-    return any(resolved in build_write_approval_paths(home) for home in homes)
+    folded = _folded_parts(Path(resolved))
+    return any(folded == _folded_parts(Path(p)) for home in homes for p in build_write_approval_paths(home))
 
 
 # Secret-bearing project-local env file basenames, blocked anywhere on disk.
