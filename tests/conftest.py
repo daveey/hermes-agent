@@ -1093,7 +1093,10 @@ def _reset_tui_gateway_server_state():
     # later test's session claim a stale event, or spend the cap and refuse its
     # own park.
     park = sys.modules.get("tui_gateway.notification_park")
-    if park is not None:
+    # A poller can still be executing this module's first import. Like the
+    # server above, a sys.modules entry does not imply its globals exist yet.
+    # No caller can park an event until that import finishes.
+    if park is not None and not _tui_server_importing(park):
         park.clear()
 
     if snapshot is not None:

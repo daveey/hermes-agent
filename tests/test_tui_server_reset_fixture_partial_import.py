@@ -4,6 +4,9 @@ import importlib.machinery
 import sys
 import types
 
+import pytest
+from unittest.mock import Mock
+
 from tests import conftest as root_conftest
 
 
@@ -32,3 +35,24 @@ def test_fully_initialized_module_is_not_skipped():
     mod = types.ModuleType("x")
     mod.__spec__ = importlib.machinery.ModuleSpec("x", None)
     assert root_conftest._tui_server_importing(mod) is False
+
+
+@pytest.mark.parametrize("initializing", [True, False])
+def test_notification_park_cleanup_respects_import_state(monkeypatch, initializing):
+    server = types.SimpleNamespace(
+        _methods={}, _sessions={}, _cfg_cache=None, _cfg_sig=None, _cfg_path=None,
+        _db=None, _db_error=None, _real_stdout=None,
+    )
+    park = types.ModuleType("tui_gateway.notification_park")
+    park.__spec__ = importlib.machinery.ModuleSpec(park.__name__, None)
+    park.__spec__._initializing = initializing
+    clear = Mock()
+    if not initializing:
+        park.clear = clear
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", server)
+    monkeypatch.setitem(sys.modules, park.__name__, park)
+    gen = _fixture_body()()
+    next(gen)
+    with pytest.raises(StopIteration):
+        next(gen)
+    assert clear.call_count == (0 if initializing else 1)
