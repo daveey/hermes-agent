@@ -73,12 +73,21 @@ def _no_pull(monkeypatch):
     monkeypatch.setattr(client, "pull", lambda *a, **kw: None)
 
 
-def test_one_comment_and_one_delivery_per_revision_across_passes(conn):
+@pytest.mark.parametrize("keepalive", ["throttled", "expired"])
+def test_one_comment_and_one_delivery_per_revision_across_passes(conn, monkeypatch, keepalive):
+    # Same-revision queued passes inside the keepalive make no Board request (they return 0 and only re-run the
+    # local notice check); once it expires every pass re-asks the Board. Either way: one comment, one delivery.
     tid = _card(conn)
     _subscribe(conn, tid)
     hub = _hub()
-    for _ in range(4):
-        assert wp.reevaluate(conn, hub, "default", "hub", cfg=CFG) == 1
+    clock = [100.0]
+    monkeypatch.setattr(wp, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    for i in range(4):
+        expected = 1 if keepalive == "expired" or i == 0 else 0
+        assert wp.reevaluate(conn, hub, "default", "hub", cfg=CFG) == expected
+        if keepalive == "expired":
+            clock[0] += wp.RESERVE_KEEPALIVE_S
+    assert hub.reserve.call_count == (4 if keepalive == "expired" else 1)
     comments = _notice_comments(conn, tid)
     assert len(comments) == 1
     body = comments[0].body
@@ -136,7 +145,12 @@ def test_new_card_revision_gets_a_new_notice(conn):
     hub.reserve.return_value = _queued(missing=("skill:five-whys", "skill:plan"))
     for _ in range(2):
         wp.reevaluate(conn, hub, "default", "hub", cfg=CFG)
-    assert len(_notice_comments(conn, tid)) == 2
+    comments = _notice_comments(conn, tid)
+    assert len(comments) == 2
+    # The requirement change is a new local identity: the Board is re-asked inside the queued keepalive, so the
+    # new notice names the Board's fresh answer rather than the stored one.
+    assert hub.reserve.call_count == 2
+    assert "(needs: skill:five-whys, skill:plan)" in comments[1].body
 
 
 def test_no_repin_call_is_made_and_the_fence_stays(conn):
@@ -161,7 +175,8 @@ def test_already_queued_card_gets_its_notice_on_the_next_pass(conn, monkeypatch)
         wp.reevaluate(conn, hub, "default", "hub", cfg=CFG)
     assert qr.latest(conn, tid)["code"] == "no_eligible_worker"
     assert _notice_comments(conn, tid) == []
-    wp.reevaluate(conn, hub, "default", "hub", cfg=CFG)
+    assert wp.reevaluate(conn, hub, "default", "hub", cfg=CFG) == 0  # inside the queued keepalive: no Board call
+    assert hub.reserve.call_count == 1
     assert len(_notice_comments(conn, tid)) == 1
     assert len(_delivered(conn, tid)) == 1
 

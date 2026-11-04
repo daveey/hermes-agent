@@ -20,7 +20,26 @@ _refused: dict[tuple[str, str], tuple[int, float]] = {}  # (board, task) -> (ref
 # No assigned keepalive exists here. Sixty seconds bounds queue probes while still discovering
 # registry-only capacity changes without waiting for a task revision. Assigned renewals are unchanged.
 RESERVE_KEEPALIVE_S = 60.0
-_queued: dict[tuple[str, str], tuple[int, float]] = {}
+# (board, task) -> (queued revision, local notice revision, retry after). The notice revision (required labels, run
+# count) is part of the identity: a requirement change the Board would answer differently is never throttled away.
+_queued: dict[tuple[str, str], tuple[int, str | None, float]] = {}
+
+
+def _local_identity(conn, task_id):
+    from hermes_cli import kanban_repin_notice as repin
+
+    row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    return "" if row is None else json.dumps(repin.notice_revision(conn, task_id, row), sort_keys=True)
+
+
+def _notice_from_stored(conn, task_id, gateway, pool):
+    """A throttled pass makes no Board request, but the owner's repin notice still runs from the stored current
+    observation (local only, once per card revision), so a card queued before its notice existed still gets it."""
+    from hermes_cli import kanban_queue_reason as queue
+    from hermes_cli import kanban_repin_notice as repin
+
+    # Only reached while the identity is unchanged, and maybe_notify re-fences ownership and lifecycle itself.
+    repin.maybe_notify(conn, task_id, gateway, queue.latest(conn, task_id), pool)
 
 
 def creation_decision(args, cfg, gateway, pin, origin_intent):
@@ -149,7 +168,9 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
             labels = requested_move(conn, row["id"])
             stage = "reserve" if labels is None else "repin"  # provenance for a failure below
             held = _queued.get(key)
-            if labels is None and held and held[0] == row["sync_version"] and now < held[1]:
+            identity = _local_identity(conn, row["id"]) if labels is None else None
+            if labels is None and held and held[:2] == (row["sync_version"], identity) and now < held[2]:
+                queue.try_record(_notice_from_stored, conn, row["id"], gateway, candidates)
                 continue
             _queued.pop(key, None)
             try:
@@ -168,7 +189,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                     if reply.get("state") == "queued":
                         # Never adopt an arbitrary post-pull revision: it may be somebody else's edit.
                         version = reply.get("task_version", row["sync_version"])
-                        _queued[key] = (version, time.monotonic() + RESERVE_KEEPALIVE_S)
+                        _queued[key] = (version, identity, time.monotonic() + RESERVE_KEEPALIVE_S)
                         if len(_queued) > 1024:
                             del _queued[next(iter(_queued))]
                     queue.try_record(queue.record_reply, conn, row["id"], gateway, reply, candidates)

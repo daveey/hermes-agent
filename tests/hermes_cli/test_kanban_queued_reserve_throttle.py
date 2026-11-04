@@ -76,7 +76,7 @@ def test_explicit_move_bypasses_queued_cache(conn, monkeypatch):
 
 def test_cache_has_hard_bound(conn, monkeypatch):
     fixtures.acknowledged(conn)
-    monkeypatch.setattr(wp, "_queued", {("default", str(i)): (4, float("inf")) for i in range(1024)})
+    monkeypatch.setattr(wp, "_queued", {("default", str(i)): (4, "", float("inf")) for i in range(1024)})
     monkeypatch.setattr(client, "pull", lambda *a, **kw: None)
     wp.reevaluate(conn, fixtures.RecordingHub(), "default", "hub", cfg=CFG)
     assert len(wp._queued) == 1024

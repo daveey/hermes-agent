@@ -86,7 +86,8 @@ def notice_text(payload):
             f"`{command(task_id, origin)}` on {origin}, or until a pool worker is given those labels.")
 
 
-def _revision(conn, task_id, row):
+def notice_revision(conn, task_id, row):
+    """The card revision a notice is posted once for: its required labels and how many runs it has had."""
     runs = conn.execute("SELECT count(*) FROM task_runs WHERE task_id=?", (task_id,)).fetchone()[0]
     return {"required": required_labels(row), "run_count": runs}
 
@@ -112,7 +113,7 @@ def maybe_notify(conn, task_id, gateway, value, pool=None):
                 or sync.board_mode(conn) != "primary"
                 or (sync.sync_state(conn) or {}).get("gateway_id") != gateway):
             return False
-        revision = _revision(conn, task_id, row)
+        revision = notice_revision(conn, task_id, row)
         for (payload,) in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=?",
                                        (task_id, NOTICE_KIND)):
             if kb._json_dict(payload).get("revision") == revision:
@@ -137,7 +138,7 @@ def awaiting(conn, task_id):
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
     if row is None:
         return False
-    revision = _revision(conn, task_id, row)
+    revision = notice_revision(conn, task_id, row)
     from hermes_cli import kanban_db as kb
     return any(kb._json_dict(p).get("revision") == revision for (p,) in conn.execute(
         "SELECT payload FROM task_events WHERE task_id=? AND kind=?", (task_id, NOTICE_KIND)))
