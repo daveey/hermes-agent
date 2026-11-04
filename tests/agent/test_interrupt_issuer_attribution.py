@@ -101,16 +101,23 @@ def test_gateway_lifecycle_producers_name_a_system_issuer():
 def test_soft_interrupt_with_tool_reason_is_attributed_to_the_system():
     """A system producer that must stop the turn SOFTLY labels itself via ``tool_reason``. The
     message-carrying soft path used to hardcode ``user sent a new message``, so a batch-guard abort
-    was booked as a human stop and rendered as the user-stop placeholder (#130207)."""
+    was booked as a human stop and rendered as the user-stop placeholder (#130207).
+
+    The Desktop terminal batch guard itself is no longer a turn-stop producer: a command or
+    preparation timeout stops only the batch, and the model still answers (self-heal
+    plugin-9605e451d0, tests/agent/test_terminal_batch_timeout_continues.py)."""
     import concurrent.futures
     from types import SimpleNamespace
     from unittest.mock import patch
 
+    import agent.terminal_approval_batch as tab
     import agent.tool_executor as te
 
     agent = _bare_agent()
     agent._touch_activity = lambda *_: None
-    batch = SimpleNamespace(authorization_gate=te._ConcurrentToolAuthorizationGate(), executor=None, close=lambda: None)
+    stops = []
+    batch = SimpleNamespace(authorization_gate=te._ConcurrentToolAuthorizationGate(), executor=None,
+                            close=lambda: None, stop=stops.append)
     prepared = SimpleNamespace(batch=batch, tids=[], future=concurrent.futures.Future())
     try:
         # Drive the REAL batch-timeout guard: a prepared terminal call whose worker never settles.
@@ -122,9 +129,10 @@ def test_soft_interrupt_with_tool_reason_is_attributed_to_the_system():
             te._run_sequential_tool_execution_middleware(
                 agent, function_name="terminal", function_args={}, effective_task_id="t",
                 tool_call_id="c1", execute=lambda *_a, **_k: None)
-        assert agent._interrupt_requested is True
-        assert interrupt_issuer(agent) == "terminal_batch_timeout"
-        # No message: gateway/CLI re-queue ``_interrupt_message`` as the user's next turn.
+        # The timeout stops the batch (later prepared commands never start), not the turn.
+        assert stops == [tab.COMMAND_TIMEOUT_NOTICE]
+        assert agent._interrupt_requested is False
+        assert interrupt_issuer(agent) is None
         assert agent._interrupt_message is None
 
         # A USER stop that abandons the same wedged batch (grace elapsed) keeps its own attribution:
@@ -148,9 +156,7 @@ def test_soft_interrupt_with_tool_reason_is_attributed_to_the_system():
         assert agent._pending_redirect == "use the staging db"
 
         # Desktop batch PREPARATION has the same two exits: a user stop that cancels it keeps the
-        # user's message/redirect, and a preparation timeout is a system stop with no message.
-        import agent.terminal_approval_batch as tab
-
+        # user's message/redirect, and a preparation timeout stops only the batch.
         def _prepare(exc, during=lambda: None):
             class _Batch:
                 def __init__(self, *_a):
@@ -162,6 +168,9 @@ def test_soft_interrupt_with_tool_reason_is_attributed_to_the_system():
 
                 def close(self):
                     pass
+
+                def stop(self, notice):
+                    stops.append(notice)
 
             ids = iter(["p1", "p2"])
 
@@ -190,8 +199,11 @@ def test_soft_interrupt_with_tool_reason_is_attributed_to_the_system():
         assert agent._pending_redirect == "use the staging db"
         set_interrupt(False)
         agent.clear_interrupt()
+        stops.clear()
         _prepare(TimeoutError("Terminal approval preparation timed out; commands were not started"))
-        assert interrupt_issuer(agent) == "terminal_batch_preparation_timeout"
+        assert stops == [tab.PREPARATION_TIMEOUT_NOTICE]
+        assert agent._interrupt_requested is False
+        assert interrupt_issuer(agent) is None
         assert agent._interrupt_message is None
 
         # Sequential skip notices (stop before a call / after one) render the recorded system reason.
@@ -199,7 +211,7 @@ def test_soft_interrupt_with_tool_reason_is_attributed_to_the_system():
             return [SimpleNamespace(id=f"s{i}", function=SimpleNamespace(name=f"t{i}", arguments="{}")) for i in (1, 2)]
 
         def _stop_mid_batch(*_a, **_k):
-            agent.interrupt(tool_reason="terminal batch timeout")
+            agent.interrupt(tool_reason="cron inactivity watchdog")
             return None, 0.0
 
         agent._vprint, agent.log_prefix = (lambda *_a, **_k: None), ""
@@ -207,7 +219,7 @@ def test_soft_interrupt_with_tool_reason_is_attributed_to_the_system():
             set_interrupt(False)
             agent.clear_interrupt()
             if stop_first:
-                agent.interrupt(tool_reason="terminal batch timeout")
+                agent.interrupt(tool_reason="cron inactivity watchdog")
             rows = []
             with (
                 patch.object(te, "_budget_for_agent"),
@@ -218,15 +230,15 @@ def test_soft_interrupt_with_tool_reason_is_attributed_to_the_system():
                 patch.object(te, "_publish_sequential_result", return_value=True),
             ):
                 te._execute_tool_calls_sequential(agent, SimpleNamespace(tool_calls=_calls()), rows, "t", finalize=False)
-            assert rows and all("Turn aborted — terminal batch timeout" in r["content"] for r in rows), rows
+            assert rows and all("Turn aborted — cron inactivity watchdog" in r["content"] for r in rows), rows
             assert not any("User sent a new message" in r["content"] for r in rows)
 
         # A slot no worker filled after a system stop says so, in both the row and the hook.
         with patch.object(te, "_emit_terminal_post_tool_call") as emitted:
             result, _, _ = te._unfinished_tool_result(
                 agent, te._ToolCallRef("t3", {}, "t", "u1", []), timed_out=False, timeout_s=None)
-        assert "Turn aborted — terminal batch timeout" in result
-        assert emitted.call_args.kwargs["error_message"] == "Tool execution cancelled. Turn aborted — terminal batch timeout"
+        assert "Turn aborted — cron inactivity watchdog" in result
+        assert emitted.call_args.kwargs["error_message"] == "Tool execution cancelled. Turn aborted — cron inactivity watchdog"
         # Rendered verbatim: consumers substitute ``{name}`` with str.replace, never str.format.
         agent._tool_interrupt_reason = "guard {x}"
         assert interrupt_skip_wording(agent) == "Turn aborted — guard {x}"

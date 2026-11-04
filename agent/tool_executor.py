@@ -984,15 +984,14 @@ def _run_sequential_tool_execution_middleware(
             )
         abandoned = True
         if prepared is not None:
-            # A timed-out shell may still be unwinding. Never release a later
-            # prepared command into overlapping execution.
-            prepared.batch.close()
+            # A timed-out shell may still be unwinding. Never release a later prepared command into
+            # overlapping execution. A timeout stops the batch, not the turn: the model still gets this
+            # result (an interrupt here ended the turn with no reply, self-heal plugin-9605e451d0).
             if state == "timeout":
-                # Label the abort as the batch guard's own, not a user stop (#130207). No message:
-                # ``_interrupt_message`` is what gateway/CLI re-queue as the user's next turn. On the
-                # interrupted branch the stop is already published; re-interrupting would rebook it
-                # and null the user's queued message and redirect.
-                agent.interrupt(tool_reason="terminal batch timeout")
+                from agent.terminal_approval_batch import COMMAND_TIMEOUT_NOTICE
+                prepared.batch.stop(COMMAND_TIMEOUT_NOTICE)
+            else:
+                prepared.batch.close()
         future.cancel()
         if state == "timeout":
             _interrupt_worker_tids(agent, worker_tid)
@@ -1902,6 +1901,7 @@ def _execute_tool_calls_sequential(agent, assistant_message, messages: list, eff
     owns turn-end work)."""
     _tool_budget = _budget_for_agent(agent)  # once per turn, not per result
     tool_calls = assistant_message.tool_calls
+    from agent.terminal_approval_batch import report_batch_stop
 
     for i, tool_call in enumerate(tool_calls, 1):
         if getattr(agent, "_incremental_persistence_failed", False):
@@ -1916,6 +1916,13 @@ def _execute_tool_calls_sequential(agent, assistant_message, messages: list, eff
                 hook_id=lambda tc: getattr(tc, "id", "") or "",
                 flush_stage="cancelled tool result",
             ):
+                return
+            break
+
+        # A Desktop terminal batch that stopped itself (a timeout) reports its unstarted calls; the turn goes on.
+        stopped = report_batch_stop(agent, messages, tool_calls[i - 1:], effective_task_id)
+        if stopped is not None:
+            if not stopped:
                 return
             break
 

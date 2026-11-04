@@ -108,6 +108,16 @@ class _TerminalBatch:
         # describes the world its command will run in, so it must not be
         # consumed — the guard re-runs live instead (#113158).
         self.failure_seen = False
+        # Set when the batch stopped itself (a prepared command or the preparation timed out).
+        # The sequential loop then reports every unstarted call with this notice and the turn
+        # goes on: the model gets the error, as it does outside a batch. Aborting the turn here
+        # ended it with no reply at all (self-heal plugin-9605e451d0).
+        self.stop_notice: str | None = None
+
+    def stop(self, notice: str):
+        """Close the batch so no later prepared command starts; later calls get ``notice``."""
+        self.stop_notice = notice
+        self.close()
 
     def start(self):
         from agent.tool_executor import _resolve_sequential_tool_timeout
@@ -187,6 +197,28 @@ def bind_prepared_dispatch(dispatch):
         return invoke(*args, **kwargs)
 
     return once
+
+
+COMMAND_TIMEOUT_NOTICE = "[Not run: {name} was not started because an earlier terminal command in this batch timed out]"
+PREPARATION_TIMEOUT_NOTICE = "[Not run: {name} was not started because terminal approval preparation for this batch timed out]"
+
+
+def batch_stop_notice():
+    """The current batch's stop notice once it stopped itself, else None."""
+    batch = _batch.get()
+    return None if batch is None else batch.stop_notice
+
+
+def report_batch_stop(agent, messages, remaining, task_id):
+    """None while the current batch runs. Once it stopped itself, append one not-run row per
+    ``remaining`` call and return True (False when a flush failed: the caller stops the batch)."""
+    notice = batch_stop_notice()
+    if notice is None:
+        return None
+    from agent.tool_executor import _append_skipped_tool_results
+    agent._vprint(f"{agent.log_prefix}⏱ Terminal batch stopped: skipping {len(remaining)} call(s)", force=True)
+    return _append_skipped_tool_results(agent, messages, remaining, task_id, content=notice,
+                                        flush_stage="skipped tool result")
 
 
 def take_prepared_call(call_id):
@@ -313,13 +345,14 @@ def terminal_approval_batch(agent, calls, messages, task_id):
             try:
                 batch.start()
             except (_CancelledPreparation, TimeoutError) as exc:
-                batch.close()
                 # A cancellation means a stop is already published (or our own
                 # close() ran): re-interrupting would overwrite the user's queued
-                # message/redirect. A timeout is a system stop: tool_reason only, no
-                # message (callers re-queue _interrupt_message as the user's next turn).
+                # message/redirect. A timeout stops only the batch, never the turn:
+                # every call is reported as not run and the model answers.
                 if isinstance(exc, TimeoutError):
-                    agent.interrupt(tool_reason="terminal batch preparation timeout")
+                    batch.stop(PREPARATION_TIMEOUT_NOTICE)
+                else:
+                    batch.close()
                 # The sequential path must still persist a result for every
                 # assistant tool call, even if preparation never finished.
         yield
