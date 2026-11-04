@@ -1041,6 +1041,41 @@ class TestXaiToken:
 
 
 
+class TestGoogleAuthKey:
+    """AI Studio "auth key" Gemini keys: ``AQ.`` + ~50 body chars (synthetic here, never a real key)."""
+
+    KEY = "AQ." + "Ab8SyntheticTestOnly0123456789abcdefghijKLMNOP_-xy"
+    BODY = KEY[3:]
+
+    def test_key_shape_is_53_chars(self):
+        assert len(self.KEY) == 53
+
+    def test_plain_text_masked(self):
+        result = redact_sensitive_text(f"gemini key is {self.KEY} ok", force=True)
+        assert self.BODY not in result
+
+    def test_env_assignment_masked(self):
+        result = redact_sensitive_text(f"GEMINI_API_KEY={self.KEY}", force=True)
+        assert self.BODY not in result
+
+    def test_url_key_query_masked(self):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={self.KEY}&pageSize=5"
+        result = redact_sensitive_text(url, force=True)
+        assert self.BODY not in result
+        assert "pageSize=5" in result
+
+    def test_json_value_masked(self):
+        import json
+        text = json.dumps({"value": self.KEY, "model": "gemini"})
+        result = redact_sensitive_text(text, force=True)
+        assert self.BODY not in result
+        assert '"model": "gemini"' in result
+
+    def test_faq_prose_and_short_aq_untouched(self):
+        text = "See FAQ.questionsAndAnswersSectionForMoreDetailsAboutKeys and AQ.x here."
+        assert redact_sensitive_text(text, force=True) == text
+
+
 class TestDbConnstrCodeOutput:
     """Regression tests for issue #33801 — _DB_CONNSTR_RE corrupting code output.
 

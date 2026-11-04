@@ -184,6 +184,9 @@ _PREFIX_PATTERNS = [
     r"xapp-\d+-[A-Za-z0-9-]{10,}",      # Slack app-Level token
     r"xox[baprs]-[A-Za-z0-9-]{10,}",    # Slack bot/app/user tokens
     r"AIza[A-Za-z0-9_-]{30,}",          # Google API keys
+    # Google AI Studio "auth key" Gemini keys (``AQ.`` + ~50 chars), used exactly like ``AIza…``.
+    # The matcher's lookbehind keeps ``FAQ.…`` prose out; the length floor keeps short ``AQ.x`` out.
+    r"AQ\.[A-Za-z0-9_-]{40,}",
     r"pplx-[A-Za-z0-9]{10,}",           # Perplexity
     r"fal_[A-Za-z0-9_-]{10,}",          # Fal.ai
     r"fc-[A-Za-z0-9]{10,}",             # Firecrawl
