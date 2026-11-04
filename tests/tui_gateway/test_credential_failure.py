@@ -211,3 +211,66 @@ def test_agent_init_failed_error_enrichment_honours_its_contract(tmp_path, monke
         result = frames[-1]["params"]["payload"]
         assert "failure_resets_at" not in result
         assert result["reset_at"] == 1793774268.0
+
+
+def _prompt_turn_on_quota_build(monkeypatch, tmp_path, *, dead_build: bool):
+    """Drive a submitted prompt (``_run_after_agent_ready``, prompt.submit's turn thread) onto a quota-walled
+    build, recording the RPC error ``_wait_agent_for_prompt`` hands back and the client frames the turn emits."""
+    import threading
+    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    from tui_gateway import server
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    reset = 1793774268.0
+    session, _payloads, crashes = _strict_build(
+        monkeypatch, SubscriptionQuotaUnavailable("openai-codex", "gpt-6-astra", reset))
+    assert crashes == [] and session["agent_failure"]["failure_resets_at"] == reset
+    session.update({"history_lock": threading.Lock(), "running": True, "agent": None, "history": [],
+                    "history_version": 0, "cols": 80, "inflight_turn": None})
+    if dead_build:  # the build thread is gone but never set ready: the dead-build branch
+        session["agent_ready"] = threading.Event()
+        assert not session["_agent_build_thread"].is_alive()
+    else:  # the build finished and set ready with its error: the final branch
+        assert session["agent_ready"].is_set()
+    monkeypatch.setattr(server, "_AGENT_BUILD_WAIT_SLICE", 0.01)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+    real_wait, waited = server._wait_agent_for_prompt, []
+    monkeypatch.setattr(server, "_wait_agent_for_prompt", lambda *a: waited.append(real_wait(*a)) or waited[-1])
+    frames = []
+    monkeypatch.setattr(server, "write_json", lambda frame: frames.append(frame) or True)
+    server._run_after_agent_ready("rid", "sid", session, "hello", None, None, None)
+    (err,) = waited
+    complete = [f["params"]["payload"] for f in frames if f["params"]["type"] == "message.complete"]
+    return session, reset, err, complete
+
+
+@pytest.mark.parametrize("dead_build", [True, False], ids=["dead-build", "final-branch"])
+def test_prompt_wait_rpc_error_reads_reset_at_not_the_replay_clock(tmp_path, monkeypatch, dead_build):
+    """Both ``_wait_agent_for_prompt`` failure exits carry ``agent_failure`` as a client may see it."""
+    session, reset, err, complete = _prompt_turn_on_quota_build(monkeypatch, tmp_path, dead_build=dead_build)
+    data = err["error"]["data"]
+    assert "failure_resets_at" not in data
+    assert data["reset_at"] == reset
+    assert session["agent_failure"]["failure_resets_at"] == reset  # the automation replay still reads it
+    (payload,) = complete
+    assert payload["status"] == "error"
+    assert "failure_resets_at" not in payload
+    assert payload["reset_at"] == reset
+
+
+def test_client_failure_fields_keeps_a_reset_at_already_set(tmp_path, monkeypatch):
+    """``failure_resets_at`` only fills an unset ``reset_at``: a known pool reset is never overwritten."""
+    from tui_gateway import server
+    from tui_gateway.credential_failure import client_failure_fields
+    pool_reset, replay_reset = 4102444800, 1793774268.0
+    failure = {"failure_kind": "exhausted", "reset_at": pool_reset, "failure_resets_at": replay_reset}
+    assert client_failure_fields(failure) == {"failure_kind": "exhausted", "reset_at": pool_reset}
+    assert failure["failure_resets_at"] == replay_reset  # the stored record is not mutated
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    frames = []
+    monkeypatch.setattr(server, "write_json", lambda frame: frames.append(frame) or True)
+    monkeypatch.setitem(server._sessions, "both-resets", {"agent_failure": failure})
+    server._emit("error", "both-resets", {"message": "opaque", "error_surface": {
+        "layer": "runtime", "code": "agent_init_failed", "retryable": False}})
+    result = frames[-1]["params"]["payload"]
+    assert "failure_resets_at" not in result
+    assert result["reset_at"] == pool_reset
