@@ -1,4 +1,5 @@
-"""Owner notice for a worker-first card no pool worker can run (``no_eligible_worker``). [daveey]
+"""Owner notice for a worker-first card no pool worker can run (``no_eligible_worker``, or with overflow off the
+Board's ``capability_mismatch``/``mixed`` rollup over the whole pool; see ``no_pool_worker``). [daveey]
 
 Under the approved overflow plan (ruling 9) the Board no longer returns such a card to its origin: it stays
 queued and fenced until its creator repins it. Without this module the only trace was a queue reason in
@@ -45,6 +46,32 @@ def observed_labels(value):
     return sorted(labels)
 
 
+# Board exclusion reasons that come from ``supports()`` (task metadata vs operator attestation): a worker with one
+# of them cannot run the card until its labels change or the card is repinned; capacity and liveness reasons clear
+# by themselves.
+STRUCTURAL = frozenset({"missing_labels", "task_workspace_unsupported", "task_branch_unsupported",
+                        "task_metadata_invalid", "task_requirement_unsupported"})
+
+
+def no_pool_worker(value, pool=None):
+    """True when a normalized queue observation says no configured pool worker can run the card.
+
+    The Board computes ``no_eligible_worker`` only on its overflow path; with overflow off (the default) the same
+    card queues with the per-candidate rollup ``capability_mismatch`` or ``mixed``. Those count only when every
+    candidate carries a structural reason and, when ``pool`` is given, the candidates cover the whole pool.
+    """
+    if not isinstance(value, dict) or value.get("state") != "queued":
+        return False
+    if value.get("code") == CODE:
+        return True
+    if value.get("code") not in ("capability_mismatch", "mixed"):
+        return False
+    candidates = value.get("candidates") or []
+    if not candidates or not all(STRUCTURAL & set(c.get("reasons") or []) for c in candidates):
+        return False
+    return pool is None or set(pool) <= {c.get("machine") for c in candidates}
+
+
 def command(task_id, origin):
     return f'hermes kanban move {task_id} --runs-on machine:{origin} --reason "no pool worker can run it"'
 
@@ -64,8 +91,9 @@ def _revision(conn, task_id, row):
     return {"required": required_labels(row), "run_count": runs}
 
 
-def maybe_notify(conn, task_id, gateway, value):
-    """Post the notice for a normalized ``queued``/``no_eligible_worker`` observation, once per card revision.
+def maybe_notify(conn, task_id, gateway, value, pool=None):
+    """Post the notice for a normalized queued observation no pool worker can serve (``no_pool_worker``), once per
+    card revision.
 
     Runs on every reserve reply, not only on a changed observation, so a card already queued when this code
     deploys gets its notice on the next pass. Same ownership fence as the observation record: only the origin
@@ -75,7 +103,7 @@ def maybe_notify(conn, task_id, gateway, value):
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli.kanban_worker_placement import POLICY
 
-    if not isinstance(value, dict) or value.get("state") != "queued" or value.get("code") != CODE:
+    if not no_pool_worker(value, pool):
         return False
     with kb.write_txn(conn):
         row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -97,8 +125,19 @@ def maybe_notify(conn, task_id, gateway, value):
 
 
 def awaiting(conn, task_id):
-    """True while the card's current queue observation is the Board's ``no_eligible_worker`` queue."""
+    """True while the card's current queue observation says no pool worker can run it and its owner was told.
+
+    The notice is the pool-coverage proof: ``maybe_notify`` posted it only when the candidates covered the pool.
+    """
     from hermes_cli import kanban_queue_reason as queue
 
     value = queue.latest(conn, task_id) or {}
-    return bool(value.get("current") and value.get("state") == "queued" and value.get("code") == CODE)
+    if not (value.get("current") and no_pool_worker(value)):
+        return False
+    row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None:
+        return False
+    revision = _revision(conn, task_id, row)
+    from hermes_cli import kanban_db as kb
+    return any(kb._json_dict(p).get("revision") == revision for (p,) in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind=?", (task_id, NOTICE_KIND)))
