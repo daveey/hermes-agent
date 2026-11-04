@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from typing import Optional
 
 
@@ -76,3 +77,63 @@ def comment_id_before_run_start(conn: sqlite3.Connection, task_id: str, run_id: 
     got = conn.execute("SELECT MAX(id) FROM task_comments WHERE task_id = ? AND created_at < ?",
                        (task_id, int(row[0]))).fetchone()
     return int(got[0]) if got and got[0] is not None else 0
+
+
+def agent_comment_ids(conn: sqlite3.Connection, task_id: str, comment_ids: list[int]) -> set[int]:
+    """Those of ``comment_ids`` whose ``commented`` event says an agent wrote them
+    (``writer_kind='agent'``). Legacy and system comments carry no kind and are not included. [daveey]"""
+    ids = [int(i) for i in comment_ids]
+    if not ids:
+        return set()
+    marks = ",".join("?" * len(ids))
+    rows = conn.execute(
+        "SELECT json_extract(payload, '$.comment_id') FROM task_events "
+        "WHERE task_id = ? AND kind = 'commented' "
+        "AND json_extract(payload, '$.writer_kind') = 'agent' "
+        f"AND json_extract(payload, '$.comment_id') IN ({marks})", (task_id, *ids)).fetchall()
+    return {int(r[0]) for r in rows if r[0] is not None}
+
+
+def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, *,
+                origin_gateway: Optional[str] = None, writer_kind: Optional[str] = None,
+                writer_session: Optional[str] = None) -> int:
+    """Append a comment (moved from ``kanban_db``; re-exported there). ``origin_gateway``: the gateway it came from (the hermes-hub relay passes the
+    sender); default: the gateway the author spelling names, else this gateway (kanban_comment_origin). [daveey]
+
+    ``writer_kind`` ("agent" | "human") records who typed it on the ``commented`` event, with the
+    agent's ``writer_session``: David and his agents share one profile, so the author can't say.
+    Unset (system writers, legacy callers) leaves the payload as before. [daveey]"""
+    if not body or not body.strip():
+        raise ValueError("comment body is required")
+    if not author or not author.strip():
+        raise ValueError("comment author is required")
+    if writer_kind not in (None, "agent", "human"):
+        raise ValueError(f"writer_kind must be 'agent' or 'human', not {writer_kind!r}")
+    from hermes_cli.kanban_comment_origin import resolve_origin
+    origin = resolve_origin(author, origin_gateway)
+    now = int(time.time())
+    # [daveey] A comment written from inside a worker run records that run on its
+    # ``commented`` event, so the live comment bridge can skip exactly the run's own notes
+    # by id. Authorship cannot: workers and the chats steering them share a profile.
+    # ``allow_nested=True``: graph builders (kanban_swarm blackboard seeding)
+    # compose comment writes under one outer commit.
+    with _kb.write_txn(conn, allow_nested=True):
+        _kb._require_task(conn, task_id)
+        cur = conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at, origin_gateway) "
+            "VALUES (?, ?, ?, ?, ?)", (task_id, author.strip(), body.strip(), now, origin),
+        )
+        cid = int(cur.lastrowid or 0)
+        payload: dict = {"author": author, "len": len(body), "comment_id": cid}
+        payload.update(writer_provenance(conn, task_id))  # writer_run_id + portable writer_run_uid
+        if writer_kind:
+            payload["writer_kind"] = writer_kind
+            if writer_session:
+                payload["writer_session"] = str(writer_session)
+        _kb._append_event(conn, task_id, "commented", payload)
+        return cid
+
+
+# Late-bound at the bottom (import-cycle breaking, like ``kanban_db_schedule``): ``kanban_db``
+# re-exports from this module, so it must be fully populated before ``kanban_db`` imports it.
+from hermes_cli import kanban_db as _kb

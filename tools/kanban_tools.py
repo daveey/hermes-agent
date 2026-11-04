@@ -703,18 +703,6 @@ _comment_poll_last_attempt: float = 0.0
 _comment_watermark: dict[str, int] = {}
 
 
-def _comment_stamp(c: Any, own_identity: str) -> str:
-    """``default (another session) at 04:50 PDT``: who wrote the note and when, so a worker
-    can tell an operator note from its own even when both run as the same profile."""
-    author = (c.author or "").strip() or "operator"
-    who = f"{author} (another session)" if author == own_identity else author
-    try:
-        when = time.strftime("%H:%M %Z", time.localtime(int(c.created_at)))
-    except (TypeError, ValueError, OverflowError):
-        return who
-    return f"{who} at {when}"
-
-
 def inject_new_comments_from_env(agent: Any) -> bool:
     """Steer new operator comments on the worker's task into ``agent``; True iff a
     steer was injected; never raises. Skipped as own: the comments THIS run wrote, by id
@@ -744,6 +732,7 @@ def inject_new_comments_from_env(agent: Any) -> bool:
             if seen is not None and rows and run_id is not None:
                 own_ids = (kb.own_comment_ids(conn, tid, run_id)
                            | kb.delivered_comment_ids(conn, tid, run_id))
+            agent_ids = kb.agent_comment_ids(conn, tid, [c.id for c in rows]) if seen is not None else set()
     except Exception:
         logger.debug("comment-inject: bridge failed", exc_info=True)
         return False
@@ -763,10 +752,8 @@ def inject_new_comments_from_env(agent: Any) -> bool:
         fresh = [c for c in rows if (c.author or "").strip() != own and (c.body or "").strip()]
     if not fresh:
         return False
-    lines = [f"- {_comment_stamp(c, own)}: {c.body.strip()}" for c in fresh]
-    note = ("New note" + ("s" if len(fresh) > 1 else "")
-            + " on your kanban task from the operator (delivered mid-run). "
-            + "Take it into account for the work you're doing right now:\n" + "\n".join(lines))
+    from tools.kanban_tools_notes import live_note
+    note = live_note(fresh, own, agent_ids)
     try:
         delivered = bool(agent.steer(note))
     except Exception:
@@ -1375,7 +1362,10 @@ def _handle_comment(args: dict, **kw) -> str:
         foreign = _kfc.refusal(conn, str(tid))  # [daveey] only a replica copy here: name the owner
         if foreign:
             raise _Reject(foreign, _kfc.REJECTION)
-        cid = kb.add_comment(conn, tid, author=author, body=str(body))
+        # [daveey] This tool is always an agent: record it, so no reader guesses (agent-261aa31f49).
+        from gateway.session_context import get_session_env
+        cid = kb.add_comment(conn, tid, author=author, body=str(body), writer_kind="agent",
+                             writer_session=get_session_env("HERMES_SESSION_ID", "") or None)
         subscribed = _maybe_subscribe_on_touch(conn, str(tid))
         live = kb.live_run_id(conn, str(tid))
         extra: dict = {"live_run": live is not None}
