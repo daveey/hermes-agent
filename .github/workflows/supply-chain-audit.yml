@@ -64,7 +64,14 @@ jobs:
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
           ref: ${{ inputs.commit }}
-          fetch-depth: 0
+
+      # fork: `git diff base...head` needs their merge base: fetch both histories' commits only,
+      # not fetch-depth 0's every head, tag and blob (trees and blobs load lazily).
+      - name: Fetch the merge base
+        uses: ./.github/actions/fetch-merge-base
+        with:
+          base: ${{ github.event.pull_request.base.sha }}
+          head: ${{ github.event.pull_request.head.sha }}
 
       - name: Scan diff for critical patterns
         id: scan
@@ -168,7 +175,14 @@ jobs:
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
           ref: ${{ inputs.commit }}
-          fetch-depth: 0
+
+      # fork: `git diff base...head` needs their merge base: fetch both histories' commits only,
+      # not fetch-depth 0's every head, tag and blob (trees and blobs load lazily).
+      - name: Fetch the merge base
+        uses: ./.github/actions/fetch-merge-base
+        with:
+          base: ${{ github.event.pull_request.base.sha }}
+          head: ${{ github.event.pull_request.head.sha }}
 
       - name: Check for unbounded PyPI deps
         id: bounds

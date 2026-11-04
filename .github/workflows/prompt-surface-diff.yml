@@ -41,9 +41,9 @@ jobs:
   diff:
     name: Prompt surface summary
     runs-on: [self-hosted, ci-fast]
-    # fork: a full-history fetch of this ~1 GB private repo on a fresh ci-fast runner can exceed
-    # 5 min; a cancel here fails the required aggregate (execution is required even though the
-    # findings are advisory). 10 is the fast-lane cap (tests/ci/test_fast_runner_routing.py).
+    # fork: a cancel here fails the required aggregate (execution is required even though the
+    # findings are advisory), so keep the fast-lane cap (tests/ci/test_fast_runner_routing.py).
+    # The checkout below is depth 1 plus a commits-only history fetch, not fetch-depth 0.
     timeout-minutes: 10
     outputs:
       changed: ${{ steps.diff.outputs.changed }}
@@ -53,23 +53,35 @@ jobs:
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
           ref: ${{ inputs.commit }}
-          fetch-depth: 0 # need history for the merge base
           persist-credentials: false
+
+      # Merge base, not the base tip: surface changes that landed on main after the branch point
+      # are not this PR's doing. fork: a fetch-depth 0 checkout (every head, tag and blob) ran past
+      # the timeout on slow ci-fast runners; this fetches only the two histories' commits.
+      - name: Fetch the merge base
+        id: merge-base
+        uses: ./.github/actions/fetch-merge-base
+        with:
+          base: ${{ github.base_ref }}
 
       - name: Summarise the snapshot diff
         id: diff
         env:
-          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ steps.merge-base.outputs.sha }}
+          FETCH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Merge base, not the base tip: surface changes that landed on main after the branch
-          # point are not this PR's doing.
-          BASE_SHA=$(git merge-base "origin/${BASE_REF}" HEAD)
+          : "${BASE_SHA:?no merge base with the target branch}"
           SNAP=tests/fixtures/prompt_surface
+          # The base snapshot's trees and blobs are fetched lazily (partial clone) and the checkout
+          # persists no credentials: pass the token to these git commands only, never to the script.
+          auth="http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+          unset FETCH_TOKEN
           mkdir -p "$RUNNER_TEMP/base"
-          if git cat-file -e "${BASE_SHA}:${SNAP}" 2>/dev/null; then
-            git archive "$BASE_SHA" "$SNAP" | tar -x -C "$RUNNER_TEMP/base"
+          if [ -n "$(git -c "$auth" ls-tree -d "$BASE_SHA" -- "$SNAP")" ]; then
+            git -c "$auth" archive "$BASE_SHA" "$SNAP" | tar -x -C "$RUNNER_TEMP/base"
           fi
+          unset auth
           python3 scripts/ci/prompt_surface.py diff "$RUNNER_TEMP/base/$SNAP" "$SNAP" \
             --output "$RUNNER_TEMP/prompt-surface.md"
           if [ -s "$RUNNER_TEMP/prompt-surface.md" ]; then

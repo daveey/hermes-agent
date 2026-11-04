@@ -25,13 +25,21 @@ jobs:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
           ref: ${{ inputs.commit }}
-          fetch-depth: 0  # Full history needed for git log
+
+      # fork: git log needs the full commit history of main and HEAD, not fetch-depth 0's every
+      # head, tag and blob; this fetches commits only.
+      - name: Fetch the merge base
+        id: merge-base
+        uses: ./.github/actions/fetch-merge-base
+        with:
+          base: main
 
       - name: Check for unmapped contributor emails
         id: check-emails
+        env:
+          MERGE_BASE: ${{ steps.merge-base.outputs.sha }}
         run: |
-          # Get the merge base between this PR and main
-          MERGE_BASE=$(git merge-base origin/main HEAD)
+          : "${MERGE_BASE:?no merge base with main}"
 
           # Find any new author emails in this PR's commits
           NEW_EMAILS=$(git log ${MERGE_BASE}..HEAD --format='%ae' --no-merges | sort -u)

@@ -1,0 +1,43 @@
+name: Fetch the merge base
+description: >-
+  After a default (depth 1) checkout, fetch the complete commit history of HEAD and one base
+  revision, commits only (--filter=tree:0, no other heads, no tags), and output their merge base.
+  It replaces `fetch-depth: 0`, which on this ~1 GB fork fetched all ~500 heads, every tag and
+  every blob: 2-3 min on a good ci-fast runner and past the job timeout on slow ones, failing the
+  required aggregate. The history is complete, so merge-base, `base..HEAD` ranges and
+  `git log --author` answer exactly as on a full clone. Trees and blobs of other commits are fetched
+  lazily on first use (git diff / archive / worktree), which needs credentials: keep the
+  checkout's default persist-credentials, or pass a token to those commands yourself. Use it
+  right after actions/checkout (default fetch-depth) with `base` set to the PR's base branch;
+  the merge base is in `steps.<id>.outputs.sha`.
+
+inputs:
+  base:
+    description: Branch name (fetched to refs/remotes/origin/<base>) or a 40-hex commit.
+    required: true
+  head:
+    description: Revision in the checkout, or a 40-hex commit to fetch. Default HEAD.
+    default: HEAD
+  token:
+    description: Token for the fetch when the checkout did not persist credentials.
+    default: ${{ github.token }}
+
+outputs:
+  sha:
+    description: The merge base of base and head; empty when the histories are unrelated.
+    value: ${{ steps.fetch.outputs.sha }}
+
+runs:
+  using: composite
+  steps:
+    - id: fetch
+      shell: bash
+      env:
+        _BASE: ${{ inputs.base }}
+        _HEAD: ${{ inputs.head }}
+        FETCH_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        sha=$("$GITHUB_ACTION_PATH/fetch-merge-base.sh" "$_BASE" "$_HEAD")
+        echo "Merge base of ${_BASE} and ${_HEAD}: ${sha:-<none: unrelated histories>}"
+        echo "sha=${sha}" >> "$GITHUB_OUTPUT"

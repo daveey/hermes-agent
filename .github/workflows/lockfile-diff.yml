@@ -41,9 +41,9 @@ jobs:
   diff:
     name: package-lock.json semantic diff
     runs-on: [self-hosted, ci-fast]
-    # fork: a full-history fetch of this ~1 GB private repo on a fresh ci-fast runner can exceed
-    # 5 min; a cancel here fails the required aggregate (execution is required even though the
-    # findings are advisory). 10 is the fast-lane cap (tests/ci/test_fast_runner_routing.py).
+    # fork: a cancel here fails the required aggregate (execution is required even though the
+    # findings are advisory), so keep the fast-lane cap (tests/ci/test_fast_runner_routing.py).
+    # The checkout below is depth 1 plus a commits-only history fetch, not fetch-depth 0.
     timeout-minutes: 10
     outputs:
       changed: ${{ steps.diff.outputs.changed }}
@@ -53,18 +53,25 @@ jobs:
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
           ref: ${{ inputs.commit }}
-          fetch-depth: 0 # need history for the merge base
-          # fork: commits+trees only; the two lockfile blobs are fetched lazily (credentials persist).
-          filter: blob:none
+
+      # fork: commits only, not fetch-depth 0; the two lockfile blobs are fetched lazily
+      # (credentials persist).
+      - name: Fetch the merge base
+        id: merge-base
+        uses: ./.github/actions/fetch-merge-base
+        with:
+          base: ${{ github.base_ref }}
 
       - name: Generate semantic lockfile diff
         id: diff
+        env:
+          BASE_SHA: ${{ steps.merge-base.outputs.sha }}
         run: |
           set -euo pipefail
           # Three-dot semantics by hand: diff from the merge base with the
           # target branch to the PR head, so changes that landed on main
           # after the branch point don't show up as this PR's doing.
-          BASE_SHA=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          : "${BASE_SHA:?no merge base with the target branch}"
           echo "Merge base: ${BASE_SHA}"
           python3 scripts/ci/lockfile_diff.py \
             --base "$BASE_SHA" \

@@ -38,19 +38,22 @@ jobs:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
           ref: ${{ inputs.commit }}
-          fetch-depth: 0 # full history both sides for merge-base
-          # [daveey] merge-base needs only the commit graph; a full-blob clone of
-          # the ~1 GB fork outran the 10-min fast-lane cap on fresh runners.
-          filter: blob:none
+
+      # [daveey] merge-base needs only the commit graph: the full history of main and HEAD,
+      # commits only. A fetch-depth 0 clone of the ~1 GB fork outran the 10-min fast-lane cap.
+      # The action fails on a fetch error, so an empty sha means unrelated histories.
+      - id: fetch-merge-base
+        name: Fetch the merge base
+        uses: ./.github/actions/fetch-merge-base
+        with:
+          base: main
 
       - id: merge-base-check
         name: Reject PRs with no common ancestor on main
+        env:
+          BASE: ${{ steps.fetch-merge-base.outputs.sha }}
         run: |
-          # `git merge-base` exits non-zero AND prints nothing when the two
-          # commits share no ancestor.  We check both conditions explicitly
-          # so the failure message is clear regardless of which signal fires
-          # first.
-          if ! BASE=$(git merge-base origin/main HEAD 2>/dev/null) || [ -z "$BASE" ]; then
+          if [ -z "$BASE" ]; then
             STATUS='[{"source":"unrelated histories","results":[{"kind":"action_required","title":"Unrelated histories","summary":"This PR has no common ancestor with main.","detail":"","how_to_fix":"Rebase your changes onto current main:\n```\ngit fetch origin main\ngit checkout -b fix-branch origin/main\n# re-apply your changes (cherry-pick, copy files, etc.)\ngit push -f origin fix-branch\n```\n"}]}]'
             echo "review_status=${STATUS}" >> "$GITHUB_OUTPUT"
             echo "review_status=${STATUS}" > review-status.json

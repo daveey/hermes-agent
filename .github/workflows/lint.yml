@@ -47,7 +47,14 @@ jobs:
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
         with:
           ref: ${{ inputs.commit }}
-          fetch-depth: 0 # need full history for merge-base + worktree
+
+      # fork: commits only, not fetch-depth 0 (every head, tag and blob, which hung this job at
+      # its timeout); the base worktree's trees and blobs are fetched lazily (credentials persist).
+      - name: Fetch the merge base
+        id: merge-base
+        uses: ./.github/actions/fetch-merge-base
+        with:
+          base: ${{ github.base_ref }}
 
       # No automatic post-save: an optional cache upload must not consume the job timeout.
       - uses: ./.github/actions/setup-pm
@@ -76,7 +83,8 @@ jobs:
           # For PRs, diff against the merge base with the target branch.
           # For pushes to main, diff against the previous commit on main.
           if [ "${{ inputs.event_name }}" = "pull_request" ]; then
-            BASE_SHA=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+            BASE_SHA="${{ steps.merge-base.outputs.sha }}"
+            [ -n "$BASE_SHA" ] || { echo "::error::no merge base with ${{ github.base_ref }}"; exit 1; }
             BASE_REF="origin/${{ github.base_ref }}"
           else
             BASE_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)
