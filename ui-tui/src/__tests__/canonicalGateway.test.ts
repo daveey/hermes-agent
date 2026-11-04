@@ -2,6 +2,17 @@ import { expect, it } from 'vitest'
 
 import { canonicalRequest, canonicalResult, localCreationOptions, sharedControlParams } from '../canonicalGateway.js'
 
+it('preserves an empty toolset pick and leaves an absent pick to the profile', () => {
+  expect(localCreationOptions({} as NodeJS.ProcessEnv)).not.toHaveProperty('toolsets')
+  const contract = { sources: ['tui'], parameters: ['request_id', 'source', 'toolsets'] }
+  for (const value of ['', ' , ']) {
+    const options = localCreationOptions({ HERMES_TUI_TOOLSETS: value } as NodeJS.ProcessEnv)
+    expect(options.toolsets).toEqual([])
+    expect(canonicalRequest('session.create', { request_id: 'empty', ...options }, contract).params.toolsets).toEqual([])
+  }
+  expect(localCreationOptions({ HERMES_TUI_TOOLSETS: 'web, terminal, ' } as NodeJS.ProcessEnv).toolsets).toEqual(['web', 'terminal'])
+})
+
 it.each(['HERMES_SAFE_MODE', 'HERMES_IGNORE_USER_CONFIG'])('carries %s on the launching session policy', flag => {
   const field = flag === 'HERMES_SAFE_MODE' ? 'safe_mode' : 'ignore_user_config'
   const options = localCreationOptions({ [flag]: '1' } as NodeJS.ProcessEnv)

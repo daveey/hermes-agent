@@ -108,7 +108,9 @@ export function localCreationOptions(env = process.env): Record<string, unknown>
 
   const options: Record<string, unknown> = Object.fromEntries(Object.entries(fields).filter(([, value]) => value))
 
-  if (env.HERMES_TUI_TOOLSETS) { options.toolsets = env.HERMES_TUI_TOOLSETS.split(',') }
+  if (env.HERMES_TUI_TOOLSETS !== undefined) {
+    options.toolsets = env.HERMES_TUI_TOOLSETS.split(',').map(name => name.trim()).filter(Boolean)
+  }
 
   // `hermes --tui -s a,b`: the owner renders these into the session's frozen prompt.
   const skills = [...new Set((env.HERMES_TUI_SKILLS ?? '').split(/[,\n]/).map(name => name.trim()).filter(Boolean))]

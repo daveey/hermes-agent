@@ -1099,7 +1099,7 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
             )),
             ("cli.config.section_agent", (
                 ("cli.config.label_max_turns", self.max_turns),
-                ("cli.config.label_toolsets", ", ".join(self.enabled_toolsets) if self.enabled_toolsets else "all"),
+                ("cli.config.label_toolsets", "all" if self.enabled_toolsets is None else ", ".join(self.enabled_toolsets) or "none"),
                 ("cli.config.label_verbose", self.verbose),
             )),
             ("cli.config.section_session", (

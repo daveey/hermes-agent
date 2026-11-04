@@ -108,12 +108,12 @@ def _oneshot_exit_code(response: Optional[str], result: dict) -> int:
 
 
 def _normalize_toolsets(toolsets: object = None) -> list[str] | None:
-    """Split repeated/comma-separated toolset flags into a clean list (``None`` when empty)."""
-    if not toolsets:
+    """Split flags, preserving an explicit empty pick (only ``None`` means unset)."""
+    if toolsets is None:
         return None
     items = toolsets if isinstance(toolsets, (list, tuple)) else [toolsets]
     parts = [str(item).split(",") if isinstance(item, str) else [str(item)] for item in items]
-    return [p.strip() for chunk in parts for p in chunk if p.strip()] or None
+    return [p.strip() for chunk in parts for p in chunk if p.strip()]
 
 
 def _normalize_skills(skills: object = None) -> list[str]:
@@ -165,6 +165,8 @@ def _validate_explicit_toolsets(toolsets: object = None) -> tuple[list[str] | No
     normalized = _normalize_toolsets(toolsets)
     if normalized is None:
         return None, None
+    if not normalized:
+        return [], None
 
     try:
         from toolsets import validate_toolset

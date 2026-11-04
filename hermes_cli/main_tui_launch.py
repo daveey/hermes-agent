@@ -289,6 +289,12 @@ def _normalize_tui_toolsets(toolsets: object) -> list[str]:
         return _split_comma_items(toolsets, split_non_str=False) if toolsets else []
 
 
+def _export_tui_toolsets(env: dict, toolsets: object) -> None:
+    """Empty is a typed no-tools pick; absent leaves the profile/env default alone."""
+    if toolsets is not None:
+        env["HERMES_TUI_TOOLSETS"] = ",".join(_normalize_tui_toolsets(toolsets))
+
+
 def _read_cgroup_memory_limit() -> Optional[int]:
     """Container memory limit in bytes, or None if unconstrained (v2 ``memory.max``, then v1).
 
@@ -536,7 +542,6 @@ def _launch_tui(
     for key, value in (
         ("HERMES_MODEL", model), ("HERMES_INFERENCE_MODEL", model),
         ("HERMES_TUI_PROVIDER", provider), ("HERMES_INFERENCE_PROVIDER", provider),
-        ("HERMES_TUI_TOOLSETS", ",".join(_normalize_tui_toolsets(toolsets))),
         ("HERMES_TUI_SKILLS", skills_value),
         ("HERMES_TUI_QUERY", query), ("HERMES_TUI_IMAGE", image),
         ("HERMES_TUI_CHECKPOINTS", "1" if checkpoints else None),
@@ -546,6 +551,7 @@ def _launch_tui(
         ("HERMES_ACCEPT_HOOKS", "1" if accept_hooks else None)):
         if value:
             env[key] = value
+    _export_tui_toolsets(env, toolsets)
     # Generous V8 heap (8GB target; default cap can fatal-OOM on long sessions),
     # sized below the cgroup limit by _resolve_tui_heap_mb() so V8 exits
     # gracefully instead of being reaped silently. Token-level merge respects a
