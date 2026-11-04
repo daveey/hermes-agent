@@ -23,10 +23,11 @@ def idempotency_key(task_id):
 
 def _session_state(path, session):
     """True/False for a session found in ``path``; ``"missing"`` when absent; None when unreadable."""
+    from hermes_cli import kanban_lockguard
     from hermes_cli.kanban_origin_adapter import _resolve_session
 
     try:
-        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1)
+        db = kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=1)
         try:
             tip = _resolve_session(path, session, db)
             row = db.execute("SELECT archived, ended_at, end_reason FROM sessions WHERE id=?", (tip,)).fetchone()
