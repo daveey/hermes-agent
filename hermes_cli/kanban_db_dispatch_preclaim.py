@@ -37,6 +37,7 @@ def eligible_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row], status: str
             kept.append(row)
         else:
             if reason == WAITING and repin.awaiting(conn, row["id"]):
-                reason = repin.MANUAL_REPIN  # no pool worker can run it: its creator must repin, not a lease
+                from hermes_cli.kanban_repin_owner import wait_reason
+                reason = wait_reason(conn, row["id"])
             result.skipped_ineligible.append((row["id"], reason))
     return kept

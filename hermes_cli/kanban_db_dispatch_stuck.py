@@ -19,6 +19,20 @@ def manual_repin_ids(results: Iterable[Optional[Any]]) -> list[str]:
                    for tid, reason in res.skipped_ineligible if reason == MANUAL_REPIN})
 
 
+def _repin_wait(reason):
+    return reason == MANUAL_REPIN or reason.startswith(MANUAL_REPIN + ':no_owner:')
+
+
+def _supervisor_label(reason):
+    """``...:no_owner:<id>:<status>`` -> ``supervisor <id> (<status>)``; a closed one is never shown as live."""
+    parts = reason[len(MANUAL_REPIN + ':no_owner:'):].split(':')
+    if len(parts) != 2:
+        return "supervisor pending"
+    sid, status = parts
+    return f"supervisor {sid} ({status}" + (", closed: no live supervision)" if status in ("done", "archived")
+                                            else ")")
+
+
 def describe_suppression(results: Iterable[Optional[Any]]) -> str:
     """One line naming why the tick(s) held ready work back, or ``""``.
 
@@ -48,7 +62,7 @@ def describe_suppression(results: Iterable[Optional[Any]]) -> str:
             key = f"claim_deferred({reason})"
             counts[key] = counts.get(key, 0) + 1
         for _task_id, reason in res.skipped_ineligible:
-            if reason == MANUAL_REPIN:
+            if _repin_wait(reason):
                 continue  # named on its own (manual_repin_ids): not a hold this machine's lease explains
             key = f"skipped_ineligible({reason})"
             counts[key] = counts.get(key, 0) + 1
@@ -103,8 +117,13 @@ def stuck_warning(bad_ticks: int, results: Iterable[Optional[Any]]) -> str:
     if repin:
         # No pool worker can run these (Board ``no_eligible_worker``); each card carries the repin command.
         msg += f" Not a stall, waiting for a manual repin: {', '.join(repin)}."
+    orphaned = sorted({f"{tid} (no owner; {_supervisor_label(reason)})"
+                       for res in results if res is not None for tid, reason in res.skipped_ineligible
+                       if reason.startswith(MANUAL_REPIN + ':no_owner:')})
+    if orphaned:
+        msg += f" Waiting for repin supervision: {', '.join(orphaned)}."
     lease_bound = any(res is not None and (res.claim_deferred or any(
-        reason != MANUAL_REPIN for _tid, reason in res.skipped_ineligible)) for res in results)
+        not _repin_wait(reason) for _tid, reason in res.skipped_ineligible)) for res in results)
     if lease_bound:
         # With sync enabled every claim goes through the Board lease: a stopped sync loop explains them all. [daveey]
         from hermes_cli import kanban_sync_runstate as runstate

@@ -5,9 +5,11 @@ Under the approved overflow plan (ruling 9) the Board no longer returns such a c
 queued and fenced until its creator repins it. Without this module the only trace was a queue reason in
 ``kanban show``. Here the origin posts ONE comment per card revision with the exact repin command, appends a
 ``worker_repin_notice`` event (the gateway/TUI notifiers deliver it to the card's origin chat, when it has one),
-and the dispatcher's stuck summary lists such cards as waiting for a manual repin instead of a lease stall.
+and the dispatcher's stuck summary separates owned manual waits from orphaned waits. Ownership is checked
+on every sweep, independently of notice deduplication; ``kanban_repin_owner`` creates one local supervisor
+on the same board when no live recipient or open creator remains.
 
-Never repins: the notice only tells the creator what to run.
+Never repins: the notice and supervisor ask an owner to decide the placement.
 
 A "revision" is the card's required labels plus its run count, not the Board ``sync_version``: every Board
 reserve of a queued card bumps that version, so keying on it would repeat the notice on every pass.
@@ -101,28 +103,60 @@ def maybe_notify(conn, task_id, gateway, value, pool=None):
     gateway, only an unclaimed ready policy card. Returns True when it posted.
     """
     from hermes_cli import kanban_db as kb
-    from hermes_cli import kanban_db_sync as sync
-    from hermes_cli.kanban_worker_placement import POLICY
 
     if not no_pool_worker(value, pool):
         return False
+    def fenced(row):
+        return _origin_fenced(conn, row, gateway)
+
+    posted = False
     with kb.write_txn(conn):
         row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if (row is None or row["created_on"] != gateway or row["placement_policy"] != POLICY
-                or row["status"] != "ready" or row["claim_lock"] or row["lease_holder"]
-                or sync.board_mode(conn) != "primary"
-                or (sync.sync_state(conn) or {}).get("gateway_id") != gateway):
+        if not fenced(row):
             return False
         revision = notice_revision(conn, task_id, row)
-        for (payload,) in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=?",
-                                       (task_id, NOTICE_KIND)):
-            if kb._json_dict(payload).get("revision") == revision:
-                return False
-        payload = {"task_id": task_id, "origin": gateway, "revision": revision,
-                   "labels": observed_labels(value) or revision["required"]}
-        kb._append_event(conn, task_id, NOTICE_KIND, payload)
-        kb.add_comment(conn, task_id, AUTHOR, notice_text(payload), origin_gateway=gateway)
-        return True
+        if not any(kb._json_dict(payload).get("revision") == revision for (payload,) in conn.execute(
+                "SELECT payload FROM task_events WHERE task_id=? AND kind=?", (task_id, NOTICE_KIND))):
+            payload = {"task_id": task_id, "origin": gateway, "revision": revision,
+                       "labels": observed_labels(value) or revision["required"]}
+            kb._append_event(conn, task_id, NOTICE_KIND, payload)
+            kb.add_comment(conn, task_id, AUTHOR, notice_text(payload), origin_gateway=gateway)
+            posted = True
+    # The notice is committed above; ownership recovery runs on every sweep (not only a new notice) in its own
+    # transaction, so its failure never undoes the notice and the next sweep retries.
+    _recover_owner(conn, task_id, gateway, fenced)
+    return posted
+
+
+def _origin_fenced(conn, row, gateway):
+    """Only the origin gateway, on a Board primary, for an unclaimed ready worker-first card."""
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli.kanban_worker_placement import POLICY
+
+    return not (row is None or row["created_on"] != gateway or row["placement_policy"] != POLICY
+                or row["status"] != "ready" or row["claim_lock"] or row["lease_holder"]
+                or sync.board_mode(conn) != "primary"
+                or (sync.sync_state(conn) or {}).get("gateway_id") != gateway)
+
+
+def _recover_owner(conn, task_id, gateway, fenced):
+    """Never raises: the notice is already committed and a failed recovery must not undo or block it.
+
+    ``ensure_supervisor`` writes in its own transaction (a savepoint if a caller ever holds one), so a create
+    failure rolls back only the supervisor; the next sweep retries.
+    """
+    import logging
+
+    from hermes_cli.config_backend import ConfigBackendUnavailable
+    from hermes_cli.kanban_repin_owner import ensure_supervisor
+
+    try:
+        return ensure_supervisor(conn, task_id, gateway, fenced)
+    except (Exception, ConfigBackendUnavailable) as exc:  # health: allow BLE001 -- optional recovery cannot control dispatch
+        # ConfigBackendUnavailable is a SystemExit on purpose, so it is named explicitly.
+        logging.getLogger(__name__).warning("repin owner recovery for %s failed (%s); retrying next sweep",
+                                            task_id, type(exc).__name__)
+        return None
 
 
 def awaiting(conn, task_id):

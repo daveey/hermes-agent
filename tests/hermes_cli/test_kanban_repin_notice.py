@@ -57,6 +57,13 @@ def _notice_comments(conn, tid):
 
 
 def _subscribe(conn, tid, chat="origin-chat"):
+    from hermes_constants import get_hermes_home
+    from hermes_state import SessionDB
+    db = SessionDB(db_path=get_hermes_home() / 'state.db')
+    try:
+        db.create_session(chat, source='desktop')
+    finally:
+        db.close()
     kn.add_notify_sub(conn, task_id=tid, platform="tui", chat_id=chat,
                       delivery_metadata={"reason": "create"})
 
@@ -155,6 +162,7 @@ def test_new_card_revision_gets_a_new_notice(conn):
 
 def test_no_repin_call_is_made_and_the_fence_stays(conn):
     tid = _card(conn)
+    _subscribe(conn, tid)
     hub = _hub()
     for _ in range(3):
         wp.reevaluate(conn, hub, "default", "hub", cfg=CFG)
@@ -191,6 +199,7 @@ def test_other_queue_codes_post_no_notice(conn):
 
 def test_stuck_summary_names_the_card_and_does_not_count_it_as_a_stall(conn):
     tid = _card(conn)
+    _subscribe(conn, tid)
     wp.reevaluate(conn, _hub(), "default", "hub", cfg=CFG)
     rows = conn.execute("SELECT * FROM tasks WHERE status='ready'").fetchall()
     result = dispatch.DispatchResult()
@@ -265,6 +274,7 @@ def test_a_pool_worker_missing_from_the_observation_means_no_notice(conn):
 
 def test_stuck_summary_counts_a_capability_mismatch_card_as_waiting_for_repin(conn):
     tid = _card(conn)
+    _subscribe(conn, tid)
     wp.reevaluate(conn, _hub(_rolled_up("capability_mismatch", _W1_MISSING)), "default", "hub", cfg=CFG)
     rows = conn.execute("SELECT * FROM tasks WHERE status='ready'").fetchall()
     result = dispatch.DispatchResult()
