@@ -74,6 +74,40 @@ def test_explicit_move_bypasses_queued_cache(conn, monkeypatch):
     assert len(hub.calls) == 1
 
 
+def test_throttle_preserves_failure_stage_provenance(conn, monkeypatch):
+    """A throttled pass records no error; the repin bypass and the post-expiry reserve keep their own stage."""
+    from hermes_cli import kanban_queue_reason as qr
+
+    tid = fixtures.acknowledged(conn)
+    hub = fixtures.RecordingHub()
+    clock = [100.0]
+    monkeypatch.setattr(wp, "_queued", {})
+    monkeypatch.setattr(wp, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(client, "pull", lambda *a, **kw: None)
+    wp.reevaluate(conn, hub, "default", "hub", cfg=CFG)
+    assert ("default", tid) in wp._queued
+    queued = qr.latest(conn, tid)
+
+    def refused(board, **body):
+        raise ConnectionRefusedError(111, "x")
+    hub.reserve = refused
+    wp.reevaluate(conn, hub, "default", "hub", cfg=CFG)  # throttled: no Board request, so no reserve error
+    assert qr.latest(conn, tid) == queued
+
+    hub.repin = refused
+    monkeypatch.setattr(wp, "requested_move", lambda *a: ["machine:hub"])
+    assert wp.reevaluate(conn, hub, "default", "hub", cfg=CFG) == 0  # explicit move bypasses the cache
+    value = qr.latest(conn, tid)
+    assert value["stage"] == "repin" and value["transport"] == "refused"
+
+    monkeypatch.setattr(wp, "requested_move", lambda *a: None)
+    clock[0] += wp.RESERVE_KEEPALIVE_S
+    monkeypatch.setattr(qr, "record_error", lambda *a, **kw: calls.append(kw) or True)
+    calls = []
+    assert wp.reevaluate(conn, hub, "default", "hub", cfg=CFG) == 0  # expired: re-asks and fails as a reserve
+    assert [kw["stage"] for kw in calls] == ["reserve"]
+
+
 def test_cache_has_hard_bound(conn, monkeypatch):
     fixtures.acknowledged(conn)
     monkeypatch.setattr(wp, "_queued", {("default", str(i)): (4, "", float("inf")) for i in range(1024)})
