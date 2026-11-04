@@ -163,6 +163,22 @@ def _record_client_active_in_process(
     store.record_client_active(_resource())
 
 
+def _record_client_active_against_held_store(
+    database_path: str,
+    outbox_directory: str,
+    ready: Any,
+    held: Any,
+    attempted: Any,
+) -> None:
+    store = SharedMetricsStore(Path(database_path), Path(outbox_directory))
+    ready.set()
+    try:
+        assert held.wait(timeout=60)
+        store.record_client_active(_resource())
+    finally:
+        attempted.set()
+
+
 def test_model_call_counter_survives_restart_and_exports_only_new_deltas(tmp_path):
     database_path = tmp_path / "metrics.sqlite3"
     outbox_directory = tmp_path / "outbox"
@@ -1689,6 +1705,97 @@ def test_cross_process_client_active_attempts_record_one_install(tmp_path):
     [active] = store.counter_snapshot()
     assert active["metric_name"] == CLIENT_ACTIVE_METRIC
     assert active["dimensions"] == {}
+    assert active["value"] == 1
+
+
+def test_client_active_the_busy_store_cannot_take_is_deferred_then_latched_once(tmp_path):
+    """A writer holding the store past the 250 ms busy timeout: the session-start latch returns at
+    once without raising, and the deferred compare-and-set lands later at most once."""
+    database_path = tmp_path / "metrics.sqlite3"
+    store = SharedMetricsStore(database_path, tmp_path / "outbox")
+    other = SharedMetricsStore(database_path, tmp_path / "outbox")
+    blocker = sqlite3.connect(database_path)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        assert store.record_client_active(_resource()) is False
+        assert other.record_client_active(_resource()) is False
+    finally:
+        blocker.rollback()
+        blocker.close()
+    assert store.counter_snapshot() == []
+    store.drain_deferred()
+    other.drain_deferred()
+    [active] = store.counter_snapshot()
+    assert active["metric_name"] == CLIENT_ACTIVE_METRIC
+    assert active["value"] == 1
+    assert store.record_client_active(_resource()) is False
+    assert store.counter_snapshot()[0]["value"] == 1
+
+
+def test_a_failing_latch_drops_only_itself_not_the_deferred_writes(tmp_path, monkeypatch):
+    """A latch that fails for a reason other than contention raises and is dropped; the writes
+    deferred before it stay queued for the next write."""
+    database_path = tmp_path / "metrics.sqlite3"
+    store = SharedMetricsStore(database_path, tmp_path / "outbox")
+    blocker = sqlite3.connect(database_path)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        store.record_model_call(_dimensions(), _resource())
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    def broken_install_id(connection):
+        raise RuntimeError("install id unavailable")
+
+    monkeypatch.setattr(store, "_install_id", broken_install_id)
+    with pytest.raises(RuntimeError):
+        store.record_client_active(_resource())
+    monkeypatch.undo()
+    store.drain_deferred()
+    [model_calls] = store.counter_snapshot()
+    assert model_calls["metric_name"] == MODEL_ROUTE_METRIC
+    assert model_calls["value"] == 1
+
+
+def test_cross_process_client_active_held_past_busy_timeout_records_one_install(tmp_path):
+    """Deterministic form of the cross-process race: the store is held past the busy timeout while
+    both processes attempt, so neither may fail, and the exit drains latch the install once."""
+    database_path = tmp_path / "metrics.sqlite3"
+    outbox_directory = tmp_path / "outbox"
+    SharedMetricsStore(database_path, outbox_directory)
+    context = mp.get_context("spawn")
+    held = context.Event()
+    readies = [context.Event() for _ in range(2)]
+    attempts = [context.Event() for _ in range(2)]
+    processes = [
+        context.Process(
+            target=_record_client_active_against_held_store,
+            args=(str(database_path), str(outbox_directory), ready, held, attempted),
+        )
+        for ready, attempted in zip(readies, attempts)
+    ]
+    for process in processes:
+        process.start()
+    # Each process opens its store (a schema write) before the store is held.
+    for ready in readies:
+        assert ready.wait(timeout=60)
+    blocker = sqlite3.connect(database_path)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        held.set()
+        for attempted in attempts:
+            assert attempted.wait(timeout=60)
+    finally:
+        blocker.rollback()
+        blocker.close()
+    for process in processes:
+        process.join(timeout=60)
+        assert not process.is_alive()
+        assert process.exitcode == 0
+
+    [active] = SharedMetricsStore(database_path, outbox_directory).counter_snapshot()
+    assert active["metric_name"] == CLIENT_ACTIVE_METRIC
     assert active["value"] == 1
 
 

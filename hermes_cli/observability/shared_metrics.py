@@ -250,33 +250,50 @@ class SharedMetricsStore:
         self, state_key: str, metric_name: str, dimensions: dict[str, str],
         resource: dict[str, str],
     ) -> bool:
-        """Transactional compare-and-set latch shared by concurrent Hermes processes."""
+        """Transactional compare-and-set latch shared by concurrent Hermes processes. True only when
+        this call recorded the metric; a store another writer holds past the short busy timeout
+        defers the compare-and-set (False) to the next write or the exit drain."""
         self._validate_counter(metric_name, dimensions, resource)
+        recorded = False
+
+        def latch(connection: sqlite3.Connection) -> None:
+            nonlocal recorded
+            recorded = self._latch_once_per_interval(
+                connection, state_key, metric_name, dimensions, resource
+            )
+
+        return self._write_or_defer(latch) and recorded
+
+    def _latch_once_per_interval(
+        self, connection: sqlite3.Connection, state_key: str, metric_name: str,
+        dimensions: dict[str, str], resource: dict[str, str],
+    ) -> bool:
+        # The clock is read inside the transaction: a deferred latch compares against what other
+        # processes committed meanwhile, never against its own stale attempt time.
         now = _utc_now()
-        with self._write() as connection:
-            row = connection.execute(
-                "SELECT value FROM telemetry_state WHERE key = ?", (state_key,)
-            ).fetchone()
-            last_recorded = self._parse_state_timestamp(row["value"]) if row is not None else None
-            if last_recorded is not None and last_recorded > now:
-                # A wall-clock correction must not suppress activity until the stale future
-                # timestamp plus another full interval.
-                connection.execute(
-                    "UPDATE telemetry_state SET value = ? WHERE key = ?",
-                    (_isoformat(now), state_key),
-                )
-                return False
-            if last_recorded is not None and now < last_recorded + _ACTIVE_INSTALL_INTERVAL:
-                return False
-            self._install_id(connection)
-            self._record_counter_in_transaction(
-                connection, metric_name, dimensions, resource, now.date().isoformat()
-            )
+        row = connection.execute(
+            "SELECT value FROM telemetry_state WHERE key = ?", (state_key,)
+        ).fetchone()
+        last_recorded = self._parse_state_timestamp(row["value"]) if row is not None else None
+        if last_recorded is not None and last_recorded > now:
+            # A wall-clock correction must not suppress activity until the stale future
+            # timestamp plus another full interval.
             connection.execute(
-                "INSERT INTO telemetry_state(key, value) VALUES (?, ?)"
-                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (state_key, _isoformat(now)),
+                "UPDATE telemetry_state SET value = ? WHERE key = ?",
+                (_isoformat(now), state_key),
             )
+            return False
+        if last_recorded is not None and now < last_recorded + _ACTIVE_INSTALL_INTERVAL:
+            return False
+        self._install_id(connection)
+        self._record_counter_in_transaction(
+            connection, metric_name, dimensions, resource, now.date().isoformat()
+        )
+        connection.execute(
+            "INSERT INTO telemetry_state(key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (state_key, _isoformat(now)),
+        )
         return True
 
     def record_counter(
@@ -431,18 +448,19 @@ class SharedMetricsStore:
                 break
         return self._export_and_prune()
 
-    def _write_or_defer(self, write: Callable[[sqlite3.Connection], None]) -> None:
-        """Run ``write`` (after any deferred ones) in one write transaction. A store another writer
-        holds past the short busy timeout keeps them in memory for the next write or process exit
-        instead of losing them or stalling the caller."""
+    def _write_or_defer(self, write: Callable[[sqlite3.Connection], None]) -> bool:
+        """Run ``write`` (after any deferred ones) in one write transaction; True once committed. A
+        store another writer holds past the short busy timeout keeps them in memory for the next
+        write or process exit instead of losing them or stalling the caller (False)."""
         with self._deferred_lock:
             pending, self._deferred = [*self._deferred, write], []
         try:
             with self._write() as connection:
                 for item in pending:
                     item(connection)
-        except sqlite3.OperationalError as exc:
-            busy = "locked" in str(exc) or "busy" in str(exc)
+            return True
+        except Exception as exc:
+            busy = isinstance(exc, sqlite3.OperationalError) and ("locked" in str(exc) or "busy" in str(exc))
             with self._deferred_lock:
                 # A failure that is not contention drops only this write: the earlier ones stay queued.
                 self._deferred = [*(pending if busy else pending[:-1]), *self._deferred][-_DEFERRED_WRITES_MAX:]
@@ -453,6 +471,7 @@ class SharedMetricsStore:
                     _DEFERRING_STORES.append(self)
             if not busy:
                 raise
+            return False
 
     def drain_deferred(self, busy_timeout_ms: int = _SCHEMA_BUSY_TIMEOUT_MS) -> None:
         """Write the deferred writes (process exit / export waits longer than the user's path does)."""
