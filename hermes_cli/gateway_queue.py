@@ -101,11 +101,15 @@ def published_queue(cli, store) -> list[str]:
 
     The owner's published list is authoritative: an admission it no longer lists (cancelled, replaced or
     steered by another client, or started) is not shown as queued, even while ``queued_inputs`` still
-    owes its turn a paint."""
+    owes its turn a paint. The typed turn this viewer is submitting or running (``GatewayAgent``'s
+    ``_own_submissions``, matched by the row's ``input_id``: its ``submission_id``) is not a queued
+    prompt, though the owner lists it ``queued`` from its admission until its claim."""
     state = _state(cli, store)
     for gone in [admission for admission in state.queued_at if admission not in state.queued_inputs]:
         state.queued_at.pop(gone, None)
-    rows = [row for row in state.pending or () if isinstance(row, dict)]
+    agent = getattr(cli, "agent", None)
+    own = {sub for sid, sub in set(getattr(agent, "_own_submissions", ())) if sid == cli.session_id}
+    rows = [row for row in state.pending or () if isinstance(row, dict) and row.get("input_id") not in own]
     known = {row.get("admission_id") for row in rows}
     fresh = [text for admission, text in state.queued_inputs.items()
              if admission not in known and state.queued_at.get(admission, -1) >= state.pending_seq]

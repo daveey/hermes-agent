@@ -66,7 +66,7 @@ class _Turn:
     settlement after a replay gap."""
 
     def __init__(self, session_id):
-        self.session_id, self.admission = session_id, None
+        self.session_id, self.admission, self.submission = session_id, None, None
         # Parts, joined on read: ``+=`` on an attribute copies the whole segment per delta (quadratic).
         self._shown, self._spoken = [], []
         self.seen, self.answered, self.gapped = set(), set(), False
@@ -175,6 +175,12 @@ class GatewayAgent:
         self._generation = None
         self._admission = None
         self._turn = None  # a turn a later one replaced stops taking frames
+        # ``(session_id, submission_id)`` of each typed turn from its ``prompt.submit`` until its
+        # ``run_conversation`` returns: the owner publishes its pending list (listing the admission as
+        # ``queued`` by ``input_id``) before the receipt and the claim, and that row is this turn, not a
+        # queued prompt (``gateway_queue.published_queue``). A set: a later turn may submit while an
+        # earlier one's submit still blocks (``_take_turn_route``).
+        self._own_submissions = set()
         self._epoch = None  # the connection epoch this turn was submitted on
         self._interrupt_sent_at = None
         self._rate_limit_state = None
@@ -750,6 +756,14 @@ class GatewayAgent:
     def run_conversation(self, user_message, conversation_history=None, stream_callback=None,
                          task_id=None, persist_user_message=None, turn_author=None, **_kw):
         turn = self._turn = _Turn(self.session_id)  # first: a turn main gave up on stops consuming
+        try:
+            return self._run_turn(turn, user_message, conversation_history, stream_callback,
+                                  persist_user_message, turn_author)
+        finally:
+            self._own_submissions.discard(turn.submission)
+
+    def _run_turn(self, turn, user_message, conversation_history, stream_callback, persist_user_message,
+                  turn_author):
         history = list(conversation_history or [])
         self._turn_ask_index = len(history)  # the staged ask's row in this turn's transcript
         self._turn_api_calls = None
@@ -775,6 +789,8 @@ class GatewayAgent:
                 if notice:
                     return self._unadmitted(history, user_message, notice)
                 params = self._submit_params(user_message, persist_user_message, turn_author)
+                turn.submission = (turn.session_id, params["submission_id"])
+                self._own_submissions.add(turn.submission)
                 if self._stop(turn)():
                     raise CallStopped("prompt.submit")
                 receipt = self.connection.call("prompt.submit", **{**params, "session_id": turn.session_id})
