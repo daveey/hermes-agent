@@ -210,6 +210,29 @@ def test_lost_review_completed_by_the_worker_tool_stays_held(board, monkeypatch)
     assert dispatch.check_respawn_guard(board, task) == "active_pr"
 
 
+@pytest.mark.parametrize("tool", ["continue", "request_review"])
+def test_continue_and_request_review_stamp_worker_session_id(board, monkeypatch, tool):
+    """The _LOST_REVIEW_KEYS comment says kanban_continue and kanban_request_review stamp worker_session_id
+    like kanban_complete does; pin each of those entry paths on the run the tool ends."""
+    from tools import kanban_tools as kt
+    _task, parents = incident(board, monkeypatch, finish=False)
+    parent = parents[0]
+    kb.claim_task(board, parent)
+    row = kb.get_task(board, parent)
+    assert row is not None and row.current_run_id
+    monkeypatch.setenv("HERMES_KANBAN_TASK", parent)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(row.current_run_id))
+    monkeypatch.setenv("HERMES_SESSION_ID", "review-session")
+    if tool == "continue":
+        out = json.loads(kt._handle_continue({"checkpoint": "Reviewed half of PR #682; next: the tests."}))
+    else:
+        out = json.loads(kt._handle_request_review({"summary": "Reviewed PR #682. No blocking defects."}))
+    assert out["ok"] is True, out
+    stored = kb._json_dict(board.execute(
+        "SELECT metadata FROM task_runs WHERE id = ?", (row.current_run_id,)).fetchone()[0])
+    assert stored.get("worker_session_id") == "review-session", stored
+
+
 @pytest.mark.parametrize("captured", [None, []])
 def test_lost_review_needs_a_checkpointed_pr_to_name(captured):
     """checkpoint() never stores an empty capture, so one here comes from a checkpoint written without "prs"
