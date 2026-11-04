@@ -25,6 +25,22 @@ pytestmark = [pytest.mark.platforms("linux"),
 _REPO = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture
+def browser_processes(monkeypatch):
+    """Enumerate only our real subprocesses; keep real argv/liveness checks."""
+    import psutil
+
+    processes = []
+
+    def process_iter(*args, **kwargs):
+        for proc in processes:
+            if proc.poll() is None:
+                yield psutil.Process(proc.pid)
+
+    monkeypatch.setattr(psutil, "process_iter", process_iter)
+    return processes
+
+
 def _dir_of_a_dead_owner() -> Path:
     """A throwaway profile dir named for a Hermes process that has exited (it died mid-launch)."""
     from hermes_constants import hermes_home_key
@@ -52,11 +68,12 @@ def _stop(proc: subprocess.Popen) -> None:
     proc.wait(timeout=10)
 
 
-def test_an_unrecorded_live_browsers_throwaway_profile_survives_the_reclaim(tmp_path):
+def test_an_unrecorded_live_browsers_throwaway_profile_survives_the_reclaim(tmp_path, browser_processes):
     """Owner SIGKILLed before its record existed, its Chromium still up: reclaim waits for that Chromium."""
     script = write_fake_chromium(tmp_path / "chromium")
     udd = _dir_of_a_dead_owner()
     proc = _start_browser_on(script, udd, tmp_path / "chromium.log")
+    browser_processes.append(proc)
     try:
         launcher.reap_orphaned_browsers()
         assert udd.is_dir(), "the reaper deleted the profile of a Chromium still running on it"
@@ -69,13 +86,14 @@ def test_an_unrecorded_live_browsers_throwaway_profile_survives_the_reclaim(tmp_
         kill_fake(proc.pid, script)
 
 
-def test_a_live_browsers_profile_survives_when_its_record_cannot_prove_the_pid(tmp_path):
+def test_a_live_browsers_profile_survives_when_its_record_cannot_prove_the_pid(tmp_path, browser_processes):
     """A record whose start time no longer proves the pid is never signalled; its dir must not go either while a
     Chromium still runs on it."""
     from hermes_constants import hermes_home_key
     script = write_fake_chromium(tmp_path / "chromium")
     udd = _dir_of_a_dead_owner()
     proc = _start_browser_on(script, udd, tmp_path / "chromium.log")
+    browser_processes.append(proc)
     try:
         unprovable = launcher.LaunchedBrowser(key="lost", pid=proc.pid, start_time=1, cdp_url="", http_url="",
                                               user_data_dir=str(udd), owned=True, ephemeral=True,

@@ -34,6 +34,9 @@ def records(monkeypatch):
     monkeypatch.setattr(launcher, "_served_homes", set(), raising=False)
     monkeypatch.setattr(launcher, "_browsers", {})
     monkeypatch.setattr(launcher, "_procs", {})
+    # Records and liveness are synthetic; unrelated host browsers must not
+    # enter the fallback argv scan (which resolves their real profile paths).
+    monkeypatch.setattr("psutil.process_iter", lambda *a, **k: iter(()))
     terminated = []
     monkeypatch.setattr(launcher, "_terminate", lambda pid, start_time, proc: terminated.append(pid))
     return SimpleNamespace(dir=path, terminated=terminated,

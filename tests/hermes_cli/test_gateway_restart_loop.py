@@ -485,8 +485,9 @@ class TestGatewaySelfTargetingGuard:
         def _sentinel(*a, **k):
             raise _Reached()
 
-        monkeypatch.setattr(gw, "_dispatch_via_service_manager_if_s6", _sentinel)
-        monkeypatch.setattr(gw, "_dispatch_all_via_service_manager_if_s6", _sentinel)
+        # This is the first boundary after the self-targeting guard, before
+        # host process discovery or service/session inspection can run.
+        monkeypatch.setattr("hermes_cli.gateway_profile_lifecycle.profile_lifecycle", _sentinel)
         args = Namespace(gateway_command="stop", all=False, system=False)
         with pytest.raises(_Reached):
             gw.gateway_command(args)
