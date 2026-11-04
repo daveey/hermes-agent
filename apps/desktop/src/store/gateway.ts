@@ -27,7 +27,13 @@ import { initialGatewayProfile } from '@/lib/platform'
 import { RECONNECT_ATTEMPT_TIMEOUT_MS, SOURCE_SWITCH_DIAL_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
 import { recordSecondaryWire } from '@/store/connection-wire'
 import { $gatewayActivationEpoch } from '@/store/gateway-activation-epoch'
-import { isMissingConnectionError, isMissingProfileError, isStalledDialError } from '@/store/gateway-dial-failures'
+import {
+  backgroundDialCoolingDown,
+  isMissingConnectionError,
+  isMissingProfileError,
+  isStalledDialError,
+  recordDialFailure
+} from '@/store/gateway-dial-failures'
 import { isKeptRoute, keptRouteOpened } from '@/store/gateway-kept-routes'
 import { $primaryGatewayRoute } from '@/store/gateway-primary-route'
 import type { RegistryConfig } from '@/store/gateway-registry-config'
@@ -811,32 +817,6 @@ function rearmSecondary(entry: Secondary, priority: SpawnPriority = 'foreground'
   entry.stalledDials = 0
 }
 
-function recordDialFailure(entry: Secondary, error?: unknown): void {
-  // Auth rejection has its own ledger (reauthFailures) that already fails background callers fast.
-  if (error !== undefined && isGatewayReauthRequired(error)) {
-    return
-  }
-
-  const previous = g.dialFailures.get(entry.scope)
-
-  g.dialFailures.set(entry.scope, {
-    at: Date.now(),
-    streak: (previous?.streak ?? 0) + 1,
-    connectionId: entry.connectionId ?? null
-  })
-}
-
-/** True while a background caller must leave redialing to the ladder: the scope's last dial
- *  failed (or its socket died before RECONNECT_STABLE_OPEN_MS) inside a window that widens with
- *  the failure streak, on the same ceilings as the reconnect ladder. History clears on proof of
- *  health (a served RPC, or a socket that lived) and on a fresh start (foreground re-arm, connection
- *  removal, full teardown) — never on a bare open, so an accept-then-close backend keeps escalating. */
-function backgroundDialCoolingDown(scope: string, now = Date.now()): boolean {
-  const failure = g.dialFailures.get(scope)
-
-  return failure !== undefined && now - failure.at < reconnectBackoffDelayMs(failure.streak - 1, { jitter: false })
-}
-
 /** Dial a request's secondary if it is down. Both request paths (a plain profile via
  *  gatewayForProfile, a registry route via requestGatewayForAgent) used to dial straight past
  *  the reconnect ladder, and openSecondary only coalesces CONCURRENT dials, so a poller against
@@ -848,7 +828,7 @@ async function openSecondaryForRequest(entry: Secondary, spawnPriority: SpawnPri
     return
   }
 
-  if (spawnPriority !== 'foreground' && backgroundDialCoolingDown(entry.scope)) {
+  if (spawnPriority !== 'foreground' && backgroundDialCoolingDown(g.dialFailures.get(entry.scope))) {
     scheduleReconnect(entry)
     throw new Error(`Backend for "${entry.profile}" is reconnecting; retry after it settles.`)
   }
@@ -856,7 +836,7 @@ async function openSecondaryForRequest(entry: Secondary, spawnPriority: SpawnPri
   try {
     await openSecondary(entry)
   } catch (error) {
-    recordDialFailure(entry, error)
+    recordDialFailure(g.dialFailures, entry, error)
     throw error
   }
 }
@@ -888,7 +868,7 @@ async function reconnectSecondary(entry: Secondary): Promise<void> {
   } catch (error) {
     // Restart the background-request cooldown from the ladder's own failure too, or a poll
     // could slip a dial in between two ladder attempts on an older, expired window.
-    recordDialFailure(entry, error)
+    recordDialFailure(g.dialFailures, entry, error)
 
     if (isGatewayReauthRequired(error)) {
       notifyError(error, translateNow('boot.errors.gatewaySignInRequired'), { action: RECOVERY_ACTIONS.openGateways() })
@@ -1002,7 +982,7 @@ function createSecondary(profile: string, connectionId: null | string = null): S
         entry.reconnectAttempt = 0
         g.dialFailures.delete(scope)
       } else if (entry.openedAt !== null) {
-        recordDialFailure(entry)
+        recordDialFailure(g.dialFailures, entry)
       }
 
       entry.openedAt = null
@@ -1040,7 +1020,7 @@ async function gatewayForProfile(
   // cooling-down scope has to be held back before it, not just before openSecondary.
   const existing = g.secondaries.get(key)
 
-  if (spawnPriority !== 'foreground' && !(existing && isOpen(existing.gateway)) && backgroundDialCoolingDown(key)) {
+  if (spawnPriority !== 'foreground' && !(existing && isOpen(existing.gateway)) && backgroundDialCoolingDown(g.dialFailures.get(key))) {
     throw new Error(`Backend for "${key}" is reconnecting; retry after it settles.`)
   }
 

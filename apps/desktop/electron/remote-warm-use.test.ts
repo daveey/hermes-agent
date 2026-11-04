@@ -125,8 +125,8 @@ describe('main.ts wiring', () => {
       /const connection = await ensureRegistryBackend\(payload\?\.connectionId, payload\?\.profile\)\n/
     )
     expect(main).toContain('ensureRegistryBackend(registryConnectionId, routeProfile)\n')
-    expect(main).toContain(
-      'route.connectionId ? ensureRegistryBackend(route.connectionId, route.profile) : ensureBackend(route.profile)'
+    expect(main).toMatch(
+      /route\.connectionId\s*\? ensureRegistryBackend\(route\.connectionId, route\.profile\)\s*: ensureBackend\(route\.profile, \{ inheritsPrimary \}\)/
     )
   })
 })
