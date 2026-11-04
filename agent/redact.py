@@ -455,8 +455,9 @@ _JSON_KEY_NAMES = r"(?:api_?[Kk]ey|token|secret|password|access_token|refresh_to
 _JSON_FIELD_RE = re.compile(rf'("{_JSON_KEY_NAMES}")\s*:\s*"([^"]+)"', re.IGNORECASE)
 # The same field inside a JSON-encoded string (``{"output": "{\\"api_key\\": \\"…\\"}"}``): every tool result
 # that wraps a config dump in JSON escapes the quotes, so the rule above never saw the value (#115104).
-# The backreference keeps the key's and value's escape depth equal.
-_JSON_FIELD_ESCAPED_RE = re.compile(rf'((\\+)"{_JSON_KEY_NAMES}\2")\s*:\s*\2"([^"\\]+)\2"', re.IGNORECASE)
+# The backreference keeps the key's and value's escape depth equal. ``(?<!\\)`` starts a match only at the head
+# of a backslash run: retrying from every backslash of a long run was quadratic.
+_JSON_FIELD_ESCAPED_RE = re.compile(rf'((?<!\\)(\\+)"{_JSON_KEY_NAMES}\2")\s*:\s*\2"([^"\\]+)\2"', re.IGNORECASE)
 
 # Python ``repr`` uses single-quoted mapping fields, so opaque credentials in
 # tracebacks and pytest failure introspection bypass the double-quoted JSON rule
@@ -804,6 +805,80 @@ def _redact_python_repr_fields(text: str) -> str:
     return _PYTHON_REPR_FIELD_RE.sub(_sub, text)
 
 
+# Source-preserving output (terminal, execute_code, read_file) skips the key-based passes so
+# ``{'api_key': 'test'}`` fixtures survive. A generated credential is not fixture-shaped, though:
+# ``secrets.token_urlsafe(32)`` (managed-worker adoption secrets in ``worker-outboxes/*/pending.json``)
+# is 43 base64url chars mixing both cases. That shape in a credential-named field is masked in every
+# mode. Hex digests (one case) and ``/``-led paths never match; neither do prose-like fixture values.
+_RANDOM_TOKEN_RE = re.compile(r"(?=[A-Za-z0-9_+/-]*[a-z])(?=[A-Za-z0-9_+/-]*[A-Z])[A-Za-z0-9_+/-]{32,}={0,2}")
+
+
+def _looks_like_random_token(value: str) -> bool:
+    return not value.startswith("/") and _RANDOM_TOKEN_RE.fullmatch(value) is not None
+
+
+def _redact_random_secret_fields(text: str, mask) -> str:
+    """``code_file`` counterpart of the JSON / repr field passes: mask only random-token values."""
+    def _json(m: re.Match) -> str:
+        return m.group(0) if not _looks_like_random_token(m.group(2)) else f'{m.group(1)}: "{mask(m.group(2))}"'
+
+    def _json_escaped(m: re.Match) -> str:
+        if not _looks_like_random_token(m.group(3)):
+            return m.group(0)
+        return f'{m.group(1)}: {m.group(2)}"{mask(m.group(3))}{m.group(2)}"'
+
+    def _repr(m: re.Match) -> str:
+        value = m.group("single_value") if m.group("single_value") is not None else m.group("double_value")
+        if not _is_python_repr_secret_key(m.group("key")) or not _looks_like_random_token(value):
+            return m.group(0)
+        prefix, quote = ((m.group("single_prefix") or "", "'") if m.group("single_value") is not None
+                         else (m.group("double_prefix") or "", '"'))
+        return f"'{m.group('key')}'{m.group('sep')}{prefix}{quote}{mask(value)}{quote}"
+
+    if '"' in text:
+        text = _JSON_FIELD_RE.sub(_json, text)
+        if '\\"' in text:
+            text = _JSON_FIELD_ESCAPED_RE.sub(_json_escaped, text)
+    if "'" in text:
+        text = _PYTHON_REPR_FIELD_RE.sub(_repr, text)
+    return text
+
+
+# ``subprocess.TimeoutExpired`` / ``CalledProcessError`` text echoes the whole argv
+# (``Command '['grep', '-rlF', '<secret>', '.']' timed out after 30 seconds``). An argv element has
+# no key, so the only signal is its shape: a random token (see _RANDOM_TOKEN_RE, ``/`` excluded so
+# path segments stay separate) inside that exact diagnostic is masked. Search for a secret
+# in-process instead of passing it in argv: argv is also visible in ``ps`` and /proc.
+_SUBPROCESS_COMMAND_TAIL_RE = re.compile(r"(['\"]) (?:timed out after |returned non-zero exit status |died with )")
+_SUBPROCESS_COMMAND_SPAN = 16384  # a shell=True script may span lines
+_ARGV_RANDOM_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_+-])(?=[A-Za-z0-9_+-]*[a-z])(?=[A-Za-z0-9_+-]*[A-Z])[A-Za-z0-9_+-]{32,}={0,2}"
+    r"(?![A-Za-z0-9_+=-])")
+
+
+def _redact_subprocess_argv(text: str) -> str:
+    """Mask random tokens between ``Command '`` and its ``' timed out after`` (etc.) tail.
+
+    Anchored on the tail, then a bounded backward search for the head: a forward
+    lazy regex from every ``Command '`` rescanned the line per head (quadratic on hostile output).
+    ``scanned`` keeps the backward windows disjoint, so the whole pass is linear."""
+    out, pos, scanned = [], 0, 0
+    for m in _SUBPROCESS_COMMAND_TAIL_RE.finditer(text):
+        end = m.start()
+        lo = max(scanned, end - _SUBPROCESS_COMMAND_SPAN)
+        scanned = m.end()
+        head = text.rfind(f"Command {m.group(1)}", lo, end)
+        if head < 0:
+            continue
+        body = head + len("Command ") + 1
+        out += [text[pos:body], _ARGV_RANDOM_TOKEN_RE.sub("***", text[body:end])]
+        pos = end
+    if not out:
+        return text
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def _redact_python_diagnostic_repr_fields(text: str) -> str:
     """Mask repr fields only on pytest/error lines in source-preserving output."""
     lines = text.splitlines(keepends=True)
@@ -1046,6 +1121,11 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
 
     if not code_file:
         text = _redact_assignments(text, mask_nonreusable=file_read)
+    elif ":" in text:
+        text = _redact_random_secret_fields(text, _mask_token_nonreusable if file_read else (lambda _v: "***"))
+
+    if "Command " in text:
+        text = _redact_subprocess_argv(text)
 
     if "uthorization" in text or "UTHORIZATION" in text:  # cheapest gate over every casing
         text = _AUTH_HEADER_RE.sub(lambda m: m.group(1) + (m.group(2) or "") + _mask_token(m.group(3)), text)
