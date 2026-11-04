@@ -261,17 +261,21 @@ def test_timezone_pinned_job_releases_to_its_own_zones_next_slot(tmp_cron_home, 
 
 
 def test_queued_run_now_keeps_hold_and_skips_pool_read(tmp_cron_home, pool):
-    """A run-now queued during the hold waits for the boundary (extra_fire.reschedule owns it);
-    the early release never rewrites next_run_at under it."""
+    """A run-now queued during the hold waits for the boundary: extra_fire.reschedule leaves
+    manual_run_at == next_run_at == the parked instant with the natural slot saved. The early
+    release must not rewrite next_run_at under it (that would silently drop the user's run-now)."""
     from cron import extra_fire
-    from cron.jobs import trigger_job
 
     job_id = _held_job()
-    assert trigger_job(job_id) is not None
+    update_job(job_id, {"manual_run_at": PARKED.isoformat(),
+                        extra_fire.RESTORE_KEY: "2026-11-04T16:07:00+00:00"})
     assert extra_fire.queued(_get(job_id))
-    get_due_jobs()
+    assert job_id not in {d["id"] for d in get_due_jobs()}
+    j = _get(job_id)
     assert pool["reads"] == []
-    assert _get(job_id).get(qh.STATE_KEY) == PARKED.isoformat()
+    assert j.get(qh.STATE_KEY) == PARKED.isoformat()
+    assert j["next_run_at"] == PARKED.isoformat()
+    assert extra_fire.queued(j)
 
 
 def test_real_credential_pool_drives_pool_serving(tmp_path, monkeypatch):
