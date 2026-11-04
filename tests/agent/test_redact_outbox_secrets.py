@@ -105,6 +105,31 @@ class TestSubprocessArgvDiagnostics:
         out = redact_sensitive_text(_timeout_text(f"grep -rlF {SECRET} ."), code_file=True)
         assert SECRET not in out
 
+    @pytest.mark.parametrize("error", [subprocess.TimeoutExpired, subprocess.CalledProcessError])
+    @pytest.mark.parametrize("tails", [1, 3])
+    def test_shell_string_with_embedded_tail_is_masked(self, error, tails):
+        script = 'echo "worker" died with code; ' * tails + f"curl -H {SECRET} x"
+        exc = error(script, 30) if error is subprocess.TimeoutExpired else error(1, script)
+        text = str(exc)
+        assert SECRET not in redact_sensitive_text(text, code_file=True)
+
+    def test_unheaded_tail_does_not_mask_ordinary_text(self):
+        text = f"ordinary {SECRET}' died with code"
+        assert redact_sensitive_text(text, code_file=True) == text
+
+    def test_continuation_window_keeps_span_bound(self):
+        from agent.redact import _redact_subprocess_argv, _SUBPROCESS_COMMAND_SPAN
+        other = SECRET[::-1]
+        text = f"Command 'echo' died with {SECRET} " + "x " * _SUBPROCESS_COMMAND_SPAN
+        text += f"{other}' timed out after 30 seconds"
+        out = _redact_subprocess_argv(text)
+        assert SECRET in out  # beyond the bounded continuation window
+        assert other not in out
+
+    def test_double_quoted_head_with_embedded_tail_is_masked(self):
+        text = f'Command "echo \'worker\' died with code; curl -H {SECRET} x" timed out after 30 seconds'
+        assert SECRET not in redact_sensitive_text(text, code_file=True)
+
     def test_called_process_error_argv_is_masked(self):
         text = str(subprocess.CalledProcessError(1, ["curl", "-H", f"X-Adopt: {SECRET}", "http://x"]))
         assert SECRET not in redact_sensitive_text(text, code_file=True)

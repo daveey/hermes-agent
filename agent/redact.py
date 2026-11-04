@@ -863,14 +863,23 @@ def _redact_subprocess_argv(text: str) -> str:
     lazy regex from every ``Command '`` rescanned the line per head (quadratic on hostile output).
     ``scanned`` keeps the backward windows disjoint, so the whole pass is linear."""
     out, pos, scanned = [], 0, 0
+    in_command = False
     for m in _SUBPROCESS_COMMAND_TAIL_RE.finditer(text):
         end = m.start()
         lo = max(scanned, end - _SUBPROCESS_COMMAND_SPAN)
         scanned = m.end()
-        head = text.rfind(f"Command {m.group(1)}", lo, end)
-        if head < 0:
+        # A shell script can contain a tail with a different quote from the
+        # diagnostic's head. Treat either quote as a conservative boundary.
+        head = max(text.rfind("Command '", lo, end), text.rfind('Command "', lo, end))
+        if head >= 0:
+            body = head + len("Command ") + 1
+            in_command = True
+        elif in_command:
+            # The earlier tail may itself be script text. Continue masking in
+            # this disjoint, bounded window rather than losing the real tail.
+            body = lo
+        else:
             continue
-        body = head + len("Command ") + 1
         out += [text[pos:body], _ARGV_RANDOM_TOKEN_RE.sub("***", text[body:end])]
         pos = end
     if not out:
