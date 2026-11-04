@@ -1164,7 +1164,7 @@ export async function requestGatewayForAgent<T>(
 ): Promise<T> {
   const key = normKey(profile)
   const scope = registryBackendScopeKey(connectionId, key)
-  noteForegroundUse(connectionId ?? primaryConnectionId(), key, spawnPriority)
+  noteForegroundUse(connectionId ?? (key === g.primaryProfile ? primaryConnectionId() : null), key, spawnPriority)
 
   if (scope === key) {
     return requestGatewayForProfile<T>(key, method, params, timeoutMs, signal, { spawnPriority })
@@ -1396,7 +1396,7 @@ export async function retainGatewayForAgent(
 ): Promise<() => void> {
   const key = normKey(profile)
   const scope = registryBackendScopeKey(connectionId, key)
-  noteForegroundUse(connectionId ?? primaryConnectionId(), key, spawnPriority)
+  noteForegroundUse(connectionId ?? (key === g.primaryProfile ? primaryConnectionId() : null), key, spawnPriority)
 
   if (scope === key) {
     // Plain-profile route: gatewayForProfile's request lease IS the retain —
@@ -1518,7 +1518,10 @@ export async function retainGatewayForSessionTurn(
   profile: string,
   sessionId: string
 ): Promise<() => void> {
-  noteRemoteUse(connectionId ?? primaryConnectionId(), normKey(profile)) // a prompt.submit: the user's send is use
+  noteRemoteUse(
+    connectionId ?? (normKey(profile) === g.primaryProfile ? primaryConnectionId() : null),
+    normKey(profile)
+  ) // a prompt.submit: the user's send is use
 
   // Primary events do not flow through a Secondary's terminal-event listener.
   // Registering a no-op lease here would leave a phantom key that can suppress
@@ -1670,7 +1673,11 @@ export async function openGatewayForAgent(
   }: { activationLease?: boolean; spawnPriority?: SpawnPriority } = {}
 ): Promise<void> {
   const scope = registryBackendScopeKey(connectionId, profile)
-  noteForegroundUse(connectionId ?? primaryConnectionId(), profile, spawnPriority)
+  noteForegroundUse(
+    connectionId ?? (normKey(profile) === g.primaryProfile ? primaryConnectionId() : null),
+    profile,
+    spawnPriority
+  )
 
   if (scope === normKey(profile) || isPrimaryRegistryRoute(connectionId, profile)) {
     return openGatewayForProfile(profile, { spawnPriority })

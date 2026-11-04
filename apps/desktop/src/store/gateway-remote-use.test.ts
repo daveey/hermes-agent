@@ -161,6 +161,29 @@ describe('remote profile use reporting', () => {
     expect(desktop.noteRemoteUse).toHaveBeenCalledTimes(1)
   })
 
+  it.each(['open', 'request', 'retain', 'send'] as const)(
+    'a bare non-primary %s uses the legacy door without stamping the SSH primary',
+    async action => {
+      setPrimaryGatewayConnectionId(HUB, 'remote')
+
+      if (action === 'open') {
+        await openGatewayForAgent(null, 'work', { spawnPriority: 'foreground' })
+      } else if (action === 'request') {
+        await requestGatewayForAgent(null, 'work', 'session.create', {}, undefined, undefined, {
+          spawnPriority: 'foreground'
+        })
+      } else if (action === 'retain') {
+        await retainGatewayForAgent(null, 'work', { spawnPriority: 'foreground' }).then(release => release())
+      } else {
+        await retainGatewayForSessionTurn(null, 'work', 'session-1').then(release => release())
+      }
+
+      expect(desktop.getConnection).toHaveBeenCalledWith('work')
+      expect(desktop.getConnectionFor).not.toHaveBeenCalled()
+      expect(desktop.noteRemoteUse).not.toHaveBeenCalled()
+    }
+  )
+
   it("a send on the window's own (remote primary) gateway is a use of the primary's route", async () => {
     setPrimaryGateway({ connectionState: 'open' } as never, 'research')
     setPrimaryGatewayConnectionId(HUB, 'remote')
