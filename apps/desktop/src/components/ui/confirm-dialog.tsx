@@ -85,13 +85,13 @@ export function ConfirmDialog({
   // ReferenceError.
   // The write below is a timer handle, and not a mirror of a reactive value.
   // It happens on unmount only, and it clears the handle this component owns.
+  // An onConfirm that unmounts the caller (disband leaves the room) resolves
+  // after cleanup ran, so the timer must not be armed once unmounted.
   // eslint-disable-next-line no-restricted-syntax
   useEffect(() => {
     unmountedRef.current = false
 
     return () => {
-      // run() may still be awaiting onConfirm; it must not arm a new timer
-      // (or set state) once the dialog is gone.
       unmountedRef.current = true
 
       if (closeTimerRef.current !== null) {

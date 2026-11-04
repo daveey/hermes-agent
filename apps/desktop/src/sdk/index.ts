@@ -130,6 +130,7 @@ export type { PluginGateway } from './gateways'
 export * from './hub-sync'
 /** The plugin authoring contract (`HermesPlugin`, `PluginContext`, `ctx.*` door types). */
 export type * from './plugin-contract'
+export type { PluginProfileRequestOptions, PluginProfileRoute } from './profile-request'
 
 // -- state: readonly views over the app's live atoms -------------------------
 
@@ -1542,8 +1543,8 @@ export const host = {
 
 // -- react bridge -------------------------------------------------------------
 
-export type { PluginProfileRequestOptions, PluginProfileRoute } from './profile-request'
 export type { DesktopSettingKey, DesktopSettingValues } from './settings'
+export * from './sidebar-sections'
 
 // -- ui: the design language --------------------------------------------------
 
@@ -1580,6 +1581,9 @@ export {
   type ComposerModelPillContext,
   type ComposerModelPillProvider
 } from '@/app/chat/composer/contrib'
+/** The main composer's surface pieces, so a plugin composer (Bot Mode rooms) reads as the
+ *  same input: the ring, the fill layer behind the editor, and the ghost / primary icon buttons. */
+export { GHOST_ICON_BTN, PRIMARY_ICON_BTN } from '@/app/chat/composer/control-classes'
 /** THE session status dot — the one primitive the sidebar row, the pane tabs
  *  and the session switcher render, so a session's status can never disagree
  *  between surfaces. Pass the STORED session id and it resolves the rest
@@ -1597,19 +1601,6 @@ export { SidebarRowLead } from '@/app/chat/sidebar/chrome'
  *  switcher, the fleet profile rail and any plugin rail listing gateways share
  *  it, so a connection looks the same wherever it is named. */
 export { ConnectionGlyph } from '@/app/chat/sidebar/connection-glyph'
-/** [daveey] Chrome for a `SIDEBAR_SECTIONS_AREA` contribution (left pane,
- *  between Pinned and Projects): the collapsible header + capped body of the
- *  core sections, and a clickable row on the session-row grid. */
-export {
-  SidebarSection,
-  type SidebarSectionProps,
-  SidebarSectionRow,
-  type SidebarSectionRowProps
-} from '@/app/chat/sidebar/contributed-sections'
-/** [daveey] The sidebar session row's "which machine" glyph (laptop / Mac
- *  mini / cloud) for a registry connection id. Renders nothing with fewer
- *  than two gateways, so single-gateway users see no change. */
-export { GatewayDeviceIcon } from '@/app/chat/sidebar/gateway-device-icon'
 export { SIDEBAR_ROW_LEAD, SIDEBAR_TRUNCATED_LEADING } from '@/app/chat/sidebar/row-geometry'
 export { PALETTE_AREA, type PaletteContribution } from '@/app/command-palette/contrib'
 /** Page-owned header control (the kanban board switcher): projected into the
@@ -1623,6 +1614,7 @@ export { WorkspacePageHeaderControl } from '@/app/contrib/workspace-page-header'
  *  that prints a next run switches its label on this (`t.cron.next` →
  *  `t.cron.overdueSince`) so a dead scheduler never reads as "Next: 7 hr ago". */
 export { nextRunOverdueMs } from '@/app/cron/job-state'
+
 /** Master-detail components for pane content; the overlay-bound Panel root is deliberately private. */
 export {
   PanelAction,
@@ -1699,6 +1691,7 @@ export type { TitlebarTool } from '@/app/shell/titlebar-controls'
  * `MEDIA:` delivery directives) and the same rich Markdown/media components as
  * core chat. Prefer this over raw Streamdown for transcript-style messages. */
 export { MessageTextContent } from '@/components/assistant-ui/markdown-text'
+export { composerInputBacking, composerSurfaceRing } from '@/components/chat/composer-dock'
 /** The oversized Collapse lettering an empty chat is titled with — core writes
  *  "HERMES AGENT" with it, a `chat.empty` contribution writes its own name. */
 export { Wordmark } from '@/components/chat/wordmark'

@@ -21,11 +21,14 @@ test runner at ``scripts/run_tests.sh``.
 import asyncio
 import atexit
 import importlib
+import ipaddress
 import os
 import shutil
+import socket
 import sqlite3
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from subprocess import Popen as _GUARD_POPEN
 
@@ -1580,6 +1583,12 @@ def pytest_configure(config):
         "dispatcher's memory guard to 'no data' — only for tests that "
         "exercise the guard itself with their own patched samples.",
     )
+    config.addinivalue_line(
+        "markers",
+        "allow_network: let the test (and the module-scoped fixtures it sets up) "
+        "reach real hosts through the external network fence — only for PM "
+        "toolchain and wheel downloads; everything else is served by fixtures.",
+    )
     # NOTE: platforms("linux") / platforms("macos") / platforms("windows") are declared in
     # pyproject.toml's ``markers`` list, not here — they are part of the
     # project's public marker vocabulary (``pytest --markers``, and the CI
@@ -1720,65 +1729,68 @@ def _audio_playback_guard(request, monkeypatch):
 
 
 # ── External network fence ───────────────────────────────────────────────────
-# Unit tests never resolve a non-loopback host. A test that forgets to stub its
-# transport otherwise reads live third-party data (a model catalog, a registry,
-# an account endpoint) and turns red whenever that data changes; for Nous URLs
-# it also mints REAL guests on the production Portal. Refusing the name lookup
-# covers every client at once (httpx, urllib, requests, aiohttp and asyncio all
-# resolve through socket.getaddrinfo) and fails exactly like an offline host,
-# the path production already handles, so the result is the same on every run.
-# Only loopback (localhost, 127.0.0.0/8, ::1) resolves, plus the unspecified
-# bind addresses (0.0.0.0, ::, no host) that local servers listen on. A test
-# that needs another name installs its own resolver with
-# ``monkeypatch.setattr(socket, "getaddrinfo", fake)``, which replaces this
-# one. Live canaries opt out with ``@pytest.mark.live``.
-_NOUS_SERVICE_DOMAINS = ("nousresearch.com", "staging-nousresearch.com")
+# Unit tests run against fixtures, never a live service. A lookup of any host off this
+# machine is refused the way an offline host refuses it, which is the path production
+# already handles. Every Python client (httpx, urllib, requests, aiohttp, asyncio)
+# resolves through socket.getaddrinfo, so the whole class closes in one place.
+#
+# The Nous domains were the first instance: a test home has no Nous identity, so a hosted
+# connector action minted a REAL guest on the production Portal on every CI run. Every
+# other host behaved the same way: building an agent fetched OpenRouter, models.dev and
+# model-catalog metadata live, a stand-in agent's title request went to openrouter.ai, and
+# verdicts followed whatever those services (or a filtering DNS resolver) answered that day.
+#
+# Serve what a test needs from a fixture instead: a server on 127.0.0.1, a stubbed
+# transport (tests/hermes_cli/anon_portal.py routes httpx at a fake Portal), a seeded
+# cache, or a patched resolver seam (``tools.url_safety._getaddrinfo`` for the SSRF
+# guards). Address literals resolve without a lookup and stay allowed. Live canaries opt
+# in with ``@pytest.mark.live``, the PM tests that download real toolchains and wheels on
+# purpose with ``@pytest.mark.allow_network``. Processes a test spawns are outside the fence.
+#
+# Installed for the whole process at import, not per test: a background thread a test
+# started (inventory refresh, memory sync, a metadata probe) outlives the test, and a
+# per-test patch left it the gap between one test's teardown and the next one's setup.
+_LOCAL_HOST_NAMES = frozenset({"", "localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback",
+                               socket.gethostname().lower()})
+_REAL_GETADDRINFO = socket.getaddrinfo
+_NETWORK_ALLOWED = threading.Event()
 
 
-def _host_name(host) -> str:
-    return (host.decode() if isinstance(host, bytes) else str(host or "")).lower().rstrip(".")
-
-
-def _is_nous_service_host(host) -> bool:
-    name = _host_name(host)
-    return any(name == domain or name.endswith("." + domain) for domain in _NOUS_SERVICE_DOMAINS)
-
-
-def _is_local_test_host(host) -> bool:
-    import ipaddress
-
-    name = _host_name(host).strip("[]").split("%", 1)[0]
-    if name in ("", "localhost"):
-        return True
-    try:
-        address = ipaddress.ip_address(name)
-    except ValueError:
+def _is_external_host(host) -> bool:
+    name = (host.decode() if isinstance(host, bytes) else str(host or "")).lower().rstrip(".")
+    if name in _LOCAL_HOST_NAMES or name.endswith(".localhost"):
         return False
-    return address.is_loopback or address.is_unspecified
+    try:
+        ipaddress.ip_address(name.strip("[]").split("%", 1)[0])
+    except ValueError:
+        return True
+    return False
 
 
-@pytest.fixture(autouse=True)
-def _no_live_nous_services(request, monkeypatch):
-    """Refuse every non-loopback name lookup (historical name: Nous was first)."""
-    if request.node.get_closest_marker("live"):
-        return
-    import socket
-
-    real_getaddrinfo = socket.getaddrinfo
-
-    def fenced_getaddrinfo(host, *args, **kwargs):
-        if _is_local_test_host(host):
-            return real_getaddrinfo(host, *args, **kwargs)
-        if _is_nous_service_host(host):
-            hint = "stub the HTTP layer (tests/hermes_cli/anon_portal.py) or mark the test live"
-            kind = "a live Nous service"
-        else:
-            hint = "stub the HTTP layer (or install a test resolver) or mark the test live"
-            kind = "not a loopback host"
+def _fenced_getaddrinfo(host, *args, **kwargs):
+    if _is_external_host(host) and not _NETWORK_ALLOWED.is_set():
         raise socket.gaierror(
-            socket.EAI_NONAME, f"test fence: {_host_name(host)!r} is {kind}; unit tests stay offline: {hint}")
+            socket.EAI_NONAME,
+            f"test fence: {host!r} is off this machine; serve it from a fixture (local server, "
+            "stubbed transport, seeded cache) or mark the test live")
+    return _REAL_GETADDRINFO(host, *args, **kwargs)
 
-    monkeypatch.setattr(socket, "getaddrinfo", fenced_getaddrinfo)
+
+socket.getaddrinfo = _fenced_getaddrinfo
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Open the fence for ``live`` canaries and ``allow_network`` tests (PM toolchain and wheel
+    downloads, which run real installs on purpose). The whole protocol is wrapped, so a
+    module-scoped fixture the test sets up downloads under the same opening."""
+    if item.get_closest_marker("live") is None and item.get_closest_marker("allow_network") is None:
+        return (yield)
+    _NETWORK_ALLOWED.set()
+    try:
+        return (yield)
+    finally:
+        _NETWORK_ALLOWED.clear()
 
 
 @pytest.fixture(autouse=True)
