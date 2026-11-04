@@ -1237,11 +1237,21 @@ class SessionDB(
         first_corrupt: Optional[BaseException] = None
         while True:
             scope = _corrupt_confirm.TouchedTables()
+            cache_released: Optional[bool] = None  # None: no connection was in use when the read failed
             try:
                 with self._read_ctx() as conn:
-                    # Composed with any caller authorizer (also on the non-WAL writer fallback).
-                    with scope.recording(conn):
-                        result = fn(conn)
+                    try:
+                        # Composed with any caller authorizer (also on the non-WAL writer fallback).
+                        with scope.recording(conn):
+                            result = fn(conn)
+                    except sqlite3.DatabaseError as exc:
+                        # A warm reader keeps its page cache across transactions while the WAL is
+                        # unchanged: a bad page read once would be re-read from the cache by the
+                        # replay and recur even when the file is clean. Release it while this
+                        # connection is still ours, never by closing it (POSIX locks, see above).
+                        if first_corrupt is None and is_structural_corruption_error(exc):
+                            cache_released = _corrupt_confirm.release_reader_cache(conn)
+                        raise
             except sqlite3.OperationalError as exc:
                 if ioerr_attempts >= _READ_ONLY_IOERR_RETRY_ATTEMPTS or _DISK_IO_ERROR_MARKER not in str(exc).lower():
                     note_storage_error(self.db_path, exc)
@@ -1254,7 +1264,7 @@ class SessionDB(
                 # touched does NOT confirm is replayed before it latches the process (a SELECT has
                 # no effect to duplicate); a confirmed one, a check timeout/error or a recurrence
                 # is published as before.
-                outcome = self._read_corrupt_replay_blocker(exc, scope, first_corrupt)
+                outcome = self._read_corrupt_replay_blocker(exc, scope, first_corrupt, cache_released)
                 if outcome is None:
                     first_corrupt = exc
                     continue
@@ -1268,15 +1278,19 @@ class SessionDB(
             return result
 
     def _read_corrupt_replay_blocker(self, exc: BaseException, scope: "_corrupt_confirm.TouchedTables",
-                                     first_corrupt: Optional[BaseException]) -> Optional[str]:
-        """None when a read that raised *exc* may be replayed once (structural, first time, and a
-        clean scoped read-only quick_check); otherwise the outcome for the latch reason."""
+                                     first_corrupt: Optional[BaseException],
+                                     cache_released: Optional[bool] = None) -> Optional[str]:
+        """None when a read that raised *exc* may be replayed once (structural, first time, the failing
+        reader's page cache released, and a clean scoped read-only quick_check); otherwise the outcome
+        for the latch reason."""
         if first_corrupt is not None:
             return "recurred on replay"
         if not is_structural_corruption_error(exc):
             return "no replay"
         if storage_state(self.db_path) == STORAGE_CORRUPT:  # no replay once latched: never spawn per read
             return "no replay: storage already latched"
+        if cache_released is False:  # fail closed: a replay could re-read the very page that failed
+            return "no replay: reader cache not released"
         confirm = _corrupt_confirm.confirm_corruption(
             self.db_path, scope.tables(), _corrupt_confirm.confirm_budget(None),
             extensions=_corrupt_confirm.extensions_loaded_by(self))

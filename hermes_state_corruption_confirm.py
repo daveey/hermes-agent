@@ -269,6 +269,21 @@ def writer_replay_blocker(db, stage: str, first_corrupt: Optional[BaseException]
     return None
 
 
+def release_reader_cache(conn) -> bool:
+    """Release a pooled reader's unpinned page cache after a structural read error; False when that fails.
+
+    The read twin of the writer's release in ``writer_replay_blocker``: a ``mode=ro`` reader keeps its
+    cache across transactions while the WAL is unchanged, so a replay could re-read the cached page
+    that raised instead of the file. The connection stays open and in the pool (``close()`` would
+    cancel this process's POSIX locks for every sibling connection); a failure means the caller must
+    not replay."""
+    try:
+        conn.execute("PRAGMA shrink_memory")
+    except sqlite3.Error:
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class ConfirmResult:
     """``outcome``: ``clean`` | ``damaged`` | ``timeout`` | ``no_budget`` | ``error``.

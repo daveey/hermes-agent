@@ -847,3 +847,128 @@ def test_notice_guarantee_recurring_corrupt_after_clean_confirm_latches(tmp_path
         assert "recurred on replay" in _reason(db.db_path)
     finally:
         db.close()
+
+
+# ── a warm pooled reader's page cache must not outlive the failing read ──
+#
+# A ``mode=ro`` pooled reader keeps its page cache across transactions while the WAL is unchanged. A
+# bad page read once (a torn read, a transient fault) stays cached, so a replay that reuses it recurs
+# and latches even though the fresh-process check found the file clean. The writer releases its cache
+# (``PRAGMA shrink_memory``) before a replay; the reader must too, WITHOUT closing the connection
+# (close() cancels this process's POSIX locks for every sibling connection).
+
+
+def _page_of(path, table):
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+        root = conn.execute("SELECT rootpage FROM sqlite_master WHERE name = ?", (table,)).fetchone()[0]
+    finally:
+        conn.close()
+    return page_size, root
+
+
+class _TransientBadPage:
+    """Garbage on disk for the first read of *table*'s root page; the bytes are restored before the
+    fresh-process check runs, so the check is clean while the reader's cache still holds the bad page."""
+
+    def __init__(self, path, table, monkeypatch):
+        self.path = path
+        self.page_size, root = _page_of(path, table)
+        self.offset = self.page_size * (root - 1)
+        with open(path, "rb") as fh:
+            fh.seek(self.offset)
+            self.good = fh.read(self.page_size)
+        self.restored = False
+        real = cc.confirm_corruption
+
+        def confirm(*a, **kw):
+            self.restore()
+            return real(*a, **kw)
+
+        monkeypatch.setattr(cc, "confirm_corruption", confirm)
+
+    def _write(self, data):
+        with open(self.path, "r+b") as fh:
+            fh.seek(self.offset)
+            fh.write(data)
+
+    def damage(self):
+        self._write(b"\xde\xad\xbe\xef" * (self.page_size // 4))
+
+    def restore(self):
+        self._write(self.good)
+        self.restored = True
+
+
+def _warm_reader_db(tmp_path):
+    path = tmp_path / "state.db"
+    db = SessionDB(db_path=path)
+    db.create_session("s1", source="cli")
+    db.append_message("s1", "user", "hello")
+    return db, path
+
+
+def test_reader_replay_releases_its_cached_bad_page(tmp_path, monkeypatch):
+    db, path = _warm_reader_db(tmp_path)
+    try:
+        bad = _TransientBadPage(path, "sessions", monkeypatch)
+        bad.damage()
+        row = db._read_one("SELECT id, source FROM sessions WHERE id = ?", ("s1",))
+        assert bad.restored  # a real structural error reached the (clean) fresh-process check
+        assert row is not None and row[0] == "s1"
+        assert storage_state(path) == "ok"
+        assert unconfirmed_corruption_count(path) == 1
+    finally:
+        db.close()
+
+
+def test_reader_replay_never_closes_the_pooled_connection(tmp_path, monkeypatch):
+    db, path = _warm_reader_db(tmp_path)
+    try:
+        closed = []
+        monkeypatch.setattr(db, "_close_read_conn", lambda conn: closed.append(conn))
+        bad = _TransientBadPage(path, "sessions", monkeypatch)
+        bad.damage()
+        assert db._read_one("SELECT id FROM sessions WHERE id = ?", ("s1",))[0] == "s1"
+        assert closed == []
+        assert db._read_one("SELECT count(*) FROM messages")[0] == 1  # the pool still serves reads
+    finally:
+        db.close()
+
+
+def test_reader_cache_release_failure_fails_closed(tmp_path, monkeypatch):
+    db, path = _warm_reader_db(tmp_path)
+    try:
+        bad = _TransientBadPage(path, "sessions", monkeypatch)
+        real_ctx = db._read_ctx
+
+        @contextmanager
+        def ctx(*a, **k):
+            with real_ctx(*a, **k) as conn:
+                yield _NoShrink(conn)
+
+        monkeypatch.setattr(db, "_read_ctx", ctx)
+        bad.damage()
+        with pytest.raises(sqlite3.DatabaseError):
+            db._read_one("SELECT id, source FROM sessions WHERE id = ?", ("s1",))
+        assert storage_state(path) == "corrupt"
+        assert "no replay: reader cache not released" in _reason(path)
+    finally:
+        db.close()
+
+
+class _NoShrink:
+    """Reader proxy whose cache release fails."""
+
+    def __init__(self, real):
+        self._real = real
+
+    def execute(self, sql, *args, **kwargs):
+        if "shrink_memory" in sql:
+            raise sqlite3.OperationalError("injected: cannot release cache")
+        return self._real.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
