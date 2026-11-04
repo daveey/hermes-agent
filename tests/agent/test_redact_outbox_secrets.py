@@ -113,6 +113,16 @@ class TestSubprocessArgvDiagnostics:
         text = str(exc)
         assert SECRET not in redact_sensitive_text(text, code_file=True)
 
+    @pytest.mark.parametrize("error", [subprocess.TimeoutExpired, subprocess.CalledProcessError])
+    @pytest.mark.parametrize("quote", ["'", '"'])
+    @pytest.mark.parametrize("as_list", [False, True])
+    @pytest.mark.parametrize("prefix", ["", 'echo "worker" died with code; '])
+    def test_embedded_command_head_does_not_hide_earlier_secret(self, error, quote, as_list, prefix):
+        script = prefix + f"curl -H {SECRET}; echo Command {quote}x{quote}"
+        argv = ["sh", "-c", script] if as_list else script
+        exc = error(argv, 30) if error is subprocess.TimeoutExpired else error(1, argv)
+        assert SECRET not in redact_sensitive_text(str(exc), code_file=True)
+
     def test_unheaded_tail_does_not_mask_ordinary_text(self):
         text = f"ordinary {SECRET}' died with code"
         assert redact_sensitive_text(text, code_file=True) == text

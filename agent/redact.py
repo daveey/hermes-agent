@@ -850,6 +850,7 @@ def _redact_random_secret_fields(text: str, mask) -> str:
 # path segments stay separate) inside that exact diagnostic is masked. Search for a secret
 # in-process instead of passing it in argv: argv is also visible in ``ps`` and /proc.
 _SUBPROCESS_COMMAND_TAIL_RE = re.compile(r"(['\"]) (?:timed out after |returned non-zero exit status |died with )")
+_SUBPROCESS_COMMAND_HEAD_RE = re.compile(r"Command ['\"]")
 _SUBPROCESS_COMMAND_SPAN = 16384  # a shell=True script may span lines
 _ARGV_RANDOM_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_+-])(?=[A-Za-z0-9_+-]*[a-z])(?=[A-Za-z0-9_+-]*[A-Z])[A-Za-z0-9_+-]{32,}={0,2}"
@@ -869,15 +870,16 @@ def _redact_subprocess_argv(text: str) -> str:
         lo = max(scanned, end - _SUBPROCESS_COMMAND_SPAN)
         scanned = m.end()
         # A shell script can contain a tail with a different quote from the
-        # diagnostic's head. Treat either quote as a conservative boundary.
-        head = max(text.rfind("Command '", lo, end), text.rfind('Command "', lo, end))
-        if head >= 0:
-            body = head + len("Command ") + 1
-            in_command = True
-        elif in_command:
+        # diagnostic's head, or a fake Command head. Start at the first head
+        # of either quote style so script text cannot hide earlier tokens.
+        head = _SUBPROCESS_COMMAND_HEAD_RE.search(text, lo, end)
+        if in_command:
             # The earlier tail may itself be script text. Continue masking in
-            # this disjoint, bounded window rather than losing the real tail.
+            # this disjoint, bounded window, even across another script head.
             body = lo
+        elif head is not None:
+            body = head.end()
+            in_command = True
         else:
             continue
         out += [text[pos:body], _ARGV_RANDOM_TOKEN_RE.sub("***", text[body:end])]
