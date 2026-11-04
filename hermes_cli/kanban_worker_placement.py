@@ -156,7 +156,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                 else:
                     reply = hub.reserve(board, task_id=row["id"], expected_revision=row["sync_version"],
                                         candidates=candidates)
-                    queue.try_record(queue.record_reply, conn, row["id"], gateway, reply)
+                    queue.try_record(queue.record_reply, conn, row["id"], gateway, reply, candidates)
                 attempted += 1
             except OSError as exc:
                 # An unavailable transport applies to the entire batch, not just this card.

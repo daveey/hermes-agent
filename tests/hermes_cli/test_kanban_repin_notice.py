@@ -196,3 +196,63 @@ def test_stuck_summary_keeps_other_refusals_as_lease_holds(conn):
     assert f"waiting for a manual repin: {tid}" in line
     assert "skipped_ineligible(labels_mismatch)=1" in line
     assert "Board lease refused or deferred" in line
+
+
+# Live shape (hub, 2026-11-04, fixture t_01a1a46cbd08b275): with worker overflow off the Board never computes
+# ``no_eligible_worker`` (only ``overflowDecision`` does); a card no pool worker is attested for queues with the
+# per-candidate rollup ``capability_mismatch`` (or ``mixed``) instead. It is the same silent wait.
+
+def _rolled_up(code, *candidates):
+    reply = _queued()
+    reply["observation"]["code"] = code
+    reply["observation"]["candidates"] = list(candidates)
+    return reply
+
+
+_W1_MISSING = {"machine": "worker-1", "reasons": ["missing_labels"], "missing_labels": ["skill:five-whys"]}
+
+
+def test_capability_mismatch_over_the_whole_pool_gets_one_notice_and_no_second_comment(conn):
+    tid = _card(conn)
+    _subscribe(conn, tid)
+    hub = _hub(_rolled_up("capability_mismatch", _W1_MISSING))
+    for _ in range(3):
+        wp.reevaluate(conn, hub, "default", "hub", cfg=CFG)
+    ours = [c.body for c in kb.list_comments(conn, tid) if c.author == rn.AUTHOR]
+    assert len(ours) == 1 and ours[0].startswith("No pool worker can run this card (needs: skill:five-whys)")
+    assert COMMAND.format(tid=tid) in ours[0]
+    assert len(_delivered(conn, tid)) == 1
+    hub.repin.assert_not_called()
+
+
+def test_mixed_rollup_where_every_pool_worker_lacks_a_capability_gets_the_notice(conn):
+    tid = _card(conn)
+    stale = {**_W1_MISSING, "reasons": ["last_seen_stale", "missing_labels"]}
+    wp.reevaluate(conn, _hub(_rolled_up("mixed", stale)), "default", "hub", cfg=CFG)
+    assert len(_notice_comments(conn, tid)) == 1
+
+
+def test_a_pool_worker_without_a_capability_reason_means_no_notice(conn):
+    tid = _card(conn)
+    cfg = {"worker_pools": {"hub": ["worker-1", "worker-2"]}}
+    busy = {"machine": "worker-2", "reasons": ["max_card_runs_reached"]}
+    wp.reevaluate(conn, _hub(_rolled_up("mixed", _W1_MISSING, busy)), "default", "hub", cfg=cfg)
+    assert _notices(conn, tid) == []
+
+
+def test_a_pool_worker_missing_from_the_observation_means_no_notice(conn):
+    tid = _card(conn)
+    cfg = {"worker_pools": {"hub": ["worker-1", "worker-2"]}}
+    wp.reevaluate(conn, _hub(_rolled_up("capability_mismatch", _W1_MISSING)), "default", "hub", cfg=cfg)
+    assert _notices(conn, tid) == []
+    assert any(c.body.startswith("Candidate capabilities") for c in kb.list_comments(conn, tid))
+
+
+def test_stuck_summary_counts_a_capability_mismatch_card_as_waiting_for_repin(conn):
+    tid = _card(conn)
+    wp.reevaluate(conn, _hub(_rolled_up("capability_mismatch", _W1_MISSING)), "default", "hub", cfg=CFG)
+    rows = conn.execute("SELECT * FROM tasks WHERE status='ready'").fetchall()
+    result = dispatch.DispatchResult()
+    assert eligible_rows(conn, rows, "ready", result) == []
+    assert result.skipped_ineligible == [(tid, rn.MANUAL_REPIN)]
+    assert f"waiting for a manual repin: {tid}" in stuck_warning(6, [result])
