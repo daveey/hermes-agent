@@ -26,6 +26,7 @@ class _Server(http.server.ThreadingHTTPServer):
         self.requests: list[tuple[str, str]] = []
         self.mode = "ok"  # ok | close | drop_post | status:<n> | bad_status
         self.lock = threading.Lock()
+        self.dropped = threading.Event()
         self.open_sockets: list[socket.socket] = []
 
     def get_request(self):
@@ -59,7 +60,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         with srv.lock:
             srv.requests.append((self.command, self.path))
         mode = srv.mode
-        if mode == "drop_post" and self.command == "POST":
+        if mode in ("drop_post", "drop_once") and self.command == "POST":
+            if mode == "drop_once":
+                srv.mode = "ok"
+                srv.dropped.set()
             self.close_connection = True
             self.connection.shutdown(socket.SHUT_RDWR)
             return
@@ -131,7 +135,8 @@ def test_stale_socket_get_is_retried_once(server, monkeypatch):
 
 
 @pytest.mark.parametrize("elapsed", [1.5, 2.1])
-def test_get_resend_recomputes_remaining_budget(server, monkeypatch, elapsed):
+@pytest.mark.parametrize("reserve", [False, True])
+def test_get_resend_recomputes_remaining_budget(server, monkeypatch, elapsed, reserve):
     """A real reused connection closes after spending part (or all) of the budget."""
     from types import SimpleNamespace
     clock = [100.0]
@@ -140,23 +145,103 @@ def test_get_resend_recomputes_remaining_budget(server, monkeypatch, elapsed):
     hub.machines()
     hub.deadline = 102.0
     original = _Handler._serve
+    method = "do_POST" if reserve else "do_GET"
+
+    def request():
+        return (hub.reserve("default", task_id="t_test", expected_revision=7, candidates=["worker-1"])
+                if reserve else hub.machines())
 
     def close_once(handler):
         clock[0] += elapsed
-        monkeypatch.setattr(_Handler, "do_GET", original)
+        monkeypatch.setattr(_Handler, method, original)
         handler.close_connection = True
         handler.connection.shutdown(socket.SHUT_RDWR)
 
-    monkeypatch.setattr(_Handler, "do_GET", close_once)
+    monkeypatch.setattr(_Handler, method, close_once)
     try:
         if elapsed > 2:
             with pytest.raises(TimeoutError, match="budget exhausted"):
-                hub.machines()
+                request()
             assert server.connections == 1
         else:
-            assert hub.machines()["path"] == "/v2/machines"
+            expected_path = "/v2/boards/default/placement/reserve" if reserve else "/v2/machines"
+            assert request()["path"] == expected_path
             assert hub._local.conn.sock.gettimeout() <= 0.5
             assert server.connections == 2
+    finally:
+        hub.close()
+
+
+def test_stale_socket_reserve_is_retried_once(server, monkeypatch):
+    hub = _hub(server)
+    hub.machines()
+    monkeypatch.setattr(ksc, "_peer_closed", lambda conn: False)
+    # Half-close emits FIN but still accepts the request writes, deterministically
+    # exercising getresponse rather than the existing request-write retry.
+    server.mode = "drop_once"
+    send = hub._local.conn.request
+
+    def send_then_observe_drop(*args, **kwargs):
+        send(*args, **kwargs)
+        assert server.dropped.wait(2)  # first handler switches mode before the retry can arrive
+
+    monkeypatch.setattr(hub._local.conn, "request", send_then_observe_drop)
+    with server.lock:
+        for sock in server.open_sockets:
+            sock.shutdown(socket.SHUT_WR)
+    try:
+        result = hub.reserve("default", task_id="t_test", expected_revision=7, candidates=["worker-1"])
+        assert json.loads(result["body"])["expected_revision"] == 7
+        assert server.connections == 2
+        assert [m for m, _ in server.requests].count("POST") == 2
+    finally:
+        hub.close()
+
+
+@pytest.mark.parametrize("warm, expected", [(True, 2), (False, 1)])
+def test_reserve_lost_answer_retry_is_bounded(server, warm, expected):
+    hub = _hub(server)
+    if warm:
+        hub.machines()
+    server.mode = "drop_post"
+    try:
+        with pytest.raises(OSError):
+            hub.reserve("default", task_id="t_test", expected_revision=7, candidates=["worker-1"])
+        assert [m for m, _ in server.requests].count("POST") == expected
+        assert server.connections == expected
+    finally:
+        hub.close()
+
+
+def test_reserve_lost_answer_replays_identical_body(server, monkeypatch):
+    hub = _hub(server)
+    hub.machines()
+    bodies = []
+    original = _Handler.do_POST
+
+    def lose_once(handler):
+        bodies.append(handler.rfile.read(int(handler.headers["content-length"])))
+        monkeypatch.setattr(_Handler, "do_POST", original)
+        handler.close_connection = True
+        handler.connection.shutdown(socket.SHUT_RDWR)
+
+    monkeypatch.setattr(_Handler, "do_POST", lose_once)
+    try:
+        result = hub.reserve("default", task_id="t_test", expected_revision=7, candidates=["worker-1"])
+        assert bodies == [result["body"].encode()]
+        assert server.connections == 2
+    finally:
+        hub.close()
+
+
+def test_lease_whose_answer_is_lost_is_not_resent(server):
+    hub = _hub(server)
+    hub.machines()
+    server.mode = "drop_post"
+    try:
+        with pytest.raises(OSError):
+            hub.leases("default", {"op": "claim"})
+        assert [m for m, _ in server.requests].count("POST") == 1
     finally:
         hub.close()
 

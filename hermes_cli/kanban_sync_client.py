@@ -261,13 +261,13 @@ class Hub:
                 raise TimeoutError("Board request budget exhausted")
         return timeout
 
-    def _call(self, method: str, path: str, body: Optional[dict] = None) -> dict:
+    def _call(self, method: str, path: str, body: Optional[dict] = None, *, replay_safe: bool = False) -> dict:
         timeout = self._remaining()
         data = None if body is None else json.dumps(body).encode()
         parts = urllib.parse.urlsplit(self.ident.url)
         if parts.scheme not in ("http", "https") or not parts.hostname or self._proxied(parts):
             return self._call_urlopen(method, path, data, timeout)
-        return self._call_kept_alive(parts, method, path, data, timeout)
+        return self._call_kept_alive(parts, method, path, data, timeout, replay_safe=replay_safe)
 
     def _call_urlopen(self, method: str, path: str, data: Optional[bytes], timeout: Optional[float] = None) -> dict:
         timeout = self._remaining(timeout)
@@ -339,7 +339,7 @@ class Hub:
         return conn, False
 
     def _call_kept_alive(self, parts: urllib.parse.SplitResult, method: str, path: str, data: Optional[bytes],
-                         timeout: Optional[float] = None) -> dict:
+                         timeout: Optional[float] = None, *, replay_safe: bool = False) -> dict:
         import http.client
         target = (parts.path or "") + path
         headers = self._headers()
@@ -356,9 +356,9 @@ class Hub:
                 resp = conn.getresponse()
             except (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError) as exc:
                 self._drop()
-                # The server closed a reused socket without answering. Only an idempotent GET is resent: a POST
-                # (ops, leases) may have been applied, so it fails like any transport error and the round retries.
-                if reused and attempt == 0 and method == "GET":
+                # Only GET or an explicitly replay-safe operation may repeat after a lost answer.
+                # Reserve is revision-fenced; other POSTs (ops, leases) must not opt in.
+                if reused and attempt == 0 and (method == "GET" or replay_safe):
                     continue
                 raise urllib.error.URLError(exc) from exc
             except (OSError, http.client.HTTPException) as exc:
@@ -413,7 +413,7 @@ class Hub:
         """Atomic Board placement; errors leave the persisted local queue fence intact."""
         return self._call("POST", f"/v2/boards/{board}/placement/reserve", {
             "task_id": task_id, "expected_revision": expected_revision,
-            "policy": "worker-first-v1", "candidates": candidates})
+            "policy": "worker-first-v1", "candidates": candidates}, replay_safe=True)
 
     def sessions(self, board: str, body: dict) -> dict:
         """Session owners (session handover, :mod:`hermes_cli.session_owner`): ``get`` / ``move``. A 409 refusal
