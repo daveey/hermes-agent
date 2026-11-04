@@ -140,6 +140,10 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
             compacting = params
             children = rows('SELECT id FROM sessions WHERE parent_session_id=?', (sid,))
             assert len(children) == 1, children
+            summary_at = next(i for i, r in enumerate(peer.requests) if r['model'] == 'summary')
+            last_turn = next(r for r in reversed(peer.requests[:summary_at]) if r['model'] == 'original')
+            before['compaction_input'] = {
+                str(m.get('content', '')) for m in json.loads(last_turn['wire']) if m['role'] != 'system'}
             receipts = {compacting['input_id']: accepted['admission_id']}
             for name in FOLLOWERS:
                 receipts[name] = (await call(ws, 'prompt.submit', session_id=sid, input_id=name, text=name))['admission_id']
@@ -194,11 +198,17 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
         order = [r['text'] for r in peer.requests if r['model'] == 'original' and r['text'] in FOLLOWERS]
         assert order == list(FOLLOWERS), order
         assert executed(compacting['text'][:12]) == before['compacting_requests'], 'compacted turn replayed'
+        # Which turns compaction folds depends on where the token threshold falls, and that moves with
+        # the system prompt's size (its date line is longer on a Wednesday). Derive the compacted middle
+        # from the parent's pre-compaction request instead of naming a turn.
+        compacted_away = before['compaction_input'] - {c for _, _, c in before['compacted']}
+        assert compacted_away, 'compaction folded no turn into the summary'
         for name in FOLLOWERS:
             wire = next(r['wire'] for r in peer.requests if r['text'] == name)
             # protect_first_n keeps PRESSURE_0 verbatim; the compacted middle is only inside the summary.
             turns = [str(m.get('content', '')) for m in json.loads(wire)]
-            assert 'SUMMARY_RETAINED_FACTS' in wire and not any(t.startswith('PRESSURE_1 ') for t in turns), name
+            assert turns[1].startswith('PRESSURE_0 '), name
+            assert 'SUMMARY_RETAINED_FACTS' in wire and not compacted_away & set(turns), name
         settled = admissions()
         assert {r['target_session_id'] for r in settled} == {sid}
         assert [r['request_id'] for r in settled][-3:] == list(FOLLOWERS)

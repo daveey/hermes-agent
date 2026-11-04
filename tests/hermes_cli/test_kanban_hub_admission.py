@@ -1,9 +1,11 @@
 """Final hub CPU/cap gate: an independent full CPU sample taken UNDER admission.lock, ready and review paths."""
 import json
 import os
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 
 import pytest
 
@@ -219,23 +221,19 @@ def test_simultaneous_claimers_at_6_of_7_start_at_most_one(board, monkeypatch):
     conn, home = board
     configure(home, cap=7)
     advisory(home)
-    count = {"running": 6}
-    gate_lock = threading.Lock()
-
+    # Six runs elsewhere plus whatever this board has claimed, read from the DB like the real count:
+    # a counter bumped after claim_task returns lags the lock release, so a busy runner let a second
+    # claimer recount 6/7 before the first winner's bump landed.
     def active():
-        with gate_lock:
-            return count["running"]
+        with closing(sqlite3.connect(f"file:{home / 'kanban.db'}?mode=ro", uri=True, timeout=5)) as db:
+            return 6 + db.execute("SELECT count(*) FROM tasks WHERE status='running'").fetchone()[0]
     monkeypatch.setattr(mm, "active_card_runs", active)
     monkeypatch.setattr(cm, "sample", fake_sample(10.0, check=lambda: time.sleep(0.2)))  # health: allow HX013 -- stands in for the ~1 s sample held under the lock
     tasks = [task(conn, title=f"t{i}") for i in range(4)]
 
     def go(t):
         with kbc.connect(home / "kanban.db") as other:
-            got = kb.claim_task(other, t)
-        if got is not None:
-            with gate_lock:
-                count["running"] += 1
-        return got
+            return kb.claim_task(other, t)
     for _ in range(3):  # contended rounds: losers defer (lock busy) or are refused at 7/7
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(go, tasks))
