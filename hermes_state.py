@@ -816,6 +816,7 @@ class SessionDB(
         conn = _connect_tracked_db(
             read_only_db_uri(self.db_path), tracking_path=self.db_path, uri=True,
             check_same_thread=False, timeout=timeout, isolation_level=None,
+            factory=_corrupt_confirm.ScopedAuthorizerConnection,  # composes the corruption-scope recorder
         )
         conn.row_factory = sqlite3.Row
         return conn
@@ -848,6 +849,7 @@ class SessionDB(
         isolation_level=None: explicit BEGIN IMMEDIATE."""
         conn = _connect_tracked_db(
             str(self.db_path), check_same_thread=False, timeout=1.0, isolation_level=None,
+            factory=_corrupt_confirm.ScopedAuthorizerConnection,  # composes the corruption-scope recorder
         )
         try:
             conn.row_factory = sqlite3.Row
@@ -1237,11 +1239,9 @@ class SessionDB(
             scope = _corrupt_confirm.TouchedTables()
             try:
                 with self._read_ctx() as conn:
-                    if conn is self._conn:  # non-WAL fallback: the writer's authorizer slot is not ours
+                    # Composed with any caller authorizer (also on the non-WAL writer fallback).
+                    with scope.recording(conn):
                         result = fn(conn)
-                    else:
-                        with scope.recording(conn):
-                            result = fn(conn)
             except sqlite3.OperationalError as exc:
                 if ioerr_attempts >= _READ_ONLY_IOERR_RETRY_ATTEMPTS or _DISK_IO_ERROR_MARKER not in str(exc).lower():
                     note_storage_error(self.db_path, exc)
@@ -1275,8 +1275,11 @@ class SessionDB(
             return "recurred on replay"
         if not is_structural_corruption_error(exc):
             return "no replay"
+        if storage_state(self.db_path) == STORAGE_CORRUPT:  # no replay once latched: never spawn per read
+            return "no replay: storage already latched"
         confirm = _corrupt_confirm.confirm_corruption(
-            self.db_path, scope.tables(), _corrupt_confirm.confirm_budget(None))
+            self.db_path, scope.tables(), _corrupt_confirm.confirm_budget(None),
+            extensions=_corrupt_confirm.extensions_loaded_by(self))
         if not confirm.clean:
             return f"no replay: {confirm.describe()}"
         logger.warning(
@@ -1452,42 +1455,21 @@ class SessionDB(
         """Build the quarantine error for this handle (message assembled once)."""
         return StateDbCorruptError(f"{prefix}{_STATE_DB_CORRUPT_MSG} (cause: {self._db_corrupt_reason})")
 
-    def _corrupt_replay_blocker(self, stage: str, first_corrupt: Optional[BaseException]) -> Optional[str]:
-        """None when a write that just raised structural corruption may be replayed once on this
-        connection; otherwise why not (it becomes part of the latch reason).
-
-        Replay only when nothing of the attempt can be durable: the error came from BEGIN or the
-        callback (never COMMIT, whose settlement is unknown), the rollback really ended the
-        transaction, and this call has not replayed already. The connection's unpinned page cache
-        is released first so the replay re-reads the pages from the file instead of a cached copy."""
-        if first_corrupt is not None:
-            return f"recurred on replay (first: {_corruption_detail(first_corrupt)})"
-        if stage not in ("begin", "callback"):
-            return f"no replay: stage={stage} (settlement unknown)"
-        with self._lock:
-            conn = self._conn
-            if conn is None or conn.in_transaction:
-                return "no replay: rollback not confirmed"
-            try:
-                conn.execute("PRAGMA shrink_memory")
-            except sqlite3.Error as exc:
-                return f"no replay: page-cache release failed ({exc})"
-        return None
-
     def _replay_or_halt_corrupt(self, exc: BaseException, fn: Callable[..., Any], stage: str,
                                 first_corrupt: Optional[BaseException], *,
                                 scope: "_corrupt_confirm.TouchedTables",
                                 deadline: float) -> BaseException:
         """Return *exc* (the caller replays the write once) or quarantine and raise.
 
-        The replay needs, after the rollback/stage blockers, a CLEAN bounded read-only
-        quick_check of the tables the attempt touched (fresh process, timeout = remaining
-        patience); damage, a timeout or any check error quarantines instead."""
-        replay_blocker = self._corrupt_replay_blocker(stage, first_corrupt)
+        The replay needs, after the rollback/stage blockers (``writer_replay_blocker``), a CLEAN
+        bounded read-only quick_check of the tables the attempt touched (fresh process, timeout =
+        remaining patience); damage, a timeout or any check error quarantines instead."""
+        replay_blocker = _corrupt_confirm.writer_replay_blocker(self, stage, first_corrupt)
         confirm = None
         if replay_blocker is None:
             confirm = _corrupt_confirm.confirm_corruption(
-                self.db_path, scope.tables(), _corrupt_confirm.confirm_budget(deadline))
+                self.db_path, scope.tables(), _corrupt_confirm.confirm_budget(deadline),
+                extensions=_corrupt_confirm.extensions_loaded_by(self))
             if not confirm.clean:
                 replay_blocker = f"no replay: {confirm.describe()}"
         if replay_blocker is not None:

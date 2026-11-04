@@ -19,7 +19,8 @@ documents (stop Hermes, recover or restore, start again). No marker is written t
 the file it would describe is the one that is damaged.
 
 Because it never clears, it must not be set on one unconfirmed error (2026-11-03: one error on
-a file that later passed ``quick_check`` refused every write for an hour). The writer
+a file that later passed ``quick_check`` refused every write for an hour; that later check shows
+only that the pages read back consistent then, not that the file was never damaged). The writer
 (``SessionDB._execute_write``) and the pooled reader first run a bounded ``quick_check`` of the
 tables the failing statement touched, read-only in a fresh process
 (``hermes_state_corruption_confirm``). Only a clean check allows ONE replay of the rolled-back

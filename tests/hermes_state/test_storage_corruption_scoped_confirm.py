@@ -18,10 +18,13 @@ Faults are injected into throwaway databases under ``tmp_path`` only.
 """
 
 import logging
+import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -29,7 +32,7 @@ import hermes_state_corruption_confirm as cc
 import hermes_state_runtime as rt
 from hermes_state import SessionDB, StateDbCorruptError
 from hermes_state_health import (
-    reset_storage_state, storage_corrupt_reason, storage_state, unconfirmed_corruption_count,
+    mark_storage_corrupt, reset_storage_state, storage_corrupt_reason, storage_state, unconfirmed_corruption_count,
 )
 
 MALFORMED = "database disk image is malformed"
@@ -122,9 +125,9 @@ def confirms(monkeypatch):
     calls = _Calls()
     real_confirm, real_argv = cc.confirm_corruption, cc._child_argv
 
-    def spy(db_path, tables, timeout_s):
-        result = real_confirm(db_path, tables, timeout_s)
-        calls.append({"tables": tables, "timeout_s": timeout_s, "result": result})
+    def spy(db_path, tables, timeout_s, **kw):
+        result = real_confirm(db_path, tables, timeout_s, **kw)
+        calls.append({"tables": tables, "timeout_s": timeout_s, "result": result, **kw})
         return result
 
     def argv_spy(*a):
@@ -376,7 +379,7 @@ def test_check_is_scoped_to_the_named_tables(tmp_path):
     assert cc.confirm_corruption(path, None, 10.0).outcome == "damaged"
     narrow = cc.confirm_corruption(path, frozenset({"state_meta"}), 10.0)
     assert narrow.outcome == "clean", narrow
-    assert narrow.scope == "sqlite_schema,state_meta"
+    assert narrow.scope == "sqlite_schema,sqlite_sequence,state_meta"  # sqlite_sequence: always, when present
 
 
 # ── paths that must never reach the check ──
@@ -508,7 +511,7 @@ class TestPooledRead:
 
 class TestTouchedTables:
     def test_records_tables_from_triggers_and_fts_shadow_statements_but_no_values(self, tmp_path):
-        conn = sqlite3.connect(tmp_path / "x.db")
+        conn = sqlite3.connect(tmp_path / "x.db", factory=cc.ScopedAuthorizerConnection)
         try:
             conn.execute("CREATE TABLE t(a INTEGER PRIMARY KEY, b)")
             conn.execute("CREATE TABLE audit(n)")
@@ -528,7 +531,7 @@ class TestTouchedTables:
     def test_unknown_scope_widens_to_full(self, tmp_path):
         assert cc.TouchedTables().tables() is None  # never attached
         rec = cc.TouchedTables()
-        conn = sqlite3.connect(tmp_path / "x.db")
+        conn = sqlite3.connect(tmp_path / "x.db", factory=cc.ScopedAuthorizerConnection)
         try:
             with rec.recording(conn):
                 conn.execute("BEGIN")
@@ -543,3 +546,304 @@ class TestTouchedTables:
         odd(27, "idx", None, "main", None)  # SQLITE_REINDEX: not mapped
         odd(18, "t", None, "main", None)
         assert odd.tables() is None
+
+    def test_recorder_composes_with_a_callers_authorizer_and_never_replaces_it(self, tmp_path):
+        conn = sqlite3.connect(tmp_path / "x.db", factory=cc.ScopedAuthorizerConnection)
+        try:
+            conn.execute("CREATE TABLE t(a)")
+            conn.execute("CREATE TABLE locked(a)")
+            conn.commit()
+
+            def deny_locked(action, arg1, arg2, dbname, source):
+                return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_INSERT and arg1 == "locked" else sqlite3.SQLITE_OK
+
+            conn.set_authorizer(deny_locked)
+            rec = cc.TouchedTables()
+            with rec.recording(conn):
+                conn.execute("INSERT INTO t VALUES (1)")  # allowed by the caller's authorizer: recorded
+                with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+                    conn.execute("INSERT INTO locked VALUES (1)")  # the caller's deny still applies
+            assert rec.tables() == frozenset({"t", "locked"})
+            with pytest.raises(sqlite3.DatabaseError, match="not authorized"):  # restored, not cleared
+                conn.execute("INSERT INTO locked VALUES (2)")
+            conn.set_authorizer(None)
+            conn.execute("INSERT INTO locked VALUES (3)")
+        finally:
+            conn.close()
+
+    def test_connection_without_the_composing_slot_is_left_untouched(self, tmp_path):
+        conn = sqlite3.connect(tmp_path / "x.db")  # plain sqlite3.Connection: its authorizer is unknowable
+        try:
+            conn.execute("CREATE TABLE locked(a)")
+            conn.set_authorizer(lambda action, a1, *_: sqlite3.SQLITE_DENY if a1 == "locked" else sqlite3.SQLITE_OK)
+            rec = cc.TouchedTables()
+            with rec.recording(conn):
+                with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+                    conn.execute("INSERT INTO locked VALUES (1)")
+            assert rec.tables() is None  # unknown scope: whole-file check
+            with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+                conn.execute("INSERT INTO locked VALUES (2)")
+        finally:
+            conn.close()
+
+    def test_session_db_connections_carry_the_composing_slot(self, tmp_path):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        try:
+            assert isinstance(db._conn, cc.ScopedAuthorizerConnection)
+            with db._read_ctx() as conn:
+                assert isinstance(conn, cc.ScopedAuthorizerConnection)
+        finally:
+            db.close()
+
+
+# ── what the authorizer cannot see: sqlite_sequence and FTS shadow tables (real damage) ──
+
+
+def _damage_root_of(path, table):
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+        root = conn.execute("SELECT rootpage FROM sqlite_master WHERE name = ?", (table,)).fetchone()[0]
+    finally:
+        conn.close()
+    assert root and root > 1
+    with open(path, "r+b") as fh:
+        fh.seek(page_size * (root - 1))
+        fh.write(b"\xde\xad\xbe\xef" * (page_size // 4))
+
+
+def _append_scope(db):
+    """The scope a real transcript append records (rolled back: the file is not changed)."""
+    rec = cc.TouchedTables()
+    with db._lock:
+        with rec.recording(db._conn):
+            db._conn.execute("BEGIN IMMEDIATE")
+            try:
+                db._conn.execute("INSERT INTO messages (session_id, role, content, timestamp) "
+                                 "VALUES ('s1', 'user', 'scope probe', 0)")
+            finally:
+                db._conn.rollback()
+    return rec.tables()
+
+
+def test_damaged_sqlite_sequence_is_always_checked(tmp_path):
+    path = tmp_path / "state.db"
+    seed = SessionDB(db_path=path)
+    seed.create_session("s1", source="cli")
+    seed.append_message(session_id="s1", role="user", content="autoincrement row")  # messages: AUTOINCREMENT
+    seed.close()
+    _damage_root_of(path, "sqlite_sequence")
+    # A scope that never names sqlite_sequence (AUTOINCREMENT updates it with no authorizer callback).
+    result = cc.confirm_corruption(path, frozenset({"state_meta"}), 10.0)
+    assert result.outcome == "damaged", result
+    assert "sqlite_sequence" in result.scope
+
+
+def test_damaged_fts_data_shadow_table_is_checked_for_an_append_scope(tmp_path):
+    path = tmp_path / "state.db"
+    seed = SessionDB(db_path=path)
+    try:
+        if not seed._fts_enabled:
+            pytest.skip("FTS5 unavailable in this build")
+        seed.create_session("s1", source="cli")
+        for i in range(5):
+            seed.append_message(session_id="s1", role="user", content=f"indexed row {i}")
+        scope = _append_scope(seed)
+    finally:
+        seed.close()
+    assert scope is not None and {"messages", "messages_fts"} <= scope
+    assert "messages_fts_data" not in scope  # FTS5 reads _data through the blob API: no authorizer callback
+    _damage_root_of(path, "messages_fts_data")
+    result = cc.confirm_corruption(path, scope, 10.0)
+    assert result.outcome == "damaged", result
+    assert "messages_fts_data" in result.scope and "messages_fts_idx" in result.scope
+
+
+# ── already latched: no check, no process spawn ──
+
+
+class _SpawnCounter:
+    def __init__(self, monkeypatch):
+        self.n = 0
+        real = cc.subprocess.run
+
+        def counting(*a, **k):
+            self.n += 1
+            return real(*a, **k)
+
+        monkeypatch.setattr(cc.subprocess, "run", counting)
+
+
+def test_reads_on_an_already_latched_file_never_spawn_a_check(tmp_path, monkeypatch):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("s1", source="cli")
+        mark_storage_corrupt(db.db_path, "earlier confirmed damage")
+        spawns = _SpawnCounter(monkeypatch)
+        calls = TestPooledRead()._flaky(db, monkeypatch, None)
+        for _ in range(3):
+            with pytest.raises(sqlite3.DatabaseError):
+                db._read_one("SELECT id FROM sessions WHERE id = ?", ("s1",))
+        assert calls["n"] == 3  # one attempt each: no replay
+        assert spawns.n == 0
+        with pytest.raises(StateDbCorruptError):  # writes refused before any statement, no spawn either
+            db.append_message(session_id="s1", role="user", content="refused")
+        assert spawns.n == 0
+    finally:
+        db.close()
+
+
+def test_first_read_on_a_healthy_latch_spawns_exactly_once(tmp_path, monkeypatch):
+    """Control for the test above: the counter does see a real check."""
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("s1", source="cli")
+        spawns = _SpawnCounter(monkeypatch)
+        TestPooledRead()._flaky(db, monkeypatch, 1)
+        row = db._read_one("SELECT id FROM sessions WHERE id = ?", ("s1",))
+        assert row is not None and row[0] == "s1"
+        assert spawns.n == 1
+    finally:
+        db.close()
+
+
+# ── loadable CJK tokenizer: the child loads the parent's own extension ──
+
+
+@pytest.fixture(scope="module")
+def cjk_so(tmp_path_factory):
+    src = Path(__file__).resolve().parents[2] / "native" / "fts5_cjk"
+    if shutil.which("gcc") is None or not (src / "fts5_cjk.c").exists():
+        pytest.skip("no C toolchain / tokenizer source")
+    out = tmp_path_factory.mktemp("fts5cjk") / "libfts5_cjk.so"
+    try:
+        subprocess.run(["gcc", "-shared", "-fPIC", "-O2", f"-I{src / 'vendor'}", str(src / "fts5_cjk.c"),
+                        "-o", str(out)], check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        pytest.skip(f"tokenizer build failed: {e.stderr[:200]}")
+    probe = sqlite3.connect(":memory:")
+    try:
+        probe.enable_load_extension(True)
+        probe.load_extension(str(out))
+    except Exception as e:  # extension loading compiled out: skip
+        pytest.skip(f"extension loading unavailable: {e}")
+    finally:
+        probe.close()
+    return out
+
+
+def test_whole_file_check_with_cjk_tokenizer_loads_the_parents_extension(tmp_path, monkeypatch, confirms, cjk_so):
+    """``quick_check`` of an FTS5 table that stores its own content tokenizes it, so a
+    ``cjk_unicode61`` table makes the stdlib-only child fail with "SQL logic error" unless it loads
+    the tokenizer. (The shipped ``messages_fts_cjk`` is external-content and does not need it on
+    SQLite 3.53; a contentful one does, so the test adds one to the real store.)"""
+    monkeypatch.setenv("HERMES_FTS5_CJK_SO", str(cjk_so))
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        assert db._fts_cjk_loaded and db._fts_cjk_available
+        db.create_session("s1", source="cli")
+        db.append_message(session_id="s1", role="user", content="일본 프로필 indexed")
+        db._execute_write(lambda conn: conn.execute(
+            "CREATE VIRTUAL TABLE cjk_notes USING fts5(body, tokenize='cjk_unicode61')"))
+        db._execute_write(lambda conn: conn.execute("INSERT INTO cjk_notes(body) VALUES ('웅기 일본 notes')"))
+        with _inject(db, match="BEGIN IMMEDIATE", times=1):  # unknown scope: whole-file quick_check
+            db.append_message(session_id="s1", role="user", content="after begin fault 웅기")
+        [call] = confirms
+        assert (call["tables"], call["result"].outcome) == (None, "clean"), call["result"]
+        assert call["extensions"] == (str(cjk_so),)
+        assert storage_state(db.db_path) == "ok"
+        assert _contents(db.db_path).count("after begin fault 웅기") == 1
+    finally:
+        db.close()
+    # Fail closed, documented: without the tokenizer the whole-file check errors (never "clean").
+    without = cc.confirm_corruption(tmp_path / "state.db", None, 10.0)
+    assert without.outcome == "error" and not without.clean, without
+    assert "SQL logic error" in without.detail
+    # A scoped check needs no tokenizer: the vtable's shadow B-trees are checked, not the vtable.
+    scoped = cc.confirm_corruption(tmp_path / "state.db", frozenset({"cjk_notes"}), 10.0)
+    assert scoped.outcome == "clean" and "cjk_notes_data" in scoped.scope, scoped
+
+
+def test_no_extension_is_passed_when_the_parent_did_not_load_one(tmp_path, confirms):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db._fts_cjk_loaded = False
+        assert cc.extensions_loaded_by(db) == ()
+        db.create_session("s1", source="cli")
+        with _inject(db, match="BEGIN IMMEDIATE", times=1):
+            db.append_message(session_id="s1", role="user", content="x")
+        assert confirms[0]["extensions"] == ()
+        assert confirms.spawned[0][-1] == "[]"
+    finally:
+        db.close()
+
+
+# ── notice_guarantee entry path (tui_gateway/notice_guarantee.py candidates -> SessionDB._read_all) ──
+
+
+class _ReadFaulty:
+    """Proxy over a pooled reader raising an injected corruption on matching SQL after preparing it."""
+
+    def __init__(self, real, match, state):
+        self._real, self._match, self._state = real, match, state
+
+    def execute(self, sql, *args, **kwargs):
+        if self._match in sql:
+            self._state["matched"] += 1
+            if self._state["left"] is None or self._state["left"] > 0:
+                if self._state["left"] is not None:
+                    self._state["left"] -= 1
+                self._real.execute("EXPLAIN " + sql, *args, **kwargs)  # prepared: the scope is recorded
+                raise _malformed()
+        return self._real.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _notice_db(tmp_path, monkeypatch, times):
+    from tui_gateway import notice_guarantee as ng
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("chat-1", source="desktop")
+    db.append_message("chat-1", "user", "run the card")
+    row = db.append_kanban_notice("chat-1", "Kanban t_x done", {"notice_id": "n1", "display_text": "Kanban t_x done"})
+    db._write_rowcount("UPDATE messages SET timestamp = ? WHERE id = ?", (time.time() - ng.GRACE_S - 60, row))
+    state = {"left": times, "matched": 0}
+    real_ctx = db._read_ctx
+
+    @contextmanager
+    def ctx(*a, **k):
+        with real_ctx(*a, **k) as conn:
+            yield _ReadFaulty(conn, "kanban_notice", state)
+
+    monkeypatch.setattr(db, "_read_ctx", ctx)
+    return ng, db, row, state
+
+
+def test_notice_guarantee_one_shot_corrupt_with_clean_confirm_does_not_latch(tmp_path, monkeypatch, confirms):
+    ng, db, row, state = _notice_db(tmp_path, monkeypatch, 1)
+    try:
+        found = ng.candidates(db, time.time())
+        assert [c["msg_id"] for c in found] == [row]
+        assert state["matched"] == 2  # failed once, replayed once
+        [call] = confirms
+        assert call["result"].outcome == "clean"
+        assert call["tables"] is not None and {"sessions", "messages"} <= call["tables"]
+        assert storage_state(db.db_path) == "ok"
+        assert unconfirmed_corruption_count(db.db_path) == 1
+    finally:
+        db.close()
+
+
+def test_notice_guarantee_recurring_corrupt_after_clean_confirm_latches(tmp_path, monkeypatch, confirms):
+    ng, db, _row, state = _notice_db(tmp_path, monkeypatch, None)
+    try:
+        with pytest.raises(sqlite3.DatabaseError):
+            ng.candidates(db, time.time())
+        assert state["matched"] == 2
+        assert [c["result"].outcome for c in confirms] == ["clean"]  # one check, no second
+        assert storage_state(db.db_path) == "corrupt"
+        assert "recurred on replay" in _reason(db.db_path)
+    finally:
+        db.close()

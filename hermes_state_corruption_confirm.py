@@ -3,7 +3,8 @@
 The storage latch (``hermes_state_health``) never clears, so one unconfirmed
 "database disk image is malformed" used to refuse every write until a restart
 (2026-11-03, hermes-hub: an hour of refused receipts and transcripts on a file that later
-passed ``quick_check`` on every table). Before the writer or the pooled reader replays a
+passed ``quick_check`` on every table; that later pass does not prove the file was never
+damaged, only that it read back consistent then). Before the writer or the pooled reader replays a
 statement that raised structural corruption, this module runs a bounded
 ``PRAGMA quick_check`` scoped to the tables the failing attempt touched (each table's
 indexes are checked with it), on a FRESH read-only connection in a FRESH process:
@@ -17,17 +18,51 @@ indexes are checked with it), on a FRESH read-only connection in a FRESH process
   a missing budget, a spawn failure, unparsable output or any error is not, and the caller
   latches as before.
 
-The scope comes from a SQLite authorizer installed on the connection for the attempt
-(``TouchedTables``): it sees every table each statement reads or writes at prepare time,
-including trigger bodies and FTS5's internal shadow-table statements. It records table
-NAMES only, never SQL text or bound parameters. When the scope is unknown (the error came
-before any statement was prepared, e.g. ``BEGIN IMMEDIATE``; an action the recorder cannot
-map; a table the fresh connection cannot resolve) the check widens to a whole-file
+The scope comes from a SQLite authorizer composed onto the connection for the attempt
+(``TouchedTables`` + ``ScopedAuthorizerConnection``): it sees every table each statement reads
+or writes at prepare time, including trigger bodies and FTS5's internal shadow-table statements.
+It records table NAMES only, never SQL text or bound parameters. The recorder is COMPOSED with
+any authorizer the caller installed (``set_authorizer`` on a ``ScopedAuthorizerConnection``
+records the caller's callback; the recorder runs first and the caller's verdict is returned
+unchanged), never put in its place. Python's ``sqlite3`` cannot read a connection's current
+authorizer, so on any other connection class the recorder does not attach at all and the scope
+stays unknown. When the scope is unknown (the error came before any statement was prepared,
+e.g. ``BEGIN IMMEDIATE``; an action the recorder cannot map; a connection without the composing
+slot; a table the fresh connection cannot resolve) the check widens to a whole-file
 ``quick_check`` under the same bound, so an unknown scope is never treated as clean.
 
-A clean check does not prove the file was never damaged, nor explain the first error: it
-says the pages those tables live on read back consistent now. The caller therefore allows
-exactly one replay; a recurrence latches without a second check.
+The scoped check always adds what the authorizer cannot see:
+
+* ``sqlite_schema``, and ``sqlite_sequence`` when present (AUTOINCREMENT updates it internally,
+  with no authorizer callback);
+* every shadow table of a virtual table in scope (FTS5 reads ``<name>_data`` through
+  ``sqlite3_blob_open``, which never reaches the authorizer). Virtual tables themselves are not
+  passed to ``quick_check``; their shadow tables are ordinary B-trees and are checked instead.
+
+Limits, stated so nobody reads more into ``clean`` than it says:
+
+* A SCOPED ``quick_check`` walks only the named B-trees and their indexes. It does not check the
+  freelist or page ownership across B-trees (a page claimed by two trees, or a damaged freelist
+  trunk, is reported only by the whole-file mode). Damage of that shape that made the first
+  statement fail is not seen; if it makes the replay fail too, that recurrence latches.
+* The check is one read transaction (a snapshot) in another process. Other threads of this
+  process and other processes may keep writing to the file while it runs and after it returns;
+  it neither blocks them nor proves anything about their writes. The latch it guards is per
+  process: another process that hits the same pages runs its own confirmation.
+* A clean check does not prove the file was never damaged, nor explain the first error: it says
+  the pages those tables live on read back consistent at that snapshot. The caller therefore
+  allows exactly one replay; a recurrence latches without a second check. A later clean
+  ``quick_check`` (by hand, or after a restart) is no such proof either.
+* The whole-file check runs ``quick_check`` on FTS5 tables too, and for an FTS5 table that stores
+  its own content that needs the table's tokenizer ("SQL logic error" otherwise; the shipped
+  external-content ``messages_fts_cjk`` does not need it on SQLite 3.53).
+  The child is ``python -I -S`` (stdlib only), so the caller passes the loadable tokenizer its
+  own connection already loaded (``cjk_unicode61`` from the core ``fts5_cjk_so_path()``) and the
+  child loads exactly that path and nothing else. When the parent did not load it, or the child
+  cannot, the whole-file check of a file with such a ``cjk_unicode61`` table errors and the caller
+  latches (fail closed). A scoped check is unaffected: it checks shadow B-trees, not the vtable.
+* A process that has already latched the file does not run the check again (no replay is
+  possible once latched, so a check could only cost a process spawn per read).
 """
 
 from __future__ import annotations
@@ -43,6 +78,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator, Optional
 
+from hermes_state_health import STORAGE_CORRUPT, corruption_detail, storage_state
 from hermes_state_holders import read_only_db_uri
 
 logger = logging.getLogger(__name__)
@@ -130,20 +166,27 @@ class TouchedTables:
 
     @contextmanager
     def recording(self, conn) -> Iterator[TouchedTables]:
-        """Install this recorder as *conn*'s authorizer for the block. Installing an authorizer
+        """Compose this recorder into *conn*'s authorizer for the block. Installing an authorizer
         expires the connection's prepared statements, so cached statements re-prepare and are
-        seen too. A connection that refuses the authorizer leaves the scope unknown."""
-        try:
-            conn.set_authorizer(self)
-            self._attached = True
-        except (sqlite3.Error, AttributeError, TypeError):  # closed / foreign connection: scope unknown
+        seen too. A connection without the composing slot (``ScopedAuthorizerConnection``) is
+        left untouched, because replacing its authorizer could drop a caller's deny rule: the
+        scope stays unknown (whole-file check)."""
+        push = getattr(conn, "hermes_push_scope_recorder", None)
+        previous = None
+        if push is None:
             self._unknown = True
+        else:
+            try:
+                previous = push(self)
+                self._attached = True
+            except (sqlite3.Error, AttributeError, TypeError):  # closed connection: scope unknown
+                self._unknown = True
         try:
             yield self
         finally:
             if self._attached:
                 try:
-                    conn.set_authorizer(None)
+                    conn.hermes_pop_scope_recorder(previous)
                 except (sqlite3.Error, AttributeError, TypeError) as exc:  # closed under us: nothing to detach
                     logger.debug("state.db scope recorder: authorizer detach failed: %s", exc)
 
@@ -151,6 +194,79 @@ class TouchedTables:
         if not self._attached or self._unknown or not self._names:
             return None
         return frozenset(self._names)
+
+
+class ScopedAuthorizerConnection(sqlite3.Connection):
+    """``sqlite3.Connection`` whose authorizer is a composition: an optional scope recorder (never
+    denies) followed by the caller's own authorizer, whose verdict is returned unchanged.
+
+    ``set_authorizer`` keeps its public meaning (install / clear THE caller's authorizer); the
+    callback is remembered so the recorder can be added and removed around it without
+    overwriting it. A caller authorizer that raises still denies the statement, exactly as when
+    it is installed alone."""
+
+    _hermes_external_authorizer = None
+    _hermes_scope_recorder = None
+
+    def set_authorizer(self, authorizer_callback):
+        sqlite3.Connection.set_authorizer(self, self._hermes_compose(self._hermes_scope_recorder, authorizer_callback))
+        self._hermes_external_authorizer = authorizer_callback
+
+    def hermes_push_scope_recorder(self, recorder):
+        """Put *recorder* in front of the caller's authorizer; returns the recorder it replaces."""
+        previous = self._hermes_scope_recorder
+        sqlite3.Connection.set_authorizer(self, self._hermes_compose(recorder, self._hermes_external_authorizer))
+        self._hermes_scope_recorder = recorder
+        return previous
+
+    def hermes_pop_scope_recorder(self, previous=None) -> None:
+        """Remove the recorder (restoring *previous*); the caller's authorizer stays installed."""
+        sqlite3.Connection.set_authorizer(self, self._hermes_compose(previous, self._hermes_external_authorizer))
+        self._hermes_scope_recorder = previous
+
+    @staticmethod
+    def _hermes_compose(recorder, external):
+        if recorder is None:
+            return external
+        if external is None:
+            return recorder
+
+        def composed(action, arg1, arg2, dbname, source):
+            recorder(action, arg1, arg2, dbname, source)  # never raises, always SQLITE_OK
+            return external(action, arg1, arg2, dbname, source)
+
+        return composed
+
+
+def writer_replay_blocker(db, stage: str, first_corrupt: Optional[BaseException]) -> Optional[str]:
+    """None when a write on *db* (a ``SessionDB``) that just raised structural corruption may be
+    replayed once on its writer connection; otherwise why not (it becomes part of the latch reason).
+
+    Replay only when nothing of the attempt can be durable: the error came from BEGIN or the
+    callback (never COMMIT, whose settlement is unknown), the rollback really ended the
+    transaction, this call has not replayed already, and the file is not latched already. The
+    writer connection's unpinned page cache is released first so the replay re-reads the pages
+    from the file instead of a cached copy.
+
+    Takes the writer lock on purpose: ``in_transaction`` and ``PRAGMA shrink_memory`` are state of
+    the WRITER connection itself (not a data read a pooled reader could answer), and the
+    connection may only be used under that lock. Lives here, next to the confirmation it gates,
+    rather than on ``SessionDB``."""
+    if first_corrupt is not None:
+        return f"recurred on replay (first: {corruption_detail(first_corrupt)})"
+    if storage_state(db.db_path) == STORAGE_CORRUPT:
+        return "no replay: storage already latched"
+    if stage not in ("begin", "callback"):
+        return f"no replay: stage={stage} (settlement unknown)"
+    with db._lock:
+        conn = db._conn
+        if conn is None or conn.in_transaction:
+            return "no replay: rollback not confirmed"
+        try:
+            conn.execute("PRAGMA shrink_memory")
+        except sqlite3.Error as exc:
+            return f"no replay: page-cache release failed ({exc})"
+    return None
 
 
 @dataclass(frozen=True)
@@ -173,32 +289,57 @@ class ConfirmResult:
 
 
 # Runs in the fresh process (``python -I -S``: no site-packages, no PYTHON* env, stdlib only).
-# argv: uri, JSON list of table names or null (whole file), busy timeout in ms.
+# argv: uri, JSON list of table names or null (whole file), busy timeout in ms, JSON list of the
+# loadable extensions (tokenizers) the parent connection itself loaded (usually empty).
 # Prints one JSON object; problem rows are page/row locations, never row contents.
 _CHILD = r"""
 import json, sqlite3, sys
 uri, scope_json, busy_ms = sys.argv[1], sys.argv[2], int(sys.argv[3])
+extensions = json.loads(sys.argv[4]) if len(sys.argv) > 4 else []
 scope = json.loads(scope_json)
 out = {}
 try:
     conn = sqlite3.connect(uri, uri=True, timeout=busy_ms / 1000.0, isolation_level=None)
     try:
         conn.execute("PRAGMA query_only=1")
+        if extensions:
+            conn.enable_load_extension(True)
+            try:
+                for path in extensions:
+                    conn.load_extension(path)
+            finally:
+                conn.enable_load_extension(False)
         targets = None
         if scope is not None:
-            known = {}
+            known, virtual = {}, []
             for name, sql in conn.execute("SELECT name, sql FROM sqlite_schema WHERE type='table'"):
-                known[name.lower()] = (name, (sql or "").lstrip().upper().startswith("CREATE VIRTUAL"))
+                is_virtual = (sql or "").lstrip().upper().startswith("CREATE VIRTUAL")
+                known[name.lower()] = (name, is_virtual)
+                if is_virtual:
+                    virtual.append(name.lower())
             known["sqlite_schema"] = known["sqlite_master"] = ("sqlite_schema", False)
             targets = ["sqlite_schema"]
+            if "sqlite_sequence" in known:  # AUTOINCREMENT writes it with no authorizer callback
+                targets.append(known["sqlite_sequence"][0])
+            wanted = []
             for name in scope:
-                hit = known.get(str(name).lower())
-                if hit is None:
+                key = str(name).lower()
+                if key not in known:
                     targets = None
                     out["widened"] = "unresolved table"
                     break
-                if not hit[1] and hit[0] not in targets:
-                    targets.append(hit[0])
+                wanted.append(key)
+                # A virtual table (or one of its shadow tables) in scope brings all of its shadow
+                # tables: FTS5 reads <name>_data through the blob API, invisible to the authorizer.
+                for vt in virtual:
+                    if key == vt or key.startswith(vt + "_"):
+                        wanted += sorted(k for k in known if k.startswith(vt + "_") and not known[k][1])
+            if targets is not None:
+                for key in wanted:
+                    real, is_virtual = known[key]
+                    if not is_virtual and real not in targets:
+                        targets.append(real)
+        out["checked"] = targets  # kept when a check below raises: the latch names what was checked
         problems = []
         if targets is None:
             problems += [r[0] for r in conn.execute("PRAGMA quick_check")]
@@ -214,14 +355,25 @@ try:
         conn.close()
 except sqlite3.Error as exc:
     out = {"ok": False, "error": type(exc).__name__,
-           "sqlite": getattr(exc, "sqlite_errorname", None), "message": str(exc)[:160]}
+           "sqlite": getattr(exc, "sqlite_errorname", None), "message": str(exc)[:160],
+           **({"checked": out["checked"]} if "checked" in out else {})}
 sys.stdout.write(json.dumps(out))
 """
 
 
-def _child_argv(uri: str, scope_json: str, busy_ms: int) -> list[str]:
+def _child_argv(uri: str, scope_json: str, busy_ms: int, extensions_json: str = "[]") -> list[str]:
     """The fresh-process command (a seam for tests that need a hung or failing child)."""
-    return [sys.executable, "-I", "-S", "-c", _CHILD, uri, scope_json, str(busy_ms)]
+    return [sys.executable, "-I", "-S", "-c", _CHILD, uri, scope_json, str(busy_ms), extensions_json]
+
+
+def extensions_loaded_by(db) -> tuple:
+    """The loadable extensions *db* (a ``SessionDB``) loaded into its own connections: the
+    ``cjk_unicode61`` tokenizer from the core path (``fts5_cjk_so_path``, the one
+    ``load_fts5_cjk_extension`` uses), and only when that load succeeded. Never a new path."""
+    if not getattr(db, "_fts_cjk_loaded", False):
+        return ()
+    from hermes_state_fts import fts5_cjk_so_path
+    return (str(fts5_cjk_so_path()),)
 
 
 def confirm_budget(deadline: Optional[float], *, default_s: float = READ_CONFIRM_TIMEOUT_S) -> float:
@@ -246,17 +398,21 @@ def _scope_label(checked) -> str:
     return ",".join(sorted("".join(ch for ch in str(n) if ch.isalnum() or ch == "_")[:64] for n in checked))[:400]
 
 
-def confirm_corruption(db_path, tables: Optional[frozenset], timeout_s: float) -> ConfirmResult:
+def confirm_corruption(db_path, tables: Optional[frozenset], timeout_s: float, *,
+                       extensions: tuple = ()) -> ConfirmResult:
     """Bounded read-only ``quick_check`` of *tables* (``None`` = whole file) in a fresh process.
 
-    Never raises; anything but an exact per-table ``ok`` is a non-clean result."""
+    *extensions*: loadable extensions (tokenizers) the CALLER's own connection already loaded from
+    the core-configured path (``extensions_loaded_by``); the child loads exactly these and never
+    a path of its own. Never raises; anything but an exact per-table ``ok`` is a non-clean result."""
     started = time.monotonic()
     requested = None if tables is None else sorted(tables)
     label = _scope_label(requested)
     if timeout_s < CONFIRM_MIN_S:
         return ConfirmResult("no_budget", label, 0.0, f"{max(timeout_s, 0.0):.3f}s left of the write patience")
     try:
-        argv = _child_argv(read_only_db_uri(db_path), json.dumps(requested), int(timeout_s * 1000))
+        argv = _child_argv(read_only_db_uri(db_path), json.dumps(requested), int(timeout_s * 1000),
+                           json.dumps([str(e) for e in extensions]))
         proc = subprocess.run(
             argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout_s, check=False,
             close_fds=True, env=_child_env(),
@@ -289,7 +445,10 @@ __all__ = [
     "CONFIRM_MIN_S",
     "READ_CONFIRM_TIMEOUT_S",
     "ConfirmResult",
+    "ScopedAuthorizerConnection",
     "TouchedTables",
     "confirm_budget",
     "confirm_corruption",
+    "extensions_loaded_by",
+    "writer_replay_blocker",
 ]
