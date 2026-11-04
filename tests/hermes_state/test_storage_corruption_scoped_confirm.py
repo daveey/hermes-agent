@@ -972,3 +972,40 @@ class _NoShrink:
 
     def __getattr__(self, name):
         return getattr(self._real, name)
+
+
+# ── the log sentences are a contract: the coach `corruption` signal collector parses them ──
+
+
+def test_unconfirmed_warning_sentences_are_the_coach_contract(tmp_path, monkeypatch, caplog):
+    """hermes-mods plugins/coach/signals.py (UNCONFIRMED_RE) files one Kanban incident from these records:
+    logger ``hermes_state``, WARNING, message ``state.db <abs path>: ...`` ending in one of the four forms."""
+    import re
+    caplog.set_level(logging.WARNING)
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("s1", source="cli")
+        real_ctx = db._read_ctx
+        n = {"left": 1}
+
+        @contextmanager
+        def ctx(*a, **k):
+            with real_ctx(*a, **k) as conn:
+                if n["left"]:
+                    n["left"] -= 1
+                    raise _malformed()
+                yield conn
+
+        monkeypatch.setattr(db, "_read_ctx", ctx)
+        assert db._read_one("SELECT id FROM sessions WHERE id = ?", ("s1",))[0] == "s1"
+    finally:
+        db.close()
+    msgs = [r.getMessage() for r in caplog.records if r.name == "hermes_state" and r.levelno == logging.WARNING]
+    prefix = f"state.db {tmp_path / 'state.db'}: "
+    first = [m for m in msgs if "NOT confirmed (" in m]
+    gone = [m for m in msgs if "did not recur on replay" in m]
+    assert len(first) == 1 and len(gone) == 1, msgs
+    assert re.match(re.escape(prefix) + r"a read raised structural corruption \(.+\), NOT confirmed \(.*unconfirmed "
+                    r"this process: \d+\); .*replaying it once", first[0])
+    assert re.match(re.escape(prefix) + r"read corruption \(.+\) did not recur on replay; storage is NOT latched "
+                    r"\(unconfirmed corruption\)\.$", gone[0])
