@@ -292,7 +292,7 @@ class Pane:
     def paste_gap(self) -> None:
         """Keep the next key out of the input batch the app is still reading: prompt_toolkit takes an
         Enter that lands within 50 ms of the last buffer change for a pasted newline."""
-        time.sleep(1.2)  # health: allow HX013 -- the gap IS the behaviour: the CLI's paste detection is time-based
+        time.sleep(0.1)  # health: allow HX013 -- exceed the CLI's 50 ms paste-detection window
 
     def submit(self, text: str) -> None:
         self.baseline = self.scrollback()

@@ -116,18 +116,22 @@ class Session:
         self.steps = 0
 
     def step(self, name: str, action: Callable[[], Any], needles: list[str], *, timeout: float = 60.0,
-             quiet: float = 2.0) -> str:
+             quiet: float = 0.2) -> str:
         """Run *action*, then require one of *needles* to appear in output produced after the step's
         latest input (``Pane.wait``): text already in the scrollback never satisfies a step."""
         self.steps += 1
         started = time.monotonic()
+        print(f"STEP {name}", flush=True)
         action()
         hit = self.pane.wait(needles, timeout) if needles else True
-        self.pane.settle(quiet=quiet, timeout=30)
+        if not hit:
+            pytest.fail(f"{name}: missing {needles}\n{self.pane.screen()}\n{self.pane.ch.diagnostics()}")
+        # A modal is ready when its question appears. Its spinner keeps repainting
+        # while waiting for our answer, so screen quiescence cannot signal readiness.
+        if quiet:
+            self.pane.settle(quiet=quiet, timeout=30)
         text = self.pane.scrollback()
         self.timings.append((name, round(time.monotonic() - started, 1)))
-        if not hit:
-            self.failures.append(f"{name}: none of {needles!r} appeared; screen:\n{self.pane.screen()[-2500:]}")
         if "Traceback (most recent call last)" in text:
             self.failures.append(f"{name}: a traceback reached the terminal")
         return text
@@ -174,6 +178,38 @@ def test_witness_coverage_rejects_an_uninstrumented_cli() -> None:
         check_witness_coverage([gateway], [])
 
 
+def test_modal_readiness_does_not_wait_for_screen_quiescence() -> None:
+    from unittest.mock import Mock
+
+    pane = Mock()
+    pane.wait.return_value = "question"
+    pane.scrollback.return_value = "question"
+    Session(pane).step("modal", lambda: None, ["question"], quiet=0)
+    pane.wait.assert_called_once_with(["question"], 60.0)
+    pane.settle.assert_not_called()
+
+
+def test_missing_step_output_fails_before_driving_more_input() -> None:
+    from unittest.mock import Mock
+
+    pane = Mock()
+    pane.wait.return_value = None
+    pane.scrollback.return_value = ""
+    with pytest.raises(pytest.fail.Exception, match="missing.*answer"):
+        Session(pane).step("turn", lambda: None, ["answer"])
+    pane.settle.assert_not_called()
+
+
+def test_paste_gap_exceeds_cli_window_without_seconds_of_padding(monkeypatch) -> None:
+    from unittest.mock import Mock
+
+    pause = Mock()
+    monkeypatch.setattr("tests.e2e.core.cli_tmux._classic.time.sleep", pause)
+    Pane(Mock()).paste_gap()
+    pause.assert_called_once()
+    assert 0.05 < pause.call_args.args[0] <= 0.2
+
+
 def test_classic_cli_live_session_runs_every_turn_in_the_gateway(tmp_path: Path) -> None:
     require_tmux()
     llm = FakeLLMServer(_main, aux=_aux)
@@ -189,13 +225,13 @@ def test_classic_cli_live_session_runs_every_turn_in_the_gateway(tmp_path: Path)
         try:
             s.step("startup", pane.launch, ["\u2624 fake-model"], timeout=120, quiet=3.0)
             s.step("markdown", lambda: pane.submit("LIVE01 show markdown"), ["LIVE01 end."])
-            s.step("approval_modal", lambda: pane.submit("LIVE02 run a command"), ["Dangerous Command"], quiet=1.5)
+            s.step("approval_modal", lambda: pane.submit("LIVE02 run a command"), ["Dangerous Command"], quiet=0)
             s.step("approve_once", lambda: pane.keys("Enter"), ["LIVE02 done"])
             s.step("read_file", lambda: pane.submit("LIVE03 read notes"), ["LIVE03 done"])
             s.step("write_file", lambda: pane.submit("LIVE04 write a file"), ["LIVE04 done"])
             s.step("search_files", lambda: pane.submit("LIVE05 search"), ["LIVE05 done"])
             s.step("memory", lambda: pane.submit("LIVE07 remember"), ["LIVE07 done"])
-            s.step("clarify_modal", lambda: pane.submit("LIVE08 ask me"), ["LIVE08 which colour?"], quiet=1.5)
+            s.step("clarify_modal", lambda: pane.submit("LIVE08 ask me"), ["LIVE08 which colour?"], quiet=0)
             s.step("clarify_answer", lambda: (pane.keys("Enter"), pane.paste_gap(), pane.keys("Enter")), ["LIVE08 done"])
             s.step("delegate", lambda: pane.submit("LIVE09 delegate"), ["LIVE09 done"], timeout=90)
             s.step("delegate_result", lambda: None, ["LIVECHILD result"], timeout=90, quiet=3.0)
@@ -203,7 +239,7 @@ def test_classic_cli_live_session_runs_every_turn_in_the_gateway(tmp_path: Path)
             s.step("bg_process_notice", lambda: None, ["live10-bg-finished"], timeout=60, quiet=3.0)
             for command, needle in SLASH_SWEEP:
                 s.step(command, lambda c=command: pane.submit(c), [needle], timeout=30)
-            s.step("/model", lambda: pane.submit("/model"), ["Model Picker"], timeout=30, quiet=1.5)
+            s.step("/model", lambda: pane.submit("/model"), ["Model Picker"], timeout=30, quiet=0)
             s.step("/model close", lambda: pane.keys("Escape"), [], quiet=1.0)
             s.step("/bg", lambda: pane.submit("/bg LIVE14 compute something"), ["LIVE14 background answer"],
                    timeout=90)
@@ -219,7 +255,7 @@ def test_classic_cli_live_session_runs_every_turn_in_the_gateway(tmp_path: Path)
                    ["Interrupted"], timeout=45, quiet=3.0)
             if "THE-END" in pane.scrollback():
                 s.failures.append("interrupt: the turn streamed to THE-END")
-            s.step("/new", lambda: pane.submit("/new"), ["destroys conversation state"], timeout=30, quiet=1.5)
+            s.step("/new", lambda: pane.submit("/new"), ["destroys conversation state"], timeout=30, quiet=0)
             s.step("/new confirm", lambda: pane.keys("Enter"), ["New session started"], timeout=30)
             s.step("plain turn after /new", lambda: pane.submit("LIVE30 hello again"), ["LIVE30 ok."])
             s.step("/quit", lambda: pane.submit("/quit"), ["Resume this session with:"], timeout=30)
