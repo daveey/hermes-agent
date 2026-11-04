@@ -21,6 +21,7 @@ from hermes_cli import kanban_annotation_refresh as _bounded
 from hermes_cli import kanban_activity_revision as _revision
 from hermes_cli import kanban_session_activity_hub as _hub_signature
 from hermes_cli import kanban_session_activity_revalidate as _revalidate
+from hermes_cli import kanban_counts_scopes as _count_scopes
 from hermes_cli import kanban_session_activity_recent_done as _recent_done
 from hermes_cli.kanban_session_activity_origin_snapshot import remote_snapshot as _remote_snapshot
 from hermes_cli.kanban_session_activity_hub import _hub_content_signature
@@ -77,6 +78,7 @@ _pairs_lock = threading.Lock()
 # _all_counts single flight: held for a whole recompute; the generation bumps when one publishes.
 _counts_flight = threading.Lock()
 _counts_generation = 0
+_cache_generation = 0  # publication generation of the active scoped snapshot
 # Cross-thread annotation flight. ``one_annotation_snapshot`` only shares a read
 # inside one thread. Session-list polls arrive on many AnyIO workers at once; each
 # used to wait on ``_counts_flight`` and then run waiting sources and attention
@@ -1193,15 +1195,7 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
     return cards
 
 
-def _cached_count_result(include_waiting: bool, include_snapshot: bool) -> tuple:
-    """Called under _cache_lock: annotation identities must travel with their count generation."""
-    assert _cache is not None
-    counts = _cache[1:5]
-    if include_snapshot:
-        parked, held = _parked_cache[0]
-        return (*counts, dict(_waiting_cache[0]), parked, held, _stalled_cache[0],
-                _identity.merge_keys(_remote_keys_cache[0], _local_keys_cache[0]))
-    return (*counts, dict(_waiting_cache[0])) if include_waiting else counts
+_cached_count_result = _count_scopes.result_locked
 
 
 def _all_counts(*, include_waiting: bool = False, include_snapshot: bool = False) -> tuple:
@@ -1216,12 +1210,13 @@ def _all_counts(*, include_waiting: bool = False, include_snapshot: bool = False
     wall = time.time()
     fingerprint = _activity_fingerprint()
     with _cache_lock:
+        _count_scopes.restore_locked(scope)
         if _revalidate.counts_fresh(scope, fingerprint, now):
             return _cached_count_result(include_waiting, include_snapshot)
         seen = _counts_generation
     with _counts_flight:
         with _cache_lock:
-            if _counts_generation != seen and _cache is not None and _cache_scope == scope:
+            if _cache_generation > seen and _cache is not None and _cache_scope == scope:
                 return _cached_count_result(include_waiting, include_snapshot)
         return _recompute_all_counts(scope, now, fingerprint, include_waiting=include_waiting,
                                      include_snapshot=include_snapshot, wall=wall)
@@ -1231,6 +1226,7 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
                           include_snapshot: bool = False, wall: float | None = None) -> tuple:
     """Read every local board and the remote links into fresh counts and publish them to the cache."""
     global _cache, _cache_scope, _cache_fingerprint, _counts_generation, _cache_read_at, _cache_revalidatable
+    global _cache_generation
     active: dict[str, int] = {}
     blocked: dict[str, int] = {}
     unseen: dict[str, int] = {}
@@ -1291,11 +1287,13 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         _cache_revalidatable = wall is not None and _revalidate.revalidatable(fingerprint, wall)
         _cache_fingerprint = fingerprint
         _counts_generation += 1
+        _cache_generation = _counts_generation
         _waiting_cache[0] = waiting_ids
         _parked_cache[0] = parked_held
         _stalled_cache[0] = stalled
         _remote_keys_cache[0] = remote_ids
         _local_keys_cache[0] = local_ids
+        _count_scopes.remember_locked()
         return _cached_count_result(include_waiting, include_snapshot)
 
 
@@ -1979,6 +1977,7 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
         _links_cache = None
     with _cache_lock:
         _cache = None
+        _count_scopes.reset_locked()
         _attention.clear()
         if not keep_remote:
             _remote_last = None

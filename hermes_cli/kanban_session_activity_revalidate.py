@@ -82,6 +82,7 @@ def unchanged_inputs(scope: tuple[str, ...]) -> tuple[float, tuple] | None:
     registered) for the local boards'. None otherwise, or while nothing is cached."""
     from hermes_cli import kanban_session_activity as _ksa
     with _ksa._cache_lock:
+        _ksa._count_scopes.restore_locked(scope)
         if _ksa._cache is None or _ksa._cache_scope != scope:
             return None
     read_at = time.time()

@@ -153,6 +153,100 @@ def test_a_settled_stat_keyed_board_revalidates_until_it_is_written(clock, spies
         conn.close()
 
 
+def test_alternating_profile_scopes_reuse_their_unchanged_counts(clock, spies, tmp_path, monkeypatch):
+    """The all-profiles projects tree visits each home on every refresh."""
+    scope = ["a"]
+    monkeypatch.setattr(ksa, "_origin_scope", lambda: (scope[0],))
+    conn = _board(tmp_path / "kanban.db", [("t1", "running", "s1")])
+    try:
+        for name in ("a", "b"):
+            scope[0] = name
+            assert _poll()["kanban_active"] == 1
+        cold = dict(spies)
+        for _ in range(3):
+            _advance(clock, ksa._CACHE_TTL_S + 0.5)
+            for name in ("a", "b"):
+                scope[0] = name
+                assert _poll()["kanban_active"] == 1
+        assert spies == cold
+        # The stored scope must still observe a committed revision immediately.
+        conn.execute("INSERT INTO tasks VALUES ('t2', 'ready', 's1')")
+        for name in ("a", "b"):
+            scope[0] = name
+            assert _poll()["kanban_active"] == 2
+        assert spies["recompute"] == cold["recompute"] + 2
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("counted", [True, False])
+def test_restored_scope_keeps_its_original_age_bound(clock, spies, tmp_path, monkeypatch, counted):
+    scope = ["a"]
+    monkeypatch.setattr(ksa, "_origin_scope", lambda: (scope[0],))
+    conn = _board(tmp_path / "kanban.db", [("t1", "running", "s1")], counted=counted)
+    try:
+        _poll()
+        scope[0] = "b"
+        _poll()
+        _advance(clock, (ksa._COUNTS_MAX_AGE_S if counted else ksa._CACHE_TTL_S) + 1)
+        scope[0] = "a"
+        assert _poll()["kanban_active"] == 1
+        assert spies["recompute"] == 3
+    finally:
+        conn.close()
+
+
+def test_scoped_counts_lru_is_bounded(clock, spies, tmp_path, monkeypatch):
+    scope = ["a"]
+    monkeypatch.setattr(ksa, "_origin_scope", lambda: (scope[0],))
+    monkeypatch.setattr(ksa._count_scopes, "MAX_SCOPES", 2)
+    conn = _board(tmp_path / "kanban.db", [("t1", "running", "s1")])
+    try:
+        for name in ("a", "b", "a", "c", "a"):
+            scope[0] = name
+            assert _poll()["kanban_active"] == 1
+        assert spies["recompute"] == 3
+        assert len(ksa._count_scopes._entries) == 2
+        scope[0] = "b"  # evicted, not silently served from another profile
+        assert _poll()["kanban_active"] == 1
+        assert spies["recompute"] == 4
+    finally:
+        conn.close()
+
+
+def test_concurrent_scopes_keep_counts_and_waiting_identities_together(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextvars import ContextVar
+    from threading import Barrier
+
+    scope = ContextVar("test_scope", default="a")
+    monkeypatch.setattr(ksa, "_origin_scope", lambda: (scope.get(),))
+    paths = {name: tmp_path / name / "kanban.db" for name in ("a", "b")}
+    monkeypatch.setattr(ksa, "_board_db_paths", lambda: [paths[scope.get()]])
+    monkeypatch.setattr(ksa, "_remote_cards", lambda *a, **k: [])
+    monkeypatch.setattr(ksa, "_shadow_fingerprint", lambda: ())
+    for name, path in paths.items():
+        conn = _board(path, [(name, "running", name)])
+        conn.close()
+    ksa._reset_cache_for_tests()
+    barrier = Barrier(4)
+
+    def read(name):
+        scope.set(name)
+        barrier.wait(timeout=10)
+        for _ in range(10):
+            active, _, _, _, waiting, _, _, _, keys = ksa._all_counts(include_snapshot=True)
+            assert active == {name: 1}
+            assert waiting == {name: frozenset({name})}
+            assert set(keys) == {name}
+
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(read, ("a", "b", "a", "b")))
+    finally:
+        ksa._reset_cache_for_tests()
+
+
 def _done_board(path: Path) -> sqlite3.Connection:
     conn = _board(path, [])
     conn.execute("ALTER TABLE tasks ADD COLUMN title TEXT")
