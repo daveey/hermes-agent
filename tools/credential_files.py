@@ -301,14 +301,19 @@ def _sanitized_copy_store() -> Path:
     return get_hermes_home() / "cache" / "sandbox-skills"
 
 
-def _sanitized_copy_dir(skills_dir: Path | str) -> Path:
+def _sanitized_copy_dir(real_skills_dir: str) -> Path:
+    """The copy dir keyed on *real_skills_dir*, which the caller has already resolved.
+
+    Not resolved again: a second ``realpath`` could see a root swapped since the caller's,
+    keying the copy on one tree while the walk fills it from another.
+    """
     import hashlib
 
-    key = hashlib.sha256(os.path.realpath(skills_dir).encode("utf-8")).hexdigest()[:16]
+    key = hashlib.sha256(real_skills_dir.encode("utf-8")).hexdigest()[:16]
     safe_dir = _sanitized_copy_store() / key
     if not safe_dir.is_dir():
         safe_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("credential_files: created sanitized skills copy of %s at %s", skills_dir, safe_dir)
+        logger.info("credential_files: created sanitized skills copy of %s at %s", real_skills_dir, safe_dir)
     return safe_dir
 
 
@@ -335,13 +340,31 @@ _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 # O_NONBLOCK: a FIFO swapped in after vetting must not block the open (fstat then rejects it).
 _SOURCE_FILE_FLAGS = os.O_RDONLY | _O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | _O_CLOEXEC
 _SOURCE_DIR_FLAGS = _SOURCE_FILE_FLAGS | _O_DIRECTORY
+
+
+def _os_supports(capability: set, name: str) -> bool:
+    """Whether ``os.<name>`` is in the ``os.supports_*`` set *capability*.
+
+    Matched by the builtin's name, not by identity: the sets hold the original builtins, so
+    ``os.stat in os.supports_dir_fd`` turns False as soon as anything has wrapped ``os.stat``
+    (an I/O audit hook, a profiler, the test suite's home guard) when this module is imported,
+    and the copy would then be withheld on a platform that supports it.
+    """
+    return any(getattr(func, "__name__", None) == name for func in capability)
+
+
+def _anchored_copy_supported() -> bool:
+    """Whether this platform can read a tree race-free (O_NOFOLLOW + dir_fd opens)."""
+    return bool(
+        _O_NOFOLLOW and _O_DIRECTORY
+        and _os_supports(os.supports_dir_fd, "open") and _os_supports(os.supports_dir_fd, "stat")
+        and _os_supports(os.supports_follow_symlinks, "stat") and _os_supports(os.supports_fd, "scandir")
+    )
+
+
 # Without these (Windows) there is no race-free way to read a sandbox-writable tree, so the
 # sanitized copy is withheld (fails closed) instead of falling back to a path-following copy.
-_ANCHORED_COPY_SUPPORTED = bool(
-    _O_NOFOLLOW and _O_DIRECTORY
-    and os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd
-    and os.stat in os.supports_follow_symlinks and os.scandir in os.supports_fd
-)
+_ANCHORED_COPY_SUPPORTED = _anchored_copy_supported()
 _withheld_roots_warned: set[str] = set()
 
 

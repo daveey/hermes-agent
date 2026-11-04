@@ -37,6 +37,54 @@ def test_posix_hosts_have_anchored_copy():
     assert cf._ANCHORED_COPY_SUPPORTED
 
 
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("style", ["functools.wraps", "plain"])
+def test_detection_survives_wrapped_os_functions(monkeypatch, style):
+    """``os.stat in os.supports_dir_fd`` is identity: a module first imported while os.stat/
+    os.open/os.scandir are wrapped (the suite's home I/O guard, an audit hook) must still
+    detect the capability, or every skills mount is silently emptied."""
+    import functools
+
+    def wrapped(original):
+        def guarded(*args, **kwargs):
+            return original(*args, **kwargs)
+        return functools.wraps(original)(guarded) if style == "functools.wraps" else guarded
+
+    for name in ("open", "stat", "scandir"):
+        monkeypatch.setattr(os, name, wrapped(getattr(os, name)))
+    if style == "plain":
+        for name in ("open", "stat", "scandir"):
+            getattr(os, name).__name__ = name  # a wrapper only needs the builtin's name
+
+    assert os.stat not in os.supports_dir_fd  # precondition: identity membership is broken
+    assert cf._anchored_copy_supported()
+
+
+def test_copy_key_uses_the_callers_single_resolution(home, monkeypatch):
+    """The root is resolved once: a later realpath (seeing a root swapped since) must not
+    pick the copy dir, or the copy keyed on one tree is filled from another."""
+    import hashlib
+    import sys
+
+    real = os.path.realpath(home / "skills")
+    seen = []
+    original = os.path.realpath
+
+    def swapping_realpath(path, *args, **kwargs):
+        resolved = original(path, *args, **kwargs)
+        if resolved != real or sys._getframe(1).f_globals.get("__name__") != cf.__name__:
+            return resolved  # other paths, and the suite's own I/O guard, see the real answer
+        seen.append(path)  # the copy code's first resolution is honest, any later one "swapped"
+        return resolved if len(seen) == 1 else "/swapped/elsewhere"
+
+    monkeypatch.setattr(cf.os.path, "realpath", swapping_realpath)
+    copy = Path(cf._safe_skills_path(home / "skills"))
+    monkeypatch.setattr(cf.os.path, "realpath", original)
+
+    assert copy.name == hashlib.sha256(real.encode("utf-8")).hexdigest()[:16]
+    assert (copy / "s" / "SKILL.md").is_file()
+
+
 @pytest.mark.platforms("windows")
 def test_windows_withholds_skills_copy_for_real(tmp_path, monkeypatch):
     home = tmp_path / "hh"
