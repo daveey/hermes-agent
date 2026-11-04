@@ -99,6 +99,8 @@ def _probe_root(tmp_path: Path) -> Path:
     shutil.copy2(_SCRIPTS / "run_tests_parallel.py", root / "scripts")
     shutil.copy2(_SCRIPTS / "run_tests_parallel_rss.py", root / "scripts")
     shutil.copy2(_SCRIPTS / "run_tests_host_slots.py", root / "scripts")
+    shutil.copy2(_SCRIPTS / "run_tests_launch.py", root / "scripts")
+    shutil.copy2(_SCRIPTS / "run_tests_fork_child.py", root / "scripts")
     shutil.copy2(_SCRIPTS / "ci" / "list_os_marked_tests.py", root / "scripts" / "ci")
     return root
 

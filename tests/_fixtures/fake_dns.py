@@ -1,7 +1,7 @@
 """Opt-in resolver for tests whose code under test resolves a URL's host itself.
 
-The suite's network fence (``_no_live_nous_services`` in tests/conftest.py) refuses every
-non-loopback name lookup, IP literals included. SSRF guards (``tools.url_safety``, the
+The suite's network fence (``_fenced_getaddrinfo`` in tests/conftest.py) refuses every
+lookup of a host off this machine. SSRF guards (``tools.url_safety``, the
 browser URL policy, Slack's file-URL check) judge a URL by the address its host resolves
 to, so under the fence they see a refusal and fail closed. A test of the *allowed* path
 requests ``public_dns``, which answers without touching the network:
