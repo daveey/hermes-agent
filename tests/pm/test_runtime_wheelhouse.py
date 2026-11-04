@@ -20,6 +20,9 @@ from pm.runtime import runtime_environment
 from scripts.bundles.payload import seal_pm_runtime
 from tests.pm._fixtures import stage_host_python
 
+# The wheelhouse is downloaded from PyPI on purpose (only the stage afterwards is offline).
+pytestmark = pytest.mark.allow_network
+
 
 # Verified wheel bytes by URL: test_worker imports this fixture too, so each module
 # would otherwise fetch the same wheels from PyPI again.

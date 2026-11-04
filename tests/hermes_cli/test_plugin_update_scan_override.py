@@ -158,7 +158,10 @@ def test_subdirectory_update_asks_before_a_caution_scan_and_never_accepts_danger
     so it never downloads PM's pinned Python."""
     from hermes_cli import plugins_cmd as pc
 
-    repo, plugin, target = _subdir_install(tmp_path, monkeypatch)
+    # admission_env runs the update's dependency transaction on the local uv and interpreter; without
+    # it the applied update downloaded a whole Python toolchain from GitHub on every run.
+    root, _home = admission_env
+    repo, plugin, target = _subdir_install(root, monkeypatch)
     (plugin / "helper.py").write_text("eval('1 + 1')\n", encoding="utf-8")
     _commit(repo, "caution")
     before = pc._read_install_metadata()["my-plugin"]
