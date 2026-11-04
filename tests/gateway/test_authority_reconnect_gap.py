@@ -1,9 +1,12 @@
 """A reconnecting viewer receives what its session published between the replay answer and its resume."""
 import asyncio
 import queue
+import threading
 from types import SimpleNamespace
 
 import pytest
+
+from tests.waiting import async_wait_until
 
 
 def _drain(peer):
@@ -14,7 +17,8 @@ def _drain(peer):
 
 
 @pytest.mark.asyncio
-async def test_resume_after_replay_delivers_the_frames_published_in_between(tmp_path, monkeypatch):
+@pytest.mark.parametrize('hold_delivery', [False, True], ids=['normal', 'delayed-fanout'])
+async def test_resume_after_replay_delivers_the_frames_published_in_between(tmp_path, monkeypatch, hold_delivery):
     from gateway.config import GatewayConfig, Platform
     from gateway.session import SessionSource, SessionStore
     from gateway.session_authority import LiveSession, initialize_session_authority
@@ -34,12 +38,19 @@ async def test_resume_after_replay_delivers_the_frames_published_in_between(tmp_
     db.create_session('chat', source='telegram')
     authority.sessions['chat'] = LiveSession(SessionSource(platform=Platform.TELEGRAM, chat_id='gap'), 'chat')
 
+    release_delivery = threading.Event()
+    loop = asyncio.get_running_loop()
+
     class Peer:
         def __init__(self):
             self.frames = queue.Queue()
+            self.last_sequence = 0
 
         def write(self, frame):
+            if hold_delivery and frame['params']['type'] == 'message.complete':
+                assert release_delivery.wait(30), 'test did not release fanout delivery'
             self.frames.put(frame)
+            self.last_sequence = frame['params']['seq']
             return True
 
     dropped, reconnected, fresh = Peer(), Peer(), Peer()
@@ -52,6 +63,13 @@ async def test_resume_after_replay_delivers_the_frames_published_in_between(tmp_
 
     attached = await old.resume(ref, {})
     await turn('one')
+    # Hold terminal delivery beyond turn completion, then release on the next loop tick.
+    loop.call_soon(release_delivery.set)
+    # Publication is complete, but the independent fanout writer may still be behind.
+    # Establish the empty-replay precondition at the receiver, not at the producer.
+    _, published = authority.sessions['chat'].event_stream.watermark()
+    await async_wait_until(lambda: dropped.last_sequence == published, timeout=30,
+                           what='all published frames delivered to the old peer')
     seen = _drain(dropped)[-1]['seq']
     # The reconnect: the replay is answered on the new socket before its resume rebinds it.
     replay = (await new.dispatch({'id': 1, 'method': 'session.events.since', 'params': {
