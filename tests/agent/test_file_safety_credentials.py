@@ -305,3 +305,74 @@ def test_the_webapps_sign_in_files_are_neither_read_nor_written(tmp_path, monkey
         assert get_read_block_error(str(stored.parent)) is not None
         assert is_write_denied(str(stored)), f"write_file may replace {stored}"
         assert is_write_denied(str(stored.parent / "planted.json"))
+
+
+@pytest.mark.parametrize("rel", [
+    "AUTH.JSON", "Auth.Json", ".ENV", ".Anthropic_OAuth.json",
+    "SKILLS/.HUB/cache/SKILL.md", "skills/.Hub/x.md",
+    "MCP-TOKENS/gh.json", "Vault/vault.key",
+])
+def test_read_deny_list_is_case_insensitive(fake_home, rel):
+    """On a case-insensitive FS (macOS, Windows) ``resolve()`` keeps the caller's spelling, so
+    ``~/.hermes/AUTH.JSON`` opens ``auth.json``; an exact-case compare let it through."""
+    from agent.file_safety import get_read_block_error
+
+    path = _create(fake_home, rel)
+    assert get_read_block_error(str(path)) is not None, rel
+
+
+def test_case_insensitive_home_dir_is_blocked(tmp_path, monkeypatch):
+    """``~/.Config/Token-Broker/x`` is ``~/.config/token-broker/x`` on macOS."""
+    import agent.file_safety as fs
+
+    home = tmp_path / "user"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(fs, "_guard_homes", lambda _p="": {str(home)})
+    key = home / ".Config" / "Token-Broker" / "token.json"
+    key.parent.mkdir(parents=True)
+    key.write_text("k")
+    assert fs.get_read_block_error(str(key)) is not None
+
+
+def test_read_deny_candidate_names_cover_every_name_rule(fake_home):
+    """``read_deny_candidate_names`` is the walkers' pre-filter: every basename a deny rule
+    matches on (exact stores, denied dirs, env files, ``.hub``) must be in it, casefolded,
+    or a sandbox walker would skip the full guard for a denied path."""
+    import agent.file_safety as fs
+
+    names = [os.path.basename(n) for n in fs._CREDENTIAL_FILE_NAMES]
+    names += [sub for sub, _d, _f in fs._READ_DENIED_DIRS]
+    names += [rel.rsplit("/", 1)[-1] for rel in fs.HOME_READ_DENIED_DIRS]
+    names += [*fs._BLOCKED_PROJECT_ENV_BASENAMES, ".hub"]
+    candidates = fs.read_deny_candidate_names()
+    for name in names:
+        assert name.casefold() in candidates, name
+        assert name.upper().casefold() in candidates, name
+    for ordinary in ("SKILL.md", "references", "scripts", "run.sh", ".env.example"):
+        assert ordinary.casefold() not in candidates, ordinary
+
+
+@pytest.mark.require_symlinks
+def test_read_deny_candidate_names_include_resolved_symlink_targets(fake_home, tmp_path):
+    """The guard denies the resolved target of a symlinked store, so its basename is a candidate."""
+    import agent.file_safety as fs
+
+    target = tmp_path / "elsewhere" / "creds.json"
+    target.parent.mkdir()
+    target.write_text("{}")
+    (fake_home / "auth.json").symlink_to(target)
+    assert fs.get_read_block_error(str(target)) is not None
+    assert "creds.json" in fs.read_deny_candidate_names()
+
+
+@pytest.mark.require_symlinks
+def test_hub_cache_is_denied_through_a_symlinked_skills_dir(fake_home, tmp_path):
+    """``HERMES_HOME/skills`` is often a symlink into a repo; the resolved ``.hub`` path is still denied."""
+    from agent.file_safety import get_read_block_error
+
+    repo_skills = tmp_path / "repo" / "skills"
+    (repo_skills / ".hub").mkdir(parents=True)
+    cached = repo_skills / ".hub" / "SKILL.md"
+    cached.write_text("x")
+    (fake_home / "skills").symlink_to(repo_skills)
+    assert get_read_block_error(str(cached)) is not None

@@ -558,21 +558,27 @@ def _readonly_skill_mount_args() -> list[str]:
     args: list[str] = []
     try:
         import tools.credential_files as cf
-        for getter, expects_file, noun in _RO_MOUNT_SOURCES:
-            for entry in getattr(cf, getter)():
-                src = Path(entry["host_path"])
-                if expects_file:
-                    problem = ("source is a directory (likely Docker-in-Docker auto-creation)" if src.is_dir()
-                               else None if src.is_file() else "source not found")
-                else:
-                    problem = None if src.is_dir() else "source is not a directory"
-                if problem:
-                    logger.warning("Docker: skipping %s mount — %s: %s", noun.split()[0], problem, src)
-                    continue
-                args.extend(["-v", f"{entry['host_path']}:{entry['container_path']}:ro"])
-                logger.info("Docker: mounting %s %s -> %s", noun, entry["host_path"], entry["container_path"])
     except Exception as e:
-        logger.debug("Docker: could not load credential file mounts: %s", e)
+        logger.warning("Docker: could not load credential file mounts: %s", e, exc_info=True)
+        return args
+    for getter, expects_file, noun in _RO_MOUNT_SOURCES:
+        try:  # per source: a skills-copy failure must not also drop credential and cache mounts
+            entries = getattr(cf, getter)() or []
+        except Exception as e:
+            logger.warning("Docker: skipping %s mounts — %s failed: %s", noun, getter, e, exc_info=True)
+            continue
+        for entry in entries:
+            src = Path(entry["host_path"])
+            if expects_file:
+                problem = ("source is a directory (likely Docker-in-Docker auto-creation)" if src.is_dir()
+                           else None if src.is_file() else "source not found")
+            else:
+                problem = None if src.is_dir() else "source is not a directory"
+            if problem:
+                logger.warning("Docker: skipping %s mount — %s: %s", noun.split()[0], problem, src)
+                continue
+            args.extend(["-v", f"{entry['host_path']}:{entry['container_path']}:ro"])
+            logger.info("Docker: mounting %s %s -> %s", noun, entry["host_path"], entry["container_path"])
     return args
 
 
