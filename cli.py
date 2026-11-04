@@ -1524,13 +1524,19 @@ class HermesCLI(CLIBacktrackMixin, CLIInitMixin, CLITuiRuntimeMixin, CLIProcessN
 def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills):
     """Resolve the toolset list (explicit / coding posture / platform default), construct HermesCLI, and start the background skills preload."""
     toolsets_list = None
+    # [daveey] A typed empty pick (`-t ''`, `-t ,`) is "no tools", not "no pick": unset is None. Treating
+    # it as no pick sent nothing on session.create, so the gateway froze the full profile default and a
+    # no-tools one-shot ran (and ended partial on) tool calls.
+    typed = toolsets is not None and not (isinstance(toolsets, (list, tuple)) and not toolsets)
     if isinstance(toolsets, str) and toolsets:
-        toolsets_list = [t.strip() for t in toolsets.split(",")]
+        toolsets_list = [t.strip() for t in toolsets.split(",") if t.strip()]
+    elif isinstance(toolsets, str):
+        toolsets_list = []
     elif isinstance(toolsets, (list, tuple)) and toolsets:
         # Fire may pass multiple --toolsets as a tuple
         toolsets_list = []
         for t in toolsets:
-            toolsets_list.extend([x.strip() for x in t.split(",")] if isinstance(t, str) else [str(t)])
+            toolsets_list.extend([x.strip() for x in t.split(",") if x.strip()] if isinstance(t, str) else [str(t)])
     elif not toolsets:
         # Coding posture inside a code workspace, else the profile default the gateway resolves (its
         # platform resolver reads plugin toolsets, which only the gateway loads: adopted when the session
@@ -1567,10 +1573,10 @@ def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url
         if emit_partial_update_hint(e):
             sys.exit(1)
         raise
-    if not toolsets:
+    if not typed:
         cli._explicit_toolsets = False  # the gateway resolves the default and coding posture itself
     # Only a typed -t is checked against a resumed session's frozen toolsets.
-    cli._typed_toolsets = toolsets_list if toolsets else None
+    cli._typed_toolsets = toolsets_list if typed else None
 
     # skills.auto_load rides the same background preload as -s; --ignore-rules skips it with
     # the rest of the auto-injected context. Resolved here (not lazily in the agent) so the

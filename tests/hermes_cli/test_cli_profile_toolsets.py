@@ -101,3 +101,32 @@ def test_coding_posture_is_left_to_the_gateway(store, monkeypatch):
     host, _printed = _launch(monkeypatch, db, coding=["terminal"])
     assert host.enabled_toolsets == ["terminal"]  # the local display still shows the posture
     assert "toolsets" not in _created(client)
+
+
+@pytest.mark.parametrize("typed", ["", ","])
+def test_typed_empty_toolsets_is_a_no_tools_pick(store, monkeypatch, typed):
+    """`hermes chat -Q -t ''` (auto_options' no-tools drafting call) is an explicit empty pick: it rides
+    session.create as ``toolsets: []`` and the gateway policy carries no tools, not the profile default
+    (whose code_execution/terminal the model then called, ending the 1-turn run partial, exit 1)."""
+    from gateway.session_local_inventory import _policy_tools
+    from gateway.session_policy import build_policy
+    db, client = store
+    host, _printed = _launch(monkeypatch, db, toolsets=typed, coding=["terminal"])
+    assert host.enabled_toolsets == [] and host._explicit_toolsets is True and host._typed_toolsets == []
+    params = _created(client)
+    assert params["toolsets"] == []
+    policy = build_policy(params, CONFIG)
+    assert policy.toolsets == ()
+    assert _policy_tools(policy, CONFIG)[1] == []
+
+
+def test_explicit_empty_pick_skips_default_mcp_servers_and_plugin_toolsets(monkeypatch):
+    """The gateway folds every enabled MCP server (and default-on plugin toolsets) into a list naming
+    none of them; for an empty pick that would hand a no-tools session the tool_search bridge."""
+    from gateway.session_policy import _resolve_toolsets
+    config = {"agent": {}, "platform_toolsets": {"cli": ["terminal"]},
+              "mcp_servers": {"srv": {"command": "true"}}}
+    import copy
+    assert "srv" in _resolve_toolsets({"toolsets": ["terminal"]}, copy.deepcopy(config), "oneshot", False)
+    assert _resolve_toolsets({"toolsets": []}, copy.deepcopy(config), "oneshot", False) == set()
+    assert _resolve_toolsets({"toolsets": []}, copy.deepcopy(config), "oneshot", False, bypass=True) == set()
