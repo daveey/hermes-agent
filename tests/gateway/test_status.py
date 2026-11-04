@@ -818,11 +818,16 @@ class TestScopedLocks:
         # ``gateway.status._pid_exists`` (psutil-first, safe on Windows).
         monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
+        # The synthetic PID may belong to an unrelated/stopped host process.
+        # Supply all OS identity probes, while retaining real gateway recognition.
+        monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: "python -m hermes_cli.main gateway run")
+        monkeypatch.setattr(status, "_process_is_stopped", lambda pid: False)
 
         acquired, existing = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
 
         assert acquired is False
         assert existing["pid"] == 99999
+        assert json.loads(lock_path.read_text()) == existing
 
     def test_acquire_scoped_lock_replaces_pid_reused_by_unrelated_process(self, tmp_path, monkeypatch):
         """macOS regression: PID reused by an unrelated process with start_time=None.
