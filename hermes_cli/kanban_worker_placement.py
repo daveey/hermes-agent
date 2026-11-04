@@ -173,6 +173,8 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                 queue.try_record(_notice_from_stored, conn, row["id"], gateway, candidates)
                 continue
             _queued.pop(key, None)
+            started = time.monotonic()  # timing provenance for a failure below: budget left at call start
+            budget = queue.call_budget(hub, started)
             try:
                 if labels is not None:
                     # A run moved this card (kanban_move). Its runs_on is Board-owned, so only the origin's
@@ -195,10 +197,12 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                     queue.try_record(queue.record_reply, conn, row["id"], gateway, reply, candidates)
                 attempted += 1
             except OSError as exc:
+                timing = queue.call_timing(budget, started, time.monotonic())
                 # An unavailable transport applies to the entire batch, not just this card.
-                queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc, stage=stage)
+                queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc, stage=stage, timing=timing)
                 return attempted
             except client.HubError as exc:
+                timing = queue.call_timing(budget, started, time.monotonic())
                 fence = None
                 if rejection_code(exc) == "not_claimable":
                     # The Board already has it leased or not ready: our copy is behind. Back off at this revision.
@@ -206,7 +210,8 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                     fence, machine = before[row["id"]]
                     if picked_up(conn, hub, board, gateway, row["id"], machine, pulled):
                         continue  # the worker we reserved already claimed it: a pickup, not a refusal
-                queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc, fence=fence, stage=stage)
+                queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc, fence=fence, stage=stage,
+                                 timing=timing)
                 # Refused revisions still advance the local cursor, but never the feed.
                 continue
     finally:

@@ -123,9 +123,9 @@ def _same_lifecycle(conn, task_id, row, value):
 
 
 def _signature(value):
-    # stage/transport are provenance only: they never make an otherwise-identical observation a new event.
+    # stage/transport/timing are provenance only: they never make an otherwise-identical observation a new event.
     signature = {k: v for k, v in value.items()
-                 if k not in ("observed_at_ms", "recorded_at_ms", "current", "stage", "transport")}
+                 if k not in ("observed_at_ms", "recorded_at_ms", "current", "stage", "transport", *TIMING_KEYS)}
     if value.get("state") == "assigned" and value.get("machine") and "lifecycle" in value:
         # Reading back the assignment promised by this reply is not a transition.
         signature["lifecycle"] = {**value["lifecycle"], "runs_on": value["machine"]}
@@ -246,6 +246,50 @@ def try_record(writer, *args, **kwargs):
 
 
 STAGES = frozenset({"pull", "reserve", "repin"})
+TIMING_KEYS = ("budget_ms", "elapsed_ms")
+TIMING_CAP_MS = 86_400_000
+
+
+def _real(value):
+    """A finite int/float, never a bool, str, complex, arbitrary object or an int too large for a float."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # e.g. 10**400: unusable as a deadline or duration
+        return False
+
+
+def _ms(seconds):
+    """Non-negative whole milliseconds capped at one day, or None for a non-real / non-finite input (bool too)."""
+    if not _real(seconds):
+        return None
+    # Clamp in seconds BEFORE scaling: a huge finite float (1e306) would overflow to inf at * 1000.
+    return round(min(TIMING_CAP_MS / 1000, max(0, seconds)) * 1000)
+
+
+def call_budget(hub, started):
+    """Seconds left on ``hub``'s absolute monotonic deadline at ``started``, or None when it has no usable one."""
+    deadline = getattr(hub, "deadline", None)
+    if not _real(deadline):
+        return None
+    try:
+        return deadline - started
+    except Exception:  # health: allow BLE001 -- optional diagnostic arithmetic must never stop the Board call
+        return None
+
+
+def call_timing(budget_s, started, ended):
+    """Allowlisted provenance for a failed Board call: budget at start (if known) and time to the exception."""
+    timing = {}
+    try:
+        if (budget := _ms(budget_s)) is not None:
+            timing["budget_ms"] = budget
+        if (elapsed := _ms(ended - started)) is not None:
+            timing["elapsed_ms"] = elapsed
+    except Exception:  # health: allow BLE001 -- optional timing must never mask the original Board error
+        return timing
+    return timing
 
 
 def transport_kind(error):
@@ -277,7 +321,7 @@ def record_pull_error(conn, gateway, *, status=None, error=None):
         try_record(record_error, conn, row["id"], gateway, status=status, error=error, stage="pull")
 
 
-def record_error(conn, task_id, gateway, *, status=None, error=None, fence=None, stage=None):
+def record_error(conn, task_id, gateway, *, status=None, error=None, fence=None, stage=None, timing=None):
     value = {"version": 1, "code": "board_error", "candidates": []}
     from hermes_cli.kanban_sync_client import HubError, Resync, SyncUnavailable
     if isinstance(error, Resync):
@@ -293,6 +337,11 @@ def record_error(conn, task_id, gateway, *, status=None, error=None, fence=None,
             value["transport"] = transport_kind(error)
     if stage in STAGES:
         value["stage"] = stage
+    if isinstance(timing, dict):
+        for key in TIMING_KEYS:
+            ms = timing.get(key)
+            if type(ms) is int and 0 <= ms <= TIMING_CAP_MS:
+                value[key] = ms
     if isinstance(error, HubError):
         status = error.status
         try:
