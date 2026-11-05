@@ -3891,8 +3891,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         with self._session_db_cache_lock:
             self._session_db_cache_closed = False
         if not self._api_key_passes_startup_guard():
-            # Config error, not transient: a bare ``return False`` would make the reconnect watcher
-            # re-instantiate the adapter (+ sqlite connection) until EMFILE.
             self._set_fatal_error(
                 # A rejected API_SERVER_KEY is a configuration error, not a transient blip — the key will
                 # not become valid on its own. A bare ``return False`` makes the reconnect watcher in
@@ -3994,6 +3992,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     "config.yaml: platforms.api_server.port",
                     self.name, self._host, self._port, exc)
                 return False
+            # Port 0 asks the kernel to allocate; publish the owned endpoint, not :0.
+            self._port = self._runner.addresses[0][1]
             from gateway.platforms.shared_ingress import listener_base_url
             self._mark_connected(listener_base=listener_base_url(self._host, self._port))
             # Publish a metrics-bearing snapshot at bind and keep it fresh: the

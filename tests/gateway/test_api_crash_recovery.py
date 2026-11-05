@@ -4,7 +4,7 @@ from http.server import ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
-import socket
+import re
 import sqlite3
 import threading
 
@@ -13,7 +13,7 @@ pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optiona
 import aiohttp
 
 from tests.gateway.fixtures.local_recovery_probe import child_env, daemon, Model
-from tests.waiting import async_wait_until
+from tests.waiting import async_wait_until, wait_until
 
 
 def test_api_crash_queue_and_identified_result_retry(tmp_path):
@@ -24,18 +24,27 @@ def test_api_crash_queue_and_identified_result_retry(tmp_path):
     peer.requests = []
     peer.blocked, peer.release = threading.Event(), threading.Event()
     threading.Thread(target=peer.serve_forever, daemon=True).start()
-    with socket.socket() as sock:
-        sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
+
     base = f'http://127.0.0.1:{peer.server_port}/v1'
     cfg = {'model': {'provider': 'custom', 'default': 'local-wire-stub', 'base_url': base},
-           'gateway': {'platforms': {'api_server': {'enabled': True, 'port': port, 'host': '127.0.0.1'}}, 'multiplex_profiles': False},
+           'gateway': {'platforms': {'api_server': {'enabled': True, 'port': 0, 'host': '127.0.0.1'}}, 'multiplex_profiles': False},
            'auxiliary': {'title_generation': {'enabled': False}}, 'terminal': {'cwd': str(home)}}
     (home / 'config.yaml').write_text(json.dumps(cfg))
     env = {**child_env(), **{k: os.environ[k] for k in ('TIRITH_ENABLED',) if k in os.environ}}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
                OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=base, API_SERVER_KEY='ordinary-daemon-owned-secret',
-               API_SERVER_ENABLED='true', API_SERVER_PORT=str(port), PYTHONUNBUFFERED='1')
-    url = f'http://127.0.0.1:{port}/v1'
+               API_SERVER_ENABLED='true', API_SERVER_PORT='0', PYTHONUNBUFFERED='1')
+
+    api_log = home / 'logs/gateway.log'
+
+    def api_url(log_offset):
+        # Control-plane readiness does not identify the aiohttp listener. Bind in
+        # the child: bind/close in the parent leaves a port the next dashboard
+        # (or another test) can claim between crashes.
+        def listening():
+            text = api_log.read_bytes()[log_offset:].decode('utf-8', errors='replace')
+            return re.search(r'API server listening on (http://127\.0\.0\.1:[1-9][0-9]*) ', text)
+        return wait_until(listening, timeout=120, what='this daemon API listener').group(1) + '/v1'
     headers = {'Authorization': 'Bearer ordinary-daemon-owned-secret'}
     runs = {}
     pids, epochs = [], []
@@ -106,12 +115,15 @@ def test_api_crash_queue_and_identified_result_retry(tmp_path):
     try:
         with daemon(root, home, env, barrier=True, fixture='api_recovery_daemon.py') as (proc, desc):
             pids.append(proc.pid); epochs.append(desc['authority_epoch'])
+            url = api_url(0)
             asyncio.run(first())
             proc.kill(); proc.wait(timeout=10)
         peer.release.set()
         for _ in range(2):
+            log_offset = api_log.stat().st_size
             with daemon(root, home, env, barrier=False) as (proc, desc):
                 pids.append(proc.pid); epochs.append(desc['authority_epoch'])
+                url = api_url(log_offset)
                 asyncio.run(restarted())
                 proc.kill(); proc.wait(timeout=10)
         texts = [next((m.get('content', '') for m in reversed(req['messages']) if m['role'] == 'user'), '') for req in peer.requests]
