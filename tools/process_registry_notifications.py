@@ -387,6 +387,8 @@ def process_completion_display_text(events: list) -> str:
         outcome = "Finished" if exit_code == 0 else "Failed"
     cmd = _short_command(evt.get("command"))
     detail = f" (exit {exit_code})" if reason not in ("killed", *_REASON_STATUS) and exit_code != 0 else ""
+    if outcome == "Finished" and _masked_failure_note(evt):
+        outcome, detail = "Exited 0", " but Output Shows Failure"
     return f"Background Process {outcome}{detail}: {cmd}" if cmd else f"Background Process {outcome}{detail}"
 
 
@@ -472,7 +474,22 @@ def _delegation_attribution_line(evt: dict) -> str | None:
             + (f' Task: "{goal}"' if goal else ""))
 
 
-def _completion_status(evt: dict) -> str:
+def _masked_failure_note(evt: dict) -> str | None:
+    """Warning when a plain exit-0 completion's command/output show a masked failure (`; echo
+    EXIT=$?` printing EXIT=1, `| tail` over a traceback). Checked on the untrimmed output.
+    Advice only: the exit code is reported unchanged."""
+    if (evt.get("completion_reason") or "exited") != "exited" or evt.get("exit_code") != 0:
+        return None
+    output = evt.get("output")
+    if not isinstance(output, str) or not output:
+        return None
+    with suppress(Exception):
+        from tools.terminal_hints import annotate_masked_success
+        return annotate_masked_success(str(evt.get("command") or ""), output)
+    return None
+
+
+def _completion_status(evt: dict, masked_note: str | None = None) -> str:
     reason = evt.get("completion_reason") or "exited"
     if reason == "killed":
         if evt.get("kill_reason"):
@@ -480,6 +497,8 @@ def _completion_status(evt: dict) -> str:
         if evt.get("termination_source") == "core_update_pause":
             return "killed by the Hermes update"
         return f"terminated by {evt.get('termination_source') or 'Hermes'}"
+    if masked_note:
+        return "exited 0 but output shows failure"
     return _REASON_STATUS.get(reason) or ("completed normally" if evt.get("exit_code", "?") == 0 else "exited")
 
 
@@ -515,6 +534,9 @@ def format_process_notification(evt: dict) -> str | None:
         _exit = "?"
     _out = evt.get("output", "")
     _signal = ", SIGTERM" if _exit in {-15, 143, "-15", "143"} else ""
+    # Before any trim: a status line or failure shape may sit in the part cut below.
+    _masked = _masked_failure_note(evt)
+    _warning = f"Warning: {_masked}\n" if _masked else ""
     # A subagent-owned process's full output belongs in the child's transcript, not as
     # a raw wall in the parent — trim hard but keep enough tail to recognise failures.
     if _attribution and isinstance(_out, str) and len(_out) > 600:
@@ -527,5 +549,5 @@ def format_process_notification(evt: dict) -> str | None:
         _out = (f"...(first {evt['output_cut']} characters cut — process(action=\"log\", "
                 f"session_id=\"{_sid}\") has the full output)\n{_out}")
     return (
-        f"[IMPORTANT: Background process {_sid} {_completion_status(evt)} (exit code {_exit}{_signal}).\n"
-        f"{attribution}Command: {_cmd}\nOutput:\n{_out}]")
+        f"[IMPORTANT: Background process {_sid} {_completion_status(evt, _masked)} (exit code {_exit}{_signal}).\n"
+        f"{_warning}{attribution}Command: {_cmd}\nOutput:\n{_out}]")

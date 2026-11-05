@@ -215,3 +215,63 @@ class TestMaskedSuccess:
             )
             is None
         )
+
+
+class TestStatusEchoWrapper:
+    """`cmd; echo EXIT=$?` exits with echo's 0; the printed status is the real one."""
+
+    INCIDENT = ('hermes chat --resume 20261103_abc -q "review PR 818 at exact head" '
+                '> /tmp/review-818.log 2>&1; echo EXIT=$?')
+
+    def test_incident_command_flagged_with_status(self):
+        hint = annotate_masked_success(self.INCIDENT, "EXIT=1\n")
+        assert hint is not None
+        assert "status 1" in hint and "FAILED" in hint
+
+    def test_status_zero_not_flagged(self):
+        assert annotate_masked_success(self.INCIDENT, "EXIT=0\n") is None
+
+    def test_readonly_head_mentioning_status_not_flagged(self):
+        assert annotate_masked_success("grep EXIT= /tmp/review-818.log; echo EXIT=$?",
+                                       "EXIT=1\nEXIT=0\n") is None
+
+    def test_status_variants(self):
+        for cmd, out, n in [
+            ('make test; echo "exit=$?"', "lots\nexit=2\n", "2"),
+            ("./run.sh; printf 'rc=%s\\n' $?", "rc=1\n", "1"),
+            ('pytest -q; echo "exit code: $?"', "3 passed\nexit code: 3\n", "3"),
+            ("npm test\necho STATUS=$?", "STATUS=127\n", "127"),
+        ]:
+            hint = annotate_masked_success(cmd, out)
+            assert hint is not None, cmd
+            assert f"status {n}" in hint, (cmd, hint)
+
+    def test_status_line_beyond_head_window_still_flagged(self):
+        out = "x" * 9000 + "\nEXIT=1\n"
+        assert annotate_masked_success("make all; echo EXIT=$?", out) is not None
+
+    def test_status_text_without_echo_wrapper_not_flagged(self):
+        assert annotate_masked_success("cat notes.txt > /dev/null && ./x", "EXIT=1\n") is None
+        assert annotate_masked_success("./deploy.sh", "EXIT=1\n") is None
+        # echo not printing $? is not a status wrapper
+        assert annotate_masked_success("./deploy.sh; echo done", "EXIT=1\ndone\n") is None
+
+    def test_status_mid_line_not_flagged(self):
+        assert annotate_masked_success("./x; echo EXIT=$?",
+                                       "the job printed EXIT=1 earlier\nEXIT=0\n") is None
+
+    def test_last_status_line_wins(self):
+        # `a; echo rc=$?; b; echo rc=$?`: only the final printed status decides.
+        assert annotate_masked_success("a; echo rc=$?; b; echo rc=$?", "rc=1\nrc=0\n") is None
+        assert "status 4" in (annotate_masked_success("a; echo rc=$?; b; echo rc=$?",
+                                                      "rc=0\nrc=4\n") or "")
+
+    def test_trailing_true_with_failure_shape(self):
+        hint = annotate_masked_success("cargo build; true", "error: could not compile `x`\n")
+        assert hint is not None
+        assert annotate_masked_success("cargo build; true", "Finished release\n") is None
+
+    def test_existing_pipe_and_or_cases_unchanged(self):
+        out = "error: could not compile `x`\n"
+        assert "pipeline" in (annotate_masked_success("cargo build | tail -5", out) or "")
+        assert "`||` fallback" in (annotate_masked_success("cargo build || echo FAILED", out) or "")

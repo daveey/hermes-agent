@@ -104,7 +104,35 @@ _MASKING_SHAPES: list[tuple[re.Pattern[str], str]] = [
      "exit_code 0 here is the status of the `||` fallback (echo/true), NOT of the command before "
      "it — and the output contains failure indicators. Treat this run as FAILED until proven "
      "otherwise: re-run the command bare to get its real exit code."),
+    # `cmd; true` / `cmd; :` as the last statement: exit status is always 0.
+    (re.compile(r"(?:;|\n)\s*(?:true|:)\s*;?\s*$"),
+     "exit_code 0 here is the status of the trailing `; true`, NOT of the command before it — and "
+     "the output contains failure indicators. Treat this run as FAILED until proven otherwise: "
+     "re-run the command bare to get its real exit code."),
 ]
+
+# Status-echo wrapper: `cmd > log 2>&1; echo EXIT=$?` (or `printf 'rc=%s' $?`) as the LAST
+# statement makes the exit code echo's 0, while the wrapped command's real status is printed.
+# Incident agent-1e03ea6be2: a background `hermes chat -q ...; echo EXIT=$?` printed EXIT=1 and
+# the completion notice said "completed normally (exit code 0)".
+_STATUS_ECHO = re.compile(r"(?:;|\n)\s*(?:echo|printf)\b[^;&|\n]*\$\{?\?[^;&|\n]*;?\s*$")
+# A whole line that is a printed status: EXIT=1, exit=2, rc=1, exit code: 3, STATUS=127.
+_PRINTED_STATUS = re.compile(
+    r"(?im)^[ \t]*[\"']?(?:exit(?:[ _-]?(?:code|status))?|rc|status|ret(?:urn)?[ _-]?code)"
+    r"[ \t]*[=:][ \t]*(\d+)[ \t]*[\"']?[ \t]*$")
+
+
+def _status_echo_note(status: int) -> str:
+    return (f"exit_code 0 here is the status of the trailing `echo ...$?`, NOT of the command it "
+            f"wraps — that command printed status {status}. Treat this run as FAILED (status "
+            f"{status}); read its output/log for the cause before reporting success.")
+
+
+def _printed_nonzero_status(output: str) -> Optional[int]:
+    """The LAST printed status line in the output's tail (the echo runs last), if nonzero."""
+    found = _PRINTED_STATUS.findall(output[-_SCAN_CHARS:])
+    status = int(found[-1]) if found else 0
+    return status or None
 
 _READONLY_HEADS = frozenset({
     "grep", "rg", "ag", "find", "ls", "cat", "head", "tail", "jq", "awk",
@@ -139,9 +167,12 @@ def _first_token(command: str) -> str:
 def annotate_masked_success(command: str, output: str) -> Optional[str]:
     """Warning note when an exit-0 result likely masks a failure (caller gates on exit 0)."""
     cmd = command or ""
-    window = (output or "")[:_SCAN_CHARS]
-    if (not cmd or not window or _first_token(cmd) in _READONLY_HEADS
-            or not _FAILURE_SHAPES.search(window)):
+    if not cmd or not output or _first_token(cmd) in _READONLY_HEADS:
+        return None
+    if _STATUS_ECHO.search(cmd) and (status := _printed_nonzero_status(output)):
+        return _status_echo_note(status)
+    window = output[:_SCAN_CHARS]
+    if not _FAILURE_SHAPES.search(window):
         return None
     return next((note for rx, note in _MASKING_SHAPES if rx.search(cmd)), None)
 
