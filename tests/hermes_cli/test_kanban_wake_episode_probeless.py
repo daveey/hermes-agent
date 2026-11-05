@@ -2,6 +2,8 @@
 import json
 import time
 
+import pytest
+
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_wake_check as wc
@@ -96,3 +98,41 @@ def test_outside_probe_less_park_keeps_exit_reset_for_unobserved_episode(parked)
         assert state is not None and state["episode_first_at"] is None
     finally:
         home.close()
+
+
+def _peer_episode(peer, tid, now):
+    if peer.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0] != "running":
+        peer.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
+        assert kb.claim_task(peer, tid, claimer="peer") is not None
+    assert kb.schedule_task(peer, tid, reason="waiting", wake_check="exit 1")
+    state = wc.get_state(peer, tid)
+    wc.apply_result(peer, tid, state["cmd"], 1, "", generation=state["generation"], now=now)
+    return peer.execute("SELECT first_at, checks FROM task_wake_episodes WHERE task_id = ?", (tid,)).fetchone()
+
+
+@pytest.mark.parametrize("kind", ["scheduled", "continued"])
+def test_in_corridor_park_resets_undelivered_foreign_episode(kanban_home, kind):
+    with kbc.connect_closing() as conn:
+        tid = helpers._running(conn)
+        before = len(_kinds(conn, tid))
+        assert kb.schedule_task(conn, tid, reason=SOAK, clock_only=True)
+        assert [k for k in _kinds(conn, tid)[before:] if k != "commented"] == ["scheduled"]  # fresh entry
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+        peer = carry.replica(conn)
+        try:
+            t0 = int(time.time())
+            assert tuple(_peer_episode(peer, tid, t0)) == (t0, 1)  # never delivered to home
+            before = len(_kinds(conn, tid))
+            if kind == "scheduled":
+                assert kb.schedule_task(conn, tid, reason=SOAK, clock_only=True)
+            else:
+                kb._append_event(conn, tid, "continued", {"reason": "soak"})
+            added = [k for k in _kinds(conn, tid)[before:] if k != "commented"]
+            assert added == [episode.EVIDENCE_EVENT, kind]
+            carry.import_events(conn, peer, tid)
+            episode.reconcile(peer, tid)
+            t1 = t0 + 3600
+            assert tuple(_peer_episode(peer, tid, t1)) == (t1, 1)  # same probe: old age/count gone
+        finally:
+            peer.close()
