@@ -206,10 +206,16 @@ class TestPromptInjection:
         assert "8842" in prompt
         assert "watchlist" in prompt
 
-    def test_empty_notepad_prompt_byte_stable(self, cron_env, notepad):
+    def test_empty_notepad_prompt_byte_stable(self, cron_env, notepad, monkeypatch):
+        from datetime import UTC, datetime
+
         from cron.jobs import create_job
         from cron.scheduler import _build_job_prompt
 
+        # Compare notepad effects at the same run time: the prompt intentionally
+        # includes the current minute, which can change between builds on CI.
+        now = datetime(2026, 11, 5, 2, 41, 59, tzinfo=UTC)
+        monkeypatch.setattr("cron.scheduler_prompt._hermes_now", lambda: now)
         job = create_job(prompt="Check the feed", schedule="every 1h")
         baseline = _build_job_prompt(job)
 
