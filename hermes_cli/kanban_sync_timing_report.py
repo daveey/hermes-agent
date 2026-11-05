@@ -11,6 +11,10 @@ reported as their own invalid capture, never dropped) and measured distributions
   overlap, plus the overlap residual (latency minus the measured overlapping report time, the same interval's own
   measurement, not another route's median); a capture with no overlapping change has coverage ``none``;
 - failed/raised services, changes still unserviced at the stop marker (censored, never dropped);
+- due-report overlap and no-due-report-overlap cohorts separately from the compatibility total-report cohorts;
+  due means a recorded collect or send component, including failed/raised reports, never the result string or a
+  duration threshold. Overlap uses the full due report interval, not just its components; residuals subtract only
+  that interval's own measured overlap, not a counterfactual or a latency acceptance verdict;
 - full report durations (due and not-due cohorts), their components and send outcomes;
 - the diagnostic's own flush and hook overhead.
 """
@@ -102,7 +106,7 @@ def _overlap(a0: int, a1: int, spans: list[tuple[int, int]]) -> int:
     return sum(max(0, min(a1, s1) - max(a0, s0)) for s0, s1 in spans)
 
 
-def _served(cap: list[dict], report_spans, flush_spans) -> list[dict]:
+def _served(cap: list[dict], report_spans, flush_spans, due_report_spans=()) -> list[dict]:
     changes = {r["seq"]: r for r in cap if r.get("ev") == "chg"}
     done: set[int] = set()
     served = []
@@ -117,12 +121,17 @@ def _served(cap: list[dict], report_spans, flush_spans) -> list[dict]:
             served.append({"seq": seq, "b": svc["b"], "latency_ns": svc["t1"] - chg["t"],
                            "to_start_ns": svc["t0"] - chg["t"], "failed_attempts": svc.get("fails", 0),
                            "report_overlap_ns": _overlap(chg["t"], svc["t1"], report_spans),
+                           "due_report_overlap_ns": _overlap(chg["t"], svc["t1"], due_report_spans),
                            "flush_overlap_ns": _overlap(chg["t"], svc["t1"], flush_spans)})
     return served
 
 
+def _is_due(rep: dict) -> bool:
+    return "collect_t0" in rep or "send_t0" in rep
+
+
 def _reports(reps: list[dict]) -> dict:
-    due = [r for r in reps if "collect_t0" in r or "send_t0" in r]
+    due = [r for r in reps if _is_due(r)]
     parts = {name: _dist_ms([r[f"{name}_t1"] - r[f"{name}_t0"] for r in due if f"{name}_t0" in r])
              for name in ("collect", "limit", "cpu", "adv", "send")}
     return {"due": _dist_ms([r["t1"] - r["t0"] for r in due]),
@@ -151,18 +160,26 @@ def _measure(cap: list[dict], stop: dict) -> dict[str, Any]:
     start = cap[0]
     by = {ev: [r for r in cap if r.get("ev") == ev] for ev in ("rep", "flush", "svc", "pend", "chg", "wait")}
     report_spans = [(r["t0"], r["t1"]) for r in by["rep"]]
+    due_report_spans = [(r["t0"], r["t1"]) for r in by["rep"] if _is_due(r)]
     flush_spans = [(r["t0"], r["t1"]) for r in by["flush"]]
-    served = _served(cap, report_spans, flush_spans)
+    served = _served(cap, report_spans, flush_spans, due_report_spans)
     overlap = [s for s in served if s["report_overlap_ns"] > 0]
     plain = [s for s in served if s["report_overlap_ns"] == 0]
+    due_overlap = [s for s in served if s["due_report_overlap_ns"] > 0]
+    no_due_overlap = [s for s in served if s["due_report_overlap_ns"] == 0]
     local = [r["t1"] - r["l_t"] for r in by["svc"] if r.get("out") == "ok" and r.get("loop") and "l_t" in r]
     return {
         "duration_ms": (stop["t"] - start["t"]) / _NS_PER_MS if "t" in stop else None,
         "changes": len(by["chg"]), "served": served,
         "coverage": "overlap" if overlap else "none",
+        "due_report_coverage": "overlap" if due_overlap else "none",
         "cohorts": {"overlap": _dist_ms([s["latency_ns"] for s in overlap]),
                     "non_overlap": _dist_ms([s["latency_ns"] for s in plain]),
                     "overlap_residual_ms": _dist_ms([s["latency_ns"] - s["report_overlap_ns"] for s in overlap]),
+                    "due_report_overlap": _dist_ms([s["latency_ns"] for s in due_overlap]),
+                    "no_due_report_overlap": _dist_ms([s["latency_ns"] for s in no_due_overlap]),
+                    "due_report_overlap_residual_ms": _dist_ms(
+                        [s["latency_ns"] - s["due_report_overlap_ns"] for s in due_overlap]),
                     "all": _dist_ms([s["latency_ns"] for s in served])},
         "local_to_service": _dist_ms(local),
         "service_failures": sum(r.get("out") != "ok" for r in by["svc"]),
