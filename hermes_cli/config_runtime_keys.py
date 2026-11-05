@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 CORE_RUNTIME_KEYS: dict[str, str] = {
     "computer_use.backend": "plugins/computer_use/__init__.py configured_backend_name() (unset = cua)",
     "dashboard.kanban": "plugins/kanban/dashboard/plugin_api.py (bundled dashboard tab preferences)",
+    "kanban.sync.diagnostics.timing_until": "hermes_cli/kanban_sync_timing.py (installation root; finite Unix "
+                                            "time at most 600 s ahead arms one bounded sync timing capture)",
 }
 
 

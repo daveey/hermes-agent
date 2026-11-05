@@ -181,15 +181,21 @@ class Reporter:
         self.next_at = 0.0
 
     def _sample(self) -> dict:
+        from hermes_cli import kanban_sync_timing as timing
         from hermes_cli import machine_cpu_metrics as cpu
-        sample = dict((self.collect_fn or collect)())
-        state, _limit = (self.cpu_limit_fn or cpu.root_limit)()
+        with timing.span("collect"):
+            sample = dict((self.collect_fn or collect)())
+        with timing.span("limit"):
+            state, _limit = (self.cpu_limit_fn or cpu.root_limit)()
         if state == cpu.ON:  # only the gated hub pays the ~1 s measurement, taken last: right before sending
-            measured = (self.cpu_sample_fn or cpu.sample)()
+            with timing.span("cpu"):
+                measured = (self.cpu_sample_fn or cpu.sample)()
+            timing.note_cpu_sample(measured)
             if measured and all(k in measured for k in cpu.FIELDS):
                 sample.update({k: measured[k] for k in cpu.FIELDS})
                 try:
-                    record_hub_cpu_sample(measured)
+                    with timing.span("adv"):
+                        record_hub_cpu_sample(measured)
                 except OSError as exc:
                     _log.debug("hub CPU advisory sample not recorded: %s", exc)
         return sample
@@ -200,8 +206,11 @@ class Reporter:
             return False
         self.next_at = now + REPORT_EVERY_S
         try:
+            from hermes_cli import kanban_sync_timing as timing
             from hermes_cli.machine_drain_metrics import send_compatible
-            send_compatible(self.send, self._sample())
+            sample = self._sample()
+            with timing.span("send"):  # the whole send: the private bounded transport, its join and its timeout
+                send_compatible(self.send, sample)
             return True
         except Exception as exc:  # health: allow BLE001 -- load reporting must never stop kanban sync
             status = getattr(exc, "status", None)

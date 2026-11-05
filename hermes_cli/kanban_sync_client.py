@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_sync_timing as sync_timing  # off unless kanban.sync.diagnostics.timing_until arms it
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
 from hermes_cli.kanban_sync_client_attempt import note_attempt
 
@@ -1049,6 +1050,7 @@ def sync_all_once(hub: Optional[Hub] = None, *,
     publish_pickup_if_changed(hub)
     results = []
     for slug, path in board_paths() if boards is None else boards:
+        mark = sync_timing.board_start(slug, results)
         try:
             results.append(sync_board(slug, path, hub, ident.gateway))
         except SchemaAhead as exc:
@@ -1057,6 +1059,8 @@ def sync_all_once(hub: Optional[Hub] = None, *,
         except (HubError, OSError, Resync, sqlite3.Error, SyncUnavailable, SyncRoundBusy) as exc:
             _log.warning("kanban sync: round for %s failed (%s: %s)", slug, type(exc).__name__, exc)
             results.append(RoundResult(board=slug, mode="?", error=f"{type(exc).__name__}: {exc}"))
+        finally:
+            sync_timing.board_end(mark, results)
     return results
 
 
@@ -1110,7 +1114,7 @@ class FeedWatcher:
                         if kind in ("changes", "changed", "resync"):
                             self.frames += 1
                             if self.on_change is not None:
-                                self.on_change(self.board)
+                                sync_timing.decoded_change(self.board, self.on_change, kind)
                             self.wake.set()
             except Exception as exc:  # health: allow BLE001 -- any socket failure: back off and reconnect; polling covers the gap
                 if self.on_state is not None:
@@ -1438,6 +1442,8 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
     except BaseException as exc:
         runstate.record_down(f"kanban sync loop crashed: {type(exc).__name__}: {exc}")
         raise
+    finally:
+        sync_timing.stop()
 
 
 def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], runstate: Any) -> None:
@@ -1470,7 +1476,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
                                       on_state=work.feed_state)
                 watchers[slug] = threading.Thread(target=watcher.run, daemon=True, name=f"kanban-feed-{slug}")
                 watchers[slug].start()
-        selected = work.select(boards, time.monotonic(), outbox_pending)
+        selected = sync_timing.select(work.select, boards, time.monotonic(), outbox_pending)
         selected += [b for b in deferred_repairs_due(boards, _repair_clock()) if b not in selected]
         results = sync_all_once(hub, boards=selected)
         ahead = [r for r in results if (r.error or "").startswith("SchemaAhead")]
@@ -1487,12 +1493,12 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
         if time.monotonic() >= next_links:
             reconcile_links(boards, ident.gateway, skip_unchanged=True)
             next_links = time.monotonic() + LINKS_EVERY_S
-        metrics.report_due()
+        sync_timing.report(metrics.report_due)
         remaining = max(0.0, work.deadline - time.monotonic())
         deferred_due = next_deferred_repair(boards)
         if deferred_due is not None:
             remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
-        wait_for_work(wake, [p for _s, p in boards], remaining, keep_running)
+        sync_timing.wait(wait_for_work, wake, [p for _s, p in boards], remaining, keep_running)
     runstate.record_down("stopped (gateway stopping, or the host sync lease went to another gateway)")
 
 
