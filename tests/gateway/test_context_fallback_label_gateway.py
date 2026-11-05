@@ -91,6 +91,18 @@ async def test_context_marks_a_non_resident_sessions_defaulted_route():
     assert "Window: 128,000 tokens (fallback)" in result
 
 
+def test_extracted_route_resolver_marks_bedrocks_static_default(monkeypatch):
+    """The fork's extracted ``gateway.run_model_context`` resolver agrees with the resolver's own default
+    record: an unknown Bedrock model's static 128K is a default, a detected window is not."""
+    from gateway import run
+    from gateway.run_model_context import resolve_gateway_model_context
+    monkeypatch.setattr(run, "_load_gateway_config", dict)
+    route = {"provider": "bedrock", "base_url": RUNTIME_URL, "api_key": "aws-sdk"}
+    defaulted = resolve_gateway_model_context(UNKNOWN, route)
+    assert (defaulted.context_length, defaulted.context_source) == (128_000, "default")
+    assert run._resolve_gateway_model_context(UNKNOWN, route).context_source == "default"
+
+
 @pytest.mark.asyncio
 async def test_model_switch_does_not_show_a_discarded_pin(tmp_path, monkeypatch):
     """The configured model's 128K pin is dropped for the new route, so it must not label the new window."""

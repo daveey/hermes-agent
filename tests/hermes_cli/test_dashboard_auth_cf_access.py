@@ -70,6 +70,19 @@ def test_ws_ticket_works_with_access_session(gated):
     assert r.status_code == 200 and r.json()["ticket"]
 
 
+@pytest.mark.parametrize("site", ["same-site", "cross-site"])
+def test_access_session_write_from_another_page_is_refused(gated, site):
+    """Access rides the browser's CF_Authorization cookie: a write the browser marks as another
+    page's is refused like a cookie session's, while the same page's write and reads still work."""
+    headers = {cf_access.HEADER: _token(), "Sec-Fetch-Site": site}
+    r = gated.post("/api/auth/ws-ticket", headers=headers)
+    assert r.status_code == 403
+    assert r.json()["detail"] == "Cookie-authenticated writes must come from this dashboard's own page."
+    assert gated.get("/api/auth/me", headers=headers).status_code == 200
+    own = gated.post("/api/auth/ws-ticket", headers={cf_access.HEADER: _token(), "Sec-Fetch-Site": "same-origin"})
+    assert own.status_code == 200 and own.json()["ticket"]
+
+
 @pytest.mark.parametrize("kwargs", [
     {"aud": "some-other-app"},
     {"iss": "https://evil.cloudflareaccess.com"},

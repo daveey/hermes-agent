@@ -259,6 +259,10 @@ async def gated_auth_middleware(
                 nxt = request.query_params.get("next", "")
                 target = nxt if nxt and is_safe_next_path(nxt) else f"{prefix_from_request(request)}/"
                 return RedirectResponse(url=target, status_code=302)
+            # Access asserts the login from the browser's own CF_Authorization cookie, so a write
+            # the browser itself says another page made is refused here as for a cookie session.
+            if request.method not in _SAFE_METHODS and _browser_says_other_page(request):
+                return JSONResponse(status_code=403, content={"detail": _OTHER_PAGE_WRITE_DETAIL})
             request.state.session = cf_session
             return await call_next(request)
     # Login/callback routes have their own credentials/state checks. Logout is public so an
