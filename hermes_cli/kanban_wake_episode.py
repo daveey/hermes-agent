@@ -47,12 +47,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         BEGIN DELETE FROM task_wake_episode_exit WHERE task_id = NEW.id; END""")
     conn.execute("""CREATE TRIGGER IF NOT EXISTS task_wake_episode_exit_delete AFTER DELETE ON tasks
         BEGIN DELETE FROM task_wake_episode_exit WHERE task_id = OLD.id; END""")
-    # Fresh local creation: no episode can predate a task this home just created, so
-    # its first probe-less park has nothing to clear. Set only by the local ``created``
-    # event (sync-imported rows never append it); consumed by the first probe-less park.
+    # Fresh local triage creation: a triage card is not runnable, so no peer can have
+    # parked it on a probe before this home's direct triage -> scheduled park, which then
+    # has nothing to clear. Set only by the local ``created`` event of a triage card
+    # (sync-imported rows never append it; a runnable card may reach a peer and be parked
+    # there first). Any other status transition, a probe park, or the first probe-less
+    # park drops it.
     conn.execute("CREATE TABLE IF NOT EXISTS task_wake_episode_fresh (task_id TEXT PRIMARY KEY)")
     conn.execute("DROP TRIGGER IF EXISTS task_wake_episode_fresh_insert")
     conn.execute("DROP TRIGGER IF EXISTS task_wake_episode_fresh_entry")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS task_wake_episode_fresh_transition AFTER UPDATE OF status ON tasks
+        WHEN NOT (OLD.status = 'triage' AND NEW.status = 'scheduled')
+        BEGIN DELETE FROM task_wake_episode_fresh WHERE task_id = NEW.id; END""")
     conn.execute("""CREATE TRIGGER IF NOT EXISTS task_wake_episode_fresh_delete AFTER DELETE ON tasks
         BEGIN DELETE FROM task_wake_episode_fresh WHERE task_id = OLD.id; END""")
 
@@ -138,8 +144,10 @@ def snapshot_event(conn: sqlite3.Connection, task_id: str, kind: str,
     """
     status = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
     outside = status is not None and status[0] not in _CORRIDOR
-    if kind == "created":  # local creation only (triage too): sync imports never append it
+    if kind == "created" and status is not None and status[0] == "triage":  # local triage creation only
         conn.execute("INSERT OR IGNORE INTO task_wake_episode_fresh VALUES (?)", (task_id,))
+    if kind in {"scheduled", "continued"} and (payload or {}).get("wake_check"):
+        conn.execute("DELETE FROM task_wake_episode_fresh WHERE task_id = ?", (task_id,))  # probe park
     if not outside and kind not in _CARRY_EVENTS and not kind.startswith("wake_"):
         return payload, None
     if outside and conn.execute("SELECT 1 FROM task_wake_episode_exit WHERE task_id = ?", (task_id,)).fetchone() \
@@ -150,7 +158,7 @@ def snapshot_event(conn: sqlite3.Connection, task_id: str, kind: str,
         reconcile(conn, task_id)  # judge against every delivered park, then idempotent in _snapshot
         fresh = conn.execute("DELETE FROM task_wake_episode_fresh WHERE task_id = ?", (task_id,)).rowcount > 0
         if fresh and not _probe_known(conn, task_id):
-            # First park after local creation, no probe delivered: nothing to clear, so
+            # Direct park of a locally created triage card, no probe delivered: nothing to clear, so
             # no evidence (keeps atomic park event contracts). Every later park may
             # follow an undelivered foreign episode, so it carries the reset below.
             return payload, None

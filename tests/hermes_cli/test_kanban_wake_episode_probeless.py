@@ -33,12 +33,101 @@ def _episode(conn, tid):
     return conn.execute("SELECT cmd FROM task_wake_episodes WHERE task_id = ?", (tid,)).fetchone()
 
 
-def test_never_probed_park_adds_no_evidence(kanban_home):
+def test_first_park_of_created_runnable_card_carries_a_reset(kanban_home):
+    # A runnable card may reach a peer and be parked on a probe there before this home's
+    # first park, so local creation alone proves nothing: the first park carries a reset.
     with kbc.connect_closing() as conn:
         tid = helpers._running(conn)
         before = len(_kinds(conn, tid))
         assert kb.schedule_task(conn, tid, reason=SOAK, clock_only=True)
+        assert [k for k in _kinds(conn, tid)[before:] if k != "commented"] == [episode.EVIDENCE_EVENT, "scheduled"]
+
+
+def _triage(conn):
+    tid = kb.create_task(conn, title="t", assignee="worker", triage=True)
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == "triage"
+    return tid
+
+
+def test_direct_triage_park_of_local_triage_card_adds_no_evidence(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = _triage(conn)
+        before = len(_kinds(conn, tid))
+        assert kb.schedule_task(conn, tid, reason=SOAK, clock_only=True)
         assert [k for k in _kinds(conn, tid)[before:] if k != "commented"] == ["scheduled"]
+        assert _park(conn, tid, "scheduled") == [episode.EVIDENCE_EVENT, "scheduled"]  # marker consumed
+
+
+@pytest.mark.parametrize("route", [("todo", "ready"), ("blocked",)])
+def test_triage_card_leaving_triage_otherwise_is_not_fresh(kanban_home, route):
+    # Raw status writes, as a synced remote transition applies them.
+    with kbc.connect_closing() as conn:
+        tid = _triage(conn)
+        for status in route:
+            conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, tid))
+        assert _park(conn, tid, "scheduled") == [episode.EVIDENCE_EVENT, "scheduled"]
+
+
+@pytest.mark.parametrize("status", ["running", "ready"])
+def test_triage_card_entering_corridor_is_not_fresh_without_a_further_transition(kanban_home, status):
+    # One synced remote transition out of triage, then a park with no further status write.
+    with kbc.connect_closing() as conn:
+        tid = _triage(conn)
+        conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, tid))
+        before = len(_kinds(conn, tid))
+        kb._append_event(conn, tid, "continued", {"reason": "soak"})
+        assert _kinds(conn, tid)[before:] == [episode.EVIDENCE_EVENT, "continued"]
+
+
+def test_created_runnable_card_first_park_without_status_write_resets_foreign_episode(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="worker")  # no home status write before its park
+        assert conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0] in episode._CORRIDOR
+        peer = carry.replica(conn)
+        try:
+            t0 = int(time.time())
+            assert tuple(_peer_episode(peer, tid, t0)) == (t0, 1)  # foreign P, never delivered to home
+            before = len(_kinds(conn, tid))
+            kb._append_event(conn, tid, "continued", {"reason": "soak"})
+            assert _kinds(conn, tid)[before:] == [episode.EVIDENCE_EVENT, "continued"]
+            carry.import_events(conn, peer, tid)
+            episode.reconcile(peer, tid)
+            assert _episode(peer, tid) is None
+        finally:
+            peer.close()
+
+
+def test_probe_park_of_triage_card_drops_freshness(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = _triage(conn)
+        assert kb.schedule_task(conn, tid, reason="waiting", wake_check="exit 1")  # direct triage park, probe P
+        peer = carry.replica(conn)
+        try:
+            assert _park(peer, tid, "scheduled") == [episode.EVIDENCE_EVENT, "scheduled"]  # peer clears P
+            carry.import_events(peer, conn, tid)  # delivered; the peer's status write is still delayed
+            before = len(_kinds(conn, tid))
+            kb._append_event(conn, tid, "continued", {"reason": "soak"})
+            assert _kinds(conn, tid)[before:] == [episode.EVIDENCE_EVENT, "continued"]
+        finally:
+            peer.close()
+
+
+@pytest.mark.parametrize("kind", ["scheduled", "continued"])
+def test_first_home_park_resets_undelivered_foreign_episode_on_created_card(kanban_home, kind):
+    with kbc.connect_closing() as conn:
+        tid = helpers._running(conn)  # created here, runnable: the peer receives it
+        peer = carry.replica(conn)
+        try:
+            t0 = int(time.time())
+            assert tuple(_peer_episode(peer, tid, t0)) == (t0, 1)  # foreign P, never delivered to home
+            assert _park(conn, tid, kind) == [episode.EVIDENCE_EVENT, kind]  # home's first, no-probe park
+            carry.import_events(conn, peer, tid)
+            episode.reconcile(peer, tid)
+            assert _episode(peer, tid) is None
+            t1 = t0 + 3600
+            assert tuple(_peer_episode(peer, tid, t1)) == (t1, 1)  # same probe: old age/count gone
+        finally:
+            peer.close()
 
 
 def test_every_probe_less_repark_carries_a_reset(parked):
@@ -117,7 +206,7 @@ def test_in_corridor_park_resets_undelivered_foreign_episode(kanban_home, kind):
         tid = helpers._running(conn)
         before = len(_kinds(conn, tid))
         assert kb.schedule_task(conn, tid, reason=SOAK, clock_only=True)
-        assert [k for k in _kinds(conn, tid)[before:] if k != "commented"] == ["scheduled"]  # fresh entry
+        assert [k for k in _kinds(conn, tid)[before:] if k != "commented"] == [episode.EVIDENCE_EVENT, "scheduled"]
         conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
         assert kb.claim_task(conn, tid, claimer="worker") is not None
         peer = carry.replica(conn)
@@ -155,7 +244,7 @@ def _park(conn, tid, kind):
 def test_park_after_explicit_reset_resets_new_undelivered_foreign_episode(kanban_home, kind):
     with kbc.connect_closing() as conn:
         tid = helpers._running(conn)
-        assert _park(conn, tid, kind) == [kind]  # fresh local creation
+        assert _park(conn, tid, kind) == [episode.EVIDENCE_EVENT, kind]  # runnable card: never fresh
         peer = carry.replica(conn)
         try:
             t0 = int(time.time())
