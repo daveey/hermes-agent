@@ -13,8 +13,10 @@ import pytest
 from hermes_cli import kanban_scope_heartbeat as scope_hb
 from hermes_cli import kanban_session_activity as activity
 from tests.hermes_cli.test_kanban_remote_terminal_release import observed
-from tests.hermes_cli.test_kanban_replica_read_memo import card, hub, row_reads  # hub: the fixture
+from tests.hermes_cli import test_kanban_replica_read_memo as memo_helpers
+from tests.hermes_cli.test_kanban_replica_read_memo import card, row_reads
 
+hub = memo_helpers.hub
 WINDOW = scope_hb.SCOPE_HEARTBEAT_FLOOR_S
 
 
