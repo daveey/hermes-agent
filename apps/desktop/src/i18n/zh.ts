@@ -3333,6 +3333,7 @@ export const zhOverrides = {
     queueSend: '发送',
     queueDelete: '删除',
     queueLostNote: '重启期间该轮次已丢失',
+    queueUpdateNote: (started: string | undefined) => `正在等待 Hermes 更新${started ? `（开始于 ${started}）` : ''}，将自动发送`,
     restoreImageDraft: '恢复图片草稿',
     queueCancelFailed: '无法移除排队的轮次',
     queueLostDiscard: '丢弃',

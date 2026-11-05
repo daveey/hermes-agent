@@ -84,6 +84,7 @@ import {
   conflictingTranscriptIdentity,
   transcriptRowIds
 } from './pending-turn-identity'
+import { queuedProjectionMessage } from './queued-projection'
 import { reconcileOwnerApprovalMode } from './runtime-owner'
 import { publishSessionUsage } from './session-usage'
 
@@ -1224,11 +1225,7 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
   }
 
   if (queuedUser) {
-    projected.push({
-      id: `user-queued-${sessionId}`,
-      role: 'user',
-      parts: [textPart(queuedUser)]
-    })
+    projected.push(queuedProjectionMessage(sessionId, projection.queued!))
   }
 
   if (foldTarget) {

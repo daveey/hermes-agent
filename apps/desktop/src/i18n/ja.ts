@@ -2452,6 +2452,7 @@ export const jaOverrides = {
     queueSend: '送信',
     queueDelete: '削除',
     queueLostNote: '再起動中にターンが失われました',
+    queueUpdateNote: (started: string | undefined) => `Hermes の更新を待機中${started ? `（${started} 開始）` : ''}、自動的に送信されます`,
     restoreImageDraft: '画像の下書きを復元',
     queueCancelFailed: 'キュー内のターンを削除できませんでした',
     queueLostDiscard: '破棄',

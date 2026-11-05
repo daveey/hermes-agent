@@ -188,6 +188,13 @@ class TranscriptMessage(OpenModel):
     reasoning: str | None = None
 
 
+class QueuedReason(WireEnum):
+    """Why a queued prompt waits instead of running. ``core_update``: an idle send refused only by the
+    core-update admission hold (``prompt.submit`` reply, live-session ``queued`` snapshot)."""
+
+    core_update = "core_update"
+
+
 class SubagentStatus(WireEnum):
     """Lifecycle of one delegated child (``tools/delegate_tool_child_run.py``); ``failed`` /
     ``error`` / ``timeout`` / ``interrupted`` / ``completed`` are terminal."""

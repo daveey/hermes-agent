@@ -2871,8 +2871,12 @@ export interface PromptSubmitResult {
   turn_isolation?: boolean | null
   admission_id?: string | null
   forwarded?: boolean | null
+  queued_reason?: QueuedReason | null
+  queued_started_at?: number | null
 }
 export type PromptSubmitStatus = 'streaming' | 'queued' | 'steered' | 'redirected'
+/** Why a queued prompt waits instead of running. ``core_update``: an idle send refused only by the core-update admission hold (``prompt.submit`` reply, live-session ``queued`` snapshot). */
+export type QueuedReason = 'core_update'
 export interface PromptAdmitParams {
   profile: string
   stored_session_id: string
@@ -3359,8 +3363,11 @@ export interface SegmentStamp {
   offset: number
   end: number
 }
+/** The queued next-turn prompt; the reason fields mirror the ``prompt.submit`` reply that queued it. */
 export interface QueuedPrompt {
   user: string
+  queued_reason?: QueuedReason | null
+  queued_started_at?: number | null
 }
 /** One unanswered server→client request (``server_requests.Request.snapshot``); the reconnecting client re-delivers it to its request handlers. */
 export interface OpenRequestEntry {

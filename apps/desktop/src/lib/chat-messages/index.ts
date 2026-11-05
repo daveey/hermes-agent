@@ -30,6 +30,7 @@ export { admitStreamText, closingStreamRun, sameStreamSegment, type StreamSpan }
 export {
   concatPartsByToolCall,
   hasUnresolvedToolCall,
+  holdsUpdateHeldPromptIdle,
   isRedeliveredToolEvent,
   markQueuedPromptStarted,
   QUESTION_CARD_TOOLS,

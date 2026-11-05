@@ -41,6 +41,9 @@ export interface RemoveQueuedPromptOptions {
 export interface QueuedPromptEntry {
   id: string
   serverStatus?: string
+  queued_reason?: 'core_update'
+  /** Update start in Unix seconds, not the local enqueue time. */
+  queued_started_at?: number | null
   /** The queued-row verbs the owner serves for a server row (`steer`, `replace`); none from an
    *  owner that predates them. Projected from the pending snapshot, never set locally. */
   serverControls?: string[]

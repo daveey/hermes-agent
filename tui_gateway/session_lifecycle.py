@@ -817,8 +817,21 @@ def _ws_session_is_orphaned(session: dict | None) -> bool:
     return bool(_ws_session_is_detached(session) and not session.get("running"))
 
 
+def _cancel_background_review_on_stop(session: dict) -> None:
+    """Stop's reach into this session's background memory/skill review. The review fork is invisible to the
+    foreground gates (``running``/``_run_thread``): a user hitting Stop while only the post-turn review still
+    runs (the common case: the main turn already finished) would see "stopped" while the review keeps calling
+    the model. Fires for both compute-host and in-process sessions (on this process's agent); never raises."""
+    if (agent_for_review := session.get("agent")) is not None:
+        with contextlib.suppress(Exception):
+            from agent.background_review import cancel_background_review_for_live_turn
+            cancel_background_review_for_live_turn(
+                agent_for_review, message="session interrupted", tool_reason="session interrupted")
+
+
 def _interrupt_session_turn(
     sid: str, session: dict, *, request_id: str | None = None, orphan: bool = False, reason: str | None = None,
+    keep_update_held_queue: bool = False, outcome: dict | None = None,
 ) -> bool:
     """Apply the shared ``session.interrupt`` contract to one claimed session; returns whether the compute-host control
     channel was used. The WS orphan reaper reuses this so a dead client gets the same partial-history/queue semantics.
@@ -828,6 +841,16 @@ def _interrupt_session_turn(
     ``reason`` [daveey]: fixed slug for WHY the turn is stopped (``user_stop`` default, ``ws_orphan`` for the
     orphan reaper, ``backend_exit``, ``lease_takeover``, ``session_close``). A non-user reason reaches the agent as
     its ``tool_reason`` so the interrupted row and agent.log name the producer, not a bare user Stop.
+    ``keep_update_held_queue`` (the ``session.interrupt`` RPC for a plain Stop/Esc gesture): an IDLE user Stop
+    leaves a queue the core-update admission hold is holding (``_update_held_queue``) untouched, with no cancel
+    flag or queue-generation bump either; that message is the user's next turn, sent before the update, not
+    the run being stopped. A running turn, a non-user reason and any other caller clear the queue as before.
+    The keep is decided ONCE, under ``history_lock`` and before any compute-host I/O, and a kept Stop is a
+    no-op for the turn machinery: no child interrupt frame (the child would bump its own queue generation
+    while the parent's stays, so the drained turn would arrive stale and end as ``interrupted`` unseen).
+    ``outcome`` (optional, filled in place): ``kept_update_held_queue`` (that decision) and
+    ``stale_marker_key`` (an ``_active_turn_marker_key`` of an earlier turn, taken under the same lock when
+    kept), so a caller acts on this Stop's decision instead of re-reading state a drain may have changed since.
     """
     reason = reason or ("ws_orphan" if orphan else "user_stop")
     agent_tool_reason = None if reason == "user_stop" else reason.replace("_", " ")
@@ -837,17 +860,34 @@ def _interrupt_session_turn(
     # A manual compaction holds `running` with no run thread and its own finally releases it: Stop must not
     # abort it nor clear `running` under it, or the next submit is admitted idle and loses its reply (#133504).
     compressing = bool(session.get("_manual_compress_active"))
-    should_interrupt = bool(session.get("running")) and not compressing
-    run_thread_alive = False
-    if use_compute_host:
+    run_thread_alive = not use_compute_host and (rt := session.get("_run_thread")) is not None and rt.is_alive()
+    keep_queue, stale_marker_key = False, ""
+    if keep_update_held_queue and reason == "user_stop" and not orphan and not compressing:
+        with session["history_lock"]:
+            # Idle = no parent turn (a drain claims `running` under this lock), no in-process run thread and no
+            # compute-host turn in flight: `_compute_host_turn_id` lives from dispatch to its completion, even
+            # when the parent's `running` mirror lags. `_compute_host_active` is NOT activity: it outlives the
+            # previous turn. A turn admitted after this point started after the Stop, so it is not this Stop's.
+            keep_queue = (not session.get("running") and not run_thread_alive
+                          and not session.get("_compute_host_turn_id") and _update_held_queue(session))
+            if keep_queue:
+                stale_marker_key = str(session.pop("_active_turn_marker_key", "") or "")
+    if outcome is not None:
+        outcome.update(kept_update_held_queue=keep_queue, stale_marker_key=stale_marker_key)
+    should_interrupt = bool(session.get("running")) and not compressing and not keep_queue
+    if use_compute_host and not keep_queue:
         # The host owns the live turn (parent `running` can lag a blocked tool), so let it decide. Gate on
         # `_compute_host_active`: HostSupervisor.interrupt() calls start(), so a lazy session would spawn a child to interrupt.
         if should_interrupt or session.get("_compute_host_active"):
             # Only a non-default reason rides on the frame (the child defaults to user_stop).
             _get_compute_host_supervisor().interrupt(
                 sid, request_id=request_id, **({} if reason == "user_stop" else {"reason": reason}))
-    else:
-        run_thread_alive = (rt := session.get("_run_thread")) is not None and rt.is_alive()
+    if keep_queue:
+        # Nothing this Stop could stop is running: only the local post-turn background review is cancelled.
+        # A turn a drain admitted after the decision is not this Stop's (no running reset, no pending/approval deny).
+        logger.info("session.interrupt: idle Stop kept the update-held queued prompt for session %s", sid)
+        _cancel_background_review_on_stop(session)
+        return use_compute_host
     with session["history_lock"]:
         session["_turn_cancel_requested"] = True
         session["queued_prompt"] = None
@@ -880,16 +920,8 @@ def _interrupt_session_turn(
                     _clear_inflight_turn(session)
     # Sibling of the #102895 finalize-path fix above: an explicit /stop (or the WS-orphan reaper's
     # interrupt-at-grace) must also reach a background memory/skill review, not just the foreground
-    # turn. The review fork is invisible to `should_interrupt`/`run_thread_alive` above (both gated
-    # on the FOREGROUND turn's session["running"]/_run_thread) — a user hitting Stop while only the
-    # post-turn review is still running (the common case: the main turn already finished) would see
-    # "stopped" while the review keeps calling the model. Fires unconditionally (both compute-host
-    # and in-process turns) since the review is always local to this process.
-    if (agent_for_review := session.get("agent")) is not None:
-        with contextlib.suppress(Exception):
-            from agent.background_review import cancel_background_review_for_live_turn
-            cancel_background_review_for_live_turn(
-                agent_for_review, message="session interrupted", tool_reason="session interrupted")
+    # turn (``_cancel_background_review_on_stop``).
+    _cancel_background_review_on_stop(session)
     _clear_pending(sid)
     with contextlib.suppress(Exception):
         # Deny-resolve every pending approval so no agent thread blocks on the queue. The

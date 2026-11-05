@@ -3004,6 +3004,7 @@ export interface Translations extends NoticeTranslations {
     queueSteer: string
     queueDelete: string
     queueLostNote: string
+    queueUpdateNote: (started?: string) => string
     restoreImageDraft: string
     queueCancelFailed: string
     queueLostDiscard: string

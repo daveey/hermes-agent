@@ -550,7 +550,8 @@ export function toolEventOwnerMessageId(
     : toolCallOwnerMessageId(messages, payload, phase, turnAnchorId)
 }
 
-const isQueuedPromptRow = (message: ChatMessage) => message.role === 'user' && message.id.startsWith('user-queued-')
+const isQueuedPromptRow = (message: ChatMessage) => message.role === 'user' &&
+  (message.id.startsWith('user-queued-') || message.queued_reason === 'core_update')
 
 /**
  * True while a projected queued prompt still waits for a later turn.
@@ -567,15 +568,32 @@ export function queuedPromptAwaitsNextTurn(messages: ChatMessage[]): boolean {
   return Boolean(queued && !queued.queuedTurnStarted)
 }
 
-/** Record that the queued prompt's turn has started (on `message.start`). */
+const awaitsUpdate = (message: ChatMessage) =>
+  message.role === 'user' && message.queued_reason === 'core_update' && !message.queuedTurnStarted
+
+/** Record that the queued prompt's turn has started (on `message.start`).
+ *  The owner merges every update-held send into one turn (`A\n\nB`), so that
+ *  start begins all of them, not just the newest row. */
 export function markQueuedPromptStarted(messages: ChatMessage[]): ChatMessage[] {
   const queuedIndex = messages.findLastIndex(isQueuedPromptRow)
 
-  if (queuedIndex < 0 || messages[queuedIndex].queuedTurnStarted) {
+  if (queuedIndex < 0 || (messages[queuedIndex].queuedTurnStarted && !messages.some(awaitsUpdate))) {
     return messages
   }
 
-  return messages.map((message, index) => (index === queuedIndex ? { ...message, queuedTurnStarted: true } : message))
+  return messages.map((message, index) =>
+    index === queuedIndex || awaitsUpdate(message) ? { ...message, queuedTurnStarted: true } : message
+  )
+}
+
+/** An idle session whose prompt the owner holds until a core update ends: no turn is
+ *  running, so Stop has nothing to cancel and must not latch away the held turn's stream. */
+export function holdsUpdateHeldPromptIdle(
+  state: { awaitingResponse: boolean; busy: boolean; messages: ChatMessage[]; streamId: null | string; turnLive: boolean },
+  queuedHeld = false
+): boolean {
+  return !state.busy && !state.awaitingResponse && !state.turnLive && !state.streamId &&
+    (queuedHeld || state.messages.some(awaitsUpdate))
 }
 
 /**

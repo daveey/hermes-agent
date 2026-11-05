@@ -69,6 +69,8 @@ export type ChatMessage = {
    *  `message.start` arrived after it was drawn. It is now that turn's user
    *  row, not a prompt still waiting for a later turn. */
   queuedTurnStarted?: boolean
+  queued_reason?: 'core_update'
+  queued_started_at?: number | null
   /** Locally recovered output not yet represented by a durable completed reply. */
   recovered?: boolean
   /** Whether hydration reached a final assistant source row, rather than a tool round. */

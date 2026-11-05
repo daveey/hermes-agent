@@ -17,6 +17,7 @@ import { MessageTimelineTimestamp } from '@/components/assistant-ui/thread/timel
 import { type RestoreMessageTarget } from '@/components/assistant-ui/thread/types'
 import { useMessageReactions } from '@/components/assistant-ui/thread/use-message-reactions'
 import { UserMessageText } from '@/components/assistant-ui/thread/user-message-text'
+import { UpdateHeldNote } from '@/components/chat/update-held-note'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
@@ -456,6 +457,13 @@ function useUserBubbleClamp(readOnly: boolean, touch: boolean) {
   return { bodyClamped, clampActive, clampInnerRef, expanded, setExpanded }
 }
 
+function UserMessageUpdateHold() {
+  const updateHeld = useAuiState(s => s.message.metadata.custom?.queued_reason === 'core_update')
+  const updateStartedAt = useAuiState(s => s.message.metadata.custom?.queued_started_at)
+
+  return updateHeld ? <div className="text-xs text-muted-foreground"><UpdateHeldNote startedAt={updateStartedAt} /></div> : null
+}
+
 export const UserMessage: FC<{
   onCancel?: () => Promise<void> | void
   onRequestRestoreConfirm?: (messageId: string, target: RestoreMessageTarget) => void
@@ -590,6 +598,7 @@ export const UserMessage: FC<{
         }
         messageId={messageId}
       >
+        <UserMessageUpdateHold />
         <ActionBarPrimitive.Root className="relative w-full max-w-full" data-slot="aui_user-bubble-actions">
           <div className="human-message-with-todos-wrapper flex w-full flex-col gap-0">
             <ReactionPicker

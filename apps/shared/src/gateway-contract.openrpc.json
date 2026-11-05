@@ -33617,6 +33617,29 @@
             ],
             "default": null,
             "title": "Forwarded"
+          },
+          "queued_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QueuedReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "queued_started_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Queued Started At"
           }
         },
         "title": "PromptSubmitResult",
@@ -33876,10 +33899,34 @@
       },
       "QueuedPrompt": {
         "additionalProperties": false,
+        "description": "The queued next-turn prompt; the reason fields mirror the ``prompt.submit`` reply that queued it.",
         "properties": {
           "user": {
             "title": "User",
             "type": "string"
+          },
+          "queued_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QueuedReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "queued_started_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Queued Started At"
           }
         },
         "required": [
@@ -33887,6 +33934,14 @@
         ],
         "title": "QueuedPrompt",
         "type": "object"
+      },
+      "QueuedReason": {
+        "description": "Why a queued prompt waits instead of running. ``core_update``: an idle send refused only by the\ncore-update admission hold (``prompt.submit`` reply, live-session ``queued`` snapshot).",
+        "enum": [
+          "core_update"
+        ],
+        "title": "QueuedReason",
+        "type": "string"
       },
       "ReactionAuthor": {
         "enum": [

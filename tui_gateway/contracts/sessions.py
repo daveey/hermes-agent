@@ -10,8 +10,8 @@ from typing import Literal
 from pydantic import Field
 
 from .base import JsonValue, Params, Result, WireEnum
-from .common import (OpenModel, PendingApproval, ProfileParams, SessionLiveInfo, SessionParams, TranscriptMessage,
-                     Usage)
+from .common import (OpenModel, PendingApproval, ProfileParams, QueuedReason, SessionLiveInfo, SessionParams,
+                     TranscriptMessage, Usage)
 from .connectors_operation import ConnectionRequestPayload
 from .registry import method
 
@@ -104,7 +104,11 @@ class InflightTurn(Result):
 
 
 class QueuedPrompt(Result):
+    """The queued next-turn prompt; the reason fields mirror the ``prompt.submit`` reply that queued it."""
+
     user: str
+    queued_reason: QueuedReason | None = None
+    queued_started_at: float | None = None
 
 
 class TodoState(Result):

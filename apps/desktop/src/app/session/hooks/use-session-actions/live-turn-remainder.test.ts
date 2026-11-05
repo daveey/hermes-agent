@@ -109,7 +109,7 @@ it('pairs only the queue projection, preserving equal corrections and different 
   const projection: Pick<SessionResumeResult, 'inflight' | 'queued' | 'session_id'> = {
     session_id: 'runtime',
     inflight: { user: prompt, assistant: '', corrections: [correction], correction_offsets: [0], streaming: true },
-    queued: { user: correction }
+    queued: { user: correction, queued_reason: 'core_update', queued_started_at: 1234 }
   }
 
   const reconcile = (previous: ChatMessage[]) =>
@@ -138,6 +138,7 @@ it('pairs only the queue projection, preserving equal corrections and different 
       chatMessageText(oldQueue)
     ])
     expect(current.filter(row => row.id === 'user-queued-runtime')).toHaveLength(1)
+    expect(current.find(row => row.id === 'user-queued-runtime')).toMatchObject({ queued_reason: 'core_update', queued_started_at: 1234 })
     expect(current).toContainEqual(unrelatedUser)
     expect(current).toContainEqual(oldQueue)
     expect(current).toContainEqual(response)

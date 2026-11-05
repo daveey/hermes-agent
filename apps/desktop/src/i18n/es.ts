@@ -3929,6 +3929,7 @@ export const esOverrides = {
     queueResume: 'Reanudar',
     queueResumeTip: 'La cola se pausó al detener; reanuda el envío de los turnos en cola',
     queueLostNote: 'Turno perdido durante el reinicio',
+    queueUpdateNote: (started: string | undefined) => `Esperando una actualización de Hermes${started ? ` (iniciada a las ${started})` : ''}, se enviará automáticamente`,
     restoreImageDraft: 'Restaurar borrador con imagen',
     queueCancelFailed: 'No se pudo quitar el turno en cola',
     queueLostDiscard: 'Descartar',

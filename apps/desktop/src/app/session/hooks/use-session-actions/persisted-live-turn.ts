@@ -5,6 +5,7 @@ import { parseErrorSurface } from '@/lib/error-surface'
 import type { SessionMessage, SessionResumeResult } from '@/types/hermes'
 
 import { mergeLiveAssistantRun } from './live-turn-remainder'
+import { queuedProjectionMessage } from './queued-projection'
 import { reconcileDurableHistory } from './utils'
 
 const rowId = (row: SessionMessage) => row.row_id ?? row.id
@@ -315,14 +316,14 @@ export function reconcilePersistedLiveTurn(
       (message, index) => index >= turnStart && message.role === 'user' && message.id === id
     )
 
-    const parts = [textPart(projection.queued.user)]
+    const queuedMessage = queuedProjectionMessage(projection.session_id, projection.queued)
 
     // The anchored turn has one next-turn queue slot. Refresh its projection
     // in place; equal correction/optimistic user text is a different occurrence.
     if (queuedIndex >= 0) {
-      result[queuedIndex] = { ...result[queuedIndex], parts }
+      result[queuedIndex] = { ...result[queuedIndex], ...queuedMessage }
     } else {
-      result.push({ id, role: 'user', parts })
+      result.push(queuedMessage)
     }
   }
 

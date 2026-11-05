@@ -68,6 +68,19 @@ def is_held(root):
     return True
 
 
+def hold_started_at(root):
+    """When the current hold was set (Unix seconds), from the hold marker itself; None when unknown.
+
+    ``set_hold`` creates the marker with O_CREAT and never rewrites it, so its mtime is the hold's start
+    (a re-set while held keeps the original). ``lstat``: a dangling symlink is a hold too. Unreadable,
+    absent (lifted since the caller's check) or a non-positive time = None; never raises."""
+    try:
+        started = (Path(root) / "holds" / "hermes-sync").lstat().st_mtime
+    except OSError:
+        return None
+    return started if started > 0 else None
+
+
 class Reservation:
     """An independently locked file, automatically unlocked on process exit."""
     def __init__(self, fd, path):

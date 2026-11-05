@@ -21,9 +21,11 @@ import {
   chatMessageText,
   finalizeInterruptedMessages,
   hasUnresolvedToolCall,
+  holdsUpdateHeldPromptIdle,
   textPart
 } from '@/lib/chat-messages'
 import { interruptParams } from '@/lib/stop-origin'
+import type { QueuedPromptEntry } from '@/store/composer-queue'
 import type { ConfirmRequest } from '@/store/confirm'
 
 import {
@@ -471,6 +473,18 @@ export function finalizeStoppedMessages(
   )
 
   return finalizeUserInterruptedMessages(flagged, streamId, occurredAt)
+}
+
+/** Stop's `interrupted` latch. An idle session whose prompt the owner holds for a core
+ *  update has no turn to cancel (the owner's Stop is a no-op there), so Stop must not latch
+ *  and drop the held turn's later stream; every other Stop latches as before. */
+export function stopLatchesInterrupt(
+  state: ClientSessionState,
+  queued: ReadonlyArray<Pick<QueuedPromptEntry, 'queued_reason' | 'serverStatus'>>
+): boolean {
+  const queuedHeld = queued.some(entry => entry.serverStatus === 'queued' && entry.queued_reason === 'core_update')
+
+  return state.interrupted || !holdsUpdateHeldPromptIdle(state, queuedHeld)
 }
 
 /**

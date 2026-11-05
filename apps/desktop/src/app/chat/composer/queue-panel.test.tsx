@@ -33,6 +33,16 @@ function renderPanel(entries: QueuedPromptEntry[], onDiscardLost?: (id: string) 
 
 afterEach(cleanup)
 
+it.each([true, false])('shows update-held reason without expanding (known start: %s)', async known => {
+  const started = new Date(2026, 10, 5, 9, 7).getTime() / 1000
+  renderPanel([{ ...entry('held', 'after update'), serverStatus: 'queued',
+    queued_reason: 'core_update', queued_started_at: known ? started : null } as QueuedPromptEntry])
+  expect(await screen.findByText(known
+    ? 'Waiting for a Hermes update (started 09:07), sends automatically'
+    : 'Waiting for a Hermes update, sends automatically')).toBeTruthy()
+  expect(screen.queryByRole('button', { name: 'Send now' })).toBeNull()
+})
+
 // The panel's StatusSection starts collapsed; tests read the entries, so open it.
 async function renderExpandedPanel(entries: QueuedPromptEntry[]) {
   const view = renderPanel(entries)

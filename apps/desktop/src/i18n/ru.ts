@@ -2718,6 +2718,7 @@ export const ruOverrides = {
     queueSend: 'Отправить',
     queueDelete: 'Удалить',
     queueLostNote: 'Ход потерян при перезапуске',
+    queueUpdateNote: (started: string | undefined) => `Ожидание обновления Hermes${started ? ` (начато в ${started})` : ''}, отправится автоматически`,
     restoreImageDraft: 'Восстановить черновик с изображением',
     queueCancelFailed: 'Не удалось удалить ход из очереди',
     queueLostDiscard: 'Отбросить',

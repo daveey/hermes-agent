@@ -3505,6 +3505,7 @@ export const en: Translations = {
     queueSend: 'Send',
     queueDelete: 'Delete',
     queueLostNote: 'Turn lost during restart',
+    queueUpdateNote: started => `Waiting for a Hermes update${started ? ` (started ${started})` : ''}, sends automatically`,
     restoreImageDraft: 'Restore image draft',
     queueCancelFailed: "Couldn't remove the queued turn",
     queueLostDiscard: 'Discard',

@@ -882,6 +882,8 @@ export interface SessionResumeResult {
   }
   queued?: null | {
     user?: string
+    queued_reason?: 'core_update' | null
+    queued_started_at?: number | null
   }
   // The oldest gateway approval still waiting for a response. This is returned
   // on resume so a reconnect can restore a prompt whose original event was

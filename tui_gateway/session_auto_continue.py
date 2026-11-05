@@ -20,6 +20,11 @@ _AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT = 15
 # [daveey] Waits before each replay of a turn refused for a retryable reason (a stale ownership lease during a core
 # update, a rate limit). One per attempt; ``desktop.auto_continue.max_attempts`` can only lower the count.
 _REFUSED_RETRY_DELAYS_S = (45.0, 180.0)
+# A queued envelope accepted behind the core-update admission hold carries why it waits and since when
+# (``_queue_submit_behind_update_hold``); the same keys go out on the prompt.submit reply and the snapshot.
+QUEUED_REASON_KEY = "queued_reason"
+QUEUED_STARTED_AT_KEY = "queued_started_at"
+UPDATE_HOLD_QUEUED_REASON = "core_update"
 
 
 def _resume_reuse_live_locked(ctx, sid: str, session: dict) -> dict:
@@ -667,10 +672,15 @@ def _queue_submit_behind_update_hold(rid, sid: str, session: dict, text: Any, tr
     lose it), and ``retry_queued_prompt`` re-enters admission until the hold lifts. Returns the
     ``{"status": "queued"}`` reply, or None when the refusal was not the hold (a retiring backend keeps its
     5035: the client is replacing this process) or the session is no longer idle (caller retries)."""
-    from hermes_cli.backend_retirement import retirement
+    from hermes_cli.backend_retirement import last_refusal, retirement, update_hold_started_at
+    # Only a refusal by the update hold itself is labelled: a briefly busy or unreadable fence queues as
+    # before (the retry admits it within a tick) but is not "waiting for an update". Read before any other
+    # reservation in this context can overwrite the reason.
+    held_by_update = last_refusal() == "held"
     if not retirement.acquire():
         return None
     retirement.release()
+    hold_started = update_hold_started_at(session.get("profile_home") or None) if held_by_update else None
     from tui_gateway.admission_retry import retry_queued_prompt
     with session["history_lock"]:
         if session.get("running") or session.get("_closing") or session.get("_finalized"):
@@ -679,6 +689,12 @@ def _queue_submit_behind_update_hold(rid, sid: str, session: dict, text: Any, tr
         if image_paths:
             session["attached_images"] = []
         envelope = _enqueue_prompt(session, text, transport, image_paths=image_paths, turn_author=turn_author)
+        if envelope is not None and held_by_update:
+            # On the envelope (a merge lands in the head, which then carries it): the live-session snapshot
+            # and an idle Stop (``_interrupt_session_turn``) read it from there.
+            envelope[QUEUED_REASON_KEY] = UPDATE_HOLD_QUEUED_REASON
+            if hold_started is not None or not envelope.get(QUEUED_STARTED_AT_KEY):
+                envelope[QUEUED_STARTED_AT_KEY] = hold_started
         if envelope is not None:
             _persist_queued_user_row(session, envelope, display_kind)
         session["last_active"] = time.time()
@@ -692,8 +708,21 @@ def _queue_submit_behind_update_hold(rid, sid: str, session: dict, text: Any, tr
         if not retry_queued_prompt(rid, sid, session) and session.get("queued_prompt"):
             # Retirement raced in between: the queue is the client's to replay; keep the 5035.
             logger.info("update-hold queue for session %s: retry unavailable, kept queued", sid)
-    logger.info("prompt.submit for session %s queued behind the core-update admission hold", sid)
-    return _ok(rid, {"status": "queued"})
+        reply: dict = {"status": "queued"}
+        if held_by_update:
+            head = envelope if envelope is not None else session.get("queued_prompt")
+            started = head.get(QUEUED_STARTED_AT_KEY) if isinstance(head, dict) else hold_started
+            reply.update(queued_reason=UPDATE_HOLD_QUEUED_REASON, queued_started_at=started)
+    logger.info("prompt.submit for session %s queued behind the core-update admission hold (refusal=%s)",
+                sid, "held" if held_by_update else "other")
+    return _ok(rid, reply)
+
+
+def _update_held_queue(session: dict) -> bool:
+    """Caller holds history_lock. True when any queued envelope waits on the core-update admission hold."""
+    head = session.get("queued_prompt")
+    return any(isinstance(e, dict) and e.get(QUEUED_REASON_KEY) == UPDATE_HOLD_QUEUED_REASON
+               for e in ([head] if head else []) + list(session.get("queued_prompts") or []))
 
 
 def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
@@ -861,7 +890,13 @@ def _queued_prompt_snapshot(session: dict) -> dict | None:
     reconnect while it is still queued)."""
     queued = session.get("queued_prompt")
     user = _inflight_text(queued.get("text")) if isinstance(queued, dict) else ""
-    return {"user": user} if user else None
+    if not user or not isinstance(queued, dict):
+        return None
+    snapshot: dict = {"user": user}
+    if queued.get(QUEUED_REASON_KEY) == UPDATE_HOLD_QUEUED_REASON:
+        # A reconnecting client re-renders "waiting for an update" (and since when) instead of a bare queue.
+        snapshot.update(queued_reason=UPDATE_HOLD_QUEUED_REASON, queued_started_at=queued.get(QUEUED_STARTED_AT_KEY))
+    return snapshot
 
 
 def register(server) -> None:

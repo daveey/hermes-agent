@@ -61,8 +61,9 @@ const labels = (row: ReturnType<typeof within>) =>
     .map((button: HTMLElement) => button.getAttribute('aria-label'))
     .filter(Boolean)
 
-it('Delete on a server-queued card cancels its admission at the authority', async () => {
-  reconcilePendingSubmissions('stored', [{ admission_id: 'adm-1', status: 'queued', user: 'later please' }])
+it.each([false, true])('Delete cancels a server-queued card at the authority (update-held: %s)', async held => {
+  reconcilePendingSubmissions('stored', [{ admission_id: 'adm-1', status: 'queued', user: 'later please',
+    ...(held ? { queued_reason: 'core_update', queued_started_at: null } : {}) }])
   const request = vi.fn(async () => ({ admission_id: 'adm-1', status: 'terminal', outcome: 'cancelled' }))
   renderSlot(request)
 

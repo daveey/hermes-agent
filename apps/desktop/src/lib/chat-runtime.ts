@@ -429,6 +429,11 @@ export function messageCreatedAt(message: Pick<ChatMessage, 'timestamp'>, nowMs 
 const staleNoticeMeta = (message: ChatMessage): { staleNotice?: true } =>
   message.staleNotice ? { staleNotice: true } : {}
 
+const queuedMessageMeta = (message: ChatMessage) => ({
+  queued_reason: message.queuedTurnStarted ? null : (message.queued_reason ?? null),
+  queued_started_at: message.queued_started_at
+})
+
 export function toRuntimeMessage(message: ChatMessage): ThreadMessage {
   const role =
     message.role === 'user' || message.role === 'assistant' || message.role === 'system' ? message.role : 'assistant'
@@ -454,7 +459,8 @@ export function toRuntimeMessage(message: ChatMessage): ThreadMessage {
       content: message.parts.filter((part): part is Extract<ChatMessagePart, { type: 'text' }> => part.type === 'text'),
       attachments: [],
       createdAt,
-      metadata: { custom: { attachmentRefs: message.attachmentRefs ?? [], ...reactionMeta, ...timelineMeta } }
+      metadata: { custom: { attachmentRefs: message.attachmentRefs ?? [], ...reactionMeta, ...timelineMeta,
+        ...queuedMessageMeta(message) } }
     } as ThreadMessage
   }
 

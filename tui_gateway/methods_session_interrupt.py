@@ -69,6 +69,13 @@ def _stop_origin(params: dict) -> str | None:
     return _STOP_ORIGIN_UNSAFE.sub("_", raw.strip())[:_STOP_ORIGIN_MAX] or None
 
 
+# Plain Stop gestures (desktop ``lib/stop-origin.ts``; None = a client that sends no origin, e.g. the TUI's Esc).
+# Only these leave an idle session's update-held queue in place (``_interrupt_session_turn``): ``delete`` is the
+# chat's explicit deletion, ``rewind``/``send_now`` interrupt as part of another operation, and a plugin's Stop
+# keeps the ordinary clear.
+_HELD_QUEUE_KEEPING_ORIGINS = frozenset({None, "stop_button", "esc", "tile", "tile:esc", "slash", "transcript"})
+
+
 def _note_stop_issuer(sid: str, session: dict, transport, origin: str | None = None) -> None:
     """Remember who stopped the running turn (and with which gesture) and log it; an idle session queues
     nothing. A Stop without an origin clears an earlier one, so a gesture never labels a later Stop."""
@@ -132,7 +139,8 @@ def _note_user_input(session: dict) -> None:
             session["_turn_user_input"] = True
 
 
-def _recover_unreachable_compute_host_turn(sid: str, session: dict, inflight_at_interrupt) -> None:
+def _recover_unreachable_compute_host_turn(sid: str, session: dict, inflight_at_interrupt,
+                                           kept_update_held_queue: bool = False) -> None:
     """Stop on a compute host that is gone (broken pipe, respawn exhausted, #82603).
 
     The failed dial raised before ``_interrupt_session_turn`` purged the queue, and no ``turn.end`` will ever
@@ -146,10 +154,13 @@ def _recover_unreachable_compute_host_turn(sid: str, session: dict, inflight_at_
         logger.warning("session.interrupt: compute-host pending-turn probe failed for %s: %s", sid, exc)
         pending = True
     with session["history_lock"]:
-        session["_turn_cancel_requested"] = True
-        session["queued_prompt"] = None
-        session.pop("queued_prompts", None)
-        session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
+        # A Stop the helper already decided keeps the update-held queue (``outcome``; a kept Stop sends no
+        # interrupt frame, so only a later step can have raised) leaves it: there was no turn to recover.
+        if not kept_update_held_queue:
+            session["_turn_cancel_requested"] = True
+            session["queued_prompt"] = None
+            session.pop("queued_prompts", None)
+            session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
         inflight_now = session.get("inflight_turn")
         if not pending and session.get("running") and inflight_now is not None and inflight_now is inflight_at_interrupt:
             session["running"] = False
@@ -176,21 +187,36 @@ def _(rid, params: dict) -> dict:
                     resume_wake = False
                     return _ok(rid, {"status": "not_interrupted", "interrupted": False})
         sid = str(params.get("session_id") or "")
+        origin = _stop_origin(params)
+        keep_held = origin in _HELD_QUEUE_KEEPING_ORIGINS
         _note_user_input(session)
-        _note_stop_issuer(sid, session, current_transport(), _stop_origin(params))
+        _note_stop_issuer(sid, session, current_transport(), origin)
         if _session_uses_compute_host(session):
             with session["history_lock"]:
                 inflight_at_interrupt = session.get("inflight_turn")
+            outcome: dict = {}
             try:
-                _interrupt_session_turn(sid, session, request_id=f"interrupt-{rid}")
+                _interrupt_session_turn(sid, session, request_id=f"interrupt-{rid}", keep_update_held_queue=keep_held,
+                                        outcome=outcome)
             except Exception as exc:  # health: allow BLE001 -- the bridge raises transport-specific errors unknown here; logged, and Stop recovers the session instead of failing
                 logger.warning("session.interrupt: compute-host interrupt failed for %s: %s", sid, exc)
-                _recover_unreachable_compute_host_turn(sid, session, inflight_at_interrupt)
+                _recover_unreachable_compute_host_turn(sid, session, inflight_at_interrupt,
+                                                       bool(outcome.get("kept_update_held_queue")))
             return _ok(rid, {"status": "interrupted", "turn_isolation": True})
         # No agent wait: a turn parked on the deferred build already honors _turn_cancel_requested. Waiting here
         # failed Stop with 5032 once the build failed or outlived 30s (and started a build for a lazy session), so
         # the Desktop, which interrupts before session.close, could not delete such a session (#133262).
-        _interrupt_session_turn(sid, session)
+        outcome = {}
+        _interrupt_session_turn(sid, session, keep_update_held_queue=keep_held, outcome=outcome)
+        if outcome.get("kept_update_held_queue"):
+            # Decided with the keep, under the same lock (never re-read here: the hold can lift and a drain start
+            # the kept turn, with its own marker and key, after the helper returned). The kept queue's durable
+            # replay is the session_key marker (reason update_hold_queue): the next backend must still send it
+            # after the update, so only an earlier turn's stale key is cleared.
+            stale_key = str(outcome.get("stale_marker_key") or "")
+            if stale_key and stale_key != str(session.get("session_key") or ""):
+                clear_turn_marker(_session_home(session), stale_key)
+            return _ok(rid, {"status": "interrupted"})
         # Retire the crash-recovery marker NOW: until the run thread's finally, a backend exit looks like a crash
         # and session.resume auto-continues the turn the user just stopped (the extra key covers compression
         # rotating session_key mid-turn).

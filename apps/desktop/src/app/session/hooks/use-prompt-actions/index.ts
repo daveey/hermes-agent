@@ -24,7 +24,7 @@ import {
   setComposerAttachmentUploadState,
   updateComposerAttachment
 } from '@/store/composer'
-import { serverOwnsComposerQueue } from '@/store/composer-queue'
+import { getQueuedPrompts, serverOwnsComposerQueue } from '@/store/composer-queue'
 import { resetSessionBackground } from '@/store/composer-status'
 import { confirm } from '@/store/confirm'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
@@ -77,6 +77,7 @@ import {
   retryKeepsDeepConfirm,
   runRewindSubmit,
   sealAcceptedCorrection,
+  stopLatchesInterrupt,
   type SurvivorUserRowIds
 } from './rewind'
 import { useSlashCommand } from './slash'
@@ -798,7 +799,7 @@ export function usePromptActions({
         streamId: null,
         pendingBranchGroup: null,
         needsInput: false,
-        interrupted: true,
+        interrupted: stopLatchesInterrupt(state, getQueuedPrompts(state.storedSessionId ?? selectedStoredSessionIdRef.current)),
         turnStartedAt: null,
         turnLive: false
       }

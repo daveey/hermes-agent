@@ -197,7 +197,7 @@ export function rebindPaneToResumedRuntime({
 
 /** The prompt submit pipeline, extracted from usePromptActions. */
 /** Canonical admission receipt; `user_row_id` binds the optimistic bubble to its durable row. */
-type SubmitReceipt = Pick<PromptSubmitResult, 'forwarded' | 'user_row_id'> & {
+type SubmitReceipt = Pick<PromptSubmitResult, 'forwarded' | 'user_row_id' | 'queued_reason' | 'queued_started_at'> & {
   admission_id?: string
   submission_id?: string
   session_id?: string
@@ -1244,6 +1244,54 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           // Validate the admission receipt and bind it to the optimistic bubble.
           // Returns false when the receipt is not this send's admission.
           const applySubmitReceipt = (result: SubmitReceipt, receiptSessionId: string): boolean => {
+            const applyTrackedReceipt = (result: SubmitReceipt, receiptSessionId: string) => {
+              trackPendingSubmission(targetStoredSessionId ?? liveSessionId, {
+                id: result.queued_reason === 'core_update' ? (result.admission_id ?? submissionId) : submissionId,
+                ...(result.queued_reason === 'core_update' ? { inputId: submissionId } : {}),
+                text,
+                displayText: options?.displayText,
+                status: result.status,
+                queued_reason: result.queued_reason ?? undefined,
+                queued_started_at: result.queued_started_at
+              })
+
+              // Queued is also the initial receipt for an idle session's first
+              // turn. Keep its input and any start event that raced this ACK;
+              // explicit queue-only sends never inserted an optimistic bubble.
+              // An exact retry of an admission the owner lost mid-turn answers `unknown`: it was
+              // admitted (never replay it) and no turn will run. Keep the bubble; the pending
+              // fanout's lost card offers Discard (prompt.resolve_unknown).
+              if (result.status === 'terminal' || result.status === 'unknown' ||
+                (result.status === 'queued' && result.queued_reason === 'core_update')) {
+                // Deduplication does not start a turn or promise another terminal
+                // event. Remove our duplicate bubble, but preserve any live turn
+                // that an owner event established while the receipt was in flight.
+                const next = updateSessionState(
+                  receiptSessionId,
+                  state => ({
+                    ...state,
+                    messages: result.status === 'unknown' ? state.messages : state.messages.filter(message => message.id !== optimisticId),
+                    ...(!state.turnLive &&
+                      !state.streamId &&
+                      !state.sawAssistantPayload && {
+                        busy: false,
+                        awaitingResponse: false,
+                        pendingBranchGroup: null,
+                        turnStartedAt: null,
+                        // A Stop pressed while this ACK was in flight found no turn: the owner
+                        // still holds the prompt, so its later turn's stream must be accepted.
+                        ...(result.status === 'queued' && { interrupted: false })
+                      })
+                  }),
+                  targetStoredSessionId
+                )
+
+                if (!next.busy && !next.awaitingResponse) {
+                  releaseBusy()
+                }
+              }
+            }
+
             if (isVoiceStoppedReceipt(result)) {
               // Settled with no turn: the stop phrase ended the voice chat another viewer runs. No
               // turn holds the bubble, so it goes, and nothing is tracked as pending.
@@ -1266,44 +1314,26 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             }
 
             if ((result?.submission_id ?? result?.admission_id) === submissionId) {
-              trackPendingSubmission(targetStoredSessionId ?? liveSessionId, {
-                id: submissionId,
-                text,
-                displayText: options?.displayText,
-                status: result.status
-              })
+              applyTrackedReceipt(result, receiptSessionId)
+            }
 
-              // Queued is also the initial receipt for an idle session's first
-              // turn. Keep its input and any start event that raced this ACK;
-              // explicit queue-only sends never inserted an optimistic bubble.
-              // An exact retry of an admission the owner lost mid-turn answers `unknown`: it was
-              // admitted (never replay it) and no turn will run. Keep the bubble; the pending
-              // fanout's lost card offers Discard (prompt.resolve_unknown).
-              if (result.status === 'terminal' || result.status === 'unknown') {
-                // Deduplication does not start a turn or promise another terminal
-                // event. Remove our duplicate bubble, but preserve any live turn
-                // that an owner event established while the receipt was in flight.
-                const next = updateSessionState(
-                  receiptSessionId,
-                  state => ({
-                    ...state,
-                    messages: result.status === 'unknown' ? state.messages : state.messages.filter(message => message.id !== optimisticId),
-                    ...(!state.turnLive &&
-                      !state.streamId &&
-                      !state.sawAssistantPayload && {
-                        busy: false,
-                        awaitingResponse: false,
-                        pendingBranchGroup: null,
-                        turnStartedAt: null
-                      })
-                  }),
-                  targetStoredSessionId
-                )
+            if (legacyAccepted && result.status === 'queued' && result.queued_reason === 'core_update') {
+              const next = updateSessionState(receiptSessionId, state => {
+                // A start event that overtook the ACK owns the live state and must not be undone.
+                if (state.turnLive || state.streamId || state.sawAssistantPayload) { return state }
 
-                if (!next.busy && !next.awaitingResponse) {
-                  releaseBusy()
+                return {
+                  ...state,
+                  messages: state.messages.map(message => message.id === optimisticId
+                    ? { ...message, queued_reason: 'core_update' as const, queued_started_at: result.queued_started_at } : message),
+                  busy: false, awaitingResponse: false, turnStartedAt: null, pendingBranchGroup: null,
+                  // Stop during the in-flight submit had no turn to cancel; the owner holds this
+                  // send for the update, so the held turn's later stream must not be dropped.
+                  interrupted: false
                 }
-              }
+              }, targetStoredSessionId)
+
+              if (!next.busy && !next.awaitingResponse) { releaseBusy() }
             }
 
             // RT-37: forwarded to the gateway owner's FIFO; its queued-row card stands for the send.

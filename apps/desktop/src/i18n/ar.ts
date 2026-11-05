@@ -117,6 +117,7 @@ export const arOverrides = {
     ...arChat.composer,
     redirect: 'إعادة توجيه التشغيل الحالي',
     queueLostNote: 'فُقد الدور أثناء إعادة التشغيل',
+    queueUpdateNote: (started: string | undefined) => `بانتظار تحديث Hermes${started ? ` (بدأ ${started})` : ''}، سيتم الإرسال تلقائيًا`,
     restoreImageDraft: 'استعادة مسودة الصورة',
     queueCancelFailed: 'تعذّر إزالة الدور المنتظر',
     queueLostDiscard: 'تجاهل',

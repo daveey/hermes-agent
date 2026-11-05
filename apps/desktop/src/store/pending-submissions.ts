@@ -9,8 +9,9 @@ import { $sessions, resolveComposerSessionKey } from './session'
 const ENTRY_PREFIX = 'hermes.desktop.pendingSubmissions.v2:'
 // The pre-v2 single blob, read for upgrade and drained per session as entries are rewritten.
 const LEGACY_KEY = 'hermes.desktop.pendingSubmissions.v1'
-interface PendingSubmission {
+interface PendingSubmission extends Pick<QueuedPromptEntry, 'queued_reason' | 'queued_started_at'> {
   id: string
+  inputId?: string
   text: string
   displayText?: string
   status?: string
@@ -180,11 +181,27 @@ export function trackPendingSubmission(storedId: string, entry: PendingSubmissio
   }
 
   const held = readPendingSubmission(key, entry.id)
-  window.localStorage.setItem(entryKey(key, entry.id), JSON.stringify(mergeReceipt(held, entry)))
+  const merged = mergeReceipt(held, entry)
+  window.localStorage.setItem(entryKey(key, entry.id), JSON.stringify(merged))
+
+  // A held idle send has no running turn. Paint its owner-held card from the ACK too,
+  // so a delayed/lost pending fanout cannot leave a phantom running bubble.
+  if (merged.status === 'queued' && merged.queued_reason === 'core_update') {
+    const current = getQueuedPrompts(key)
+    const admissions = new Map(merged.inputId ? [[merged.inputId, merged.id]] : [])
+    writeSessionQueue(key, projectQueue(current, new Map([[merged.id, merged]]), admissions, new Set(current.map(row => row.id))))
+  }
 }
 
 // Array.isArray narrows `unknown` to `any[]`; the helpers keep that wire shape.
 type RawReceipts = any[]
+
+const queueHold = (raw: { queued_reason?: unknown; queued_started_at?: unknown }): Pick<QueuedPromptEntry, 'queued_reason' | 'queued_started_at'> => ({
+  queued_reason: raw.queued_reason === 'core_update' ? 'core_update' : undefined,
+  queued_started_at: raw.queued_reason === 'core_update' &&
+    (raw.queued_started_at === null || (typeof raw.queued_started_at === 'number' && Number.isFinite(raw.queued_started_at)))
+    ? raw.queued_started_at : undefined
+})
 
 // Retired identities are remembered per session only as long as a late snapshot can matter.
 const RETIRED_MEMORY = 200
@@ -216,6 +233,7 @@ function collectReceipts(value: RawReceipts, known: Record<string, PendingSubmis
 
     receipts.set(id, {
       ...known[id],
+      ...queueHold(stale ? known[id] : raw),
       id,
       text: typeof raw.user === 'string' ? raw.user : (known[id]?.text ?? ''),
       status: stale ? known[id].status : raw.status,
@@ -251,7 +269,7 @@ function projectQueue(
 
     if (receipt) {
       if (receipt.status !== 'started') {
-        next.push({ ...entry, id: receipt.id, serverStatus: receipt.status, serverControls: receipt.controls })
+        next.push({ ...entry, ...queueHold(receipt), id: receipt.id, serverStatus: receipt.status, serverControls: receipt.controls })
       }
 
       receipts.delete(receipt.id)
@@ -264,6 +282,7 @@ function projectQueue(
     if (receipt.status !== 'started') {
       next.push({
         id: receipt.id,
+        ...queueHold(receipt),
         text: receipt.text,
         displayText: receipt.displayText,
         attachments: [],
@@ -312,6 +331,7 @@ function updateKnownReceipts(known: Record<string, PendingSubmission>, value: Ra
 
       known[raw.admission_id] = {
         ...previous,
+        ...queueHold(raw),
         id: raw.admission_id,
         text: raw.user ?? previous?.text ?? '',
         // A steer in transfer reads `started` but can still go back to its queue place: it never

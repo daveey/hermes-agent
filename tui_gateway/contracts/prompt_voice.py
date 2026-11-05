@@ -10,7 +10,7 @@ from __future__ import annotations
 from pydantic import Field
 
 from .base import JsonValue, Params, Result, WireEnum
-from .common import OpenModel, PendingApproval, SessionParams
+from .common import OpenModel, PendingApproval, QueuedReason, SessionParams
 from .registry import method
 
 # ── prompt.submit ─────────────────────────────────────────────────────────────────────────────
@@ -78,6 +78,11 @@ class PromptSubmitResult(Result):
     # the OWNER's FIFO (``status: queued``) and runs there after the current turn; nothing runs here.
     admission_id: str | None = None
     forwarded: bool | None = None
+    # An idle send refused only by the core-update admission hold is queued here and runs once it lifts
+    # (``session_auto_continue._queue_submit_behind_update_hold``). ``queued_started_at``: when that hold
+    # was set (Unix seconds, its marker's mtime), null when unreadable. Both absent on any other reply.
+    queued_reason: QueuedReason | None = None
+    queued_started_at: float | None = None
 
 
 method("prompt.submit", params=PromptSubmitParams, result=PromptSubmitResult,

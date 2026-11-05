@@ -33,6 +33,25 @@ it('projects resumed runtime pending receipts under durable identity without mak
   expect(getQueuedPrompts('runtime')).toEqual([])
 })
 
+it('projects update metadata through canonical reconnect and live snapshots, clearing it when the hold ends', () => {
+  const protocol = new CanonicalDesktopProtocol()
+
+  const held = { admission_id: 'held', input_id: 'input', status: 'queued', text: 'after update',
+    queued_reason: 'core_update', queued_started_at: 1234 }
+
+  const resumed = protocol.result('session.resume', {}, { session_id: 'update', stored_session_id: 'update', pending: [held] })
+  applyRuntimeInfo(resumed.info, { foreground: false })
+  expect(getQueuedPrompts('update')).toMatchObject([{ queued_reason: 'core_update', queued_started_at: 1234 }])
+  expect(readPendingSubmissions('update').held).toMatchObject({ queued_reason: 'core_update', queued_started_at: 1234 })
+  const event = { type: 'session.info', session_id: 'update', payload: { pending: [{ ...held, queued_started_at: null }] } }
+  protocol.event(event)
+  reconcilePendingSubmissions('update', (event.payload as any).pending_submissions)
+  expect(getQueuedPrompts('update')[0].queued_started_at).toBeNull()
+  reconcilePendingSubmissions('update', [{ admission_id: 'held', status: 'queued', user: 'after update' }])
+  expect(getQueuedPrompts('update')[0].queued_reason).toBeUndefined()
+  expect(getQueuedPrompts('update')[0].queued_started_at).toBeUndefined()
+})
+
 it('carries the queued-row controls the owner lists onto the card, and none when it lists none (RT-35)', () => {
   reconcilePendingSubmissions('chat', [
     { admission_id: 'served', status: 'queued', user: 'edit me', controls: ['steer', 'replace'] },

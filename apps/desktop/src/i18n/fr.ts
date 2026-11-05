@@ -3949,6 +3949,7 @@ export const frOverrides = {
     queueResume: 'Reprendre',
     queueResumeTip: "Mis en pause par Arrêter — reprendre l'envoi des tours en file d'attente",
     queueLostNote: 'Tour perdu pendant le redémarrage',
+    queueUpdateNote: (started: string | undefined) => `En attente d’une mise à jour de Hermes${started ? ` (démarrée à ${started})` : ''}, envoi automatique`,
     restoreImageDraft: "Restaurer le brouillon d'image",
     queueCancelFailed: "Impossible de retirer le tour en file d'attente",
     queueLostDiscard: 'Ignorer',

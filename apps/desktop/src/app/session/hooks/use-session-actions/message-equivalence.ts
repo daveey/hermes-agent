@@ -47,6 +47,8 @@ const COMPARED_FIELDS = [
   // Not painted, but the view's copy can seed session state again (resume
   // reads $messages), so a started queued turn must reach it.
   'queuedTurnStarted',
+  'queued_reason',
+  'queued_started_at',
   'reactions',
   'timestamp',
   'completedAt',
@@ -168,6 +170,10 @@ const FLAG_FIELDS = ['interim', 'queuedTurnStarted'] as const
 const flagsDiffer = (a: ChatMessage, b: ChatMessage) =>
   FLAG_FIELDS.some(field => (a[field] ?? false) !== (b[field] ?? false))
 
+const timelineMetadataDiffers = (a: ChatMessage, b: ChatMessage) =>
+  a.timestamp !== b.timestamp || a.completedAt !== b.completedAt ||
+  a.queued_reason !== b.queued_reason || a.queued_started_at !== b.queued_started_at
+
 export function chatMessagesEquivalent(a: ChatMessage, b: ChatMessage): boolean {
   if (
     a.id !== b.id ||
@@ -185,8 +191,7 @@ export function chatMessagesEquivalent(a: ChatMessage, b: ChatMessage): boolean 
     (a.errorSurface?.retryable ?? null) !== (b.errorSurface?.retryable ?? null) ||
     a.hidden !== b.hidden ||
     a.branchGroupId !== b.branchGroupId ||
-    a.timestamp !== b.timestamp ||
-    a.completedAt !== b.completedAt ||
+    timelineMetadataDiffers(a, b) ||
     flagsDiffer(a, b) ||
     !chatReactionsEquivalent(a.reactions, b.reactions)
   ) {

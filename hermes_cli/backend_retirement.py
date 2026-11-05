@@ -79,6 +79,21 @@ def admission_waiter(home=None, busy_wait_s=None):
         yield free
 
 
+def update_hold_started_at(home=None):
+    """When the update hold that ``reservation`` refuses on was set (Unix seconds), or None when unknown.
+
+    Reads the same installation-root marker ``admission_fence.reserve`` checks (``holds/hermes-sync``), not
+    the Kanban ``drain-hold`` record: that is a different hold with its own clock. Never raises."""
+    try:
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+        from hermes_cli.admission_fence import hold_started_at
+
+        return hold_started_at(get_default_hermes_root(home=home or get_hermes_home()) / "core-update")
+    except Exception:  # health: allow BLE001 -- a display timestamp must never fail the submit it labels
+        _log.debug("update hold start time unreadable", exc_info=True)
+        return None
+
+
 def refusal_text():
     """The 5035 text for the latest refusal in this context."""
     if _refusal.get() == "busy":

@@ -2,6 +2,7 @@ import { useState } from 'react'
 
 import { StatusRow } from '@/components/chat/status-row'
 import { StatusSection } from '@/components/chat/status-section'
+import { UpdateHeldNote } from '@/components/chat/update-held-note'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
@@ -87,6 +88,8 @@ export function QueuePanel({
     // The owner died mid-turn and recovered this row as `unknown`: the
     // FIFO behind it is paused until someone acknowledges the loss.
     const lost = entry.serverStatus === 'unknown'
+    const updateHeld = entry.serverStatus === 'queued' && entry.queued_reason === 'core_update'
+
     const preview = entryPreview(entry, c)
     const canExpand = shouldOfferExpandedPreview(preview)
     const isExpanded = expandedIds.has(entry.id)
@@ -147,9 +150,10 @@ export function QueuePanel({
           >
             {preview}
           </p>
-          {(attachmentsCount > 0 || isEditing || lost) && (
+          {(attachmentsCount > 0 || isEditing || lost || updateHeld) && (
             <div className="mt-0.5 flex items-center gap-1.5 text-[0.64rem] text-muted-foreground/75">
               {lost && <span data-slot="queue-lost-note">{c.queueLostNote}</span>}
+              {updateHeld && <UpdateHeldNote startedAt={entry.queued_started_at} />}
               {attachmentsCount > 0 && <span>{c.attachments(attachmentsCount)}</span>}
               {isEditing && (
                 <span className="text-[color-mix(in_srgb,var(--dt-composer-ring)_78%,var(--muted-foreground))]">
@@ -166,6 +170,10 @@ export function QueuePanel({
   // A lost (`unknown`) turn pauses the FIFO until someone acknowledges it: its card and Discard
   // must be on screen without expanding the section, and the header names the pause (#134889 NF2).
   const lostEntries = entries.filter(entry => entry.serverStatus === 'unknown')
+
+  const previewEntries = entries.filter(entry => entry.serverStatus === 'unknown' ||
+    (entry.serverStatus === 'queued' && entry.queued_reason === 'core_update'))
+
   const paused = parked || lostEntries.length > 0
 
   return (
@@ -187,7 +195,7 @@ export function QueuePanel({
       }
       icon={<Codicon className="text-muted-foreground/70" name={paused ? 'debug-pause' : 'layers'} size="0.8rem" />}
       label={paused ? c.queuedPaused(entries.length) : c.queued(entries.length)}
-      preview={lostEntries.length > 0 ? lostEntries.map(renderRow) : undefined}
+      preview={previewEntries.length > 0 ? previewEntries.map(renderRow) : undefined}
     >
       {entries.map(renderRow)}
     </StatusSection>

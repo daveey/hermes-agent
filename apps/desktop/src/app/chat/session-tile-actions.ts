@@ -21,6 +21,7 @@ import { triggerHaptic } from '@/lib/haptics'
 import { asStopOrigin, interruptParams, type StopOrigin } from '@/lib/stop-origin'
 import { clearClarifyRequest } from '@/store/clarify'
 import type { ComposerAttachment } from '@/store/composer'
+import { getQueuedPrompts } from '@/store/composer-queue'
 import { resetSessionBackground } from '@/store/composer-status'
 import { confirm } from '@/store/confirm'
 import { notify, notifyError } from '@/store/notifications'
@@ -64,6 +65,7 @@ import {
   revalidateEditPlan,
   runRewindSubmit,
   sealAcceptedCorrection,
+  stopLatchesInterrupt,
   type SurvivorUserRowIds
 } from '../session/hooks/use-prompt-actions/rewind'
 import { useSubmitPrompt } from '../session/hooks/use-prompt-actions/submit'
@@ -374,7 +376,7 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
       streamId: null,
       pendingBranchGroup: null,
       needsInput: false,
-      interrupted: true
+      interrupted: stopLatchesInterrupt(state, getQueuedPrompts(state.storedSessionId ?? storedIdRef.current))
     }))
 
     clearSessionTodos(sessionId)

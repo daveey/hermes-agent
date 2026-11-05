@@ -3940,6 +3940,7 @@ export const deOverrides = {
     queueResume: 'Fortsetzen',
     queueResumeTip: 'Durch Stopp pausiert — fortsetzen, um die eingereihten Turns zu senden',
     queueLostNote: 'Turn beim Neustart verloren',
+    queueUpdateNote: (started: string | undefined) => `Wartet auf ein Hermes-Update${started ? ` (gestartet um ${started})` : ''}, wird automatisch gesendet`,
     restoreImageDraft: 'Bildentwurf wiederherstellen',
     queueCancelFailed: 'Der wartende Zug konnte nicht entfernt werden',
     queueLostDiscard: 'Verwerfen',
