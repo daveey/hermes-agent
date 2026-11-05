@@ -205,5 +205,6 @@ def park(
         **({"clear_blocker": True} if meta.get("clear_blocker") else {}),
     }, run_id=run_id)
     # [daveey] ``probe_host``: another gateway runs this probe (a relay to the home); it registers it there.
-    kwc.set_check(conn, task_id, wake_check if kwc.probe_here(conn, probe_host) else None, check_every, now=now)
+    kwc.set_check(conn, task_id, wake_check, check_every, now=now,
+                  register_here=kwc.probe_here(conn, probe_host))
     return True

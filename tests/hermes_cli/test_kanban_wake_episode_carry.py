@@ -1,5 +1,6 @@
 """Episode payload transport, including remapped ids and coalesced status updates."""
 import sqlite3
+import uuid
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_wake_check as wc
@@ -16,6 +17,7 @@ def replica(conn):
     other = sqlite3.connect(":memory:", isolation_level=None)
     other.row_factory = sqlite3.Row
     conn.backup(other)
+    other.execute("UPDATE wake_episode_identity SET source = ? WHERE id = 1", (str(uuid.uuid4()),))
     return other
 
 

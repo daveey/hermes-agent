@@ -428,12 +428,15 @@ def restore_missing_checks(conn: sqlite3.Connection, *, now: Optional[int] = Non
 # --- state table --------------------------------------------------------------------------
 
 def set_check(conn: sqlite3.Connection, task_id: str, cmd: Optional[str], every: Optional[int],
-              *, now: Optional[int] = None) -> None:
-    """Record (or clear, when ``cmd`` is None) the card's probe. Caller holds the write txn.
-    The first probe is due at once: the condition may have come true while the worker parked."""
+              *, now: Optional[int] = None, register_here: bool = True) -> None:
+    """Record the logical probe, registering execution only on its designated host.
+
+    Caller holds the write txn. Clearing a relayed execution row is not a change
+    to the logical probe or its episode. The first local probe is due at once.
+    """
     episode.repark(conn, task_id, cmd)
     conn.execute("DELETE FROM task_wake_checks WHERE task_id = ?", (task_id,))
-    if not cmd:
+    if not cmd or not register_here:
         return
     now = int(time.time()) if now is None else int(now)
     conn.execute(

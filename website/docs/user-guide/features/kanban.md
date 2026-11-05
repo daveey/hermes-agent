@@ -492,6 +492,14 @@ leaving the wake/worker/re-park cycle for blocked, triage or a terminal status r
 it. Errors do not advance it and retain their existing handling. Machine-local
 `task_wake_episodes` stores the start, count and last stale wake independently of
 probe leases; `kanban show` and board probe state expose these episode fields.
+Existing synced lifecycle events carry episode snapshots and per-store reset
+sequences. A receiver joins reset knowledge and rejects snapshots that have not
+observed its resets, so delayed starts cannot resurrect a finished episode and
+replayed reset receipts cannot erase a newer one. Steady exit-1 checks only update
+local state; the first check, resets, wakes and remote-alive events publish it.
+Relaying execution to another gateway does not change the logical probe. The
+store identity is local: cloning a live database for concurrent operation is not
+a supported way to enroll another gateway.
 
 Human asks that resolve outside Hermes: a blocked card's `human_request` may
 carry `resolved_check` (a shell command) and `resolved_check_every` (seconds,

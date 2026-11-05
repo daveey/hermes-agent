@@ -12,6 +12,8 @@ import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from hermes_cli import kanban_wake_episode_barriers as barriers
+
 STALE_EVENT = "wake_check_stale"
 DEFAULT_STALE_HOURS = 48
 
@@ -21,6 +23,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("""CREATE TABLE IF NOT EXISTS task_wake_episodes (
         task_id TEXT PRIMARY KEY, cmd TEXT NOT NULL, first_at INTEGER NOT NULL,
         checks INTEGER NOT NULL, last_stale_at INTEGER)""")
+    barriers.ensure_schema(conn)
+    conn.execute("CREATE TABLE IF NOT EXISTS task_wake_episode_cmd (task_id TEXT PRIMARY KEY, cmd TEXT)")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS task_wake_episode_cmd_delete AFTER DELETE ON tasks
+        BEGIN DELETE FROM task_wake_episode_cmd WHERE task_id = OLD.id; END""")
     conn.execute("""CREATE TRIGGER IF NOT EXISTS task_wake_episode_reset
         AFTER UPDATE OF status ON tasks
         WHEN NEW.status NOT IN ('scheduled', 'todo', 'ready', 'running', 'review')
@@ -49,20 +55,33 @@ def consumed(conn: sqlite3.Connection, task_id: str, event_id: int) -> None:
 def reconcile(conn: sqlite3.Connection, task_id: str) -> None:
     """Consume portable snapshots once, using only this DB's event ids as a cursor."""
     seen = conn.execute("SELECT event_id FROM task_wake_episode_seen WHERE task_id = ?", (task_id,)).fetchone()
-    row = conn.execute("SELECT id, payload FROM task_events WHERE task_id = ? AND id > ? "
-                       "AND payload LIKE ? ORDER BY id DESC LIMIT 1",
-                       (task_id, seen[0] if seen else 0, '%"_wake_episode_v1"%')).fetchone()
-    if row is None:
-        return
-    consumed(conn, task_id, row[0])
+    rows = conn.execute("SELECT id, payload FROM task_events WHERE task_id = ? AND id > ? "
+                        "AND payload LIKE ? ORDER BY id",
+                        (task_id, seen[0] if seen else 0, '%"_wake_episode_v1"%')).fetchall()
+    for row in rows:
+        consumed(conn, task_id, row[0])
+        _apply_snapshot(conn, task_id, row[1])
+
+
+def _apply_snapshot(conn: sqlite3.Connection, task_id: str, raw: str) -> None:
     try:
-        payload = json.loads(row[1])
+        payload = json.loads(raw)
     except (ValueError, TypeError):
         return
     if not isinstance(payload, dict) or _SNAPSHOT not in payload:
         return
     data = payload[_SNAPSHOT]
-    if data is not None and not _valid_snapshot(data):
+    context = payload.get(barriers.KEY, {})
+    if not barriers.valid(context):
+        return
+    park = isinstance(data, dict) and set(data) == {"park_cmd"} and (
+        data["park_cmd"] is None or isinstance(data["park_cmd"], str))
+    if data is not None and not park and not _valid_snapshot(data):
+        return
+    if not barriers.accept(conn, task_id, context, empty=data is None):
+        return
+    if park:
+        _remember_probe(conn, task_id, data["park_cmd"])
         return
     if data is not None:
         local = conn.execute("SELECT cmd, first_at, checks, last_stale_at FROM task_wake_episodes "
@@ -71,8 +90,9 @@ def reconcile(conn: sqlite3.Connection, task_id: str) -> None:
             data["checks"] = max(local[2], data["checks"])
             stamps = [stamp for stamp in (local[3], data["last_stale_at"]) if stamp is not None]
             data["last_stale_at"] = max(stamps) if stamps else None
-    reset(conn, task_id)
+    conn.execute("DELETE FROM task_wake_episodes WHERE task_id = ?", (task_id,))
     if data is not None:
+        _remember_probe(conn, task_id, data["cmd"])
         conn.execute("INSERT INTO task_wake_episodes VALUES (?, ?, ?, ?, ?)",
                      (task_id, data["cmd"], data["first_at"], data["checks"], data["last_stale_at"]))
 
@@ -87,7 +107,7 @@ def _valid_snapshot(data: object) -> bool:
 
 
 def snapshot_event(conn: sqlite3.Connection, task_id: str, kind: str, payload: dict | None) -> dict | None:
-    """Carry at existing lifecycle/remote-alive events, never append a per-check journal."""
+    """Carry lifecycle evidence; steady exit-1 checks do not append events."""
     status = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
     outside = status is not None and status[0] not in _CORRIDOR
     if not outside and kind not in _CARRY_EVENTS and not kind.startswith("wake_"):
@@ -97,20 +117,38 @@ def snapshot_event(conn: sqlite3.Connection, task_id: str, kind: str, payload: d
         reset(conn, task_id)
     elif kind in {"scheduled", "continued"}:
         cmd = (payload or {}).get("wake_check")
-        conn.execute("DELETE FROM task_wake_episodes WHERE task_id = ? AND cmd IS NOT ?", (task_id, cmd))
+        _change_probe(conn, task_id, cmd)
     row = conn.execute("SELECT cmd, first_at, checks, last_stale_at FROM task_wake_episodes "
                        "WHERE task_id = ?", (task_id,)).fetchone()
     data = dict(zip(("cmd", "first_at", "checks", "last_stale_at"), row)) if row else None
-    return {**(payload or {}), _SNAPSHOT: data}
+    if data is None and kind in {"scheduled", "continued"}:
+        data = {"park_cmd": (payload or {}).get("wake_check")}
+    # A null snapshot only resets a peer when it carries an unseen reset barrier;
+    # an unobserved episode on the home is otherwise unknown, not evidence of success.
+    return {**(payload or {}), _SNAPSHOT: data, barriers.KEY: barriers.current(conn, task_id)}
 
 
 def reset(conn: sqlite3.Connection, task_id: str) -> None:
     conn.execute("DELETE FROM task_wake_episodes WHERE task_id = ?", (task_id,))
+    barriers.advance(conn, task_id)
+
+
+def _remember_probe(conn: sqlite3.Connection, task_id: str, cmd: str | None) -> None:
+    conn.execute("INSERT INTO task_wake_episode_cmd VALUES (?, ?) ON CONFLICT(task_id) "
+                 "DO UPDATE SET cmd = excluded.cmd", (task_id, cmd))
+    conn.execute("DELETE FROM task_wake_episodes WHERE task_id = ? AND cmd IS NOT ?", (task_id, cmd))
+
+
+def _change_probe(conn: sqlite3.Connection, task_id: str, cmd: str | None) -> None:
+    row = conn.execute("SELECT cmd FROM task_wake_episode_cmd WHERE task_id = ?", (task_id,)).fetchone()
+    if row and row[0] != cmd:
+        reset(conn, task_id)
+    _remember_probe(conn, task_id, cmd)
 
 
 def repark(conn: sqlite3.Connection, task_id: str, cmd: str | None) -> None:
     reconcile(conn, task_id)
-    conn.execute("DELETE FROM task_wake_episodes WHERE task_id = ? AND cmd IS NOT ?", (task_id, cmd))
+    _change_probe(conn, task_id, cmd)
 
 
 def stale_seconds() -> float:
