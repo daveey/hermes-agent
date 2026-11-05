@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 from datetime import UTC, datetime
 
@@ -192,6 +193,24 @@ def snapshot(conn, task_id):
     return None if row is None else {"row": dict(row), "lifecycle": _lifecycle(conn, task_id, row)}
 
 
+def _owned_row(conn, task_id, gateway, fence):
+    """The row an observation may be recorded against (``fence``'s when given), or None when not origin-owned
+    ready policy work. Call inside the write transaction."""
+    from hermes_cli import kanban_db_sync as sync
+
+    row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is not None and fence is not None:
+        if fence["row"]["id"] != task_id:
+            raise ValueError("fence snapshot is for another task")
+        row = fence["row"]
+    if (not row or sync.board_mode(conn) != "primary" or row["created_on"] != gateway
+            or (sync.sync_state(conn) or {}).get("gateway_id") != gateway
+            or row["placement_policy"] != "worker-first-v1" or row["status"] != "ready"
+            or row["claim_lock"] or row["lease_holder"]):
+        return None
+    return row
+
+
 def _record(conn, task_id, gateway, value, *, fence=None, comment=True):
     """Append one change-only observation and its thread comment.
 
@@ -200,18 +219,10 @@ def _record(conn, task_id, gateway, value, *, fence=None, comment=True):
     the placement tick learned to pull on ``not_claimable``.
     """
     from hermes_cli import kanban_db as kb
-    from hermes_cli import kanban_db_sync as sync
 
     with kb.write_txn(conn):
-        row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if row is not None and fence is not None:
-            if fence["row"]["id"] != task_id:
-                raise ValueError("fence snapshot is for another task")
-            row = fence["row"]
-        if (not row or sync.board_mode(conn) != "primary" or row["created_on"] != gateway
-                or (sync.sync_state(conn) or {}).get("gateway_id") != gateway
-                or row["placement_policy"] != "worker-first-v1" or row["status"] != "ready"
-                or row["claim_lock"] or row["lease_holder"]):
+        row = _owned_row(conn, task_id, gateway, fence)
+        if row is None:
             return False
         value = {**value, "lifecycle": fence["lifecycle"] if fence is not None else _lifecycle(conn, task_id, row)}
         previous = _stored(conn, task_id)
@@ -230,6 +241,7 @@ def record_reply(conn, task_id, gateway, reply, pool=None):
     from hermes_cli import kanban_repin_notice as repin
 
     value = normalize(reply)
+    clear_streak(gateway, task_id)  # the Board answered for this card: a transient failure streak is over
     recorded = _record(conn, task_id, gateway, value, comment=not repin.no_pool_worker(value, pool))
     # Every reply, not only a changed one: a card queued before the notice existed gets it on the next pass.
     repin.maybe_notify(conn, task_id, gateway, value, pool)
@@ -334,6 +346,10 @@ def record_pull_error(conn, gateway, *, status=None, error=None):
     the write transaction so a concurrent claim/repin cannot acquire a new wait.
     Timing (budget_ms/elapsed_ms) is the failed HTTP attempt stamped on ``error``, never the whole pull.
     """
+    from hermes_cli.kanban_sync_client import Resync
+
+    if isinstance(error, Resync):
+        clear_pull_streaks(gateway)  # a feed reset is the Board answering the pull, not an outage
     timing = attempt_timing(error)
     rows = conn.execute(
         "SELECT id FROM tasks WHERE placement_policy='worker-first-v1' AND status='ready' "
@@ -343,6 +359,14 @@ def record_pull_error(conn, gateway, *, status=None, error=None):
 
 
 def record_error(conn, task_id, gateway, *, status=None, error=None, fence=None, stage=None, timing=None):
+    """Record a failed Board pass for one card.
+
+    A transient failure (transport ``OSError``, ``SyncUnavailable`` or an HTTP 5xx) changes the card's queue
+    reason, and posts its comment, only on the ``CONFIRM_PASSES``-th consecutive transient failure of the same
+    request kind for that card (see ``_streaks``). Every unconfirmed failure is still recorded, as a ``DIAGNOSTIC_EVENT`` carrying the same
+    allowlisted provenance (stage/transport/budget_ms/elapsed_ms), so nothing is silently dropped. A Board
+    refusal or other non-transient failure records at once, as before.
+    """
     value = {"version": 1, "code": "board_error", "candidates": []}
     from hermes_cli.kanban_sync_client import HubError, Resync, SyncUnavailable
     if isinstance(error, Resync):
@@ -372,8 +396,78 @@ def record_error(conn, task_id, gateway, *, status=None, error=None, fence=None,
             code = None
         if isinstance(code, str) and code in _REJECTIONS:
             if code == "revision_conflict":
+                clear_streak(gateway, task_id)  # the Board answered
                 return False  # Expected CAS race; retry after sync, without outage/recovery chatter.
             value.update(code="board_refused", rejection_code=code)
     if type(status) is int and 100 <= status <= 599:
         value["http_status"] = status
+    if not _transient(value, error):
+        if stage != "pull":
+            clear_streak(gateway, task_id)  # a Board answer (refusal or other non-outage error) for this card
+        return _record(conn, task_id, gateway, value, fence=fence)
+    runs = conn.execute("SELECT count(*) FROM task_runs WHERE task_id=?", (task_id,)).fetchone()[0]
+    passes = _bump_streak(gateway, task_id, stage, runs)
+    if passes < CONFIRM_PASSES:
+        _record_diagnostic(conn, task_id, gateway, {**value, "pass": passes}, fence=fence)
+        return False
     return _record(conn, task_id, gateway, value, fence=fence)
+
+
+DIAGNOSTIC_EVENT = "worker_queue_board_error"
+CONFIRM_PASSES = 2
+_STREAK_CAP = 4096
+# Consecutive transient failures per (gateway, task, kind). kind "pull": the dispatcher's feed pull, observed for
+# every origin card on every tick, so a successful pull ends it. kind "card": that card's own reserve/repin, observed
+# only when the card is attempted, so only a Board answer for that card ends it (a card skipped by the batch cursor
+# neither continues nor breaks its streak). Any transient failure keeps the streak: an outage that alternates
+# 502/503/timeout is still one outage. Process-local on purpose: a restart can only delay a confirmation by one pass,
+# never manufacture one. The sync loop and the dispatcher both reach it, hence the lock. A streak also ends when the
+# card ran since its last failure (it left the queue and came back). There is deliberately no wall-clock window: with
+# many queued cards the batch cursor retries one card only every few ticks, and a window would hide that outage.
+_streaks: dict[tuple[str, str, str], tuple[int, int]] = {}  # -> (passes, run count at the last failure)
+_streaks_lock = threading.Lock()
+
+
+def _transient(value, error):
+    from hermes_cli.kanban_sync_client import HubError, SyncUnavailable
+
+    if value.get("code") != "board_error":
+        return False  # a Board refusal is an answer, not an outage
+    if isinstance(error, HubError):
+        return type(error.status) is int and 500 <= error.status <= 599
+    return isinstance(error, (OSError, SyncUnavailable))
+
+
+def _bump_streak(gateway, task_id, stage, runs):
+    key = (gateway, task_id, "pull" if stage == "pull" else "card")
+    with _streaks_lock:
+        held = _streaks.pop(key, None)
+        passes = held[0] + 1 if held is not None and held[1] == runs else 1
+        _streaks[key] = (passes, runs)
+        while len(_streaks) > _STREAK_CAP:
+            del _streaks[next(iter(_streaks))]
+    return passes
+
+
+def clear_streak(gateway, task_id):
+    """The Board answered this card's reserve/repin (a reply or a refusal): its card streak ends."""
+    with _streaks_lock:
+        _streaks.pop((gateway, task_id, "card"), None)
+
+
+def clear_pull_streaks(gateway):
+    """A feed pull succeeded: every origin card's pull streak ends."""
+    with _streaks_lock:
+        for key in [k for k in _streaks if k[0] == gateway and k[2] == "pull"]:
+            del _streaks[key]
+
+
+def _record_diagnostic(conn, task_id, gateway, value, *, fence=None):
+    """Append an unconfirmed transient failure; no queue-reason change and no thread comment."""
+    from hermes_cli import kanban_db as kb
+
+    with kb.write_txn(conn):
+        if _owned_row(conn, task_id, gateway, fence) is None:
+            return False
+        kb._append_event(conn, task_id, DIAGNOSTIC_EVENT, {**value, "recorded_at_ms": int(time.time() * 1000)})
+        return True

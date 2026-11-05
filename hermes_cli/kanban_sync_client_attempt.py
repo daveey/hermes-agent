@@ -23,3 +23,21 @@ def note_attempt(exc: BaseException, deadline: Optional[float], started: float, 
             setattr(exc, ATTEMPT_ATTR, (budget, ended - started))
     except Exception as err:  # health: allow BLE001 -- optional diagnostics must never mask the Board error
         logging.getLogger(__name__).debug("attempt timing not stamped (%s)", type(err).__name__)
+
+
+# A replay-safe timeout is resent only when at least this much of the shared deadline is left: less cannot carry a
+# round trip, and spending it would turn the real timeout into a budget-exhausted error.
+REPLAY_MIN_BUDGET_S = 0.1
+
+
+def replay_after_timeout(exc: BaseException, attempt: int, replay_safe: bool, deadline: Optional[float],
+                         now: float) -> bool:
+    """Whether a timed-out first attempt of a replay-safe request is resent once, on a fresh connection, within the
+    same deadline (``now`` is the caller's monotonic clock). Only reserve opts in: it is revision-fenced, and the
+    Board answers a same-revision replay with the recorded reservation. Ops and leases never do."""
+    if not (replay_safe and attempt == 0 and isinstance(exc, TimeoutError)):
+        return False
+    if deadline is not None and deadline - now < REPLAY_MIN_BUDGET_S:
+        return False
+    logging.getLogger(__name__).warning("replay-safe Board request timed out; replaying it once (revision-fenced)")
+    return True

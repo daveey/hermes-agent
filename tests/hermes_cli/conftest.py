@@ -13,9 +13,11 @@ def _isolate_kanban_worker_process_registries(monkeypatch):
     Use fresh dictionaries rather than clearing shared ones so teardown restores their owner.
     """
     from hermes_cli import kanban_db_dispatch
+    from hermes_cli import kanban_queue_reason
 
     monkeypatch.setattr(kanban_db_dispatch, "_live_worker_procs", {})
     monkeypatch.setattr(kanban_db_dispatch, "_recent_worker_exits", {})
+    monkeypatch.setattr(kanban_queue_reason, "_streaks", {})  # transient Board-failure streaks are per test
 
 
 @pytest.fixture

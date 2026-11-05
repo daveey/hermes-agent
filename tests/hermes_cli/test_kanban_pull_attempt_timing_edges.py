@@ -20,6 +20,16 @@ from hermes_cli import kanban_sync_client_attempt as attempt
 from tests.hermes_cli import test_kanban_sync_hub_keepalive as keepalive
 from tests.hermes_cli import test_kanban_worker_reserve_client as fixtures
 
+
+@pytest.fixture(autouse=True)
+def _confirm_on_first_pass(monkeypatch):
+    """These tests pin the provenance of the recorded board_error, not the transient-failure debounce
+    (tests/hermes_cli/test_kanban_queue_transient_debounce.py): confirm a transient failure on its first pass."""
+    from hermes_cli import kanban_queue_reason
+
+    monkeypatch.setattr(kanban_queue_reason, "CONFIRM_PASSES", 1)
+
+
 conn = fixtures.conn
 server = keepalive.server
 CAP_MS = 86_400_000

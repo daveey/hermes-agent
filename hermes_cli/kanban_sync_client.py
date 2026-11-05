@@ -43,7 +43,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_sync_timing as sync_timing  # off unless kanban.sync.diagnostics.timing_until arms it
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
-from hermes_cli.kanban_sync_client_attempt import note_attempt
+from hermes_cli.kanban_sync_client_attempt import note_attempt, replay_after_timeout
 
 _log = logging.getLogger(__name__)
 
@@ -365,6 +365,8 @@ class Hub:
                     self._drop()
                     if reused and attempt == 0:  # a stale kept-alive socket: the request never reached the server
                         continue
+                    if replay_after_timeout(exc, attempt, replay_safe, self.deadline, time.monotonic()):
+                        continue
                     raise urllib.error.URLError(exc) from exc
                 try:
                     resp = conn.getresponse()
@@ -377,11 +379,15 @@ class Hub:
                     raise urllib.error.URLError(exc) from exc
                 except (OSError, http.client.HTTPException) as exc:
                     self._drop()
+                    if replay_after_timeout(exc, attempt, replay_safe, self.deadline, time.monotonic()):
+                        continue
                     raise urllib.error.URLError(exc) from exc
                 try:
                     raw = resp.read()
                 except (OSError, http.client.HTTPException) as exc:
                     self._drop()
+                    if replay_after_timeout(exc, attempt, replay_safe, self.deadline, time.monotonic()):
+                        continue
                     raise urllib.error.URLError(exc) from exc
                 if resp.will_close:
                     self._drop()

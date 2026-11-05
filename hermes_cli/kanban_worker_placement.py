@@ -180,6 +180,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                     # A run moved this card (kanban_move). Its runs_on is Board-owned, so only the origin's
                     # creator repin can apply that move; reserving would hand it straight back to the pool.
                     reply = hub.repin(board, task_id=row["id"], expected_revision=row["sync_version"], runs_on=labels)
+                    queue.clear_streak(gateway, row["id"])
                     try:
                         _record_repin(conn, row["id"], gateway, labels, reply)
                     except sqlite3.Error:
@@ -209,6 +210,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                     _refused[key] = (row["sync_version"], now + NOT_CLAIMABLE_BACKOFF_S)
                     fence, machine = before[row["id"]]
                     if picked_up(conn, hub, board, gateway, row["id"], machine, pulled):
+                        queue.clear_streak(gateway, row["id"])
                         continue  # the worker we reserved already claimed it: a pickup, not a refusal
                 queue.try_record(queue.record_error, conn, row["id"], gateway, error=exc, fence=fence, stage=stage,
                                  timing=timing)
@@ -359,12 +361,13 @@ def dispatch_tick(conn):
             return
         hub = client.Hub(ident, timeout=DISPATCH_NETWORK_BUDGET_S,
                          deadline=time.monotonic() + DISPATCH_NETWORK_BUDGET_S)
+        from hermes_cli import kanban_queue_reason as queue
         try:
             client.pull(conn, hub, state["board_id"], observers=True, partition=ident.gateway)
         except (client.HubError, client.SyncUnavailable, client.Resync, OSError) as exc:
-            from hermes_cli import kanban_queue_reason as queue
             queue.try_record(queue.record_pull_error, conn, ident.gateway, error=exc)
             return
+        queue.clear_pull_streaks(ident.gateway)  # a feed-pull failure streak is no longer consecutive
         reevaluate(conn, hub, state["board_id"], ident.gateway)
     except (client.HubError, client.SyncUnavailable, client.Resync, OSError):
         # Offline origin cannot remove the queue fence or manufacture an assignment.
