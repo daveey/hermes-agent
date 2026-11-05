@@ -47,12 +47,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         BEGIN DELETE FROM task_wake_episode_exit WHERE task_id = NEW.id; END""")
     conn.execute("""CREATE TRIGGER IF NOT EXISTS task_wake_episode_exit_delete AFTER DELETE ON tasks
         BEGIN DELETE FROM task_wake_episode_exit WHERE task_id = OLD.id; END""")
-    # Fresh local triage creation: a triage card is not runnable, so no peer can have
-    # parked it on a probe before this home's direct triage -> scheduled park, which then
-    # has nothing to clear. Set only by the local ``created`` event of a triage card
-    # (sync-imported rows never append it; a runnable card may reach a peer and be parked
-    # there first). Any other status transition, a probe park, or the first probe-less
-    # park drops it.
+    # Fresh local triage creation: the card's direct triage -> scheduled park. On an
+    # UNSYNCED board no peer can have parked it on a probe first, so that park has nothing
+    # to clear and adds no evidence. On a synced board a peer may promote/claim/park (or
+    # directly park) the triage card while this home still sees triage, so the park
+    # carries the reset inline in its own event (atomic park: still one event); durable
+    # sync state is re-checked at the park and enabling sync clears every marker
+    # (``forget_fresh``). Set only by the local ``created`` event of a triage card
+    # (sync-imported rows never append it; a runnable card may reach a peer). Any other
+    # status transition, a probe park, or the first probe-less park drops it.
     conn.execute("CREATE TABLE IF NOT EXISTS task_wake_episode_fresh (task_id TEXT PRIMARY KEY)")
     conn.execute("DROP TRIGGER IF EXISTS task_wake_episode_fresh_insert")
     conn.execute("DROP TRIGGER IF EXISTS task_wake_episode_fresh_entry")
@@ -158,10 +161,14 @@ def snapshot_event(conn: sqlite3.Connection, task_id: str, kind: str,
         reconcile(conn, task_id)  # judge against every delivered park, then idempotent in _snapshot
         fresh = conn.execute("DELETE FROM task_wake_episode_fresh WHERE task_id = ?", (task_id,)).rowcount > 0
         if fresh and not _probe_known(conn, task_id):
-            # Direct park of a locally created triage card, no probe delivered: nothing to clear, so
-            # no evidence (keeps atomic park event contracts). Every later park may
-            # follow an undelivered foreign episode, so it carries the reset below.
-            return payload, None
+            # Direct park of a locally created triage card, no probe delivered. Unsynced:
+            # nothing to clear, no evidence. Synced: a peer may have parked it first, so
+            # carry the reset in the park's own payload (keeps atomic park cardinality).
+            # Every later park may follow an undelivered foreign episode: reset below.
+            if not _synced(conn):
+                return payload, None
+            reset(conn, task_id)
+            return {**(payload or {}), **_snapshot(conn, task_id, kind, payload, outside)}, None
         reset(conn, task_id)  # home state may be unknown: make the clear an explicit reset barrier
     snapshot = _snapshot(conn, task_id, kind, payload, outside)
     separate = probe_less or (
@@ -187,6 +194,21 @@ def _snapshot(conn: sqlite3.Connection, task_id: str, kind: str, payload: dict |
     # A null snapshot only resets a peer when it carries an unseen reset barrier;
     # an unobserved episode on the home is otherwise unknown, not evidence of success.
     return {_SNAPSHOT: data, barriers.KEY: barriers.current(conn, task_id)}
+
+
+def _synced(conn: sqlite3.Connection) -> bool:
+    """Durable local sync state exists: the board was enabled for sync at some point (any
+    mode, including a later detach), so peers may hold copies. Read from SQLite inside the
+    caller's transaction, never from config, so a concurrent enable is serialized."""
+    from hermes_cli import kanban_db_sync
+
+    return kanban_db_sync.sync_state(conn) is not None
+
+
+def forget_fresh(conn: sqlite3.Connection) -> None:
+    """Drop every freshness marker; called in the transaction that enables sync (after
+    ``ensure_schema``, which connect runs first)."""
+    conn.execute("DELETE FROM task_wake_episode_fresh")
 
 
 def _probe_known(conn: sqlite3.Connection, task_id: str) -> bool:

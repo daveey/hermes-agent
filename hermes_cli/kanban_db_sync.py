@@ -384,13 +384,16 @@ def install_or_remove(conn: sqlite3.Connection, db_path: str) -> None:
         _add_column_if_missing(conn, table, column, ddl)
     for table in _UID_TABLES:
         conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uid ON {table}(uid)")
-    conn.execute(
-        "INSERT OR IGNORE INTO kanban_sync_state (board_id, gateway_id, hlc_last, mode) "
-        "SELECT ?, ?, '', 'shadow' WHERE NOT EXISTS (SELECT 1 FROM kanban_sync_state)",
-        (f"local:{uuid7()}", f"gw_{uuid7()}"),
-    )
     from hermes_cli.kanban_db_connect import write_txn
     with write_txn(conn):  # one transaction: no other writer can land between dropping and recreating a trigger
+        enabled_now = conn.execute(
+            "INSERT OR IGNORE INTO kanban_sync_state (board_id, gateway_id, hlc_last, mode) "
+            "SELECT ?, ?, '', 'shadow' WHERE NOT EXISTS (SELECT 1 FROM kanban_sync_state)",
+            (f"local:{uuid7()}", f"gw_{uuid7()}"),
+        ).rowcount > 0
+        if enabled_now:  # [daveey] peers may now receive this board's cards: no unsynced freshness marker survives
+            from hermes_cli.kanban_wake_episode import forget_fresh
+            forget_fresh(conn)
         state = conn.execute("SELECT mode, board_id FROM kanban_sync_state").fetchone()
         if state[0] == "off":
             drop_triggers(conn)
