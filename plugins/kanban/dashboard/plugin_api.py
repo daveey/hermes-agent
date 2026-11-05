@@ -395,6 +395,7 @@ def get_task(
     if run_state_type not in (None, "status", "outcome"):
         raise HTTPException(status_code=400, detail="run_state_type must be 'status' or 'outcome'")
     from hermes_cli import kanban_foreign_card as kfc
+    from hermes_cli.kanban_wait_live import owner_proof
     with _board_conn(board) as (board, conn):
         task = kanban_db.get_task(conn, task_id)
         if task is not None:
@@ -403,7 +404,7 @@ def get_task(
             queue = kqp.position(conn, task, board)  # [daveey] a long wait reads as queued, not stuck
             if queue is not None:
                 out["queue"] = queue
-            return {**out, "source": "live"}
+            return {**out, "source": "live", "wait_observation": owner_proof(conn, task)}
         live_file = kbc._main_db_file(conn)
     # [daveey] A synced board's live file holds only this gateway's own cards; a card another gateway created
     # (a Board worker node no Desktop reaches) is read from the board replica, named with its owner.

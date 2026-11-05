@@ -19,6 +19,7 @@ import os
 import shlex
 import sqlite3
 import subprocess
+import time
 import sys
 from pathlib import Path
 from typing import Optional
@@ -125,6 +126,7 @@ def _agent_owned_park(board: Optional[str], target: str, *, source=None) -> bool
 
 def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] = None, until=DEFAULT_UNTIL,
                  since=()) -> tuple[int, str]:
+    started = time.monotonic()
     inner = ["hermes", "kanban", "wait-check", kind, target, "--until", ",".join(until)]
     # ``since`` (--from) is applied here, on the reply, so an older remote never sees a flag it would reject.
     if board:
@@ -134,15 +136,17 @@ def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] =
     try:
         p = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_TIMEOUT}", host, remote],
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=SSH_TIMEOUT + 15, check=False)
+                           timeout=15 if kind == "task" else SSH_TIMEOUT + 15, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         if kind == "task":
             from hermes_cli.kanban_wait_replica import check
-            return check(gateway, target, board=board, until=until, since=since)
+            return check(gateway, target, board=board, until=until, since=since,
+                         live_timeout=25 - (time.monotonic() - started))
         return 2, f"error: ssh {host}: {exc}"
     if p.returncode == 255 and kind == "task":
         from hermes_cli.kanban_wait_replica import check
-        return check(gateway, target, board=board, until=until, since=since)
+        return check(gateway, target, board=board, until=until, since=since,
+                         live_timeout=25 - (time.monotonic() - started))
     out = (p.stdout + p.stderr).strip()
     if p.returncode == 0 and since and kind == "task":
         words = (p.stdout or "").split()

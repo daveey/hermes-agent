@@ -17,6 +17,10 @@ STALE_RC = 3
 STATUSES = frozenset(("todo", "ready", "running", "scheduled", "review", "blocked", "triage", "done", "archived"))
 
 
+class MissingReplica(ValueError):
+    """No local observation exists for this owner-qualified card."""
+
+
 class StaleReplica(ValueError):
     """The card was seen in the gateway's replica, but that replica is older than MAX_AGE_SECONDS."""
 
@@ -34,7 +38,7 @@ def read_task(gateway, target, board=None):
         rows = db.execute("SELECT data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
                           (gateway, f"default/{board}/{target}")).fetchall()
         if not rows:
-            raise ValueError(f"{target} not found in {gateway} replica")
+            raise MissingReplica(f"{target} not found in {gateway} replica")
         tasks = [json.loads(r[0]) for r in rows]
         if any(t != tasks[0] for t in tasks[1:]):
             raise ValueError(f"ambiguous replica records for {target}")
@@ -96,15 +100,22 @@ def stale_message(target, stale):
             f"stale_age={stale.age:.0f}s, limit={stale.limit:.0f}s; last seen {status}, unknown now: not yet)")
 
 
-def check(gateway, target, *, board=None, until=(), since=()):
+def check(gateway, target, *, board=None, until=(), since=(), live_timeout=None):
     try:
+        source = "replica"
         try:
             task = read_task(gateway, target, board)
+        except MissingReplica:
+            if live_timeout is None:
+                raise
+            from hermes_cli.kanban_wait_live import read_task as read_live
+            task = read_live(gateway, target, board=board, timeout_seconds=live_timeout)
+            source = "live owner"
         except StaleReplica as stale:
             return STALE_RC, stale_message(target, stale)
         status = task["status"]
         orphan = orphan_reason(task)
-        suffix = " (replica; orphan producer)" if orphan else " (replica)"
+        suffix = f" ({source}; orphan producer)" if orphan else f" ({source})"
         if status in since:
             return 1, f"{target} {status} (unchanged since park){suffix}"
         if status in until:
@@ -114,7 +125,7 @@ def check(gateway, target, *, board=None, until=(), since=()):
             if not isinstance(evidence, dict) or type(evidence.get("parked_agent")) is not bool:
                 raise ValueError(f"{target} scheduled producer evidence unavailable; update owner core")
             if evidence["parked_agent"]:
-                return 0, f"{target} {status} (replica; orphan producer)"
+                return 0, f"{target} {status} ({source}; orphan producer)"
         return 1, f"{target} {status}{suffix}"
     except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError) as exc:
         return 2, f"error: replica {gateway}: {exc}"

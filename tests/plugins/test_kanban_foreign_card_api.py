@@ -93,6 +93,7 @@ def test_replica_only_card_reads_with_source_and_owner(kanban_home, api, monkeyp
     assert body["task"]["id"] == tid and body["task"]["title"] == "Made on worker-1"
     assert [c["body"] for c in body["comments"]] == ["from the worker"]
     assert "queue" not in body  # queue position is for the live dispatcher's own cards
+    assert "wait_observation" not in body
 
 
 def test_replica_ignored_when_board_does_not_sync(kanban_home, api, monkeypatch):
@@ -109,6 +110,8 @@ def test_live_card_unchanged_plus_source_live(kanban_home, api, monkeypatch):
     tid = _live_card()
     body = api.get(f"/api/plugins/kanban/tasks/{tid}").json()
     assert body["source"] == "live"
+    assert body["wait_observation"] == {"board": "default", "human_request": False,
+                                         "parked_agent": False, "orphan_reason": None}
     assert "owner" not in body
     assert set(body) >= {"task", "comments", "events", "attachments", "links", "link_tasks", "child_results", "runs"}
 
@@ -195,6 +198,13 @@ def test_done_card_has_no_queue(kanban_home, api):
     tid = _live_card()
     _set(tid, status="done")
     assert "queue" not in api.get(f"/api/plugins/kanban/tasks/{tid}").json()
+
+
+def test_live_orphan_proof_is_owner_computed(kanban_home, api):
+    tid = _live_card()
+    _set(tid, status="blocked", block_kind=None, human_request=None)
+    proof = api.get(f"/api/plugins/kanban/tasks/{tid}").json()["wait_observation"]
+    assert proof["orphan_reason"] and proof["parked_agent"] is True
 
 
 def test_worker_first_card_reports_worker_pool_reason(kanban_home, api):
