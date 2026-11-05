@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import locale
-import math
+from agent.turn_recovery_image_limits import _image_error_max_dimension
 import re
 import time
 from dataclasses import dataclass
@@ -24,7 +24,8 @@ from agent.model_metadata import is_output_cap_error, parse_available_output_tok
 from agent.retry_utils import is_zai_coding_overload_error, zai_coding_overload_retry_ceiling
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.message_sanitization import (
-    _looks_like_corrupt_image_rejection, _looks_like_image_content_rejection, _sanitize_messages_non_ascii,
+    _looks_like_corrupt_image_rejection, _looks_like_image_content_rejection, _messages_carry_images,
+    _sanitize_messages_non_ascii,
     _sanitize_messages_surrogates, _sanitize_structure_non_ascii, _sanitize_structure_surrogates,
     _strip_images_from_messages, _strip_non_ascii, close_interrupted_tool_sequence, record_reasoning_field_rejection,
 )
@@ -67,39 +68,6 @@ def _blines(agent: Any, *lines: str) -> None:
     """``_buffer_vprint`` each line (surfaces only if every retry+fallback exhausts)."""
     for line in lines:
         agent._buffer_vprint(line)
-
-
-def _image_error_max_dimension(error: Exception) -> Optional[int]:
-    """Extract a provider-reported image dimension ceiling, if present."""
-    parts = []
-    for value in (error, getattr(error, "message", None), getattr(error, "body", None)):
-        if value:
-            try:
-                parts.append(str(value))
-            except Exception:
-                pass
-    text = " ".join(parts).lower()
-    # OpenAI Codex Responses reports a tile-patch budget (ceil(w/32)×ceil(h/32))
-    # instead of a pixel ceiling. A square image is the worst case for the budget,
-    # so a per-side cap of isqrt(limit)*32 px keeps isqrt(limit)² ≤ limit — for the
-    # 30000-patch ceiling that is 5536 px. Without this the caller falls back to
-    # 8000 px and a 6000 px image that already exceeds the budget is skipped (#106337).
-    if "patches after processing" in text:
-        match = re.search(r"exceeding the limit of\s*(\d{2,7})", text)
-        if not match:
-            return None
-        max_dimension = math.isqrt(int(match.group(1))) * 32
-        return max_dimension if 512 <= max_dimension <= 8000 else None
-    if "image" not in text or "dimension" not in text or "max allowed size" not in text:
-        return None
-    match = re.search(r"max allowed size(?:\s+for [^:]+)?:\s*(\d{3,5})\s*pixels?", text)
-    if not match:
-        return None
-    try:
-        max_dimension = int(match.group(1))
-    except ValueError:
-        return None
-    return max_dimension if 512 <= max_dimension <= 8000 else None
 
 
 def _try_refresh_nous_paid_entitlement_credentials(agent) -> bool:
@@ -288,9 +256,11 @@ def recover_before_classification(
             # request would loop on the same error.
             if _strip_request_images_and_retry(agent, api_messages):
                 return True, active_system_prompt
-        else:
+        elif _messages_carry_images(api_messages or messages):
             # Record the model; the retry re-enters build_api_request with the same
             # api_messages and strip_images_for_rejecting_model strips them there.
+            # A request with no image never marks: a 4xx body can echo the user's own text
+            # ("X is not a multimodal model"), and a wrong mark blinds a vision model until /new.
             _rejected.add(_model_key)
             _vlines(
                 agent,
