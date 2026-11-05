@@ -1,9 +1,13 @@
 """Tests for hermes_cli.logs — log viewing and filtering."""
 
+import time
 from datetime import datetime, timedelta
+
+import pytest
 
 from hermes_cli.logs import (
     LOG_FILES,
+    _LineFilter,
     _extract_level,
     _extract_logger_name,
     _line_matches_component,
@@ -13,6 +17,23 @@ from hermes_cli.logs import (
     _read_last_n_lines,
     _read_tail,
 )
+
+
+def _set_tz(monkeypatch, name: str) -> None:
+    """Pin the process zone (restored by monkeypatch teardown) so local-time conversions are deterministic."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset unavailable on this platform")
+    monkeypatch.setenv("TZ", name)
+    time.tzset()
+
+
+@pytest.fixture(autouse=True)
+def _restore_tz():
+    # Torn down after monkeypatch has restored $TZ, so the C library re-reads the original zone.
+    yield
+    if hasattr(time, "tzset"):
+        time.tzset()
+
 
 # ---------------------------------------------------------------------------
 # Timestamp parsing
@@ -38,14 +59,63 @@ class TestParseLineTimestamp:
         ts = _parse_line_timestamp("2026-04-11 10:23:45 INFO gateway.run: msg")
         assert ts == datetime(2026, 4, 11, 10, 23, 45)
 
-    def test_iso_t_separated_update_and_handoff_stamps(self):
+    def test_iso_t_separated_update_and_handoff_stamps(self, monkeypatch):
         # posix.sh: date +%Y-%m-%dT%H:%M:%S%z; windows.ps1: yyyy-MM-ddTHH:mm:ssK
+        # An offset-aware stamp is converted to this machine's wall clock (pinned to UTC here).
+        _set_tz(monkeypatch, "UTC")
         assert _parse_line_timestamp("2026-09-29T21:36:18+08:00 update| step done") == datetime(
-            2026, 9, 29, 21, 36, 18
+            2026, 9, 29, 13, 36, 18
         )
         assert _parse_line_timestamp("2026-09-29T21:36:18Z step stalled") == datetime(
             2026, 9, 29, 21, 36, 18
         )
+        assert _parse_line_timestamp("2026-09-29T21:36:18+0800 update| step done") == datetime(
+            2026, 9, 29, 13, 36, 18
+        )
+        # no offset: naive, zone unknown, left as written
+        assert _parse_line_timestamp("=== hermes update started 2026-09-29T21:36:18 ===") == datetime(
+            2026, 9, 29, 21, 36, 18
+        )
+
+    def test_desktop_log_legacy_and_offset_shapes(self, monkeypatch):
+        _set_tz(monkeypatch, "America/Los_Angeles")
+        legacy = "2026-11-05 12:00:00,123 [hermes] [boot] ready"
+        aware = "2026-11-05 12:00:00,123 -08:00 [hermes] [boot] ready"
+        assert _parse_line_timestamp(legacy) == datetime(2026, 11, 5, 12, 0, 0)
+        assert _parse_line_timestamp(aware) == datetime(2026, 11, 5, 12, 0, 0)
+        # Writer in another zone: same instant, expressed on this machine's clock.
+        assert _parse_line_timestamp("2026-11-05 15:00:00,000 -05:00 [hermes] x") == datetime(2026, 11, 5, 12, 0, 0)
+        assert _parse_line_timestamp("2026-11-05 20:00:00,000 +00:00 [hermes] x") == datetime(2026, 11, 5, 12, 0, 0)
+
+    def test_desktop_log_dst_fold_and_midnight(self, monkeypatch):
+        _set_tz(monkeypatch, "UTC")
+        # Fold: 01:30 -07:00 and 01:30 -08:00 are an hour apart.
+        first = _parse_line_timestamp("2026-11-01 01:30:00,000 -07:00 [hermes] a")
+        second = _parse_line_timestamp("2026-11-01 01:30:00,000 -08:00 [hermes] b")
+        assert second - first == timedelta(hours=1)
+        # Spring gap: 01:59:59 -08:00 and 03:00:00 -07:00 are one second apart.
+        before = _parse_line_timestamp("2026-03-08 01:59:59,000 -08:00 [hermes] a")
+        after = _parse_line_timestamp("2026-03-08 03:00:00,000 -07:00 [hermes] b")
+        assert after - before == timedelta(seconds=1)
+        # Midnight rollover in the writer's zone.
+        assert _parse_line_timestamp("2026-11-04 23:59:59,999 -08:00 [hermes] a") == datetime(2026, 11, 5, 7, 59, 59)
+        assert _parse_line_timestamp("2026-11-05 00:00:00,000 -08:00 [hermes] b") == datetime(2026, 11, 5, 8, 0, 0)
+
+    def test_desktop_log_continuation_and_since_filter(self, monkeypatch):
+        _set_tz(monkeypatch, "UTC")
+        cutoff = datetime(2026, 11, 5, 8, 0, 0)
+        keep = _LineFilter(since=cutoff)
+        # 07:59 -08:00 is 15:59 UTC (after cutoff); the naive legacy 07:59 predates it.
+        assert keep("2026-11-05 07:59:00,000 -08:00 [hermes] new") is True
+        assert keep("    continuation of the new record") is True
+        assert keep("2026-11-05 07:59:00,000 [hermes] legacy") is False
+        assert keep("    continuation of the legacy record") is False
+
+    def test_offset_lookalikes_are_not_offsets(self, monkeypatch):
+        _set_tz(monkeypatch, "UTC")
+        # "-0500" followed by digits, or a bare dash number, is message text, not a zone.
+        assert _parse_line_timestamp("2026-04-11 10:23:45 -12345 INFO x") == datetime(2026, 4, 11, 10, 23, 45)
+        assert _parse_line_timestamp("2026-04-11 10:23:45,001 INFO x: -5") == datetime(2026, 4, 11, 10, 23, 45)
 
 class TestExtractLevel:
     def test_info(self):
@@ -212,7 +282,7 @@ def _log_file_samples() -> dict:
         "gateway": _python_log_line("gateway.run"),
         "gui": _python_log_line("hermes_cli.web_server"),
         # Written by TypeScript; apps/desktop/electron/desktop-log-line.test.ts pins the same shape.
-        "desktop": "2026-09-28 13:18:46,062 [hermes] [boot] ready",
+        "desktop": "2026-09-28 13:18:46,062 -07:00 [hermes] [boot] ready",
         "mcp": _mcp_output_line(),
         # update.log mirrors raw update output; handoff lines carry the shim's ISO-8601 stamp.
         "update": _update_log_line(),

@@ -77,7 +77,8 @@ const prettyState = (state: string) => state.replace(/_/g, ' ').replace(/^./, c 
 
 // Strip leading "YYYY-MM-DD HH:MM:SS,mmm " and "[runtime_id] " prefixes from
 // log lines so they don't dominate the display. Full text preserved on hover.
-const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}[,.\d]*\s+/
+// desktop.log lines carry a numeric UTC offset ("-08:00") after the stamp; legacy lines do not.
+const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}[,.\d]*(?:\s?(?:Z|[+-]\d{2}:?\d{2}))?\s+/
 const RUNTIME_BRACKET_RE = /^\[[^\]]+]\s+/
 const trimLogLine = (raw: string) => raw.trim().replace(TIMESTAMP_RE, '').replace(RUNTIME_BRACKET_RE, '')
 

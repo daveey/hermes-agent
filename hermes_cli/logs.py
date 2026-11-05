@@ -24,7 +24,7 @@ Usage examples::
 import re
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -70,7 +70,16 @@ def log_file_path(log_name: str) -> Optional[Path]:
 # "2026-04-05 22:35:00[,123]" at the start of a line; update.log /
 # desktop-update-handoff.log stamp with the shell's ISO-8601 "T" shape
 # ("2026-09-29T21:36:18+08:00", "=== hermes update started 2026-09-29T21:36:18 ===").
-_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})")
+#
+# desktop.log (Electron) additionally stamps a numeric UTC offset after the
+# milliseconds ("2026-11-05 12:00:00,000 -08:00 [hermes] ..."); installs that
+# predate it write the naive shape. Group 2 captures an offset when present
+# ("-08:00", "+0530", "Z"); lines without one stay naive and are never assigned a zone.
+_TS_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})"
+    r"(?:[,.]\d+)?"
+    r"(?:\s?(Z|[+-]\d{2}:?\d{2})(?![\d:]))?"
+)
 _LEVEL_RE = re.compile(r"\s(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s")
 # Logger name: the token before ":" after the level and optional "[session]" tag,
 # e.g. "INFO gateway.run:" or "INFO [sess_abc] tools.terminal_tool:".
@@ -92,9 +101,24 @@ def _parse_line_timestamp(line: str) -> Optional[datetime]:
     if not m:
         return None
     try:
-        return datetime.strptime(m.group(1).replace("T", " "), "%Y-%m-%d %H:%M:%S")
+        naive = datetime.strptime(m.group(1).replace("T", " "), "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None
+    offset = m.group(2)
+    if offset is None:
+        return naive  # legacy/naive stamp: the writer's zone is unknown, compare as local wall time
+    # Offset-aware stamp: name the instant, then express it in this machine's wall clock
+    # so it compares with the naive ``--since`` cutoff.
+    try:
+        if offset == "Z":
+            tz = UTC
+        else:
+            digits = offset[1:].replace(":", "")
+            delta = timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+            tz = timezone(-delta if offset[0] == "-" else delta)
+        return naive.replace(tzinfo=tz).astimezone().replace(tzinfo=None)
+    except (ValueError, OverflowError, OSError):
+        return naive
 
 
 def _extract_level(line: str) -> Optional[str]:
