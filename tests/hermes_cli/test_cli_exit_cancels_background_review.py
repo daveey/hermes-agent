@@ -1,4 +1,4 @@
-"""The classic CLI owns its post-turn background review: exit cancels it, one-shots never fork it.
+"""The classic CLI owns its post-turn background review: exit cancels it, single-query runs never fork it.
 
 Observed 2026-10-29 20:16 PDT (session 20261029_201245_dfaf9b, core cb1aa70f): the foreground turn
 answered, the review fork spawned, CLI cleanup ran memory shutdown, then the review's first API call
@@ -139,35 +139,3 @@ def test_single_query_cli_agent_skips_background_review(monkeypatch):
 
 def test_interactive_cli_agent_keeps_background_review(monkeypatch):
     assert not _cli_capturing_agent_kwargs(monkeypatch, single_query=False).get("skip_background_review")
-
-
-def test_oneshot_z_agent_skips_background_review(monkeypatch):
-    import hermes_cli.oneshot as oneshot_mod
-
-    captured = {}
-
-    class _FakeAgent:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-        def __setattr__(self, name, _value):
-            pass
-
-        def run_conversation(self, _prompt, conversation_history=None):
-            return {"final_response": "pong", "session_id": "s"}
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(oneshot_mod, "_create_session_db_for_oneshot", lambda: None)
-    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"model": {"default": "m", "provider": "custom"}})
-    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", lambda **_kw: {
-        "api_key": "k", "base_url": "https://x.example/v1", "provider": "custom", "api_mode": "chat_completions",
-        "credential_pool": None})
-    monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda _cfg, _p: [])
-    monkeypatch.setattr("hermes_cli.mcp_startup.ensure_mcp_discovery_before_agent_build", lambda **_kw: None)
-    monkeypatch.setattr("run_agent.AIAgent", _FakeAgent)
-
-    oneshot_mod._run_agent("say OK")
-
-    assert captured.get("skip_background_review") is True

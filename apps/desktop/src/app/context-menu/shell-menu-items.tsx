@@ -5,6 +5,7 @@ import { toggleTargetZoneTabStrip } from '@/components/pane-shell/tree/store'
 import { type MenuKit, renderActionItem } from '@/components/ui/actions-menu'
 import { type Translations, useI18n } from '@/i18n'
 import { runBuiltinAction } from '@/lib/keybinds/plugin-actions'
+import { cloudOwnsUpdates } from '@/store/cloud-updates'
 import { openCommandPalette } from '@/store/command-palette'
 import { toggleProfileRailVisible } from '@/store/profile-rail-prefs'
 import { toggleStatusbarVisible } from '@/store/statusbar-prefs'
@@ -39,15 +40,21 @@ function shellSections(
     onSelect: () => navigateToWorkspacePage(navigate, SETTINGS_ROUTE)
   })
 
-  const update = renderActionItem(kit, {
-    icon: 'cloud-download',
-    key: 'shell-update',
-    label: t.commandCenter.updateHermes,
-    onSelect: requestActiveUpdate
-  })
+  // A Webapp served by Hermes Cloud has nothing to update. Desktop connected to Cloud keeps
+  // the row: it updates this machine's app and skips the agent.
+  const updateHidden = cloudOwnsUpdates('client')
+
+  const update = updateHidden
+    ? null
+    : renderActionItem(kit, {
+        icon: 'cloud-download',
+        key: 'shell-update',
+        label: t.commandCenter.updateHermes,
+        onSelect: requestActiveUpdate
+      })
 
   if (primaryOnly) {
-    return [[newChat, settings, update]]
+    return [update ? [newChat, settings, update] : [newChat, settings]]
   }
 
   return [
@@ -92,7 +99,7 @@ function shellSections(
       }),
       settings
     ],
-    [update]
+    ...(update ? [[update]] : [])
   ]
 }
 

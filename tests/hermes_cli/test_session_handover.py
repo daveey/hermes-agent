@@ -225,8 +225,7 @@ def test_oneshot_resume_of_a_moved_session_exits_before_the_turn(gw, monkeypatch
     monkeypatch.setattr(hm, "_resolve_session_by_name_or_id", lambda value: value)
     monkeypatch.setattr(hm, "_confirm_startup_expensive_model_override", lambda args: None)
     ran = []
-    monkeypatch.setattr(hm, "_run_and_exit_oneshot", lambda *a, **k: ran.append(k))
-    # Fork: upstream runs -z through the gateway chat launcher; the moved fence must stop it too.
+    # Fork: upstream runs -z through the gateway chat launcher; the moved fence must stop it.
     monkeypatch.setattr("hermes_cli.gateway_chat_startup.launch_gateway_chat", lambda args: ran.append(args) or 0)
     _moved_away(gw)
     with pytest.raises(SystemExit) as exc:

@@ -72,14 +72,6 @@ def test_cli_resume_of_a_stale_model_keeps_the_launch_default(enforced):
     assert (stub.model, stub.provider) == APPROVED
 
 
-def test_oneshot_resume_of_a_stale_model_keeps_the_ambient_choice(enforced):
-    from hermes_cli.oneshot import _ModelChoice, _apply_stored_session_runtime
-    choice = _apply_stored_session_runtime(_ModelChoice("class:deep", "auto"), row(*RETIRED), explicit_model=False)
-    assert (choice.model, choice.provider) == ("class:deep", "auto")
-    choice = _apply_stored_session_runtime(_ModelChoice("class:deep", "auto"), row(*APPROVED), explicit_model=False)
-    assert (choice.model, choice.provider) == APPROVED
-
-
 def test_api_session_resume_of_a_stale_model_follows_the_default(enforced):
     from gateway.platforms.api_server import APIServerAdapter
     adapter = object.__new__(APIServerAdapter)
