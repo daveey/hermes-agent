@@ -128,9 +128,10 @@ def test_meta_and_heartbeat_changes_reread(hub):
     statements.clear()
     live, fresh, _, _ = live_and_fresh(path, clock)
     assert row_reads(statements) == 2 and live == fresh and live[0]['stale'] is True
-    with sqlite3.connect(path) as db:
+    with sqlite3.connect(path) as db:  # a heartbeat row that makes a scope fresh changes the answer's inputs
         db.execute("INSERT INTO replica VALUES ('owner','gateway','info',1,99,?,0)",
-                   (json.dumps({'gateway': 'owner', 'task_scopes': []}),))
+                   (json.dumps({'gateway': 'owner', 'task_scopes': [
+                       {'profile': 'work', 'board': 'build', 'state': 'ok', 'observed_at': 1000.0}]}),))
     statements.clear()
     activity._read_remote_links(path)
     assert row_reads(statements) == 1

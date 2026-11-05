@@ -642,14 +642,14 @@ def _decode_replica_task(record_key: str, data: Any) -> tuple[dict[str, Any], st
     return t, digest, evidence
 
 
-# [daveey] Last live (``now=None``) replica read: (key, read_at, valid_until, cards, qualified, owners). The remote
+# [daveey] Last live (``now=None``) replica read: (key, read_at, None, cards, qualified, owners). The remote
 # projection rebuilds on every local board write (its fingerprint covers every kanban.db), and hub.db itself is
 # written ~45 times a minute (outbox, ledger, cursor), but its task rows change only when a pull lands. Re-reading
 # ~6k replica rows (~23 MB of JSON) cost ~0.1 s CPU per sidebar poll for an unchanged answer. hermes-hub stamps
 # every replica write with the hub feed's monotonic ``seq``, so an insert or update raises ``max(seq)`` and a
 # delete lowers ``count``: ``_REPLICA_PROBE`` (index-only, ~6 ms) plus the small identity/heartbeat rows is the
-# whole input. Reused while that key and the origin profile are unchanged and wall time stays inside the window
-# where no hub-staleness or scope-heartbeat cut-off can flip (``valid_until``).
+# whole input. Reused while that key (scope heartbeats as their freshness verdicts at read time), the origin
+# profile, the stale verdict and every ``synced_at`` are unchanged and wall time has not stepped back.
 _remote_read_memo: tuple | None = None
 _REPLICA_PROBE = ("SELECT count(*), count(seq), max(seq), total(seq), total(version), total(octet_length(data)) "
                   "FROM replica WHERE coll = 'tasks'")
@@ -686,12 +686,15 @@ def _read_remote_links(path: Path, now: float | None = None, *,
         if live and {'seq', 'version'} <= columns:
             probe = conn.execute(_REPLICA_PROBE).fetchone()
             if probe[0] == probe[1]:  # a row without seq proves nothing about its text: never memoize it
-                key = (str(path), me, version_column, tuple(info_rows), offline, probe, get_active_profile_name())
+                # [daveey] ``info_rows`` reach the projection only as each scope's freshness verdict at ``now``
+                # (release, moved evidence): the owner's per-cycle ``observed_at`` rewrite alone is no new answer.
+                key = (str(path), me, version_column, _scope_hb.fresh_scopes(_scope_heartbeats(info_rows), now),
+                       offline, probe, get_active_profile_name())
             memo = _remote_read_memo
             # [daveey] ``last_ok`` moves on every hub pull (~2 s) while the task rows rarely do; it reaches the
             # answer only through the stale verdict and each card's ``synced_at`` (``_replica_synced``), so the
             # memo compares those instead of ``last_ok`` itself.
-            if (key is not None and memo is not None and memo[0] == key and memo[1] <= now < memo[2]
+            if (key is not None and memo is not None and memo[0] == key and memo[1] <= now
                     and memo[6] == stale and memo[7] == _replica_synced(memo[8], last_ok)):
                 if qualified_out is not None:
                     qualified_out.update(memo[4])
@@ -712,9 +715,8 @@ def _read_remote_links(path: Path, now: float | None = None, *,
     seen_at: dict[str, float] = {}
     cards = _project_replica(path, now, me, rows, info_rows, last_ok, offline,
                              qualified_out=qualified, owners_out=owners, seen_out=seen_at, moved_out=moved)
-    # Reuse ends at the next scope-heartbeat cut-off; the hub-staleness cut-off is the ``stale`` comparison above.
-    beats = [beat + d for beat, window in _scope_heartbeats(info_rows).values() for d in (0.0, window)]
-    _remote_read_memo = (key, now, min((t for t in beats if t > now), default=float('inf')), list(cards),
+    # Heartbeat cut-offs are the live verdicts in ``key``, hub staleness the ``stale`` check; a clock step back rereads.
+    _remote_read_memo = (key, now, None, list(cards),
                          frozenset(qualified), frozenset(owners), stale, _replica_synced(seen_at, last_ok),
                          dict(seen_at), dict(moved))
     if qualified_out is not None:

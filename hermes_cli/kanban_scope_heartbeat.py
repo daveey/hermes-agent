@@ -71,3 +71,8 @@ def scope_heartbeats(info_rows: list[tuple[str, str]]) -> dict[tuple[str, str, s
     return {key: (scopes[0]['observed_at'], windows[key]) for key, scopes in seen.items()
             if len(scopes) == 1 and scopes[0].get('state') == 'ok'
             and type(scopes[0].get('observed_at')) in (int, float)}
+
+
+def fresh_scopes(heartbeats: dict[tuple[str, str, str], tuple[float, float]], now: float) -> frozenset:
+    """The ``scope_heartbeats`` keys ``fresh`` at ``now``: all a replica projection learns from the heartbeats."""
+    return frozenset(key for key, (beat, window) in heartbeats.items() if fresh(beat, now, window))
