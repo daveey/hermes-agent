@@ -330,6 +330,9 @@ KANBAN_BLOCK_SCHEMA = _schema(
     "kanban_block",
     (
         "Stop work on this task and route it according to WHY you're stuck. "
+        "This ends the current run: after a successful block, do not call "
+        "lifecycle tools or kanban_link/kanban_unlink on this card again; write "
+        "your final reply. "
         "Set ``kind`` to say which: 'dependency' (waiting on another task — "
         "goes to todo and auto-resumes when that task finishes, no human "
         "needed), 'needs_input' (a decision/answer only David can give; needs "
@@ -937,8 +940,10 @@ KANBAN_UNLINK_SCHEMA = _schema(
     (
         "Remove a parent→child dependency edge. A dispatcher worker may "
         "only remove edges of its own card (its dependencies or its "
-        "children), e.g. to undo a kanban_link it made before a "
-        "kanban_block(kind='dependency'); an orchestrator may unlink any "
+        "children), e.g. to undo a kanban_link it made, while its run is "
+        "still live (before it parks); once its run has ended (after "
+        "kanban_block/kanban_schedule/...) it is refused with run_already_ended. "
+        "An orchestrator may unlink any "
         "edge. A child that no longer waits on anything is promoted at once."
     ),
     {

@@ -464,7 +464,9 @@ def test_schedule_parks_current_worker_with_reason(worker_env):
     assert out == {
         "ok": True, "task_id": worker_env, "run_id": out["run_id"],
         "status": "scheduled", "reason": reason,
+        "run_ended": True, "next": out["next"],  # agent-6ab88d2b1c: a run-ending success says so
     }
+    assert "This run is over; the card is scheduled." in out["next"]
     with kbc.connect() as conn:
         assert kb.get_task(conn, worker_env).status == "scheduled"
         run = kb.latest_run(conn, worker_env)
@@ -1776,8 +1778,11 @@ def test_sweep_escalates_old_agent_owned_block_once(worker_env):
 # kanban_unlink
 # ---------------------------------------------------------------------------
 
-def test_worker_blocks_on_dependency_then_unlinks_and_completes(worker_env):
-    """link own card under a parent -> block(dependency) -> unlink -> complete own card."""
+def test_worker_links_then_unlinks_while_live_and_completes(worker_env):
+    """link own card under a parent -> unlink (run still live) -> complete own card.
+
+    Unlinking AFTER kanban_block(kind='dependency') is refused (run_already_ended): that is how a parked
+    worker undid its own park in agent-6ab88d2b1c (tests/tools/test_kanban_post_run_calls.py)."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     from tools import kanban_tools as kt
@@ -1785,15 +1790,11 @@ def test_worker_blocks_on_dependency_then_unlinks_and_completes(worker_env):
     with kbc.connect() as conn:
         parent = kb.create_task(conn, title="upstream")
     assert json.loads(kt._handle_link({"parent_id": parent, "child_id": worker_env}))["ok"] is True
-    blocked = json.loads(kt._handle_block({"reason": "waiting on upstream", "kind": "dependency"}))
-    assert blocked["ok"] is True
-    with kbc.connect() as conn:
-        assert kb.get_task(conn, worker_env).status == "todo"
-
     out = json.loads(kt._handle_unlink({"parent_id": parent, "child_id": worker_env}))
     assert out["ok"] is True and out["unlinked"] is True
     with kbc.connect() as conn:
         assert kb.parent_ids(conn, worker_env) == []
+        assert kb.get_task(conn, worker_env).status == "running"
 
     done = json.loads(kt._handle_complete({"summary": "no longer needs the parent"}))
     assert "error" not in done, done
@@ -1840,7 +1841,7 @@ def test_unlink_tool_registered_for_workers():
     assert "kanban_unlink" not in kt._ORCHESTRATOR_TOOLS
 
 
-def test_old_run_cannot_complete_once_the_card_was_reclaimed(worker_env):
+def test_old_run_cannot_complete_once_the_card_was_reclaimed(worker_env, monkeypatch):
     """The late-completion path ends at the next claim: a stale run must not close the new run's card."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
@@ -1850,7 +1851,11 @@ def test_old_run_cannot_complete_once_the_card_was_reclaimed(worker_env):
         parent = kb.create_task(conn, title="upstream")
     kt._handle_link({"parent_id": parent, "child_id": worker_env})
     assert json.loads(kt._handle_block({"reason": "waiting", "kind": "dependency"}))["ok"] is True
-    kt._handle_unlink({"parent_id": parent, "child_id": worker_env})
+    # The parked worker may no longer unlink (run_already_ended); an orchestrator does it.
+    with monkeypatch.context() as orch:
+        orch.delenv("HERMES_KANBAN_TASK")
+        orch.delenv("HERMES_KANBAN_RUN_ID")
+        assert json.loads(kt._handle_unlink({"parent_id": parent, "child_id": worker_env}))["ok"] is True
     with kbc.connect() as conn:
         assert kb.claim_task(conn, worker_env) is not None  # dispatcher respawns the card
     out = json.loads(kt._handle_complete({"summary": "late"}))

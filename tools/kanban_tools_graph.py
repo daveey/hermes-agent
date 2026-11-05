@@ -25,7 +25,13 @@ def handle_link(args: dict, **kw) -> str:
     parent_id = args.get("parent_id")
     child_id = args.get("child_id")
     _check(parent_id and child_id, "both parent_id and child_id are required")
+    from tools import kanban_tools_run_end as kre
     with _board(args.get("board")) as (kb, conn):
+        own = os.environ.get("HERMES_KANBAN_TASK")
+        if own in (str(parent_id), str(child_id)):  # a parked worker must not edit its own card's edges
+            refused = kre.refusal(conn, "kanban_link", own)
+            if refused:
+                return refused
         gated = kb.link_tasks(
             conn, parent_id=parent_id, child_id=child_id,
             expected_child_run_id=_worker_run_id(str(child_id)))
@@ -51,7 +57,11 @@ def handle_unlink(args: dict, **kw) -> str:
                       "edges between cards your task created, ask the board's supervisor executor: "
                       "kanban_supervisor_request(ops=[{\"op\": \"unlink\", \"parent_id\": ..., "
                       "\"child_id\": ...}]) (via tool_call; dry_run=true previews scope)")
+    from tools import kanban_tools_run_end as kre
     with _board(args.get("board")) as (kb, conn):
+        refused = kre.refusal(conn, "kanban_unlink")  # unlinking a dependency park's parent undid the park
+        if refused:
+            return refused
         _check(kb.unlink_tasks(conn, parent_id, child_id), f"no such link: {parent_id} -> {child_id}")
         return _ok(parent_id=parent_id, child_id=child_id, unlinked=True)
 

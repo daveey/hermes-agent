@@ -134,9 +134,9 @@ class _Reject(Exception):
     ``COMPLETE_REJECTION_CLASSES``) so digests can count refusals by cause
     instead of grepping prose that changes between releases."""
 
-    def __init__(self, message: str, rejection: Optional[str] = None):
+    def __init__(self, message: str, rejection: Optional[str] = None, *, payload: Optional[str] = None):
         extra = {"rejection": rejection} if rejection else {}
-        super().__init__(tool_error(message, **extra))
+        super().__init__(payload or tool_error(message, **extra))
         self.rejection = rejection
 
 
@@ -222,6 +222,9 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                 if refused is not None:
                     return refused
                 out = fn(args, **kw)
+                if tool_name in _RUN_LIFECYCLE_TOOLS and isinstance(out, str) and out.startswith('{"ok": true'):
+                    from tools import kanban_tools_run_end as kre
+                    out = kre.annotate_success(_board, args, out)
                 if classify_rejections and isinstance(out, str) and out.startswith('{"error"'):
                     out = _tag_rejection(out, "invalid_args")
                 return out
@@ -406,6 +409,11 @@ def _worker_guard(tool_name: str, args: dict) -> str:
             "pinned, or use an orchestrator/CLI path that passes an explicit "
             "expected_run_id."
         )
+    if tool_name in _RUN_LIFECYCLE_TOOLS - {"kanban_complete"}:  # complete keeps its own-park close
+        from tools import kanban_tools_run_end as kre
+        refused = kre.guard_refusal(_board, args, tool_name, tid)
+        if refused:
+            raise _Reject("", kre.CODE, payload=refused)
     return tid
 
 

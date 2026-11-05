@@ -188,6 +188,7 @@ def test_tool_refused_schedule_leaves_no_comment_and_says_why(worker_env):
     from tools import kanban_tools as kt
     out = json.loads(kt._handle_schedule({"reason": "Parked on the wall", "clock_only": True}))
     assert "blocked on a human answer (block_kind needs_input" in out.get("error", ""), out
+    assert out.get("code") == "run_already_ended", out  # the worker's own block ended its run
     with kbc.connect() as conn:
         assert kb.get_task(conn, worker_env).status == "blocked"
         assert _comments(conn, worker_env) == []
