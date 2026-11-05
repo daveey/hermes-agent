@@ -625,3 +625,78 @@ def test_slow_hook_times_out_and_delivers(agent, caplog):
         release.set()
     assert result["final_response"] == "fast answer" and run.shown == "fast answer"
     assert any("timed out" in r.getMessage() for r in caplog.records)
+
+
+# agent-9382d717aa: a pre_verify continue (the coach's report_only nudge) under an active final-gate buffer hides the
+# draft from screen and DB exactly like a pre_final_gate hold, but sent the nudge bare. The model took its full
+# 1006-char answer as delivered and sent a 214-char delta; the user never saw the answer.
+_LONG_DRAFT = "Mini load breakdown: " + "the worker pool runs three builds at once and the indexer re-scans. " * 14
+
+
+def _accepting_buffer():
+    return _buffered(lambda **kw: None)
+
+
+def test_buffered_pre_verify_nudge_starts_with_not_shown_notice(agent):
+    run = Run(agent, [_LONG_DRAFT, _LONG_DRAFT + " Provisioning started."])
+    with patch("agent.turn_stop_gates._pre_verify_nudge", side_effect=["[coach] Fix it.", None]):
+        _run(agent, _accepting_buffer())
+    wire = [m.get("content") for m in run.requests[1]["messages"]]
+    assert f"{HELD_NOTICE}\n\n[coach] Fix it." in wire, wire
+    assert run.interims == []
+
+
+def test_streamed_pre_verify_nudge_has_no_not_shown_notice(agent):
+    """Control: with no buffer the draft streamed (and was emitted as an interim), so it WAS shown."""
+    run = Run(agent, ["Streamed draft.", "Second."])
+    with patch("agent.turn_stop_gates._pre_verify_nudge", side_effect=["[coach] Fix it.", None]):
+        _run(agent, lambda **kw: None)
+    assert "Streamed draft." in run.shown
+    wire = [m.get("content") for m in run.requests[1]["messages"]]
+    assert "[coach] Fix it." in wire and not any(HELD_NOTICE in str(w) for w in wire)
+
+
+def test_stub_revision_after_hidden_pre_verify_draft_restores_draft(agent, caplog):
+    stub = "The provisioning agent is actively running; I won't launch a duplicate."
+    run = Run(agent, [_LONG_DRAFT, stub])
+    with (
+        patch("agent.turn_stop_gates._pre_verify_nudge", side_effect=["[coach] Fix it.", None]),
+        caplog.at_level(logging.INFO, logger="agent.conversation_loop"),
+    ):
+        result = _run(agent, _accepting_buffer())
+    assert result["final_response"] == f"{_LONG_DRAFT.rstrip()}\n\n{stub}"
+    assert _LONG_DRAFT.strip() in run.shown and stub in run.shown
+    assert result["messages"][-1]["content"] == result["final_response"]
+    assert "restored_hidden_draft hook=pre_verify" in caplog.text
+
+
+def test_full_length_revision_after_hidden_pre_verify_draft_is_untouched(agent, caplog):
+    revision = _LONG_DRAFT + " Provisioning started as sa-0-1."
+    run = Run(agent, [_LONG_DRAFT, revision])
+    with (
+        patch("agent.turn_stop_gates._pre_verify_nudge", side_effect=["[coach] Fix it.", None]),
+        caplog.at_level(logging.INFO, logger="agent.conversation_loop"),
+    ):
+        result = _run(agent, _accepting_buffer())
+    assert result["final_response"] == revision
+    assert run.shown.count("Mini load breakdown") == 1
+    assert "restored_hidden_draft" not in caplog.text
+
+
+def test_short_hidden_pre_verify_draft_is_not_restored(agent):
+    """Below 800 chars the safety net stays off: the model was told it was hidden and may restate it."""
+    run = Run(agent, ["Short draft.", "Done."])
+    with patch("agent.turn_stop_gates._pre_verify_nudge", side_effect=["[coach] Fix it.", None]):
+        result = _run(agent, _accepting_buffer())
+    assert result["final_response"] == "Done."
+    assert "Short draft." not in run.shown
+
+
+def test_buffered_verify_on_stop_nudge_also_says_not_shown(agent):
+    """Every verification gate that hides a buffered draft says so, not only pre_verify; it is not restored (no net)."""
+    run = Run(agent, [_LONG_DRAFT, "Verified."])
+    with patch("agent.turn_stop_gates._verify_on_stop_nudge", side_effect=["Verify again", None]):
+        result = _run(agent, _accepting_buffer())
+    wire = [m.get("content") for m in run.requests[1]["messages"]]
+    assert f"{HELD_NOTICE}\n\nVerify again" in wire, wire
+    assert result["final_response"] == "Verified."

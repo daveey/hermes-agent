@@ -138,8 +138,10 @@ def _late_lsp_verdicts(agent) -> Optional[str]:
             + body)
 
 
-def _append_interim_answer(agent, final_msg, messages, conversation_history, flush_fail_msg: str) -> None:
-    """Keep buffered candidates private until final output transformation.
+def _append_interim_answer(agent, final_msg, messages, conversation_history, flush_fail_msg: str) -> bool:
+    """Keep buffered candidates private until final output transformation. Returns whether the
+    answer reached the screen: False when a final-gate buffer hid it, so the caller's nudge must
+    say so (``held_nudge``) exactly like a pre_final_gate hold (agent-9382d717aa).
 
     Unbuffered legacy responses still emit and persist as verification interims: real content
     is persisted and emitted as interim so the user sees the attempted answer; only the nudge is
@@ -153,15 +155,47 @@ def _append_interim_answer(agent, final_msg, messages, conversation_history, flu
         agent._discard_final_gate_buffer()
         final_msg[_PFG_FLAG] = True
         append_message(messages, final_msg)
-        return
+        return False
     agent._emit_interim_assistant_message(final_msg)
     append_message(messages, final_msg)
     if final_msg.get("display_kind") == "hidden":
-        return
+        return True
     try:
         agent._flush_messages_to_session_db(messages, conversation_history)
     except Exception:
         logger.debug(flush_fail_msg, exc_info=True)
+    return True
+
+
+# Safety net for a pre_verify continue that hid its draft (agent-9382d717aa): pre_verify asks for more work, never a
+# retraction, so a revision under RESTORE_MAX_RATIO of a hidden draft of RESTORE_MIN_CHARS+ is a delta written as if
+# the draft had been delivered. The draft already passed pre_final_gate (buffered turns run that gate first).
+RESTORE_MIN_CHARS = 800
+RESTORE_MAX_RATIO = 0.4
+
+
+def _remember_hidden_draft(agent, final_response) -> None:
+    if isinstance(final_response, str) and len(final_response.strip()) > len(
+            getattr(agent, "_pre_verify_hidden_draft", None) or ""):
+        agent._pre_verify_hidden_draft = final_response.strip()
+
+
+def _restore_hidden_draft(agent, final_msg, final_response, *, deliver: bool):
+    """Prefix the hidden pre_verify draft to a stub final reply; returns the (possibly) new reply."""
+    draft = getattr(agent, "_pre_verify_hidden_draft", None) or ""
+    agent._pre_verify_hidden_draft = None
+    if (not isinstance(final_response, str) or len(draft) < RESTORE_MIN_CHARS
+            or len(final_response.strip()) >= RESTORE_MAX_RATIO * len(draft) or draft in final_response):
+        return final_response
+    prefix = draft + "\n\n"
+    restored = prefix + final_response.lstrip()
+    key = "api_content" if final_msg.get("api_content") and not final_msg.get("content") else "content"
+    final_msg[key] = restored
+    if deliver:
+        agent._deliver_stream_text(prefix)
+    logger.info("restored_hidden_draft hook=pre_verify draft_chars=%d reply_chars=%d session=%s",
+                len(draft), len(final_response), getattr(agent, "session_id", None) or "")
+    return restored
 
 
 def apply_stop_gates(
@@ -253,6 +287,10 @@ def apply_stop_gates(
         if verdict is not None:
             return verdict
     stream_deferred = defer_stream and getattr(agent, "_final_gate_buffer", None) is not None
+    if _decision.replacement is not None:
+        agent._pre_verify_hidden_draft = None  # a replacement retracts: never resurrect the hidden text
+    else:
+        final_response = _restore_hidden_draft(agent, final_msg, final_response, deliver=not stream_deferred)
     if _decision.replacement is not None and not stream_deferred:
         agent._deliver_stream_text(final_response)
     elif _decision.append:
@@ -274,15 +312,16 @@ def apply_stop_gates(
 
 def _apply_verification_gates(agent, final_msg, final_response, messages, conversation_history, _continue):
     # Legacy verification precedence, after buffered candidate acceptance.
+    from agent.pre_final_gate import held_nudge
     _lsp_note = _late_lsp_verdicts(agent)
     if _lsp_note:
         agent._lsp_turn_end_notes = getattr(agent, "_lsp_turn_end_notes", 0) + 1  # int: checked above
         final_msg["finish_reason"] = "verification_required"
-        _append_interim_answer(
+        _shown = _append_interim_answer(
             agent, final_msg, messages, conversation_history, "late-LSP interim flush failed"
         )
         # A durable row (no scaffolding flag): it is never stripped, so no sent byte changes later.
-        append_message(messages, {"role": "user", "content": _lsp_note})
+        append_message(messages, {"role": "user", "content": held_nudge(_lsp_note, _shown)})
         agent._session_messages = messages
         logger.debug("late LSP verdicts delivered before the final answer (%d)", agent._lsp_turn_end_notes)
         return StopGateVerdict(
@@ -295,10 +334,10 @@ def _apply_verification_gates(agent, final_msg, final_response, messages, conver
     if _verify_nudge:
         agent._verification_stop_nudges = getattr(agent, "_verification_stop_nudges", 0) + 1
         final_msg["finish_reason"] = "verification_required"
-        _append_interim_answer(
+        _shown = _append_interim_answer(
             agent, final_msg, messages, conversation_history, "verify-on-stop interim flush failed"
         )
-        verdict = _continue(_verify_nudge, "_verification_stop_synthetic")
+        verdict = _continue(held_nudge(_verify_nudge, _shown), "_verification_stop_synthetic")
         # Internal nudge: stay silent on the terminal, debug-log only.
         logger.debug("verification stop-loop nudge issued (attempt %d)", agent._verification_stop_nudges)
         return verdict
@@ -308,10 +347,12 @@ def _apply_verification_gates(agent, final_msg, final_response, messages, conver
     if _verify_nudge2:
         agent._pre_verify_nudges = _attempt + 1
         final_msg["finish_reason"] = "verify_hook_continue"
-        _append_interim_answer(
+        _shown = _append_interim_answer(
             agent, final_msg, messages, conversation_history, "pre_verify interim flush failed"
         )
-        verdict = _continue(_verify_nudge2, "_pre_verify_synthetic")
+        if not _shown:
+            _remember_hidden_draft(agent, final_response)
+        verdict = _continue(held_nudge(_verify_nudge2, _shown), "_pre_verify_synthetic")
         logger.debug("pre_verify nudge issued (attempt %d)", agent._pre_verify_nudges)
         return verdict
 
@@ -322,10 +363,10 @@ def _apply_verification_gates(agent, final_msg, final_response, messages, conver
         # Like verify-on-stop/pre_verify, only the nudge is scaffolding: the answer is a real model
         # response and must be durable before the next request (an observed managed worker binds
         # each SDK response to one durable assistant row and faults closed otherwise).
-        _append_interim_answer(
+        _shown = _append_interim_answer(
             agent, final_msg, messages, conversation_history, "kanban stop interim flush failed"
         )
-        verdict = _continue(_kanban_nudge, "_kanban_stop_synthetic")
+        verdict = _continue(held_nudge(_kanban_nudge, _shown), "_kanban_stop_synthetic")
         logger.info(
             "kanban stop-loop nudge issued (attempt %d) task=%s",
             agent._kanban_stop_nudges,

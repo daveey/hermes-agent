@@ -632,6 +632,7 @@ def _reset_per_turn_agent_state(agent: Any) -> None:
     # pre_final_gate [daveey]: hold counter, and a stream buffer (a list) only while a needs_buffer
     # hook applies this turn. Kept out of _PER_TURN_RESET_STATE so upstream edits there merge cleanly.
     agent._pre_final_gate_attempts = 0
+    agent._pre_verify_hidden_draft = None  # turn_stop_gates._restore_hidden_draft (agent-9382d717aa)
     try:
         from agent.pre_final_gate import needs_buffer
         agent._final_gate_buffer = [] if needs_buffer(agent) else None
