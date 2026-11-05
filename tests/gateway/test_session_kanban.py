@@ -59,6 +59,7 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('mode', ['complete', 'timeout', 'rate_limit', 'billing', 'crash',
+    pytest.param('crash_contended', marks=pytest.mark.platforms('posix')),
     pytest.param('timeout_contended', marks=pytest.mark.platforms('posix'))])
 def test_real_dispatcher_lifecycle(tmp_path, mode):
     import os
@@ -73,6 +74,9 @@ def test_real_dispatcher_lifecycle(tmp_path, mode):
     assert result.returncode == 0, result.stdout + result.stderr
     receipt = json.loads((tmp_path / 'state' / 'receipt.json').read_text())
     print(json.dumps(receipt))
+    if mode == 'crash_contended':
+        assert receipt['first_sweep_deferred']
+        assert receipt['run_outcome'] == 'crashed' and receipt['failures'] == 1
     if mode == 'timeout_contended':
         assert receipt['initial_claim_deferred']
         assert receipt['run_outcome'] == 'timed_out' and receipt['failures'] == 1

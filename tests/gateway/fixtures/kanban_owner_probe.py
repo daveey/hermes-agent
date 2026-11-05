@@ -68,7 +68,8 @@ def main():
     peer = ThreadingHTTPServer(('127.0.0.1', 0), Model)
     peer.requests = []
     contended = os.environ.get('KANBAN_PROBE_MODE') == 'timeout_contended'
-    peer.mode = 'timeout' if contended else os.environ.get('KANBAN_PROBE_MODE', 'complete')
+    crash_contended = os.environ.get('KANBAN_PROBE_MODE') == 'crash_contended'
+    peer.mode = 'crash' if crash_contended else ('timeout' if contended else os.environ.get('KANBAN_PROBE_MODE', 'complete'))
     peer.blocked, peer.release = threading.Event(), threading.Event()
     threading.Thread(target=peer.serve_forever, daemon=True).start()
     url = f'http://127.0.0.1:{peer.server_port}/v1'
@@ -179,7 +180,21 @@ def main():
                     dispatch.reap_worker_zombies()
                     receipt['client_exit'] = dispatch._classify_worker_exit(clients[0].pid)
                     dispatch._recent_worker_exits.clear()
-                    swept = dispatch.dispatch_once(conn, board='owned', max_spawn=0)
+                    from hermes_cli.kanban_db_connect import _dispatch_tick_lock
+                    # A connection opener can be descheduled while holding this lock.
+                    with _dispatch_tick_lock(kb.kanban_db_path(board='owned')) if crash_contended else nullcontext():
+                        swept = dispatch.dispatch_once(conn, board='owned', max_spawn=0)
+                    if crash_contended:
+                        assert swept.skipped_locked, swept
+                        receipt['first_sweep_deferred'] = True
+                    def sweep_when_unlocked():
+                        nonlocal swept
+                        # A refused tick did no recovery. Retry only that refusal,
+                        # never an admitted tick with the wrong lifecycle outcome.
+                        if swept.skipped_locked:
+                            swept = dispatch.dispatch_once(conn, board='owned', max_spawn=0)
+                        return None if swept.skipped_locked else swept
+                    swept = wait_until(sweep_when_unlocked, timeout=60, what='dispatcher recovery tick lock')
                     task = kb.get_task(conn, tid)
                     run = dict(conn.execute('SELECT * FROM task_runs WHERE id=?', (params['run_id'],)).fetchone())
                     from gateway.session_kanban import worker_exit_code
