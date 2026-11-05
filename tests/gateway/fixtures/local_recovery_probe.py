@@ -85,6 +85,10 @@ async def rpc(ws, method, **params):
 
 
 def websocket(home, desc, **kw):
+    # These probes test RPC behavior, not heartbeat responsiveness. A CPU-starved
+    # daemon can miss the library's 20s pong deadline before RPC_DEADLINE expires.
+    # Keep pings, but let rpc() own the hang bound; heartbeat tests can opt back in.
+    kw.setdefault('ping_timeout', None)
     grant = control(home, 'session-ticket', {'profile_id': str(home), 'instance_id': desc['instance_id'], 'purpose': 'interactive'})
     return connect(desc['api_origin'].replace('http:', 'ws:') + '/api/ws',
                    subprotocols=['hermes-gateway-v1', 'hermes-gateway-ticket.' + grant['ticket']], **kw)
