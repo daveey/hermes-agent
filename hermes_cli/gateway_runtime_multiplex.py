@@ -18,7 +18,8 @@ from pathlib import Path
 def multiplexer_root_for(home: Path) -> Path | None:
     """Default root that may multiplex *home*, when *home* is a named profile under it."""
     from hermes_constants import named_profile_home
-    if named_profile_home(home) is None:
+    # The ancestry helper also recognizes descendants, which may be independent homes.
+    if named_profile_home(home) != home:
         return None
     root = home.parent.parent
     return root if root != home else None
