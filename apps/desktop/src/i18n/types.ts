@@ -3687,6 +3687,15 @@ export interface Translations extends NoticeTranslations {
           system_prompt: string
           tool_definitions: string
         }
+        compact: {
+          action: string
+          busyHint: string
+          confirm: string
+          hint: string
+          question: string
+          questionNamed: (title: string) => string
+          working: string
+        }
         empty: string
         loading: string
         percentFull: (percent: number) => string
