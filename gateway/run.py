@@ -2344,8 +2344,8 @@ def _resolve_gateway_model_context(
     ``route`` (``provider`` / ``base_url`` / ``api_key`` of a session-only /model switch) replaces the
     default runtime credentials so the window is looked up against the endpoint that actually serves
     ``model``; a ``model.context_length`` pin only survives when that route still matches the config.
-    ``context_source`` is ``"default"`` only for a model unknown to the catalog that fell through to
-    ``DEFAULT_FALLBACK_CONTEXT`` — a catalog-listed 256K model is ``"detected"``.
+    ``context_source`` is ``"default"`` only for a model no source knows that fell through to a resolver
+    default (Bedrock's static 128K, or ``DEFAULT_FALLBACK_CONTEXT``) — a catalog-listed model is ``"detected"``.
     """
     from gateway.run_model_context import resolve_gateway_model_context
     return resolve_gateway_model_context(model, route)
