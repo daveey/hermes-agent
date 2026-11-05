@@ -148,6 +148,38 @@ def test_spawn_local_stamps_persist_on_release(registry, monkeypatch, tmp_path):
     assert session.persist_on_release is False
 
 
+def test_persisted_spawn_writes_a_log_and_says_why_it_has_no_pty(registry, monkeypatch, tmp_path):
+    """A persisted job outlives its spawner, so it never writes to the spawner's pipe (SIGPIPE once that
+    process exits); a pty=true request on it says why it runs without a PTY instead of failing silently."""
+    import subprocess
+
+    from tools import terminal_tool_sudo
+    from tools.environments import local as local_env
+    from tools.process_registry_output_log import PERSIST_NO_PTY, output_dir
+    from tools.process_registry_stdin import stdin_unavailable_error
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(local_env, "_resolve_hermes_bin_dir", lambda: None)
+    monkeypatch.setattr(registry, "_track_started", lambda *a, **k: None)
+    monkeypatch.setattr(terminal_tool_sudo, "_rewrite_compound_background", lambda c: c)
+    monkeypatch.setattr(ProcessRegistry, "_scope_argv", lambda self, session, command, *a: ["/bin/sh", "-c", command])
+    popen = MagicMock(return_value=MagicMock(pid=4242, stdin=None))
+    monkeypatch.setattr("subprocess.Popen", popen)
+    pty_spawn = MagicMock(side_effect=AssertionError("a persisted job must not get the backend's PTY"))
+    monkeypatch.setattr(ProcessRegistry, "_spawn_local_pty", pty_spawn)
+
+    session = registry.spawn_local("sleep 60", task_id="t1", persist_on_release=True, use_pty=True)
+
+    assert session.output_log == str(output_dir() / f"{session.id}.log")
+    assert popen.call_args.kwargs["stdout"] != subprocess.PIPE
+    assert session.pty_fallback == PERSIST_NO_PTY
+    assert PERSIST_NO_PTY in stdin_unavailable_error(session)
+    assert "isolated worker" not in stdin_unavailable_error(session)
+
+    volatile = registry.spawn_local("echo hi", task_id="t1")
+    assert not volatile.output_log and not volatile.pty_fallback
+
+
 def test_checkpoint_carries_persist_on_release():
     """A crash-recovery checkpoint must carry the flag, or a persisted job
     resurrects as killable by the next session's release sweep (#41225)."""

@@ -208,6 +208,21 @@ def test_idle_shutdown_without_update_names_the_backend_shutdown(home, registry,
     assert "proc_notify" in text and "sleep 600" in text
 
 
+def test_shutdown_receipt_for_killed_notify_job_says_how_to_survive_updates(home, registry, backend, monkeypatch):
+    """A chat whose CI wait died with the backend must learn how to keep the next one alive."""
+    monkeypatch.setattr(up, "_detect_skew", lambda: None)
+    notify = _job("proc_notify", owner="turn-1", command="hermes-core-wt ship my-fix", notify=True)
+    registry._running[notify.id] = notify
+    backend.sessions["sid"] = _session(home)
+
+    server._shutdown_sessions()
+
+    assert notify.termination_source == "backend_shutdown" and notify.persist_on_release is False
+    text = _resume_text(monkeypatch, home)
+    assert "proc_notify" in text
+    assert "restart it with persist_on_release=true so it survives updates" in text
+
+
 def test_idle_session_with_only_quiet_jobs_gets_no_wake_marker(home, registry, backend):
     quiet = _job("proc_quiet", owner="turn-1", command="npm run dev")
     registry._running[quiet.id] = quiet

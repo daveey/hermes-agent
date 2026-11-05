@@ -37,7 +37,7 @@ from tools.process_registry_notifications import (
     format_process_notification, heartbeat_output_tail, is_child_process_notification, should_surface_notification)
 from tools.process_registry_checkpoint import ProcessCheckpointMixin
 from tools.process_registry_readopt import ProcessReadoptMixin
-from tools.process_registry_output_log import ProcessOutputLogMixin, open_output_log, record_exit_command, worker_output_log
+from tools.process_registry_output_log import ProcessOutputLogMixin, open_output_log, record_exit_command, spawn_output_log
 from tools.process_registry_ownership import ProcessOwnershipMixin
 from tools.process_registry_termination import ProcessTerminationMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
@@ -179,8 +179,8 @@ def _worker_memory_max_bytes() -> int:
     return min(override_bound, safe_bound) if override_bound else safe_bound
 
 
-def _systemd_scope_argv(binary: str, unit_name: str, *argv: str, memory_max: int = 0, slice_name: str = "") -> list[str]:
-    """``systemd-run --user --scope`` argv shared by the probe and real spawns.
+def _systemd_scope_argv(binary: str, unit_name: str, *argv: str, memory_max: int | str = 0, slice_name: str = "") -> list[str]:
+    """``systemd-run --user --scope`` argv shared by the probe and real spawns (``memory_max`` 0 = worker cap).
     ``--collect`` self-cleans the scope after exit; ``--unit`` names it for systemctl.
     No ``OOMPolicy=``: transient scopes reject it on systemd <253 (#102486).
     ``--expand-environment=no`` keeps the command byte-identical (#132385)."""
@@ -1197,8 +1197,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
         session = self._new_session(command, task_id, owner_task_id, session_key, _resolve_safe_cwd(cwd or process_cwd() or os.path.expanduser("~")),
                                     persist_on_release=persist_on_release)
         pty_scope_attempted = False
-        # A worker's pipe or PTY dies with the worker (the child's next write is SIGPIPE): write to a log.
-        log = worker_output_log(session.id)
+        # A worker's or persisted job's pipe/PTY dies with its spawner (next write is SIGPIPE): write to a log.
+        log = spawn_output_log(session, use_pty)
         if use_pty and log is None:
             try:
                 return self._spawn_local_pty(session, safe_command, env_vars)

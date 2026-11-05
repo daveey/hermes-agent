@@ -29,10 +29,14 @@ def output_dir() -> Path:
     return get_hermes_home() / "logs" / "process-output"
 
 
-def worker_output_log(session_id: str) -> Optional[Path]:
-    """The log a worker-spawned process writes to; None outside a registered worker."""
+def worker_output_log(session_id: str, *, persist: bool = False) -> Optional[Path]:
+    """The log a worker-spawned or ``persist_on_release`` process writes to; None otherwise.
+
+    A persisted job outlives its spawner by contract (a Desktop backend restarted by every hub update,
+    2026-11-04): on a pipe its first write after the spawner exits is SIGPIPE, so it logs here too and the
+    next backend re-adopts the log (POSIX only: the Windows trap-wrapped log path is untested). [daveey]"""
     from agent.runtime_session_store import is_worker_process
-    if not is_worker_process():
+    if not ((persist and os.name != "nt") or is_worker_process()):
         return None
     directory = output_dir()
     make_user_dir(directory, mode=0o700, parents=True, exist_ok=True)
@@ -45,6 +49,18 @@ def worker_output_log(session_id: str) -> Optional[Path]:
                 exited.with_suffix(".log").unlink(missing_ok=True)
                 exited.unlink()
     return directory / f"{session_id}.log"
+
+
+PERSIST_NO_PTY = "persist_on_release jobs write to a log file so they outlive the backend"
+
+
+def spawn_output_log(session, use_pty: bool) -> Optional[Path]:
+    """``worker_output_log`` for a new local spawn. A persisted ``pty=true`` request runs on the log (the
+    backend holds a PTY master, so the job would get SIGHUP when it exits) and records why."""
+    log = worker_output_log(session.id, persist=session.persist_on_release)
+    if log is not None and use_pty and session.persist_on_release:
+        session.pty_fallback = PERSIST_NO_PTY
+    return log
 
 
 def adoptable_log(path) -> str:

@@ -1704,7 +1704,7 @@ TERMINAL_SCHEMA = {
             "persist_on_release": {
                 "type": "boolean",
                 "default": False,
-                "description": "With background=true: survive session end, /new, compression and other cleanup (not host exit). Only for jobs the user explicitly wants to outlive the conversation."
+                "description": "With background=true: survive session end, /new, compression, backend restarts and Hermes updates (not host exit). Use it for jobs that must outlive the conversation or a restart, such as a long CI wait; a job without it is killed when the backend restarts for an update."
             }
             # Legacy aliases (unadvertised, still accepted): notify_on_complete
             # (bool) and watch_patterns (list). notify=true|[...] maps onto

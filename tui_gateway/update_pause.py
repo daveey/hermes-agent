@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 
 PAUSE_REASON = "core_update_pause"
 UPDATE_KILL_REASON = "killed by the Hermes update"
+# Restart advice on every job an update or backend exit stopped: only persisted jobs survive both. [daveey]
+PERSIST_RESTART_HINT = "restart it with persist_on_release=true so it survives updates"
 MAX_PAUSES = 3
 PAUSE_STATUS_TEXT = "Paused for a Hermes update; continues automatically"
 # The update itself takes a few minutes: a turn that would age out of the freshness window meanwhile is
@@ -343,7 +345,7 @@ def killed_jobs_report(killed_jobs: list | None, heading: str) -> str:
                          f"— interruption outcome {state}; inspect its result before restarting")
             continue
         lines.append(f"- {job['session_id']} started {_format_start(job.get('started_at'))}: {command} "
-                     f"— restart it if you still need it")
+                     f"— restart it if you still need it; {PERSIST_RESTART_HINT}")
         if job.get("notify_on_complete"):
             notice = job.get("notice") or _killed_job_notice(job)
             if notice:

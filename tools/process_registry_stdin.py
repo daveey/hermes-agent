@@ -17,6 +17,9 @@ def _no_pty_reason(session) -> str:
     if session.pty_fallback:
         return f"pty=true was requested but {session.pty_fallback}, so it runs without stdin"
     if session.output_log:
+        if session.persist_on_release:
+            from tools.process_registry_output_log import PERSIST_NO_PTY
+            return f"{PERSIST_NO_PTY}, with no pseudo-terminal"
         return "background processes here run in an isolated worker that cannot give them a pseudo-terminal"
     if not _pty_available():
         return "the PTY library (ptyprocess/pywinpty) is not installed"
