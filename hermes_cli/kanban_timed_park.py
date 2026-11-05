@@ -172,6 +172,7 @@ def park(
                                 expected_run_id=expected_run_id) is not None
         from hermes_cli import kanban_deploy_window as kdw
         wake_at, reason = kdw.apply(record, wake_at, reason, now=now)
+        reason, check_every = kaw.resource_apply(record, reason, check_every)
     wake_check = wake_check or kaw.card_probe(record)
     wake_check, check_every = kwc.validate_park(
         wake_at=wake_at, wake_check=wake_check, check_every=check_every, clock_only=clock_only)

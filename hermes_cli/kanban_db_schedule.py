@@ -50,6 +50,7 @@ def schedule_task(
         from hermes_cli import kanban_deploy_window as kdw
         payload = scheduled_payload(reason)
         payload["wake_at"], reason = kdw.apply(record, payload["wake_at"], reason, now=int(_time.time()))
+        reason, check_every = kaw.resource_apply(record, reason, check_every)
         payload["reason"] = reason
         wake_check, check_every = kwc.validate_park(
             wake_at=payload["wake_at"], wake_check=wake_check,

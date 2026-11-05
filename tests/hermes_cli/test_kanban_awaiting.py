@@ -783,7 +783,8 @@ def test_bb_gate_pool_parks_with_a_stated_reset_never_escalate(kanban_home, monk
     "bb-gate: governor: 5-min load 4.8/core",
     "bb-gate: governor: free disk 8 GB < 15.0 GB",
 ])
-def test_bb_gate_host_holds_still_escalate_on_the_third_park(kanban_home, monkeypatch, reason) -> None:
+def test_undeclared_probe_parks_still_escalate_on_the_third_park(kanban_home, monkeypatch, reason) -> None:
+    # A park that declares nothing is a genuine inferred external wait: the repeat-park detector still fires.
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     with kbc.connect_closing() as conn:
         tid = _ready(conn)
@@ -815,3 +816,88 @@ def test_a_past_or_far_clock_window_still_escalates(kanban_home, monkeypatch) ->
 ])
 def test_inferred_probe_ref_names_the_script(cmd, ref) -> None:
     assert kaw.probe_ref(cmd) == ref
+
+
+# -- governor/pool gates are an internal resource wait (bb t_01a19f5cca30ed12) ----------------------------
+# t_01a18aa302529d91 parked 3x on "governor: memory pressure warn; Claude pool at 87%", recorded as an inferred
+# external wait on the host launch command, and escalated into an Unstick card. A declared ``resource`` wait
+# resumes on its probe, never escalates, and a repeat backs off with the gate named in the reason.
+GOV = {"kind": "resource", "ref": "bb-gate governor: memory,pool"}
+
+
+def test_gate_denial_parks_as_a_resource_wait_then_auto_resumes(kanban_home, monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    hold = tmp_path / "hold"
+    hold.write_text("governor")
+    probe = f"test ! -e {hold}"
+    run = _cli()
+    with kbc.connect_closing() as conn:
+        tid = _ready(conn)
+        assert run("schedule", tid, "bb-gate: governor: memory pressure warn; Claude pool at 87%",
+                   "--wake-check", probe, "--check-every", "600", "--awaiting", json.dumps(GOV),
+                   "--awaiting-why", "Claude pool at 87% (holds at 75%)") == 0
+        task = kb.get_task(conn, tid)
+        assert task.status == "scheduled"
+        rec = _park_payload(conn, tid)["awaiting"]
+        assert rec["kind"] == "resource" and rec["ref"] == GOV["ref"] and not rec.get("inferred"), rec
+        assert "probe" not in rec and "repeat" not in rec
+        from hermes_cli import kanban_wait_info as kwi
+        assert kwi.LIVE_PRODUCER_KINDS.count("resource") == 1
+        # The pool drops below threshold: the gate's own probe passes and the card resumes.
+        # While the hold stands the probe fails and the card stays parked.
+        kwc.run_due_wake_checks(conn, now=int(time.time()) + 601, wait=True)
+        assert kb.get_task(conn, tid).status == "scheduled"
+        hold.unlink()
+        kwc.run_due_wake_checks(conn, now=int(time.time()) + 1202, wait=True)
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+def test_resource_wait_needs_its_probe(kanban_home, monkeypatch) -> None:
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    with kbc.connect_closing() as conn:
+        tid = _ready(conn)
+        with pytest.raises(kaw.AwaitingError, match="resource.*wake_check"):
+            kaw.resolve(conn, tid, awaiting=GOV, reason="bb-gate: governor: Claude pool at 87%")
+        with pytest.raises(kaw.AwaitingError, match="needs ref=.*why="):
+            kaw.resolve(conn, tid, awaiting=GOV, reason="bb-gate: governor: Claude pool at 87%", wake_check="false")
+
+
+def test_a_worker_cannot_dodge_escalation_by_calling_its_wall_a_resource(kanban_home, monkeypatch) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _ready(conn)
+        monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+        with pytest.raises(kaw.AwaitingError, match="admission gate"):
+            kaw.resolve(conn, tid, awaiting={**GOV, "why": "vendor response"}, reason="waiting", wake_check="false")
+
+
+def test_governor_resource_parks_never_escalate_and_back_off(kanban_home, monkeypatch) -> None:
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    reasons = [f"bb-gate: governor: memory pressure warn; Claude pool at {p}% (self-fix waits at 75%)"
+               for p in (84, 87, 87, 88, 90)]
+    with kbc.connect_closing() as conn:
+        tid = _ready(conn)
+        kinds = _bb_gate_parks(conn, tid, reasons, GOV, "Claude pool at 87% (holds at 75%)")
+        assert kaw.ESCALATED_EVENT not in kinds and kinds.count("scheduled") == 5, kinds
+        assert not conn.execute("SELECT 1 FROM tasks WHERE title LIKE 'Unstick%'").fetchone()
+        parks = [e.payload for e in kb.list_events(conn, tid) if e.kind == "scheduled"]
+        # Never an external premise inferred from the host launch command.
+        for p in parks:
+            assert p["awaiting"]["kind"] == "resource" and not p["awaiting"].get("inferred"), p
+            assert "daveey-min" not in p["awaiting"].get("ref", "") and "probe" not in p["awaiting"]
+        assert len({p["awaiting"]["premise"] for p in parks}) == 1  # the reading changed, the gate did not
+        assert [p["awaiting"].get("repeat", 0) for p in parks] == [0, 1, 2, 3, 4]
+        assert [p["check_every"] for p in parks] == [600, 1200, 2400, 3600, 3600]
+        assert "resource wait on bb-gate governor: memory,pool: park 3 in a row" in parks[2]["reason"]
+        assert "Gate: Claude pool at 87% (holds at 75%)" in parks[2]["reason"]
+        assert parks[0]["reason"] == reasons[0]
+
+
+def test_repeat_detector_still_fires_for_a_genuine_external_premise_after_resource_parks(
+        kanban_home, monkeypatch) -> None:
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    ext = {"kind": "external", "ref": "AWS support case 12345"}
+    with kbc.connect_closing() as conn:
+        tid = _ready(conn)
+        _bb_gate_parks(conn, tid, ["bb-gate: governor: Claude pool at 88%"] * 3, GOV, "pool 88%")
+        kinds = _bb_gate_parks(conn, tid, ["waiting on the vendor quota raise"] * 3, ext, "case open, ETA 2d")
+        assert kinds[-1] == kaw.ESCALATED_EVENT and kinds.count(kaw.ESCALATED_EVENT) == 1, kinds

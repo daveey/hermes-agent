@@ -16,6 +16,13 @@ Each park now carries ``awaiting = {kind, ref, why}`` on its parking event:
 * ``ci`` / ``deploy``: ``ref`` is a run / job / release id or URL.
 * ``external``: ``ref`` names the vendor or ticket and ``why`` gives the evidence.
 * ``clock``: a real window (a soak, a cooldown, a release slot).
+* ``resource``: an internal resource gate (a governor's pool or host-pressure hold) whose own
+  ``wake_check`` passes once the reading drops below its threshold. It needs that probe, never
+  escalates into an "Unstick" owner card (nobody can act on a transient load reading), and a
+  repeat park on the same gate with no new evidence backs its probe cadence off and says so in
+  the reason (``resource_apply``) instead. Only an operator process (the gate) may declare one, never
+  a card's own worker. Its ``wake_at`` deadline still wakes the card: the gate then re-checks
+  admission and re-parks it (a counted repeat) if the hold stands.
 * ``human``: refused. A wait on David is a visible ``blocked`` card with ``human_request``;
   an ask he already answered (ask-gate ledger) is never re-asked.
 
@@ -48,7 +55,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-KINDS = ("card", "ci", "deploy", "external", "clock", "human")
+KINDS = ("card", "ci", "deploy", "external", "clock", "human", "resource")
+RESOURCE = "resource"
+# A repeat resource park doubles its probe cadence per park in a row on the same gate, up to this.
+RESOURCE_BACKOFF_MAX_SECONDS = 3600
 AGENT_ACTION_WAIT = "agent_action_wait"
 HUMAN_WAIT = "human_wait"
 INVALID_AWAITING = "invalid_awaiting"
@@ -161,6 +171,9 @@ def premise_hash(awaiting: dict, reason: Optional[str]) -> str:
     """Stable id of what a park waits on: the declared producer (with its why), else the reason."""
     if awaiting.get("inferred"):
         basis = " ".join((reason or "").lower().split())[:400]
+    elif awaiting.get("kind") == RESOURCE:
+        # The gate, not its reading: "pool at 87%" and "pool at 88%" are one premise with no new evidence.
+        basis = "|".join(awaiting.get(k, "") for k in ("kind", "gateway", "ref"))
     else:
         basis = "|".join(awaiting.get(k, "") for k in ("kind", "gateway", "ref", "why"))
     return hashlib.sha256(basis.encode()).hexdigest()[:16]
@@ -430,9 +443,24 @@ def _check_human(conn, task_id, awaiting, text) -> None:
     raise human_error(task_id, text)
 
 
+def _check_resource(conn, task_id, awaiting, text) -> None:
+    if not awaiting.get("ref") or not awaiting.get("why"):
+        raise AwaitingError(INVALID_AWAITING, "awaiting kind='resource' needs ref=<gate and resource, e.g. "
+                                              "'bb-gate governor: pool'> and why=<the reading and threshold>")
+    if parked_by_own_worker(task_id):
+        # Only an admission gate (an operator process such as bb_gate) declares one: it is exempt from re-park
+        # escalation, so a worker naming its own wall a "resource" would hide a stuck premise.
+        raise AwaitingError(INVALID_AWAITING, (
+            "awaiting kind='resource' is for an admission gate parking a card behind its own hold, not a worker "
+            "parking itself; name the producer (card, ci, deploy, external, clock) instead"))
+    wall = text_wall(text)
+    if wall:
+        raise wall_error(task_id, wall, text)
+
+
 _CHECKS: dict[str, Callable[[sqlite3.Connection, str, dict, str], None]] = {
     "card": _check_card, "ci": _check_run, "deploy": _check_run, "external": _check_external,
-    "clock": _check_clock, "human": _check_human,
+    "clock": _check_clock, "human": _check_human, "resource": _check_resource,
 }
 
 
@@ -509,6 +537,10 @@ def resolve(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Op
         return _infer(conn, task_id, reason=reason, wake_check=wake_check, clock_only=clock_only,
                       op=op, wake_in=wake_in)
     text = " ".join(x for x in (reason, declared.get("why"), declared.get("ref")) if x)
+    if declared["kind"] == RESOURCE and not (wake_check and str(wake_check).strip()):
+        raise AwaitingError(INVALID_AWAITING, (
+            "awaiting kind='resource' needs a wake_check that passes once the resource drops below its threshold: "
+            "that probe is what resumes the card"))
     _CHECKS[declared["kind"]](conn, task_id, declared, text)
     return declared
 
@@ -673,6 +705,14 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
     if record["kind"] == "card" or (record["kind"] == "clock" and record.get("inferred")):
         return record
     record["premise"] = premise_hash(record, reason)
+    if record["kind"] == RESOURCE:
+        # A governor/pool hold is internal and transient: its probe resumes the card when the reading drops.
+        # Escalating it made "Unstick" cards for a premise nobody can act on (bb t_01a19f5cca30ed12), and on a
+        # Claude-pool hold they burned the quota the hold waits on. A repeat records its count for the backoff.
+        repeat = prior_same_premise(conn, task_id, record["premise"])
+        if repeat:
+            record["repeat"] = repeat
+        return record
     if clock_window_end(record, time.time()) is not None:
         # A stated window (a weekly quota reset) ends by itself; an escalation card cannot shorten it
         # and, for a Claude-pool hold, burns the quota it waits on (bb t_01a19f847b7f5abb). No ``probe``
@@ -686,6 +726,28 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
             and prior_same_premise(conn, task_id, record["premise"], probe=probe) >= REPARK_LIMIT):
         raise RepeatedPark(record)
     return record
+
+
+def resource_apply(record: Optional[dict], reason: Optional[str],
+                   check_every: Optional[int]) -> tuple[Optional[str], Optional[int]]:
+    """``(reason, check_every)`` for a park: a repeat resource park backs off and surfaces its gate.
+
+    The n-th park in a row on one resource gate with no new evidence re-checks ``2**n`` times less often (up
+    to ``RESOURCE_BACKOFF_MAX_SECONDS``), and the reason names the gate and its reading, so the board shows
+    "waiting on the pool" rather than an opaque probe. Other parks pass through unchanged."""
+    if not isinstance(record, dict) or record.get("kind") != RESOURCE:
+        return reason, check_every
+    repeat = int(record.get("repeat") or 0)
+    if repeat <= 0:
+        return reason, check_every
+    from hermes_cli import kanban_wake_check as kwc
+    base = kwc.normalize_every(check_every)
+    every = max(base, min(base * 2 ** min(repeat, 8), RESOURCE_BACKOFF_MAX_SECONDS))
+    record["backoff_check_every"] = every
+    note = (f"[resource wait on {record.get('ref')}: park {repeat + 1} in a row on this gate with no new "
+            f"evidence; re-checking every {every // 60} min"
+            + (f". Gate: {record['why'][:300]}" if record.get("why") else "") + "]")
+    return (f"{reason} {note}" if reason else note), every
 
 
 # --- re-park escalation ------------------------------------------------------------------------

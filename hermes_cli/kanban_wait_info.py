@@ -29,8 +29,8 @@ from typing import Any, Optional
 STALL_AFTER_S = 2 * 3600
 
 # Producers that change the awaited condition without an agent acting (a card that runs, a CI run, a deploy, a
-# vendor/ticket, the clock).
-LIVE_PRODUCER_KINDS = ("card", "ci", "deploy", "external", "clock")
+# vendor/ticket, the clock, an internal resource gate whose own probe resumes the card once its reading drops).
+LIVE_PRODUCER_KINDS = ("card", "ci", "deploy", "external", "clock", "resource")
 # Block kinds only an agent clears (core kanban_block_policy.AGENT_OWNED_KINDS, plus assignment routing). Untyped
 # (None/legacy) blocks are agent-owned too, but uncertain: they only count once stalled.
 AGENT_BLOCK_KINDS = ("transient", "capability", "assignment", "needs_input")

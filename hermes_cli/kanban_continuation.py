@@ -161,6 +161,8 @@ def continue_task(
             from hermes_cli import kanban_deploy_window as kdw
             wake_at, noted = kdw.apply(record, wake_at, checkpoint, now=now)
             checkpoint = noted or checkpoint
+            noted, check_every = kaw.resource_apply(record, checkpoint, check_every)
+            checkpoint = noted or checkpoint
             wake_check = wake_check or kaw.card_probe(record)
             why = kaw.park_cycle_error(conn, task_id, record, wake_check)
             if why:
