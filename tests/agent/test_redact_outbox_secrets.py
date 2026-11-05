@@ -162,7 +162,7 @@ class TestSubprocessArgvDiagnostics:
 
     def test_escaped_json_backslash_run_stays_linear(self):
         import time
-        text = "\\" * 40_000 + '\\"token\\": \\"x'
+        text = "\\" * 200_000 + '\\"token\\": \\"x'
         start = time.perf_counter()
         redact_sensitive_text(text, force=True, code_file=True)
         redact_sensitive_text(text, force=True)
