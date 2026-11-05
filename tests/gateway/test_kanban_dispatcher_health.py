@@ -111,7 +111,7 @@ def test_native_loop_publishes_only_actual_board_success(tmp_path, monkeypatch, 
     async def between(interval):
         checks.append(health.available(root, board, "default", "ready"))
         if len(checks) == 1:
-            assert checks[-1]
+            assert checks[-1], (health.time.monotonic(), (root / ".dispatcher-health.json").read_text())
             assert not health.available(root, kb.kanban_db_path("broken"), "default", "ready")
             if ending == "cancel":
                 raise asyncio.CancelledError

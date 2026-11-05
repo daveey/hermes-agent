@@ -16,11 +16,23 @@ def _owns_lock(path: Path, pid: int) -> bool:
     """Require this process, not merely somebody, to hold the native flock."""
     stat = path.stat()
     identity = f"{os.major(stat.st_dev):02x}:{os.minor(stat.st_dev):02x}:{stat.st_ino}"
-    for line in Path("/proc/locks").read_text(encoding="utf-8").splitlines():
-        fields = line.split()
-        if (len(fields) >= 6 and fields[1:4] == ["FLOCK", "ADVISORY", "WRITE"]
-                and fields[4] == str(pid) and fields[5] == identity):
-            return True
+    # /proc/locks is a host-wide, multi-read snapshot: unrelated lock churn
+    # can shift entries between reads and omit our still-held lock. fdinfo
+    # observes only this process's descriptor, including its actual lock owner.
+    for fd in Path(f"/proc/{pid}/fd").iterdir():
+        try:
+            opened = fd.stat()
+            if (opened.st_dev, opened.st_ino) != (stat.st_dev, stat.st_ino):
+                continue
+            info = Path(f"/proc/{pid}/fdinfo/{fd.name}").read_text(encoding="utf-8")
+        except OSError:
+            continue  # descriptors may close while being enumerated
+        for line in info.splitlines():
+            fields = line.split()
+            if (len(fields) >= 7 and fields[0] == "lock:"
+                    and fields[2:5] == ["FLOCK", "ADVISORY", "WRITE"]
+                    and fields[5] == str(pid) and fields[6] == identity):
+                return True
     return False
 
 
