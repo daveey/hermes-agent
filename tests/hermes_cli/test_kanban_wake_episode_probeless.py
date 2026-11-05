@@ -41,10 +41,11 @@ def test_never_probed_park_adds_no_evidence(kanban_home):
         assert [k for k in _kinds(conn, tid)[before:] if k != "commented"] == ["scheduled"]
 
 
-def test_repeated_probe_less_park_evidence_is_emitted_once(parked):
+def test_every_probe_less_repark_carries_a_reset(parked):
     conn, tid, _ = parked
-    assert _park_without_probe(conn, tid) == [episode.EVIDENCE_EVENT, "scheduled"]
-    assert _park_without_probe(conn, tid) == ["scheduled"]  # cleared probe already carried
+    # A carried reset proves nothing about peers afterwards: each re-park repeats it.
+    for _ in range(3):
+        assert _park_without_probe(conn, tid) == [episode.EVIDENCE_EVENT, "scheduled"]
 
 
 def test_local_episode_without_probe_record_still_carries_evidence(parked):
@@ -136,3 +137,61 @@ def test_in_corridor_park_resets_undelivered_foreign_episode(kanban_home, kind):
             assert tuple(_peer_episode(peer, tid, t1)) == (t1, 1)  # same probe: old age/count gone
         finally:
             peer.close()
+
+
+def _park(conn, tid, kind):
+    if conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0] != "running":
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+    before = len(_kinds(conn, tid))
+    if kind == "scheduled":
+        assert kb.schedule_task(conn, tid, reason=SOAK, clock_only=True)
+    else:
+        kb._append_event(conn, tid, "continued", {"reason": "soak"})
+    return [k for k in _kinds(conn, tid)[before:] if k not in {"claimed", "commented"}]
+
+
+@pytest.mark.parametrize("kind", ["scheduled", "continued"])
+def test_park_after_explicit_reset_resets_new_undelivered_foreign_episode(kanban_home, kind):
+    with kbc.connect_closing() as conn:
+        tid = helpers._running(conn)
+        assert _park(conn, tid, kind) == [kind]  # fresh local creation
+        peer = carry.replica(conn)
+        try:
+            t0 = int(time.time())
+            assert tuple(_peer_episode(peer, tid, t0)) == (t0, 1)  # undelivered to home
+            assert _park(conn, tid, kind) == [episode.EVIDENCE_EVENT, kind]  # explicit reset
+            carry.import_events(conn, peer, tid)
+            episode.reconcile(peer, tid)
+            t1 = t0 + 3600
+            assert tuple(_peer_episode(peer, tid, t1)) == (t1, 1)  # new foreign P, still undelivered
+            assert _park(conn, tid, kind) == [episode.EVIDENCE_EVENT, kind]  # third park: reset again
+            assert _episode(peer, tid)
+            carry.import_events(conn, peer, tid)
+            episode.reconcile(peer, tid)
+            # The second foreign episode's age/count are gone too (a further peer park here
+            # would trip the unrelated park-cycle guard, so read the episode row directly).
+            assert peer.execute("SELECT 1 FROM task_wake_episodes WHERE task_id = ?", (tid,)).fetchone() is None
+        finally:
+            peer.close()
+
+
+def test_sync_imported_task_is_not_fresh(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = helpers._running(conn)
+        conn.execute("DELETE FROM task_wake_episode_fresh WHERE task_id = ?", (tid,))
+        row = dict(conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone())
+        conn.execute("DELETE FROM tasks WHERE id = ?", (tid,))
+        conn.execute(f"INSERT INTO tasks ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+                     tuple(row.values()))  # raw row insert, as sync import does: no local 'created'
+        assert conn.execute("SELECT 1 FROM task_wake_episode_fresh WHERE task_id = ?", (tid,)).fetchone() is None
+        assert _park(conn, tid, "scheduled") == [episode.EVIDENCE_EVENT, "scheduled"]
+
+
+def test_sync_imported_corridor_entry_is_not_fresh(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = helpers._running(conn)
+        conn.execute("DELETE FROM task_wake_episode_fresh WHERE task_id = ?", (tid,))
+        conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (tid,))
+        conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (tid,))  # raw status write
+        assert _park(conn, tid, "continued") == [episode.EVIDENCE_EVENT, "continued"]

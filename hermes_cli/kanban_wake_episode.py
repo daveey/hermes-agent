@@ -47,17 +47,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         BEGIN DELETE FROM task_wake_episode_exit WHERE task_id = NEW.id; END""")
     conn.execute("""CREATE TRIGGER IF NOT EXISTS task_wake_episode_exit_delete AFTER DELETE ON tasks
         BEGIN DELETE FROM task_wake_episode_exit WHERE task_id = OLD.id; END""")
-    # Fresh corridor entry (creation, or arrival from outside it): no episode can have
-    # survived into this corridor, so its first probe-less park has nothing to clear.
-    # Any later park in the same corridor may follow an undelivered foreign episode.
+    # Fresh local creation: no episode can predate a task this home just created, so
+    # its first probe-less park has nothing to clear. Set only by the local ``created``
+    # event (sync-imported rows never append it); consumed by the first probe-less park.
     conn.execute("CREATE TABLE IF NOT EXISTS task_wake_episode_fresh (task_id TEXT PRIMARY KEY)")
-    conn.execute("""CREATE TRIGGER IF NOT EXISTS task_wake_episode_fresh_insert AFTER INSERT ON tasks
-        WHEN NEW.status IN ('scheduled', 'todo', 'ready', 'running', 'review')
-        BEGIN INSERT OR IGNORE INTO task_wake_episode_fresh VALUES (NEW.id); END""")
-    conn.execute("""CREATE TRIGGER IF NOT EXISTS task_wake_episode_fresh_entry AFTER UPDATE OF status ON tasks
-        WHEN OLD.status NOT IN ('scheduled', 'todo', 'ready', 'running', 'review')
-         AND NEW.status IN ('scheduled', 'todo', 'ready', 'running', 'review')
-        BEGIN INSERT OR IGNORE INTO task_wake_episode_fresh VALUES (NEW.id); END""")
+    conn.execute("DROP TRIGGER IF EXISTS task_wake_episode_fresh_insert")
+    conn.execute("DROP TRIGGER IF EXISTS task_wake_episode_fresh_entry")
     conn.execute("""CREATE TRIGGER IF NOT EXISTS task_wake_episode_fresh_delete AFTER DELETE ON tasks
         BEGIN DELETE FROM task_wake_episode_fresh WHERE task_id = OLD.id; END""")
 
@@ -143,6 +138,8 @@ def snapshot_event(conn: sqlite3.Connection, task_id: str, kind: str,
     """
     status = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
     outside = status is not None and status[0] not in _CORRIDOR
+    if kind == "created":  # local creation only (triage too): sync imports never append it
+        conn.execute("INSERT OR IGNORE INTO task_wake_episode_fresh VALUES (?)", (task_id,))
     if not outside and kind not in _CARRY_EVENTS and not kind.startswith("wake_"):
         return payload, None
     if outside and conn.execute("SELECT 1 FROM task_wake_episode_exit WHERE task_id = ?", (task_id,)).fetchone() \
@@ -153,19 +150,15 @@ def snapshot_event(conn: sqlite3.Connection, task_id: str, kind: str,
         reconcile(conn, task_id)  # judge against every delivered park, then idempotent in _snapshot
         fresh = conn.execute("DELETE FROM task_wake_episode_fresh WHERE task_id = ?", (task_id,)).rowcount > 0
         if fresh and not _probe_known(conn, task_id):
-            # Fresh corridor entry or explicit reset already carried, no probe delivered
-            # since: nothing to clear, so no evidence (keeps atomic park event contracts).
-            # Otherwise the home's state is unknown: a later park may follow an
-            # undelivered foreign episode, so it carries the reset below.
+            # First park after local creation, no probe delivered: nothing to clear, so
+            # no evidence (keeps atomic park event contracts). Every later park may
+            # follow an undelivered foreign episode, so it carries the reset below.
             return payload, None
         reset(conn, task_id)  # home state may be unknown: make the clear an explicit reset barrier
     snapshot = _snapshot(conn, task_id, kind, payload, outside)
     separate = probe_less or (
         outside and kind not in _CARRY_EVENTS and kind not in _EXIT_EVENTS and not kind.startswith("wake_"))
     if separate:
-        if probe_less:
-            # This evidence is an explicit reset: the next probe-less park repeats it.
-            conn.execute("INSERT OR IGNORE INTO task_wake_episode_fresh VALUES (?)", (task_id,))
         return payload, snapshot
     return {**(payload or {}), **snapshot}, None
 
