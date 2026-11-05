@@ -11,7 +11,12 @@ def append_event(conn: sqlite3.Connection, task_id: str, kind: str, payload: dic
     from hermes_cli.kanban_recovery_history import stamp
     from hermes_cli import kanban_wake_episode as episode
 
-    payload = episode.snapshot_event(conn, task_id, kind, payload)
+    payload, evidence = episode.snapshot_event(conn, task_id, kind, payload)
+    if evidence is not None:  # precedes the primary event, which stays the latest
+        cur = conn.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)", (
+            task_id, run_id, episode.EVIDENCE_EVENT, json.dumps(evidence), int(time.time())))
+        assert cur.lastrowid is not None
+        episode.consumed(conn, task_id, cur.lastrowid)
     stamped = stamp(conn, task_id, kind, payload, run_id)
     cur = conn.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)", (
         task_id, run_id, kind, json.dumps(stamped, ensure_ascii=False) if stamped else None, int(time.time())))

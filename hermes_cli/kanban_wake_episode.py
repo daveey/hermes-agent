@@ -39,12 +39,23 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         task_id TEXT PRIMARY KEY, event_id INTEGER NOT NULL)""")
     conn.execute("""CREATE TRIGGER IF NOT EXISTS task_wake_episode_seen_delete AFTER DELETE ON tasks
         BEGIN DELETE FROM task_wake_episode_seen WHERE task_id = OLD.id; END""")
+    # One reset is carried per corridor exit; re-entering the corridor re-arms it.
+    conn.execute("CREATE TABLE IF NOT EXISTS task_wake_episode_exit (task_id TEXT PRIMARY KEY)")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS task_wake_episode_exit_rearm
+        AFTER UPDATE OF status ON tasks
+        WHEN NEW.status IN ('scheduled', 'todo', 'ready', 'running', 'review')
+        BEGIN DELETE FROM task_wake_episode_exit WHERE task_id = NEW.id; END""")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS task_wake_episode_exit_delete AFTER DELETE ON tasks
+        BEGIN DELETE FROM task_wake_episode_exit WHERE task_id = OLD.id; END""")
 
 
 _SNAPSHOT = "_wake_episode_v1"
 _CARRY_EVENTS = frozenset({"scheduled", "continued", "continuation_woken", "wake_episode_started",
                            "wake_episode_reset", "condition_met"})
 _CORRIDOR = frozenset({"scheduled", "todo", "ready", "running", "review"})
+# Status-transition kinds whose own payload carries the corridor-exit reset.
+_EXIT_EVENTS = frozenset({"blocked", "gave_up", "timed_out", "completed", "archived"})
+EVIDENCE_EVENT = "wake_episode_evidence"
 
 
 def consumed(conn: sqlite3.Connection, task_id: str, event_id: int) -> None:
@@ -106,15 +117,35 @@ def _valid_snapshot(data: object) -> bool:
                  (type(data["last_stale_at"]) is int and data["last_stale_at"] >= data["first_at"])))
 
 
-def snapshot_event(conn: sqlite3.Connection, task_id: str, kind: str, payload: dict | None) -> dict | None:
-    """Carry lifecycle evidence; steady exit-1 checks do not append events."""
+def snapshot_event(conn: sqlite3.Connection, task_id: str, kind: str,
+                   payload: dict | None) -> tuple[dict | None, dict | None]:
+    """Return ``(payload, evidence)``; steady exit-1 checks do not append events.
+
+    Lifecycle events carry the snapshot in their own payload. Unrelated events and
+    probe-less parks keep their payload untouched: their evidence (a corridor-exit
+    reset or a cleared probe, still needed by peers whose episode this home never
+    observed) is returned separately for a ``wake_episode_evidence`` event.
+    """
     status = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
     outside = status is not None and status[0] not in _CORRIDOR
     if not outside and kind not in _CARRY_EVENTS and not kind.startswith("wake_"):
-        return payload
+        return payload, None
+    if outside and conn.execute("SELECT 1 FROM task_wake_episode_exit WHERE task_id = ?", (task_id,)).fetchone() \
+            and not conn.execute("SELECT 1 FROM task_wake_episodes WHERE task_id = ?", (task_id,)).fetchone():
+        return payload, None  # this exit's reset was already carried
+    snapshot = _snapshot(conn, task_id, kind, payload, outside)
+    separate = (kind in {"scheduled", "continued"} and not (payload or {}).get("wake_check")) or (
+        outside and kind not in _CARRY_EVENTS and kind not in _EXIT_EVENTS and not kind.startswith("wake_"))
+    if separate:
+        return payload, snapshot
+    return {**(payload or {}), **snapshot}, None
+
+
+def _snapshot(conn: sqlite3.Connection, task_id: str, kind: str, payload: dict | None, outside: bool) -> dict:
     reconcile(conn, task_id)
     if outside:
         reset(conn, task_id)
+        conn.execute("INSERT OR IGNORE INTO task_wake_episode_exit VALUES (?)", (task_id,))
     elif kind in {"scheduled", "continued"}:
         cmd = (payload or {}).get("wake_check")
         _change_probe(conn, task_id, cmd)
@@ -125,7 +156,7 @@ def snapshot_event(conn: sqlite3.Connection, task_id: str, kind: str, payload: d
         data = {"park_cmd": (payload or {}).get("wake_check")}
     # A null snapshot only resets a peer when it carries an unseen reset barrier;
     # an unobserved episode on the home is otherwise unknown, not evidence of success.
-    return {**(payload or {}), _SNAPSHOT: data, barriers.KEY: barriers.current(conn, task_id)}
+    return {_SNAPSHOT: data, barriers.KEY: barriers.current(conn, task_id)}
 
 
 def reset(conn: sqlite3.Connection, task_id: str) -> None:
