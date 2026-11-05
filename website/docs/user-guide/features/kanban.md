@@ -482,6 +482,17 @@ Probe state is in the `task_wake_checks` table and shown by `kanban show`,
 the worker context and the board API; `kanban diagnostics` flags failing or
 overdue probes, and parks more than 2 h out that have neither.
 
+A clean exit-1 probe that never passes wakes its card to reconsider the wait after
+`kanban.wake_check_stale_hours` (default 48; invalid/nonpositive values use 48).
+The `wake_check_stale` event and comment carry the elapsed hours, check count and
+episode start in Pacific time. Identical-probe re-parks retain the episode, with
+no further stale wake until another full interval has elapsed. A changed/removed
+probe, a passing probe (including the initial success before confirmation), or
+leaving the wake/worker/re-park cycle for blocked, triage or a terminal status resets
+it. Errors do not advance it and retain their existing handling. Machine-local
+`task_wake_episodes` stores the start, count and last stale wake independently of
+probe leases; `kanban show` and board probe state expose these episode fields.
+
 Human asks that resolve outside Hermes: a blocked card's `human_request` may
 carry `resolved_check` (a shell command) and `resolved_check_every` (seconds,
 default 900, 120–21600). Use it when David's step leaves a readable trace, so

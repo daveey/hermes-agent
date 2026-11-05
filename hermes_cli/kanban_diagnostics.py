@@ -706,6 +706,7 @@ def _rule_block_unblock_cycling(task, events, runs, now, cfg) -> list[Diagnostic
 _READY_WAIT_FLOOR_KINDS = frozenset({
     "created", "promoted", "reclaimed", "unblocked",
     "claimed", "spawned", "continuation_woken", "condition_met", "wake_probe_stale",
+    "wake_check_stale",
 })
 
 

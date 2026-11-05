@@ -1885,6 +1885,7 @@ DEFAULT_CONFIG = {
     },
     # Kanban coordination: one dispatcher per board reclaims, promotes, and spawns workers.
     "kanban": {
+        "wake_check_stale_hours": 48,  # Reconsider a never-passing probe; same-probe re-parks retain age.
         # Central sync (core patch 0193): true = boards opened afterwards get sync tables + outbox triggers. [daveey]
         "sync": {"enabled": False},
         "create_overlap_check": True,  # kanban_create refuses work open cards already own (kanban_overlap) [daveey]
@@ -1896,8 +1897,7 @@ DEFAULT_CONFIG = {
         "recovery_card_assignee": "default",  # assignee of the card an automatic recovery files [daveey]
         # Opt-in per-profile broker argv before gh (empty = ordinary login); never include tokens.
         "pr_acceptance": {"gh_command_prefix": []},
-        # Calendar retention for terminal worktrees; archive commits to recovery
-        # refs before reaping. 0 disables age-based archival/startup sweeping.
+        # Terminal worktrees: archive recovery refs before reaping; 0 disables age-based archival/sweeps.
         "worktree_retention_days": 7,
         # Auto-subscribe the originating gateway/TUI session to completion + block events when
         # kanban_create is called from a session with a persistent delivery channel. Disable for

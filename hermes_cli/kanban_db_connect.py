@@ -967,6 +967,8 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
             if resolved not in _INITIALIZED_PATHS:
                 conn.executescript(_kb.SCHEMA_SQL)
                 _migrate_add_optional_columns(conn)
+                from hermes_cli.kanban_wake_episode import ensure_schema
+                ensure_schema(conn)
                 _kb._sync.install_or_remove(conn, resolved)
                 _ensure_activity_revision(conn, resolved)
                 _INITIALIZED_PATHS.add(resolved)

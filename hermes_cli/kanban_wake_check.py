@@ -44,6 +44,8 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
 from typing import Any, Optional
 
+from hermes_cli import kanban_wake_episode as episode
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CHECK_EVERY = 900
@@ -429,6 +431,7 @@ def set_check(conn: sqlite3.Connection, task_id: str, cmd: Optional[str], every:
               *, now: Optional[int] = None) -> None:
     """Record (or clear, when ``cmd`` is None) the card's probe. Caller holds the write txn.
     The first probe is due at once: the condition may have come true while the worker parked."""
+    episode.repark(conn, task_id, cmd)
     conn.execute("DELETE FROM task_wake_checks WHERE task_id = ?", (task_id,))
     if not cmd:
         return
@@ -440,11 +443,16 @@ def set_check(conn: sqlite3.Connection, task_id: str, cmd: Optional[str], every:
 
 
 def _row_dict(row) -> dict:
-    keys = ("task_id", "cmd", "every", "next_at", "last_at", "last_rc", "last_out", "fails", "generation", "purpose")
-    return {k: row[i] for i, k in enumerate(keys)}
+    keys = ("task_id", "cmd", "every", "next_at", "last_at", "last_rc", "last_out", "fails", "generation", "purpose",
+            "episode_first_at", "episode_checks", "episode_last_stale_at")
+    return dict(zip(keys, row))
 
 
-_SELECT = ("SELECT task_id, cmd, every, next_at, last_at, last_rc, last_out, fails, generation, purpose "
+_LEGACY_SELECT = "SELECT task_id, cmd, every, next_at, last_at, last_rc, last_out, fails, generation, purpose"
+_SELECT = (_LEGACY_SELECT + ", "
+           "(SELECT first_at FROM task_wake_episodes e WHERE e.task_id = task_wake_checks.task_id), "
+           "(SELECT checks FROM task_wake_episodes e WHERE e.task_id = task_wake_checks.task_id), "
+           "(SELECT last_stale_at FROM task_wake_episodes e WHERE e.task_id = task_wake_checks.task_id) "
            "FROM task_wake_checks")
 # [daveey] Which status each probe purpose runs in: a park's wake_check while ``scheduled``, a human ask's
 # resolved_check (``kanban_ask_resolved``) while ``blocked``. A row whose card left that status is stale.
@@ -455,7 +463,7 @@ _LIVE_ROW = ("((w.purpose = 'ask_resolved' AND t.status = 'blocked') "
 
 def get_state(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
     try:
-        row = conn.execute(_SELECT + " WHERE task_id = ?", (task_id,)).fetchone()
+        row = _state_rows(conn, " WHERE task_id = ?", (task_id,)).fetchone()
     except sqlite3.OperationalError:  # board created by older code, read-only fenced conn
         return None
     return _row_dict(row) if row else None
@@ -464,15 +472,25 @@ def get_state(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
 def load_states(conn: sqlite3.Connection, task_ids: Optional[list[str]] = None) -> dict[str, dict]:
     try:
         if task_ids is None:
-            rows = conn.execute(_SELECT).fetchall()
+            rows = _state_rows(conn).fetchall()
         elif not task_ids:
             return {}
         else:
             marks = ",".join("?" for _ in task_ids)
-            rows = conn.execute(_SELECT + f" WHERE task_id IN ({marks})", tuple(task_ids)).fetchall()
+            rows = _state_rows(conn, f" WHERE task_id IN ({marks})", tuple(task_ids)).fetchall()
     except sqlite3.OperationalError:
         return {}
     return {r[0]: _row_dict(r) for r in rows}
+
+
+def _state_rows(conn: sqlite3.Connection, suffix: str = "", params: tuple = ()):
+    try:
+        return conn.execute(_SELECT + suffix, params)
+    except sqlite3.OperationalError as exc:
+        if "no such table: task_wake_episodes" not in str(exc):
+            raise
+        # A fenced read-only board may still be owned by a pre-upgrade process.
+        return conn.execute(_LEGACY_SELECT + ", NULL, NULL, NULL FROM task_wake_checks" + suffix, params)
 
 
 def describe_state(state: dict, *, now: Optional[int] = None) -> str:
@@ -487,7 +505,9 @@ def describe_state(state: dict, *, now: Optional[int] = None) -> str:
     fails = f", {state['fails']} failing in a row" if state.get("fails") else ""
     due = "due now" if state["next_at"] <= now else f"next {stamp(state['next_at'])}"
     what = "ask resolved_check " if state.get("purpose") == "ask_resolved" else ""
-    return f"{what}`{state['cmd']}` every {state['every']}s; {last}{fails}; {due}"
+    pending = (f"; not passed since {episode.stamp(state['episode_first_at'])} "
+               f"({state['episode_checks']} checks)" if state.get("episode_first_at") is not None else "")
+    return f"{what}`{state['cmd']}` every {state['every']}s; {last}{fails}; {due}{pending}"
 
 
 # --- probe runner -------------------------------------------------------------------------
@@ -725,7 +745,7 @@ def producer_note(hit: dict) -> str:
 
 
 def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, now: Optional[int], generation: str,
-                     purpose: str = "wake") -> Any:
+                     purpose: str = "wake", stale_interval: Optional[float] = None) -> Any:
     key = (db_path, task_id)
     try:
         rc, out = _run_probe(key, cmd, cwd, env)
@@ -759,7 +779,8 @@ def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, 
                 from hermes_cli.kanban_dead_ancestry import detect
                 dead_ancestry = detect(cmd, cwd)
             apply_result(conn, task_id, cmd, rc, out, now=now, generation=generation, diagnostics=diag,
-                         answered=answered, producer=producer, dead_ancestry=dead_ancestry)
+                         answered=answered, producer=producer, dead_ancestry=dead_ancestry,
+                         stale_interval=stale_interval)
         finally:
             conn.close()
         return rc
@@ -771,7 +792,8 @@ def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, 
 def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out: str,
                  *, generation: str, now: Optional[int] = None,
                  diagnostics: Optional[dict] = None, answered: Optional[dict] = None,
-                 producer: Optional[dict] = None, dead_ancestry: Optional[list[dict]] = None) -> Optional[str]:
+                 producer: Optional[dict] = None, dead_ancestry: Optional[list[dict]] = None,
+                 stale_interval: Optional[float] = None) -> Optional[str]:
     """Record one probe result; wake the card on success or a broken probe. Returns the event
     kind appended (``condition_met`` / ``wake_check_broken``) or None. A result for a probe
     that is no longer the card's (re-parked, unblocked) is dropped."""
@@ -779,6 +801,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
 
     now = int(time.time()) if now is None else int(now)
     tail = _tail(out)
+    interval = episode.stale_seconds() if stale_interval is None else stale_interval
     with kb.write_txn(conn):
         state = get_state(conn, task_id)
         status = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -786,6 +809,8 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                 or state.get("purpose") == "ask_resolved" or status is None or status[0] != "scheduled"):
             return None
         rc_col = rc if isinstance(rc, int) else -1
+        if rc == 0 or (diagnostics and diagnostics.get("first_rc") == 0):
+            episode.reset(conn, task_id)
         if rc == 0:
             return _wake(conn, task_id, CONDITION_MET_EVENT, {
                 "wake_check": cmd, "output": tail, **({"diagnostics": diagnostics} if diagnostics else {})})
@@ -815,6 +840,12 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                 woke = wake_once(conn, task_id, cmd, dead_ancestry)
                 if woke:
                     return woke
+            stale = episode.not_yet(conn, task_id, cmd, now, interval)
+            if stale:
+                woke = _wake(conn, task_id, episode.STALE_EVENT, stale)
+                if woke:
+                    kb.add_comment(conn, task_id, "kanban-dispatcher", stale["note"])
+                return woke
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = 1, last_out = ?, fails = 0, "
                 "next_at = ? WHERE task_id = ?", (now, tail, now + int(state["every"]), task_id))
@@ -885,6 +916,7 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
         if not db_path:
             return {"submitted": [], "in_flight": 0}
         ts = int(time.time()) if now is None else int(now)
+        stale_interval = episode.stale_seconds()  # resolve before crossing into unscoped pool threads
         try:
             stale = conn.execute(
                 "SELECT w.task_id FROM task_wake_checks w LEFT JOIN tasks t ON t.id = w.task_id "
@@ -929,7 +961,7 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
                     continue
             cwd = probe_cwd(task.workspace_path)
             fut = _pool().submit(_probe_and_apply, db_path, task_id, cmd, cwd, _probe_env(task, db_path), now, claim,
-                                 purpose)
+                                 purpose, stale_interval)
             with _LOCK:
                 _IN_FLIGHT[key] = fut
             submitted.append(task_id)
@@ -968,13 +1000,15 @@ def _render_wake_context(conn: sqlite3.Connection, task_id: str) -> str:
     lines: list[str] = []
     from hermes_cli.kanban_comment_origin import WAKE_PROBE_STALE_EVENT
 
-    kinds = (*SCHEDULED_ENTRY_EVENTS, CONDITION_MET_EVENT, BROKEN_EVENT, WAKE_PROBE_STALE_EVENT)
+    kinds = (*SCHEDULED_ENTRY_EVENTS, CONDITION_MET_EVENT, BROKEN_EVENT, WAKE_PROBE_STALE_EVENT, episode.STALE_EVENT)
     marks = ",".join("?" for _ in kinds)
     row = conn.execute(
         f"SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
         "ORDER BY id DESC LIMIT 1", (task_id, *kinds)).fetchone()
-    if row is not None and row[0] in (CONDITION_MET_EVENT, BROKEN_EVENT, WAKE_PROBE_STALE_EVENT):
+    if row is not None and row[0] in (CONDITION_MET_EVENT, BROKEN_EVENT, WAKE_PROBE_STALE_EVENT, episode.STALE_EVENT):
         payload = kb._json_dict(row[1])
+        if row[0] == episode.STALE_EVENT:
+            return f"## Woken to reconsider a never-passing wake check\n{payload.get('note', '')}\n"
         if row[0] == WAKE_PROBE_STALE_EVENT and payload.get("reason") == PRODUCER_FINISHED:
             lines.append("## Woken because the awaited producer card finished but the wake check missed it")
             lines.append(f"{payload.get('note')} Last output:")
