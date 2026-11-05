@@ -31,7 +31,7 @@ def test_auto_on_a_concrete_model_still_means_the_profiles_route(tmp_path):
 def _kanban_policy(tmp_path, monkeypatch, **overrides):
     from contextlib import closing
     from types import SimpleNamespace
-    from gateway.session_contract import Principal
+    from gateway.session_contract import SessionActor
     from gateway.session_kanban import build_kanban_policy
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect
@@ -48,7 +48,7 @@ def _kanban_policy(tmp_path, monkeypatch, **overrides):
         kb.recompute_ready(conn)
         task = kb.claim_task(conn, task_id)
     connection = SimpleNamespace(authority=SimpleNamespace(profile_id=str(tmp_path)), native_owner=True,
-                                 actor=Principal('owner', str(tmp_path), frozenset({'session:create'}), 'transport'))
+                                 actor=SessionActor('owner', str(tmp_path), frozenset({'session:create'}), 'transport'))
     policy, _secrets = build_kanban_policy(connection, dict(board='owned', task_id=task.id, run_id=task.current_run_id,
                                                             claim_lock=task.claim_lock), PROFILE)
     return policy

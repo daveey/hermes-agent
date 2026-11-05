@@ -129,8 +129,8 @@ def _admit_next(env, task_id):
     async def resume(ref, params):
         calls.append(('resume', ref.session_id))
     authority = SimpleNamespace(profile_id=str(env.tmp), db=env.db, submit=submit)
-    from gateway.session_contract import Principal
-    actor = Principal('owner', str(env.tmp), frozenset({'session:create'}), 'transport')
+    from gateway.session_contract import SessionActor
+    actor = SessionActor('owner', str(env.tmp), frozenset({'session:create'}), 'transport')
     connection = SimpleNamespace(authority=authority, actor=actor, native_owner=True, resume=resume)
     params = dict(board='owned', task_id=task_id, run_id=task.current_run_id, claim_lock=task.claim_lock)
     from gateway import session_kanban

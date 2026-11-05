@@ -34,9 +34,36 @@ class ResizeObserverStub {
 
 const disconnected: Element[] = []
 const originalRemove = Element.prototype.remove
+const attachedGuests = new Map<number, Guest>()
+const activityLeases = new Map<number, Guest>()
+let nextActivityToken = 0
+let previousDesktop: Window['hermesDesktop']
 
 beforeEach(() => {
   disconnected.length = 0
+  attachedGuests.clear()
+  activityLeases.clear()
+  previousDesktop = window.hermesDesktop
+  window.hermesDesktop = {
+    ...previousDesktop,
+    beginPreviewGuestActivity: async id => {
+      const guest = attachedGuests.get(id)
+
+      if (!guest) {throw new Error(`Unknown preview guest ${id}`)}
+      const token = ++nextActivityToken
+      activityLeases.set(token, guest)
+
+      return token
+    },
+    executePreviewGuestScript: async (token, code) => {
+      const guest = activityLeases.get(token)
+
+      if (!guest?.executeJavaScript) {throw new Error(`Unknown preview activity ${token}`)}
+
+      return guest.executeJavaScript(code)
+    },
+    endPreviewGuestActivity: async token => { activityLeases.delete(token) }
+  } as Window['hermesDesktop']
   vi.stubGlobal('ResizeObserver', ResizeObserverStub)
   vi.stubGlobal('CSS', { ...globalThis.CSS, escape: (value: string) => value })
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
@@ -58,6 +85,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   Element.prototype.remove = originalRemove
+  window.hermesDesktop = previousDesktop
+  expect(activityLeases.size).toBe(0)
   vi.unstubAllGlobals()
 })
 
@@ -117,9 +146,11 @@ const value = (respond: ReturnType<typeof vi.fn>) => JSON.parse(respond.mock.cal
 
 /** Make a webview behave like an attached Electron guest showing `text`. */
 function attach(webview: Guest, text: string) {
+  const id = attachedGuests.size + 1
+  attachedGuests.set(id, webview)
   webview.executeJavaScript = async (code: string) =>
     code.includes('innerText') ? text : JSON.stringify({ success: true, elements: [{ ref: 'e1', text: 'Continue' }] })
-  Object.assign(webview, { getTitle: () => 'Page', getURL: () => 'https://a.example/' })
+  Object.assign(webview, { getWebContentsId: () => id, getTitle: () => 'Page', getURL: () => 'https://a.example/' })
   webview.dispatchEvent(new Event('dom-ready'))
 }
 

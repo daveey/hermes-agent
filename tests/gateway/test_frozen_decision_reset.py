@@ -13,7 +13,7 @@ from tests.gateway.test_local_resume_compression_child import _runner, _compress
 async def test_queued_frozen_decision_target_fence(tmp_path, monkeypatch, rotation, generic_identity):
     from gateway import run
     from gateway.session_authority import initialize_session_authority
-    from gateway.session_contract import Principal
+    from gateway.session_contract import SessionActor
     from gateway.session_local import create_local_session
     from gateway.session_automation import reset_and_rehome_messages, restore_local_automation
     from gateway.platforms.event import MessageEvent
@@ -24,7 +24,7 @@ async def test_queued_frozen_decision_target_fence(tmp_path, monkeypatch, rotati
     runner = _runner(tmp_path)
     authority = await initialize_session_authority(runner, profile_id='fixture', instance_id='owner')
     monkeypatch.setattr(authority, '_schedule_admitted', lambda *args: None)
-    actor = Principal('human', 'fixture', frozenset({'session:create', 'session:read'}), 'socket')
+    actor = SessionActor('human', 'fixture', frozenset({'session:create', 'session:read'}), 'socket')
     ref = create_local_session(authority, actor, dict(request_id='create', source='gui',
         cwd=str(tmp_path), model='m', toolsets=[]))
     live = authority.sessions[ref.session_id]
@@ -101,7 +101,7 @@ async def test_caller_cancelled_during_reset_write_still_settles_frozen_decision
     from gateway.platforms.event import MessageEvent
     from gateway.session_authority import initialize_session_authority
     from gateway.session_automation import reset_and_rehome_messages, restore_local_automation
-    from gateway.session_contract import Principal
+    from gateway.session_contract import SessionActor
     from gateway.session_local import create_local_session
     from gateway.session_runtime_workers import mutation_tasks
     from hermes_state_runtime import claim_session_input, get_session_admission
@@ -112,7 +112,7 @@ async def test_caller_cancelled_during_reset_write_still_settles_frozen_decision
     authority = await initialize_session_authority(runner, profile_id='fixture', instance_id='owner')
     monkeypatch.setattr(authority, '_schedule_admitted', lambda *args: None)
     monkeypatch.setattr(authority, '_schedule', lambda *args: None)
-    actor = Principal('human', 'fixture', frozenset({'session:create', 'session:read'}), 'socket')
+    actor = SessionActor('human', 'fixture', frozenset({'session:create', 'session:read'}), 'socket')
     ref = create_local_session(authority, actor, dict(request_id='create', source='gui',
         cwd=str(tmp_path), model='m', toolsets=[]))
     live = authority.sessions[ref.session_id]
