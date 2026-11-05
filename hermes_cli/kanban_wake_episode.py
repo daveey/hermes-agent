@@ -124,7 +124,9 @@ def snapshot_event(conn: sqlite3.Connection, task_id: str, kind: str,
     Lifecycle events carry the snapshot in their own payload. Unrelated events and
     probe-less parks keep their payload untouched: their evidence (a corridor-exit
     reset or a cleared probe, still needed by peers whose episode this home never
-    observed) is returned separately for a ``wake_episode_evidence`` event.
+    observed) is returned separately for a ``wake_episode_evidence`` event. A
+    probe-less park inside the corridor on a task with no delivered probe or
+    episode adds nothing, so atomic parks still append only their own event.
     """
     status = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
     outside = status is not None and status[0] not in _CORRIDOR
@@ -133,8 +135,15 @@ def snapshot_event(conn: sqlite3.Connection, task_id: str, kind: str,
     if outside and conn.execute("SELECT 1 FROM task_wake_episode_exit WHERE task_id = ?", (task_id,)).fetchone() \
             and not conn.execute("SELECT 1 FROM task_wake_episodes WHERE task_id = ?", (task_id,)).fetchone():
         return payload, None  # this exit's reset was already carried
+    probe_less = kind in {"scheduled", "continued"} and not (payload or {}).get("wake_check")
+    if probe_less and not outside:
+        reconcile(conn, task_id)  # judge against every delivered park, then idempotent in _snapshot
+        if not _probe_known(conn, task_id):
+            # Nothing to clear here and no probe was ever delivered: the park changes no
+            # episode state, so it adds no evidence (keeps atomic park event contracts).
+            return payload, None
     snapshot = _snapshot(conn, task_id, kind, payload, outside)
-    separate = (kind in {"scheduled", "continued"} and not (payload or {}).get("wake_check")) or (
+    separate = probe_less or (
         outside and kind not in _CARRY_EVENTS and kind not in _EXIT_EVENTS and not kind.startswith("wake_"))
     if separate:
         return payload, snapshot
@@ -157,6 +166,12 @@ def _snapshot(conn: sqlite3.Connection, task_id: str, kind: str, payload: dict |
     # A null snapshot only resets a peer when it carries an unseen reset barrier;
     # an unobserved episode on the home is otherwise unknown, not evidence of success.
     return {_SNAPSHOT: data, barriers.KEY: barriers.current(conn, task_id)}
+
+
+def _probe_known(conn: sqlite3.Connection, task_id: str) -> bool:
+    row = conn.execute("SELECT cmd FROM task_wake_episode_cmd WHERE task_id = ?", (task_id,)).fetchone()
+    return bool(row and row[0]) or conn.execute(
+        "SELECT 1 FROM task_wake_episodes WHERE task_id = ?", (task_id,)).fetchone() is not None
 
 
 def reset(conn: sqlite3.Connection, task_id: str) -> None:
