@@ -704,3 +704,122 @@ def test_a_record_outside_the_allowlist_is_dropped_and_invalidates(tmp_path):
     assert "secret" not in h.log.read_text(encoding="utf-8")
     stop = h.records()[-1]
     assert (stop["errors"], stop["lost"], stop["valid"]) == (2, 2, False)
+
+
+# --- review corrections: the analyzer fails closed on file-level problems and provenance --------------------------
+
+
+def _good_capture(tmp_path, **kw) -> list[dict]:
+    h = Harness(tmp_path, **kw)
+    h.arm()
+    with h.diag.lock:
+        h.diag._emit(h.diag.capture, {"ev": "chg", "b": 0, "t": h.clock.ns, "kind": "changes", "lk": 0})
+    h.until[0] = None
+    h.diag.boundary()
+    recs = h.records()
+    assert report.validate(report.captures(recs)[0]) == []
+    return recs
+
+
+def _run_main(tmp_path, lines: list[str], capsys) -> tuple[int, list[dict]]:
+    path = tmp_path / "capture.jsonl"
+    path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    code = report.main([str(path)])
+    return code, json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("prefix", [
+    ["not json"],  # junk before the first start
+    [json.dumps({"ev": "chg", "seq": 0, "b": 0, "t": 1, "kind": "changes", "lk": 0})],  # orphan record
+    ["{\"ev\": \"svc\"}", "[]"],  # a capture whose start marker is missing
+])
+def test_records_before_the_first_start_are_retained_and_fail_the_file(tmp_path, capsys, prefix):
+    good = [json.dumps(r) for r in _good_capture(tmp_path)]
+    code, summaries = _run_main(tmp_path, prefix + good, capsys)
+    assert code == 1
+    assert len(summaries) == 2, "the prefix is reported, never silently dropped"
+    assert summaries[0]["valid"] is False and "no_start_marker" in summaries[0]["invalid"]
+    assert summaries[1]["valid"] is True
+
+
+@pytest.mark.parametrize("lines", [[], ["not json"], ["{}", "{\"ev\": \"stop\"}"]])
+def test_a_file_with_no_complete_capture_never_passes_and_never_crashes(tmp_path, capsys, lines):
+    code, summaries = _run_main(tmp_path, lines, capsys)
+    assert code == 1
+    assert all(s["valid"] is False for s in summaries)
+
+
+@pytest.mark.parametrize("mutate, problem", [
+    (lambda recs: recs[0].update(schema=99), "schema_mismatch"),
+    (lambda recs: recs[1].update(ev="mystery"), "unknown_event"),
+    (lambda recs: recs[1].update(url="https://x"), "field_not_allowed"),
+    (lambda recs: recs[1].update(b="board-slug"), "field_not_allowed"),
+    (lambda recs: recs[0].update(code_src="none") or recs[0].pop("code"), "identity_unverified"),
+    (lambda recs: recs[0].update(disk_moved=True), "identity_unverified"),
+    (lambda recs: recs[0].pop("code"), "identity_unverified"),
+])
+def test_validate_rejects_schema_event_allowlist_and_unverified_identity(tmp_path, mutate, problem):
+    recs = _good_capture(tmp_path)
+    mutate(recs)
+    assert problem in report.validate(report.captures(recs)[0])
+
+
+def test_a_capture_without_boot_identity_is_unverified(tmp_path):
+
+    h = Harness(tmp_path, code_identity=lambda: (None, "none", None))
+    h.arm()
+    h.until[0] = None
+    h.diag.boundary()
+    assert report.validate(report.captures(h.records())[0]) == ["identity_unverified"]
+
+
+def test_malformed_but_allowlisted_records_are_invalid_not_a_crash(tmp_path, capsys):
+    recs = _good_capture(tmp_path)
+    i = next(i for i, r in enumerate(recs) if r["ev"] == "chg")
+    recs[i].pop("t")  # a chg record with no timestamp, then a service that claims it
+    recs.insert(i + 1, {"ev": "svc", "b": 0, "t0": 1, "t1": 2, "loop": True, "out": "ok",
+                        "c_first": recs[i]["seq"], "c_last": recs[i]["seq"]})
+    for i, r in enumerate(recs):
+        r["seq"] = i
+    code, summaries = _run_main(tmp_path, [json.dumps(r) for r in recs], capsys)
+    assert code == 1 and "malformed_record" in summaries[0]["invalid"]
+
+
+def test_unserviced_changes_and_truncated_boards_are_separate_counts(tmp_path):
+    recs = _good_capture(tmp_path)
+    recs.insert(-1, {"ev": "pend", "b": 0, "c_first": 1, "c_last": 3, "c_n": 3, "c_t": 1})
+    for i, r in enumerate(recs):
+        r["seq"] = i
+    recs[-1]["pend_more"] = 5
+    assert report.validate(report.captures(recs)[0]) == []
+    summary = report.summarize(report.captures(recs)[0])
+    assert summary["unserviced"] == 3
+    assert summary["unserviced_boards_truncated"] == 5
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("boom"), KeyError("x")])
+def test_an_identity_failure_leaks_no_fd_and_still_captures_unverified(tmp_path, exc):
+    import os
+
+    def identity():
+        raise exc
+    before = len(os.listdir("/proc/self/fd"))
+    h = Harness(tmp_path, code_identity=identity)
+    h.arm()
+    h.until[0] = None
+    h.diag.boundary()
+    assert len(os.listdir("/proc/self/fd")) == before
+    recs = h.records()
+    assert recs[0]["code_src"] == "none" and recs[-1]["ev"] == "stop"
+    assert report.validate(report.captures(recs)[0]) == ["identity_unverified"]
+
+
+def test_a_start_failure_after_open_closes_the_fd(tmp_path, monkeypatch):
+    import os
+    h = Harness(tmp_path)
+    h.until[0] = h.clock.wall_s + 300.0
+    monkeypatch.setattr(timing.random, "SystemRandom", lambda: (_ for _ in ()).throw(RuntimeError("rng")))
+    before = len(os.listdir("/proc/self/fd"))
+    h.diag.boundary()
+    assert h.diag.capture is None
+    assert len(os.listdir("/proc/self/fd")) == before

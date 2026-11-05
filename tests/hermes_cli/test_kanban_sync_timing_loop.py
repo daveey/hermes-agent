@@ -49,6 +49,8 @@ def test_real_loop_records_full_report_cost_and_matches_a_change_to_its_boards_s
     root = tmp_path / "root"
     root.mkdir()
     monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda *a, **k: root)
+    # A test process has no hermes_bootstrap boot fingerprint; stand one in so the capture's provenance is verified.
+    monkeypatch.setattr(timing, "_code_identity", lambda: ("0123456789abcdef0123456789abcdef01234567", "boot", False))
     monkeypatch.setattr(timing, "_DIAG", timing.TimingDiag())
     monkeypatch.setattr(mm, "REPORT_EVERY_S", 3.0)
     _config(root, None)

@@ -3,10 +3,16 @@
 Arm with the installation-root config key ``kanban.sync.diagnostics.timing_until``: a finite Unix timestamp at most
 :data:`MAX_ACTIVATION_S` ahead when the loop first sees it. Missing, null, non-numeric, non-finite, past or overlong
 values (an overlong value never arms later either) and an unreadable config are off. The loop checks the key at its
-safe boundary (just before it waits for work); one capture ends at the earliest of the configured time, 600 s of
-monotonic time, a changed/removed value, a config read failure, a write failure or the file cap, and the same
-value never arms twice in a process. Off costs one signature-cached config read per loop and creates no file or
-thread.
+safe boundary (just before it waits for work); one capture ends at the first such boundary after the earliest of
+the configured time, 600 s of monotonic time, a changed/removed value or a config read failure (there is no hard
+timer: the stop can overrun that time by up to one sync round plus one wait, at most about one poll period), or
+at once on a write failure or the file cap; the same value never arms twice in a process. Off costs one
+signature-cached config read per loop and creates no file or thread.
+
+Known limits while a capture is armed: ``select`` holds the diagnostic lock across ``SyncWork.select`` (including
+its per-board outbox reads), so a feed callback can wait that long before it returns to its socket; the wait shows
+in ``chg.lk``, and loop/product latency is unaffected. A new capture rotates a file at least half the cap to
+``.1``, replacing any older ``.1``: archive a capture you need before arming the next one.
 
 What is recorded (monotonic ns; wall clock only for provenance/expiry), to ``<root>/logs/kanban-sync-timing.jsonl``:
 - ``chg``: a decoded Board feed change frame, before ``SyncWork.changed`` (the connect-time catch-up is not one).
@@ -269,17 +275,21 @@ class TimingDiag:
                 os.replace(path, path.with_name(path.name + ".1"))
         except FileNotFoundError:
             pass
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        now = self.clock_ns()
-        cap = _Capture(until, now + int(remaining * 1e9), fd, random.SystemRandom().getrandbits(62))
-        cap.bytes = os.fstat(fd).st_size  # earlier captures count against the same file cap
-        try:
+        try:  # resolved before the fd exists; any failure only leaves the capture unverified
             code, src, moved = (self.code_identity or _code_identity)()
-        except (ImportError, OSError, ValueError):
+        except Exception:  # health: allow BLE001 -- identity failure marks provenance unverified, never leaks an fd
             code, src, moved = None, "none", None
-        rec = {"ev": "start", "t": now, "wall_ms": int(self.wall() * 1000), "until_ms": int(until * 1000),
-               "deadline_ns": cap.deadline_ns, "pid": os.getpid(), "run": cap.run, "schema": SCHEMA,
-               "queue_max": self.queue_max, "file_max": self.file_max, "code_src": src}
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:  # until the capture owns the fd, any failure closes it
+            now = self.clock_ns()
+            cap = _Capture(until, now + int(remaining * 1e9), fd, random.SystemRandom().getrandbits(62))
+            cap.bytes = os.fstat(fd).st_size  # earlier captures count against the same file cap
+            rec = {"ev": "start", "t": now, "wall_ms": int(self.wall() * 1000), "until_ms": int(until * 1000),
+                   "deadline_ns": cap.deadline_ns, "pid": os.getpid(), "run": cap.run, "schema": SCHEMA,
+                   "queue_max": self.queue_max, "file_max": self.file_max, "code_src": src}
+        except BaseException:
+            os.close(fd)
+            raise
         if code is not None:
             rec["code"] = code
         if moved is not None:

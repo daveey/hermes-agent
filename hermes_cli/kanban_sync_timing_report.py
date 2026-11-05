@@ -2,7 +2,9 @@
 
 ``python -m hermes_cli.kanban_sync_timing_report <file>`` prints one JSON summary per capture. It applies no
 threshold and no baseline: it reports validity (any lost record, sequence gap, diagnostic error, identity change,
-missing stop marker or incomplete stop reason invalidates the capture) and measured distributions only:
+missing stop marker, incomplete stop reason, schema/event/allowlist violation, malformed record, or a start without a
+boot-recorded code identity or with a moved checkout invalidates the capture; records before the first ``start`` are
+reported as their own invalid capture, never dropped) and measured distributions only:
 
 - per decoded change served by its own board's successful service: notification-to-service latency, and how much
   of that interval overlapped measured report spans and diagnostic flush spans; cohorts with and without report
@@ -22,6 +24,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
+from hermes_cli.kanban_sync_timing import ENUMS, SCHEMA, _allowed
+
 COMPLETE_REASONS = frozenset({"expired", "bound", "disabled"})
 _NS_PER_MS = 1_000_000
 
@@ -38,13 +42,13 @@ def load(path: Path) -> list[dict]:
 
 
 def captures(records: Iterable[dict]) -> list[list[dict]]:
-    """Split at each ``start`` record; records before the first start form no capture."""
+    """Split at each ``start`` record. Records before the first start (orphans, junk, a capture whose start is
+    missing) are kept as their own leading capture, which :func:`validate` rejects as ``no_start_marker``."""
     caps: list[list[dict]] = []
     for rec in records:
-        if rec.get("ev") == "start":
+        if rec.get("ev") == "start" or not caps:
             caps.append([])
-        if caps:
-            caps[-1].append(rec)
+        caps[-1].append(rec)
     return caps
 
 
@@ -61,6 +65,15 @@ def validate(cap: list[dict]) -> list[str]:
         problems.append("unparseable_line")
     if [r.get("seq") for r in cap] != list(range(len(cap))):
         problems.append("sequence_gap")
+    if start.get("schema") != SCHEMA:
+        problems.append("schema_mismatch")
+    real = [r for r in cap if r.get("ev") != "_bad"]
+    if any(r.get("ev") not in ENUMS["ev"] for r in real):
+        problems.append("unknown_event")
+    if any(not _allowed(k, v) for r in real for k, v in r.items()):
+        problems.append("field_not_allowed")
+    if start.get("code_src") != "boot" or "code" not in start or start.get("disk_moved") is True:
+        problems.append("identity_unverified")
     if stop is not None:
         if stop.get("lost"):
             problems.append("lost_records")
@@ -122,6 +135,20 @@ def _reports(reps: list[dict]) -> dict:
 def summarize(cap: list[dict]) -> dict[str, Any]:
     problems = validate(cap)
     start, stop = cap[0], (cap[-1] if cap[-1].get("ev") == "stop" else {})
+    try:
+        measured = _measure(cap, stop)
+    except (KeyError, TypeError, ValueError, ArithmeticError):  # a record missing or mistyping a needed field
+        problems, measured = problems + ["malformed_record"], {}
+    return {
+        "valid": not problems, "invalid": problems,
+        "identity": {k: start.get(k) for k in ("run", "pid", "code", "code_src", "disk_moved")},
+        "stop_reason": stop.get("reason"), "records": len(cap), "lost": stop.get("lost"),
+        **measured,
+    }
+
+
+def _measure(cap: list[dict], stop: dict) -> dict[str, Any]:
+    start = cap[0]
     by = {ev: [r for r in cap if r.get("ev") == ev] for ev in ("rep", "flush", "svc", "pend", "chg", "wait")}
     report_spans = [(r["t0"], r["t1"]) for r in by["rep"]]
     flush_spans = [(r["t0"], r["t1"]) for r in by["flush"]]
@@ -130,10 +157,7 @@ def summarize(cap: list[dict]) -> dict[str, Any]:
     plain = [s for s in served if s["report_overlap_ns"] == 0]
     local = [r["t1"] - r["l_t"] for r in by["svc"] if r.get("out") == "ok" and r.get("loop") and "l_t" in r]
     return {
-        "valid": not problems, "invalid": problems,
-        "identity": {k: start.get(k) for k in ("run", "pid", "code", "code_src", "disk_moved")},
         "duration_ms": (stop["t"] - start["t"]) / _NS_PER_MS if "t" in stop else None,
-        "stop_reason": stop.get("reason"), "records": len(cap), "lost": stop.get("lost"),
         "changes": len(by["chg"]), "served": served,
         "coverage": "overlap" if overlap else "none",
         "cohorts": {"overlap": _dist_ms([s["latency_ns"] for s in overlap]),
@@ -142,7 +166,10 @@ def summarize(cap: list[dict]) -> dict[str, Any]:
                     "all": _dist_ms([s["latency_ns"] for s in served])},
         "local_to_service": _dist_ms(local),
         "service_failures": sum(r.get("out") != "ok" for r in by["svc"]),
-        "unserviced": sum(r.get("c_n", 0) for r in by["pend"]) + (stop.get("pend_more") or 0),
+        # Changes still pending at stop, and separately the boards beyond the stop's PEND_MAX records (their change
+        # count is unknown): different units, never summed.
+        "unserviced": sum(r.get("c_n", 0) for r in by["pend"]),
+        "unserviced_boards_truncated": stop.get("pend_more") or 0,
         "reports": _reports(by["rep"]),
         "waits": dict(Counter(r.get("why") for r in by["wait"])),
         "overhead": {"flushes": len(by["flush"]), "flush": _dist_ms([e - s for s, e in flush_spans]),
