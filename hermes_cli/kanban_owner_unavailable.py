@@ -12,7 +12,8 @@ Such a run is booked ``owner_unavailable`` and requeued WITHOUT counting a failu
 - the board holds an ``owner_admitted`` marker for the run (the owner did admit it, so a turn may
   have run and its loss is a real failure), unless the run's bound interpreter proved it died
   constructing its agent on the host's routing registry (empty, or unreadable/invalid:
-  ``kanban_host_refusal.proven``: no turn ran, and no card's pin could have passed), or
+  ``kanban_host_refusal.proven``: no turn ran, and no card's pin could have passed), or its final
+  bound-worker receipt proves an owner storage refusal (``kanban_owner_storage_refusal``), or
 - the card's last ``NEUTRAL_STREAK_LIMIT`` closed runs were all ``owner_unavailable`` (an owner that
   never comes back must still reach the breaker instead of respawning forever).
 
@@ -92,7 +93,7 @@ def _note_legacy(dead, conn, task_id, run_id, log) -> None:
 
 def noted(dead, conn, task_id, run_id, log=None):
     """``note`` then return *dead* (one expression at the call site). A requeued host refusal (a
-    startup registry refusal, or a pre-admission ``storage_unavailable``) is surfaced here, in the
+    startup registry refusal, or a pre-/post-admission ``storage_unavailable``) is surfaced here, in the
     sweep's transaction: once per window per host, never once per card."""
     _note_legacy(dead, conn, task_id, run_id, log)
     note(dead, conn, task_id, run_id)
@@ -103,9 +104,17 @@ def noted(dead, conn, task_id, run_id, log=None):
 
 
 def note(dead, conn, task_id, run_id) -> None:
-    """Rebook a dead worker (``_DeadWorker``) that exited owner-unavailable as a neutral requeue, or
-    turn it back into a plain nonzero-exit crash when the run cannot be proven turn-free. No-op for
-    any other exit."""
+    """Rebook owner unavailability or a proven mid-turn owner-store refusal as a neutral requeue.
+
+    Admission requires a startup or bound-worker storage proof; other exits remain crashes.
+    """
+    storage_proof = None
+    if dead.kind == "nonzero_exit" and dead.code == 1:
+        from hermes_cli.kanban_owner_storage_refusal import proven as storage_refusal
+        storage_proof = storage_refusal(conn, task_id, run_id, dead.event_payload.get("claimer"))
+        if storage_proof:
+            dead.kind = EXIT_KIND
+            dead.event_payload["exit_kind"] = EXIT_KIND
     if dead.kind not in (EXIT_KIND, OWNER_DOWN_KIND):
         return
     owner_down = dead.kind == OWNER_DOWN_KIND
@@ -114,9 +123,9 @@ def note(dead, conn, task_id, run_id) -> None:
         reason = "no board connection to check the admission"
     else:
         admitted = _owner_admitted(conn, task_id, run_id)
-        # Admitted: only a bound interpreter's startup proof excuses it. Not admitted: requeued as
+        # Admitted: only a bound interpreter's startup/storage proof excuses it. Not admitted: requeued as
         # before; a submitter's pre-admission proof only names the host fault for the notice.
-        proof = proven(conn, task_id, run_id, dead.event_payload.get("claimer"), admitted=admitted,
+        proof = storage_proof or proven(conn, task_id, run_id, dead.event_payload.get("claimer"), admitted=admitted,
                        pid=dead.event_payload.get("pid"))
         if admitted and not proof:
             reason = "the owner had admitted this run"

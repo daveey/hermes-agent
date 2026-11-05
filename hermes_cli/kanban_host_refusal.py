@@ -129,7 +129,8 @@ def proven(conn: sqlite3.Connection, task_id: str, run_id, claim_lock, *, admitt
 
 def run_error(pid, proof: dict) -> str:
     """The requeued run's error text for a proven host refusal."""
-    return f"pid {pid}: {_cause(proof)}; no turn ran, requeued without counting a failure"
+    phase = "turn interrupted" if proof.get("phase") == "midrun" else "no turn ran"
+    return f"pid {pid}: {_cause(proof)}; {phase}, requeued without counting a failure"
 
 
 def _cause(proof: dict, task_id: Optional[str] = None) -> str:
@@ -139,6 +140,8 @@ def _cause(proof: dict, task_id: Optional[str] = None) -> str:
         return (f"the host's model-routing registry could not be read or validated when {whose} worker "
                 f"started ({proof.get('detail') or 'invalid'})")
     if kind == OWNER_STORAGE_UNAVAILABLE:
+        if proof.get("phase") == "midrun":
+            return "the profile owner refused the running worker's persistence with storage_unavailable"
         claim = f"card {task_id}'s claim" if task_id else "the claim"
         return (f"the profile owner kept refusing {claim} with {proof.get('reason') or 'storage_unavailable'} "
                 "(its runtime store or session policy could not be read)")
@@ -168,7 +171,8 @@ def _notify(conn, task_id, proof):
     host = _host()
     base = NOTICE_KEY_PREFIX + host
     window = int(time.time()) // NOTICE_WINDOW_SECONDS
-    line = f"{host}: {_cause(proof, task_id)}; no turn ran and the card was requeued without counting a failure."
+    phase = "the turn was interrupted" if proof.get("phase") == "midrun" else "no turn ran"
+    line = f"{host}: {_cause(proof, task_id)}; {phase} and the card was requeued without counting a failure."
     marker = {"window": window, "task_id": task_id, "kind": proof.get("kind")}
     # The lookup runs inside the write transaction (the sweep's IMMEDIATE one, or our own), so two
     # sweeps cannot both find no card and open two.
@@ -186,14 +190,13 @@ def _notify(conn, task_id, proof):
                     kb.add_comment(conn, existing, AUTHOR, f"Again: {line}")
                     kb._append_event(conn, existing, NOTICE_EVENT, marker)
                 return existing
-            body = (f"{line}\n\nA host fault refuses Kanban workers on this host before any turn runs: an empty, "
+            body = (f"{line}\n\nA host fault refuses Kanban workers on this host before or during a turn: an empty, "
                     "unreadable or invalid `model_routing` registry when a worker starts, or a profile owner whose "
-                    "runtime store or session policy cannot be read (`storage_unavailable`, e.g. a truncated "
-                    "config.yaml). Every card on this host is refused until it is restored. The refused cards are "
+                    "runtime store or session policy cannot be read (`storage_unavailable`). The refused cards are "
                     "requeued uncounted (up to the owner-unavailable streak limit, then they count), and this card "
                     "is commented at most once per 15 minutes while it lasts.\n\n"
-                    "Fix: restore the host's config.yaml (the `model_routing` registry, the model and session "
-                    "policy) from the last good copy (`hermes config` or the config history), then confirm a "
+                    "Fix: inspect the profile owner's storage health and config.yaml (the `model_routing` "
+                    "registry, model and session policy), restore the failing dependency, then confirm a "
                     "refused card runs.")
             tid = kb.create_task(conn, title=f"{host}: host config fault, Kanban workers refused"[:120],
                                  body=body, assignee="default", created_by=AUTHOR, priority=80,
