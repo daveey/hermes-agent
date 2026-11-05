@@ -1351,28 +1351,30 @@ def _remove_relocated_basetemp(config) -> None:
 def _processes_with_hermes_home_under(roots) -> list[int]:
     """PIDs (never this process) whose environment names a ``HERMES_HOME`` inside one of *roots*.
 
-    Linux only (``/proc/<pid>/environ``; unreadable entries are another user's and skipped).
-    Elsewhere the scan is empty: a test-spawned daemon there is the per-test guard's problem.
+    POSIX (psutil's exec-time environment; another user's processes are unreadable and skipped).
+    Windows is out of scope: no leak observed there, and SIGTERM there is TerminateProcess.
 
     Membership is decided lexically: another process's ``HERMES_HOME`` is never resolved, because
     the host's live gateways (the hub's ``~/.hermes/profiles/<p>``) name the real Hermes home and
     ``realpath`` would ``lstat`` it, which the real-home I/O guard refuses. Only this session's own
     roots are resolved, and both their given and resolved spellings are matched, so a child that
     got either spelling of a root is still found.
+
     """
-    if not sys.platform.startswith("linux") or not os.path.isdir("/proc"):
+    if os.name != "posix":
         return []
+    import psutil
+
     resolved = {Path(os.path.abspath(r)) for r in roots if r} | {Path(r).resolve() for r in roots if r}
+    me = os.getpid()
     found = []
-    for entry in os.scandir("/proc"):
-        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+    for proc in psutil.process_iter():
+        if proc.pid == me:
             continue
         try:
-            with open(f"/proc/{entry.name}/environ", "rb") as handle:
-                environ = handle.read().split(b"\0")
-        except OSError:
+            home = proc.environ().get("HERMES_HOME")
+        except (psutil.Error, OSError):
             continue
-        home = next((item[12:] for item in environ if item.startswith(b"HERMES_HOME=")), None)
         if not home:
             continue
         try:
@@ -1383,7 +1385,7 @@ def _processes_with_hermes_home_under(roots) -> list[int]:
             continue
         path = Path(os.path.normpath(text))
         if any(path == root or path.is_relative_to(root) for root in resolved):
-            found.append(int(entry.name))
+            found.append(proc.pid)
     return found
 
 

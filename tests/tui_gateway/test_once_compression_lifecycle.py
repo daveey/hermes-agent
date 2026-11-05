@@ -9,7 +9,7 @@ from tui_gateway import server
 from hermes_cli.config import atomic_config_write
 from tests.agent.test_class_compression_lineage import rotate
 from agent.model_routing_state import RoutingState
-from agent.conversation_compression import ensure_compression_feasibility_checked
+from agent.conversation_compression_feasibility import ensure_compression_feasibility_checked
 
 # Real Desktop switch and AIAgent; synthetic credentials and SDK construction only.
 destinations = fixtures.destinations

@@ -12,6 +12,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+import psutil
 
 from tests import conftest as suite_conftest
 from tests.waiting import wait_until
@@ -24,7 +25,7 @@ def _detached(env_home, marker):
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-@pytest.mark.platforms("linux")
+@pytest.mark.platforms("linux", "macos")
 @pytest.mark.live_system_guard_bypass  # signals only the two children this test spawned
 def test_session_teardown_terminates_daemons_under_the_session_basetemp_only(tmp_path):
     basetemp, elsewhere = tmp_path / "basetemp", tmp_path / "elsewhere"
@@ -33,7 +34,7 @@ def test_session_teardown_terminates_daemons_under_the_session_basetemp_only(tmp
     inside = _detached(basetemp / "t0" / "hermes", "inside")
     outside = _detached(elsewhere, "outside")
     try:
-        # Both children have exec'd with their HERMES_HOME (what the reaper reads from /proc).
+        # Both children have exec'd with their HERMES_HOME (what the reaper reads via psutil environ()).
         wait_until(lambda: {inside.pid, outside.pid} <= set(suite_conftest._processes_with_hermes_home_under(
             [basetemp, elsewhere])), timeout=10, what='both detached children started')
         config = SimpleNamespace(_tmp_path_factory=SimpleNamespace(_basetemp=basetemp))
@@ -48,10 +49,10 @@ def test_session_teardown_terminates_daemons_under_the_session_basetemp_only(tmp
             proc.wait(timeout=5)
 
 
-@pytest.mark.platforms("linux")
+@pytest.mark.platforms("linux", "macos")
 @pytest.mark.live_system_guard_bypass  # signals nothing: the only child is outside every session root
 def test_session_teardown_skips_a_live_gateway_on_the_real_hermes_home_without_touching_it(tmp_path):
-    # A host's own gateways (hermes-hub: HERMES_HOME=~/.hermes/profiles/<p>) are visible in /proc.
+    # A host's own gateways are visible in psutil's process environment inventory.
     # The scan must neither signal them nor resolve their home: realpath lstat()s the real home,
     # which the real-home I/O guard (active in this test) refuses.
     assert suite_conftest._REAL_HERMES_ROOT_CANDIDATES, "the real-home guard has no root to refuse"
@@ -59,7 +60,7 @@ def test_session_teardown_skips_a_live_gateway_on_the_real_hermes_home_without_t
     basetemp = tmp_path / "basetemp"
     live = _detached(real_profile, "live")
     try:
-        wait_until(lambda: _environ_home(live.pid) == os.fsencode(real_profile), timeout=10,
+        wait_until(lambda: _environ_home(live.pid) == str(real_profile), timeout=10,
                    what="the live-gateway stand-in exec'd with its HERMES_HOME")
         config = SimpleNamespace(_tmp_path_factory=SimpleNamespace(_basetemp=basetemp))
         assert live.pid not in suite_conftest._reap_session_hermes_processes(config)
@@ -71,10 +72,7 @@ def test_session_teardown_skips_a_live_gateway_on_the_real_hermes_home_without_t
 
 
 def _environ_home(pid):
-    # /proc is outside every guarded root; read it the way the reaper does.
     try:
-        with open(f"/proc/{pid}/environ", "rb") as handle:
-            environ = handle.read().split(b"\0")
-    except OSError:
+        return psutil.Process(pid).environ().get("HERMES_HOME")
+    except (psutil.Error, OSError):
         return None
-    return next((item[12:] for item in environ if item.startswith(b"HERMES_HOME=")), None)
