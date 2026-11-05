@@ -42,6 +42,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
+from hermes_cli.kanban_sync_client_attempt import note_attempt
 
 _log = logging.getLogger(__name__)
 
@@ -280,14 +281,19 @@ class Hub:
         # urllib's internal redirect follows, not merely the initial fallback send.
         open_request = (urllib.request.build_opener(_DeadlineRequests(self._remaining)).open
                         if self.deadline is not None else urllib.request.urlopen)
+        started = time.monotonic()
         try:
-            with open_request(req, timeout=timeout) as resp:
-                return json.loads(resp.read() or b"{}")
-        except urllib.error.HTTPError as exc:
-            text = exc.read().decode("utf-8", "replace")[:500]
-            if exc.code == 410:
-                raise Resync(text) from exc
-            raise HubError(exc.code, text) from exc
+            try:
+                with open_request(req, timeout=timeout) as resp:
+                    return json.loads(resp.read() or b"{}")
+            except urllib.error.HTTPError as exc:
+                text = exc.read().decode("utf-8", "replace")[:500]
+                if exc.code == 410:
+                    raise Resync(text) from exc
+                raise HubError(exc.code, text) from exc
+        except Exception as exc:  # health: allow BLE001 -- stamps diagnostics, then re-raises the same error
+            note_attempt(exc, self.deadline, started, time.monotonic())
+            raise
 
     @staticmethod
     def _proxied(parts: urllib.parse.SplitResult) -> bool:
@@ -348,46 +354,52 @@ class Hub:
         target = (parts.path or "") + path
         headers = self._headers()
         for attempt in (0, 1):
-            conn, reused = self._connection(parts, self._remaining(timeout))
+            attempt_timeout = self._remaining(timeout)  # exhausted here: no attempt was made, so no timing
+            started = time.monotonic()  # this attempt only: a stale-socket retry restarts the clock
             try:
-                conn.request(method, target, body=data, headers=headers)
-            except (OSError, http.client.HTTPException) as exc:
-                self._drop()
-                if reused and attempt == 0:  # a stale kept-alive socket: the request never reached the server
-                    continue
-                raise urllib.error.URLError(exc) from exc
-            try:
-                resp = conn.getresponse()
-            except (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError) as exc:
-                self._drop()
-                # Only GET or an explicitly replay-safe operation may repeat after a lost answer.
-                # Reserve is revision-fenced; other POSTs (ops, leases) must not opt in.
-                if reused and attempt == 0 and (method == "GET" or replay_safe):
-                    continue
-                raise urllib.error.URLError(exc) from exc
-            except (OSError, http.client.HTTPException) as exc:
-                self._drop()
-                raise urllib.error.URLError(exc) from exc
-            try:
-                raw = resp.read()
-            except (OSError, http.client.HTTPException) as exc:
-                self._drop()
-                raise urllib.error.URLError(exc) from exc
-            if resp.will_close:
-                self._drop()
-            else:
-                self._local.used = _hub_monotonic()
-            status = resp.status
-            if 300 <= status < 400 and method == "GET":  # the Board service sends none; urlopen follows them
-                return self._call_urlopen(method, path, data, timeout)
-            if 300 <= status < 400:  # never resend a POST the server may have applied
-                raise HubError(status, raw.decode("utf-8", "replace")[:500])
-            if not 200 <= status < 300:
-                text = raw.decode("utf-8", "replace")[:500]
-                if status == 410:
-                    raise Resync(text)
-                raise HubError(status, text)
-            return json.loads(raw or b"{}")
+                conn, reused = self._connection(parts, attempt_timeout)
+                try:
+                    conn.request(method, target, body=data, headers=headers)
+                except (OSError, http.client.HTTPException) as exc:
+                    self._drop()
+                    if reused and attempt == 0:  # a stale kept-alive socket: the request never reached the server
+                        continue
+                    raise urllib.error.URLError(exc) from exc
+                try:
+                    resp = conn.getresponse()
+                except (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError) as exc:
+                    self._drop()
+                    # Only GET or an explicitly replay-safe operation may repeat after a lost answer.
+                    # Reserve is revision-fenced; other POSTs (ops, leases) must not opt in.
+                    if reused and attempt == 0 and (method == "GET" or replay_safe):
+                        continue
+                    raise urllib.error.URLError(exc) from exc
+                except (OSError, http.client.HTTPException) as exc:
+                    self._drop()
+                    raise urllib.error.URLError(exc) from exc
+                try:
+                    raw = resp.read()
+                except (OSError, http.client.HTTPException) as exc:
+                    self._drop()
+                    raise urllib.error.URLError(exc) from exc
+                if resp.will_close:
+                    self._drop()
+                else:
+                    self._local.used = _hub_monotonic()
+                status = resp.status
+                if 300 <= status < 400 and method == "GET":  # the Board service sends none; urlopen follows them
+                    return self._call_urlopen(method, path, data, timeout)
+                if 300 <= status < 400:  # never resend a POST the server may have applied
+                    raise HubError(status, raw.decode("utf-8", "replace")[:500])
+                if not 200 <= status < 300:
+                    text = raw.decode("utf-8", "replace")[:500]
+                    if status == 410:
+                        raise Resync(text)
+                    raise HubError(status, text)
+                return json.loads(raw or b"{}")
+            except Exception as exc:  # health: allow BLE001 -- stamps diagnostics, then re-raises the same error
+                note_attempt(exc, self.deadline, started, time.monotonic())
+                raise
         raise AssertionError("unreachable")  # pragma: no cover
 
     def ops(self, board: str, ops: list[dict]) -> dict:

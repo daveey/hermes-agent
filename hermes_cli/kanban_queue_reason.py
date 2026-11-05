@@ -308,17 +308,38 @@ def transport_kind(error):
     return "other"
 
 
+def attempt_timing(error):
+    """Allowlisted timing of the failed HTTP attempt the Board client stamped on ``error``; ``{}`` when absent.
+
+    The stamp is ``(budget_s, elapsed_s)`` seconds (``kanban_sync_client_attempt.note_attempt``). Each value goes
+    through the same bounded whole-millisecond rounding/clamping as reserve/repin timing; an unusable one is omitted."""
+    timing = {}
+    try:
+        from hermes_cli.kanban_sync_client_attempt import ATTEMPT_ATTR
+        stamp = getattr(error, ATTEMPT_ATTR, None)
+        if type(stamp) is not tuple or len(stamp) != 2:
+            return timing
+        for key, seconds in zip(TIMING_KEYS, stamp):
+            if (ms := _ms(seconds)) is not None:
+                timing[key] = ms
+    except Exception:  # health: allow BLE001 -- optional timing must never mask the original Board error
+        return {}
+    return timing
+
+
 def record_pull_error(conn, gateway, *, status=None, error=None):
     """A failed feed read affects all origin-owned ready policy observations.
 
     Selection is diagnostic only; _record rechecks ownership and lifecycle under
     the write transaction so a concurrent claim/repin cannot acquire a new wait.
+    Timing (budget_ms/elapsed_ms) is the failed HTTP attempt stamped on ``error``, never the whole pull.
     """
+    timing = attempt_timing(error)
     rows = conn.execute(
         "SELECT id FROM tasks WHERE placement_policy='worker-first-v1' AND status='ready' "
         "AND created_on=? AND claim_lock IS NULL AND lease_holder IS NULL", (gateway,)).fetchall()
     for row in rows:
-        try_record(record_error, conn, row["id"], gateway, status=status, error=error, stage="pull")
+        try_record(record_error, conn, row["id"], gateway, status=status, error=error, stage="pull", timing=timing)
 
 
 def record_error(conn, task_id, gateway, *, status=None, error=None, fence=None, stage=None, timing=None):
