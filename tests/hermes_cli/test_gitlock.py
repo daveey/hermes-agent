@@ -708,7 +708,8 @@ def test_a_killed_fetchs_ref_lock_goes_and_the_next_fetch_lands(repo: Path, tmp_
 # ---- a killed shallow fetch's shallow.lock (installer checkouts are `--depth 1`) ----
 
 # Upload-pack's pack-objects hook (honored from global config only) runs after the server sent
-# its shallow-info, so the client already holds shallow.lock: the kill lands in the pack transfer.
+# its shallow-info, but the client may not have consumed it yet. Hold the transfer until the
+# test observes both this hook's marker and the client's shallow.lock before killing the fetch.
 _HOLD_IN_PACK_TRANSFER = """#!/bin/sh
 : > "{held}"
 while [ ! -e "{release}" ]; do sleep 0.05; done
@@ -747,9 +748,11 @@ def test_a_killed_shallow_fetchs_shallow_lock_goes_and_the_next_fetch_lands(repo
     try:
         def reached_pack_transfer() -> bool:
             assert proc.poll() is None, f"the fetch exited early: {err.read_text(encoding='utf-8')}"
-            return held.exists()
+            # The server can publish held before the client consumes shallow-info.
+            # Wait for both processes, not just the server's pack-objects hook.
+            return held.exists() and lock.exists()
 
-        wait_until(reached_pack_transfer, timeout=30, what="the fetch reaching its pack transfer")
+        wait_until(reached_pack_transfer, timeout=120, what="the held fetch acquiring shallow.lock")
         assert lock.exists(), "premise: the shallow fetch holds shallow.lock"
         assert release_dead_fetch_locks(clone) == [] and lock.exists(), "the reclaim took a live fetch's lock"
     finally:
