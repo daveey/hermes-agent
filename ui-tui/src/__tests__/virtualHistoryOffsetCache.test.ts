@@ -514,47 +514,65 @@ describe('useVirtualHistory offset cache reuse', () => {
     }
   })
 
-  it('corrects and compensates a same-layout row measured at unmount', async () => {
-    const items = Array.from({ length: 20 }, (_, index) => ({ height: 2, key: `item-${index}` }))
-    const expose = { current: null as Exposed | null }
-    const streams = makeStreams()
-    const initialHeights = new Map(items.map(item => [item.key, item.height]))
+  it.each([false, true])(
+    'corrects and compensates a same-layout row measured at unmount (starved=%s)',
+    async starved => {
+      const items = Array.from({ length: 20 }, (_, index) => ({ height: 2, key: `item-${index}` }))
+      const expose = { current: null as Exposed | null }
+      const streams = makeStreams()
+      const initialHeights = new Map(items.map(item => [item.key, item.height]))
 
-    const instance = renderSync(React.createElement(Harness, { expose, initialHeights, items }), {
-      patchConsole: false,
-      stderr: streams.stderr as NodeJS.WriteStream,
-      stdin: streams.stdin as NodeJS.ReadStream,
-      stdout: streams.stdout as NodeJS.WriteStream
-    })
+      const instance = renderSync(React.createElement(Harness, { expose, initialHeights, items }), {
+        patchConsole: false,
+        stderr: streams.stderr as NodeJS.WriteStream,
+        stdin: streams.stdin as NodeJS.ReadStream,
+        stdout: streams.stdout as NodeJS.WriteStream
+      })
 
-    try {
-      // Generous settle windows: the unmount-measurement callback must fire
-      // before the assertion, and under CI load a 20-40ms sleep is not
-      // enough (flaked as "adjustScrollTop called 0 times").
-      await delay(50)
-      const scroll = expose.current!.scroll!
+      try {
+        await vi.waitFor(() => {
+          expect(expose.current?.scroll?.getViewportHeight()).toBe(10)
+          expect(expose.current?.scroll?.getScrollHeight()).toBe(40)
+        })
+        const scroll = expose.current!.scroll!
 
-      scroll.scrollTo(0)
-      await delay(50)
-      scroll.scrollTo(5)
-      const adjustScrollTop = vi.spyOn(scroll, 'adjustScrollTop')
-      const staleHeights = new Map(initialHeights)
+        scroll.scrollTo(0)
 
-      staleHeights.set(items[0]!.key, 1)
-      instance.rerender(React.createElement(Harness, { expose, initialHeights: staleHeights, items }))
-      await delay(400)
+        if (starved) {
+          // Let the old 50 ms settle timer expire before React can finish the
+          // deferred remount. Blocking this test thread models a descheduled CI
+          // worker without burning CPU or slowing any other process.
+          const settle = delay(50)
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100)
+          await settle
+        }
 
-      expect(adjustScrollTop).toHaveBeenCalledOnce()
-      expect(adjustScrollTop).toHaveBeenCalledWith(1)
-      expect(scroll.getScrollTop()).toBe(6)
-      expect(scroll.isSticky()).toBe(false)
-      expect(expose.current!.virtualHistory.start).toBeGreaterThan(0)
-      expect(expose.current!.virtualHistory.offsets[1]).toBe(2)
-    } finally {
-      instance.unmount()
-      instance.cleanup()
+        // scrollTo changes the DOM position immediately, not the deferred range.
+        // Row 0 must actually be mounted before scrolling it out with stale data.
+        await vi.waitFor(() => {
+          expect(scroll.getScrollTop()).toBe(0)
+          expect(expose.current!.virtualHistory.start).toBe(0)
+        })
+        scroll.scrollTo(5)
+        const adjustScrollTop = vi.spyOn(scroll, 'adjustScrollTop')
+        const staleHeights = new Map(initialHeights)
+
+        staleHeights.set(items[0]!.key, 1)
+        instance.rerender(React.createElement(Harness, { expose, initialHeights: staleHeights, items }))
+        await delay(400)
+
+        expect(adjustScrollTop).toHaveBeenCalledOnce()
+        expect(adjustScrollTop).toHaveBeenCalledWith(1)
+        expect(scroll.getScrollTop()).toBe(6)
+        expect(scroll.isSticky()).toBe(false)
+        expect(expose.current!.virtualHistory.start).toBeGreaterThan(0)
+        expect(expose.current!.virtualHistory.offsets[1]).toBe(2)
+      } finally {
+        instance.unmount()
+        instance.cleanup()
+      }
     }
-  })
+  )
 
   it('does not compensate for measured height changes in or below the viewport', async () => {
     const before = Array.from({ length: 20 }, (_, index) => ({ height: 2, key: `item-${index}` }))
