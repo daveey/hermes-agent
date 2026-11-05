@@ -11,8 +11,8 @@ def resolve_gateway_model_context(model=None, route=None):
         _resolve_runtime_agent_kwargs, _best_effort,
     )
     from gateway.run_class_routing import class_context_length
-    from agent.model_metadata import (
-        DEFAULT_CONTEXT_LENGTHS, DEFAULT_FALLBACK_CONTEXT, _longest_key_match, get_model_context_length)
+    from agent.context_pin import is_fallback_context_length
+    from agent.model_metadata import get_model_context_length
 
     resolved_model = model or _resolve_gateway_model()
     class_window = class_context_length(resolved_model, provider=(route or {}).get("provider", "auto"))
@@ -75,8 +75,8 @@ def resolve_gateway_model_context(model=None, route=None):
         resolved_model, base_url=base_url or "", api_key=api_key or "",
         config_context_length=config_context_length, provider=provider or "",
         custom_providers=custom_providers)
-    fell_through = (context_length == DEFAULT_FALLBACK_CONTEXT
-                    and _longest_key_match(DEFAULT_CONTEXT_LENGTHS, str(resolved_model).lower()) is None)
+    fell_through = is_fallback_context_length(
+        context_length, model=str(resolved_model), provider=provider or "", base_url=base_url or "")
     context_source = ("config" if config_context_length is not None
                       else "default" if fell_through else "detected")
     return _GatewayModelContext(
