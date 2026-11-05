@@ -809,8 +809,11 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                 or state.get("purpose") == "ask_resolved" or status is None or status[0] != "scheduled"):
             return None
         rc_col = rc if isinstance(rc, int) else -1
+        episode.reconcile(conn, task_id)
         if rc == 0 or (diagnostics and diagnostics.get("first_rc") == 0):
             episode.reset(conn, task_id)
+            if rc != 0:
+                kb._append_event(conn, task_id, "wake_episode_reset")
         if rc == 0:
             return _wake(conn, task_id, CONDITION_MET_EVENT, {
                 "wake_check": cmd, "output": tail, **({"diagnostics": diagnostics} if diagnostics else {})})

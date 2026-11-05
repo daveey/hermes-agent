@@ -1860,9 +1860,8 @@ def _append_event(
     run_id: Optional[int] = None,
 ) -> None:
     """Insert an event row inside the caller's txn; ``run_id`` groups it by attempt (NULL = task-scoped)."""
-    from hermes_cli.kanban_recovery_history import stamp  # causal recovery evidence (synced boards)
-    conn.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)", (
-        task_id, run_id, kind, _json_or_null(stamp(conn, task_id, kind, payload, run_id)), int(time.time())))
+    from hermes_cli.kanban_db_events import append_event
+    append_event(conn, task_id, kind, payload, run_id=run_id)
 
 
 def _end_run(
