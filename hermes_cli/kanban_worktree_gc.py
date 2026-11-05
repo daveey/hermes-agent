@@ -18,6 +18,7 @@ from pathlib import Path
 
 from hermes_cli import kanban_db_workspace as ws
 from hermes_cli import kanban_lockguard
+from hermes_cli.kanban_workspace_jobs import defer_owned_job_cleanup
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +79,8 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = N
                 continue
             if ws._defer_shared_workspace_cleanup(conn, row["id"], path):
                 continue
+            if defer_owned_job_cleanup(row["id"], path):
+                continue
             if not removable:
                 aged.append((row["id"], path, row["completed_at"]))
                 continue
@@ -130,7 +133,8 @@ def _archive_and_remove_scratch(conn: sqlite3.Connection, task_id: str, path: Pa
     trash = path.with_name(f".{path.name}.gc-{os.getpid()}")
     with kb.write_txn(conn):
         if (not ws._is_terminal_task(conn, task_id) or ws._has_active_children(conn, task_id)
-                or ws._defer_shared_workspace_cleanup(conn, task_id, path)):
+                or ws._defer_shared_workspace_cleanup(conn, task_id, path)
+                or defer_owned_job_cleanup(task_id, path)):
             log.info("Keeping scratch workspace for task %s after archiving it to %s: "
                      "the card is live again or shares the path: %s", task_id, final, path)
             return 0

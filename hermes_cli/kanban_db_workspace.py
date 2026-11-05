@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 import contextlib
 
 from hermes_cli.worktree_ops import release_lsp_clients
+from hermes_cli.kanban_workspace_jobs import defer_owned_job_cleanup
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -454,7 +455,8 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             if _is_managed_scratch_path(wp):
                 if not _scratch_tree_removable(wp):
                     _kb._log.info("Preserving scratch workspace with Git metadata or scan uncertainty: %s", wp)
-                elif not _defer_shared_workspace_cleanup(conn, task_id, path):
+                elif (not _defer_shared_workspace_cleanup(conn, task_id, path)
+                      and not defer_owned_job_cleanup(task_id, wp)):
                     release_lsp_clients(str(wp))
                     shutil.rmtree(wp, ignore_errors=True)
                     _log_scratch_removal(conn, task_id, wp, "scratch workspace")
@@ -606,6 +608,8 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
                     _kb._log.info("Preserving parent scratch workspace with Git metadata or scan uncertainty: %s", wp)
                     continue
                 if _defer_shared_workspace_cleanup(conn, parent_id, ws_path):
+                    continue
+                if defer_owned_job_cleanup(parent_id, wp):
                     continue
                 release_lsp_clients(str(wp))
                 shutil.rmtree(wp, ignore_errors=True)
