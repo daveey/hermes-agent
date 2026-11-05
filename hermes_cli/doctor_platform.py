@@ -184,7 +184,8 @@ def _check_s6_supervision(issues: list[str]) -> None:
     """Under our s6 /init, report static services and the ONE host gateway slot; no-op elsewhere.
     Counterpart to :func:`_check_gateway_service_linger` (systemd-on-host)."""
     try:
-        from hermes_cli.service_manager import S6ServiceManager, _s6_running
+        from hermes_cli.service_manager import (
+            S6_STATIC_SCANDIR, S6ServiceManager, _s6_running, s6_service_up)
     except Exception:
         return
     # Only "is s6 PID 1?" matters here. detect_service_manager() would go on to probe
@@ -193,8 +194,8 @@ def _check_s6_supervision(issues: list[str]) -> None:
         return
     _section("s6 Supervision")
     mgr = S6ServiceManager()
-    for static in ("main-hermes", "dashboard"):  # s6-rc symlinks under /run/service/, same s6-svstat probe
-        up = mgr.is_running(static)
+    for static in ("main-hermes", "dashboard"):  # s6-rc symlinks in the root scandir, not the gateway one
+        up = s6_service_up(S6_STATIC_SCANDIR / static)
         (check_ok if up else check_info)(f"{static}: up" if up else f"{static}: down (expected if not enabled via env)")
     _report_host_gateway_slot(mgr, issues)
 
