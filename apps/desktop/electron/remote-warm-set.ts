@@ -5,6 +5,7 @@
 import fs from 'node:fs'
 
 import { backendScopeKey } from './connection-registry'
+import { DESKTOP_PROFILE_NAME_RE } from './desktop-profile'
 import { prewarmTargetKey, prewarmTargets, RecentRemoteProfiles } from './remote-prewarm'
 import { type SshKeepaliveHoldDeps, SshKeepaliveHolds } from './ssh-keepalive-hold'
 
@@ -46,7 +47,7 @@ export function createRemoteWarmSet(deps: RemoteWarmSetDeps) {
     const id = String(connectionId ?? '').trim()
     const name = String(profile ?? '').trim() || 'default'
 
-    if (!id || !USE_PROFILE_NAME_RE.test(name) || !sshConnectionIds().includes(id)) {
+    if (!id || !DESKTOP_PROFILE_NAME_RE.test(name) || !sshConnectionIds().includes(id)) {
       return false
     }
 
@@ -62,8 +63,6 @@ export function createRemoteWarmSet(deps: RemoteWarmSetDeps) {
 
   return { holds, listTargets, noteDial, noteUse, recent }
 }
-
-const USE_PROFILE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/
 
 export type RegistryDialUseOpts = { forceProbe?: boolean; passive?: boolean; use?: boolean }
 

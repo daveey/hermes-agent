@@ -96,6 +96,29 @@ describe('remote warm set: what counts as use', () => {
     expect(setHeld).not.toHaveBeenCalled()
   })
 
+  it.each(['note-use', 'use dial'])('%s accepts only dialable lowercase profile names', entry => {
+    const { set, setHeld, stateBytes } = warmSet({})
+    const touch = vi.spyOn(set.recent, 'touch')
+    const noteUse = vi.spyOn(set.holds, 'noteUse')
+    const before = stateBytes()
+
+    const report = (profile: string) =>
+      entry === 'note-use' ? set.noteUse('hermes-hub', profile) : set.noteDial('hermes-hub', profile, { use: true })
+
+    expect(report('Research')).toBe(false)
+    expect(report('reSearch')).toBe(false)
+    expect(touch).not.toHaveBeenCalled()
+    expect(noteUse).not.toHaveBeenCalled()
+    expect(setHeld).not.toHaveBeenCalled()
+    expect(stateBytes()).toBe(before)
+
+    expect(report('research')).toBe(true)
+    expect(touch).toHaveBeenCalledExactlyOnceWith('hermes-hub', 'research')
+    expect(noteUse).toHaveBeenCalledExactlyOnceWith('conn:hermes-hub::research')
+    expect(setHeld).toHaveBeenCalledWith('conn:hermes-hub::research', true)
+    expect(JSON.parse(stateBytes())['hermes-hub']).toHaveProperty('research')
+  })
+
   it('registryDialCountsAsUse: only an explicit use flag on a non-passive, non-probe dial', () => {
     expect(registryDialCountsAsUse()).toBe(false)
     expect(registryDialCountsAsUse({})).toBe(false)
