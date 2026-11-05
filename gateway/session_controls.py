@@ -27,7 +27,7 @@ def _refusal_data(exc: RuntimeStoreError) -> dict:
         value = getattr(exc, key, None)
         if value:
             data[key] = value
-    for key in ('revision', 'execution_generation'):
+    for key in ('revision', 'execution_generation', 'expected_sequence'):
         if isinstance(getattr(exc, key, None), int):
             data[key] = getattr(exc, key)
     if getattr(exc, 'admitted', None) is False:

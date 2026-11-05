@@ -45,7 +45,17 @@ def apply_row_annotations(messages, annotations):
                 message[key] = value
 
 class WorkerPersistenceError(RuntimeError):
-    pass
+    data = {}  # the owner's structured ``error.data`` (field, detail, expected_sequence) when it refused
+
+
+#: Receipted entries the journal keeps after their receipt, so a gap the owner reports (``expected N``
+#: while the journal is past N) can be re-sent instead of killing the worker. Bounded twice: a few
+#: entries, and a byte budget, since the journal is rewritten and fsynced on every receipt.
+_ACKED_KEEP = 4
+_ACKED_MAX_BYTES = 256 * 1024
+#: Operations whose result moved the worker's own identity (target, child, terminal status). A gap
+#: holding one is not re-sent: replaying it under the current scope would not be the same write.
+_UNREPLAYABLE = frozenset({'compression.publish', 'child.reserve', 'execution.finish'})
 
 
 def is_retired_generation_error(exc) -> bool:
@@ -115,7 +125,13 @@ class _OwnerLink:
                     frame = json.loads(self.ws.recv())
                 except ValueError:
                     continue
-                if isinstance(frame, dict) and self.awaiting is not None and frame.get('id') == self.awaiting:
+                # Only a response (result/error, no method) answers the call, and only once: clearing
+                # ``awaiting`` before the put means a duplicate or late frame with the same id is
+                # dropped instead of queued as the NEXT call's reply (it would hand that call another
+                # write's result and the journal would advance past a write never committed).
+                if (isinstance(frame, dict) and self.awaiting is not None and frame.get('id') == self.awaiting
+                        and 'method' not in frame and ('result' in frame or 'error' in frame)):
+                    self.awaiting = None
                     self.replies.put(frame)
         except Exception as exc:  # health: allow BLE001 -- handed to the caller, which raises it (ConnectionClosed included)
             self.replies.put(exc)
@@ -199,6 +215,26 @@ class WorkerRPC:
             self._drop()
 
     def __call__(self, method, **params):
+        if method != 'worker.persist':
+            return self._call(method, **params)
+        # A success reply is acknowledged only when it is THIS write's receipt: the owner stamps
+        # ``_receipt`` = (execution, sequence) after the commit returned. Anything else (another
+        # write's reply, a stale frame) is not durable proof (t_01a1a8fa8be4217f: the journal dropped
+        # 273 on a reply while the owner stayed at 272), so the exact entry is re-sent; the owner
+        # resolves that idempotently by (execution, sequence, digest).
+        expected = {'execution_id': params.get('execution_id'), 'sequence': params.get('sequence')}
+        for _attempt in range(3):
+            result = self._call(method, **params)
+            receipt = result.get('_receipt') if isinstance(result, dict) else None
+            if receipt is None or receipt == expected:
+                # No receipt at all is an owner from before the stamp (a rolling upgrade): accepted as
+                # before. A receipt naming another write is never this write's proof.
+                return {key: value for key, value in result.items() if key != '_receipt'} if receipt else result
+            logger.warning('worker.persist reply is not the receipt of sequence %s operation=%s (got %r); re-sending',
+                           expected['sequence'], params.get('operation'), receipt)
+        raise WorkerPersistenceError('receipt_mismatch')
+
+    def _call(self, method, **params):
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -239,7 +275,9 @@ class WorkerRPC:
                     logger.warning('worker owner refused %s operation=%s sequence=%s: %s field=%s detail=%s',
                                    method, params.get('operation'), params.get('sequence'),
                                    error.get('message'), data.get('field'), data.get('detail'))
-                raise WorkerPersistenceError(error.get('message', 'persistence_failed'))
+                failure = WorkerPersistenceError(error.get('message', 'persistence_failed'))
+                failure.data = data  # the str stays the bare wire code; recovery reads the structure
+                raise failure
             if method in ('worker.register', 'worker.adopt') and params.get('pid') == os.getpid():
                 global _worker_process
                 _worker_process = True
@@ -369,15 +407,55 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
             self.journal = candidate
             return self.retry_pending()[0]
 
+    def _persist(self, entry):
+        return self.rpc('worker.persist', **self.scope, **entry)
+
+    def _resend_gap(self, error, entry):
+        """The owner refused ``entry`` because it still expects an earlier sequence: a receipt this
+        journal acknowledged never committed. Re-send the gap from the retained acknowledged entries,
+        or fail ``lost_receipt`` when they are gone (never re-number, never loosen the owner's fence)."""
+        data = getattr(error, 'data', None) or {}
+        expected = data.get('expected_sequence')
+        if str(error) != 'invalid_params' or data.get('field') != 'sequence' or type(expected) is not int:
+            return False
+        if expected >= entry['sequence']:
+            return False
+        held = {item['sequence']: item for item in self.journal.get('acked', [])}
+        gap = [held.get(number) for number in range(expected, entry['sequence'])]
+        if any(item is None or item['operation'] in _UNREPLAYABLE for item in gap):
+            logger.error('worker journal acknowledged sequences %s..%s the owner never committed; '
+                         'not held for re-send: lost_receipt', expected, entry['sequence'] - 1)
+            raise WorkerPersistenceError('lost_receipt') from error
+        logger.warning('worker owner expects sequence %s, journal at %s: re-sending the gap',
+                       expected, entry['sequence'])
+        for item in gap:
+            self._persist(item)
+        return True
+
+    def _acked(self, journal, entry):
+        acked = [*journal.get('acked', []), entry][-_ACKED_KEEP:]
+        while acked and len(json.dumps(acked)) > _ACKED_MAX_BYTES:
+            acked.pop(0)
+        return dict(journal, acked=acked)
+
     def retry_pending(self):
         with self.lock:
             results = []
             try:
                 while self.journal['pending']:
                     entry = self.journal['pending'][0]
-                    result = self.rpc('worker.persist', **self.scope, **entry)
+                    try:
+                        result = self._persist(entry)
+                    except WorkerPersistenceError as exc:
+                        if not self._resend_gap(exc, entry):
+                            raise
+                        continue  # the gap is committed now; send this entry again
                     candidate = dict(self.journal, pending=self.journal['pending'][1:])
                     candidate = self._compression_receipt_journal(candidate, result)
+                    if candidate['scope'] == self.scope:
+                        candidate = self._acked(candidate, entry)
+                    else:
+                        candidate = {key: value for key, value in candidate.items() if key != 'acked'}
                     self._save(candidate)
                     self.scope = candidate['scope']
                     self.journal = candidate

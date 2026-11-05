@@ -149,7 +149,9 @@ async def test_child_reserve_verifies_the_parent_claim_and_refuses_while_drainin
         with pytest.raises(rt.RuntimeStoreError, match='permission_denied'):
             await reserve(1, secret='f' * 32)
         draining.append(True)
-        assert await reserve(1) == {'refused': 'runtime_draining'}
+        # The wire reply names the committed receipt it answers (t_01a1a8fa8be4217f).
+        assert await reserve(1) == {'refused': 'runtime_draining',
+                                    '_receipt': {'execution_id': 'compute', 'sequence': 1}}
         draining.clear()
         assert 'child' in await reserve(2)
         with db._read_ctx() as conn:

@@ -96,8 +96,20 @@ def _verify(connection, ref, params, claim):
 
 async def worker_request(connection, ref, params, *, operation):
     if operation == 'persist':
-        return await timed_persist(params, lambda: _worker_request(connection, ref, params, operation=operation))
+        result = await timed_persist(params, lambda: _worker_request(connection, ref, params, operation=operation))
+        return stamp_worker_receipt(result, params)
     return await _worker_request(connection, ref, params, operation=operation)
+
+
+def stamp_worker_receipt(result, params):
+    """Name the committed write a ``worker.persist`` reply answers. Only reached once the receipt
+    transaction returned (a refusal or failed commit raises instead), and never stored: the worker
+    drops a journal entry only on a reply naming exactly that (execution, sequence). Correlating by
+    the RPC id alone once let a reply that was not this write's receipt advance the journal past a
+    write the owner never committed (t_01a1a8fa8be4217f: owner at 272, journal acked 273)."""
+    if not isinstance(result, dict):
+        return result
+    return {**result, '_receipt': {'execution_id': params.get('execution_id'), 'sequence': params.get('sequence')}}
 
 
 async def _worker_request(connection, ref, params, *, operation):
