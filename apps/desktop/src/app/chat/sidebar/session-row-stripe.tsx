@@ -1,3 +1,4 @@
+import { useStore } from '@nanostores/react'
 import { useEffect } from 'react'
 
 import { Codicon } from '@/components/ui/codicon'
@@ -8,6 +9,9 @@ import { outcomeHasCrons, outcomeStripe, outcomeTooltip } from '@/lib/session-ou
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import { useSessionParked } from '@/lib/use-session-parked'
 import { cn } from '@/lib/utils'
+import { stuckOnPausedQueue } from '@/store/owner-queue-landed'
+import { $pausedQueueSessionIds } from '@/store/owner-queue-reconcile'
+import { $sessions } from '@/store/session'
 import {
   kanbanStripeCounts,
   recordStripeTransition,
@@ -69,13 +73,22 @@ interface SessionRowStatusStripeProps {
  *  it waits on, or why it is unresolved. */
 export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }: SessionRowStatusStripeProps) {
   const { t } = useI18n()
+  const pausedIds = useStore($pausedQueueSessionIds)
 
   if (!statusStripe) {
     return null
   }
 
   const outcomeKind = outcomePainted && outcomeStripe(session.outcome) ? session.outcome?.kind : undefined
-  const tipText = outcomeKind ? outcomeTooltip(session.outcome, t.sidebar.row) : null
+  const pausedQueue = statusStripe === 'stuck' && stuckOnPausedQueue(session.id, pausedIds, $sessions.get())
+
+  // [daveey] A red painted by this app's own queue names its cause: the backend's status says nothing about it.
+  const tipText = pausedQueue
+    ? t.sidebar.row.pausedQueue
+    : outcomeKind
+      ? outcomeTooltip(session.outcome, t.sidebar.row)
+      : null
+
   const doneCron = Boolean(outcomeKind) && outcomeHasCrons(session.outcome)
   const glyph = GLYPH_STRIPES.has(statusStripe) || doneCron
 

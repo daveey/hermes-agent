@@ -3711,6 +3711,7 @@ export const frOverrides = {
     messageCount: count => `${count} ${count === 1 ? 'message' : 'messages'}`,
     toolCallCount: count => `${count} ${count === 1 ? "appel d'outil" : "appels d'outil"}`,
     row: {
+      pausedQueue: 'Un message mis en file avant un redémarrage n’a peut-être pas été exécuté : renvoyez-le ou supprimez-le',
       pin: 'Épingler',
       unpin: 'Désépingler',
       markUnread: 'Marquer comme non lue',

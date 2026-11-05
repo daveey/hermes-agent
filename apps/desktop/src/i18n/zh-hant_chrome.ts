@@ -196,6 +196,7 @@ export const zhHantChrome = {
     messageCount: count => `${count} 條訊息`,
     toolCallCount: count => `${count} 次工具調用`,
     row: {
+      pausedQueue: '重新啟動前排入佇列的訊息可能未執行：請重新傳送或捨棄',
       pin: '釘選',
       unpin: '取消釘選',
       markUnread: '標記為未讀',

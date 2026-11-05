@@ -3102,6 +3102,7 @@ export const zhOverrides = {
     messageCount: count => `${count} 条消息`,
     toolCallCount: count => `${count} 次工具调用`,
     row: {
+      pausedQueue: '重启前排队的消息可能未运行：请重新发送或丢弃',
       pin: '置顶',
       unpin: '取消置顶',
       markUnread: '标记为未读',

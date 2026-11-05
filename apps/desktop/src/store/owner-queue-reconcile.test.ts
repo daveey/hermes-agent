@@ -1,11 +1,13 @@
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { getSessionMessages } from '@/api/sessions'
 import type { HermesConnection } from '@/global'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import type { SessionInfo } from '@/types/hermes'
 
 import { $queuedPromptsBySession } from './composer-queue'
 import { requestGatewayForProfile } from './gateway'
+import { resetLandedUnknownChecksForTests } from './owner-queue-landed'
 import { watchOwnerQueues } from './owner-queue-reconcile'
 import { reconcilePendingSubmissions, trackPendingSubmission } from './pending-submissions'
 import { $connection, $gatewayState, $selectedStoredSessionId, $sessions, setSessions } from './session'
@@ -19,11 +21,29 @@ vi.mock('@/store/gateway', async importOriginal => {
   return { ...actual, requestGatewayForProfile: vi.fn(actual.requestGatewayForProfile) }
 })
 
+// The stored transcript (a passive REST read): empty unless a test says what ran.
+vi.mock('@/api/sessions', async importOriginal => ({
+  ...(await importOriginal<object>()),
+  getSessionMessages: vi.fn(async () => ({
+    messages: [],
+    pagination: { limit: 50, offset: 0, order: 'latest', returned: 0 },
+    session_id: ''
+  }))
+}))
+
 const connectionAt = (wsUrl: string) => ({ mode: 'local', wsUrl }) as HermesConnection
 
 const row = (id: string, extra: Partial<SessionInfo> = {}): SessionInfo =>
   // Fork: a row without a fresh kanban read stays `background` (see kanban-observation.ts).
-  ({ id, kanban_observed_at: Date.now() / 1000, message_count: 4, source: 'desktop', started_at: 0, title: id, ...extra }) as SessionInfo
+  ({
+    id,
+    kanban_observed_at: Date.now() / 1000,
+    message_count: 4,
+    source: 'desktop',
+    started_at: 0,
+    title: id,
+    ...extra
+  }) as SessionInfo
 
 // The owner's list after a restart cut the running turn: the turn is `unknown` (only Discard
 // resolves it) and the send queued behind it waits.
@@ -151,4 +171,113 @@ it('a chat whose queue only holds a waiting send does not ask for the user', () 
   reconcilePendingSubmissions('gamma', [{ admission_id: 'queued-send', status: 'queued', user: 'queued after hold' }])
 
   expect($sessionDotStateById.get().gamma).not.toBe('needs-input')
+})
+
+// A restart cut the chat's turn on a hub (non-local) route: the owner listed it `unknown`, and nothing
+// in the background re-reads that owner, so the card outlived the message running again.
+describe('an unknown card on a route the background reconcile never reads', () => {
+  const hub = () => ({ mode: 'remote', wsUrl: 'wss://hub.example/api/ws?token=t' }) as HermesConnection
+  const now = () => Date.now() / 1000
+
+  const transcript = (...messages: Array<Record<string, unknown>>) =>
+    vi.mocked(getSessionMessages).mockResolvedValue({
+      messages: messages as never,
+      pagination: { limit: 50, offset: 0, order: 'latest', returned: messages.length },
+      session_id: 'hub-chat'
+    })
+
+  const lostTurn = () => {
+    $connection.set(hub())
+    reconcilePendingSubmissions('hub-chat', [
+      { admission_id: 'lost-turn', status: 'unknown', user: 'resume the rollout' }
+    ])
+  }
+
+  afterEach(() => {
+    vi.mocked(getSessionMessages).mockClear()
+    resetLandedUnknownChecksForTests()
+  })
+
+  it('stops asking for the user once the stored transcript shows the message ran to a reply', async () => {
+    lostTurn()
+    transcript(
+      { role: 'assistant', content: 'Done.', timestamp: now() },
+      { role: 'user', content: 'resume the rollout', timestamp: now() - 1 }
+    )
+    const stop = watchOwnerQueues(vi.fn() as unknown as Parameters<typeof watchOwnerQueues>[0])
+    $gatewayState.set('open')
+    setSessions([row('hub-chat', { turn_live: false })])
+    expect($sessionDotStateById.get()['hub-chat']).toBe('needs-input')
+
+    await vi.waitFor(() => expect($sessionDotStateById.get()['hub-chat']).not.toBe('needs-input'))
+    stop()
+    expect($queuedPromptsBySession.get()['hub-chat'] ?? []).toEqual([])
+    // Read passively from the stored transcript, never a session.resume (no billed turn).
+    expect(vi.mocked(getSessionMessages).mock.calls[0]?.[3]).toEqual({ passive: true })
+  })
+
+  it('a merged turn that joined the queued text with another send also counts', async () => {
+    lostTurn()
+    transcript(
+      { role: 'assistant', content: [{ type: 'text', text: 'On it.' }], timestamp: now() },
+      { role: 'user', content: 'resume the rollout\n\nand report back', timestamp: now() - 1 }
+    )
+    const stop = watchOwnerQueues(vi.fn() as unknown as Parameters<typeof watchOwnerQueues>[0])
+    $gatewayState.set('open')
+    setSessions([row('hub-chat', { turn_live: false })])
+
+    await vi.waitFor(() => expect($sessionDotStateById.get()['hub-chat']).not.toBe('needs-input'))
+    stop()
+  })
+
+  it.each([
+    [
+      'the text is not in the transcript',
+      [
+        { role: 'assistant', content: 'Done.', timestamp: 1e10 },
+        { role: 'user', content: 'something else', timestamp: 1e10 - 1 }
+      ]
+    ],
+    [
+      'a later turn was answered, not the one that carried the text',
+      [
+        { role: 'assistant', content: 'Done.', timestamp: 1e10 + 2 },
+        { role: 'user', content: 'a new question', timestamp: 1e10 + 1 },
+        { role: 'user', content: 'resume the rollout', timestamp: 1e10 }
+      ]
+    ],
+    [
+      'the message is stored but nothing replied after it (the lost run itself)',
+      [{ role: 'user', content: 'resume the rollout', timestamp: 1e10 }]
+    ],
+    [
+      'only an older copy of the same words is stored',
+      [
+        { role: 'assistant', content: 'Done.', timestamp: 1000 },
+        { role: 'user', content: 'resume the rollout', timestamp: 999 }
+      ]
+    ]
+  ])('stays paused when %s', async (_why, messages) => {
+    lostTurn()
+    transcript(...messages)
+    const stop = watchOwnerQueues(vi.fn() as unknown as Parameters<typeof watchOwnerQueues>[0])
+    $gatewayState.set('open')
+    setSessions([row('hub-chat', { turn_live: false })])
+    await vi.waitFor(() => expect(getSessionMessages).toHaveBeenCalled())
+    await new Promise(resolve => setTimeout(resolve, 0))
+    stop()
+
+    expect($sessionDotStateById.get()['hub-chat']).toBe('needs-input')
+  })
+
+  it('never reads while a turn is live in the chat', async () => {
+    lostTurn()
+    const stop = watchOwnerQueues(vi.fn() as unknown as Parameters<typeof watchOwnerQueues>[0])
+    $gatewayState.set('open')
+    setSessions([row('hub-chat', { turn_live: true })])
+    await new Promise(resolve => setTimeout(resolve, 0))
+    stop()
+
+    expect(getSessionMessages).not.toHaveBeenCalled()
+  })
 })

@@ -2235,6 +2235,7 @@ export const jaOverrides = {
     messageCount: count => `${count} 件のメッセージ`,
     toolCallCount: count => `${count} 件のツール呼び出し`,
     row: {
+      pausedQueue: '再起動前にキューに入れたメッセージが実行されていない可能性があります：再送信するか破棄してください',
       pin: 'ピン留め',
       unpin: 'ピン留めを解除',
       markUnread: '未読にする',

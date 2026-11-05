@@ -3692,6 +3692,7 @@ export const esOverrides = {
     messageCount: (count: number) => `${count} ${count === 1 ? 'mensaje' : 'mensajes'}`,
     toolCallCount: (count: number) => `${count} ${count === 1 ? 'llamada a herramienta' : 'llamadas a herramientas'}`,
     row: {
+      pausedQueue: 'Puede que un mensaje en cola antes de un reinicio no se haya ejecutado: envíalo de nuevo o descártalo',
       pin: 'Fijar',
       unpin: 'Desfijar',
       markUnread: 'Marcar como no leído',

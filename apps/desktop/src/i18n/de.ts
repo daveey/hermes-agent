@@ -3704,6 +3704,7 @@ export const deOverrides = {
     messageCount: count => `${count} ${count === 1 ? 'Nachricht' : 'Nachrichten'}`,
     toolCallCount: count => `${count} ${count === 1 ? 'Tool-Aufruf' : 'Tool-Aufrufe'}`,
     row: {
+      pausedQueue: 'Eine vor einem Neustart eingereihte Nachricht wurde womöglich nicht ausgeführt: erneut senden oder verwerfen',
       pin: 'Anpinnen',
       unpin: 'Lösen',
       markUnread: 'Als ungelesen markieren',

@@ -7,6 +7,7 @@ import { stableArray } from '@/lib/stable-array'
 import type { SessionResumeResult } from '@/types/hermes'
 
 import { $queuedPromptsBySession, serverOwnsComposerQueue } from './composer-queue'
+import { checkLandedUnknownCards } from './owner-queue-landed'
 import { journaledPendingSessions, pendingSnapshotFence, reconcilePendingSubmissions } from './pending-submissions'
 import { $connection, $gatewayState, $selectedStoredSessionId, $sessions, resolveComposerSessionKey } from './session'
 import { knownOwnerForSession, ownerConnectionMode, requestForOwnedSession } from './session-states'
@@ -114,7 +115,15 @@ export function watchOwnerQueues(request: GatewayRequest): () => void {
     }
   }
 
-  const stops = [$gatewayState.subscribe(check), $sessions.listen(check)]
+  // [daveey] Every route, every list refresh: a red `unknown` card whose message the stored transcript shows ran.
+  const checkLanded = () => checkLandedUnknownCards($pausedQueueSessionIds.get())
+
+  const stops = [
+    $gatewayState.subscribe(check),
+    $sessions.listen(check),
+    $sessions.listen(checkLanded),
+    $pausedQueueSessionIds.subscribe(checkLanded)
+  ]
 
   return () => stops.forEach(stop => stop())
 }

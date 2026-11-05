@@ -4900,6 +4900,7 @@
     "sidebar.row.outcomeUnresolved",
     "sidebar.row.outcomeWaiting",
     "sidebar.row.ownedByProfile",
+    "sidebar.row.pausedQueue",
     "sidebar.row.pin",
     "sidebar.row.rename",
     "sidebar.row.renameDesc",

@@ -355,6 +355,19 @@ export function reconcilePendingSubmissions(storedId: string, value: unknown, fe
   }
 }
 
+/** Drop one admission's record (not retire it): the stored transcript showed its turn ran, on a route whose owner
+ *  snapshot this page cannot read. A later snapshot that still lists it repaints its card. */
+export function forgetPendingSubmission(storedId: string, id: string): void {
+  const key = journalKey(storedId)
+  const before = readPendingSubmissions(key)
+
+  if (id in before) {
+    const after = { ...before }
+    delete after[id]
+    writeEntries(key, before, after)
+  }
+}
+
 /** The fence of a canonical frame or snapshot, when it carries a usable one. */
 export function pendingSnapshotFence(epoch: unknown, sequence: unknown): PendingSnapshotFence | undefined {
   return typeof epoch === 'string' && epoch && typeof sequence === 'number' && Number.isFinite(sequence)
