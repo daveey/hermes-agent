@@ -356,6 +356,18 @@ jobs:
             exit 1
           fi
 
+      - name: Fetch upstream release identity
+        if: steps.changed.outputs.files != ''
+        run: |
+          set -euo pipefail
+          # The fork carries upstream commits but publishes no release tags.
+          # Full history from the fork alone therefore still reports unknown.
+          # Import only official release refs, never PR-controlled metadata;
+          # version_info selects only tags reachable from the trusted HEAD.
+          # Do not force conflicting tags or move the checked-out base.
+          git fetch --no-tags --filter=blob:none \
+            https://github.com/NousResearch/hermes-agent.git 'refs/tags/v*:refs/tags/v*'
+
       - name: Prepare Hermes from the trusted base
         if: steps.changed.outputs.files != ''
         uses: ./.github/actions/setup-pm
