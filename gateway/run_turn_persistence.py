@@ -314,11 +314,22 @@ class GatewayTurnPersistenceMixin:
 
     def _hmwa_add_failed_turn_notice(self, response, notice):
         """Make failed-turn delivery explicit without replacing the provider-specific guidance."""
+        from agent.turn_failure_copy import REFUSED_TURN_ACTIONS_WARNING
         response = str(response or "").strip()
+        # [daveey] A refused turn's result already ends with the side-effect warning that its
+        # retained notice repeats: show it once, in the notice (the copy the transcript keeps).
+        if notice.endswith(REFUSED_TURN_ACTIONS_WARNING) and response.endswith(REFUSED_TURN_ACTIONS_WARNING):
+            response = response[:-len(REFUSED_TURN_ACTIONS_WARNING)].rstrip()
         return f"{response}\n\n{notice}" if response else notice
 
     def _hmwa_failed_turn_notice(self, agent_result):
         """Choose retry guidance without assuming completed tool effects can be repeated safely."""
+        if agent_result.get("failure_reason") == "content_policy_blocked":
+            # [daveey] The refusal handler returns the CLEAN pre-refusal history, so a message scan
+            # can't see this turn's tool rows and would claim "not processed" after a tool ran. Use
+            # the typed result fields, the same notice the owner retains for display.
+            from agent.turn_failure_copy import refused_turn_display_notice
+            return refused_turn_display_notice(agent_result)
         from gateway.media_repair import _current_turn_messages
         # Compression during the failed turn can move the slice boundary; the shared helper falls
         # back to the last user row so tool evidence is not silently dropped.
