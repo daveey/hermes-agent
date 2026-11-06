@@ -80,11 +80,12 @@ test('the probe reports a slow write with the checks that were running, and stop
   })
   await new Promise((r) => setTimeout(r, 40))
   const samples = await probe.stop()
-  expect(samples.length).toBeGreaterThan(0)
+  const stoppedCount = samples.length
+  expect(stoppedCount).toBeGreaterThan(0)
   expect(stalls.length).toBe(samples.length)
   expect(stalls[0]).toMatchObject({ fsyncMs: SEVERE_STALL_MS + 1, running: ['ui-tui :: check'] })
   await new Promise((r) => setTimeout(r, 20))
-  expect(await probe.stop()).toHaveLength(samples.length)
+  expect(await probe.stop()).toHaveLength(stoppedCount)
 })
 
 test('a write that fails is skipped, not recorded as a fast disk', async () => {
@@ -101,6 +102,10 @@ test('a write that fails is skipped, not recorded as a fast disk', async () => {
 
 test('the real write+fsync path measures the temp dir and leaves nothing behind', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'stall-probe-'))
+  /** @type {ReturnType<typeof startStallProbe> | undefined} */
+  let probe
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let deadline
   try {
     // Wait for three completed real write+fsyncs, not a fixed wall-clock
     // window: on a loaded runner (or Termux storage) one fsync can take
@@ -109,8 +114,13 @@ test('the real write+fsync path measures the temp dir and leaves nothing behind'
     let completed = 0
     /** @type {() => void} */
     let threeDone = () => {}
-    const three = new Promise((r) => (threeDone = r))
-    const probe = startStallProbe({
+    const three = new Promise((resolve, reject) => {
+      threeDone = resolve
+      // Reject here, before Vitest's 30s timeout, so finally can stop the
+      // probe and remove its directory even if no successful samples arrive.
+      deadline = setTimeout(() => reject(new Error(`Only ${completed}/3 fsync samples completed in 10s`)), 10_000)
+    })
+    probe = startStallProbe({
       dir,
       intervalMs: 5,
       running: () => {
@@ -124,6 +134,11 @@ test('the real write+fsync path measures the temp dir and leaves nothing behind'
     expect(samples.every((s) => s.fsyncMs >= 0 && s.fsyncMs < SEVERE_STALL_MS)).toBe(true)
     expect(readdirSync(dir)).toEqual([])
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    clearTimeout(deadline)
+    try {
+      await probe?.stop()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   }
 })
