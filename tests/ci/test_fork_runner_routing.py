@@ -102,6 +102,26 @@ def test_fork_rewriter_preserves_completion_capacity(tmp_path, original_label):
         assert _labels(observer["jobs"]["comment"]) == {"self-hosted", POLL}
 
 
+def test_fork_linux_jobs_never_require_blacksmith_runners():
+    # PR classifiers can skip a new job even while its workflow is green.
+    # Check every Linux routing declaration, including matrix runner values.
+    offenders = [
+        f"{wf}:{name}"
+        for wf, name, job in _jobs()
+        if re.search(r"blacksmith-[^'\"\s,\]}]*ubuntu", str({
+            "runs-on": job.get("runs-on"), "strategy": job.get("strategy"),
+        }))
+    ]
+    assert not offenders, f"Fork has no Blacksmith Linux runners: {offenders}"
+
+
+def test_nix_jobs_use_portable_checkout():
+    for wf, name, job in _jobs():
+        if wf == "nix.yml":
+            for step in job.get("steps", []):
+                assert not step.get("uses", "").startswith("useblacksmith/"), name
+
+
 def test_detect_timeout_tolerates_a_loaded_hub():
     data = _YAML.load((WORKFLOWS / "ci.yaml").read_text(encoding="utf-8"))
     assert data["jobs"]["detect"]["timeout-minutes"] >= 5
