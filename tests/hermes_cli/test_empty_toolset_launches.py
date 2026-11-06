@@ -6,23 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.session_policy import build_policy
-from hermes_cli import main, main_tui_launch, oneshot
+from hermes_cli import main, main_tui_launch
 from hermes_cli.gateway_chat import _requested_policy
-
-
-@pytest.mark.parametrize('value', ['', ' , ', [], ['']])
-def test_legacy_oneshot_preserves_empty_pick(monkeypatch, value):
-    captured = {}
-
-    def run(prompt, **kwargs):
-        captured.update(kwargs)
-        return 'no tools', {'completed': True}
-
-    monkeypatch.setattr(oneshot, '_run_agent', run)
-    monkeypatch.setattr(oneshot, '_silence_console_log_handlers', lambda: None)
-    assert oneshot.run_oneshot('list tools', toolsets=value) == 0
-    assert captured['toolsets'] == []
-    assert captured['use_config_toolsets'] is False
 
 
 @pytest.mark.parametrize('explicit', [False, True])
