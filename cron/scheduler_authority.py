@@ -68,36 +68,50 @@ def replayable_completions(job_id, completions):
     return [eid for eid in completions or () if journal_path(job_id, eid).exists()]
 
 
-def _pause_unless_held(job_id, reason):
-    """An uncertain observer cannot replace a pause the operator already owns."""
-    from cron.jobs import _jobs_lock, get_job, pause_job
-    with _jobs_lock():
-        job = get_job(job_id)
-        if job is None or job.get('state') == 'paused':
-            return True
-        return _pause_identity(pause_job(job_id, reason=reason))
+def _sibling_pauses(job_id, execution_id):
+    """Pause identities still needed by other journaled fires of this job."""
+    own = journal_path(job_id, execution_id)
+    for path in own.parent.glob('*.json'):
+        if path == own:
+            continue
+        try:
+            record = json.loads(path.read_text(encoding='utf-8-sig'))
+        except FileNotFoundError:
+            continue
+        params = record['params']
+        if params['job_id'] == job_id:
+            if path != journal_path(job_id, params['request_id']):
+                raise ValueError('cron journal identity conflict')
+            yield record.get('pause_recorded')
 
 
 def pause_for_unknown(job_id, execution_id, reason):
-    """The firer pauses the job for this fire's unverified admission and records that exact pause
-    on the fire's journal, so the receipt that later proves the run terminal can lift it."""
+    """Record a shared uncertainty hold without replacing an operator's hold or disable."""
+    from cron.jobs import _jobs_lock, get_job, is_job_runnable, pause_job
     from utils import atomic_json_write
-    paused = _pause_unless_held(job_id, reason)
     journal = journal_path(job_id, execution_id)
-    if journal.exists():
-        record = json.loads(journal.read_text(encoding='utf-8-sig'))
-        record.setdefault('pause_recorded', paused)
-        atomic_json_write(journal, record, mode=0o600, fsync_dir=True)
+    with _jobs_lock():
+        job = get_job(job_id)
+        if job is not None and is_job_runnable(job):
+            paused = _pause_identity(pause_job(job_id, reason=reason))
+        else:
+            current = job and _pause_identity(job)
+            paused = current if current and current in list(_sibling_pauses(job_id, execution_id)) else True
+        if journal.exists():
+            record = json.loads(journal.read_text(encoding='utf-8-sig'))
+            record.setdefault('pause_recorded', paused)
+            atomic_json_write(journal, record, mode=0o600, fsync_dir=True)
 
 
-def _lift_pause(job_id, pause):
+def _lift_pause(job_id, pause, execution_id=None):
     """A verified terminal receipt resolved the uncertainty that paused the schedule: resume it iff
     the job is still held by exactly that pause (an operator's own pause/resume is never touched)."""
     from cron.jobs import _jobs_lock, get_job, resume_job
     with _jobs_lock():
         job = get_job(job_id) if isinstance(pause, dict) else None
         if (job is not None and job.get('state') == 'paused'
-                and (job.get('paused_at'), job.get('paused_reason')) == (pause['paused_at'], pause['reason'])):
+                and (job.get('paused_at'), job.get('paused_reason')) == (pause['paused_at'], pause['reason'])
+                and pause not in list(_sibling_pauses(job_id, execution_id))):
             try:
                 resume_job(job_id)
             except ValueError:  # a one-shot whose instant has passed stays paused for the operator
@@ -110,16 +124,18 @@ def retire_terminal_journal(job_id, execution_id):
     Called only after terminal bookkeeping, never to replay output or retry the old fire.
     Keep the journal if lifting the pause fails so a later reconciliation can retry.
     """
+    from cron.jobs import _jobs_lock
     journal = journal_path(job_id, execution_id)
-    try:
-        record = json.loads(journal.read_text(encoding='utf-8-sig'))
-    except FileNotFoundError:
-        return
-    params = record['params']
-    if (params['job_id'], params['request_id']) != (job_id, execution_id):
-        raise ValueError('cron journal identity conflict')
-    _lift_pause(job_id, record.get('pause_recorded'))
-    journal.unlink(missing_ok=True)
+    with _jobs_lock():
+        try:
+            record = json.loads(journal.read_text(encoding='utf-8-sig'))
+        except FileNotFoundError:
+            return
+        params = record['params']
+        if (params['job_id'], params['request_id']) != (job_id, execution_id):
+            raise ValueError('cron journal identity conflict')
+        _lift_pause(job_id, record.get('pause_recorded'), execution_id)
+        journal.unlink(missing_ok=True)
 
 
 def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id=None):
@@ -249,7 +265,6 @@ def reconcile_pending(*, allow_connect=True):
     from cron.scheduler import (_RunDelivery, _FireOwnership, _apply_agent_failure_marker,
                                 _save_compose_deliver)
     from cron.scheduler_bookkeeping import fail_empty_response, finish_completed_run
-    from utils import atomic_json_write
     import logging
 
     root = get_hermes_home() / 'cron' / 'admissions'
@@ -296,9 +311,8 @@ def reconcile_pending(*, allow_connect=True):
                          'result': [False, f'# Cron Job: {params["job_id"]} (FAILED)\n\n{error}\n', '', error]}
             if state['status'] != 'terminal':
                 if state['status'] == 'unknown' and not record.get('pause_recorded'):
-                    reason = 'Canonical cron unknown; no automatic re-execution'
-                    record['pause_recorded'] = _pause_unless_held(params['job_id'], reason)
-                    atomic_json_write(journal, record, mode=0o600, fsync_dir=True)
+                    pause_for_unknown(params['job_id'], params['request_id'],
+                                      'Canonical cron unknown; no automatic re-execution')
                 continue
             success, output, answer, error = state['result']
             job = dict(state['job'], **(state.get('job_flags') or {}))
