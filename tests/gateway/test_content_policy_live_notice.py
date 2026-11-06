@@ -1,0 +1,145 @@
+"""[daveey] A gateway safety refusal's LIVE reply carries the same notice the owner retains in SQLite.
+
+``handle_content_policy_refusal`` hands back the CLEAN pre-refusal history, so the turn's tool rows
+are gone from ``result["messages"]``. The gateway's failed-turn notice used to rescan those messages,
+found no tool evidence and appended "Your request was not processed" — even after a tool ran — while
+the retained ``content_refused`` display row said the opposite. Both now come from
+``refused_turn_display_notice``. Driven through the real refusal handler, the real gateway caller
+(``_handle_message_with_agent``) and a real ``state.db``.
+"""
+
+from unittest.mock import AsyncMock
+
+import pytest
+
+from agent.turn_failure_copy import (
+    CONTENT_REFUSED_METADATA_KEY, CONTENT_REFUSED_NOTICE, FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE,
+    REFUSED_TURN_ACTIONS_WARNING,
+)
+from hermes_state_rewind import retain_refused_turn_for_display
+from tests.agent.test_content_policy_refusal_stop_details import _agent, _db_with_refused_turn, _display, _model, _refuse
+from tests.gateway.test_duplicate_user_message import _bootstrap, _event, _source
+
+_SESSION_KEY = "agent:main:telegram:group:-1001:12345"
+
+
+async def _gateway_refusal(monkeypatch, tmp_path, *, partial, category, footer=""):
+    """Run the real refusal handler against a real db, then the gateway turn that delivers it."""
+    agent = _agent()
+    db, working = _db_with_refused_turn(tmp_path, partial)
+    agent._session_db = db
+    result = _refuse(agent, working, {"category": category, "explanation": "classifier halt"},
+                     current_turn_user_idx=2).result
+    assert result is not None
+    result.update(history_offset=2, last_prompt_tokens=0)
+    runner = _bootstrap(monkeypatch, tmp_path)
+    runner._evict_cached_agent = lambda *a, **k: None
+    # The owner's retention lands in the REAL state.db the refused turn was flushed to.
+    runner.session_store.retain_refused_turn_for_display.side_effect = (
+        lambda sid, *, notice, boundary_row_id=None:
+        {"retained": True} if retain_refused_turn_for_display(
+            db, "s", notice=notice, boundary_row_id=boundary_row_id) else None)
+    runner._run_agent = AsyncMock(return_value=result)
+    if footer:
+        runner._hmwa_runtime_footer_line = lambda *a, **k: footer
+    response = await runner._handle_message_with_agent(_event(), _source(), _SESSION_KEY, 1)
+    assert isinstance(response, str)
+    return db, runner, response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial", [False, True], ids=["no-tool", "partial"])
+async def test_live_refusal_notice_matches_the_retained_sqlite_notice(monkeypatch, tmp_path, partial):
+    db, runner, response = await _gateway_refusal(monkeypatch, tmp_path, partial=partial, category="general_harms")
+    try:
+        stored = _display(db)[-1]["display_metadata"][CONTENT_REFUSED_METADATA_KEY]["notice"]
+        assert "(category: general_harms)" in stored
+        # The live reply ends with exactly the retained notice, never the generic failed-turn copy.
+        assert response.endswith(stored), response
+        assert FAILED_TURN_NOTICE not in response and "not processed" not in response
+        assert PARTIAL_FAILED_TURN_NOTICE not in response
+        # Provider guidance survives; the side-effect warning is shown once, iff a tool ran.
+        assert "safety filter refused" in response
+        assert response.count(REFUSED_TURN_ACTIONS_WARNING) == int(partial)
+        # The refused turn stays out of the model read, and no failed-turn boundary was written.
+        assert _model(db) == [("user", "hello"), ("assistant", "hi there")]
+        assert not any(m.get("display_kind") == "failed_turn" for m in _display(db))
+        # The gateway wrote no user/boundary rows of its own for the refused turn.
+        assert not runner.session_store.append_to_transcript.call_args_list  # pyright: ignore[reportAttributeAccessIssue]
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial", [False, True], ids=["no-tool", "partial"])
+@pytest.mark.parametrize("category", ["<script>bad</script>", "secret\ntext", "x" * 81])
+async def test_live_refusal_notice_drops_an_unsafe_category(monkeypatch, tmp_path, partial, category):
+    db, _runner, response = await _gateway_refusal(monkeypatch, tmp_path, partial=partial, category=category)
+    try:
+        stored = _display(db)[-1]["display_metadata"][CONTENT_REFUSED_METADATA_KEY]["notice"]
+        expected = f"{CONTENT_REFUSED_NOTICE} {REFUSED_TURN_ACTIONS_WARNING}" if partial else CONTENT_REFUSED_NOTICE
+        assert stored == expected
+        assert response.endswith(stored), response
+        assert "(category:" not in response
+        assert category not in response
+        assert "not processed" not in response
+        assert response.count(REFUSED_TURN_ACTIONS_WARNING) == int(partial)
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("partial", [False, True], ids=["no-tool", "partial"])
+def test_tui_live_refusal_text_never_claims_not_processed(tmp_path, partial):
+    """TUI owner control: its live text is the refusal result's own copy (no gateway notice)."""
+    from tui_gateway.prompt_turn import _turn_outcome
+
+    agent = _agent()
+    db, working = _db_with_refused_turn(tmp_path, partial)
+    agent._session_db = db
+    try:
+        result = _refuse(agent, working, {"category": "general_harms"}, current_turn_user_idx=2).result
+        assert result is not None
+        raw, _status, _ = _turn_outcome(result)
+        assert "not processed" not in raw
+        assert raw.count(REFUSED_TURN_ACTIONS_WARNING) == int(partial)
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("messages, expected", [
+    ([{"role": "user", "content": "go"}], FAILED_TURN_NOTICE),
+    ([{"role": "user", "content": "go"}, {"role": "tool", "tool_call_id": "c", "content": "ran"}],
+     PARTIAL_FAILED_TURN_NOTICE),
+], ids=["no-tool", "partial"])
+def test_other_failures_keep_the_message_scan_notice(monkeypatch, tmp_path, messages, expected):
+    runner = _bootstrap(monkeypatch, tmp_path)
+    assert runner._hmwa_failed_turn_notice(
+        {"failed": True, "failure_reason": "server_error", "messages": messages, "history_offset": 0}) == expected
+    assert runner._hmwa_add_failed_turn_notice(
+        f"x\n\n{REFUSED_TURN_ACTIONS_WARNING}", expected) == f"x\n\n{REFUSED_TURN_ACTIONS_WARNING}\n\n{expected}"
+
+
+_FOOTER = "model: test-model | ctx 0%"
+
+
+@pytest.mark.asyncio
+async def test_footer_enabled_partial_refusal_shows_the_warning_once(monkeypatch, tmp_path):
+    """The runtime footer is appended AFTER the failed-turn notice, so the body's own warning is still
+    its last text when the notice dedups it: one warning, one footer, footer last."""
+    db, _runner, response = await _gateway_refusal(
+        monkeypatch, tmp_path, partial=True, category="general_harms", footer=_FOOTER)
+    try:
+        stored = _display(db)[-1]["display_metadata"][CONTENT_REFUSED_METADATA_KEY]["notice"]
+        assert response.count(REFUSED_TURN_ACTIONS_WARNING) == 1, response
+        assert response.count(_FOOTER) == 1 and response.endswith(f"{stored}\n\n{_FOOTER}"), response
+        assert "safety filter refused" in response and "not processed" not in response
+    finally:
+        db.close()
+
+
+def test_add_notice_keeps_a_body_that_does_not_end_with_the_warning(monkeypatch, tmp_path):
+    """Only a body ENDING with the warning is trimmed; a notice ending with it alone changes nothing."""
+    runner = _bootstrap(monkeypatch, tmp_path)
+    body = "provider guidance that is long enough to be truncated if the guard were dropped"
+    notice = f"{CONTENT_REFUSED_NOTICE} {REFUSED_TURN_ACTIONS_WARNING}"
+    assert runner._hmwa_add_failed_turn_notice(body, notice) == f"{body}\n\n{notice}"
