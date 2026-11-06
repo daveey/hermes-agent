@@ -777,24 +777,9 @@ class SessionSessionsMixin:
         self._write_model_config_patch(session_id, patch)
 
     def seed_session_model_config(self, session_id: str, defaults: dict[str, Any]) -> None:
-        """Add the ``defaults`` keys the row's model_config lacks, atomically; existing keys (including an
-        explicit ``None``) always win. For an agent adopting a row another writer created first (the
-        gateway's bare SessionStore row): the create upsert would have kept that writer's model_config
-        whole, so the agent's init config (``model_routing``, ``max_iterations``) never reached it."""
-        if not session_id or not isinstance(defaults, dict) or not defaults:
-            return
-
-        def _do(conn):
-            row = conn.execute("SELECT model_config FROM sessions WHERE id = ?", (session_id,)).fetchone()
-            if row is None:
-                return
-            config = _parse_model_config(row[0])
-            missing = {k: v for k, v in defaults.items() if k not in config}
-            if not missing:
-                return
-            config.update(missing)
-            conn.execute("UPDATE sessions SET model_config = ? WHERE id = ?", (json.dumps(config), session_id))
-        self._execute_write(_do)
+        """Add the ``defaults`` keys the row's model_config lacks, atomically (existing keys win)."""
+        from hermes_state_sessions_model_config import seed_session_model_config
+        seed_session_model_config(self, session_id, defaults)
 
     def get_session_model_config_value(self, session_id: str, key: str, default: Any = None) -> Any:
         """Read one key out of a session's model_config JSON (tolerant parse)."""
@@ -967,11 +952,15 @@ class SessionSessionsMixin:
         This is the DELIBERATE archive (user, CLI, API): it clears the ``auto_archived``
         provenance, so re-activation never un-hides it on the user's behalf. A real
         unarchived -> archived flip fires ``on_session_delete`` (``reason="archive"``) after commit;
-        ``notify=False`` is for housekeeping that hides a row whose session lives on elsewhere."""
+        ``notify=False`` is for housekeeping that hides a row whose session lives on elsewhere.
+        Archiving the canonical Bot Chat retires its name in the same write
+        (:meth:`_retire_canonical_bot_chat_in_transaction`)."""
         def _do(conn):
             row = conn.execute("SELECT archived FROM sessions WHERE id = ?", (session_id,)).fetchone()
             ids = self._set_lineage_column_in_transaction(
                 conn, "archived", session_id, int(archived), extra_set_sql=", auto_archived = 0")
+            if archived and ids:
+                self._retire_canonical_bot_chat_in_transaction(conn, session_id)
             return ids, bool(archived and ids and row is not None and not row[0])
         ids, newly_archived = self._execute_write(_do)
         if newly_archived and notify:

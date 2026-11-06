@@ -1,6 +1,7 @@
+import { canonicalRequest, canonicalResult, sharedControlParams } from '@hermes/shared/gateway-canonical'
 import { expect, it } from 'vitest'
 
-import { canonicalRequest, canonicalResult, localCreationOptions, sharedControlParams } from '../canonicalGateway.js'
+import { localCreationOptions } from '../launchOptions.js'
 
 it('preserves an empty toolset pick and leaves an absent pick to the profile', () => {
   expect(localCreationOptions({} as NodeJS.ProcessEnv)).not.toHaveProperty('toolsets')
