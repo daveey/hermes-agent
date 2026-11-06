@@ -167,6 +167,60 @@ def test_gateway_offline_past_cap_wakes_with_offline_note(replica, board):
     assert "producer's gateway is offline" in wake.render_wake_context(conn, tid)
 
 
+@pytest.mark.parametrize("next_result", ["offline", "met", "fault", "changed_probe", "cooldown"])
+def test_offline_escalation_repark_backoff(replica, board, monkeypatch, next_result):
+    from hermes_cli import kanban_db as kb
+
+    conn, tid = board
+    now = pin_replica_clock(monkeypatch)
+    put(replica, "blocked")
+    make_stale(replica, wake.STALE_WAKE_AFTER + 3600)
+    rc, out = wait.check_remote("other", "task", TID, since=("blocked",))
+    cmd = f"hermes kanban wait-check task {TID} --gateway other --from blocked"
+
+    def park(command):
+        assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z",
+                                wake_check=command, check_every=3600)
+
+    park(cmd)
+    _probe_results(conn, tid, cmd, rc, out, 1, start=int(now))
+    assert kb.get_task(conn, tid).status == "ready"
+    assert kb.claim_task(conn, tid, claimer="worker") is not None
+    if next_result == "changed_probe":
+        cmd += " --until done"
+    park(cmd)
+    if next_result == "met":
+        make_stale(replica, 0)
+        replica.execute("DELETE FROM replica WHERE coll='tasks'")
+        put(replica, "done")
+        rc, out = wait.check_remote("other", "task", TID, since=("blocked",))
+        assert rc == 0
+    elif next_result == "fault":
+        rc, out = 2, "error: unexpected probe fault"
+    start = int(now) + (wake.STALE_WAKE_AFTER if next_result == "cooldown" else 2)
+    _probe_results(conn, tid, cmd, rc, out, 1, start=start)
+    if next_result == "offline":
+        assert kb.get_task(conn, tid).status == "scheduled"
+        state = wake.get_state(conn, tid)
+        assert state["next_at"] == start + 3600
+        assert state["last_rc"] == 3 and state["fails"] == 0
+        # A new connection sees the durable acknowledgement, not process state.
+        from hermes_cli import kanban_db_connect as kbc
+        with kbc.connect_closing() as reopened:
+            _probe_results(reopened, tid, cmd, rc, out.replace("90000", "93600"), 1, start=start + 3600)
+            assert kb.get_task(reopened, tid).status == "scheduled"
+    elif next_result == "fault":
+        assert kb.get_task(conn, tid).status == "scheduled"
+        _probe_results(conn, tid, cmd, rc, out, wake.BROKEN_AFTER - 1, start=start + 3600)
+        assert kb.get_task(conn, tid).status == "ready"
+        event = [e for e in kb.list_events(conn, tid) if e.kind == wake.BROKEN_EVENT][-1]
+        assert event.payload["output"] == out and event.payload["fails"] == wake.BROKEN_AFTER
+    else:
+        assert kb.get_task(conn, tid).status == "ready"
+        if next_result == "met":
+            assert any(e.kind == wake.CONDITION_MET_EVENT for e in kb.list_events(conn, tid))
+
+
 def test_schedule_awaiting_card_on_stale_replica_is_accepted(replica, board, monkeypatch):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt

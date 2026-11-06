@@ -12,7 +12,8 @@ dispatcher probes it off-thread on each tick:
   wait-check`` read the card from a stale replica of an offline gateway (a sleeping Mac). Probed
   again without counting toward ``BROKEN_AFTER``, until the replica is ``STALE_WAKE_AFTER`` old;
   then the card wakes (``wake_check_broken`` with ``reason=gateway_offline``) saying how long the
-  gateway has been offline;
+  gateway has been offline. Identical task/probe/gateway escalations are limited to once per
+  24 hours across worker reparks; regular probes and successful-condition wakes are unchanged;
 * anything else, or a timeout, ``BROKEN_AFTER`` times in a row -> the card wakes with a
   ``wake_check_broken`` event so a worker fixes the probe. A broken probe is never silent.
 
@@ -859,9 +860,10 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
             return None
         age = stale_age(rc, out)
         if age is not None:
-            if age >= STALE_WAKE_AFTER:
-                m = STALE_GATEWAY_RE.search(out or "")
-                gw = m.group(1).rstrip(",;)") if m else "the producer's gateway"
+            from hermes_cli.kanban_offline_backoff import recently_escalated
+            m = STALE_GATEWAY_RE.search(out or "")
+            gw = m.group(1).rstrip(",;)") if m else "the producer's gateway"
+            if age >= STALE_WAKE_AFTER and not recently_escalated(conn, task_id, cmd, gw, now, STALE_WAKE_AFTER):
                 hours = age / 3600
                 return _wake(conn, task_id, BROKEN_EVENT, {
                     "wake_check": cmd, "rc": rc, "fails": 0, "output": tail, "reason": "gateway_offline",
