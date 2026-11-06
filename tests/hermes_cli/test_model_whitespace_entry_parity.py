@@ -134,7 +134,8 @@ def test_cmd_chat_m_rejects_with_config_provider(main_mod, fake_cli, no_http, mo
 def test_oneshot_z_rejects(main_mod, no_http, monkeypatch, capsys):
     _config(monkeypatch)
     called = []
-    # -z runs through launch_gateway_chat; its startup -m guard must refuse before the gateway launch.
+    # -z runs through launch_gateway_chat (upstream 936f3465f82 deleted ``_run_and_exit_oneshot``); the
+    # startup -m check lives in its consent step, so stub only the session launch that would follow it.
     monkeypatch.setattr("hermes_cli.gateway_chat.launch_from_args", lambda *a, **k: called.append(1) or 0)
     args = _chat_args(model="a b", provider="anthropic")
     args.oneshot = "hi"

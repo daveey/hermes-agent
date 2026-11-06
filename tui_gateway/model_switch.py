@@ -325,24 +325,12 @@ def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: 
 LARGE_MODEL_NOTICE_KEY = "model.large_notice"
 
 
-def _apply_model_switch(
-    sid: str, session: dict, raw_input: str, *, confirm_expensive_model: bool = False,
-    pin_session_override: bool = True, parsed_flags: Any | None = None,
-    persist_override: bool | None = None, count_switch: bool = True) -> dict:
-    """``count_switch=False``: an internal swap (config adoption, MoA one-shot and its restore), not a
-    user's /model pick, so it stays out of the shared-metrics switch count."""
-    from hermes_cli.model_switch import parse_model_switch_args, switch_model
-    if parsed_flags is None:
-        parsed_flags = parse_model_switch_args(raw_input)
-    if getattr(parsed_flags, "is_reset", False):
-        return _reset_session_model_override(sid, session)
-    model_input, explicit_provider, one_turn, persist_global, reasoning_effort = _switch_request(
-        raw_input, parsed_flags, persist_override)
-    agent = session.get("agent")
-    if one_turn and not agent:
-        raise ValueError("/model --once requires a live session")
-    current_provider, current_model, current_base_url, current_api_key = _current_model_runtime(
-        agent, explicit_provider)
+def _preflight_model_switch(
+        model_input: str, explicit_provider: Any, persist_global: bool, agent: Any,
+        current_provider: Any, current_model: Any, current_base_url: Any, current_api_key: Any,
+        *, raw_input: str) -> tuple:
+    """Resolve the switch plan without committing it: ``(result, guard_result, cfg, custom_provs)``."""
+    from hermes_cli.model_switch import switch_model
     # User-defined providers let switch_model resolve named custom endpoints
     # (e.g. "ollama-launch") and validate against saved model lists.
     user_provs = custom_provs = cfg = None
@@ -372,22 +360,13 @@ def _apply_model_switch(
                 explicit_provider=explicit_provider, user_providers=user_provs,
                 custom_providers=custom_provs)
             guard_result = result
-    if not result.success:
-        raise ValueError(result.error_message or "model switch failed")
-    restore_snapshot = None
-    if one_turn and agent:
-        restore_snapshot = session.get('one_turn_model_restore') or _snapshot_agent_model_runtime(agent)
-    if agent:
-        _merge_preflight_warning(guard_result, agent, session, cfg, custom_provs)
-        result.warning_message = guard_result.warning_message
-    if not confirm_expensive_model:
-        confirm = _expensive_model_confirm(guard_result, current_base_url, current_api_key, agent)
-        if confirm is not None:
-            confirm['value'] = result.new_model
-            return confirm
-    records_composer_override = (
-        pin_session_override and isinstance(session, dict) and not one_turn
-        and not persist_global and session.get("follow_profile_config"))
+    return result, guard_result, cfg, custom_provs
+
+
+def _commit_recording_composer_profile(
+        sid: str, session: dict, agent: Any, result: Any, current_model: Any, restore_snapshot: Any,
+        records_composer_override: Any) -> None:
+    """Commit the switch to a live ``agent``; a failed commit puts ``composer_override_profile`` back."""
     had_composer_profile = "composer_override_profile" in session
     previous_composer_profile = session.get("composer_override_profile")
     if records_composer_override:
@@ -405,6 +384,51 @@ def _apply_model_switch(
             else:
                 session.pop("composer_override_profile", None)
         raise
+
+
+def _apply_model_switch(
+    sid: str, session: dict, raw_input: str, *, confirm_expensive_model: bool = False,
+    pin_session_override: bool = True, parsed_flags: Any | None = None,
+    persist_override: bool | None = None, count_switch: bool = True) -> dict:
+    """``count_switch=False``: an internal swap (config adoption, MoA one-shot and its restore), not a
+    user's /model pick, so it stays out of the shared-metrics switch count."""
+    from hermes_cli.model_switch import parse_model_switch_args
+    if parsed_flags is None:
+        parsed_flags = parse_model_switch_args(raw_input)
+    if getattr(parsed_flags, "is_reset", False):
+        return _reset_session_model_override(sid, session)
+    model_input, explicit_provider, one_turn, persist_global, reasoning_effort = _switch_request(
+        raw_input, parsed_flags, persist_override)
+    if persist_global:  # refused before switch_model() touches the live session
+        _refuse_managed_model_pick(reasoning_effort)
+    agent = session.get("agent")
+    if one_turn and not agent:
+        raise ValueError("/model --once requires a live session")
+    current_provider, current_model, current_base_url, current_api_key = _current_model_runtime(
+        agent, explicit_provider)
+    result, guard_result, cfg, custom_provs = _preflight_model_switch(
+        model_input, explicit_provider, persist_global, agent,
+        current_provider, current_model, current_base_url, current_api_key, raw_input=raw_input)
+    if not result.success:
+        raise ValueError(result.error_message or "model switch failed")
+    if persist_global:  # the exact plan, incl. conditional clears: still before any confirm or commit
+        _refuse_managed_model_pick(reasoning_effort, result)
+    restore_snapshot = None
+    if one_turn and agent:
+        restore_snapshot = session.get('one_turn_model_restore') or _snapshot_agent_model_runtime(agent)
+    if agent:
+        _merge_preflight_warning(guard_result, agent, session, cfg, custom_provs)
+        result.warning_message = guard_result.warning_message
+    if not confirm_expensive_model:
+        confirm = _expensive_model_confirm(guard_result, current_base_url, current_api_key, agent)
+        if confirm is not None:
+            confirm['value'] = result.new_model
+            return confirm
+    records_composer_override = (
+        pin_session_override and isinstance(session, dict) and not one_turn
+        and not persist_global and session.get("follow_profile_config"))
+    _commit_recording_composer_profile(
+        sid, session, agent, result, current_model, restore_snapshot, records_composer_override)
     # PER-SESSION override so a rebuild of THIS session (/new, resume) re-derives the model.
     # Deliberately NOT written to process-global env (HERMES_MODEL & co.): the desktop hosts
     # every same-profile session in one process, so os.environ would leak the switch to all.

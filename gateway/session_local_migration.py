@@ -97,7 +97,7 @@ def legacy_launch_params(row):
         route.setdefault('provider', 'custom')
     if row['source'] == 'acp' and 'cwd' not in params and Path(str(saved.get('cwd') or '')).is_absolute():
         params['cwd'] = saved['cwd']
-    from agent.model_routing_restore import restore_route
+    from agent.model_routing_restore import restore_route, stale_managed_pin
     restored = restore_route(row.get('model'), saved)
     if restored:
         model, provider = restored
@@ -106,6 +106,11 @@ def legacy_launch_params(row):
             # wire protocol must not travel with it.
             route = {'provider': provider}
         params['model'] = model
+    if stale_managed_pin(params.get('model'), route.get('provider')):
+        # Adoption is a resume, not a new concrete request. A retired/paid history
+        # tuple must not become a frozen pin that every subsequent turn rejects.
+        params.pop('model', None)
+        route = {}
     params.update({key: route[key] for key in ('provider', 'base_url') if key in route})
     reasoning = saved.get('reasoning_config')
     if isinstance(reasoning, dict):

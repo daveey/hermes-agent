@@ -41,6 +41,24 @@ def finite_turn_scope(finite, unattended=False):
         _finite_turn.reset(token)
 
 
+@contextmanager
+def finite_review_scope(agent):
+    """[daveey] A finite turn (``-z`` / ``chat -q`` / ``-Q``, incl. ``--resume`` of a ``cli`` session) never
+    forks the post-turn skill/memory review, as the classic single-query process did
+    (``skip_background_review=single_query_mode``). Per turn on the shared cached agent: the session's
+    source, policy and cache key are untouched, and the agent's own value is restored when the run
+    returns, so the next interactive turn on the same agent keeps its review."""
+    if finite_turn_required() is not True or agent is None:
+        yield
+        return
+    previous = getattr(agent, 'skip_background_review', False)
+    agent.skip_background_review = True
+    try:
+        yield
+    finally:
+        agent.skip_background_review = previous
+
+
 def admit_finite(params, *, submitter=None):
     """Validate a submission's finite flags. *submitter* ``(connection, ref)`` marks a wire client: it may
     ask for an unattended (auto-approving) turn only as the local CLI principal on its own CLI session."""

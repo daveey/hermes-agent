@@ -50,14 +50,13 @@ project until total store size is under ``max_total_size_mb``.
 
 import fnmatch
 import hashlib
-import heapq
 import json
 import logging
 import os
 import re
 import shutil
-import stat
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path, PurePosixPath
@@ -65,7 +64,7 @@ from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import selected_git_env, windows_hide_flags
 from hermes_cli.gitlock import clear_stale_tmp_packs
 from tools import checkpoint_staging as staging
-from tools.checkpoint_manager_staging import CheckpointStagingMixin
+from tools.checkpoint_snapshot import SnapshotMixin
 from typing import Dict, List, Optional, Set, Tuple
 
 from utils import env_int, rmtree_readonly
@@ -483,7 +482,8 @@ def _run_git(
         if input_text is None:
             stdin_options: dict = {"stdin": subprocess.DEVNULL}
         else:
-            stdin_options = {"input": input_text if text_options else input_text.encode("utf-8")}
+            # fsencode mirrors the fsdecode of -z output: POSIX names need not be UTF-8.
+            stdin_options = {"input": input_text if text_options else os.fsencode(input_text)}
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -934,13 +934,19 @@ def _pre_v2_shadow_repos(base: Path) -> list[dict]:
     return out
 
 
-def _checkpoint_candidates(path: str):
-    """Yield candidate files, pruning default excludes and the live store."""
+def _dir_file_count(path: str) -> int:
+    """Count checkpoint candidates, pruning the default excludes and the live store.
+
+    With HERMES_HOME as the working directory the checkpoint store and its lock sit inside
+    the tree; ``git add`` excludes them by pathspec, so a growing store must not push the
+    project over ``_MAX_FILES`` and skip its own checkpoints.
+    """
+    count = 0
     try:
         root = _normalize_path(path)
         if not root.is_dir():
-            return
-        store_paths = set(_store_pathspecs(_resolve_checkpoint_base(), root))
+            return 0
+        skip = frozenset(_store_pathspecs(_resolve_checkpoint_base(), root))
 
         directory_patterns = tuple(
             pattern[:-1] for pattern in DEFAULT_EXCLUDES if pattern.endswith("/")
@@ -955,68 +961,68 @@ def _checkpoint_candidates(path: str):
             retained_directories = []
             for name in directory_names:
                 candidate = Path(current_dir) / name
-                if candidate.relative_to(root).as_posix() in store_paths:
+                if skip and candidate.relative_to(root).as_posix() in skip:
                     continue
                 if candidate.is_symlink():
                     if not any(fnmatch.fnmatchcase(name, p) for p in file_patterns):
-                        yield candidate
+                        count += 1
                 elif not any(
                     # git applies slash-less patterns (``*.log``) to directories too
                     fnmatch.fnmatchcase(name, p) for p in directory_patterns + file_patterns
                 ):
                     retained_directories.append(name)
+                if count > _MAX_FILES:
+                    return count
             directory_names[:] = retained_directories
 
             for name in file_names:
                 if any(fnmatch.fnmatchcase(name, p) for p in file_patterns):
                     continue
-                candidate = Path(current_dir) / name
-                if candidate.relative_to(root).as_posix() not in store_paths:
-                    yield candidate
+                if skip and (Path(current_dir) / name).relative_to(root).as_posix() in skip:
+                    continue
+                count += 1
+                if count > _MAX_FILES:
+                    return count
     except OSError:
         pass
-
-
-def _dir_file_count(path: str) -> int:
-    """Count checkpoint candidates, stopping just beyond the breadth limit."""
-    count = 0
-    for count, _ in enumerate(_checkpoint_candidates(path), 1):
-        if count > _MAX_FILES:
-            break
     return count
-
-
-def _scan_tree(path: str, cap_bytes: int, max_entries: int) -> staging.TreeScan:
-    """Collect the fork's staging budget data using the same exclusions as the guard."""
-    scan = staging.TreeScan()
-    root = _normalize_path(path)
-    biggest = []
-    for candidate in _checkpoint_candidates(path):
-        scan.count += 1
-        if scan.count > max_entries:
-            break
-        try:
-            st = candidate.lstat()
-        except OSError:
-            continue
-        if not stat.S_ISREG(st.st_mode):
-            continue
-        rel = candidate.relative_to(root).as_posix()
-        if cap_bytes > 0 and st.st_size > cap_bytes:
-            scan.oversize.append(rel)
-        else:
-            scan.files[rel] = (st.st_size, st.st_mtime)
-        heapq.heappush(biggest, (st.st_size, rel))
-        if len(biggest) > 3:
-            heapq.heappop(biggest)
-    scan.biggest = sorted(biggest, reverse=True)
-    return scan
 
 
 def _too_broad(abs_dir: str) -> bool:
     """``/``, the user's home and every ancestor of it: never a project, always huge."""
     home = Path.home().resolve()
     return Path(abs_dir) in {Path("/"), home, *home.parents}
+
+
+def _staging_scan(
+    working_dir: str, cap_bytes: int,
+    store: Optional[Path] = None, index_file: Optional[Path] = None,
+) -> staging.TreeScan:
+    """The tree walk staging prices and size-caps from: what ``git add -A`` will actually read.
+
+    It prunes what the add never stages, so a growing tree there does not inflate the
+    estimate: the checkpoint store when it sits inside ``working_dir`` (HERMES_HOME as the
+    working directory; :func:`_stage_all_args` excludes it by pathspec) and the default
+    excludes, pruned like :func:`_dir_file_count` so a huge ``node_modules/`` or ``.venv/``
+    is never walked. The walk is not cut short at ``_MAX_FILES``: a bounded walk could stop
+    before a later oversize file and let ``git add`` read it.
+
+    ``add -A`` still re-reads paths already in ``index_file`` inside a pruned directory, so
+    those are stat'ed from the index listing and size-capped too.
+    """
+    base = store.parent if store is not None else _resolve_checkpoint_base()
+    skip = frozenset(_store_pathspecs(base, working_dir))
+    scan = staging.scan_tree(
+        working_dir, cap_bytes, sys.maxsize, excludes=tuple(DEFAULT_EXCLUDES), skip=skip,
+    )
+    if store is not None and index_file is not None and index_file.exists():
+        ok, out, _ = _run_git(
+            ["ls-files", "--cached", "-z", *_exclude_store_args(base, working_dir)],
+            store, working_dir, index_file=index_file,
+        )
+        if ok:
+            staging.add_tracked(scan, working_dir, [p for p in out.split("\x00") if p], cap_bytes)
+    return scan
 
 
 def _dir_size_bytes(path: Path) -> int:
@@ -1038,7 +1044,7 @@ def _dir_size_bytes(path: Path) -> int:
 # CheckpointManager
 # ---------------------------------------------------------------------------
 
-class CheckpointManager(CheckpointStagingMixin):
+class CheckpointManager(SnapshotMixin):
     """Manages automatic filesystem checkpoints.
 
     Designed to be owned by AIAgent.  Call ``new_turn()`` at the start of
@@ -1058,8 +1064,8 @@ class CheckpointManager(CheckpointStagingMixin):
     max_file_size_mb : int
         Skip adding any single file larger than this to a checkpoint.
         (A per-project ``core.excludesFile`` built before staging, so git
-        never reads them, with literal pathspecs for unusual names and a
-        post-stage size check as a backstop.)
+        never reads them, plus a post-stage size check as a backstop. The
+        checkpoint store itself is excluded by pathspec.)
     """
 
     def __init__(
@@ -1153,8 +1159,13 @@ class CheckpointManager(CheckpointStagingMixin):
         # Stage the current tree so the name-only diff sees new files too.
         # Oversize files are excluded from staging (git never reads them) and
         # no checkpoint holds them, so they count as changed by definition.
-        scan = _scan_tree(abs_dir, self.max_file_size_mb * 1024 * 1024, _MAX_FILES)
-        self._stage_all(store, abs_dir, index_file, scan)
+        scan = _staging_scan(abs_dir, self.max_file_size_mb * 1024 * 1024, store, index_file)
+        staged, _, stage_err = self._stage_all(store, abs_dir, index_file, scan)
+        if not staged:
+            # A partial index would under-report changes; refuse rather than plan from it.
+            _run_git(["read-tree", _ref_name(dir_hash)], store, abs_dir,
+                     index_file=index_file, allowed_returncodes={128})
+            return {"success": False, "error": f"Could not stage the working tree: {stage_err}"}
         ok, names_out, err = _run_git(
             ["diff", "--name-only", "-z", commit_hash, "--cached",
              *_exclude_store_args(store.parent, abs_dir)],
@@ -1340,7 +1351,12 @@ class CheckpointManager(CheckpointStagingMixin):
         index_file = _index_path(store, dir_hash)
 
         # Stage current state into the per-project index to compare.
-        self._stage_all(store, abs_dir, index_file)
+        staged, _, stage_err = self._stage_all(store, abs_dir, index_file)
+        if not staged:
+            # A partial index would show a wrong diff; refuse and keep the index on the ref.
+            _run_git(["read-tree", _ref_name(dir_hash)], store, abs_dir,
+                     index_file=index_file, allowed_returncodes={128})
+            return {"success": False, "error": f"Could not stage the working tree: {stage_err}"}
 
         # A checkpoint taken before the store was excluded may still contain it; never
         # report the store as a change against such a checkpoint.
@@ -1705,117 +1721,6 @@ class CheckpointManager(CheckpointStagingMixin):
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
-
-    def _take(self, working_dir: str, reason: str, *, prune: bool = True) -> bool:
-        """Take a snapshot.  Returns True on success."""
-        store = _store_path()
-
-        err = _init_store(store, working_dir)
-        if err:
-            logger.debug("Checkpoint store init failed: %s", err)
-            return False
-
-        _touch_project(store, working_dir)
-
-        # Quick size guard — don't try to snapshot enormous directories
-        scan = _scan_tree(working_dir, self.max_file_size_mb * 1024 * 1024, _MAX_FILES)
-        if scan.count > _MAX_FILES:
-            logger.debug("Checkpoint skipped: >%d files in %s", _MAX_FILES, working_dir)
-            return False
-
-        dir_hash = _project_hash(working_dir)
-        index_file = _index_path(store, dir_hash)
-        ref = _ref_name(dir_hash)
-
-        warm_since, seeded = self._seed_project_index(store, working_dir, index_file, ref)
-        if not self._stage_snapshot(store, working_dir, index_file, scan, warm_since, seeded):
-            return False
-
-        # Compare against the current ref tip (not HEAD — HEAD points to a
-        # branch that doesn't exist on a bare store, so ``diff --cached``
-        # against HEAD would always show "new file" for every staged path).
-        ok_ref, ref_commit, _ = _run_git(
-            ["rev-parse", "--verify", ref + "^{commit}"],
-            store, working_dir,
-            allowed_returncodes={128},
-        )
-        has_ref = ok_ref and bool(ref_commit)
-
-        if has_ref:
-            ok_diff, _, _ = _run_git(
-                ["diff-index", "--cached", "--quiet", ref_commit],
-                store, working_dir,
-                allowed_returncodes={1},
-                index_file=index_file,
-            )
-            if ok_diff:
-                logger.debug("Checkpoint skipped: no changes in %s", working_dir)
-                return False
-        else:
-            # No ref yet — skip only if the index is empty.
-            ok_ls, ls_out, _ = _run_git(
-                ["ls-files", "--cached"],
-                store, working_dir,
-                index_file=index_file,
-            )
-            if ok_ls and not ls_out.strip():
-                logger.debug("Checkpoint skipped: empty tree in %s", working_dir)
-                return False
-
-        # Write tree from per-project index.
-        ok_tree, tree_sha, err = _run_git(
-            ["write-tree"], store, working_dir,
-            index_file=index_file,
-        )
-        if not ok_tree or not tree_sha:
-            logger.debug("Checkpoint write-tree failed: %s", err)
-            return False
-
-        # A nested repository is stored as a gitlink, not its files: say so in
-        # the checkpoint itself rather than only when a rollback is refused.
-        ok_ls, tree_out, _ = _run_git(["ls-tree", "-r", "-z", tree_sha], store, working_dir)
-        nested_repos = _gitlink_paths(tree_out) if ok_ls else []
-        if nested_repos:
-            logger.info("Checkpoint of %s does not capture nested git repositories: %s",
-                        working_dir, ", ".join(nested_repos))
-            # Listings read the subject (%s), which ends at the first blank
-            # line, so keep a multiline reason (a terminal command) on one
-            # line or the note falls outside every listing.
-            reason = " ".join(
-                line.strip() for line in reason.splitlines() if line.strip()
-            ) + _uncaptured_note(nested_repos)
-
-        # Build commit (parent = current ref tip, if any).
-        commit_args = ["commit-tree", tree_sha, "-m", reason, "--no-gpg-sign"]
-        if has_ref:
-            commit_args = ["commit-tree", tree_sha, "-p", ref_commit, "-m", reason, "--no-gpg-sign"]
-        ok_commit, new_sha, err = _run_git(
-            commit_args, store, working_dir,
-            index_file=index_file,
-        )
-        if not ok_commit or not new_sha:
-            logger.debug("Checkpoint commit-tree failed: %s", err)
-            return False
-
-        # Update the per-project ref.
-        update_args = ["update-ref", ref, new_sha]
-        if has_ref:
-            update_args = ["update-ref", ref, new_sha, ref_commit]
-        ok_update, _, err = _run_git(
-            update_args, store, working_dir,
-        )
-        if not ok_update:
-            logger.debug("Checkpoint update-ref failed: %s", err)
-            return False
-
-        logger.debug("Checkpoint taken in %s: %s (%s)", working_dir, reason, new_sha[:8])
-
-        # Count and size budgets share one failure boundary. A workspace
-        # removed after the snapshot landed (Kanban cleanup) has nothing to prune.
-        if prune and os.path.isdir(working_dir):
-            self._prune(store, working_dir, ref)
-
-        return True
 
     def _prune(self, store: Path, working_dir: str, ref: str) -> None:
         """Checkpoint-take path: snapshot-count budget plus one size round, gc deferred to the

@@ -1,4 +1,4 @@
-"""The classic CLI owns its post-turn background review: exit cancels it, single-query runs never fork it.
+"""The classic CLI owns its post-turn background review: exit cancels it, one-shots never fork it.
 
 Observed 2026-10-29 20:16 PDT (session 20261029_201245_dfaf9b, core cb1aa70f): the foreground turn
 answered, the review fork spawned, CLI cleanup ran memory shutdown, then the review's first API call
@@ -139,3 +139,44 @@ def test_single_query_cli_agent_skips_background_review(monkeypatch):
 
 def test_interactive_cli_agent_keeps_background_review(monkeypatch):
     assert not _cli_capturing_agent_kwargs(monkeypatch, single_query=False).get("skip_background_review")
+
+
+def _gateway_built_agent_kwargs(monkeypatch, tmp_path, source):
+    """The kwargs the gateway's in-process turn hands ``AIAgent`` for a session created with *source*.
+
+    ``hermes -z`` runs through the gateway (``_run_oneshot_from_args`` -> ``launch_gateway_chat``),
+    which creates the session with ``source='oneshot'``; the agent is built gateway-side by
+    ``GatewaySessionAgentMixin._build_fresh_agent`` from that session's frozen policy.
+    """
+    from gateway import session_policy
+    from gateway.session_execution import GatewaySessionAgentMixin
+
+    policy = session_policy.build_policy(
+        {"cwd": str(tmp_path), "source": source, "model": "m", "provider": "custom",
+         "base_url": "http://127.0.0.1:9/v1"}, {})
+    assert policy.source == source
+    monkeypatch.setattr(session_policy, "policy_for_source", lambda _runner, _source: policy)
+    # Prefill loading (the authority's profile files) is not under test here.
+    monkeypatch.setattr("gateway.session_worker_construct.session_prefill", lambda *_a: None)
+    built = {}
+    turn = GatewaySessionAgentMixin.__new__(GatewaySessionAgentMixin)
+    turn._runner = types.SimpleNamespace(session_authority=types.SimpleNamespace(), _prefill_messages=None,
+                                         _service_tier=None, _session_db=None, _refresh_fallback_model=lambda: None)
+    src = types.SimpleNamespace(chat_id="sid", user_id="u", user_id_alt=None, user_name=None, chat_name=None,
+                                chat_type="dm", thread_id=None)
+    turn._ctx = types.SimpleNamespace(source=src, user_config={}, enabled_toolsets=[], disabled_toolsets=None,
+                                      session_id="sid", session_key="k", AIAgent=lambda **kw: built.update(kw))
+    turn._build_fresh_agent({"model": "m", "runtime": {}}, "local", None, 1, None, {}, False)
+    # Finiteness belongs to the submitted turn, not the session's frozen source.
+    from gateway.session_finite import finite_review_scope, finite_turn_scope
+    agent = types.SimpleNamespace(skip_background_review=built.get("skip_background_review", False))
+    with finite_turn_scope(source == "oneshot"), finite_review_scope(agent):
+        return {**built, "skip_background_review": agent.skip_background_review}
+
+
+def test_oneshot_z_agent_skips_background_review(monkeypatch, tmp_path):
+    assert _gateway_built_agent_kwargs(monkeypatch, tmp_path, "oneshot").get("skip_background_review") is True
+
+
+def test_gateway_interactive_cli_agent_keeps_background_review(monkeypatch, tmp_path):
+    assert not _gateway_built_agent_kwargs(monkeypatch, tmp_path, "cli").get("skip_background_review")

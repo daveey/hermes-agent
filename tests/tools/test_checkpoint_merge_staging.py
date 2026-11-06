@@ -26,7 +26,8 @@ def test_excluded_trees_do_not_exhaust_scan_or_budget(project, monkeypatch):
         for i in range(5):
             (folder / f"item{i}").write_bytes(b"x" * 4096)
     # Do not initialize a pretend git store: the real store is created below.
-    scan = cm._scan_tree(str(project), 1024, cm._MAX_FILES)
+    # The scan the take path prices and size-caps from (the a2db0efb sync named it _scan_tree).
+    scan = cm._staging_scan(str(project), 1024)
     assert scan.count == 1
     assert scan.oversize == []
     assert set(scan.files) == {"source.py"}
@@ -81,3 +82,88 @@ def test_failed_oversize_removal_aborts_snapshot(project, monkeypatch):
     mgr.new_turn()
     assert not mgr.ensure_checkpoint(str(project), "must fail")
     assert mgr.list_checkpoints(str(project))[0]["hash"] == before
+
+
+@pytest.mark.parametrize("entry", ["checkpoint", "diff", "safe_restore"])
+def test_first_oversize_removal_failure_refuses_without_reading_blob(project, monkeypatch, entry):
+    """Only the FIRST ``update-index --force-remove`` fails (the pre-add oversize unstage).
+
+    An always-failing removal also trips the post-add oversize drop, so the snapshot
+    still refused even when ``_stage_all`` ignored its own unstage result; meanwhile
+    ``add -A`` had already hashed the grown file into the store as a dangling blob.
+    Failing once and succeeding afterwards isolates the pre-add guard.
+    """
+    mgr = cm.CheckpointManager(enabled=True, max_file_size_mb=1)
+    (project / "grows.bin").write_bytes(b"small")
+    assert mgr.ensure_checkpoint(str(project), "baseline")
+    before = mgr.list_checkpoints(str(project))[0]["hash"]
+    (project / "grows.bin").write_bytes(os.urandom(2 * 1024 * 1024))
+    (project / "source.py").write_text("after\n")
+    mgr.record_agent_write(str(project / "source.py"))
+    real_run = cm._run_git
+    removals = []
+
+    def fail_first_remove(args, *a, **kw):
+        if args[:2] == ["update-index", "--force-remove"]:
+            removals.append(list(args))
+            if len(removals) == 1:
+                return False, "", "injected first removal failure"
+        return real_run(args, *a, **kw)
+
+    monkeypatch.setattr(cm, "_run_git", fail_first_remove)
+    if entry == "checkpoint":
+        mgr.new_turn()
+        assert not mgr.ensure_checkpoint(str(project), "must fail")
+        assert mgr.list_checkpoints(str(project))[0]["hash"] == before
+    elif entry == "diff":
+        assert not mgr.diff(str(project), before)["success"]
+    else:
+        assert not mgr._safe_restore_plan(str(project), before)["success"]
+    assert removals and "grows.bin" in removals[0]
+    store = cm._store_path()
+    # The grown, incompressible file must never enter the store, not even dangling.
+    assert sum(p.stat().st_size for p in (store / "objects").rglob("*") if p.is_file()) < 1024 * 1024
+
+
+def test_failed_excluded_drop_abandons_the_seed(tmp_path, monkeypatch):
+    """A seeded index whose excluded entries could not be dropped is abandoned (no index
+    left), so the cold path stages instead of trusting an index still holding them."""
+    import subprocess
+
+    monkeypatch.setattr(cm, "CHECKPOINT_BASE", tmp_path / "checkpoints")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+
+    def git(cwd, *args):
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+                       cwd=str(cwd), env=env, check=True, capture_output=True)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    (repo / "main.py").write_text("print('hi')\n")
+    (repo / ".gitignore").write_text("secret.txt\n")
+    (repo / "secret.txt").write_text("force-added\n")
+    git(repo, "add", "-A")
+    git(repo, "add", "-f", "secret.txt")
+    git(repo, "commit", "-q", "-m", "init")
+    wt = tmp_path / "wt"
+    git(repo, "worktree", "add", "-q", str(wt), "HEAD")
+    abs_wt = str(cm._normalize_path(str(wt)))
+    store = cm._store_path()
+    cm._init_store(store, abs_wt)
+    index_file = cm._index_path(store, cm._project_hash(abs_wt))
+    real_run = cm._run_git
+    removals = []
+
+    def fail_first_remove(args, *a, **kw):
+        if args[:2] == ["update-index", "--force-remove"]:
+            removals.append(list(args))
+            if len(removals) == 1:
+                return False, "", "injected first removal failure"
+        return real_run(args, *a, **kw)
+
+    monkeypatch.setattr(cm, "_run_git", fail_first_remove)
+    assert cm.CheckpointManager(enabled=True)._seed_from_repo_index(store, abs_wt, index_file) is False
+    assert removals and "secret.txt" in removals[0]
+    assert not index_file.exists()
