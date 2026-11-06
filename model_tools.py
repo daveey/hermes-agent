@@ -714,6 +714,7 @@ class _CallIds:
     tool_call_id: Optional[str] = None
     turn_id: Optional[str] = None
     api_request_id: Optional[str] = None
+    conversation_id: Optional[str] = None  # compression-stable root (agent.prompt_cache_scope.conversation_id)
 
     def hook_kwargs(self) -> dict[str, str]:
         """Same fields with None -> "" (hook/middleware wire contract)."""
@@ -743,7 +744,7 @@ def _emit_post_tool_call_hook(
     task_id: Optional[str] = None, session_id: Optional[str] = None, tool_call_id: Optional[str] = None,
     turn_id: Optional[str] = None, api_request_id: Optional[str] = None, duration_ms: int = 0,
     status: Optional[str] = None, error_type: Optional[str] = None, error_message: Optional[str] = None,
-    middleware_trace: Optional[list[dict[str, Any]]] = None,
+    middleware_trace: Optional[list[dict[str, Any]]] = None, conversation_id: Optional[str] = None,
 ) -> None:
     """Emit the ``post_tool_call`` observer hook; gated on has_hook, and ok/error
     fields are derived from the result only past that gate when status is None."""
@@ -757,7 +758,7 @@ def _emit_post_tool_call_hook(
             status, error_type, error_message = _tool_result_observer_fields(function_name, result)
         invoke_hook(
             "post_tool_call", tool_name=function_name, args=function_args, result=result,
-            **_CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id).hook_kwargs(),
+            **_CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id, conversation_id).hook_kwargs(),
             duration_ms=duration_ms, status=status, error_type=error_type, error_message=error_message,
             middleware_trace=list(middleware_trace or []),
         )
@@ -891,7 +892,8 @@ def _execute_tool(function_name: str, function_args: dict[str, Any], original_ar
                   *, user_task: Optional[str], enabled_tools: Optional[list[str]], skip_tool_execution_middleware: bool) -> Any:
     """Run the registry handler (through tool-execution middleware unless skipped)
     with the approval observability context bound for the duration."""
-    dispatch_kwargs: dict[str, Any] = {"task_id": ids.task_id, "session_id": ids.session_id}
+    dispatch_kwargs: dict[str, Any] = {
+        "task_id": ids.task_id, "session_id": ids.session_id, "conversation_id": ids.conversation_id}
     if function_name == "execute_code":
         # Prefer the caller's list so subagents can't overwrite the parent's
         # tool set via the process-global.
@@ -946,6 +948,7 @@ def handle_function_call(
     skip_pre_tool_call_hook: bool = False, skip_tool_request_middleware: bool = False,
     skip_tool_execution_middleware: bool = False, tool_request_middleware_trace: Optional[list[dict[str, Any]]] = None,
     enabled_toolsets: Optional[list[str]] = None, disabled_toolsets: Optional[list[str]] = None,
+    conversation_id: Optional[str] = None,
 ) -> str:
     """Route a tool call through hooks/middleware to the registry; returns a JSON string.
 
@@ -963,14 +966,14 @@ def handle_function_call(
         return _handle_function_call(function_name, function_args, task_id, tool_call_id, session_id, turn_id,
                                      api_request_id, user_task, enabled_tools, skip_pre_tool_call_hook,
                                      skip_tool_request_middleware, skip_tool_execution_middleware,
-                                     tool_request_middleware_trace, enabled_toolsets, disabled_toolsets, None)
+                                     tool_request_middleware_trace, enabled_toolsets, disabled_toolsets, None, conversation_id)
     token = _deferred_transform_tool_results.set(None)
     try:
         return _handle_function_call(function_name, function_args, task_id, tool_call_id, session_id, turn_id,
                                      api_request_id, user_task, enabled_tools, skip_pre_tool_call_hook,
                                      skip_tool_request_middleware, skip_tool_execution_middleware,
                                      tool_request_middleware_trace, enabled_toolsets, disabled_toolsets,
-                                     own_deferred)
+                                     own_deferred, conversation_id)
     finally:
         _deferred_transform_tool_results.reset(token)
 
@@ -981,6 +984,7 @@ def _handle_function_call(
     enabled_tools: Optional[list[str]], skip_pre_tool_call_hook: bool, skip_tool_request_middleware: bool,
     skip_tool_execution_middleware: bool, tool_request_middleware_trace: Optional[list[dict[str, Any]]],
     enabled_toolsets: Optional[list[str]], disabled_toolsets: Optional[list[str]], own_deferred: Optional[list],
+    conversation_id: Optional[str],
 ) -> str:
     """Body of handle_function_call. *own_deferred*: the executor's transform queue claimed by this
     call (None = run transform_tool_result inline)."""
@@ -989,7 +993,7 @@ def _handle_function_call(
         function_args = {}
     trace = list(tool_request_middleware_trace or [])
     function_name = _LEGACY_TOOL_ALIASES.get(function_name, function_name)
-    ids = _CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id)
+    ids = _CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id, conversation_id)
     start = time.monotonic()
 
     def _emit(result: Any, **extra: Any) -> Any:

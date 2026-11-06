@@ -35,16 +35,13 @@ repaired explicitly rather than silently replaced by display defaults.
 
 ## Dedicated runtime
 
-Call the native boundary with a constant ID and your scoped spawn function:
-
-```python
-from hermes_cli.kanban_db_connect import connect_closing
-from hermes_cli.kanban_db_dispatch import dispatch_once
-
-with connect_closing(board="example") as conn:
-    result = dispatch_once(conn, board="example", dispatcher_id="dedicated-worker",
-                           spawn_fn=scoped_spawn)
-```
+Dedicated runtimes use internal core APIs, not the published plugin API. Plugins
+must not import these internals. A same-UID host runtime opens the board with
+`hermes_cli.kanban_db_connect.connect_closing(board="example")` and, within that
+connection's context, calls `hermes_cli.kanban_db_dispatch.dispatch_once` with
+`conn`, `board="example"`, a constant `dispatcher_id="dedicated-worker"`, and
+its own `spawn_fn=scoped_spawn`. The context closes the connection after the tick.
+This embedding contract is maintained with the core, not as a plugin extension.
 
 The ID is an explicit Python keyword, not an environment variable or a worker
 grant. Stock CLI, daemon, and embedded gateway callers omit it and cannot dispatch
