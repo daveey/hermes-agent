@@ -94,6 +94,42 @@ def test_cpu_report_budget_is_two_seconds():
     assert ksc.CPU_REPORT_BUDGET_S == 2.0
 
 
+@pytest.mark.parametrize("elapsed,reason,exhausted", [
+    (1.0, TimeoutError("timed out"), True),
+    (0.5, TimeoutError("timed out"), False),
+    (1.0, ConnectionResetError("reset"), False),
+])
+def test_bounded_call_worker_timeout_wins_race(monkeypatch, elapsed, reason, exhausted):
+    """Both deadline contenders must expose the same timeout, without hiding transport failures."""
+    from types import SimpleNamespace
+    import urllib.error
+
+    clock = [100.0]
+    error = urllib.error.URLError(reason)
+    real_thread = threading.Thread
+
+    class FinishedWorker(real_thread):
+        def join(self, timeout=None):
+            # Select the worker-wins ordering regardless of host scheduling.
+            super().join(10)
+            assert not self.is_alive()
+
+    def fail(self, *args):
+        clock[0] += elapsed
+        raise error
+
+    monkeypatch.setattr(ksc, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(ksc.Hub, "_call", fail)
+    monkeypatch.setattr(ksc._hub_threading, "Thread", FinishedWorker)
+    with pytest.raises(TimeoutError if exhausted else urllib.error.URLError) as caught:
+        ksc._bounded_call(ksc.Identity(url="http://unused", key="k" * 16, gateway="gw"),
+                          "POST", "/metrics", {}, 1.0)
+    if exhausted:
+        assert caught.value.__cause__ is error
+    else:
+        assert caught.value is error
+
+
 @pytest.mark.parametrize("server", ["stall", "trickle"], indirect=True)
 def test_abandoned_bounded_call_thread_ends_promptly_after_the_budget(server, monkeypatch):
     """HX012 trace: a trickling response keeps every recv inside its socket timeout, so the abandoned request thread

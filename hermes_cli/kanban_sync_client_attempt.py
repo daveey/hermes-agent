@@ -4,7 +4,17 @@ Kept apart from ``kanban_sync_client`` (the HTTP client) and ``kanban_queue_reas
 records it), so neither imports the other's layer for it.
 """
 import logging
-from typing import Optional
+import urllib.error
+from typing import NoReturn, Optional
+
+
+def raise_bounded_error(error: BaseException, deadline: float, now: float, budget_s: float) -> NoReturn:
+    """Normalize deadline expiry even when the socket worker finishes before the joining caller."""
+    # Preserve early socket timeouts and unrelated failures as Hub's transport errors.
+    if (isinstance(error, urllib.error.URLError) and isinstance(error.reason, TimeoutError)
+            and now >= deadline):
+        raise TimeoutError(f"Board request exceeded its {budget_s:g} s total budget") from error
+    raise error
 
 ATTEMPT_ATTR = "board_attempt"
 

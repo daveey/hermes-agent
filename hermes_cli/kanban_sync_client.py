@@ -43,7 +43,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_sync_timing as sync_timing  # off unless kanban.sync.diagnostics.timing_until arms it
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
-from hermes_cli.kanban_sync_client_attempt import note_attempt, replay_after_timeout
+from hermes_cli.kanban_sync_client_attempt import note_attempt, raise_bounded_error, replay_after_timeout
 
 _log = logging.getLogger(__name__)
 
@@ -229,7 +229,7 @@ def _bounded_call(ident: Identity, method: str, path: str, body: Optional[dict],
                 cut(box["conn"])
         raise TimeoutError(f"Board request exceeded its {budget_s:g} s total budget")
     if "error" in box:
-        raise box["error"]
+        raise_bounded_error(box["error"], deadline, time.monotonic(), budget_s)
     return box["result"]
 
 
