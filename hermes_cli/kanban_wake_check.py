@@ -14,6 +14,12 @@ dispatcher probes it off-thread on each tick:
   then the card wakes (``wake_check_broken`` with ``reason=gateway_offline``) saying how long the
   gateway has been offline. Identical task/probe/gateway escalations are limited to once per
   24 hours across worker reparks; regular probes and successful-condition wakes are unchanged;
+* exit 3 with ``source_state=unknown`` and ``gateway=<name>`` -> unknown, not yet: the producer's gateway
+  published that board's scope as ``unknown`` (its collector could not read the board), so nothing vouches
+  for the last-seen status and there is no observation age. Never counted toward ``BROKEN_AFTER``; the
+  first such result wakes the card once (``wake_check_broken`` with ``reason=gateway_scope_unknown``), and
+  later ones for the same task/probe/gateway are held while a source-unavailable escalation
+  (``gateway_offline`` or ``gateway_scope_unknown``) is under 24 hours old;
 * anything else, or a timeout, ``BROKEN_AFTER`` times in a row -> the card wakes with a
   ``wake_check_broken`` event so a worker fixes the probe. A broken probe is never silent.
 
@@ -62,6 +68,11 @@ UNKNOWN_RC = 3
 STALE_WAKE_AFTER = 24 * 3600
 STALE_AGE_RE = re.compile(r"\bstale_age=(\d+)s\b")
 STALE_GATEWAY_RE = re.compile(r"\bgateway=(\S+)")
+# kanban_wait_replica.unknown_message: the owner published this board's scope as ``unknown``. [daveey]
+SOURCE_UNKNOWN_RE = re.compile(r"\bsource_state=unknown\b")
+SCOPE_UNKNOWN_REASON = "gateway_scope_unknown"
+# Escalations meaning "the producer's owner cannot vouch for its card": one acknowledges the other.
+SOURCE_UNAVAILABLE_REASONS = ("gateway_offline", SCOPE_UNKNOWN_REASON)
 GUARD_SECONDS = 2 * 3600
 OUTPUT_TAIL_CHARS = 500
 MAX_CMD_CHARS = 2000
@@ -96,6 +107,15 @@ def stale_age(rc: Any, out: str) -> Optional[int]:
         return None
     m = STALE_AGE_RE.search(out or "")
     return int(m.group(1)) if m else None
+
+
+def source_unknown(rc: Any, out: str) -> Optional[str]:
+    """The producer's gateway when this result is "owner scope unknown, not yet", else None. [daveey]"""
+    text = out or ""
+    if rc != UNKNOWN_RC or output_error(text) or STALE_AGE_RE.search(text) or not SOURCE_UNKNOWN_RE.search(text):
+        return None
+    m = STALE_GATEWAY_RE.search(text)
+    return (m.group(1).rstrip(",;)") or None) if m else None
 
 
 def output_error(out: str) -> Optional[str]:
@@ -148,8 +168,8 @@ def dry_run_error(cmd: Optional[str], *, cwd: Optional[str] = None, env: Optiona
     if rc == 0 and not output_error(out):
         return already_true_message(out, blocker_id=blocker_id)
     bad = None
-    if stale_age(rc, out) is not None:
-        return None  # unknown, not yet: the producer's gateway is offline right now
+    if stale_age(rc, out) is not None or source_unknown(rc, out):
+        return None  # unknown, not yet: the producer's gateway is offline or cannot read its board right now
     if not isinstance(rc, int) or rc >= 2:
         bad = f"exited {rc}"
     elif output_error(out):
@@ -678,10 +698,10 @@ def _remote_producer(gateway: str, ref: str, board: Optional[str]) -> tuple[int,
 def _remote_completed_at(gateway: str, ref: str, board: Optional[str]) -> Optional[int]:
     """The remote card's ``completed_at`` from this host's hermes-hub replica, when it has one. Best effort."""
     try:
-        from hermes_cli.kanban_wait_replica import StaleReplica, read_task
+        from hermes_cli.kanban_wait_replica import StaleReplica, UnknownScope, read_task
         try:
             task = read_task(gateway, ref, board=board)
-        except StaleReplica as exc:
+        except (StaleReplica, UnknownScope) as exc:
             task = exc.task
         value = task.get("completed_at")
         return int(value) if value else None
@@ -863,7 +883,8 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
             from hermes_cli.kanban_offline_backoff import recently_escalated
             m = STALE_GATEWAY_RE.search(out or "")
             gw = m.group(1).rstrip(",;)") if m else "the producer's gateway"
-            if age >= STALE_WAKE_AFTER and not recently_escalated(conn, task_id, cmd, gw, now, STALE_WAKE_AFTER):
+            if age >= STALE_WAKE_AFTER and not recently_escalated(conn, task_id, cmd, gw, now, STALE_WAKE_AFTER,
+                                                                  reasons=SOURCE_UNAVAILABLE_REASONS):
                 hours = age / 3600
                 return _wake(conn, task_id, BROKEN_EVENT, {
                     "wake_check": cmd, "rc": rc, "fails": 0, "output": tail, "reason": "gateway_offline",
@@ -872,6 +893,26 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                              "card's status is unknown. Check whether that machine is up, then re-check and park "
                              "again (or replan without it).")})
             # Not broken: the gateway is just offline. Keep any real-failure streak from before as it was.
+            conn.execute(
+                "UPDATE task_wake_checks SET last_at = ?, last_rc = ?, last_out = ?, "
+                "next_at = ? WHERE task_id = ?", (now, rc, tail, now + int(state["every"]), task_id))
+            _note_alive(conn, task_id, cmd, now)
+            return None
+        gw = source_unknown(rc, out)
+        if gw is not None:
+            # The owner is publishing but says it could not read this board: unknown, not yet, never "broken".
+            # Escalate once; while that (or an offline) escalation is under 24 h old the same probe stays parked.
+            from hermes_cli.kanban_offline_backoff import recently_escalated
+            if not recently_escalated(conn, task_id, cmd, gw, now, STALE_WAKE_AFTER,
+                                      reasons=SOURCE_UNAVAILABLE_REASONS):
+                return _wake(conn, task_id, BROKEN_EVENT, {
+                    "wake_check": cmd, "rc": rc, "fails": 0, "output": tail, "reason": SCOPE_UNKNOWN_REASON,
+                    "gateway": gw,
+                    "note": (f"Gateway {gw} is syncing but reports it could not read its board, so the producer "
+                             "card's status is unknown (its last-seen status is kept, not trusted). Check that "
+                             "gateway's Hermes runtime and hermes-hub collector, then re-check and park again on "
+                             "the same probe (identical unknown results are then held for 24 h), or replan.")})
+            # Same unchanged source state, already escalated: keep any real-failure streak as it was.
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = ?, last_out = ?, "
                 "next_at = ? WHERE task_id = ?", (now, rc, tail, now + int(state["every"]), task_id))
@@ -1029,6 +1070,9 @@ def _render_wake_context(conn: sqlite3.Connection, task_id: str) -> str:
                          "woke before its deadline. Its output:")
         elif payload.get("reason") == "gateway_offline":
             lines.append("## Woken because the producer's gateway is offline")
+            lines.append(f"{payload.get('note')} Probe: `{payload.get('wake_check')}`. Last output:")
+        elif payload.get("reason") == SCOPE_UNKNOWN_REASON:
+            lines.append("## Woken because the producer's gateway could not read its board")
             lines.append(f"{payload.get('note')} Probe: `{payload.get('wake_check')}`. Last output:")
         else:
             lines.append("## Woken because the wake check is broken")
