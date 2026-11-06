@@ -68,30 +68,58 @@ def replayable_completions(job_id, completions):
     return [eid for eid in completions or () if journal_path(job_id, eid).exists()]
 
 
+def _pause_unless_held(job_id, reason):
+    """An uncertain observer cannot replace a pause the operator already owns."""
+    from cron.jobs import _jobs_lock, get_job, pause_job
+    with _jobs_lock():
+        job = get_job(job_id)
+        if job is None or job.get('state') == 'paused':
+            return True
+        return _pause_identity(pause_job(job_id, reason=reason))
+
+
 def pause_for_unknown(job_id, execution_id, reason):
     """The firer pauses the job for this fire's unverified admission and records that exact pause
     on the fire's journal, so the receipt that later proves the run terminal can lift it."""
-    from cron.jobs import pause_job
     from utils import atomic_json_write
-    paused = pause_job(job_id, reason=reason)
+    paused = _pause_unless_held(job_id, reason)
     journal = journal_path(job_id, execution_id)
-    if paused and journal.exists():
+    if journal.exists():
         record = json.loads(journal.read_text(encoding='utf-8-sig'))
-        record['pause_recorded'] = _pause_identity(paused)
+        record.setdefault('pause_recorded', paused)
         atomic_json_write(journal, record, mode=0o600, fsync_dir=True)
 
 
 def _lift_pause(job_id, pause):
     """A verified terminal receipt resolved the uncertainty that paused the schedule: resume it iff
     the job is still held by exactly that pause (an operator's own pause/resume is never touched)."""
-    from cron.jobs import get_job, resume_job
-    job = get_job(job_id) if isinstance(pause, dict) else None
-    if (job is not None and job.get('state') == 'paused'
-            and (job.get('paused_at'), job.get('paused_reason')) == (pause['paused_at'], pause['reason'])):
-        try:
-            resume_job(job_id)
-        except ValueError:  # a one-shot whose instant has passed stays paused for the operator
-            pass
+    from cron.jobs import _jobs_lock, get_job, resume_job
+    with _jobs_lock():
+        job = get_job(job_id) if isinstance(pause, dict) else None
+        if (job is not None and job.get('state') == 'paused'
+                and (job.get('paused_at'), job.get('paused_reason')) == (pause['paused_at'], pause['reason'])):
+            try:
+                resume_job(job_id)
+            except ValueError:  # a one-shot whose instant has passed stays paused for the operator
+                pass
+
+
+def retire_terminal_journal(job_id, execution_id):
+    """Retire a terminal fire's uncertainty pause before discarding its recovery identity.
+
+    Called only after terminal bookkeeping, never to replay output or retry the old fire.
+    Keep the journal if lifting the pause fails so a later reconciliation can retry.
+    """
+    journal = journal_path(job_id, execution_id)
+    try:
+        record = json.loads(journal.read_text(encoding='utf-8-sig'))
+    except FileNotFoundError:
+        return
+    params = record['params']
+    if (params['job_id'], params['request_id']) != (job_id, execution_id):
+        raise ValueError('cron journal identity conflict')
+    _lift_pause(job_id, record.get('pause_recorded'))
+    journal.unlink(missing_ok=True)
 
 
 def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id=None):
@@ -217,7 +245,7 @@ def reconcile_pending(*, allow_connect=True):
     from hermes_constants import get_hermes_home
     from hermes_cli.gateway_client import connect_gateway
     from cron.executions import FIRER_FINISHED_STATES, execution_owner_live, get_execution
-    from cron.jobs import get_job, pause_job
+    from cron.jobs import get_job
     from cron.scheduler import (_RunDelivery, _FireOwnership, _apply_agent_failure_marker,
                                 _save_compose_deliver)
     from cron.scheduler_bookkeeping import fail_empty_response, finish_completed_run
@@ -238,8 +266,8 @@ def reconcile_pending(*, allow_connect=True):
             row = get_execution(params['request_id'])
             if row is not None and row['job_id'] == params['job_id'] and row['status'] in FIRER_FINISHED_STATES:
                 # The firer booked this attempt's terminal outcome itself (ownership lost, shutdown
-                # interrupt, a crashed tail): the receipt is not a result to save or deliver again.
-                journal.unlink(missing_ok=True)
+                # interrupt, a crashed tail): lift only its own pause, never save or deliver again.
+                retire_terminal_journal(params['job_id'], params['request_id'])
                 continue
             if 'refusal' in record:
                 state = {'status': 'terminal', 'result': record['refusal'], 'job': record['job']}
@@ -269,7 +297,7 @@ def reconcile_pending(*, allow_connect=True):
             if state['status'] != 'terminal':
                 if state['status'] == 'unknown' and not record.get('pause_recorded'):
                     reason = 'Canonical cron unknown; no automatic re-execution'
-                    record['pause_recorded'] = _pause_identity(pause_job(params['job_id'], reason=reason))
+                    record['pause_recorded'] = _pause_unless_held(params['job_id'], reason)
                     atomic_json_write(journal, record, mode=0o600, fsync_dir=True)
                 continue
             success, output, answer, error = state['result']
@@ -285,7 +313,6 @@ def reconcile_pending(*, allow_connect=True):
             _save_compose_deliver(delivery, fence, answer, output, adapters=None, loop=None,
                                  verbose=False, execution_token=None)
             fail_empty_response(delivery, answer)
-            if finish_completed_run(delivery, None, params['request_id'], recovered=True):
-                _lift_pause(params['job_id'], record.get('pause_recorded'))
+            finish_completed_run(delivery, None, params['request_id'], recovered=True)
         except Exception:
             logging.getLogger(__name__).warning('Cron receipt recovery deferred: %s', journal, exc_info=True)

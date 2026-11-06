@@ -61,8 +61,7 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
         update_job(job["id"], {"last_delivery_queued": None})
         job["last_delivery_queued"] = None
     mark_kwargs: dict = {"delivery_error": d.delivery_error}
-    from cron.scheduler_authority import journal_path
-    journal = journal_path(job['id'], execution_id)
+    from cron.scheduler_authority import retire_terminal_journal
     if not job.get('no_agent'):
         mark_kwargs['execution_id'] = execution_id
     if not d.success and job.pop("_model_unreachable", False):
@@ -139,5 +138,8 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
     if job.get("last_delivery_queued"):
         # A drain that settled before this run's own bookkeeping landed found nothing to fence on.
         settle_quietly(job["id"], execution_id)
-    journal.unlink(missing_ok=True)
+    try:
+        retire_terminal_journal(job['id'], execution_id)
+    except (OSError, ValueError, KeyError, TypeError):
+        scheduler.logger.warning('Cron terminal pause retirement deferred: %s', execution_id, exc_info=True)
     return True
