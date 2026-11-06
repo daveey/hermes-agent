@@ -23,7 +23,7 @@ from tests.gateway.test_duplicate_user_message import _bootstrap, _event, _sourc
 _SESSION_KEY = "agent:main:telegram:group:-1001:12345"
 
 
-async def _gateway_refusal(monkeypatch, tmp_path, *, partial, category):
+async def _gateway_refusal(monkeypatch, tmp_path, *, partial, category, footer=""):
     """Run the real refusal handler against a real db, then the gateway turn that delivers it."""
     agent = _agent()
     db, working = _db_with_refused_turn(tmp_path, partial)
@@ -40,6 +40,8 @@ async def _gateway_refusal(monkeypatch, tmp_path, *, partial, category):
         {"retained": True} if retain_refused_turn_for_display(
             db, "s", notice=notice, boundary_row_id=boundary_row_id) else None)
     runner._run_agent = AsyncMock(return_value=result)
+    if footer:
+        runner._hmwa_runtime_footer_line = lambda *a, **k: footer
     response = await runner._handle_message_with_agent(_event(), _source(), _SESSION_KEY, 1)
     assert isinstance(response, str)
     return db, runner, response
@@ -115,3 +117,29 @@ def test_other_failures_keep_the_message_scan_notice(monkeypatch, tmp_path, mess
         {"failed": True, "failure_reason": "server_error", "messages": messages, "history_offset": 0}) == expected
     assert runner._hmwa_add_failed_turn_notice(
         f"x\n\n{REFUSED_TURN_ACTIONS_WARNING}", expected) == f"x\n\n{REFUSED_TURN_ACTIONS_WARNING}\n\n{expected}"
+
+
+_FOOTER = "model: test-model | ctx 0%"
+
+
+@pytest.mark.asyncio
+async def test_footer_enabled_partial_refusal_shows_the_warning_once(monkeypatch, tmp_path):
+    """The runtime footer is appended AFTER the failed-turn notice, so the body's own warning is still
+    its last text when the notice dedups it: one warning, one footer, footer last."""
+    db, _runner, response = await _gateway_refusal(
+        monkeypatch, tmp_path, partial=True, category="general_harms", footer=_FOOTER)
+    try:
+        stored = _display(db)[-1]["display_metadata"][CONTENT_REFUSED_METADATA_KEY]["notice"]
+        assert response.count(REFUSED_TURN_ACTIONS_WARNING) == 1, response
+        assert response.count(_FOOTER) == 1 and response.endswith(f"{stored}\n\n{_FOOTER}"), response
+        assert "safety filter refused" in response and "not processed" not in response
+    finally:
+        db.close()
+
+
+def test_add_notice_keeps_a_body_that_does_not_end_with_the_warning(monkeypatch, tmp_path):
+    """Only a body ENDING with the warning is trimmed; a notice ending with it alone changes nothing."""
+    runner = _bootstrap(monkeypatch, tmp_path)
+    body = "provider guidance that is long enough to be truncated if the guard were dropped"
+    notice = f"{CONTENT_REFUSED_NOTICE} {REFUSED_TURN_ACTIONS_WARNING}"
+    assert runner._hmwa_add_failed_turn_notice(body, notice) == f"{body}\n\n{notice}"
