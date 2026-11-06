@@ -18,13 +18,15 @@ def _paused_fire(job):
     return fire, journal
 
 
+@pytest.mark.parametrize('cancelled', [False, True])
 @pytest.mark.parametrize('operator_hold', [False, True])
-def test_firer_finished_recovery_retires_only_its_pause(tmp_path, monkeypatch, operator_hold):
+def test_firer_finished_recovery_retires_only_its_pause(tmp_path, monkeypatch, operator_hold, cancelled):
     with jobs.use_cron_store(tmp_path / 'cron'):
         job = jobs.create_job(prompt='report', schedule='every 1h', deliver='local')
         fire, journal = _paused_fire(job)
-        executions.finish_execution(fire, success=False, error='stopped')
+        executions.finish_execution(fire, success=False, error='stopped', cancelled=cancelled)
         before = executions.get_execution(fire)
+        assert before['status'] == ('cancelled' if cancelled else 'failed')
         if operator_hold:
             jobs.pause_job(job['id'], reason='operator hold')
         monkeypatch.setattr(scheduler, '_save_compose_deliver',
