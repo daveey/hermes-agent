@@ -243,10 +243,12 @@ class SnapshotMixin:
                 line.strip() for line in reason.splitlines() if line.strip()
             ) + cm._uncaptured_note(nested_repos)
 
-        # Build commit (parent = current ref tip, if any).
-        commit_args = ["commit-tree", tree_sha, "-m", reason, "--no-gpg-sign"]
+        # Build commit (parent = current ref tip, if any). The body's exact take time lets a whole-tree
+        # /rollback tell a turn after the snapshot from one before it in the same git second.
+        message = f"{reason}\n\n{cm.TAKEN_AT_TRAILER}: {time.time():.6f}"
+        commit_args = ["commit-tree", tree_sha, "-m", message, "--no-gpg-sign"]
         if has_ref:
-            commit_args = ["commit-tree", tree_sha, "-p", ref_commit, "-m", reason, "--no-gpg-sign"]
+            commit_args = ["commit-tree", tree_sha, "-p", ref_commit, "-m", message, "--no-gpg-sign"]
         ok_commit, new_sha, err = cm._run_git(
             commit_args, store, working_dir,
             index_file=index_file,

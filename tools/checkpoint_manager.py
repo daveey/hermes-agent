@@ -89,6 +89,8 @@ def _resolve_checkpoint_base() -> Path:
 # Single shared store directory under CHECKPOINT_BASE.
 _STORE_DIRNAME = "store"
 _REFS_PREFIX = "refs/hermes"
+# Commit-body line carrying a snapshot's exact take time (listings read only the subject).
+TAKEN_AT_TRAILER = "Hermes-Taken-At"
 _INDEXES_DIRNAME = "indexes"
 _PROJECTS_DIRNAME = "projects"
 _LEDGERS_DIRNAME = "ledgers"

@@ -5,7 +5,7 @@
 // plain `check` gives that. This is the same selection rule the old CI matrix
 // used, so the set of commands is unchanged. Only the schedule is different.
 //
-// This is not `npm run --ws check`, because that command is serial and stops
+// This is not `pnpm -r run check`, because that command stops
 // at the first workspace that fails. This runs every unit and fails at the
 // end with the full list.
 //
@@ -21,27 +21,37 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { availableParallelism, tmpdir, totalmem } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 
 import { memoryBudgetMiB, oomKills, schedule, unitsOf } from './workspace-check-admission.mjs'
 import { readCounters, startStallProbe, summarize } from './workspace-check-stall-probe.mjs'
 import { temporaryMemoryMiB } from './workspace-check-temp-memory.mjs'
 
 const IS_CI = Boolean(process.env.GITHUB_ACTIONS)
-const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+const PNPM = 'pnpm'
 
 /** @typedef {import('./workspace-check-admission.mjs').Unit} Unit */
 
 /** @returns {Unit[]} */
 function discoverUnits() {
-  const raw = execFileSync(NPM, ['query', '.workspace'], {
+  const raw = execFileSync(PNPM, ['ls', '--recursive', '--depth', '-1', '--json'], {
     encoding: 'utf-8',
     shell: process.platform === 'win32',
   })
-  // `npm query` returns the standard manifest fields only, so the memory map
-  // is read from the package.json itself.
-  return unitsOf(JSON.parse(raw), (pkg) =>
-    JSON.parse(readFileSync(join(pkg.path || pkg.location, 'package.json'), 'utf-8')).checkMemoryMiB,
+  /** @type {{path: string}[]} */
+  const projects = JSON.parse(raw)
+  const root = process.cwd()
+
+  const packages = []
+  for (const project of projects) {
+    const location = relative(root, project.path).split('\\').join('/')
+    // The root's `check` runs every workspace's check: it is not a unit.
+    if (!location) continue
+    packages.push({ ...JSON.parse(readFileSync(join(project.path, 'package.json'), 'utf-8')), location })
+  }
+  // pnpm's listing omits scripts and memory declarations; read both from manifests.
+  return unitsOf(packages, (pkg) =>
+    JSON.parse(readFileSync(join(root, pkg.location, 'package.json'), 'utf-8')).checkMemoryMiB,
   )
 }
 
@@ -89,7 +99,7 @@ function tmpMount() {
 function runUnit(unit) {
   return new Promise((resolve) => {
     const started = Date.now()
-    const child = spawn(NPM, ['run', '--prefix', unit.pkg, unit.script], {
+    const child = spawn(PNPM, ['--dir', unit.pkg, 'run', unit.script], {
       // Buffer, and do not inherit. Children that share one stdout
       // interleave their lines, and a failure is then hard to read.
       stdio: ['ignore', 'pipe', 'pipe'],

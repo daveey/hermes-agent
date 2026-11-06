@@ -133,6 +133,52 @@ describe('slash output face', () => {
 
     expect(body(container)?.className).toContain('font-mono')
   })
+
+  it('centers a single-line status inline after the command', () => {
+    const { container } = render(<Harness text={'slash:/model\n  model → x  '} />)
+    const row = container.querySelector('[data-role="system"]')
+
+    expect(row?.className).toContain('text-center')
+    expect(row?.querySelector('.font-mono')?.textContent).toBe('/model')
+    expect(row?.textContent).toContain('·model → x')
+  })
+})
+
+describe('prefixed system notes', () => {
+  it('renders a review note as memory chrome with trimmed label and detail', () => {
+    const { container } = render(<Harness text="review: Memory updated :  saved 2 facts " />)
+    const row = container.querySelector('[data-role="system"]')
+
+    expect(row?.querySelector('.tool-memory-legendary-title')?.textContent).toBe('Memory updated')
+    expect(row?.querySelector('.tool-memory-legendary-meta')?.textContent).toBe('saved 2 facts')
+  })
+
+  it('omits the review detail span when there is no detail', () => {
+    const { container } = render(<Harness text="review:Skill saved" />)
+    const row = container.querySelector('[data-role="system"]')
+
+    expect(row?.querySelector('.tool-memory-legendary-title')?.textContent).toBe('Skill saved')
+    expect(row?.querySelector('.tool-memory-legendary-meta')).toBeNull()
+  })
+
+  it('renders a steer note with its trimmed text', () => {
+    const { container } = render(<Harness text="steer:  rerun tests  " />)
+    const row = container.querySelector('[data-role="system"]')
+
+    expect(row?.textContent).toContain('steered·rerun tests')
+  })
+
+  it('left-aligns a multiline plain note', () => {
+    const { container } = render(<Harness text={'line one\nline two'} />)
+
+    expect(container.querySelector('[data-role="system"]')?.className).toContain('text-left')
+  })
+
+  it('renders nothing for an empty system message', () => {
+    const { container } = render(<Harness text="" />)
+
+    expect(container.querySelector('[data-role="system"]')).toBeNull()
+  })
 })
 
 // [daveey] session-outcome: a blocked-card notice whose card has since left `blocked` stays in the transcript,
