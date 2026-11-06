@@ -13,6 +13,7 @@ next ``hermes chat``, a respawned backend) does not pay for the same folder agai
 """
 from __future__ import annotations
 
+import fnmatch
 import heapq
 import json
 import logging
@@ -70,21 +71,63 @@ class TreeScan:
         return ", ".join(f"{rel} ({size / 1048576:.1f} MB)" for size, rel in self.biggest) or "none"
 
 
-def scan_tree(path: str, cap_bytes: int, max_entries: int) -> TreeScan:
+def _has_negation(gitignore: Path) -> bool:
+    """True when a ``.gitignore`` holds a ``!`` re-include: it may override the store's excludes."""
+    try:
+        text = gitignore.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return True  # unreadable: assume it could re-include, never prune under it
+    return any(line.lstrip().startswith("!") for line in text.splitlines())
+
+
+def scan_tree(
+    path: str, cap_bytes: int, max_entries: int, *,
+    excludes: tuple[str, ...] = (), skip: frozenset[str] = frozenset(),
+) -> TreeScan:
     """Walk ``path`` once: count entries (stop past ``max_entries``), collect files over ``cap_bytes``
     (0 = no cap) as POSIX paths relative to ``path``, and keep the 3 biggest files for the logs.
+
+    ``skip`` holds relative POSIX paths git is told never to stage (the checkpoint store nested in
+    the tree): they are neither walked nor counted. ``excludes`` are gitignore-style name patterns
+    (the store's ``info/exclude``; a trailing ``/`` means directories only) pruned the way git
+    applies them, so an excluded ``node_modules/`` is not walked. A subtree under a ``.gitignore``
+    with a ``!`` re-include is walked in full: git may stage what the patterns name there.
 
     Symlinks are not followed (git stages the link, not its target)."""
     scan = TreeScan()
     root = Path(path)
     heap: list[tuple[int, str]] = []
+    dir_patterns = tuple(p[:-1] for p in excludes if p.endswith("/"))
+    file_patterns = tuple(p for p in excludes if not p.endswith("/"))
+    unprunable: set[str] = set()  # dirpaths under a re-including .gitignore
+
+    def excluded(name: str, patterns: tuple[str, ...]) -> bool:
+        return any(fnmatch.fnmatchcase(name, p) for p in patterns)
+
     try:
         for dirpath, dirnames, filenames in os.walk(root):
+            rel_dir = Path(dirpath).relative_to(root).as_posix()
+            prefix = "" if rel_dir == "." else rel_dir + "/"
+            if skip:
+                dirnames[:] = [d for d in dirnames if prefix + d not in skip]
+                filenames = [f for f in filenames if prefix + f not in skip]
+            if ".git" in dirnames:
+                dirnames.remove(".git")
+            if excludes:
+                parent = str(Path(dirpath).parent)
+                prune = not (
+                    (dirpath != str(root) and parent in unprunable)
+                    or (".gitignore" in filenames and _has_negation(Path(dirpath) / ".gitignore"))
+                )
+                if prune:
+                    # git applies slash-less patterns (``*.log``) to directories too
+                    dirnames[:] = [d for d in dirnames if not excluded(d, dir_patterns + file_patterns)]
+                    filenames = [f for f in filenames if not excluded(f, file_patterns)]
+                else:
+                    unprunable.add(dirpath)
             scan.count += len(dirnames) + len(filenames)
             if scan.count > max_entries:
                 break
-            if ".git" in dirnames:
-                dirnames.remove(".git")
             for name in filenames:
                 full = Path(dirpath) / name
                 try:
@@ -93,7 +136,7 @@ def scan_tree(path: str, cap_bytes: int, max_entries: int) -> TreeScan:
                     continue
                 if not stat.S_ISREG(st.st_mode):
                     continue
-                rel = full.relative_to(root).as_posix()
+                rel = prefix + name
                 if cap_bytes > 0 and st.st_size > cap_bytes:
                     scan.oversize.append(rel)
                 else:
@@ -106,6 +149,29 @@ def scan_tree(path: str, cap_bytes: int, max_entries: int) -> TreeScan:
         pass
     scan.biggest = sorted(heap, reverse=True)
     return scan
+
+
+def add_tracked(scan: TreeScan, root: str, tracked: list[str], cap_bytes: int) -> None:
+    """Price and size-cap index entries the pruned walk did not see.
+
+    ``add -A`` re-reads every path already in the index whatever the excludes say, so a tracked
+    file inside a pruned directory must still reach ``oversize`` before git hashes it."""
+    seen = set(scan.files) | set(scan.oversize)
+    base = Path(root)
+    for rel in tracked:
+        if rel in seen:
+            continue
+        try:
+            st = (base / rel).lstat()
+        except (OSError, ValueError):
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        if cap_bytes > 0 and st.st_size > cap_bytes:
+            scan.oversize.append(rel)
+        else:
+            scan.files[rel] = (st.st_size, st.st_mtime)
+        seen.add(rel)
 
 
 _GITIGNORE_SPECIAL = re.compile(r"([\\*?\[\]!#])")
@@ -134,6 +200,25 @@ def write_oversize_excludes(store: Path, dir_hash: str, oversize: list[str]) -> 
         path.write_bytes(b"".join(os.fsencode(line) + b"\n" for line in lines))
     except (OSError, UnicodeError) as exc:
         logger.warning("Checkpoint: could not write oversize excludes %s: %s", path, exc)
+        return None
+    return path
+
+
+def write_oversize_pathspec(store: Path, dir_hash: str, paths: list[str]) -> Optional[Path]:
+    """Write the NUL-separated literal exclude pathspecs ``git add`` reads via ``--pathspec-from-file``.
+
+    The excludes file alone loses to a project ``.gitignore`` re-include (``*.bin`` then
+    ``!weights.bin``): git then opens the oversize file and runs its clean filter. An exclude
+    pathspec is not a gitignore rule, so nothing in the tree can override it, and ``literal``
+    keeps any name (glob characters, leading/trailing spaces, newlines) exact.
+    """
+    path = store / "info" / f"oversize-{dir_hash}.pathspec"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # fsencode: POSIX names need not be UTF-8 (surrogate-escaped here).
+        path.write_bytes(b"".join(os.fsencode(f":(exclude,top,literal){rel}") + b"\0" for rel in paths))
+    except (OSError, UnicodeError) as exc:
+        logger.warning("Checkpoint: could not write oversize pathspec %s: %s", path, exc)
         return None
     return path
 

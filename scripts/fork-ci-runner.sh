@@ -7,20 +7,21 @@
 # runners; decision in hosts/hermes-hub/gh-runner/README.md "macOS / Windows").
 set -euo pipefail
 cd "$(dirname "$0")/../.github/workflows"
+# Upstream's Linux labels: GitHub-hosted ubuntu-latest(-32-core)/ubuntu-24.04 and
+# Blacksmith blacksmith-<N>vcpu-ubuntu-2404 (never the -arm variant: no arm64 runner).
+# The cheap repository guards are steps of ONE repo-guards.yml job (upstream
+# consolidation); it runs `docker run` (hadolint), so it is a DOCKER_FILES entry below.
+UPSTREAM_LINUX='ubuntu-latest(-32-core)?|ubuntu-24\.04|blacksmith-[0-9]+vcpu-ubuntu-2404'
 FILES=(ci.yaml tests.yml lint.yml js-tests.yml rust-tests.yml remote-backends.yml
   bootstrap-installer.yml e2e-desktop-core.yml e2e-desktop-update.yml
-  docs-site-checks.yml history-check.yml contributor-check.yml
-  uv-lockfile-check.yml infographic-check.yml profile-artifact-check.yml
-  icons-freshness-check.yml case-collision-check.yml blob-size-check.yml
-  lazy-deps-guard.yml lockfile-diff.yml prompt-surface-diff.yml
-  docker-lint.yml supply-chain-audit.yml)
-sed -i.bak -E 's/^([[:space:]]*runs-on:[[:space:]]*)(ubuntu-latest(-32-core)?|ubuntu-24\.04)[[:space:]]*$/\1[self-hosted, hermes-hub]/' "${FILES[@]}"
+  docs-site-checks.yml)
+sed -i.bak -E "s/^([[:space:]]*runs-on:[[:space:]]*)(${UPSTREAM_LINUX})[[:space:]]*\$/\\1[self-hosted, hermes-hub]/" "${FILES[@]}"
 rm -f ./*.bak
 
 # Long-lived pollers go to the poll-only runners (label `hermes-hub-poll` ONLY,
 # 0.5 CPU each; hosts/hermes-hub/gh-runner/ci-slice.sh install-poll), so they
 # never hold one of the test runners.
-sed -i.bak -E 's/^([[:space:]]*runs-on:[[:space:]]*)(\[self-hosted, hermes-hub\]|ubuntu-latest|ubuntu-24\.04)[[:space:]]*$/\1[self-hosted, hermes-hub-poll]/' ci-review-comment.yml
+sed -i.bak -E "s/^([[:space:]]*runs-on:[[:space:]]*)(\\[self-hosted, hermes-hub\\]|${UPSTREAM_LINUX})[[:space:]]*\$/\\1[self-hosted, hermes-hub-poll]/" ci-review-comment.yml
 rm -f ./*.bak
 
 # Aggregator/report jobs run on the bounded ci-fast lane, never the
@@ -35,28 +36,18 @@ rm -f ./*.bak
 # (checkout 52s + compare-API retry), which skipped every lane.
 python3 - <<'PY'
 import re
+# Upstream folded the timing report into all-checks-pass (trailing advisory steps)
+# and the supply-chain jobs into repo-guards.yml steps, so the gate is the only
+# completion job left. The combined lint.yml job (20 min, includes the full-tree
+# ruff + ty diff) and repo-guards (15 min, docker run) are not light jobs.
 COMPLETION = {
-    'ci.yaml': ('all-checks-pass', 'ci-timings'),
-    'supply-chain-audit.yml': ('aggregate',),
+    'ci.yaml': ('all-checks-pass',),
 }
 FAST = {
     # macos-state-required is FAST but not COMPLETION: it keeps always() so a
     # skipped or cancelled macOS lane still fails the required check.
-    'ci.yaml': ('detect', 'all-checks-pass', 'ci-timings', 'macos-state-required'),
+    'ci.yaml': ('detect', 'all-checks-pass', 'macos-state-required'),
     'actionlint.yml': ('actionlint',),
-    'lint.yml': ('ruff-blocking', 'code-health', 'windows-footguns'),
-    'case-collision-check.yml': ('check-case-collisions',),
-    'infographic-check.yml': ('check-no-committed-infographics',),
-    'blob-size-check.yml': ('check-blob-size',),
-    'profile-artifact-check.yml': ('check-profile-artifacts',),
-    'lazy-deps-guard.yml': ('lazy-deps-guard',),
-    'history-check.yml': ('check-common-ancestor',),
-    'contributor-check.yml': ('check-attribution',),
-    'uv-lockfile-check.yml': ('check',),
-    'icons-freshness-check.yml': ('check',),
-    'lockfile-diff.yml': ('diff',),
-    'prompt-surface-diff.yml': ('diff',),
-    'supply-chain-audit.yml': ('scan', 'dep-bounds', 'aggregate'),
 }
 for f in sorted(set(COMPLETION) | set(FAST)):
     t = open(f).read()
@@ -67,7 +58,7 @@ for f in sorted(set(COMPLETION) | set(FAST)):
         new = block
         if name in COMPLETION.get(f, ()):
             new = re.sub(r'(?m)^(    if: )always\(\)$', r"\1${{ !cancelled() }}", new)
-        new = re.sub(r'(?m)^(    runs-on: )(?:\[self-hosted, (?:hermes-hub(?:-poll)?|ci-fast)\]|ubuntu-latest|ubuntu-24\.04)$',
+        new = re.sub(r'(?m)^(    runs-on: )(?:\[self-hosted, (?:hermes-hub(?:-poll)?|ci-fast)\]|ubuntu-latest|ubuntu-24\.04|blacksmith-[0-9]+vcpu-ubuntu-2404)$',
                      r'\1[self-hosted, ci-fast]', new)
         t = t.replace(block, new)
     if f == 'ci.yaml':
@@ -80,8 +71,8 @@ PY
 # ONLY, so plain [self-hosted, hermes-hub] jobs never land on them;
 # hosts/hermes-hub/gh-runner/setup-ci-docker.sh). Plain ubuntu jobs above stay
 # on the socket-less runners.
-DOCKER_FILES=(docker-lint.yml remote-backends.yml docker.yml nix.yml sandbox-image.yml)
-sed -i.bak -E 's/^([[:space:]]*runs-on:[[:space:]]*)(\[self-hosted, hermes-hub(, docker)?\]|ubuntu-latest(-32-core)?|ubuntu-24\.04)[[:space:]]*$/\1[self-hosted, docker-ci]/' "${DOCKER_FILES[@]}"
+DOCKER_FILES=(repo-guards.yml remote-backends.yml docker.yml nix.yml sandbox-image.yml)
+sed -i.bak -E "s/^([[:space:]]*runs-on:[[:space:]]*)(\\[self-hosted, hermes-hub(, docker)?\\]|${UPSTREAM_LINUX})[[:space:]]*\$/\\1[self-hosted, docker-ci]/" "${DOCKER_FILES[@]}"
 # Matrix-driven image builds: amd64 -> docker-ci runner; no arm64 runner, so
 # drop the arm64 leg; let the secret-free build/test jobs run on the fork
 # (publish/merge jobs stay NousResearch-only: they need Docker Hub secrets).
@@ -89,11 +80,11 @@ python3 - <<'PY'
 import re
 for f in ('docker.yml', 'sandbox-image.yml'):
     t = open(f).read()
-    t = re.sub(r"runner: ubuntu-latest-32-core\n", "runner: docker-ci\n", t)
+    t = re.sub(r"runner: (?:ubuntu-latest-32-core|blacksmith-[0-9]+vcpu-ubuntu-2404)\n", "runner: docker-ci\n", t)
     t = re.sub(r"( *)arch: \[amd64, arm64\]\n", r"\1arch: [amd64]  # fork: no arm64 runner\n", t)
-    t = re.sub(r"(?:          #[^\n]*\n)*          - arch: arm64\n            runner: ubuntu-latest-32-arm-core\n            platform: linux/arm64\n", "", t)
-    t = t.replace("((needs.mode.outputs.release != 'true' && github.repository == 'NousResearch/hermes-agent' && needs.detect.outputs.build",
-                  "((needs.mode.outputs.release != 'true' && (github.repository == 'NousResearch/hermes-agent' || github.repository == 'daveey/hermes') && needs.detect.outputs.build")
+    t = re.sub(r"(?:          #[^\n]*\n)*          - arch: arm64\n            runner: (?:ubuntu-latest-32-arm-core|blacksmith-[0-9]+vcpu-ubuntu-2404-arm)\n            platform: linux/arm64\n", "", t)
+    t = re.sub(r"\(\(needs\.mode\.outputs\.release != 'true' && github\.repository == 'NousResearch/hermes-agent' && needs\.(detect|mode)\.outputs\.build",
+               r"((needs.mode.outputs.release != 'true' && (github.repository == 'NousResearch/hermes-agent' || github.repository == 'daveey/hermes') && needs.\1.outputs.build", t)
     t = t.replace("  build:\n    if: github.repository == 'NousResearch/hermes-agent'\n",
                   "  build:\n    if: github.repository == 'NousResearch/hermes-agent' || github.repository == 'daveey/hermes'\n")
     # One shared hub (not a 32-core hosted runner): a cold amd64 image build

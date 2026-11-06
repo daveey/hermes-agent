@@ -6,23 +6,43 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.session_policy import build_policy
-from hermes_cli import main, main_tui_launch, oneshot
+from hermes_cli import main, main_tui_launch, gateway_chat
 from hermes_cli.gateway_chat import _requested_policy
 
 
 @pytest.mark.parametrize('value', ['', ' , ', [], ['']])
-def test_legacy_oneshot_preserves_empty_pick(monkeypatch, value):
+@pytest.mark.asyncio
+async def test_gateway_oneshot_preserves_empty_pick(monkeypatch, tmp_path, value):
+    from contextlib import asynccontextmanager
+    from hermes_cli.gateway_chat_view import GatewayChatView
     captured = {}
 
-    def run(prompt, **kwargs):
-        captured.update(kwargs)
-        return 'no tools', {'completed': True}
+    class Peer:
+        async def rpc(self, method, **params):
+            if method == 'runtime.describe':
+                return {'session_create': {'sources': ['oneshot'],
+                        'parameters': ['source', 'cwd', 'toolsets']}}
+            assert method == 'session.create'
+            captured.update(params)
+            policy = build_policy(params, {'platform_toolsets': {'cli': ['web']}}, profile_terminal=False)
+            assert policy.toolsets == ()
+            return {'stored_session_id': 'empty-tools'}
 
-    monkeypatch.setattr(oneshot, '_run_agent', run)
-    monkeypatch.setattr(oneshot, '_silence_console_log_handlers', lambda: None)
-    assert oneshot.run_oneshot('list tools', toolsets=value) == 0
+    @asynccontextmanager
+    async def connected():
+        yield Peer()
+
+    async def rendered(self, query, *, oneshot):
+        assert query == 'list tools' and oneshot and self.quiet
+        return 0
+
+    monkeypatch.setattr(gateway_chat, 'connect_gateway', connected)
+    monkeypatch.setattr(GatewayChatView, 'run', rendered)
+    args = main._light_chat_parser().parse_args(['-z', 'list tools'])
+    args.toolsets = value  # also exercise cli.main's programmatic list form
+    args.in_dir = str(tmp_path)
+    assert await gateway_chat.run_gateway_chat(args) == 0
     assert captured['toolsets'] == []
-    assert captured['use_config_toolsets'] is False
 
 
 @pytest.mark.parametrize('explicit', [False, True])

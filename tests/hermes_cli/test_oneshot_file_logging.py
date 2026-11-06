@@ -1,71 +1,29 @@
-"""``hermes -z`` keeps writing agent.log while keeping the console clean.
+"""The real ``hermes -z`` client keeps stdout clean; its gateway logs the actual turn.
 
-``run_oneshot`` used to call ``logging.disable(logging.CRITICAL)``. That short-circuits
-``Logger.isEnabledFor`` for every logger, so the file handlers from ``setup_logging()`` never saw
-a record either: one-shot turns left no ``conversation turn`` / ``API call #N`` / ``Turn ended``
-line in agent.log, and provider audits that read it could not see them. Only console handlers
-may be silenced; stdout stays exactly the reply and stderr carries no log text.
+The former test patched an in-process runner no production entry point used. Exercise
+CLI -> gateway -> loopback provider instead: a reply alone cannot prove file logging.
 """
+import subprocess
+import sys
 
-import logging
-from unittest import mock
+from tests.gateway.test_unified_gateway_native_live import ROOT, daemon
 
-import pytest
-
-import hermes_logging
-from hermes_cli import oneshot
-
-_MARK = "oneshot-file-logging-probe API call #1: model=fake provider=fake"
+pytest_plugins = ["tests.gateway.test_unified_gateway_native_live"]  # its ``harness`` and ``peer`` fixtures
 
 
-@pytest.fixture
-def file_logged_home(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
-    home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
-    root = logging.getLogger()
-    saved_level, saved_handlers = root.level, list(root.handlers)
-    saved_disable = logging.root.manager.disable
-    saved_last_resort = logging.lastResort
-    hermes_logging._reset_queued_handlers()
-    hermes_logging._logging_initialized = False
-    logging.disable(logging.NOTSET)
-    hermes_logging.setup_logging(hermes_home=home, force=True)
-    try:
-        yield home
-    finally:
-        hermes_logging._reset_queued_handlers()
-        hermes_logging._logging_initialized = False
-        for h in list(root.handlers):
-            if h not in saved_handlers:
-                root.removeHandler(h)
-        root.setLevel(saved_level)
-        logging.disable(saved_disable)
-        logging.lastResort = saved_last_resort
-
-
-def test_oneshot_logs_reach_agent_log_but_not_console(file_logged_home, capfd):
-    # A console handler like the one ``--verbose`` / a library basicConfig would attach, bound to
-    # the real stderr before run_oneshot's redirect takes effect.
-    console = logging.StreamHandler()
-    console.setLevel(logging.DEBUG)
-    logging.getLogger().addHandler(console)
-    module_logger = logging.getLogger("run_agent.oneshot_probe")
-
-    def fake_agent(*_a, **_kw):
-        module_logger.info(_MARK)
-        return "the reply", {"final_response": "the reply", "completed": True, "failed": False}
-
-    try:
-        with mock.patch.object(oneshot, "_run_agent", side_effect=fake_agent):
-            code = oneshot.run_oneshot("q")
-        hermes_logging.flush_log_queue()
-    finally:
-        logging.getLogger().removeHandler(console)
-
-    out, err = capfd.readouterr()
-    assert code == 0
-    assert out == "the reply\n"
-    assert _MARK not in err and err == ""
-    agent_log = (file_logged_home / "logs" / "agent.log").read_text(encoding="utf-8")
-    assert _MARK in agent_log
+def test_oneshot_logs_reach_agent_log_but_not_console(harness):
+    home, env = harness['home'], harness['env']
+    with daemon(home, env, 'oneshot-gateway.log'):
+        result = subprocess.run(
+            [sys.executable, '-m', 'hermes_cli.main', '-z', 'FILE_LOGGING_PROBE',
+             '--in', str(harness['work']), '-t', ''],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=90, check=False,
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert result.stdout == 'NATIVE_ACK_FILE_LOGGING_PROBE\n'
+        assert result.stderr == ''
+        assert any(r['text'] == 'FILE_LOGGING_PROBE' for r in harness['peer'].requests)
+    agent_log = (home / 'logs' / 'agent.log').read_text(encoding='utf-8')
+    assert 'API call #1' in agent_log
+    assert 'native-model' in agent_log
+    assert 'Turn ended' in agent_log

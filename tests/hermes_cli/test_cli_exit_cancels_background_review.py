@@ -141,33 +141,42 @@ def test_interactive_cli_agent_keeps_background_review(monkeypatch):
     assert not _cli_capturing_agent_kwargs(monkeypatch, single_query=False).get("skip_background_review")
 
 
-def test_oneshot_z_agent_skips_background_review(monkeypatch):
-    import hermes_cli.oneshot as oneshot_mod
+def _gateway_built_agent_kwargs(monkeypatch, tmp_path, source):
+    """The kwargs the gateway's in-process turn hands ``AIAgent`` for a session created with *source*.
 
-    captured = {}
+    ``hermes -z`` runs through the gateway (``_run_oneshot_from_args`` -> ``launch_gateway_chat``),
+    which creates the session with ``source='oneshot'``; the agent is built gateway-side by
+    ``GatewaySessionAgentMixin._build_fresh_agent`` from that session's frozen policy.
+    """
+    from gateway import session_policy
+    from gateway.session_execution import GatewaySessionAgentMixin
 
-    class _FakeAgent:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
+    policy = session_policy.build_policy(
+        {"cwd": str(tmp_path), "source": source, "model": "m", "provider": "custom",
+         "base_url": "http://127.0.0.1:9/v1"}, {})
+    assert policy.source == source
+    monkeypatch.setattr(session_policy, "policy_for_source", lambda _runner, _source: policy)
+    # Prefill loading (the authority's profile files) is not under test here.
+    monkeypatch.setattr("gateway.session_worker_construct.session_prefill", lambda *_a: None)
+    built = {}
+    turn = GatewaySessionAgentMixin.__new__(GatewaySessionAgentMixin)
+    turn._runner = types.SimpleNamespace(session_authority=types.SimpleNamespace(), _prefill_messages=None,
+                                         _service_tier=None, _session_db=None, _refresh_fallback_model=lambda: None)
+    src = types.SimpleNamespace(chat_id="sid", user_id="u", user_id_alt=None, user_name=None, chat_name=None,
+                                chat_type="dm", thread_id=None)
+    turn._ctx = types.SimpleNamespace(source=src, user_config={}, enabled_toolsets=[], disabled_toolsets=None,
+                                      session_id="sid", session_key="k", AIAgent=lambda **kw: built.update(kw))
+    turn._build_fresh_agent({"model": "m", "runtime": {}}, "local", None, 1, None, {}, False)
+    # Finiteness belongs to the submitted turn, not the session's frozen source.
+    from gateway.session_finite import finite_review_scope, finite_turn_scope
+    agent = types.SimpleNamespace(skip_background_review=built.get("skip_background_review", False))
+    with finite_turn_scope(source == "oneshot"), finite_review_scope(agent):
+        return {**built, "skip_background_review": agent.skip_background_review}
 
-        def __setattr__(self, name, _value):
-            pass
 
-        def run_conversation(self, _prompt, conversation_history=None):
-            return {"final_response": "pong", "session_id": "s"}
+def test_oneshot_z_agent_skips_background_review(monkeypatch, tmp_path):
+    assert _gateway_built_agent_kwargs(monkeypatch, tmp_path, "oneshot").get("skip_background_review") is True
 
-        def close(self):
-            pass
 
-    monkeypatch.setattr(oneshot_mod, "_create_session_db_for_oneshot", lambda: None)
-    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"model": {"default": "m", "provider": "custom"}})
-    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", lambda **_kw: {
-        "api_key": "k", "base_url": "https://x.example/v1", "provider": "custom", "api_mode": "chat_completions",
-        "credential_pool": None})
-    monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda _cfg, _p: [])
-    monkeypatch.setattr("hermes_cli.mcp_startup.ensure_mcp_discovery_before_agent_build", lambda **_kw: None)
-    monkeypatch.setattr("run_agent.AIAgent", _FakeAgent)
-
-    oneshot_mod._run_agent("say OK")
-
-    assert captured.get("skip_background_review") is True
+def test_gateway_interactive_cli_agent_keeps_background_review(monkeypatch, tmp_path):
+    assert not _gateway_built_agent_kwargs(monkeypatch, tmp_path, "cli").get("skip_background_review")

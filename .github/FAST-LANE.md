@@ -13,6 +13,18 @@ heavy `hermes-hub` pool they queued behind full suites (PR #266: 23 min for a
 `ci-fast` when it is re-run after an upstream merge.
 The `!cancelled()` condition still keeps superseded runs from latching their group.
 
+## Upstream consolidation (November 2026)
+
+Upstream merged the cheap checks into two jobs, so most admitted jobs below no
+longer exist as jobs. The CI timing report is now advisory trailing steps of
+`all-checks-pass` (`continue-on-error`, `always()`). Ruff enforcement, code
+health and Windows footguns are steps of `lint.yml`'s single `lint` job, which
+also runs the full-tree `ruff + ty diff` (20-minute timeout), so it runs on
+`hermes-hub`. Every repository guard, lockfile/prompt-surface diff and
+supply-chain job is a step of `repo-guards.yml`'s `guards` (15-minute timeout,
+hadolint through `docker run`), so it runs on `docker-ci`. The `ci-fast` lane
+now holds `detect`, `actionlint`, `all-checks-pass` and `macos-state-required`.
+
 ## Third admission (November 1, 2026)
 
 `macOS state required (v1)` (`ci.yaml` job `macos-state-required`) is the

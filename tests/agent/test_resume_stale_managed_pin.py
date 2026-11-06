@@ -72,12 +72,43 @@ def test_cli_resume_of_a_stale_model_keeps_the_launch_default(enforced):
     assert (stub.model, stub.provider) == APPROVED
 
 
-def test_oneshot_resume_of_a_stale_model_keeps_the_ambient_choice(enforced):
-    from hermes_cli.oneshot import _ModelChoice, _apply_stored_session_runtime
-    choice = _apply_stored_session_runtime(_ModelChoice("class:deep", "auto"), row(*RETIRED), explicit_model=False)
-    assert (choice.model, choice.provider) == ("class:deep", "auto")
-    choice = _apply_stored_session_runtime(_ModelChoice("class:deep", "auto"), row(*APPROVED), explicit_model=False)
-    assert (choice.model, choice.provider) == APPROVED
+@pytest.mark.parametrize('stored', [RETIRED, PAID, APPROVED])
+@pytest.mark.parametrize('managed', [False, True])
+@pytest.mark.parametrize('recorded_pin', [False, True])
+@pytest.mark.asyncio
+async def test_oneshot_resume_adopts_managed_model_policy(enforced, tmp_path, monkeypatch, stored, managed, recorded_pin):
+    from types import SimpleNamespace
+    from gateway import run
+    from gateway.config import GatewayConfig, Platform
+    from gateway.session import SessionStore
+    from gateway.session_authority import initialize_session_authority
+    from gateway.session_contract import SessionActor
+    from gateway.session_local_title import resolve_titled_session
+
+    enforced['model_routing']['enforce_subscription_only'] = managed
+    atomic_config_write(tmp_path / 'config.yaml', enforced)
+    config = {**enforced, 'model': {'default': 'class:deep', 'provider': 'auto'},
+              'platform_toolsets': {'cli': []}}
+    monkeypatch.setattr(run, '_load_gateway_config', lambda: config)
+    store = SessionStore(tmp_path / 'sessions', GatewayConfig())
+    db = store._db
+    saved = {'provider': stored[1], **(pin(*stored) if recorded_pin else {})}
+    db.create_session('old-oneshot', source='oneshot', model=stored[0],
+                      model_config=saved, cwd=str(tmp_path))
+    db.append_message('old-oneshot', role='user', content='retained question')
+    db.append_message('old-oneshot', role='assistant', content='retained answer')
+    runner = SimpleNamespace(session_store=store, _session_db=db, adapters={}, _draining=False)
+    authority = await initialize_session_authority(runner, profile_id=str(tmp_path), instance_id='resume')
+    actor = SessionActor('native', str(tmp_path), frozenset({'session:create', 'session:read'}), 'native')
+    authority._native_legacy_transports = {actor.transport_id: actor}
+    ref = resolve_titled_session(authority, actor, 'old-oneshot')
+    snapshot = await authority.attach(actor, ref)
+    assert [m['content'] for m in snapshot.history] == ['retained question', 'retained answer']
+    policy = runner.adapters[Platform.LOCAL].policies[ref.session_id]
+    expected = ('class:deep', 'auto') if managed and stored != APPROVED else stored
+    assert (policy.model, policy.provider) == expected
+    assert policy.cwd == str(tmp_path)
+    assert db.get_session('old-oneshot')['model'] == stored[0]  # history is not rewritten
 
 
 def test_api_session_resume_of_a_stale_model_follows_the_default(enforced):

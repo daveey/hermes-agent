@@ -77,7 +77,6 @@ def main_mod(monkeypatch):
     monkeypatch.setattr(mod, "_sync_bundled_skills_for_startup", lambda: None)
     monkeypatch.setattr(mod, "_pin_kanban_board_env", lambda: None)
     monkeypatch.setattr(mod, "_resolve_session_by_name_or_id", lambda val: val)
-    monkeypatch.setattr(mod, "_oneshot_cleanup_done", False)
 
     class _NoTTY:
         def isatty(self):
@@ -135,7 +134,9 @@ def test_cmd_chat_m_rejects_with_config_provider(main_mod, fake_cli, no_http, mo
 def test_oneshot_z_rejects(main_mod, no_http, monkeypatch, capsys):
     _config(monkeypatch)
     called = []
-    monkeypatch.setattr(main_mod, "_run_and_exit_oneshot", lambda *a, **k: called.append(1))
+    # -z runs through launch_gateway_chat (upstream 936f3465f82 deleted ``_run_and_exit_oneshot``); the
+    # startup -m check lives in its consent step, so stub only the session launch that would follow it.
+    monkeypatch.setattr("hermes_cli.gateway_chat.launch_from_args", lambda *a, **k: called.append(1) or 0)
     args = _chat_args(model="a b", provider="anthropic")
     args.oneshot = "hi"
     with pytest.raises(SystemExit) as exc:

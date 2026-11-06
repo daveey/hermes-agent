@@ -5,6 +5,8 @@ Moving it onto poll slots introduced another dependency: live-comment observers
 can await the very completion jobs queued behind them (PR 221). On the heavy
 hermes-hub lane they then queued behind full suites (PR 266: 23 min for a 7 s
 aggregate), so they run on the bounded ci-fast lane, which no observer uses.
+Upstream later folded the timing report and the supply-chain aggregate into
+steps (of the gate and of repo-guards.yml), so the gate is the one completion job.
 """
 from __future__ import annotations
 
@@ -23,8 +25,7 @@ HEAVY = "hermes-hub"
 POLL = "hermes-hub-poll"
 FAST = "ci-fast"
 COMPLETION = {
-    "ci.yaml": ("all-checks-pass", "ci-timings"),
-    "supply-chain-audit.yml": ("aggregate",),
+    "ci.yaml": ("all-checks-pass",),
 }
 
 
@@ -69,7 +70,7 @@ def test_aggregators_do_not_wait_for_observers_and_skip_on_cancel(wf, name):
     assert "!cancelled()" in cond and "always()" not in cond
 
 
-@pytest.mark.parametrize("original_label", [POLL, HEAVY, FAST, "ubuntu-latest"])
+@pytest.mark.parametrize("original_label", [POLL, HEAVY, FAST, "ubuntu-latest", "blacksmith-4vcpu-ubuntu-2404"])
 def test_fork_rewriter_preserves_completion_capacity(tmp_path, original_label):
     # Run the real upstream-reapply entry point twice, without touching the checkout.
     shutil.copytree(ROOT / ".github", tmp_path / ".github")
@@ -84,7 +85,7 @@ def test_fork_rewriter_preserves_completion_capacity(tmp_path, original_label):
             match = re.search(r"(?m)^  " + re.escape(name) + r":\n(?:(?!  \S).*\n)*", text)
             assert match
             block = match.group(0)
-            label = original_label if original_label == "ubuntu-latest" else f"[self-hosted, {original_label}]"
+            label = original_label if original_label in ("ubuntu-latest", "blacksmith-4vcpu-ubuntu-2404") else f"[self-hosted, {original_label}]"
             changed = re.sub(r"(?m)^    runs-on: .*$", f"    runs-on: {label}", block)
             changed = re.sub(r"(?m)^    if: .*$", "    if: always()", changed)
             text = text.replace(block, changed)

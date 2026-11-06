@@ -15,7 +15,8 @@ def load(relative):
     return YAML(typ="safe").load((ROOT / relative).read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("lane", ["lint-diff", "ruff-blocking", "code-health", "windows-footguns"])
+# Upstream merged lint-diff, ruff-blocking, code-health and windows-footguns into one `lint` job.
+@pytest.mark.parametrize("lane", ["lint"])
 def test_lint_cache_is_restore_only_with_a_bounded_best_effort_save(lane):
     job = load(".github/workflows/lint.yml")["jobs"][lane]
     setup = next(step for step in job["steps"] if step.get("uses") == "./.github/actions/setup-pm")

@@ -281,8 +281,9 @@ def _launch_flags(args):
 
 def _requested_policy(args):
     policy = _launch_flags(args)
-    if isinstance(policy.get("toolsets"), str):
-        policy["toolsets"] = [name.strip() for name in policy["toolsets"].split(",") if name.strip()]
+    if "toolsets" in policy:
+        from hermes_cli.oneshot import _normalize_toolsets
+        policy["toolsets"] = _normalize_toolsets(policy["toolsets"])
     if "skills" in policy:
         # `-s a,b -s c` (argparse append) or cli.main's comma string: one deduplicated list.
         raw = policy["skills"] if isinstance(policy["skills"], (list, tuple)) else [policy["skills"]]
