@@ -299,7 +299,10 @@ class SnapshotMixin:
             # git refuses command-line pathspecs beside --pathspec-from-file, so the store
             # self-exclusion rides in the same file. git add fails on an exclude pathspec
             # naming an ignored path, so only paths the ignore rules miss go in it.
-            self._unstage(store, working_dir, index_file, scan.oversize)
+            # Fail closed: an oversize path left in the index is re-read by ``add -A``
+            # (excludes do not apply to tracked paths), hashing it into the store.
+            if not self._unstage(store, working_dir, index_file, scan.oversize):
+                return False, "", "could not drop oversize paths"
             store_specs = cm._store_pathspecs(store.parent, working_dir)
             unignored = self._not_ignored(store, working_dir, config, scan.oversize + store_specs)
             if unignored is None:
@@ -379,8 +382,8 @@ class SnapshotMixin:
         if not ok:
             return abandon(err or "ls-files failed")
         excluded = [p for p in out.split("\x00") if p]
-        if excluded:
-            self._unstage(store, working_dir, index_file, excluded)
+        if excluded and not self._unstage(store, working_dir, index_file, excluded):
+            return abandon("could not drop excluded paths")
 
         ok, out, err = cm._run_git(
             ["ls-files", "-z", "-v", "--stage"],

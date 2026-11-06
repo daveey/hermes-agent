@@ -1160,7 +1160,12 @@ class CheckpointManager(SnapshotMixin):
         # Oversize files are excluded from staging (git never reads them) and
         # no checkpoint holds them, so they count as changed by definition.
         scan = _staging_scan(abs_dir, self.max_file_size_mb * 1024 * 1024, store, index_file)
-        self._stage_all(store, abs_dir, index_file, scan)
+        staged, _, stage_err = self._stage_all(store, abs_dir, index_file, scan)
+        if not staged:
+            # A partial index would under-report changes; refuse rather than plan from it.
+            _run_git(["read-tree", _ref_name(dir_hash)], store, abs_dir,
+                     index_file=index_file, allowed_returncodes={128})
+            return {"success": False, "error": f"Could not stage the working tree: {stage_err}"}
         ok, names_out, err = _run_git(
             ["diff", "--name-only", "-z", commit_hash, "--cached",
              *_exclude_store_args(store.parent, abs_dir)],
@@ -1346,7 +1351,12 @@ class CheckpointManager(SnapshotMixin):
         index_file = _index_path(store, dir_hash)
 
         # Stage current state into the per-project index to compare.
-        self._stage_all(store, abs_dir, index_file)
+        staged, _, stage_err = self._stage_all(store, abs_dir, index_file)
+        if not staged:
+            # A partial index would show a wrong diff; refuse and keep the index on the ref.
+            _run_git(["read-tree", _ref_name(dir_hash)], store, abs_dir,
+                     index_file=index_file, allowed_returncodes={128})
+            return {"success": False, "error": f"Could not stage the working tree: {stage_err}"}
 
         # A checkpoint taken before the store was excluded may still contain it; never
         # report the store as a change against such a checkpoint.
