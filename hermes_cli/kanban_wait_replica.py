@@ -29,6 +29,20 @@ class StaleReplica(ValueError):
         self.gateway, self.board, self.age, self.task, self.limit = gateway, board, age, task, limit
 
 
+class UnknownScope(ValueError):
+    """The card was seen in the gateway's replica, but its owner published this board's scope as ``unknown``.
+
+    The owner's collector (hermes-hub ``collect_all``/``scope_heartbeats``) writes ``state: unknown`` with no
+    ``observed_at`` when it could not read the board for longer than its carry window; the task records it published
+    before are kept, never tombstoned. So the last-seen status is known and nothing vouches for it now: "cannot tell,
+    not yet", like a stale replica, but with no observation time to report as an age. [daveey]
+    """
+
+    def __init__(self, gateway, board, task):
+        super().__init__(f"task scope unknown for {gateway}/{board}")
+        self.gateway, self.board, self.task = gateway, board, task
+
+
 def read_task(gateway, target, board=None):
     """Exact owner-qualified match, including completed/archived records, with fresh scope proof."""
     board = board or "default"
@@ -55,6 +69,8 @@ def read_task(gateway, target, board=None):
             # readers still count as fresh (kanban_scope_heartbeat). [daveey]
             limit = max(limit, scope_window(info))
         matched = [s for s in scopes if s.get("profile") == "default" and s.get("board") == board]
+        if len(matched) == 1 and matched[0].get("state") == "unknown" and "observed_at" not in matched[0]:
+            raise UnknownScope(gateway, board, task)
         if len(matched) != 1 or matched[0].get("state") != "ok":
             raise ValueError(f"missing successful task-scope observation for {gateway}/{board}")
         age = time.time() - float(matched[0].get("observed_at") or 0)
@@ -100,6 +116,16 @@ def stale_message(target, stale):
             f"stale_age={stale.age:.0f}s, limit={stale.limit:.0f}s; last seen {status}, unknown now: not yet)")
 
 
+def unknown_message(target, unknown):
+    """Like ``stale_message``: words 0-1 keep the reader shape; ``source_state=unknown`` and ``gateway=`` are what the
+    wake-check dispatcher reads (``kanban_wake_check.source_unknown``). No ``stale_age=``: the owner published no
+    observation time, so none is invented. Never starts with ``error:``."""
+    status = unknown.task.get("status")
+    orphan = " orphan producer;" if orphan_reason(unknown.task) else ""
+    return (f"{target} {status} (replica scope unknown:{orphan} gateway={unknown.gateway} could not read board "
+            f"{unknown.board} (source_state=unknown); last seen {status}, unknown now: not yet)")
+
+
 def check(gateway, target, *, board=None, until=(), since=(), live_timeout=None):
     try:
         source = "replica"
@@ -113,6 +139,8 @@ def check(gateway, target, *, board=None, until=(), since=(), live_timeout=None)
             source = "live owner"
         except StaleReplica as stale:
             return STALE_RC, stale_message(target, stale)
+        except UnknownScope as unknown:
+            return STALE_RC, unknown_message(target, unknown)
         status = task["status"]
         orphan = orphan_reason(task)
         suffix = f" ({source}; orphan producer)" if orphan else f" ({source})"

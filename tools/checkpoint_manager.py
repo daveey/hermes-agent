@@ -935,12 +935,18 @@ def _pre_v2_shadow_repos(base: Path) -> list[dict]:
 
 
 def _dir_file_count(path: str) -> int:
-    """Count checkpoint candidates, pruning the default excludes."""
+    """Count checkpoint candidates, pruning the default excludes and the live store.
+
+    With HERMES_HOME as the working directory the checkpoint store and its lock sit inside
+    the tree; ``git add`` excludes them by pathspec, so a growing store must not push the
+    project over ``_MAX_FILES`` and skip its own checkpoints.
+    """
     count = 0
     try:
         root = _normalize_path(path)
         if not root.is_dir():
             return 0
+        skip = frozenset(_store_pathspecs(_resolve_checkpoint_base(), root))
 
         directory_patterns = tuple(
             pattern[:-1] for pattern in DEFAULT_EXCLUDES if pattern.endswith("/")
@@ -955,6 +961,8 @@ def _dir_file_count(path: str) -> int:
             retained_directories = []
             for name in directory_names:
                 candidate = Path(current_dir) / name
+                if skip and candidate.relative_to(root).as_posix() in skip:
+                    continue
                 if candidate.is_symlink():
                     if not any(fnmatch.fnmatchcase(name, p) for p in file_patterns):
                         count += 1
@@ -969,6 +977,8 @@ def _dir_file_count(path: str) -> int:
 
             for name in file_names:
                 if any(fnmatch.fnmatchcase(name, p) for p in file_patterns):
+                    continue
+                if skip and (Path(current_dir) / name).relative_to(root).as_posix() in skip:
                     continue
                 count += 1
                 if count > _MAX_FILES:
