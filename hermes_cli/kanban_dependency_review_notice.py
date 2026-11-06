@@ -49,7 +49,7 @@ def _refusal(conn, parent, run, owner, evidence, parked_at):
     if review._completed_review_run(conn, parent, parked_at, owner["id"]) is None:
         return "completed_review_run refused (claimed, completed, independent run required)"
     data = kb._json_dict(run["metadata"])
-    if not review._exact_head(data):
+    if not (review._exact_head(data) or review._prefix_repair_head(data)):
         return "exact_head refused (reviewed_sha/head/exact_head must be 40 hex)"
     captured = evidence.get("prs")
     if not isinstance(captured, list) or not all(isinstance(u, str) for u in captured):

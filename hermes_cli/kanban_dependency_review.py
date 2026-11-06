@@ -146,6 +146,28 @@ def _requests_changes(row, data) -> bool:
     return bool(_SUMMARY_VERDICT.search(row["summary"] or ""))
 
 
+def _prefix_repair_head(data) -> bool:
+    """Mixed prefix findings permit repair only, never an approval inference.
+
+    Producers can review a PR and its stacked follow-up together. Require a
+    complete exact-head/verdict pairing, an explicit change request and named PR;
+    canonical single-head handoffs remain the preferred producer format.
+    """
+    verdicts = data.get("verdicts")
+    heads = {key.removeprefix("reviewed_sha_"): value for key, value in data.items()
+             if key.startswith("reviewed_sha_prefix")}
+    if data.get("verdict") is not None or not isinstance(verdicts, dict):
+        return False
+    if set(heads) != set(verdicts) or not (data.get("pr") or data.get("reviewed_pr")):
+        return False
+    if not all(re.fullmatch(r"prefix[1-9][0-9]*", key)
+               and isinstance(value, str) and _SHA.fullmatch(value) for key, value in heads.items()):
+        return False
+    values = list(verdicts.values())
+    return (all(isinstance(v, str) and v in {"APPROVE", "REQUEST_CHANGES"} for v in values)
+            and "REQUEST_CHANGES" in values)
+
+
 def _reviewed_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) -> set[str]:
     """Repair evidence: changes or an unknown verdict at an exact head, PR-bound.
 
@@ -162,7 +184,8 @@ def _reviewed_prs(conn, parent_id, parked_at, owner_run_id, captured: set[str]) 
     approval = isinstance(verdict, str) and verdict.strip().lower() in _APPROVALS
     # Respawn is not merge approval. An unrecognised/absent verdict still hands
     # findings back to the parked owner; keep explicit approvals on their all-parent path.
-    if not _exact_head(data) or (approval and not _requests_changes(row, data)):
+    exact_repair = _exact_head(data) or _prefix_repair_head(data)
+    if not exact_repair or (approval and not _requests_changes(row, data)):
         return set()
     named = _named_prs(data, captured)
     if named is not None:
@@ -216,7 +239,9 @@ def is_review_result(metadata, summary, captured) -> bool:
     prose and names the PR is held too, and a review that keeps its outcome under other
     keys is treated as a prerequisite. [daveey]
     """
-    if any(key in metadata for key in _REVIEW_KEYS) or _SUMMARY_VERDICT.search(summary or ""):
+    if (any(key in metadata for key in _REVIEW_KEYS)
+            or any(key.startswith("reviewed_sha_prefix") for key in metadata)
+            or _SUMMARY_VERDICT.search(summary or "")):
         return True
     prs = {u.rstrip("/").lower() for u in captured or () if isinstance(u, str)}
     if not prs or not set(metadata) <= _LOST_REVIEW_KEYS:
