@@ -1082,13 +1082,16 @@ def nonretryable_client_error_result(
         # deterministic for the unchanged conversation, so a persisted refused turn re-trips the
         # filter on every later message and locks the chat (the "stuck session" report); the owner
         # erases the durable turn-start row after the lease releases. Mirrors #1630.
-        from agent.turn_context import history_before_current_turn, refused_turn_boundary_row_id
+        from agent.turn_context import (
+            current_turn_ran_actions, history_before_current_turn, refused_turn_boundary_row_id,
+        )
         _clean = history_before_current_turn(messages, current_turn_user_idx, conversation_history)
         return _content_policy_blocked_result(
             _clean, api_call_count,
             final_response="⚠️ " + content_policy_copy(label=_plabel, summary=_nonretryable_summary),
             error_detail=_nonretryable_summary,
             boundary_row_id=refused_turn_boundary_row_id(messages, current_turn_user_idx),
+            ran_actions=current_turn_ran_actions(messages, current_turn_user_idx),
         )
     # Skip persistence on likely context-overflow (400 + large session): persisting the
     # failed message grows the session and repeats the failure.

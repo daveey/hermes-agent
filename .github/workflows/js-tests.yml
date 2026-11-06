@@ -177,8 +177,8 @@ jobs:
         # (a half-extracted download, a worktree its later cleanup never removed).
         uses: ./.github/actions/check-clean-worktree
 
-  # The Prebuilt TUI job of termux-verify.yml installs ONLY ui-tui + tests-js
-  # (npm adds apps/shared and ui-tui/packages/hermes-ink), not the full
+  # The Prebuilt TUI job of termux-verify.yml installs ui-tui + tests-js +
+  # apps/desktop and their dependency closure, not the full
   # workspace the job above installs. A tests-js or ui-tui change that assumes
   # another workspace is installed passes `check` above and first fails there,
   # on some unrelated scripts/termux or pm PR: termux-verify's path filter never
@@ -203,12 +203,12 @@ jobs:
           extras: '[]'
           cache-node: false
       - name: Install the locked JS workspace
-        run: npm ci --workspace ui-tui --workspace tests-js --include-workspace-root --include=dev --no-fund --no-audit
+        run: pnpm install --frozen-lockfile --filter "{./ui-tui}..." --filter "{./tests-js}..." --filter "{./apps/desktop}..."
       - name: Check and bundle the TUI
         run: |
-          npm run check --workspace tests-js
-          npm run check --workspace ui-tui
-          npm run build --workspace ui-tui
+          pnpm --dir tests-js run check
+          pnpm --dir ui-tui run check
+          pnpm --dir ui-tui run build
       - name: Check the checkout is clean
         uses: ./.github/actions/check-clean-worktree
 
@@ -235,7 +235,7 @@ jobs:
           extras: '[]'
           cache-node: false
       - name: Install locked chat driver dependencies
-        run: npm ci --workspace tests-js --include-workspace-root --omit=dev --ignore-scripts --no-audit --no-fund
+        run: pnpm install --frozen-lockfile --filter "{./tests-js}..." --prod --ignore-scripts
       - name: Resolve every driver import
         run: |
           node .github/scripts/check-runtime-driver-imports.mjs

@@ -812,7 +812,9 @@ def handle_content_policy_refusal(
     # set including the refused request + tool rounds — so returning it would re-poison CLI/ACP memory
     # even after the owner cleans the durable transcript (#149708 review). Build it from the real
     # turn boundary, and carry the refused run's durable boundary row so the owner drops the exact turn.
-    from agent.turn_context import history_before_current_turn, refused_turn_boundary_row_id
+    from agent.turn_context import (
+        current_turn_ran_actions, history_before_current_turn, refused_turn_boundary_row_id,
+    )
     clean_history = history_before_current_turn(messages, current_turn_user_idx, conversation_history)
     _boundary_row_id = refused_turn_boundary_row_id(messages, current_turn_user_idx)
     return RefusalVerdict("return", _content_policy_blocked_result(
@@ -820,4 +822,5 @@ def handle_content_policy_refusal(
         error_detail=_refusal_text or "model declined (content_filter)",
         refusal_category=_stop_details.get("category") if isinstance(_stop_details, dict) else None,
         boundary_row_id=_boundary_row_id,
+        ran_actions=current_turn_ran_actions(messages, current_turn_user_idx),
     ), active_system_prompt)

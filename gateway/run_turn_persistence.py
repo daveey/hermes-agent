@@ -537,7 +537,8 @@ class GatewayTurnPersistenceMixin:
             # Mirrors the context_overflow no-grow rule (#1630); only a non-retryable block drops.
             if agent_persisted:
                 await self._hmwa_retain_content_policy_refused_turn(
-                    sid, session_key, agent_result.get("refused_turn_boundary_row_id"))
+                    sid, session_key, agent_result.get("refused_turn_boundary_row_id"),
+                    notice_result=agent_result)
         else:
             if not history and source.platform != Platform.LOCAL:
                 # Fresh session: the tool definitions (as sent in the API request) make the transcript
@@ -607,7 +608,8 @@ class GatewayTurnPersistenceMixin:
         # trigger a rebuild next turn (destroying prompt caching).
         await self._refresh_agent_cache_message_count(session_key, sid)
 
-    async def _hmwa_retain_content_policy_refused_turn(self, sid, session_key, boundary_row_id=None):
+    async def _hmwa_retain_content_policy_refused_turn(self, sid, session_key, boundary_row_id=None,
+                                                       notice_result=None):
         """Retain a safety-refused turn for display while forcing the next turn to rebuild from the
         clean (model) transcript. The ONE owner-side refusal cleanup for every durable gateway owner:
         the in-process runner (this persist path), the managed worker (Bot Chat / safe-mode, via
@@ -629,11 +631,14 @@ class GatewayTurnPersistenceMixin:
         ``retain_refused_turn_for_display`` reports failure by returning ``None`` (it swallows its own
         errors), so only evict on a confirmed retention and warn otherwise — a silently-failed
         un-stick leaves the chat locked, and that is the one outcome worth a visible signal.
+
+        [daveey] ``notice_result`` (the turn's result) supplies the validated refusal category and the
+        possible-side-effect warning for the retained notice (``refused_turn_display_notice``).
         """
-        from agent.turn_failure_copy import CONTENT_REFUSED_NOTICE
+        from agent.turn_failure_copy import refused_turn_display_notice
         try:
             outcome = await self.async_session_store.retain_refused_turn_for_display(
-                sid, notice=CONTENT_REFUSED_NOTICE, boundary_row_id=boundary_row_id)
+                sid, notice=refused_turn_display_notice(notice_result), boundary_row_id=boundary_row_id)
         except Exception as e:  # health: allow BLE001 -- best-effort; a refusal must never crash turn teardown
             logger.warning("content-policy refusal: retaining the refused turn for %s raised: %s", sid, e)
             return

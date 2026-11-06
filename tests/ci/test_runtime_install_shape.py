@@ -1,7 +1,7 @@
 """The runtime-only tests-js install shape is checked on the PRs that can break it.
 
 desktop-bundle-smoke.yml and the install-e2e-*-run.yml workflows install
-``npm ci --workspace tests-js --include-workspace-root --omit=dev`` and launch
+``pnpm install --filter "{./tests-js}..." --prod`` and launch
 tests/install/e2e-assets drivers. They run on release/dispatch only, so a driver
 importing a devDependency first failed at release time. js-tests.yml's
 ``runtime-install-shape`` job installs the same shape on every frontend-lane PR
@@ -33,7 +33,7 @@ _WORKFLOWS = [
     "install-e2e-macos-run.yml",
     "install-e2e-windows-run.yml",
 ]
-_INSTALL = re.compile(r"^\s*run:\s*(npm ci --workspace tests-js .*)$", re.MULTILINE)
+_INSTALL = re.compile(r'^\s*run:\s*(pnpm install .*--filter "\{\./tests-js\}\.\.\." .*)$', re.MULTILINE)
 _ASSETS = _REPO / "tests/install/e2e-assets"
 _CHECKER = (_REPO / ".github/scripts/check-runtime-driver-imports.mjs").read_text(
     encoding="utf-8"
@@ -53,7 +53,7 @@ def _install_commands(workflow: str) -> list[str]:
 def test_every_runtime_install_in_the_workflows_is_one_shape():
     shapes = {c for w in _WORKFLOWS for c in _install_commands(w)}
     assert len(shapes) == 1, shapes
-    assert "--omit=dev" in next(iter(shapes))
+    assert next(iter(shapes)) == 'pnpm install --frozen-lockfile --filter "{./tests-js}..." --prod --ignore-scripts'
     # desktop-bundle-smoke 1, install-e2e-run 1, macos 2, windows 2: a new
     # install step must be added to this count on purpose.
     assert sum(len(_install_commands(w)) for w in _WORKFLOWS) == 6
@@ -111,6 +111,8 @@ def test_checker_covers_every_node_script_the_launchers_run():
         "scripts/generate-icons.mjs",
         ".github/scripts/check-runtime-driver-imports.mjs",
         "tests-js/scripts/mock-provider-config.ts",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
     ],
 )
 def test_every_input_of_the_shape_selects_the_frontend_lane(path):

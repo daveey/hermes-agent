@@ -1143,20 +1143,14 @@ def _content_policy_blocked_result(
     messages: list[dict], api_call_count: int, *, final_response: str, error_detail: str,
     refusal_category: Any = None,
     boundary_row_id: Optional[int] = None,
+    ran_actions: bool = False,
 ) -> dict[str, Any]:
-    """Terminal turn result for a content-policy block (deterministic for the unchanged
-    prompt, so no retry); shared by the HTTP-200 and exception paths. ``messages`` is the
-    CLEAN pre-refusal history (the refused turn is dropped from it). ``boundary_row_id`` is
-    the durable row that started the refused run, so the owner drops the exact turn."""
-    result = {
-        "final_response": final_response, "messages": messages, "api_calls": api_call_count,
-        "completed": False, "failed": True, "error": f"content_policy_blocked: {error_detail}",
-        "failure_reason": "content_policy_blocked", "failure_retryable": False,
-        "refusal_category": refusal_category,
-    }
-    if boundary_row_id is not None:
-        result["refused_turn_boundary_row_id"] = boundary_row_id
-    return result
+    """Shared refusal result; keep the public loop seam while copy lives in its topical module."""
+    from agent.turn_failure_copy import content_policy_blocked_result
+    return content_policy_blocked_result(
+        messages, api_call_count, final_response=final_response, error_detail=error_detail,
+        refusal_category=refusal_category, boundary_row_id=boundary_row_id, ran_actions=ran_actions,
+    )
 
 
 def _partial_turn_result(
@@ -1973,7 +1967,7 @@ def _close_durable_failed_turn(agent, result: Any) -> None:
         # hedge over the whole list rather than under-report a possible side effect.
         start = result.get("current_turn_user_idx")
         turn_messages = messages[start:] if isinstance(start, int) and 0 <= start < len(messages) else messages
-        content = failed_turn_notice(turn_messages, restarted=_stopped_by_backend_exit(agent, result), result=result)
+        content = failed_turn_notice(turn_messages, restarted=_stopped_by_backend_exit(agent, result))
         # [daveey] A turn nobody typed (a Kanban notice, a background-job report) is never "sent again" by a
         # person: its host supplies copy that says what failed and what happens next (TUI: automation replay).
         override = getattr(agent, "_failed_turn_notice_override", None)

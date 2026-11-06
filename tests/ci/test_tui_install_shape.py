@@ -1,7 +1,7 @@
 """The Prebuilt TUI install shape is checked on the PRs that can break it.
 
-termux-verify.yml's ``tui`` job installs only ui-tui + tests-js (npm adds
-apps/shared and ui-tui/packages/hermes-ink) and runs their checks. Its path
+termux-verify.yml's ``tui`` job installs ui-tui + tests-js + apps/desktop and
+their dependency closure, then runs the TUI checks. Its path
 filter covers scripts/termux, pm and its own tests, so a tests-js or ui-tui
 change never ran it on its own PR: 7a33a706f5 added a tests-js test that
 assumed apps/desktop was installed, passed the main CI's full install, and
@@ -50,10 +50,11 @@ def test_main_ci_job_matches_the_termux_prebuilt_tui_job():
     assert _shape(main) == _shape(termux)
     runs = [cmd for kind, cmd in _shape(main) if kind == "run"]
     # The point of the job: a minimal install, not the full workspace.
-    assert any("npm ci --workspace ui-tui --workspace tests-js --include-workspace-root" in r for r in runs)
-    assert not any(r.startswith("npm ci") and "apps/desktop" in r for r in runs)
-    assert "npm run check --workspace tests-js" in runs[-1]
-    assert "npm run build --workspace ui-tui" in runs[-1]
+    assert runs[0] == ('pnpm install --frozen-lockfile --filter "{./ui-tui}..." '
+                       '--filter "{./tests-js}..." --filter "{./apps/desktop}..."')
+    assert "pnpm --dir tests-js run check" in runs[-1]
+    assert "pnpm --dir ui-tui run check" in runs[-1]
+    assert "pnpm --dir ui-tui run build" in runs[-1]
     assert not main.get("continue-on-error")
 
 
@@ -73,7 +74,8 @@ def test_job_gates_the_merge_through_js_tests():
     "apps/shared/src/index.ts",
     ".github/scripts/run-workspace-checks.mjs",
     "package.json",
-    "package-lock.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
     "scripts/build/tui.mjs",
     "eslint.config.shared.mjs",
     ".npmrc",

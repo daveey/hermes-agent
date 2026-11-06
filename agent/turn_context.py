@@ -340,6 +340,18 @@ def history_before_current_turn(
     return list(fallback) if isinstance(fallback, list) else []
 
 
+def current_turn_ran_actions(messages: Any, current_turn_user_idx: Any) -> bool:
+    """[daveey] Whether the current (refused) turn ran a tool. Scoped to this turn when its user row
+    index is usable; otherwise hedges over the whole working set rather than under-report a possible
+    side effect."""
+    from agent.turn_failure_copy import turn_ran_actions
+    if not isinstance(messages, list):
+        return False
+    if isinstance(current_turn_user_idx, int) and 0 <= current_turn_user_idx < len(messages):
+        return turn_ran_actions(messages[current_turn_user_idx:])
+    return turn_ran_actions(messages)
+
+
 def refused_turn_boundary_row_id(messages: Any, current_turn_user_idx: Any) -> Optional[int]:
     """The durable row id that STARTED the current (refused) turn, or ``None``.
 

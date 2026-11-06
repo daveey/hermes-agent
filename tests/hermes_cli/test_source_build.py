@@ -654,7 +654,7 @@ def test_without_the_defer_flag_a_running_desktop_is_swapped_as_upstream(tmp_pat
 
 
 @pytest.mark.platforms("macos")
-@pytest.mark.parametrize("change", ["apps/desktop/src/a.ts", "apps/shared/src/x.ts", "package-lock.json"])
+@pytest.mark.parametrize("change", ["apps/desktop/src/a.ts", "apps/shared/src/x.ts", "pnpm-lock.yaml", "pnpm-workspace.yaml"])
 def test_update_builds_when_a_desktop_input_changed_since_the_prebuilt_commit(tmp_path, monkeypatch, capsys, change):
     from hermes_cli.source_build import _build_desktop_product
 
