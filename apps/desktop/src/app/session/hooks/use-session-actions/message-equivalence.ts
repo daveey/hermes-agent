@@ -40,6 +40,9 @@ const COMPARED_FIELDS = [
   // A busy-chat refusal hands the user's words back to the composer, which reads this marker
   // from the published transcript: a resume that only attaches it must still publish.
   'refusedSend',
+  // Safety-refused display block — drives the greyed notice, so attaching or
+  // changing it (resume replay) must repaint, like errorSurface.
+  'contentRefused',
   'hidden',
   'branchGroupId',
   'interim',
@@ -174,6 +177,19 @@ const timelineMetadataDiffers = (a: ChatMessage, b: ChatMessage) =>
   a.timestamp !== b.timestamp || a.completedAt !== b.completedAt ||
   a.queued_reason !== b.queued_reason || a.queued_started_at !== b.queued_started_at
 
+// Structured display descriptors — the error card (errorSurface) and the
+// safety-refused notice (contentRefused) each arrive as a fresh object per
+// resume/replay, so identity comparison would repaint forever; both need a
+// structural compare of their rendered fields. Kept out of the host comparator
+// so its branch count stays within the ratchet.
+const displayDescriptorsDiffer = (a: ChatMessage, b: ChatMessage) =>
+  (a.errorSurface?.layer ?? null) !== (b.errorSurface?.layer ?? null) ||
+  (a.errorSurface?.code ?? null) !== (b.errorSurface?.code ?? null) ||
+  (a.errorSurface?.retryable ?? null) !== (b.errorSurface?.retryable ?? null) ||
+  // Safety-refused block: compare presence and notice.
+  Boolean(a.contentRefused) !== Boolean(b.contentRefused) ||
+  (a.contentRefused?.notice ?? null) !== (b.contentRefused?.notice ?? null)
+
 export function chatMessagesEquivalent(a: ChatMessage, b: ChatMessage): boolean {
   if (
     a.id !== b.id ||
@@ -184,11 +200,7 @@ export function chatMessagesEquivalent(a: ChatMessage, b: ChatMessage): boolean 
     a.recovered !== b.recovered ||
     a.pending !== b.pending ||
     a.error !== b.error ||
-    // Structural compare — the descriptor arrives as a fresh object per
-    // resume/replay, so identity comparison would repaint forever.
-    (a.errorSurface?.layer ?? null) !== (b.errorSurface?.layer ?? null) ||
-    (a.errorSurface?.code ?? null) !== (b.errorSurface?.code ?? null) ||
-    (a.errorSurface?.retryable ?? null) !== (b.errorSurface?.retryable ?? null) ||
+    displayDescriptorsDiffer(a, b) ||
     a.hidden !== b.hidden ||
     a.branchGroupId !== b.branchGroupId ||
     timelineMetadataDiffers(a, b) ||

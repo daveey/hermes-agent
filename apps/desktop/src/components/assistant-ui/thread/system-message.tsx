@@ -4,6 +4,7 @@ import { type FC, useState } from 'react'
 import { MarkdownTextContent } from '@/components/assistant-ui/markdown-text'
 import { messageContentText } from '@/components/assistant-ui/thread/content'
 import { MessageTimelineTimestamp } from '@/components/assistant-ui/thread/timeline-timestamp'
+import { UserMessageText } from '@/components/assistant-ui/thread/user-message-text'
 import { SCAFFOLD_GLYPH_CLASS, SCAFFOLD_LABEL_CLASS, ScaffoldRow } from '@/components/chat/scaffold-row'
 import { Codicon } from '@/components/ui/codicon'
 import { LogView } from '@/components/ui/log-view'
@@ -64,39 +65,186 @@ export const BackgroundResult: FC<BackgroundResultProps> = ({ text, report, proc
   )
 }
 
+/** A safety-refused turn kept for display: the user's own message rendered
+ *  greyed and non-interactive (no edit, no actions), with a short notice that
+ *  the model's safety filter refused it. Right-aligned like the prompt it was,
+ *  but a dashed muted card — never the blue user bubble, never a reply. */
+const ContentRefusedNote: FC<{ notice: string; userText: string }> = ({ notice, userText }) => (
+  <MessagePrimitive.Root
+    className="flex w-full min-w-0 max-w-full flex-col items-stretch gap-1 self-end pb-(--conversation-turn-gap)"
+    data-role="system"
+    data-slot="aui_content-refused"
+  >
+    <div className="ml-auto flex min-w-0 max-w-full flex-col gap-1.5 rounded-xl border border-dashed border-(--ui-stroke-tertiary) px-3 py-2 text-left opacity-70">
+      {userText && <UserMessageText className="wrap-anywhere text-(--ui-text-tertiary)" text={userText} />}
+      <span className="flex items-center gap-1.5 text-[0.6875rem] leading-5 text-muted-foreground/70">
+        <Codicon className="shrink-0 text-muted-foreground/60" name="shield" size="0.75rem" />
+        <span className="wrap-anywhere">{notice}</span>
+      </span>
+    </div>
+    <MessageTimelineTimestamp className="self-end pr-1.5" />
+  </MessagePrimitive.Root>
+)
+
+// [daveey] A blocked-card notice whose card has since left `blocked`: kept for the record, dimmed, and labelled so
+// it no longer reads as a live ask.
+const StaleNoticeNote: FC<{ label: string; text: string }> = ({ label, text }) => {
+  const multiline = text.includes('\n')
+
+  return (
+    <MessagePrimitive.Root
+      className={cn(
+        'w-[60%] max-w-[44rem] self-center px-2 py-0.5 text-[0.6875rem] leading-5 text-muted-foreground/55 opacity-60',
+        multiline ? 'text-left' : 'text-center'
+      )}
+      data-role="system"
+      data-slot="aui_system-message-root"
+      data-stale-notice=""
+    >
+      <span className="mr-1.5 font-medium text-muted-foreground/70" data-slot="stale-notice-label">
+        {label}
+      </span>
+      <LinkifiedText className="whitespace-pre-wrap" explicitOnly pretty={false} text={text} />{' '}
+      <MessageTimelineTimestamp className={cn(multiline ? 'mt-0.5 block' : 'ml-1.5')} />
+    </MessagePrimitive.Root>
+  )
+}
+
+// The self-improvement review saved something to memory/skills — the same
+// kind of event as a landed `memory` write, so it wears the same chrome:
+// brain glyph with the gold→purple glow, gradient label, purple detail,
+// left-aligned in the reading column like every other scaffold line.
+const ReviewNote: FC<{ detail: string; label: string }> = ({ detail, label }) => (
+  <MessagePrimitive.Root
+    className="flex w-full min-w-0 max-w-full items-start gap-1.5 self-start py-0.5"
+    data-role="system"
+    data-slot="aui_system-message-root"
+  >
+    <span className="tool-memory-legendary-glyph flex h-(--conversation-line-height) w-3.5 shrink-0 items-center justify-center">
+      <ToolIcon className="text-(--tool-memory-legendary-icon)" name="brain" size="0.875rem" />
+    </span>
+    <span className={cn(SCAFFOLD_LABEL_CLASS, 'tool-memory-legendary-title shrink-0 text-transparent')}>{label}</span>
+    {detail && (
+      <span className={cn(SCAFFOLD_LABEL_CLASS, 'tool-memory-legendary-meta min-w-0 wrap-anywhere')}>{detail}</span>
+    )}
+  </MessagePrimitive.Root>
+)
+
+const SteerNote: FC<{ text: string }> = ({ text }) => (
+  <MessagePrimitive.Root
+    className="flex max-w-[min(86%,44rem)] items-center gap-1.5 self-center px-2 py-0.5 text-[0.6875rem] leading-5 text-muted-foreground/60"
+    data-role="system"
+    data-slot="aui_system-message-root"
+  >
+    <Codicon className="text-muted-foreground/55" name="compass" size="0.75rem" />
+    <span className="text-muted-foreground/55">steered</span>
+    <span className="text-muted-foreground/35">·</span>
+    <span className="whitespace-pre-wrap">{text}</span> <MessageTimelineTimestamp />
+  </MessagePrimitive.Root>
+)
+
+const SlashStatusNote: FC<{ command: string; output: string }> = ({ command, output }) => {
+  // Single-line status (e.g. "model → x") reads best centered inline; padded
+  // multiline output (catalogs, usage tables) needs left-aligned, wider room
+  // or the column alignment breaks.
+  const multiline = output.includes('\n')
+  // A window plan's /usage (token table + `[||||||    ]` plan gauges) only lines
+  // up in a monospace face. Every other output keeps the default face.
+  const tabular = multiline && USAGE_WINDOW_GAUGE_RE.test(output)
+
+  return (
+    <MessagePrimitive.Root
+      className={cn(
+        'w-[60%] max-w-[44rem] self-center px-2 py-0.5 text-[0.6875rem] leading-5 text-muted-foreground/60',
+        multiline ? 'text-left' : 'text-center'
+      )}
+      data-role="system"
+      data-slot="aui_system-message-root"
+    >
+      <span className="font-mono text-muted-foreground/55">{command}</span>
+      {multiline ? (
+        <LinkifiedText
+          className={cn('mt-0.5 block whitespace-pre-wrap', tabular && 'font-mono text-[0.65rem] leading-[1.15rem]')}
+          explicitOnly
+          pretty={false}
+          text={output}
+        />
+      ) : (
+        <>
+          <span className="mx-1.5 text-muted-foreground/35">·</span>
+          <LinkifiedText className="whitespace-pre-wrap" explicitOnly pretty={false} text={output} />
+        </>
+      )}{' '}
+      <MessageTimelineTimestamp className={cn(multiline ? 'mt-0.5 block' : 'ml-1.5')} />
+    </MessagePrimitive.Root>
+  )
+}
+
+const PlainSystemNote: FC<{ text: string }> = ({ text }) => {
+  const multiline = text.includes('\n')
+
+  return (
+    <MessagePrimitive.Root
+      className={cn(
+        'w-[60%] max-w-[44rem] self-center px-2 py-0.5 text-[0.6875rem] leading-5 text-muted-foreground/55',
+        multiline ? 'text-left' : 'text-center'
+      )}
+      data-role="system"
+      data-slot="aui_system-message-root"
+    >
+      <LinkifiedText className="whitespace-pre-wrap" explicitOnly pretty={false} text={text} />{' '}
+      <MessageTimelineTimestamp className={cn(multiline ? 'mt-0.5 block' : 'ml-1.5')} />
+    </MessagePrimitive.Root>
+  )
+}
+
+/** A plain-text system line, dispatched on its prefix (`review:`, `steer:`,
+ *  `slash:<cmd>\n<output>`); anything else is a centered muted note. */
+const TextSystemNote: FC<{ text: string }> = ({ text }) => {
+  const review = text.match(REVIEW_NOTE_RE)?.groups
+
+  if (review) {
+    return <ReviewNote detail={review.detail.trim()} label={review.label.trim()} />
+  }
+
+  const steer = text.match(STEER_NOTE_RE)?.groups
+
+  if (steer) {
+    return <SteerNote text={steer.text.trim()} />
+  }
+
+  const slash = text.match(SLASH_STATUS_RE)?.groups
+
+  if (slash) {
+    return <SlashStatusNote command={slash.command} output={slash.output.trim()} />
+  }
+
+  return <PlainSystemNote text={text} />
+}
+
 export const SystemMessage: FC = () => {
+  const { t } = useI18n()
   const text = useAuiState(s => messageContentText(s.message.content))
   const asyncResult = useAuiState(s => s.message.metadata.custom?.asyncResult)
   const processResult = useAuiState(s => s.message.metadata.custom?.asyncResultKind === 'process')
   const staleNotice = useAuiState(s => s.message.metadata.custom?.staleNotice === true)
-  const { t } = useI18n()
+
+  const contentRefused = useAuiState(s => s.message.metadata.custom?.contentRefused as undefined | { notice?: string })
+
+  // A safety-refused turn, kept for display only: the user's own message, greyed
+  // and non-interactive, with a short notice. Not a user bubble, not a reply.
+  if (contentRefused) {
+    return (
+      <ContentRefusedNote notice={contentRefused.notice ?? t.assistant.thread.contentRefusedNotice} userText={text} />
+    )
+  }
 
   if (!text) {
     return null
   }
 
-  // [daveey] A blocked-card notice whose card has since left `blocked`: kept for the record, dimmed, and labelled so
-  // it no longer reads as a live ask.
   if (staleNotice) {
-    const multiline = text.includes('\n')
-
-    return (
-      <MessagePrimitive.Root
-        className={cn(
-          'w-[60%] max-w-[44rem] self-center px-2 py-0.5 text-[0.6875rem] leading-5 text-muted-foreground/55 opacity-60',
-          multiline ? 'text-left' : 'text-center'
-        )}
-        data-role="system"
-        data-slot="aui_system-message-root"
-        data-stale-notice=""
-      >
-        <span className="mr-1.5 font-medium text-muted-foreground/70" data-slot="stale-notice-label">
-          {t.assistant.thread.staleNotice}
-        </span>
-        <LinkifiedText className="whitespace-pre-wrap" explicitOnly pretty={false} text={text} />{' '}
-        <MessageTimelineTimestamp className={cn(multiline ? 'mt-0.5 block' : 'ml-1.5')} />
-      </MessagePrimitive.Root>
-    )
+    return <StaleNoticeNote label={t.assistant.thread.staleNotice} text={text} />
   }
 
   if (processResult || (typeof asyncResult === 'string' && asyncResult)) {
@@ -115,104 +263,5 @@ export const SystemMessage: FC = () => {
     )
   }
 
-  // The self-improvement review saved something to memory/skills — the same
-  // kind of event as a landed `memory` write, so it wears the same chrome:
-  // brain glyph with the gold→purple glow, gradient label, purple detail,
-  // left-aligned in the reading column like every other scaffold line.
-  const reviewNote = text.match(REVIEW_NOTE_RE)
-
-  if (reviewNote?.groups) {
-    const detail = reviewNote.groups.detail.trim()
-
-    return (
-      <MessagePrimitive.Root
-        className="flex w-full min-w-0 max-w-full items-start gap-1.5 self-start py-0.5"
-        data-role="system"
-        data-slot="aui_system-message-root"
-      >
-        <span className="tool-memory-legendary-glyph flex h-(--conversation-line-height) w-3.5 shrink-0 items-center justify-center">
-          <ToolIcon className="text-(--tool-memory-legendary-icon)" name="brain" size="0.875rem" />
-        </span>
-        <span className={cn(SCAFFOLD_LABEL_CLASS, 'tool-memory-legendary-title shrink-0 text-transparent')}>
-          {reviewNote.groups.label.trim()}
-        </span>
-        {detail && (
-          <span className={cn(SCAFFOLD_LABEL_CLASS, 'tool-memory-legendary-meta min-w-0 wrap-anywhere')}>{detail}</span>
-        )}
-      </MessagePrimitive.Root>
-    )
-  }
-
-  const steerNote = text.match(STEER_NOTE_RE)
-
-  if (steerNote?.groups) {
-    return (
-      <MessagePrimitive.Root
-        className="flex max-w-[min(86%,44rem)] items-center gap-1.5 self-center px-2 py-0.5 text-[0.6875rem] leading-5 text-muted-foreground/60"
-        data-role="system"
-        data-slot="aui_system-message-root"
-      >
-        <Codicon className="text-muted-foreground/55" name="compass" size="0.75rem" />
-        <span className="text-muted-foreground/55">steered</span>
-        <span className="text-muted-foreground/35">·</span>
-        <span className="whitespace-pre-wrap">{steerNote.groups.text.trim()}</span> <MessageTimelineTimestamp />
-      </MessagePrimitive.Root>
-    )
-  }
-
-  const slashStatus = text.match(SLASH_STATUS_RE)
-
-  if (slashStatus?.groups) {
-    const output = slashStatus.groups.output.trim()
-    // Single-line status (e.g. "model → x") reads best centered inline; padded
-    // multiline output (catalogs, usage tables) needs left-aligned, wider room
-    // or the column alignment breaks.
-    const multiline = output.includes('\n')
-    // A window plan's /usage (token table + `[||||||    ]` plan gauges) only lines
-    // up in a monospace face. Every other output keeps the default face.
-    const tabular = multiline && USAGE_WINDOW_GAUGE_RE.test(output)
-
-    return (
-      <MessagePrimitive.Root
-        className={cn(
-          'w-[60%] max-w-[44rem] self-center px-2 py-0.5 text-[0.6875rem] leading-5 text-muted-foreground/60',
-          multiline ? 'text-left' : 'text-center'
-        )}
-        data-role="system"
-        data-slot="aui_system-message-root"
-      >
-        <span className="font-mono text-muted-foreground/55">{slashStatus.groups.command}</span>
-        {multiline ? (
-          <LinkifiedText
-            className={cn('mt-0.5 block whitespace-pre-wrap', tabular && 'font-mono text-[0.65rem] leading-[1.15rem]')}
-            explicitOnly
-            pretty={false}
-            text={output}
-          />
-        ) : (
-          <>
-            <span className="mx-1.5 text-muted-foreground/35">·</span>
-            <LinkifiedText className="whitespace-pre-wrap" explicitOnly pretty={false} text={output} />
-          </>
-        )}{' '}
-        <MessageTimelineTimestamp className={cn(multiline ? 'mt-0.5 block' : 'ml-1.5')} />
-      </MessagePrimitive.Root>
-    )
-  }
-
-  const multiline = text.includes('\n')
-
-  return (
-    <MessagePrimitive.Root
-      className={cn(
-        'w-[60%] max-w-[44rem] self-center px-2 py-0.5 text-[0.6875rem] leading-5 text-muted-foreground/55',
-        multiline ? 'text-left' : 'text-center'
-      )}
-      data-role="system"
-      data-slot="aui_system-message-root"
-    >
-      <LinkifiedText className="whitespace-pre-wrap" explicitOnly pretty={false} text={text} />{' '}
-      <MessageTimelineTimestamp className={cn(multiline ? 'mt-0.5 block' : 'ml-1.5')} />
-    </MessagePrimitive.Root>
-  )
+  return <TextSystemNote text={text} />
 }

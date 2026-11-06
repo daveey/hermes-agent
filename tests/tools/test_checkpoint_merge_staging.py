@@ -18,6 +18,36 @@ def project(tmp_path, monkeypatch):
     return root
 
 
+def test_snapshot_emits_exact_taken_at_trailer_read_by_rollback(project, monkeypatch):
+    """Exercise the real snapshot writer and reader, for both root and child commits."""
+    from types import SimpleNamespace
+
+    from tools import checkpoint_snapshot
+    from tools.checkpoint_undo_hint import checkpoint_taken_at
+
+    mgr = cm.CheckpointManager(enabled=True)
+    previous = None
+    for timestamp, reason in (
+        (1700000000.123456, "before first edit"),
+        (1700000000.654321, "before command\nwith a second line"),
+    ):
+        monkeypatch.setattr(checkpoint_snapshot, "time", SimpleNamespace(time=lambda: timestamp))
+        (project / "source.py").write_text(f"{reason}\n")
+        mgr.new_turn()
+        assert mgr.ensure_checkpoint(str(project), reason)
+        commit = mgr.list_checkpoints(str(project))[0]["hash"]
+        assert commit != previous
+        store = cm._store_path()
+        ok, body, err = cm._run_git(["log", "-1", "--format=%B", commit], store, str(project))
+        assert ok, err
+        assert body.strip() == f"{reason}\n\nHermes-Taken-At: {timestamp:.6f}"
+        assert checkpoint_taken_at(str(project), commit) == (timestamp, True)
+        ok, parents, err = cm._run_git(["log", "-1", "--format=%P", commit], store, str(project))
+        assert ok, err
+        assert parents.strip() == (previous or "")
+        previous = commit
+
+
 def test_excluded_trees_do_not_exhaust_scan_or_budget(project, monkeypatch):
     monkeypatch.setattr(cm, "_MAX_FILES", 3)
     for directory in ("build", "agent-browser-chrome-test", "run.log", "checkpoints/store"):

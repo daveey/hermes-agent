@@ -82,6 +82,85 @@ OPEN_TURN_TAIL_ROLES = frozenset({"user", "tool"})
 FAILED_TURN_DISPLAY_KIND = "failed_turn"
 
 
+# ---- safety-refused turn, retained for display only -------------------------------------------
+# A content-policy refusal is deterministic for the unchanged conversation (the filter judges the
+# whole thread), so the whole refused turn leaves the MODEL's context — otherwise every later
+# message re-trips the filter and the chat locks (the "stuck session" report). But the user keeps
+# SEEING their message: the user row is retained in the DISPLAY projection (never the model read)
+# and tagged with this display_kind, while the raw tool rounds + refusal detail collapse into
+# CONTENT_REFUSED_NOTICE. Rendered cross-surface (Desktop, CLI/TUI, ACP) as a greyed block.
+CONTENT_REFUSED_DISPLAY_KIND = "content_refused"
+CONTENT_REFUSED_NOTICE = (
+    "This message was refused by the model's safety filter — try a different query."
+)
+# messages.display_metadata key carrying the stored notice, so every surface renders one copy.
+CONTENT_REFUSED_METADATA_KEY = "content_refused"
+# [daveey] A refused turn may have run tools before the filter tripped: erasing it from the model's
+# context does not undo their effects, so the notice must not read as "nothing happened".
+REFUSED_TURN_ACTIONS_WARNING = "Some actions may already have run; verify their effects."
+
+
+def safe_refusal_category(category: Any) -> Optional[str]:
+    """[daveey] A provider refusal category fit for display: a short ASCII machine identifier, never
+    provider prose, markup or reasoning (``None`` otherwise)."""
+    if (isinstance(category, str) and 0 < len(category) <= 80
+            and all(c.isascii() and (c.isalnum() or c in "_-") for c in category)):
+        return category
+    return None
+
+
+def turn_ran_actions(turn_messages: Any) -> bool:
+    """True when the turn's rows show a tool call or result (a side effect may already have happened)."""
+    return any(
+        isinstance(row, dict) and (
+            row.get("role") == "tool" or (row.get("role") == "assistant" and row.get("tool_calls"))
+        ) for row in turn_messages or ()
+    )
+
+
+def content_refused_notice(category: Any = None, *, ran_actions: bool = False) -> str:
+    """[daveey] The ``content_refused`` display notice: upstream's copy, plus the validated provider
+    category and the possible-side-effect warning. Display-only — never part of the model's context."""
+    safe = safe_refusal_category(category)
+    notice = (CONTENT_REFUSED_NOTICE if safe is None else
+              f"This message was refused by the model's safety filter (category: {safe}) — try a different query.")
+    return f"{notice} {REFUSED_TURN_ACTIONS_WARNING}" if ran_actions else notice
+
+
+def content_policy_blocked_result(
+    messages: list[dict], api_call_count: int, *, final_response: str, error_detail: str,
+    refusal_category: Any = None, boundary_row_id: Optional[int] = None,
+    ran_actions: bool = False,
+) -> dict[str, Any]:
+    """Terminal refusal result shared by HTTP-200 and exception paths. ``messages`` is clean
+    pre-refusal history; the category and possible-side-effect warning stay display-only.
+    ``boundary_row_id`` identifies the exact durable turn for owner-side retention."""
+    ran_actions = ran_actions is True
+    if ran_actions:
+        final_response = f"{final_response}\n\n{REFUSED_TURN_ACTIONS_WARNING}"
+    result = {
+        "final_response": final_response, "messages": messages, "api_calls": api_call_count,
+        "completed": False, "failed": True, "error": f"content_policy_blocked: {error_detail}",
+        "failure_reason": "content_policy_blocked", "failure_retryable": False,
+        "refusal_category": refusal_category,
+        "refused_turn_ran_actions": ran_actions,
+        "refused_turn_notice": content_refused_notice(refusal_category, ran_actions=ran_actions),
+    }
+    if boundary_row_id is not None:
+        result["refused_turn_boundary_row_id"] = boundary_row_id
+    return result
+
+
+def refused_turn_display_notice(result: Any) -> str:
+    """[daveey] Owner side: the notice to retain for a refused turn's result. Rebuilt from the result's
+    typed fields (re-validated, since a managed worker's result crosses a process boundary), never a
+    free-text field."""
+    if not isinstance(result, dict):
+        return CONTENT_REFUSED_NOTICE
+    return content_refused_notice(
+        result.get("refusal_category"), ran_actions=result.get("refused_turn_ran_actions") is True)
+
+
 def untyped_failed_turn_display_kind(role: Any, content: Any) -> Optional[str]:
     """``FAILED_TURN_DISPLAY_KIND`` for a boundary row persisted before the closers typed it
     (exact notice text, so a real reply quoting it stays a reply); read-side only."""
@@ -92,26 +171,12 @@ def untyped_failed_turn_display_kind(role: Any, content: Any) -> Optional[str]:
     return None
 
 
-def failed_turn_notice(turn_messages: Any, *, restarted: bool = False, result: Any = None) -> str:
-    """Display-only boundary: preserve refusal categories and possible tool effects, not raw provider prose."""
-    partial = any(
-        isinstance(row, dict) and (
-            row.get("role") == "tool" or (row.get("role") == "assistant" and row.get("tool_calls"))
-        ) for row in turn_messages or ()
-    )
-    if isinstance(result, dict) and result.get("failure_reason") == "content_policy_blocked":
-        category = result.get("refusal_category")
-        # Category is a machine identifier, not arbitrary provider prose/markup or reasoning.
-        safe = (isinstance(category, str) and 0 < len(category) <= 80
-                and all(c.isascii() and (c.isalnum() or c in "_-") for c in category))
-        detail = f" (category: {category})" if safe else ""
-        notice = (
-            f"The model provider's content filter refused this turn{detail}. "
-            "Try to rephrase your question, or start a new chat or fork from before the problematic context; "
-            "a long conversation can contribute to a filter trigger."
-        )
-        return notice + (" Some actions may already have run; verify their effects." if partial else "")
-    if partial:
+def failed_turn_notice(turn_messages: Any, *, restarted: bool = False) -> str:
+    """Boundary copy for a failed turn: never claim "not processed" when a tool may have run. ``restarted``:
+    the turn was stopped by a backend restart, whose recovery continues a turn that ran no tool. A
+    content-policy refusal never gets this boundary (it is retained as ``content_refused`` instead:
+    ``content_refused_notice``)."""
+    if turn_ran_actions(turn_messages):
         return PARTIAL_FAILED_TURN_NOTICE
     return RESTART_FAILED_TURN_NOTICE if restarted else FAILED_TURN_NOTICE
 
@@ -282,8 +347,9 @@ _AUTH_COPY: dict[str, str] = {
 }
 
 CONTENT_POLICY_NEXT_STEPS = (
-    "Try rewording your message or removing sensitive attachments, or switch to another "
-    "model with /model."
+    "That message has been left out of this conversation, so you're not stuck — just ask "
+    "something else and you can keep going. Rewording it, removing any sensitive attachments, "
+    "or switching models with /model can also help."
 )
 
 # ---- one reason → "what happened" gloss, shared by cron, subagent and chat notices ------------

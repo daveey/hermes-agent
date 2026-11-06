@@ -110,10 +110,8 @@ jobs:
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
         with:
-          # Several python tests shell out to node (desktop backend-child .ts,
-          # msix-shared.mjs, update handoff). Self-hosted runners only have
-          # apt's Node 18, which cannot strip .ts or require() ESM; use the
-          # PM-locked Node like the e2e job does.
+          # Python tests need PM's Node for .ts/ESM subprocesses and pnpm for
+          # the real scripts/build/node-deps.mjs; all supplies both toolchains.
           toolchain: all
           extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain"]'
           test-environment: 'true'
@@ -301,7 +299,7 @@ jobs:
         # HERMES_E2E_REQUIRE_TUI=1 below turns a missing build into a failure.
         uses: ./.github/actions/retry
         with:
-          command: npm ci --workspace ui-tui --ignore-scripts --no-audit --no-fund && npm run build --workspace ui-tui
+          command: pnpm install --frozen-lockfile --filter "{./ui-tui}..." --ignore-scripts && pnpm --dir ui-tui run build
 
       - name: Install ripgrep (prebuilt binary)
         run: |

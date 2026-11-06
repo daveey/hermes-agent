@@ -4508,6 +4508,7 @@ export const en: Translations = {
       dismissError: 'Dismiss error',
       responseStopped: 'Response stopped',
       staleNotice: 'outdated: card moved on',
+      contentRefusedNotice: "This message was refused by the model's safety filter — try a different query.",
       ...enErrorLayers,
       errorCodes: enErrorCodes,
       errorAuthKinds: {

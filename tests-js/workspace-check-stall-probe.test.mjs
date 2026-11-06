@@ -102,8 +102,23 @@ test('a write that fails is skipped, not recorded as a fast disk', async () => {
 test('the real write+fsync path measures the temp dir and leaves nothing behind', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'stall-probe-'))
   try {
-    const probe = startStallProbe({ dir, intervalMs: 5 })
-    await new Promise((r) => setTimeout(r, 150))
+    // Wait for three completed real write+fsyncs, not a fixed wall-clock
+    // window: on a loaded runner (or Termux storage) one fsync can take
+    // longer than 75 ms, and a 150 ms window then holds only two samples.
+    // The probe calls `running()` once per completed write, as it records it.
+    let completed = 0
+    /** @type {() => void} */
+    let threeDone = () => {}
+    const three = new Promise((r) => (threeDone = r))
+    const probe = startStallProbe({
+      dir,
+      intervalMs: 5,
+      running: () => {
+        if (++completed === 3) threeDone()
+        return []
+      },
+    })
+    await three
     const samples = await probe.stop()
     expect(samples.length).toBeGreaterThan(2)
     expect(samples.every((s) => s.fsyncMs >= 0 && s.fsyncMs < SEVERE_STALL_MS)).toBe(true)

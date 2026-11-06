@@ -1,6 +1,6 @@
 // Proves the E2E driver entry points resolve every import under the
 // runtime-only tests-js install the release workflows use:
-//   npm ci --workspace tests-js --include-workspace-root --omit=dev --ignore-scripts
+//   pnpm install --frozen-lockfile --filter "{./tests-js}..." --prod --ignore-scripts
 // That install has no devDependencies (vitest, jsdom, node-pty, ...), so a
 // driver that imports one only fails on a hosted macOS/Windows release runner.
 // This walks each entry point's static import graph (import/export-from,
