@@ -1,3 +1,5 @@
+# Revalidate this unchanged pin after Yuanbao's core extraction reaches the trusted
+# base: admission against the pre-extraction core correctly rejects its yb_* names.
 name: yuanbao
 repo: https://github.com/NousResearch/hermes-labs-plugins
 sha: 51ede1f023906114ec06c216c4a7b98e8a45d672
