@@ -94,6 +94,15 @@ def _clear_stall(key: tuple[str, str, str]) -> None:
         _overdue_warned.discard(key)
 
 
+def _clear_drained_stalls(slug: str, subs: list[dict]) -> None:
+    active = {_stall_key(slug, sub) for sub in subs}
+    with _stall_lock:
+        for key in list(_stalls.keys() | _overdue_warned):
+            if key[0] == slug and key not in active:
+                _stalls.pop(key, None)
+                _overdue_warned.discard(key)
+
+
 def _warn_if_overdue(key: tuple[str, str, str], age_s: float) -> None:
     with _stall_lock:
         reason = _stalls.get(key)
@@ -310,6 +319,7 @@ def sweep_once(
     for slug in _board_slugs(_kb):
         try:
             if _kbn.count_notify_subs(board=slug, platform="tui") == 0:
+                _clear_drained_stalls(slug, [])
                 continue
             conn = _kbc.connect(board=slug)
         except Exception:
@@ -321,9 +331,12 @@ def sweep_once(
             with contextlib.suppress(Exception):
                 _kbn.recover_orphaned_notify_claims(conn, platform="tui")
             try:
-                subs = _kbn.list_notify_subs(conn)
+                from tui_gateway.kanban_unloaded_candidates import subscriptions
+                subs = subscriptions(conn, _KANBAN_NOTIFY_KINDS)
             except Exception:
                 continue
+            # Candidates omit drained rows; preserve their old stall cleanup.
+            _clear_drained_stalls(slug, subs)
             for sub in subs:
                 chat_id = sub.get("chat_id") or ""
                 if (sub.get("platform") or "").lower() != "tui" or not chat_id or chat_id in live_ids:
