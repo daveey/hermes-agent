@@ -118,17 +118,33 @@ it.each(['factory', 'constructor'] as const)('recovers after a synchronous %s re
   expect(client.connectionState).toBe('closed')
 })
 
+it('surfaces an unminted IPC refusal to the registry caller before opening a socket', async () => {
+  const wsUrl = localUrl.replace('native_dial=1', 'native_dial=unminted')
+
+  const failure = new Error('control socket busy')
+
+  ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
+    getConnectionFor: vi.fn(async () => ({ mode: 'local', authMode: 'native', profile: 'default', wsUrl })),
+    getGatewayWsUrlFor: vi.fn().mockRejectedValue(failure)
+  }
+  configureGatewayRegistry({ activeConnectionId: () => 'hub', foregroundScopes: () => new Set(), onEvent: vi.fn() })
+
+  await expect(openGatewayForAgent('local', 'default')).rejects.toThrow('control socket busy')
+  expect(sockets).toHaveLength(0)
+})
+
 it.each([
-  { mode: 'local', recovery: 'backoff' },
-  { mode: 'local', recovery: 'request' },
-  { mode: 'remote', recovery: 'backoff' }
-] as const)('recovers a retained $mode secondary via $recovery while the hub primary stays open', async ({ mode, recovery }) => {
+  { mode: 'local', recovery: 'backoff', descriptor: localUrl },
+  { mode: 'local', recovery: 'request', descriptor: localUrl },
+  { mode: 'local', recovery: 'backoff', descriptor: localUrl.replace('native_dial=1', 'native_dial=unminted') },
+  { mode: 'local', recovery: 'request', descriptor: localUrl.replace('native_dial=1', 'native_dial=unminted') },
+  { mode: 'remote', recovery: 'backoff', descriptor: remoteUrl }
+] as const)('recovers a retained $mode secondary via $recovery ($descriptor) while the hub primary stays open', async ({ mode, recovery, descriptor: url }) => {
   const owner = { connectionId: mode === 'local' ? 'local' : 'other-remote', mode, profile: 'default' }
-  const url = mode === 'local' ? localUrl : remoteUrl
   const mint = vi.fn(async () => `${url}${mode === 'local' ? '&ticket=fresh' : ''}`)
   mint.mockResolvedValueOnce(mode === 'local' ? `${url}&ticket=initial` : url)
-  // Native descriptor is credential-free: a transient IPC mint failure falls
-  // back to it, and the real openGatewaySocket refuses it synchronously.
+  // Unminted descriptors surface the IPC failure; legacy native descriptors
+  // still fall back and are refused by the real socket factory.
   mint.mockRejectedValueOnce(new Error('gateway restarting'))
   const onActiveRouteChanged = vi.fn()
 
@@ -155,7 +171,7 @@ it.each([
 
   if (mode === 'local') {
     expect(original.protocols).toEqual(['hermes-gateway-v1', 'hermes-gateway-ticket.initial'])
-    expect(original.url).toBe(localUrl)
+    expect(original.url).toBe(url)
   }
 
   original.drop()
@@ -180,7 +196,10 @@ it.each([
   }
 
   if (mode === 'local') {
-    expect(errors).toHaveBeenCalledWith(expect.stringContaining('conn:local::default'), expect.objectContaining({ message: 'Native gateway requires a fresh private ticket' }))
+    if (!url.includes('native_dial=unminted')) {
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining('conn:local::default'), expect.objectContaining({ message: 'Native gateway requires a fresh private ticket' }))
+    }
+
     expect(mint.mock.calls.length).toBeGreaterThanOrEqual(3)
   }
 

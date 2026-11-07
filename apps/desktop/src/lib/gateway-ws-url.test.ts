@@ -199,21 +199,20 @@ describe('resolveGatewayWsUrl', () => {
     })
   })
 
-  // Local Electron dials its own gateway through main: a failed mint falls back to the descriptor
-  // URL, so the reconnect loop owns the retry.
+  // Local Electron's unminted descriptor is also credential-free: retain the mint failure.
   describe('local Electron native dial', () => {
     const localConn = { authMode: 'native' as const, wsUrl: 'ws://127.0.0.1:8642/api/ws?native_dial=unminted' }
 
-    it('falls back to the descriptor URL when the mint rejects', async () => {
+    it('surfaces the original error when the mint rejects', async () => {
       const getGatewayWsUrl = vi.fn().mockRejectedValue(new Error('control socket busy'))
 
-      await expect(resolveGatewayWsUrl({ getGatewayWsUrl }, localConn)).resolves.toBe(localConn.wsUrl)
+      await expect(resolveGatewayWsUrl({ getGatewayWsUrl }, localConn)).rejects.toThrow('control socket busy')
     })
 
-    it('falls back to the descriptor URL when the mint refuses', async () => {
+    it('surfaces the original error when the mint refuses', async () => {
       const getGatewayWsUrl = vi.fn().mockResolvedValue({ error: 'gateway restarting', ok: false })
 
-      await expect(resolveGatewayWsUrl({ getGatewayWsUrl }, localConn)).resolves.toBe(localConn.wsUrl)
+      await expect(resolveGatewayWsUrl({ getGatewayWsUrl }, localConn)).rejects.toThrow('gateway restarting')
     })
 
     it('dials the freshly minted URL', async () => {

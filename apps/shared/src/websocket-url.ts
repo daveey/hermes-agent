@@ -78,10 +78,11 @@ export async function resolveGatewayWsUrl(deps: ResolveGatewayWsUrlDeps, conn: G
     }
   }
 
-  // The Webapp's descriptor URL carries no credential of its own, so a failed mint IS the answer
-  // (a gateway that cannot attach says why); falling back to that URL only fails later, nameless.
-  // Every other descriptor falls back to its cached URL and leaves the retry to the reconnect loop.
-  const mintRequired = nativeDialOf(conn.wsUrl) === BROWSER_NATIVE_DIAL
+  // Browser and unminted Electron descriptors carry no credential of their own: falling back
+  // after a failed mint only loses its error to a later socket-factory refusal.
+  // Other descriptors retain their cached-URL fallback.
+  const nativeDial = nativeDialOf(conn.wsUrl)
+  const mintRequired = nativeDial === BROWSER_NATIVE_DIAL || nativeDial === 'unminted'
 
   if (mint) {
     const fresh = await mint(profile).catch((error: unknown) => {
