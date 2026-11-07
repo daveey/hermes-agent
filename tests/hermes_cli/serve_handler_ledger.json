@@ -7,7 +7,7 @@
   "rpc": {
    "authority": 108,
    "keep-host-wide": 1,
-   "undecided": 187
+   "undecided": 188
   },
   "websocket": {
    "undecided": 9
@@ -643,6 +643,7 @@
   {"current_path": "legacy fallback; standalone: legacy server.dispatch", "decision": "undecided", "handler": "vault.add", "kind": "rpc", "ref": "D3"},
   {"current_path": "legacy fallback; standalone: legacy server.dispatch", "decision": "undecided", "handler": "vault.list", "kind": "rpc", "ref": "D3"},
   {"current_path": "legacy fallback; standalone: legacy server.dispatch", "decision": "undecided", "handler": "vault.lock", "kind": "rpc", "ref": "D3"},
+  {"current_path": "legacy fallback; standalone: legacy server.dispatch", "decision": "undecided", "handler": "vault.preview.fill", "kind": "rpc", "ref": "D3"},
   {"current_path": "legacy fallback; standalone: legacy server.dispatch", "decision": "undecided", "handler": "vault.remove", "kind": "rpc", "ref": "D3"},
   {"current_path": "legacy fallback; standalone: legacy server.dispatch", "decision": "undecided", "handler": "vault.source.set", "kind": "rpc", "ref": "D3"},
   {"current_path": "legacy fallback; standalone: legacy server.dispatch", "decision": "undecided", "handler": "vault.sources", "kind": "rpc", "ref": "D3"},

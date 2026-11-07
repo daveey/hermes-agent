@@ -26,7 +26,8 @@ def report(cwd: Path, upstream: str, conflicts: list[str]) -> str | None:
     from hermes_cli._launchers import runtime_command
     from hermes_constants import get_hermes_home
 
-    root = Path(__file__).resolve().parents[1]
+    from hermes_cli._startup_fast import project_root_str
+    root = Path(project_root_str())
     args = ["--cwd", str(cwd), "--upstream", upstream, *(a for p in conflicts for a in ("--conflict", p))]
     try:
         proc = subprocess.run(

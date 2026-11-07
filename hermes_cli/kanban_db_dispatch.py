@@ -32,7 +32,7 @@ from hermes_cli import kanban_db_dispatch_guard_notice as _guard_notice
 from hermes_cli.kanban_db_stale_claims import _defer_reclaim_for_live_worker
 from hermes_cli.kanban_suspend_ledger import awake_seconds as _awake_seconds, record_dispatch_pass as _record_dispatch_pass
 from hermes_cli.kanban_db_dispatch_guard_notice import guard_hold_started_at as _guard_hold_started_at
-from hermes_cli import kanban_db_dispatch_quota as _kbq
+from hermes_cli import kanban_db_dispatch_quota as _kbq, _startup_fast
 from hermes_cli.kanban_db_dispatch_exit_code import exit_code_kind as _exit_code_kind
 from hermes_cli.kanban_db_dispatch_allowlist import _dispatch_profile_allowlist, dispatch_profile_allowlist_summary
 from hermes_cli import kanban_worker_scope as _worker_scope, kanban_aggregate_scope as _aggregate_scope
@@ -2578,7 +2578,7 @@ def _propagate_module_import_root(cmd: list[str], env: dict[str, str]) -> None:
     from cron.scheduler_worker_env import is_hermes_module_argv, pin_hermes_tree_on_pythonpath
     if not is_hermes_module_argv(cmd):
         return
-    pin_hermes_tree_on_pythonpath(env, Path(__file__).resolve().parents[1])
+    pin_hermes_tree_on_pythonpath(env, Path(_startup_fast.project_root_str()))
 
 
 def _absolute_hermes_path(path: str) -> str:
@@ -2990,7 +2990,7 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, o
     # died on `No module named 'hermes_cli'` before it ever reached the owner. Same pin as cron's
     # external worker (#112729): applied to the sanitized env, after every other decision stands.
     from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
-    env = pin_hermes_tree_on_pythonpath(env, Path(__file__).resolve().parent.parent)
+    env = pin_hermes_tree_on_pythonpath(env, Path(_startup_fast.project_root_str()))
     # [daveey] Deferred placement: a card with parents that nothing pins here runs on the routed gateway.
     # Its forwarder (seconds, no LLM) replaces the worker; on any failure it execs ``cmd`` itself.
     from hermes_cli.kanban_placement_forward import forward_argv

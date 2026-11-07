@@ -16,6 +16,8 @@ Reconnect: unanswered requests are returned as ``open_requests`` by ``session.re
 ``session.activate`` / ``session.events.since`` (:func:`open_requests`); the shared TypeScript
 channel re-delivers them as if they had just arrived, so the notification replay ring never
 has to carry "a question still waiting for an answer".
+Vault preview operations are live-only: their script payload is discarded after
+dispatch and is never included in these reconnect snapshots.
 
 Batch clarify keeps per-question locks (``clarify.lock`` → :func:`lock_answer`): answers stay
 editable until every question is locked, locked answers survive a timeout, and the last lock
@@ -60,9 +62,11 @@ class ServerRequest:
         "on_result",
         "params",
         "qids",
+        "replayable",
         "result",
         "sid",
         "target",
+        "transport",
         "withdrawn",
         "writing",
     )
@@ -74,6 +78,7 @@ class ServerRequest:
         self.target = None
         self.method = method
         self.params = dict(params)
+        self.replayable = can_replay_request(method, params)
         self.event = threading.Event()
         self.result: dict | None = None
         self.answered = False
@@ -84,6 +89,8 @@ class ServerRequest:
         self.on_result = on_result
         # Client transports that answered NOT_SHOWN_CODE (no window there shows this session).
         self.declined: set = set()
+        # Set = the frame goes to this one client socket and only a response from it settles the request.
+        self.transport: Any = None
         # Published but frame not yet written; a cancel in that gap parks its reason in ``withdrawn`` for _register.
         self.writing = False
         self.withdrawn: str | None = None
@@ -103,6 +110,11 @@ class ServerRequest:
 
 _lock = threading.Lock()
 _open: dict[str, ServerRequest] = {}
+
+
+def can_replay_request(method: str, params: dict) -> bool:
+    """Secure page scripts belong only to the original live request, never a resume."""
+    return not (method == "preview.act" and params.get("action") == "vault")
 
 # Frame sinks, bound by ``bind_sinks`` from server.py at import time (like the method_ctx split
 # modules): importing server back from here would pick a different module object under the test
@@ -180,15 +192,20 @@ def _register(req: ServerRequest) -> None:
     _, problem = contracts.validate_params(contract, {"session_id": req.sid, **req.params})
     if problem is not None:
         raise ValueError(problem)  # a key the renderer's typed handler would never read: our bug
+    frame = req.frame()
+    if not req.replayable:
+        # Build the immediate wire frame first; pending state keeps only correlation
+        # and cancellation metadata, never the secret-bearing expression.
+        req.params = {}
     with _lock:
         req.writing = True
         _open[req.id] = req
     delivered = True
     try:
         if req.target is None:
-            _write(req.frame())
+            (req.transport.write if req.transport is not None else _write)(frame)
         else:
-            delivered = bool(req.target.write(req.frame()))
+            delivered = bool(req.target.write(frame))
     finally:
         with _lock:
             req.writing = False
@@ -201,27 +218,32 @@ def _register(req: ServerRequest) -> None:
 
 
 def send(method: str, sid: str, params: dict, *, timeout: float | None,
-         qids: list[str] | None = None) -> dict | None:
+         qids: list[str] | None = None, transport: Any = None) -> dict | None:
     """Send one request and block for the response ``result`` (a dict).
 
     Returns ``None`` when the renderer never answered (timeout, cancel, or an error response — e.g.
     a client without a handler for ``method``). ``timeout`` semantics: None → wait until answered or
     cancelled, 0 → return immediately, > 0 → bounded wait. A batch (``qids``) that settled returns
     ``{"answers": <locked so far>, "outcome"}`` (``submitted`` / ``cancelled`` / ``timed_out``).
+    ``transport`` pins a session-less request to the client socket that asked for it (an RPC handler
+    calling back into its own caller's window): the frame goes only there, only its response settles
+    it, and any error from it (a decline included) is a refusal.
     """
-    target = _preview_client(sid) if method == "preview.open" else None
+    target = (transport if transport is not None else _preview_client(sid)) if method == "preview.open" else None
     if method == "preview.open" and target is None:
         return None
-    if target is None and _unanswerable(method, sid):
+    if target is None and transport is None and _unanswerable(method, sid):
         return None
     req = ServerRequest(sid, method, params, qids=qids)
     req.target = target
+    req.transport = transport
     try:
         _register(req)
     except BaseException:
         with _lock:
             _open.pop(req.id, None)
         raise
+
     try:
         req.event.wait(timeout)
     except BaseException:
@@ -310,7 +332,10 @@ def resolve_response(frame: dict, transport: Any = None) -> bool:
         pending = _open.get(rid)
         if pending is not None and pending.target is not None and pending.target is not transport:
             return False
-    if _is_not_shown(frame) and (pending is None or pending.target is None):
+    if pending is not None and pending.transport is not None and pending.transport is not transport:
+        logger.debug("server request %s: response from a client it was not sent to dropped", rid)
+        return False
+    if _is_not_shown(frame) and (pending is None or (pending.target is None and pending.transport is None)):
         return _decline(rid, transport)
     with _lock:
         req = _open.get(rid)
@@ -391,7 +416,8 @@ def open_requests(sid: str) -> list[dict]:
     """Replayable requests for *sid*, oldest first. Targeted creation must not replay
     into a different window and create a duplicate tab."""
     with _lock:
-        reqs = sorted((req for req in _open.values() if req.sid == sid and req.target is None), key=lambda r: r.created_at)
+        reqs = sorted((req for req in _open.values() if req.sid == sid and req.target is None and req.replayable),
+                      key=lambda r: r.created_at)
     return [req.snapshot() for req in reqs]
 
 
@@ -407,6 +433,18 @@ def pending_kind(sid: str) -> str:
     with _lock:
         reqs = [req for req in _open.values() if req.sid == sid]
     return min(reqs, key=lambda r: r.created_at).method if reqs else ""
+
+
+def resolve_pinned_response(frame: Any, transport: Any) -> bool:
+    """Settle *frame* when it answers a request pinned to *transport* (``send(transport=...)``); False for
+    anything else, which stays with its usual owner (a session authority's own registry, or the
+    unpinned path of :func:`resolve_response`)."""
+    if not is_response_frame(frame) or not isinstance(frame.get("id"), str):
+        return False
+    with _lock:
+        req = _open.get(frame["id"])
+    return req is not None and req.transport is not None and req.transport is transport and resolve_response(
+        frame, transport)
 
 
 def is_response_frame(obj: Any) -> bool:

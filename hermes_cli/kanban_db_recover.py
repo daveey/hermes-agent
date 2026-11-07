@@ -870,7 +870,8 @@ def spawn_recovery(db_path: Path, *, wait: bool = False, timeout: float = RECOVE
     if holder_task:
         env[HOLDER_TASK_ENV] = holder_task
     cmd = [sys.executable, "-m", "hermes_cli.kanban_db_recover", "--db", key, "--json", *(extra_args or [])]
-    repo_root = str(Path(__file__).resolve().parents[1])
+    from hermes_cli._startup_fast import project_root_str
+    repo_root = project_root_str()
     env["PYTHONPATH"] = repo_root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     if not wait:
         log = Path(key).with_name(Path(key).name + ".recover.log")
