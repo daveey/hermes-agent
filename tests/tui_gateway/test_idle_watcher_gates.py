@@ -64,9 +64,10 @@ def test_sweep_idle_does_not_read_replica_and_unloaded_chat_is_retried(tmp_path,
 
     poll({CHAT})
     poll({CHAT})
-    original = krn._task_rows
+    # Count actual snapshot opens, including the warm seq-only projection path.
+    original = krn._ro
     reads = []
-    monkeypatch.setattr(krn, "_task_rows", lambda *a: reads.append(1) or original(*a))
+    monkeypatch.setattr(krn, "_ro", lambda *a: reads.append(1) or original(*a))
     poll({CHAT})
     assert reads == []
     poll(set())
@@ -77,7 +78,8 @@ def test_sweep_idle_does_not_read_replica_and_unloaded_chat_is_retried(tmp_path,
 
 
 def test_sweep_commit_during_read_is_not_cached(tmp_path, monkeypatch):
-    replica = _replica(tmp_path, [])
+    # Concurrent commits require WAL while the real reader snapshot is held.
+    replica = _replica(tmp_path, [], 'wal')
     krn._reset_for_tests()
     original = krn._task_rows
 

@@ -688,7 +688,9 @@ def _reset_for_tests() -> None:
     """Forget this process's memos, as a restarted backend would (the ledger file stays)."""
     from tui_gateway.kanban_remote_observations import _decoded, _decoded_files, _memo
     from tui_gateway.kanban_replica_observer import reset as reset_observers
+    from tui_gateway.remote_sweep_projection import reset as reset_projection
 
+    reset_projection()
     global _index_memo, _sweep_memo
     _sweep_memo = None
     reset_observers()
@@ -1038,7 +1040,8 @@ def _sweep_snapshot(path, me: str) -> tuple:
     One memo bounds retained data; a failed/racing read cannot bless a stale snapshot.
     """
     global _sweep_memo
-    from tui_gateway.kanban_replica_observer import fingerprint
+    from tui_gateway.kanban_replica_observer import file_identity, fingerprint
+    from tui_gateway import remote_sweep_projection
 
     stamp = fingerprint(path)
     memo = _sweep_memo
@@ -1046,10 +1049,9 @@ def _sweep_snapshot(path, me: str) -> tuple:
         return memo[2], memo[3]
     _sweep_memo = None
     with contextlib.closing(_ro(Path(path))) as conn:
-        rows = _canonical(_task_rows(conn, me))
-    cards = list(_sweep_cards(rows, me))
-    states = {ref: (state, {"sessions": task.get("sessions")})
-              for ref, (state, task) in _current_states(rows).items()}
+        conn.execute("BEGIN")
+        cards, states = remote_sweep_projection.snapshot(
+            conn, file_identity(stamp), me)
     if stamp is not None and fingerprint(path) == stamp:
         _sweep_memo = (stamp, me, cards, states)
     return cards, states
