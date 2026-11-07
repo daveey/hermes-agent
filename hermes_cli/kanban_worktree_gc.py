@@ -62,9 +62,11 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = N
                 "FROM tasks t WHERE t.workspace_kind='scratch' "
                 f"AND t.status IN {ws._TERMINAL_STATUSES_SQL}"
             ).fetchall()
+            known_paths = _scratch_owner_paths(conn)
             for board in ws._sibling_board_db_files(conn):
                 with _read_board(board) as other:
-                    other.execute("SELECT workspace_path FROM tasks").fetchall()
+                    known_paths.update(_scratch_owner_paths(other))
+            _report_unowned_scratch(kb.workspaces_root(), known_paths)
         except (OSError, sqlite3.Error):
             log.warning("Scratch GC aborted: cannot read all boards; preserving workspaces", exc_info=True)
             return 0
@@ -76,6 +78,7 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = N
                 continue
             removable = ws._scratch_tree_removable(path)
             if not removable and not _finished_before(row, days):
+                _report_scratch_retention(row, path, days)
                 continue
             if ws._defer_shared_workspace_cleanup(conn, row["id"], path):
                 continue
@@ -93,6 +96,43 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = N
     for task_id, path, completed_at in aged:
         removed += _archive_and_remove_scratch(conn, task_id, path, completed_at)
     return removed
+
+
+def _scratch_owner_paths(conn: sqlite3.Connection) -> set[Path]:
+    """Read local records only; this inventory never supplies deletion candidates."""
+    from hermes_cli import kanban_db as kb
+
+    root = kb.workspaces_root(board=_board_slug(conn))
+    paths = set()
+    for row in conn.execute("SELECT id, workspace_kind, workspace_path FROM tasks"):
+        if row["workspace_path"]:
+            paths.add(Path(row["workspace_path"]).expanduser().resolve())
+        elif row["workspace_kind"] == "scratch":
+            paths.add((root / row["id"]).resolve())
+    return paths
+
+
+def _report_unowned_scratch(root: Path, known_paths: set[Path]) -> None:
+    """Observe root children without entering them or guessing task IDs from names."""
+    if not root.exists():
+        return
+    for path in root.iterdir():
+        if path.is_symlink() or not path.is_dir():
+            continue
+        if path.resolve() not in known_paths:
+            log.warning("Scratch preserved: reason=owner_unverified path=%s; "
+                        "no local task workspace record; moved or unknown ownership; "
+                        "no deletion deadline", path)
+
+
+def _report_scratch_retention(row: sqlite3.Row, path: Path, days: int) -> None:
+    # Logs, not task events: observing retention must never extend its age.
+    since = row["completed_at"] or row["last_event"] or row["created_at"]
+    reason = "retention_disabled" if days <= 0 else "retention_pending"
+    eligible_at = since + days * 86400 if days > 0 and since else None
+    log.warning("Scratch preserved: reason=%s path=%s task=%s eligible_at=%s; "
+                "deadline is archival eligibility only, all safety guards still apply",
+                reason, path, row["id"], eligible_at)
 
 
 def _finished_before(row: sqlite3.Row, days: int) -> bool:
