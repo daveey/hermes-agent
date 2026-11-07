@@ -181,7 +181,9 @@ def test_a_sigkilled_owner_takes_its_harness_daemon_with_it(tmp_path):
         process_identity._supervised_pgids.clear()
 
 
-def test_a_daemon_another_live_hermes_started_on_the_same_name_is_never_registered(tmp_path, registered):
+@pytest.mark.parametrize("unpublished_argv", [False, True])
+def test_a_daemon_another_live_hermes_started_on_the_same_name_is_never_registered(
+        tmp_path, registered, monkeypatch, unpublished_argv):
     """Two Hermes processes on the default BU_NAME read the same bu-default.pid. The daemon belongs
     to the one whose CLI started it: the other must not hand it to its supervisor, or that Hermes
     dying would kill a browser session the first still uses."""
@@ -198,6 +200,24 @@ def test_a_daemon_another_live_hermes_started_on_the_same_name_is_never_register
     daemon = subprocess.Popen([sys.executable, "-m", "browser_harness.daemon"], cwd=str(tmp_path / "pkgroot"),
                               stdin=subprocess.DEVNULL, start_new_session=True, env={**os.environ, **tag})
     try:
+        import psutil
+
+        if unpublished_argv:
+            # Reproduce the valid empty argv observation at the first post-Popen read.
+            original_cmdline = psutil.Process.cmdline
+            pending = [True]
+
+            def cmdline(proc):
+                if proc.pid == daemon.pid and pending:
+                    pending.pop()
+                    return []
+                return original_cmdline(proc)
+
+            monkeypatch.setattr(psutil.Process, "cmdline", cmdline)
+        # Popen's exec handshake can finish before argv is visible to psutil. Establish
+        # only that raw precondition; never retry the ownership verdict under test.
+        wait_until(lambda: bool(psutil.Process(daemon.pid).cmdline()), timeout=30,
+                   what="the stand-in harness daemon's argv to become visible")
         _publish(runtime, "bu-default", daemon.pid)
         # The in-call check stops too, instead of re-checking a daemon that is never ours every tick.
         assert browser_use_cli._own_harness_daemon_until_owned({"BH_HOME": str(runtime.parent)}) is False
