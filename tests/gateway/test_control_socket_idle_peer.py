@@ -22,7 +22,13 @@ async def exchange(server, request, sock=None):
 
     writer = SimpleNamespace(write=output.append, drain=drain, close=lambda: None,
                              get_extra_info=lambda key: sock)
-    await server._handle_connection(reader, writer)
+    from gateway.control_dispatch import ControlRequestDispatcher
+    server._request_dispatch = ControlRequestDispatcher()
+    try:
+        await server._handle_connection(reader, writer)
+    finally:
+        server._request_dispatch.close()
+        server._request_dispatch = None
     assert len(output) == 1
     return json.loads(output[0])
 

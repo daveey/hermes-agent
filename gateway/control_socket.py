@@ -1,5 +1,5 @@
 """Gateway control socket — the gateway-owned local coordination surface: a local-only socket answering
-versioned JSON verbs (``identify``, ``status``). A connectable socket with a well-formed ``identify``
+versioned JSON verbs (``identify``, ``status``, ``resolve-profile``, ``session-ticket``, ...). A connectable socket with a well-formed ``identify``
 answer IS liveness — no PID-reuse heuristics. Never a TCP port: filesystem/pipe ACLs are the auth
 boundary. POSIX: ``$HERMES_HOME/gateway.sock`` (or a temp-dir socket + ``gateway.sock.path`` pointer
 file when the home path exceeds ``sun_path`` or its filesystem refuses sockets); Windows: named pipe ``\\\\.\\pipe\\hermes-gateway-<hash>``.
@@ -25,6 +25,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from gateway.control_dispatch import ControlRequestDispatcher
+
 logger = logging.getLogger(__name__)
 
 CONTROL_PROTOCOL_VERSION = 1
@@ -36,19 +38,6 @@ _MAX_UNIX_PATH = 100  # sun_path limit is 104 on macOS/BSD, 108 on Linux; margin
 _MAX_REQUEST_BYTES = 64 * 1024
 _MAX_RESPONSE_BYTES = 512 * 1024
 _DEFAULT_CLIENT_TIMEOUT = 2.0
-# Control verbs run on their own small pool, never the loop's default executor: that pool is shared
-# with every other ``run_in_executor(None, ...)`` in the gateway, and an ``identify`` queued behind a
-# burst of them blows the 2 s client budget while the gateway is perfectly healthy.
-_CONTROL_EXECUTOR = None
-
-
-def _control_executor():
-    global _CONTROL_EXECUTOR
-    if _CONTROL_EXECUTOR is None:
-        from concurrent.futures import ThreadPoolExecutor
-
-        _CONTROL_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="control-socket")
-    return _CONTROL_EXECUTOR
 # What a filesystem that cannot host an AF_UNIX node answers: a Docker Desktop (virtiofs) bind mount
 # refuses the socket, and an inode a previous container left there can be neither stat'ed nor
 # removed from inside (#123761). Not EADDRINUSE: a live sibling must keep failing loudly.
@@ -307,9 +296,12 @@ class GatewayControlServer:
         # on a reader nothing else references could otherwise be garbage collected.
         self._connection_tasks: set[asyncio.Task] = set()
         self.ticket_store = None
+        # ``resolve-profile`` (gateway.control_resolve); None keeps the unknown-verb answer.
+        self.resolve_handler: Optional[Callable[[dict, Path], dict[str, Any]]] = None
         self.private_handlers = {}
         self._server: Optional[asyncio.AbstractServer] = None
         self._pipe_server: Any = None  # Windows proactor pipe server
+        self._request_dispatch: ControlRequestDispatcher | None = None
         self._bind_path: Optional[Path] = None
         self._pointer_file: Optional[Path] = None
         self._fallback_root: Optional[Path] = None  # mkdtemp root created for a squatted fallback
@@ -352,6 +344,8 @@ class GatewayControlServer:
         self._loop_watchdog = watchdog
 
     async def _start_posix(self) -> bool:
+        if self._request_dispatch is None:
+            self._request_dispatch = ControlRequestDispatcher()
         bind_path, pointer_file = resolve_server_socket_path(self._home)
         try:
             bind_path = await self._bind_posix(bind_path, pointer_file)
@@ -430,6 +424,9 @@ class GatewayControlServer:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(self._pipe_server.close)
         self._server = self._pipe_server = None
+        if self._request_dispatch is not None:
+            self._request_dispatch.close()
+            self._request_dispatch = None
         self.cleanup_files()
 
     def cleanup_files(self) -> None:
@@ -470,6 +467,8 @@ class GatewayControlServer:
                     raise PermissionError("authenticated private request required")
                 response = {"ok": True, "protocol": CONTROL_PROTOCOL_VERSION,
                             "result": self.private_handlers[verb](request["params"], peer_subject)}
+            elif verb == "resolve-profile" and self.resolve_handler is not None:
+                response = {"ok": True, "protocol": CONTROL_PROTOCOL_VERSION, "result": self.resolve_handler(request, self._home)}
             elif verb == "session-ticket":
                 response = {"ok": True, "protocol": CONTROL_PROTOCOL_VERSION,
                             "result": self._session_ticket(request, peer_subject)}
@@ -571,24 +570,17 @@ class GatewayControlServer:
             raw = await asyncio.wait_for(reader.readline(), timeout=_DEFAULT_CLIENT_TIMEOUT)
             if not raw or len(raw) > _MAX_REQUEST_BYTES:
                 return
-            # Handlers read disk; keep that off the loop that drives every platform
-            # adapter so a fast-polling consumer can't stall heartbeats.
+            dispatcher = self._request_dispatch
+            if dispatcher is None:
+                return  # listener shutdown won the race with this connection's read
             from gateway.control_diagnostics import safe_verb
-            timing.verb = safe_verb(raw, self._handlers.keys() | self.private_handlers.keys() | {"session-ticket"})
+            timing.verb = safe_verb(raw, self._handlers.keys() | self.private_handlers.keys()
+                                    | {"session-ticket", "resolve-profile"})
             # Only authenticated verbs consume the peer; public polls need no filesystem checks.
             peer = (self._posix_peer_subject(writer)
                     if timing.verb == "session-ticket" or timing.verb in self.private_handlers else None)
-            timing.enqueue()
-            try:
-                future = _control_executor().submit(timing.run, self.handle_request_line, raw.rstrip(b"\n"), peer)
-            except BaseException:
-                from concurrent.futures import Future
-                failed = Future()
-                failed.cancel()
-                timing.work_done(failed)
-                raise
-            future.add_done_callback(timing.work_done)
-            response = await asyncio.wrap_future(future)
+            response = await dispatcher.dispatch(
+                self.handle_request_line, raw.rstrip(b"\n"), peer, timing=timing)
             writer.write(response)
             await asyncio.wait_for(writer.drain(), timeout=_DEFAULT_CLIENT_TIMEOUT)
         except (TimeoutError, ConnectionError, OSError):

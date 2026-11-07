@@ -607,21 +607,37 @@ def test_register_child_waits_behind_writers_that_keep_landing(tmp_path, monkeyp
     ledger.parent.mkdir(parents=True, exist_ok=True)
     released = threading.Event()
 
-    def busy_writers() -> None:  # 1.5 s of writers ahead, each landing within the stall window
-        with open(ledger.with_name(ledger.name + ".lock"), "a+b") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            started.set()
-            for i in range(15):
-                pi.atomic_json_write(ledger, [{"pid": 1, "purpose": f"ahead-{i}"}])
-                time.sleep(0.1)  # health: allow HX013 -- the pacing IS the behaviour: live writers holding the lock past the old flat timeout
-            released.set()
+    class WriterClock:
+        # Real atomic replacements and real lock contention, but host scheduling cannot
+        # consume the fixture's deliberately short stall window between writes.
+        now = 0.0
+        writes = 0
 
-    started = threading.Event()
-    ahead = threading.Thread(target=busy_writers, daemon=True)
-    ahead.start()
-    assert started.wait(10)
-    assert pi.register_child(os.getpid(), "behind-the-queue") is True
-    ahead.join(10)
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, interval):
+            assert interval == pi._LEDGER_LOCK_POLL_S
+            assert not released.is_set(), "lock remained contended after holder release"
+            self.now += 0.1
+            if self.writes < 15:
+                pi.atomic_json_write(ledger, [{"pid": 1, "purpose": f"ahead-{self.writes}"}])
+                self.writes += 1
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                released.set()
+
+    clock = WriterClock()
+    # Replace this module's clock only, not the shared stdlib time module.
+    monkeypatch.setattr(pi, "time", clock)
+    with open(ledger.with_name(ledger.name + ".lock"), "a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        assert pi.register_child(os.getpid(), "behind-the-queue") is True
+    assert clock.writes == 15
+    assert clock.now > pi._LEDGER_LOCK_TIMEOUT_S
     assert released.is_set(), "register_child wrote before the writers ahead of it let go of the lock"
     assert not [r for r in caplog.records if "spawn ledger lock" in r.getMessage()], "gave up on live writers"
     rows = json.loads(ledger.read_text(encoding="utf-8"))

@@ -18,6 +18,14 @@ from agent.context_compressor import (LEGACY_SUMMARY_PREFIX, SUMMARY_PREFIX, _ME
     _MERGED_SUMMARY_DELIMITER, _SUMMARY_END_MARKER)
 
 
+# Drive from the lineage sessions through idx_messages_session_active. The previous ``JOIN lineage`` form let the
+# planner SCAN the whole messages table (300k rows / 1.9 GB on hermes-hub) inside BEGIN IMMEDIATE, holding the
+# state.db write lock for as long as a cold scan took. [daveey]
+_NOTICE_BY_ID_SQL = (
+    "SELECT m.id FROM messages m WHERE m.session_id IN (SELECT id FROM lineage) "
+    "AND m.display_kind='kanban_notice' AND json_extract(m.display_metadata, '$.notice_id') = ? LIMIT 1")
+
+
 # Persisted title provenance: automatic display labels are not user-selected identities.
 TITLE_SOURCE_DERIVED = "derived"
 TITLE_SOURCE_LLM = "llm"
@@ -817,6 +825,15 @@ BEGIN
     -- An in-place rewrite (prompt expansion, multimodal context, a redaction) moves neither the
     -- active row count nor the highest id; this write-side revision is what a transcript-derived
     -- cache keys on (conversation_revision). Whoever wrote the row, old builds included.
+    UPDATE sessions SET transcript_revision = transcript_revision + 1 WHERE id = new.session_id;
+END;
+DROP TRIGGER IF EXISTS messages_display_revision_update;
+CREATE TRIGGER IF NOT EXISTS messages_display_revision_update
+AFTER UPDATE OF codex_reasoning_items, codex_message_items, display_kind, display_metadata ON messages
+BEGIN
+    -- A reaction, a display rewrite or checkpoint pruning: a transcript poller's cursor
+    -- (transcript_cursor_state) keys on these too. Its own name, so an older build's open, which
+    -- recreates the trigger above with that build's column list, leaves this one in place.
     UPDATE sessions SET transcript_revision = transcript_revision + 1 WHERE id = new.session_id;
 END;
 CREATE INDEX IF NOT EXISTS idx_messages_session_active

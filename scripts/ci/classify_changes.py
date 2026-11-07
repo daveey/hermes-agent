@@ -99,13 +99,11 @@ import subprocess
 import sys
 
 _FRONTEND = ("ui-tui/", "web/", "apps/")  # TS typecheck-matrix packages
-# Shipped page outside those packages, exercised by the desktop Electron suite.
+# Shipped inputs outside those packages, exercised by the desktop Electron suite.
 _FRONTEND_FILES = {
     "scripts/desktop-update/ui.html",
-    # Root inputs of every workspace's checks: each package's eslint config
-    # imports the shared one, and .npmrc shapes every ``npm ci``. As
-    # unrecognized paths they ran only the Python lane, so a lint-breaking edit
-    # went green on its own PR. [daveey]
+    "scripts/ci/desktop_build_cache.py",
+    # Shared eslint configuration and install policy affect every workspace.
     "eslint.config.shared.mjs",
     ".npmrc",
 }
@@ -148,6 +146,8 @@ _PY_RELEVANT_CONTRACT_FILES = {
     # tests/tui_gateway/contracts/test_generated.py (rendered from tui_gateway/contracts)
     "apps/shared/src/gateway-contract.generated.ts",
     "apps/shared/src/gateway-contract.openrpc.json",
+    # tests/gateway/test_control_socket_vectors.py (the public control-socket contract)
+    "apps/shared/src/node/control-socket.vectors.json",
     # tests/hermes_cli/test_desktop_slash_registry.py
     "apps/desktop/src/lib/desktop-slash-registry.json",
     # tests/tui_gateway/test_show_reasoning_display_gate.py (card-tool names vs the gateway lifecycle set)
@@ -392,6 +392,7 @@ _UPDATE_DEPENDENCIES = (
     "pm/plugins_state.py",
     "pm/install.py",  # also sealed()/lazy_installs_allowed(): every update's default-tool install
     "pm/packages.py",  # source_build's pnpm environment (pnpm_env)
+    "pm/index_config.py",  # source_build's npmrc bridge (read_npmrc, user_npmrc, hermes_npmrc)
     "hermes_cli/desktop_build_lock.py",
     "hermes_cli/desktop_build_reuse.py",  # source_build keeps the packaged app when no input changed
     "hermes_cli/desktop_release_holders.py",  # main_desktop names/closes a holder of release/ on a failed swap
