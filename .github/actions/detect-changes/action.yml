@@ -115,6 +115,7 @@ runs:
           # die with "cannot iterate over: null", which fails every retry
           # and forces the fail-open path (seen on stacked PRs). The full
           # file list (up to the API's 300-file cap) is on page one.
+
           #
           # Self-hosted runners may not ship the gh CLI. Without it every
           # attempt died with "command not found" and the retry sleeps ate the
@@ -125,7 +126,7 @@ runs:
             if command -v gh >/dev/null 2>&1; then
               gh api --paginate \
                 "repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}" \
-                --jq '.files[]?.filename'
+                --jq '.files[]? | [.filename, .previous_filename // empty] | @tsv'
               return
             fi
             local page
@@ -134,13 +135,14 @@ runs:
                 -H "Authorization: Bearer ${GH_TOKEN}" \
                 -H "Accept: application/vnd.github+json" \
                 "https://api.github.com/repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}?per_page=100&page=${page}" |
-                python3 -c 'import json,sys; [print(f["filename"]) for f in (json.load(sys.stdin).get("files") or [])]' ||
+                python3 -c 'import json,sys; [print("\t".join([f["filename"]] + ([f["previous_filename"]] if f.get("previous_filename") else []))) for f in (json.load(sys.stdin).get("files") or [])]' ||
                 return 1
             done
           }
           CHANGED=""
           for i in 1 2 3; do
             if CHANGED="$(compare_files)"; then
+
               break
             fi
             if [ "$i" = 3 ]; then

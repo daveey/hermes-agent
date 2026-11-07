@@ -57,6 +57,23 @@ def test_changed_test_file_runs(repo):
     assert _files(repo, ["tests/pkg/test_other.py"]) == {"tests/pkg/test_other.py"} | SMOKE
 
 
+@pytest.mark.parametrize("changed", [
+    "pkg/other.py\tpkg/core.py", "pkg/core.py\tpkg/other.py",
+])
+def test_renamed_module_selects_both_sides(repo, changed):
+    assert _files(repo, [changed]) == _files(repo, ["pkg/other.py", "pkg/core.py"])
+
+
+@pytest.mark.parametrize("changed", [
+    "docs/old-fixtures.md\ttests/conftest.py", "tests/conftest.py\tdocs/old-fixtures.md",
+])
+def test_renamed_setup_emits_full_cli_plan(repo, tmp_path, changed):
+    gh_out = tmp_path / "rename-gh.txt"
+    assert at.main(["--repo", str(repo), "--changed", changed, "--github-output", str(gh_out)]) == 0
+    outputs = dict(line.split("=", 1) for line in gh_out.read_text().splitlines())
+    assert outputs["mode"] == "full" and "tests/conftest.py" in outputs["reason"]
+
+
 def test_transitive_and_function_level_importers_run(repo):
     # core <- mid <- top (inside a function) <- test_top
     assert {"tests/pkg/test_top.py", "tests/pkg/test_patch.py"} <= _files(repo, ["pkg/core.py"])
