@@ -675,6 +675,18 @@ describe('a hidden session keeps driving its own parked Browser page', () => {
     return $previewTabs.get().find(tab => tab.target.url === `https://${host}`)!
   }
 
+  it('declines vault open in a parked window so the visible owner can answer', async () => {
+    openOwn('stored-a', 'flow.example')
+    const { decline, respond } = deliver(
+      'preview.act',
+      { action: 'vault', session_id: 'rt-a', vault: { operation: 'open' } },
+      'rt-b'
+    )
+
+    await vi.waitFor(() => expect(decline).toHaveBeenCalledTimes(1))
+    expect(respond).not.toHaveBeenCalled()
+  })
+
   it("acts in the hidden session's own tab, never the page on screen", async () => {
     const a = openOwn('stored-a', 'flow.example')
     const b = openOwn('stored-b', 'b.example')

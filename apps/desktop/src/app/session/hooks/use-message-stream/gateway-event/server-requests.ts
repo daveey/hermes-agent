@@ -1059,7 +1059,13 @@ export function handleServerRequest(
       // window it was last shown in. That window claims the session's
       // preview.read/preview.act so the agent keeps working while the user is
       // in another chat; the handler only ever reaches that session's own tab.
-      if (BACKGROUND_PREVIEW_REQUESTS.has(request.method) && windowHoldsBackgroundPreview(sessionId)) {
+      // Vault bindings belong to the visible owner. A parked window must decline,
+      // not race that owner with the vault handler's inactive-session refusal.
+      if (
+        BACKGROUND_PREVIEW_REQUESTS.has(request.method) &&
+        request.params.action !== 'vault' &&
+        windowHoldsBackgroundPreview(sessionId)
+      ) {
         handler({ deps, request, sessionId, isActiveSession: false })
 
         return true
