@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # Changed paths that change how every test runs: the suite, not a selection, is the honest answer.
 WIDE = (
     re.compile(r"(^|/)conftest\.py$"),
-    re.compile(r"^(pyproject\.toml|uv\.lock|pytest\.ini|setup\.cfg|tox\.ini)$"),
+    re.compile(r"^(pyproject\.toml|uv\.lock|pytest\.ini|setup\.(cfg|py)|tox\.ini)$"),
     # PM activation inputs include the interpreter pin, not just Python dependencies.
     re.compile(r"^pm/(lock\.json|environments\.py|testenv\.py)$"),
     re.compile(r"^scripts/(run_tests\.sh|run_tests_parallel\.py|run-in-hermes-env|_activation\.sh)$"),
@@ -160,6 +160,9 @@ def slices_for(seconds: float) -> int:
 def plan(repo: Path, changed: list[str], full_reason: str | None = None) -> dict:
     if full_reason:
         return {"mode": "full", "reason": full_reason, "files": [], "slices": MAX_SLICES}
+    # detect-changes emits the new and previous path of a rename on one TSV row.
+    # Both sides can affect tests, including a setup file moved out of its old location.
+    changed = [path for row in changed for path in row.split("\t") if path]
     wide = sorted(c for c in changed if any(p.search(c) for p in WIDE))
     if wide:
         return {"mode": "full", "reason": f"changes every test's setup: {', '.join(wide[:5])}", "files": [],
