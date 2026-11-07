@@ -95,6 +95,35 @@ def test_unreadable_board_aborts_without_unknown_owner_claim(board, caplog):
     assert "owner_unverified" not in caplog.text
 
 
+def test_nested_record_represents_root_child(board, caplog):
+    tid, path = helpers._task(status="running")
+    nested = path / "nested"
+    nested.mkdir()
+    with kbc.connect_closing() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET workspace_path=? WHERE id=?", (str(nested), tid))
+    caplog.set_level(logging.WARNING)
+    assert helpers._gc() == 0
+    assert "owner_unverified" not in caplog.text
+
+
+def test_inventory_failure_does_not_block_known_cleanup(board, caplog, monkeypatch):
+    _, path = helpers._task()
+    real_iterdir = type(path).iterdir
+
+    def unreadable_root(self):
+        if self == path.parent:
+            raise PermissionError("inventory denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(type(path), "iterdir", unreadable_root)
+    caplog.set_level(logging.WARNING)
+    assert helpers._gc() == 0
+    assert not path.exists()
+    assert "inventory unavailable" in caplog.text
+    assert "cannot read all boards" not in caplog.text
+
+
 def test_completed_time_wins_over_later_diagnostics(board, remote, caplog):
     tid, path = helpers._task(remote=remote)
     with kbc.connect_closing() as conn:

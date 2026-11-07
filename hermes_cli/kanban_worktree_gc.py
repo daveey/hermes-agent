@@ -66,10 +66,14 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = N
             for board in ws._sibling_board_db_files(conn):
                 with _read_board(board) as other:
                     known_paths.update(_scratch_owner_paths(other))
-            _report_unowned_scratch(kb.workspaces_root(), known_paths)
         except (OSError, sqlite3.Error):
             log.warning("Scratch GC aborted: cannot read all boards; preserving workspaces", exc_info=True)
             return 0
+        try:
+            _report_unowned_scratch(kb.workspaces_root(), known_paths)
+        except OSError:
+            log.warning("Scratch preservation inventory unavailable; unknown paths remain preserved",
+                        exc_info=True)
         for row in rows:
             path = Path(row["workspace_path"] or (kb.workspaces_root() / row["id"])).expanduser()
             if not path.is_dir() or path.is_symlink() or not ws._is_managed_scratch_path(path):
@@ -116,10 +120,13 @@ def _report_unowned_scratch(root: Path, known_paths: set[Path]) -> None:
     """Observe root children without entering them or guessing task IDs from names."""
     if not root.exists():
         return
+    root_key = root.resolve()
+    represented = {root_key / known.relative_to(root_key).parts[0]
+                   for known in known_paths if known.is_relative_to(root_key) and known != root_key}
     for path in root.iterdir():
         if path.is_symlink() or not path.is_dir():
             continue
-        if path.resolve() not in known_paths:
+        if path.resolve() not in represented:
             log.warning("Scratch preserved: reason=owner_unverified path=%s; "
                         "no local task workspace record; moved or unknown ownership; "
                         "no deletion deadline", path)
