@@ -988,8 +988,8 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
                 if deferred:
                     result.repair_deferred = True
                 else:
-                    result.repaired = repair_divergence(live, replica, gateway)
-                    repair_missing_children(live, replica, gateway)
+                    from hermes_cli.kanban_sync_repair_content import run
+                    result.repaired = run(live, replica, gateway, path=path, inputs=inputs, rebuilt=rebuilt)
                     retire_lost_placeholder_links(live, replica, gateway)
                     if inputs is not None:
                         _REPAIRED[key] = inputs
@@ -1344,6 +1344,8 @@ def _repair_clock() -> float:
 
 def reset_board_watch() -> None:
     """Tests: close the kept connections and forget completed repair passes."""
+    from hermes_cli.kanban_sync_repair_content import reset
+    reset()
     _WATCH.reset()
     _REPAIRED.clear()
     _REPAIRED_AT.clear()
