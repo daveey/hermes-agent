@@ -107,6 +107,7 @@ import type { PaginatedSessions, UsageStats } from '@/types/hermes'
 
 import type { SessionMutationSnapshot } from '../../../shared/src/session-http-mutations'
 
+import { isBotWakeTimeout, logBotWake } from './bot-wake-log'
 import { pluginDecisions, profiles, skills, toolsets } from './bridge'
 import { composerHost } from './composer'
 import { $gateways, type PluginGateway } from './gateways'
@@ -1105,8 +1106,7 @@ export const host = {
             options.awaitHydration &&
             generation === openSessionGeneration &&
             attempt < maxAttempts &&
-            error instanceof Error &&
-            error.message.startsWith('Timed out loading ')
+            isBotWakeTimeout(error)
 
           if (!retryable) {
             throw error
@@ -1121,7 +1121,7 @@ export const host = {
 
           // Logged per attempt so a support bundle shows the retry happened at
           // all; the terminal failure is reported once by the catch below.
-          console.warn('[bot-wake] hydration timed out, retrying', {
+          logBotWake('hydration timed out, retrying', {
             attempt,
             hydrationWaitMs: Date.now() - profileActiveAt,
             profile: targetProfile,
@@ -1133,12 +1133,11 @@ export const host = {
       if (
         options.awaitHydration &&
         openingStillCurrent() &&
-        error instanceof Error &&
-        error.message.startsWith('Timed out loading ')
+        isBotWakeTimeout(error)
       ) {
         const timedOutAt = Date.now()
 
-        console.warn('[bot-wake] hydration timed out', {
+        logBotWake('hydration timed out', {
           attempts: wakePhase === 'hydration' ? maxAttempts : 1,
           hydrationWaitMs: wakePhase === 'hydration' ? timedOutAt - profileActiveAt : 0,
           phase: wakePhase,
