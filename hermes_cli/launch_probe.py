@@ -37,8 +37,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from hermes_cli._startup_fast import project_root_str
+
 SCHEMA = 1
-SOURCE_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT = Path(project_root_str())
 DEFAULT_TIMEOUT = 1.0  # seconds, end to end: worker start, PM work and the answer
 _MAX_RESPONSE = 1 << 16
 _REAP_SECONDS = 1.0

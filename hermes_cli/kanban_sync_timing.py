@@ -117,7 +117,8 @@ def _code_identity() -> tuple[Optional[str], str, Optional[bool]]:
     """The revision this process booted on (recorded by ``hermes_bootstrap``), never the mutable checkout HEAD;
     ``disk_moved`` says whether the checkout has moved since."""
     from hermes_cli.git_fingerprint import process_boot_fingerprint, read_git_revision_fingerprint
-    root = Path(__file__).resolve().parent.parent
+    from hermes_cli._startup_fast import project_root_str
+    root = Path(project_root_str())
     boot = process_boot_fingerprint(root)
     sha = boot.rsplit(":", 1)[-1] if boot else ""
     if not _HEX40.fullmatch(sha):

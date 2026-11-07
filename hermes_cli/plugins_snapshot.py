@@ -157,7 +157,8 @@ def fingerprint(home: Optional[Path] = None) -> Optional[str]:
         from hermes_cli import plugins as _plugins
 
         home = Path(home) if home is not None else get_hermes_home()
-        repo = Path(__file__).resolve().parent.parent
+        from hermes_cli._startup_fast import project_root_str
+        repo = Path(project_root_str())
         parts: list = [SNAPSHOT_VERSION, sys.version, sys.prefix, str(home), str(repo)]
         parts.append([[name, os.environ.get(name)] for name in _ENV_INPUTS])
         for name in ("config.yaml", ".env"):

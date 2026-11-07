@@ -491,7 +491,8 @@ def spawn_after_turn_move(session_id: str, to: str, reason: str) -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
     log = open(log_dir / f"session-move-{session_id}.log", "ab")  # handed to the child
     try:
-        repo = str(Path(__file__).resolve().parent.parent)
+        from hermes_cli._startup_fast import project_root_str
+        repo = project_root_str()
         p = subprocess.Popen(
             [sys.executable, "-m", "hermes_cli.main", "sessions", "move", session_id, "--to", to,
              "--reason", reason, "--after-turn"],
