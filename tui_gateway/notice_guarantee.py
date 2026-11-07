@@ -61,13 +61,14 @@ def _reset_refreshed_for_tests() -> None:
     _refreshed.clear()
 
 _CANDIDATES_SQL = """
-SELECT s.id AS sid, m.id AS msg_id, m.timestamp, m.content, m.display_metadata
+SELECT s.id AS sid, m.id AS msg_id, m.timestamp, m.content, m.display_metadata,
+       {last_active} AS last_active
   FROM sessions s
   JOIN messages m ON m.id = (SELECT id FROM messages WHERE session_id = s.id AND active = 1
                                AND role IN ('user', 'assistant', 'tool') ORDER BY id DESC LIMIT 1)
  WHERE s.archived = 0 AND COALESCE(s.muted, 0) = 0
    AND COALESCE(s.end_reason, '') <> 'compression' AND COALESCE(s.end_reason, '') NOT LIKE 'moved_to_gateway:%'
-   AND {last_active} >= ? AND m.display_kind = 'kanban_notice' AND m.timestamp <= ?
+   AND m.display_kind = 'kanban_notice'
 """
 
 _STARTED_SQL = """
@@ -80,11 +81,18 @@ SELECT COUNT(*) FROM messages WHERE session_id IN (SELECT id FROM lineage) AND d
 def candidates(db: Any, now: float) -> list[dict]:
     """Chats in ``db`` whose last active message is a kanban notice older than ``GRACE_S`` and not yet claimed."""
     from hermes_state_common import _sql_session_last_active
+    from tui_gateway.notice_candidates import rows as candidate_rows
     from tui_gateway.notice_fanout import _decode
-    rows = db._read_all(_CANDIDATES_SQL.format(last_active=_sql_session_last_active("s")),
-                        (now - LOOKBACK_S, now - GRACE_S))
+    rows = candidate_rows(db, _CANDIDATES_SQL.format(last_active=_sql_session_last_active("s")))
     out = []
     for row in rows:
+        # Cache structure, not age: a notice can become due (or expire) without a commit.
+        if row["last_active"] is None or row["last_active"] < now - LOOKBACK_S:
+            continue
+        if not isinstance(row["timestamp"], (int, float)):
+            continue
+        if row["timestamp"] > now - GRACE_S:
+            continue
         meta = _decode(row["display_metadata"])
         if "closeout" not in meta:
             out.append({"sid": str(row["sid"]), "msg_id": int(row["msg_id"]), "content": str(row["content"] or ""),
