@@ -75,9 +75,8 @@ def deliver_pending(sid: str, session: dict) -> str:
             if db is None:
                 return "none"
             target = server._submit_row_target_key(session)
-            if not target or db.get_session(target) is None:
-                return "none"
-            rows = pa.pending_for_owner(db, pa.owner_of(db, target))
+            from tui_gateway.notification_idle import pending_producers
+            rows = pending_producers(db, session, target)
     except Exception:
         logger.warning("producer admission: pending read failed", exc_info=True)
         return "error"

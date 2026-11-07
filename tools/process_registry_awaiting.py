@@ -64,7 +64,7 @@ def _release_events(events) -> None:
                     break
 
 
-def take_ready(queue, timeout: float) -> list:
+def take_ready(queue, timeout: float, *, wake_generation=None) -> list:
     """Dequeue everything queued (waiting up to ``timeout`` for the first event) and hold each event's owner in the
     same critical section, so no reaper check can observe an event as neither queued nor held. Delegation result
     copies are marked held there too (``async_delegation.mark_copy_held``), so another session's orphan sweep never
@@ -72,7 +72,8 @@ def take_ready(queue, timeout: float) -> list:
     returns."""
     from tools.async_delegation import completion_copy_id, mark_copy_held
     with queue.not_empty:
-        if not queue._qsize() and timeout > 0:
+        unchanged = wake_generation is None or wake_generation == getattr(queue, "_notification_generation", 0)
+        if not queue._qsize() and timeout > 0 and unchanged:
             queue.not_empty.wait(timeout)
         events = list(queue.queue)
         queue.queue.clear()

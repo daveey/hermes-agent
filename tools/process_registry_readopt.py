@@ -207,6 +207,13 @@ class ProcessReadoptMixin:
                 self._parked_events = []
             self._parked_events.append(event)
             del self._parked_events[:-_MAX_PARKED_EVENTS]
+        from tui_gateway.notification_wait import wake
+        wake(self.completion_queue)
+
+    def has_parked_events(self) -> bool:
+        """Empty is a lock-protected proof; a producer wakes queue waiters on publication."""
+        with self._lock:
+            return bool(self._parked_events)
 
     def take_parked_events(self, owns: Callable[[dict[str, Any]], bool]) -> list[dict[str, Any]]:
         """Remove and return the parked events *owns* claims. ``owns`` runs outside the lock."""

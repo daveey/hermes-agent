@@ -562,6 +562,9 @@ def maybe_sweep_orphaned_completions(target_queue, *, now: Optional[float] = Non
             return 0
         _last_orphan_sweep[home] = now
     try:
+        from tools.async_delegation_idle import ledger_quiet
+        if ledger_quiet(_db_path()):
+            return 0
         return sweep_orphaned_completions(target_queue)
     except Exception:
         logger.debug("Orphaned async delegation sweep failed", exc_info=True)

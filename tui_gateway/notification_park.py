@@ -110,7 +110,17 @@ def park(evt: dict) -> bool:
     for held in displaced:
         logger.debug("Dropping parked %s notification to make room for a %s (key=%r)",
                      held.get("type"), evt.get("type", "completion"), _key(held))
+    if admitted:
+        from tools.process_registry import process_registry
+        from tui_gateway.notification_wait import wake
+        wake(process_registry.completion_queue)
     return admitted
+
+
+def has_parked() -> bool:
+    """No scan on the idle path; producers publish a queue wake after adding work."""
+    with _lock:
+        return bool(_parked)
 
 
 def claim(owns: Callable[[dict], bool]) -> list:

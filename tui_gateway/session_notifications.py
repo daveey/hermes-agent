@@ -451,7 +451,8 @@ def _maybe_fire_tui_heartbeat_tick(sid: str, session: dict) -> None:
         return
     if not (sid_key := session.get("session_key") or ""):
         return
-    mgr = HeartbeatManager(session_id=sid_key)
+    from tui_gateway.notification_idle import schedule_manager
+    mgr = schedule_manager(session, "heartbeat", HeartbeatManager)
     if not mgr.is_active() or not mgr.state.is_due() or _notif_gateway_owns_heartbeat(session, sid_key):
         return  # not due, or the gateway poller owns the routed conversation — stays due there
     if not _notif_claim_turn(session):
@@ -533,7 +534,8 @@ def _maybe_fire_tui_loop_tick(sid: str, session: dict) -> None:
         return
     if not (sid_key := session.get("session_key") or ""):
         return
-    mgr = LoopManager(session_id=sid_key)
+    from tui_gateway.notification_idle import schedule_manager
+    mgr = schedule_manager(session, "loop", LoopManager)
     if not mgr.is_due() or goal_blocks_loop_tick(sid_key) or _loop_route_is_gateway_chat(mgr.state):
         return  # not due, or the gateway's wakeup scanner owns the routed chat — stays due there
     if not _notif_claim_turn(session):
@@ -652,17 +654,14 @@ def _kb_board_key(_kb, board_meta) -> tuple[str, str]:
 
 
 def _kb_board_file_sig(db_path) -> tuple | None:
-    """(mtime_ns, size, inode) of a board's kanban.db and -wal: every commit (a new event, a claim) moves one of them."""
-    import os
-    out = []
-    for path in (str(db_path), f"{db_path}-wal"):
-        try:
-            st = os.stat(path)
-        except OSError:
-            out.append(None)
-            continue
-        out.append((st.st_mtime_ns, st.st_size, st.st_ino))
-    return tuple(out) if out[0] is not None else None
+    """A commit revision from a guarded retained reader (stat alone misses WAL publication)."""
+    from hermes_cli.kanban_session_activity import cached_ro
+    try:
+        with cached_ro(Path(db_path)) as conn:
+            return conn, conn.execute("PRAGMA data_version").fetchone()[0]
+    except Exception:
+        logger.debug("Kanban revision unavailable", exc_info=True)
+        return None  # unreadable never means unchanged
 
 
 def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None, seen: dict | None = None) -> list:
@@ -674,9 +673,6 @@ def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None,
     session's last completed poll: no commit means no new event to claim. 21 open chats each probing every board
     every 5 s, and opening it writable to re-claim nothing, kept the Desktop backend busy. The signature is taken
     before the poll, so a commit during it is polled again next tick."""
-    from hermes_cli.kanban_placement import is_placeholder_session
-    if is_placeholder_session(session_key):
-        return []
     from hermes_cli import kanban_db_connect as _kbc
     from hermes_cli import kanban_db_notify as _kbn
     db_path = sig = None
@@ -684,14 +680,20 @@ def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None,
         with contextlib.suppress(Exception):
             db_path = str(_kb.kanban_db_path(board=slug))
             sig = _kb_board_file_sig(db_path)
-        if sig is not None and seen.get(db_path) == sig:
+        if sig is not None and seen.get(db_path) == (session_key, sig):
             from hermes_constants import get_hermes_home
             from tui_gateway.kanban_consumer_health import polled
             polled(get_hermes_home(), session_key, db_path)
             return []
+    from hermes_cli.kanban_placement import is_placeholder_session
+    if is_placeholder_session(session_key):
+        return []
     texts = _kb_poll_board_now(_kb, _kbc, _kbn, slug, session_key, claims)
-    if sig is not None:
-        seen[db_path] = sig
+    from tui_gateway.notification_idle import board_quiet
+    if sig is not None and board_quiet(db_path, session_key):
+        seen[db_path] = (session_key, sig)
+    elif seen is not None:
+        seen.pop(db_path, None)
     return texts
 
 
@@ -873,8 +875,33 @@ def _collect_remote_kanban_notifications(session_key: str, claims: list | None) 
 
 
 def _notif_poll_kanban(sid: str, session: dict) -> None:
-    with _session_profile_runtime_scope(session):
-        _notif_poll_kanban_scoped(sid, session)
+    # Collection only reads/claims local SQLite rows. Provider/terminal bindings are
+    # needed for delivery, not for every empty tick. Resolve the home each time:
+    # sessions can move profiles and multiplexing can activate after thread start.
+    from tui_gateway.notification_idle import collection_home
+    with collection_home(session, _launch_home):
+        if session.get("_finalized") or session.get("_closing") or session.get("_lease_taken_over"):
+            prepared = ([], [])
+        else:
+            prepared = _notif_collect_kanban(session)
+        # Track custody before provider binding or a concurrent finalize can fail.
+        session.setdefault("_kanban_pending", []).extend(prepared[0])
+        session.setdefault("_kanban_claims", []).extend(prepared[1])
+    if not any(prepared) and not session.get("_kanban_pending") and not session.get("_kanban_claims"):
+        return
+    with contextlib.ExitStack() as scope:
+        try:
+            scope.enter_context(_session_profile_runtime_scope(session))
+        except Exception as exc:
+            # Nothing has been dispatched. Return custody in the collection home
+            # so a transient binding error retries next tick instead of killing
+            # the poller and stranding claims until their lease expires.
+            with collection_home(session, _launch_home):
+                _kb_release_claims(session)
+            logger.debug("Kanban provider binding failed", exc_info=True)
+            _notif_log_failure("kanban provider binding failed", exc)
+            return
+        _notif_poll_kanban_scoped(sid, session, prepared)
 
 
 class _KanbanText(str):
@@ -1151,7 +1178,19 @@ def _kb_owner_refusal(sid: str, session: dict):
     return refusal
 
 
-def _notif_poll_kanban_scoped(sid: str, session: dict) -> None:
+def _notif_collect_kanban(session: dict) -> tuple:
+    claims: list = []
+    texts = []
+    if time.monotonic() >= float(session.get("_kanban_refused_until") or 0):
+        try:
+            texts = _collect_kanban_notifications(session, claims)
+        except Exception as exc:
+            logger.debug("Kanban collection failed", exc_info=True)
+            _notif_log_failure("kanban notification poll failed", exc)
+    return texts, claims
+
+
+def _notif_poll_kanban_scoped(sid: str, session: dict, prepared=None) -> None:
     """One kanban poll: emit new texts, buffer them, and run the buffered batch as a turn if idle. Events are
     cursor-claimed, so they wait in the buffer instead of dropping the agent turn; a turn the admission gate
     refuses hands its claims back (_kb_rewind_refused)."""
@@ -1161,22 +1200,14 @@ def _notif_poll_kanban_scoped(sid: str, session: dict) -> None:
         if session.get("_kanban_claims") or session.get("_kanban_pending"):
             _kb_release_claims(session)
         return
-    claims: list = []
-    if time.monotonic() < float(session.get("_kanban_refused_until") or 0):
-        texts = []
-    else:
-        try:
-            texts = _collect_kanban_notifications(session, claims)
-        except Exception as exc:
-            _notif_log_failure("kanban notification poll failed", exc)
-            texts = []
+    texts, claims = prepared if prepared is not None else _notif_collect_kanban(session)
     for text in texts:
         from gateway.warning_notifications import DiagnosticText, render_notification
         render_notification(lambda: _emit("status.update", sid, {"kind": "process", "text": text}),
                             platform="tui", diagnostic=isinstance(text, DiagnosticText))
-    if texts:
+    if texts and prepared is None:
         session.setdefault("_kanban_pending", []).extend(texts)
-    if claims:  # a silent claim still waiting for its ack has no text but is tracked too
+    if claims and prepared is None:  # prepared collections already transferred custody
         session.setdefault("_kanban_claims", []).extend(claims)
     if not session.get("_kanban_pending") or not _notif_claim_turn(session):
         return
@@ -1301,6 +1332,9 @@ def _notif_hold_for(owner: dict, evt: dict, queue) -> bool:
             return False
         mark_copy_held(completion_copy_id(evt))
         held.append(evt)
+    from tui_gateway.notification_wait import wake
+    if owner.get("_notif_poller_ident") != threading.get_ident():
+        wake(queue)  # a self re-hold must still wait (admission/backoff may refuse while not running)
     return True
 
 
@@ -1515,6 +1549,8 @@ def _notif_take_parked(sid, session, registry, handle) -> int:
     take = getattr(registry, "take_parked_events", None)
     if take is None:
         return 0
+    if not getattr(registry, "has_parked_events", lambda: True)():
+        return 0
     try:
         events = take(lambda evt: _session_owns_notification_event(sid, session, evt))
         if events:
@@ -1712,11 +1748,14 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
     queue = process_registry.completion_queue
     emitted = session.setdefault("_notification_emitted", set())
     with _notif_held_lock:
+        session["_notif_poller_ident"] = threading.get_ident()
         session["_notif_held"] = session.get("_notif_held") or []
     handle = lambda events, deferred: _notif_handle_ready(
         sid, session, events, emitted, process_registry, format_process_notification, deferred)
+    from tui_gateway.notification_wait import due_timeout, generation
     last_kanban_poll = last_loop_poll = last_parked_poll = 0.0
     while not stop_event.is_set() and not session.get("_finalized"):
+        wake_generation = generation(queue)
         now = time.monotonic()
         # Completions whose owner process died after this one started (#97202); throttled per profile home.
         async_delegation.maybe_sweep_orphaned_completions(queue)
@@ -1751,10 +1790,17 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
         # owner session stays protected from the reapers (it is in neither the queue nor ``running`` meanwhile).
         # Addressed events parked while their owner was not live (notification_park): once this session proves it
         # owns one, it is this session's to deliver, ahead of the shared queue.
-        parked = notification_park.claim(lambda evt: _session_owns_notification_event(sid, session, evt))
+        parked = (notification_park.claim(lambda evt: _session_owns_notification_event(sid, session, evt))
+                  if notification_park.has_parked() else [])
         ready = []
         try:
-            ready = take_ready(queue, 0 if parked else 0.5)
+            deadlines = [last_loop_poll + _LOOP_POLL_SECONDS, last_kanban_poll + _KANBAN_POLL_SECONDS]
+            has_registry_park = getattr(process_registry, "has_parked_events", lambda: True)
+            if has_registry_park() or notification_park.has_parked():
+                deadlines.append(last_parked_poll + _PARKED_POLL_SECONDS)
+            timeout = due_timeout(time.monotonic(), deadlines, session, stop_event)
+            ready = take_ready(queue, 0 if parked or stop_event.is_set() else timeout,
+                               wake_generation=wake_generation)
             if not parked and not ready:
                 continue
             handle(parked + ready, None)
@@ -1845,7 +1891,9 @@ _notif_held_lock = threading.Lock()
 def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     """Start the background notification poller for a TUI session (thread name is greppable)."""
     _wire_desktop_sinks()
-    stop = threading.Event()
+    from tools.process_registry import process_registry
+    from tui_gateway.notification_wait import PollerStop
+    stop = PollerStop(process_registry.completion_queue)
     t = threading.Thread(target=_notification_poller_loop, args=(stop, sid, session), daemon=True, name=f"tui-notif-poller-{sid}")
     _notification_pollers[:] = [(s, th) for (s, th) in _notification_pollers if th.is_alive()] + [(stop, t)]
     from tui_gateway.kanban_consumer_health import register
