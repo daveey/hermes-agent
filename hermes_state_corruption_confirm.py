@@ -53,14 +53,9 @@ Limits, stated so nobody reads more into ``clean`` than it says:
   the pages those tables live on read back consistent at that snapshot. The caller therefore
   allows exactly one replay; a recurrence latches without a second check. A later clean
   ``quick_check`` (by hand, or after a restart) is no such proof either.
-* The whole-file check runs ``quick_check`` on FTS5 tables too, and for an FTS5 table that stores
-  its own content that needs the table's tokenizer ("SQL logic error" otherwise; the shipped
-  external-content ``messages_fts_cjk`` does not need it on SQLite 3.53).
-  The child is ``python -I -S`` (stdlib only), so the caller passes the loadable tokenizer its
-  own connection already loaded (``cjk_unicode61`` from the core ``fts5_cjk_so_path()``) and the
-  child loads exactly that path and nothing else. When the parent did not load it, or the child
-  cannot, the whole-file check of a file with such a ``cjk_unicode61`` table errors and the caller
-  latches (fail closed). A scoped check is unaffected: it checks shadow B-trees, not the vtable.
+* The child is ``python -I -S`` (stdlib only) and loads no extensions, matching SessionDB
+  after CJK tokenizer retirement. Unknown custom tokenizers fail closed during whole-file
+  checks. Scoped checks cover shadow B-trees, not the virtual table.
 * A process that has already latched the file does not run the check again (no replay is
   possible once latched, so a check could only cost a process spawn per read).
 """
@@ -304,26 +299,19 @@ class ConfirmResult:
 
 
 # Runs in the fresh process (``python -I -S``: no site-packages, no PYTHON* env, stdlib only).
-# argv: uri, JSON list of table names or null (whole file), busy timeout in ms, JSON list of the
-# loadable extensions (tokenizers) the parent connection itself loaded (usually empty).
+# argv: uri, JSON list of table names or null (whole file), busy timeout in ms.
 # Prints one JSON object; problem rows are page/row locations, never row contents.
 _CHILD = r"""
 import json, sqlite3, sys
 uri, scope_json, busy_ms = sys.argv[1], sys.argv[2], int(sys.argv[3])
-extensions = json.loads(sys.argv[4]) if len(sys.argv) > 4 else []
+
 scope = json.loads(scope_json)
 out = {}
 try:
     conn = sqlite3.connect(uri, uri=True, timeout=busy_ms / 1000.0, isolation_level=None)
     try:
         conn.execute("PRAGMA query_only=1")
-        if extensions:
-            conn.enable_load_extension(True)
-            try:
-                for path in extensions:
-                    conn.load_extension(path)
-            finally:
-                conn.enable_load_extension(False)
+
         targets = None
         if scope is not None:
             known, virtual = {}, []
@@ -376,19 +364,9 @@ sys.stdout.write(json.dumps(out))
 """
 
 
-def _child_argv(uri: str, scope_json: str, busy_ms: int, extensions_json: str = "[]") -> list[str]:
+def _child_argv(uri: str, scope_json: str, busy_ms: int) -> list[str]:
     """The fresh-process command (a seam for tests that need a hung or failing child)."""
-    return [sys.executable, "-I", "-S", "-c", _CHILD, uri, scope_json, str(busy_ms), extensions_json]
-
-
-def extensions_loaded_by(db) -> tuple:
-    """The loadable extensions *db* (a ``SessionDB``) loaded into its own connections: the
-    ``cjk_unicode61`` tokenizer from the core path (``fts5_cjk_so_path``, the one
-    ``load_fts5_cjk_extension`` uses), and only when that load succeeded. Never a new path."""
-    if not getattr(db, "_fts_cjk_loaded", False):
-        return ()
-    from hermes_state_fts import fts5_cjk_so_path
-    return (str(fts5_cjk_so_path()),)
+    return [sys.executable, "-I", "-S", "-c", _CHILD, uri, scope_json, str(busy_ms)]
 
 
 def confirm_budget(deadline: Optional[float], *, default_s: float = READ_CONFIRM_TIMEOUT_S) -> float:
@@ -413,21 +391,17 @@ def _scope_label(checked) -> str:
     return ",".join(sorted("".join(ch for ch in str(n) if ch.isalnum() or ch == "_")[:64] for n in checked))[:400]
 
 
-def confirm_corruption(db_path, tables: Optional[frozenset], timeout_s: float, *,
-                       extensions: tuple = ()) -> ConfirmResult:
+def confirm_corruption(db_path, tables: Optional[frozenset], timeout_s: float) -> ConfirmResult:
     """Bounded read-only ``quick_check`` of *tables* (``None`` = whole file) in a fresh process.
 
-    *extensions*: loadable extensions (tokenizers) the CALLER's own connection already loaded from
-    the core-configured path (``extensions_loaded_by``); the child loads exactly these and never
-    a path of its own. Never raises; anything but an exact per-table ``ok`` is a non-clean result."""
+    Never loads extensions or raises; anything but an exact per-table ``ok`` is a non-clean result."""
     started = time.monotonic()
     requested = None if tables is None else sorted(tables)
     label = _scope_label(requested)
     if timeout_s < CONFIRM_MIN_S:
         return ConfirmResult("no_budget", label, 0.0, f"{max(timeout_s, 0.0):.3f}s left of the write patience")
     try:
-        argv = _child_argv(read_only_db_uri(db_path), json.dumps(requested), int(timeout_s * 1000),
-                           json.dumps([str(e) for e in extensions]))
+        argv = _child_argv(read_only_db_uri(db_path), json.dumps(requested), int(timeout_s * 1000))
         proc = subprocess.run(
             argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout_s, check=False,
             close_fds=True, env=_child_env(),
@@ -464,6 +438,6 @@ __all__ = [
     "TouchedTables",
     "confirm_budget",
     "confirm_corruption",
-    "extensions_loaded_by",
+
     "writer_replay_blocker",
 ]
