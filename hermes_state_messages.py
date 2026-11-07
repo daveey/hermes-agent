@@ -1131,7 +1131,7 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
 
     def set_user_message_content(self, session_id: str, row_id: int, content: Any,
                                  display_metadata: Optional[dict[str, Any]] = None) -> int:
-        """Rewrite one active user row, optionally replacing display metadata and clearing its API sidecar."""
+        """Rewrite one active user row, merge-patching display metadata and clearing its API sidecar."""
         from hermes_state_message_content import set_user_message_content
         return set_user_message_content(self, session_id, row_id, content, display_metadata)
 

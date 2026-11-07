@@ -4,10 +4,14 @@ import { connectionIdForLabel, type ConnectionRegistry } from './connection-regi
 export class EnvironmentRegistry {
   private views = new WeakMap<ConnectionRegistry, ConnectionRegistry>()
   private environmentId: string | null = null
+  private previous: ConnectionRegistry | null = null
 
   constructor(private readonly env: { url?: string; token?: string }) {}
 
   read(stored: ConnectionRegistry): ConnectionRegistry {
+    // Retain the read baseline: reading the shared store again before its write
+    // refreshes its revision and defeats its concurrent-writer rebase.
+    this.previous = stored
     const url = String(this.env.url || '').trim()
 
     if (!url) {
@@ -46,7 +50,7 @@ export class EnvironmentRegistry {
   }
 
   /** Keep edits to saved sources, but never persist the env source or its selection. */
-  stored(next: ConnectionRegistry, previous: ConnectionRegistry): ConnectionRegistry {
+  stored(next: ConnectionRegistry, previous: ConnectionRegistry = this.previous || next): ConnectionRegistry {
     const id = this.environmentId
 
     if (!id) {
