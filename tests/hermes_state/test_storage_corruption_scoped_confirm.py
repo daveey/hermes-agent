@@ -18,13 +18,10 @@ Faults are injected into throwaway databases under ``tmp_path`` only.
 """
 
 import logging
-import shutil
 import sqlite3
-import subprocess
 import sys
 import time
 from contextlib import contextmanager
-from pathlib import Path
 
 import pytest
 
@@ -708,73 +705,21 @@ def test_first_read_on_a_healthy_latch_spawns_exactly_once(tmp_path, monkeypatch
         db.close()
 
 
-# ── loadable CJK tokenizer: the child loads the parent's own extension ──
+# ── retired tokenizer settings never reach the fresh-process probe ──
 
 
-@pytest.fixture(scope="module")
-def cjk_so(tmp_path_factory):
-    src = Path(__file__).resolve().parents[2] / "native" / "fts5_cjk"
-    if shutil.which("gcc") is None or not (src / "fts5_cjk.c").exists():
-        pytest.skip("no C toolchain / tokenizer source")
-    out = tmp_path_factory.mktemp("fts5cjk") / "libfts5_cjk.so"
-    try:
-        subprocess.run(["gcc", "-shared", "-fPIC", "-O2", f"-I{src / 'vendor'}", str(src / "fts5_cjk.c"),
-                        "-o", str(out)], check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        pytest.skip(f"tokenizer build failed: {e.stderr[:200]}")
-    probe = sqlite3.connect(":memory:")
-    try:
-        probe.enable_load_extension(True)
-        probe.load_extension(str(out))
-    except Exception as e:  # extension loading compiled out: skip
-        pytest.skip(f"extension loading unavailable: {e}")
-    finally:
-        probe.close()
-    return out
-
-
-def test_whole_file_check_with_cjk_tokenizer_loads_the_parents_extension(tmp_path, monkeypatch, confirms, cjk_so):
-    """``quick_check`` of an FTS5 table that stores its own content tokenizes it, so a
-    ``cjk_unicode61`` table makes the stdlib-only child fail with "SQL logic error" unless it loads
-    the tokenizer. (The shipped ``messages_fts_cjk`` is external-content and does not need it on
-    SQLite 3.53; a contentful one does, so the test adds one to the real store.)"""
-    monkeypatch.setenv("HERMES_FTS5_CJK_SO", str(cjk_so))
+def test_retired_extension_setting_does_not_affect_confirmation(tmp_path, monkeypatch, confirms):
+    monkeypatch.setenv("HERMES_FTS5_CJK_SO", str(tmp_path / "retired.so"))
     db = SessionDB(db_path=tmp_path / "state.db")
     try:
-        assert db._fts_cjk_loaded and db._fts_cjk_available
         db.create_session("s1", source="cli")
         db.append_message(session_id="s1", role="user", content="일본 프로필 indexed")
-        db._execute_write(lambda conn: conn.execute(
-            "CREATE VIRTUAL TABLE cjk_notes USING fts5(body, tokenize='cjk_unicode61')"))
-        db._execute_write(lambda conn: conn.execute("INSERT INTO cjk_notes(body) VALUES ('웅기 일본 notes')"))
-        with _inject(db, match="BEGIN IMMEDIATE", times=1):  # unknown scope: whole-file quick_check
+        with _inject(db, match="BEGIN IMMEDIATE", times=1):
             db.append_message(session_id="s1", role="user", content="after begin fault 웅기")
         [call] = confirms
         assert (call["tables"], call["result"].outcome) == (None, "clean"), call["result"]
-        assert call["extensions"] == (str(cjk_so),)
         assert storage_state(db.db_path) == "ok"
         assert _contents(db.db_path).count("after begin fault 웅기") == 1
-    finally:
-        db.close()
-    # Fail closed, documented: without the tokenizer the whole-file check errors (never "clean").
-    without = cc.confirm_corruption(tmp_path / "state.db", None, 10.0)
-    assert without.outcome == "error" and not without.clean, without
-    assert "SQL logic error" in without.detail
-    # A scoped check needs no tokenizer: the vtable's shadow B-trees are checked, not the vtable.
-    scoped = cc.confirm_corruption(tmp_path / "state.db", frozenset({"cjk_notes"}), 10.0)
-    assert scoped.outcome == "clean" and "cjk_notes_data" in scoped.scope, scoped
-
-
-def test_no_extension_is_passed_when_the_parent_did_not_load_one(tmp_path, confirms):
-    db = SessionDB(db_path=tmp_path / "state.db")
-    try:
-        db._fts_cjk_loaded = False
-        assert cc.extensions_loaded_by(db) == ()
-        db.create_session("s1", source="cli")
-        with _inject(db, match="BEGIN IMMEDIATE", times=1):
-            db.append_message(session_id="s1", role="user", content="x")
-        assert confirms[0]["extensions"] == ()
-        assert confirms.spawned[0][-1] == "[]"
     finally:
         db.close()
 

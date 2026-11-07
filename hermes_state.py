@@ -54,7 +54,7 @@ from hermes_state_guard import (
 )
 from hermes_state_readpool import _READ_POOL_MAX, _proc_fd_targets, _read_budget_for
 from hermes_state_sessions import SessionSessionsMixin
-from hermes_state_fts import SessionFtsSetupMixin, load_fts5_cjk_extension
+from hermes_state_fts import SessionFtsSetupMixin
 from hermes_state_portability import SessionPortabilityMixin
 from hermes_state_telegram import SessionTelegramTopicsMixin
 from hermes_state_profile_repair import SessionProfileRepairMixin
@@ -680,9 +680,7 @@ class SessionDB(
         self._db_corrupt, self._db_corrupt_reason = False, ""  # sticky quarantine (StateDbCorruptError)
         self._fts_usermerge_floor_applied = False  # one-shot usermerge-floor write guard
         self._fts_enabled = self._fts_stale = self._trigram_available = False
-        # _fts_cjk_loaded: tokenizer on the writer connection; _fts_cjk_available: messages_fts_cjk
-        # is queryable AND not marked stale.
-        self._fts_cjk_loaded = self._fts_cjk_available = self._fts_unavailable_warned = False
+        self._fts_unavailable_warned = False
         self._conn = None
         # Async token accounting; distinct from self._lock so enqueue/flush never contends with writes.
         self._token_queue: deque = deque()
@@ -844,7 +842,7 @@ class SessionDB(
             raise sqlite3.DatabaseError(msg)
 
     def _open_writer_conn(self) -> sqlite3.Connection:
-        """Connect + WAL/pragma/tokenizer setup for a writer connection (no schema init). Short timeout:
+        """Connect + WAL/pragma setup for a writer connection (no schema init). Short timeout:
         jittered application-level retry handles contention, not SQLite's busy handler;
         isolation_level=None: explicit BEGIN IMMEDIATE."""
         conn = _connect_tracked_db(
@@ -864,7 +862,6 @@ class SessionDB(
             _secure_state_db_files(self.db_path)
             apply_database_pragmas(conn, db_label="state.db")
             conn.execute("PRAGMA foreign_keys=ON")
-            self._fts_cjk_loaded = load_fts5_cjk_extension(conn)
         except BaseException:
             self._close_connection_quietly(conn)
             raise
@@ -933,10 +930,8 @@ class SessionDB(
         try:
             conn = self._connect_read_only(timeout=_READ_BUSY_TIMEOUT_S)
             apply_database_pragmas(conn, db_label="state.db")
-            if self._fts_cjk_loaded:  # registers in the connection, not the file: ro is fine
-                load_fts5_cjk_extension(conn)
         except BaseException as exc:
-            # A half-open connection (open ok, extension load failed) is a live tracked descriptor,
+            # A half-open connection (open ok, pragmas failed) is a live tracked descriptor,
             # the leak shape this pool exists to fix; a stranded permit would shrink the read
             # path by one slot forever. (Not _close_read_conn: callers release their own permit.)
             if conn is not None:
@@ -1301,8 +1296,7 @@ class SessionDB(
         if cache_released is False:  # fail closed: a replay could re-read the very page that failed
             return "no replay: reader cache not released"
         confirm = _corrupt_confirm.confirm_corruption(
-            self.db_path, scope.tables(), _corrupt_confirm.confirm_budget(None),
-            extensions=_corrupt_confirm.extensions_loaded_by(self))
+            self.db_path, scope.tables(), _corrupt_confirm.confirm_budget(None))
         if not confirm.clean:
             return f"no replay: {confirm.describe()}"
         logger.warning(
@@ -1491,8 +1485,7 @@ class SessionDB(
         confirm = None
         if replay_blocker is None:
             confirm = _corrupt_confirm.confirm_corruption(
-                self.db_path, scope.tables(), _corrupt_confirm.confirm_budget(deadline),
-                extensions=_corrupt_confirm.extensions_loaded_by(self))
+                self.db_path, scope.tables(), _corrupt_confirm.confirm_budget(deadline))
             if not confirm.clean:
                 replay_blocker = f"no replay: {confirm.describe()}"
         if replay_blocker is not None:
