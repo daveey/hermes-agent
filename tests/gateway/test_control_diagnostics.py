@@ -32,6 +32,8 @@ def test_slow_real_verb_warns_without_parameters(tmp_path, caplog):
 
     async def run():
         server = GatewayControlServer(tmp_path, verb_handlers={"status": status})
+        from gateway.control_dispatch import ControlRequestDispatcher
+        server._request_dispatch = ControlRequestDispatcher()
         assert await server.start()
         try:
             assert (await exchange(server, params={"secret": "NEVER-LOG-ME"}))["ok"]
@@ -128,7 +130,7 @@ def test_saturated_executor_queue_and_fast_quiet(tmp_path, caplog):
             await server.stop()
 
     with caplog.at_level(logging.WARNING), ThreadPoolExecutor(max_workers=4) as pool:
-        with patch("gateway.control_socket._control_executor", return_value=pool):
+        with patch("gateway.control_dispatch.ThreadPoolExecutor", return_value=pool):
             asyncio.run(run(pool))
     records = latency_records(caplog)
     assert len(records) == 1
@@ -241,6 +243,8 @@ def test_callback_start_delay_included_and_error_private(tmp_path, caplog, verb)
 
     async def run():
         server = GatewayControlServer(tmp_path, verb_handlers={"status": status})
+        from gateway.control_dispatch import ControlRequestDispatcher
+        server._request_dispatch = ControlRequestDispatcher()
         reader = asyncio.StreamReader()
         reader.feed_data(json.dumps({"verb": verb, "params": {"secret": "PRIVATE"}}).encode() + b"\n")
         writer = Mock()
@@ -251,6 +255,7 @@ def test_callback_start_delay_included_and_error_private(tmp_path, caplog, verb)
         await task
         assert not json.loads(writer.write.call_args.args[0])["ok"]
         assert server._diagnostics.in_flight == 0
+        server._request_dispatch.close()
 
     with caplog.at_level(logging.WARNING):
         asyncio.run(run())
@@ -290,6 +295,8 @@ def test_cancelled_connection_still_reports_slow_running_handler(tmp_path, caplo
 
     async def run():
         server = GatewayControlServer(tmp_path, verb_handlers={"status": status})
+        from gateway.control_dispatch import ControlRequestDispatcher
+        server._request_dispatch = ControlRequestDispatcher()
         server._posix_peer_subject = lambda writer: None
         reader = asyncio.StreamReader()
         reader.feed_data(b'{"verb":"status"}\n')
@@ -307,6 +314,7 @@ def test_cancelled_connection_still_reports_slow_running_handler(tmp_path, caplo
         finally:
             release.set()
             timer.join()
+            server._request_dispatch.close()
 
     with caplog.at_level(logging.WARNING):
         asyncio.run(run())
