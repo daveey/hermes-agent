@@ -179,6 +179,36 @@ def _starting_multiplexer_root(home: Path) -> Path | None:
     return root if root is not None and missing_owner_state(root) == "starting" else None
 
 
+def _host_lock_held(root: Path) -> bool:
+    """True while some owner holds *root*'s gateway lock: after the host start this call spawned
+    for a named profile exited, that owner is the sibling start that won the race."""
+    from hermes_cli.gateway_runtime_discovery import missing_owner_state
+    return missing_owner_state(root) == "starting"
+
+
+def _exited_start_verdict(home: Path, observed: GatewayDiscovery, status: int | None, child,
+                          child_home: Path, child_offset: int) -> GatewayDiscovery | None:
+    """The terminal verdict once the one start this call requested exited and *home* is still
+    absent; None while there is nothing to conclude yet (no exit, or a racer that won)."""
+    if status is None or observed.state != "absent":
+        return None
+    if child_home != home and _host_lock_held(child_home):
+        # This named profile's start was for its HOST gateway, and that start lost the race to a
+        # sibling's (every served profile's cron tick ensures the host at once): the winner holds
+        # the host lock but does not serve this profile yet. A racer that won is not a dead start;
+        # wait for it (this call still never launches another), unless the winner is a standalone
+        # host that can never add this profile.
+        if reason := _standalone_multiplexer_reason(child_home):
+            return GatewayDiscovery("inaccessible", reason_code="profile_parked", detail=reason)
+        return None
+    # The start died without leaving an owner: waiting out the deadline cannot change that, and
+    # this call never launches a second one. Its own (redacted) output is the answer the user
+    # needs, not a pointer to a file.
+    from hermes_cli.gateway_runtime_start import startup_failure_report
+    return GatewayDiscovery("inaccessible", reason_code="runtime_exited",
+                            detail=startup_failure_report(child_home, child_offset, status, child.pid))
+
+
 def _standalone_multiplexer_reason(root: Path) -> str | None:
     """A live host's reason for not serving its named profiles, if it published one.
 
@@ -457,13 +487,8 @@ def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float = DEFAULT
                 continue
             if observed.state not in {"absent", "starting"}:
                 return observed
-            if status is not None and observed.state == "absent":
-                # The one start this invocation requested died without leaving an owner: waiting
-                # out the deadline cannot change that, and this call never launches a second one.
-                # Its own (redacted) output is the answer the user needs, not a pointer to a file.
-                from hermes_cli.gateway_runtime_start import startup_failure_report
-                return GatewayDiscovery("inaccessible", reason_code="runtime_exited",
-                                        detail=startup_failure_report(child_home, child_offset, status, child.pid))
+            if (verdict := _exited_start_verdict(home, observed, status, child, child_home, child_offset)) is not None:
+                return verdict
             if observed.state == "starting" and not retiring:
                 requested = True
             if observed.state == "absent":

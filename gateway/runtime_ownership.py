@@ -15,6 +15,7 @@ from pathlib import Path
 import stat
 import threading
 import time
+from typing import Any
 from hermes_dir_acl import make_user_dir
 
 logger = logging.getLogger(__name__)
@@ -189,8 +190,24 @@ class ProfileOwnership:
                     added.append(home)
             except BaseException:
                 for home in reversed(added):
+                    # Unpublish before letting go: a rolled-back attempt's record would otherwise
+                    # name this live process as the owner of a lock it no longer holds, and a
+                    # contender that then loses the flock to a client probe refuses at once.
+                    self._unpublish(home)
                     self.release(home)
                 raise
+
+    def _unpublish(self, home: Path) -> None:
+        with self._mutex:
+            handle: Any = self._handles.get(canonical_home(home))
+            if handle is None:
+                return
+            try:
+                handle.seek(0)
+                handle.truncate()
+                handle.flush()
+            except OSError:
+                pass  # best effort: the flock, not the record, is the authority
 
     def owns(self, home: Path) -> bool:
         with self._mutex:
@@ -278,16 +295,21 @@ TRANSIENT_HOLDER_POLL_S = 0.1
 def _conflicting_homes(homes):
     """The homes whose gateway.lock another holder has right now: each probed alone with its own open
     file description and released at once (the all-or-nothing reserve does not say which failed).
-    A home freed meanwhile is simply not listed; the next reserve attempt takes it."""
+    A home freed meanwhile is simply not listed; the next reserve attempt takes it.
+
+    A pure flock probe, never a reserve: a reserve writes this process's record into the lock, and
+    a contender that loses the flock to that probe reads the record as a live owner and refuses
+    at once, so two concurrent starts of the same host both exit (C7 two-tenant cron fire)."""
+    from gateway.status import _probe_lock_file
     conflicting = []
     for home in homes:
-        probe = ProfileOwnership()
         try:
-            probe.reserve([home])
-        except OwnershipConflict:
+            fd = _open_lock(canonical_home(home) / 'gateway.lock')
+        except FileNotFoundError:
+            continue  # no home directory yet: nobody can hold its lock
+        handle = os.fdopen(fd, 'r+', encoding='utf-8')  # windows-footgun: ok — probe only, never written
+        if _probe_lock_file(handle):
             conflicting.append(home)
-        finally:
-            probe.close()
     return conflicting
 
 

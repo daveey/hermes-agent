@@ -23,7 +23,7 @@ def stream_boundary(monkeypatch):
 
     monkeypatch.setattr(routing, "_class_request", lambda *args: ("class:deep", "owner", {}))
     monkeypatch.setattr(routing, "_prepare", prepare)
-    monkeypatch.setattr(routing, "_retryable", lambda exc: isinstance(exc, TimeoutError))
+    # A TimeoutError is retryable on upstream's real verdict (fallback label "request timed out").
     monkeypatch.setattr(aux, "_client_streams_internally", lambda client: False)
     monkeypatch.setattr(aux, "_close_cached_client", lambda client, **kwargs: closed.append(client))
     return SimpleNamespace(clients=clients, failures=failures, closed=closed)

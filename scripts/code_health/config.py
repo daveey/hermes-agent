@@ -148,6 +148,7 @@ RULES: tuple[Rule, ...] = (
          " blocks on an Event the test sets at teardown."
          " `sleep(0)` to yield is fine. A delay that IS the behaviour under test takes"
          " `# health: allow HX013 -- <why>`", "ast", include=TESTS, exclude=()),
+
     # Error handling: the caller's exception is thrown in at a contextmanager's yield.
     Rule("HX014", "@contextmanager swallows the caller's error at a yield it can reach again", "a broad `except`"
          " around `yield` eats the `with` block's own error and, on a second yield, becomes \"generator"
@@ -158,6 +159,10 @@ RULES: tuple[Rule, ...] = (
          " (`hermes_cli.ws_logging`; `ws_logger(\"server\")` for `serve`): the library logs a peer that stopped"
          " answering pings as `ERROR keepalive ping failed` + traceback even when this code handles the drop",
          "ast", exclude=TESTS + ("scripts/*", "evals/*")),
+    Rule("HX016", "private API-error predicate", "use `classify_api_error` (`agent.auxiliary_error_policy`"
+         " on the aux path); add the phrasing to its pattern tables", "ast",
+         include=("agent/auxiliary*.py", "agent/context_compressor*.py", "agent/turn_*.py")),
+
 )
 
 RULES_BY_ID = {rule.id: rule for rule in RULES}
