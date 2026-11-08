@@ -61,7 +61,8 @@ def _state_paths():
 
 @contextlib.contextmanager
 def _state(path):
-    conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)
+    # Local session history only, never a board DB; callers supply _state_paths().
+    conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)  # noqa: kanban-lockguard
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -297,8 +298,8 @@ def gc_custody(conn, days):
                     continue
                 try:
                     owner = _terminal(hub, board, receipt["task_id"])
-                except (OSError, client.SyncUnavailable) as exc:
-                    # Transport failure: every later receipt would wait out its own timeout.
+                except (OSError, client.SyncUnavailable, client.Resync) as exc:
+                    # Unavailable authority: stop rather than repeat the failure for every receipt.
                     log.warning("Scratch custody preserved: task=%s path=%s reason=board_unavailable "
                                 "eligible_at=None; pass stopped (%s)", receipt["task_id"],
                                 receipt["workspace_path"], exc)

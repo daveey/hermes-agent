@@ -752,6 +752,7 @@ def test_gc_skips_unavailable_path_before_board_and_keeps_receipt(env, caplog, s
     (lambda: __import__("urllib.error").error.URLError("connection refused"), True),
     (lambda: TimeoutError("Board request exceeded its budget"), True),
     (lambda: client.SyncUnavailable("offline"), True),
+    (lambda: client.Resync("authority requires resync"), True),
     (lambda: client.HubError(404, "no such row"), False),  # a per-row answer, not transport
 ])
 def test_board_transport_failure_stops_pass(env, monkeypatch, caplog, error, stops):
