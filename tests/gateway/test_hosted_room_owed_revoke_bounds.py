@@ -19,7 +19,7 @@ def _rows(db):
                             "ORDER BY member_id, expires_at").fetchall()
 
 
-def _owe(db, grant, *, now, member="peer", room="ended", expires_at=None):
+def _owe(db, grant, *, now=None, member="peer", room="ended", expires_at=None):
     from gateway.hosted_room_peer import room_grant_hard_expiry
     hosted_rooms.owe_room_grant_revoke(
         db, room_id=room, member_id=member, target_url="http://127.0.0.1:9", grant=grant,
