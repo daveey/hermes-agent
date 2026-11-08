@@ -1121,7 +1121,8 @@ let refreshing = false
 export async function refreshChangedDiskPlugins(reason = 'refresh'): Promise<string[]> {
   const desktop = window.hermesDesktop
 
-  if (!desktop || scanning || refreshing || disk.size === 0) {
+  // Never race a scan (it owns `disk` while it runs); the next tick re-checks.
+  if (!desktop || scanInFlight || refreshing || disk.size === 0) {
     return []
   }
 
