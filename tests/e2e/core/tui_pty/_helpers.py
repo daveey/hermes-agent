@@ -394,7 +394,8 @@ class TmuxTui:
             poll(lambda: not self.alive() or self._raw_mode(), timeout=timeout,
                  what="the TUI to take the terminal (raw mode)")
         except AssertionError as exc:
-            raise AssertionError(f"{exc}\n{self.dump()}") from None
+            members = {pid: cmdline(pid) for pid in session_members(self.pane_pid)}
+            raise AssertionError(f"{exc}\n--- screen ---\n{self.dump()}\n--- processes ---\n{members}") from None
         state = self.pane_state()
         assert state.startswith("0 "), (
             f"hermes --tui exited during startup (pane_dead pid status={state!r}, "

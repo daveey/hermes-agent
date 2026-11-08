@@ -252,8 +252,12 @@ class PtyHermes:
         deadline = time.monotonic() + timeout
         while True:
             remaining = max(1.0, deadline - time.monotonic())
-            poll(lambda: self._dead() or self._raw_mode(), timeout=remaining,
-                 what="the UI to take the terminal (raw mode)")
+            try:
+                poll(lambda: self._dead() or self._raw_mode(), timeout=remaining,
+                     what="the UI to take the terminal (raw mode)")
+            except AssertionError as exc:
+                members = {pid: cmdline(pid) for pid in session_members(self.sid)}
+                raise AssertionError(f"{exc}\n--- screen ---\n{self.dump()}\n--- processes ---\n{members}") from None
             assert self.proc.poll() is None, f"hermes exited ({self.proc.returncode}) during startup\n{self.dump()}"
             self.wait_quiet(1.0, timeout=max(1.0, deadline - time.monotonic()))
             if self._raw_mode():

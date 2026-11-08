@@ -55,3 +55,33 @@ def test_exit_inventory_never_exempts_gateway_or_supervisor(monkeypatch):
     leftovers = term.leftover_processes(timeout=0)
     assert any(line.startswith(f"{gateway}:") for line in leftovers)
     assert any(line.startswith(f"{supervisor}:") for line in leftovers)
+
+
+@pytest.mark.parametrize("surface", ["pty", "tmux"])
+def test_startup_timeout_reports_screen_and_owned_processes(monkeypatch, surface):
+    from tests.e2e.core.tui_pty import _helpers
+
+    module = _pty if surface == "pty" else _helpers
+    if surface == "pty":
+        term = object.__new__(_pty.PtyHermes)
+        term.sid = 42000
+        wait = term.wait_ready
+    else:
+        term = object.__new__(_helpers.TmuxTui)
+        term.pane_pid = 42000
+        wait = term.wait_raw
+    monkeypatch.setattr(term, "dump", lambda: "startup screen")
+    monkeypatch.setattr(module, "session_members", lambda sid: [sid, 42001])
+    monkeypatch.setattr(module, "cmdline", lambda pid: f"owned-child-{pid}")
+
+    def timeout(*args, **kwargs):
+        raise AssertionError("raw mode deadline")
+
+    monkeypatch.setattr(module, "poll", timeout)
+    with pytest.raises(AssertionError) as error:
+        wait()
+    message = str(error.value)
+    assert "raw mode deadline" in message
+    assert "startup screen" in message
+    assert "owned-child-42000" in message
+    assert "owned-child-42001" in message
