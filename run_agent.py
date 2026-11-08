@@ -346,9 +346,11 @@ class AIAgent(
                 # A reserved child row already exists, and first-turn writers (prompt-refresh epoch,
                 # usage anchor) may have patched its model_config before this create, so the
                 # keep-existing upsert dropped the constructor config. Merge it beside them.
-                patch = {k: v for k, v in (self._session_row_model_config() or {}).items() if v is not None}
-                if patch:
-                    self._session_db.patch_session_model_config(self.session_id, patch)
+                # [daveey] Only owner stores reserve rows. Constructor lineage/non-sidecar keys
+                # belong in the owner seed API; preserve any authoritative first-turn values.
+                seed = {k: v for k, v in (self._session_row_model_config() or {}).items() if v is not None}
+                if seed:
+                    self._session_db.seed_session_model_config(self.session_id, seed)
             self._session_db_created = True
             if source == "kanban":
                 from hermes_cli.kanban_worker_recovery import register_worker_session

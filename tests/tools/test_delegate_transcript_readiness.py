@@ -158,6 +158,36 @@ async def test_published_children_open_before_any_child_starts(
 
 
 @pytest.mark.asyncio
+async def test_reserved_child_init_preserves_early_owner_config(
+    tmp_path, monkeypatch, offline_children
+):
+    connection, parent_ref = await _connect(tmp_path, monkeypatch, "sub-1")
+    db = connection.authority.db
+    child = _build_child_agent(
+        task_index=0, goal="Synthetic inspection", context=None, toolsets=["file"],
+        model=None, max_iterations=2, task_count=1,
+        parent_agent=_parent(db, parent_ref.session_id, lambda *a, **kw: None),
+    )
+    try:
+        # A first-turn owner write is authoritative over stale constructor defaults.
+        db.seed_session_model_config(child.session_id, {"max_iterations": 7, "max_tokens": None})
+        early = json.loads(db.get_session(child.session_id)["model_config"])
+        assert early["max_iterations"] == 7 and early["max_tokens"] is None
+        child._session_init_model_config["max_tokens"] = 128
+        child._cached_system_prompt = "Synthetic completed prompt"
+        stamp_prompt_epoch(child, 17)
+        child._ensure_db_session()
+        config = json.loads(db.get_session(child.session_id)["model_config"])
+        assert config["max_iterations"] == 7
+        assert config["max_tokens"] is None
+        assert config["_delegate_from"] == parent_ref.session_id
+        assert config["prompt_refresh_epoch"] == 17
+        assert child._session_db_created
+    finally:
+        child.close()
+
+
+@pytest.mark.asyncio
 async def test_failed_reservation_closes_unpublished_child_and_a_later_build_can_retry(
     tmp_path,
     monkeypatch,
