@@ -282,11 +282,17 @@ def evict(conn: sqlite3.Connection) -> list[str]:
     with write_txn(conn):
         conn.execute("UPDATE kanban_sync_state SET applying = 1")
         for (tid,) in rows:
+            if not conn.execute(
+                    "SELECT 1 FROM tasks WHERE id=? AND created_on IS NOT NULL AND created_on != ? "
+                    "AND claim_lock IS NULL AND status != 'running'" + keep, (tid, own)).fetchone():
+                continue
             if conn.execute(
                     "SELECT 1 FROM kanban_sync_outbox WHERE state != 'rejected' AND (row_uid = ? OR "
                     "json_extract(fields, '$.task_id') = ?) LIMIT 1", (tid, tid)).fetchone():
                 continue
             from hermes_cli.kanban_run_tombstones import retain_ended_runs
+            from hermes_cli.kanban_scratch_custody import retain
+            retain(conn, tid)
             retain_ended_runs(conn, tid)
             for table in present:
                 conn.execute(f"DELETE FROM {table} WHERE task_id = ?", (tid,))

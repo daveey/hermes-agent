@@ -99,6 +99,8 @@ def gc_task_scratch(conn: sqlite3.Connection, *, older_than_days: int | None = N
     # Archiving runs git for minutes on big clones: never hold the board's write lock for it.
     for task_id, path, completed_at in aged:
         removed += _archive_and_remove_scratch(conn, task_id, path, completed_at)
+    from hermes_cli.kanban_scratch_custody import gc_custody
+    removed += gc_custody(conn, days)
     return removed
 
 
@@ -108,6 +110,8 @@ def _scratch_owner_paths(conn: sqlite3.Connection) -> set[Path]:
 
     root = kb.workspaces_root(board=_board_slug(conn))
     paths = set()
+    from hermes_cli.kanban_scratch_custody import receipts
+    paths.update(Path(r["workspace_path"]).resolve() for r in receipts(conn))
     for row in conn.execute("SELECT id, workspace_kind, workspace_path FROM tasks"):
         if row["workspace_path"]:
             paths.add(Path(row["workspace_path"]).expanduser().resolve())
