@@ -725,7 +725,6 @@ def _kb_stray_delegate_keys(session: dict, session_key: str) -> tuple:
 def _kb_reclaim_stray_subs(_kbn, slug: str, session_key: str, stray: tuple) -> bool:
     """Re-key ``tui`` subscriptions bound to this session's own subagents back onto it. True when the board is
     clean afterwards (nothing to move, or moved); False on a DB error so the caller retries next poll."""
-    import sqlite3
     from hermes_cli import kanban_db_connect as _kbc
     try:
         if not any(_kbn.count_notify_subs(board=slug, platform="tui", chat_id=k) for k in stray):
@@ -733,7 +732,8 @@ def _kb_reclaim_stray_subs(_kbn, slug: str, session_key: str, stray: tuple) -> b
         with contextlib.closing(_kbc.connect(board=slug)) as conn:
             _kbn.retarget_notify_subs(conn, platform="tui", from_chat_ids=stray, to_chat_id=session_key)
         return True
-    except sqlite3.Error as exc:  # busy/locked board: the caller retries next poll
+    except Exception as exc:  # corruption, permissions and archival races also retry without dropping other boards
+        logger.debug("Kanban stray-subscription reclaim failed on %s", slug, exc_info=True)
         _notif_log_failure(f"kanban stray-subscription reclaim failed on {slug}", exc)
         return False
 
