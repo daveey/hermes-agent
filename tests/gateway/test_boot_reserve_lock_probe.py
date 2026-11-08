@@ -263,3 +263,87 @@ def test_cancelled_hot_serve_never_takes_the_profile_after_cleanup(tmp_path, mon
         assert not process_ownership.owns(fresh)
     finally:
         process_ownership.release(fresh)
+
+
+# C7 (tests/e2e/core/tenancy/test_two_tenant_desktop_backend.py): every served profile's cron tick
+# starts the host gateway at once. The starter that lost root re-checked which homes conflict by
+# RESERVING each one alone, which wrote its own (live) PID into a profile's gateway.lock; the starter
+# that held root then lost that profile's flock to the probe, read the record as a live owner and
+# refused at once. Both exited 1 and the fire was booked failed. A probe or a rolled-back attempt
+# must never leave a record naming a live process that does not hold the lock.
+_STARTER = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from gateway.runtime_ownership import OwnershipConflict, ProfileOwnership, _conflicting_homes
+homes = [Path(p) for p in sys.argv[3:]]
+if sys.argv[2] == "probe":  # the losing starter's re-check of which homes conflict
+    print(len(_conflicting_homes(homes)), flush=True)
+else:  # an all-or-nothing reserve that rolls back on its last home
+    try:
+        ProfileOwnership().reserve(homes)
+    except OwnershipConflict:
+        print("rolled-back", flush=True)
+sys.stdin.readline()  # stay alive: a record naming this pid reads as a LIVE owner
+"""
+
+
+@contextmanager
+def _live_starter(kind, *homes):
+    proc = subprocess.Popen([sys.executable, "-c", _STARTER, str(Path(__file__).resolve().parents[2]), kind,
+                             *map(str, homes)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        yield proc, proc.stdout.readline().strip()
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def _boot_through_probe_flicker(root, boot, flicker_home):
+    """Boot's reserve while a plain client probe holds *flicker_home* across the first attempt and
+    its re-check (the window in which the conflict is judged), released before the retry."""
+    held = []
+
+    class Probed(ProfileOwnership):
+        attempts = 0
+
+        def reserve(self, homes, **kwargs):
+            self.attempts += 1
+            while held:
+                held.pop().close()
+            if self.attempts > 1:
+                return super().reserve(homes, **kwargs)
+            held.append(_probe_hold(flicker_home))
+            return super().reserve(homes, **kwargs)
+
+    booting = Probed()
+    try:
+        _reserve_waiting_out_browse_reconcile(booting, [root, boot], wait_s=10)
+        return booting.owns(root) and booting.owns(boot)
+    finally:
+        booting.close()
+        for handle in held:
+            handle.close()
+
+
+def test_a_conflict_probe_never_publishes_its_prober_as_the_owner(tmp_path):
+    root, boot = _homes(tmp_path)
+    before = (boot / "gateway.lock").read_bytes()
+    with _live_starter("probe", boot) as (_proc, out):
+        assert out == "0"
+        assert (boot / "gateway.lock").read_bytes() == before, "a conflict probe wrote an owner record"
+        assert _boot_through_probe_flicker(root, boot, boot)
+
+
+def test_a_rolled_back_reserve_never_leaves_a_live_owner_record(tmp_path):
+    root, boot = _homes(tmp_path)
+    blocker = _probe_hold(boot)  # the rival starter's last home is held: its reserve rolls back
+    try:
+        with _live_starter("reserve", root, boot) as (proc, out):
+            assert out == "rolled-back"
+            blocker.close()
+            assert str(proc.pid) not in (root / "gateway.lock").read_text(encoding="utf-8"), \
+                "a rolled-back reserve left its live pid as root's owner record"
+            assert _boot_through_probe_flicker(root, boot, root)
+    finally:
+        blocker.close()

@@ -6,7 +6,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { HermesReadDirResult } from '@/global'
 
-import { DISK_REFRESH_MS, refreshChangedDiskPlugins, unloadRuntimePlugin, watchRuntimePlugins } from './runtime-loader'
+import {
+  discoverRuntimePlugins,
+  DISK_REFRESH_MS,
+  refreshChangedDiskPlugins,
+  unloadRuntimePlugin,
+  watchRuntimePlugins
+} from './runtime-loader'
 
 const root = '/local/.hermes/desktop-plugins'
 const file = `${root}/linked/plugin.js`
@@ -154,5 +160,32 @@ describe('disk plugins: level-triggered refresh (missed fs events)', () => {
     readDir.mockImplementation(async dir => (dir === root ? { entries: [] } : { entries: [] }))
     expect(await refreshChangedDiskPlugins('test')).toEqual([])
     await vi.waitFor(() => expect(stopPreviewFileWatch).toHaveBeenCalled())
+  })
+
+  it('a refresh tick while a scan is in flight is skipped, never racing the scan', async () => {
+    // Previous case retired `linked`; load it again through a manual rescan.
+    source = version('v5')
+    await discoverRuntimePlugins()
+    expect(counters.__linked_v5).toBe(1)
+
+    // Hold the next scan at its first await (the plugins root).
+    let releaseRoot: (root: string) => void = () => undefined
+    const rootReads = desktopPluginsRoot.mock.calls.length
+    desktopPluginsRoot.mockImplementationOnce(() => new Promise<string>(resolve => (releaseRoot = resolve)))
+    const scan = discoverRuntimePlugins()
+    await vi.waitFor(() => expect(desktopPluginsRoot).toHaveBeenCalledTimes(rootReads + 1))
+
+    source = version('v6')
+    const reads = readFileText.mock.calls.length
+    expect(await refreshChangedDiskPlugins('test')).toEqual([])
+    expect(readFileText.mock.calls.length).toBe(reads)
+    expect(counters.__linked_v6).toBeUndefined()
+
+    // The scan itself (a reload) then picks up the new bytes, once.
+    releaseRoot(root)
+    await scan
+    expect(counters.__linked_v6).toBe(1)
+
+    unloadRuntimePlugin('linked')
   })
 })

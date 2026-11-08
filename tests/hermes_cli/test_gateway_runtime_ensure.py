@@ -523,3 +523,65 @@ def test_dead_unmanaged_start_is_a_prompt_terminal_verdict(tmp_path, monkeypatch
     assert "RuntimeError: boot failed with key" in result.detail, result.detail
     assert secret not in result.detail and "OLD_RUN_TRACEBACK" not in result.detail
     assert "gateway-stdio.log" in result.detail
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_named_profile_start_that_loses_the_host_race_awaits_the_winning_multiplexer(tmp_path, monkeypatch):
+    """C7 (two-tenant Desktop backend): every served profile's cron tick ensures the HOST gateway at
+    once. The host start this call spawned for named profile *alpha* loses the race to a sibling's
+    (`A gateway already owns this host`, exit 1) while the winner holds the root lock but does not
+    serve alpha yet. That is a racer that won, not a dead start: wait for it (never `runtime_exited`,
+    which books the cron fire as failed until the next hourly slot) and never launch a second one."""
+    from gateway.runtime_ownership import ProfileOwnership
+    from hermes_cli import gateway_runtime as runtime, gateway_runtime_service as service, gateway_runtime_start as start
+
+    root = tmp_path / ".hermes"
+    home = root / "profiles" / "alpha"
+    home.mkdir(parents=True, mode=0o700)
+    (root / "logs").mkdir(mode=0o700)
+    (root / "config.yaml").write_text("model: {default: m}\n", encoding="utf-8")
+    winner = ProfileOwnership()
+    children = []
+
+    def losing_start(target, **kwargs):
+        winner.reserve([root])  # the sibling's host start takes the root first
+        log = (target / "logs" / "gateway-stdio.log").open("ab")
+        code = "import sys; print('A gateway already owns this host (PID 1).'); sys.exit(1)"
+        children.append(subprocess.Popen([sys.executable, "-c", code], stdout=log, stderr=log))
+        return children[-1]
+    monkeypatch.setattr(runtime, "_update_fenced", lambda homes: False)
+    monkeypatch.setattr(service, "discover_existing_gateway_service", lambda *a, **k: None)
+    monkeypatch.setattr(start, "spawn_unmanaged_gateway", losing_start)
+    try:
+        result = runtime.ensure_gateway_runtime(home, timeout=2.0)
+    finally:
+        winner.close()
+    assert (result.state, result.reason_code) == ("starting", "deadline"), result
+    assert len(children) == 1 and children[0].returncode == 1
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_named_profile_host_start_that_dies_alone_is_still_a_prompt_terminal_verdict(tmp_path, monkeypatch):
+    """The race guard above must not hide a host start that crashed with nobody holding the root."""
+    from hermes_cli import gateway_runtime as runtime, gateway_runtime_service as service, gateway_runtime_start as start
+
+    root = tmp_path / ".hermes"
+    home = root / "profiles" / "alpha"
+    home.mkdir(parents=True, mode=0o700)
+    (root / "logs").mkdir(mode=0o700)
+    (root / "config.yaml").write_text("model: {default: m}\n", encoding="utf-8")
+    children = []
+
+    def dead_start(target, **kwargs):
+        log = (target / "logs" / "gateway-stdio.log").open("ab")
+        code = "import sys; print('RuntimeError: host boot failed'); sys.exit(3)"
+        children.append(subprocess.Popen([sys.executable, "-c", code], stdout=log, stderr=log))
+        return children[-1]
+    monkeypatch.setattr(runtime, "_update_fenced", lambda homes: False)
+    monkeypatch.setattr(service, "discover_existing_gateway_service", lambda *a, **k: None)
+    monkeypatch.setattr(start, "spawn_unmanaged_gateway", dead_start)
+    before = time.monotonic()
+    result = runtime.ensure_gateway_runtime(home, timeout=20.0)
+    assert time.monotonic() - before < 10
+    assert (result.state, result.reason_code) == ("inaccessible", "runtime_exited"), result
+    assert "RuntimeError: host boot failed" in result.detail and len(children) == 1
