@@ -470,7 +470,16 @@ def mkdir_under_hermes_home(path: str | Path) -> Path:
     # closure that creates home dirs, and a missing copy fails loudly instead of silently skipping the
     # elevated grant (tests/pm/test_bootstrap_import_closure.py).
     from hermes_dir_acl import make_user_dir
-    make_user_dir(target, parents=True, exist_ok=True)
+    home = named_profile_home(target)
+    if home is None:
+        make_user_dir(target, parents=True, exist_ok=True)
+    else:
+        # The profile can disappear after the liveness check. Never recursively create its
+        # ancestors: each mkdir below an existing named home must fail if rename/delete won.
+        current = home
+        for part in target.relative_to(home).parts:
+            current = current / part
+            make_user_dir(current, exist_ok=True)
     return target
 
 

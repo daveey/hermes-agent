@@ -298,17 +298,19 @@ def _receipt_name(data: dict[str, Any]) -> str:
 
 def _write_rotated(data: dict[str, Any]) -> Path:
     """Use the same stdlib-only atomic writer as PM's installed facts."""
-    from pm.filesystem import lock_fd
-    from pm.lock import _write
+    from hermes_constants import mkdir_under_hermes_home
+    from pm.filesystem import durable_write_bytes, lock_fd
 
     d = _receipt_dir()
-    d.mkdir(parents=True, exist_ok=True)
+    mkdir_under_hermes_home(d)
     path = d / _receipt_name(data)
     # Concurrent completions share latest.json; serialize its replacement.
     with (d / ".pm-write.lock").open("a+b") as lock:
         lock_fd(lock.fileno(), wait=True)
-        _write(path, data)
-        _write(d / "latest.json", data)
+        payload = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        # Retirement can race any write, including the second (latest) publication.
+        durable_write_bytes(path, payload, create_parent=False)
+        durable_write_bytes(d / "latest.json", payload, create_parent=False)
         _rotate(d)
     return path
 

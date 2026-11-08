@@ -209,6 +209,8 @@ COPY pm/ pm/
 # `python3 -m pm.cli install` fails with "No module named
 # 'hermes_constants'" without it on the path. Copy the module next to pm.
 COPY hermes_constants.py hermes_constants.py
+# Receipt writers use the profile-safe mkdir and its stdlib-only ACL helper.
+COPY hermes_dir_acl.py hermes_dir_acl.py
 # PM imports the shared stdlib locking owner before deps exist.
 COPY hermes_cli/__init__.py hermes_cli/runtime_state.py hermes_cli/
 COPY scripts/bundles/payload.py scripts/bundles/payload.py

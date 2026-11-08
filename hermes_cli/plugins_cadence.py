@@ -92,8 +92,10 @@ def cached_git_updates(install_metadata: dict) -> dict[str, str]:
 
 def _markers_dir() -> Path:
     """The markers dir, created on demand — WRITE paths only."""
+    from hermes_constants import mkdir_under_hermes_home
+
     d = _marker_path().parent
-    d.mkdir(parents=True, exist_ok=True)
+    mkdir_under_hermes_home(d)
     return d
 
 
@@ -173,6 +175,12 @@ def run_scheduled_check(
 
     if log is None:
         log = logging.getLogger(__name__)
+    from hermes_constants import assert_named_profile_home_live, get_hermes_home
+
+    try:
+        assert_named_profile_home_live(get_hermes_home())
+    except FileNotFoundError:
+        return None
     if not check_due(now=now, config_get=config_get):
         return None
     if not _tick_lock.acquire(blocking=False):
@@ -274,6 +282,12 @@ def _run_check_locked(
     # reviewed sha, tracked git pulls), scan-gated by the update path itself, which also refuses a
     # widened catalog pin or a too-new requires_hermes without a terminal. Pinned/manual/drift/pip
     # are never auto-applied (their update_available is False/None or their class excludes it).
+    from hermes_constants import assert_named_profile_home_live, get_hermes_home
+
+    try:
+        assert_named_profile_home_live(get_hermes_home())
+    except FileNotFoundError:
+        return results
     if apply_updates_fn and updates and auto_apply_enabled(config_get):
         _auto_apply(updates, checked_installs, apply_updates_fn, log)
 
@@ -313,9 +327,10 @@ def maybe_run_gateway_check(
     costs one warning and a stamped marker — never an apply.
     """
     if plugins_dir is None:
-        from hermes_cli import plugins_cmd
+        from hermes_constants import get_hermes_home
 
-        plugins_dir = plugins_cmd._plugins_dir()
+        # A read-only background check must not create a home from a stale served-profile list.
+        plugins_dir = get_hermes_home() / "plugins"
     if run_checks_fn is None:
         # ONE shared network-default implementation — plugins_updates
         # owns default_fetch / default_ls_remote / _default_pypi_latest;

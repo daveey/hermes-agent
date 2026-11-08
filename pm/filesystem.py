@@ -166,9 +166,10 @@ def file_digest(path: Path) -> str | None:
     return hashlib.sha256(data).hexdigest() if data is not None else None
 
 
-def durable_write_bytes(path: Path, data: bytes) -> None:
+def durable_write_bytes(path: Path, data: bytes, *, create_parent: bool = True) -> None:
     """Replace ``path`` atomically and fsync file and directory so a crash keeps old or new bytes."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if create_parent:
+        path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".publish-")
     try:
         with os.fdopen(fd, "wb") as stream:
