@@ -30,7 +30,7 @@ class ModelPeer(BaseHTTPRequestHandler):
         reply = f"LOCAL_ACK_{marker}"
         if 'BLOCK_FIFO' in json.dumps(last):
             self.server.blocked.set()
-            assert self.server.release.wait(15), 'fixture model gate timed out'
+            assert self.server.release.wait(getattr(self.server, 'release_timeout', 15)), 'fixture model gate timed out'
         self.server.requests.append(request) if 'messages' in request else self.server.metadata_requests.append(request)
         base = {"id": "chatcmpl-local", "model": "local-wire-stub", "created": 1}
         self.send_response(200)
