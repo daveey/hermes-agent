@@ -664,7 +664,8 @@ def _kb_board_file_sig(db_path) -> tuple | None:
         return None  # unreadable never means unchanged
 
 
-def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None, seen: dict | None = None) -> list:
+def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None, seen: dict | None = None,
+                   *, stray: tuple = (), unreclaimed: list | None = None) -> list:
     """Claim + format this session's unseen events on one board. One poller per live session: the board is not opened
     writable unless it has a subscription owned by this exact session (a failed read-only probe — locked/corrupt DB —
     falls through so delivery is preserved).
@@ -675,26 +676,66 @@ def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None,
     before the poll, so a commit during it is polled again next tick."""
     from hermes_cli import kanban_db_connect as _kbc
     from hermes_cli import kanban_db_notify as _kbn
+    from hermes_cli.kanban_placement import is_placeholder_session
+    if is_placeholder_session(session_key):
+        return []
+    # Reclaim before the quiet-board shortcut: a failed reclaim must retry even without a board commit.
+    reclaimed = not stray or _kb_reclaim_stray_subs(_kbn, slug, session_key, stray)
+    if not reclaimed and unreclaimed is not None:
+        unreclaimed.append(slug)
     db_path = sig = None
     if seen is not None:
         with contextlib.suppress(Exception):
             db_path = str(_kb.kanban_db_path(board=slug))
             sig = _kb_board_file_sig(db_path)
-        if sig is not None and seen.get(db_path) == (session_key, sig):
+        if reclaimed and sig is not None and seen.get(db_path) == (session_key, sig):
             from hermes_constants import get_hermes_home
             from tui_gateway.kanban_consumer_health import polled
             polled(get_hermes_home(), session_key, db_path)
             return []
-    from hermes_cli.kanban_placement import is_placeholder_session
-    if is_placeholder_session(session_key):
-        return []
     texts = _kb_poll_board_now(_kb, _kbc, _kbn, slug, session_key, claims)
     from tui_gateway.notification_idle import board_quiet
-    if sig is not None and board_quiet(db_path, session_key):
+    if reclaimed and sig is not None and board_quiet(db_path, session_key):
         seen[db_path] = (session_key, sig)
     elif seen is not None:
         seen.pop(db_path, None)
     return texts
+
+
+def _kb_stray_delegate_keys(session: dict, session_key: str) -> tuple:
+    """This session's marked delegate subagent ids, looked up once per live session. Before the reserved child
+    kept its ``_delegate_from`` marker, ``kanban_create`` resolved the parent's key to the unmarked child and
+    subscribed the card under the child's id, so its completions went to the subagent (#150198)."""
+    if (cached := session.get("_kanban_stray_keys")) is not None:
+        return cached
+    import sqlite3
+    try:
+        with _session_db(session) as db:
+            if db is None:
+                return ()  # store unavailable: not cached, so a later poll retries
+            from hermes_state_delegate_children import delegate_descendant_ids
+            keys = tuple(delegate_descendant_ids(db, session_key))
+    except sqlite3.Error as exc:  # busy/locked store: not cached, so a later poll retries
+        _notif_log_failure("kanban stray-subscription lookup failed", exc)
+        return ()
+    session["_kanban_stray_keys"] = keys
+    return keys
+
+
+def _kb_reclaim_stray_subs(_kbn, slug: str, session_key: str, stray: tuple) -> bool:
+    """Re-key ``tui`` subscriptions bound to this session's own subagents back onto it. True when the board is
+    clean afterwards (nothing to move, or moved); False on a DB error so the caller retries next poll."""
+    import sqlite3
+    from hermes_cli import kanban_db_connect as _kbc
+    try:
+        if not any(_kbn.count_notify_subs(board=slug, platform="tui", chat_id=k) for k in stray):
+            return True
+        with contextlib.closing(_kbc.connect(board=slug)) as conn:
+            _kbn.retarget_notify_subs(conn, platform="tui", from_chat_ids=stray, to_chat_id=session_key)
+        return True
+    except sqlite3.Error as exc:  # busy/locked board: the caller retries next poll
+        _notif_log_failure(f"kanban stray-subscription reclaim failed on {slug}", exc)
+        return False
 
 
 def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: list | None) -> list:
@@ -794,7 +835,11 @@ def _collect_kanban_notifications(session: dict, claims: list | None = None) -> 
     for slug, resolved in (_kb_board_key(_kb, board_meta) for board_meta in boards):
         unique.setdefault(resolved, slug)
     seen = session.setdefault("_kb_board_seen", {})
-    texts = [t for slug in unique.values() for t in _kb_poll_board(_kb, slug, session_key, claims, seen)]
+    stray, unreclaimed = _kb_stray_delegate_keys(session, session_key), []
+    texts = [t for slug in unique.values() for t in _kb_poll_board(
+        _kb, slug, session_key, claims, seen, stray=stray, unreclaimed=unreclaimed)]
+    if stray and not unreclaimed:
+        session["_kanban_stray_keys"] = ()  # every board is clean; stop probing
     return texts + _collect_remote_kanban_notifications(session_key, claims)
 
 
