@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -23,6 +24,9 @@ from agent.message_metadata import append_message
 from agent.pre_final_gate import UnresolvedFallback
 
 logger = logging.getLogger("agent.conversation_loop")
+
+# Shown while ``pre_verify`` hooks judge an answer that has already streamed [daveey].
+PRE_VERIFY_STATUS = "Checking the reply before finishing…"
 
 
 @dataclass
@@ -87,12 +91,26 @@ def _pre_verify_nudge(agent, final_response, attempt: int) -> Optional[str]:
                 from agent.coding_context import is_coding_context
                 coding = bool(is_coding_context(platform=getattr(agent, "platform", "") or ""))
                 agent._resolved_is_coding = coding
-            return get_pre_verify_continue_message(
-                session_id=getattr(agent, "session_id", None) or "",
-                platform=getattr(agent, "platform", "") or "",
-                model=getattr(agent, "model", "") or "", coding=coding, attempt=attempt,
-                final_response=final_response, changed_paths=_edited,
-            )
+            # The answer has already streamed; a reply-check hook can take tens of seconds (LLM judges), so
+            # say so instead of leaving a bare spinner under a finished-looking answer (agent-7aa110cfd7).
+            _sid = getattr(agent, "session_id", None) or ""
+            try:
+                agent._emit_status(PRE_VERIFY_STATUS)
+            except Exception:
+                logger.debug("pre_verify status emit failed", exc_info=True)
+            _t0 = time.monotonic()
+            _msg = None
+            try:
+                _msg = get_pre_verify_continue_message(
+                    session_id=_sid,
+                    platform=getattr(agent, "platform", "") or "",
+                    model=getattr(agent, "model", "") or "", coding=coding, attempt=attempt,
+                    final_response=final_response, changed_paths=_edited,
+                )
+                return _msg
+            finally:
+                logger.info("pre_verify done session=%s seconds=%.2f continued=%s attempt=%d",
+                            _sid, time.monotonic() - _t0, bool(_msg), attempt)
     except Exception:
         logger.debug("pre_verify hook check failed", exc_info=True)
     return None
