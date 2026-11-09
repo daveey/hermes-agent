@@ -39,12 +39,30 @@ def lifecycle_lock(database):
         return lock
 
 
+class BoardLifecycleBusy(sqlite3.OperationalError):
+    """Another thread holds this board's open/close transition. [daveey]
+
+    Carries ``SQLITE_BUSY`` like a native busy error, so every busy check (``retry_open``, readers that degrade a
+    busy board to its last good answer) treats it as "busy, retry later" rather than a broken board
+    (kanban-359833be53: without the code one busy board marked every sidebar row ``kanban_unknown``)."""
+
+    def __init__(self, message="database is locked: board lifecycle is busy"):
+        super().__init__(message)
+        self.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        self.sqlite_errorname = "SQLITE_BUSY"
+
+
+def is_busy(exc) -> bool:
+    """True for a busy/locked board (native SQLite or ``BoardLifecycleBusy``), not a corrupt or missing one."""
+    return (getattr(exc, "sqlite_errorcode", 0) or 0) & 0xff in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+
+
 @contextmanager
 def lifecycle_access(database, timeout):
     """A reader keeps its own busy budget even behind a long-timeout opener."""
     lock = lifecycle_lock(database)
     if not lock.acquire(timeout=max(0.0, float(timeout))):
-        raise sqlite3.OperationalError("database is locked: board lifecycle is busy")
+        raise BoardLifecycleBusy()
     try:
         yield lock
     finally:
@@ -107,8 +125,7 @@ def retry_open(open_once, timeout):
         try:
             return open_once(max(0.0, deadline - time.monotonic()))
         except sqlite3.OperationalError as exc:
-            code = getattr(exc, "sqlite_errorcode", 0) & 0xff
-            if code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            if not is_busy(exc):
                 raise
             remaining = deadline - time.monotonic()
             if remaining <= 0:

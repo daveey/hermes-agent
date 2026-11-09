@@ -12,8 +12,11 @@ State stays in ``kanban_session_activity`` (late-bound ``_ksa``: that module imp
 from __future__ import annotations
 
 import logging
+import sqlite3
 import threading
 import time
+
+from hermes_cli.kanban_generation import is_busy
 
 _log = logging.getLogger("hermes_cli.kanban_session_activity")
 
@@ -44,9 +47,29 @@ def board_memo_key(path) -> tuple:
     key = _ksa._board_content_key(path)
     if key[:1] == ("stat",):
         # data_version is connection-local: retain identity to reject a replacement reader.
-        with _ksa.cached_ro(path) as conn:
-            return key, conn, conn.execute("PRAGMA data_version").fetchone()[0]
+        try:
+            with _ksa.cached_ro(path) as conn:
+                return key, conn, conn.execute("PRAGMA data_version").fetchone()[0]
+        except sqlite3.OperationalError as exc:
+            # [daveey] The probe falls back to the stat exactly when the board is busy: a busy board has no key that
+            # vouches for its memo row. The token matches no memo row and carries the error, so the reader reuses
+            # that board's last good counts or re-raises it without spending a second busy budget; the other
+            # boards' counts are never aborted (kanban-359833be53).
+            if not is_busy(exc):
+                raise
+            return key, BusyToken(exc)
     return key
+
+
+class BusyToken:
+    """Ends a memo key whose board was busy: equal to nothing, so it never matches a memo row. [daveey]"""
+
+    def __init__(self, error: sqlite3.OperationalError):
+        self.error = error
+
+
+def is_busy_key(key) -> bool:
+    return isinstance(key, tuple) and len(key) == 2 and isinstance(key[1], BusyToken)
 
 
 def counts_fresh(scope: tuple[str, ...], fingerprint: tuple, now: float) -> bool:

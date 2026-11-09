@@ -19,6 +19,7 @@ from hermes_cli import kanban_activity_identity as _identity
 from hermes_cli import kanban_annotation_disk as _annotation_copy
 from hermes_cli import kanban_annotation_refresh as _bounded
 from hermes_cli import kanban_activity_revision as _revision
+from hermes_cli import kanban_session_activity_busy as _busy
 from hermes_cli import kanban_session_activity_hub as _hub_signature
 from hermes_cli import kanban_session_activity_revalidate as _revalidate
 from hermes_cli import kanban_counts_scopes as _count_scopes
@@ -921,7 +922,7 @@ def _without_local_open_duplicates(rows: list[dict[str, Any]], *, gateway: str,
     def contains(path: Path, sid: str, task_id: str) -> bool:
         key = (path, sid)
         if key not in task_ids:
-            task_ids[key] = {t['id'] for t in _read_session_tasks(path, [sid], LISTED_STATUSES)}
+            task_ids[key] = {t['id'] for t in _busy.session_tasks(path, [sid], LISTED_STATUSES, _read_session_tasks)}
         return task_id in task_ids[key]
 
     for row in local:
@@ -1240,6 +1241,7 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
     _parked_sink.stalled = stalled
     local_keys: dict[str, set[tuple[str, str, bool]]] = {}
     _local_keys_sink.keys = local_keys
+    _busy.begin_recompute()
     try:
         pairs = _read_local_pairs_into(active, blocked, unseen)
     finally:
@@ -1286,7 +1288,7 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         _cache_scope = scope
         _cache = (now + _CACHE_TTL_S, *counts)
         _cache_read_at = now
-        _cache_revalidatable = wall is not None and _revalidate.revalidatable(fingerprint, wall)
+        _cache_revalidatable = wall is not None and not _busy.reused() and _revalidate.revalidatable(fingerprint, wall)
         _cache_fingerprint = fingerprint
         _counts_generation += 1
         _cache_generation = _counts_generation
@@ -1377,10 +1379,11 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
         if reads is not None and ((sink is not None and "parked" not in reads)
                                   or (stalled is not None and "stall_rows" not in reads)):
             reads = None
-        if reads is None:
-            _board_memo.pop(str(path), None)
-            reads, complete = _read_board(path, parked=sink is not None, stalled=stalled is not None)
-            if complete:
+        if reads is None:  # [daveey] a busy board reuses its last good counts (kanban-359833be53)
+            reads, complete, fresh = _busy.board_reads(path, key, hit, sink is not None, stalled is not None, _read_board)
+            if fresh:
+                _board_memo.pop(str(path), None)
+            if fresh and complete:
                 _board_memo[str(path)] = (key, reads)
         for src, into in ((reads["unseen"], unseen), (reads["active"], active), (reads["blocked"], blocked)):
             for sid, n in src.items():
@@ -1652,7 +1655,7 @@ def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED
         return []
     out: list[dict[str, Any]] = []
     for path in _board_db_paths():
-        out.extend(_read_session_tasks(path, ids, statuses))
+        out.extend(_busy.session_tasks(path, ids, statuses, _read_session_tasks))  # busy board: last list, stale
     for t in out:
         t.setdefault("key", f"{t['board']}/{t['id']}")
     # [daveey] Cards on other gateways this lineage owns: the same rows the counts use, owner-qualified
@@ -1975,6 +1978,7 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
     _annotation_copy.reset()
     with _pairs_lock:
         _board_memo.clear()
+    _busy.reset()
     with _links_lock:
         _links_cache = None
     with _cache_lock:
