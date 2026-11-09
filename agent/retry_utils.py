@@ -210,7 +210,38 @@ OFFLINE_POLL_MAX_S = 30.0
 NETWORK_CONTROL_HOST = "github.com"
 _RESOLVE_TIMEOUT_S = 5.0
 _OFFLINE_SLICE_S = 0.2
+# One failed provider lookup next to a good control lookup is not proof of a bad base_url: on a
+# waking or roaming laptop the control name can answer from cache while a fresh lookup fails
+# (self-heal agent-e9b010909c: chatgpt.com reported "misconfigured" while it was reachable). The
+# provider host is re-checked this many times, this many awake seconds apart, before deciding.
+MISCONFIG_RECHECKS = 2
+MISCONFIG_RECHECK_S = 5.0
+# Hosts that resolved in this process: a later failure is an outage, never a typo.
+_RESOLVED_HOSTS: set[str] = set()
+_BUILTIN_PROVIDER_HOSTS: Optional[frozenset] = None
 _logger = logging.getLogger(__name__)
+
+
+def builtin_provider_hosts() -> frozenset:
+    """Host names of Hermes' built-in providers' default base URLs (never a user typo)."""
+    global _BUILTIN_PROVIDER_HOSTS
+    if _BUILTIN_PROVIDER_HOSTS is not None:
+        return _BUILTIN_PROVIDER_HOSTS
+    urls: list[Any] = []
+    try:
+        from hermes_cli import auth as _auth
+        from hermes_cli.providers import HERMES_OVERLAYS
+    except ImportError:  # a stripped install: nothing counts as built-in, the typo check still runs
+        _logger.debug("provider registry unavailable for built-in host check", exc_info=True)
+    else:
+        for row in _auth._REGISTRY_ROWS:
+            urls.append(getattr(row, "inference_base_url", None) if not isinstance(row, tuple)
+                        else (row[2] if len(row) > 2 else ""))
+        urls.extend(o.base_url_override for o in HERMES_OVERLAYS.values())
+    hosts = {provider_host(u) for u in urls if isinstance(u, str) and u.startswith("http")}
+    hosts -= {"", "localhost", "127.0.0.1", "::1", "0.0.0.0"}
+    _BUILTIN_PROVIDER_HOSTS = frozenset(hosts)
+    return _BUILTIN_PROVIDER_HOSTS
 
 
 def is_local_network_error(error: Any) -> bool:
@@ -272,7 +303,10 @@ def host_resolves(host: str, timeout: float = _RESOLVE_TIMEOUT_S, *, is_interrup
         if interrupted() or remaining <= 0:
             return False
         done.wait(min(_OFFLINE_SLICE_S, remaining))
-    return bool(outcome.get("ok"))
+    ok = bool(outcome.get("ok"))
+    if ok:
+        _RESOLVED_HOSTS.add(host)
+    return ok
 
 
 def provider_host(base_url: Any) -> str:
@@ -294,7 +328,9 @@ def wait_for_network(
     Returns ``(outcome, awake_seconds_spent)``; outcome is ``"online"`` (it resolves again: retry
     without spending an attempt), ``"already_online"`` (it resolved at once: the failure is not the
     network's, count the attempt), ``"misconfigured"`` (the control host resolves but the provider's
-    does not: logs an ERROR and returns at once), ``"interrupted"``, ``"exhausted"`` or ``"disabled"``.
+    still does not after MISCONFIG_RECHECKS re-checks, it never resolved in this process and it is not
+    a built-in provider host: logs an ERROR; a built-in or earlier-resolved host that stopped
+    resolving logs one WARNING and waits instead), ``"interrupted"``, ``"exhausted"`` or ``"disabled"``.
     Polls every OFFLINE_POLL_MIN_S..OFFLINE_POLL_MAX_S seconds in short slices so *is_interrupted*
     is honoured promptly; *on_tick(awake_spent_s)* runs about every 30 s of waiting (liveness)."""
     is_interrupted = is_interrupted or (lambda: False)
@@ -311,22 +347,51 @@ def wait_for_network(
         if is_interrupted() or elapsed() >= budget_s:
             return False
         if resolve is not None:
-            return resolve(name)
+            ok = bool(resolve(name))
+            if ok:
+                _RESOLVED_HOSTS.add(name)
+            return ok
         return host_resolves(name, timeout=min(_RESOLVE_TIMEOUT_S, budget_s - elapsed()),
                              is_interrupted=is_interrupted)
 
+    def sleep_awake(seconds):
+        """Sleep *seconds* of awake time in short slices; False when interrupted."""
+        slice_end = min(budget_s, elapsed() + seconds)
+        while elapsed() < slice_end:
+            if is_interrupted():
+                return False
+            time.sleep(min(_OFFLINE_SLICE_S, slice_end - elapsed()))
+        return not is_interrupted()
+
+    seen_before = host in _RESOLVED_HOSTS
     if lookup(host):
         return "already_online", elapsed()
     if control_host and control_host != host and lookup(control_host):
-        _logger.error(
-            "provider host does not resolve while network is up: %s (control host %s resolves) — "
-            "check the provider base_url", host, control_host,
+        # The control name may answer from cache while a fresh lookup fails (waking/roaming
+        # laptop): re-check the provider host before calling its base_url wrong.
+        for _ in range(MISCONFIG_RECHECKS):
+            if not sleep_awake(MISCONFIG_RECHECK_S):
+                return "interrupted", elapsed()
+            if lookup(host):
+                _logger.info("provider host %s resolves again after %.0fs (transient DNS failure)",
+                             host, elapsed())
+                return "online", elapsed()
+        if not seen_before and host not in builtin_provider_hosts():
+            _logger.error(
+                "provider host does not resolve while network is up: %s (control host %s resolves) — "
+                "check the provider base_url", host, control_host,
+            )
+            return "misconfigured", elapsed()
+        _logger.warning(
+            "provider host stopped resolving, waiting: %s (%s; control host %s resolves); waiting up to "
+            "%.0fs of awake time", host, "resolved earlier" if seen_before else "built-in provider host",
+            control_host, budget_s,
         )
-        return "misconfigured", elapsed()
-    _logger.warning(
-        "offline — waiting for network: %s and %s do not resolve; waiting up to %.0fs of awake time",
-        host, control_host, budget_s,
-    )
+    else:
+        _logger.warning(
+            "offline — waiting for network: %s and %s do not resolve; waiting up to %.0fs of awake time",
+            host, control_host, budget_s,
+        )
     if on_wait is not None and not is_interrupted():
         on_wait()
     spent = elapsed()

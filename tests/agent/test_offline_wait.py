@@ -213,10 +213,104 @@ def test_provider_host_not_resolving_while_network_is_up_logs_error_and_does_not
     resolve, _calls = _resolver(fail_first=10**9, control_ok=True)
     with caplog.at_level(logging.WARNING, logger="agent.retry_utils"):
         outcome, spent = wait_for_network("api.typo-example.com", budget_s=900, resolve=resolve)
-    assert outcome == "misconfigured" and clock.sleeps == 0 and spent == 0
+    # A typo'd custom host is still reported, after at most MISCONFIG_RECHECKS re-checks of it.
+    import agent.retry_utils as ru
+    assert outcome == "misconfigured"
+    assert _calls["provider"] == 1 + ru.MISCONFIG_RECHECKS
+    assert spent <= ru.MISCONFIG_RECHECKS * ru.MISCONFIG_RECHECK_S + 1
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
     assert errors[0].getMessage().startswith("provider host does not resolve while network is up")
+
+
+# A DNS blip on a waking/roaming laptop: the control name answers from cache while a fresh lookup of
+# the provider host fails once (self-heal agent-e9b010909c: chatgpt.com reported "misconfigured" 55x
+# while other sessions on the same Mac reached it seconds later).
+
+
+@pytest.fixture(autouse=True)
+def _fresh_resolved_hosts(monkeypatch):
+    import agent.retry_utils as ru
+    if hasattr(ru, "_RESOLVED_HOSTS"):
+        monkeypatch.setattr(ru, "_RESOLVED_HOSTS", set())
+
+
+def _errors(caplog):
+    return [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_builtin_provider_host_failing_once_then_resolving_is_online_not_misconfigured(monkeypatch, caplog):
+    from agent.retry_utils import wait_for_network
+    _Clock(awake_per_sleep=1.0, wall_per_sleep=1.0).install(monkeypatch)
+    resolve, calls = _resolver(fail_first=1, control_ok=True)
+    with caplog.at_level(logging.INFO, logger="agent.retry_utils"):
+        outcome, _spent = wait_for_network("chatgpt.com", budget_s=900, resolve=resolve)
+    assert outcome == "online"
+    assert calls["provider"] == 2
+    assert not _errors(caplog)
+
+
+def test_custom_host_failing_once_then_resolving_is_online_not_misconfigured(monkeypatch, caplog):
+    from agent.retry_utils import wait_for_network
+    _Clock(awake_per_sleep=1.0, wall_per_sleep=1.0).install(monkeypatch)
+    resolve, calls = _resolver(fail_first=1, control_ok=True)
+    with caplog.at_level(logging.INFO, logger="agent.retry_utils"):
+        outcome, _spent = wait_for_network("llm.custom-example.com", budget_s=900, resolve=resolve)
+    assert outcome == "online" and calls["provider"] == 2
+    assert not _errors(caplog)
+
+
+def test_builtin_provider_host_that_keeps_failing_waits_without_error(monkeypatch, caplog):
+    from agent.retry_utils import wait_for_network
+    _Clock(awake_per_sleep=1.0, wall_per_sleep=1.0).install(monkeypatch)
+    resolve, _calls = _resolver(fail_first=10**9, control_ok=True)
+    with caplog.at_level(logging.WARNING, logger="agent.retry_utils"):
+        outcome, spent = wait_for_network("chatgpt.com", budget_s=120, resolve=resolve)
+    assert outcome == "exhausted" and spent >= 120
+    assert not _errors(caplog)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "provider host stopped resolving" in warnings[0]
+
+
+def test_host_that_resolved_earlier_in_this_process_waits_without_error(monkeypatch, caplog):
+    from agent.retry_utils import wait_for_network
+    _Clock(awake_per_sleep=1.0, wall_per_sleep=1.0).install(monkeypatch)
+    host = "llm.custom-example.com"
+    assert wait_for_network(host, budget_s=900, resolve=lambda h: True)[0] == "already_online"
+    resolve, _calls = _resolver(fail_first=10**9, control_ok=True)
+    with caplog.at_level(logging.WARNING, logger="agent.retry_utils"):
+        outcome, _spent = wait_for_network(host, budget_s=120, resolve=resolve)
+    assert outcome == "exhausted"
+    assert not _errors(caplog)
+
+
+def test_host_resolves_records_successful_lookups(monkeypatch):
+    import agent.retry_utils as ru
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [("addr",)])
+    assert ru.host_resolves("llm.custom-example.com")
+    assert "llm.custom-example.com" in ru._RESOLVED_HOSTS
+
+
+def test_turn_on_provider_dns_blip_with_network_up_logs_no_misconfiguration(monkeypatch, caplog):
+    """Real turn: the provider host's first lookup fails while github.com resolves, then it resolves.
+    The SAME attempt goes through and no "check the provider base_url" ERROR is filed."""
+    _fast_offline_polls(monkeypatch)
+    import agent.retry_utils as ru
+    monkeypatch.setattr(ru, "MISCONFIG_RECHECK_S", 0.01, raising=False)
+
+    class _Blip(_FlakyDNS):
+        def __call__(self, host, port, *args, **kwargs):
+            if host == "github.com":
+                return self._real("127.0.0.1", port, *args, **kwargs)
+            return super().__call__(host, port, *args, **kwargs)
+
+    dns = _Blip(offline_lookups=2, owned=(_OFFLINE_HOST,))
+    with caplog.at_level(logging.WARNING):
+        result, served = _turn(monkeypatch, dns)
+    assert result.get("completed") and result.get("final_response") == "answered", result
+    assert served == 1 and dns.remaining == 0
+    assert not [r for r in caplog.records
+                if r.getMessage().startswith("provider host does not resolve while network is up")]
 
 
 def test_both_hosts_failing_logs_one_offline_warning(monkeypatch, caplog):
