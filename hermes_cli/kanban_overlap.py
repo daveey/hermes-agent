@@ -597,7 +597,10 @@ def _replica_cards(self_gw: Optional[str]) -> Iterable[dict]:
                "status": t.get("status"), "title": t.get("title") or "", "body": t.get("body") or "",
                "local": False,
                "session_id": next((s.get("session") for s in sessions if s.get("rel") == "created"), None),
-               "creator_task_id": None, "key_family": None,
+               # hermes-hub client >= 1.9.27 publishes the key; per-host automation keyed by one creator on two
+               # gateways is then exempt like a local same-family card (cron-d7cb391a4c). Older publishers: None.
+               "creator_task_id": None,
+               "key_family": key_family(ikey if isinstance(ikey := t.get("idempotency_key"), str) else None),
                "chats": sorted({str(s["session"]) for s in sessions if s.get("session")})}
 
 
