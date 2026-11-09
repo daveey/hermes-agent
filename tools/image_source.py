@@ -89,8 +89,35 @@ async def resolve_image_source(
         return _finalize(data, "", "file", s, permitted)
     if _is_local_terminal_backend():
         # Any path was host-readable, so a miss means the file doesn't exist.
-        raise SourceNotFound(f"media file not found: '{p}'", src=s, origin="file")
+        raise SourceNotFound(f"media file not found: '{p}'{_sibling_hint(p)}", src=s, origin="file")
     return await _resolve_container_fallback(p, ctx, s, permitted)
+
+
+_SIBLING_HINT_MAX = 10
+_SIBLING_SCAN_MAX = 5000  # a miss in a huge dir must not stall on a full listing
+
+
+def _sibling_hint(p: Path) -> str:
+    """``; files in that dir: a.png, b.png (+N more)`` naming real files that share the missing name's
+    non-digit stem prefix and suffix (``figure-page-79-0.png`` -> ``figure-page-*.png``), else "".
+    An agent that lost a file list to compaction otherwise guesses names until a loop guard fires."""
+    try:
+        parent = p.expanduser().parent
+        prefix = re.split(r"\d", p.stem, maxsplit=1)[0]
+        suffix = p.suffix.lower()
+        with os.scandir(parent) as it:
+            entries = [e for _, e in zip(range(_SIBLING_SCAN_MAX), it)]
+        names = sorted(
+            (e.name for e in entries
+             if e.name.startswith(prefix) and e.name.lower().endswith(suffix) and e.is_file()),
+            key=lambda n: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", n)],
+        )
+    except OSError:
+        return ""
+    if not names:
+        return ""
+    more = f" (+{len(names) - _SIBLING_HINT_MAX} more)" if len(names) > _SIBLING_HINT_MAX else ""
+    return f"; files in that dir: {', '.join(names[:_SIBLING_HINT_MAX])}{more}"
 
 
 def _read_host_bytes_bounded(path: Path, src: str, cap: int) -> bytes:

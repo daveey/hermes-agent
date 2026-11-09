@@ -34,6 +34,9 @@ from agent.context_compressor_prellm import PreLlmSkipMixin
 from agent.context_compressor_window import CompactionWindowMixin
 from agent.context_compressor_prune import ProactivePruneMixin
 from agent.context_compressor_summary import SummaryDispatchMixin
+from agent.context_compressor_output_stubs import (
+    _json_dict, _output_lines, _short_output_kept_verbatim, _str_arg, _sum_execute_code, _sum_terminal,
+)
 from agent.context_compressor_prompt_rules import EPISTEMIC_STANCE_RULE, UNVERIFIED_HYPOTHESES_SECTION, _today_for_prompt
 from agent.context_compressor_retry import retryable_user_text, typed_prompt_content
 from agent.context_compressor_tail import (
@@ -1669,12 +1672,6 @@ def _image_part_label(part: dict[str, Any]) -> str:
     return f"[image: {url}]" if isinstance(url, str) and url.startswith(("http://", "https://")) else "[image]"
 
 
-def _str_arg(args: dict, key: str, default: str = "") -> str:
-    """Coerce a parsed tool arg to ``str`` (models emit non-string values)."""
-    val = args.get(key, default)
-    return val if isinstance(val, str) else default if val is None else str(val)
-
-
 def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) -> str:
     """1-line summary of a tool call + result. Never raises: a malformed historical call must not crash-loop compression."""
     try:
@@ -1683,13 +1680,6 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
         logger.debug("Tool-result summary failed for %s: %s", tool_name, exc)
         _len = len(tool_content) if isinstance(tool_content, str) else 0
         return f"[{tool_name}] ({_len:,} chars result)"
-
-
-def _sum_terminal(name, args, content, content_len, line_count):
-    cmd = _str_arg(args, "command")
-    cmd = cmd if len(cmd) <= 80 else cmd[:77] + "..."
-    exit_code = m.group(1) if (m := re.search(r'"exit_code"\s*:\s*(-?\d+)', content)) else "?"
-    return f"[terminal] ran `{cmd}` -> exit {exit_code}, {line_count} lines output"
 
 
 def _sum_write_file(name, args, content, content_len, line_count):
@@ -1733,12 +1723,6 @@ def _sum_delegate_task(name, args, content, content_len, line_count):
     goal = _str_arg(args, "goal")
     goal = goal if len(goal) <= 60 else goal[:57] + "..."
     return f"[delegate_task] '{goal}' ({content_len:,} chars result)" + _result_failure_suffix(content)
-
-
-def _sum_execute_code(name, args, content, content_len, line_count):
-    code_str = _str_arg(args, "code")
-    code_preview = code_str[:60].replace("\n", " ") + ("..." if len(code_str) > 60 else "")
-    return f"[execute_code] `{code_preview}` ({line_count} lines output)"
 
 
 def _sum_skill_view(name, args, content, content_len, line_count):
@@ -1998,15 +1982,7 @@ _TOOL_RESULT_SUMMARIZERS = {
 }
 
 
-def _json_dict(text: Any) -> dict:
-    """Parse ``text`` as a JSON object; ``{}`` for empty, invalid, or non-object input."""
-    try:
-        parsed = json.loads(text) if text else {}
-    # Just-loaded / actively-referenced skills survive verbatim (#32106). Pass-4 pressure demotion overrides
-    # this.
-    except (json.JSONDecodeError, TypeError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+
 
 
 def _summarize_refused_tool_result(tool_name: str, args: dict, content: str) -> str | None:
@@ -2040,7 +2016,7 @@ def _summarize_tool_result_unguarded(tool_name: str, tool_args: str, tool_conten
     if (refused := _summarize_refused_tool_result(tool_name, args, content)) is not None:
         return refused
     content_len = len(content)
-    line_count = content.count("\n") + 1 if content.strip() else 0
+    line_count = len(_output_lines(content))
     summarizer = _TOOL_RESULT_SUMMARIZERS.get(tool_name)
     if summarizer is not None:
         return summarizer(tool_name, args, content, content_len, line_count)
@@ -3199,7 +3175,8 @@ class ContextCompressor(
         min_prune_chars: int, protected_skills: Optional[set[str]] = None,
     ) -> bool:
         """Replace the tool result at ``idx`` with a 1-line summary; True if modified.
-        ``protected_skills`` (lower-cased) spares matching skill_view bodies; None (pressure pass) overrides the guard."""
+        ``protected_skills`` (lower-cased) spares matching skill_view bodies and short terminal/execute_code
+        listings; None (pressure pass) overrides both guards."""
         msg = result[idx]
         if msg.get("role") != "tool":
             return False
@@ -3221,6 +3198,8 @@ class ContextCompressor(
             _skill = _json_dict(tool_args).get("name", "")
             if isinstance(_skill, str) and _skill.lower() in protected_skills:
                 return False
+        if protected_skills is not None and _short_output_kept_verbatim(tool_name, content):
+            return False
         result[idx] = {**msg, "content": _summarize_tool_result(tool_name, tool_args, content)}
         return True
 
