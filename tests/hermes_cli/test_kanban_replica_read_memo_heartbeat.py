@@ -190,6 +190,27 @@ def test_gateway_identity_change_rereads(world):
     assert row_reads(statements) == 2 and live == []
 
 
+def test_reader_answers_exactly_while_heartbeat_writer_is_uncommitted(world):
+    """A production WAL writer cannot exclude readers, even if descheduled before commit."""
+    path, _, _, clock = world
+    tick(path, clock, 1100.0)
+    fresh_answer, _ = read(path, clock)
+    set_info(path, [ok(2000.0)])
+    future_answer, _ = read(path, clock)
+    assert fresh_answer != future_answer
+    writer = sqlite3.connect(path)
+    try:
+        writer.execute('BEGIN EXCLUSIVE')
+        writer.execute("UPDATE replica SET data=? WHERE coll='gateway' AND key='info'",
+                       (json.dumps({'gateway': 'owner', 'task_scopes': [ok(1000.0)]}),))
+        # The last committed heartbeat remains visible while the writer holds its transaction.
+        assert read(path, clock)[0] == future_answer
+        writer.commit()
+        assert read(path, clock)[0] == fresh_answer
+    finally:
+        writer.close()
+
+
 def test_concurrent_reads_during_heartbeat_churn_answer_exactly(world):
     path, _, _, clock = world
     tick(path, clock, 1100.0)

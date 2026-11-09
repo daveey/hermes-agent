@@ -30,6 +30,8 @@ def hub(tmp_path, monkeypatch):
     """hermes-hub's replica schema: every write carries the feed's monotonic ``seq``."""
     path = tmp_path / 'hub.db'
     with sqlite3.connect(path) as db:
+        # Match hub client's open_db: rollback journaling excludes concurrent readers during commit.
+        db.execute('PRAGMA journal_mode = WAL')
         db.executescript('CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);'
                          'CREATE TABLE replica(gw TEXT, coll TEXT, key TEXT, version INTEGER, seq INTEGER, data TEXT,'
                          ' updated_at INTEGER, PRIMARY KEY (gw, coll, key));'
