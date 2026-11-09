@@ -16,7 +16,7 @@ import json
 import signal
 import sqlite3
 import threading
-import time
+
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -55,22 +55,14 @@ def test_local_review_reviews_the_stored_conversation_once_the_cached_agent_is_g
                OPENROUTER_API_KEY='loopback-only', OPENAI_API_KEY='loopback-only', PYTHONUNBUFFERED='1')
     out = {}
 
-    def settled():
+    async def settled(ws, sid):
+        # A terminal row is not yet an idle session: the authority masks a settlement as started until
+        # it publishes the completion, and a command sent in that gap meets the busy dispatcher.
         with contextlib.closing(sqlite3.connect(f'file:{home / "state.db"}?mode=ro', uri=True)) as db:
-            return all(row[0] == 'terminal' for row in db.execute('SELECT status FROM session_admissions'))
-
-    async def idle(ws, sid, what):
-        # The store marks a turn terminal before the owner publishes its completion, and until then the
-        # owner still reads the turn as started: a command sent in that gap is refused with "Agent is
-        # running". So wait for the owner's own view (the live listing's ``running``), not only the row.
-        deadline = time.monotonic() + 60
-        while True:
-            if settled():
-                listed = (await rpc(ws, 'session.list'))['result']['sessions']
-                if [row['running'] for row in listed if row['session_id'] == sid] == [False]:
-                    return
-            assert time.monotonic() < deadline, f'timed out waiting for {what}'
-            await asyncio.sleep(0.05)
+            if not all(row[0] == 'terminal' for row in db.execute('SELECT status FROM session_admissions')):
+                return False
+        listed = (await rpc(ws, 'session.list'))['result']['sessions']
+        return [row['running'] for row in listed if row['session_id'] == sid] == [False]
 
     async def review(ws, sid, focus):
         before = len(peer.requests)
@@ -87,7 +79,8 @@ def test_local_review_reviews_the_stored_conversation_once_the_cached_agent_is_g
         # The reviewer's completion comes back to this session as a delegation-completion turn.
         await async_wait_until(lambda: any('ASYNC DELEGATION' in json.dumps(r) for r in peer.requests[before:]),
                                timeout=60, what=f'the {focus} completion re-entering the session')
-        await idle(ws, sid, f'the {focus} completion turn settling')
+        await async_wait_until(lambda: settled(ws, sid), timeout=60,
+                               what=f'the {focus} completion turn settling')
         return {'provider': request.get('provider'), 'prefill': 'PREFILL_EXAMPLE' in text,
                 'saw_conversation': 'OPENED_PR_42' in text}
 
@@ -100,12 +93,12 @@ def test_local_review_reviews_the_stored_conversation_once_the_cached_agent_is_g
                                 cwd=str(work))
             sid = created['result']['session_id']
             await rpc(ws, 'prompt.submit', session_id=sid, input_id='warm', text='OPENED_PR_42')
-            await idle(ws, sid, 'the warm turn settling')
+            await async_wait_until(lambda: settled(ws, sid), timeout=60, what='the warm turn settling')
             out['warm'] = await review(ws, sid, 'resident pass')
             moa = (await rpc(ws, 'slash.exec', session_id=sid, command='moa compare the options'))['result']
             assert moa.get('type') == 'send', moa
             await rpc(ws, 'prompt.submit', session_id=sid, input_id='moa', text=moa['message'])
-            await idle(ws, sid, 'the /moa turn settling')
+            await async_wait_until(lambda: settled(ws, sid), timeout=60, what='the /moa turn settling')
             out['cold'] = await review(ws, sid, 'cold pass')
 
     try:

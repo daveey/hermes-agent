@@ -8,7 +8,6 @@ the singleton lock and the health telemetry; everything that only needs the
 from __future__ import annotations
 
 import contextlib
-import os
 import sqlite3
 import time
 from dataclasses import asdict, dataclass
@@ -371,6 +370,7 @@ class _KanbanDispatcher:
         self._ad_min_age = max(int(min_age_seconds), 0)
         try:
             from hermes_cli import kanban_decompose as _decomp
+
         except Exception as exc:  # pragma: no cover
             logger.warning("kanban auto-decompose: import failed (%s); skipping", exc)
             return 0
@@ -381,6 +381,7 @@ class _KanbanDispatcher:
             for slug in self._board_slugs():
                 if attempted >= auto_decompose_per_tick:
                     break
+
                 # The decomposer connects without a board kwarg. Keep selection
                 # local to this tick: a process-env pin makes concurrent discovery
                 # incorrectly offer environments:[kanban] skills.
@@ -394,6 +395,7 @@ class _KanbanDispatcher:
                     # Contain connection, callback and cleanup failures per board;
                     # the caller must still reach tick_once for healthy peers.
                     logger.exception("kanban auto-decompose: board %s failed", slug)
+
         return successes
 
     def _decompose_board(self, decomp, slug, budget):

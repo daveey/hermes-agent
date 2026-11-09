@@ -2,22 +2,22 @@ pre-commit:
   jobs:
     - name: lint python
       glob: "*.py" # glob filter
-      run: ruff check --config ./ruff.pre-commit.toml {staged_files}
+      run: just ruff {staged_files}
 
     - name: lint web
       root: web/
       glob: "web/**/*.{js,ts,tsx}"
-      run: pnpm exec eslint {staged_files}
+      run: just eslint {staged_files}
 
     - name: lint bootstrap installer
       root: apps/bootstrap-installer/
       glob: "*.{js,ts,tsx}"
-      run: pnpm exec eslint {staged_files}
+      run: just eslint {staged_files}
 
     - name: lint desktop app
       root: apps/desktop/
       glob: "*.{js,ts,tsx}"
-      run: pnpm exec eslint {staged_files}
+      run: just eslint {staged_files}
 
     # CI fails when locales/_keys.desktop.json lags the English strings; regenerate on commit.
     - name: desktop i18n keys
@@ -27,14 +27,14 @@ pre-commit:
     - name: lint tui
       root: ui-tui/
       glob: "*.{js,ts,tsx}"
-      run: pnpm exec eslint {staged_files}
+      run: just eslint {staged_files}
 
     - name: lint shared
       root: apps/shared/
       glob: "*.{js,ts,tsx}"
-      run: pnpm exec eslint {staged_files}
+      run: just eslint {staged_files}
 
     - name: lint tests
       root: tests-js/
       glob: "*.{js,ts,tsx}"
-      run: pnpm exec eslint {staged_files}
+      run: just eslint {staged_files}
