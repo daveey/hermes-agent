@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.gateway.test_stored_history_mount import _connect
+from agent.prompt_refresh import stamp_prompt_epoch
 from agent.turn_facade_lease import admit_durable_turn_lease
 from tools.delegate_tool import _build_child_agent
 
@@ -96,7 +97,8 @@ async def test_published_children_open_before_any_child_starts(
             assert row is not None
             assert row["source"] == "subagent"
             assert row["parent_session_id"] == parent_ref.session_id
-            assert row["model_config"] is None
+            # Only the lineage marker: the rest of the constructor config lands on the first turn.
+            assert json.loads(row["model_config"]) == {"_delegate_from": parent_ref.session_id}
             assert not child._session_db_created
             reply = await connection.dispatch(
                 {
@@ -128,11 +130,23 @@ async def test_published_children_open_before_any_child_starts(
                 assert not child._session_db_created
                 child._session_init_model_config["synthetic_startup_setting"] = "ready"
                 child._cached_system_prompt = "Synthetic completed prompt"
+                # The real first turn stamps the prompt-refresh epoch (any profile that ran
+                # refresh-prompts) BEFORE the constructor create; that early patch must not
+                # freeze the reserved row's config and drop the lineage marker.
+                stamp_prompt_epoch(child, 17)
                 child._ensure_db_session()
                 ready = connection.authority.db.get_session(sid)
                 config = json.loads(ready["model_config"])
                 assert config["_delegate_from"] == parent_ref.session_id
                 assert config["synthetic_startup_setting"] == "ready"
+                assert config["max_iterations"] == 2
+                assert config["prompt_refresh_epoch"] == 17
+                # Without the marker the parent's resume followed the child as a continuation,
+                # so opening the parent showed the subagent transcript.
+                db = connection.authority.db
+                db.append_message(parent_ref.session_id, "user", "parent turn")
+                db.append_message(sid, "assistant", "child report")
+                assert db.resolve_resume_session_id(parent_ref.session_id) == parent_ref.session_id
                 assert ready["system_prompt"] == "Synthetic completed prompt"
                 assert ready["model"] == "synthetic-model"
                 assert child._session_db_created
@@ -141,6 +155,36 @@ async def test_published_children_open_before_any_child_starts(
     finally:
         for child in children:
             child.close()
+
+
+@pytest.mark.asyncio
+async def test_reserved_child_init_preserves_early_owner_config(
+    tmp_path, monkeypatch, offline_children
+):
+    connection, parent_ref = await _connect(tmp_path, monkeypatch, "sub-1")
+    db = connection.authority.db
+    child = _build_child_agent(
+        task_index=0, goal="Synthetic inspection", context=None, toolsets=["file"],
+        model=None, max_iterations=2, task_count=1,
+        parent_agent=_parent(db, parent_ref.session_id, lambda *a, **kw: None),
+    )
+    try:
+        # A first-turn owner write is authoritative over stale constructor defaults.
+        db.seed_session_model_config(child.session_id, {"max_iterations": 7, "max_tokens": None})
+        early = json.loads(db.get_session(child.session_id)["model_config"])
+        assert early["max_iterations"] == 7 and early["max_tokens"] is None
+        child._session_init_model_config["max_tokens"] = 128
+        child._cached_system_prompt = "Synthetic completed prompt"
+        stamp_prompt_epoch(child, 17)
+        child._ensure_db_session()
+        config = json.loads(db.get_session(child.session_id)["model_config"])
+        assert config["max_iterations"] == 7
+        assert config["max_tokens"] is None
+        assert config["_delegate_from"] == parent_ref.session_id
+        assert config["prompt_refresh_epoch"] == 17
+        assert child._session_db_created
+    finally:
+        child.close()
 
 
 @pytest.mark.asyncio

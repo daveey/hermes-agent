@@ -1006,3 +1006,24 @@ def test_every_session_db_call_in_the_agent_loop_is_classified_by_the_store():
         "Classify these SessionDB calls in hermes_cli/gateway_session_store.py "
         f"(_READS / _GATEWAY_OWNED / _COUNTED_REPAIRS / _REFUSED_BY_DESIGN): {unclassified}")
     assert all(isinstance(why, str) and why for why in gss._REFUSED_BY_DESIGN.values())
+
+
+def test_reserved_child_first_turn_seed_is_gateway_owned(store, monkeypatch):
+    """[daveey] A reserved child's first turn seeds its constructor config after ``create_session``;
+    the gateway owns both writes, so the seed is a no-op (no gateway call) and the row counts as
+    created instead of refusing and retrying creation every turn."""
+    import types
+
+    from run_agent import AIAgent
+
+    db, client = store
+    before = len(client.calls)
+    assert db.seed_session_model_config("child", {"max_iterations": 2}) is None
+    agent = types.SimpleNamespace(
+        _persist_disabled=False, _session_db_created=False, _session_db=db, _session_db_reserved=True,
+        platform="cli", session_id="child", model="m", _cached_system_prompt="p", _parent_session_id="parent",
+        _session_row_model_config=lambda: {"_delegate_from": "parent", "max_iterations": 2},
+    )
+    AIAgent._ensure_db_session(agent)
+    assert agent._session_db_created is True
+    assert len(client.calls) == before
