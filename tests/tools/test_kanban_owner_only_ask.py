@@ -15,8 +15,8 @@ RELAY_81905 = helpers.RELAY_81905
 _status = helpers._status
 worker_env = helpers.worker_env
 
-OWNER_ACTION = ("From your own Hermes chat open the owner-terminal flow for the exact dropped workflow. "
-                "Unblock = verify cancellation; archive = abandon reconciliation.")
+OWNER_ACTION = ("From your own Hermes chat open the owner-terminal flow for task t_01a1c0d75a11b3cd. "
+                "Unblock = resume verification; archive = abandon reconciliation.")
 BOTH_REFUSALS = ("run_in_user_terminal refused: Kanban caller, owner chats only. "
                  "cross_session send refused: Kanban worker cannot send into a human chat.")
 OWNER_ONLY = {**RELAY_81905, "interaction": "user_terminal", "action": OWNER_ACTION, "evidence": BOTH_REFUSALS,
@@ -45,6 +45,14 @@ def test_owner_only_ask_with_both_refusals_passes_lint():
     {"evidence": "run_in_user_terminal worked fine but cross_session refused"},
     {"evidence": "run_in_user_terminal would be refused. cross_session send would be refused."},
     {"evidence": "run_in_user_terminal refused: network down. cross_session send refused: network down."},
+    {"action": "From your own Hermes chat open the owner-terminal flow and ask for the broker Gemini secret repair. Unblock = verify; archive = abandon."},
+    {"action": "From your own Hermes chat do not open the owner-terminal flow; instead repair the secret. Unblock = verify; archive = abandon."},
+    {"why_human": "This is not a host_only boundary; another agent could do it"},
+    {"evidence": BOTH_REFUSALS + " I didn't try either."},
+    {"evidence": "Per docs " + BOTH_REFUSALS},
+    {"evidence": "If called, " + BOTH_REFUSALS},
+    {"evidence": "Untested: " + BOTH_REFUSALS},
+    {"evidence": "On another card last week " + BOTH_REFUSALS},
 ])
 def test_relay_ask_without_both_refusals_is_still_refused(override):
     from hermes_cli.kanban_block_policy import user_ask_lint_error
@@ -76,6 +84,6 @@ def test_block_entry_still_refuses_true_relay(worker_env):
 
 def test_standing_ask_sweep_keeps_evidenced_owner_only_ask():
     from hermes_cli.kanban_block_policy import standing_ask_error
-    assert standing_ask_error(None, "t_x", "title", OWNER_ONLY) is None
-    err = standing_ask_error(None, "t_x", "title", {**OWNER_ONLY, "evidence": "none"})
+    assert standing_ask_error(None, "t_01a1c0d75a11b3cd", "title", OWNER_ONLY) is None
+    err = standing_ask_error(None, "t_01a1c0d75a11b3cd", "title", {**OWNER_ONLY, "evidence": "none"})
     assert err and err[0] == "agent_relay_ask"
