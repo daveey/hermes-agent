@@ -441,6 +441,11 @@ def generate_launchd_plist() -> str:
     # ProgramArguments (incl. --profile); the stderr wrapper keeps launchd restart semantics while timestamping
     # stderr; the osascript wrapper gives the job a Local Network identity (see launchd_program_arguments).
     # [daveey] With Hermes Python.app installed, the signed bundle owns the job instead (TCC attribution).
+    # [daveey] HERMES_LAUNCHD_LABEL in EnvironmentVariables reaches every process of the job. launchd stamps
+    # XPC_SERVICE_NAME=<label> only on the job's main process (the signed wrapper / osascript); everything
+    # below it, the launcher, stderr_timestamp and the gateway, reads XPC_SERVICE_NAME=0, so stderr_timestamp's
+    # re-export found nothing, the gateway never read the live ExitTimeOut, drained past launchd's 60 s and
+    # launchd restarted into it (start_refused owner_alive=true, defect gateway-cc28b19bca).
     stdout_log, stderr_log = log_dir / "gateway.log", log_dir / "gateway.error.log"
     command = _timestamped_stderr_gateway_command(stderr_log, external_supervisor=True)
     command = [*gateway_launcher_prefix(hermes_home), *command]
@@ -488,6 +493,8 @@ def generate_launchd_plist() -> str:
         <string>{hermes_home}</string>
         <key>HERMES_SUPERVISED_CHILD</key>
         <string>1</string>
+        <key>HERMES_LAUNCHD_LABEL</key>
+        <string>{escape(label)}</string>
     </dict>
 
     <key>LimitLoadToSessionType</key>

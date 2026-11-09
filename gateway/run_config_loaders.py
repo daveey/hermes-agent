@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -19,7 +20,8 @@ from gateway.config import Platform
 from gateway.restart import (
     DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT, DEFAULT_GATEWAY_POST_INTERRUPT_GRACE_TIMEOUT,
     DEFAULT_GATEWAY_RESTART_AFTER_TURN_TIMEOUT, DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
-    DEFAULT_GATEWAY_SIGNAL_INTERRUPT_GRACE_TIMEOUT, parse_cron_drain_timeout,
+    DEFAULT_GATEWAY_SIGNAL_INTERRUPT_GRACE_TIMEOUT, EXTERNAL_GATEWAY_SUPERVISOR_ENV,
+    LAUNCHD_GUI_EXIT_TIMEOUT_CLAMP_S, parse_cron_drain_timeout,
     parse_restart_after_turn_timeout, parse_restart_drain_timeout,
     launchd_service_label, parse_signal_interrupt_grace_timeout, read_launchd_exit_timeout_s,
     resolve_launchd_capped_drain,
@@ -454,7 +456,7 @@ class GatewayConfigLoadersMixin:
         return value
 
     @staticmethod
-    def _load_launchd_exit_timeout(drain_timeout: float) -> Optional[float]:
+    def _load_launchd_exit_timeout(drain_timeout: float, *, platform: Optional[str] = None) -> Optional[float]:
         """Read the live launchd ``ExitTimeOut`` this job runs under, if any.
 
         launchd is the one supervisor the gateway cannot size from config: the per-user (gui)
@@ -464,13 +466,12 @@ class GatewayConfigLoadersMixin:
         when ``launchctl print`` is unavailable. Logs a WARNING when the configured drain exceeds
         the live budget so the misconfiguration is visible at boot, not at the next SIGKILL.
         """
-        label = launchd_service_label()
-        if label is None:
-            return None
+        platform = sys.platform if platform is None else platform  # data, so both arms test on any host
+        label = launchd_service_label(platform=platform)
         # read_launchd_exit_timeout_s is already fail-open (returns None on any probe failure).
-        exit_timeout = read_launchd_exit_timeout_s(label)
+        exit_timeout = read_launchd_exit_timeout_s(label, platform=platform) if label else None
         if exit_timeout is None:
-            return None
+            return GatewayConfigLoadersMixin._assumed_launchd_exit_timeout(label, platform)
         effective = resolve_launchd_capped_drain(drain_timeout, exit_timeout)
         if effective < drain_timeout:
             logger.warning(
@@ -485,6 +486,35 @@ class GatewayConfigLoadersMixin:
                 label, exit_timeout, drain_timeout,
             )
         return exit_timeout
+
+    @staticmethod
+    def _assumed_launchd_exit_timeout(label: Optional[str], platform: str) -> Optional[float]:
+        """[daveey] Budget for a darwin ``--external-supervisor`` gateway that cannot read its live ``ExitTimeOut``.
+
+        Under the generated plist that gateway IS a launchd job, and the gui domain clamps every job to at most
+        ``LAUNCHD_GUI_EXIT_TIMEOUT_CLAMP_S``. "No limit" there let a SIGTERM drain run its full configured
+        length past launchd's SIGKILL of the job, so launchd restarted into a gateway still tearing down
+        (gateway-cc28b19bca). Assume the clamp instead, and leave a ``gateway.launchd_budget_missing`` exit-diag
+        row so the coach files the lost label as a defect. Any other gateway keeps ``None`` (fail-open).
+        """
+        external = str(os.environ.get(EXTERNAL_GATEWAY_SUPERVISOR_ENV, "")).strip().lower() in {"1", "true", "yes", "on"}
+        if platform != "darwin" or not external:
+            return None
+        assumed = float(LAUNCHD_GUI_EXIT_TIMEOUT_CLAMP_S)
+        reason = "probe_failed" if label else "no_label"
+        logger.warning(
+            "launchd_budget_missing: --external-supervisor gateway could not read its launchd exit timeout "
+            "(%s, label %s); assuming the per-user clamp of %.0fs so signal-driven stops end before launchd SIGKILLs",
+            reason, label or "unset", assumed,
+        )
+        try:
+            from hermes_cli.gateway_exit_diag import make_exit_diag
+            make_exit_diag()("gateway.launchd_budget_missing", reason=reason, label=label,
+                             assumed_exit_timeout_s=int(assumed),
+                             xpc_service_name=os.environ.get("XPC_SERVICE_NAME"))
+        except Exception:  # health: allow BLE001 -- the diag row must never break gateway boot
+            logger.debug("launchd_budget_missing diag write failed", exc_info=True)
+        return assumed
 
     @classmethod
     def _load_env_or_agent_cfg_timeout(cls, env_var: str, cfg_key: str, parse, default: float) -> float:
