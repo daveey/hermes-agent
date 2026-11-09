@@ -45,6 +45,9 @@ _GATEWAY_OWNED = frozenset({
     "update_session_model", "patch_session_model_config", "maybe_auto_archive",
     "maybe_auto_prune_and_vacuum", "set_meta", "update_token_counts", "close",
     "update_system_prompt",  # [daveey] the gateway builds, persists and refreshes the prompt
+    # [daveey] the gateway's own agent seeds its row; create_session above is a no-op here too, so a
+    # reserved child's first-turn seed must not refuse and leave its row creation retrying.
+    "seed_session_model_config",
 })
 # [daveey] Agent-loop SessionDB methods this store refuses on purpose: name -> why. The parity test
 # requires every ``_session_db`` call in the agent loop to be in one of these sets, so a new call

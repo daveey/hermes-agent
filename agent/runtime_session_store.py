@@ -625,6 +625,14 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
             raise WorkerPersistenceError('invalid_params')
         self._apply('session.sidecars', {'patch': patch})
 
+    def seed_session_model_config(self, session_id, defaults):
+        # [daveey] Seeding fills keys the row lacks: on a worker's row, which the owner reserved with
+        # its routing, lineage and policy config, that is an owner write. A worker's model_config writes
+        # are sidecar patches and, for a reserved child, the constructor set ``worker_create`` validates
+        # on ``session.create``; so a seed journals and writes nothing (the agent probes it on adopted
+        # rows, where a refusal would only log), and another session's row is refused as for any write.
+        self._session(session_id)
+
     def update_session_tool_names(self, session_id, pin):
         # The tools[] freeze pin ({"version", "tools"[, "delegation_backend"]}; None clears): without it every
         # fresh worker re-probes check_fns and a config flip between turns silently forks the cached prefix.

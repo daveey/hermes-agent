@@ -127,3 +127,42 @@ def test_lease_key_answers_only_inside_the_workers_lineage(tmp_path):
             store.close()
     finally:
         db.close()
+
+
+def test_seed_is_an_owner_write_the_worker_never_journals(tmp_path, caplog):
+    """[daveey] ``seed_session_model_config`` fills keys the row lacks, which on a worker's row means
+    owner-reserved routing/lineage config: the store writes nothing, journals nothing, latches no failure,
+    and refuses another session's row. The adopted-row path that probes it stays silent."""
+    import logging
+    import types
+
+    from agent.runtime_session_store import WorkerPersistenceError
+    from agent.turn_facade_lease import _seed_adopted_row_model_config
+
+    db = SessionDB(tmp_path / 'state.db')
+    try:
+        db.create_session('s', 'cli', model_config={'model_routing': {'class': 'c'}})
+        db.create_session('other', 'cli')
+        store = _worker_store(db, tmp_path)
+        try:
+            before = json.loads(db.get_session('s')['model_config'])
+            sequence = store.journal['next_sequence']
+            seed = {'max_iterations': 3, '_delegate_from': 'forged', 'model_routing': None}
+            assert store.seed_session_model_config('s', seed) is None
+            agent = types.SimpleNamespace(_persist_disabled=False, _session_row_model_config=lambda: seed)
+            with caplog.at_level(logging.WARNING, logger='agent.turn_facade_lease'):
+                _seed_adopted_row_model_config(agent, store, 's')
+            assert not [r for r in caplog.records if 'adopted session row' in r.getMessage()]
+            assert json.loads(db.get_session('s')['model_config']) == before
+            assert store.journal['next_sequence'] == sequence and store.journal['pending'] == []
+            assert store.failure is None
+            with pytest.raises(WorkerPersistenceError, match='permission_denied'):
+                store.seed_session_model_config('other', {'max_iterations': 3})
+            assert json.loads(db.get_session('other')['model_config'] or '{}') == {}
+            # The store still writes sidecars afterwards: seeding latched nothing.
+            store.patch_session_model_config('s', {'prompt_refresh_epoch': 5})
+            assert json.loads(db.get_session('s')['model_config']) == {**before, 'prompt_refresh_epoch': 5}
+        finally:
+            store.close()
+    finally:
+        db.close()
