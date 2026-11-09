@@ -865,12 +865,60 @@ def _anchored_worktree(repo_root: Path, task_id: str, branch_name: str) -> tuple
     return target, branch_name
 
 
-def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> tuple[Path, str]:
+_RESTORE_SCAN_LIMIT = 200
+
+
+def _restore_repo_for_missing_worktree(
+    requested: Path, branch_name: str, *, board: Optional[str] = None,
+) -> Optional[Path]:
+    """The one repo that can re-add the deleted worktree *requested* on its existing
+    *branch_name*: the repo of any git checkout next to it (main checkout or a
+    sibling linked worktree, via its common dir) or the board ``default_workdir``.
+    Never guesses: no repo with the branch, or several different ones -> None.
+    [daveey]"""
+    candidates: list[Path] = []
+    board_slug = board if board else _kb.get_current_board()
+    try:
+        default = (_kb.read_board_metadata(board_slug).get("default_workdir") or "").strip()
+    except (OSError, ValueError, AttributeError):
+        default = ""
+    if default and Path(default).expanduser().is_absolute():
+        candidates.append(Path(default).expanduser())
+    parent = requested.parent
+    try:
+        siblings = sorted(p for p in parent.iterdir() if p.is_dir() and p != requested)
+    except OSError:
+        siblings = []
+    candidates += siblings[:_RESTORE_SCAN_LIMIT]
+    repos: dict[str, Path] = {}
+    for cand in candidates:
+        common = _git_common_dir(cand)
+        if common is None:
+            continue
+        key = _path_key(common)
+        if key in repos:
+            continue
+        root = common.parent if common.name == ".git" else None
+        if root is None or _git_toplevel(root) is None:
+            continue
+        if _git_branch_exists(root, branch_name):
+            repos[key] = root
+    return next(iter(repos.values())) if len(repos) == 1 else None
+
+
+def _resolve_worktree_workspace(
+    task: Task, *, board: Optional[str] = None, restored: Optional[list] = None,
+) -> tuple[Path, str]:
     """Resolve + materialize a linked git worktree for ``task``. With no
     ``task.workspace_path`` the anchor is the board's ``default_workdir`` so
     every worktree lands under a board-owned repo (``<repo>/.worktrees/<id>``)
     instead of the dispatcher's incidental CWD (whatever dir the gateway was
-    launched from); with no anchor configured we fail loudly rather than guess."""
+    launched from); with no anchor configured we fail loudly rather than guess.
+
+    A concrete path that is gone while the card's ``branch_name`` still exists in
+    a repo next to it (or the board ``default_workdir``) is re-added on that
+    branch and reported through *restored* (the dispatcher logs a
+    ``worktree_restored`` event) instead of failing as a config error. [daveey]"""
     branch_name = (task.branch_name or "").strip() or f"wt/{task.id}"
     if not task.workspace_path:
         board_slug = board if board else _kb.get_current_board()
@@ -928,6 +976,26 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
         return _anchored_worktree(repo_root, task.id, branch_name)
 
     repo_root = _repo_root_for_worktree_target(requested.parent)
+    if repo_root is None and not requested.exists() and (task.branch_name or "").strip():
+        # A sibling-layout tree (``~/code/bb-dev/bb-1175`` of ``~/code/bb-dev/babybear``)
+        # that ran before and was deleted since: re-add it from the card's own branch.
+        repo_root = _restore_repo_for_missing_worktree(requested, branch_name, board=board)
+        if repo_root is None:
+            raise WorktreeWorkspaceConfigError(
+                f"task {task.id} worktree {task.workspace_path!r} was deleted after the card ran (or was created) "
+                f"(on branch {branch_name!r}), and no repo next to it or in the board default_workdir "
+                f"has that branch any more. Re-add it from the repo that has the work: "
+                f"git -C <repo> worktree add {task.workspace_path} <branch>"
+            )
+        _git(repo_root, "worktree", "prune", timeout=60)  # a stale registration blocks the re-add
+        _ensure_git_worktree(repo_root, requested, branch_name)
+        _kb._log.warning(
+            "kanban: restored deleted worktree %s for task %s from %s (branch %s)",
+            requested, task.id, repo_root, branch_name,
+        )
+        if restored is not None:
+            restored.append({"path": str(requested), "repo": str(repo_root), "branch": branch_name})
+        return requested, branch_name
     if repo_root is None:
         raise WorktreeWorkspaceConfigError(
             f"task {task.id} "
@@ -937,6 +1005,22 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
         )
     _ensure_git_worktree(repo_root, requested, branch_name)
     return requested, branch_name
+
+
+def resolve_worktree_for_dispatch(
+    conn: sqlite3.Connection, task: Task, *, board: Optional[str] = None,
+) -> tuple[Path, str]:
+    """:func:`_resolve_worktree_workspace` for the dispatcher: a working copy deleted
+    after the card ran and re-added from its branch gets a ``worktree_restored``
+    event (path, repo, branch, restored_at), so the next deletion can be matched
+    against GC/cleanup logs. [daveey]"""
+    restored: list = []
+    out = _resolve_worktree_workspace(task, board=board, restored=restored)
+    for info in restored:
+        with _kb.write_txn(conn):
+            _kb._append_event(conn, task.id, "worktree_restored",
+                              dict(info, restored_at=int(time.time())), run_id=task.current_run_id)
+    return out
 
 
 def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:

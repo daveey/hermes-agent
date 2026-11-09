@@ -2133,7 +2133,7 @@ def _dispatch_lane_task(
     try:
         resolved_branch_name = None
         if claimed.workspace_kind == "worktree":
-            workspace, resolved_branch_name = _kbw._resolve_worktree_workspace(claimed, board=board)
+            workspace, resolved_branch_name = _kbw.resolve_worktree_for_dispatch(conn, claimed, board=board)
         else:
             workspace = _kbw.resolve_workspace(claimed, board=board)
     except Exception as exc:
