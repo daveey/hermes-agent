@@ -24,7 +24,8 @@ from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kan
 from tools.kanban_tools_placement import (_local_placement, _machine_placement, _marker_placement_fields, _persisted_session_id,
                                           _create_session_id, _placement_origin, _placement_refused, _runs_where)
 from tools.kanban_tools_db_hint import generic_tool_error
-from tools.kanban_tools_park_args import _blocker_id_arg, _clear_blocker_arg, _blocker_scope_args, _park_guard
+from tools.kanban_tools_park_args import (_blocker_id_arg, _clear_blocker_arg, _blocker_scope_args, _park_guard,
+                                          _wake_check_args, _wake_check_echo)
 from hermes_cli.kanban_ask_resolved import ask_checks, create_ask_check, filing_context
 from tools import kanban_tools_completion as _kc, kanban_tools_create_args as _ca
 from tools.kanban_tools_schemas import (
@@ -155,6 +156,7 @@ COMPLETE_REJECTION_CLASSES = frozenset({
     "empty",          # no summary/result, or an evidence-free completion
     "live_claim",     # another live dispatcher worker owns the card
     "stale_run",      # run superseded, card already terminal, or unknown id
+    "not_running",    # card waits (scheduled/todo/ready) with no run: archive it or re-park it as a watch [daveey]
     "foreign_card",   # card exists here only as a Board replica copy; its owner gateway must write it [daveey]
     "pr_acceptance",  # completion contract's PR CI acceptance refused (pr_acceptance event ok=false)
     "parents",        # unsatisfied parent dependencies
@@ -957,6 +959,10 @@ def _handle_complete(args: dict, **kw) -> str:
                 raise _Reject(
                     f"could not complete {tid}: unsatisfied parent dependencies: "
                     f"{detail}; complete the parents first (done or archived)", "parents")
+            if task and task.status in ("scheduled", "todo", "ready") and not _kc.pr_acceptance_refused(
+                    conn, tid, event_mark):
+                from hermes_cli.kanban_watch import NOT_RUNNING_TEMPLATE  # [daveey] not a vague "stale run"
+                raise _Reject(NOT_RUNNING_TEMPLATE.format(tid=tid, status=task.status), "not_running")
             reason = (task.last_failure_error if task else None) or \
                 f"could not complete {tid} (unknown id, stale run, or already terminal)"
             _check(False, reason, "pr_acceptance" if _kc.pr_acceptance_refused(conn, tid, event_mark)
@@ -970,31 +976,6 @@ def _handle_complete(args: dict, **kw) -> str:
                    attachments=[
                        _fields(a, _ATTACHMENT_FIELDS)
                        for a in kb.list_attachments(conn, tid)])
-
-
-def _wake_check_args(args: dict) -> tuple[Optional[str], Optional[int], bool]:
-    """``(wake_check, check_every, clock_only)`` from a park call, validated. [daveey]"""
-    from hermes_cli import kanban_wake_check as kwc
-
-    raw_every = args.get("check_every")
-    _check(raw_every is None or (isinstance(raw_every, (int, float)) and not isinstance(raw_every, bool)),
-           "check_every must be an integer number of seconds")
-    clock_only = args.get("clock_only", False)
-    _check(isinstance(clock_only, bool), "clock_only must be true or false")
-    try:
-        cmd = kwc.normalize_cmd(args.get("wake_check"))
-        every = kwc.normalize_every(raw_every) if cmd else None
-        err = kwc.dry_run_error(cmd, blocker_id=args.get("blocker_id"))
-        if err:
-            raise ValueError(err)
-    except ValueError as exc:
-        _check(False, str(exc), kwc.refusal_code(str(exc)))
-    return (_redact(cmd) if cmd else None), every, clock_only
-
-
-def _wake_check_echo(wake: tuple) -> dict:
-    """Result fields echoing the park's probe (none when it has no probe)."""
-    return {"wake_check": wake[0], "check_every": wake[1]} if wake[0] else {}
 
 
 def _awaiting_arg(args: dict, wake: tuple) -> tuple[Optional[dict], tuple]:
@@ -1190,8 +1171,12 @@ def _handle_schedule(args: dict, **kw) -> str:
         blocker_id = _blocker_id_arg(args)
         clear_blocker = _clear_blocker_arg(args, blocker_id)
         _park_guard(conn, tid, "schedule", wake, reason=reason)
+        from hermes_cli import kanban_watch as kwatch
+        raw_watch = args.get("watch")
+        _check(raw_watch is None or isinstance(raw_watch, bool), "watch must be true or false")
         ok = kb.schedule_task(
-            conn, tid, reason=reason, expected_run_id=_worker_run_id(tid),
+            conn, tid, watch=kwatch.resolve(conn, tid, raw_watch), reason=reason,
+            expected_run_id=_worker_run_id(tid),
             wake_check=wake[0], check_every=wake[1], clock_only=wake[2], awaiting=awaiting,
             clear_blocker=clear_blocker, blocker_id=blocker_id, **_blocker_scope_args(args))
         _check(ok, "" if ok else krc.human_answer_refusal(conn, tid, "schedule")
@@ -1199,7 +1184,11 @@ def _handle_schedule(args: dict, **kw) -> str:
         escalated = _escalated(kb, conn, tid)
         if escalated:
             return escalated
-        return _ok_landed(kb, conn, tid, "scheduled", reason=reason, **_wake_check_echo(wake))
+        # [daveey] A watch says so; a long non-watch park says which chat it holds open and how to free it.
+        hold = kwatch.chat_hold_hint(conn, tid)
+        return _ok_landed(kb, conn, tid, "scheduled", reason=reason, **_wake_check_echo(wake),
+                          **({"watch": True} if kwatch.is_watch(conn, tid) else {}),
+                          **({"chat_hold": hold} if hold else {}))
 
 
 @_kanban_handler("kanban_continue")

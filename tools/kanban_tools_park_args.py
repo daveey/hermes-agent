@@ -50,3 +50,29 @@ def _park_guard(conn, tid: str, op: str, wake: tuple, **plan: Any) -> None:
                                                             if op == "block" else {}))
     err = kwc.guard_error(wake_at=wake_at, wake_check=wake[0], clock_only=wake[2])
     _check(err is None, f"kanban_{op} {err}", "invalid_args")
+
+
+def _wake_check_args(args: dict) -> tuple[Optional[str], Optional[int], bool]:
+    """``(wake_check, check_every, clock_only)`` from a park call, validated. [daveey]"""
+    from hermes_cli import kanban_wake_check as kwc
+
+    raw_every = args.get("check_every")
+    _check(raw_every is None or (isinstance(raw_every, (int, float)) and not isinstance(raw_every, bool)),
+           "check_every must be an integer number of seconds")
+    clock_only = args.get("clock_only", False)
+    _check(isinstance(clock_only, bool), "clock_only must be true or false")
+    try:
+        cmd = kwc.normalize_cmd(args.get("wake_check"))
+        every = kwc.normalize_every(raw_every) if cmd else None
+        err = kwc.dry_run_error(cmd, blocker_id=args.get("blocker_id"))
+        if err:
+            raise ValueError(err)
+    except ValueError as exc:
+        _check(False, str(exc), kwc.refusal_code(str(exc)))
+    from tools.kanban_tools import _redact  # lazy: kanban_tools imports this module
+    return (_redact(cmd) if cmd else None), every, clock_only
+
+
+def _wake_check_echo(wake: tuple) -> dict:
+    """Result fields echoing the park's probe (none when it has no probe)."""
+    return {"wake_check": wake[0], "check_every": wake[1]} if wake[0] else {}

@@ -34,10 +34,11 @@ from hermes_cli.kanban_scope_heartbeat import scope_heartbeats as _scope_heartbe
 from hermes_cli.kanban_session_activity_records import _fold_legacy_aliases, _moved_evidence, _retire_moved
 from hermes_cli.kanban_session_activity_attention import AttentionCache as _AttentionCache
 from hermes_cli.kanban_session_activity_attention import run_checks as _run_done_checks
+from hermes_cli.kanban_session_activity_card_details import _add_card_details
+from hermes_cli.kanban_watch import not_watch_sql as _not_watch
 import contextlib
 import json
 import logging
-import re
 import os
 import sqlite3
 import threading
@@ -140,7 +141,7 @@ def _status_filter(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> tuple
     parked = "t.status IN ('blocked', 'triage')"
     if statuses == BLOCKED_STATUSES:
         return f"({parked} AND {human})", ()
-    return f"(t.status IN ({ph}) OR ({parked} AND NOT {human}))", statuses
+    return f"((t.status IN ({ph}) OR ({parked} AND NOT {human})) AND {_not_watch(conn)})", statuses  # [daveey]
 
 
 def _stored_needs_human(value, kind) -> bool:
@@ -384,7 +385,7 @@ def _parked_pairs(conn: sqlite3.Connection) -> set[tuple[str, str]]:
     """(session, task) for every parked card (scheduled/blocked/triage) a session created or shepherds."""
     if "session_id" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
         return set()
-    parked = "t.status IN ('scheduled', 'blocked', 'triage')"
+    parked = f"(t.status IN ('scheduled', 'blocked', 'triage') AND {_not_watch(conn)})"  # watch: kanban_watch
     pairs: set[tuple[str, str]] = {
         (str(sid), str(tid)) for sid, tid in conn.execute(
             f"SELECT session_id, id FROM tasks t WHERE session_id IS NOT NULL AND session_id != '' AND {parked}")}
@@ -1552,15 +1553,16 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_runs'").fetchone():
             run_start = "(SELECT r.started_at FROM task_runs r WHERE r.id = t.current_run_id)"
         found: dict[str, dict[str, Any]] = {}
+        watch = _not_watch(conn)  # [daveey] a watch park is not the chat's open card (close-out gate)
         for row in conn.execute(
                 f"SELECT {select}, {run_start} AS current_run_started_at FROM tasks t "
-                f"WHERE t.session_id IN ({sid_ph}) AND t.status IN ({st_ph})", (*ids, *statuses)):
+                f"WHERE t.session_id IN ({sid_ph}) AND t.status IN ({st_ph}) AND {watch}", (*ids, *statuses)):
             found[row["id"]] = {**dict(row), "via": "created"}
         try:
             for row in conn.execute(
                     f"SELECT {select}, {run_start} AS current_run_started_at FROM kanban_notify_subs s "
                     f"JOIN tasks t ON t.id = s.task_id WHERE s.platform = 'tui' AND {_counted_sub_clause(conn)} "
-                    f"AND s.chat_id IN ({sid_ph}) AND t.status IN ({st_ph})", (*ids, *statuses)):
+                    f"AND s.chat_id IN ({sid_ph}) AND t.status IN ({st_ph}) AND {watch}", (*ids, *statuses)):
                 found.setdefault(row["id"], {**dict(row), "via": "subscribed"})
         except sqlite3.Error:  # board predates notify subscriptions
             pass
@@ -1572,59 +1574,6 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
             _log.debug("kanban wait info read failed for %s: %s", path, exc)
     board = _board_slug(path)
     return [{**t, "board": board} for t in found.values()]
-
-
-_PR_URL_RE = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
-_NOTE_CHARS = 200
-
-
-def _first_line(text: Any) -> str:
-    line = str(text or "").strip().split("\n", 1)[0].strip()
-    return line[:_NOTE_CHARS]
-
-
-def _add_card_details(conn: sqlite3.Connection, found: dict[str, dict[str, Any]]) -> None:
-    """Per listed card, what the linked-card rows show: the latest event (``activity_kind``/``activity_at``), a
-    one-line ``note`` (the newest run summary or comment) and the newest GitHub PR ``pr_url`` found in its
-    comments, result or run summaries. One query per table for all listed cards; missing tables are skipped."""
-    if not found:
-        return
-    ids = list(found)
-    ph = ",".join("?" for _ in ids)
-
-    def rows(sql: str) -> list[sqlite3.Row]:
-        try:
-            return conn.execute(sql, ids).fetchall()
-        except sqlite3.Error:
-            return []
-
-    for r in rows(f"SELECT task_id, kind, MAX(created_at) AS at FROM task_events WHERE task_id IN ({ph}) GROUP BY task_id"):
-        found[r["task_id"]].update(activity_kind=r["kind"], activity_at=r["at"])
-    notes: dict[str, tuple[Any, str]] = {}
-    prs: dict[str, tuple[Any, str]] = {}
-
-    def offer(task_id: str, at: Any, text: Any) -> None:
-        at = at or 0
-        line = _first_line(text)
-        if line and at >= notes.get(task_id, (-1, ""))[0]:
-            notes[task_id] = (at, line)
-        for url in _PR_URL_RE.findall(str(text or "")):
-            if at >= prs.get(task_id, (-1, ""))[0]:
-                prs[task_id] = (at, url)
-
-    for r in rows(f"SELECT task_id, COALESCE(ended_at, started_at) AS at, summary FROM task_runs "
-                  f"WHERE task_id IN ({ph}) AND summary IS NOT NULL"):
-        offer(r["task_id"], r["at"], r["summary"])
-    for r in rows(f"SELECT task_id, created_at AS at, body FROM task_comments WHERE task_id IN ({ph})"):
-        offer(r["task_id"], r["at"], r["body"])
-    for r in rows(f"SELECT id AS task_id, completed_at AS at, result FROM tasks WHERE id IN ({ph}) AND result IS NOT NULL"):
-        for url in _PR_URL_RE.findall(str(r["result"] or "")):
-            if (r["at"] or 0) >= prs.get(r["task_id"], (-1, ""))[0]:
-                prs[r["task_id"]] = (r["at"] or 0, url)
-    for task_id, (_, line) in notes.items():
-        found[task_id]["note"] = line
-    for task_id, (_, url) in prs.items():
-        found[task_id]["pr_url"] = url
 
 
 def _remote_cards(ids: list[str] | None, statuses: tuple[str, ...], stale_ok: bool) -> list[dict[str, Any]]:
