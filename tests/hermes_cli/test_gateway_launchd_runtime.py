@@ -18,7 +18,7 @@ import plistlib
 from pathlib import Path
 
 from hermes_cli import gateway_launchd_runtime as runtime
-from hermes_cli.gateway_launchd_runtime import responsible_app, start_gateway_job
+from hermes_cli.gateway_launchd_runtime import GatewayJob, responsible_app, start_gateway_job
 from tests.waiting import wait_until
 
 
@@ -114,3 +114,19 @@ def test_job_keeps_the_osascript_wrapper_without_a_signed_app(monkeypatch, tmp_p
     monkeypatch.setattr(runtime.sys, "executable", "/usr/local/bin/python3")
     args = _job_program_arguments(monkeypatch, tmp_path, ["/usr/local/bin/python3", "-m", "hermes_cli.main"])
     assert args[:4] == ["/usr/bin/osascript", "-l", "JavaScript", "-e"], args
+
+
+def test_a_job_keeps_reporting_its_exit_past_the_spawn_deadline_once_the_ensure_moves_it(monkeypatch):
+    """A slow start the ensure keeps waiting on must still surface the job's exit (runtime_exited)."""
+    import time
+    calls = []
+
+    def launchctl(*args, timeout):
+        calls.append(timeout)
+        return None if timeout <= 0 else subprocess.CompletedProcess(args, 0, "\tlast exit code = 1\n", "")
+    monkeypatch.setattr(runtime, "_launchctl", launchctl)
+    job = GatewayJob("gui/501/probe", deadline=time.monotonic() - 1)
+    assert job.poll() is None
+    job.extend_deadline(time.monotonic() + 60)
+    job._checked = 0.0
+    assert job.poll() == 1
