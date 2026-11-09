@@ -15,8 +15,8 @@ RELAY_81905 = helpers.RELAY_81905
 _status = helpers._status
 worker_env = helpers.worker_env
 
-OWNER_ACTION = ("From your own Hermes chat run `aws kms create-grant ...` in your terminal. "
-                "Unblock = the agent verifies the grant; archive = drop the grant.")
+OWNER_ACTION = ("From your own Hermes chat open the owner-terminal flow for the exact dropped workflow. "
+                "Unblock = verify cancellation; archive = abandon reconciliation.")
 BOTH_REFUSALS = ("run_in_user_terminal refused: Kanban caller, owner chats only. "
                  "cross_session send refused: Kanban worker cannot send into a human chat.")
 OWNER_ONLY = {**RELAY_81905, "interaction": "user_terminal", "action": OWNER_ACTION, "evidence": BOTH_REFUSALS,
@@ -36,6 +36,15 @@ def test_owner_only_ask_with_both_refusals_passes_lint():
     {"evidence": ""},
     {"interaction": "external"},                                              # not a terminal step
     {"interaction": "approval"},
+    {"action": "Ask your agent to repair the secret. Unblock = verify; archive = abandon."},
+    {"action": "From your own Hermes chat apply an amendment. Unblock = verify; archive = abandon."},
+    {"action": OWNER_ACTION + " Ask your agent to repair the secret."},
+    {"why_human": "Another gateway has AWS credentials"},
+    {"evidence": "run_in_user_terminal was not refused; cross_session was not refused"},
+    {"evidence": "I did not try run_in_user_terminal or cross_session because they would be refused"},
+    {"evidence": "run_in_user_terminal worked fine but cross_session refused"},
+    {"evidence": "run_in_user_terminal would be refused. cross_session send would be refused."},
+    {"evidence": "run_in_user_terminal refused: network down. cross_session send refused: network down."},
 ])
 def test_relay_ask_without_both_refusals_is_still_refused(override):
     from hermes_cli.kanban_block_policy import user_ask_lint_error

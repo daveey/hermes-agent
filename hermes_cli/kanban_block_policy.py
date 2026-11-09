@@ -155,27 +155,46 @@ def agent_route_gap_error(human_request) -> Optional[str]:
             "on that card. Keep human_request for what only David can do: approve, pay, sign in, a physical step.")
 
 
-# An owner-only terminal step is evidenced when BOTH agent routes to it were refused for a Kanban caller:
-# run_in_user_terminal (owner chats only; its refusal says "ask from your own Hermes chat") and cross_session send
-# (no Kanban-to-human-chat injection). With both closed, that ask is the human's own step, not a relay. [daveey]
-_UT_REFUSED = re.compile(r"\brun_in_user_terminal\b[^\n]{0,160}?\brefus|\brefus[^\n]{0,160}?\brun_in_user_terminal\b",
-                         re.IGNORECASE)
-_XS_REFUSED = re.compile(r"\bcross_session\b[^\n]{0,160}?\brefus|\brefus[^\n]{0,160}?\bcross_session\b",
-                         re.IGNORECASE)
+# This is a presentation lint exception, never an execution grant. Both tools refusing a worker is NOT
+# sufficient: arbitrary agent work can still be routed to another worker. Only the explicit host_only
+# owner-terminal initiation gets an exception; ordinary agent-directed requests remain relays. [daveey]
+_OWNER_TERMINAL = re.compile(r"\b(?:open|start)\s+the\s+owner-terminal\s+flow\b", re.IGNORECASE)
+_AGENT_DIRECTED = re.compile(r"\b(?:ask|tell|have|get)\b[^.;\n]{0,100}\b(?:agent|chat|session)s?\b", re.IGNORECASE)
+_UNOBSERVED_REFUSAL = re.compile(r"\b(?:not refused|never refused|would|might|hypothetical|did not try)\b", re.IGNORECASE)
+_REFUSAL_CLAUSES = {
+    "run_in_user_terminal": re.compile(
+        r"\brun_in_user_terminal\s+(?:(?:was|is)\s+)?refused\b([^.;\n]*)", re.IGNORECASE),
+    "cross_session": re.compile(
+        r"\bcross_session\s+(?:send\s+)?(?:(?:was|is)\s+)?refused\b([^.;\n]*)", re.IGNORECASE),
+}
 
 
 def owner_only_action_evidenced(human_request) -> bool:
-    """True for an ``interaction=user_terminal`` ask whose evidence quotes both the run_in_user_terminal and the
-    cross_session refusal.
+    """Recognize an explicit owner-terminal initiation, not a generic relay with refusal boilerplate.
 
-    Hub t_01a1c0d75a11b3cd: run_in_user_terminal refused the Kanban caller ("ask from your own Hermes chat"),
-    cross_session refused the send, and kanban_block then rejected that same ask as agent_relay_ask. No agent
-    route is left, so the ask stands. An ask without both refusals still hits the relay lint.
+    Evidence is descriptive lint input, not authenticated tool receipts. Runtime owner-only execution
+    gates remain authoritative. Require separate positive refusal clauses naming the Kanban boundary,
+    plus a host_only reason and a narrowly phrased initiation action; uncertainty fails closed.
     """
-    if not isinstance(human_request, dict) or str(human_request.get("interaction") or "") != "user_terminal":
+    if not isinstance(human_request, dict) or str(human_request.get("interaction") or "").strip() != "user_terminal":
         return False
+    action = str(human_request.get("action") or "")
+    why = str(human_request.get("why_human") or "")
     evidence = str(human_request.get("evidence") or "")
-    return bool(_UT_REFUSED.search(evidence) and _XS_REFUSED.search(evidence))
+    if not _OWNER_TERMINAL.search(action) or _AGENT_DIRECTED.search(action):
+        return False
+    if not re.search(r"\bhost_only\s+(?:execution\s+)?boundary\b", why, re.IGNORECASE):
+        return False
+    if _UNOBSERVED_REFUSAL.search(evidence):
+        return False
+    for tool, pattern in _REFUSAL_CLAUSES.items():
+        match = pattern.search(evidence)
+        if not match or not re.search(r"\bKanban\b", match[1], re.IGNORECASE):
+            return False
+        boundary = r"\bowner(?:'s)?\s+(?:own\s+)?chats?\b" if tool == "run_in_user_terminal" else r"\bhuman chat\b"
+        if not re.search(boundary, match[1], re.IGNORECASE):
+            return False
+    return True
 
 
 def agent_relay_ask_error(action: str, human_request=None) -> Optional[str]:
@@ -192,9 +211,10 @@ def agent_relay_ask_error(action: str, human_request=None) -> Optional[str]:
             "(1) declare the capability the other gateway holds with kanban_block(needs=['aws:<account>:<scope>' "
             "| 'ssh:<host>' | 'host:<gateway>']) so an owner card opens there; or (2) kanban_comment the exact "
             "request and send it to the owning chat with cross_session (action='send'), or kanban_create the "
-            "owner card on that gateway (placement='<gateway>') and park on it. For an owner-only terminal step "
-            "that run_in_user_terminal AND cross_session both refused for a Kanban caller, file "
-            "interaction='user_terminal' with evidence quoting both refusals: that ask is allowed. If no gateway holds the "
+            "owner card on that gateway (placement='<gateway>') and park on it. Only an explicit 'open the "
+            "owner-terminal flow' ask with interaction='user_terminal', why_human naming the host_only boundary, "
+            "and separate observed Kanban/owner-chat and Kanban/human-chat refusal clauses for run_in_user_terminal "
+            "and cross_session may pass this lint; that never grants execution authority. If no gateway holds the "
             "capability, the gap is the capability registry: fix the probe config (kanban.capabilities.probes) "
             "on the host that has the access. Keep human_request for what only David can do: approve, pay, "
             "sign in, a physical step.")
