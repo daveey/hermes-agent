@@ -1,9 +1,31 @@
 """Class routing's credential boundary: no generic provider/billing fallback."""
 from __future__ import annotations
 
+import logging
+import time
+
 from agent.model_routing import ModelRoutingError, resolve_model_route
 from contextlib import contextmanager
 from contextvars import ContextVar
+
+logger = logging.getLogger(__name__)
+
+# [daveey] One re-check of an exact pin whose own credential was unselectable, after this pause.
+PIN_RECHECK_DELAY_SECONDS = 1.0
+_CREDENTIAL_MISSES = ("no available credential", "select() returned no credential")
+
+
+class PinnedRouteUnavailable(ModelRoutingError):
+    """[daveey] A session's exact pin lost its own route to a credential/provider check (not a quota wall).
+
+    Before this, the allocator refused such a turn as "Exact pinned route cannot fail over", the same text a
+    switch/record mismatch raises, so a transient credential miss (mini bb-aux 2026-11-05, self-heal
+    agent-36e9ac084a) looked like a routing-store bug and nothing said why the pin was dropped."""
+
+    def __init__(self, provider, model, reason, rechecked=False):
+        self.provider, self.model, self.reason, self.rechecked = provider, model, reason, rechecked
+        suffix = " (still missing after a pool reload)" if rechecked else ""
+        super().__init__(f"Pinned route {provider}/{model} is unavailable: {reason}{suffix}")
 
 _temporary_resolution = ContextVar("temporary_model_resolution", default=False)
 _routing_session = ContextVar("model_routing_session", default=None)
@@ -54,6 +76,7 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
     pools = {}
     unavailable = []
     available = []
+    dropped = {}  # (provider, model) -> why that route left the candidate list
     if _temporary_resolution.get():
         state_path = ":memory:"
 
@@ -61,6 +84,7 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
         from hermes_cli.config import is_provider_enabled
         block = config.get("providers", {}).get(route["provider"], {})
         if not is_provider_enabled(block):
+            dropped[route["provider"], route["model"]] = "provider disabled"
             return False
         key = route["provider"], route["billing"]
         if key not in pools:
@@ -69,6 +93,7 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
         if pools[key].has_available(model=route["model"]):
             available.append(route)
             return True
+        dropped[route["provider"], route["model"]] = "no available credential"
         if route["billing"] == "subscription":
             from agent.model_routing_unavailable import quota_unavailable
             if error := quota_unavailable(pools[key], route["model"]):
@@ -90,6 +115,7 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
             # Roll back the unready selection before trying another same-class
             # candidate. Never enter the legacy environment-key ladder.
             failed.append((selected, selected_model))
+            dropped[selected, selected_model] = "select() returned no credential"
             raise UnavailableCredential
         cfg = {"provider": selected, "default": selected_model}
         resolved.update(runtime._resolve_runtime_from_pool_entry(
@@ -100,6 +126,7 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
         if prepare_runtime is not None:
             prepare_runtime(resolved)
 
+    rechecked = False
     while True:
         unavailable.clear()
         available.clear()
@@ -117,7 +144,32 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
             # never enter eligible(), and a prepared runtime's errors stay fatal.
             if unavailable and not available and not resolved:
                 raise min(unavailable, key=lambda error: error.resets_at) from None
-            raise
+            if not exact_pin or available or resolved or not dropped:
+                raise
+            # [daveey] The pin's own route was dropped by a credential/provider check, not by policy or
+            # the routing store. A credential miss is often momentary (a concurrent single-use-token
+            # refresh fails silently and select() returns None): reload the pools from disk and re-check
+            # once before refusing. A pin still never moves to another model.
+            if not rechecked and any(why in _CREDENTIAL_MISSES for why in dropped.values()):
+                rechecked = True
+                logger.info("model routing: exact pin %s for session %s lost its credential (%s); "
+                            "reloading the pool and re-checking once", _describe(dropped), session_id,
+                            _describe(dropped, reasons=True))
+                time.sleep(PIN_RECHECK_DELAY_SECONDS)
+                pools.clear()
+                dropped.clear()
+                failed[:] = list(excluded)
+                continue
+            (provider_name, model_name), reason = sorted(dropped.items())[0]
+            error = PinnedRouteUnavailable(provider_name, model_name, reason, rechecked=rechecked)
+            logger.warning("model routing: session %s: %s", session_id, error)
+            raise error from None
+
+
+def _describe(dropped, reasons=False):
+    if reasons:
+        return ", ".join(f"{p}/{m}: {why}" for (p, m), why in sorted(dropped.items()))
+    return ", ".join(f"{p}/{m}" for p, m in sorted(dropped))
 
 
 def refresh_class_anthropic_token(agent):
