@@ -19,10 +19,18 @@ def show(args: dict) -> str:
         task = kt._existing_task(kb, conn, tid)
         from tools.kanban_tools_capsule import own_card_view
         worker_context, capsule = own_card_view(task, tid, kb.build_worker_context(conn, tid))
+        # A card ready and unclaimed 30+ min gets its queue place and the moves that start it (kanban-447c98343f):
+        # "ready but has not started" was reported as a status instead of acted on. [daveey]
+        from hermes_cli.kanban_parent_unclaimed import ready_hint
+        try:
+            queue_hint = ready_hint(conn, task)
+        except Exception:  # health: allow BLE001 -- an advisory hint must never fail the read
+            queue_hint = None
         return json.dumps({
             "task": kt._fields(task, kt._TASK_FIELDS),
             **capsule,
             "queue_reason": kqr.latest(conn, tid),
+            **({"queue_hint": queue_hint} if queue_hint else {}),
             "parents": kb.parent_ids(conn, tid),
             "unsatisfied_parents": [
                 {"id": pid, "status": status} for pid, status in kb.unsatisfied_parents(conn, tid)],

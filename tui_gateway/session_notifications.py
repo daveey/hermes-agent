@@ -167,7 +167,7 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 # Mirror gateway/kanban_watchers.py TERMINAL_KINDS: claim silent kinds (archived/unblocked) too so the cursor advances
 # past them and they can't wedge a later completed/blocked event behind an unclaimed row.
 _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked",
-                        "quota_episode_notice", "worker_repin_notice")
+                        "quota_episode_notice", "worker_repin_notice", "dependency_parent_unclaimed")
 # kanban, /loop + /heartbeat and the bot mailbox share one idle-poll cadence; probing the lease registry on
 # every 0.5s queue timeout cost ~a core at 11 sessions (#108005).
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0
@@ -602,6 +602,11 @@ def _kb_repin_notice(payload: dict) -> str:
     return ": " + notice_text(payload)
 
 
+def _kb_parent_unclaimed(payload: dict) -> str:
+    from hermes_cli.kanban_parent_unclaimed import notice_text
+    return ": " + notice_text(payload)
+
+
 def _kb_failure(kind: str, payload: dict, title: str) -> str:
     """Cause-accurate gave_up/crashed wording; pid/exit/raw output only under ``Details:``. [daveey]"""
     from hermes_cli.kanban_failure_summary import describe_failure
@@ -618,6 +623,7 @@ _KANBAN_EVENT_FORMATTERS = {
     "status": ("🔄", lambda t, p, title: f" → {p.get('status') or ''}"),
     "quota_episode_notice": ("⏳", lambda t, p, title: _kb_quota_episode(p)),
     "worker_repin_notice": ("⚠", lambda t, p, title: _kb_repin_notice(p)),
+    "dependency_parent_unclaimed": ("⏳", lambda t, p, title: _kb_parent_unclaimed(p)),
 }
 
 

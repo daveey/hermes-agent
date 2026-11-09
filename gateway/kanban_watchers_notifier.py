@@ -47,10 +47,12 @@ def _pin_first():
 # ``quota_episode_notice`` (third consecutive quota requeue) is a passive notice: it never wakes the origin,
 # whose own turn would land on the same exhausted provider. ``worker_repin_notice`` (no pool worker can run the
 # card; hermes_cli.kanban_repin_notice) is passive too: it tells the creator the repin command, never runs it.
-TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "quota_episode_notice", "worker_repin_notice")
+# ``dependency_parent_unclaimed`` (hermes_cli.kanban_parent_unclaimed) wakes the waiting chat: it must act on the
+# parent that cannot start (bump, re-place, do it here), not answer "ready but not started" when asked. [daveey]
+TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "quota_episode_notice", "worker_repin_notice", "dependency_parent_unclaimed")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
-_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected")
+_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected", "dependency_parent_unclaimed")
 
 
 def diagnostic_event(ev) -> bool:
@@ -490,6 +492,11 @@ def _fmt_repin_notice(ev, n) -> tuple:
     return f"⚠ {n.head}: {notice_text(ev.payload)}", None, None
 
 
+def _fmt_parent_unclaimed(ev, n) -> tuple:
+    from hermes_cli.kanban_parent_unclaimed import notice_text
+    return f"⏳ {n.head}: {notice_text(ev.payload)}", None, None
+
+
 def _fmt_timed_out(ev, n) -> tuple:
     limit = int(_payload(ev, "limit_seconds") or 0)
     minutes = max(1, round(limit / 60)) if limit else 0
@@ -516,6 +523,7 @@ _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
     "block_loop_detected": _fmt_block_loop_detected,
     "quota_episode_notice": _fmt_quota_episode,
     "worker_repin_notice": _fmt_repin_notice,
+    "dependency_parent_unclaimed": _fmt_parent_unclaimed,
 }
 
 

@@ -33,6 +33,7 @@ from hermes_cli import kanban_db_sync as _sync
 from hermes_cli.kanban_worker_placement import validate_creation
 from hermes_cli import kanban_placement_forward as _placement_fwd  # stdlib-only at import: no cycle
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
+from hermes_cli.kanban_db_dispatch_queries import DISPATCH_ORDER  # stdlib-only at import: no cycle
 from hermes_cli.kanban_admission import admission_hold_set, claim_transaction, claim_and_open_run, hub_cpu_advisory
 from hermes_cli.kanban_workflow import DEFAULT_STATUSES as VALID_STATUSES
 from toolsets import get_toolset_names
@@ -1473,12 +1474,11 @@ def list_tasks(
         if order_by not in VALID_SORT_ORDERS:
             raise ValueError(f"order_by must be one of {sorted(VALID_SORT_ORDERS.keys())}")
         query += f" ORDER BY {VALID_SORT_ORDERS[order_by]}"
-    else:
-        query += " ORDER BY priority DESC, created_at ASC"
+    else:  # the dispatcher's lane order: a card others wait on first among its effective priority [daveey]
+        query += f" ORDER BY {DISPATCH_ORDER}"
     if limit:
         query += f" LIMIT {int(limit)}"
-    rows = conn.execute(query, params).fetchall()
-    return [Task.from_row(r) for r in rows]
+    return [Task.from_row(r) for r in conn.execute(query, params).fetchall()]
 
 
 def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:

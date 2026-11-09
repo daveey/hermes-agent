@@ -32,6 +32,7 @@ import time
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from hermes_cli import kanban_db_sync as sync
+from hermes_cli.kanban_db_dispatch_queries import DISPATCH_ORDER
 
 _log = logging.getLogger(__name__)
 
@@ -356,7 +357,8 @@ def candidates(replica: sqlite3.Connection, own: str, *, now_ms: Optional[int] =
         # parents_not_done by the Board, and that refusal demotes it on every machine. [daveey]
         "AND NOT EXISTS (SELECT 1 FROM task_links l LEFT JOIN tasks p ON p.id = l.parent_id "
         "WHERE l.child_id = tasks.id AND COALESCE(p.status, '') NOT IN ('done', 'archived')) "
-        "ORDER BY status = 'review' DESC, priority DESC, created_at, id",
+        # Same lane order as the hub dispatcher (``DISPATCH_ORDER``): a waited-on parent first. [daveey]
+        f"ORDER BY status = 'review' DESC, {DISPATCH_ORDER}, id",
         (own, now_ms)).fetchall()
 
 

@@ -37,7 +37,7 @@ from hermes_cli.kanban_db_dispatch_exit_code import exit_code_kind as _exit_code
 from hermes_cli.kanban_db_dispatch_allowlist import _dispatch_profile_allowlist, dispatch_profile_allowlist_summary
 from hermes_cli import kanban_worker_scope as _worker_scope, kanban_aggregate_scope as _aggregate_scope
 from hermes_cli import kanban_host_reboot as _host_reboot, kanban_owner_unavailable as _ou  # [daveey]
-from hermes_cli import kanban_owner_death as _owner_death  # [daveey]
+from hermes_cli import kanban_owner_death as _owner_death, kanban_parent_unclaimed as _parent_unclaimed  # [daveey]
 from hermes_cli.kanban_db_dispatch_crash_accounting import _account_crashes  # [daveey]
 from hermes_cli.kanban_db_dispatch_dead_worker import _DeadWorker
 from hermes_cli.kanban_db_dispatch_queries import lane_rows, skip_reap
@@ -2431,6 +2431,7 @@ def _dispatch_once_locked(
         from hermes_cli.kanban_block_policy import sweep_blocked_cards
         sweep_blocked_cards(conn, result)
         _guard_notice.sweep_remote_guard_holds(conn, result)
+        _parent_unclaimed.safe_sweep(conn)  # before the spawn cap: a capped host is when a parent starves [daveey]
     from hermes_cli.kanban_gateway_drain import dispatch_paused
     if dispatch_paused():
         _kb._log.info('kanban dispatcher: scheduling paused — gateway draining or restart requested')
@@ -2442,9 +2443,8 @@ def _dispatch_once_locked(
         except Exception:
             logger = _kb._log
             logger.warning("kanban worker placement failed; continuing local dispatch", exc_info=True)
-    may_spawn, spawn_budget = _tick_spawn_budget(
-        conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
-    )
+    may_spawn, spawn_budget = _tick_spawn_budget(conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress,
+                                                 board=board)
     if not may_spawn:
         return result
 

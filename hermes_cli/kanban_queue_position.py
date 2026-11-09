@@ -18,14 +18,17 @@ _log = logging.getLogger(__name__)
 
 
 def _ahead(conn: sqlite3.Connection, task) -> int:
-    """Unclaimed ready cards of the same assignee the dispatcher reaches first (higher priority, or the same
-    priority and created earlier). Worker-first cards wait for the pool, not a local slot, so they are not ahead."""
+    """Unclaimed ready cards of the same assignee the dispatcher reaches first, in its own lane order
+    (``DISPATCH_ORDER``: effective priority, then cards others wait on, then age). Worker-first cards wait for the
+    pool, not a local slot, so they are not ahead."""
+    from hermes_cli.kanban_db_dispatch_queries import DISPATCH_ORDER
     from hermes_cli.kanban_worker_placement import POLICY
-    return int(conn.execute(
-        "SELECT COUNT(*) FROM tasks WHERE status = 'ready' AND claim_lock IS NULL AND id != ? AND assignee IS ? "
-        "AND placement_policy IS NOT ? AND (priority > ? OR (priority = ? AND created_at < ?))",
-        (task.id, task.assignee, POLICY, int(task.priority or 0), int(task.priority or 0), int(task.created_at or 0)),
-    ).fetchone()[0])
+    ids = [r[0] for r in conn.execute(
+        "SELECT id FROM tasks WHERE status = 'ready' AND claim_lock IS NULL AND assignee IS ? "
+        f"AND (placement_policy IS NOT ? OR id = ?) ORDER BY {DISPATCH_ORDER}",
+        (task.assignee, POLICY, task.id),
+    ).fetchall()]
+    return ids.index(task.id) if task.id in ids else len(ids)
 
 
 def _running_and_limit(conn: sqlite3.Connection, board: Optional[str]) -> tuple[Optional[int], Optional[int]]:

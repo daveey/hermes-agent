@@ -3,12 +3,23 @@ import os
 import sqlite3
 
 
+# A card another card waits on (a ``todo`` child) is dispatched first among its effective priority, and that
+# priority is the highest of its own and its waiting children's. Before 11-09 the lane was priority then age only:
+# a p0 parent of a waiting rollout sat ready 2 h behind 61 older p0 leaves (kanban-447c98343f). The stored
+# priority never changes; explicit priority still wins. Rows of ``tasks`` (unaliased) only. [daveey]
+_WAITERS = "FROM task_links wl JOIN tasks w ON w.id = wl.child_id WHERE wl.parent_id = tasks.id AND w.status = 'todo'"
+DISPATCH_ORDER = (
+    f"MAX(COALESCE(tasks.priority, 0), COALESCE((SELECT MAX(COALESCE(w.priority, 0)) {_WAITERS}), 0)) DESC, "
+    f"EXISTS (SELECT 1 {_WAITERS}) DESC, tasks.created_at ASC"
+)
+
+
 def lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
-    """Unclaimed rows of one lane in dispatch order."""
+    """Unclaimed rows of one lane in dispatch order (:data:`DISPATCH_ORDER`)."""
     return conn.execute(
         "SELECT id, assignee FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
-        "ORDER BY priority DESC, created_at ASC"
+        f"ORDER BY {DISPATCH_ORDER}"
     ).fetchall()
 
 
