@@ -143,12 +143,17 @@ def check_create(conn, runs_on, *, assignee: Optional[str], requires, workspace_
     if sync.board_mode(conn) != "primary":
         return
     labels = wn.normalize_runs_on(runs_on if isinstance(runs_on, str) else list(runs_on))
-    reg = wn.registry() if labels else None
+    try:
+        reg = wn.registry() if labels else None
+    except Exception:  # health: allow BLE001 -- same unknown-registry policy as check/runs_elsewhere
+        reg = None
     machines = reg.get("machines") if reg is not None else None
+    me = wn._own(conn)
     # No candidates is not evidence of missing profile tools (check deliberately
     # allows unknown tools). It IS evidence of an impossible label conjunction.
     # Include held/inactive machines: temporary unavailability is not a typo.
-    if labels and machines is not None and not any(
+    # A missing self entry is incomplete evidence, as in runs_elsewhere.
+    if labels and machines and machines.get(me) and not any(
             set(labels) <= wn.effective_labels(entry, name) for name, entry in machines.items()):
         raise ValueError(
             f"runs_on={labels}: no enrolled machine carries all these labels. Nothing was written. "

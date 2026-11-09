@@ -42,7 +42,20 @@ def test_registered_labels_are_not_rejected_while_machines_held(gws, monkeypatch
     assert kb.create_task(hub.conn, title="held not impossible", assignee="default", requires=[], runs_on=labels)
 
 
-def test_unknown_registry_does_not_claim_labels_are_impossible(gws, monkeypatch):
+@pytest.mark.parametrize("registry", [None, {"machines": {}}, {"machines": {"other": {"labels": []}}}])
+def test_unknown_registry_does_not_claim_labels_are_impossible(gws, monkeypatch, registry):
     hub, _ = gws
-    monkeypatch.setattr(wn, "registry", lambda: None)
+    monkeypatch.setattr(wn, "registry", lambda: registry)
     assert kb.create_task(hub.conn, title="unknown", assignee="default", requires=[], runs_on=["custom"])
+    assert kb.create_task(hub.conn, title="self", assignee="default", requires=[], runs_on=[f"machine:{HUB}"])
+
+
+def test_registry_exception_preserves_unknown_behavior(gws, monkeypatch):
+    hub, _ = gws
+
+    def unavailable():
+        from hermes_cli.kanban_sync_client import SyncUnavailable
+        raise SyncUnavailable("identity unavailable")
+
+    monkeypatch.setattr(wn, "registry", unavailable)
+    assert kb.create_task(hub.conn, title="unknown", assignee="default", requires=[], runs_on=["linux"])
