@@ -2433,7 +2433,7 @@ _PRE_AGENT_ERROR_KINDS = ("fire", "gate")
 def _record_run_outcome(
     job: dict[str, Any], success: bool, error: Optional[str], delivery_error: Optional[str],
     status: Optional[str], now: str, *, agent_skipped: bool = False, fire_error: bool = False,
-    gate_error: bool = False,
+    gate_error: bool = False, shutdown_interrupted: bool = False,
 ) -> None:
     """Stamp one completed run onto *job*: status fields, failure streak, alert markers, claims.
 
@@ -2466,6 +2466,9 @@ def _record_run_outcome(
         job.pop("last_fire_error", None)
         job["failure_streak"] = 0
         job.pop("last_error_kind", None)
+    elif shutdown_interrupted:
+        # Preserve diagnostic evidence without blaming the job for its owner's shutdown.
+        job["last_failure"] = {"at": now, "detail": error or (status or "run failed")}
     elif not cancelled:
         prior = job.get("last_error_kind") if int(job.get("failure_streak") or 0) else None
         if not (fire_error or gate_error) or prior not in (None, *_PRE_AGENT_ERROR_KINDS):
@@ -2559,6 +2562,7 @@ def mark_job_run(
     agent_skipped: bool = False,
     fire_error: bool = False,
     gate_error: bool = False,
+    shutdown_interrupted: bool = False,
 ) -> bool:
     """Mark a job as run: update last_run_at/last_status, bump completed, recompute next_run_at,
     and retire the record as a terminal completion when the repeat limit is reached. A manual run
@@ -2594,6 +2598,9 @@ def mark_job_run(
 
     ``gate_error``: this failed run stopped at a pre-agent gate (monitor source failure,
     unparseable config); booked as ``last_error_kind = "gate"``. [daveey]
+
+    ``shutdown_interrupted``: the gateway stopped this execution; preserve its error evidence
+    without changing ``failure_streak`` or ``last_error_kind``. [daveey]
     """
     def apply(jobs, _i, job):
         if execution_id is not None and execution_id in job.get("canonical_completions", []):
@@ -2610,7 +2617,7 @@ def mark_job_run(
         held = extra_fire.held_markers(job) if extra else {}
         _record_run_outcome(job, success, error, delivery_error, status, now,
                             agent_skipped=agent_skipped, fire_error=fire_error,
-                            gate_error=gate_error)
+                            gate_error=gate_error, shutdown_interrupted=shutdown_interrupted)
         job.update(held)  # a run-now queued mid-run is its own fire, not this one
         if execution_id is not None:  # retire ids recovery can no longer replay; latest stays last
             from cron.scheduler_authority import replayable_completions as live

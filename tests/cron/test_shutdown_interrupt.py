@@ -58,6 +58,36 @@ class TestGetRunningJobIds:
 
 
 class TestMarkRunningJobsInterrupted:
+    @pytest.mark.parametrize("streak,kind", [(0, None), (2, "gate"), (3, "agent")])
+    def test_shutdown_preserves_failure_accounting(self, tmp_path, streak, kind):
+        from cron import jobs
+        import cron.scheduler as sched
+
+        home = tmp_path / "profile"
+        home.mkdir()
+        with jobs.use_cron_store(home):
+            job = jobs.create_job(prompt="x", schedule="every 5m", name="owned")
+            job = jobs.claim_job_for_fire(job["id"], force=True, return_job=True)
+            assert isinstance(job, dict)
+            job["failure_streak"] = streak
+            if kind is not None:
+                job["last_error_kind"] = kind
+            jobs.save_jobs([job])
+            key = sched._inflight_key(job["id"])
+            sched._running_job_ids.add(key)
+            sched._running_fire_owners[key] = {object(): (job["fire_claim"]["by"], home)}
+            reason = "Gateway shutdown (post-interrupt) killed the job's tool subprocess."
+            assert sched.mark_running_jobs_interrupted(reason) == [job["id"]]
+            saved = jobs.load_jobs()[0]
+            assert saved["last_status"] == "error"
+            assert saved["last_failure"]["detail"] == reason
+            assert saved["failure_streak"] == streak
+            assert saved.get("last_error_kind") == kind
+            assert jobs.mark_job_run(job["id"], False, "real agent failure")
+            saved = jobs.load_jobs()[0]
+            assert saved["failure_streak"] == streak + 1
+            assert saved["last_error_kind"] == "agent"
+
     def test_no_op_when_nothing_running(self):
         import cron.scheduler as sched
 
@@ -194,7 +224,8 @@ class TestRunningFireOwnerRegistry:
             release.wait(timeout=2)
             return True
 
-        def mark(_job_id, _success, _reason, *, expected_fire_owner):
+        def mark(_job_id, _success, _reason, *, expected_fire_owner, shutdown_interrupted):
+            assert shutdown_interrupted is True
             marked_owners.append(expected_fire_owner)
             return True
 
@@ -232,7 +263,8 @@ class TestRunningFireOwnerRegistry:
             object(): ("owner-b", profile_b),
         }
 
-        def mark(job_id, success, reason, *, expected_fire_owner):
+        def mark(job_id, success, reason, *, expected_fire_owner, shutdown_interrupted):
+            assert shutdown_interrupted is True
             observed.append(
                 (
                     job_id,
