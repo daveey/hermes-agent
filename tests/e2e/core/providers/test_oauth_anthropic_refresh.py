@@ -6,6 +6,11 @@ Messages endpoint (accepted base-URL override ``http://127.0.0.1:<port>/anthropi
 and the vendor token endpoint (hardcoded ``https://platform.claude.com``)
 reached through the TLS-intercepting proxy — nothing of ours is faked.
 
+The auxiliary-call case drives the turn through the real ``tui_gateway`` backend (the process the Ink
+TUI and Desktop talk to) instead of ``-z``: a one-shot session never starts the auto-title call
+(``agent_is_oneshot`` in ``agent/turn_context.py``), so only an interactive session reaches the race
+that lost the login in #120815.
+
 Two triggers for the refresh:
 
 * the vendor's 401 — the first model call is answered with a tool call and the
@@ -21,10 +26,13 @@ token and the login is lost.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import threading
 import time
 import uuid
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -39,10 +47,13 @@ from tests.e2e.core.providers._oauth_helpers import (
     tool,
     wait_until,
 )
+from tests.e2e.core.providers._openai_helpers import HarnessError
+from tests.e2e.core.providers._openai_tui import TuiGateway
 
 pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="tagged-tree cleanup uses /proc")
 
 FINAL = "OAUTH-REFRESH-TURN-COMPLETE"
+PROMPT = "Read the note file and report."
 SLOW_TOKEN_ENDPOINT_S = 2.0
 
 CASES = {
@@ -112,12 +123,35 @@ def _run_turn(tmp_path, *, aux_401: bool, clock_expired: bool):
         rig.tokens.before_refresh_response = slow_token_endpoint
         threading.Thread(target=settle, daemon=True).start()
     try:
-        proc = run_hermes(rig.fh, ["-z", "Read the note file and report."], extra_env=rig.child_env, timeout=150)
+        proc = (_run_interactive_turn(rig, PROMPT) if aux_401
+                else run_hermes(rig.fh, ["-z", PROMPT], extra_env=rig.child_env, timeout=150))
     finally:
+        aux_reached_wire = aux_sent.is_set()
         for ev in (aux_sent, refresh_in_flight, aux_answered, aux_settled):
             ev.set()
         rig.stop()
+    if aux_401:
+        # Precondition of the race, named instead of surfacing as a 120 s Hold timeout and a 401 at the
+        # main turn: the auxiliary call must actually have been sent with the expired bearer.
+        assert aux_reached_wire, f"no auxiliary (title) call reached the wire with the expired bearer\n{proc.stderr}"
     return rig, proc, canary
+
+
+def _run_interactive_turn(rig, prompt: str) -> subprocess.CompletedProcess:
+    """One turn in an interactive ``tui_gateway`` session (titled, unlike ``-z``), shaped like ``run_hermes``."""
+    fh = rig.fh
+    home = cast(Any, SimpleNamespace(env=fh.env, root=fh.root, project=fh.root))  # the Home fields TuiGateway reads
+    gw = TuiGateway(home, extra_env=rig.child_env)
+    try:
+        sid = gw.call("session.create", {"cols": 100}, timeout=120)["session_id"]
+        try:
+            answer, rc = gw.turn(sid, prompt, timeout=150), 0
+        except HarnessError as exc:
+            answer, rc = str(exc), 1
+    finally:
+        stderr = gw.tail()
+        gw.close()
+    return subprocess.CompletedProcess(gw.proc.args, rc, answer, stderr)
 
 
 @pytest.mark.parametrize("case", list(CASES))

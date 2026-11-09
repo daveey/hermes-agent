@@ -122,6 +122,8 @@ jobs:
       - name: Install locked chat driver dependencies
         id: dependencies
         shell: bash
+        # Keep the minimal-install command visible to the fork's install-shape
+        # invariant shared with the macOS/Windows and runtime proof lanes.
         run: pnpm install --frozen-lockfile --filter "{./tests-js}..." --prod --ignore-scripts
 
       - name: Fetch one exact downloadable artifact

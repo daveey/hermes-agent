@@ -166,6 +166,8 @@ jobs:
           # job's token out of .git/config where that code could read it.
           persist-credentials: false
 
+      # Fork: keep these inline gates rather than upstream's catalog_*.py
+      # entrypoints, which do not enforce trusted-base execution or sandboxing.
       - name: Find changed catalog entries
         id: changed
         env:
@@ -559,6 +561,20 @@ jobs:
               FAILED=1; echo "::endgroup::"; continue
             fi
 
+            # SELF-UPDATER GATE (README rule 3): scan before provenance-verified
+            # paths are removed. Provenance establishes origin, not behavior.
+            # NUL delimiters preserve spaces and prevent forged log lines.
+            SELF_UPDATE=$(grep -rlZE 'releases/latest|releases/download|raw\.githubusercontent\.com|codeload\.github\.com' \
+                --include='*.js' --include='*.mjs' --include='*.cjs' --include='*.ts' \
+                --include='*.jsx' --include='*.tsx' --include='*.mts' --include='*.cts' \
+                "$PLUGIN_DIR" \
+              | xargs -r0 grep -lZE 'writeTextFile|renamePath|writeFile\(|writeFileSync|renameSync|copyFileSync|cpSync|createWriteStream' || true)
+            SELF_UPDATE=$(printf '%s' "$SELF_UPDATE" | tr '\0\n' ' ')
+            if [ -n "$SELF_UPDATE" ]; then
+              echo "::error file=$entry::self-updating code in catalog build (fetches GitHub AND writes plugin files): $SELF_UPDATE"
+              FAILED=1; echo "::endgroup::"; continue
+            fi
+
             # UNSCANNABLE-PAYLOAD GATE (README rule 17). A reviewer and the install
             # scanner must be able to read everything shipped at the pin as source:
             # no compiled binaries (by header), committed bytecode, or archives
@@ -566,8 +582,9 @@ jobs:
             # each one under `attested_binaries:` and the binary must carry a
             # GitHub build-provenance attestation tying it to this repo's own
             # workflow at the pinned source digest; those paths are exempted here
-            # and verified below. No stdin: the parser must not drain the entry fd.
-            ATTESTED=$(python3 -I - "$ENTRY_FILE" <<'PYEOF' </dev/null
+            # and verified below. The heredoc supplies Python source on stdin;
+            # the entry list is separately held on fd 3.
+            ATTESTED=$(python3 -I - "$ENTRY_FILE" <<'PYEOF'
           import re, shlex, sys
           from ruamel.yaml import YAML
           try:
@@ -631,22 +648,6 @@ jobs:
               FAILED=1; echo "::endgroup::"; continue
             fi
 
-            # SELF-UPDATER GATE (README rule 3): the pin is the only update path.
-            # A desktop bundle that both fetches from GitHub AND writes/renames
-            # plugin files is a self-updater; either half alone is fine (a
-            # plugin may read the API, or manage its own data files).
-            # NUL-delimited both ways: committed filenames with spaces or
-            # newlines must not split into grep options or forged log lines.
-            SELF_UPDATE=$(grep -rlZE 'releases/latest|releases/download|raw\.githubusercontent\.com|codeload\.github\.com' \
-                --include='*.js' --include='*.mjs' --include='*.cjs' --include='*.ts' \
-                --include='*.jsx' --include='*.tsx' --include='*.mts' --include='*.cts' \
-                "$PLUGIN_DIR" \
-              | xargs -r0 grep -lZE 'writeTextFile|renamePath|writeFile\(|writeFileSync|renameSync|copyFileSync|cpSync|createWriteStream' || true)
-            SELF_UPDATE=$(printf '%s' "$SELF_UPDATE" | tr '\0\n' ' ')
-            if [ -n "$SELF_UPDATE" ]; then
-              echo "::error file=$entry::self-updating code in catalog build (fetches GitHub AND writes plugin files): $SELF_UPDATE"
-              FAILED=1; echo "::endgroup::"; continue
-            fi
             echo "✅ PASS: $entry"
             echo "::endgroup::"
           done 3<<< "$CHANGED_FILES"

@@ -40,7 +40,13 @@ test.runIf(process.platform === 'linux')('disk fallback keeps fixture sockets be
       '
       exit 7
     `;
-    const script = step.run.replace('TMPDIR="$temp_root" node .github/scripts/run-workspace-checks.mjs', probe);
+    // The probe stands in for the workflow's real workload line. If that line moves
+    // (upstream rewrote it to `just check-js-ci`), a silent no-op replace would run
+    // every real workspace check here, and spawnSync's timeout kills only bash, leaving
+    // that duplicate suite running beside CI's own checks. Fail before spawning instead.
+    const workload = 'TMPDIR="$temp_root" just check-js-ci';
+    expect(step.run.split(workload).length - 1, `workflow step must run exactly one \`${workload}\``).toBe(1);
+    const script = step.run.replace(workload, probe);
     const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', script], {
       cwd: root,
       env: { ...process.env, RUNNER_TEMP: runnerTemp, SELECTED: selected, PATH: `${bin}:${process.env.PATH}` },

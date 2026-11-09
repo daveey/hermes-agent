@@ -247,8 +247,11 @@ CASES: list[Case] = [
          profiles=_profile_work),
     Case("aux_bare_custom_never_reaches_env_openai_base_url",
          [Leg(Q, ("named",), {"named": 1}, "named")], _aux_bare_custom),
-    Case("aux_title_endpoint_separate_from_main",
-         [Leg(Q, ("main", "aux"), {"main": 1, "aux": 1}, "main")], _aux_title_endpoint),
+    # A one-shot (``chat -q``) never titles its session (agent/oneshot_footprint.py): with a dedicated
+    # title endpoint configured, the aux host is NOT a selected host, so any request there is a LEAK.
+    # The aux title route itself is pinned on a titling path: test_tui_gateway_aux_title_endpoint_routing.
+    Case("aux_title_endpoint_oneshot_never_titles",
+         [Leg(Q, ("main",), {"main": 1}, "main")], _aux_title_endpoint),
     Case("delegation_endpoint_child_routed",
          [Leg(Q, ("main", "deleg"), {"main": 2, "deleg": 1}, "main")], _delegation_endpoint),
     Case("delegation_named_provider_child_routed",
@@ -401,6 +404,43 @@ def test_tui_gateway_model_switch_routing(tmp_path: Path, request: pytest.Fixtur
             assert_routing(check_routing(fleet, log, {leg.host: allowed}, {leg.host: 1}), ctx)
             if leg.ok:
                 assert payload.get("text") == f"answer-from-{leg.host}", ctx
+    finally:
+        gw.close()
+        fleet.stop()
+        trap.stop()
+
+
+def test_tui_gateway_aux_title_endpoint_routing(tmp_path: Path) -> None:
+    """``auxiliary.title_generation`` on its own endpoint: the session title is generated on the aux
+    host with the aux key, the turn on main with main's key, and neither crosses over.
+
+    Runs through the stdio tui_gateway because an interactive session is the path that titles; a
+    one-shot ``chat -q`` deliberately skips the title call (aux_title_endpoint_oneshot_never_titles).
+    """
+    fleet = Fleet(ROLES).start()
+    trap = EgressTrap()
+    home = tmp_path / "home"
+    config, env = base_config(fleet)
+    _aux_title_endpoint(config, env, fleet)
+    write_home(home / ".hermes", config, env)
+    gw = TuiGateway(home, proxy=trap.url)
+    try:
+        gw.wait(gw.event("gateway.ready"), timeout=120)
+        sid = gw.call("session.create", {"cols": 100})["result"]["session_id"]
+        marks = fleet.marks()
+        done = gw.turn(sid, "hello")
+        # The model title upgrade runs on a background thread as the turn settles: wait for the
+        # title the AUX host answered before reading the log, or a slow runner reads it as missing.
+        gw.seen_or_wait(_titled(gw, sid, "aux-from-aux"), timeout=120)
+        log = fleet.since(marks)
+        payload = (done.get("params") or {}).get("payload") or {}
+        ctx = f"{done.get('params', {}).get('type')} {str(payload)[:300]}\n{describe(log)}"
+        assert_routing(check_routing(fleet, log, {"main": fleet.keys["main"], "aux": fleet.keys["aux"]},
+                                     {"main": 1, "aux": 1}), ctx)
+        assert payload.get("text") == "answer-from-main", ctx
+        # must_hit is a floor: also pin that the title did not ALSO ride main, nor the turn ride aux.
+        assert [r["kind"] for r in log["main"] if r["kind"] != "get"] == ["main"], ctx
+        assert all(r["kind"] in {"aux", "get"} for r in log["aux"]), ctx
     finally:
         gw.close()
         fleet.stop()
