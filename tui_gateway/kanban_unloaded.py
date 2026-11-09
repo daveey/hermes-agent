@@ -595,6 +595,11 @@ def _loop(stop: threading.Event) -> None:
         from tui_gateway.notice_fanout import card_change_pass
         from tui_gateway.notice_guarantee import guarantee_pass
         card_change_pass()
+        # [daveey] A parent that was mid-turn when the orphan reap killed its subagent refused that notice: re-offer
+        # it before the guarantee pass, so the same tick can wake the parent on it (desktop-ac1b365935).
+        from tui_gateway import server
+        from tui_gateway.reap_notices import retry_pending_killed_notices
+        retry_pending_killed_notices(server._get_db())
         guarantee_pass()
         stop.wait(interval)
 
