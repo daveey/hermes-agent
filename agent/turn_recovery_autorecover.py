@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from agent.error_classifier import TRANSIENT_REASONS
+from agent.error_classifier import CODEX_BARE_400_MARKER, TRANSIENT_REASONS
 
 logger = logging.getLogger("agent.conversation_loop")
 
@@ -56,6 +56,9 @@ def ladder_eligible(agent: Any, classified: Any) -> bool:
     policy, billing, overflow ... are deterministic for this request), and no answer text streamed to
     the user yet (delivered text is never replayed by this path)."""
     if auto_recovery_cycles(agent) <= 0 or classified.reason not in TRANSIENT_REASONS:
+        return False
+    # Codex's bare 400 earns its normal retries only; surviving them means the request is bad.
+    if (getattr(classified, "error_context", None) or {}).get(CODEX_BARE_400_MARKER):
         return False
     streamed = getattr(agent, "_current_streamed_assistant_text", "") or ""
     return not agent._has_content_after_think_block(streamed)

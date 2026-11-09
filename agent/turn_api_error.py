@@ -16,7 +16,7 @@ import time
 from typing import Any, Dict, Optional
 
 from agent.api_error_summary import is_provider_stream_parse_error
-from agent.error_classifier import RETRYABLE_CLIENT_REASONS, FailoverReason, classify_api_error
+from agent.error_classifier import CODEX_BARE_400_MARKER, RETRYABLE_CLIENT_REASONS, FailoverReason, classify_api_error
 from agent.turn_offline_wait import wait_out_offline
 from agent.route_verdicts import route_visit
 from agent.turn_overflow import recover_from_overflow
@@ -134,6 +134,14 @@ def handle_api_error(
         base_url=str(getattr(agent, "base_url", "") or ""),
         api_key=getattr(agent, "api_key", None),
     )
+    if (classified.error_context or {}).get(CODEX_BARE_400_MARKER):
+        # Detection: one line per bare 400 lets the error detector count retries against the
+        # final "API call failed after N retries" failures (cron-4f48467a6f).
+        logger.warning(
+            "codex bare-400 retry: openai-codex answered HTTP 400 {\"detail\": \"Bad Request\"} with no reason "
+            "(attempt %s/%s) model=%s msgs=%s tokens=~%s",
+            retry_count + 1, max_retries, getattr(agent, "model", ""), len(api_messages or []), approx_tokens,
+        )
     logger.debug(
         "Error classified: reason=%s status=%s retryable=%s compress=%s rotate=%s fallback=%s",
         classified.reason.value, classified.status_code,

@@ -567,6 +567,8 @@ _V_CONTEXT_OVERFLOW = _v(_R.context_overflow, should_compress=True)
 _V_PAYLOAD_TOO_LARGE = _v(_R.payload_too_large, should_compress=True)
 _V_OVERLOADED, _V_SERVER_ERROR, _V_TIMEOUT, _V_UNKNOWN = map(_v, (_R.overloaded, _R.server_error, _R.timeout, _R.unknown))
 _V_IMAGE_TOO_LARGE, _V_IMAGE_CORRUPT = _v(_R.image_too_large), _v(_R.image_corrupt)
+# ``error_context[CODEX_BARE_400_MARKER]`` = retry within the cap, but never the auto-recovery ladder.
+CODEX_BARE_400_MARKER = "codex_bare_400"
 _V_MULTIMODAL, _V_INVALID_ENCRYPTED = _v(_R.multimodal_tool_content_unsupported), _v(_R.invalid_encrypted_content)
 _V_REASONING_MANDATORY = _v(_R.reasoning_mandatory, should_compress=False, should_fallback=False)
 # Same recovery hints as format_error: consumers without a merge-and-retry step (the main loop
@@ -1417,6 +1419,12 @@ def _classify_400(c: _Ctx) -> Verdict:
     # prompt_cache_retention ~20% of the time): transient, retry identical request.
     if _is_server_injected_param_rejection(msg, c.provider_slug):
         return _V_SERVER_ERROR
+    # Codex's reason-less ``{"detail": "Bad Request"}``: seen once on a healthy request whose identical
+    # retry succeeded (cron-4f48467a6f). Exact envelope, provider-gated. Retried within the normal
+    # retry cap only: the marker keeps it out of the post-exhaustion auto-recovery ladder, because a
+    # bare 400 that survives every retry is the request, not an outage.
+    if _is_codex_bare_bad_request(c):
+        return _v(_R.server_error, error_context={CODEX_BARE_400_MARKER: True})  # fresh dict per call
     if any(p in msg for p in _MALFORMED_TOOL_ARGS_PATTERNS):
         return _V_MALFORMED_TOOL_ARGS
     if any(p in msg for p in _ROLE_ALTERNATION_PATTERNS):
@@ -1565,6 +1573,20 @@ def _is_codex_masked_replay_rejection(c: _Ctx) -> bool:
     return (c.code == "invalid_prompt" and body_msg == _CODEX_MASKED_REPLAY_MESSAGE) or (
         c.msg.strip() == f"invalid_prompt: {_CODEX_MASKED_REPLAY_MESSAGE}"
     )
+
+
+_CODEX_BARE_BAD_REQUEST_DETAIL = "bad request"
+_CODEX_BARE_BAD_REQUEST_MSG = "error code: 400 - {'detail': 'bad request'}"
+
+
+def _is_codex_bare_bad_request(c: _Ctx) -> bool:
+    """HTTP 400 from ``openai-codex`` whose whole body is ``{"detail": "Bad Request"}`` (or, with no
+    parsed body, the SDK's exact wrapped message for it). Any other key or wording keeps format_error."""
+    if c.provider_slug != "openai-codex" or c.status_code != 400:
+        return False
+    if isinstance(c.body, dict) and c.body:
+        return set(c.body) == {"detail"} and str(c.body.get("detail") or "").strip().lower() == _CODEX_BARE_BAD_REQUEST_DETAIL
+    return c.msg.strip() == _CODEX_BARE_BAD_REQUEST_MSG
 
 
 def _error_obj(body: Any) -> dict:
