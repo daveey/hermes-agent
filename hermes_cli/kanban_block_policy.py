@@ -155,21 +155,46 @@ def agent_route_gap_error(human_request) -> Optional[str]:
             "on that card. Keep human_request for what only David can do: approve, pay, sign in, a physical step.")
 
 
-def agent_relay_ask_error(action: str) -> Optional[str]:
+# An owner-only terminal step is evidenced when BOTH agent routes to it were refused for a Kanban caller:
+# run_in_user_terminal (owner chats only; its refusal says "ask from your own Hermes chat") and cross_session send
+# (no Kanban-to-human-chat injection). With both closed, that ask is the human's own step, not a relay. [daveey]
+_UT_REFUSED = re.compile(r"\brun_in_user_terminal\b[^\n]{0,160}?\brefus|\brefus[^\n]{0,160}?\brun_in_user_terminal\b",
+                         re.IGNORECASE)
+_XS_REFUSED = re.compile(r"\bcross_session\b[^\n]{0,160}?\brefus|\brefus[^\n]{0,160}?\bcross_session\b",
+                         re.IGNORECASE)
+
+
+def owner_only_action_evidenced(human_request) -> bool:
+    """True for an ``interaction=user_terminal`` ask whose evidence quotes both the run_in_user_terminal and the
+    cross_session refusal.
+
+    Hub t_01a1c0d75a11b3cd: run_in_user_terminal refused the Kanban caller ("ask from your own Hermes chat"),
+    cross_session refused the send, and kanban_block then rejected that same ask as agent_relay_ask. No agent
+    route is left, so the ask stands. An ask without both refusals still hits the relay lint.
+    """
+    if not isinstance(human_request, dict) or str(human_request.get("interaction") or "") != "user_terminal":
+        return False
+    evidence = str(human_request.get("evidence") or "")
+    return bool(_UT_REFUSED.search(evidence) and _XS_REFUSED.search(evidence))
+
+
+def agent_relay_ask_error(action: str, human_request=None) -> Optional[str]:
     """Typed refusal for an ask that only relays a message from David to an agent (self-heal agent-c03353a3cf).
 
     Hub t_01a188c8ddf998ac asked David to "ask for the broker Gemini secret repair from your own Hermes chat on
     the AWS-authorized Mac"; that chat did it itself in 10 minutes. Such a block is a routing gap shown to David
     as his task, so the worker must route it to an agent instead.
     """
-    if not _RELAY.search(action):
+    if not _RELAY.search(action) or owner_only_action_evidenced(human_request):
         return None
     return (f"{RELAY_ASK_CODE}: human_request.action asks David to pass a message to an agent or chat "
             "(\"from your own Hermes chat\", \"ask your agent to ...\"). Agents can do that without him: "
             "(1) declare the capability the other gateway holds with kanban_block(needs=['aws:<account>:<scope>' "
             "| 'ssh:<host>' | 'host:<gateway>']) so an owner card opens there; or (2) kanban_comment the exact "
             "request and send it to the owning chat with cross_session (action='send'), or kanban_create the "
-            "owner card on that gateway (placement='<gateway>') and park on it. If no gateway holds the "
+            "owner card on that gateway (placement='<gateway>') and park on it. For an owner-only terminal step "
+            "that run_in_user_terminal AND cross_session both refused for a Kanban caller, file "
+            "interaction='user_terminal' with evidence quoting both refusals: that ask is allowed. If no gateway holds the "
             "capability, the gap is the capability registry: fix the probe config (kanban.capabilities.probes) "
             "on the host that has the access. Keep human_request for what only David can do: approve, pay, "
             "sign in, a physical step.")
@@ -187,7 +212,7 @@ def user_ask_lint_error(human_request) -> Optional[str]:
     if not isinstance(human_request, dict):
         return None
     action = " ".join(str(human_request.get("action") or "").split())
-    relay = agent_relay_ask_error(action) or agent_route_gap_error(human_request)
+    relay = agent_relay_ask_error(action, human_request) or agent_route_gap_error(human_request)
     if relay:
         return relay
     missing = [label for label, rx in (("what unblocking the card does", _UNBLOCK),
@@ -298,7 +323,7 @@ def standing_ask_error(conn: sqlite3.Connection, task_id: str, title, request) -
     """
     if not isinstance(request, dict):
         return None
-    err = agent_relay_ask_error(_action_line(request)) or agent_route_gap_error(request)
+    err = agent_relay_ask_error(_action_line(request), request) or agent_route_gap_error(request)
     if err:
         return (RELAY_ASK_CODE if err.startswith(RELAY_ASK_CODE) else ROUTE_GAP_CODE), err, {}
     named = _named_task_ids(title, request, task_id)
