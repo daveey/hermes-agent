@@ -310,7 +310,10 @@ def test_cancelled_connection_still_reports_slow_running_handler(tmp_path, caplo
         timer = threading.Timer(0.6, release.set)
         timer.start()
         try:
-            await async_wait_until(lambda: server._diagnostics.in_flight == 0, timeout=3)
+            # completed() drops in_flight before emitting on the worker thread.
+            # Keep capture active until publication, not merely accounting, finishes.
+            await async_wait_until(lambda: latency_records(caplog), timeout=30)
+            assert server._diagnostics.in_flight == 0
         finally:
             release.set()
             timer.join()
