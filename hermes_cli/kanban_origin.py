@@ -181,6 +181,21 @@ def _safe(value: Any, placeholder: str) -> str:
     return text if _SAFE_NAME.match(text) else placeholder
 
 
+def _turn_session_id(env: Mapping[str, str], explicit_env: bool) -> str:
+    """The chat this turn runs for. A gateway or Desktop backend serves several chats in one process, and
+    ``os.environ["HERMES_SESSION_ID"]`` holds whichever chat wrote it last: the current turn's id is the session
+    ContextVar (``get_session_env`` falls back to the env only when none is bound). A hint built from the env
+    told chat 370c8b to subscribe chat 5fb607 to its cards (agent-884fdd96f8). An explicit ``env`` (tests, a
+    caller replaying a child's env) is used as given. [daveey]"""
+    if explicit_env:
+        return str(env.get("HERMES_SESSION_ID") or "")
+    try:
+        from gateway.session_context import get_session_env
+    except ImportError:
+        return str(env.get("HERMES_SESSION_ID") or "")
+    return str(get_session_env("HERMES_SESSION_ID", "") or "")
+
+
 def adopt_next_step(task_id: str, board: str, *, env: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
     """The supported way to attach an existing card to a chat, for a ``kanban_origin_adopt`` call that has no
     courier context. That tool only runs inside a courier-delivered adoption; a chat (or a worker) gets the
@@ -190,6 +205,7 @@ def adopt_next_step(task_id: str, board: str, *, env: Optional[Mapping[str, str]
     another gateway: a ``hermes-hub create-task`` that gets the command run there. Unknown or unsafe parts stay
     ``<placeholders>`` and ``complete`` is False: such a command must be filled in before it is run.
     """
+    explicit_env = env is not None
     env = os.environ if env is None else env
     me, _ = gateway_names()
     me = _safe(me, "")
@@ -218,7 +234,7 @@ def adopt_next_step(task_id: str, board: str, *, env: Optional[Mapping[str, str]
         owner_gw, owner_profile = ((_safe(owners[0][0], "<owner-gateway>"), _safe(owners[0][1], "<owner-profile>"))
                                    if len(owners) == 1 else ("<owner-gateway>", "<owner-profile>"))
         run_on = me or "<this-gateway>"
-        session = _safe(env.get("HERMES_SESSION_ID"), "<origin-session-id>")
+        session = _safe(_turn_session_id(env, explicit_env), "<origin-session-id>")
         # "custom" = a HERMES_HOME outside ~/.hermes: no profile name to pass; the CLI resolves its own.
         origin_profile = my_profile if my_profile != "custom" else ""
     if me and owner_gw == me and (not worker or run_on == me):

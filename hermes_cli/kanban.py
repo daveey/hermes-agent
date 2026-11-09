@@ -1698,6 +1698,9 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
         )
     print(f"Subscribed {args.platform}:{args.chat_id}" + (f":{args.thread_id}" if args.thread_id else "")
           + f" to {args.task_id}")
+    if args.platform == "tui":
+        from hermes_cli.kanban_notify_target import print_tui_target
+        print_tui_target(args.task_id, args.chat_id)
     return 0
 
 

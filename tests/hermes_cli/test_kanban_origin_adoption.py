@@ -320,3 +320,25 @@ def test_worker_with_origin_on_same_gateway_gets_no_self_addressed_delegate(boar
     assert "delegate" not in refused
     assert refused["next_step"] == f"hermes kanban --board default notify-subscribe {tid} --platform tui --chat-id s_here"
     assert "cross_session" in refused["error"]
+
+
+def test_chat_refusal_names_this_turns_chat_not_the_process_env(board, tmp_path, monkeypatch):
+    """[daveey] agent-884fdd96f8: a gateway serving several chats keeps whichever chat wrote os.environ last in
+    HERMES_SESSION_ID; the current turn's chat is the session ContextVar. The hint must bind the calling chat,
+    or the agent subscribes an unrelated chat to its card (hub 2026-11-03, chat 5fb607 got 370c8b's cards)."""
+    import contextvars
+    import gateway.session_context as sc
+    _conn, tid = board
+    _hub_state(tmp_path, monkeypatch, "hub", [("hub", f"default/default/{tid}")])
+    monkeypatch.setenv("HERMES_SESSION_ID", "s_other_chat")  # the chat that ran last in this process
+
+    def turn():
+        tokens = sc.set_session_vars(session_id="s_this_chat", session_key="s_this_chat", source="desktop")
+        try:
+            return _refuse(tid)
+        finally:
+            sc.clear_session_vars(tokens)
+
+    refused = contextvars.copy_context().run(turn)
+    assert refused["next_step"] == (f"hermes kanban --board default notify-subscribe {tid} "
+                                    "--platform tui --chat-id s_this_chat"), refused
