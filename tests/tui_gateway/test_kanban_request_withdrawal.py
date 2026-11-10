@@ -150,6 +150,34 @@ def test_dispatched_withdrawal_keeps_claim_until_worker_persists(tmp_path, monke
                 job()
 
 
+@pytest.mark.parametrize("kind,after,retained", [
+    ("request_withdrawn", True, True),
+    ("request_withdrawn", False, False),
+    ("comment", True, False),
+])
+def test_failed_drop_fences_only_pending_withdrawal(kind, after, retained):
+    with closing(kbc.connect()) as conn:
+        tid = kb.create_task(conn, title="Decision", assignee="worker")
+        ident = dict(task_id=tid, platform="tui", chat_id="failed-drop")
+        kbn.add_notify_sub(conn, **ident)
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, kind, {})
+        cursor = conn.execute("SELECT MAX(id) FROM task_events WHERE task_id=?", (tid,)).fetchone()[0]
+        assert kbn.remove_notify_sub(conn, preserve_withdrawal_after=cursor - int(after), **ident) is not retained
+        assert bool(kbn.list_notify_subs(conn, task_id=tid)) is retained
+
+
+def test_silent_tail_does_not_strand_archived_subscription():
+    with closing(kbc.connect()) as conn:
+        tid = kb.create_task(conn, title="Ordinary archive", assignee="worker")
+        kbn.add_notify_sub(conn, task_id=tid, platform="tui", chat_id="silent-tail")
+        kb.archive_task(conn, tid)
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "archive_worker_termination", {})
+        assert server._collect_kanban_notifications({"session_key": "silent-tail"}) == []
+        assert kbn.list_notify_subs(conn, task_id=tid) == []
+
+
 def test_request_withdrawal_is_deliverable_on_both_surfaces():
     from gateway import kanban_watchers_notifier as notifier
     ev = SimpleNamespace(kind="request_withdrawn", payload={})

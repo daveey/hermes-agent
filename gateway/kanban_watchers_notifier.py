@@ -606,10 +606,13 @@ class _KanbanNotification:
         has_withdrawal = any(ev.kind == "request_withdrawn" for ev in self.d["events"])
         if fails >= MAX_SEND_FAILURES and not has_withdrawal:
             logger.warning(drop_fmt, self.task_id, self.platform_str, fails)
-            await self.unsub()
+            await _to_thread_process_service(
+                self.runner._kanban_drop_failed, self.sub, self.d.get("old_cursor", 0), self.board_slug,
+            )
             self.clear_failures()
-        else:
-            await self.rewind()
+        # A withdrawal may have committed while an older batch was being sent.
+        # The transactional drop guard retains it; rewind that older claim.
+        await self.rewind()
 
     async def _wake_failed(self, fmt: str, exc: Exception) -> None:
         drop_fmt = "kanban notifier: dropping subscription %s on %s after %d consecutive wake failures"

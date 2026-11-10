@@ -385,13 +385,20 @@ def remove_notify_sub(
     platform: str,
     chat_id: str,
     thread_id: Optional[str] = None,
+    preserve_withdrawal_after: Optional[int] = None,
 ) -> bool:
     # Pure composition primitive: reconciliation validates receipt + row snapshot
     # and retires the subscription in one outer transaction.
     with _kb.write_txn(conn, allow_nested=True):
+        guard = ""
+        extra = ()
+        if preserve_withdrawal_after is not None:
+            guard = (" AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = ? "
+                     "AND e.kind = 'request_withdrawn' AND e.id > ?)")
+            extra = (task_id, int(preserve_withdrawal_after))
         cur = conn.execute(
-            "DELETE FROM kanban_notify_subs " + _SUB_KEY_WHERE,
-            _sub_key(task_id, platform, chat_id, thread_id),
+            "DELETE FROM kanban_notify_subs " + _SUB_KEY_WHERE + guard,
+            (*_sub_key(task_id, platform, chat_id, thread_id), *extra),
         )
     return cur.rowcount > 0
 
@@ -869,7 +876,8 @@ def ack_notify_claim(
         ).fetchone()
         if row is not None and row["inflight_from"] is None and row["status"] == "archived":
             conn.execute("DELETE FROM kanban_notify_subs " + _SUB_KEY_WHERE
-                         + " AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = ? AND e.id > ?)",
+                         + " AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = ? "
+                         "AND e.kind = 'request_withdrawn' AND e.id > ?)",
                          (*key, task_id, int(upto)))
     return cur.rowcount > 0
 
