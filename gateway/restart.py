@@ -39,6 +39,9 @@ EXTERNAL_GATEWAY_SUPERVISOR_ENV = "HERMES_GATEWAY_EXTERNAL_SUPERVISOR"
 # Forwarded by the stderr-timestamp launchd wrapper (hermes_cli/stderr_timestamp.py) to the gateway
 # grandchild, which sees ``XPC_SERVICE_NAME=0``. Read only via :func:`launchd_job_label`.
 LAUNCHD_LABEL_ENV = "HERMES_LAUNCHD_LABEL"
+# [daveey] Live ExitTimeOut the unsandboxed hermes-gateway-launcher read with ``launchctl print`` for this job
+# (gateway-64b702b67e): a gateway under sandbox-exec cannot exec launchctl itself.
+LAUNCHD_EXIT_TIMEOUT_ENV = "HERMES_LAUNCHD_EXIT_TIMEOUT_S"
 # launchd's app-coalition service names (``application.<bundle>.<n>``) leak into IDE integrated terminals;
 # they never name a gateway job.
 LAUNCHD_APP_COALITION_PREFIX = "application."
@@ -143,10 +146,53 @@ def read_launchd_exit_timeout_s(
     is not launchd-owned (non-darwin, or no ``ai.hermes`` job label — see :func:`launchd_job_label`), ``launchctl`` is missing
     or fails, or the print output carries no ``exit timeout`` line. Callers
     must treat ``None`` as fail-open: the configured drain stands unchanged.
+    [daveey] When the probe fails for a known job, the launcher's ``HERMES_LAUNCHD_EXIT_TIMEOUT_S`` is used
+    (see :func:`read_launchd_exit_timeout_with_source`).
+    """
+    return read_launchd_exit_timeout_with_source(label, environ=environ, uid=uid, run=run, platform=platform)[0]
+
+
+def launcher_exit_timeout_s(environ: Mapping[str, str] | None = None) -> float | None:
+    """[daveey] ``HERMES_LAUNCHD_EXIT_TIMEOUT_S`` as a positive integer number of seconds, else ``None``."""
+    env = os.environ if environ is None else environ
+    raw = str(env.get(LAUNCHD_EXIT_TIMEOUT_ENV, "") or "").strip()
+    if not raw.isdigit() or int(raw) <= 0:
+        return None
+    return float(int(raw))
+
+
+def read_launchd_exit_timeout_with_source(
+    label: str | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    uid: int | None = None,
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    platform: str = sys.platform,
+) -> tuple[float | None, str | None]:
+    """``(exit_timeout_s, source)`` with ``source`` ``"launchctl"``, ``"launcher"`` or ``None``.
+
+    [daveey] A gateway under ``sandbox-exec`` is denied ``launchctl`` (deliberate escape guard on the mini's
+    ``com.daveey.babybear.hermes-*`` jobs), so its own probe always fails. The unsandboxed
+    ``hermes-gateway-launcher`` probes once and exports ``HERMES_LAUNCHD_EXIT_TIMEOUT_S``; that value is used
+    only when this process's probe fails or finds no ``exit timeout`` line AND a job label is known
+    (gateway-64b702b67e). A working live probe always wins.
     """
     label = label or launchd_service_label(environ, platform=platform)
     if not label:
-        return None
+        return None, None
+    live = _probe_launchd_exit_timeout(label, uid=uid, run=run)
+    if live is not None:
+        return live, "launchctl"
+    fallback = launcher_exit_timeout_s(environ)
+    return (fallback, "launcher") if fallback is not None else (None, None)
+
+
+def _probe_launchd_exit_timeout(
+    label: str,
+    *,
+    uid: int | None,
+    run: Callable[..., subprocess.CompletedProcess[str]],
+) -> float | None:
     if uid is None:
         getuid = getattr(os, "getuid", None)  # absent on Windows; label is None there anyway
         if getuid is None:

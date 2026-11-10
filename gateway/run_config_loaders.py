@@ -23,7 +23,7 @@ from gateway.restart import (
     DEFAULT_GATEWAY_SIGNAL_INTERRUPT_GRACE_TIMEOUT, EXTERNAL_GATEWAY_SUPERVISOR_ENV,
     LAUNCHD_GUI_EXIT_TIMEOUT_CLAMP_S, parse_cron_drain_timeout,
     parse_restart_after_turn_timeout, parse_restart_drain_timeout,
-    launchd_service_label, parse_signal_interrupt_grace_timeout, read_launchd_exit_timeout_s,
+    launchd_service_label, parse_signal_interrupt_grace_timeout, read_launchd_exit_timeout_with_source,
     resolve_launchd_capped_drain,
 )
 from gateway.session import SessionSource
@@ -468,22 +468,25 @@ class GatewayConfigLoadersMixin:
         """
         platform = sys.platform if platform is None else platform  # data, so both arms test on any host
         label = launchd_service_label(platform=platform)
-        # read_launchd_exit_timeout_s is already fail-open (returns None on any probe failure).
-        exit_timeout = read_launchd_exit_timeout_s(label, platform=platform) if label else None
+        # Fail-open (None on any probe failure). [daveey] A sandboxed gateway cannot exec launchctl; its
+        # unsandboxed launcher's HERMES_LAUNCHD_EXIT_TIMEOUT_S stands in then (source "launcher").
+        exit_timeout, source = (read_launchd_exit_timeout_with_source(label, platform=platform)
+                                if label else (None, None))
         if exit_timeout is None:
             return GatewayConfigLoadersMixin._assumed_launchd_exit_timeout(label, platform)
+        via = " (from launcher)" if source == "launcher" else ""
         effective = resolve_launchd_capped_drain(drain_timeout, exit_timeout)
         if effective < drain_timeout:
             logger.warning(
-                "restart_drain_timeout=%.0fs exceeds the live launchd exit timeout (%.0fs) for %s; "
+                "restart_drain_timeout=%.0fs exceeds the live launchd exit timeout (%.0fs) for %s%s; "
                 "signal-driven stops will drain at most %.0fs so teardown finishes before launchd "
                 "SIGKILLs (launchd clamps ExitTimeOut in the per-user domain).",
-                drain_timeout, exit_timeout, label, effective,
+                drain_timeout, exit_timeout, label, via, effective,
             )
         else:
             logger.info(
-                "launchd exit timeout for %s is %.0fs (drain %.0fs fits)",
-                label, exit_timeout, drain_timeout,
+                "launchd exit timeout for %s is %.0fs%s (drain %.0fs fits)",
+                label, exit_timeout, via, drain_timeout,
             )
         return exit_timeout
 
