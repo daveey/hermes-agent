@@ -31,10 +31,15 @@ reuse_sink = threading.local()
 _tasks_memo: dict[tuple, list[dict[str, Any]]] = {}  # last good per-board task list, by (board, ids, statuses)
 _tasks_lock = threading.Lock()
 TASKS_MEMO_MAX = 512
-# A busy board with no last good list for the query keeps being read this long (well inside the Desktop's 15 s
-# request timeout) before the request fails; the pause only bounds an error that returns without waiting.
+# One request's shared budget for re-reading busy boards that have no last good list for the query (well inside the
+# Desktop's 15 s request timeout); the pause only bounds an error that returns without waiting.
 FIRST_READ_BUSY_BUDGET_S = 3.0
 FIRST_READ_RETRY_PAUSE_S = 0.05
+
+
+def request_deadline() -> float:
+    """The monotonic deadline one ``session_tasks`` request shares across every board it reads."""
+    return time.monotonic() + FIRST_READ_BUSY_BUDGET_S
 
 
 def begin_recompute() -> None:
@@ -65,15 +70,17 @@ def board_reads(path: Path, key: tuple, hit: tuple | None, parked: bool, stalled
 
 
 def session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...],
-                  read: Callable[[Path, list[str], tuple[str, ...]], list[dict[str, Any]]]) -> list[dict[str, Any]]:
+                  read: Callable[[Path, list[str], tuple[str, ...]], list[dict[str, Any]]], *,
+                  deadline: float | None = None) -> list[dict[str, Any]]:
     """``read(path, ids, statuses)``, or on a busy board its last good list for the same query, every row ``stale``.
 
     A busy board with no last list for this query (a chat opened for the first time since the backend started) is
-    read again until ``FIRST_READ_BUSY_BUDGET_S`` runs out before it raises: one read only waits 500 ms for the
-    board, and a lifecycle hold a little longer than that made ``/api/session-kanban-tasks`` 500 and the Desktop
-    panel show "Task status unavailable" for every newly opened chat."""
+    read again until the caller's ``deadline`` (``time.monotonic()``) passes, then raises: one read only waits 500 ms
+    for the board, and a lifecycle hold a little longer than that made ``/api/session-kanban-tasks`` 500 and the
+    Desktop panel show "Task status unavailable" for every newly opened chat. The deadline belongs to the whole
+    request (``request_deadline``), so several busy boards share one budget. ``None`` never retries: callers holding
+    a lock (the links projection under ``_links_lock``) must fail fast."""
     key = (str(path), tuple(ids), tuple(statuses))
-    deadline = None
     while True:
         try:
             tasks = read(path, ids, statuses)
@@ -87,8 +94,7 @@ def session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...],
                 _log.warning("kanban board %s busy; reused last counts", path)
                 return [{**t, "stale": True} for t in last]
             now = time.monotonic()
-            deadline = now + FIRST_READ_BUSY_BUDGET_S if deadline is None else deadline
-            if now >= deadline:
+            if deadline is None or now >= deadline:
                 raise
             time.sleep(min(FIRST_READ_RETRY_PAUSE_S, deadline - now))  # an instant busy error must not spin
     with _tasks_lock:
