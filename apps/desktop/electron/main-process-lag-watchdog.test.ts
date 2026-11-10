@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+
 import { describe, expect, it } from 'vitest'
 
 import { createMainProcessLagWatchdog } from './main-process-lag-watchdog'
@@ -36,6 +38,43 @@ function harness({ now = 0, cadenceMs = 1_000, thresholdMs = 2_000 } = {}) {
     cleared: () => cleared
   }
 }
+
+// Importing main.ts would boot Electron. Read its actual wiring rather than
+// duplicating the production settings in the harness and missing threshold drift.
+const mainSource = fs.readFileSync(new URL('./main.ts', import.meta.url), 'utf8')
+const wiring = mainSource.match(/createMainProcessLagWatchdog\(\{\s*cadenceMs: ([\d_]+),\s*thresholdMs: ([\d_]+),/)
+
+function productionHarness() {
+  expect(wiring).not.toBeNull()
+
+  return harness({
+    cadenceMs: Number(wiring![1].replaceAll('_', '')),
+    thresholdMs: Number(wiring![2].replaceAll('_', ''))
+  })
+}
+
+describe('main-process watchdog production threshold', () => {
+  it.each([1_000, 1_001, 1_999, 2_000])('records %ims of delay, including the one-second blind spot', lag => {
+    const subject = productionHarness()
+    const cadence = Number(wiring![1].replaceAll('_', ''))
+
+    subject.watchdog.start()
+    subject.tick(cadence + lag)
+    expect(subject.logs).toHaveLength(1)
+    expect(subject.logs[0]).toContain(`lagged ${lag}ms`)
+    subject.tick(2 * cadence + lag)
+    expect(subject.logs).toHaveLength(1)
+  })
+
+  it('keeps sub-second jitter quiet', () => {
+    const subject = productionHarness()
+    const cadence = Number(wiring![1].replaceAll('_', ''))
+
+    subject.watchdog.start()
+    subject.tick(cadence + 999)
+    expect(subject.logs).toEqual([])
+  })
+})
 
 describe('createMainProcessLagWatchdog', () => {
   it('does not log while ticks arrive on their expected cadence', () => {
