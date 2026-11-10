@@ -43,7 +43,7 @@ def without_carried_inputs(text: str, cfg: dict) -> str:
         path = get_hermes_home() / "kanban" / "carried-evidence.json"
         if path.is_symlink() or path.stat().st_size > MAX_BYTES:
             return text
-        receipt = json.loads(path.read_text(encoding="utf-8"))
+        receipt = json.loads(path.read_text(encoding="utf-8-sig"))
         if not isinstance(receipt, dict) or receipt.get("version") != 1:
             return text
         at = receipt.get("verified_at")
