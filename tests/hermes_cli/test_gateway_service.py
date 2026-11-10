@@ -429,18 +429,17 @@ class TestWslInteropPaths:
 class TestGatewayStopCleanup:
     @pytest.mark.platforms("linux")
     def test_stop_only_kills_current_profile_by_default(self, tmp_path, monkeypatch):
-        """Without --all, stop uses systemd (if available) and does NOT call
-        the global kill_gateway_processes().
-
-        Linux-gated: the routing under test is the systemd arm, and it is only
-        reached when the host really isn't macOS/Windows (the old
-        ``is_macos → False`` stub is gone).
-        """
+        """On Linux, stop without --all uses systemd, not global process killing."""
         unit_path = tmp_path / "hermes-gateway.service"
         unit_path.write_text("unit\n", encoding="utf-8")
 
         monkeypatch.setattr(gateway_cli, "supports_systemd_services", lambda: True)
         monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda system=False: unit_path)
+
+        # This tests stop routing, not host process discovery. A real scan can
+        # resolve another running gateway's home outside the isolated HERMES_HOME.
+        # Model a current-profile gateway without probing or signalling a real PID.
+        monkeypatch.setattr(gateway_cli, "find_gateway_pids", lambda: [4242])
 
         service_calls = []
         kill_calls = []

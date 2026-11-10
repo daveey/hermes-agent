@@ -14,6 +14,9 @@ from typing import Any, Callable, Dict, Optional
 from agent.message_metadata import append_message
 from agent.reasoning_promotion import answer_in_reasoning_capability
 from agent.repetition_guard import STOP_PATH_MIN_CHARS, is_runaway_repetition
+from agent.stall_tail_detectors import (
+    promoted_reasoning_announces_action, trailing_colon_handoff, trailing_continue_intent,
+)
 from agent.stream_delivery import publish_held_final_row
 from agent.turn_failure_copy import stamp_failure
 from agent.turn_empty_response import (
@@ -214,8 +217,7 @@ def finish_text_response(
     # delivery channel (gateway status message / CLI print). NEVER appended to messages/api_messages:
     # conversation context and the cached prompt prefix stay byte-identical.
     from agent.agent_runtime_helpers import (
-        intent_ack_continuation_mode, looks_like_degenerate_final, promoted_reasoning_announces_action,
-        tool_results_this_turn, trailing_continue_intent,
+        intent_ack_continuation_mode, looks_like_degenerate_final, tool_results_this_turn,
     )
 
     _ack_mode = intent_ack_continuation_mode(agent)
@@ -226,19 +228,20 @@ def finish_text_response(
     # stalled model, and returning it as the answer aborts the tool loop while reporting
     # "complete" (#111761). Same cap, so a model that never acts still ends after 2 nudges.
     _stall_text = agent._strip_think_blocks(final_response or "")
+    _tool_rows = tool_results_this_turn(messages)
     _stall_continue_intent = (
         bool(getattr(agent, "_stall_guards", True))
         and agent.valid_tool_names
         and codex_ack_continuations < 2
         and (
-            trailing_continue_intent(_stall_text)
+            # A short prose reply ending on ":" with zero tool calls this turn is a stall too (agent-b6540f8eef).
+            trailing_continue_intent(_stall_text) or (_tool_rows == 0 and trailing_colon_handoff(_stall_text))
             or (bool(_promoted) and promoted_reasoning_announces_action(_stall_text))
         )
     )
     # Degenerate-final guard (#103483): the turn did real tool work and then stopped on a
     # fragment. Same scope knob and the SAME bounded counter as the ack continuation; the nudge
     # row itself closes the tool-work window, so a second fragment ends the turn as the answer.
-    _tool_rows = tool_results_this_turn(messages)
     _degenerate_final = (
         bool(getattr(agent, "_stall_guards", True))
         and _ack_mode != "off"

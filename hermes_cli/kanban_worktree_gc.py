@@ -321,7 +321,57 @@ def _sweep_repo(repo_root: str) -> None:
         log.warning("Orphan task worktree preserved and tombstoned: %s", path)
     for board in boards:
         # mode=rw refuses to fabricate a missing board after discovery.
-        with contextlib.closing(kanban_lockguard.connect(board.as_uri() + "?mode=rw", uri=True, timeout=1,
-                                               isolation_level=None)) as conn:
-            conn.row_factory = sqlite3.Row
-            gc_task_worktrees(conn, older_than_days=days, repo_root=repo_root)
+        try:
+            with contextlib.closing(kanban_lockguard.connect(board.as_uri() + "?mode=rw", uri=True, timeout=1,
+                                                   isolation_level=None)) as conn:
+                conn.row_factory = sqlite3.Row
+                gc_task_worktrees(conn, older_than_days=days, repo_root=repo_root)
+        except sqlite3.OperationalError as exc:
+            from hermes_cli.kanban_db_connect import _is_busy_error
+            if not _is_busy_error(exc):
+                raise _BoardError(board) from exc
+            # Another writer held the lock past our short (TUI-foreground) wait:
+            # normal contention, so skip this board and keep cleaning the rest.
+            log.info("worktree GC skipped busy board %s; retrying next sweep", board)
+            _note_busy_skip(board)
+        else:
+            _note_busy_skip(board, cleared=True)
+
+
+BUSY_ALERT_AFTER = 3
+
+
+def _note_busy_skip(board: Path, *, cleared: bool = False) -> None:
+    """Count back-to-back busy skips per board; at BUSY_ALERT_AFTER open the GC card. [daveey]
+
+    A board that is busy on every sweep would otherwise never be cleaned, silently.
+    """
+    from hermes_cli import kanban_db as kb
+    state_file = kb.kanban_home() / "gc-busy-skips.json"
+    try:
+        state = json.loads(state_file.read_text(encoding="utf-8-sig"))
+        if not isinstance(state, dict):
+            state = {}
+    except (OSError, ValueError):
+        state = {}
+    key = str(board)
+    if cleared:
+        if key not in state:
+            return
+        state.pop(key)
+        count = 0
+    else:
+        prior = state.get(key)
+        count = (prior if isinstance(prior, int) and prior > 0 else 0) + 1
+        state[key] = count
+    try:
+        tmp = state_file.with_name(f".{state_file.name}.{os.getpid()}")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        tmp.replace(state_file)
+    except OSError:
+        log.info("worktree GC could not record busy-skip count in %s", state_file, exc_info=True)
+    if count >= BUSY_ALERT_AFTER:
+        from hermes_cli import kanban_gc_alert
+        kanban_gc_alert.report(None, key, f"worktree GC skipped this board {count} sweeps in a row "
+                                          "because it stayed busy (database is locked); its finished "
+                                          "worktrees are not being cleaned")

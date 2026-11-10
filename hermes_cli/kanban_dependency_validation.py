@@ -39,3 +39,13 @@ def validate_dependency_block(conn, task_id, kind):
     missing = [parent for parent, state in parent_states(conn, task_id) if state is None]
     if missing:
         raise missing_dependency_error(missing)
+
+
+def check_link_parent(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
+    """Refuse an edge that would cycle or hang under a never-finishing standing card. [daveey]"""
+    if would_cycle(conn, parent_id, child_id):
+        raise ValueError(f"linking {parent_id} -> {child_id} would create a cycle")
+    from hermes_cli.kanban_standing_parent import standing_parent_error, standing_reason
+    standing = standing_reason(conn, parent_id)
+    if standing:
+        raise standing_parent_error(parent_id, child_id, standing)

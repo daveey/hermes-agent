@@ -1228,7 +1228,7 @@ def create_task(
     requires: Optional[list[str]] = None,
     lint_blocked: bool = True, runs_on: Optional[Iterable[str]] = None, require_declaration: bool = False,
     placement_policy: Optional[str] = None,
-    insert_guard: Optional[Callable[[sqlite3.Connection], None]] = None,
+    insert_guard: Optional[Callable[[sqlite3.Connection], None]] = None, placement_audit: Optional[dict] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1396,7 +1396,7 @@ def create_task(
                     workspace_path=workspace_path, branch_name=branch_name, project_id=project_id,
                     skills=skills_list, goal_mode=goal_mode, model_override=model_override,
                     provider_override=provider_override, created_by=created_by, requires=required,
-                    human_request=human_request,
+                    human_request=human_request, placement_audit=placement_audit,
                 )
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 initialize_ownership(conn, task_id, creator_task_id, parents, now, chat_origin)
@@ -1587,7 +1587,7 @@ def link_tasks(
         raise ValueError("a task cannot depend on itself")
     gated = False
     with write_txn(conn):
-        from hermes_cli.kanban_dependency_validation import missing_dependency_error, would_cycle
+        from hermes_cli.kanban_dependency_validation import check_link_parent, missing_dependency_error
         missing = _missing_task_ids(conn, [parent_id, child_id])
         if missing:
             raise missing_dependency_error(missing)
@@ -1599,8 +1599,7 @@ def link_tasks(
             or child["current_run_id"] != expected_child_run_id
         ):
             raise ValueError(f"cannot link {parent_id} -> {child_id}: child is already running")
-        if would_cycle(conn, parent_id, child_id):
-            raise ValueError(f"linking {parent_id} -> {child_id} would create a cycle")
+        check_link_parent(conn, parent_id, child_id)  # cycles; standing parents [daveey]
         _link(conn, parent_id, child_id)
         # If child was ready but parent is not yet terminal, demote child to todo
         # (archived counts as terminal, matching _parents_satisfied/recompute_ready).

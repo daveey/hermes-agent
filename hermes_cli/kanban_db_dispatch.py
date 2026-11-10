@@ -175,6 +175,7 @@ class DispatchResult:
     promoted: int = 0
     reconciled_orphans: list[str] = field(default_factory=list)
     """``running`` cards requeued by :func:`reconcile_orphaned_running` (broken claim bookkeeping, dead/gone worker)."""
+    released_leftover_claims: list[str] = field(default_factory=list)  # dead local claims cleared [daveey]
     reaped_terminal_workers: list[str] = field(default_factory=list)
     """Task ids whose worker outlived its closed run and was terminated by :func:`reap_terminal_workers`."""
     stopped_run_scopes: list[str] = field(default_factory=list)  # ended runs' scopes stopped (kanban_worker_scope) [daveey]
@@ -944,24 +945,9 @@ def detect_stale_running(
     return reclaimed
 
 
-# A ``claimed`` event younger than this means a claim may still be publishing, so the orphan sweep leaves
-# the card alone. One claim publication (``claim_task``/``claim_review_task``) is: the Board lease grant
-# RPC (``kanban_sync_client.HTTP_TIMEOUT_S`` = 30 s), the claim txn's ``BEGIN IMMEDIATE`` (busy timeout,
-# ``DEFAULT_BUSY_TIMEOUT_MS`` = 120 s), then, when the CAS was refused, the release RPC of the unused
-# lease (30 s): 180 s worst case. The Board's grant row can reach the local DB anywhere in that window
-# and leaves the card ``running`` with no ``claim_lock``. A real orphan waits at most this long more.
-ORPHAN_CLAIM_GRACE_SECONDS = 180
-
-
-def _claim_in_flight(conn: sqlite3.Connection, task_id: str, now: int) -> bool:
-    """A claim on ``task_id`` may still be publishing: claimed within the grace, or the Board
-    lease mirror says this gateway holds an unexpired lease on it."""
-    if conn.execute(
-        "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'claimed' AND created_at >= ? LIMIT 1",
-        (task_id, now - ORPHAN_CLAIM_GRACE_SECONDS),
-    ).fetchone():
-        return True
-    return _kb._sync.held_by_us_live(conn, task_id, now)
+from hermes_cli.kanban_db_dispatch_claims import (  # moved out; re-exported [daveey]
+    ORPHAN_CLAIM_GRACE_SECONDS, _claim_in_flight, release_leftover_local_claims,
+)
 
 
 def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
@@ -2251,6 +2237,7 @@ def _run_reclaim_phase(
             result.reconciled_orphans = reconcile_orphaned_running(conn)
     if reconcile_orphans:
         close_dangling_runs(conn)  # ended/non-running tasks can still retain a running run
+        result.released_leftover_claims = release_leftover_local_claims(conn)  # not gated: not running [daveey]
     if has_running:
         result.stale = detect_stale_running(conn, stale_timeout_seconds=stale_timeout_seconds)
         result.crashed = detect_crashed_workers(conn, board=board)

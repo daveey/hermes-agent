@@ -27,6 +27,9 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    # No external writers here; real scans can fail closed. See test_kanban_workspace_jobs.
+    from hermes_cli import kanban_workspace_jobs
+    monkeypatch.setattr(kanban_workspace_jobs.psutil, "process_iter", lambda: iter(()))
     kb.init_db()
     return home
 
@@ -44,11 +47,6 @@ def _init_git_repo(repo: Path) -> None:
 # ---------------------------------------------------------------------------
 # Schema / init
 # ---------------------------------------------------------------------------
-
-
-
-
-
 
 
 @pytest.mark.platforms("windows")

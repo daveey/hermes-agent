@@ -15,7 +15,11 @@ Two guards, both notice/re-prompt-only:
 These assert behavior contracts, not message snapshots.
 """
 
-from agent.agent_runtime_helpers import trailing_continue_intent
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from agent.stall_tail_detectors import trailing_continue_intent
 from agent.tool_guardrails import (
     IDENTICAL_RESULT_STUB_MIN_CHARS,
     STALL_GUARD_IDENTICAL_CALL_THRESHOLD,
@@ -485,3 +489,107 @@ def test_promoted_reasoning_detector_ignores_thai_stated_answers():
         "พรุ่งนี้จะฝนตกทั่วประเทศ",  # "tomorrow it will rain" — not a first-person action verb
     ):
         assert not promoted_reasoning_announces_action(text), text
+
+
+# ── colon hand-off stall: a short reply ENDING on ":" with zero tool calls ──────────────────
+# Verbatim tail from defect agent-b6540f8eef: the reply announced its next step and stopped, and
+# the narrow "let me now" detector above returned False for it.
+
+INCIDENT_TAIL = "Verifying this one the same way: \u2026 Reading the card first, together with the PR:"
+
+
+def test_colon_handoff_detector_catches_announced_next_step():
+    from agent.stall_tail_detectors import trailing_colon_handoff
+
+    for text in (INCIDENT_TAIL, "Checking the PR now:", "Let me check the card first:  \n"):
+        assert not trailing_continue_intent(text), text  # the old detector misses every one
+        assert trailing_colon_handoff(text), text
+
+
+def test_colon_handoff_detector_ignores_answers_code_and_long_replies():
+    from agent.stall_tail_detectors import trailing_colon_handoff
+
+    for text in (
+        "Here's the answer: 42.",
+        "Status: green",
+        "",
+        None,
+        "```yaml\nkey:",  # unclosed fence: the colon is code, not prose
+        "Use this:\n```python\nd = {\n    'a':",
+        ("Here is the full analysis. " * 20) + "Next steps:",
+    ):
+        assert not trailing_colon_handoff(text), text
+
+
+@pytest.fixture()
+def colon_agent():
+    from run_agent import AIAgent
+    with (
+        patch("model_tools.get_tool_definitions", return_value=[]),
+        patch("model_tools.check_toolset_requirements", return_value={}),
+        patch("agent.process_bootstrap.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890", base_url="http://127.0.0.1:8000/v1", model="test/model",
+            provider="vllm", quiet_mode=True, skip_context_files=True, skip_memory=True,
+        )
+    agent.client = MagicMock()
+    agent._cached_system_prompt = "You are helpful."
+    agent._use_prompt_caching = False
+    agent.compression_enabled = False
+    agent.save_trajectories = False
+    agent.valid_tool_names = {"terminal", "read_file"}
+    agent._stall_guards = True
+    return agent
+
+
+def _run_colon(agent, responses):
+    agent.client.chat.completions.create.side_effect = list(responses)
+    with (
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+        patch("model_tools.handle_function_call", return_value="ok"),
+    ):
+        return agent.run_conversation("verify this card")
+
+
+@pytest.mark.parametrize("tail", [INCIDENT_TAIL, "Checking the PR now:"])
+def test_colon_tail_with_zero_tool_calls_reprompts(colon_agent, tail):
+    from tests.agent.test_run_agent import _mock_response
+
+    result = _run_colon(colon_agent, [
+        _mock_response(content=tail, finish_reason="stop"),
+        _mock_response(content="Card verified; PR merged.", finish_reason="stop"),
+    ])
+    assert result["api_calls"] == 2
+    assert result["final_response"] == "Card verified; PR merged."
+
+
+def test_colon_tail_stall_is_bounded_by_the_continuation_cap(colon_agent):
+    from tests.agent.test_run_agent import _mock_response
+
+    result = _run_colon(colon_agent, [_mock_response(content=INCIDENT_TAIL, finish_reason="stop") for _ in range(3)]
+                        + [_mock_response(content="NEVER REACHED", finish_reason="stop")])
+    assert result["api_calls"] == 3
+    assert result["final_response"] == INCIDENT_TAIL
+
+
+def test_colon_answer_and_colon_after_tool_calls_do_not_reprompt(colon_agent):
+    from tests.agent.test_run_agent import _mock_response, _mock_tool_call
+
+    result = _run_colon(colon_agent, [
+        _mock_response(content="Here's the answer: 42.", finish_reason="stop"),
+        _mock_response(content="NEVER REACHED", finish_reason="stop"),
+    ])
+    assert result["api_calls"] == 1
+
+    colon_agent.client.chat.completions.create.reset_mock()
+    tc = _mock_tool_call(name="terminal", arguments='{"command": "true"}', call_id="c1")
+    result = _run_colon(colon_agent, [
+        _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc]),
+        _mock_response(content="Results are below:", finish_reason="stop"),
+        _mock_response(content="NEVER REACHED", finish_reason="stop"),
+    ])
+    assert result["api_calls"] == 2
+    assert result["final_response"] == "Results are below:"

@@ -46,6 +46,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Iterable, Protocol
@@ -504,8 +505,16 @@ def _gh(url: str, token: str) -> Any:
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "hermes-ci-flaky-cards"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read())
+    # Only reads are safe to replay after an ambiguous transport failure.
+    attempts = 4 if req.get_method() == "GET" else 1
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read())
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            if (isinstance(exc, urllib.error.HTTPError) and exc.code < 500) or attempt == attempts - 1:
+                raise
+            time.sleep(2 ** attempt)
 
 
 def _completed_runs(api: str, token: str, *, since: float, per_page: int = 100) -> list[dict[str, Any]]:

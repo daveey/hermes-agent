@@ -11,9 +11,11 @@ remote-tracking ref. Any doubt preserves the worktree.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
+import psutil
 import pytest
 
 from hermes_cli import kanban_db as kb
@@ -43,6 +45,9 @@ def _git(*args: str, cwd: str | None = None) -> str:
 
 @pytest.fixture
 def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # Filesystem-only lifecycle fixtures own no external jobs. Keep discovery
+    # synthetic as well as HOME; live-writer coverage supplies its own processes.
+    monkeypatch.setattr(psutil, "process_iter", lambda *args, **kwargs: iter(()))
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -610,3 +615,87 @@ def test_gc_abort_card_comments_once_then_reopens_after_done(kanban_home):
     again = kanban_gc_alert.report(None, "/x/kanban.db", "boom")
     assert again != first  # a recurrence after the fix is a new, visible card
     assert [c["id"] for c in _gc_abort_cards(kanban_home) if c["status"] != "done"] == [again]
+
+
+def _busy_board_and_other(kanban_home, repo, monkeypatch):
+    """Default board write-locked by another connection; a named board holds an aged done tree."""
+    import sqlite3
+    from hermes_cli import kanban_worktree_gc as gc
+    monkeypatch.setattr(gc, "retention_days", lambda: 7)
+    monkeypatch.setattr(kbc, "_BUSY_MAX_RETRIES", 0)
+    with kbc.connect_closing() as conn:
+        busy_tid, busy_wt = _worktree_task(conn, repo, "busy-board tree")
+        _age_task(conn, busy_tid)
+    other_db = kanban_home / "kanban" / "boards" / "other" / "kanban.db"
+    other_db.parent.mkdir(parents=True)
+    kb.init_db(other_db)
+    with kbc.connect_closing(other_db) as conn:
+        other_tid, other_wt = _worktree_task(conn, repo, "other-board tree")
+        _age_task(conn, other_tid)
+    holder = sqlite3.connect(str(kanban_home / "kanban.db"), timeout=0, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    return gc, holder, busy_wt, other_wt
+
+
+def test_startup_sweep_skips_a_busy_board_and_cleans_the_rest(kanban_home, repo, monkeypatch, caplog):
+    import logging
+    gc, holder, busy_wt, other_wt = _busy_board_and_other(kanban_home, repo, monkeypatch)
+    try:
+        with caplog.at_level(logging.INFO, logger=gc.log.name):
+            gc.sweep_repo(str(repo))
+    finally:
+        holder.rollback()
+        holder.close()
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], caplog.text
+    assert "skipped busy board" in caplog.text
+    assert busy_wt.exists()  # the locked board is left alone this pass
+    assert not other_wt.exists()  # the other board is still cleaned
+    gc.sweep_repo(str(repo))  # lock released: next pass cleans it and resets the streak
+    assert not busy_wt.exists()
+    assert json.loads((kanban_home / "gc-busy-skips.json").read_text()) == {}
+
+
+def test_startup_sweep_alerts_once_after_three_busy_skips(kanban_home, repo, monkeypatch):
+    from hermes_cli import kanban_gc_alert
+    calls = []
+    monkeypatch.setattr(kanban_gc_alert, "report", lambda conn, db, detail: calls.append((db, detail)))
+    gc, holder, busy_wt, _other = _busy_board_and_other(kanban_home, repo, monkeypatch)
+    (kanban_home / "gc-busy-skips.json").write_text("[1, 2]")  # unreadable shape: restart the count
+    try:
+        for _ in range(2):
+            gc.sweep_repo(str(repo))
+        assert calls == []
+        gc.sweep_repo(str(repo))
+    finally:
+        holder.rollback()
+        holder.close()
+    assert len(calls) == 1
+    assert calls[0][0] == str((kanban_home / "kanban.db").resolve())
+    assert "3" in calls[0][1] and "busy" in calls[0][1]
+    assert busy_wt.exists()
+
+
+def test_startup_sweep_non_busy_mutation_error_still_opens_the_abort_card(kanban_home, repo, monkeypatch):
+    import sqlite3
+    from hermes_cli import kanban_gc_alert
+    from hermes_cli import kanban_worktree_gc as gc
+    monkeypatch.setattr(gc, "retention_days", lambda: 7)
+    calls = []
+    monkeypatch.setattr(kanban_gc_alert, "report", lambda conn, db, detail: calls.append((db, detail)))
+    def broken(conn, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+    monkeypatch.setattr(gc, "gc_task_worktrees", broken)
+    gc.sweep_repo(str(repo))
+    assert len(calls) == 1 and "disk I/O error" in calls[0][1]
+    assert not (kanban_home / "gc-busy-skips.json").exists()
+
+
+def test_startup_sweep_clean_pass_writes_no_busy_state(kanban_home, repo, monkeypatch):
+    from hermes_cli import kanban_worktree_gc as gc
+    monkeypatch.setattr(gc, "retention_days", lambda: 7)
+    (kanban_home / "gc-busy-skips.json").write_text("[1, 2]")  # unreadable shape: treated as empty
+    gc.sweep_repo(str(repo))
+    assert (kanban_home / "gc-busy-skips.json").read_text() == "[1, 2]"
+    (kanban_home / "gc-busy-skips.json").unlink()
+    gc.sweep_repo(str(repo))
+    assert not (kanban_home / "gc-busy-skips.json").exists()
