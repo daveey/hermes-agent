@@ -8,7 +8,8 @@ unloaded sweeper's loop therefore looks, in every profile store, for chats whose
 
 - a "blocked" notice whose card has moved on since (answered, rescheduled, done, archived) never wakes: it is
   stamped ``closeout.state = "superseded"`` and the chat's outcome is refreshed;
-- a notice about a card blocked on a human never wakes: the chat's outcome is refreshed (it reads ``decision``);
+- a notice about a card blocked on a human never wakes: its owner's outcome reads ``decision``; an incidental
+  recipient with no owning obligation preserves its preceding turn's outcome through an informational marker;
 - otherwise the notice row is claimed (``display_metadata.closeout``, compare-and-swap on the row, so exactly one
   backend acts on it) and ONE close-out turn is started with ``server._wake_session_turn``; the claim records the
   verdict;

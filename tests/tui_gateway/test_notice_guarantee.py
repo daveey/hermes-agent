@@ -141,6 +141,8 @@ def test_touch_only_human_notice_preserves_previous_turn_outcome(db, prior):
     out, calls = _run(db)
 
     assert calls == [] and [o["result"] for o in out] == ["refreshed:human"]
+    stored = so.get_outcome(CHAT, db=db)
+    assert (stored["kind"], stored.get("reason")) == (before["kind"], before.get("reason"))
     after = so.refresh_outcome(CHAT, "manual", db=db)
     assert (after["kind"], after.get("reason")) == (before["kind"], before.get("reason"))
     assert db._read_one("SELECT MAX(id) FROM messages WHERE session_id = ?", (CHAT,))[0] == row
