@@ -22,7 +22,8 @@ from hermes_cli.config import cfg_get, load_config
 from hermes_cli.kanban_capabilities import check_tool_create, declaration_required
 from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc
 from tools.kanban_tools_placement import (_local_placement, _machine_placement, _marker_placement_fields, _persisted_session_id,
-                                          _create_session_id, _placement_origin, _placement_refused, _runs_where)
+                                          _create_session_id, _placement_origin, _placement_refused, _runs_where,
+                                          _effective_board_args, _origin_enrollment)
 from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_park_args import (_blocker_id_arg, _clear_blocker_arg, _blocker_scope_args, _park_guard,
                                           _wake_check_args, _wake_check_echo)
@@ -1600,6 +1601,7 @@ def _handle_create(args: dict, **kw) -> str:
     human_action_now = _parse_bool_arg(args, "human_action_now")
     with _board(args.get("board")) as (kb, conn):
         _check(*create_ask_check(conn, args, str(assignee)))  # ask line, then its filing probe [daveey]
+        args = _effective_board_args(args, origin_intent)
         # Never infer approval from prose or silently turn a human gate into
         # dispatchable work. Ask the creator to distinguish a future dependency
         # from a human action that can actually be taken while parents are open.
@@ -1663,6 +1665,8 @@ def _handle_create(args: dict, **kw) -> str:
             _pin = _kp.explicit_foreign_pin(args, _reg.self_gateway())
             if _pin:
                 return _placement_refused(_pin, "an origin-bound card is created on this gateway")
+        marker_placement = _origin_enrollment(args, origin, marker_placement, assignee=assignee,
+                                               skills=skills, project_id=project_id)
         try:
             new_tid = kb.create_task(
                 conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
@@ -1679,6 +1683,7 @@ def _handle_create(args: dict, **kw) -> str:
                 max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
                 requires=args.get("requires"), runs_on=runs_on, max_retries=max_retries,
                 placement_policy=(marker_placement or {}).get("placement_policy"),
+                placement_checked=True,  # this front door already checked pins, origins and portability
                 placement_audit=_creation_audit(args),
                 require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
                 model_override=model_override, provider_override=provider_override,

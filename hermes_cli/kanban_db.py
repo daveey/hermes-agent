@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from hermes_cli import kanban_db_sync as _sync
-from hermes_cli.kanban_worker_placement import validate_creation
+from hermes_cli.kanban_worker_placement import resolved_db_policy, validate_creation
 from hermes_cli import kanban_placement_forward as _placement_fwd  # stdlib-only at import: no cycle
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
 from hermes_cli.kanban_db_dispatch_queries import DISPATCH_ORDER  # stdlib-only at import: no cycle
@@ -1228,6 +1228,7 @@ def create_task(
     requires: Optional[list[str]] = None,
     lint_blocked: bool = True, runs_on: Optional[Iterable[str]] = None, require_declaration: bool = False,
     placement_policy: Optional[str] = None,
+    placement_checked: bool = False,
     insert_guard: Optional[Callable[[sqlite3.Connection], None]] = None, placement_audit: Optional[dict] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
@@ -1307,8 +1308,7 @@ def create_task(
     project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
         conn, project_id, project_source_task_id, workspace_kind, workspace_path
     )
-    validate_creation(placement_policy, runs_on=runs_on, workspace_kind=workspace_kind,
-                      workspace_path=workspace_path, project=project_id, origin_intent=None, board=board)
+    placement_policy = resolved_db_policy(locals())
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
 

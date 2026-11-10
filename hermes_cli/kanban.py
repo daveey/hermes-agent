@@ -538,6 +538,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                                  if in_worker else None),
                 validate_workspace=True, validate_skills=True, runs_on=getattr(args, "runs_on", None),
                 placement_policy=cli_policy(args, body, ws_kind, ws_path, board),
+                placement_checked=True, board=board,
                 placement_audit=cli_audit(args, body, ws_kind, ws_path, board),
                 insert_guard=after_create.guard,  # re-checks overlap under the write lock [daveey]
             )

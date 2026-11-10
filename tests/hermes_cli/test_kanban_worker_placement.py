@@ -119,6 +119,8 @@ def test_hub_state_work_stays_local(title):
 
 @pytest.mark.parametrize("title", [
     # ~/.hermes/skills is host state, not a checkout: curator ledger, usage counts, locks, live-patched skills.
+    "Run `journalctl --user` to inspect worker OOM kills",
+    "Inspect this host's model routing registry and config.yaml",
     "Patch ~/.hermes/skills/devops/kanban-orchestrator/SKILL.md (live edit)",
     "Sum use_count from /home/ubuntu/.hermes/skills/.usage.json",
     # Existing worktrees on this host hold unpushed work a worker cannot see.

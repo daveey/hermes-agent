@@ -370,6 +370,7 @@ HOME_GATEWAY_MARKERS = (
     r"\bkanban\.db\b", r"\bcron ?(job|jobs|tab)?\b",
     r"\btoken-broker\b", r"\bhermes-sync\b", r"\bon the hub\b", r"\bthe hub's\b",
     r"\bgateway (restart|config|service)\b", r"\bsystemctl\b", r"\blaunchd\b", r"\bssh\b",
+    r"\bjournalctl\b", r"\bthis host\b",
     r"\brestart(ing)? (the )?gateway\b", r"\bhermes config (set|edit|unset)\b",
 )
 

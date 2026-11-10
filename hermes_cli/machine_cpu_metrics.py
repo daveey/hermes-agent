@@ -1,7 +1,9 @@
 """Measured CPU busy for the hub admission gate (worker-first overflow, docs/worker-first-v1.md).
 
 Busy is computed from two aggregate ``/proc/stat`` snapshots taken about one second apart on the monotonic clock:
-``100 * (Δtotal - Δidle - Δiowait) / Δtotal`` where total sums user..steal. ``guest``/``guest_nice`` are already
+``100 * (Δtotal - Δidle - Δiowait - Δnice) / Δtotal`` where total sums user..steal. Positive-nice user time is
+excluded so low-priority batch work does not veto foreground admission; system/IRQ/steal remain busy.
+This is aggregate non-nice busy, not a per-process nice>=10 filter. ``guest``/``guest_nice`` are already
 included in user/nice and are never added again; ``steal`` counts as busy (time this host could not use). Any read
 error, malformed line, counter decrease (reboot/reset), non-positive total, or an elapsed window outside
 [1000, 2000] ms yields ``None`` (unknown), which every caller treats as "refuse", never as idle.
@@ -44,7 +46,7 @@ def parse_proc_stat(text: str) -> Optional[tuple[int, int]]:
         values = (user, nice, system, idle, iowait, irq, softirq, steal)
         if any(v < 0 for v in values):
             return None
-        return sum(values), idle + iowait
+        return sum(values), idle + iowait + nice
     return None
 
 
