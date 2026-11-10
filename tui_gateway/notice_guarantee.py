@@ -250,6 +250,15 @@ def _refresh_once(db: Any, cand: dict, branch: str, seen: set) -> str:
     seen.add(key)
     if key in _refreshed:
         return "skipped:refreshed"
+    if branch == "human":
+        # This notice intentionally starts no turn. Keep the real card decision in
+        # live-work precedence, but don't strand incidental (touch-only) recipients.
+        meta = {**cand["meta"], "outcome_informational": True}
+        changed = db._write_rowcount(
+            "UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
+            (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"]))
+        if changed != 1:
+            return "skipped:changed"
     if _refresh(db, cand["sid"]):
         _refreshed.add(key)
     return f"refreshed:{branch}"

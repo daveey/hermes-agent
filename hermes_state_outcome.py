@@ -454,6 +454,11 @@ def _completion_note(row: dict) -> Optional[dict]:
     if isinstance(meta, str):
         with contextlib.suppress(ValueError, TypeError):
             meta = json.loads(meta)
+    # The notice guarantee also deliberately suppresses turns for validated human
+    # notices. Card ownership still supplies decision/wait outcomes independently;
+    # an incidental recipient resumes classification of its own preceding turn.
+    if isinstance(meta, dict) and row.get("display_kind") == _NOTICE_KIND and meta.get("outcome_informational") is True:
+        return meta
     return meta if isinstance(meta, dict) and meta.get("completion_note") else None
 
 
