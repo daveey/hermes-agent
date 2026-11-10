@@ -295,8 +295,8 @@ def _apply_usage(rows: list[dict]) -> None:
     from the cache only, and ask for a background refresh, so the picker never waits on a usage API
     and a chip can warn before the wall instead of at it.
 
-    Single-account providers keep the legacy gauge (``usage.windows``). A provider with a
-    MULTI-ENTRY credential pool reports ``usage.accounts`` instead — one row per account, each with
+    Providers without a persisted pool keep the legacy gauge (``usage.windows``). Every
+    nonempty credential pool reports ``usage.accounts`` instead — one row per account, each with
     its own windows/state/resets_at — because one account's quota says nothing about its siblings;
     a provider-wide percentage there would be a fabricated average. A snapshot older than the
     staleness bound renders ``unknown``/``unavailable``, never a confident stale gauge. Nothing here
@@ -332,16 +332,15 @@ def _apply_usage(rows: list[dict]) -> None:
 
     wanted: list[str] = []
     entry_requests: list[dict] = []
-    pooled_sizes = {slug: len(entries) for slug, entries in read_credential_pool().items() if entries}
+    pooled = {slug for slug, entries in read_credential_pool().items() if entries}
     for row in rows:
         slug = str(row.get("slug") or "")
         if not slug or row.get("is_user_defined") or row.get("authenticated") is False:
             continue
         supports_usage = has_account_usage(slug)
-        # A single-entry pool (or no pool) is the single-account case: the legacy gauge stays
-        # (chip contract unchanged). Only a genuinely multi-entry pool gets per-account rows —
-        # there, a provider-wide percentage would be a fabricated average across logins.
-        if pooled_sizes.get(slug, 0) < 2:
+        # Persisted account identity must not disappear with missing telemetry, even for
+        # one entry. Only genuinely non-pooled providers may use ambient legacy credentials.
+        if slug not in pooled:
             if not supports_usage:
                 continue
             wanted.append(slug)
@@ -350,8 +349,6 @@ def _apply_usage(rows: list[dict]) -> None:
             if windows and not snapshot_is_stale(snapshot):
                 row["usage"] = {"windows": windows}
             continue
-        if supports_usage:
-            wanted.append(slug)
         accounts = _pool_usage_accounts(slug, _wire_windows, _account_resets_at, entry_requests)
         if accounts is not None:
             row["usage"] = {"accounts": accounts}

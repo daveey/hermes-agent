@@ -76,3 +76,24 @@ it('only presents a pool-wide wall when every account is limited, preserving unk
   expect(screen.getByText('10 accounts')).toBeTruthy()
   expect(screen.queryByText(/Limited until|accounts limited/)).toBeNull()
 })
+
+it('renders a sole unknown Claude account without implying readiness or hiding its identity', async () => {
+  const row: ModelOptionProvider = {
+    slug: 'anthropic',
+    name: 'Anthropic',
+    models: ['claude-opus'],
+    usage: {
+      accounts: [{ id: 'entry:only', label: 'Claude subscription', state: 'unknown', windows: [], resets_at: null }]
+    }
+  }
+
+  render(view(row))
+  const chip = screen.getByText('1 account')
+  expect(screen.queryByText(/left|Limited until/)).toBeNull()
+  fireEvent.pointerMove(chip, { pointerType: 'mouse' })
+  const tip = await screen.findByRole('tooltip')
+  expect(within(tip).getByText('Claude subscription')).toBeTruthy()
+  expect(tip.textContent).toContain('Usage unavailable')
+  expect(tip.querySelector('span[style="width: 0%;"]')).toBeTruthy()
+  expect(tip.textContent).not.toMatch(/ready|100% left/i)
+})
