@@ -15,6 +15,8 @@ export interface CompletionEntry {
   /** Optional completion-action id. When set, picking the item runs that action
    *  (e.g. opening an overlay) instead of inserting a chip + waiting for submit. */
   action?: string
+  /** From a `composer.atCompletions` source that set `multiWord`. */
+  multiWord?: boolean
 }
 
 export interface CompletionPayload {

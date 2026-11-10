@@ -80,6 +80,9 @@ interface AtItemMetadata extends Record<string, string> {
   rawText: string
   /** Just the value portion (after `@kind:`), or empty for simple refs. */
   insertId: string
+  /** '1' when the row came from a `multiWord` source: the popover may stay
+   *  open across a space while such rows match (`@baby bear`). */
+  multiWord: string
 }
 
 function textValue(value: unknown, fallback = ''): string {
@@ -211,7 +214,8 @@ export function useAtCompletions(options: {
               text: item.insert,
               display: item.display || item.insert,
               meta: item.meta || '',
-              icon: item.icon || ''
+              icon: item.icon || '',
+              multiWord: source.multiWord === true
             } as CompletionEntry)
           }
         } catch {
@@ -282,7 +286,8 @@ export function useAtCompletions(options: {
       display: classified.display,
       meta: classified.meta,
       rawText: entry.text,
-      insertId: classified.insertId
+      insertId: classified.insertId,
+      multiWord: entry.multiWord ? '1' : ''
     }
 
     return {

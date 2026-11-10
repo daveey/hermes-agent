@@ -168,6 +168,34 @@ describe('contributed @ completion sources', () => {
     expect(rows).not.toContain('@researcher')
   })
 
+  it('tags rows from a multiWord source so the popover can stay open across a space', async () => {
+    vi.useFakeTimers()
+    disposers.push(
+      registry.register({
+        id: 'sessions',
+        area: COMPOSER_AREAS.atCompletions,
+        data: {
+          multiWord: true,
+          provide: q => (q === 'baby b' ? [{ insert: '@session:abc', display: 'baby bear' }] : [])
+        } satisfies ComposerAtCompletionSource
+      })
+    )
+    addSource('bots', q => ('baby b'.startsWith(q) ? [{ insert: '@babybot' }] : []))
+
+    const { result } = renderHook(() =>
+      useAtCompletions({ gateway: gatewayStub([]) as never, sessionId: 's1', cwd: '/repo' })
+    )
+
+    await searchAndRead(result, 'baby b')
+
+    let rows: readonly { label: string; metadata?: Record<string, unknown> }[] = []
+    act(() => {
+      rows = result.current.adapter.search?.('baby b') || []
+    })
+    const flags = Object.fromEntries(rows.map(r => [r.label, r.metadata?.multiWord]))
+    expect(flags).toMatchObject({ 'baby bear': '1', '@babybot': '' })
+  })
+
   it('isolates a throwing source instead of killing the popover', async () => {
     vi.useFakeTimers()
     addSource('broken', () => {
