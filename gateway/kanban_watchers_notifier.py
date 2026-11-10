@@ -514,13 +514,17 @@ def _fmt_timed_out(ev, n) -> tuple:
     return t("gateway.kanban.ping.timed_out", head=n.head, span=span), None, None
 
 
+def _fmt_request_withdrawn(ev, n):
+    detail = ("the card was archived. No answer is needed for this request; "
+              "this is not approval and not proof of completion.")
+    return f"ℹ {n.head} request withdrawn: {detail}", f"Request withdrawn: {detail}", None
+
+
 # archived / unblocked are claimed (so the cursor advances past them) but
 # intentionally silent (no formatter), and excluded from _WAKE_KINDS so they
 # never wake the creator.
 _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
-    "request_withdrawn": lambda ev, n: (f"ℹ {n.head} request withdrawn: the card was archived. "
-                                      "No answer is needed for this request; this is not approval "
-                                      "and not proof of completion.", None, None),
+    "request_withdrawn": _fmt_request_withdrawn,
     "completed": _fmt_completed,
     "blocked": _fmt_blocked,
     "gave_up": _fmt_failure("gave_up"),
@@ -598,7 +602,9 @@ class _KanbanNotification:
         fails = self.sub_fail_counts.get(self.sub_key, 0) + 1
         self.sub_fail_counts[self.sub_key] = fails
         logger.warning(fmt, *prefix, fails, MAX_SEND_FAILURES, exc, exc_info=exc_info)
-        if fails >= MAX_SEND_FAILURES:
+        # Withdrawal is a durable revocation receipt, not a disposable ping.
+        has_withdrawal = any(ev.kind == "request_withdrawn" for ev in self.d["events"])
+        if fails >= MAX_SEND_FAILURES and not has_withdrawal:
             logger.warning(drop_fmt, self.task_id, self.platform_str, fails)
             await self.unsub()
             self.clear_failures()
