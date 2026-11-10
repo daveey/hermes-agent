@@ -14,9 +14,10 @@ indexes are checked with it), on a FRESH read-only connection in a FRESH process
   process's fcntl locks; https://sqlite.org/howtocorrupt.html §2.2);
 * read-only (``mode=ro`` + ``query_only``): the check can never write to the file;
 * bounded: the child is killed at the caller's remaining write patience (capped);
-* fail closed: only an exact ``ok`` for every checked table is "clean". Damage, a timeout,
-  a missing budget, a spawn failure, unparsable output or any error is not, and the caller
-  latches as before.
+* only an exact ``ok`` for every checked table is "clean". Writers fail closed on all
+  non-clean results. Read timeout/no_budget fails that read without latching and starts
+  one background whole-file check without an execution deadline; only damage from that
+  check latches. Immediate damage/errors and replay recurrence still latch as before.
 
 The scope comes from a SQLite authorizer composed onto the connection for the attempt
 (``TouchedTables`` + ``ScopedAuthorizerConnection``): it sees every table each statement reads
@@ -68,8 +69,10 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
+from contextvars import Context, copy_context
 from dataclasses import dataclass
 from typing import Iterator, Optional
 
@@ -288,6 +291,7 @@ class ConfirmResult:
     scope: str  # "full" or comma-separated checked table names
     elapsed_s: float
     detail: str = ""
+    table_results: tuple[tuple[str, str], ...] = ()
 
     @property
     def clean(self) -> bool:
@@ -302,8 +306,20 @@ class ConfirmResult:
 # argv: uri, JSON list of table names or null (whole file), busy timeout in ms.
 # Prints one JSON object; problem rows are page/row locations, never row contents.
 _CHILD = r"""
-import json, sqlite3, sys
+import json, os, sqlite3, sys, threading
 uri, scope_json, busy_ms = sys.argv[1], sys.argv[2], int(sys.argv[3])
+parent_pid = int(sys.argv[4])
+
+# Detach from the caller's foreground process group, not from its lifetime. A restarted
+# POSIX gateway must not leave minutes-long read snapshots holding back WAL reclamation.
+def watch_parent():
+    tick = threading.Event()
+    while os.getppid() == parent_pid:
+        tick.wait(1.0)
+    os._exit(1)
+
+if os.name == "posix":
+    threading.Thread(target=watch_parent, daemon=True).start()
 
 scope = json.loads(scope_json)
 out = {}
@@ -321,6 +337,8 @@ try:
                 if is_virtual:
                     virtual.append(name.lower())
             known["sqlite_schema"] = known["sqlite_master"] = ("sqlite_schema", False)
+            if not scope:  # explicit diagnostic request: every ordinary/shadow table
+                scope = sorted(k for k, (_, vt) in known.items() if not vt)
             targets = ["sqlite_schema"]
             if "sqlite_sequence" in known:  # AUTOINCREMENT writes it with no authorizer callback
                 targets.append(known["sqlite_sequence"][0])
@@ -349,7 +367,13 @@ try:
             problems = [] if problems == ["ok"] else problems
         else:
             for t in targets:
-                rows = [r[0] for r in conn.execute("PRAGMA quick_check('%s')" % t.replace("'", "''"))]
+                try:
+                    rows = [r[0] for r in conn.execute("PRAGMA quick_check('%s')" % t.replace("'", "''"))]
+                except sqlite3.Error as exc:
+                    rows = ["%s/%s: %s" % (type(exc).__name__, getattr(exc, "sqlite_errorname", None), str(exc)[:160])]
+                    if out.get("sqlite") not in ("SQLITE_CORRUPT", "SQLITE_NOTADB"):
+                        out.update(error=type(exc).__name__, sqlite=getattr(exc, "sqlite_errorname", None), message=str(exc)[:160])
+                out.setdefault("table_results", []).append([t, "; ".join(str(r)[:160] for r in rows[:3])])
                 if rows != ["ok"]:
                     problems += rows
         out.update(ok=not problems, checked=targets, problems=len(problems),
@@ -366,7 +390,7 @@ sys.stdout.write(json.dumps(out))
 
 def _child_argv(uri: str, scope_json: str, busy_ms: int) -> list[str]:
     """The fresh-process command (a seam for tests that need a hung or failing child)."""
-    return [sys.executable, "-I", "-S", "-c", _CHILD, uri, scope_json, str(busy_ms)]
+    return [sys.executable, "-I", "-S", "-c", _CHILD, uri, scope_json, str(busy_ms), str(os.getpid())]
 
 
 def confirm_budget(deadline: Optional[float], *, default_s: float = READ_CONFIRM_TIMEOUT_S) -> float:
@@ -391,20 +415,22 @@ def _scope_label(checked) -> str:
     return ",".join(sorted("".join(ch for ch in str(n) if ch.isalnum() or ch == "_")[:64] for n in checked))[:400]
 
 
-def confirm_corruption(db_path, tables: Optional[frozenset], timeout_s: float) -> ConfirmResult:
-    """Bounded read-only ``quick_check`` of *tables* (``None`` = whole file) in a fresh process.
+def confirm_corruption(db_path, tables: Optional[frozenset], timeout_s: Optional[float]) -> ConfirmResult:
+    """Read-only ``quick_check`` in a fresh process; timeout None is background-only.
 
-    Never loads extensions or raises; anything but an exact per-table ``ok`` is a non-clean result."""
+    tables=None checks the whole file; an empty frozenset requests all per-table results.
+    Never loads extensions; anything but an exact per-table ``ok`` is non-clean."""
     started = time.monotonic()
     requested = None if tables is None else sorted(tables)
     label = _scope_label(requested)
-    if timeout_s < CONFIRM_MIN_S:
+    if timeout_s is not None and timeout_s < CONFIRM_MIN_S:
         return ConfirmResult("no_budget", label, 0.0, f"{max(timeout_s, 0.0):.3f}s left of the write patience")
     try:
-        argv = _child_argv(read_only_db_uri(db_path), json.dumps(requested), int(timeout_s * 1000))
+        argv = _child_argv(read_only_db_uri(db_path), json.dumps(requested),
+                           int((timeout_s if timeout_s is not None else 30.0) * 1000))
         proc = subprocess.run(
             argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout_s, check=False,
-            close_fds=True, env=_child_env(),
+            close_fds=True, env=_child_env(), start_new_session=timeout_s is None,
         )
     except subprocess.TimeoutExpired:
         return ConfirmResult("timeout", label, time.monotonic() - started, f"killed after {timeout_s:.2f}s")
@@ -419,14 +445,82 @@ def confirm_corruption(db_path, tables: Optional[frozenset], timeout_s: float) -
         return ConfirmResult("error", label, elapsed, f"child rc={proc.returncode}, unparsable output")
     if "checked" in out:
         label = _scope_label(out.get("checked"))
+    try:
+        results = tuple((str(t), str(r)) for t, r in out.get("table_results", []))
+    except (ValueError, TypeError):
+        return ConfirmResult("error", label, elapsed, "invalid per-table results")
     if "error" in out:
         detail = f"{out.get('error')}/{out.get('sqlite')}: {out.get('message', '')}"[:200]
         corrupt = out.get("sqlite") in ("SQLITE_CORRUPT", "SQLITE_NOTADB") or "malformed" in str(out.get("message"))
-        return ConfirmResult("damaged" if corrupt else "error", label, elapsed, detail)
+        return ConfirmResult("damaged" if corrupt else "error", label, elapsed, detail, results)
     if out.get("ok") is True and out.get("problems") == 0:
-        return ConfirmResult("clean", label, elapsed, str(out.get("widened") or ""))
+        return ConfirmResult("clean", label, elapsed, str(out.get("widened") or ""), results)
+    if out.get("ok") is not False or not isinstance(out.get("problems"), int) or out["problems"] <= 0:
+        return ConfirmResult("error", label, elapsed, "invalid check result")
     first = "; ".join(str(p) for p in (out.get("first") or []))[:300]
-    return ConfirmResult("damaged", label, elapsed, f"{out.get('problems')} problem(s): {first}")
+    return ConfirmResult("damaged", label, elapsed, f"{out.get('problems')} problem(s): {first}", results)
+
+
+_background_lock = threading.Lock()
+_background_thread: Optional[threading.Thread] = None
+_background_paths: dict[str, tuple[str, Context]] = {}
+
+
+def background_confirmation_pending(db_path) -> bool:
+    with _background_lock:
+        return os.path.realpath(db_path) in _background_paths
+
+
+def _run_background_confirmations() -> None:
+    global _background_thread
+    from hermes_state_health import mark_storage_corrupt
+
+    while True:
+        with _background_lock:
+            if not _background_paths:
+                _background_thread = None
+                return
+            path, (first_error, context) = next(iter(_background_paths.items()))
+        try:
+            logger.warning("state.db read corrupt unconfirmed; background quick_check started: %s; %s",
+                           path, first_error)
+            result = context.run(confirm_corruption, path, None, None)
+            logger.warning("state.db background quick_check result: %s; %s", path, result.describe())
+            if result.outcome == "damaged":
+                context.run(mark_storage_corrupt, path, f"{first_error}; background {result.describe()}")
+        except Exception:  # health: allow BLE001 -- a diagnostic failure is not evidence of damage; keep draining other profiles
+            logger.exception("state.db background quick_check failed: %s", path)
+        finally:
+            with _background_lock:
+                _background_paths.pop(path, None)
+
+
+def schedule_background_confirmation(db_path, first_error: str) -> bool:
+    """One whole-file child in flight per process. Queue distinct files, coalesce same-file scopes.
+
+    No execution deadline: only actual damage latches. Further reads of a queued/in-flight file
+    fail immediately without spawning another foreground check. Other profile files are queued,
+    not silently discarded. A subsequent incident after completion may request a new check.
+    """
+    global _background_thread
+    path = os.path.realpath(db_path)
+    with _background_lock:
+        if path in _background_paths:
+            return False
+        _background_paths[path] = (first_error, copy_context())
+        if _background_thread is not None:
+            logger.warning("state.db read corrupt unconfirmed; background quick_check queued: %s", path)
+            return True
+        thread = threading.Thread(target=_run_background_confirmations, name="state-db-confirm", daemon=True)
+        _background_thread = thread
+        try:
+            thread.start()
+        except RuntimeError:
+            _background_thread = None
+            _background_paths.pop(path, None)
+            logger.warning("state.db read corrupt unconfirmed; background quick_check could not start", exc_info=True)
+            return False
+        return True
 
 
 __all__ = [

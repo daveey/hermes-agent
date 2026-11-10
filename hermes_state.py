@@ -1295,8 +1295,18 @@ class SessionDB(
             return "no replay: storage already latched"
         if cache_released is False:  # fail closed: a replay could re-read the very page that failed
             return "no replay: reader cache not released"
+        if _corrupt_confirm.background_confirmation_pending(self.db_path):
+            exc.__dict__["hermes_read_corrupt_unconfirmed"] = True
+            raise exc
         confirm = _corrupt_confirm.confirm_corruption(
             self.db_path, scope.tables(), _corrupt_confirm.confirm_budget(None))
+        if confirm.outcome in ("timeout", "no_budget"):
+            _corrupt_confirm.schedule_background_confirmation(
+                self.db_path, f"{exc} [{_corruption_detail(exc)}; op=read; {confirm.describe()}]")
+            # Raised from the handler: do not flow through note_storage_error below.
+            # The failed SELECT is not replayed, but unrelated writers remain available.
+            exc.__dict__["hermes_read_corrupt_unconfirmed"] = True
+            raise exc
         if not confirm.clean:
             return f"no replay: {confirm.describe()}"
         logger.warning(

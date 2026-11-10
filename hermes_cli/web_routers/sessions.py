@@ -298,6 +298,8 @@ def _list_sessions_payload(
                 else "Internal server error"),
         ) from exc
     except sqlite3.DatabaseError as exc:
+        if getattr(exc, "hermes_read_corrupt_unconfirmed", False):
+            raise HTTPException(status_code=503, detail="Session read failed; background integrity check pending.") from exc
         # A damaged store is unavailable, not empty and not an internal error (#72046).
         db_path = _session_db_path_for_profile(profile)
         if not (note_storage_error(db_path, exc) or is_malformed_db_error(exc)):
