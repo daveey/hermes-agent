@@ -300,13 +300,19 @@ async def execute(authority, ref, row, policy):
     job = dict(data['cron_job'], execution_id=execution_id)
     token = bind_execution(authority, ref.session_id, job['id'], execution_id)
     try:
-        from cron.cancellation import CancelRequest, _CombinedCancelEvent
+        from cron.cancellation import CancelRequest, ShutdownAwareCancel, _CombinedCancelEvent
+        from cron.scheduler import fire_interrupted_by_shutdown
 
         db_path = await asyncio.to_thread(Path(authority.db.db_path).resolve)
         with _profile_runtime_scope(db_path.parent):
             # The forwarded ``cron.cancel`` carries no reason, so the operator's marker is read here
-            # first: a stopped agent run reports "cancelled on request", not a lost fire claim.
-            stop = _CombinedCancelEvent(CancelRequest(execution_id), cancel)
+            # first: a stopped agent run reports "cancelled on request", not a lost fire claim. When
+            # the firer is this process and its shutdown interrupted the fire, the forwarded cancel
+            # reports that shutdown, not lost ownership (cron-7c04faf754).
+            job_id = job['id']
+            stop = _CombinedCancelEvent(
+                CancelRequest(execution_id),
+                ShutdownAwareCancel(cancel, lambda: fire_interrupted_by_shutdown(job_id)))
             result = await asyncio.to_thread(_run_identified, run_job, job, execution_id,
                                              extra_prompt=data['extra_prompt'], cancel_event=stop)
         # run_job stamps run-side verdicts on ITS job copy (quota hold, unreachable model); the

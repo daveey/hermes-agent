@@ -531,8 +531,9 @@ from cron.executions import (
     recover_interrupted_executions, settle_unstarted_execution, terminalize_dead_owner)
 from cron.scheduler_liveness import ExecutionProgressStamper, _inactivity_watchdog_loop
 from cron.scheduler_bookkeeping import _classify_delivery_outcome
-from cron.cancellation import (CancelRequest, _CancelEventLike, _CombinedCancelEvent, cancel_reason,
-                               clear_cancel, finish_lost_execution,
+from cron.cancellation import (CancelRequest, CronShutdownInterrupted, ShutdownAwareCancel,
+                               _CancelEventLike, _CombinedCancelEvent, cancel_is_shutdown,
+                               cancel_reason, clear_cancel, finish_lost_execution,
                                run_job_unless_cancelled as _run_job_unless_cancelled)
 
 # Response marker that suppresses delivery (output is still saved locally for audit).
@@ -1214,6 +1215,18 @@ def _is_interrupted(job_id: str, token: Optional[object] = None) -> bool:
         if token is not None and token in _interrupted_job_ids:
             return True
         return key in _interrupted_job_ids
+
+
+def fire_interrupted_by_shutdown(job_id: str) -> bool:
+    """Has this process's shutdown marked ANY in-flight fire of ``job_id`` interrupted? For the
+    owner gateway's run (gateway.session_cron.execute), which holds no firer token: its forwarded
+    ``cron.cancel`` carries no reason, and when the firer is this same process the flag says the
+    stop was our own shutdown, not another process taking the claim (cron-7c04faf754)."""
+    key = _inflight_key(job_id)
+    with _running_lock:
+        if key in _interrupted_job_ids:
+            return True
+        return any(token in _interrupted_job_ids for token in _running_fire_owners.get(key, {}))
 
 
 def _consume_interrupted_flag(job_id: str, token: Optional[object] = None) -> bool:
@@ -2049,7 +2062,9 @@ def _run_agent_with_watchdog(
         reason = cancel_reason(cancel_event)
         if agent is not None and hasattr(agent, "interrupt"):
             agent.interrupt(f"Cron run stopped: {reason}")
-        raise RuntimeError(f"Cron job '{job_name}' was stopped: {reason}")
+        # This gateway's own shutdown is an expected stop, not a lost claim (cron-7c04faf754).
+        error = CronShutdownInterrupted if cancel_is_shutdown(cancel_event) else RuntimeError
+        raise error(f"Cron job '{job_name}' was stopped: {reason}")
 
     def _heartbeat_run_claim_if_due():
         nonlocal _last_claim_heartbeat
@@ -2856,7 +2871,8 @@ def run_job(
 
     except (Exception, ConfigBackendUnavailable) as e:  # the plane being down fails THIS fire only
         error_msg = _job_error_message(e)
-        logger.exception("Job '%s' failed: %s", job_name, error_msg)
+        if not _log_shutdown_stop(job_name, error_msg, e):
+            logger.exception("Job '%s' failed: %s", job_name, error_msg)
         # Cowork-style unreachable-model re-run (cron/unreachable_retry.py): flag failures where
         # the model was never reached (transient network/DNS, zero API calls) so the bookkeeping
         # tail can schedule a bounded automatic re-run instead of waiting a full period.
@@ -2944,8 +2960,22 @@ def _teardown_cron_agent(
         timeout_seconds=timeout_seconds)
 
 
-def _run_with_fire_claim_heartbeat(job: dict, run) -> bool:
-    """Run ``run`` while keeping this job's owned durable fire claim fresh."""
+def _log_shutdown_stop(job_name: str, error_msg: str, exc: BaseException) -> bool:
+    """``run_job``'s failure log for a stop by this gateway's own shutdown: expected (shutdown already
+    wrote the interrupted ``last_status``), so one WARNING without traceback and not the coach's
+    "Job '<name>' failed:" defect line. False for everything else, real ownership loss included,
+    which ``run_job`` keeps logging at ERROR with its traceback (cron-7c04faf754)."""
+    if not isinstance(exc, CronShutdownInterrupted):
+        return False
+    logger.warning("Job '%s' stopped by gateway shutdown: %s", job_name, error_msg)
+    return True
+
+
+def _run_with_fire_claim_heartbeat(job: dict, run, *, execution_token: Optional[object] = None) -> bool:
+    """Run ``run`` while keeping this job's owned durable fire claim fresh.
+
+    ``execution_token`` scopes the shutdown check: a claim cleared by THIS execution's shutdown
+    interrupt stops the run as a shutdown, not as lost ownership."""
     claim = job.get("fire_claim")
     owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
     if not owner:
@@ -2953,7 +2983,8 @@ def _run_with_fire_claim_heartbeat(job: dict, run) -> bool:
 
     job_id = str(job.get("id") or "")
     stop = threading.Event()
-    lost_ownership = threading.Event()
+    lost_ownership = ShutdownAwareCancel(
+        threading.Event(), lambda: _is_interrupted(job_id, execution_token))
 
     def _finish_unstarted(error: str) -> None:
         execution_id = job.get("execution_id")
@@ -2994,9 +3025,15 @@ def _run_with_fire_claim_heartbeat(job: dict, run) -> bool:
                         last_confirmed = time.monotonic()
                         continue
                     lost_ownership.set()
-                    logger.warning(
-                        "Job '%s': fire claim ownership lost; interrupting stale run",
-                        job_id)
+                    if lost_ownership.shutdown_interrupted:
+                        # Our own shutdown wrote the interrupted outcome, which cleared the claim.
+                        logger.warning(
+                            "Job '%s': gateway shutdown interrupted the run; stopping it",
+                            job_id)
+                    else:
+                        logger.warning(
+                            "Job '%s': fire claim ownership lost; interrupting stale run",
+                            job_id)
                     return
                 last_confirmed = time.monotonic()
             except Exception:
@@ -3123,7 +3160,8 @@ def run_one_job(
                     extra_prompt=extra_prompt,
                     claim_lost=lost_ownership,
                     transport_cancel=cancel_event,
-                    execution_token=execution_token))
+                    execution_token=execution_token),
+                execution_token=execution_token)
     finally:
         with _running_lock:
             executions = _running_fire_owners.get(_fire_key)

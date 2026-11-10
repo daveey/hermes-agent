@@ -19,7 +19,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Callable, Dict, Optional, Protocol
 
 from hermes_constants import get_hermes_home
 
@@ -136,6 +136,14 @@ class _CombinedCancelEvent:
                 return getattr(event, "reason", None)
         return None
 
+    @property
+    def shutdown_interrupted(self) -> bool:
+        """Whether the source that fired (same one ``reason`` reads) is a shutdown interrupt."""
+        for event in self._events:
+            if event.is_set():
+                return cancel_is_shutdown(event)
+        return False
+
 
 class CancelRequest:
     """``_CancelEventLike`` view of one execution's cancel marker.
@@ -163,6 +171,53 @@ class CancelRequest:
                     self._reason = recorded
             self._reason = self._reason or _DEFAULT_REASON
         return self._reason
+
+
+SHUTDOWN_INTERRUPT_REASON = "Gateway shutdown interrupted the run"
+
+
+class CronShutdownInterrupted(RuntimeError):
+    """A run stopped because this process's own gateway shutdown marked it interrupted
+    (``mark_running_jobs_interrupted``): an expected stop, not a lost fire claim. Shutdown
+    already wrote the job's interrupted ``last_status``; ``run_job`` logs it without a traceback."""
+
+
+def cancel_is_shutdown(cancel_event: Any) -> bool:
+    """True when the source that fired is this gateway's shutdown interrupt (cron-7c04faf754)."""
+    return bool(getattr(cancel_event, "shutdown_interrupted", False))
+
+
+class ShutdownAwareCancel:
+    """``_CancelEventLike`` around a fire-claim latch that knows when THIS process's shutdown fired it.
+
+    Gateway shutdown marks the execution interrupted (``scheduler._interrupted_job_ids``) and then
+    writes the interrupted outcome, which clears the fire claim. The run's claim heartbeat (and the
+    owner gateway's forwarded ``cron.cancel``) then see a claim that nobody else took. ``interrupted``
+    is that in-process flag check, read when the latch is inspected, so whichever path latched it
+    reports the shutdown instead of "cron fire ownership was lost" — a real takeover leaves the flag
+    unset and keeps the lost-ownership wording.
+    """
+
+    def __init__(self, event: Any, interrupted: Callable[[], bool]) -> None:
+        self._event = event
+        self._interrupted = interrupted
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    def set(self) -> None:
+        self._event.set()
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        return self._event.wait(timeout)
+
+    @property
+    def shutdown_interrupted(self) -> bool:
+        return self._event.is_set() and bool(self._interrupted())
+
+    @property
+    def reason(self) -> Optional[str]:
+        return SHUTDOWN_INTERRUPT_REASON if self.shutdown_interrupted else getattr(self._event, "reason", None)
 
 
 def cancel_reason(cancel_event: Any) -> str:
