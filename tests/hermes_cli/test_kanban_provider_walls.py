@@ -93,7 +93,10 @@ def test_record_wall_for_run_uses_tier_event_and_log(board, monkeypatch):
     assert CODEX in walls.active_walls(path=p)
 
 
-def test_storm_alert_opens_one_card(board):
+def test_storm_alert_opens_one_local_card_with_worker_pool(board, monkeypatch):
+    from hermes_cli import kanban_placement as placement
+    monkeypatch.setattr(placement, "config", lambda: {"worker_pools": {"hub": ["worker-1"]}})
+    monkeypatch.setattr(placement.reg, "self_gateway", lambda: "hub")
     conn = kbc.connect()
     now = int(time.time())
     for i in range(12):
@@ -102,6 +105,7 @@ def test_storm_alert_opens_one_card(board):
     conn.commit()
     first = walls.alert_on_storm(conn)
     assert first and walls.alert_on_storm(conn) == first
+    assert kb.get_task(conn, first).placement_policy is None
 
 
 def test_storm_alert_quiet_below_threshold(board):

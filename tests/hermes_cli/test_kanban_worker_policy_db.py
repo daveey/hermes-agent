@@ -62,6 +62,17 @@ def test_direct_producer_keeps_placement_exclusions(conn, monkeypatch, fields):
     assert kb.get_task(conn, tid).placement_policy is None
 
 
+@pytest.mark.parametrize("title,reason", [("Analyze public data", None), ("Inspect this host", "home gateway marker")])
+def test_direct_producer_records_authoritative_audit(conn, monkeypatch, title, reason):
+    from hermes_cli import kanban_placement as placement
+    monkeypatch.setattr(placement, "config", lambda: {"worker_pools": {"hub": ["worker-1"]}})
+    monkeypatch.setattr(placement.reg, "self_gateway", lambda: "hub")
+    tid = kb.create_task(conn, title=title, assignee="default", created_by="owner-wake")
+    created = next(e for e in kb.list_events(conn, tid) if e.kind == "created")
+    assert "portable_reason" in created.payload
+    assert created.payload["portable_reason"] == reason
+
+
 def test_direct_producer_uses_connection_board(conn, monkeypatch):
     from hermes_cli import kanban_placement as placement
 
