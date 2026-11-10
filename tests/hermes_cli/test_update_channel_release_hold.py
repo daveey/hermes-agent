@@ -32,6 +32,11 @@ def git(root, *args):
 @pytest.fixture
 def source(tmp_path, monkeypatch):
     """An install on a post-runtime ``main`` commit; the release sits beside it, before the runtime."""
+    # Git/channel fixture: no host gateways belong to this temporary install.
+    from hermes_cli import update_cmd_posix_pause as pause
+    monkeypatch.setattr(pause, "_discover_systemd", list)
+    monkeypatch.setattr(pause, "_discover_launchd", list)
+    monkeypatch.setattr(pause, "_discover_bare", lambda pids: ([], []))
     home, origin, checkout = (tmp_path / name for name in ("home", "origin", "checkout"))
     home.mkdir()
     origin.mkdir()

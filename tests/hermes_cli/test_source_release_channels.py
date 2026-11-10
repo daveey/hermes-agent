@@ -25,6 +25,11 @@ def git(root, *args):
 
 @pytest.fixture(params=["utf-8", "utf-8-sig"])
 def releases(tmp_path, monkeypatch, request):
+    # Git/channel fixture: no host gateways belong to this temporary install.
+    from hermes_cli import update_cmd_posix_pause as pause
+    monkeypatch.setattr(pause, "_discover_systemd", list)
+    monkeypatch.setattr(pause, "_discover_launchd", list)
+    monkeypatch.setattr(pause, "_discover_bare", lambda pids: ([], []))
     origin = tmp_path / "origin"
     origin.mkdir()
     git(origin, "init", "-b", "main")

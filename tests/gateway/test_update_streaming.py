@@ -365,6 +365,11 @@ class TestCmdUpdateGatewayMode:
         monkeypatch.setattr(main, "_finalize_update_output", lambda state: None)
         monkeypatch.setattr(main, "_run_pre_update_backup", lambda args: None)
         monkeypatch.setattr(main, "_pause_windows_gateways_for_update", lambda: None)
+        # Prompt/Git fixture has no gateway fleet; leave the pause fence real.
+        from hermes_cli import update_cmd_posix_pause as pause
+        monkeypatch.setattr(pause, "_discover_systemd", list)
+        monkeypatch.setattr(pause, "_discover_launchd", list)
+        monkeypatch.setattr(pause, "_discover_bare", lambda pids: ([], []))
         monkeypatch.setattr("hermes_cli.update_inventory.collect_runtime_inventory", lambda: None)
         monkeypatch.setattr(update_cmd, "_prepare_git_command", lambda **_: (False, ["git"], False))
         monkeypatch.setattr(update_cmd, "run_completion", lambda request: {"exit_code": 0, "receipt": None})
