@@ -6,7 +6,8 @@ A ready card with no claim for hours looked the same as a stuck one, so chats re
 worker pool instead, and the Board's last answer about it is stored by ``kanban_queue_reason``.
 
 :func:`position` returns ``{"lane": "local", "ahead", "running", "limit", "approximate": True}`` or
-``{"lane": "worker_pool", "reason": <code>}``; None for a card that is not ready.
+``{"lane": "worker_pool", "reason": <code>}``; ``{"lane": "leftover_claim", "claim_lock", "worker_pid"}`` for a ready card
+still holding a local claim (never dispatched); None for a card that is not ready.
 """
 from __future__ import annotations
 
@@ -96,6 +97,11 @@ def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Opt
     """The queue a ``ready`` ``task`` in this gateway's live file waits in; None for any other status."""
     if task is None or task.status != "ready":
         return None
+    # [daveey] A ready card still holding a local claim is never picked (the dispatcher claims only claim_lock IS
+    # NULL); say so instead of a slot wait (agent-dc4177df2e: T6 read as a CPU wait for 5 days).
+    lock = conn.execute("SELECT claim_lock, worker_pid FROM tasks WHERE id = ?", (task.id,)).fetchone()
+    if lock is not None and lock[0]:
+        return {"lane": "leftover_claim", "claim_lock": lock[0], "worker_pid": lock[1]}
     from hermes_cli.kanban_worker_placement import POLICY
     if getattr(task, "placement_policy", None) == POLICY:
         from hermes_cli import kanban_queue_reason as kqr
@@ -123,6 +129,10 @@ def describe(place: Optional[dict[str, Any]]) -> Optional[str]:
     if not place:
         return None
     lane = place.get("lane")
+    if lane == "leftover_claim":
+        return (f"held by leftover claim {place.get('claim_lock')} (worker gone, pid {place.get('worker_pid')}): "
+                "the dispatcher skips a ready card with a claim_lock. Its leftover-claim sweep clears a dead local "
+                "claim on the next tick; if this line persists, the claim belongs to a live or foreign worker")
     if lane == "unplaceable":
         missing = place.get("missing") or []
         what = (f"label(s) {', '.join(missing)} carried by no machine" if missing
