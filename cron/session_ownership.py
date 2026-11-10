@@ -29,6 +29,18 @@ def store_homes(db) -> list[Path]:
     return list(dict.fromkeys([home, root, *(p.parent.parent for p in sorted(root.glob("profiles/*/cron/jobs.json")))]))
 
 
+def _retain_session_jobs(session_ids: list[str]) -> None:
+    with jobs._jobs_lock():
+        records = _read_records()
+        changed = False
+        for job in records:
+            if job.get("owner_session_id") in session_ids and job.get("owner_retained") != job.get("owner_session_id"):
+                job["owner_retained"] = job["owner_session_id"]
+                changed = True
+        if changed:
+            jobs.save_jobs(records)
+
+
 def release_for_database(db, session_ids: list[str], *, keep: bool = False) -> tuple[list[dict], list[str]]:
     released, errors = [], []
     for home in store_homes(db):
@@ -37,15 +49,7 @@ def release_for_database(db, session_ids: list[str], *, keep: bool = False) -> t
         try:
             with jobs.use_cron_store(home):
                 if keep:
-                    with jobs._jobs_lock():
-                        records = _read_records()
-                        changed = False
-                        for job in records:
-                            if job.get("owner_session_id") in session_ids and job.get("owner_retained") != job.get("owner_session_id"):
-                                job["owner_retained"] = job["owner_session_id"]
-                                changed = True
-                        if changed:
-                            jobs.save_jobs(records)
+                    _retain_session_jobs(session_ids)
                 else:
                     released.extend(release_session_jobs(session_ids))
         except (OSError, RuntimeError, ValueError) as exc:
