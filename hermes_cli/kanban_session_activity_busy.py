@@ -4,8 +4,8 @@ kanban-359833be53: while another thread held one board's lifecycle lock, the cou
 sidebar marked EVERY chat row ``kanban_unknown``; ``session_tasks`` failed the same way. Like the content probe and the
 origin-work snapshot save, a busy board now means "degrade, retry next time": it serves its last good answer, logs
 one WARNING line (no traceback, so self-heal sees a rate rather than a crash) and is read again on the next pass. A
-board never read successfully before still raises: unknown, never "no work". A corrupt or missing board is not busy
-and still raises.
+board ``session_tasks`` never read for the query is retried for a bounded budget, then raises: unknown, never "no
+work". A corrupt or missing board is not busy and still raises.
 
 State is per process; ``kanban_session_activity`` resets it with its caches.
 """
@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,6 +31,10 @@ reuse_sink = threading.local()
 _tasks_memo: dict[tuple, list[dict[str, Any]]] = {}  # last good per-board task list, by (board, ids, statuses)
 _tasks_lock = threading.Lock()
 TASKS_MEMO_MAX = 512
+# A busy board with no last good list for the query keeps being read this long (well inside the Desktop's 15 s
+# request timeout) before the request fails; the pause only bounds an error that returns without waiting.
+FIRST_READ_BUSY_BUDGET_S = 3.0
+FIRST_READ_RETRY_PAUSE_S = 0.05
 
 
 def begin_recompute() -> None:
@@ -61,17 +66,31 @@ def board_reads(path: Path, key: tuple, hit: tuple | None, parked: bool, stalled
 
 def session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...],
                   read: Callable[[Path, list[str], tuple[str, ...]], list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    """``read(path, ids, statuses)``, or on a busy board its last good list for the same query, every row ``stale``."""
+    """``read(path, ids, statuses)``, or on a busy board its last good list for the same query, every row ``stale``.
+
+    A busy board with no last list for this query (a chat opened for the first time since the backend started) is
+    read again until ``FIRST_READ_BUSY_BUDGET_S`` runs out before it raises: one read only waits 500 ms for the
+    board, and a lifecycle hold a little longer than that made ``/api/session-kanban-tasks`` 500 and the Desktop
+    panel show "Task status unavailable" for every newly opened chat."""
     key = (str(path), tuple(ids), tuple(statuses))
-    try:
-        tasks = read(path, ids, statuses)
-    except sqlite3.OperationalError as exc:
-        with _tasks_lock:
-            last = _tasks_memo.get(key)
-        if last is None or not is_busy(exc):
-            raise
-        _log.warning("kanban board %s busy; reused last counts", path)
-        return [{**t, "stale": True} for t in last]
+    deadline = None
+    while True:
+        try:
+            tasks = read(path, ids, statuses)
+            break
+        except sqlite3.OperationalError as exc:
+            if not is_busy(exc):
+                raise
+            with _tasks_lock:
+                last = _tasks_memo.get(key)
+            if last is not None:
+                _log.warning("kanban board %s busy; reused last counts", path)
+                return [{**t, "stale": True} for t in last]
+            now = time.monotonic()
+            deadline = now + FIRST_READ_BUSY_BUDGET_S if deadline is None else deadline
+            if now >= deadline:
+                raise
+            time.sleep(min(FIRST_READ_RETRY_PAUSE_S, deadline - now))  # an instant busy error must not spin
     with _tasks_lock:
         _tasks_memo.pop(key, None)
         _tasks_memo[key] = tasks
