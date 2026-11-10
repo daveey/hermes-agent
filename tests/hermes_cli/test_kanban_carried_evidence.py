@@ -37,26 +37,29 @@ def test_portable_verified_brief(carried):
 @pytest.mark.parametrize("fault", ["missing", "stale", "future", "nan", "uncovered", "bad_shape", "hash", "unpin", "suffix", "symlink", "oversize"])
 def test_fail_closed(carried, fault):
     name, file, manifest, receipt, cfg, body = carried
-    if fault == "missing":
-        manifest.unlink()
-    elif fault in ("stale", "future", "nan"):
-        receipt["verified_at"] = {"stale": time.time() - 7200, "future": time.time() + 100, "nan": float("nan")}[fault]
-    elif fault == "uncovered":
-        cfg["worker_pools"]["hub"].append("worker-2")
-    elif fault == "bad_shape":
-        receipt["files"] = []
-    elif fault == "hash":
-        file.write_text("changed")
-    elif fault == "unpin":
-        body = body.replace(receipt["files"][name], "not pinned")
-    elif fault == "suffix":
-        body = body.replace(name, name + "/child")
-    elif fault == "symlink":
+    def symlink():
         target = file.with_name("target")
         file.rename(target)
         file.symlink_to(target)
-    elif fault == "oversize":
-        file.write_bytes(b"x" * (ce.MAX_BYTES + 1))
+
+    mutations = {
+        "missing": manifest.unlink,
+        "stale": lambda: receipt.update(verified_at=time.time() - 7200),
+        "future": lambda: receipt.update(verified_at=time.time() + 100),
+        "nan": lambda: receipt.update(verified_at=float("nan")),
+        "uncovered": lambda: cfg["worker_pools"]["hub"].append("worker-2"),
+        "bad_shape": lambda: receipt.update(files=[]),
+        "hash": lambda: file.write_text("changed"),
+        "unpin": lambda: None,
+        "suffix": lambda: None,
+        "symlink": symlink,
+        "oversize": lambda: file.write_bytes(b"x" * (ce.MAX_BYTES + 1)),
+    }
+    mutations[fault]()
+    if fault == "unpin":
+        body = body.replace(receipt["files"][name], "not pinned")
+    if fault == "suffix":
+        body = body.replace(name, name + "/child")
     if fault != "missing":
         manifest.write_text(json.dumps(receipt))
     assert placement.portable_reason({"body": body}, cfg) == "home gateway marker"
