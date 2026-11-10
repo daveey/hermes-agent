@@ -179,3 +179,8 @@ def register(ctx):
     ctx.register_delegation_provider(ConformanceDelegation())
     ctx.register_secret_source(ConformanceSecretSource())
     ctx.on_unload(_on_unload)
+
+
+def load_tests(loader, tests, pattern):
+    """Refuse unittest discovery: it imports test modules without conftest isolation."""
+    raise RuntimeError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")
