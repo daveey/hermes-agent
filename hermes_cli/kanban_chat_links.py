@@ -36,10 +36,10 @@ def link_uid(task_id: str, gateway: str, profile: Optional[str], session: str, k
     return f"{task_id}:{gateway}:{profile or '-'}:{session}:{kind}"
 
 
-def _worker_shepherd(session: Any, kind: str) -> bool:
+def _worker_shepherd(session: Any, kind: str, gateway=None, profile=None) -> bool:
     """A headless execution receipt is provenance, never a chat destination. [daveey]"""
     from hermes_cli.kanban_db_notify import is_headless_session
-    return is_headless_session(session)
+    return is_headless_session(session, gateway=gateway, profile=profile)
 
 
 def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, Any]]:
@@ -47,7 +47,7 @@ def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, 
 
     A machine session of this gateway (``is_machine_session``: a worker/cron/one-shot/subagent transcript) is no
     chat, so it is never wanted: :func:`reconcile` releases a link to it and never writes one back. [daveey]"""
-    from hermes_cli.kanban_db_notify import machine_sessions
+    from hermes_cli.kanban_db_notify import is_machine_session, machine_sessions
     from hermes_cli.kanban_session_activity import _counted_sub_clause
     now = int(time.time())
     out: dict[str, dict[str, Any]] = {}
@@ -68,7 +68,7 @@ def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, 
             f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)}")]
     except sqlite3.Error:  # board predates notify subscriptions
         shepherds = []
-    machine = machine_sessions(gateway, [r["chat_session"] for r in created] + [r[1] for r in sessions]
+    machine = machine_sessions(gateway, [r[1] for r in sessions]
                                + [r[1] for r in shepherds], local_gateway=gateway)
 
     def add(task_id: str, session: str, kind: str, created_at: Any) -> None:
@@ -80,7 +80,7 @@ def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, 
                     "chat_session": session, "kind": kind, "released": 0, "created_at": int(created_at or now)}
 
     for row in created:
-        if not _worker_shepherd(row["chat_session"], row["kind"]) and row["chat_session"] not in machine:
+        if not is_machine_session(gateway, row["chat_session"], profile=row["chat_profile"], local_gateway=gateway):
             # [daveey] Wanted unreleased, like a ``tasks.session_id`` creator link: creator-chat ownership has no
             # release on this gateway but the machine/placeholder rules above. Keeping the stored flag let one
             # foreign reconcile (a named-profile gateway on an older core holding the host sync lock) release it
@@ -105,10 +105,10 @@ def _ledger_links(board: str, gateway: str) -> dict[str, dict[str, Any]]:
             continue
         from hermes_cli.kanban_placement import is_placeholder_session
         kind = "created" if card.get("via") == "origin" else "shepherd"
-        if is_placeholder_session(card["session"]) or _worker_shepherd(card["session"], kind):
+        if is_placeholder_session(card["session"]):
             continue
         from hermes_cli.kanban_db_notify import is_machine_session
-        if is_machine_session(gateway, card["session"], local_gateway=gateway):
+        if is_machine_session(gateway, card["session"], local_gateway=gateway, profile=card.get("origin_profile")):
             continue
         profile = card.get("origin_profile")
         uid = link_uid(card["id"], gateway, profile, card["session"], kind)
@@ -135,7 +135,7 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
     no human reads that session, so it owns nothing even on an open card (hub t_01a19864fc42f5b2 was owned by
     MacBook worker transcript 20261029_180356_84db5f, 2026-11-01)."""
     from hermes_cli import kanban_sync_client as ksc
-    from hermes_cli.kanban_db_notify import machine_sessions
+    from hermes_cli.kanban_db_notify import is_machine_session
     from hermes_cli.kanban_lockguard import connect
     from hermes_cli.kanban_placement import is_placeholder_session
     path = ksc.shadow_path(board)
@@ -156,12 +156,13 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
     except sqlite3.Error as exc:  # an unreadable replica releases nothing this round; the next one retries
         _log.info("kanban chat links: replica %s unreadable for owner-link releases (%s)", path, exc)
         return {}
-    machine = machine_sessions(gateway, [r["chat_session"] for r in rows], local_gateway=gateway)
     out: dict[str, dict[str, Any]] = {}
     for r in rows:
-        if r["uid"] in want or is_placeholder_session(r["chat_session"]) or _worker_shepherd(r["chat_session"], "created"):
+        if r["uid"] in want or is_placeholder_session(r["chat_session"]) or _worker_shepherd(
+                r["chat_session"], "created", gateway, r["chat_profile"]):
             continue
-        if r.pop("status") not in TERMINAL_STATUSES and r["chat_session"] not in machine:
+        if r.pop("status") not in TERMINAL_STATUSES and not is_machine_session(
+                gateway, r["chat_session"], local_gateway=gateway, profile=r["chat_profile"]):
             continue
         out[r["uid"]] = {**r, "released": 1, "created_at": int(r["created_at"] or time.time())}
     return out
@@ -179,7 +180,7 @@ def _plan(conn: sqlite3.Connection, board: str, gateway: str, ledger: bool) -> t
     if ledger:
         want.update(_ledger_links(board, gateway))
     want.update(_owner_written_releases(board, gateway, want))
-    rows = conn.execute("SELECT uid, released, chat_session, kind, task_id FROM task_chat_links "
+    rows = conn.execute("SELECT uid, released, chat_session, kind, task_id, chat_profile FROM task_chat_links "
                         "WHERE chat_gateway = ?", (gateway,)).fetchall()
     return want, rows
 
@@ -234,7 +235,7 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
     # A placement attribution id is not a chat: its link is deleted (captured, so the Board drops it too), never
     # merely released; a released one still counted in every diff and replica read. A worker transcript's
     # shepherd link is no chat either (its wakes are refused). [daveey]
-    placeholders = {r[0] for r in rows if is_placeholder_session(r[2]) or _worker_shepherd(r[2], r[3])}
+    placeholders = {r[0] for r in rows if is_placeholder_session(r[2]) or _worker_shepherd(r[2], r[3], gateway, r[5])}
     added = changed = released = retired = 0
     with write_txn(conn):
         for uid in placeholders - set(want):

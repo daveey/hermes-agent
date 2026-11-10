@@ -69,8 +69,17 @@ def worker_transcript_reason(db: Any, chat_id: str) -> Optional[str]:
 
     Hub card t_a989e5e0 (2026-10-31): five MacBook worker transcripts of another card held shepherd subs on it, so
     its done notice was written into all five and each wake was refused. Never raises (unknown = a chat)."""
-    from hermes_cli.kanban_db_notify import is_headless_session
-    if is_headless_session(chat_id):
+    from hermes_cli.kanban_session_provenance import _HEADLESS_SESSION, _INTERACTIVE_SOURCES, session_creation_source
+    from hermes_cli.kanban_session_provenance import MACHINE_SESSION_SOURCES
+    # The supplied store is the destination authority, not the process's ambient profile.
+    read = getattr(db, "get_session", None)
+    try:
+        row = read(chat_id) if read is not None else None
+    except sqlite3.Error:
+        row = None
+    source = session_creation_source(dict(row)) if isinstance(row, (dict, sqlite3.Row)) else None
+    if source in MACHINE_SESSION_SOURCES or (
+            _HEADLESS_SESSION.fullmatch(chat_id) and source not in _INTERACTIVE_SOURCES):
         return WORKER_TRANSCRIPT
     probe = getattr(db, "is_kanban_owned_session", None)
     try:

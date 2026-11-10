@@ -21,7 +21,7 @@ def initialize_ownership(conn, task_id, creator_task_id, parents, created_at, ch
     from hermes_cli.kanban_chat_links import link_uid
 
     origin = parse_origin(chat_origin) if chat_origin else None
-    if origin is None or is_headless_session(origin.session):
+    if origin is None or is_headless_session(origin.chat_id):
         inherit_creator_origin(conn, task_id, creator_task_id, created_at=created_at)
         _inherit_notify_subs(conn, task_id, parents, created_at=created_at)
         if origin is not None and not conn.execute(
@@ -93,7 +93,8 @@ def resolve_chats(conn: sqlite3.Connection, creator_task_id: str) -> list[dict]:
                 continue
             seen.add(task_id)
             for row in _chat_links(conn, task_id):
-                if (not is_machine_session(row["chat_gateway"], row["chat_session"], local_gateway=me)
+                if (not is_machine_session(row["chat_gateway"], row["chat_session"], local_gateway=me,
+                                           profile=row["chat_profile"])
                         and not is_placeholder_session(row["chat_session"])):
                     key = (row["chat_gateway"], row["chat_profile"], row["chat_session"])
                     owners.setdefault(key, dict(row))

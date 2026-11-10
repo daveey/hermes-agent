@@ -46,91 +46,10 @@ _SCALAR_TYPES = (str, int, float, bool)
 _SUB_KEY_WHERE = "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?"
 
 
-# A ``local-<sha256>`` session id is a headless LOCAL creation receipt (``hermes_state_keys.local_identity``): a
-# Kanban worker run, cron job or one-shot, never an interactive chat. Its notices are never read and a wake is
-# refused (``session.resume`` 4132 for workers), so it is never a notify destination. [daveey]
-_HEADLESS_SESSION = re.compile(r"local-[0-9a-f]{64}")
-_HEADLESS_GLOB = "local-" + "[0-9a-f]" * 64
-
-
-def is_headless_session(chat_id: Any) -> bool:
-    """True for a headless receipt session id, bare (``tui``) or ``<gw>/<profile>/<session>`` (``hub``)."""
-    return bool(_HEADLESS_SESSION.fullmatch(str(chat_id or "").rsplit("/", 1)[-1]))
-
-
-# ``sessions.source`` values of sessions no human reads: Kanban worker runs, cron runs, one-shots, subagents.
-# Older ones carry ordinary timestamp ids (``20261029_180356_84db5f``), so the id rule above misses them. [daveey]
-MACHINE_SESSION_SOURCES = frozenset({"kanban", "cron", "oneshot", "subagent"})
-_MISSING_TTL_S = 300.0
-# ``(state.db, session) -> (source, cached_at)``. A session's source never changes, so found rows stay cached;
-# a missing row is re-read after ``_MISSING_TTL_S`` (its session may be created later).
-_source_cache: dict[tuple[str, str], tuple[Optional[str], float]] = {}
-
-
-def _local_session_sources(sessions: Iterable[str]) -> dict[str, Optional[str]]:
-    """``sessions.source`` for each id in this gateway's state.db (None when missing or unreadable). Read-only."""
-    from contextlib import closing
-    from hermes_constants import get_hermes_home
-    path = str(get_hermes_home() / "state.db")
-    now = time.monotonic()
-    out: dict[str, Optional[str]] = {}
-    todo = []
-    for sid in dict.fromkeys(sessions):
-        hit = _source_cache.get((path, sid))
-        if hit is not None and (hit[0] is not None or now - hit[1] < _MISSING_TTL_S):
-            out[sid] = hit[0]
-        else:
-            todo.append(sid)
-    if not todo:
-        return out
-    found: dict[str, Optional[str]] = {}
-    readable = False
-    if Path(path).exists():
-        try:
-            uri = Path(path).as_uri() + "?mode=ro"
-            with closing(sqlite3.connect(uri, uri=True, timeout=5)) as db:  # noqa: kanban-lockguard (state.db, not a board)
-                for i in range(0, len(todo), 500):
-                    chunk = todo[i:i + 500]
-                    found.update(db.execute(
-                        f"SELECT id, source FROM sessions WHERE id IN ({','.join('?' * len(chunk))})", chunk))
-            readable = True
-        except sqlite3.Error:
-            pass
-    for sid in todo:
-        source = found.get(sid)
-        out[sid] = str(source) if source is not None else None
-        if readable:
-            _source_cache[(path, sid)] = (out[sid], now)
-    return out
-
-
-def machine_sessions(gateway: Any, sessions: Iterable[Any], *, local_gateway: Optional[str] = None) -> set[str]:
-    """The ids among ``sessions`` (chats of ``gateway``; bare or ``<gw>/<profile>/<session>``) that are machine
-    sessions per :func:`is_machine_session`, with one state.db read for the batch."""
-    ids = {str(s or "") for s in sessions}
-    out = {s for s in ids if is_headless_session(s) or s.rsplit("/", 1)[-1].startswith("cron_")}
-    rest = {s: s.rsplit("/", 1)[-1] for s in ids - out if s}
-    if not rest or not gateway:
-        return out
-    if local_gateway is None:
-        from hermes_cli.kanban_origin import gateway_names
-        local_gateway = gateway_names()[0]
-    if not local_gateway or str(gateway) != local_gateway:
-        return out
-    sources = _local_session_sources(rest.values())
-    return out | {s for s, sid in rest.items() if sources.get(sid) in MACHINE_SESSION_SOURCES}
-
-
-def is_machine_session(gateway: Any, session: Any, *, local_gateway: Optional[str] = None) -> bool:
-    """True when ``session`` (a chat of ``gateway``) is a session no human reads, so never a chat owner:
-
-    - a headless receipt id (:func:`is_headless_session`);
-    - a cron run id (``cron_<job>_<ts>``);
-    - a session of THIS gateway whose state.db ``sessions.source`` is in :data:`MACHINE_SESSION_SOURCES`.
-
-    A missing or unknown session, or one on another gateway (its state.db is not readable here), stays human.
-    ``local_gateway`` defaults to ``kanban_origin.gateway_names()[0]``; batch callers pass it once. [daveey]"""
-    return bool(machine_sessions(gateway, (session,), local_gateway=local_gateway))
+# Compatibility exports: provenance is shared by link reconciliation and notice delivery.
+from hermes_cli.kanban_session_provenance import (
+    is_headless_session, is_machine_session, machine_sessions, _source_cache,
+)
 
 
 def _sub_key(task_id: str, platform: str, chat_id: str, thread_id: Optional[str]) -> tuple:
@@ -1107,11 +1026,8 @@ def _owning_sub_clause() -> str:
     observers = ", ".join(f"'{r}'" for r in OBSERVER_SUB_REASONS)
     reason = ("CASE WHEN json_valid(s.delivery_metadata) "
               "THEN json_extract(s.delivery_metadata, '$.reason') END")
-    # A headless receipt session (worker/cron transcript) is never a destination, whatever its reason: a row
-    # written before ``add_notify_sub`` refused them must not spread to children (``is_headless_session``).
-    headless = (f"(s.platform IN ('hub', 'tui') AND (s.chat_id GLOB '{_HEADLESS_GLOB}' "
-                f"OR s.chat_id GLOB '*/{_HEADLESS_GLOB}'))")
-    return (f"COALESCE({reason} IN ({observers}), 0) = 0 AND NOT {headless} AND ({reason} IS NOT NULL "
+    # Machine destinations are filtered by _machine_sub_chats: an ID-only SQL veto rejects Desktop too.
+    return (f"COALESCE({reason} IN ({observers}), 0) = 0 AND ({reason} IS NOT NULL "
             f"OR s.platform != 'hub' OR s.created_at <= COALESCE(p.created_at, 0) + {LEGACY_ORIGIN_BIND_WINDOW_S})")
 
 
