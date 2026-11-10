@@ -27,13 +27,8 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    # These DB/filesystem fixtures launch no external workspace-owning jobs.
-    # A real host scan can fail closed (unavailable or over budget), deferring
-    # cleanup for reasons unrelated to the lifecycle under test. Keep the real
-    # veto and cleanup code, but supply this fixture's empty process inventory.
-    # Live writers and scan failures are covered in test_kanban_workspace_jobs.
+    # No external writers here; real scans can fail closed. See test_kanban_workspace_jobs.
     from hermes_cli import kanban_workspace_jobs
-
     monkeypatch.setattr(kanban_workspace_jobs.psutil, "process_iter", lambda: iter(()))
     kb.init_db()
     return home
@@ -52,11 +47,6 @@ def _init_git_repo(repo: Path) -> None:
 # ---------------------------------------------------------------------------
 # Schema / init
 # ---------------------------------------------------------------------------
-
-
-
-
-
 
 
 @pytest.mark.platforms("windows")
