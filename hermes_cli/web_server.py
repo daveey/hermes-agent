@@ -210,6 +210,10 @@ def _get_pty_active_session_files(app: FastAPI) -> dict[str, Path]:
 
 app = FastAPI(title="Hermes Agent", version=get_version_info().base_version, lifespan=app_lifespan)
 
+from hermes_cli.web_board_busy import install_board_busy_handler
+
+install_board_busy_handler(app)
+
 from hermes_cli.dashboard_auth.body_limit import AuthBodyLimitMiddleware
 
 # Register first (innermost): auth gates run before this, JSON parsing after it.
