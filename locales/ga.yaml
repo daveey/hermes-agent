@@ -225,6 +225,7 @@ gateway:
     truncated_suffix: "… (giorraithe; úsáid `hermes kanban …` i do theirminéal le haghaidh aschur iomláin)"
     no_output: "(gan aschur)"
     wake:
+      request_withdrawn: "iarratas tarraingthe siar (ní ceadú ná cruthúnas ar chríochnú é)"
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
       crashed: "crashed (worker exited); dispatcher will retry"

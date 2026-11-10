@@ -225,6 +225,7 @@ gateway:
     truncated_suffix: "… (kısaltıldı; tam çıktı için terminalinizde `hermes kanban …` komutunu kullanın)"
     no_output: "(çıktı yok)"
     wake:
+      request_withdrawn: "istek geri çekildi (onay veya tamamlanma kanıtı değildir)"
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
       crashed: "crashed (worker exited); dispatcher will retry"

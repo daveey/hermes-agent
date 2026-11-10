@@ -225,6 +225,7 @@ gateway:
     truncated_suffix: "…（已截斷；如需完整輸出請在終端機執行 `hermes kanban …`）"
     no_output: "（無輸出）"
     wake:
+      request_withdrawn: "請求已撤回（不代表批准或完成證明）"
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
       crashed: "crashed (worker exited); dispatcher will retry"

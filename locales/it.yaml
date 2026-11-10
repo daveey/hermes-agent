@@ -225,6 +225,7 @@ gateway:
     truncated_suffix: "… (troncato; usa `hermes kanban …` nel terminale per l'output completo)"
     no_output: "(nessun output)"
     wake:
+      request_withdrawn: "richiesta ritirata (non è approvazione né prova di completamento)"
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
       crashed: "crashed (worker exited); dispatcher will retry"

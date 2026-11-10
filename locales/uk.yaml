@@ -225,6 +225,7 @@ gateway:
     truncated_suffix: "… (скорочено; використовуйте `hermes kanban …` у терміналі для повного виводу)"
     no_output: "(немає виводу)"
     wake:
+      request_withdrawn: "запит відкликано (не є схваленням або підтвердженням завершення)"
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
       crashed: "crashed (worker exited); dispatcher will retry"
