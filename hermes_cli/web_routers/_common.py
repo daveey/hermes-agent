@@ -210,6 +210,8 @@ def corrupt_store_status(db_path, exc) -> HTTPException:
     """The structured ``state_db_corrupt`` 503 for a malformed store, warning once per store per
     :data:`_CORRUPT_STORE_WARN_INTERVAL_S` (debug afterwards). Callers ``raise ... from exc``."""
     from hermes_state_errors import classify_persistence_error
+    if getattr(exc, "hermes_read_corrupt_unconfirmed", False):
+        return HTTPException(status_code=503, detail="Session read failed; background integrity check pending.")
     key, now = str(db_path), time.monotonic()
     last = _corrupt_store_warned_at.get(key)
     detail = _STORE_STATUS_DETAIL_BY_CAUSE.get(classify_persistence_error(exc), CORRUPT_STORE_DETAIL)

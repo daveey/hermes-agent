@@ -169,6 +169,9 @@ def _resolve_session_id(db, session_id: str) -> Optional[str]:
     try:
         return db.resolve_session_id(session_id)
     except sqlite3.DatabaseError as exc:
+        if getattr(exc, "hermes_read_corrupt_unconfirmed", False):
+            from hermes_cli.web_routers._common import corrupt_store_status
+            raise corrupt_store_status(db.db_path, exc) from exc
         if not is_malformed_db_error(exc):
             raise
         _log.error("state.db is corrupt while resolving session %s: %s", session_id, exc)

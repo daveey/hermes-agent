@@ -101,6 +101,38 @@ def test_web_outer_handlers_do_not_relatch_unconfirmed_read(db, monkeypatch, rou
         db.append_message(session_id="s1", role="user", content="router did not latch")
 
 
+@pytest.mark.parametrize("route", ["usage", "models", "resolve", "browse"])
+def test_web_reads_report_unconfirmed_not_repair(db, monkeypatch, caplog, route):
+    import asyncio
+    from fastapi import HTTPException
+    from hermes_cli.web_routers import analytics, sessions
+    from hermes_cli import web_server_sessions
+
+    monkeypatch.setattr(cc, "confirm_corruption", lambda *args: cc.ConfirmResult("timeout", "sessions", 5.0))
+    monkeypatch.setattr(cc, "schedule_background_confirmation", lambda *args: True)
+
+    def fail(*args, **kwargs):
+        return db._read_retrying_ioerr(corrupt_read)
+
+    with pytest.raises(HTTPException) as caught:
+        if route in ("usage", "models"):
+            monkeypatch.setattr(analytics, "_session_db_path_for_profile", lambda *a: db.db_path)
+            monkeypatch.setattr(analytics, f"_get_{route}_analytics", fail)
+            asyncio.run(getattr(analytics, f"get_{route}_analytics")(days=7))
+        elif route == "resolve":
+            monkeypatch.setattr(db, "resolve_session_id", fail)
+            sessions._resolve_session_id(db, "s")
+        else:
+            monkeypatch.setattr("hermes_state.SessionDB", fail)
+            web_server_sessions._open_session_db_at_path(db.db_path, read_only=True)
+    assert caught.value.status_code == 503
+    assert "background integrity check pending" in str(caught.value.detail)
+    assert "doctor" not in str(caught.value.detail)
+    assert "repaired" not in caplog.text
+    assert storage_state(db.db_path) == "ok"
+    db.append_message(session_id="s1", role="user", content="still writable")
+
+
 def test_distinct_profile_checks_queue_and_errors_do_not_latch(tmp_path, monkeypatch):
     entered, release = threading.Event(), threading.Event()
     paths = [tmp_path / "a.db", tmp_path / "b.db"]
