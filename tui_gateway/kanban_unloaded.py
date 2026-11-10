@@ -428,6 +428,9 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
     if verdict is None:  # a worker slot is ours: the job wakes, or writes the row itself
         try:
             verdict = spawn(lambda: _wake_job(wake, session_db, slug, ident, tip, text, metadata, old, new, now))
+            # The worker alone owns ack/rewind, including synchronous test dispatch.
+            return {"board": slug, "task_id": ident["task_id"], "chat_id": ident["chat_id"], "session_id": tip,
+                    "texts": texts, "woken": verdict == "started", "wake_result": verdict, "held_by": held_by}
         except Exception:
             _wake_slots.release()
             logger.warning("kanban sweep could not start a wake for %s", tip, exc_info=True)

@@ -813,7 +813,7 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
             # flight is removed by their ack instead, so the claim it records survives until delivery. [daveey]
             if task and getattr(task, "status", "") == "archived" and (not sub_texts or claim is None):
                 with contextlib.suppress(Exception):
-                    _kbn.remove_notify_sub(conn, **sub_ident)
+                    _kbn.ack_notify_claim(conn, upto=_new, from_cursor=_old, **sub_ident)
     from hermes_constants import get_hermes_home
     from tui_gateway.kanban_consumer_health import polled
     polled(get_hermes_home(), session_key, _kb.kanban_db_path(board=slug))

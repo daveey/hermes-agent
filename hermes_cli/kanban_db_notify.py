@@ -868,7 +868,9 @@ def ack_notify_claim(
             "WHERE s.task_id = ? AND s.platform = ? AND s.chat_id = ? AND s.thread_id = ?", key,
         ).fetchone()
         if row is not None and row["inflight_from"] is None and row["status"] == "archived":
-            conn.execute("DELETE FROM kanban_notify_subs " + _SUB_KEY_WHERE, key)
+            conn.execute("DELETE FROM kanban_notify_subs " + _SUB_KEY_WHERE
+                         + " AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = ? AND e.id > ?)",
+                         (*key, task_id, int(upto)))
     return cur.rowcount > 0
 
 

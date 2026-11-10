@@ -868,6 +868,4 @@ class _KanbanNotification:
         await self.advance()
         if not is_push:
             self.clear_failures()
-        # Unsubscribe only on archive; ``done`` is reversible.
-        if self.task and self.task.status == "archived":
-            await self.unsub()
+        # advance/ack removes archived subscriptions only after all events drain.
