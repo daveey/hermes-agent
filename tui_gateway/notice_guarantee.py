@@ -250,16 +250,22 @@ def _refresh_once(db: Any, cand: dict, branch: str, seen: set) -> str:
     seen.add(key)
     if key in _refreshed:
         return "skipped:refreshed"
-    if branch == "human":
-        # This notice intentionally starts no turn. Keep the real card decision in
-        # live-work precedence, but don't strand incidental (touch-only) recipients.
+    from hermes_state_outcome import get_outcome
+
+    refreshed = _refresh(db, cand["sid"])
+    outcome = get_outcome(cand["sid"], db=db) if refreshed else None
+    if branch == "human" and outcome and outcome.get("reason") == "notice_tail":
+        # No owning decision/wait accounted for this intentionally passive notice.
+        # Preserve the preceding turn instead of manufacturing an obligation for
+        # an incidental recipient. Other outcomes need no metadata write.
         meta = {**cand["meta"], "outcome_informational": True}
         changed = db._write_rowcount(
             "UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
             (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"]))
         if changed != 1:
             return "skipped:changed"
-    if _refresh(db, cand["sid"]):
+        refreshed = _refresh(db, cand["sid"])
+    if refreshed:
         _refreshed.add(key)
     return f"refreshed:{branch}"
 

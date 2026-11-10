@@ -161,7 +161,9 @@ def test_informational_marker_only_applies_to_validated_notice_rows(role, kind, 
 
 
 def test_human_notice_stamp_does_not_overwrite_a_concurrent_claim(db):
-    tid = _decision_card()
+    with contextlib.closing(kbc.connect()) as conn:
+        tid = kb.create_task(conn, title="other deploy", assignee="worker", session_id="other-chat",
+                             initial_status="blocked", human_request=HUMAN, lint_blocked=False)
     row = _notice(db, f"⏸ Kanban {tid} blocked", task_id=tid)
     [cand] = ng.candidates(db, time.time())
     ng._stamp(db, row, "claimed")
