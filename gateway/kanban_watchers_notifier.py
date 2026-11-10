@@ -50,10 +50,10 @@ def _pin_first():
 # ``dependency_parent_unclaimed`` (hermes_cli.kanban_parent_unclaimed) wakes the waiting chat: it must act on the
 # parent that cannot start (bump, re-place, do it here), not answer "ready but not started" when asked. [daveey]
 # ``chat_wait_unclaimed`` (hermes_cli.kanban_chat_wait) does the same for a card the chat waits on directly.
-TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "quota_episode_notice", "worker_repin_notice", "dependency_parent_unclaimed", "chat_wait_unclaimed")
+TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "quota_episode_notice", "worker_repin_notice", "dependency_parent_unclaimed", "chat_wait_unclaimed", "request_withdrawn")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
-_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected", "dependency_parent_unclaimed", "chat_wait_unclaimed")
+_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected", "dependency_parent_unclaimed", "chat_wait_unclaimed", "request_withdrawn")
 
 
 def diagnostic_event(ev) -> bool:
@@ -518,6 +518,9 @@ def _fmt_timed_out(ev, n) -> tuple:
 # intentionally silent (no formatter), and excluded from _WAKE_KINDS so they
 # never wake the creator.
 _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
+    "request_withdrawn": lambda ev, n: (f"ℹ {n.head} request withdrawn: the card was archived. "
+                                      "No answer is needed for this request; this is not approval "
+                                      "and not proof of completion.", None, None),
     "completed": _fmt_completed,
     "blocked": _fmt_blocked,
     "gave_up": _fmt_failure("gave_up"),

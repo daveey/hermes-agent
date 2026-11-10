@@ -409,9 +409,8 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
         logger.info("kanban notice for %s/%s not delivered to chat %s: %s", slug, ident["task_id"], tip, skip)
         return None
     texts = [t for t in (fmt(sub, task, ev, slug) for ev in claimed) if t]
-    if task and getattr(task, "status", "") == "archived":
-        with contextlib.suppress(Exception):
-            _kbn.remove_notify_sub(conn, **ident)
+    # Archive may carry a withdrawal receipt. Retain its subscription until
+    # ack_notify_claim removes it after durable delivery; failures must retry.
     if not texts:
         # Silent kinds only (unblocked/archived): nothing to deliver, so the claim is complete. Returning without
         # this ack left the range in flight under this live process for good, and the chat's owner could never

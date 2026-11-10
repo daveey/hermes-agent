@@ -8,6 +8,7 @@ import contextlib
 import threading
 
 from .method_ctx import bind_module
+from .kanban_notice_text import chat_wait_suffix as _kb_chat_wait
 
 
 def _notif_locked_sessions(fn, default):
@@ -168,7 +169,7 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 # past them and they can't wedge a later completed/blocked event behind an unclaimed row.
 _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked",
                         "quota_episode_notice", "worker_repin_notice", "dependency_parent_unclaimed",
-                        "chat_wait_unclaimed")
+                        "chat_wait_unclaimed", "request_withdrawn")
 # kanban, /loop + /heartbeat and the bot mailbox share one idle-poll cadence; probing the lease registry on
 # every 0.5s queue timeout cost ~a core at 11 sessions (#108005).
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0
@@ -608,11 +609,6 @@ def _kb_parent_unclaimed(payload: dict) -> str:
     return ": " + notice_text(payload)
 
 
-def _kb_chat_wait(payload: dict) -> str:
-    from hermes_cli.kanban_chat_wait import notice_text
-    return ": " + notice_text(payload)
-
-
 def _kb_failure(kind: str, payload: dict, title: str) -> str:
     """Cause-accurate gave_up/crashed wording; pid/exit/raw output only under ``Details:``. [daveey]"""
     from hermes_cli.kanban_failure_summary import describe_failure
@@ -621,6 +617,8 @@ def _kb_failure(kind: str, payload: dict, title: str) -> str:
 
 # kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
 _KANBAN_EVENT_FORMATTERS = {
+    "request_withdrawn": ("ℹ", lambda t, p, title: " request withdrawn: the card was archived. "
+                         "No answer is needed for this request; this is not approval and not proof of completion."),
     "completed": ("✔", _kb_completed),
     "blocked": ("⏸", lambda t, p, title: " blocked" + (f": {str(p.get('reason'))[:160]}" if p.get("reason") else "")),
     "gave_up": ("✖", lambda t, p, title: _kb_failure("gave_up", p, title)),

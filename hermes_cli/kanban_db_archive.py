@@ -23,7 +23,7 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via:
     from hermes_cli import kanban_db as kb
     with kb.write_txn(conn):
         row = conn.execute(
-            "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?",
+            "SELECT status, human_request, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if not row:
@@ -45,6 +45,10 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via:
         # [daveey] via: archived outside the creator scope; event_extra: e.g. a forwarded run (kanban_owner_archive_relay)
         payload = {"source_status": row["status"], **({"via": via} if via else {}), **(event_extra or {})}
         kb._append_event(conn, task_id, "archived", payload, run_id=run_id)
+        # Preserve a terminal receipt for the ask before archive removes its subscription.
+        # This is withdrawal, never a user's answer or successful task completion.
+        if row["status"] == "blocked" and row["human_request"]:
+            kb._append_event(conn, task_id, "request_withdrawn", {}, run_id=run_id)
         # [daveey] Same txn as the flip: a crash before forward_archive below still leaves the cancellation
         # for the dispatcher sweep (kanban_placement_forward.sweep_unresolved_archives).
         from hermes_cli.kanban_placement_forward import record_cancel_intent
