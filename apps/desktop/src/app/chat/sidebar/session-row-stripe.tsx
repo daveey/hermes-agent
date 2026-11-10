@@ -14,6 +14,7 @@ import { $pausedQueueSessionIds } from '@/store/owner-queue-reconcile'
 import { $sessions } from '@/store/session'
 import {
   kanbanStripeCounts,
+  outcomePaintsStripe,
   recordStripeTransition,
   type SessionDotState,
   sessionStatusStripe,
@@ -31,7 +32,7 @@ export function useSessionRowStripe(
   session: SessionInfo,
   dotState: SessionDotState,
   live: boolean
-): { statusStripe: null | SessionStatusStripe; userBlocked: boolean } {
+): { outcomePainted: boolean; statusStripe: null | SessionStatusStripe; userBlocked: boolean } {
   const userBlocked = useSessionParked(session.id, session)
   const counts = kanbanStripeCounts(session)
 
@@ -56,7 +57,7 @@ export function useSessionRowStripe(
     recordStripeTransition(session, statusStripe, dotState)
   }, [session, statusStripe, dotState])
 
-  return { statusStripe, userBlocked }
+  return { outcomePainted: outcomePaintsStripe(dotState, userBlocked), statusStripe, userBlocked }
 }
 
 /** [daveey] Stripes drawn as a small glyph in the stripe's place: a cron loop, or the card glyph for kanban waits. */

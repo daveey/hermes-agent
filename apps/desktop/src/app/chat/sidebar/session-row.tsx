@@ -381,7 +381,7 @@ function SidebarSessionRowImpl({
   const dotState = useSessionDotState(session.id, session)
 
   const liveTurn = hasLiveTurn(dotState)
-  const { statusStripe, userBlocked } = useSessionRowStripe(session, dotState, rowHasLiveStatus(session))
+  const { outcomePainted, statusStripe } = useSessionRowStripe(session, dotState, rowHasLiveStatus(session))
 
   // Card header line: the workspace this belongs to — the project when it
   // resolves (same function the session color reads, so name and tint agree;
@@ -540,11 +540,7 @@ function SidebarSessionRowImpl({
             not a working one: with several sessions busy the arcs drowned out
             the current task. Working state stays on the status dot [daveey]. */}
         {isSelected && <span aria-hidden="true" className="arc-border arc-row" />}
-        <SessionRowStatusStripe
-          outcomePainted={!userBlocked && !liveTurn}
-          session={session}
-          statusStripe={statusStripe}
-        />
+        <SessionRowStatusStripe outcomePainted={outcomePainted} session={session} statusStripe={statusStripe} />
         {/* #38072 finding 3: the row's body is a DIV, not a button — the
             reorder grabber (dnd-kit role="button" + tabIndex, kept for
             keyboard reorder, #83617) and the ⋯ trigger must be SIBLINGS of

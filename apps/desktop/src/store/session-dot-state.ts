@@ -333,6 +333,12 @@ const derivedStatusStripe = (
   )
 }
 
+/** [daveey] Whether a stored outcome may paint the stripe: a ⌘B park or the chat's own live turn beats it, but work
+ *  that outlives the turn (a running card, a background job) does not. The stripe's tooltip must use this same test,
+ *  or a red decision stripe on a chat whose card is running shows no question. */
+export const outcomePaintsStripe = (state: SessionDotState, userBlocked: boolean): boolean =>
+  !userBlocked && !hasOwnLiveTurn(state)
+
 //  [daveey] `outcome`: the row's stored outcome (session-outcome contract). When present it wins over every derived
 //  input below; a ⌘B park and a live turn (working / quiet / needs-input) still beat it. Absent (an older backend)
 //  → the derivation below, unchanged.
@@ -348,7 +354,7 @@ export const sessionStatusStripe = (
   kanbanStalled = 0,
   outcome: null | SessionOutcome | undefined = null
 ): null | SessionStatusStripe => {
-  if (!userBlocked && !hasOwnLiveTurn(state)) {
+  if (outcomePaintsStripe(state, userBlocked)) {
     const fromOutcome = outcomeStripe(outcome)
 
     if (fromOutcome) {
