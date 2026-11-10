@@ -39,6 +39,9 @@ EXTERNAL_GATEWAY_SUPERVISOR_ENV = "HERMES_GATEWAY_EXTERNAL_SUPERVISOR"
 # Forwarded by the stderr-timestamp launchd wrapper (hermes_cli/stderr_timestamp.py) to the gateway
 # grandchild, which sees ``XPC_SERVICE_NAME=0``. Read only via :func:`launchd_job_label`.
 LAUNCHD_LABEL_ENV = "HERMES_LAUNCHD_LABEL"
+# launchd's app-coalition service names (``application.<bundle>.<n>``) leak into IDE integrated terminals;
+# they never name a gateway job.
+LAUNCHD_APP_COALITION_PREFIX = "application."
 
 DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT = float(DEFAULT_CONFIG["agent"]["restart_drain_timeout"])
 DEFAULT_GATEWAY_SIGNAL_INTERRUPT_GRACE_TIMEOUT = float(DEFAULT_CONFIG["gateway"]["signal_interrupt_grace_timeout"])
@@ -90,21 +93,27 @@ def parse_launchd_exit_timeout(print_output: object) -> float | None:
 
 
 def launchd_job_label(environ: Mapping[str, str] | None = None) -> str | None:
-    """The ``ai.hermes.*`` launchd job label in *environ*, or ``None`` (no darwin gate).
+    """This process's launchd job label in *environ*, or ``None`` (no darwin gate).
 
-    launchd stamps ``XPC_SERVICE_NAME`` only on the job process it spawns. The generated plist
-    runs the stderr-timestamp wrapper there, so the gateway grandchild reads ``XPC_SERVICE_NAME=0``
-    and finds its label only in the wrapper's re-export, ``HERMES_LAUNCHD_LABEL``. Both go through
-    the same ``ai.hermes`` predicate: app-coalition labels (``application.<bundle>…``, exported
-    into IDE integrated terminals) are not our job. ONE seam for every reader of launchd identity
-    (drain cap, restart route, control-socket supervisor declaration).
+    launchd stamps ``XPC_SERVICE_NAME`` only on the job process it spawns, so a gateway below a
+    wrapper reads ``XPC_SERVICE_NAME=0`` and finds its job only in ``HERMES_LAUNCHD_LABEL`` (set in
+    the plist's ``EnvironmentVariables`` or re-exported by the stderr-timestamp wrapper).
+    ``XPC_SERVICE_NAME`` counts only with the ``ai.hermes`` prefix: launchd also exports
+    app-coalition names (``application.<bundle>…``) there into IDE integrated terminals, and those
+    are not our job. [daveey] An explicit ``HERMES_LAUNCHD_LABEL`` is an operator assertion and
+    counts whatever its prefix (hand-written plists such as ``com.daveey.babybear.*`` name their own
+    job there, gateway-64b702b67e), except an app-coalition name, which is never a job identity in
+    either variable. ONE seam for every reader of launchd identity (drain cap, restart route,
+    control-socket supervisor declaration).
     """
     env = os.environ if environ is None else environ
-    for var in ("XPC_SERVICE_NAME", LAUNCHD_LABEL_ENV):
-        label = str(env.get(var, "") or "").strip()
-        if label.startswith("ai.hermes"):
-            return label
-    return None
+    xpc = str(env.get("XPC_SERVICE_NAME", "") or "").strip()
+    if xpc.startswith("ai.hermes"):
+        return xpc
+    explicit = str(env.get(LAUNCHD_LABEL_ENV, "") or "").strip()
+    if not explicit or explicit == "0" or explicit.startswith(LAUNCHD_APP_COALITION_PREFIX):
+        return None
+    return explicit
 
 
 def launchd_service_label(environ: Mapping[str, str] | None = None, *, platform: str = sys.platform) -> str | None:

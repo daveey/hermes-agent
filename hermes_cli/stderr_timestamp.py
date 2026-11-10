@@ -114,15 +114,19 @@ def _child_launchd_label_env(environ: Mapping[str, str] | None = None) -> dict[s
     interactive shell has none, the grandchild sees ``XPC_SERVICE_NAME=0``). Re-exporting the
     label lets the gateway resolve its job without it (the stop-drain cap reading the live
     ``ExitTimeOut``, the exit-75 restart route, the control-socket supervisor declaration — all
-    via ``gateway.restart.launchd_job_label``). Only ``ai.hermes.*`` labels are exported;
-    app-coalition labels are meaningless as a job identity.
+    via ``gateway.restart.launchd_job_label``). ``XPC_SERVICE_NAME`` is exported only as an
+    ``ai.hermes.*`` label (app-coalition labels are meaningless as a job identity); [daveey] an
+    explicit ``HERMES_LAUNCHD_LABEL`` passes through whatever its prefix (hand-written
+    ``com.daveey.babybear.*`` plists, gateway-64b702b67e). Same rule as ``launchd_job_label``.
     """
     env = os.environ if environ is None else environ
-    for variable in ("XPC_SERVICE_NAME", _LAUNCHD_LABEL_ENV):
-        label = str(env.get(variable, "") or "").strip()
-        if label.startswith("ai.hermes"):
-            return {_LAUNCHD_LABEL_ENV: label}
-    return {}
+    xpc = str(env.get("XPC_SERVICE_NAME", "") or "").strip()
+    if xpc.startswith("ai.hermes"):
+        return {_LAUNCHD_LABEL_ENV: xpc}
+    explicit = str(env.get(_LAUNCHD_LABEL_ENV, "") or "").strip()
+    if not explicit or explicit == "0" or explicit.startswith("application."):
+        return {}
+    return {_LAUNCHD_LABEL_ENV: explicit}
 
 
 def _prepare_child_command(command: Sequence[str], environ: Mapping[str, str] | None = None) -> list[str]:
