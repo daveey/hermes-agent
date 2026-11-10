@@ -26,10 +26,15 @@ def show(args: dict) -> str:
             queue_hint = ready_hint(conn, task)
         except Exception:  # health: allow BLE001 -- an advisory hint must never fail the read
             queue_hint = None
+        # Every ready card says where it waits, same dict as the REST read (kanban-7d720d4ab8): a null queue_reason
+        # for a card waiting on a full hub read as stuck, and a chat ran its work outside the dispatcher. [daveey]
+        from hermes_cli import kanban_queue_position as kqp
+        queue = kqp.read(conn, task, args.get("board"))
         return json.dumps({
             "task": kt._fields(task, kt._TASK_FIELDS),
             **capsule,
             "queue_reason": kqr.latest(conn, tid),
+            **kqp.fields(queue),
             **({"queue_hint": queue_hint} if queue_hint else {}),
             "parents": kb.parent_ids(conn, tid),
             "unsatisfied_parents": [

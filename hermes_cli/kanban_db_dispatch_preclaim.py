@@ -40,4 +40,28 @@ def eligible_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row], status: str
                 from hermes_cli.kanban_repin_owner import wait_reason
                 reason = wait_reason(conn, row["id"])
             result.skipped_ineligible.append((row["id"], reason))
+            if reason == "labels_mismatch" and getattr(result, "scheduling_admitted", False):
+                note_unplaceable(conn, row["id"])
     return kept
+
+
+def note_unplaceable(conn: sqlite3.Connection, task_id: str) -> None:
+    """One ``skipped_unplaceable`` event when no known machine satisfies the card's ``runs_on``: the skip was in
+    the tick result only, so t_01a1a521638d0a78 (runs_on ["hermes-hub"]) sat ready for days with nothing on the
+    card saying why. Written again only when the missing labels change or something else happened since. [daveey]"""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_queue_position as kqp
+    try:
+        place = kqp.placement(conn, task_id)
+    except Exception:  # health: allow BLE001 -- the event is advisory; the skip itself already happened
+        kb._log.debug("kanban dispatch: unplaceable check failed for %s", task_id, exc_info=True)
+        return
+    if not place or place.get("lane") != "unplaceable":
+        return
+    payload = {"runs_on": place["runs_on"], "missing": place["missing"], "machines": place["machines"]}
+    with kb.write_txn(conn):
+        last = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id,)).fetchone()
+        if last is None or last["kind"] != "skipped_unplaceable" or last["payload"] != kb._json_or_null(payload):
+            kb._append_event(conn, task_id, "skipped_unplaceable", payload)
