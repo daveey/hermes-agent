@@ -3901,7 +3901,7 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str, *, recovery_tai
     _ctx_prior_attempts(lines, conn, task_id, now)
     _ctx_parent_results(lines, conn, task_id, now)
     _ctx_role_history(lines, conn, task, now)
-    _ctx_comments(lines, list_comments(conn, task_id), now)
+    _ctx_comments(lines, conn, task_id, now)
     from hermes_cli.kanban_worker_recovery import build_recovery_context
     return "\n".join(lines).rstrip() + "\n" + (build_recovery_context(conn, task_id) if recovery_tail else "")
 

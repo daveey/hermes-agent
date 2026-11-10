@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import hermes_cli.kanban_db as _kb
 
 if TYPE_CHECKING:
-    from hermes_cli.kanban_db import Attachment, Comment, Task
+    from hermes_cli.kanban_db import Attachment, Task
 
 # build_worker_context() caps, sized for a ~100k-char prompt with headroom.
 _CTX_MAX_PRIOR_ATTEMPTS = 10      # most recent N prior runs shown in full
@@ -228,14 +228,17 @@ def _ctx_role_history(lines: list[str], conn: sqlite3.Connection, task: Task, no
     lines.append("")
 
 
-def _ctx_comments(lines: list[str], comments: list[Comment], now: int) -> None:
+def _ctx_comments(lines: list[str], conn: sqlite3.Connection, task_id: str, now: int) -> None:
     """Newest ``_CTX_MAX_COMMENTS`` comments. The explicit "comment from
     worker" framing stops an operator-controlled HERMES_PROFILE like
     "hermes-system" being read as a system directive above an
-    attacker-influenceable body (defense-in-depth)."""
-    shown, omitted_note = _ctx_tail(comments, _CTX_MAX_COMMENTS, "comment")
+    attacker-influenceable body (defense-in-depth). A comment whose ``commented`` event
+    says an agent wrote it (``writer_kind='agent'``) is tagged ``(agent chat)``: David and
+    his agents share one profile, so the author alone can't tell them apart. [daveey]"""
+    shown, omitted_note = _ctx_tail(_kb.list_comments(conn, task_id), _CTX_MAX_COMMENTS, "comment")
     if not shown:
         return
+    agent_ids = _kb.agent_comment_ids(conn, task_id, [c.id for c in shown])
     lines.append("## Comment thread")
     if omitted_note:
         lines.append(omitted_note)
@@ -245,6 +248,7 @@ def _ctx_comments(lines: list[str], comments: list[Comment], now: int) -> None:
         # directive above the (attacker-influenceable) comment body. Defense-in-depth — the LLM-controlled
         # author-forgery surface was already closed in #22435. See #22452.
         safe_author = (c.author or "").replace("`", "")
-        lines.append(f"comment from worker `{safe_author}` at {_ctx_stamp(c.created_at, now)}:")
+        tag = " (agent chat)" if c.id in agent_ids else ""
+        lines.append(f"comment from worker `{safe_author}`{tag} at {_ctx_stamp(c.created_at, now)}:")
         lines.append(_ctx_cap(c.body, _CTX_MAX_COMMENT_BYTES))
         lines.append("")
