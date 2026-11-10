@@ -103,6 +103,7 @@ def test_both_park_producers_publish_a_wake(monkeypatch):
     from tui_gateway import notification_park
     from tui_gateway.notification_wait import generation
     from tools.process_registry import process_registry
+    from tools.process_registry_awaiting import release
     q = queue.Queue()
     monkeypatch.setattr(process_registry, "completion_queue", q)
     monkeypatch.setattr(process_registry, "_parked_events", [])
@@ -113,15 +114,22 @@ def test_both_park_producers_publish_a_wake(monkeypatch):
         process_registry.park_unowned_event(event)
         assert generation(q) > before
         assert process_registry.has_parked_events()
-        assert process_registry.take_parked_events(lambda e: True) == [event]
+        taken = process_registry.take_parked_events(lambda e: True)
+        try:
+            assert taken == [event]
+        finally:
+            release(taken)
         assert not process_registry.has_parked_events()
         before = generation(q)
         assert notification_park.park(event)
         assert generation(q) > before
         assert notification_park.has_parked()
         taken = notification_park.claim(lambda e: True)
-        assert taken == [event]
-        notification_park.unhold(taken)
+        try:
+            assert taken == [event]
+        finally:
+            release(taken)
+            notification_park.unhold(taken)
         assert not notification_park.has_parked()
     finally:
         notification_park.clear()

@@ -238,9 +238,18 @@ def test_parked_events_are_taken_only_by_their_owner():
     mine, theirs = {"session_key": "a"}, {"session_key": "b"}
     registry.park_unowned_event(mine)
     registry.park_unowned_event(theirs)
-    assert registry.take_parked_events(lambda e: e["session_key"] == "a") == [mine]
-    assert registry.take_parked_events(lambda e: e["session_key"] == "a") == []
-    assert registry.take_parked_events(lambda e: True) == [theirs]
+    from tools.process_registry_awaiting import release
+    taken = registry.take_parked_events(lambda e: e["session_key"] == "a")
+    try:
+        assert taken == [mine]
+        assert registry.take_parked_events(lambda e: e["session_key"] == "a") == []
+    finally:
+        release(taken)
+    taken = registry.take_parked_events(lambda e: True)
+    try:
+        assert taken == [theirs]
+    finally:
+        release(taken)
 
 
 def test_start_tui_orphan_recovery_runs_off_thread(checkpoint, procs):

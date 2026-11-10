@@ -335,8 +335,9 @@ def test_finished_notice_survives_orderly_restart(home, registry, backend, monke
     assert "were running" not in text and "jobs stopped" not in text.lower()
 
 
+@pytest.mark.parametrize("pending", ["queue", "registry_park", "notification_park"])
 @pytest.mark.parametrize("control", ["stop", "quiet", "foreign_session", "consumed", "delivered"])
-def test_finished_notice_shutdown_controls(home, registry, backend, monkeypatch, control):
+def test_finished_notice_shutdown_controls(home, registry, backend, monkeypatch, control, pending):
     from tools.process_registry_notifications import format_process_notification
 
     job = _job("proc_done", owner="turn-1", command="true", notify=True)
@@ -357,7 +358,14 @@ def test_finished_notice_shutdown_controls(home, registry, backend, monkeypatch,
      "consumed": lambda: registry._completion_consumed.add(job.id),
      "delivered": delivered}[control]()
     # A stale duplicate must not resurrect an acknowledged or suppressed completion.
-    registry.completion_queue.put(event)
+    if pending == "registry_park":
+        registry.park_unowned_event(event)
+    elif pending == "notification_park":
+        from tui_gateway import notification_park
+        monkeypatch.setattr(notification_park, "_parked", [])
+        assert notification_park.park(event)
+    else:
+        registry.completion_queue.put(event)
     server._shutdown_sessions()
     assert read_turn_marker(home, "session-key") is None
     assert read_turn_marker(home / "other-profile", "session-key") is None
@@ -772,6 +780,25 @@ def test_claimed_parked_notice_keeps_exit_custody(home, registry, backend, monke
         if park == "notification":
             notification_park.unhold(claimed)
     assert not any(e is event for e in pending_events(registry.completion_queue))
+
+
+@pytest.mark.parametrize("disposal", ["clear", "expire"])
+def test_park_disposal_does_not_release_an_independent_hold(registry, monkeypatch, disposal):
+    from tools.process_registry_awaiting import hold, pending_events, release
+    from tui_gateway import notification_park
+    monkeypatch.setattr(notification_park, "_parked", [])
+    event = {"type": "completion", "session_id": "proc_hold", "owner_task_id": "owner"}
+    hold([event])
+    try:
+        assert notification_park.park(event)
+        if disposal == "clear":
+            notification_park.clear()
+        else:
+            monkeypatch.setattr(notification_park, "time", types.SimpleNamespace(monotonic=lambda: float("inf")))
+            assert notification_park.claim(lambda evt: True) == []
+        assert any(e is event for e in pending_events(registry.completion_queue))
+    finally:
+        release([event])
 
 
 def test_registry_park_claim_rechecks_presence(registry):
