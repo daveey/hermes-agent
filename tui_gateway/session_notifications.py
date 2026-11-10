@@ -1612,7 +1612,11 @@ def _notif_take_parked(sid, session, registry, handle) -> int:
     try:
         events = take(lambda evt: _session_owns_notification_event(sid, session, evt))
         if events:
-            handle(events, None)
+            from tools.process_registry_awaiting import release
+            try:
+                handle(events, None)
+            finally:
+                release(events)
         return len(events)
     except Exception as exc:
         _notif_log_failure("parked notification dispatch failed", exc)
@@ -1868,6 +1872,7 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
             _notif_log_failure("notification dispatch failed", exc)
         finally:
             release_in_flight(ready)
+            release_in_flight(parked)
             notification_park.unhold(parked)
     # Kanban claims still buffered go back to the board: the process may live on (close, evict). [daveey]
     try:

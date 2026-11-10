@@ -116,7 +116,13 @@ def _pending_completions(sid: str, session: dict) -> list[dict]:
     # queue ↔ in flight ↔ held. The held list is read under its lock together with queue and in-flight, so a
     # poller moving an event between them (take_ready, _notif_take_held, a requeue) is seen at least once.
     events = unpublished_completions(process_registry)
-    with server._notif_held_lock:
+    from tui_gateway import notification_park
+    # Read every off-queue custodian together with queue/in-flight custody. Separate
+    # snapshots can miss a queue-to-park move between reads. Park claims acquire an
+    # in-flight hold before removing their source copy. No callbacks under these locks.
+    with process_registry._lock, notification_park._lock, server._notif_held_lock:
+        events.extend(process_registry._parked_events or ())
+        events.extend(evt for _deadline, evt in notification_park._parked)
         events.extend(pending_events(process_registry.completion_queue))
         events.extend(session.get("_notif_held") or ())
     # Stable after the fence: a notice turn's start marks its notices delivered under ``_sessions_lock``, and
