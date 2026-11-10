@@ -62,19 +62,73 @@ def _json_dict(raw) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+# A grant the Board returned unused leaves a run row that never started anything here: the events it may
+# carry are the Board's grant (``claimed`` with holder/run_uid, no local ``lock``) and its ``released``.
+# Anything else (spawned, owner_admitted, worker_bound, heartbeat, worker_result, ...) is execution or
+# admission evidence and keeps the row an ordinary intervening run. [daveey]
+_UNUSED_GRANT_EVENT_KINDS = frozenset({'claimed', 'released'})
+# The Board's release writes exactly ``{"unused_grant": true}`` into the run's metadata. Any other key (the
+# sweep's pid/claimer/exit_code/owner_restart/worker_output/attempt_note, or one added later) fails closed:
+# the row is then an ordinary run and the resume is not attempted.
+_UNUSED_GRANT_METADATA_KEYS = frozenset({'unused_grant'})
+_MAX_UNUSED_GRANTS_SKIPPED = 32
+
+
+def _is_unused_grant_run(conn: sqlite3.Connection, run) -> bool:
+    """A run row that only records a Board lease grant that was released before anything started locally.
+
+    Both the Board's explicit ``unused_grant`` release (``task_runs.metadata``; ClaimGate.__exit__ in
+    ``kanban_db_sync``) and the absence of any execution or admission trace are required: an ordinary release,
+    a crash, a timeout or a completion, or a run that was spawned or admitted, is never skipped.
+    """
+    if run['ended_at'] is None or run['status'] != 'released' or (run['outcome'] or '') != 'released':
+        return False
+    meta = _json_dict(run['metadata'])
+    if meta.get('unused_grant') is not True or meta.keys() - _UNUSED_GRANT_METADATA_KEYS:
+        return False
+    if run['error'] or run['summary']:
+        return False
+    columns = run.keys()
+    if any(c not in columns or run[c] for c in ('worker_pid', 'last_heartbeat_at', 'claim_lock')):
+        return False
+    for kind, payload in conn.execute('SELECT kind, payload FROM task_events WHERE task_id=? AND run_id=?',
+                                      (run['task_id'], run['id'])):
+        if kind not in _UNUSED_GRANT_EVENT_KINDS:
+            return False
+        body = _json_dict(payload)
+        if kind == 'claimed' and 'lock' in body:  # a local claim CAS happened: not a bare grant
+            return False
+        if kind == 'released' and body.get('unused_grant') is not True:
+            return False
+    return True
+
+
 def restart_candidate(conn: sqlite3.Connection, task_id: str, run_id: int) -> Optional[dict]:
     """The run immediately before ``run_id`` on this card when it was lost to an owner restart, with the
     session its owner admitted it to; ``None`` for every other requeue (crash, timeout, quota, block...).
 
     Only the immediately preceding run counts: a crash or timeout in between means the restart loss is
-    not what this run is recovering from, and the ordinary path applies unchanged.
+    not what this run is recovering from, and the ordinary path applies unchanged. The one exception is a
+    Board lease grant released unused (:func:`_is_unused_grant_run`): it never started anything, so it is
+    not "in between" and the restart loss behind it is still the run being recovered. Those rows are listed in
+    ``skipped_unused_grant_runs``.
     """
     from hermes_cli.kanban_db_dispatch import _is_owner_restart_run
-    prev = conn.execute('SELECT * FROM task_runs WHERE task_id=? AND id<? ORDER BY id DESC LIMIT 1',
-                        (task_id, run_id)).fetchone()
+    rows = conn.execute('SELECT * FROM task_runs WHERE task_id=? AND id<? ORDER BY id DESC LIMIT ?',
+                        (task_id, run_id, _MAX_UNUSED_GRANTS_SKIPPED + 1)).fetchall()
+    skipped: list[int] = []
+    prev = None
+    for row in rows:
+        if _is_unused_grant_run(conn, row):
+            skipped.append(int(row['id']))
+            continue
+        prev = row
+        break
     if prev is None or prev['ended_at'] is None or not _is_owner_restart_run(prev):
         return None
     candidate = {'prior_run_id': int(prev['id']), 'prior_profile': prev['profile']}
+    if skipped:
+        candidate['skipped_unused_grant_runs'] = sorted(skipped)
     admitted = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='owner_admitted' "
                             'ORDER BY id DESC LIMIT 1', (task_id, prev['id'])).fetchone()
     payload = _json_dict(admitted[0] if admitted else None)
@@ -122,6 +176,8 @@ def plan_resume(candidate: Optional[dict], *, task, run_id: int, session_db, own
     if candidate is None:
         return None
     plan = {'prior_run_id': candidate['prior_run_id'], 'run_id': run_id}
+    if candidate.get('skipped_unused_grant_runs'):
+        plan['skipped_unused_grant_runs'] = list(candidate['skipped_unused_grant_runs'])
 
     def fallback(reason, **extra):
         return {**plan, 'fallback': reason, **extra}
@@ -187,7 +243,9 @@ def plan_and_seed(candidate: dict, *, task, run_id: int, session_db, owner_db: O
     except Exception:
         logger.warning('Kanban restart resume: planning failed; fresh session', exc_info=True)
         return {'prior_run_id': candidate.get('prior_run_id'), 'run_id': run_id,
-                'prior_session_id': candidate.get('session_id'), 'fallback': 'plan_failed'}, 0
+                'prior_session_id': candidate.get('session_id'), 'fallback': 'plan_failed',
+                **({'skipped_unused_grant_runs': candidate['skipped_unused_grant_runs']}
+                   if candidate.get('skipped_unused_grant_runs') else {})}, 0
     if not plan.get('resumed_session_id'):
         return plan, 0
     try:
@@ -265,7 +323,7 @@ def record_resume_event(conn, task_id: str, run_id: int, plan: dict, copied: Opt
     """One ``restart_resume`` event per admitted attempt that follows an owner-restart loss."""
     from hermes_cli import kanban_db as kb
     payload = {k: plan[k] for k in ('prior_run_id', 'prior_session_id', 'messages', 'tokens', 'threshold',
-                                    'fallback') if plan.get(k) is not None}
+                                    'fallback', 'skipped_unused_grant_runs') if plan.get(k) is not None}
     if plan.get('resumed_session_id'):
         if copied:
             payload.update(resumed_session_id=plan['resumed_session_id'], copied_messages=copied,

@@ -207,8 +207,20 @@ class FakeHub:
             runs = b["rows"].get("task_runs", {})
             if (self.svc.lease_runs and cur and cur["run_uid"] == run and run in runs
                     and runs[run].get("ended_at") is None):
-                self.svc._put(b, "task_runs", run, {"status": "released", "outcome": "released", "ended_at": 2},
+                unused = bool(body.get("unused_grant"))
+                # As the Board's releaseTask with ``unused_grant: true`` (live t_01a1a1dea9c64d6a run 164239): the
+                # run's metadata and the ``released`` event both say the grant never started anything.
+                self.svc._put(b, "task_runs", run, {"status": "released", "outcome": "released", "ended_at": 2,
+                                                    **({"metadata": json.dumps({"unused_grant": True},
+                                                                               separators=(",", ":"))}
+                                                       if unused else {})},
                               gw, op_id, hlc)
+                if unused:
+                    self.svc._put(b, "task_events", f"ev-rel-{run}",
+                                  {"task_id": task, "run_uid": run, "kind": "released",
+                                   "payload": json.dumps({"error": None, "retry_status": "ready",
+                                                          "unused_grant": True}, separators=(",", ":")),
+                                   "created_at": int(time.time())}, gw, op_id, hlc)
                 self.svc._put(b, "tasks", task, {"status": "ready", "current_run_uid": None, "lease_holder": None,
                                                  "lease_expires": None}, gw, op_id, hlc)
             return {"status": "applied", "lease": None}
