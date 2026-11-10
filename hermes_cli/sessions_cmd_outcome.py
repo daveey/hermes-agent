@@ -94,7 +94,7 @@ def sidebar_rows(db, limit: int = AUDIT_DEFAULT_LIMIT) -> list[dict[str, Any]]:
 
 def audit_rows(db, *, refresh: bool = False, limit: int = AUDIT_DEFAULT_LIMIT) -> list[dict[str, Any]]:
     """``{id, title, kind, reason, age_h, on, items}`` per sidebar row (``age_h`` = hours since last activity)."""
-    from hermes_state_outcome import refresh_outcome
+    from hermes_state_outcome import _cron_items, _lineage_ids, refresh_outcome
 
     if refresh:
         ensure_outcome_hooks()
@@ -102,6 +102,9 @@ def audit_rows(db, *, refresh: bool = False, limit: int = AUDIT_DEFAULT_LIMIT) -
     for row in sidebar_rows(db, limit):
         outcome = refresh_outcome(row["id"], "manual", db=db) if refresh else row.get("outcome")
         outcome = outcome or {}
+        crons = _cron_items(_lineage_ids(db, row["id"])) if outcome.get("kind") == "done" else []
+        if crons:
+            outcome = {**outcome, "reason": "done_owns_cron", "on": crons}
         last = row.get("last_active") or row.get("started_at") or now
         out.append({"id": row["id"], "title": row.get("title") or row.get("preview") or "",
                     "kind": outcome.get("kind"), "reason": outcome.get("reason"),

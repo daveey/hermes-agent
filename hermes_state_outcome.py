@@ -139,6 +139,8 @@ def validate_declaration(outcome: Any) -> dict[str, Any]:
         if not summary:
             raise ValueError("a done outcome needs a summary")
         out["summary"] = summary[:SUMMARY_CHARS]
+        if outcome.get("keep_crons") is True:
+            out["keep_crons"] = True
     elif kind == "decision":
         raw_items = outcome.get("items")
         items = [_decision_item(i) for i in raw_items] if isinstance(raw_items, list) else []
@@ -628,6 +630,12 @@ def declare_outcome(sid: str, outcome: dict, *, db: Any = None) -> dict[str, Any
         tip = _tip(handle, sid)
         if _row(handle, tip) is None:
             raise ValueError(f"unknown session {sid}")
+        if declared["kind"] == "done" and not declared.get("keep_crons"):
+            from cron.jobs import use_cron_store
+            from cron.session_ownership import release_session_jobs
+
+            with use_cron_store(Path(handle.db_path).parent):
+                declared["released_crons"] = release_session_jobs(_lineage_ids(handle, tip))
         _write(handle, tip, declared)
     return declared
 
