@@ -261,6 +261,9 @@ def test_a_new_ready_episode_notifies_again(board):
         then = int(time.time()) - 31 * 60
         conn.execute("UPDATE task_events SET created_at=? WHERE task_id=? AND kind IN ('blocked','unblocked')",
                      (then, tid))
+        # block_task books a synthetic ``blocked`` run ending at the block; it ages with the block it records.
+        conn.execute("UPDATE task_runs SET started_at=?, ended_at=? WHERE task_id=? AND outcome='blocked'",
+                     (then, then, tid))
         conn.commit()
         assert cw.sweep(conn) == 1
         assert len(_notices(conn, tid)) == 2

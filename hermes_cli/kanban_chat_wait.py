@@ -88,19 +88,61 @@ def notice_text(payload: Any) -> str:
     tid = str(payload.get("parent") or "<card>")[:64]
     title = str(payload.get("parent_title") or "").strip()[:120]
     named = f"{tid} ({title})" if title else tid
+    hold = ""
+    if payload.get("hold_reason") and payload.get("hold_until"):
+        stamp = time.strftime("%H:%M:%SZ", time.gmtime(int(payload["hold_until"])))
+        hold = f"; dispatcher hold {payload['hold_reason']} until {stamp}"
     return (f"{named}, which this chat waits on, has been ready {payload.get('ready_minutes', '?')} min with no "
-            f"worker ({payload.get('queue') or 'queue place unknown'}). " + pu._options(tid) + ".")
+            f"worker ({payload.get('queue') or 'queue place unknown'}{hold}). " + pu._options(tid) + ".")
 
 
-_FLOOR = ", ".join(f"'{k}'" for k in sorted({"created", "promoted", "reclaimed", "unblocked", "claimed",
-                                              "spawned", "continuation_woken", "condition_met", "continued"}))
+def _floor_kinds() -> str:
+    from hermes_cli.kanban_diagnostics import _READY_WAIT_FLOOR_KINDS
+    return ", ".join(f"'{k}'" for k in sorted({*_READY_WAIT_FLOOR_KINDS, "continued"}))
+
+
+# Prefilter only (``pu.ready_since`` decides): the same event floor as the diagnostic, and the latest run's end,
+# so a long run that a restart requeued never counts as ready time. [daveey]
 _CANDIDATES = (
     "SELECT t.id, t.title, t.created_at FROM tasks t "
     "WHERE t.status = 'ready' AND t.claim_lock IS NULL "
     "AND (t.session_id IS NOT NULL OR EXISTS (SELECT 1 FROM kanban_notify_subs s WHERE s.task_id = t.id)) "
-    f"AND COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id AND e.kind IN ({_FLOOR})), "
-    "t.created_at) BETWEEN ? AND ? ORDER BY t.id"
+    f"AND MAX(COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id AND e.kind IN "
+    f"({_floor_kinds()})), t.created_at), "
+    "COALESCE((SELECT MAX(r.ended_at) FROM task_runs r WHERE r.task_id = t.id), 0)) "
+    "BETWEEN ? AND ? ORDER BY t.id"
 )
+
+
+def _clock_hold(conn, task_id: str, since: int, now: float) -> dict[str, Any]:
+    """``{"hold_reason", "hold_until"}`` while a clock guard still holds ``task_id``, else ``{}``.
+
+    The reason of this ready episode's latest ``respawn_guarded`` event (at or after ``since``); a latest run
+    lost to an owner restart is the owner-restart cooldown even before the tick that records the guard.
+    Advisory only: a failed lookup drops the hold from the notice, never the notice."""
+    try:
+        return _clock_hold_unchecked(conn, task_id, since, now)
+    except Exception:  # health: allow BLE001 -- the hold is advisory; the notice must still go out
+        _log.debug("chat-wait: clock hold lookup failed for %s", task_id, exc_info=True)
+        return {}
+
+
+def _clock_hold_unchecked(conn, task_id: str, since: int, now: float) -> dict[str, Any]:
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_dispatch import _is_owner_restart_run
+    from hermes_cli.kanban_db_dispatch_clock import guard_hold_until
+    reason = None
+    row = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'respawn_guarded' "
+                       "AND created_at >= ? ORDER BY created_at DESC, id DESC LIMIT 1", (task_id, int(since))).fetchone()
+    if row is not None:
+        reason = kb._json_dict(row[0]).get("reason")
+    if not reason:
+        run = conn.execute("SELECT outcome, metadata FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL "
+                           "ORDER BY ended_at DESC LIMIT 1", (task_id,)).fetchone()
+        if run is not None and _is_owner_restart_run(run):
+            reason = "owner_restart_cooldown"
+    until = guard_hold_until(conn, task_id, str(reason), int(now)) if reason else None
+    return {"hold_reason": str(reason), "hold_until": int(until)} if until else {}
 
 
 def sweep(conn, *, now: Optional[float] = None) -> int:
@@ -114,7 +156,8 @@ def sweep(conn, *, now: Optional[float] = None) -> int:
         if ready_for < THRESHOLD_SECONDS or ready_for > MAX_EPISODE_SECONDS:
             continue
         if pu.post_notice(conn, row["id"], row["id"], wait_key=f"ready@{since}", waited_seconds=ready_for,
-                          ready_seconds=ready_for, parent_title=row["title"], kind=NOTICE_KIND):
+                          ready_seconds=ready_for, parent_title=row["title"], kind=NOTICE_KIND,
+                          extra=_clock_hold(conn, row["id"], since, now)):
             posted += 1
     return posted
 

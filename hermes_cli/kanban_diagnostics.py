@@ -702,20 +702,56 @@ def _rule_block_unblock_cycling(task, events, runs, now, cfg) -> list[Diagnostic
 
 
 # Events after which a now-ready, unclaimed task must have (re-)entered ready:
-# the classic ready transitions plus every claim/park/wake on the way back.
+# the classic ready transitions plus every claim/park/wake on the way back, and a run lost
+# to a gateway restart (booked ``owner_restart_lost``, not ``reclaimed``: without it an 80-min
+# run read as 80 min ready, hermes-hub 2026-11-10). Other run-ending requeues are bounded by
+# the run's ``ended_at`` (``_last_run_end_ts``), never by kinds a pre-claim check may write. [daveey]
 _READY_WAIT_FLOOR_KINDS = frozenset({
     "created", "promoted", "reclaimed", "unblocked",
     "claimed", "spawned", "continuation_woken", "condition_met", "wake_probe_stale",
     "wake_check_stale",
+    "owner_restart_lost",
 })
 
 
-def _last_ready_entry_ts(events: Iterable[Any]) -> int:
-    """Latest ready-entry floor; a ``continued`` checkpoint counts only when it resumed straight to ready."""
+def _last_run_end_ts(runs: Iterable[Any]) -> int:
+    """Latest ``ended_at`` over ``runs`` (0 if none): a card is never unclaimed-ready while a run is open."""
+    from hermes_cli import kanban_db as kb
+    ends = [kb._to_epoch(_task_field(r, "ended_at", None)) for r in (runs or [])]
+    return int(max([0, *(e for e in ends if e)]))
+
+
+def _last_ready_entry_ts(events: Iterable[Any], runs: Iterable[Any] = ()) -> int:
+    """Latest ready-entry floor; a ``continued`` checkpoint counts only when it resumed straight to ready.
+    The latest run's end bounds it too, whatever event (if any) the requeue left."""
     events = list(events)
     continued_ready = [_event_ts(ev) for ev in events
                        if _event_kind(ev) == "continued" and _parse_payload(ev).get("status") == "ready"]
-    return max([_latest_event_ts(events, _READY_WAIT_FLOOR_KINDS), *continued_ready])
+    return max([_latest_event_ts(events, _READY_WAIT_FLOOR_KINDS), *continued_ready, _last_run_end_ts(runs)])
+
+
+def _guard_clock(events: Iterable[Any], runs: Iterable[Any], cfg,
+                 since: int = 0) -> tuple[Optional[str], Optional[int]]:
+    """``(guard reason, hold-until epoch)`` from the latest ``respawn_guarded`` event of this ready episode
+    (at or after ``since``); the epoch only for a run-end clock hold (owner-restart / rate-limit /
+    infrastructure cooldown), computed like ``kanban_db_dispatch_clock.guard_hold_until`` (quota-episode
+    backoffs are not modelled). Advisory: the live verdict is the dispatcher's."""
+    guarded = [ev for ev in (events or []) if _event_kind(ev) == "respawn_guarded" and _event_ts(ev) >= since]
+    if not guarded:
+        return None, None
+    reason = _parse_payload(max(guarded, key=_event_ts)).get("reason")
+    reason = str(reason) if reason else None
+    end = _last_run_end_ts(runs)
+    if not end or reason not in ("owner_restart_cooldown", "rate_limit_cooldown", "infrastructure_cooldown"):
+        return reason, None
+    from hermes_cli import kanban_db as kb
+    if reason == "owner_restart_cooldown":
+        from hermes_cli.kanban_db_dispatch import OWNER_RESTART_COOLDOWN_SECONDS
+        cooldown = cfg.get("owner_restart_cooldown_seconds") or kb._env_int(
+            "HERMES_KANBAN_OWNER_RESTART_COOLDOWN_SECONDS", OWNER_RESTART_COOLDOWN_SECONDS)
+    else:
+        cooldown = cfg.get("rate_limit_cooldown_seconds") or kb._resolve_rate_limit_cooldown_seconds()
+    return reason, end + int(cooldown)
 
 
 def _foreign_machines(task, cfg) -> list[str]:
@@ -772,7 +808,7 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     # claim/park, so those events bound the wait from below too. Without them a
     # card cycling claim -> scheduled -> condition_met -> ready all day read as
     # "ready 18h with no worker" from its first promotion. [daveey]
-    last_ready_ts = _last_ready_entry_ts(events)
+    last_ready_ts = _last_ready_entry_ts(events, runs)
     if last_ready_ts == 0:
         last_ready_ts = int(_task_field(task, "created_at", default=0) or 0)
     if last_ready_ts == 0:
@@ -821,13 +857,18 @@ def _rule_held_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     reason = _ready_hold_reason(task, events, cfg)
     if not reason:
         return []
-    since = _last_ready_entry_ts(events) or int(_task_field(task, "created_at", 0) or 0)
+    since = _last_ready_entry_ts(events, runs) or int(_task_field(task, "created_at", 0) or 0)
     age = now - since
     if not since or age < float(cfg.get("stranded_threshold_seconds", 30 * 60)):
         return []
+    guard_reason, hold_until = _guard_clock(events, runs, cfg, since) if reason == "respawn_guarded" else (None, None)
+    hold = f"{reason}: {guard_reason}" if guard_reason else reason
+    if hold_until:
+        stamp = time.strftime("%H:%M:%SZ", time.gmtime(hold_until))
+        hold += f", until {stamp}" if hold_until > now else f", expired {stamp}"
     return [Diagnostic(
         kind="held_in_ready", severity="warning",
-        title=(f"Ready {int(age / 60)}m, last observed hold ({reason})" if reason == "respawn_guarded"
+        title=(f"Ready {int(age / 60)}m, last observed hold ({hold})" if reason == "respawn_guarded"
                else f"Ready {int(age / 60)}m, held ({reason})"),
         detail=("The last recorded dispatch decision was a guard hold; the current hold is not verified. "
                 "A cleared blocker, capacity limit, or missing pickup can leave this historical event "
@@ -837,7 +878,9 @@ def _rule_held_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
         actions=[_cli_hint("Check dispatcher status", "hermes kanban diagnostics")],
         first_seen_at=since, last_seen_at=since, count=1,
         data={"ready_since": since, "age_seconds": int(age), "hold_reason": reason,
-              "foreign_machines": _foreign_machines(task, cfg)},
+              "foreign_machines": _foreign_machines(task, cfg),
+              **({"guard_reason": guard_reason} if guard_reason else {}),
+              **({"hold_until": hold_until} if hold_until else {})},
     )]
 
 
