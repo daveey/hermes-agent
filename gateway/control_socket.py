@@ -615,7 +615,8 @@ class _PipeControlProtocol(asyncio.Protocol):
 
 
 def query_gateway_control(home: Path, verb: str, *, params: Optional[dict[str, Any]] = None,
-                          timeout: float = _DEFAULT_CLIENT_TIMEOUT) -> Optional[dict[str, Any]]:
+                          timeout: float = _DEFAULT_CLIENT_TIMEOUT,
+                          report_unsupported: bool = False) -> Optional[dict[str, Any]]:
     """Ask the gateway serving ``home`` a control verb; returns its ``result`` payload. Any failure (no/stale
     socket, timeout, malformed answer, ``ok: false``) returns None so callers fall back to the scan layer.
     ``params`` carries verb arguments (e.g. ``{"old": ..., "new": ...}``). Never raises."""
@@ -629,6 +630,9 @@ def query_gateway_control(home: Path, verb: str, *, params: Optional[dict[str, A
         response = json.loads(raw.decode("utf-8")) if raw else None
     except Exception:
         return None
+    if (report_unsupported and isinstance(response, dict) and response.get("ok") is False
+            and isinstance(response.get("supported_verbs"), list) and verb not in response["supported_verbs"]):
+        return {"unsupported": True}
     result = response.get("result") if isinstance(response, dict) and response.get("ok") is True else None
     return result if isinstance(result, dict) else None
 
@@ -690,7 +694,10 @@ def pause_gateway_for_update(home: Path, *, timeout: float = _DEFAULT_CLIENT_TIM
 
     Step 2 of the socket migration (#92091).
     """
-    return query_gateway_control(home, "pause-if-idle-for-update" if idle_only else "pause-for-update", timeout=timeout)
+    if idle_only:
+        return query_gateway_control(home, "pause-if-idle-for-update", timeout=max(timeout, 6.0),
+                                     report_unsupported=True)
+    return query_gateway_control(home, "pause-for-update", timeout=timeout)
 
 
 def rescan_gateway_profiles(home: Path, *, timeout: float = 8.0) -> Optional[dict[str, Any]]:

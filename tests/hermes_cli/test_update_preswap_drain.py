@@ -96,8 +96,9 @@ def test_busy_pause_precedes_stash_or_discard_but_follows_prompt(tmp_path, monke
     seen = []
     monkeypatch.setattr(stash, "_ask_keep_local_changes", lambda changes: seen.append("prompt") or keep)
     monkeypatch.setattr(pause, "pause_at_commit_point", lambda: seen.append("pause") or "gateway busy")
-    with pytest.raises(pause.PauseRefused, match="gateway busy"):
+    with pytest.raises(SystemExit) as refused:
         stash._stash_local_changes_if_needed(["git"], tmp_path, ask_first=True, checkout_move=gate._moves_for(None))
+    assert refused.value.code == 1
     assert seen == ["prompt", "pause"]
     assert source.read_text() == "dirty = 2\n"
     assert git("rev-parse", "HEAD").stdout == before
@@ -214,7 +215,7 @@ def test_command_releases_desktop_fence_after_preswap_refusal(tmp_path, monkeypa
     subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
                     "commit", "-qm", "source"], check=True)
     source.write_text("dirty = 2\n")
-    with pytest.raises(KeyboardInterrupt if mode == "interrupt" else pause.PauseRefused):
+    with pytest.raises(KeyboardInterrupt if mode == "interrupt" else SystemExit):
         main.cmd_update(SimpleNamespace(gateway=False))
     assert desktop_gate() == "CLEAR"
     assert source.read_text() == "dirty = 2\n"
