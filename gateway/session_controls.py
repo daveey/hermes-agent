@@ -12,6 +12,7 @@ from gateway.config import Platform
 from gateway.session_contract import CANONICAL_GATEWAY_PROTOCOL, SessionActor, SessionRef, Submission
 from gateway.session_llm_oneshot import DeferredReply
 from hermes_constants import profile_name_for_home
+from hermes_state_mutation_guards import MUTATION_GUARD_REFUSALS, busy_refusal
 from hermes_state_runtime import RuntimeStoreError
 
 logger = logging.getLogger(__name__)
@@ -381,6 +382,14 @@ class AuthorityConnection:
             return {'jsonrpc': '2.0', 'id': rid, 'error': {
                 'code': getattr(exc, 'wire_code', 4001), 'message': getattr(exc, 'wire_message', exc.reason),
                 'data': _refusal_data(exc)}}
+        except MUTATION_GUARD_REFUSALS as exc:
+            # Backstop: a caller that never translated a live turn lease / compression lock still
+            # answers the retryable busy verdict, and the WARNING names the caller left to fix.
+            logger.warning('untranslated mutation guard refusal method=%s profile=%s: %s: %s', method,
+                           getattr(self.actor, 'profile_id', None), type(exc).__name__, exc)
+            refusal = busy_refusal(exc)
+            return {'jsonrpc': '2.0', 'id': rid, 'error': {
+                'code': 4001, 'message': refusal.reason, 'data': _refusal_data(refusal)}}
         except sqlite3.Error as exc:
             _log_storage_failure(getattr(self.actor, 'profile_id', None), method,
                                  params.get('session_id'), exc)
@@ -877,7 +886,6 @@ class AuthorityConnection:
 
     async def mutate(self, ref, params):
         from gateway.session_mutations import mutate_session
-        from hermes_state_mutation_guards import MUTATION_GUARD_REFUSALS, busy_refusal
         try:
             result = await mutate_session(self.authority, self.actor, ref, params)
         except MUTATION_GUARD_REFUSALS as exc:

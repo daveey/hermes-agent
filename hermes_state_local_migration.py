@@ -115,8 +115,16 @@ def bind_legacy_target(db, conn, receipt):
     from hermes_state_compression import _CHAIN_STEP_SQL
     if conn.execute(_CHAIN_STEP_SQL, (target,)).fetchone() is not None:
         raise RuntimeStoreError('admission_conflict')
-    from hermes_state_mutation_guards import require_idle
-    require_idle(db, conn, [target])
+    from hermes_state_mutation_guards import MUTATION_GUARD_REFUSALS, busy_refusal, require_idle
+    from hermes_state_errors import SessionTurnLeaseLostError
+    try:
+        require_idle(db, conn, [target])
+    except MUTATION_GUARD_REFUSALS as exc:
+        # Another writer's live turn lease is the coordination refusal below; a compression lock
+        # is the retryable busy verdict. Neither may escape as an untyped internal error.
+        if isinstance(exc, SessionTurnLeaseLostError):
+            raise RuntimeStoreError('runtime_coordination_required') from exc
+        raise busy_refusal(exc) from exc
     root = db._session_turn_lease_key_on_conn(conn, target)
     if conn.execute('SELECT 1 FROM session_turn_leases WHERE conversation_id=? AND expires_at>?',
                     (root, time.time())).fetchone():
