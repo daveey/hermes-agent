@@ -9,7 +9,6 @@ import { startSessionDrag } from '@/app/chat/session-drag'
 import { PlatformAvatar } from '@/app/messaging/platform-icon'
 import { openSession } from '@/app/open-session'
 import { formatMessageTimestamp } from '@/components/assistant-ui/thread/timestamp'
-import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { RowButton } from '@/components/ui/row-button'
 import { OverflowTip, Tip } from '@/components/ui/tooltip'
@@ -34,10 +33,7 @@ import { normalizeProfileKey } from '@/store/profile'
 import { $projects } from '@/store/projects'
 import { $pullRequestsByBranch, sessionPrKey } from '@/store/pull-requests'
 import { sessionPinId } from '@/store/session'
-import {
-  hasLiveTurn,
-  rowBackgroundProcesses
-} from '@/store/session-dot-state'
+import { hasLiveTurn, rowBackgroundProcesses } from '@/store/session-dot-state'
 import { $sessionListDensity } from '@/store/session-list-density'
 import { $openStoredSessionIds } from '@/store/session-states'
 import { sessionCostUsd } from '@/store/sidebar-archive'
@@ -58,9 +54,10 @@ import {
   SidebarRowShell
 } from './chrome'
 import { shellOwnsPress } from './reorderable-list'
-import { SessionActionsMenu, SessionContextMenu } from './session-actions-menu'
+import { SessionContextMenu } from './session-actions-menu'
 import { sessionRowDetails } from './session-row-details'
 import { resolveSessionRowClick } from './session-row-gesture'
+import { RowHoverActions } from './session-row-hover-actions'
 import { gatewayMarks } from './session-row-offline'
 import { SessionRowSlot } from './session-row-slots'
 import { SessionRowStatusStripe, useSessionRowStripe } from './session-row-stripe'
@@ -124,8 +121,27 @@ function disarmMarquee(event: React.PointerEvent<HTMLElement>) {
 // The last trailing figure yields its space to the actions button on hover or
 // keyboard focus. The sidebar's tail swap styles keep real PR actions visible
 // while they are hovered or focused.
-const TAIL_HIDES = 'session-row-tail min-w-5 transition-opacity'
+// [daveey] min-w-11 = the archive + kebab cluster (two size-5 buttons, gap-1).
+// [daveey] The tail reserves the hover cluster's width: archive + kebab (two
+// size-5 buttons, gap-1), or the kebab alone on an archived row.
+function tailHides(archived: boolean | undefined): string {
+  return cn('session-row-tail transition-opacity', archived ? 'min-w-5' : 'min-w-11')
+}
+
 const KEBAB_YIELDS = 'session-row-kebab'
+
+// [daveey] How the trailing slot and the hover cluster share the row's end.
+// A PR chip that ends the slot stays visible and clickable: the cluster sits
+// beside it in flow rather than covering it (the cluster is twice the old
+// kebab's width, enough to bury a short chip whole).
+function rowEndLayout(lastKey: string | undefined, chipEndsSlot: boolean, hasPr: boolean, tail: string) {
+  const prEndsSlot = chipEndsSlot && lastKey === 'pr'
+
+  return {
+    cluster: cn(lastKey && !prEndsSlot && 'absolute right-0', hasPr && !prEndsSlot && KEBAB_YIELDS),
+    lastChip: chipEndsSlot && !prEndsSlot ? cn('inline-flex justify-end', tail) : undefined
+  }
+}
 
 function formatAge(seconds: number, r: Translations['sidebar']['row']): string {
   const { unit, value } = coarseElapsed(Date.now() - seconds * 1000)
@@ -140,8 +156,8 @@ function rowHasLiveStatus(session: SessionInfo): boolean {
 
 function liveProcessBadge(session: SessionInfo, onResume: () => void) {
   return rowHasLiveStatus(session) && rowBackgroundProcesses(session).length > 0 ? (
-      <BackgroundProcessBadge onOpen={onResume} session={session} />
-    ) : null
+    <BackgroundProcessBadge onOpen={onResume} session={session} />
+  ) : null
 }
 
 function SidebarSessionRowImpl({
@@ -288,6 +304,7 @@ function SidebarSessionRowImpl({
   // thing. Chips used to render in the body instead, which left them stranded
   // to the left of the kebab's own column: never flush right, never swapping.
   const trailing: { key: string; node: React.ReactNode }[] = []
+  const tail = tailHides(session.archived)
 
   if ((showProfile || pinnedProfile) && hasProfileTag) {
     trailing.push({ key: 'profile', node: <ProfileTag profile={session.profile} /> })
@@ -312,7 +329,7 @@ function SidebarSessionRowImpl({
         <span className="pointer-events-none whitespace-nowrap text-[0.625rem] leading-none text-(--ui-text-tertiary)">
           {head}
           {/* The figures own their tail: the separator goes with it. */}
-          <span className={cn('inline-block text-right', TAIL_HIDES)}>
+          <span className={cn('inline-block text-right', tail)}>
             {head && sep}
             {showAge ? (
               <Tip label={absoluteAge} side="top">
@@ -349,6 +366,7 @@ function SidebarSessionRowImpl({
 
   // A chip that ends the slot hides whole; the figures handle their own tail.
   const chipEndsSlot = trailing.length > 0 && !figures.length && !pinnedAge
+  const end = rowEndLayout(trailing.at(-1)?.key, chipEndsSlot, Boolean(pr), tail)
   // A handed-off session's live source is local, but it originated on a
   // messaging platform — surface that origin as a small badge so e.g. a
   // Telegram thread continued here still reads as Telegram.
@@ -405,6 +423,22 @@ function SidebarSessionRowImpl({
   // against it. In the card it renders INSIDE the header row instead — the
   // shell column would span the card's full height and shave every line,
   // when only the header shares its line with the age and kebab.
+  // One action set feeds the right-click menu and the hover kebab.
+  const menuProps = {
+    archived: Boolean(session.archived),
+    onArchive,
+    onBranch,
+    onDelete,
+    onPin,
+    onToggleUnread,
+    pinned: isPinned,
+    profile: session.profile,
+    selectedRow: session,
+    sessionId: session.id,
+    title,
+    unread
+  }
+
   const actionsNode = (
     <div
       className="relative z-2 flex shrink-0 items-center justify-end gap-1"
@@ -422,61 +456,21 @@ function SidebarSessionRowImpl({
       onPointerDown={event => event.stopPropagation()}
     >
       {trailing.map(({ key, node }, index) => (
-        <span
-          className={
-            chipEndsSlot && index === trailing.length - 1 ? cn('inline-flex justify-end', TAIL_HIDES) : undefined
-          }
-          key={key}
-        >
+        <span className={index === trailing.length - 1 ? end.lastChip : undefined} key={key}>
           {node}
         </span>
       ))}
-      <SessionActionsMenu
-        archived={Boolean(session.archived)}
-        onArchive={onArchive}
-        onBranch={onBranch}
-        onDelete={onDelete}
-        onPin={onPin}
-        onToggleUnread={onToggleUnread}
-        pinned={isPinned}
-        profile={session.profile}
-        selectedRow={session}
-        sessionId={session.id}
-        title={title}
-        unread={unread}
-      >
-        <Button
-          aria-label={r.sessionActions}
-          className={cn(
-            'size-5 rounded-[4px] bg-transparent text-transparent transition-colors duration-100 hover:bg-(--ui-control-active-background) hover:text-foreground focus-visible:bg-(--ui-control-active-background) focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring data-[state=open]:bg-(--ui-control-active-background) data-[state=open]:text-foreground group-hover:text-(--ui-text-tertiary) [&_svg]:size-3.5!',
-            trailing.length > 0 && 'absolute right-0',
-            pr && KEBAB_YIELDS
-          )}
-          data-session-actions
-          size="icon"
-          variant="ghost"
-        >
-          <Codicon name="kebab-vertical" size="0.875rem" />
-        </Button>
-      </SessionActionsMenu>
+      <RowHoverActions
+        actionsLabel={r.sessionActions}
+        archiveLabel={r.archive}
+        className={end.cluster}
+        menu={menuProps}
+      />
     </div>
   )
 
   return (
-    <SessionContextMenu
-      archived={Boolean(session.archived)}
-      onArchive={onArchive}
-      onBranch={onBranch}
-      onDelete={onDelete}
-      onPin={onPin}
-      onToggleUnread={onToggleUnread}
-      pinned={isPinned}
-      profile={session.profile}
-      selectedRow={session}
-      sessionId={session.id}
-      title={title}
-      unread={unread}
-    >
+    <SessionContextMenu {...menuProps}>
       <SidebarRowShell
         actions={card ? undefined : actionsNode}
         className={cn(
@@ -546,7 +540,11 @@ function SidebarSessionRowImpl({
             not a working one: with several sessions busy the arcs drowned out
             the current task. Working state stays on the status dot [daveey]. */}
         {isSelected && <span aria-hidden="true" className="arc-border arc-row" />}
-        <SessionRowStatusStripe outcomePainted={!userBlocked && !liveTurn} session={session} statusStripe={statusStripe} />
+        <SessionRowStatusStripe
+          outcomePainted={!userBlocked && !liveTurn}
+          session={session}
+          statusStripe={statusStripe}
+        />
         {/* #38072 finding 3: the row's body is a DIV, not a button — the
             reorder grabber (dnd-kit role="button" + tabIndex, kept for
             keyboard reorder, #83617) and the ⋯ trigger must be SIBLINGS of

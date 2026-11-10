@@ -340,6 +340,45 @@ describe('SidebarSessionRow keyboard stops', () => {
     expect(globalThis.document.activeElement).toBe(actions)
   })
 
+  it('keeps a slot-ending PR chip visible beside the hover cluster, not under it', () => {
+    $sidebarRowMeta.set(['pr'])
+    $pullRequestsByBranch.set({
+      [branchPrKey('/repo', 'feature')]: {
+        branch: 'feature',
+        draft: false,
+        number: 12345,
+        state: 'open',
+        title: 'Feature',
+        url: 'https://github.com/example/repo/pull/12345'
+      }
+    })
+
+    renderRow(makeSession({ git_branch: 'feature', git_repo_root: '/repo', title: 'Feature session' }))
+
+    const pullRequest = screen.getByRole('button', { name: 'Open pull request #12345' })
+    const cluster = screen.getByRole('button', { name: 'Session actions' }).closest('span.flex')!
+
+    expect(cluster.className).not.toContain('absolute')
+    expect(cluster.className).not.toContain('session-row-kebab')
+    expect(pullRequest.closest('.session-row-tail')).toBeNull()
+    expect(pullRequest.compareDocumentPosition(cluster) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('lifts the hover cluster over a hiding tail, sized to its buttons', () => {
+    $sidebarRowMeta.set(['updated'])
+
+    const { container, unmount } = renderRow(makeSession({ title: 'Plain' }))
+    const cluster = screen.getByRole('button', { name: 'Session actions' }).closest('span.flex')!
+
+    expect(cluster.className).toContain('absolute')
+    expect(container.querySelector('.session-row-tail')?.className).toContain('min-w-11')
+    unmount()
+
+    const archived = renderRow(makeSession({ archived: true, title: 'Old' }))
+
+    expect(archived.container.querySelector('.session-row-tail')?.className).toContain('min-w-5')
+  })
+
   it('retains the real pull-request action as a separate keyboard stop', () => {
     $sidebarRowMeta.set(['pr'])
     $pullRequestsByBranch.set({
@@ -522,7 +561,6 @@ describe('SidebarSessionRow decoration slots', () => {
   })
 })
 
-
 // The card header names the row's project. A backend-Home-owned row files
 // under the Home bucket, so the card names Home in human copy, never the
 // bucket's internal id.
@@ -616,7 +654,12 @@ describe('SidebarSessionRow kanban counts', () => {
   // (the card's figures/age tail and the one-line row's default branch), and the amber stalled glyph.
   it('shows the amber stalled count after the age on a card row', () => {
     const { container } = renderRow(
-      makeSession({ kanban_active: 2, kanban_parked: 2, kanban_stalled: 1, title: 'Stalled' } as Partial<SessionInfo> & {
+      makeSession({
+        kanban_active: 2,
+        kanban_parked: 2,
+        kanban_stalled: 1,
+        title: 'Stalled'
+      } as Partial<SessionInfo> & {
         title: string
       }),
       { card: true }
@@ -636,25 +679,25 @@ describe('SidebarSessionRow kanban counts', () => {
     act(() => $sidebarRowMeta.set([]))
 
     try {
-    const { container } = renderRow(
-      makeSession({
-        kanban_active: 1,
-        kanban_observed_at: Date.now() / 1000,
-        kanban_parked: 1,
-        kanban_stalled: 1,
-        message_count: 4,
-        title: 'Stalled one-line'
-      } as Partial<SessionInfo> & { title: string })
-    )
+      const { container } = renderRow(
+        makeSession({
+          kanban_active: 1,
+          kanban_observed_at: Date.now() / 1000,
+          kanban_parked: 1,
+          kanban_stalled: 1,
+          message_count: 4,
+          title: 'Stalled one-line'
+        } as Partial<SessionInfo> & { title: string })
+      )
 
-    expect(container.querySelector('time')).toBeNull()
-    const counts = screen.getByTestId('session-row-kanban-counts')
-    expect(counts.querySelector('[data-kanban-count="stalled"]')?.textContent).toBe('1')
-    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('stalled')
-    const glyph = container.querySelector('[data-slot="session-status-stripe"]')
-    expect(glyph?.getAttribute('data-status-stripe')).toBe('stalled')
-    expect(glyph?.className).toContain('amber')
-    expect(glyph?.querySelector('.codicon-project')).not.toBeNull()
+      expect(container.querySelector('time')).toBeNull()
+      const counts = screen.getByTestId('session-row-kanban-counts')
+      expect(counts.querySelector('[data-kanban-count="stalled"]')?.textContent).toBe('1')
+      expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('stalled')
+      const glyph = container.querySelector('[data-slot="session-status-stripe"]')
+      expect(glyph?.getAttribute('data-status-stripe')).toBe('stalled')
+      expect(glyph?.className).toContain('amber')
+      expect(glyph?.querySelector('.codicon-project')).not.toBeNull()
     } finally {
       act(() => $sidebarRowMeta.set(before))
     }
@@ -705,7 +748,6 @@ describe('SidebarSessionRow own activity stamps', () => {
       expect(stripe(container)).toBeNull()
     })
   }
-
 
   it('expires tree-only evidence without a row refresh', async () => {
     const { $kanbanObservationTick } = await import('@/store/kanban-observation')
@@ -789,7 +831,6 @@ describe('SidebarSessionRow own activity stamps', () => {
     )
 
     expect(stripe(container)).toBe('stuck')
-
   })
 
   it('still paints done (green) with no activity stamps', () => {
@@ -912,7 +953,12 @@ describe('SidebarSessionRow stored outcome', () => {
     [{ kind: 'done', summary: 'Shipped it' }, 'done', 'emerald', 'Shipped it'],
     [{ kind: 'decision', items: [{ id: 'us_1', question: 'Merge PR #12?' }] }, 'stuck', 'red', 'Merge PR #12?'],
     [{ kind: 'muted' }, 'blocked', 'zinc', 'Muted'],
-    [{ kind: 'waiting', on: [{ kind: 'capacity', id: 'hub', label: 'hub slot' }] }, 'waiting', 'zinc', 'capacity: hub slot'],
+    [
+      { kind: 'waiting', on: [{ kind: 'capacity', id: 'hub', label: 'hub slot' }] },
+      'waiting',
+      'zinc',
+      'capacity: hub slot'
+    ],
     [{ kind: 'running', on: [] }, 'waiting', 'zinc', 'Running'],
     [{ kind: 'unresolved', reason: 'notice_tail' }, 'attention', 'amber', 'Unresolved: notice_tail']
   ] as const)('%j paints %s (%s) with its tooltip', (outcome, stripe, colour, tip) => {
@@ -939,9 +985,11 @@ describe('SidebarSessionRow stored outcome', () => {
     publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true })
 
     const { container } = renderRow(
-      makeSession({ message_count: 4, outcome: { kind: 'unresolved', reason: 'no_summary' }, title: 'Busy' } as Partial<
-        SessionInfo
-      > & { title: string })
+      makeSession({
+        message_count: 4,
+        outcome: { kind: 'unresolved', reason: 'no_summary' },
+        title: 'Busy'
+      } as Partial<SessionInfo> & { title: string })
     )
 
     expect(container.querySelector('[data-sidebar-stripe]')).toBeNull()
@@ -953,9 +1001,12 @@ describe('SidebarSessionRow stored outcome', () => {
     const decision = { kind: 'decision', items: [{ id: 'us_1', question: 'Merge PR #12?' }] }
 
     const live = renderRow(
-      makeSession({ message_count: 4, outcome: decision, title: 'Close-out', turn_live: true } as Partial<
-        SessionInfo
-      > & { title: string })
+      makeSession({
+        message_count: 4,
+        outcome: decision,
+        title: 'Close-out',
+        turn_live: true
+      } as Partial<SessionInfo> & { title: string })
     )
 
     expect(live.container.querySelector('[data-sidebar-stripe]')).toBeNull()
@@ -980,4 +1031,3 @@ describe('SidebarSessionRow stored outcome', () => {
     expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('blocked')
   })
 })
-
