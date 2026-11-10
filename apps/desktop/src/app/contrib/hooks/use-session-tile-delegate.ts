@@ -603,6 +603,8 @@ export function useSessionTileDelegate({
         const runtimeId = resumed?.session_id
 
         if (!runtimeId) {
+          timing?.reconciled('failed')
+
           throw new Error('resume returned no session id')
         }
 

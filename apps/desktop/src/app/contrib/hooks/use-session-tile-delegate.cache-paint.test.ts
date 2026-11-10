@@ -231,6 +231,20 @@ describe('[daveey] a tile (the @session ref click) paints from the transcript ca
     expect(tileLines()[0]).not.toHaveProperty('paint')
   })
 
+  it('a resume that returns no runtime id writes outcome "failed" instead of nothing', async () => {
+    setSessionOwnerHint('no-runtime-ref', ROUTE)
+    vi.mocked(getLatestSessionMessages).mockResolvedValue({
+      messages: rows('from rest'),
+      session_id: 'no-runtime-ref'
+    } as never)
+    vi.mocked(requestGatewayForAgent).mockResolvedValue({} as never)
+    renderTile()
+
+    await expect(sessionTileDelegate()!.resumeTile('no-runtime-ref')).rejects.toThrow('resume returned no session id')
+
+    expect(tileLines()).toEqual([expect.objectContaining({ id: 'no-runtime-ref', outcome: 'failed', surface: 'tile' })])
+  })
+
   // [daveey] The main pane caches every REST page it opens with; a cold tile open (the first ref click on a session
   // the prefetch had not warmed) did not, so the next open of the same old session missed the cache again.
   it('a cold tile open caches the REST page it painted, under the tile owner key', async () => {
