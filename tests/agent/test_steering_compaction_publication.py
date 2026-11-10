@@ -11,7 +11,7 @@ pytest_plugins = ["tests.agent.test_pre_final_gate"]
 @pytest.mark.parametrize("in_place", [False, True])
 def test_compaction_does_not_replay_own_preflushed_rows(agent, tmp_path, monkeypatch, in_place):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setattr("agent.conversation_compression._refresh_agent_tool_definitions", lambda _: False)
+    monkeypatch.setattr("agent.conversation_compression_tools.refresh_agent_tool_definitions", lambda _: False)
     db = SessionDB(tmp_path / "state.db")
     agent._session_db = db
     agent._ensure_db_session()
@@ -49,7 +49,7 @@ def test_compaction_does_not_replay_own_preflushed_rows(agent, tmp_path, monkeyp
 @pytest.mark.parametrize("in_place", [False, True])
 def test_lost_compression_lease_does_not_publish_pending_steering(agent, tmp_path, monkeypatch, in_place):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setattr("agent.conversation_compression._refresh_agent_tool_definitions", lambda _: False)
+    monkeypatch.setattr("agent.conversation_compression_tools.refresh_agent_tool_definitions", lambda _: False)
     db = SessionDB(tmp_path / "state.db")
     agent._session_db = db
     agent._ensure_db_session()

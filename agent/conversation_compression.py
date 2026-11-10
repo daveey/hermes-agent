@@ -124,12 +124,15 @@ COMPRESSION_RETRY_TOKENS_STATUS_TEMPLATE = "🗜️ Compressed ~{before:,} → ~
 COMPRESSION_RETRY_CONTEXT_REDUCED_STATUS_TEMPLATE = (
     "🗜️ Context reduced to {new_ctx:,} tokens (was {old_ctx:,}), retrying..."
 )
+# No-op refusal (nothing dropped): chat surfaces suppress it; manual /compress feedback words it differently.
+COMPRESSION_REFUSED_WOULD_GROW_WARNING = ("⚠️ Compression refused: the generated summary would have GROWN the conversation "
+                                          "instead of shrinking it. No messages were dropped — conversation continues unchanged.")
 
 # FAILURE-CLASS notice — a deliberate carve-out from routine-compression silence (#16775 class): the context
 # is over the compression threshold but compression is blocked (summary-LLM cooldown / anti-thrash breaker),
-# so the session will keep growing until the hard provider token limit kills it. Do NOT add it to
-# ROUTINE_COMPRESSION_STATUS_SAMPLES or the gateway noise regex (_TELEGRAM_NOISY_STATUS_RE); it is pinned
-# un-swallowed in tests/gateway/test_telegram_noise_filter.py::VISIBLE_COMPRESSION_MESSAGES.
+# so the session will keep growing until the hard provider token limit kills it. DMs keep it (the owner can act);
+# shared chats drop it in gateway/run_status_filter.py (#101003). Never add it to the noise regex
+# (_TELEGRAM_NOISY_STATUS_RE) or ROUTINE_COMPRESSION_STATUS_SAMPLES; tests/gateway/test_run_status_filter.py pins it.
 CONTEXT_OVERFLOW_BLOCKED_WARNING_TEMPLATE = (
     "⚠ Context is over the compression threshold (~{tokens:,} tokens >= {threshold:,}) "
     "but compression is currently blocked ({reason}). The model may stop responding. Run /new to start a fresh "
@@ -162,20 +165,11 @@ def is_compaction_progress_status(text: str | None) -> bool:
     if body == COMPACTION_DONE_STATUS:
         return False
     lowered = body.lower()
-    # The failure-class overflow warning mentions compression but is a blocked notice, not progress.
+    # Failure-class overflow is blocked, not progress: DM/raw surfaces stay loud;
+    # the gateway may suppress the exact template for multi-user destinations.
     if "compaction complete" in lowered or "compression is currently blocked" in lowered:
         return False
     return "compact" in lowered or "compress" in lowered or "context reduced to" in lowered
-
-
-def _refresh_agent_tool_definitions(agent) -> bool:
-    """Rebuild agent.tools at the compaction commit boundary (the only moment config reaches a forever-session's
-    frozen tool schemas; the prompt cache is already invalid). Returns True when tools were added."""
-    from tools.mcp_tool_agent import refresh_agent_mcp_tools
-    added = refresh_agent_mcp_tools(agent, content_aware=True)
-    if added:
-        logger.info("Compaction tool refresh added tools: %s", sorted(added))
-    return bool(added)
 
 
 _COMPRESSOR_ATTEMPT_STATE_FIELDS = (
@@ -3065,7 +3059,7 @@ def _rebuild_system_prompt_at_boundary(agent: Any, system_message: str) -> str:
         # surface: its builder output drops the skills index, external provider blocks and tool guidance,
         # and the commit below would persist that over the live session's snapshot (restored verbatim by
         # the next fresh agent). Keep the seeded bytes; the live agent's own compaction propagates updates.
-        # Returning here also deliberately skips _refresh_agent_tool_definitions: its MCP refresh persists
+        # Returning here also deliberately skips refresh_agent_tool_definitions: its MCP refresh persists
         # the agent's tool names, which would overwrite the session's saved tools[] with the memory-only set.
         if agent._cached_system_prompt:
             from agent.system_prompt import reconstruct_static_prefix
@@ -3081,7 +3075,8 @@ def _rebuild_system_prompt_at_boundary(agent: Any, system_message: str) -> str:
     # the refresh is free; when nothing changed the snapshot is byte-equal and we keep the existing list
     # object (identity matters to provider-side tool-block caching on some backends).
     try:
-        _refresh_agent_tool_definitions(agent)
+        from agent.conversation_compression_tools import refresh_agent_tool_definitions
+        refresh_agent_tool_definitions(agent)
     except Exception:
         logger.warning(
             "compaction tool-definition refresh failed; keeping the session's existing tool snapshot", exc_info=True
@@ -3158,10 +3153,7 @@ def _salvage_or_refuse_grown_transcript(
         with contextlib.suppress(Exception):
             agent.context_compressor._last_compress_refused_would_grow = True
         with contextlib.suppress(Exception):
-            agent._emit_warning(
-                "⚠️ Compression refused: the generated summary would have GROWN the conversation instead of "
-                "shrinking it. No messages were dropped — conversation continues unchanged."
-            )
+            agent._emit_warning(COMPRESSION_REFUSED_WOULD_GROW_WARNING)
         _existing_sp = _existing_system_prompt(agent, system_message)
         _emit_aborted_attempt_telemetry(agent, attempt.started_at, "would_grow", attempt.seed)
         # Count the refusal as an ineffective-compaction strike so the anti-thrash

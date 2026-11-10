@@ -106,7 +106,7 @@ def hold_owner_wake_claim(monkeypatch):
 async def test_authority_route_runs_a_wake_receipted_before_drain_once_after_restart(
         monkeypatch, busy, claim_in_flight):
     from gateway.platforms.event import MessageEvent
-    from gateway.run_runtime import recover_profile_native_sessions
+    from gateway.run_runtime import recover_profile_native_sessions, settle_gateway_runtime
     from gateway.wake import deliver_wake
 
     held = hold_owner_wake_claim(monkeypatch) if claim_in_flight else None
@@ -134,6 +134,8 @@ async def test_authority_route_runs_a_wake_receipted_before_drain_once_after_res
         lambda: admissions(runner, authority, source)[0] == ("messaging", "terminal", "completed"),
         what="the human turn to settle",
     )
+    # Join authority tasks before the successor takes the profile.
+    await settle_gateway_runtime(runner)
     wake_row = admissions(runner, authority, source)[-1]
     assert wake_row[0] == "automation"
     assert wake_row[1] == "queued" or (wake_row[1:] == ("terminal", "completed") and wake_runs(executed) == ["owner"])
@@ -145,3 +147,32 @@ async def test_authority_route_runs_a_wake_receipted_before_drain_once_after_res
         what="the wake to run",
     )
     assert len(wake_runs(executed)) == 1  # ran once, on whichever gateway claimed it
+
+
+@pytest.mark.asyncio
+async def test_a_wake_claimed_just_before_a_drain_runs_rather_than_settling_unrun(monkeypatch):
+    """The drain begins after the wake's claim committed (its admission gate already passed): the
+    old owner holds the only claim, so it must run the wake, not answer it with the drain notice."""
+    from gateway.platforms.event import MessageEvent
+    from gateway.run_runtime import settle_gateway_runtime
+    from gateway.wake import deliver_wake
+
+    executed = []
+    runner, adapter, authority, source = await authority_route(monkeypatch, "owner", executed)
+    await adapter.handle_message(MessageEvent(text="A", source=source, message_id="A"))
+    await async_wait_until(
+        lambda: admissions(runner, authority, source) == [("messaging", "terminal", "completed")],
+        what="the human turn to settle",
+    )
+    stamp = authority._stamp_claim
+
+    def drain_begins_after_commit(ref, live, row):
+        if row:
+            runner._draining = True
+        return stamp(ref, live, row)
+
+    monkeypatch.setattr(authority, "_stamp_claim", drain_begins_after_commit)
+    await asyncio.wait_for(deliver_wake(adapter, text=WAKE, source=source), 10)
+    await settle_gateway_runtime(runner)
+    assert admissions(runner, authority, source)[-1] == ("automation", "terminal", "completed")
+    assert wake_runs(executed) == ["owner"]

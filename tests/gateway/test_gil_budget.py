@@ -40,8 +40,15 @@ def test_disabled_override_keeps_the_current_interval(restore_interval):
 def test_start_gateway_applies_it_before_serving():
     """The bootstrap calls apply_gateway_switch_interval() before it builds the runner."""
     from gateway import run_bootstrap
-    src = inspect.getsource(run_bootstrap.start_gateway)
-    calls = [n.func.id for n in ast.walk(ast.parse(src))
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+
+    def _name_calls(fn):
+        src = inspect.getsource(fn)
+        return src, [n.func.id for n in ast.walk(ast.parse(src))
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+
+    # start_gateway is the public entry; it delegates to the runtime body under the no-prompt guard.
+    _, entry_calls = _name_calls(run_bootstrap.start_gateway)
+    assert "_start_gateway_runtime" in entry_calls
+    src, calls = _name_calls(run_bootstrap._start_gateway_runtime)
     assert "apply_gateway_switch_interval" in calls
     assert src.index("apply_gateway_switch_interval()") < src.index("GatewayRunner(")

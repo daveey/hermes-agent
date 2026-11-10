@@ -33,7 +33,7 @@ def _agent(**over):
 
 
 def _rebuild(agent):
-    with patch.object(cc, "_refresh_agent_tool_definitions", return_value=False), \
+    with patch("agent.conversation_compression_tools.refresh_agent_tool_definitions", return_value=False), \
          patch("agent.system_prompt.reconstruct_static_prefix"):
         return cc._rebuild_system_prompt_at_boundary(agent, "")
 

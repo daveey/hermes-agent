@@ -6,6 +6,7 @@ is the executable scheduling configuration, not Python source under inspection.
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 import shutil
@@ -67,6 +68,33 @@ def _labels(job):
     return [value] if isinstance(value, str) else value
 
 
+def _docker_calls(steps, tmp_path, root=ROOT):
+    """Run each hadolint step's script as the runner would, with `docker` recorded, not run.
+
+    The step text alone is not the behaviour: upstream moved the `docker run` into
+    scripts/ci/lint_docker.sh, so the contract follows the command the step executes.
+    """
+    hadolint = [s for s in steps if "run" in s and "hadolint" in f"{s.get('name', '')} {s['run']}"]
+    assert hadolint, "no hadolint step in the guards job"
+    stub = tmp_path / "bin"
+    stub.mkdir(exist_ok=True)
+    calls = tmp_path / "docker-calls.tsv"
+    docker = stub / "docker"
+    docker.write_text('#!/usr/bin/env bash\nprintf \'%s\\t\' "$@" >> "$DOCKER_CALLS"\necho >> "$DOCKER_CALLS"\n',
+                      encoding="utf-8")
+    docker.chmod(0o755)
+    env = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ.get('PATH', '')}", "DOCKER_CALLS": str(calls)}
+    for step in hadolint:
+        assert "${{" not in step["run"], "expressions in the step need rendering before replay"
+        # GitHub's default Linux shell for `run:` is `bash --noprofile --norc -eo pipefail {0}`.
+        done = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
+                              cwd=root, env=env, capture_output=True, text=True, timeout=60, check=False)
+        assert done.returncode == 0, (step.get("name"), done.stdout, done.stderr)
+    if not calls.exists():
+        return []
+    return [line.split("\t")[:-1] for line in calls.read_text(encoding="utf-8").splitlines()]
+
+
 def test_only_bounded_measured_checks_use_fast_lane():
     workflows = _workflows()
     routed = set()
@@ -83,7 +111,7 @@ def test_only_bounded_measured_checks_use_fast_lane():
     assert routed == FAST
 
 
-def test_observers_and_long_work_do_not_compete_for_fast_slots():
+def test_observers_and_long_work_do_not_compete_for_fast_slots(tmp_path):
     workflows = _workflows()
     for wf, name in [
         ("ci-review-comment.yml", "comment"),
@@ -96,7 +124,7 @@ def test_observers_and_long_work_do_not_compete_for_fast_slots():
         assert workflows[wf]["jobs"][name]["runs-on"] == labels, (wf, name)
     # The combined guards job runs hadolint via `docker run`: only docker-ci has a daemon.
     guards = workflows["repo-guards.yml"]["jobs"]["guards"]["steps"]
-    assert any("docker run" in step.get("run", "") for step in guards)
+    assert ["run"] in [call[:1] for call in _docker_calls(guards, tmp_path)]
     # Test suites and E2E stay on the heavy lane even when one run is short.
     for wf, name in [
         ("catalog-tests.yml", "catalog-tests"),
@@ -105,6 +133,49 @@ def test_observers_and_long_work_do_not_compete_for_fast_slots():
         ("termux-verify.yml", "contracts"),
     ]:
         assert workflows[wf]["jobs"][name]["runs-on"] == ["self-hosted", "hermes-hub"]
+
+
+_HADOLINT_STEP = {"name": "Lint Dockerfiles (hadolint)", "run": "scripts/ci/lint_docker.sh hadolint"}
+
+
+@pytest.mark.parametrize(
+    ("hadolint_body", "steps", "docker_run"),
+    [
+        # The real script's shape: the step runs a script whose function runs docker.
+        ('run_hadolint() { docker run --rm img hadolint Dockerfile; }', [_HADOLINT_STEP], True),
+        # Through one more level (a just-style wrapper script): still docker.
+        ('run_hadolint() { bash scripts/ci/inner.sh; }', [_HADOLINT_STEP], True),
+        # Broken: the script calls a hadolint binary (no daemon needed, so docker-ci is moot).
+        ("run_hadolint() { true hadolint Dockerfile; }", [_HADOLINT_STEP], False),
+        # Broken: docker only pulls, never runs.
+        ("run_hadolint() { docker pull img; }", [_HADOLINT_STEP], False),
+        # Broken: the step no longer calls the script.
+        ('run_hadolint() { docker run img; }', [{"name": "Lint Dockerfiles (hadolint)", "run": "true"}], False),
+    ],
+)
+def test_docker_run_contract_follows_the_script(tmp_path, hadolint_body, steps, docker_run):
+    """Negative controls: the docker-ci contract reads the executed script, not the step text."""
+    root = tmp_path / "repo"
+    (root / "scripts/ci").mkdir(parents=True)
+    script = root / "scripts/ci/lint_docker.sh"
+    script.write_text(f'#!/usr/bin/env bash\nset -euo pipefail\n{hadolint_body}\n'
+                      'case "$1" in hadolint) run_hadolint ;; *) exit 2 ;; esac\n', encoding="utf-8")
+    (root / "scripts/ci/inner.sh").write_text("docker run --rm img hadolint\n", encoding="utf-8")
+    script.chmod(0o755)
+    calls = _docker_calls(steps, tmp_path, root)
+    assert (["run"] in [call[:1] for call in calls]) is docker_run, calls
+
+
+def test_a_failing_hadolint_step_fails_the_contract(tmp_path):
+    root = tmp_path / "repo"
+    (root / "scripts/ci").mkdir(parents=True)
+    script = root / "scripts/ci/lint_docker.sh"
+    script.write_text("#!/usr/bin/env bash\ndocker run img\nexit 3\n", encoding="utf-8")
+    script.chmod(0o755)
+    with pytest.raises(AssertionError):
+        _docker_calls([_HADOLINT_STEP], tmp_path, root)
+    with pytest.raises(AssertionError, match="no hadolint step"):
+        _docker_calls([{"name": "other", "run": "docker run x"}], tmp_path, root)
 
 
 def test_fast_label_is_known_and_checks_cannot_bypass_the_gate():

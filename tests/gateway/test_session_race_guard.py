@@ -27,6 +27,14 @@ class _FakeAdapter:
         self._pending_messages = {}
         self._active_sessions = {}
         self.interrupted_sessions = []
+        self.discarded_debounce_keys = []
+
+    def _event_session_key(self, event):
+        return build_session_key(event.source)
+
+    def _discard_text_debounce(self, session_key):
+        # Accepted /stop /new /reset drop the adapter's held text/media burst (#81370).
+        self.discarded_debounce_keys.append(session_key)
 
     async def send(self, chat_id, text, **kwargs):
         pass
@@ -267,6 +275,8 @@ async def test_stop_during_sentinel_force_cleans_session():
         # Should NOT be queued as pending
         adapter = runner.adapters[Platform.TELEGRAM]
         assert session_key not in adapter._pending_messages
+        # The accepted /stop drops the burst the adapter still holds for this chat.
+        assert adapter.discarded_debounce_keys == [session_key]
 
         barrier.set()
         await task1

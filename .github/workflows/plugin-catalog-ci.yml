@@ -563,13 +563,24 @@ jobs:
 
             # SELF-UPDATER GATE (README rule 3): scan before provenance-verified
             # paths are removed. Provenance establishes origin, not behavior.
-            # NUL delimiters preserve spaces and prevent forged log lines.
-            SELF_UPDATE=$(grep -rlZE 'releases/latest|releases/download|raw\.githubusercontent\.com|codeload\.github\.com' \
-                --include='*.js' --include='*.mjs' --include='*.cjs' --include='*.ts' \
-                --include='*.jsx' --include='*.tsx' --include='*.mts' --include='*.cts' \
-                "$PLUGIN_DIR" \
-              | xargs -r0 grep -lZE 'writeTextFile|renamePath|writeFile\(|writeFileSync|renameSync|copyFileSync|cpSync|createWriteStream' || true)
-            SELF_UPDATE=$(printf '%s' "$SELF_UPDATE" | tr '\0\n' ' ')
+            # JSON-encoded paths preserve spaces and prevent forged log lines.
+            SELF_UPDATE=$(python3 -I - "$PLUGIN_DIR" <<'PYEOF'
+          import json, re, sys
+          from pathlib import Path
+          fetch = re.compile(r'releases/latest|releases/download|raw\.githubusercontent\.com|codeload\.github\.com')
+          write = re.compile(r'writeTextFile|renamePath|writeFile\(|writeFileSync|renameSync|copyFileSync|cpSync|createWriteStream')
+          # Only an inert ajv schema declaration is exempt, never another URL on the same line.
+          ajv_id = 'https://raw.githubusercontent.com/ajv-validator/ajv/master/lib/refs/data.json#'
+          declaration = re.compile(r'''["$](?:id|ref)["']?\s*:\s*["']''' + re.escape(ajv_id) + r'''["']''')
+          extensions = {'.js', '.mjs', '.cjs', '.ts', '.jsx', '.tsx', '.mts', '.cts'}
+          for path in Path(sys.argv[1]).rglob('*'):
+              if not path.name.endswith(tuple(extensions)) or not path.is_file():
+                  continue
+              text = path.read_text(encoding='utf-8-sig', errors='replace')
+              if write.search(text) and fetch.search(declaration.sub('', text)):
+                  print(json.dumps(str(path)))  # no path can forge a workflow log line
+          PYEOF
+            )
             if [ -n "$SELF_UPDATE" ]; then
               echo "::error file=$entry::self-updating code in catalog build (fetches GitHub AND writes plugin files): $SELF_UPDATE"
               FAILED=1; echo "::endgroup::"; continue
