@@ -576,7 +576,8 @@ def _derive(db: Any, sid: str, *, ignore_live_turn: bool = False,
     crons = _guarded("cron", sid, lambda: _cron_items(_lineage_ids(db, sid)), [])
     named = {"crons": crons} if crons else {}
     if holds and declared.get("kind") in ("done", "waiting"):
-        return {**declared, **(named if declared.get("kind") == "done" else {})}
+        return {**{k: v for k, v in declared.items() if k != "crons"},
+                **(named if declared.get("kind") == "done" else {})}
     if not tail:
         return _outcome("unresolved", now, reason="empty", **carry)
     reason = _tail_reason(tail)
@@ -630,12 +631,16 @@ def declare_outcome(sid: str, outcome: dict, *, db: Any = None) -> dict[str, Any
         tip = _tip(handle, sid)
         if _row(handle, tip) is None:
             raise ValueError(f"unknown session {sid}")
-        if declared["kind"] == "done" and not declared.get("keep_crons"):
-            from cron.jobs import use_cron_store
-            from cron.session_ownership import release_session_jobs
+        # Persist intent before touching the separate cron store. A failed DB
+        # write must never release ownership without a completion receipt.
+        _write(handle, tip, declared)
+        if declared["kind"] == "done":
+            from cron.session_ownership import release_for_database
 
-            with use_cron_store(Path(handle.db_path).parent):
-                declared["released_crons"] = release_session_jobs(_lineage_ids(handle, tip))
+            declared["released_crons"], errors = release_for_database(
+                handle, _lineage_ids(handle, tip), keep=bool(declared.get("keep_crons")))
+            if errors:
+                declared["cron_release_error"] = "; ".join(errors)
         _write(handle, tip, declared)
     return declared
 
