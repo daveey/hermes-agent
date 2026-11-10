@@ -8,6 +8,7 @@ import pytest
 from gateway.run import GatewayRunner
 from gateway.run_class_routing import stored_class
 from gateway.slash_commands_model import _ModelSwitchContext
+from hermes_cli.model_switch import ModelSwitchResult
 from hermes_state import AsyncSessionDB, SessionDB
 
 
@@ -34,7 +35,7 @@ async def test_same_model_global_pin_clears_class_without_cached_agent(tmp_path,
     monkeypatch.setattr("gateway.slash_commands_model._persist_model_switch_to_config", AsyncMock())
     ctx = _ModelSwitchContext(session_key="key", source=None, config_path=None,
                               persist_global=True, current_model="selected-model")
-    result = SimpleNamespace(new_model="selected-model", target_provider="anthropic", api_key="",
+    result = ModelSwitchResult(success=True, new_model="selected-model", target_provider="anthropic", api_key="",
                              base_url="", api_mode="anthropic_messages", provider_label="Anthropic",
                              request_overrides={}, runtime_capabilities={})
     assert stored_class(runner, "key") == "class:deep"
@@ -83,7 +84,7 @@ async def test_once_pin_preserves_durable_class_before_and_after_restore(tmp_pat
     ctx = _ModelSwitchContext(session_key="key", source=None, config_path=None,
                               persist_global=False, one_turn=True, current_model="selected-model",
                               restore_snapshot=runner._snapshot_session_model_override("key"))
-    result = SimpleNamespace(new_model="temporary-model", target_provider="anthropic", api_key="",
+    result = ModelSwitchResult(success=True, new_model="temporary-model", target_provider="anthropic", api_key="",
                              base_url="", api_mode="anthropic_messages", provider_label="Anthropic",
                              request_overrides={}, runtime_capabilities={})
     try:
