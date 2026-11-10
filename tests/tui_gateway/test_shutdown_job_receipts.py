@@ -303,15 +303,14 @@ def test_finished_notice_survives_orderly_restart(home, registry, backend, monke
     job.append_output("CI passed: release verified\n")
     registry._finish_exited(job, 0)
     session = backend.sessions["sid"] = _session(home, _notif_held=[])
-    if pending == "registry_park":
-        registry.park_unowned_event(registry.completion_queue.get_nowait())
-    elif pending == "notification_park":
-        from tui_gateway import notification_park
-        monkeypatch.setattr(notification_park, "_parked", [])
-        assert notification_park.park(registry.completion_queue.get_nowait())
-    elif pending == "held":
-        session["_notif_held"].append(registry.completion_queue.get_nowait())
-    elif pending == "refused":
+    from tui_gateway import notification_park
+    monkeypatch.setattr(notification_park, "_parked", [])
+    destinations = {"registry_park": registry.park_unowned_event,
+                    "notification_park": notification_park.park,
+                    "held": session["_notif_held"].append}
+    if pending in destinations:
+        assert destinations[pending](registry.completion_queue.get_nowait()) is not False
+    if pending == "refused":
         event = registry.completion_queue.get_nowait()
         monkeypatch.setattr(server, "_notif_claim_turn", lambda s: True)
         monkeypatch.setattr(server, "_notif_submit", lambda *a, **kw: False)
