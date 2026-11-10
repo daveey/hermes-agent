@@ -729,6 +729,7 @@ def finalize_turn(
         exit_reason=_turn_exit_reason, api_call_count=api_call_count, messages=messages, logger=logger,
     )
 
+    agent._empty_response_retry_hint = None
     final_response, _turn_exit_reason, preserved_verification_fallback, interrupted = _resolve_budget_fallback(
         agent, final_response=final_response, api_call_count=api_call_count,
         interrupted=interrupted, failed=failed, messages=messages,
