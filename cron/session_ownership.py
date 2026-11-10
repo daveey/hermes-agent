@@ -55,43 +55,52 @@ def release_session_jobs(session_ids: list[str]) -> list[dict]:
     return released
 
 
-def release_done_owners(db, *, apply: bool = False) -> list[dict]:
-    """List (or release) live jobs owned by stored-done chats in this store.
-
-    Never derive completion from prose during migration. Explicit keep_crons is
-    durable intent, and missing/unknown owners are left alone.
-    """
+def _migrate_store(db, home: Path, apply: bool) -> list[dict]:
     from hermes_state_outcome import get_outcome
 
+    plan = []
+    with jobs.use_cron_store(home), jobs._jobs_lock():
+        if apply:
+            records = jobs.load_jobs()
+        else:
+            data = json.loads((home / "cron" / "jobs.json").read_text(encoding="utf-8-sig"))
+            records = data.get("jobs", []) if isinstance(data, dict) else data
+            if not isinstance(records, list) or any(not isinstance(j, dict) for j in records):
+                raise ValueError("Invalid cron records; migration will not repair them")
+        for job in records:
+            owner = job.get("owner_session_id")
+            if not owner or not _job_is_live(job) or job.get("owner_retained"):
+                continue
+            outcome = get_outcome(owner, db=db) or {}
+            if outcome.get("kind") != "done" or outcome.get("keep_crons"):
+                continue
+            plan.append({"id": job["id"], "name": job.get("name") or job["id"],
+                         "owner_session_id": owner, "store": str(home / "cron" / "jobs.json")})
+            if apply:
+                job["owner_session_id"] = None
+                job["released_from"] = owner
+                job["released_at"] = datetime.now(UTC).isoformat()
+        if apply and plan:
+            jobs.save_jobs(records)
+    return plan
+
+
+def release_done_owners(db, *, apply: bool = False, errors: list[str] | None = None) -> list[dict]:
+    """Use stored done (declared or derived), never run a new prose judge.
+
+    Explicit keep intent and missing/unknown owners are left alone. With an
+    errors collector, return successful stores even if a later store fails.
+    """
     plan = []
     for home in store_homes(db):
         if not (home / "cron" / "jobs.json").exists():
             continue
-        with jobs.use_cron_store(home), jobs._jobs_lock():
-            if apply:
-                records = jobs.load_jobs()
-            else:
-                data = json.loads((home / "cron" / "jobs.json").read_text(encoding="utf-8-sig"))
-                records = data.get("jobs", []) if isinstance(data, dict) else data
-                if not isinstance(records, list) or any(not isinstance(j, dict) for j in records):
-                    raise ValueError("Invalid cron records; migration will not repair them")
-            changed = False
-            for job in records:
-                owner = job.get("owner_session_id")
-                if not owner or not _job_is_live(job) or job.get("owner_retained"):
-                    continue
-                outcome = get_outcome(owner, db=db) or {}
-                if outcome.get("kind") != "done" or outcome.get("keep_crons"):
-                    continue
-                plan.append({"id": job["id"], "name": job.get("name") or job["id"],
-                             "owner_session_id": owner, "store": str(home / "cron" / "jobs.json")})
-                if apply:
-                    job["owner_session_id"] = None
-                    job["released_from"] = owner
-                    job["released_at"] = datetime.now(UTC).isoformat()
-                    changed = True
-            if changed:
-                jobs.save_jobs(records)
+        try:
+            plan.extend(_migrate_store(db, home, apply))
+        except (OSError, RuntimeError, ValueError) as exc:
+            if errors is None:
+                raise
+            errors.append(f"{home}: {exc}")
     return plan
 
 
@@ -106,10 +115,11 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if not args.db.is_file():
         parser.error("--db must name an existing session database")
+    errors: list[str] = []
     with SessionDB(db_path=args.db) as db:
-        plan = release_done_owners(db, apply=args.apply)
-    print(json.dumps({"apply": args.apply, "jobs": plan}, indent=2))
-    return 0
+        plan = release_done_owners(db, apply=args.apply, errors=errors)
+    print(json.dumps({"apply": args.apply, "jobs": plan, "errors": errors}, indent=2))
+    return int(bool(errors))
 
 
 if __name__ == "__main__":

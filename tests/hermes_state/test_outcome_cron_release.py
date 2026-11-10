@@ -195,6 +195,25 @@ def test_keep_does_not_write_unrelated_store(tmp_path, monkeypatch):
         outcomes.declare_outcome("chat", {"kind": "done", "summary": "Watching.", "keep_crons": True}, db=db)
 
 
+def test_migration_reports_partial_apply_when_later_store_is_corrupt(tmp_path, capsys):
+    import json
+    from cron import session_ownership
+
+    with jobs.use_cron_store(tmp_path), SessionDB(db_path=tmp_path / "state.db") as db:
+        db.create_session("chat", source="desktop")
+        outcomes.declare_outcome("chat", {"kind": "done", "summary": "Finished."}, db=db)
+        job = jobs.create_job(prompt="Check", schedule="every 1h", owner_session_id="chat")
+        corrupt = tmp_path / "profiles" / "other" / "cron" / "jobs.json"
+        corrupt.parent.mkdir(parents=True)
+        corrupt.write_text("broken", encoding="utf-8")
+        assert session_ownership.main(["--db", str(tmp_path / "state.db"), "--apply"]) == 1
+        report = json.loads(capsys.readouterr().out)
+        assert report["jobs"][0]["id"] == job["id"]
+        assert report["errors"]
+        assert not jobs.get_job(job["id"])["owner_session_id"]
+        assert corrupt.read_text(encoding="utf-8") == "broken"
+
+
 def test_migration_is_dry_by_default_and_preserves_non_done_owners(tmp_path):
     from cron import session_ownership
 
