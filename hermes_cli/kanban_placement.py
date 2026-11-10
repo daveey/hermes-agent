@@ -434,7 +434,9 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
     title, body = args.get("title") or "", without_evidence(without_placement_note(args.get("body") or ""))
     if _local_marker(title, body, args.get("skills"), c):
         return "local marker"
-    full = f"{title}\n{body}"
+    from hermes_cli.kanban_carried_evidence import without_carried_inputs
+
+    full = without_carried_inputs(f"{title}\n{body}", c.raw)
     extra = c.raw.get("extra_home_markers")
     pats = list(HOME_GATEWAY_MARKERS) + (list(extra) if isinstance(extra, list) else [])
     for p in pats:
