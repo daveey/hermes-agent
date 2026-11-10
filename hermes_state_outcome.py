@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional
@@ -641,7 +642,13 @@ def declare_outcome(sid: str, outcome: dict, *, db: Any = None) -> dict[str, Any
                 handle, _lineage_ids(handle, tip), keep=bool(declared.get("keep_crons")))
             if errors:
                 declared["cron_release_error"] = "; ".join(errors)
-        _write(handle, tip, declared)
+            try:
+                _write(handle, tip, declared)
+            except sqlite3.Error as exc:
+                # The declaration and cron writes already succeeded; report the
+                # receipt failure rather than pretending nothing was committed.
+                previous = declared.get("cron_release_error", "")
+                declared["cron_release_error"] = (previous + "; " if previous else "") + f"Outcome receipt not persisted: {exc}"
     return declared
 
 

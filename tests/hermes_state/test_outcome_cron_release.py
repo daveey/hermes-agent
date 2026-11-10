@@ -44,6 +44,27 @@ def test_failed_declaration_write_does_not_release_jobs(tmp_path, monkeypatch):
         assert jobs.get_job(job["id"]) == before
 
 
+def test_receipt_write_failure_reports_completed_release(tmp_path, monkeypatch):
+    with jobs.use_cron_store(tmp_path), SessionDB(db_path=tmp_path / "state.db") as db:
+        db.create_session("chat", source="desktop")
+        job = jobs.create_job(prompt="Check", schedule="every 1h", owner_session_id="chat")
+        original = outcomes._write
+        calls = []
+
+        def fail_receipt(handle, sid, value):
+            calls.append(value.copy())
+            if len(calls) == 2:
+                raise sqlite3.OperationalError("injected receipt failure")
+            original(handle, sid, value)
+
+        monkeypatch.setattr(outcomes, "_write", fail_receipt)
+        result = outcomes.declare_outcome("chat", {"kind": "done", "summary": "Finished."}, db=db)
+        assert result["released_crons"][0]["id"] == job["id"]
+        assert "injected receipt failure" in result["cron_release_error"]
+        assert outcomes.get_outcome("chat", db=db)["kind"] == "done"
+        assert not jobs.get_job(job["id"])["owner_session_id"]
+
+
 def test_corrupt_cron_store_reports_partial_completion(tmp_path):
     cron_file = tmp_path / "cron" / "jobs.json"
     cron_file.parent.mkdir()
@@ -81,7 +102,7 @@ def test_done_can_keep_cron_ownership(tmp_path):
             db.create_session("chat", source="desktop")
             result = outcomes.declare_outcome("chat", {"kind": "done", "summary": "Watching.", "keep_crons": True}, db=db)
             assert before is not None
-            assert jobs.get_job(job["id"]) == {**before, "owner_retained": True}
+            assert jobs.get_job(job["id"]) == {**before, "owner_retained": "chat"}
             assert result["keep_crons"] is True
 
 
@@ -97,6 +118,22 @@ def test_audit_flags_stored_done_with_live_cron(tmp_path, monkeypatch):
             row = next(row for row in audit_rows(db) if row["id"] == "chat")
             assert row["reason"] == "done_owns_cron"
             assert row["on"][0]["id"] == job["id"]
+
+
+def test_retention_does_not_follow_job_to_new_owner(tmp_path):
+    from cron import session_ownership
+
+    with jobs.use_cron_store(tmp_path), SessionDB(db_path=tmp_path / "state.db") as db:
+        for sid in ("watcher", "new-owner"):
+            db.create_session(sid, source="desktop")
+        job = jobs.create_job(prompt="Check", schedule="every 1h", owner_session_id="watcher")
+        outcomes.declare_outcome("watcher", {"kind": "done", "summary": "Watching.", "keep_crons": True}, db=db)
+        records = jobs.load_jobs()
+        records[0]["owner_session_id"] = "new-owner"
+        jobs.save_jobs(records)
+        outcomes._write(db, "new-owner", {"kind": "done", "summary": "Finished."})
+        assert [r["id"] for r in session_ownership.release_done_owners(db, apply=True)] == [job["id"]]
+        assert not jobs.get_job(job["id"]).get("owner_retained")
 
 
 def test_migration_preserves_keep_intent_after_outcome_replaced(tmp_path):
@@ -212,6 +249,25 @@ def test_migration_reports_partial_apply_when_later_store_is_corrupt(tmp_path, c
         assert report["errors"]
         assert not jobs.get_job(job["id"])["owner_session_id"]
         assert corrupt.read_text(encoding="utf-8") == "broken"
+
+
+@pytest.mark.parametrize("operation", ["release", "keep", "dry", "apply"])
+@pytest.mark.parametrize("raw", ['{"jobs": {"bad": {}}}', '{"jobs": [null]}', '{"jobs": [{"owner_session_id": "chat"}]}'])
+def test_ownership_never_repairs_malformed_stores(tmp_path, operation, raw):
+    from cron import session_ownership
+
+    path = tmp_path / "cron" / "jobs.json"
+    path.parent.mkdir()
+    path.write_text(raw, encoding="utf-8")
+    with SessionDB(db_path=tmp_path / "state.db") as db:
+        db.create_session("chat", source="desktop")
+        if operation in ("release", "keep"):
+            _, errors = session_ownership.release_for_database(db, ["chat"], keep=operation == "keep")
+        else:
+            errors = []
+            session_ownership.release_done_owners(db, apply=operation == "apply", errors=errors)
+        assert errors, "malformed store must be reported, not repaired"
+        assert path.read_text(encoding="utf-8") == raw
 
 
 def test_migration_is_dry_by_default_and_preserves_non_done_owners(tmp_path):
