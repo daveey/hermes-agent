@@ -66,7 +66,7 @@ def test_cli_comment_event_records_human_writer(worker_home, monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     from hermes_cli import kanban
     tid = _ready_task()
-    assert "Comment added" in kanban.run_slash(f"comment {tid} why are you asking me?")
+    assert "Comment added" in kanban.run_slash(f"comment {tid} why are you asking me?", human_typed=True)
     conn = kbc.connect()
     try:
         cid = kb.list_comments(conn, tid)[-1].id
@@ -129,7 +129,7 @@ def test_spawn_context_labels_agent_comments_only(worker_home, monkeypatch):
     from hermes_cli import kanban
     tid = _ready_task()
     kt._handle_comment({"task_id": tid, "body": "tool: re-check it yourself"})
-    kanban.run_slash(f"comment {tid} human: why are you asking me?")
+    kanban.run_slash(f"comment {tid} human: why are you asking me?", human_typed=True)
     conn = kbc.connect()
     try:
         kb.add_comment(conn, tid, "hub:gw:mac", "courier relay", writer_kind="agent")
@@ -183,7 +183,7 @@ def test_mixed_notes_keep_operator_header_and_stamp_each_line(worker_home, monke
     kt.inject_new_comments_from_env(agent)  # seed
     _chat_tool_comment(tid, "agent says: re-check it yourself")
     from hermes_cli import kanban
-    inj._as_other_session(lambda: kanban.run_slash(f"comment {tid} why are you asking me?"))
+    inj._as_other_session(lambda: kanban.run_slash(f"comment {tid} why are you asking me?", human_typed=True))
     inj._unthrottle()
     assert kt.inject_new_comments_from_env(agent) is True
     note = agent.steers[0]

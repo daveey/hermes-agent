@@ -36,11 +36,25 @@ def scrub_leaked_worker_env(environ: Optional[MutableMapping[str, str]] = None) 
     return strip_agent_scope_env(os.environ if environ is None else environ)
 
 
+_AGENT_ATTRIBUTION_KEYS = ("HERMES_AGENT", "AI_AGENT", "HERMES_DESKTOP", "HERMES_SUPERVISED_CHILD",
+                           "HERMES_SESSION_ID")
+
+
+def drop_agent_attribution(env: dict[str, str]) -> dict[str, str]:
+    """``env`` without the agent-harness markers (main()'s advertisement, a backend's or service's
+    identity), for launching the Desktop GUI: Electron is not an agent, and its terminal pane (a
+    person's shell) copies Electron's env, so a CLI comment typed there must not read as an
+    agent's (kanban_comment_writer). The backend Electron spawns re-advertises them. [daveey]"""
+    for key in _AGENT_ATTRIBUTION_KEYS:
+        env.pop(key, None)
+    return env
+
+
 def clean_launch_env(base: Optional[MutableMapping[str, str]] = None) -> dict[str, str]:
     """A copy of ``base`` (default ``os.environ``) safe to hand to a top-level app launch."""
     env = dict(os.environ if base is None else base)
     scrub_leaked_worker_env(env)
-    return env
+    return drop_agent_attribution(env)
 
 
 def _first_positional(argv: Sequence[str]) -> str:

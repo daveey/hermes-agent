@@ -1084,11 +1084,18 @@ def _cmd_comment(args: argparse.Namespace) -> int:
             suffix = f"\n\n[trimmed to {args.max_len} chars by --max-len]"
             body = body[: max(0, args.max_len - len(suffix))].rstrip() + suffix
     author = args.author or _profile_author()
+    # [daveey] /kanban (run_slash) is typed into a chat composer: human. The CLI is human only when
+    # no process in its ancestry started with an agent-harness marker (kanban_comment_writer).
+    if getattr(args, "_slash_typed", False):
+        writer_kind, writer_session = "human", None
+    else:
+        from hermes_cli.kanban_comment_writer import cli_comment_writer
+        writer_kind, writer_session, _evidence = cli_comment_writer()
     with kbc.connect_closing() as conn:
         try:
-            # [daveey] The CLI and /kanban slash command are typed by a person; agents use the tool.
             kb.add_comment(conn, args.task_id, author, body,
-                           origin_gateway=getattr(args, "origin_gateway", None), writer_kind="human")
+                           origin_gateway=getattr(args, "origin_gateway", None),
+                           writer_kind=writer_kind, writer_session=writer_session)
         except ValueError as exc:
             return _err(f"kanban comment: {exc}", 2)
         live = kb.live_run_id(conn, args.task_id)
@@ -1909,9 +1916,13 @@ Read-only commands are safe while an agent is running.\
 """
 
 
-def run_slash(rest: str) -> str:
+def run_slash(rest: str, *, human_typed: bool = False) -> str:
     """Execute a ``/kanban …`` string (``rest`` = everything after ``/kanban``) and return captured
-    stdout/stderr. Shared by the interactive CLI and the gateway so formatting is identical."""
+    stdout/stderr. Shared by the interactive CLI and the gateway so formatting is identical.
+
+    ``human_typed``: only the composer/platform-message ingress points pass True (a person typed
+    the line); any other caller (an agent's script importing this) gets the CLI's ancestry check
+    for comment provenance. [daveey]"""
     import io
 
     # Non-posix split (Windows) keeps backslashes as path separators but
@@ -1963,6 +1974,9 @@ def run_slash(rest: str) -> str:
         return f"⚠ /kanban usage error\n{body}" if body else "⚠ /kanban usage error"
     except argparse.ArgumentError as exc:
         return f"⚠ /kanban usage error\n{_usage_for_error()}\n{exc}"
+    # [daveey] Set after parsing, so no argv spelling can claim it; only the ingress callers say a
+    # person typed this /kanban line.
+    args._slash_typed = bool(human_typed)
 
     with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
         try:
