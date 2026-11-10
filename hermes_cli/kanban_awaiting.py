@@ -269,41 +269,21 @@ def dependency_cycle_reason(conn: sqlite3.Connection, task_id: str, ref: str) ->
     if ref in _descendant_ids(conn, task_id):
         return (f"{ref} is a descendant of {task_id}; a card must not wait on its own child "
                 "(the child cannot finish until this card does, so the wait never ends)")
-    seen: set[str] = set()
-    stack = [ref]
-    while stack and len(seen) < 32:
-        node = stack.pop()
-        if node == task_id:
-            return f"waiting on {ref} cycles back to {task_id}"
-        if not node or node in seen:
-            continue
-        seen.add(node)
-        row = conn.execute("SELECT status FROM tasks WHERE id = ?", (node,)).fetchone()
-        if row is None:
-            continue
-        status = row[0]
-        if status == "todo":
-            stack.extend(parent for (parent,) in conn.execute(
-                "SELECT parent_id FROM task_links WHERE child_id = ?", (node,)))
-        elif status == "scheduled":
-            awaiting, _reason = _latest_park(conn, node)
-            if isinstance(awaiting, dict) and awaiting.get("kind") == "card" and not awaiting.get("gateway"):
-                pref = awaiting.get("ref") or ""
-                if _TASK_ID.fullmatch(pref):
-                    stack.append(pref)
-            stack.extend(_scheduled_probe_ids(conn, node))
-    return None
+    from hermes_cli.kanban_awaiting_board import cross_board_cycle
+    return cross_board_cycle(conn, task_id, {"kind": "card", "ref": ref})
 
 
 def park_cycle_error(conn: sqlite3.Connection, task_id: str, record: Optional[dict],
                      wake_check: Optional[str]) -> Optional[str]:
     """Refusal text when this park's producer or wake probe would cycle, else None."""
+    from hermes_cli.kanban_awaiting_board import other_board_path
     refs: list[str] = []
-    if isinstance(record, dict) and record.get("kind") == "card" and not record.get("gateway"):
+    foreign_ref = record.get("ref") if record and other_board_path(conn, record) else None
+    if isinstance(record, dict) and record.get("kind") == "card" and not record.get("gateway") and not foreign_ref:
         ref = record.get("ref") or ""
         if _TASK_ID.fullmatch(ref):
             refs.append(ref)
-    refs.extend(_TASK_ID.findall(wake_check or ""))
+    refs.extend(ref for ref in _TASK_ID.findall(wake_check or "") if ref != foreign_ref)
     for ref in dict.fromkeys(refs):
         if ref == task_id:
             continue
@@ -328,7 +308,12 @@ def card_orphan_reason(conn: sqlite3.Connection, task_id: str, *, _depth: int = 
     if status == "scheduled":
         awaiting, reason = _latest_park(conn, task_id)
         if awaiting and awaiting.get("kind") == "card" and not awaiting.get("gateway") and _depth < 4:
-            inner = card_orphan_reason(conn, awaiting.get("ref", ""), _depth=_depth + 1)
+            from hermes_cli.kanban_awaiting_board import producer_connection
+            try:
+                with producer_connection(conn, awaiting) as owner:
+                    inner = card_orphan_reason(owner, awaiting.get("ref", ""), _depth=_depth + 1)
+            except (AwaitingError, sqlite3.Error) as exc:
+                return f"{task_id} waits on an unreadable producer board: {exc}"
             return f"{task_id} waits on {awaiting.get('ref')}, and {inner}" if inner else None
         if not awaiting or awaiting.get("inferred"):
             wall = text_wall(reason)
@@ -393,10 +378,16 @@ def _check_card(conn: sqlite3.Connection, task_id: str, awaiting: dict, text: st
         return
     if not _TASK_ID.fullmatch(ref):
         raise AwaitingError(INVALID_AWAITING, f"awaiting kind='card' needs ref=<task id> (got {ref!r})")
-    if ref == task_id:
+    from hermes_cli.kanban_awaiting_board import other_board_path, producer_connection, cross_board_cycle
+    other_board = other_board_path(conn, awaiting)
+    if other_board:
+        why = cross_board_cycle(conn, task_id, awaiting)
+        if why:
+            raise AwaitingError(INVALID_AWAITING, why)
+    if ref == task_id and not other_board:
         raise AwaitingError(INVALID_AWAITING, "a card cannot wait on itself")
     gateway = awaiting.get("gateway")
-    if not gateway:
+    if not gateway and not other_board:
         why = dependency_cycle_reason(conn, task_id, ref)
         if why:
             raise AwaitingError(INVALID_AWAITING, why)
@@ -408,12 +399,13 @@ def _check_card(conn: sqlite3.Connection, task_id: str, awaiting: dict, text: st
                 "or `hermes kanban schedule --awaiting`, which confirm it with `hermes kanban wait-check`."))
         awaiting["observed"] = seen[1]
         return
-    why = card_orphan_reason(conn, ref)
-    if why:
-        raise AwaitingError(AGENT_ACTION_WAIT, f"the producer card is not live: {why}. {_REMEDY}")
-    done = _completed_at(conn, ref)
-    if done:
-        raise producer_done_error(ref, done)
+    with producer_connection(conn, awaiting) as owner:
+        why = card_orphan_reason(owner, ref)
+        if why:
+            raise AwaitingError(AGENT_ACTION_WAIT, f"the producer card is not live: {why}. {_REMEDY}")
+        done = _completed_at(owner, ref)
+        if done:
+            raise producer_done_error(ref, done)
 
 
 def _check_run(conn, task_id, awaiting, text) -> None:

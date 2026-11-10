@@ -37,10 +37,13 @@ SSH_TIMEOUT = 25
 
 
 def _db(board: Optional[str]) -> Path:
+    if board is not None:
+        from hermes_cli.kanban_db import board_own_db_path
+        return board_own_db_path(board)
     home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
-    if os.environ.get("HERMES_KANBAN_DB") and board in (None, "default"):
+    if os.environ.get("HERMES_KANBAN_DB"):
         return Path(os.environ["HERMES_KANBAN_DB"])
-    return home / "kanban.db" if board in (None, "default") else home / "kanban" / "boards" / board / "kanban.db"
+    return home / "kanban.db"
 
 
 def _query(path: Path, sql: str, args=()):

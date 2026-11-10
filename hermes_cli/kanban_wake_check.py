@@ -743,7 +743,9 @@ def finished_producer(conn: sqlite3.Connection, task_id: str, cmd: str) -> Optio
             status = words[1] if len(words) >= 2 and words[0] == ref else ""
             completed = _remote_completed_at(str(gateway), ref, board) if status in _FINISHED_STATUSES else None
         else:
-            row = conn.execute("SELECT status, completed_at FROM tasks WHERE id = ?", (ref,)).fetchone()
+            from hermes_cli.kanban_awaiting_board import producer_connection
+            with producer_connection(conn, awaiting) as owner:
+                row = owner.execute("SELECT status, completed_at FROM tasks WHERE id = ?", (ref,)).fetchone()
             if row is None:
                 return None
             status, completed = row[0], row[1]
