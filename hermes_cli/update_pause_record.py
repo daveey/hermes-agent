@@ -487,6 +487,14 @@ def mark_stop_sent(token: dict, pid) -> None:
         print(f"  ⚠ Could not record the stop request for gateway {pid}: {exc}")
 
 
+def mark_stop_refused(token: dict, pid) -> None:
+    """A positive idle-pause refusal owes no restart, even if that process later exits normally."""
+    key = str(int(pid))
+    token["stop_sent"] = [p for p in token.get("stop_sent", []) if str(p) != key]
+    _without(token, {key})
+    write(token, owner=identity())
+
+
 def mark_stop_consumed(path: Path, marker: dict) -> None:
     """Checkpoint a validated gateway consume BEFORE its marker disappears.
 

@@ -26,6 +26,11 @@ def _checkout_move(token, *targets, paths=(), revert=False):
     the step found it, or the step reported ``whole`` on the dict this yields (a stash restore that
     applied cleanly changes the tree by design). A move is judged the moment git returns (see
     ``_settle_checkout_move``)."""
+    # Stash/discard paths can write tracked code even when HEAD will not move.
+    # Enter only after the local-changes prompt, but before any tree mutation.
+    from hermes_cli import update_cmd_posix_pause as pause
+    if refused := pause.pause_at_commit_point():
+        raise pause.PauseRefused(refused)
     step: dict = {}
     targets = sorted({t for t in targets if t})
     pause_id = (token or {}).get("pause_id")

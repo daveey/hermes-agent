@@ -2,11 +2,13 @@
 
 import os
 import threading
+import time
 
 
-def pause_for_update(runner, loop) -> dict:
+def pause_for_update(runner, loop, *, idle_only: bool = False) -> dict:
     """Control-socket executor thread: record slots before marshaling the drain onto the loop."""
-    preserve_cron_slots(runner.config)
+    if not idle_only:
+        preserve_cron_slots(runner.config)
     try:
         from hermes_cli.gateway import _get_restart_drain_timeout
         drain = float(_get_restart_drain_timeout())
@@ -14,9 +16,18 @@ def pause_for_update(runner, loop) -> dict:
         drain = 30.0
     accepted_box: list[bool] = []
     done = threading.Event()
+    deadline = time.monotonic() + 5.0
+    refused = []
 
     def request() -> None:
         try:
+            # Check and close admission in one loop callback. A busy pre-swap
+            # update must not start a drain it cannot cancel when it defers.
+            if idle_only:
+                if time.monotonic() >= deadline or runner._active_work_count() > 0:
+                    refused.append(True)
+                    return
+                preserve_cron_slots(runner.config)
             accepted_box.append(runner.request_restart(detached=False, via_service=True))
         finally:
             done.set()
@@ -24,7 +35,8 @@ def pause_for_update(runner, loop) -> dict:
     loop.call_soon_threadsafe(request)
     done.wait(timeout=5.0)
     accepted = bool(accepted_box and accepted_box[0])
-    return {"pausing": accepted, "already_stopping": not accepted,
+    return {"pausing": accepted, "already_stopping": bool(accepted_box) and not accepted,
+            "busy": bool(refused),
             "pid": os.getpid(), "drain_timeout": drain}
 
 
