@@ -175,7 +175,7 @@ jobs:
             rm -rf "$temp_root" 2>/dev/null || true
           }
           trap cleanup EXIT
-          TMPDIR="$temp_root" node .github/scripts/run-workspace-checks.mjs
+          TMPDIR="$temp_root" just check-js-ci
       - name: Check the checkout is clean
         # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
         # leaves an untracked or modified file in the checkout is reported here. Runs only when

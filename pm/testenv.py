@@ -11,8 +11,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from pm.environments import install_state_dir
-
 NAME = "test-environment"
 # The default developer environment includes the app's normal features.
 # CI lanes pass their wider provider matrix explicitly.
@@ -28,6 +26,9 @@ def developer_tools(pinned: Sequence[str]) -> list[str]:
 
 
 def testenv_root(project_root: Path) -> Path:
+    # CI bootstrap imports developer_tools before the application is installed.
+    from pm.environments import install_state_dir
+
     return install_state_dir(project_root) / NAME
 
 

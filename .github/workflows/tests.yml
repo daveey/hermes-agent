@@ -163,7 +163,7 @@ jobs:
             echo "Affected selection: $(wc -l < "$selection") files"
             scripts/run_tests.sh --files-from "$selection"
           else
-            scripts/run_tests.sh
+            just test-all
           fi
         env:
           PYTHON_CHANGED: ${{ inputs.python_changed }}
