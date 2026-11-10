@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hermes_cli.kanban_generation import is_busy
+from hermes_cli.kanban_lifecycle_diagnostics import busy_details
 from hermes_cli.kanban_session_activity_revalidate import is_busy_key
 
 _log = logging.getLogger("hermes_cli.kanban_session_activity")
@@ -63,7 +64,8 @@ def board_reads(path: Path, key: tuple, hit: tuple | None, parked: bool, stalled
     except sqlite3.OperationalError as exc:
         if hit is None or not usable or not is_busy(exc):
             raise
-        _log.warning("kanban board %s busy; reused last counts", path)
+        _log.warning("kanban board %s busy; reused last counts kind=%s sqlite_code=%s pid=%s holder=%s",
+                     path, *busy_details(exc))
         reuse_sink.reused = True
         return hit[1], False, False
     return reads, complete, True
@@ -91,7 +93,8 @@ def session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...],
             with _tasks_lock:
                 last = _tasks_memo.get(key)
             if last is not None:
-                _log.warning("kanban board %s busy; reused last counts", path)
+                _log.warning("kanban board %s busy; reused last counts kind=%s sqlite_code=%s pid=%s holder=%s",
+                             path, *busy_details(exc))
                 return [{**t, "stale": True} for t in last]
             now = time.monotonic()
             if deadline is None or now >= deadline:
