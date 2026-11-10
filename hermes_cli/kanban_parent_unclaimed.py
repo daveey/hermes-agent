@@ -114,30 +114,34 @@ def sweep(conn, *, now: Optional[float] = None) -> int:
 
 
 def safe_sweep(conn) -> int:
-    """:func:`sweep` for the dispatcher tick: a notice failure is logged and never stops dispatch."""
+    """:func:`sweep` for the dispatcher tick, then the direct chat-wait sweep (``kanban_chat_wait``, same
+    cadence; kept here so the dispatcher facade does not grow). A notice failure is logged and never stops
+    dispatch."""
+    from hermes_cli import kanban_chat_wait
     try:
-        return sweep(conn)
+        posted = sweep(conn)
     except Exception:  # health: allow BLE001 -- a notice failure must never stop dispatch
         _log.warning("kanban dispatcher: parent-unclaimed notice sweep failed", exc_info=True)
-        return 0
+        posted = 0
+    return posted + kanban_chat_wait.safe_sweep(conn)
 
 
 def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_seconds: float,
-                ready_seconds: float, parent_title: Optional[str] = None) -> bool:
-    """Append ONE ``dependency_parent_unclaimed`` event to ``task_id`` (its chats receive it through their notify
-    subscriptions) about ``waiting_on``, a card still ready and unclaimed. ``wait_key`` identifies the wait: a
-    second call with the same (waiting_on, wait_key) posts nothing. Reusable for a direct chat wait, where
-    ``waiting_on`` is ``task_id`` itself. Returns True when it posted."""
+                ready_seconds: float, parent_title: Optional[str] = None, kind: str = NOTICE_KIND) -> bool:
+    """Append ONE ``kind`` event (default ``dependency_parent_unclaimed``) to ``task_id`` (its chats receive it
+    through their notify subscriptions) about ``waiting_on``, a card still ready and unclaimed. ``wait_key``
+    identifies the wait: a second call with the same (waiting_on, wait_key) posts nothing. Reused for a direct chat
+    wait (``kanban_chat_wait``), where ``waiting_on`` is ``task_id`` itself. Returns True when it posted."""
     from hermes_cli import kanban_db as kb
     with kb.write_txn(conn):
         if any(kb._json_dict(p).get("wait_event_id") == wait_key and kb._json_dict(p).get("parent") == waiting_on
                for (p,) in conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
-                                        (task_id, NOTICE_KIND))):
+                                        (task_id, kind))):
             return False
         still = conn.execute("SELECT status, claim_lock FROM tasks WHERE id = ?", (waiting_on,)).fetchone()
         if still is None or still["status"] != "ready" or still["claim_lock"]:
             return False
-        kb._append_event(conn, task_id, NOTICE_KIND, {
+        kb._append_event(conn, task_id, kind, {
             "parent": waiting_on, "parent_title": parent_title, "wait_event_id": wait_key,
             "wait_minutes": _minutes(waited_seconds), "ready_minutes": _minutes(ready_seconds),
             "queue": _queue_words(_place(conn, waiting_on)),

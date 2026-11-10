@@ -131,7 +131,24 @@ def handle_unblock(args: dict, **kw) -> str:
     kt._require_orchestrator_tool("kanban_unblock")
     kt._enforce_worker_task_ownership(tid)
     with kt._board(args.get("board")) as (kb, conn):
-        kt._check(kb.unblock_task(conn, tid), f"could not unblock {tid} (not blocked/triage/scheduled, or unknown)")
+        # [daveey] agent-70dc07d1a5: a chat's unblock of a human_request card is David's go. It used to keep its
+        # p0 rank and return only the status, so the chat promised a pickup 47 older cards stood in front of.
+        from hermes_cli import kanban_chat_wait as cw
+        asked: dict = {}
+
+        def note_request(current) -> None:
+            asked["human"] = cw.had_human_request(current, tid)  # unblock_task clears human_request
+
+        kt._check(kb.unblock_task(conn, tid, precondition=note_request),
+                  f"could not unblock {tid} (not blocked/triage/scheduled, or unknown)")
+        try:
+            raised = cw.raise_for_human_go(conn, tid) if asked.get("human") else None
+        except Exception:  # health: allow BLE001 -- the unblock already committed; the raise is advisory
+            kt.logger.warning("kanban_unblock: human_go priority raise failed for %s", tid, exc_info=True)
+            raised = None
         subscribed = kt._maybe_subscribe_on_touch(conn, tid)
-        return kt._ok(task_id=tid, **kt._fields(kb.get_task(conn, tid), ("status",)),
+        task = kb.get_task(conn, tid)
+        return kt._ok(task_id=tid, **kt._fields(task, ("status",)),
+                      **({"priority_raised": raised} if raised else {}),
+                      **cw.unblock_fields(conn, task, args.get("board")),
                       **({"subscribed": True} if subscribed else {}))
