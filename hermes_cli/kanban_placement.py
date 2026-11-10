@@ -386,6 +386,21 @@ def without_placement_note(body: str) -> str:
     return _PLACEMENT_NOTE.sub("", body or "")
 
 
+# A producer fences quoted evidence (a proposal's "what happened on the hub", a log excerpt) with these markers so
+# the host-need scan reads only the work text. Only complete pairs are removed: an unterminated or stray marker
+# exempts nothing. The title is never fenced. Before this (kanban-12ee0e4b65) 233 of 259 self-heal proposals named
+# the hub, its kanban.db, ssh or cron while describing the incident, so every fix card built from one stayed on
+# the hub although the fix itself was a repo change landed by push. [daveey]
+EVIDENCE_OPEN = "<!-- placement:evidence -->"
+EVIDENCE_CLOSE = "<!-- /placement:evidence -->"
+_EVIDENCE = re.compile(re.escape(EVIDENCE_OPEN) + r".*?" + re.escape(EVIDENCE_CLOSE), re.DOTALL)
+
+
+def without_evidence(body: str) -> str:
+    """``body`` minus every complete fenced evidence block (:data:`EVIDENCE_OPEN` ... :data:`EVIDENCE_CLOSE`)."""
+    return _EVIDENCE.sub("", body or "")
+
+
 def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
     """Why a card cannot leave its origin; None means structurally portable, not admitted.
 
@@ -410,7 +425,7 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
         return "gateway-scoped requirement"
     if any(str(r) not in c.carried_requires() for r in reqs):
         return "uncarried requirement"
-    title, body = args.get("title") or "", without_placement_note(args.get("body") or "")
+    title, body = args.get("title") or "", without_evidence(without_placement_note(args.get("body") or ""))
     if _local_marker(title, body, args.get("skills"), c):
         return "local marker"
     full = f"{title}\n{body}"

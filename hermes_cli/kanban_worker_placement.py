@@ -61,6 +61,30 @@ def creation_decision(args, cfg, gateway, pin, origin_intent):
     return {"where": "local", "placement_policy": POLICY, "why": WAITING}
 
 
+def creation_audit(args, cfg=None):
+    """``{"portable_reason": <why it cannot leave its origin> | None}`` for the card's ``created`` event, or None when
+    no worker pool is configured (nothing to audit). Records the structural check every create runs, so the share of
+    cards a pool never sees, and why, is a query instead of a replay (kanban-12ee0e4b65). Never raises. [daveey]"""
+    from hermes_cli import kanban_placement as placement
+
+    try:
+        cfg = placement.config() if cfg is None else cfg
+        if not isinstance(cfg, dict) or not cfg.get("worker_pools"):
+            return None
+        return {"portable_reason": placement.portable_reason(args, cfg)}
+    except Exception:  # health: allow BLE001 -- an audit field never blocks a create
+        logger.warning("portable_reason audit failed", exc_info=True)
+        return None
+
+
+def _cli_fields(args, body, workspace_kind, workspace_path, board):
+    fields = {**vars(args), "body": body, "workspace_kind": workspace_kind,
+              "workspace_path": workspace_path, "board": board}
+    if fields.get("initial_status") == "running":
+        fields.pop("initial_status")  # argparse's ordinary create default, not a requested hold
+    return fields
+
+
 def cli_policy(args, body, workspace_kind, workspace_path, board):
     """CLI creation uses the same enrollment boundary, without changing legacy routes."""
     from hermes_cli import kanban_placement as placement
@@ -69,12 +93,14 @@ def cli_policy(args, body, workspace_kind, workspace_path, board):
     if not cfg.get("worker_pools"):
         return None
     gateway = placement.reg.self_gateway()
-    fields = {**vars(args), "body": body, "workspace_kind": workspace_kind,
-              "workspace_path": workspace_path, "board": board}
-    if fields.get("initial_status") == "running":
-        fields.pop("initial_status")  # argparse's ordinary create default, not a requested hold
-    result = creation_decision(fields, cfg, gateway, "auto", None)
+    result = creation_decision(_cli_fields(args, body, workspace_kind, workspace_path, board), cfg, gateway,
+                               "auto", None)
     return (result or {}).get("placement_policy")
+
+
+def cli_audit(args, body, workspace_kind, workspace_path, board):
+    """:func:`creation_audit` over the same fields :func:`cli_policy` judged."""
+    return creation_audit(_cli_fields(args, body, workspace_kind, workspace_path, board))
 
 
 def validate_creation(policy, *, runs_on, workspace_kind, workspace_path, project, origin_intent, board):

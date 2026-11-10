@@ -1554,6 +1554,13 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         return None, None
 
 
+def _creation_audit(args: dict) -> Optional[dict]:
+    """Worker-pool enrollment audit for the ``created`` event (kanban_worker_placement.creation_audit). [daveey]"""
+    from hermes_cli.kanban_worker_placement import creation_audit
+
+    return creation_audit(args)
+
+
 @_kanban_handler("kanban_create")
 def _handle_create(args: dict, **kw) -> str:
     """Create a (child) task; orchestrator workers use this to fan out."""
@@ -1672,6 +1679,7 @@ def _handle_create(args: dict, **kw) -> str:
                 max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
                 requires=args.get("requires"), runs_on=runs_on, max_retries=max_retries,
                 placement_policy=(marker_placement or {}).get("placement_policy"),
+                placement_audit=_creation_audit(args),
                 require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
                 model_override=model_override, provider_override=provider_override,
                 goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),

@@ -1228,7 +1228,7 @@ def create_task(
     requires: Optional[list[str]] = None,
     lint_blocked: bool = True, runs_on: Optional[Iterable[str]] = None, require_declaration: bool = False,
     placement_policy: Optional[str] = None,
-    insert_guard: Optional[Callable[[sqlite3.Connection], None]] = None,
+    insert_guard: Optional[Callable[[sqlite3.Connection], None]] = None, placement_audit: Optional[dict] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1396,7 +1396,7 @@ def create_task(
                     workspace_path=workspace_path, branch_name=branch_name, project_id=project_id,
                     skills=skills_list, goal_mode=goal_mode, model_override=model_override,
                     provider_override=provider_override, created_by=created_by, requires=required,
-                    human_request=human_request,
+                    human_request=human_request, placement_audit=placement_audit,
                 )
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 initialize_ownership(conn, task_id, creator_task_id, parents, now, chat_origin)
