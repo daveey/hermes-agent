@@ -307,7 +307,22 @@ export function useAtCompletions(options: {
   // nothing when the answer is already in hand.
   const isCached = useCallback((query: string) => hasCachedPathCompletion(cacheKey(query)), [cacheKey])
 
-  return useLiveCompletionAdapter({ enabled, epoch: sourceEpoch, fetcher, isCached, toItem })
+  // Contributed sources answer from memory (session/task mentions, bots), so
+  // their rows show on the keystroke instead of waiting out the debounce and
+  // the owner's `complete.path` round trip, which on a remote gateway is the
+  // whole perceived lag. Path rows join when that answer lands.
+  const instant = useCallback(
+    (query: string): CompletionEntry[] => {
+      const { entries, claimedHandles } = contributedEntries(query)
+
+      return mergeCompletionEntries(entries, [], claimedHandles)
+    },
+    // sourceEpoch: a source's rows changed behind its cache.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [contributedEntries, sourceEpoch]
+  )
+
+  return useLiveCompletionAdapter({ enabled, epoch: sourceEpoch, fetcher, instant, isCached, toItem })
 }
 
 /** Re-export `classify` for use by the formatter (insertion side). */

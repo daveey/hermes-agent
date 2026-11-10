@@ -211,6 +211,46 @@ describe('contributed @ completion sources', () => {
     expect(rows[0]).toBe('@researcher')
     expect(rows.length).toBeGreaterThan(1)
   })
+  it('shows contributed rows on the keystroke, before a slow complete.path answers', async () => {
+    vi.useFakeTimers()
+    addSource('sessions', q => ('typeahead'.startsWith(q) ? [{ insert: '@session:abc', display: 'typeahead is slow' }] : []))
+
+    // The session owner is a remote gateway: complete.path takes a second.
+    const gateway = {
+      request: vi.fn(
+        () => new Promise(resolve => setTimeout(() => resolve({ items: [{ text: '@file:src/typeahead.ts', display: 'typeahead.ts' }] }), 1_000))
+      )
+    }
+
+    const { result } = renderHook(() => useAtCompletions({ gateway: gateway as never, sessionId: 's1', cwd: '/repo' }))
+
+    let first: readonly { label: string }[] = []
+    act(() => {
+      first = result.current.adapter.search?.('typ') || []
+    })
+    expect(first.map(r => r.label)).toEqual(['typeahead is slow'])
+
+    // Next keystroke, still before any answer: the rows follow the new query.
+    let second: readonly { label: string }[] = []
+    act(() => {
+      second = result.current.adapter.search?.('typx') || []
+    })
+    expect(second.map(r => r.label)).not.toContain('typeahead is slow')
+
+    // Path rows join once the round trip lands; the contributed row still leads.
+    const settled = await searchAndRead(result, 'typ')
+    expect(settled.length).toBeGreaterThan(0)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_200)
+    })
+    let rows: readonly { label: string }[] = []
+    act(() => {
+      rows = result.current.adapter.search?.('typ') || []
+    })
+    expect(rows[0]?.label).toBe('typeahead is slow')
+    expect(rows.some(r => r.label.includes('typeahead.ts'))).toBe(true)
+  })
+
   it('re-asks an open popover when a source signals its rows changed', async () => {
     vi.useFakeTimers()
     let rows: Array<{ insert: string; meta?: string }> = []
