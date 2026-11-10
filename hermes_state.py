@@ -1127,7 +1127,7 @@ class SessionDB(
                         finally:
                             held_s = time.monotonic() - held_since
                             if held_s >= _WRITE_HOLD_WARN_S:
-                                log_write_duration(held_s, stage)
+                                log_write_duration(held_s, stage, fn)
                 # Success — periodic best-effort checkpoint + FTS merge.
                 self._note_unconfirmed_corruption(fn, first_corrupt)
                 self._write_count += 1

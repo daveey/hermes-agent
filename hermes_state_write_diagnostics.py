@@ -5,11 +5,12 @@ import logging
 import os
 import re
 import sys
+from types import FunctionType, MethodType
 
 logger = logging.getLogger("hermes_state")
 
 
-def log_write_duration(held_s: float, stage: str) -> None:
+def log_write_duration(held_s: float, stage: str, callback: object) -> None:
     """Attribute a completed/failed hold to code, including generic SQL wrappers.
 
     Never inspect SQL, parameters, locals, callable reprs, or exception text. The
@@ -31,9 +32,15 @@ def log_write_duration(held_s: float, stage: str) -> None:
                 frame = frame.f_back
         finally:
             del frame
+        # Exact built-in types avoid invoking arbitrary callable properties/reprs.
+        if type(callback) is MethodType:
+            callback = callback.__func__
+        callback_name = "opaque"
+        if type(callback) is FunctionType:
+            callback_name = re.sub(r"[^a-zA-Z0-9_.<>]", "_", callback.__code__.co_qualname)[:160]
         logger.warning(
-            "state.db write lock held %.1fs (pid %d) stage=%s callsites=%s",
-            held_s, os.getpid(), stage, " <- ".join(sites),
+            "state.db write lock held %.1fs (pid %d) stage=%s callback=%s callsites=%s",
+            held_s, os.getpid(), stage, callback_name, " <- ".join(sites),
         )
     except Exception:  # health: allow BLE001,S110 -- diagnostic handlers must never change commit settlement or cause replay
         # No recursive logging here: the failed handler may be the cause.
