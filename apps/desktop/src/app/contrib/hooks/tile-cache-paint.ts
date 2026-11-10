@@ -70,6 +70,16 @@ export function noteTileOwner(timing: TileOpenTiming | null, owner: unknown): vo
   }
 }
 
+/** [daveey] A tile open that throws still writes its line (`outcome:"failed"`), then rethrows: a failed ref click
+ *  must be distinguishable from one that never happened. */
+export function failTileOpen(timing: TileOpenTiming | null): (error: unknown) => never {
+  return error => {
+    timing?.reconciled('failed')
+
+    throw error
+  }
+}
+
 /** What the tile's first publish showed: kept rows already on screen, the cache, or the REST page. */
 export function tilePaintSource(
   authoritative: boolean,
@@ -114,6 +124,12 @@ export function settleTileOpen(args: SettleTileOpen): void {
   if (painted !== 'cache' || !cachedPaint) {
     if (painted === 'rest') {
       timing?.paint('rest', prefetch?.messages?.length ?? 0)
+    }
+
+    // [daveey] Keep the cache as warm as a main-pane open does: the next open of this (often old, unlisted)
+    // session paints from the page this one waited on.
+    if (prefetch?.messages?.length) {
+      saveTranscriptTail(args.storedSessionId, prefetch.messages, args.scope)
     }
 
     timing?.reconciled(painted === 'kept' ? 'warm' : prefetch ? 'rest' : 'failed')

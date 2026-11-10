@@ -17,6 +17,7 @@ import { useSessionTileDelegate } from './use-session-tile-delegate'
 
 vi.mock('@/hermes', async importActual => ({
   ...(await importActual<typeof HermesModule>()),
+  fetchStoredTranscriptAcrossBackends: vi.fn(async () => null),
   getLatestSessionMessages: vi.fn(async () => ({ messages: [], session_id: '' })),
   getSession: vi.fn()
 }))
@@ -26,7 +27,7 @@ vi.mock('@/store/gateway', async importActual => ({
   requestGatewayForProfile: vi.fn()
 }))
 
-const { getLatestSessionMessages } = await import('@/hermes')
+const { fetchStoredTranscriptAcrossBackends, getLatestSessionMessages } = await import('@/hermes')
 const { requestGatewayForAgent } = await import('@/store/gateway')
 
 const ROUTE = { connectionId: 'hermes-hub', mode: 'remote' as const, profile: 'default', targetProfile: 'default' }
@@ -211,5 +212,39 @@ describe('[daveey] a tile (the @session ref click) paints from the transcript ca
 
     expect(texts(states.get('runtime-refresh'))).toEqual(['fresh'])
     expect(tileLines()).toEqual([expect.objectContaining({ paint: 'rest' })])
+  })
+
+  // [daveey] A tile open that throws (resume refused, no stored transcript anywhere) used to write NO line, so a
+  // live proof could not tell "the ref click failed" from "the ref was never clicked".
+  it('a tile open that fails writes outcome "failed" instead of nothing', async () => {
+    setSessionOwnerHint('dead-ref', ROUTE)
+    vi.mocked(getLatestSessionMessages).mockResolvedValue(null as never)
+    vi.mocked(fetchStoredTranscriptAcrossBackends).mockResolvedValue(null as never)
+    vi.mocked(requestGatewayForAgent).mockRejectedValue(new Error('backend refused'))
+    renderTile()
+
+    await expect(sessionTileDelegate()!.resumeTile('dead-ref')).rejects.toThrow()
+
+    expect(tileLines()).toEqual([
+      expect.objectContaining({ connection: 'hermes-hub', id: 'dead-ref', outcome: 'failed', surface: 'tile' })
+    ])
+    expect(tileLines()[0]).not.toHaveProperty('paint')
+  })
+
+  // [daveey] The main pane caches every REST page it opens with; a cold tile open (the first ref click on a session
+  // the prefetch had not warmed) did not, so the next open of the same old session missed the cache again.
+  it('a cold tile open caches the REST page it painted, under the tile owner key', async () => {
+    setSessionOwnerHint('cold-cache-ref', ROUTE)
+    vi.mocked(getLatestSessionMessages).mockResolvedValue({
+      messages: rows('from rest', 'answer'),
+      session_id: 'cold-cache-ref'
+    } as never)
+    vi.mocked(requestGatewayForAgent).mockResolvedValue({ session_id: 'runtime-cold-cache' } as never)
+    renderTile()
+
+    await sessionTileDelegate()!.resumeTile('cold-cache-ref')
+
+    expect(tileLines()).toEqual([expect.objectContaining({ outcome: 'rest', paint: 'rest' })])
+    expect(readCachedTranscript('cold-cache-ref', SCOPE)?.messages).toHaveLength(2)
   })
 })
