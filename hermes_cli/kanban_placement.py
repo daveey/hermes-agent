@@ -157,9 +157,11 @@ UNCARRIED_OPTIONS = ("initial_status", "human_request", "workspace_path", "proje
 # kanban_create options a hermes-hub client with `create-task --option KEY=JSON` carries to the card.
 # (hermes-hub also allows reasoning_effort, but kanban_create has no such parameter.)
 CARRIED_OPTIONS = ("skills", "max_runtime_seconds", "priority", "model", "provider", "goal_mode",
-                   "goal_max_turns", "completion_contract", "idempotency_key", "requires", "triage")
+                   "goal_max_turns", "completion_contract", "idempotency_key", "requires", "triage",
+                   "distinct_from", "distinct_reason")
+IDENTITY_OPTIONS = ("idempotency_key", "distinct_from", "distinct_reason")
 # Of those, the ones an older client (no --option) cannot express at all: the card stays local.
-LEGACY_UNCARRIED = ("model", "provider", "goal_mode", "triage")
+LEGACY_UNCARRIED = ("model", "provider", "goal_mode", "triage", *IDENTITY_OPTIONS)
 HELP_CACHE_SECONDS = 600
 # Profile tools (``requires`` entries) a target can satisfy when it does not publish its profiles'
 # tools: what the hub's default profile has. host_repo never travels: it means a checkout on THIS host.
@@ -544,14 +546,34 @@ def _bool(v) -> bool:
     return bool(v)
 
 
+def _identity_options(args: dict) -> dict:
+    """Preserve safety metadata verbatim, validating the courier's create-option contract."""
+    out = {}
+    for key in IDENTITY_OPTIONS:
+        value = args.get(key)
+        if value is None or value == "" or (key == "distinct_from" and value == []):
+            continue
+        if key == "distinct_from":
+            valid = (isinstance(value, list) and 1 <= len(value) <= 32
+                     and all(isinstance(t, str) and re.fullmatch(r"t_[0-9a-f]{8,16}", t) for t in value))
+        else:
+            valid = isinstance(value, str) and bool(value.strip()) and len(value) <= 500
+        if not valid:
+            raise ValueError(f"create_option_invalid: {key}")
+        out[key] = value
+    if ("distinct_from" in out) != ("distinct_reason" in out):
+        raise ValueError("create_option_invalid: distinct_from and distinct_reason are required together")
+    return out
+
+
 def carried_options(args: dict) -> dict:
     """The set :data:`CARRIED_OPTIONS` of a kanban_create call, as JSON types hermes-hub accepts.
     Defaults (False, 0, local-only, empty) are left out. Raises on a value kanban_create would refuse.
-    ``idempotency_key`` is not sent: it already fixes the request id, which the hub dedupes on."""
-    out: dict = {}
+    The caller's creation key is distinct from the transport ID and must reach the receiver."""
+    out: dict = _identity_options(args)
     for k in CARRIED_OPTIONS:
         v = args.get(k)
-        if k == "idempotency_key":
+        if k in IDENTITY_OPTIONS:
             continue
         if v in (None, "", [], False):
             continue
@@ -848,14 +870,20 @@ def remote_body(args: dict, *, self_gw: str, target: str, carried: bool = False)
 
 def create_remote(args: dict, *, target: str, origin_session: Optional[str], origin_profile: str,
                   self_gw: str, cfg: Optional[dict] = None, hub_cli: str = "hermes-hub") -> dict:
-    """Queue the card on ``target``. Returns ``{ok, request_id, rc, ...}``; ok False means create locally."""
+    """Queue on ``target``; a fatal refusal must not fall back to a second local card."""
     c = _Cfg(config() if cfg is None else cfg)
     carried = hub_carries_options(hub_cli)
-    options = carried_options(args) if carried else {}
+    if not carried and any(args.get(k) not in (None, "", []) for k in IDENTITY_OPTIONS):
+        return {"ok": False, "fatal": True, "error": "create identity requires hermes-hub create-task --option"}
+    try:
+        options = carried_options(args) if carried else {}
+    except (TypeError, ValueError) as exc:
+        return {"ok": False, "fatal": True, "error": str(exc)}
     rid = request_id(self_gw, args, origin_session or "", options)
     prior = remote_state(rid)
-    if prior in ("queued", "sent", "done"):
-        # An identical earlier call already sent this request: never send it again, return it as is.
+    if prior in ("queued", "sent", "done") and not options.get("idempotency_key"):
+        # Content-addressed retries need no send. Explicit keys must let the courier compare
+        # the complete envelope: the same key can also name changed or formerly dropped metadata.
         return {"ok": True, "request_id": rid, "queued_only": False, "retry": True}
     argv = [hub_cli, "create-task", target, str(args.get("title") or "untitled").strip()[:300],
             "--body", remote_body(args, self_gw=self_gw, target=target, carried=carried),
@@ -869,10 +897,11 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
         argv += ["--origin-session", ""]
     rc, out, err = hub_runner(argv)
     if rc == 0:
-        return {"ok": True, "request_id": rid, "queued_only": False}
+        return {"ok": True, "request_id": rid, "queued_only": False, "retry": prior is not None}
     if rc == 3:  # hub unreachable after the liveness check: queued, sent on the next sync (durable)
-        return {"ok": True, "request_id": rid, "queued_only": True}
-    return {"ok": False, "request_id": rid, "rc": rc, "error": (err or out)[-400:]}
+        return {"ok": True, "request_id": rid, "queued_only": prior != "done", "retry": prior is not None}
+    return {"ok": False, "request_id": rid, "rc": rc, "fatal": "request_id_conflict" in (err or out),
+            "error": (err or out)[-400:]}
 
 
 def _sent_row(rid: str) -> Optional[tuple]:

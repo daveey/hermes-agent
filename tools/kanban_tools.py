@@ -1514,7 +1514,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         if not placed.get("ok"):
             logger.warning("kanban placement: %s refused the card (%s)",
                            target, placed.get("error"))
-            if kp.explicit_foreign_pin(view, reg.self_gateway()):
+            if placed.get("fatal") or kp.explicit_foreign_pin(view, reg.self_gateway()):
                 return _placement_refused(target, f"{target} refused the card: {placed.get('error')}"), None
             return None, None
         rid = placed["request_id"]
