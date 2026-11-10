@@ -35,7 +35,9 @@ def pause_for_update(runner, loop, *, idle_only: bool = False) -> dict:
     loop.call_soon_threadsafe(request)
     done.wait(timeout=5.0)
     accepted = bool(accepted_box and accepted_box[0])
-    return {"pausing": accepted, "already_stopping": bool(accepted_box) and not accepted,
+    # Legacy callers expect an outstanding callback to mean stopping, not a
+    # refusal followed by a delayed drain. Idle-only callbacks expire instead.
+    return {"pausing": accepted, "already_stopping": not accepted and (not idle_only or bool(accepted_box)),
             "busy": bool(refused),
             "pid": os.getpid(), "drain_timeout": drain}
 

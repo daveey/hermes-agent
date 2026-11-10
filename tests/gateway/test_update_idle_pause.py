@@ -104,6 +104,21 @@ def test_active_count_is_checked_in_scheduled_callback(pause_state, monkeypatch)
     runner.request_restart.assert_not_called()
 
 
+def test_legacy_delayed_callback_retains_stopping_ack(pause_state, monkeypatch):
+    runner, preserve = pause_state
+    queued = []
+    event = Mock()
+    event.wait.return_value = False
+    monkeypatch.setattr(cron_pause, "threading", SimpleNamespace(Event=lambda: event))
+    result = cron_pause.pause_for_update(runner, SimpleNamespace(call_soon_threadsafe=queued.append))
+    assert result["already_stopping"] is True
+    assert result["pausing"] is False
+    runner.request_restart.assert_not_called()
+    queued.pop()()
+    runner.request_restart.assert_called_once_with(detached=False, via_service=True)
+    preserve.assert_called_once_with(runner.config)
+
+
 def test_legacy_pause_still_requests_restart_with_active_work(pause_state):
     runner, preserve = pause_state
     runner._active_work_count.return_value = 3
