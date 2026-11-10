@@ -349,7 +349,7 @@ def _note_busy_skip(board: Path, *, cleared: bool = False) -> None:
     from hermes_cli import kanban_db as kb
     state_file = kb.kanban_home() / "gc-busy-skips.json"
     try:
-        state = json.loads(state_file.read_text(encoding="utf-8"))
+        state = json.loads(state_file.read_text(encoding="utf-8-sig"))
         if not isinstance(state, dict):
             state = {}
     except (OSError, ValueError):
