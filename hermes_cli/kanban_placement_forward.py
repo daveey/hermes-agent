@@ -443,8 +443,7 @@ def remote_args(conn: sqlite3.Connection, task, *, self_gw: str) -> dict:
         "model": task.model_override, "provider": task.provider_override if task.model_override else None,
         "goal_mode": bool(task.goal_mode), "goal_max_turns": task.goal_max_turns if task.goal_mode else None,
         "completion_contract": task.completion_contract,
-        # One request per local card: a re-forward after a crash maps to the same hub request.
-        "idempotency_key": f"placement-forward:{self_gw}:{task.id}",
+
     }
 
 
@@ -498,7 +497,9 @@ class Forwarder:
         args = remote_args(self.conn, task, self_gw=self.self_gw)
         placed = self.create(args, target=target, origin_session=st.get("origin_session"),
                              origin_profile=st.get("origin_profile") or "default", self_gw=self.self_gw,
-                             cfg=self.cfg, hub_cli=self.hub_cli)
+                             cfg=self.cfg, hub_cli=self.hub_cli,
+                             # This is transport identity, not a caller's receiver-side creation key.
+                             transport_key=f"placement-forward:{self.self_gw}:{task.id}")
         if not placed.get("ok"):
             return self._cancel(f"{target} refused the card: {placed.get('error')}")
         rid = placed["request_id"]

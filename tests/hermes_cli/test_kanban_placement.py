@@ -1086,9 +1086,7 @@ def _forwarder(conn, tid, mac, monkeypatch, *, check=(1, "x"), await_tid=HUB_TID
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_placement_forward as kpf
     from hermes_cli import kanban_wait_check as kwait
-    # Forwarding carries an explicit creation key and requires a field-capable courier.
-    mac["result"]["help"] = NEW_HELP
-    monkeypatch.setattr(kp, "_help_cache", {})
+
     monkeypatch.setattr(kwait, "check_remote", lambda gw, kind, tid_, **kw: (1, f"{tid_} ready"))
     claimed = kb.claim_task(conn, tid)
     assert claimed is not None
@@ -1149,7 +1147,7 @@ def test_forwarder_sends_the_card_with_parent_handoffs_and_parks_until_the_hub_c
         assert argv[argv.index("--origin-session") + 1] == "20261027_183000_abc123"
         body = argv[argv.index("--body") + 1]
         assert body.startswith("Push it.") and "fanned out; lint fix is the child" in body and child in body
-        assert _options(mac["calls"][0])["max_runtime_seconds"] == 900  # options travel with the card
+        assert "Runtime budget asked by the creator: 900 s." in body  # options travel with the card
         t = kb.get_task(conn, child)
         assert t.status == "scheduled"
         ev = [e for e in kb.list_events(conn, child) if e.kind == "scheduled"][-1]

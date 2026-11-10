@@ -1536,8 +1536,8 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                        note=note), None
         note = (f"{retry}The card IS created: it is queued on {target} as request {rid} and {target} makes the "
                 f"card from it (it runs there, not here: {decision['why']}). Do NOT call kanban_create again "
-                "for this card: an identical call returns this same request, and any changed call creates a "
-                f"second, duplicate card. Its task id appears once {target} applies the request "
+                "for this card: an identical call returns this same request. Changed calls with an explicit "
+                f"creation key are refused; without one they may duplicate. Its task id appears when {target} applies it "
                 + ("(this chat's tasks, " if session_id else "(")
                 + "`hermes-hub requests`).")
         return _ok(task_id=None, status="queued", **fields, runs_where=target, note=note), None

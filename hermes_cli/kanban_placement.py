@@ -869,7 +869,8 @@ def remote_body(args: dict, *, self_gw: str, target: str, carried: bool = False)
 
 
 def create_remote(args: dict, *, target: str, origin_session: Optional[str], origin_profile: str,
-                  self_gw: str, cfg: Optional[dict] = None, hub_cli: str = "hermes-hub") -> dict:
+                  self_gw: str, cfg: Optional[dict] = None, hub_cli: str = "hermes-hub",
+                  transport_key: Optional[str] = None) -> dict:
     """Queue on ``target``; a fatal refusal must not fall back to a second local card."""
     c = _Cfg(config() if cfg is None else cfg)
     carried = hub_carries_options(hub_cli)
@@ -879,7 +880,8 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
         options = carried_options(args) if carried else {}
     except (TypeError, ValueError) as exc:
         return {"ok": False, "fatal": True, "error": str(exc)}
-    rid = request_id(self_gw, args, origin_session or "", options)
+    transport_args = {**args, "idempotency_key": transport_key} if transport_key else args
+    rid = request_id(self_gw, transport_args, origin_session or "", options)
     prior = remote_state(rid)
     if prior in ("queued", "sent", "done") and not options.get("idempotency_key"):
         # Content-addressed retries need no send. Explicit keys must let the courier compare

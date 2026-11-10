@@ -141,16 +141,27 @@ def test_legacy_auto_create_keeps_explicit_key_locally(mac):
         assert conn.execute("SELECT idempotency_key FROM tasks WHERE id=?", (out["task_id"],)).fetchone()[0] == args["idempotency_key"]
 
 
-def test_legacy_forwarder_falls_back_without_sending_a_lossy_request(mac, monkeypatch):
+@pytest.mark.parametrize("modern", [False, True])
+def test_forwarder_transport_identity_survives_pre_receipt_crash(mac, monkeypatch, modern):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_placement_forward as kpf
     from tools import kanban_tools as kt
     with kbc.connect_closing() as conn:
         parent = helpers._done_parent(kb, conn)
         child = json.loads(kt._handle_create({"title": "Separate work", "parents": [parent]}))["task_id"]
         kb.recompute_ready(conn)
         forwarder = helpers._forwarder(conn, child, mac, monkeypatch)
-        monkeypatch.setattr(kp, "hub_carries_options", lambda cli: False)
-        assert forwarder.run() == "fallback"
-        assert kb.get_task(conn, child).status == "running"
-    assert mac["calls"] == []
+        monkeypatch.setattr(kp, "hub_carries_options", lambda cli: modern)
+        args = kpf.remote_args(conn, kb.get_task(conn, child), self_gw="macbook")
+        key = f"placement-forward:macbook:{child}"
+        sent = kp.create_remote(args, target="hub", self_gw="macbook", origin_session=None,
+                                origin_profile="default", cfg={}, transport_key=key)
+        assert sent["request_id"] == kp.request_id("macbook", {**args, "idempotency_key": key}, "")
+        assert "idempotency_key" not in helpers._options(mac["calls"][0])
+        # The courier accepted the request before FORWARDED was recorded. A parent edit
+        # must not make recovery execute a duplicate locally or enqueue a second envelope.
+        monkeypatch.setattr(kpf, "remote_args", lambda *a, **kw: {**args, "body": "Changed parent handoff"})
+        assert forwarder.run() == "parked"
+        assert kb.get_task(conn, child).status == "scheduled"
+    assert len(mac["calls"]) == 1
