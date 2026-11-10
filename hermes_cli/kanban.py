@@ -766,6 +766,9 @@ def _cmd_show(args: argparse.Namespace) -> int:
         wake_check = kwc.get_state(conn, args.task_id)
         from hermes_cli import kanban_queue_reason as kqr
         queue_reason = kqr.latest(conn, args.task_id)
+        # Same ``queue`` as kanban_show and the REST read (kanban-7d720d4ab8): a ready card says where it waits. [daveey]
+        from hermes_cli import kanban_queue_position as kqp
+        queue = kqp.read(conn, task, getattr(args, "board", None))
         if not want_json:
             graph = kb.task_graph_context(conn, task.id)
 
@@ -777,6 +780,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
             "runs": [_obj_dict(r, _SHOW_RUN_FIELDS) for r in runs],
             "wake_check": wake_check,
             "queue_reason": queue_reason,
+            **kqp.fields(queue),
         })
         return 0
 
@@ -787,6 +791,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
     field("status", task.status)
     field("assignee", task.assignee or "-")
     kqr.print_field(queue_reason, field)
+    kqp.print_field(queue, queue_reason, field)
     if task.tenant:
         field("tenant", task.tenant)
     field("workspace", f"{task.workspace_kind}" + (f" @ {task.workspace_path}" if task.workspace_path else ""))
