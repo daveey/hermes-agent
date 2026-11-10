@@ -241,13 +241,15 @@ function breakLock(lock, token, text, mtime) {
 // terminal's Ctrl-C and Ctrl-Z reach it and its scripts as they always did. The watcher does not:
 // on POSIX it runs in a session of its own, so the Ctrl-Z that stops the run leaves it watching,
 // and it kills the stopped tree as soon as the lock is broken, before the job can be resumed.
-// The tree is the child's descendants: stopped first, so none forks while it is read, then
+// The tree is the relay and its descendants (excluding the watcher): stopped first, so none forks while it is read, then
 // killed. A process that left the tree (daemonized, so re-parented away) is out of reach.
 // Windows has no job control; the watcher ends the tree with taskkill /T /F.
 // A relay (node-deps-relay.mjs) starts both, since this thread blocks: the watcher first, and the child only once the
 // watcher has started (one that cannot start, at a process or descriptor limit, fails the run
-// before anything writes the trees); the watcher gets the child's pid on stdin and ends with the
-// relay. A signal to the caller's group (Ctrl-C, a caller's killpg) reaches the child itself, so
+// before anything writes the trees). On POSIX the watcher knows the relay pid from launch:
+// stopping the relay just after installer spawn cannot leave the watcher without a kill target.
+// Windows (no stopped jobs) retains the child's pid on stdin for taskkill. The watcher ends with
+// the relay. A signal to the caller's group (Ctrl-C, a caller's killpg) reaches the child itself, so
 // the relay only waits; a signal aimed at this process alone kills it, and the relay, unsignalled
 // and orphaned, passes SIGTERM on to the child, which used to be left running.
 //

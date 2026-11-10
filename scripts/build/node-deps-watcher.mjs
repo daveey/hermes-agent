@@ -1,12 +1,15 @@
-// The lock watcher (node-deps-lock.mjs runWatched): kills the child the relay started, with
-// everything it started, once the lock is no longer `token`'s. Started by the relay in a session
-// of its own; the child's pid arrives on stdin once the relay has started it, and the watcher ends
-// with the relay (stdin closes). Arguments: lock, token, poll interval in ms.
+// The lock watcher (node-deps-lock.mjs runWatched): kills the relay and its installer tree
+// once the lock is no longer `token`'s. The relay pid is known before any installer can run,
+// even if the job stops immediately after spawn. The watcher has its own session and must
+// exclude itself from that tree. Stdin closing ends the watcher with a completed relay.
+// Arguments: lock, token, poll interval in ms, relay pid (POSIX). On Windows the installer
+// pid still arrives on stdin: taskkill must not target its own watcher/relay ancestry.
 import { execFileSync, spawnSync } from 'node:child_process'
 import { readdirSync, readFileSync } from 'node:fs'
 
-const [lock, token, every] = process.argv.slice(2);
-let root;
+const [lock, token, every, relay] = process.argv.slice(2);
+let root = relay;
+let installer;
 let pending = false;
 const lost = () => { try { return !readFileSync(lock, 'utf8').includes(token) } catch (error) { return error.code === 'ENOENT' } };
 function parents() {
@@ -31,11 +34,11 @@ function parents() {
 }
 function tree() {
   let table;
-  try { table = parents() } catch { return new Set([Number(root)]) }
+  try { table = parents() } catch { return new Set([root, installer].filter(Boolean).map(Number)) }
   const found = new Set([Number(root)]);
   for (let grew = true; grew;) {
     grew = false;
-    for (const [pid, ppid] of table) if (found.has(ppid) && !found.has(pid)) { found.add(pid); grew = true }
+    for (const [pid, ppid] of table) if (pid !== process.pid && found.has(ppid) && !found.has(pid)) { found.add(pid); grew = true }
   }
   return found;
 }
@@ -64,5 +67,9 @@ setInterval(tick, Number(every));
 let input = '';
 process.stdin.on('data', data => {
   input += data;
-  if (root === undefined && input.includes('\n')) { root = input.split('\n')[0]; if (pending) end() }
+  if (installer === undefined && input.includes('\n')) {
+    installer = input.split('\n')[0];
+    root ??= installer;
+    if (pending) end();
+  }
 }).on('end', () => process.exit(0));
