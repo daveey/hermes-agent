@@ -7,6 +7,7 @@ import tarfile
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 
 from hermes_cli import kanban_db as kb
@@ -18,6 +19,9 @@ OLD = int(time.time()) - 10 * 86400
 
 @pytest.fixture
 def board(tmp_path, monkeypatch):
+    # No external jobs belong to this synthetic board. Host cwd probes can stat
+    # deleted directories under the real Hermes home, outside fixture isolation.
+    monkeypatch.setattr(psutil, "process_iter", lambda *args, **kwargs: iter(()))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)

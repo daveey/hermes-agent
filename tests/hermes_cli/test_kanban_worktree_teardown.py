@@ -15,6 +15,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import psutil
 import pytest
 
 from hermes_cli import kanban_db as kb
@@ -44,6 +45,9 @@ def _git(*args: str, cwd: str | None = None) -> str:
 
 @pytest.fixture
 def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # Filesystem-only lifecycle fixtures own no external jobs. Keep discovery
+    # synthetic as well as HOME; live-writer coverage supplies its own processes.
+    monkeypatch.setattr(psutil, "process_iter", lambda *args, **kwargs: iter(()))
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
