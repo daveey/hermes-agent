@@ -1530,7 +1530,11 @@ class SessionDB(
         # Publish the profile-level state first: readiness, /api/status and the session list
         # endpoints read it, and every other handle in this process refuses writes on it.
         mark_storage_corrupt(self.db_path, reason)
-        self._disable_close_time_checkpoint()
+        # Classification runs outside _lock. setconfig waits on SQLite's connection
+        # mutex without releasing the GIL; a competing Python SQL callback needs that
+        # GIL to finish. Wait on the Python lock first, allowing the writer to settle.
+        with self._lock:
+            self._disable_close_time_checkpoint()
         logger.error(
             "state.db %s reported structural corruption outside the FTS "
             "indexes (%s); quarantining this handle: no further writes, no "
@@ -1736,6 +1740,9 @@ class SessionDB(
                 retire_without_close = generation_lost and self._settle_lost_generation_locked()
                 quarantine_reason = None if generation_lost else self._quarantine_reason()
                 if quarantine_reason is not None:
+                    # close() can win _lock after the latch is published but before
+                    # the halting thread arms SQLite's own last-connection safeguard.
+                    self._disable_close_time_checkpoint()
                     logger.warning(
                         "Skipping the close-time WAL checkpoint for %s: this "
                         "handle observed %s. Take a snapshot of state.db, -wal and -shm "
