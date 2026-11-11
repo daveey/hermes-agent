@@ -664,13 +664,13 @@ def claim_unseen_events_for_sub(
                 "SELECT inflight_from, inflight_pid, inflight_start, inflight_at, last_event_id "
                 "FROM kanban_notify_subs " + _SUB_KEY_WHERE, key,
             ).fetchone()
-            if row is not None and row["inflight_from"] is not None and not _holder_is_me(row):
+            if row is not None and row["inflight_from"] is not None:
                 if not _holder_alive(row):
                     _rewind_orphan(conn, key, row)
                 elif why := _stuck_live_claim(conn, task_id, row,
-                                              kinds if deliverable_kinds is None else deliverable_kinds):
+                                              kinds if deliverable_kinds is None else deliverable_kinds, key=key):
                     _rewind_orphan(conn, key, row, why=why)
-                else:
+                elif not _holder_is_me(row):
                     cursor = _notify_cursor(conn, task_id, platform, chat_id, thread_id) or 0
                     return cursor, cursor, []
         old_cursor = _notify_cursor(conn, task_id, platform, chat_id, thread_id)
@@ -694,6 +694,12 @@ def claim_unseen_events_for_sub(
                 "ELSE COALESCE(inflight_at, ?) END " + _SUB_KEY_WHERE,
                 (int(old_cursor), pid, start, now, now, *key),
             )
+            from hermes_cli.kanban_notify_clock import observe
+            marker = conn.execute(
+                "SELECT inflight_from, inflight_pid, inflight_start, inflight_at FROM kanban_notify_subs "
+                + _SUB_KEY_WHERE, key,
+            ).fetchone()
+            observe(conn, key, marker, now=time.monotonic())
         return old_cursor, new_cursor, events
 
 
@@ -710,8 +716,9 @@ _MY_HOLDER: Optional[tuple[int, Optional[int]]] = None
 NOTIFY_CLAIM_STALE_S = 15 * 60
 
 
-def _stuck_live_claim(conn: sqlite3.Connection, task_id: str, row, kinds: Optional[Iterable[str]]) -> Optional[str]:
-    """Why a LIVE foreign holder's claim must not block (``None`` = it still blocks). [daveey]
+def _stuck_live_claim(conn: sqlite3.Connection, task_id: str, row, kinds: Optional[Iterable[str]],
+                      *, key: tuple) -> Optional[str]:
+    """Why a LIVE holder's claim must be replayed (``None`` = it may still be held). [daveey]
 
     - its held range ``(inflight_from, last_event_id]`` has no event of ``kinds``: nothing in it will ever be
       delivered, so nothing will ever ack it (a silent-only range a consumer claimed and never acked);
@@ -731,8 +738,12 @@ def _stuck_live_claim(conn: sqlite3.Connection, task_id: str, row, kinds: Option
         claimed_at = conn.execute(
             "SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND id > ? AND id <= ?", (task_id, lo, hi),
         ).fetchone()[0]
-    age = time.time() - float(claimed_at or 0)
-    if age > NOTIFY_CLAIM_STALE_S:
+    from hermes_cli.kanban_notify_clock import observe
+    # Persisted timestamps bootstrap foreign/legacy markers only; elapsed time
+    # thereafter is monotonic. Our own markers are registered at claim time.
+    initial_age = 0.0 if _holder_is_me(row) else time.time() - float(claimed_at or 0)
+    age = observe(conn, key, row, now=time.monotonic(), initial_age=initial_age)
+    if age >= NOTIFY_CLAIM_STALE_S:
         return f"has held it {age / 60:.0f} min without an ack"
     return None
 
@@ -795,10 +806,14 @@ def _rewind_orphan(conn: sqlite3.Connection, key: tuple, row, *, why: Optional[s
     cur = conn.execute(
         "UPDATE kanban_notify_subs SET last_event_id = MIN(last_event_id, inflight_from), inflight_from = NULL, "
         "inflight_pid = NULL, inflight_start = NULL, inflight_at = NULL " + _SUB_KEY_WHERE
-        + " AND inflight_from = ? AND inflight_pid IS ?",
-        (*key, row["inflight_from"], row["inflight_pid"]),
+        + " AND inflight_from IS ? AND inflight_pid IS ? AND inflight_start IS ? "
+        "AND inflight_at IS ? AND last_event_id = ?",
+        (*key, row["inflight_from"], row["inflight_pid"], row["inflight_start"],
+         row["inflight_at"], row["last_event_id"]),
     )
     if cur.rowcount:
+        from hermes_cli.kanban_notify_clock import forget
+        forget(conn, key)
         import logging
         logging.getLogger(__name__).warning(
             "kanban notice claim for %s -> %s/%s was never delivered (holder pid %s %s); rewound to event %s "
@@ -818,18 +833,39 @@ def release_notify_claim(
     key = _sub_key(task_id, platform, chat_id, thread_id)
     with _kb.write_txn(conn):
         row = conn.execute(
-            "SELECT inflight_from, inflight_pid FROM kanban_notify_subs " + _SUB_KEY_WHERE, key,
+            "SELECT inflight_from, inflight_pid, inflight_start, inflight_at, last_event_id "
+            "FROM kanban_notify_subs " + _SUB_KEY_WHERE, key,
         ).fetchone()
         if row is None or row["inflight_from"] is None or not _holder_is_me(row):
             return False
         return _rewind_orphan(conn, key, row, why=f"is this process, which {why}")
 
 
+def release_expired_notify_claim(
+    conn: sqlite3.Connection, *, task_id: str, platform: str, chat_id: str, thread_id: Optional[str] = None,
+) -> bool:
+    """A buffered notice outlived :data:`NOTIFY_CLAIM_STALE_S` in this process: hand its range back, but ONLY if
+    the marker in the row is still this process's own and is itself that old by the process-local claim clock.
+    A sweeper-cleared marker, or a fresh reclaim of the same range (by another process or this one), is
+    left untouched, so an expired buffer can never rewind a newer claim. [daveey]"""
+    from hermes_cli.kanban_notify_clock import observe
+    key = _sub_key(task_id, platform, chat_id, thread_id)
+    with _kb.write_txn(conn):
+        row = conn.execute(
+            "SELECT inflight_from, inflight_pid, inflight_start, inflight_at, last_event_id "
+            "FROM kanban_notify_subs " + _SUB_KEY_WHERE, key,
+        ).fetchone()
+        if row is None or row["inflight_from"] is None or not _holder_is_me(row):
+            return False
+        if observe(conn, key, row, now=time.monotonic()) < NOTIFY_CLAIM_STALE_S:
+            return False
+        return _rewind_orphan(conn, key, row, why="is this process, whose buffered notice expired")
+
+
 def recover_orphaned_notify_claims(
     conn: sqlite3.Connection, *, platform: Optional[str] = None, chat_id: Optional[str] = None,
 ) -> int:
-    """Rewind every in-flight claim whose holder process is gone; returns how many. Never touches a claim held
-    by this process or by a live one."""
+    """Rewind dead or expired claims, including this process's, even on idle boards."""
     where = ["inflight_from IS NOT NULL"]
     params: list[Any] = []
     if platform is not None:
@@ -838,20 +874,23 @@ def recover_orphaned_notify_claims(
     if chat_id is not None:
         where.append("chat_id = ?")
         params.append(chat_id)
-    try:
-        rows = conn.execute(
-            "SELECT task_id, platform, chat_id, thread_id, inflight_from, inflight_pid, inflight_start "
-            "FROM kanban_notify_subs WHERE " + " AND ".join(where), params,
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return 0  # pre-migration board
-    orphans = [r for r in rows if not _holder_is_me(r) and not _holder_alive(r)]
-    if not orphans:
-        return 0
     n = 0
     with _kb.write_txn(conn):
-        for r in orphans:
-            n += _rewind_orphan(conn, _sub_key(r["task_id"], r["platform"], r["chat_id"], r["thread_id"]), r)
+        try:
+            rows = conn.execute(
+                "SELECT task_id, platform, chat_id, thread_id, inflight_from, inflight_pid, inflight_start, "
+                "inflight_at, last_event_id FROM kanban_notify_subs WHERE " + " AND ".join(where), params,
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return 0  # pre-migration board
+        from hermes_cli.kanban_notify_clock import prune
+        prune(conn)
+        for r in rows:
+            key = _sub_key(r["task_id"], r["platform"], r["chat_id"], r["thread_id"])
+            if not _holder_alive(r):
+                n += _rewind_orphan(conn, key, r)
+            elif why := _stuck_live_claim(conn, r["task_id"], r, None, key=key):
+                n += _rewind_orphan(conn, key, r, why=why)
     return n
 
 
@@ -892,6 +931,9 @@ def ack_notify_claim(
                          + " AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = ? "
                          "AND e.kind = 'request_withdrawn' AND e.id > ?)",
                          (*key, task_id, int(upto)))
+        if row is None or row["inflight_from"] is None:
+            from hermes_cli.kanban_notify_clock import forget
+            forget(conn, key)
     return cur.rowcount > 0
 
 
@@ -970,6 +1012,10 @@ def rewind_notify_cursor(
                     + _SUB_KEY_WHERE + " AND inflight_from IS NOT NULL",
                     (int(old_cursor), int(old_cursor), int(old_cursor), int(old_cursor), *key),
                 )
+                if not notify_claim_in_flight(conn, task_id=task_id, platform=platform,
+                                              chat_id=chat_id, thread_id=thread_id):
+                    from hermes_cli.kanban_notify_clock import forget
+                    forget(conn, key)
             except sqlite3.OperationalError:
                 pass  # pre-migration board
     return cur.rowcount > 0
