@@ -63,6 +63,12 @@ import {
 import { registerRecoveredRuntime, singleFlightSessionResume, takeRecoveredRuntime } from './single-flight-resume'
 import { captureSubmissionDestination, destinationAfterCreate, sameAuthorityPublishedOwner } from './submission-destination'
 import {
+  backendRefusesSubmissionId,
+  noteSubmissionIdAccepted,
+  noteSubmissionIdRefused,
+  submissionIdentityEpoch
+} from './submission-identity-support'
+import {
   acquireSubmitInFlight,
   type GatewayRequest,
   inlineErrorMessage,
@@ -1180,8 +1186,39 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
                 const params: Record<string, unknown> = { ...prepared.params, session_id: liveId }
 
+                const sendIdentityless = async () => {
+                  prepared.legacyAttempted = true
+                  await writePreparedSubmission(retryKey, prepared)
+                  const { submission_id: _id, ...legacyParams } = params
+
+                  const result = await requestGateway<SubmitReceipt>(
+                    'prompt.submit',
+                    legacyParams,
+                    PROMPT_SUBMIT_REQUEST_TIMEOUT_MS
+                  )
+
+                  legacyAccepted = true
+
+                  return result
+                }
+
+                // This destination already refused `submission_id` pre-admission: skip the
+                // refused request instead of paying a round trip on every send. Fresh sends only:
+                // a retained entry may already have been admitted WITH identity on a capable
+                // backend, so its retry must offer that identity again (dedupe), never drop it.
+                if (!retained && backendRefusesSubmissionId(destination.scopeKey)) {
+                  return await sendIdentityless()
+                }
+
+                // The activation this request went out under: a refusal answered after a
+                // route/source swap describes the old backend and must not mark the new one.
+                const identityEpoch = submissionIdentityEpoch()
+
                 try {
-                  return await requestGateway<SubmitReceipt>('prompt.submit', params, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
+                  const receipt = await requestGateway<SubmitReceipt>('prompt.submit', params, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
+                  noteSubmissionIdAccepted(destination.scopeKey)
+
+                  return receipt
                 } catch (error) {
                   // A retry whose payload no longer matches its admitted original (an attachment send
                   // offered back as text) is that original: settled as the dedupe it is, no new turn.
@@ -1198,19 +1235,9 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                     throw error
                   }
 
-                  prepared.legacyAttempted = true
-                  await writePreparedSubmission(retryKey, prepared)
-                  const { submission_id: _id, ...legacyParams } = params
+                  noteSubmissionIdRefused(destination.scopeKey, identityEpoch)
 
-                  const result = await requestGateway<SubmitReceipt>(
-                    'prompt.submit',
-                    legacyParams,
-                    PROMPT_SUBMIT_REQUEST_TIMEOUT_MS
-                  )
-
-                  legacyAccepted = true
-
-                  return result
+                  return await sendIdentityless()
                 }
               }),
             {
