@@ -18,10 +18,11 @@ from ruamel.yaml import YAML
 pytestmark = pytest.mark.fork_guard
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-# Blacksmith sizes since 2026-11-11 (softmax-universe): the light lane is 2 vCPU, suites 4, Docker/heavy 8.
+# Blacksmith sizes since 2026-11-11 (softmax-universe): the light lane is 2 vCPU, everything else 4
+# (blacksmith-8vcpu jobs sat queued with no runner on the org, PR #1077).
 FAST_LABEL = "blacksmith-2vcpu-ubuntu-2404"
 HEAVY_LABEL = "blacksmith-4vcpu-ubuntu-2404"
-BIG_LABEL = "blacksmith-8vcpu-ubuntu-2404"
+BIG_LABEL = "blacksmith-4vcpu-ubuntu-2404"
 POLL_LABEL = "blacksmith-2vcpu-ubuntu-2404"
 WORKFLOWS = ROOT / ".github" / "workflows"
 FAST = {
@@ -43,6 +44,10 @@ FAST = {
     # when the lane is skipped or cancelled), and an always() job may not wait
     # on hermes-hub (test_fork_runner_routing), so it cannot go back there.
     ("ci.yaml", "macos-state-required"),
+    # Fourth admission (November 11, 2026, Blacksmith cutover): the Docker release-phase gate.
+    # It only reads its needs' results (5-min cap, no checkout or build); its always()
+    # may not wait on the heavy size (test_fork_runner_routing).
+    ("docker.yml", "release-phase-gate"),
 }
 # Completion job in the orchestrator itself: the gate (the advisory timing report
 # runs as its trailing steps). It cannot be one of its own needs.
@@ -204,6 +209,9 @@ def test_fast_label_is_known_and_checks_cannot_bypass_the_gate():
             assert job["name"] == title
             assert set(job["needs"]) == needs
             assert job["if"] == "${{ always() }}"
+        elif (wf, name) == ("docker.yml", "release-phase-gate"):
+            # The release orchestrator's phase check, not part of the PR gate.
+            assert "always()" in job["if"] and "inputs.release-phase" in job["if"]
         elif wf == "ci.yaml":
             assert name in gate["needs"]
         else:

@@ -69,7 +69,7 @@ for f in sorted(set(COMPLETION) | set(FAST)):
 PY
 
 # The Python test slices and the bubblewrap e2e-upgrade shards are the heavy
-# lanes (8 vCPU, as on the old tfgar-tests/ci-bwrap VMs).
+# lanes (4 vCPU: blacksmith-8vcpu jobs never got a runner on softmax-universe, PR #1077).
 python3 - <<'PY'
 import re
 f = 'tests.yml'; t = open(f).read()
@@ -77,7 +77,7 @@ for name in ('test', 'e2e-upgrade'):
     m = re.search(r'(?m)^  ' + re.escape(name) + r':\n(?:(?!  \S).*\n)*', t)
     assert m, (f, name)
     block = m.group(0)
-    t = t.replace(block, re.sub(r'(?m)^(    runs-on: )blacksmith-[0-9]+vcpu-ubuntu-2404$', r'\1blacksmith-8vcpu-ubuntu-2404', block))
+    t = t.replace(block, re.sub(r'(?m)^(    runs-on: )blacksmith-[0-9]+vcpu-ubuntu-2404$', r'\1blacksmith-4vcpu-ubuntu-2404', block))
 open(f, 'w').write(t)
 PY
 
@@ -86,7 +86,7 @@ PY
 # hosts/hermes-hub/gh-runner/setup-ci-docker.sh). Plain ubuntu jobs above stay
 # on the socket-less runners.
 DOCKER_FILES=(repo-guards.yml remote-backends.yml docker.yml nix.yml sandbox-image.yml)
-sed -i.bak -E "s/^([[:space:]]*runs-on:[[:space:]]*)(\\[self-hosted, hermes-hub(, docker)?\\]|${UPSTREAM_LINUX})[[:space:]]*\$/\\1blacksmith-8vcpu-ubuntu-2404/" "${DOCKER_FILES[@]}"
+sed -i.bak -E "s/^([[:space:]]*runs-on:[[:space:]]*)(\\[self-hosted, hermes-hub(, docker)?\\]|${UPSTREAM_LINUX})[[:space:]]*\$/\\1blacksmith-4vcpu-ubuntu-2404/" "${DOCKER_FILES[@]}"
 # Matrix-driven image builds: amd64 -> docker-ci runner; no arm64 runner, so
 # drop the arm64 leg; let the secret-free build/test jobs run on the fork
 # (publish/merge jobs stay NousResearch-only: they need Docker Hub secrets).
@@ -94,7 +94,7 @@ python3 - <<'PY'
 import re
 for f in ('docker.yml', 'sandbox-image.yml'):
     t = open(f).read()
-    t = re.sub(r"runner: (?:ubuntu-latest-32-core|blacksmith-[0-9]+vcpu-ubuntu-2404)\n", "runner: blacksmith-8vcpu-ubuntu-2404\n", t)
+    t = re.sub(r"runner: (?:ubuntu-latest-32-core|blacksmith-[0-9]+vcpu-ubuntu-2404)\n", "runner: blacksmith-4vcpu-ubuntu-2404\n", t)
     t = re.sub(r"( *)arch: \[amd64, arm64\]\n", r"\1arch: [amd64]  # fork: no arm64 runner\n", t)
     t = re.sub(r"(?:          #[^\n]*\n)*          - arch: arm64\n            runner: (?:ubuntu-latest-32-arm-core|blacksmith-[0-9]+vcpu-ubuntu-2404-arm)\n            platform: linux/arm64\n", "", t)
     t = re.sub(r"\(\(needs\.mode\.outputs\.release != 'true' && github\.repository == 'NousResearch/hermes-agent' && needs\.(detect|mode)\.outputs\.build",
@@ -105,6 +105,10 @@ for f in ('docker.yml', 'sandbox-image.yml'):
     # takes ~50 min there, past the upstream 45 min cap.
     t = t.replace("    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 45\n",
                   "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 120  # fork: shared hub runner\n")
+    if f == 'docker.yml':
+        # The always() phase gate only reads needs results: the light 2 vCPU size.
+        t = re.sub(r"(  release-phase-gate:\n(?:(?!  \S).*\n)*?    runs-on: )blacksmith-[0-9]+vcpu-ubuntu-2404\n",
+                   r"\1blacksmith-2vcpu-ubuntu-2404\n", t)
     open(f, 'w').write(t)
 PY
 rm -f ./*.bak
