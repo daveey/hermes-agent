@@ -115,11 +115,43 @@ def _unanswered(history):
     return _unanswered_tool_calls(history)
 
 
+# What the agent's own executor writes for a tool call a hard interrupt cancelled or skipped
+# (agent/tool_executor.py). With a killed command's own interrupted output (replay_cleanup's
+# ``is_interrupted_tool_result`` shape) these become the update-pause text after a restart Stop.
+_STOP_RESULT_PREFIXES = ('[Tool execution cancelled \u2014 ', '[Tool execution skipped \u2014 ')
+
+
+def _stop_result_rows(session_db, session_id) -> list:
+    """Row ids of the stopped turn's cancelled, skipped or interrupted tool results: the tool rows right
+    after the transcript's last assistant tool-call message, past the closing assistant rows the
+    stopped turn wrote (its empty final reply, the interrupted-delivery note) and nothing else."""
+    from agent.replay_cleanup import is_interrupted_tool_result
+    found = []
+    for row in reversed(session_db.get_messages(session_id, latest=True, limit=256)):
+        role = row.get('role')
+        if role == 'assistant' and row.get('tool_calls'):
+            return found
+        if role == 'assistant':
+            if found:
+                return []  # an assistant reply between tool results: not one stopped tool block
+            continue
+        if role != 'tool':
+            return []
+        content = row.get('content')
+        if isinstance(content, str) and (content.startswith(_STOP_RESULT_PREFIXES)
+                                         or is_interrupted_tool_result(content)):
+            found.append(int(row['id']))
+    return []
+
+
 def _answer_interrupted_calls(session_db, session_id, at) -> int:
-    """Append the interrupted-by-update result for each trailing tool call left without one."""
+    """Give each tool call the restart Stop cut off the interrupted-by-update result: rewrite the
+    cancel/skip/interrupted result the stopping agent wrote for it, and append one for a trailing call
+    left with none."""
+    stopped = _stop_result_rows(session_db, session_id)
     history = session_db.get_messages_as_conversation(session_id)
     calls = _unanswered(history)
-    if not calls:
+    if not calls and not stopped:
         return 0
     text = interrupted_result(at)
     from agent.message_metadata import TOOL_CALL_UID, tool_call_uid_from_history
@@ -134,9 +166,13 @@ def _answer_interrupted_calls(session_db, session_id, at) -> int:
         rows.append(msg)
 
     def write(conn):
-        added, _ = session_db._insert_message_rows(conn, session_id, rows)
+        # In place (a tool result must stay right after its call), like set_user_message_content.
+        rewritten = conn.executemany(
+            "UPDATE messages SET content = ?, api_content = NULL WHERE id = ? AND session_id = ? AND role = 'tool' "
+            'AND active = 1', [(session_db._encode_content(text), row_id, session_id) for row_id in stopped]).rowcount
+        added, _ = session_db._insert_message_rows(conn, session_id, rows) if rows else (0, None)
         conn.execute('UPDATE sessions SET message_count=message_count+? WHERE id=?', (added, session_id))
-        return added
+        return max(rewritten, 0) + added
     return int(session_db._execute_write(write))
 
 

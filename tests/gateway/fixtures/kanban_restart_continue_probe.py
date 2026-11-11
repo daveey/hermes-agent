@@ -2,7 +2,7 @@
 
 Actual dispatcher argv, real ``gateway.run`` owners on one disposable home, loopback model. The first
 owner is stopped (SIGTERM: the runtime Stop of a gateway shutdown/restart) while the card's turn waits
-on the model; a second owner then starts on the same home. The run's submitter (the real
+on the model (or, with ``PROBE_MID_TOOL=1``, while its ``terminal`` tool call runs); a second owner then starts on the same home. The run's submitter (the real
 ``hermes_cli.kanban_worker_client``) must survive the gap and the second owner must continue the same
 turn in the same session: one run, one claim, one worker pid, no reclaim/crash/failure.
 """
@@ -33,11 +33,17 @@ class Model(BaseHTTPRequestHandler):
             self.server.requests.append(body)
         users = [m for m in messages if m['role'] == 'user']
         continued = any(isinstance(m.get('content'), str) and m['content'].startswith(CONTINUE_PREFIX) for m in users)
-        if messages and body.get('tools') and not continued and not self.server.blocked.is_set():
-            self.server.blocked.set()  # the first turn waits here until its owner is stopped
-            self.server.release.wait(120)
         message = {'role': 'assistant', 'content': 'CONTINUED_COMPLETE'}
         finish = 'stop'
+        if messages and body.get('tools') and not continued and not self.server.blocked.is_set():
+            self.server.blocked.set()
+            if self.server.mid_tool:  # the first turn runs a tool that is still running at the stop
+                message = {'role': 'assistant', 'content': None, 'tool_calls': [{'index': 0, 'id': 'midtool-1',
+                    'type': 'function', 'function': {'name': 'terminal', 'arguments': json.dumps(
+                        {'command': f'touch {self.server.marker} && sleep 120', 'timeout': 300})}}]}
+                finish = 'tool_calls'
+            else:  # the first turn waits here until its owner is stopped
+                self.server.release.wait(120)
         if continued and body.get('tools') and messages[-1]['role'] == 'user':
             message = {'role': 'assistant', 'content': None, 'tool_calls': [{'index': 0, 'id': 'continued-complete',
                 'type': 'function', 'function': {'name': 'kanban_complete',
@@ -79,6 +85,7 @@ def main():
     peer = ThreadingHTTPServer(('127.0.0.1', 0), Model)
     peer.requests = []
     peer.blocked, peer.release = threading.Event(), threading.Event()
+    peer.mid_tool, peer.marker = os.environ.get('PROBE_MID_TOOL') == '1', home / 'tool-started'
     threading.Thread(target=peer.serve_forever, daemon=True).start()
     url = f'http://127.0.0.1:{peer.server_port}/v1'
     os.environ.update(OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url)
@@ -123,6 +130,8 @@ def main():
                 task = kb.get_task(conn, tid)
                 receipt.update(run_id=task.current_run_id, claim_lock=task.claim_lock)
                 assert peer.blocked.wait(90), 'model never reached'
+                if peer.mid_tool:
+                    _wait(peer.marker.exists, 90, 'the turn\'s terminal tool call started')
                 receipt['worker_pid'] = kb.get_task(conn, tid).worker_pid
                 proc.terminate()  # the runtime Stop of a gateway shutdown/restart, mid-turn
                 proc.wait(60)
@@ -148,6 +157,8 @@ def main():
             receipt['admissions'] = [list(r) for r in db.execute(
                 'SELECT target_session_id, request_id, status, outcome FROM session_admissions ORDER BY seq')]
         turns = [[m.get('content') for m in r['messages'] if m['role'] == 'user'] for r in peer.requests if r.get('tools')]
+        receipt['mid_tool_results'] = sorted({m.get('content') for r in peer.requests for m in r['messages']
+                                              if m.get('role') == 'tool' and m.get('tool_call_id') == 'midtool-1'})
         receipt['continued_in_history'] = any(
             any(isinstance(t, str) and 'RESTART_CONTINUE_SENTINEL' in t for t in turn)
             and any(isinstance(t, str) and t.startswith(CONTINUE_PREFIX) for t in turn) for turn in turns)

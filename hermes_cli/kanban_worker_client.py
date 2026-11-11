@@ -308,6 +308,7 @@ async def _await_receipt(client, params, board_db, claim):
         accepted = await client.rpc('kanban.run', _timeout=admission_answer_budget(), **dict(params, db=db))
         receipt = accepted['receipt']
         claim.session_id, claim.admission_id = accepted['session_id'], receipt['admission_id']
+        claim.continuing = False  # [daveey] continued (or first) turn admitted: ordinary owner-loss rules again
         print(f'Session: {claim.session_id}', file=sys.stderr)
     else:
         receipt = await _receipt(client, claim)
