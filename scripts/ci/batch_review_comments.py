@@ -26,7 +26,7 @@ import importlib.util
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 CI_WORKFLOW_NAME = "CI"
@@ -134,13 +134,13 @@ def process_pr(token: str, repo: str, pr: dict, now: datetime) -> str:
 
 
 def run_batch(token: str, repo: str, now: datetime | None = None) -> int:
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     owner, name = repo.split("/")
     try:
         prs = lc._api_get_paginated(
             f"{lc.API_BASE}/repos/{owner}/{name}/pulls?state=open&per_page=100", token,
         )
-    except Exception as e:
+    except (OSError, ValueError, RuntimeError) as e:
         print(f"ERROR listing open PRs: {e}", file=sys.stderr)
         return 1
 
@@ -151,7 +151,7 @@ def run_batch(token: str, repo: str, now: datetime | None = None) -> int:
         try:
             result = process_pr(token, repo, pr, now)
             print(f"  PR #{pr['number']}: {result}")
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             failures += 1
             print(f"  PR #{pr['number']}: ERROR {e}", file=sys.stderr)
     if failures:

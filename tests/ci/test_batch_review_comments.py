@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -17,7 +17,7 @@ sys.modules["batch_review_comments"] = b
 _spec.loader.exec_module(b)
 
 REPO = "o/r"
-NOW = datetime(2026, 11, 11, 12, 17, tzinfo=timezone.utc)
+NOW = datetime(2026, 11, 11, 12, 17, tzinfo=UTC)
 
 
 def _pr(n, sha, head_repo: str | None = REPO, state="open"):
