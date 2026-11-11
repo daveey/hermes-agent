@@ -243,6 +243,47 @@ def test_omitted_parent_does_not_hold_missing_chat_link_repair(live, svc, failed
         shadow.close()
 
 
+def test_delivered_receipt_with_retired_restore_stays_delivered(live, svc):
+    from hermes_cli.kanban_sync_omissions import reconcile_page
+    tid = omit_pin(live, svc)
+    row = {'uid': tid, 'model_pin_mandatory': None}
+    reconcile_page(live, 'tasks', [row])
+    client.push(live, svc.hub('macbook'), 'default', 'macbook', primary=True)
+    before = [tuple(r) for r in live.execute(
+        'SELECT original_op_id,restore_op_id,state FROM kanban_sync_omissions ORDER BY original_op_id')]
+    assert before and all(r[2] == 'delivered' for r in before)
+    assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE op='restore'").fetchone()
+    reconcile_page(live, 'tasks', [row])
+    assert [tuple(r) for r in live.execute(
+        'SELECT original_op_id,restore_op_id,state FROM kanban_sync_omissions ORDER BY original_op_id')] == before
+    assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE op='restore'").fetchone()
+
+
+def test_new_omission_does_not_reopen_older_delivered_receipt(live, svc):
+    from hermes_cli.kanban_sync_omissions import reconcile_page
+    tid = omit_pin(live, svc)
+    row = {'uid': tid, 'model_pin_mandatory': None}
+    reconcile_page(live, 'tasks', [row])
+    client.push(live, svc.hub('macbook'), 'default', 'macbook', primary=True)
+    before = [tuple(r) for r in live.execute(
+        'SELECT original_op_id,restore_op_id,state FROM kanban_sync_omissions ORDER BY original_op_id')]
+    assert before and all(r[2] == 'delivered' for r in before)
+    live.execute("INSERT INTO kanban_sync_omissions "
+        "(original_op_id,table_name,row_uid,field,compat_op_id,state) "
+        "VALUES ('new-original','tasks',?,'model_pin_mandatory','new-compat','held')", (tid,))
+    live.commit()
+    reconcile_page(live, 'tasks', [row])
+    old = [tuple(r) for r in live.execute(
+        "SELECT original_op_id,restore_op_id,state FROM kanban_sync_omissions "
+        "WHERE original_op_id!='new-original' ORDER BY original_op_id")]
+    assert old == before
+    receipt = live.execute("SELECT restore_op_id,state FROM kanban_sync_omissions "
+        "WHERE original_op_id='new-original'").fetchone()
+    assert receipt['state'] == 'restoring'
+    restores = live.execute("SELECT op_id FROM kanban_sync_outbox WHERE op='restore'").fetchall()
+    assert [r[0] for r in restores] == [receipt['restore_op_id']]
+
+
 @pytest.mark.parametrize('condition', ['pending', 'missing_field', 'delivered'])
 def test_reconcile_restore_controls(live, svc, condition):
     from hermes_cli.kanban_sync_omissions import reconcile_page
