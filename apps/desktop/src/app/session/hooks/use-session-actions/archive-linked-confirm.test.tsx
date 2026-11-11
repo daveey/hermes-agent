@@ -10,6 +10,7 @@ import { type SessionInfo, setSessionArchived } from '@/hermes'
 import { registerArchiveGuard, resetArchiveGuardsForTests } from '@/store/archive-guards'
 import { $confirmRequest, settleConfirm } from '@/store/confirm'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
+import { $pinnedSessionIds } from '@/store/layout'
 import { $offlineSessions, _resetOfflineSessionsForTests } from '@/store/offline-sessions'
 import { $projectTree } from '@/store/project-tree'
 import { $sessions, _resetSessionOwnerHintsForTests, setSessionOwnerHint, setSessions } from '@/store/session'
@@ -275,6 +276,29 @@ describe('archiveSession linked-work confirmation', () => {
     expect($sessions.get().map(session => session.id)).toEqual(['s-1'])
   })
 
+  it('Cancel puts back only the archived pin, keeping pin edits made meanwhile', async () => {
+    setSessions([row({ kanban_active: 1 })])
+    $pinnedSessionIds.set(['s-1', 'old'])
+    const handle = await mountHarness()
+
+    let done: Promise<void> | undefined
+    act(() => {
+      done = handle.archiveSession('s-1')
+    })
+
+    expect($pinnedSessionIds.get()).toEqual(['old'])
+    await waitFor(() => expect($confirmRequest.get()).not.toBeNull())
+    $pinnedSessionIds.set(['new'])
+
+    await act(async () => {
+      settleConfirm(false)
+      await done
+    })
+
+    expect($pinnedSessionIds.get()).toEqual(['s-1', 'new'])
+    $pinnedSessionIds.set([])
+  })
+
   it('skipLinkedConfirm archives without asking', async () => {
     setSessions([row({ kanban_active: 3 })])
     const handle = await mountHarness()
@@ -288,6 +312,7 @@ describe('archiveSession linked-work confirmation', () => {
 
 describe('offline archive owner isolation', () => {
   beforeEach(() => {
+    $removedSessionIds.set(new Set())
     _resetOfflineSessionsForTests()
     hubRequest.mockClear()
     setSessions([])
@@ -333,25 +358,25 @@ describe('offline archive owner isolation', () => {
     expect(hubRequest).not.toHaveBeenCalled()
     expect(setSessionArchived).toHaveBeenCalledWith('s-1', true, { connectionId: 'mini', profile: 'work' })
   })
-  it('hides an offline row at once and brings it back when the queue fails', async () => {
+  // Offline rows keep main's owner-scoped flow: no bare-id tombstone, no live-slice copy.
+  it('does not tombstone another owner\'s cached chat with the same id', async () => {
+    const selectedRow = cached('cloud', 'work')
+    const otherOwnerRow = cached('mini', 'personal')
+    $offlineSessions.set([selectedRow, otherOwnerRow])
+    const handle = await mountHarness()
+    await act(() => handle.archiveSession('s-1', { selectedRow }))
+    expect($offlineSessions.get()).toEqual([otherOwnerRow])
+    expect($removedSessionIds.get().has('s-1')).toBe(false)
+  })
+  it('keeps a failed offline queue row cached and out of the live list', async () => {
     const selectedRow = cached()
     $offlineSessions.set([selectedRow])
-
-    let rejectQueue: (error: Error) => void = () => {}
-    hubRequest.mockImplementationOnce(() => new Promise((_resolve, reject) => (rejectQueue = reject)))
+    hubRequest.mockRejectedValueOnce(new Error('hub down'))
     const handle = await mountHarness()
-    let done: Promise<void> | undefined
-    act(() => {
-      done = handle.archiveSession('s-1', { selectedRow })
-    })
-    expect($removedSessionIds.get().has('s-1')).toBe(true)
-    await act(async () => {
-      await waitFor(() => expect(hubRequest).toHaveBeenCalled())
-      rejectQueue(new Error('hub down'))
-      await done
-    })
+    await act(() => handle.archiveSession('s-1', { selectedRow }))
     expect($removedSessionIds.get().has('s-1')).toBe(false)
     expect($offlineSessions.get()).toEqual([selectedRow])
+    expect($sessions.get()).toEqual([])
   })
   it('keeps linked-work confirmation for an offline row', async () => {
     const selectedRow = { ...cached(), kanban_active: 2 }
@@ -368,6 +393,7 @@ describe('offline archive owner isolation', () => {
     })
     expect(hubRequest).not.toHaveBeenCalled()
     expect($offlineSessions.get()).toEqual([selectedRow])
+    expect($sessions.get()).toEqual([])
   })
 })
 

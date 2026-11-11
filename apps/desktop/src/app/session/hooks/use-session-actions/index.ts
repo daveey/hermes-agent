@@ -3444,10 +3444,9 @@ export function useSessionActions({
 
       const listed = findListedSession(storedSessionId)
       let archived: SessionInfo | undefined
-      let listedRow: SessionInfo | undefined
 
       try {
-        archived = listedRow = sessionActionRow(storedSessionId, options?.selectedRow) ?? listed?.session
+        archived = sessionActionRow(storedSessionId, options?.selectedRow) ?? listed?.session
 
         // A selected row is the user's explicit owner; every other door
         // (hotkey, tile menu, plugins) resolves it like resume does, so a
@@ -3463,10 +3462,10 @@ export function useSessionActions({
       }
 
       // Hide first: the preflight below can take seconds; cancel/failure restores.
-      const hidden = softHideArchivedRow(storedSessionId, archived, listed, listedRow)
+      const hidden = softHideArchivedRow(storedSessionId, archived, listed)
       const archivedIds = hidden.ids
 
-      if (selectedStoredSessionIdRef.current === storedSessionId) {
+      if (hidden.hid && selectedStoredSessionIdRef.current === storedSessionId) {
         if (options?.onDeselect) {
           options.onDeselect()
         } else {

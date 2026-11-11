@@ -3,7 +3,6 @@ import type { Translations } from '@/i18n/types'
 import { $pinnedSessionIds } from '@/store/layout'
 import { notifyError } from '@/store/notifications'
 import { archiveIfOfflineCached } from '@/store/offline-session-actions'
-import { $offlineSessions, offlineIdentity } from '@/store/offline-sessions'
 import { $profiles } from '@/store/profile'
 import { sessionPinId } from '@/store/session'
 import {
@@ -21,59 +20,72 @@ import { dropListedSession, type findListedSession, resolveSessionProfile, resto
  * linked-work preflight (ancestry + task reads, plugin guards: up to ~14 s on a
  * busy or remote backend) and the archive RPC. A cancelled confirmation, an
  * unresolved owner or a failed RPC puts the row back via `restore()`.
+ *
+ * Offline-cached rows are not pre-hidden (`hid` false): tombstones and the
+ * live-slice drop are keyed by bare id, which would also hide another owner's
+ * cached chat with the same id; their owner-scoped queue path hides them.
  */
 export function softHideArchivedRow(
   storedSessionId: string,
   archived: SessionInfo | undefined,
-  listed: ReturnType<typeof findListedSession>,
-  listedRow: SessionInfo | undefined
+  listed: ReturnType<typeof findListedSession>
 ) {
-  const previousPinned = $pinnedSessionIds.get()
+  const ids = [storedSessionId, archived?.id, archived?._lineage_root_id]
+
+  if (archived?.offline_cached) {
+    return { end: () => {}, hid: false, ids, restore: () => {} }
+  }
+
+  const before = $pinnedSessionIds.get()
   // Pins are keyed on the durable lineage-root id; the stored id may be the
   // live tip after compression. Drop both so the pin can't linger.
   const pinId = archived ? sessionPinId(archived) : storedSessionId
-  const ids = [storedSessionId, archived?.id, archived?._lineage_root_id]
+  const removedPins = before.flatMap((id, index) => (id === storedSessionId || id === pinId ? [{ id, index }] : []))
 
   dropListedSession(storedSessionId)
   tombstoneSessions(ids)
   beginSessionMutation(ids)
-  $pinnedSessionIds.set(previousPinned.filter(id => id !== storedSessionId && id !== pinId))
 
-  const hidden = {
+  if (removedPins.length) {
+    $pinnedSessionIds.set(before.filter(id => id !== storedSessionId && id !== pinId))
+  }
+
+  return {
     end: () => endSessionMutation(ids),
+    hid: true,
     ids,
-    /** A queued offline archive drops its cached row; a failed queue leaves it, so it comes back. */
-    settleOffline: () => {
-      const queued =
-        !archived || !$offlineSessions.get().some(row => offlineIdentity(row) === offlineIdentity(archived))
-
-      if (queued) {
-        hidden.end()
-      } else {
-        hidden.restore()
-      }
-    },
     restore: () => {
-      // Only a row the sidebar actually listed comes back; an owner resolved
-      // from the project tree or a hint was never in that slice.
-      if (listedRow) {
-        restoreListedSession(listedRow, listed?.slice)
+      // Only the row a live sidebar slice actually held comes back, to that
+      // slice; a row resolved from the project tree or a hint never was there.
+      if (listed) {
+        restoreListedSession(listed.session, listed.slice)
       }
 
       untombstoneSessions(ids)
-      $pinnedSessionIds.set(previousPinned)
+
+      // Put back only the pins this archive removed; keep pin edits made meanwhile.
+      if (removedPins.length) {
+        const pins = [...$pinnedSessionIds.get()]
+
+        for (const { id, index } of removedPins) {
+          if (!pins.includes(id)) {
+            pins.splice(Math.min(index, pins.length), 0, id)
+          }
+        }
+
+        $pinnedSessionIds.set(pins)
+      }
+
       endSessionMutation(ids)
     }
   }
-
-  return hidden
 }
 
 type HiddenRow = ReturnType<typeof softHideArchivedRow>
 
 /**
  * Owner resolution, linked-work confirmation and the offline-queue path, run
- * while the row is already hidden. Returns the profile to archive under, or
+ * while a live row is already hidden. Returns the profile to archive under, or
  * false when archive is over: cancelled/failed (row restored) or queued offline.
  */
 export async function archivePreflight(
@@ -101,9 +113,9 @@ export async function archivePreflight(
   }
 
   try {
-    // Offline-or-live was decided before the hide dropped the live row.
+    // Offline-or-live is decided from the pre-hide row: once a live row is
+    // dropped, re-resolving could land on another cached copy.
     if (archived?.offline_cached && (await archiveIfOfflineCached(storedSessionId, copy, archived))) {
-      hidden.settleOffline()
 
       return false
     }
