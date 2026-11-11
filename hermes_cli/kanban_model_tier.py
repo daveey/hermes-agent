@@ -5,7 +5,7 @@ When ``kanban.default_model`` is set, the dispatcher runs a card that has no pin
 task only (``model_override``/``provider_override`` on the claimed ``Task``), so the card row never changes
 and a later run re-decides. Cards keep the profile's model when:
 
-* the card pins ``model`` itself (``kanban_create(model=...)`` / ``hermes kanban create --model``);
+* the card pins ``model`` itself, except review runs choose an independent reviewer;
 * it runs in the review lane (``sdlc-review`` loaded — claimed from the review column);
 * an earlier run on the card failed (``crashed``/``timed_out``/``gave_up``/``failed``) or a reviewer asked for
   changes: the second attempt after a failed fix gets the stronger model;
@@ -15,10 +15,10 @@ and a later run re-decides. Cards keep the profile's model when:
 ``kanban.strong_model`` (+ optional ``kanban.strong_provider``, else inferred from the model) names the model
 those review/retry/keep-pattern cards run on instead of the profile's model; unset keeps the old behaviour.
 
-Unset ``kanban.default_model`` (the default) = upstream behaviour: every card runs on its profile's model.
-With a class default, review/retry/keep-pattern work explicitly requests ``class:deep`` rather than
-inheriting a potentially weaker profile default. Explicit card pins and out-of-scope profiles are unchanged.
-Each decision is recorded as a ``model_tier`` task event on the run so tier effects can be measured later.
+Unset ``kanban.default_model`` retains profile routing except for explicit review pins/overrides.
+Review handoff metadata ``review_model`` (optional ``review_provider``) wins; otherwise concrete author pins
+choose a distinct strong/deep model. Ready/retry pins and unpinned out-of-scope profiles are unchanged.
+Each decision is recorded as a ``model_tier`` event, with ``implementer_model`` on review decisions.
 """
 
 from __future__ import annotations
@@ -86,6 +86,11 @@ def resolve_model_tier(
     would have run on anyway (its own pin or the profile's model); ``reason`` names the rule that decided."""
     cfg = load_tier_config() if cfg is None else cfg
     default_model = _str(cfg.get("default_model"))
+    if lane == "review" or REVIEW_SKILL in (getattr(task, "skills", None) or []):
+        from hermes_cli.kanban_review_model import resolve_review_model
+        review = resolve_review_model(conn, task, cfg)
+        if review is not None:
+            return review
     if _str(getattr(task, "model_override", None)):
         return None, None, "pinned"
     if not default_model:
@@ -209,6 +214,12 @@ def owner_model_pin(conn: sqlite3.Connection, task: Any) -> tuple[Optional[str],
             payload = json.loads(row[0]) if row else {}
         except (TypeError, ValueError):
             payload = {}
+        from hermes_cli import kanban_db as _kb
+        review = REVIEW_SKILL in (getattr(task, "skills", None) or []) or (
+            _kb._retry_status_for_run(conn, task.id, run_id) == "review")
+        if review and model and (not isinstance(payload, dict) or not _str(payload.get("model"))):
+            from hermes_cli.kanban_review_model import ReviewModelUnavailable
+            raise ReviewModelUnavailable("Review owner requires a current-run model_tier receipt")
         if isinstance(payload, dict) and _str(payload.get("model")):
             model, provider = _str(payload["model"]), _str(payload.get("provider")) or None
     if not model:
@@ -281,7 +292,7 @@ def record_run_route(conn: sqlite3.Connection, task: Any, *, lane: str, reason: 
 def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:
     """Pin the tier's model on the in-memory ``task`` (never the DB row) and record a ``model_tier`` event,
     plus the run's resolved ``run_route`` receipt (every spawn, tier off included).
-    Returns the reason. Never raises: a failure leaves the task on its profile's model."""
+    Returns the reason. Review resolution/receipt failures refuse admission rather than reusing an author pin."""
     reason = _apply_model_tier(conn, task, lane=lane, cfg=cfg)
     record_run_route(conn, task, lane=lane, reason=reason)
     return reason
@@ -324,9 +335,14 @@ def resolve_dispatch_tier(conn, task, *, lane, cfg=None):
 
 
 def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:
+    implementer_model = _str(getattr(task, "model_override", None)) or None
+    is_review = lane == "review" or REVIEW_SKILL in (getattr(task, "skills", None) or [])
     try:
         model, provider, reason = resolve_dispatch_tier(conn, task, lane=lane, cfg=cfg)
     except Exception as exc:
+        if is_review:
+            from hermes_cli.kanban_review_model import ReviewModelUnavailable
+            raise ReviewModelUnavailable(f"Review model resolution failed: {exc}") from exc
         logger.warning("kanban model tier: resolve failed for %s (%s)", getattr(task, "id", "?"), exc,
                        exc_info=True)
         return "error"
@@ -345,6 +361,9 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
         from agent.model_routing import is_class_selector
         why = class_unroutable_reason(model) if is_class_selector(model) else None
         if why:
+            if is_review and (implementer_model or reason == "review_override"):
+                from hermes_cli.kanban_review_model import ReviewModelUnavailable
+                raise ReviewModelUnavailable(f"Review model {model} is unroutable: {why}")
             # A tier-chosen class this host cannot route would crash the worker at startup ("No eligible
             # standard routes under billing/capability policy", 2026-10-27: shared config switched
             # kanban.default_model to class:standard before the host's route registry landed). Keep the
@@ -364,6 +383,8 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
             payload = {"reason": reason, "model": model or _str(getattr(task, "model_override", None)) or None,
                        "provider": provider or _str(getattr(task, "provider_override", None)) or None,
                        "lane": lane}
+            if is_review:
+                payload["implementer_model"] = implementer_model
             with _kb.write_txn(conn):
                 _kb._append_event(conn, task.id, "model_tier", payload, run_id=getattr(task, "current_run_id", None))
                 if repinned:
@@ -371,6 +392,9 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
                     from hermes_cli.kanban_pin_reroute import record
                     record(conn, task, (_str(origin[0]), _str(origin[1]).lower()), (_str(model), _str(provider)))
         except Exception as exc:
+            if is_review:
+                from hermes_cli.kanban_review_model import ReviewModelUnavailable
+                raise ReviewModelUnavailable("Cannot persist review model receipt") from exc
             if repinned:
                 # Never an unrecorded reroute: the run goes back to its pin (and its wall).
                 logger.warning("kanban model tier: pin reroute record failed for %s; keeping the pin (%s)",

@@ -2135,11 +2135,10 @@ def _dispatch_lane_task(
         # Force-load sdlc-review; the kanban lifecycle is already in every
         # worker's system prompt via KANBAN_GUIDANCE.
         claimed.skills = list(dict.fromkeys([*(claimed.skills or []), "sdlc-review"]))
-    # Default model tier (kanban.default_model): pins a cheaper model on the in-memory task unless the card is
-    # pinned, a review, a retry after a failure or matches a keep pattern. Never raises. [daveey]
+    # Apply inside spawn accounting: an unavailable independent reviewer fails closed.
     from hermes_cli.kanban_model_tier import apply_model_tier
-    apply_model_tier(conn, claimed, lane=lane)
     try:
+        apply_model_tier(conn, claimed, lane=lane)
         pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
         if pid:
             _set_worker_pid(conn, claimed.id, int(pid), run_id=claimed.current_run_id, claim_lock=claimed.claim_lock)
@@ -2153,10 +2152,10 @@ def _dispatch_lane_task(
         return True
     except Exception as exc:
         from tools.process_registry import RestartSafeScopeUnavailable
+        from hermes_cli.kanban_review_model import ReviewModelUnavailable
 
-        # The host refused the spawn (no restart-safe scope): nothing about the
-        # card ran, so it must not spend the card's retry budget (#114720).
-        infrastructure = isinstance(exc, RestartSafeScopeUnavailable)
+        # Admission failed before any worker ran; preserve its retry budget.
+        infrastructure = isinstance(exc, (RestartSafeScopeUnavailable, ReviewModelUnavailable))
         if infrastructure:
             _kb._log.warning("kanban dispatcher: spawn of %s deferred, host cannot place the worker: %s", claimed.id, exc)
         if _record_task_failure(

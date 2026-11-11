@@ -199,7 +199,7 @@ def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
     except Exception:
         logger.warning('kanban quota: route resolve failed for %s; holding', task.id, exc_info=True)
         return held, None
-    if lane == 'review' or unknown:
+    if lane == 'review' or base[2] in ('review_unpinned', 'review_override') or unknown:
         # An unrecorded wall may be any provider: no route can be proven to avoid it.
         return held, None
     try:
