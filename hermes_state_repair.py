@@ -474,9 +474,11 @@ def _publish_backup_bundle(db_path: Path, staging: Path, backup_path: Path) -> N
                 for suffix, sidecar in zip(_DB_SIDECAR_SUFFIXES, _sidecars(db_path)) if sidecar.exists()]
     published: list[Path] = []
     try:
-        for src, staged, _dst in (main, *sidecars):
-            # sqlite-sidecar-open: ok — _backup_db_file refuses while this database has a live connection.
-            shutil.copy2(src, staged)
+        from hermes_cli.sqlite_safe_read import offline_file_access
+        with offline_file_access(db_path):
+            for src, staged, _dst in (main, *sidecars):
+                # sqlite-sidecar-open: ok — offline_file_access fences connections for the whole copy.
+                shutil.copy2(src, staged)
         for _src, staged, dst in (*sidecars, main):
             os.replace(staged, dst)
             published.append(dst)
