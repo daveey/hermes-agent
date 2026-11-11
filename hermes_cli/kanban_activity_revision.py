@@ -186,7 +186,24 @@ def _covered_read(conn: sqlite3.Connection, path: Path, db: tuple | None, tables
     return revision
 
 
+# Zero-budget SQLite probes must not race each other's reader lifecycle opens.
+# The reader cache is shared, not thread-local: serialize probes before entering
+# it, so concurrent healthy readers compare the SAME connection's data_version
+# rather than turning local lock contention into unrelated unknown keys. Stripes
+# bound lock storage without retaining paths/connections indefinitely.
+_PROBE_LOCKS = tuple(threading.RLock() for _ in range(64))
+
+
+def probe_lock(path: Path):
+    return _PROBE_LOCKS[hash(str(path)) % len(_PROBE_LOCKS)]
+
+
 def content_key(path: Path, tables: Iterable[str], open_ro: Callable) -> tuple:
+    with probe_lock(path):
+        return _content_key(path, tables, open_ro)
+
+
+def _content_key(path: Path, tables: Iterable[str], open_ro: Callable) -> tuple:
     """A key that changes whenever any row of ``tables`` that the readers read changes in ``path`` (and on file
     replacement or schema change), but not on bookkeeping-only writes. ``open_ro(path)`` is a context manager
     yielding a read-only connection (a kept one: the read is one indexed row plus the schema table). Falls back to

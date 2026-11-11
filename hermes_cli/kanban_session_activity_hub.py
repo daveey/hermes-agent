@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from hermes_cli.kanban_activity_revision import file_stat
+from hermes_cli.kanban_activity_revision import file_stat, probe_lock
 
 _HUB_SIGNATURE_SQL = ("SELECT coll, COUNT(*), MAX(seq), TOTAL(seq) FROM replica WHERE coll IN ('tasks', 'gateway') "
                       "GROUP BY coll")
@@ -13,6 +13,13 @@ _hub_signature_memo: tuple | None = None
 
 
 def _hub_content_signature(hub: Path) -> tuple:
+    # Share the board-key probe lock: the zero-budget lifecycle open and memo
+    # lookup/publish are one operation, not eight contending advisory probes.
+    with probe_lock(hub):
+        return _read_hub_content_signature(hub)
+
+
+def _read_hub_content_signature(hub: Path) -> tuple:
     """Ignore session-only writes, but never mistake an equal stat for no commit.
 
     SQLite's data_version on a kept read-only connection detects commits even on
