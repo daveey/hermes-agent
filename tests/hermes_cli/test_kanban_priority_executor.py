@@ -81,6 +81,103 @@ def test_executor_refuses_whole_origin_atomically(conn, case, reason):
     assert [tuple(r) for r in conn.execute("SELECT * FROM kanban_sync_outbox")] == outbox_before
 
 
+@pytest.mark.parametrize("mutation", ["rank", "version", "boolean", "duplicate", "exception", "origin", "ceiling", "extra"])
+def test_attached_manifest_is_validated_not_trusted(conn, mutation):
+    from pathlib import Path
+    from hermes_cli import kanban_priority_executor as executor
+    ids, attachment, _ = setup_plan(conn)
+    stored = kb.get_attachment(conn, attachment)
+    assert stored is not None
+    manifest = json.loads(Path(stored.stored_path).read_bytes())
+    if mutation == "rank":
+        manifest["rows"][0]["new"] = 123
+    elif mutation == "version":
+        manifest["version"] = 1
+    elif mutation == "boolean":
+        manifest["rows"][0]["old"] = True
+    elif mutation == "duplicate":
+        manifest["rows"].append(manifest["rows"][0])
+    elif mutation == "exception":
+        manifest["exceptions"] = [{"id": "unknown", "status": "running", "origin": "two", "old": 1}]
+    elif mutation == "origin":
+        manifest["rows"][0]["origin"] = None
+    elif mutation == "ceiling":
+        manifest["ceiling"] = 999
+    else:
+        manifest["arbitrary"] = "ignored?"
+    data = json.dumps(manifest).encode()
+    attachment = kb.store_attachment_bytes(conn, ids[0], "invalid.json", data, content_type="application/json")
+    before = helpers.priorities(conn, ids)
+    with pytest.raises(ValueError, match="manifest"):
+        executor.apply_attached(conn, attachment, hashlib.sha256(data).hexdigest(), writer=sync_helpers.ME)
+    assert helpers.priorities(conn, ids) == before
+
+
+def test_restore_requires_explicit_policy_rollback_and_cas(conn):
+    from hermes_cli import kanban_priority_executor as executor
+    ids, attachment, digest = setup_plan(conn)
+    executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME)
+    with pytest.raises(ValueError, match="explicit legacy policy rollback"):
+        executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME, undo=True)
+    assert helpers.priorities(conn, ids) == [450, 10000, 900]
+    result = executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME,
+                                     undo=True, allow_legacy_rollback=True)
+    assert result["changed"] == 2
+    assert helpers.priorities(conn, ids) == [10000, 10000, 50000]
+    assert executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME,
+                                   undo=True, allow_legacy_rollback=True)["changed"] == 0
+    conn.execute("UPDATE tasks SET priority=123 WHERE id=?", (ids[0],))
+    conn.commit()
+    with pytest.raises(ValueError, match="priorities changed"):
+        executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME,
+                                undo=True, allow_legacy_rollback=True)
+    assert helpers.priorities(conn, ids) == [123, 10000, 50000]
+
+
+def test_unknown_live_origin_refuses_normalization(conn):
+    from hermes_cli import kanban_priority_executor as executor
+    ids, attachment, digest = setup_plan(conn)
+    conn.execute("UPDATE tasks SET created_on=NULL WHERE id=?", (ids[1],))
+    conn.commit()
+    with pytest.raises(ValueError, match="missing origin"):
+        executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME)
+    assert helpers.priorities(conn, ids) == [10000, 10000, 50000]
+
+
+def test_two_origins_share_ranks_and_publish_only_their_own_rows(conn, tmp_path):
+    from hermes_cli import kanban_priority_executor as executor
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_sync_client as ksc
+    from tests.hermes_cli.kanban_sync_fake_board import FakeService
+    ids, attachment, digest = setup_plan(conn)
+    svc = FakeService()
+    for task, origin, priority in zip(ids, [sync_helpers.ME, "two", sync_helpers.ME], [10000, 10000, 50000]):
+        svc.hub(origin).ops(sync_helpers.BOARD, [{
+            "client_op_id": f"seed-{task}", "op": "upsert", "table": "tasks", "uid": task,
+            "hlc": f"0000000000001-0000-{origin}",
+            "fields": {"title": task, "status": "ready", "priority": priority, "created_at": 1},
+        }])
+    other = kbc.connect(tmp_path / "other-origin.db")
+    try:
+        conn.backup(other)
+        other.execute("UPDATE kanban_sync_state SET gateway_id='two'")
+        other.commit()
+        assert executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME)["changed"] == 2
+        assert executor.apply_attached(other, attachment, digest, writer="two")["changed"] == 1
+        assert helpers.priorities(other, ids) == [10000, 450, 50000]
+        for db, origin, own in [(conn, sync_helpers.ME, {ids[0], ids[2]}), (other, "two", {ids[1]})]:
+            task_ops = {r[0] for r in db.execute("SELECT row_uid FROM kanban_sync_outbox WHERE table_name='tasks'")}
+            assert task_ops == own
+            result = ksc.push(db, svc.hub(origin), sync_helpers.BOARD, origin, primary=True)
+            assert result.rejected == 0 and result.sent > 0
+            assert not sync_helpers._pending(db)
+        canonical = svc.hub(sync_helpers.ME).snapshot_page(sync_helpers.BOARD, "tasks")
+        values = {r["id"]: r["priority"] for r in canonical["rows"]}
+        assert [values[task] for task in ids] == [450, 450, 900]
+    finally:
+        other.close()
+
+
 @pytest.mark.parametrize("context", ["worker", "descendant"])
 def test_worker_boundary_is_not_an_executor(conn, monkeypatch, tmp_path, context):
     from pathlib import Path
