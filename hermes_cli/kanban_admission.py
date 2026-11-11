@@ -222,6 +222,17 @@ def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, even
     return run_id
 
 
+def disk_admission_refused(task_id=None):
+    """Independent card-only disk check; never writes the updater/operator hold."""
+    from hermes_cli.kanban_disk_admission import refusal_reason
+
+    reason = refusal_reason()
+    if reason:
+        _defer(task_id, reason)
+        logging.getLogger(__name__).info("Disk admission refused Kanban claim %s: %s", task_id, reason)
+    return reason is not None
+
+
 def admission_hold_set(task_id=None):
     """[daveey] Lock-free early read of the updater hold, for callers to check BEFORE side effects that
     precede ``claim_transaction`` (the Board-service lease). Advisory only: ``claim_transaction`` still
@@ -230,6 +241,8 @@ def admission_hold_set(task_id=None):
     from hermes_constants import get_default_hermes_root
     from hermes_cli.admission_fence import is_held, SUPPORTED
 
+    if disk_admission_refused(task_id):
+        return True
     if not SUPPORTED:
         return False
     try:
@@ -264,6 +277,9 @@ def claim_transaction(conn, *, task_id=None, gate=None):
         raise RuntimeError("Kanban claim cannot run inside an existing transaction")
     if not SUPPORTED:
         with write_txn(conn):
+            if disk_admission_refused(task_id):
+                yield False
+                return
             _bind_echo(conn, task_id, gate)
             yield True
         return
@@ -310,6 +326,9 @@ def claim_transaction(conn, *, task_id=None, gate=None):
                 logging.getLogger(__name__).info("Hub admission refused Kanban claim %s: %s %s", task_id, reason,
                                                  getattr(_decision, "counts", None) or {})
                 _defer(task_id, reason)
+                yield False
+                return
+            if disk_admission_refused(task_id):
                 yield False
                 return
             _consumed.evidence = evidence
