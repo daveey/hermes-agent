@@ -1150,6 +1150,7 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
     "no remote work": it returns the last good answer with every row marked stale, so a session never paints
     done because the replica could not be read. No replica ever seen = not installed = []."""
     global _remote_last, _remote_scope, _snapshot_saved
+    from hermes_cli.kanban_terminal_carry import reconcile_carry
     scope = _origin_scope()
     with _cache_lock:
         previous = _remote_last if _remote_scope == scope else None
@@ -1172,7 +1173,7 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
                 raise
             return []
         _log.warning("hermes-hub replica read failed, keeping last known remote cards (stale): %s", exc)
-        return [{**c, "stale": True} for c in previous]
+        return reconcile_carry([{**c, "stale": True} for c in previous])
     # A folded legacy alias (``legacy_key``) is present under its qualified key: its last-known
     # unqualified row must not be resurrected as a stale obligation.
     present = {(c["session"], k) for c in cards for k in (c["key"], c.get("legacy_key")) if k}
@@ -1181,7 +1182,7 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
     # may attest closed) under its qualified key. [daveey]
     qualified_now = {(c["session"], c.get("gateway"), c.get("board"), c.get("id"))
                      for c in cards if c.get("ownership_state") == "qualified"}
-    cards.extend({**c, "stale": True} for c in (previous or [])
+    cards.extend(reconcile_carry([{**c, "stale": True} for c in (previous or [])
                  if (c["session"], c["key"]) not in present
                  # Successful reads migrate graph-inferred cache entries only.
                  # Receipt-backed obligations remain in the separate ledger.
@@ -1191,7 +1192,7 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
                  and not (c.get("ownership_state") == "unknown"
                           and (c["session"], c.get("gateway"), c.get("board"), c.get("id")) in qualified_now)
                  # Fresh replica: the named owner publishes the scope without it, another gateway owns the card.
-                 and not _retire_moved(c, moved))
+                 and not _retire_moved(c, moved)]))
     if _snapshot_saved != (scope, cards):
         # The durable snapshot only speeds a cold start. Losing a write race (database is locked) must not
         # fail this read: the sidebar would mark every row kanban_unknown. The next changed read retries.
