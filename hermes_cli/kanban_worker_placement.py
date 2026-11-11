@@ -487,10 +487,15 @@ def dispatch_tick(conn):
     """Retry placement before local capacity checks, without creating an extra daemon."""
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_sync_client as client
+    from hermes_cli import kanban_placement as placement
 
     if sync.board_mode(conn) != "primary":
         return
     state = sync.sync_state(conn) or {}
+    cfg = placement.config()
+    pools = cfg.get("worker_pools")
+    if not isinstance(pools, dict) or not pools.get(state.get("gateway_id")):
+        return
     if not conn.execute("SELECT 1 FROM tasks WHERE status='ready' AND created_on=? LIMIT 1",
                         (state.get("gateway_id"),)).fetchone():
         return
@@ -507,7 +512,7 @@ def dispatch_tick(conn):
             queue.try_record(queue.record_pull_error, conn, ident.gateway, error=exc)
             return
         queue.clear_pull_streaks(ident.gateway)  # a feed-pull failure streak is no longer consecutive
-        reevaluate(conn, hub, state["board_id"], ident.gateway)
+        reevaluate(conn, hub, state["board_id"], ident.gateway, cfg=cfg)
     except (client.HubError, client.SyncUnavailable, client.Resync, OSError):
         # Offline origin cannot remove the queue fence or manufacture an assignment.
         return

@@ -76,7 +76,7 @@ def test_prior_run_preserves_unpublished_custody(setup, monkeypatch, labels):
     tid = fixtures.make(db, runs_on=labels)
     db.execute("INSERT INTO task_runs (task_id,profile,status,started_at) VALUES (?,'default','completed',1)", (tid,))
     db.commit()
-    monkeypatch.setattr(node, "registry", lambda: {"machines": {"worker-1": {"state": "revoked"}}})
+    monkeypatch.setattr(node, "registry", lambda **kw: {"machines": {"worker-1": {"state": "revoked"}}})
     assert wp.reevaluate(db, hub, "default", "hub") == 0
     assert not hub.calls
 

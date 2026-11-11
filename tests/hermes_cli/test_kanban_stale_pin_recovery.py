@@ -18,7 +18,7 @@ setup = fixtures.setup
 def test_stale_pin_recovery_requests_board_recheck(setup, monkeypatch, entry):
     conn, hub = setup
     tid = fixtures.make(conn, runs_on='["machine:worker-1", "linux"]')
-    monkeypatch.setattr(node, "registry", lambda: {"machines": {"worker-1": entry}})
+    monkeypatch.setattr(node, "registry", lambda **kw: {"machines": {"worker-1": entry}})
     assert wp.reevaluate(conn, hub, "default", "hub") == 1
     assert hub.calls[0][1] == {"task_id": tid, "expected_revision": 4,
                                 "mode": "stale_pin", "candidates": ["worker-2"]}
@@ -34,7 +34,7 @@ def test_stale_pin_recovery_requests_board_recheck(setup, monkeypatch, entry):
 def test_unknown_registry_does_not_authorize_stale_recovery(setup, monkeypatch, registry):
     conn, hub = setup
     fixtures.make(conn, runs_on='["machine:worker-1"]')
-    monkeypatch.setattr(node, "registry", lambda: registry)
+    monkeypatch.setattr(node, "registry", lambda **kw: registry)
     assert wp.reevaluate(conn, hub, "default", "hub") == 0
     assert not hub.calls
 
@@ -48,7 +48,7 @@ def test_unknown_registry_does_not_authorize_stale_recovery(setup, monkeypatch, 
 def test_stale_machine_never_overrides_independent_constraints(setup, monkeypatch, fields):
     conn, hub = setup
     fixtures.make(conn, runs_on='["machine:worker-1"]', **fields)
-    monkeypatch.setattr(node, "registry", lambda: {"machines": {"worker-1": {"state": "revoked"}}})
+    monkeypatch.setattr(node, "registry", lambda **kw: {"machines": {"worker-1": {"state": "revoked"}}})
     assert wp.reevaluate(conn, hub, "default", "hub") == 0
     assert not hub.calls
 
@@ -59,6 +59,6 @@ def test_stale_threshold_uses_milliseconds(setup, monkeypatch, age, expected):
     conn, hub = setup
     fixtures.make(conn, runs_on='["machine:worker-1"]')
     monkeypatch.setattr(recovery.time, "time", lambda: 2000)
-    monkeypatch.setattr(node, "registry", lambda: {"machines": {
+    monkeypatch.setattr(node, "registry", lambda **kw: {"machines": {
         "worker-1": {"state": "active", "last_seen": (2000 - age) * 1000}}})
     assert wp.reevaluate(conn, hub, "default", "hub") == expected

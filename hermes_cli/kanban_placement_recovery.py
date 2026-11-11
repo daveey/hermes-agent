@@ -38,7 +38,7 @@ def recovery_mode(conn, row, cfg):
     names = [label.removeprefix("machine:") for label in labels or [] if label.startswith("machine:")]
     if len(names) != 1:
         return None
-    entry = ((node.registry() or {}).get("machines") or {}).get(names[0])
+    entry = ((node.registry(require_fresh=True) or {}).get("machines") or {}).get(names[0])
     if not isinstance(entry, dict):
         return None
     seen = entry.get("last_seen")
@@ -52,6 +52,9 @@ def recovery_mode(conn, row, cfg):
 def current_portable(conn, row, cfg):
     from hermes_cli.kanban_placement import portable_reason
 
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='origin_creation_intents'").fetchone():
+        if conn.execute("SELECT 1 FROM origin_creation_intents WHERE task_id=? LIMIT 1", (row["id"],)).fetchone():
+            return False  # courier binding owns the destination, including historical creates
     # Even scratch work can contain unpublished outputs from an earlier run.
     if row.get("workspace_path") or conn.execute(
             "SELECT 1 FROM task_runs WHERE task_id=? LIMIT 1", (row["id"],)).fetchone():

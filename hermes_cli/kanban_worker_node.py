@@ -214,13 +214,15 @@ def set_registry_fetch(fn: Optional[Callable[[], Mapping[str, Any]]]) -> None:
         _REGISTRY.update(at=None, value=None, retry=False, ok_at=None)
 
 
-def registry() -> Optional[Mapping[str, Any]]:
+def registry(*, require_fresh: bool = False) -> Optional[Mapping[str, Any]]:
     """``{me, machines: {name: entry}}``, cached for :data:`REGISTRY_TTL_S`; None when unreachable."""
     # Several board/executor ticks can reach the same expired entry concurrently.
     # Failed attempts also consume the TTL: an outage must not turn every tick
     # into another HTTP request. The Board still authorizes every actual lease.
     with _REGISTRY_LOCK:
-        return _registry_locked()
+        value = _registry_locked()
+        # Last-good discovery is useful offline, but is not evidence for moving a stale pin.
+        return None if require_fresh and _REGISTRY.get("retry") else value
 
 
 def registry_fresh(max_age_s: float) -> Optional[Mapping[str, Any]]:
