@@ -218,6 +218,15 @@ def test_board_path_traversal_refused(world):
         register(world, card=card)
 
 
+def test_receiptless_goal_mode_never_uses_other_tasks_judge_epoch(world):
+    for path in (world['owner'], world['replica']):
+        edit(path, 'UPDATE tasks SET goal_mode=1')
+        edit(path, "INSERT INTO task_events VALUES(1000,'other_task',8,'goal_verified',200,'{}','unrelated-judge')")
+    with pytest.raises(ValueError, match='completion_unverified'):
+        register(world)
+    assert not world['receipt'].exists()
+
+
 def test_standard_reconciler_captures_release_and_restores_on_reopen(world, monkeypatch):
     from hermes_cli import kanban_db_connect as kbc, kanban_chat_links as links
     from hermes_cli import kanban_sync_client as sync, kanban_session_activity as activity

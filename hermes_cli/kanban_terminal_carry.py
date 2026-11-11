@@ -85,7 +85,10 @@ def _owner_proof(path: Path, expected_hash: str, identity: dict) -> dict:
             'SELECT binding_json FROM origin_creation_intents WHERE task_id=?', (identity['id'],))] if has_intents else []
         payload = {k: identity[k] for k in ('id', 'gateway', 'profile', 'board')}
         observed = observe_owner_task(conn, {**payload, 'status': row['status'], 'origin_bindings': bindings}, now=0)
-        if not _verified_terminal(observed):
+        # This explicit recovery path requires task-bound goal proof even on
+        # boards where ordinary legacy projection predates judge receipts.
+        if (not _verified_terminal(observed)
+                or (row['goal_mode'] and observed['origin_observation'].get('basis') == 'legacy_completed')):
             raise ValueError('terminal_carry_completion_unverified')
         run = conn.execute('SELECT profile FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1',
                            (identity['id'],)).fetchone()
