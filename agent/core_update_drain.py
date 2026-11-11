@@ -6,7 +6,9 @@ finish and no Desktop turn is live, applies ``hermes update --yes`` and removes 
 hold is active the kanban dispatcher spawns nothing (running workers are never touched), so a
 saturated board drains instead of refilling between update checks.
 
-A hold only counts while its writer pid is alive: a crashed updater must not freeze dispatch.
+A hold only counts while its writer pid is alive and its advertised ``started_at + max_s``
+lease has not expired: a live but stalled updater must not freeze dispatch. Legacy records
+without ``max_s`` retain PID-only lifetime; invalid leases are inactive.
 A file that cannot be parsed counts for ``_UNPARSEABLE_GRACE_S`` (a writer mid-write), then not.
 """
 
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 from pathlib import Path
@@ -65,6 +68,15 @@ def read_hold(path: Path, now: Optional[float] = None, *, strict_errors: bool = 
         return {"pid": None, "reason": "unparseable drain hold"} if 0 <= age < _UNPARSEABLE_GRACE_S else None
     if pid <= 0 or not _pid_alive(pid):
         return None
+    if "max_s" in data:
+        try:
+            started_at, max_s = float(data["started_at"]), float(data["max_s"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(started_at) or not math.isfinite(max_s) or max_s <= 0:
+            return None
+        if (time.time() if now is None else now) - started_at >= max_s:
+            return None
     return data if isinstance(data, dict) else None
 
 

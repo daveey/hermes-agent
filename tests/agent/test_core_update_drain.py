@@ -43,6 +43,40 @@ def test_live_hold_blocks_dispatch(home):
     assert _kanban_dispatch_allowed() is False
 
 
+@pytest.mark.parametrize("age,active", [(119, True), (120, False), (1800, False)])
+def test_live_writer_lease_expires(home, monkeypatch, age, active):
+    from gateway.kanban_watchers_common import _kanban_dispatch_allowed
+
+    record = {"pid": os.getpid(), "started_at": 1000, "max_s": 120}
+    path = _write(home, record)
+    monkeypatch.setattr(drain.time, "time", lambda: 1000 + age)
+    assert drain.active_hold() == ({**record, "path": str(path)} if active else None)
+    assert _kanban_dispatch_allowed() is not active
+    assert path.exists()  # a reader never deletes another publisher's marker
+
+
+@pytest.mark.parametrize("fields", [
+    {"max_s": None}, {"max_s": "bad"}, {"max_s": float("inf")},
+    {"max_s": float("nan")}, {"max_s": -1}, {"max_s": 0},
+    {"max_s": 120, "started_at": "bad"},
+    {"max_s": 120, "started_at": float("inf")},
+    {"max_s": 120, "started_at": float("nan")},
+])
+def test_invalid_lease_cannot_hold_dispatch_forever(home, fields):
+    path = _write(home, {"pid": os.getpid(), "started_at": 1000, **fields})
+    assert drain.read_hold(path, now=0) is None
+
+
+def test_expired_profile_hold_does_not_hide_active_root(tmp_path, monkeypatch):
+    profile = tmp_path / "profiles" / "worker"
+    monkeypatch.setattr(drain, "_hermes_home", lambda: profile)
+    monkeypatch.setattr(drain, "_canonical_root", lambda: tmp_path)
+    monkeypatch.setattr(drain.time, "time", lambda: 2000)
+    _write(profile, {"pid": os.getpid(), "started_at": 1000, "max_s": 120})
+    root = _write(tmp_path, {"pid": os.getpid(), "started_at": 1999, "max_s": 120})
+    assert drain.active_hold()["path"] == str(root)
+
+
 def test_dead_writer_hold_is_ignored(home):
     from gateway.kanban_watchers_common import _kanban_dispatch_allowed
     _write(home, {"pid": _dead_pid(), "started_at": time.time()})
@@ -167,11 +201,14 @@ def test_live_hold_runs_wake_probes_and_promotion_but_claims_nothing(tmp_path, m
     assert st["ready"] == "ready" and spawned == []  # but nothing was claimed
 
 
-def test_without_hold_the_same_tick_claims(tmp_path, monkeypatch):
-    """Control: the board above is spawnable, so the held tick's zero claims are the hold's doing."""
+@pytest.mark.parametrize("expired_hold", [False, True])
+def test_without_active_hold_the_same_tick_claims(tmp_path, monkeypatch, expired_hold):
+    """A spawnable board resumes claims even while the expired hold's writer lives."""
     monkeypatch.setattr(drain, "_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(drain, "_canonical_root", lambda: tmp_path)
     ids, spawned = _dispatcher_board(tmp_path, monkeypatch)
+    if expired_hold:
+        _write(tmp_path, {"pid": os.getpid(), "started_at": time.time() - 1800, "max_s": 120})
     _run_one_tick(tmp_path, monkeypatch)
     assert ids["ready"] in spawned
     assert _statuses(ids)["ready"] == "running"
