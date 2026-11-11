@@ -22,6 +22,10 @@ when this process dies.
   drain. Unsupported gateways refuse explicitly until restarted on the installed code; a lost
   reply retains conservative recovery debt. The updater waits at most 30 seconds for accepted
   stops, not the post-restart after-turn budget. No planned-stop marker is sent.
+* an automated caller that already drained what it is willing to wait for (hermes-sync's apply)
+  sets ``HERMES_UPDATE_PRESWAP_STOP_BUSY=1``: every gateway then gets the ordinary drain request,
+  which pinned and older gateways know too, and what is still up after the same 30 seconds is
+  stopped through its supervisor (a bare one is killed), so a busy host still converges.
 * supervised gateways that exit are disarmed through systemd/launchd before mutation and
   restarted through their supervisor after dependencies are ready.
 * bare gateways are replayed from their recorded argv + home. Refusal settles already-accepted
@@ -64,6 +68,14 @@ _PRE_SWAP_DRAIN_WAIT_S = 30.0
 # Both acknowledged drains and unknown-outcome settlement are bounded at 70s;
 # settlement alone never authorizes mutation.
 _CHECKPOINT_DRAIN_WAIT_S = 70.0
+
+
+#: Opt-in for automated callers: stop busy gateways after the bounded wait instead of deferring.
+STOP_BUSY_ENV = "HERMES_UPDATE_PRESWAP_STOP_BUSY"
+
+
+def _stop_busy_opted_in() -> bool:
+    return os.environ.get(STOP_BUSY_ENV, "").strip().lower() in ("1", "true", "yes")
 
 
 class PauseRefused(RuntimeError):
@@ -505,6 +517,20 @@ def _ask_to_drain(entry: dict) -> bool | None:
     return False if ack and (ack.get("busy") or ack.get("unsupported")) else None
 
 
+def _ask_busy_to_drain(entry: dict) -> bool:
+    """The ordinary drain request (``request_restart``: in-flight turns get the gateway's own drain
+    window and keep their resume markers); True on its ACK. Only for the opted-in stop: unlike
+    the idle-only verb it cannot be taken back, and gateways older than that verb answer it."""
+    from gateway.control_socket import pause_gateway_for_update
+    if not entry.get("home"):
+        return False
+    try:
+        ack = pause_gateway_for_update(Path(entry["home"]))
+    except Exception:  # health: allow BLE001 -- no answer: the supervisor stop below handles it
+        return False
+    return bool(ack and (ack.get("pausing") or ack.get("already_stopping")))
+
+
 def _stop_at_once(entry: dict) -> None:
     """The stop for a gateway that did not take the drain: its supervisor's, else marker + SIGTERM."""
     from hermes_cli.update_cmd_windows import _write_update_planned_stop_marker
@@ -534,6 +560,8 @@ def _stop_gateways(token: dict, entries: list[dict], *, fence_checked: bool = Fa
     from hermes_cli.update_cmd_drain_report import drain_progress_reporter
     from hermes_cli.update_gateway_fence import parked_launchd_launcher
     budget, waiting = min(_drain_budget(), _PRE_SWAP_DRAIN_WAIT_S), []
+    if _stop_busy_opted_in():
+        return _stop_busy_gateways(token, entries, budget)
     refusals, refused = [], []
     for entry in entries:
         if not fence_checked and parked_launchd_launcher(entry):
@@ -574,6 +602,43 @@ def _stop_gateways(token: dict, entries: list[dict], *, fence_checked: bool = Fa
                            [_names([e]) for e in waiting])
     if refusals:
         raise PauseRefused("; ".join(refusals), refused)
+
+
+def _stop_busy_gateways(token: dict, entries: list[dict], budget: float) -> None:
+    """The opted-in stop: drain every gateway, wait *budget* once for all of them, then stop the
+    survivors through their supervisor (bare ones are killed). The caller chose to update over
+    the work still running, so nothing here defers on it; only a stop that fails refuses."""
+    from hermes_cli import update_pause_record as pause_record
+    waiting = []
+    for entry in entries:
+        pause_record.mark_stop_sent(token, entry["pid"])  # before the request: see _ask_to_drain
+        if _ask_busy_to_drain(entry):
+            waiting.append(entry)
+        else:
+            _stop_at_once(entry)
+            if not entry.get("kind"):
+                waiting.append(entry)  # a SIGTERMed bare gateway is waited for like a drained one
+    if waiting:
+        print(f"  ⏳ Waiting up to {budget:.0f}s for in-flight turns on {_names(waiting)}, then stopping "
+              "them for the update...")
+    deadline = time.monotonic() + budget
+    while waiting and time.monotonic() < deadline:
+        for entry in [e for e in waiting if not _alive(e["pid"], e.get("ct"))]:
+            waiting.remove(entry)
+            _disarm(entry)
+        if waiting:
+            time.sleep(0.2)
+    if waiting:
+        print(f"  ↷ Stopping {_names(waiting)} with work still running (the caller asked for it)")
+    for entry in waiting:
+        if entry.get("kind"):
+            _stop_at_once(entry)
+        else:
+            with suppress(ProcessLookupError, PermissionError):
+                os.kill(entry["pid"], getattr(signal, "SIGKILL", signal.SIGTERM))
+    bare = [e for e in waiting if not e.get("kind")]
+    if left := _wait_gone([e["pid"] for e in bare], 10.0, {e["pid"]: e.get("ct") for e in bare}):
+        raise PauseRefused("gateway PID(s) " + ", ".join(map(str, sorted(left))) + " did not stop")
 
 
 def _disarm(entry: dict) -> None:
@@ -624,7 +689,7 @@ def _relaunch_bare(entry: dict) -> int:
     logs = Path(entry["home"]) / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     env = _replay_env(entry["home"])
-    for leaked in ("INVOCATION_ID", "JOURNAL_STREAM", "HERMES_UPDATE_PAUSED", "_HERMES_GATEWAY"):
+    for leaked in ("INVOCATION_ID", "JOURNAL_STREAM", "HERMES_UPDATE_PAUSED", "_HERMES_GATEWAY", STOP_BUSY_ENV):
         env.pop(leaked, None)
     with open(logs / "gateway-update-resume.log", "ab") as log:
         proc = subprocess.Popen(list(entry["argv"]), env=env, stdin=subprocess.DEVNULL, stdout=log,
