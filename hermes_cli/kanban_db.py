@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+
+from hermes_cli.kanban_published_worktree import publication_scope
 import os
 import re
 import secrets
@@ -1210,6 +1212,7 @@ def _default_ready_assignee() -> str:
     return name or "default"
 
 
+@publication_scope
 def create_task(
     conn: sqlite3.Connection, *, title: str, body: Optional[str] = None,
     assignee: Optional[str] = None, created_by: Optional[str] = None,

@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+
+from hermes_cli.kanban_published_worktree import publication_scope
 import logging
 import os
 import re
@@ -428,6 +430,7 @@ def _print_overlap_refusal(args: argparse.Namespace, refused: str) -> int:
     return 2
 
 
+@publication_scope
 def _cmd_create(args: argparse.Namespace) -> int:
     from agent.delegation_context import is_dispatcher_owned_worker_context
 

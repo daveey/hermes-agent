@@ -352,7 +352,8 @@ def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
 # and the Board CLI name ``hermes-hub`` kept ~3 of every 4 ready hub cards off the worker pool, so the hub's
 # local execution cap throttled the whole queue. What stays local: an existing worktree on this host
 # (``~/code/_wt/<slug>``, ``~/code/_wt-remote/<slug>``, ``<repo>/.claude/worktrees/<x>``,
-# ``~/code/<repo>/.worktrees/<x>``, ``~/.hermes/hermes-agent/.worktrees/<x>`` hold unpushed work), Hermes
+# ``~/code/<repo>/.worktrees/<x>``, ``~/.hermes/hermes-agent/.worktrees/<x>`` may hold unpushed work).
+# Clean _wt roots with exact origin publication and explicit checkout identity are exempt. Hermes
 # state under ``~/.hermes`` other than the code checkout (``~/.hermes/skills`` is host state: curator ledger,
 # usage counts, live-patched skills), a
 # ``hermes-hub <subcommand>`` run (it acts with this gateway's key and replica), and a card that declares

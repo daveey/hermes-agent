@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import functools
 import json
+
+from hermes_cli.kanban_published_worktree import publication_scope
 import logging
 import os
 import time
@@ -1563,6 +1565,7 @@ def _creation_audit(args: dict, **effective) -> Optional[dict]:
 
 
 @_kanban_handler("kanban_create")
+@publication_scope
 def _handle_create(args: dict, **kw) -> str:
     """Create a (child) task; orchestrator workers use this to fan out."""
     # Only an explicitly local create is board-scoped: any other placement or an origin binding can write a

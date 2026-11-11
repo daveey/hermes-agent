@@ -6,6 +6,8 @@ remain authoritative. No fetch, checkout, push, or local ref mutation is perform
 from __future__ import annotations
 
 import re
+from contextvars import ContextVar
+from functools import wraps
 import subprocess
 import time
 from pathlib import Path
@@ -17,6 +19,23 @@ _PATH = re.compile(r"(?:~|/home/[^/\s]+)/code/_wt(?:-[\w-]+)?/[\w-]+(?=$|[\s`'\"
 _ORIGIN = re.compile(r'(?:https://github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?$')
 
 
+_observation: ContextVar[dict | None] = ContextVar('published_worktrees', default=None)
+
+
+def publication_scope(fn):
+    """Share one bounded observation per synchronous create, including nested entrypoints."""
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        if _observation.get() is not None:
+            return fn(*args, **kwargs)
+        token = _observation.set({'deadline': None, 'texts': {}})
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _observation.reset(token)
+    return wrapped
+
+
 def without_published_worktrees(text: str) -> str:
     """Remove only verified roots, within one shared three-second probe budget.
 
@@ -26,9 +45,17 @@ def without_published_worktrees(text: str) -> str:
     so its receiving agent can reconstruct the checkout. Subpaths remain local:
     they may reference ignored files not contained in the published commit.
     Credential-scrubbed origins that cannot be read also remain local.
-    Results are deliberately not cached across placement calls.
+    Results are reused only inside one create's decision/audit observation.
     """
-    deadline = time.monotonic() + 3
+    observation = _observation.get()
+    if observation is not None:
+        if text in observation['texts']:
+            return observation['texts'][text]
+        if observation['deadline'] is None:
+            observation['deadline'] = time.monotonic() + 3
+        deadline = observation['deadline']
+    else:
+        deadline = time.monotonic() + 3
     checked: dict[str, bool] = {}
 
     def replace(match: re.Match) -> str:
@@ -37,7 +64,10 @@ def without_published_worktrees(text: str) -> str:
             checked[raw] = _published(Path(raw).expanduser(), deadline, text)
         return '<published-worktree>' if checked[raw] else raw
 
-    return _PATH.sub(replace, text)
+    result = _PATH.sub(replace, text)
+    if observation is not None:
+        observation['texts'][text] = result
+    return result
 
 
 def _published(path: Path, deadline: float, text: str) -> bool:
@@ -54,7 +84,7 @@ def _published(path: Path, deadline: float, text: str) -> bool:
         if remaining <= 0:
             raise subprocess.TimeoutExpired('git', 3)
         return subprocess.check_output(
-            ['git', '-C', str(path), *args], env=env, timeout=remaining,
+            ['git', '-c', 'core.fsmonitor=false', '-C', str(path), *args], env=env, timeout=remaining,
             stderr=subprocess.DEVNULL, text=True, encoding='utf-8',
         ).strip()
 
