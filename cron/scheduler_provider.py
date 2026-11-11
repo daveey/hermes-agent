@@ -153,11 +153,6 @@ def _claim_startup_pass(home) -> bool:
         return True
 
 
-def mark_startup_recovered(home) -> None:
-    """For a provider whose start() recovers without rerunning (chronos): its startup pass is done."""
-    _claim_startup_pass(home)
-
-
 @contextlib.contextmanager
 def _startup_recovery_scope(home, *, owned: bool = True):
     """Run the block as this process's startup recovery for ``home`` when it is the first pass and
@@ -191,6 +186,10 @@ class CronScheduler(ABC):
     def is_available(self) -> bool:
         """Whether this provider can run here. MUST NOT make network calls; False → built-in."""
         return True
+
+    def mark_startup_recovered(self, home) -> None:
+        """For a provider whose start() recovers without rerunning (chronos): its startup pass is done."""
+        _claim_startup_pass(home)
 
     @abstractmethod
     def start(

@@ -79,13 +79,12 @@ class ChronosCronScheduler(CronScheduler):
         self._ticker_kwargs = {"adapters": adapters, "loop": loop, "interval": interval}
         self._stop_event = stop_event
         # A new lifecycle can't prove what an interrupted process did: classify unknown, never requeue.
-        from cron.scheduler_provider import mark_startup_recovered
         from hermes_constants import get_process_hermes_home
 
         self.recover_interrupted()
         # Settles this home's startup pass, so a later built-in fallback ticker (_note_identity_rejected)
         # does not take its own start() for a restart and rerun attempts (cron/restart_rerun.py).
-        mark_startup_recovered(get_process_hermes_home())
+        self.mark_startup_recovered(get_process_hermes_home())
         self._reconcile_logged(logger.warning, "start()")
 
     def stop(self) -> None:
