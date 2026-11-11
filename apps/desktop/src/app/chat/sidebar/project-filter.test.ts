@@ -101,6 +101,16 @@ describe('sidebar project policy (alphabetical, no empties)', () => {
     expect(sidebarProjectsShown(projects, 'explicit_empty').map(p => p.id)).toEqual(['home', 'explicit_empty', 'busy'])
   })
 
+  it('keeps an entered empty AUTO project too', () => {
+    const projects = [
+      { id: 'auto_empty', isAuto: true, sessionCount: 0 },
+      { id: 'busy', isAuto: true, sessionCount: 2 }
+    ]
+
+    expect(sidebarProjectsShown(projects).map(p => p.id)).toEqual(['busy'])
+    expect(sidebarProjectsShown(projects, 'auto_empty').map(p => p.id)).toEqual(['auto_empty', 'busy'])
+  })
+
   it('sorts alphabetically and drops the drag handle', () => {
     const handler = () => undefined
 

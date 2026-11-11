@@ -349,6 +349,18 @@ describe('ChatSidebar project entry', () => {
 
     expect($currentCwd.get()).toBe(project.path)
   })
+
+  it('stays inside an entered empty auto project instead of bouncing to the overview', () => {
+    // A non-empty sibling keeps the overview live, which is what arms the scope reset.
+    const sibling = { ...project, id: '/repos/busy', label: 'busy', path: '/repos/busy', sessionCount: 2 }
+
+    $projectTree.set([{ ...project, isAuto: true, sessionCount: 0 }, sibling])
+    $projectScope.set(project.id)
+
+    renderSidebar('/', 'chat')
+
+    expect($projectScope.get()).toBe(project.id)
+  })
 })
 
 // A brand-new chat in a folder no project claims (a CLI started in ~) has no

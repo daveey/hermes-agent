@@ -58,9 +58,11 @@ export function filterToNonEmptyProjects<T extends { id: string; isNoProject?: b
 export function sidebarProjectsShown<
   T extends { id: string; isAuto?: boolean; isNoProject?: boolean; sessionCount?: number }
 >(projects: readonly T[], keepId?: null | string): T[] {
-  const bearing = filterToSessionBearingProjects(projects)
-
-  return SIDEBAR_PROJECTS_ALPHABETICAL ? filterToNonEmptyProjects(bearing, keepId) : bearing
+  // The strict filter already drops empty auto repos; running the session-bearing one first would
+  // also drop an entered empty auto repo before `keepId` could keep it.
+  return SIDEBAR_PROJECTS_ALPHABETICAL
+    ? filterToNonEmptyProjects(projects, keepId)
+    : filterToSessionBearingProjects(projects)
 }
 
 export function filterToSessionBearingProjects<
