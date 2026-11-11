@@ -23,6 +23,7 @@ from gateway import control_socket
 from hermes_cli import dashboard_procs
 from hermes_cli import update_cmd_fleet as fleet
 from hermes_cli import update_cmd_posix_pause as pause
+from hermes_cli import update_pause_deferrals as deferrals
 
 # The pinned gateway is a stub ``python -m hermes_cli.main gateway run`` whose ``hermes_cli`` is the
 # fixture's own package; each test reaps it.
@@ -133,17 +134,20 @@ def test_update_proceeds_past_a_pinned_unit_that_cannot_idle_pause(host, capsys,
     assert UNIT in out and "running its own checkout" in out and str(host["core"]) in out, out
     assert host["procs"][0].poll() is None, "the pinned gateway was stopped"
     assert host["dropin"].read_bytes() == host["dropin_before"], "the pin (drop-in ExecStart) changed"
+    assert not deferrals.state_path().exists(), "a pause that went through left a deferral streak"
 
 
-def test_a_checkout_unit_that_cannot_idle_pause_still_defers(host):
+def test_a_checkout_unit_that_cannot_idle_pause_still_defers_and_starts_a_streak(host):
     """Control: the same unit NOT proven on another checkout keeps the refusal (its code is the one
-    being replaced)."""
+    being replaced), and that deferral is counted against it."""
     _run_on_checkout(host)
 
     verdict = pause._pause(pause._empty_token())
 
     assert verdict and f"{UNIT} does not support idle pause" in verdict
     assert host["asked"] == [str(host["home"])]
+    streak = json.loads(deferrals.state_path().read_text())["units"]
+    assert list(streak) == [UNIT] and streak[UNIT]["count"] == 1
 
 
 def test_post_commit_restart_leaves_a_pinned_unit_on_its_pin(host, monkeypatch):

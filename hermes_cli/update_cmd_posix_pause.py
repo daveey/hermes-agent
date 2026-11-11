@@ -63,7 +63,12 @@ _PRE_SWAP_DRAIN_WAIT_S = 30.0
 
 
 class PauseRefused(RuntimeError):
-    """The pause could not be completed; everything it stopped was started again."""
+    """The pause could not be completed; everything it stopped was started again. ``units``
+    names the gateways that refused (``update_pause_deferrals`` counts their streaks)."""
+
+    def __init__(self, message: str = "", units=()):
+        super().__init__(message)
+        self.units = list(units)
 
 
 def _empty_token() -> dict:
@@ -477,7 +482,7 @@ def _stop_gateways(token: dict, entries: list[dict]) -> None:
     from hermes_cli import update_pause_record as pause_record
     from hermes_cli.update_cmd_drain_report import drain_progress_reporter
     budget, waiting = min(_drain_budget(), _PRE_SWAP_DRAIN_WAIT_S), []
-    refusals = []
+    refusals, refused = [], []
     for entry in entries:
         pause_record.mark_stop_sent(token, entry["pid"])  # before the request: see _ask_to_drain
         acknowledged = _ask_to_drain(entry)
@@ -489,12 +494,13 @@ def _stop_gateways(token: dict, entries: list[dict]) -> None:
             reason = ("does not support idle pause; restart that gateway on the installed code when idle"
                       if entry.get("pause_unsupported") else "is busy or cannot acknowledge an idle pause; retry when idle")
             refusals.append(f"{_names([entry])} {reason}")
+            refused.append(_names([entry]))
             if acknowledged is None:
                 waiting.append(entry)  # a lost ACK may already be exiting; settle it before rollback
             break
     if not waiting:
         if refusals:
-            raise PauseRefused("; ".join(refusals))
+            raise PauseRefused("; ".join(refusals), refused)
         return
     print(f"  ⏳ Waiting up to {budget:.0f}s for paused gateways {_names(waiting)} to exit before the update...")
     ticks = [drain_progress_reporter(Path(e["home"]) if e.get("home") else None, budget_s=budget) for e in waiting]
@@ -507,9 +513,10 @@ def _stop_gateways(token: dict, entries: list[dict]) -> None:
             tick()
         time.sleep(0.2)
     if waiting:
-        raise PauseRefused(f"{_names(waiting)} still draining after {budget:.0f}s; retry once in-flight turns finish")
+        raise PauseRefused(f"{_names(waiting)} still draining after {budget:.0f}s; retry once in-flight turns finish",
+                           [_names([e]) for e in waiting])
     if refusals:
-        raise PauseRefused("; ".join(refusals))
+        raise PauseRefused("; ".join(refusals), refused)
 
 
 def _disarm(entry: dict) -> None:
@@ -616,6 +623,7 @@ def _pause(token: dict) -> str | None:
         print(line)
     supervised = units + jobs
     if not supervised and not bare:
+        _deferral_streak()
         return None
     from gateway.status import get_process_start_time
     from hermes_cli.update_cmd_windows import _planned_stop_marker_path
@@ -660,10 +668,25 @@ def _pause(token: dict) -> str | None:
         pause_record.sync(token)
         if not isinstance(exc, Exception):
             raise
+        _deferral_streak(exc)
         return f"gateway pause deferred ({exc}); the checkout was not changed"
     pause_record.sync(token)
+    _deferral_streak()
     print(f"  ⏸ Paused for the update: {_describe(token)} (restarted once the dependencies are synced)")
     return None
+
+
+def _deferral_streak(refusal: BaseException | None = None) -> None:
+    """Count this run on each refusing gateway's streak of deferred updates (a third in a row files
+    a repair card), or end every streak when the pause went through. Never changes the verdict."""
+    try:
+        from hermes_cli import update_pause_deferrals as deferrals
+        if refusal is None:
+            deferrals.note_pause_ok()
+        else:
+            deferrals.note_deferral(getattr(refusal, "units", ()), str(refusal))
+    except Exception as exc:  # health: allow BLE001 -- bookkeeping must not turn a deferral into a crash
+        print(f"  ⚠ Could not record the deferral streak: {exc}")
 
 
 # --------------------------------------------------------------------------- resume
