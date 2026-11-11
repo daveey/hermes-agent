@@ -207,6 +207,7 @@ def _copy_source_bundle(source: Path, snapshot_dir: Path) -> tuple[Path, list[st
                 source_part = _sidecar_path(source, suffix)
                 if source_part.exists():
                     destination_part = _sidecar_path(snapshot_source, suffix)
+                    # sqlite-sidecar-open: ok — inside offline_file_access: refused while a tracked connection is open
                     shutil.copy2(source_part, destination_part)
                     copied.append(destination_part.name)
     except LiveConnectionError as exc:

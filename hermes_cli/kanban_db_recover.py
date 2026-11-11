@@ -587,6 +587,7 @@ def _snapshot(watch: sqlite3.Connection, live: Path, dest: Path) -> tuple[sqlite
     shutil.copyfile(live, dest)
     wal = live.with_name(live.name + "-wal")
     if wal.exists():
+        # sqlite-sidecar-open: ok — corrupt-file fallback; `watch`, this process's connection, is closed above
         shutil.copyfile(wal, dest.with_name(dest.name + "-wal"))
     watch = sqlite3.connect(str(live), timeout=30)
     try:

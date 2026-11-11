@@ -105,6 +105,13 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && inputs.python }}
         run: just check --only detached-spawns
 
+      # close() on any descriptor for a SQLite -shm/-wal cancels this process's locks on it (the
+      # WAL writer lock included): hermes-hub state.db corruption 2026-11-11. Raw reads go through
+      # hermes_cli.sqlite_safe_read; `sqlite-sidecar-open: ok — <why>` marks an offline call.
+      - name: Forbid plain file calls on SQLite -shm/-wal sidecars
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && inputs.python }}
+        run: just check --only sqlite-sidecars
+
       # The install root has one owner, hermes_cli._startup_fast.project_root_str(); sys.path
       # belongs to entry points. New __file__ climbs or import-time sys.path edits fail here.
       - name: Forbid new install-root math and import-time sys.path edits
