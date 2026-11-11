@@ -89,6 +89,21 @@ function rawHashLooksLikeSession(): boolean {
   )
 }
 
+function canDispatchRouteResume(
+  currentView: string,
+  gatewayOpen: boolean,
+  request: SessionResumeRequest | null,
+  routedSessionId: string | null,
+  handledSequence: number
+): boolean {
+  // An explicit open dials its own owner. The previous gateway's restart
+  // must not strand it; consume each request only once while closed.
+  const ownerRoutedRequest =
+    request?.sessionId === routedSessionId && Boolean(request?.ownerRoute) && request.sequence > handledSequence
+
+  return currentView === 'chat' && (gatewayOpen || ownerRoutedRequest)
+}
+
 export function useRouteResume({
   activeSessionId,
   activeSessionIdRef,
@@ -141,7 +156,15 @@ export function useRouteResume({
     seenGatewayStateRef.current = true
     wasGatewayOpenRef.current = gatewayOpen
 
-    if (currentView !== 'chat' || !gatewayOpen) {
+    if (
+      !canDispatchRouteResume(
+        currentView,
+        gatewayOpen,
+        sessionResumeRequest,
+        routedSessionId,
+        handledResumeRequestRef.current
+      )
+    ) {
       return
     }
 

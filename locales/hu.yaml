@@ -228,6 +228,7 @@ gateway:
     truncated_suffix: "… (csonkítva; használd a `hermes kanban …` parancsot a terminálban a teljes kimenethez)"
     no_output: "(nincs kimenet)"
     wake:
+      request_withdrawn: "kérés visszavonva (nem jóváhagyás és nem bizonyítja a befejezést)"
       completed: "befejeződött"
       gave_up: "feladva (az újrapróbálkozások elfogytak)"
       crashed: "összeomlott (a worker kilépett); a diszpécser újrapróbálja"

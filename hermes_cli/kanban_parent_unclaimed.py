@@ -29,10 +29,12 @@ def _minutes(seconds: float) -> int:
 
 
 def ready_since(conn, task_id: str, created_at: Optional[int] = None) -> int:
-    """When ``task_id`` last entered ``ready`` (the stranded-in-ready diagnostic's floor), else its creation."""
+    """When ``task_id`` last entered ``ready`` (the stranded-in-ready diagnostic's floor, its latest run's end
+    included), else its creation."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_diagnostics import _last_ready_entry_ts
-    since = _last_ready_entry_ts(kb.list_events(conn, task_id))
+    ended = conn.execute("SELECT MAX(ended_at) AS ended_at FROM task_runs WHERE task_id = ?", (task_id,)).fetchall()
+    since = _last_ready_entry_ts(kb.list_events(conn, task_id), [dict(r) for r in ended])
     return int(since or created_at or 0)
 
 
@@ -127,11 +129,13 @@ def safe_sweep(conn) -> int:
 
 
 def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_seconds: float,
-                ready_seconds: float, parent_title: Optional[str] = None, kind: str = NOTICE_KIND) -> bool:
+                ready_seconds: float, parent_title: Optional[str] = None, kind: str = NOTICE_KIND,
+                extra: Optional[dict[str, Any]] = None) -> bool:
     """Append ONE ``kind`` event (default ``dependency_parent_unclaimed``) to ``task_id`` (its chats receive it
     through their notify subscriptions) about ``waiting_on``, a card still ready and unclaimed. ``wait_key``
     identifies the wait: a second call with the same (waiting_on, wait_key) posts nothing. Reused for a direct chat
-    wait (``kanban_chat_wait``), where ``waiting_on`` is ``task_id`` itself. Returns True when it posted."""
+    wait (``kanban_chat_wait``), where ``waiting_on`` is ``task_id`` itself; ``extra`` adds payload fields (its
+    clock hold). Returns True when it posted."""
     from hermes_cli import kanban_db as kb
     with kb.write_txn(conn):
         if any(kb._json_dict(p).get("wait_event_id") == wait_key and kb._json_dict(p).get("parent") == waiting_on
@@ -144,6 +148,6 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
         kb._append_event(conn, task_id, kind, {
             "parent": waiting_on, "parent_title": parent_title, "wait_event_id": wait_key,
             "wait_minutes": _minutes(waited_seconds), "ready_minutes": _minutes(ready_seconds),
-            "queue": _queue_words(_place(conn, waiting_on)),
+            "queue": _queue_words(_place(conn, waiting_on)), **(extra or {}),
         })
     return True

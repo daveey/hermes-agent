@@ -8,7 +8,8 @@ unloaded sweeper's loop therefore looks, in every profile store, for chats whose
 
 - a "blocked" notice whose card has moved on since (answered, rescheduled, done, archived) never wakes: it is
   stamped ``closeout.state = "superseded"`` and the chat's outcome is refreshed;
-- a notice about a card blocked on a human never wakes: the chat's outcome is refreshed (it reads ``decision``);
+- a notice about a card blocked on a human never wakes: its owner's outcome reads ``decision``; an incidental
+  recipient with no owning obligation preserves its preceding turn's outcome through an informational marker;
 - otherwise the notice row is claimed (``display_metadata.closeout``, compare-and-swap on the row, so exactly one
   backend acts on it) and ONE close-out turn is started with ``server._wake_session_turn``; the claim records the
   verdict;
@@ -250,7 +251,22 @@ def _refresh_once(db: Any, cand: dict, branch: str, seen: set) -> str:
     seen.add(key)
     if key in _refreshed:
         return "skipped:refreshed"
-    if _refresh(db, cand["sid"]):
+    from hermes_state_outcome import get_outcome
+
+    refreshed = _refresh(db, cand["sid"])
+    outcome = get_outcome(cand["sid"], db=db) if refreshed else None
+    if branch == "human" and outcome and outcome.get("reason") == "notice_tail":
+        # No owning decision/wait accounted for this intentionally passive notice.
+        # Preserve the preceding turn instead of manufacturing an obligation for
+        # an incidental recipient. Other outcomes need no metadata write.
+        meta = {**cand["meta"], "outcome_informational": True}
+        changed = db._write_rowcount(
+            "UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
+            (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"]))
+        if changed != 1:
+            return "skipped:changed"
+        refreshed = _refresh(db, cand["sid"])
+    if refreshed:
         _refreshed.add(key)
     return f"refreshed:{branch}"
 

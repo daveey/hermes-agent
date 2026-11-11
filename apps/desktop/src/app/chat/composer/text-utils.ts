@@ -218,6 +218,46 @@ export function detectTrigger(textBefore: string): TriggerState | null {
     }
   }
 
+  return detectEmojiTrigger(textBefore)
+}
+
+// A name-like `@` query (`@baby bear`) spans spaces, Slack-style: the wide
+// shape is the same boundary-anchored `@`, but its token runs to the caret
+// across spaces (never a newline, another `@`, or a chip edge). It is only a
+// CONTINUATION — see continueAtTrigger — never a fresh trigger, so ordinary
+// prose after a plain `@handle ` still ends the popover at the space.
+const AT_WIDE_TRIGGER_RE = /(?:^|[\s\uFFFC])(@)([^\s@\uFFFC][^\n@\uFFFC]*)$/
+const AT_WIDE_MAX_WORDS = 6
+
+/** Keep an open `@` popover live across a space while the source behind its
+ *  rows matches multi-word names (`multiWord` items, e.g. session titles).
+ *  `prev` is the trigger the popover was showing, `prevMultiWord` whether its
+ *  rows include a multi-word match. Returns the widened trigger, or null when
+ *  the space should end the token as it always has. */
+export function continueAtTrigger(
+  textBefore: string,
+  prev: TriggerState | null,
+  prevMultiWord: boolean
+): TriggerState | null {
+  if (!prevMultiWord || prev?.kind !== '@' || prev.scope) {
+    return null
+  }
+
+  const wide = AT_WIDE_TRIGGER_RE.exec(textBefore)
+  const query = wide?.[2] ?? ''
+
+  // Same token, one edit on: typing extends the previous query, Backspace
+  // shortens it. Anything else (caret moved, another `@`) is a new token.
+  const sameToken = query.startsWith(prev.query) || prev.query.startsWith(query)
+
+  if (!wide || !sameToken || !/\s/.test(query) || query.trim().split(/\s+/).length > AT_WIDE_MAX_WORDS) {
+    return null
+  }
+
+  return { kind: '@', query, tokenLength: 1 + query.length, value: query }
+}
+
+function detectEmojiTrigger(textBefore: string): TriggerState | null {
   // After `@` so a directive starter's colon (`@file:`) stays an `@` query.
   // Rides the reactions opt-in (Settings → Appearance) — both are one
   // "emoji features" surface, off by default.

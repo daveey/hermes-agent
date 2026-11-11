@@ -120,6 +120,11 @@ export interface ComposerAtCompletionSource {
    *  popover re-asks for its current query; without this it keeps what it
    *  got on the last keystroke. Returns an unsubscribe function. */
   subscribe?: (onChange: () => void) => () => void
+  /** Set when `provide` matches multi-word names (session titles): while any
+   *  of its rows match, the `@` popover stays open across a space, so
+   *  `@baby bear` keeps narrowing instead of closing at `@baby`. The query
+   *  then carries spaces. Sources without it never see one. */
+  multiWord?: boolean
 }
 
 export interface ComposerAttachmentContext {

@@ -116,6 +116,66 @@ def test_a_blocked_on_human_notice_never_wakes_and_reads_decision(db):
     assert stored["items"][0]["card_id"] == tid and [c["value"] for c in stored["items"][0]["choices"]] == ["ship", "hold"]
 
 
+@pytest.mark.parametrize("prior", ["summary", "request", "failed", "notice"])
+def test_touch_only_human_notice_preserves_previous_turn_outcome(db, prior):
+    from hermes_cli import kanban_db_notify as kbn
+
+    if prior == "request":
+        db.append_message(CHAT, "user", "Please do another thing.")
+    elif prior == "failed":
+        db.append_message(CHAT, "assistant", "Request failed.", finish_reason="error")
+    elif prior == "notice":
+        _notice(db, "✔ Kanban t_other done — still needs a summary")
+    before = so.refresh_outcome(CHAT, "manual", db=db)
+    with contextlib.closing(kbc.connect()) as conn:
+        tid = kb.create_task(conn, title="another chat's deploy", assignee="worker", session_id="other-chat",
+                             initial_status="blocked", human_request=HUMAN, lint_blocked=False)
+        kbn.add_notify_sub(conn, task_id=tid, platform="tui", chat_id=CHAT,
+                           delivery_metadata={"reason": "touch"})
+    row = _notice(db, f"⏸ Kanban {tid} blocked: needs approval", task_id=tid)
+    ksa._reset_cache_for_tests()
+    assert so._card_items([CHAT]) == ([], [])
+    assert so.refresh_outcome(CHAT, "manual", db=db)["reason"] == (
+        "interrupted" if prior == "request" else "notice_tail")
+
+    out, calls = _run(db)
+
+    assert calls == [] and [o["result"] for o in out] == ["refreshed:human"]
+    stored = so.get_outcome(CHAT, db=db)
+    assert (stored["kind"], stored.get("reason")) == (before["kind"], before.get("reason"))
+    after = so.refresh_outcome(CHAT, "manual", db=db)
+    assert (after["kind"], after.get("reason")) == (before["kind"], before.get("reason"))
+    assert db._read_one("SELECT MAX(id) FROM messages WHERE session_id = ?", (CHAT,))[0] == row
+    assert so._card_items([CHAT]) == ([], [])
+
+
+@pytest.mark.parametrize("role,kind,meta,ignored", [
+    ("user", "kanban_notice", {"outcome_informational": True}, True),
+    ("assistant", "kanban_notice", {"outcome_informational": True}, False),
+    ("user", None, {"outcome_informational": True}, False),
+    ("user", "kanban_notice", {"outcome_informational": "true"}, False),
+    ("user", "kanban_notice", {}, False),
+    ("user", "kanban_notice", "invalid-json", False),
+])
+def test_informational_marker_only_applies_to_validated_notice_rows(role, kind, meta, ignored):
+    row = {"role": role, "display_kind": kind, "display_metadata": meta}
+    assert (so._completion_note(row) is not None) is ignored
+
+
+def test_human_notice_stamp_does_not_overwrite_a_concurrent_claim(db):
+    with contextlib.closing(kbc.connect()) as conn:
+        tid = kb.create_task(conn, title="other deploy", assignee="worker", session_id="other-chat",
+                             initial_status="blocked", human_request=HUMAN, lint_blocked=False)
+    row = _notice(db, f"⏸ Kanban {tid} blocked", task_id=tid)
+    [cand] = ng.candidates(db, time.time())
+    ng._stamp(db, row, "claimed")
+
+    assert ng._refresh_once(db, cand, "human", set()) == "skipped:changed"
+    assert _closeout(db, row) == "claimed"
+    assert db._read_one("SELECT json_extract(display_metadata, '$.outcome_informational') "
+                        "FROM messages WHERE id = ?", (row,))[0] is None
+
+
 # Remote notices (defect kanban-a9b5d2c7c1): a notice about a card on ANOTHER gateway carries that owner's board
 # name, which does not exist here. The guarantee must not open a local board for it; it reads the
 # ``blocked_on_human`` flag the remote writer stored. [daveey]

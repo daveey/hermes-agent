@@ -358,8 +358,8 @@ def _sidebar_singleflight_cache(func):
         if cached is not miss:
             return cached
 
-        # A plain Lock is intentional: FastAPI executes this sync handler in the AnyIO
-        # worker pool, so contenders sleep without holding the GIL.
+        # Direct synchronous callers still share the refresh lock. HTTP contenders
+        # are admitted asynchronously below, before consuming a worker slot.
         with refresh_lock:
             cached = _lookup(key)
             if cached is not miss:
@@ -382,6 +382,20 @@ def _sidebar_singleflight_cache(func):
                     cache.popitem(last=False)
             return result
 
+    admitted = coalesced_read(wrapped, thread_runner=lambda func: run_in_threadpool(func))
+
+    @functools.wraps(admitted)
+    async def http_endpoint(*args, **kwargs):
+        # Fresh hits must not queue behind an unrelated slow cache miss.
+        if _SIDEBAR_CACHE_TTL_SECONDS > 0:
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            cached = await run_in_threadpool(_lookup, tuple(bound.arguments.items()))
+            if cached is not miss:
+                return cached
+        return await admitted(*args, **kwargs)
+
+    wrapped.http_endpoint = http_endpoint
     return wrapped
 
 
@@ -401,7 +415,6 @@ def _read_serial_profile_db(name, home, errors, read, cache_key):
             home, cache_key, lambda: _read_profile_db(name, home, errors, read))
 
 
-@sessions_router.get("/api/profiles/sessions")
 def get_profiles_sessions(
     # ``le=500`` caps the page size — this endpoint fans out across EVERY profile's state.db.
     # 500 (not 100) because desktop callers use limit=200 and the electron remote-merge
@@ -487,6 +500,15 @@ def get_profiles_sessions(
 _SESSION_STAMP_COLUMNS = ("cwd", "git_branch", "git_repo_root", "outcome", "muted")
 
 
+# Admit scan contenders on the event loop, before they consume AnyIO slots.
+# Keep the synchronous entry point and cross-loop DB lock for direct callers.
+sessions_router.add_api_route(
+    "/api/profiles/sessions",
+    coalesced_read(get_profiles_sessions, thread_runner=lambda func: run_in_threadpool(func)),
+    methods=["GET"],
+)
+
+
 @sessions_router.get("/api/profiles/sessions/stamps")
 def get_profiles_session_stamps(ids: str = Query(..., max_length=8000), profile: str = "default"):
     """[daveey] Activity stamps (kanban_*, goal/cron/background/turn/review, outcome, cwd) of the named sessions of
@@ -522,7 +544,6 @@ def get_profiles_session_stamps(ids: str = Query(..., max_length=8000), profile:
     return {"sessions": out}
 
 
-@sessions_router.get("/api/profiles/sessions/sidebar")
 @_sidebar_singleflight_cache
 def get_profiles_sessions_sidebar(
     recents_profile: str = "all", recents_limit: int = 20, recents_exclude: str | None = None,
@@ -746,7 +767,6 @@ def profile_project_trees(
     return out
 
 
-@sessions_router.get("/api/profiles/projects/tree")
 @_sidebar_singleflight_cache
 def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000, profile: Optional[str] = None):
     """Project tree for every profile at once, for the all-profiles sidebar.
@@ -775,6 +795,12 @@ def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000
     projects = sorted(merged.values(), key=lambda p: p.get("lastActive") or 0, reverse=True)
     return {"projects": projects, "active_id": None, "scoped_session_ids": scoped_session_ids,
             "errors": errors}
+
+
+sessions_router.add_api_route(
+    "/api/profiles/sessions/sidebar", get_profiles_sessions_sidebar.http_endpoint, methods=["GET"])
+sessions_router.add_api_route(
+    "/api/profiles/projects/tree", get_profiles_projects_tree.http_endpoint, methods=["GET"])
 
 
 # `gh pr create` prints the PR url and nothing else, so a tool result whose whole output IS a

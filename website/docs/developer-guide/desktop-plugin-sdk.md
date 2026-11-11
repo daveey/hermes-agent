@@ -498,6 +498,14 @@ composer with no chrome of its own — the seat for a suggestion pill or a statu
 hint that should sit outside the input frame (the next-prompt plugin renders its
 "next prompt" pill there).
 
+`COMPOSER_AREAS.atCompletions` adds rows to the `@` popover: a data
+contribution `{ provide(query) => items, subscribe?(onChange), multiWord? }`.
+`query` is the text after `@`. Set `multiWord: true` when your rows match
+names that contain spaces (session titles): while any of your rows match, the
+popover stays open across a space and `provide` receives the widened query
+(`'baby bear'`); it closes once none match. Sources without the flag never see
+a space in `query`.
+
 ### Composer context menu — rows on a right-click in the input {#composer-context-menu}
 
 `COMPOSER_AREAS.contextMenu` adds rows to the menu the app opens when the user

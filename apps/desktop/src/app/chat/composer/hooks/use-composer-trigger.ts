@@ -22,7 +22,7 @@ import {
   RICH_INPUT_SLOT,
   slashChipElement
 } from '../rich-editor'
-import { detectTrigger, textBeforeCaret, type TriggerState } from '../text-utils'
+import { continueAtTrigger, detectTrigger, textBeforeCaret, type TriggerState } from '../text-utils'
 
 /**
  * Rebuild-from-text fallback for carets the range walk can't anchor (a
@@ -36,6 +36,12 @@ import { detectTrigger, textBeforeCaret, type TriggerState } from '../text-utils
  * prose off and stranded a partial `folder:` in front of the chip, because the
  * window it removed wasn't the token the user was typing.
  */
+/** Rows from a source that matches multi-word names (session titles) carry
+ *  `metadata.multiWord`; only those keep an `@` popover open across a space. */
+export function hasMultiWordItem(items: readonly Unstable_TriggerItem[]): boolean {
+  return items.some(item => (item.metadata as { multiWord?: unknown } | undefined)?.multiWord === '1')
+}
+
 /** The keyup half of trigger detection, shared by both composers.
  *
  *  If the open popover already consumed this key in keydown (Arrow/Enter/Tab/
@@ -170,8 +176,8 @@ export function useComposerTrigger({
       return
     }
 
-    const before = textBeforeCaret(editor)
-    const typed = detectTrigger(before ?? composerPlainText(editor))
+    const textBefore = textBeforeCaret(editor) ?? composerPlainText(editor)
+    const typed = detectTrigger(textBefore) ?? continueAtTrigger(textBefore, trigger, hasMultiWordItem(triggerItems))
     const found = slashOff && typed?.kind === '/' ? null : typed
 
     // A text-only command has no completion screen once its prose begins. Mixed
@@ -196,7 +202,7 @@ export function useComposerTrigger({
     if (detected?.kind !== trigger?.kind || detected?.query !== trigger?.query) {
       resetTriggerActive()
     }
-  }, [editorRef, resetTriggerActive, slashOff, trigger])
+  }, [editorRef, resetTriggerActive, slashOff, trigger, triggerItems])
 
   const triggerAdapter: Unstable_TriggerAdapter | null =
     trigger?.kind === '@'
@@ -231,6 +237,20 @@ export function useComposerTrigger({
         : trigger?.kind === ':'
           ? (emoji?.loading ?? false)
           : false
+
+  // A widened `@baby bear` token lives only while multi-word rows still match:
+  // once the settled answer has none, the space was prose after all, so the
+  // popover closes instead of sitting on "No matches" for the rest of the line.
+  const widenedDeadEnd =
+    trigger?.kind === '@' && /\s/.test(trigger.query) && !triggerLoading && !hasMultiWordItem(triggerItems)
+
+  useEffect(() => {
+    if (widenedDeadEnd) {
+      setTrigger(null)
+      setTriggerItems([])
+      resetTriggerActive()
+    }
+  }, [widenedDeadEnd, resetTriggerActive])
 
   // Suppress the "No matches" empty state once a slash command is past its name:
   // a no-arg command has nothing to offer, and a fully-typed arg commits on

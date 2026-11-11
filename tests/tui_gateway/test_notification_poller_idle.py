@@ -88,6 +88,34 @@ def test_production_poller_park_publication_delivers_within_two_seconds(poller, 
         notification_park.clear()
 
 
+@pytest.mark.parametrize("raises", [False, True])
+def test_park_claim_routing_releases_in_flight_custody(poller, monkeypatch, raises):
+    from tools.process_registry_awaiting import pending_events
+    from tui_gateway import notification_park, server
+    q, stop, thread, session, _timeouts, _delivered, _received = poller
+    monkeypatch.setattr(notification_park, "claim", session["_test_real_claim"])
+    monkeypatch.setattr(server, "_session_owns_notification_event", lambda sid, s, event: True)
+    event = {"type": "completion", "session_key": "idle", "owner_task_id": "park-owner"}
+    routed = []
+
+    def handle(sid, session, events, *args):
+        if event in events:
+            routed.append(any(e is event for e in pending_events(q)))
+            stop.set()
+            if raises:
+                raise RuntimeError("routing error")
+
+    monkeypatch.setattr(server, "_notif_handle_ready", handle)
+    try:
+        assert notification_park.park(event)
+        thread.join(3)
+        assert not thread.is_alive()
+        assert routed == [True]
+        assert not any(e is event for e in pending_events(q))
+    finally:
+        notification_park.clear()
+
+
 def test_self_rehold_does_not_invalidate_wait_generation():
     from tui_gateway import server
     from tui_gateway.notification_wait import generation

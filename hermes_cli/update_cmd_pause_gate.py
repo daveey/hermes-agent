@@ -10,7 +10,7 @@ from hermes_cli import update_pause_record as _pause_record
 
 
 @contextmanager
-def _checkout_move(token, *targets, paths=(), revert=False):
+def _checkout_move(token, *targets, paths=(), revert=False, pause_gate=True):
     """Run one checkout-writing git step (switch, merge, reset, upstream sync, rollback, stash) with
     the paused gateways' tree gate bound to it BEFORE git writes a file: the commit(s) it can move
     to and the tracked *paths* it rewrites in place (stash push/apply, ``reset --hard``,
@@ -26,6 +26,14 @@ def _checkout_move(token, *targets, paths=(), revert=False):
     the step found it, or the step reported ``whole`` on the dict this yields (a stash restore that
     applied cleanly changes the tree by design). A move is judged the moment git returns (see
     ``_settle_checkout_move``)."""
+    # Stash/discard paths can write tracked code even when HEAD will not move.
+    # Enter only after the local-changes prompt, but before any tree mutation.
+    from hermes_cli import update_cmd_posix_pause as pause
+    if pause_gate and (refused := pause.pause_at_commit_point()):
+        from hermes_cli.update_cmd import _record_stop
+        print(f"↷ Update deferred: {refused}")
+        _record_stop("commit_point_refused")
+        raise SystemExit(1)
     step: dict = {}
     targets = sorted({t for t in targets if t})
     pause_id = (token or {}).get("pause_id")
@@ -52,9 +60,9 @@ def _checkout_move(token, *targets, paths=(), revert=False):
         _settle_checkout_move(token, baseline, found, root, step)
 
 
-def _moves_for(token):
+def _moves_for(token, *, pause_gate=True):
     """``_checkout_move`` bound to *token*: the ``checkout_move`` the git and stash helpers take."""
-    return lambda *targets, **bound: _checkout_move(token, *targets, **bound)
+    return lambda *targets, **bound: _checkout_move(token, *targets, pause_gate=pause_gate, **bound)
 
 
 def _settle_checkout_move(token: dict, baseline: dict, found: dict, root, step: dict) -> None:

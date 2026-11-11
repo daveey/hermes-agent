@@ -922,7 +922,7 @@ def _without_local_open_duplicates(rows: list[dict[str, Any]], *, gateway: str,
 
     def contains(path: Path, sid: str, task_id: str) -> bool:
         key = (path, sid)
-        if key not in task_ids:
+        if key not in task_ids:  # no deadline: never wait out a busy board while the caller holds _links_lock
             task_ids[key] = {t['id'] for t in _busy.session_tasks(path, [sid], LISTED_STATUSES, _read_session_tasks)}
         return task_id in task_ids[key]
 
@@ -1603,8 +1603,10 @@ def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED
     if not ids:
         return []
     out: list[dict[str, Any]] = []
+    deadline = _busy.request_deadline()  # one busy-retry budget for the whole request, not per board
     for path in _board_db_paths():
-        out.extend(_busy.session_tasks(path, ids, statuses, _read_session_tasks))  # busy board: last list, stale
+        # busy board: last list, stale; never read before: re-read until the shared deadline
+        out.extend(_busy.session_tasks(path, ids, statuses, _read_session_tasks, deadline=deadline))
     for t in out:
         t.setdefault("key", f"{t['board']}/{t['id']}")
     # [daveey] Cards on other gateways this lineage owns: the same rows the counts use, owner-qualified

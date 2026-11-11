@@ -198,7 +198,7 @@ def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, even
     return run_id
 
 
-def admission_hold_set():
+def admission_hold_set(task_id=None):
     """[daveey] Lock-free early read of the updater hold, for callers to check BEFORE side effects that
     precede ``claim_transaction`` (the Board-service lease). Advisory only: ``claim_transaction`` still
     re-checks under admission.lock, so a hold set after this read is still honoured. An unreadable
@@ -209,7 +209,10 @@ def admission_hold_set():
     if not SUPPORTED:
         return False
     try:
-        return is_held(Path(get_default_hermes_root()) / "core-update")
+        held = is_held(Path(get_default_hermes_root()) / "core-update")
+        if held:
+            _defer(task_id, "update_admission_hold")
+        return held
     except OSError:
         return False
 

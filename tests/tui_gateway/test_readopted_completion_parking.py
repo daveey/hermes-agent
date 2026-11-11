@@ -14,6 +14,7 @@ import threading
 import pytest
 
 from tools.process_registry import ProcessRegistry
+from tools.process_registry_awaiting import release
 from tui_gateway import server
 
 KEY = "20261014_152627_e39461"
@@ -42,7 +43,11 @@ def test_unowned_readopted_completion_is_parked_not_dropped(owners):
                                       completions) is True
     assert completions == []
     assert registry.completion_queue.empty()
-    assert [e["session_id"] for e in registry.take_parked_events(lambda e: True)] == ["proc_4fa0a87e0e10"]
+    taken = registry.take_parked_events(lambda e: True)
+    try:
+        assert [e["session_id"] for e in taken] == ["proc_4fa0a87e0e10"]
+    finally:
+        release(taken)
 
 
 def test_ordinary_unowned_completion_is_still_dropped(owners):
@@ -138,7 +143,11 @@ def test_exit_for_a_chat_that_is_not_open_wakes_it(monkeypatch):
     t = server._readopted_exit_deliver(dict(EVENT), registry=registry)
     assert t is not None
     t.join(5)
-    assert [e["session_key"] for e in registry.take_parked_events(lambda e: True)] == [KEY]
+    taken = registry.take_parked_events(lambda e: True)
+    try:
+        assert [e["session_key"] for e in taken] == [KEY]
+    finally:
+        release(taken)
     assert resumed and resumed[0]["session_id"] == KEY and resumed[0].get("omit_messages") is True
 
 
@@ -147,7 +156,11 @@ def test_exit_for_an_open_chat_is_parked_without_a_resume(monkeypatch):
     monkeypatch.setattr(server, "_notif_live_session_matches", lambda keys, exclude=None: KEY in keys)
     monkeypatch.setitem(server._methods, "session.resume", lambda rid, params: pytest.fail("resumed an open chat"))
     assert server._readopted_exit_deliver(dict(EVENT), registry=registry) is None
-    assert len(registry.take_parked_events(lambda e: True)) == 1
+    taken = registry.take_parked_events(lambda e: True)
+    try:
+        assert len(taken) == 1
+    finally:
+        release(taken)
 
 
 def test_wake_tries_named_profiles_when_the_launch_store_lacks_the_chat(monkeypatch, tmp_path):

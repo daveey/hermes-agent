@@ -363,6 +363,11 @@ def _patch_update_flow(monkeypatch, repo, run_real_git=True):
     monkeypatch.setattr(main_web_build, "_record_bytecode_fingerprint", lambda *a, **k: None)
     monkeypatch.setattr(hermes_main, "_run_pre_update_backup", lambda *a, **k: None)
     monkeypatch.setattr(hermes_main, "_pause_windows_gateways_for_update", lambda: None)
+    # Keep real Git behavior without discovering the runner's host services.
+    from hermes_cli import update_cmd_posix_pause as pause
+    monkeypatch.setattr(pause, "_discover_systemd", list)
+    monkeypatch.setattr(pause, "_discover_launchd", list)
+    monkeypatch.setattr(pause, "_discover_bare", lambda pids: ([], []))
     monkeypatch.setattr(
         hermes_main, "_resume_windows_gateways_after_update", lambda *a, **k: None
     )

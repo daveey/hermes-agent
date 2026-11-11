@@ -154,9 +154,10 @@ def test_ordering_handoff_does_not_absorb_unreadable_review(board, monkeypatch, 
     assert dispatch.check_respawn_guard(board, task) == expected
 
 
-def test_lost_review_citing_its_report_file_stays_held(board, monkeypatch):
-    """Completion adds an artifacts list when the summary names a scratch-workspace file, so a
-    review whose verdict was lost but which cites its report file must still be held."""
+@pytest.mark.parametrize("where", ["summary", "result"])
+def test_lost_review_citing_its_report_file_stays_held(board, monkeypatch, where):
+    """Completion adds an artifacts list when the summary or the result names a scratch-workspace
+    file, so a review whose verdict was lost but which cites its report file must still be held."""
     from hermes_cli import kanban_db_workspace as kbw
     task, parents = incident(board, monkeypatch, finish=False)
     stored_keys = []
@@ -168,7 +169,11 @@ def test_lost_review_citing_its_report_file_stays_held(board, monkeypatch):
         kbw.set_workspace_path(board, parent, workspace)
         report = workspace / "review.md"
         report.write_text("No blocking defects.\n")
-        assert kb.complete_task(board, parent, summary=f"Reviewed PR #682. No blocking defects; report: {report}",
+        if where == "summary":
+            summary, result = f"Reviewed PR #682. No blocking defects; report: {report}", None
+        else:  # the PR in the summary, the report path only in the result
+            summary, result = "Reviewed PR #682. No blocking defects.", f"Report: {report}"
+        assert kb.complete_task(board, parent, summary=summary, result=result,
                                 expected_run_id=row.current_run_id, metadata={})
         stored = kb._json_dict(board.execute(
             "SELECT metadata FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (parent,)).fetchone()[0])
@@ -203,6 +208,57 @@ def test_lost_review_completed_by_the_worker_tool_stays_held(board, monkeypatch)
         assert sorted(stored) == ["artifacts", "worker_session_id"], stored
     kb.recompute_ready(board)
     assert dispatch.check_respawn_guard(board, task) == "active_pr"
+
+
+@pytest.mark.parametrize("tool", ["continue", "request_review"])
+def test_continue_and_request_review_stamp_worker_session_id(board, monkeypatch, tool):
+    """The _LOST_REVIEW_KEYS comment says kanban_continue and kanban_request_review stamp worker_session_id
+    like kanban_complete does; pin each of those entry paths on the run the tool ends."""
+    from tools import kanban_tools as kt
+    _task, parents = incident(board, monkeypatch, finish=False)
+    parent = parents[0]
+    kb.claim_task(board, parent)
+    row = kb.get_task(board, parent)
+    assert row is not None and row.current_run_id
+    monkeypatch.setenv("HERMES_KANBAN_TASK", parent)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(row.current_run_id))
+    session = f"{tool}-worker-session"  # not incident()'s "review-session": only the tool can have written it
+    monkeypatch.setenv("HERMES_SESSION_ID", session)
+    if tool == "continue":
+        out = json.loads(kt._handle_continue({"checkpoint": "Reviewed half of PR #682; next: the tests."}))
+    else:
+        out = json.loads(kt._handle_request_review({"summary": "Reviewed PR #682. No blocking defects."}))
+    assert out["ok"] is True, out
+    stored = kb._json_dict(board.execute(
+        "SELECT metadata FROM task_runs WHERE id = ?", (row.current_run_id,)).fetchone()[0])
+    assert stored.get("worker_session_id") == session, stored
+
+
+@pytest.mark.parametrize("tool", ["complete", "continue", "request_review"])
+def test_worker_tools_stamp_no_session_id_for_another_caller(board, monkeypatch, tool):
+    """The stamp is the worker's own: an orchestrator or CLI caller (no HERMES_KANBAN_TASK) that names the card
+    keeps its own HERMES_SESSION_ID off the run it ends, or the dashboard would show it as the worker's session."""
+    from tools import kanban_tools as kt
+    _task, parents = incident(board, monkeypatch, finish=False)
+    parent = parents[0]
+    kb.claim_task(board, parent)
+    row = kb.get_task(board, parent)
+    assert row is not None and row.current_run_id
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_ID", "orchestrator-session")
+    handle, args, outcome = {
+        "complete": (kt._handle_complete, {"summary": "Reviewed PR #682. No blocking defects."}, "completed"),
+        "continue": (kt._handle_continue, {"checkpoint": "Reviewed half of PR #682; next: the tests."}, "continued"),
+        "request_review": (kt._handle_request_review, {"summary": "Reviewed PR #682. No blocking defects."},
+                           "review_requested"),
+    }[tool]
+    out = json.loads(handle({"task_id": parent, **args}))
+    assert out["ok"] is True, out
+    ended, metadata = board.execute(
+        "SELECT outcome, metadata FROM task_runs WHERE id = ?", (row.current_run_id,)).fetchone()
+    assert ended == outcome, ended
+    assert "worker_session_id" not in kb._json_dict(metadata), metadata
 
 
 @pytest.mark.parametrize("captured", [None, []])

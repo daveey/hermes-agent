@@ -72,6 +72,13 @@ import { hubGatewayForConnection, hubGatewayProjects, hubRequest, learnHubGatewa
 import { type OfflineReplicaRecord, offlineSessionsFromReplica } from './offline-sessions'
 import { fetchRemoteProjectTree, type ProjectTreePayload } from './project-tree-background'
 import {
+  applyPendingMoves,
+  consumeMoveFollowSuppression,
+  showMovedAtOnce,
+  suppressMoveFollow,
+  treeSessionRows
+} from './projects-move-optimistic'
+import {
   DUPLICATE_FOLDER_RE,
   homeRelativePath,
   labelKey,
@@ -663,19 +670,18 @@ function applyProjectTreePayload(res: ProjectTreePayload, owner: ProjectRowOwner
   lastLocalTree = { res, owner }
   const remotes = visibleRemoteTrees(owner)
   const scoped = new Set([...(res.scoped_session_ids ?? []), ...remoteScopedSessionIds(remotes)])
+
   // The tree refreshes on every sessions.changed and window focus, and most of
   // those answers are unchanged. Keep unchanged nodes by reference so the
   // entered project doesn't refetch and rebuild on a no-op (#77591).
-  $projectTree.set(
-    replaceEqualDeep(
-      $projectTree.get(),
-      mergeGatewayProjectTrees(
-        (res.projects ?? []).map(project => tagProjectSessionConnection(project, owner)),
-        remotes,
-        projectTreePreviewLimit()
-      )
-    )
+  // A move still in flight keeps its row in the destination (store/projects-move-optimistic).
+  const merged = mergeGatewayProjectTrees(
+    (res.projects ?? []).map(project => tagProjectSessionConnection(project, owner)),
+    remotes,
+    projectTreePreviewLimit()
   )
+
+  $projectTree.set(replaceEqualDeep($projectTree.get(), applyPendingMoves(merged, sessionMatchesStoredId)))
   $activeProjectId.set(res.active_id ?? null)
   // [daveey] The next cold start paints this tree before the backend is up.
   saveBootTree(owner.connectionId, res.active_id ?? null)
@@ -969,34 +975,6 @@ interface WorkspaceMovePayload {
   git_repo_root?: null | string
 }
 
-// "Move to project" relocates the session's cwd, and the backend echoes that
-// as a session.info cwd change on the selected chat — which would otherwise
-// look like an agent-driven move and yank the sidebar into the destination.
-// A move is filing, not navigation: remember the destination briefly so the
-// follow for that cwd is skipped (local fix: sidebar-move-no-follow).
-const MOVE_FOLLOW_SUPPRESS_MS = 15_000
-const moveFollowSuppressed = new Map<string, number>()
-
-function suppressMoveFollow(cwd: string): void {
-  const target = cwd.trim()
-
-  if (target) {
-    moveFollowSuppressed.set(target, Date.now() + MOVE_FOLLOW_SUPPRESS_MS)
-  }
-}
-
-function consumeMoveFollowSuppression(cwd: string): boolean {
-  const until = moveFollowSuppressed.get(cwd)
-
-  if (until === undefined) {
-    return false
-  }
-
-  moveFollowSuppressed.delete(cwd)
-
-  return until >= Date.now()
-}
-
 // ── Cross-gateway move [daveey] ─────────────────────────────────────────────
 // The sidebar shows every gateway's sessions and projects, but a move has to
 // run on the gateway that OWNS the session (asking the active one answers
@@ -1011,14 +989,6 @@ interface MoveTarget {
   remote: boolean
 }
 
-function treeSessionRows(): SessionInfo[] {
-  return $projectTree
-    .get()
-    .flatMap(project => [
-      ...(project.previewSessions ?? []),
-      ...(project.repos ?? []).flatMap(repo => repo.groups.flatMap(group => group.sessions))
-    ])
-}
 
 function moveTargetGateway(sessionId: string, profile?: null | string, connectionId?: null | string): MoveTarget {
   const row =
@@ -1199,6 +1169,7 @@ export async function moveSessionToProject(
 ): Promise<void> {
   const node = $projectTree.get().find(n => n.id === projectId)
   const target = moveTargetGateway(sessionId, profile, connectionId)
+  const undo = showMovedAtOnce(sessionId, projectId, node ? projectRootCwd(node) : '')
 
   // [daveey] The session's OWN gateway does the move, and the destination is
   // that gateway's copy of the project — created there (folder cloned if
@@ -1208,26 +1179,32 @@ export async function moveSessionToProject(
   // lacks, so a refused folder falls through to the create-it-here path.
   const fast = !target.remote && node && !isRemoteProjectId(node.id) ? projectRootCwd(node) : ''
 
-  if (fast) {
-    try {
-      await moveSessionToCwd(target, sessionId, fast)
-
-      return
-    } catch (error) {
-      if (!MISSING_WORKDIR_RE.test(String((error as Error)?.message ?? error))) {
-        throw error
+  try {
+    if (fast) {
+      try {
+        return await moveSessionToCwd(target, sessionId, fast)
+      } catch (error) {
+        if (!MISSING_WORKDIR_RE.test(String((error as Error)?.message ?? error))) {
+          throw error
+        }
       }
     }
+
+    const cwd = await ensureProjectRootOn(target, node, fast)
+
+    if (!cwd) {
+      throw new Error(translateNow('sidebar.projects.moveNoFolder'))
+    }
+
+    await moveSessionToCwd(target, sessionId, cwd)
+  } catch (error) {
+    undo()
+    void refreshProjectTree()
+
+    throw error
   }
-
-  const cwd = await ensureProjectRootOn(target, node, fast)
-
-  if (!cwd) {
-    throw new Error(translateNow('sidebar.projects.moveNoFolder'))
-  }
-
-  await moveSessionToCwd(target, sessionId, cwd)
 }
+
 
 // [daveey] ⌘⇧P "+ Create project": a new project named `name` with an empty
 // `~/code/<slug>` folder, on the session's own gateway, then the move into it.

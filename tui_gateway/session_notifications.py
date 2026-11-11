@@ -8,6 +8,7 @@ import contextlib
 import threading
 
 from .method_ctx import bind_module
+from .kanban_notice_text import chat_wait_suffix as _kb_chat_wait
 
 
 def _notif_locked_sessions(fn, default):
@@ -168,7 +169,7 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 # past them and they can't wedge a later completed/blocked event behind an unclaimed row.
 _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked",
                         "quota_episode_notice", "worker_repin_notice", "dependency_parent_unclaimed",
-                        "chat_wait_unclaimed")
+                        "chat_wait_unclaimed", "request_withdrawn")
 # kanban, /loop + /heartbeat and the bot mailbox share one idle-poll cadence; probing the lease registry on
 # every 0.5s queue timeout cost ~a core at 11 sessions (#108005).
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0
@@ -608,11 +609,6 @@ def _kb_parent_unclaimed(payload: dict) -> str:
     return ": " + notice_text(payload)
 
 
-def _kb_chat_wait(payload: dict) -> str:
-    from hermes_cli.kanban_chat_wait import notice_text
-    return ": " + notice_text(payload)
-
-
 def _kb_failure(kind: str, payload: dict, title: str) -> str:
     """Cause-accurate gave_up/crashed wording; pid/exit/raw output only under ``Details:``. [daveey]"""
     from hermes_cli.kanban_failure_summary import describe_failure
@@ -621,6 +617,8 @@ def _kb_failure(kind: str, payload: dict, title: str) -> str:
 
 # kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
 _KANBAN_EVENT_FORMATTERS = {
+    "request_withdrawn": ("ℹ", lambda t, p, title: " request withdrawn: the card was archived. "
+                         "No answer is needed for this request; this is not approval and not proof of completion."),
     "completed": ("✔", _kb_completed),
     "blocked": ("⏸", lambda t, p, title: " blocked" + (f": {str(p.get('reason'))[:160]}" if p.get("reason") else "")),
     "gave_up": ("✖", lambda t, p, title: _kb_failure("gave_up", p, title)),
@@ -815,7 +813,7 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
             # flight is removed by their ack instead, so the claim it records survives until delivery. [daveey]
             if task and getattr(task, "status", "") == "archived" and (not sub_texts or claim is None):
                 with contextlib.suppress(Exception):
-                    _kbn.remove_notify_sub(conn, **sub_ident)
+                    _kbn.ack_notify_claim(conn, upto=_new, from_cursor=_old, **sub_ident)
     from hermes_constants import get_hermes_home
     from tui_gateway.kanban_consumer_health import polled
     polled(get_hermes_home(), session_key, _kb.kanban_db_path(board=slug))
@@ -1612,7 +1610,11 @@ def _notif_take_parked(sid, session, registry, handle) -> int:
     try:
         events = take(lambda evt: _session_owns_notification_event(sid, session, evt))
         if events:
-            handle(events, None)
+            from tools.process_registry_awaiting import release
+            try:
+                handle(events, None)
+            finally:
+                release(events)
         return len(events)
     except Exception as exc:
         _notif_log_failure("parked notification dispatch failed", exc)
@@ -1868,6 +1870,7 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
             _notif_log_failure("notification dispatch failed", exc)
         finally:
             release_in_flight(ready)
+            release_in_flight(parked)
             notification_park.unhold(parked)
     # Kanban claims still buffered go back to the board: the process may live on (close, evict). [daveey]
     try:

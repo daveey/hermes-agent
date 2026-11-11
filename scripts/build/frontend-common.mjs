@@ -87,15 +87,22 @@ export function productOutput(source, out, inputs) {
 const heldCodes = new Set(['EPERM', 'EACCES', 'EBUSY'])
 const heldRetryDelays = [100, 200, 400, 800, 1600]
 
-export function retryHeld(operation) {
+export function retryHeld(operation, codes = heldCodes) {
   for (const delay of [...heldRetryDelays, undefined]) {
     try {
       return operation()
     } catch (error) {
-      if (delay === undefined || !heldCodes.has(error?.code)) throw error
+      if (delay === undefined || !codes.has(error?.code)) throw error
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay)
     }
   }
+}
+
+// Backup deletion can hit ENOTEMPTY just like scratch cleanup on macOS.
+// Keep publication synchronous (including the TUI caller), and fail closed
+// when the bounded retry budget is exhausted or the error is unrelated.
+function removeBackup(dir) {
+  retryHeld(() => rmSync(dir, { recursive: true, force: true }), new Set(['ENOTEMPTY']))
 }
 
 // Never delete the last successful product before a compiler succeeds. The
@@ -111,7 +118,7 @@ export function publishDirectory(staged, out, { source } = {}) {
   try {
     retryHeld(() => renameSync(out, backup))
   } catch (error) {
-    rmSync(backupRoot, { recursive: true, force: true })
+    removeBackup(backupRoot)
     throw error
   }
   try {
@@ -123,10 +130,10 @@ export function publishDirectory(staged, out, { source } = {}) {
       error.message += `; rollback failed (${rollbackError.message}); previous product kept at ${backup}`
       throw error
     }
-    rmSync(backupRoot, { recursive: true, force: true })
+    removeBackup(backupRoot)
     throw error
   }
-  rmSync(backupRoot, { recursive: true, force: true })
+  removeBackup(backupRoot)
 }
 
 export async function withProduct(out, compile, { source } = {}) {

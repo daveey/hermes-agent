@@ -66,7 +66,7 @@ def test_cli_comment_event_records_human_writer(worker_home, monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     from hermes_cli import kanban
     tid = _ready_task()
-    assert "Comment added" in kanban.run_slash(f"comment {tid} why are you asking me?")
+    assert "Comment added" in kanban.run_slash(f"comment {tid} why are you asking me?", human_typed=True)
     conn = kbc.connect()
     try:
         cid = kb.list_comments(conn, tid)[-1].id
@@ -111,6 +111,52 @@ def test_unknown_writer_kind_is_rejected(worker_home):
     assert "writer_kind" not in _payload(tid, cid)  # system writers: unchanged payload
 
 
+def _context_comment_lines(tid: str) -> list[str]:
+    conn = kbc.connect()
+    try:
+        ctx = kb.build_worker_context(conn, tid, recovery_tail=False)
+    finally:
+        conn.close()
+    thread = ctx.split("## Comment thread\n", 1)[1]
+    return [line for line in thread.splitlines() if line.startswith("comment from worker ")]
+
+
+def test_spawn_context_labels_agent_comments_only(worker_home, monkeypatch):
+    """A fresh worker's ``## Comment thread`` says which notes an agent wrote (the kanban_comment
+    tool, or a courier relaying with ``writer_kind='agent'``); human (CLI/dashboard) and legacy or
+    system comments keep the plain stamp. The "comment from worker" framing stays. [daveey]"""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from hermes_cli import kanban
+    tid = _ready_task()
+    kt._handle_comment({"task_id": tid, "body": "tool: re-check it yourself"})
+    kanban.run_slash(f"comment {tid} human: why are you asking me?", human_typed=True)
+    conn = kbc.connect()
+    try:
+        kb.add_comment(conn, tid, "hub:gw:mac", "courier relay", writer_kind="agent")
+        kb.add_comment(conn, tid, "default", "legacy note")
+        kb.add_comment(conn, tid, "default", "dashboard note", writer_kind="human")
+    finally:
+        conn.close()
+    lines = _context_comment_lines(tid)
+    assert len(lines) == 5, lines
+    tool, human, courier, legacy, dash = lines
+    assert tool.startswith("comment from worker `default` (agent chat) at "), tool
+    assert courier.startswith("comment from worker `hub:gw:mac` (agent chat) at "), courier
+    for plain in (human, legacy, dash):
+        assert "(agent chat)" not in plain, plain
+        assert plain.startswith("comment from worker `default` at "), plain
+
+
+def test_spawn_context_agent_label_survives_backtick_author(worker_home):
+    tid = _ready_task()
+    conn = kbc.connect()
+    try:
+        kb.add_comment(conn, tid, "hermes`-system", "x", writer_kind="agent")
+    finally:
+        conn.close()
+    assert _context_comment_lines(tid)[0].startswith("comment from worker `hermes-system` (agent chat) at ")
+
+
 def _chat_tool_comment(tid: str, body: str) -> None:
     """A Desktop chat on the same profile posting via the kanban_comment tool (no worker env)."""
     inj._as_other_session(lambda: kt._handle_comment({"task_id": tid, "body": body}))
@@ -137,7 +183,7 @@ def test_mixed_notes_keep_operator_header_and_stamp_each_line(worker_home, monke
     kt.inject_new_comments_from_env(agent)  # seed
     _chat_tool_comment(tid, "agent says: re-check it yourself")
     from hermes_cli import kanban
-    inj._as_other_session(lambda: kanban.run_slash(f"comment {tid} why are you asking me?"))
+    inj._as_other_session(lambda: kanban.run_slash(f"comment {tid} why are you asking me?", human_typed=True))
     inj._unthrottle()
     assert kt.inject_new_comments_from_env(agent) is True
     note = agent.steers[0]

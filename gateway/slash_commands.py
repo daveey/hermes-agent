@@ -35,6 +35,10 @@ from utils import atomic_json_write, is_truthy_value
 
 logger = logging.getLogger("gateway.run")
 
+# [daveey] Sources whose "/kanban" text is a payload (an API client, a webhook body), not a person
+# typing: their kanban comments get the CLI's ancestry provenance, never ``human`` by fiat.
+_UNTYPED_SLASH_PLATFORMS = frozenset({"api_server", "webhook", "msgraph_webhook"})
+
 
 # /rollback result keys -> i18n line for files the safe restore left alone.
 _ROLLBACK_SKIP_LINES = (("skipped_user_edits", "gateway.rollback.kept_user_edits"),
@@ -369,7 +373,13 @@ class GatewaySlashCommandsMixin(
                 action = tok
                 break
         try:
-            output = await asyncio.to_thread(run_slash, text)
+            # [daveey] A person's /kanban message: comments it writes are the person's. API and webhook
+            # payloads, bot authors and internal events are not a person typing; they get the CLI's
+            # ancestry check.
+            src = getattr(event, "source", None)
+            human_typed = (getattr(getattr(src, "platform", None), "value", None) not in _UNTYPED_SLASH_PLATFORMS
+                           and not getattr(src, "is_bot", False) and not getattr(event, "internal", False))
+            output = await asyncio.to_thread(run_slash, text, human_typed=human_typed)
         except Exception as exc:  # pragma: no cover - defensive
             return t("gateway.kanban.error_prefix", error=exc)
 

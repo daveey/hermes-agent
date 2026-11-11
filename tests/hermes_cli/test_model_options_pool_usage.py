@@ -162,10 +162,10 @@ def test_same_codex_account_two_credentials_counts_one_account(monkeypatch, tmp_
     assert "codex:acct-2:user-2" in ids
 
 
-def test_single_entry_pool_keeps_legacy_gauge(monkeypatch, tmp_path):
-    """A one-entry pool is the single-account case: the legacy ``usage.windows`` chip contract."""
+def test_no_pool_keeps_legacy_gauge(monkeypatch, tmp_path):
+    """Without persisted account identities the legacy ``usage.windows`` contract stays."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "a"))
-    _write_pool(tmp_path / "a", "openrouter", [_entry("c1", "tok-1")])
+    _write_pool(tmp_path / "a", "openrouter", [])
     _clear_cache()
     remember_account_usage("openrouter", _snapshot(50.0))
 

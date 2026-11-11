@@ -1239,7 +1239,7 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin):
         if rest.startswith("kanban"):
             rest = rest[len("kanban"):].lstrip()
         try:
-            output = run_slash(rest)
+            output = run_slash(rest, human_typed=True)  # [daveey] typed at the composer
         except Exception as exc:  # pragma: no cover - defensive
             output = _t("kanban.failed", error=exc)
         if output:

@@ -609,6 +609,34 @@ from automatic decomposition, so the supervising agent must split or resume the
 preserved work. Local session counts and remote replica counts treat this as
 unfinished agent work, never as waiting on a human.
 
+#### No-progress budget
+
+A card can also loop without ever failing: it parks, its clock wakes it, the
+worker finds nothing changed, comments and parks again. Before claiming a
+`ready` card the dispatcher counts its trailing runs that ended in a wait
+(`scheduled`, `blocked`, or `continued` into `scheduled`) since the card's last
+progress marker: a completion or review hand-off, a link, attachment, edit,
+reassignment, move, contract change, met wake condition, human comment, or a
+completion, archive, review, reopen or edit on a parent or child card. Agent
+comments are not progress, nor is a bare `unblocked` (a recovery loop is made
+of them). Crashes, reclaims and quota releases neither count nor reset; a declared time window (`clock_only`, `awaiting.kind=clock`) is not
+counted; a park with no wake condition (a clock poll) counts a quarter run.
+
+At `kanban.no_progress_runs` (default 5; 0 disables) the dispatcher spawns
+nothing and, deciding again under the write lock and never under another
+dispatcher's live claim, instead (event `no_progress_parked` / `no_progress_escalated`,
+`dispatch --json` key `no_progress_held`):
+
+- re-parks the card behind the latest wake condition it declared since its
+  last progress, with a 24 h clock fallback, so only the condition or real
+  progress brings the next run (a fallback that finds nothing new re-parks it
+  again: one event a day, no worker run);
+- or, when there is no usable condition (none declared since the last
+  progress, or that probe reported `wake_check_broken`), files one idempotent
+  owner card (`created_by=kanban-no-progress`) the card waits on in `todo`.
+  A looping owner card goes to `triage`. No `continuation_exhausted` or
+  `goal_unachievable` event is written, so no recovery card is opened.
+
 #### Workers and systemd cgroups
 
 Workers are fire-and-forget processes that outlive the dispatcher tick, so

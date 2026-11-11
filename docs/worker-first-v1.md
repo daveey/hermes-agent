@@ -15,7 +15,9 @@ Workers always win. The Board reserves the origin hub for a portable card only w
 
 ## Creation and schema
 
-Tool and CLI creation enroll portable light and heavy cards. The shared conservative `portable_reason` preserves scratch/default-board, assignee, carried-option, host/local/skill marker, project and gateway-requirement exclusions. Caller placement and `runs_on` (including `[]`) bypass automatic enrollment. Courier/origin creation keeps its original path. Parent and chat links are not replaced.
+Tool, CLI and direct DB producers enroll portable light and heavy cards, including worker children and origin-bound chats. The shared conservative `portable_reason` preserves scratch/default-board, assignee, carried-option, host/local/skill marker, project and gateway-requirement exclusions. Explicit local/foreign placement and `runs_on` (including `[]`) bypass automatic enrollment. Courier creation keeps its immutable owner placement; a chat origin alone does not pin execution. Parent and chat links are not replaced. The internal `placement_checked` flag preserves a front door's already-resolved decision, including deliberate non-enrollment.
+
+The admission CPU sample measures **non-nice busy**: `100 * (delta_total - delta_idle - delta_iowait - delta_nice) / delta_total`. All positive-nice user CPU is excluded, not only nice >= 10; system, IRQ and steal still count. This does not relax memory, slot, drain or freshness guards. A busy batch workload is not evidence that the host has recovered memory or I/O capacity.
 
 Local SQLite `tasks.placement_policy` is a nullable TEXT migration, included in Task and sync column declarations. `worker-first-v1` is persisted in the first create transaction. Unknown policies and contradictory policy/manual pins are refused. A policy card has no runnable local fallback: ready and review claim paths enforce the fence before requesting a Board lease, even when sync is off/shadow or registry retrieval fails.
 

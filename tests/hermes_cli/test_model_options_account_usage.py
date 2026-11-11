@@ -40,14 +40,18 @@ def test_picker_reads_cached_usage_and_refreshes_without_waiting(monkeypatch):
     # probes such as ``gh auth token``) takes seconds on a loaded runner and is not this contract.
     first = next(r for r in build_model_options_payload(ctx)["providers"] if r["slug"] == "openrouter")
     assert not answered.is_set(), "the picker waited on the usage API"
-    assert "usage" not in first, "nothing cached yet, so nothing to show"
+    (account,) = first["usage"]["accounts"]
+    assert account["state"] == "unknown" and account["windows"] == []
     assert called.wait(30), "opening the picker must start a background usage refresh"
 
     release.set()
-    wait_until(lambda: cached_account_usage("openrouter") is not None, timeout=30,
-               what="the background refresh cached the usage snapshot")
+    wait_until(lambda: cached_account_usage("openrouter", identity_id=account["id"]) is not None, timeout=30,
+               what="the background refresh cached the usage snapshot for this account")
 
     row = next(r for r in build_model_options_payload(ctx)["providers"] if r["slug"] == "openrouter")
-    (window,) = row["usage"]["windows"]
+    (refreshed,) = row["usage"]["accounts"]
+    assert refreshed["id"] == account["id"]
+    assert refreshed["state"] == "ready"
+    (window,) = refreshed["windows"]
     assert window["label"] == "Current session" and window["used_percent"] == 92.0
     assert datetime.fromisoformat(window["resets_at"]) > datetime.now(UTC)

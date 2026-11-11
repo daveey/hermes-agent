@@ -126,8 +126,10 @@ def has_parked() -> bool:
 def claim(owns: Callable[[dict], bool]) -> list:
     """Parked events ``owns`` accepts, in arrival order. ``owns`` may read the lineage store, so it runs on a
     snapshot outside the lock; an event is handed out only if it is still parked, so exactly one poller takes it.
-    Each claimed delegation's held-copy mark passes to the caller, who MUST pass the result to ``unhold`` once
-    routing returns (a re-park in between takes its own mark)."""
+    Each claimed event acquires an in-flight hold; the caller MUST call
+    ``process_registry_awaiting.release`` after routing. Each claimed delegation's
+    original park held-copy mark also passes to the caller, who MUST call ``unhold``
+    after routing (a re-park in between takes its own mark)."""
     if not _parked:
         return []
     with _lock:
@@ -137,8 +139,10 @@ def claim(owns: Callable[[dict], bool]) -> list:
     mine = {id(evt) for evt in snapshot if owns(evt)}
     if not mine:
         return []
+    from tools.process_registry_awaiting import hold
     with _lock:
         claimed = [evt for _deadline, evt in _parked if id(evt) in mine]
+        hold(claimed)
         _parked[:] = [(deadline, evt) for deadline, evt in _parked if id(evt) not in mine]
     return claimed
 

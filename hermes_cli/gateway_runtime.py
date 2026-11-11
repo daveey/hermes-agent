@@ -441,6 +441,37 @@ def _observe_replacing_stale(home: Path, deadline: float, replaced: set[Path]) -
     return GatewayDiscovery("draining", reason_code="replaced")
 
 
+def _recover_start_refusal(home: Path, deadline: float, refusal: GatewayDiscovery) -> GatewayDiscovery:
+    if refusal.reason_code == "service_identity_unverified":
+        return _await_unverified_service_owner(home, deadline)
+    return refusal
+
+
+def _await_unverified_service_owner(home: Path, deadline: float) -> GatewayDiscovery:
+    """Observe only during a supervisor restart gap; never run an unverified definition.
+
+    A custom launcher cannot be safely interpreted, but its returning private
+    control owner can still prove identity exactly as on the ordinary attach path.
+    Keep the original refusal if it does not return, rather than misreport readiness.
+    """
+    import time
+    from hermes_cli.gateway_runtime_service import remaining
+    from hermes_constants import get_default_hermes_root, get_process_hermes_home
+
+    deadline = min(deadline, time.monotonic() + 30)
+    try:
+        while True:
+            budget = remaining(deadline)
+            if _update_fenced({home, get_process_hermes_home(), get_default_hermes_root()}):
+                return _fenced_verdict(home, budget)
+            observed = discover_gateway_endpoint(home, timeout=budget)
+            if observed.state not in {"absent", "starting"}:
+                return observed
+            time.sleep(min(0.1, remaining(deadline)))
+    except TimeoutError:
+        return GatewayDiscovery("inaccessible", reason_code="service_identity_unverified")
+
+
 def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float | None = None,
                            idle_exit: bool = False) -> GatewayDiscovery:
     """Ensure once; pending remains pending at deadline.
@@ -562,7 +593,7 @@ def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float | None = 
     except TimeoutError:
         return GatewayDiscovery("starting", reason_code="deadline")
     except RuntimeStartError as exc:
-        return GatewayDiscovery(exc.state, reason_code=exc.reason, detail=exc.detail)
+        return _recover_start_refusal(home, deadline, GatewayDiscovery(exc.state, reason_code=exc.reason, detail=exc.detail))
     except PermissionError:
         return _refused(home)
     except OSError:

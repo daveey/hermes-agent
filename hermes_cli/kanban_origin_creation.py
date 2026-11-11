@@ -61,6 +61,7 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
     # The sender gated its own declaration; kept out of the stored envelope so an intent recorded
     # before the option existed still matches on retry. [daveey]
     options.pop("require_declaration", None)
+    options.pop("placement_checked", None)  # internal decision, not part of the immutable envelope
     # Options added after intents were first stored: omit them while at their default (None) so an
     # intent stored before the option existed still matches on retry; a real value stays in the
     # envelope and a differing one remains a conflict.
@@ -89,7 +90,7 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
         # The receipt request ID, not legacy best-effort idempotency, owns this
         # creation. Never adopt an unrelated existing task by its legacy key.
         options["idempotency_key"] = None
-        task_id = kb.create_task(conn, **options)
+        task_id = kb.create_task(conn, **options, placement_checked=True)  # courier retains owner placement
         marker = {"binding_id": "binding-" + secrets.token_hex(16), "version": 1,
                   "owner": {**intent["owner"], "task_id": task_id}, "origin": intent["origin"],
                   "task_record_key": f"{intent['owner']['profile']}/{intent['owner']['board']}/{task_id}"}

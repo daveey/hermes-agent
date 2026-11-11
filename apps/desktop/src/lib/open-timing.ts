@@ -6,7 +6,8 @@
  *
  *   [open-timing] {"id":…,"connection":…,"paint":"cache","paintMs":12,"reconciledMs":840,"changed":false,…}
  *
- * - click:      sidebar click, or resumeSession entry when nothing clicked
+ * - click:      sidebar click, or resumeSession entry when nothing clicked. A click that never reaches
+ *               resumeSession (it fronted a chat already open as a tile) is dropped, not logged.
  * - paint:      first transcript on screen (`cache`, `warm` or `rest`) and when
  * - reconciled: the authoritative REST page applied (`rest`), the open ended
  *               read-only on an asleep gateway (`asleep`), or another open
@@ -39,6 +40,9 @@ export interface OpenTimingRecord {
 const CLICK_WINDOW_MS = 2_000
 const KEEP = 200
 const open = new Map<string, OpenTimingRecord>()
+/** [daveey] Clicks whose resumeSession has started. A click that never got there (it only fronted a chat already
+ *  on screen as a tile, or an offline row was refused) is not a main-pane open and is dropped, not logged. */
+const entered = new Set<string>()
 
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now())
 
@@ -65,12 +69,15 @@ export function markOpenClick(id: string, connection?: string): void {
   }
 
   abandonOthers(id)
+  entered.delete(id)
   open.set(id, { clickAt: now(), connection, id, startedBy: 'click' })
 }
 
 /** resumeSession entry. Keeps a click mark from the last moment; otherwise this is the start. */
 export function markOpenStart(id: string, connection?: string): void {
   const current = open.get(id)
+
+  entered.add(id)
 
   if (current && !current.outcome && now() - current.clickAt < CLICK_WINDOW_MS) {
     current.connection ||= connection
@@ -112,6 +119,15 @@ export function markOpenReconciled(id: string, outcome: OpenOutcome, changed?: b
     return
   }
 
+  const opened = entered.has(id) || record.paint !== undefined || record.stages !== undefined
+  open.delete(id)
+  entered.delete(id)
+
+  // A superseded click that never opened anything (see `entered`) is not an abandoned open.
+  if (outcome === 'abandoned' && record.startedBy === 'click' && !opened) {
+    return
+  }
+
   record.outcome = outcome
   record.reconciledMs = Math.round(now() - record.clickAt)
 
@@ -119,7 +135,6 @@ export function markOpenReconciled(id: string, outcome: OpenOutcome, changed?: b
     record.changed = changed
   }
 
-  open.delete(id)
   writeRecord(record)
 }
 
@@ -181,5 +196,46 @@ export function startTileOpenTiming(id: string, connection?: string) {
 /** Test seam. */
 export function resetOpenTimings(): void {
   open.clear()
+  entered.clear()
   history().splice(0)
+}
+
+/** [daveey] One `[open-timing]` log line's record, or null for any other / malformed line. */
+export function parseOpenTimingLine(line: string): null | OpenTimingRecord {
+  const at = line.indexOf('[open-timing] ')
+
+  if (at < 0) {
+    return null
+  }
+
+  try {
+    const record = JSON.parse(line.slice(at + '[open-timing] '.length)) as OpenTimingRecord
+
+    return record && typeof record === 'object' && typeof record.id === 'string' ? record : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * [daveey] The acceptance gate for "a `@session` ref click painted its tile from the transcript cache": a TILE
+ * open (`surface:"tile"`) whose first paint was the cache and whose REST page then reconciled (`outcome:"rest"`).
+ * A main-pane record (sidebar click, no surface) never qualifies, whatever it painted; neither does an open that
+ * was abandoned, failed or never painted, nor a tile that waited on REST (`paint:"rest"`).
+ */
+export function isTileCachePaint(record: null | OpenTimingRecord | undefined): boolean {
+  return record?.surface === 'tile' && record.paint === 'cache' && record.outcome === 'rest'
+}
+
+/** The first log line proving a tile cache paint for `id`, or null. */
+export function tileCachePaintProof(lines: Iterable<string>, id: string): null | OpenTimingRecord {
+  for (const line of lines) {
+    const record = parseOpenTimingLine(line)
+
+    if (record?.id === id && isTileCachePaint(record)) {
+      return record
+    }
+  }
+
+  return null
 }

@@ -16,6 +16,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
+from agent import update_pause_cancel
 from agent.display import KawaiiSpinner
 from agent.interrupt_control import interrupt_issuer, interrupted_during_api_call_reason
 from agent.turn_context_compaction import _reanchor
@@ -395,6 +396,15 @@ def begin_iteration(
     # Reset per-turn checkpoint dedup so each iteration can take one snapshot.
     agent._checkpoint_mgr.new_turn()
 
+    # [daveey] A tool call the core-update pause cancelled mid-run (agent/update_pause_cancel.py): its stamped
+    # result is persisted, so pause here as at any step boundary. Declined (the request ended meanwhile): clear
+    # the cancel's interrupt and carry on; the model sees the stamped result and re-runs the call if needed.
+    # Only the cancel's own: a Stop that landed during the hook relabelled it and must end the turn below.
+    _pause = None
+    if update_pause_cancel.take_pending(agent):
+        _pause = _step_boundary_pause(agent, messages, api_call_count)
+        agent.clear_interrupt(only_reason=update_pause_cancel.CANCEL_TOOL_REASON)
+
     if agent._interrupt_requested:
         interrupted = True
         _issuer = interrupt_issuer(agent)
@@ -407,7 +417,7 @@ def begin_iteration(
     # result of the previous step is appended and before the next model call. The Desktop/TUI gateway
     # installs ``step_boundary_pause`` per turn; a reason ends the turn as an interrupt it auto-continues
     # on the updated backend. Persist first, so the next backend sees every finished tool result.
-    _pause = _step_boundary_pause(agent, messages, api_call_count)
+    _pause = _pause or _step_boundary_pause(agent, messages, api_call_count)
     if _pause:
         agent._persist_session(messages, conversation_history)
         agent._step_boundary_paused = _pause

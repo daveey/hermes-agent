@@ -44,6 +44,7 @@ from plugins.kanban.dashboard import board_read
 from plugins.kanban.dashboard.board_read import (  # BOARD_COLUMNS: the documented column list
     BOARD_COLUMNS, diagnostic_inputs as _diagnostic_inputs, diagnostics_from_inputs as _diagnostics_from_inputs)
 from plugins.kanban.dashboard.plugin_api_human_request import ask_filing_refusal, classify_request
+from plugins.kanban.dashboard.plugin_api_comment_actor import CommentBody, comment_writer
 from hermes_cli.kanban_db_attachment_names import _collision_free_path, _safe_attachment_name
 
 log = logging.getLogger(__name__)
@@ -921,20 +922,16 @@ def _set_status_direct(conn: sqlite3.Connection, task_id: str, new_status: str) 
 
 # --- Comments / links -------------------------------------------------------
 
-class CommentBody(BaseModel):
-    body: str
-    author: Optional[str] = "dashboard"
-
-
 @router.post("/tasks/{task_id}/comments")
 def add_comment(task_id: str, payload: CommentBody, board: Optional[str] = Query(None)):
     if not payload.body.strip():
         raise HTTPException(status_code=400, detail="body is required")
+    writer_kind, writer_session = comment_writer(payload)  # [daveey] agent courier vs GUI human
     with _board_conn(board) as (board, conn):
         _foreign_card_409(conn, task_id)
         _require_task(conn, task_id)
         kanban_db.add_comment(conn, task_id, author=payload.author or "dashboard", body=payload.body,
-                              writer_kind="human")  # [daveey] typed in the dashboard/Desktop
+                              writer_kind=writer_kind, writer_session=writer_session)
         return {"ok": True}
 
 

@@ -16,6 +16,7 @@ import pytest
 
 from hermes_cli import kanban_generation as gen
 from hermes_cli import kanban_session_activity as ksa
+from hermes_cli import kanban_session_activity_busy as busy
 from hermes_cli import kanban_session_activity_revalidate as revalidate
 
 
@@ -117,7 +118,35 @@ def test_session_tasks_on_a_held_board_reuse_the_last_rows_marked_stale(kanban_r
     assert not tasks["t2"].get("stale")
 
 
-def test_held_board_with_no_previous_read_is_still_an_error_not_an_empty_list(kanban_root):
+def test_first_read_waits_out_a_hold_longer_than_one_read_budget(kanban_root, monkeypatch):
+    """A chat opened for the first time hit a board held a little past the 500 ms read budget: the route 500ed and
+    the Desktop showed "Task status unavailable". The first read now outlasts such a hold."""
+    db = kanban_root / "kanban.db"
+    _make_board(db, [("t1", "running", "s1")])
+    monkeypatch.setattr(busy, "FIRST_READ_BUSY_BUDGET_S", 5.0)
+    acquired, release = threading.Event(), threading.Event()
+
+    def hold():
+        with gen.lifecycle_access(db, timeout=5):
+            acquired.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert acquired.wait(5)
+    timer = threading.Timer(1.2, release.set)  # longer than one read's 0.5 s lifecycle budget
+    timer.start()
+    try:
+        tasks = ksa.session_tasks(["s1"])
+    finally:
+        release.set()
+        timer.cancel()
+        holder.join(5)
+    assert [(t["id"], t.get("stale")) for t in tasks] == [("t1", None)]
+
+
+def test_held_board_with_no_previous_read_is_still_an_error_not_an_empty_list(kanban_root, monkeypatch):
+    monkeypatch.setattr(busy, "FIRST_READ_BUSY_BUDGET_S", 0.6)
     db = kanban_root / "kanban.db"
     _make_board(db, [("t1", "running", "s1")])
     with _held(db):

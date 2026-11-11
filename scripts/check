@@ -58,6 +58,27 @@ for root in "$repo" "$common"; do
     if [ -z "$py" ] && [ -x "$root/$rel" ]; then py="$root/$rel"; fi
   done
 done
+# No virtualenv (the Macs' pm-managed installs have none): the interpreter the checkout's own
+# launcher runs, else the first python on PATH new enough for scripts/check. A bare python3 is
+# the last resort only, so macOS's /usr/bin/python3 (3.9) first on PATH is passed over.
+ok311() { [ -n "$1" ] && "$1" -c 'import sys; sys.exit(sys.version_info < (3, 11))' </dev/null >/dev/null 2>&1; }
+if [ -z "$py" ]; then
+  for root in "$common" "${HERMES_HOME:-$HOME/.hermes}/hermes-agent"; do
+    [ -x "$root/.hermes/bin/hermes" ] || continue
+    argv="$("$root/.hermes/bin/hermes" --print-runtime-command </dev/null 2>/dev/null)" || continue
+    # a JSON list (json.dumps: non-ASCII as \u escapes), which any python decodes; sed if none
+    cand="$(printf '%s' "$argv" | python3 -c 'import json, sys; print(json.load(sys.stdin)[0])' \
+      2>/dev/null)" || cand="$(printf '%s\n' "$argv" | sed -n 's/^\[ *"\([^"\\]*\)".*/\1/p')"
+    if ok311 "$cand"; then py="$cand"; break; fi
+  done
+fi
+if [ -z "$py" ]; then
+  for name in python3.14 python3.13 python3.12 python3.11 python3 python; do
+    while IFS= read -r cand; do
+      if ok311 "$cand"; then py="$cand"; break 2; fi
+    done < <(type -ap "$name")
+  done
+fi
 [ -n "$py" ] || py="$(command -v python3 || command -v python)" || {
   echo "scripts/check hook: no python3 or python on PATH" >&2; exit 1; }
 # A pm-managed install keeps the dependencies on its composed PYTHONPATH, not in a venv (the

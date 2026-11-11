@@ -9,8 +9,8 @@ does, and the lease CAS admits one claimer.
 
 Guards:
 
-* the target labels must be satisfiable now by a registry machine other than this one that is active and not
-  on hold (``machine:<x>`` for an unregistered x never is);
+* the target labels must be satisfiable now by an active, unheld registry machine; a running card must leave
+  this machine, while a queued card may target it (``machine:<x>`` for an unregistered x never is);
 * ``machine:<x>`` needs x to advertise pickup (``placement_unavailable`` otherwise: x would never copy the card,
   :func:`hermes_cli.kanban_worker_node.check_machine_pins`);
 * ``kanban.move.max_moves`` (default 3) moves per card;
@@ -20,6 +20,8 @@ Guards:
   tools are known or unknown; every match known to lack one refuses ``capability_mismatch``, naming the
   machine and the missing tool (:mod:`hermes_cli.kanban_runs_on_capabilities`);
 * the board must sync to the Board service (``runs_on`` is a Board placement field).
+* a target must attest ``capability:host_repo`` when required and ``skill:<pin>`` for every pinned skill,
+  in addition to satisfying the assignee's existing profile-tool check.
 
 Every move is a ``moved`` event ``{from_machine, runs_on, previous_runs_on, reason, move_no, forced}``: the audit log.
 """
@@ -64,16 +66,46 @@ def history(conn: sqlite3.Connection, task_id: str) -> list[dict[str, Any]]:
     return out
 
 
-def matching_machines(runs_on: list[str], machines: Mapping[str, Mapping[str, Any]], *, me: str) -> list[str]:
-    """Registry machines other than ``me`` that are active, not held and carry every label."""
+def matching_machines(runs_on: list[str], machines: Mapping[str, Mapping[str, Any]], *, me: str,
+                      exclude_me: bool = True) -> list[str]:
+    """Active, unheld registry machines carrying every label; running moves exclude ``me``."""
     from hermes_cli import kanban_worker_node as wn
     out = []
     for name, entry in machines.items():
-        if name == me or not entry or entry.get("state", "active") != "active" or entry.get("hold"):
+        if (exclude_me and name == me) or not entry or entry.get("state", "active") != "active" or entry.get("hold"):
             continue
         if set(runs_on) <= wn.effective_labels(entry, name):
             out.append(name)
     return sorted(out)
+
+
+def _requirement_matches(matches, machines, requires, skills, *, me=None, assignee=None):
+    """Move-only attestation gate, using the Board worker contract's capability/skill labels.
+
+    Profile tools retain their existing known/unknown policy; host checkouts and pins instead need
+    affirmative labels. Filter first so separate machines cannot satisfy separate halves of the check.
+    """
+    from hermes_cli import kanban_worker_node as wn
+    required = ({"capability:host_repo"} if "host_repo" in requires else set())
+    required.update(f"skill:{pin}" for pin in skills)
+    lacking = {name: sorted(required - wn.effective_labels(machines[name], name)) for name in matches}
+    if me in matches and required and assignee:
+        # The origin need not advertise worker-pickup labels. Read its actual profile rather than
+        # rejecting a return home because the worker registry omits local checkout/skill inventory.
+        from hermes_cli import kanban_capabilities as caps
+        available = set()
+        try:
+            available = {f"capability:{c}" for c in caps._profile_capabilities(assignee)}
+            with caps._profile_policy(assignee):
+                available.update(f"skill:{pin}" for pin in skills if caps._skill_frontmatter(pin) is not None)
+        except (OSError, ValueError):
+            available = set()  # unknown local inventory cannot veto a capable remote candidate
+        lacking[me] = sorted(required - available)
+    capable = [name for name in matches if not lacking[name]]
+    if not capable:
+        detail = "; ".join(f"machine {name} lacks {', '.join(missing)}" for name, missing in lacking.items())
+        raise MoveRefused("capability_mismatch", f"No move target satisfies required worker labels: {detail}")
+    return capable
 
 
 def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool = False,
@@ -88,7 +120,7 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
         raise MoveRefused("invalid_runs_on", str(exc)) from exc
     if not labels:
         raise MoveRefused("invalid_runs_on", "runs_on must name at least one label, e.g. ['machine:worker-1']")
-    row = conn.execute("SELECT status, workspace_kind, runs_on, assignee, requires FROM tasks WHERE id = ?",
+    row = conn.execute("SELECT status, workspace_kind, runs_on, assignee, requires, skills FROM tasks WHERE id = ?",
                        (task_id,)).fetchone()
     if row is None:
         raise MoveRefused("not_found", f"task {task_id} not found")
@@ -102,11 +134,14 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
         if reg is None:
             raise MoveRefused("registry_unavailable", "the Board machine registry is unreachable; try again")
         machines = reg.get("machines") or {}
-    matches = matching_machines(labels, machines, me=me)
+    pool: Mapping[str, Mapping[str, Any]] = machines or {}
+    exclude_me = row["status"] == "running"
+    matches = matching_machines(labels, pool, me=me, exclude_me=exclude_me)
     if not matches:
-        raise MoveRefused("no_machine", f"no active, unheld machine other than {me} has every label in {labels}")
+        other = f" other than {me}" if exclude_me else ""
+        raise MoveRefused("no_machine", f"no active, unheld machine{other} has every label in {labels}")
     try:
-        wn.check_machine_pins(conn, labels, machines=machines, me=me)
+        wn.check_machine_pins(conn, labels, machines=pool, me=me)
     except wn.MachinePinRefused as exc:
         raise MoveRefused(exc.code, str(exc)) from exc
     from hermes_cli import kanban_runs_on_capabilities as roc
@@ -114,9 +149,11 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
         requires = json.loads(row["requires"]) if row["requires"] else []
     except ValueError:
         requires = []
+    matches = _requirement_matches(matches, pool, requires, wn._parse(row["skills"]) or [],
+                                   me=me, assignee=row["assignee"])
     try:
         roc.check(labels, assignee=row["assignee"], requires=requires, workspace_kind=row["workspace_kind"] or "scratch",
-                  me=me, machines={m: machines[m] for m in matches}, exclude_me=True)
+                  me=me, machines={m: pool[m] for m in matches}, exclude_me=exclude_me)
     except roc.PlacementCapabilityMismatch as exc:
         raise MoveRefused("capability_mismatch", str(exc)) from exc
     past = history(conn, task_id)

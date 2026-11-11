@@ -391,7 +391,9 @@ async def _start_gateway_start_control_socket(runner):
             return {"multiplex": bool(getattr(runner.config, "multiplex_profiles", False)), **result}
 
         _control_server = GatewayControlServer(
-            verb_handlers={"pause-for-update": lambda: pause_for_update(runner, _main_loop), "identify": _identify_runtime,
+            verb_handlers={"pause-for-update": lambda: pause_for_update(runner, _main_loop),
+                           "pause-if-idle-for-update": lambda: pause_for_update(runner, _main_loop, idle_only=True),
+                           "identify": _identify_runtime,
                            "rescan-profiles": _rescan_profiles_handler,
                            "migrate-profile-identity": migrate_profile_identity_verb(runner),
                            "unserve-profile": unserve_profile_verb(runner),

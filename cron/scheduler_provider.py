@@ -133,6 +133,47 @@ def _profile_cron_scope(home):
         reset_hermes_home_override(home_token)
 
 
+# Homes whose startup recovery already ran in this process: only the FIRST may rerun attempts its
+# predecessor was cut off in (cron/restart_rerun.py). A supervised ticker restarted after a crash
+# (scheduler_thread.restart_if_dead) or a chronos fallback re-enters start() mid-life, when a dead
+# owner was not cut off by this process's restart.
+_RESTART_RERUN_HOMES: set[str] = set()
+_RESTART_RERUN_LOCK = threading.Lock()
+
+
+def _claim_startup_pass(home) -> bool:
+    """Record ``home``'s startup pass; True only for the first one in this process."""
+    from hermes_constants import hermes_home_key
+
+    key = hermes_home_key(home)
+    with _RESTART_RERUN_LOCK:
+        if key in _RESTART_RERUN_HOMES:
+            return False
+        _RESTART_RERUN_HOMES.add(key)
+        return True
+
+
+@contextlib.contextmanager
+def _startup_recovery_scope(home, *, owned: bool = True):
+    """Run the block as this process's startup recovery for ``home`` when it is the first pass and
+    ``owned`` (a profile the gate hands to this ticker; a gated-out profile belongs to a live
+    gateway, whose own periodic reap settles it)."""
+    from cron.executions import startup_recovery
+
+    first = owned and _claim_startup_pass(home)
+    with startup_recovery() if first else contextlib.nullcontext():
+        yield
+
+
+def _gate_admits(profile_gate, name, home) -> bool:
+    if profile_gate is None:
+        return True
+    try:
+        return bool(profile_gate(name, home))
+    except Exception:  # health: allow BLE001 -- a raising gate admits nothing (the loop logs it)
+        return False
+
+
 class CronScheduler(ABC):
     """Decides WHEN a due cron job fires. Only ``name`` + ``start`` are required; keep every other
     hook NON-abstract with a safe default (``test_abc_growth_stays_additive``)."""
@@ -145,6 +186,10 @@ class CronScheduler(ABC):
     def is_available(self) -> bool:
         """Whether this provider can run here. MUST NOT make network calls; False → built-in."""
         return True
+
+    def mark_startup_recovered(self, home) -> None:
+        """For a provider whose start() recovers without rerunning (chronos): its startup pass is done."""
+        _claim_startup_pass(home)
 
     @abstractmethod
     def start(
@@ -471,7 +516,8 @@ class InProcessCronScheduler(CronScheduler):
         # store here must not take the whole ticker thread down (#111010) — the loop's own
         # per-tick handling logs, persists the reason and keeps the thread alive.
         try:
-            recovered = self.recover_interrupted()
+            with _startup_recovery_scope(get_process_hermes_home()):
+                recovered = self.recover_interrupted()
             if recovered:
                 logger.warning(
                     "Marked %d interrupted cron execution(s) unknown after restart", recovered
@@ -578,10 +624,12 @@ class InProcessCronScheduler(CronScheduler):
         # A profile may have been deleted since this snapshot was taken; never recreate a deleted home's
         # cron workspace via the heartbeat below (#47368).
         for entry in initial_homes:
-            _, home = _profile_entry(entry)
+            name, home = _profile_entry(entry)
             try:
                 with _profile_cron_scope(home):
-                    recovered = self.recover_interrupted()
+                    with _startup_recovery_scope(
+                            home, owned=_gate_admits(profile_gate, name, home)):
+                        recovered = self.recover_interrupted()
                     if recovered:
                         logger.warning(
                             "Marked %d interrupted cron execution(s) for profile at %s",

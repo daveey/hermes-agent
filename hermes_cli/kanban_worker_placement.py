@@ -77,6 +77,44 @@ def creation_audit(args, cfg=None):
         return None
 
 
+def resolved_db_placement(fields):
+    """Validate the effective workspace after project inheritance, enrolling only unchecked producers."""
+    policy = fields["placement_policy"]
+    if policy is None and not fields["placement_checked"]:
+        policy = db_policy(fields)
+    validate_creation(policy, runs_on=fields["runs_on"], workspace_kind=fields["workspace_kind"],
+                      workspace_path=fields["workspace_path"], project=fields["project_id"],
+                      origin_intent=None, board=fields["board"])
+    audit = fields["placement_audit"]
+    if audit is None:
+        audit = creation_audit(_db_fields(fields))
+    return policy, audit
+
+
+def db_policy(fields):
+    """Enroll direct producers at insertion; front doors may preserve an already checked decision."""
+    from hermes_cli import kanban_placement as placement
+
+    cfg = placement.config()
+    if not cfg.get("worker_pools"):
+        return None
+    result = creation_decision(_db_fields(fields), cfg, placement.reg.self_gateway(), "auto", None)
+    return (result or {}).get("placement_policy")
+
+
+def _db_fields(fields):
+    """Normalize direct-DB options exactly as front doors do, using the actual connection's board."""
+    from hermes_cli.kanban_db_connect import _main_db_file
+    from hermes_cli.kanban_db_sync import board_slug_for_path
+
+    args = {**fields, "project": fields.get("project_id")}
+    db_file = _main_db_file(fields["conn"])
+    args["board"] = fields.get("board") or (board_slug_for_path(db_file) if db_file else "default")
+    if args.get("initial_status") == "running":
+        args.pop("initial_status")
+    return args
+
+
 def _cli_fields(args, body, workspace_kind, workspace_path, board):
     fields = {**vars(args), "body": body, "workspace_kind": workspace_kind,
               "workspace_path": workspace_path, "board": board}

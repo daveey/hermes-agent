@@ -35,6 +35,68 @@ def test_policy_is_captured_in_first_insert_with_parent_and_origin(conn):
     assert kb.get_task(conn, tid).placement_policy == "worker-first-v1"
 
 
+@pytest.mark.parametrize("creator", ["self-heal", "user", "default"])
+def test_direct_producer_enrolls_portable_card(conn, monkeypatch, creator):
+    from hermes_cli import kanban_placement as placement
+
+    monkeypatch.setattr(placement, "config", lambda: {"worker_pools": {"hub": ["worker-1"]}})
+    monkeypatch.setattr(placement.reg, "self_gateway", lambda: "hub")
+    parent = kb.create_task(conn, title="Parent", assignee="default", runs_on=[])
+    tid = kb.create_task(conn, title="Analyze public data", assignee="default", created_by=creator,
+                         creator_task_id=parent, session_id="origin-chat", requires=["terminal"])
+    assert kb.get_task(conn, tid).placement_policy == "worker-first-v1"
+    inserts = conn.execute("SELECT fields FROM kanban_sync_outbox WHERE row_uid=? ORDER BY rowid", (tid,)).fetchall()
+    assert json.loads(inserts[0][0])["placement_policy"] == "worker-first-v1"
+
+
+@pytest.mark.parametrize("fields", [
+    {"runs_on": []}, {"runs_on": ["linux"]}, {"workspace_kind": "dir", "workspace_path": "/repo"},
+    {"board": "other"}, {"requires": ["host_repo"]}, {"placement_checked": True},
+])
+def test_direct_producer_keeps_placement_exclusions(conn, monkeypatch, fields):
+    from hermes_cli import kanban_placement as placement
+
+    monkeypatch.setattr(placement, "config", lambda: {"worker_pools": {"hub": ["worker-1"]}})
+    monkeypatch.setattr(placement.reg, "self_gateway", lambda: "hub")
+    tid = kb.create_task(conn, title="Analyze public data", assignee="default", **fields)
+    assert kb.get_task(conn, tid).placement_policy is None
+
+
+@pytest.mark.parametrize("title,reason", [("Analyze public data", None), ("Inspect this host", "home gateway marker")])
+def test_direct_producer_records_authoritative_audit(conn, monkeypatch, title, reason):
+    from hermes_cli import kanban_placement as placement
+    monkeypatch.setattr(placement, "config", lambda: {"worker_pools": {"hub": ["worker-1"]}})
+    monkeypatch.setattr(placement.reg, "self_gateway", lambda: "hub")
+    tid = kb.create_task(conn, title=title, assignee="default", created_by="owner-wake")
+    created = next(e for e in kb.list_events(conn, tid) if e.kind == "created")
+    assert "portable_reason" in created.payload
+    assert created.payload["portable_reason"] == reason
+
+
+def test_direct_producer_uses_connection_board(conn, monkeypatch):
+    from hermes_cli import kanban_placement as placement
+
+    monkeypatch.setattr(placement, "config", lambda: {"worker_pools": {"hub": ["worker-1"]}})
+    monkeypatch.setattr(placement.reg, "self_gateway", lambda: "hub")
+    kb.create_board("other")
+    with kbc.connect(board="other") as other:
+        tid = kb.create_task(other, title="Analyze public data", assignee="default")
+        assert kb.get_task(other, tid).placement_policy is None
+
+
+def test_courier_keeps_immutable_placement(conn, monkeypatch):
+    from hermes_cli import kanban_placement as placement
+    from tests.hermes_cli.test_kanban_origin_creation import intent
+
+    monkeypatch.setattr(placement, "config", lambda: {"worker_pools": {"hub": ["worker-1"]}})
+    monkeypatch.setattr(placement.reg, "self_gateway", lambda: "hub")
+    tid = kb.create_task(conn, title="Analyze public data", assignee="default", origin_intent=intent())
+    assert kb.get_task(conn, tid).placement_policy is None
+    assert kb.create_task(conn, title="Analyze public data", assignee="default", origin_intent=intent()) == tid
+    envelope = json.loads(conn.execute("SELECT intent_json FROM origin_creation_intents").fetchone()[0])
+    assert "placement_checked" not in envelope["options"]
+
+
 @pytest.mark.parametrize("mode", ["off", "shadow", "primary"])
 @pytest.mark.parametrize("lane", ["ready", "review"])
 def test_queue_fence_precedes_direct_claim_and_lease_even_without_sync(conn, mode, lane):

@@ -216,15 +216,21 @@ class ProcessReadoptMixin:
             return bool(self._parked_events)
 
     def take_parked_events(self, owns: Callable[[dict[str, Any]], bool]) -> list[dict[str, Any]]:
-        """Remove and return the parked events *owns* claims. ``owns`` runs outside the lock."""
+        """Remove and hold events *owns* claims. Predicate runs outside the lock.
+
+        Caller MUST release the returned in-flight hold after routing.
+        """
         with self._lock:
             parked = list(self._parked_events or ())
         if not parked:
             return []
         taken = [evt for evt in parked if _safe_owns(owns, evt)]
         if taken:
+            from tools.process_registry_awaiting import hold
             with self._lock:
                 ids = {id(evt) for evt in taken}
+                taken = [evt for evt in (self._parked_events or ()) if id(evt) in ids]
+                hold(taken)
                 self._parked_events = [evt for evt in (self._parked_events or ()) if id(evt) not in ids]
         return taken
 

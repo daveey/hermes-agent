@@ -24,6 +24,8 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from hermes_cli.kanban_run_machine import placement_select, run_machine
+
 _log = logging.getLogger(__name__)
 
 KINDS = ("created", "shepherd")
@@ -320,7 +322,8 @@ _replica_rows: dict[tuple[str, str, str], tuple[tuple, list[dict[str, Any]]]] = 
 def _read_replica_links(conn: sqlite3.Connection, gateway: str, profile: str) -> list[dict[str, Any]]:
     return [dict(r) for r in conn.execute(
         "SELECT l.task_id AS id, t.id AS task_row, t.title, t.status, t.assignee, t.created_at, t.started_at, "
-        "t.priority, t.block_kind, t.human_request, t.created_on, l.chat_session, l.chat_profile, l.kind, "
+        f"t.priority, t.block_kind, t.human_request, t.created_on, {placement_select(conn, 't')}, "
+        "l.chat_session, l.chat_profile, l.kind, "
         "EXISTS (SELECT 1 FROM task_chat_links r WHERE r.task_id = l.task_id AND r.chat_gateway = l.chat_gateway "
         "AND r.chat_profile IS l.chat_profile AND r.chat_session = l.chat_session AND r.released = 1) "
         "AS chat_released "
@@ -480,6 +483,8 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
                 "released": False, "reported_status": status, "synced_at": pulled, "stale": stale,
                 "source": "replica",
             }
+            if machine := run_machine(r):
+                out[pair]["run_machine"] = machine
     return list(out.values())
 
 

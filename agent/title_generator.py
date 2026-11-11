@@ -847,8 +847,10 @@ def suggest_short_name(messages: list, *, timeout: float = 30.0, llm: Callable[.
         )
         message = response.choices[0].message
         title = _clean_title(_extract_title_text(message.content or "") or _title_from_reasoning(message))
-    except Exception:
-        logger.debug("Short-name suggestion failed", exc_info=True)
+    except Exception as exc:
+        # WARNING, not DEBUG: a swallowed failure here is invisible to the user (the rename dialog just
+        # isn't pre-filled), so the log is the only place it can surface.
+        logger.warning("Short-name suggestion failed: %s: %s", type(exc).__name__, exc, exc_info=True)
         return None
     if not title:
         return None

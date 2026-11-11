@@ -615,7 +615,8 @@ class _PipeControlProtocol(asyncio.Protocol):
 
 
 def query_gateway_control(home: Path, verb: str, *, params: Optional[dict[str, Any]] = None,
-                          timeout: float = _DEFAULT_CLIENT_TIMEOUT) -> Optional[dict[str, Any]]:
+                          timeout: float = _DEFAULT_CLIENT_TIMEOUT,
+                          report_unsupported: bool = False) -> Optional[dict[str, Any]]:
     """Ask the gateway serving ``home`` a control verb; returns its ``result`` payload. Any failure (no/stale
     socket, timeout, malformed answer, ``ok: false``) returns None so callers fall back to the scan layer.
     ``params`` carries verb arguments (e.g. ``{"old": ..., "new": ...}``). Never raises."""
@@ -629,6 +630,9 @@ def query_gateway_control(home: Path, verb: str, *, params: Optional[dict[str, A
         response = json.loads(raw.decode("utf-8")) if raw else None
     except Exception:
         return None
+    if (report_unsupported and isinstance(response, dict) and response.get("ok") is False
+            and isinstance(response.get("supported_verbs"), list) and verb not in response["supported_verbs"]):
+        return {"unsupported": True}
     result = response.get("result") if isinstance(response, dict) and response.get("ok") is True else None
     return result if isinstance(result, dict) else None
 
@@ -682,13 +686,17 @@ def identify_gateway(home: Path, *, timeout: float = _DEFAULT_CLIENT_TIMEOUT) ->
     return query_gateway_control(home, "identify", timeout=timeout)
 
 
-def pause_gateway_for_update(home: Path, *, timeout: float = _DEFAULT_CLIENT_TIMEOUT) -> Optional[dict[str, Any]]:
+def pause_gateway_for_update(home: Path, *, timeout: float = _DEFAULT_CLIENT_TIMEOUT,
+                             idle_only: bool = False) -> Optional[dict[str, Any]]:
     """Ask the gateway serving ``home`` to drain and exit for an update. Returns the ACK ``{"pausing",
     "already_stopping", "pid", "drain_timeout"}`` or None when no gateway answers (old gateway without
     the verb, no/dead socket) — the caller then uses the legacy signal/tree-kill pause path.
 
     Step 2 of the socket migration (#92091).
     """
+    if idle_only:
+        return query_gateway_control(home, "pause-if-idle-for-update", timeout=max(timeout, 6.0),
+                                     report_unsupported=True)
     return query_gateway_control(home, "pause-for-update", timeout=timeout)
 
 

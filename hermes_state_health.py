@@ -24,8 +24,9 @@ only that the pages read back consistent then, not that the file was never damag
 (``SessionDB._execute_write``) and the pooled reader first run a bounded ``quick_check`` of the
 tables the failing statement touched, read-only in a fresh process
 (``hermes_state_corruption_confirm``). Only a clean check allows ONE replay of the rolled-back
-statement on the same connection, counted by ``note_unconfirmed_corruption``; damage, a timeout
-or any check error latches, and so does a recurrence. A COMMIT is never replayed (its settlement
+statement on the same connection, counted by ``note_unconfirmed_corruption``. Read timeout/no_budget
+fails only the read and starts an unbounded background check; actual background damage latches.
+Writer timeout, immediate damage/check errors and replay recurrence still latch. A COMMIT is never replayed (its settlement
 is unknown). The latched reason names the SQLite code, operation, stage and check outcome.
 """
 
@@ -81,12 +82,18 @@ def mark_storage_corrupt(db_path, reason: object) -> None:
         "`hermes sessions recover --source %s --inspect-only` or restore a snapshot.",
         db_path, reason, db_path,
     )
+    try:
+        from hermes_state_corruption_incident import schedule_incident
+
+        schedule_incident(db_path, str(reason))
+    except Exception:  # health: allow BLE001 -- incident reporting must not mask the original storage failure
+        logger.exception("state.db corruption incident scheduling failed")
 
 
 def note_storage_error(db_path, exc: BaseException, *, context: Optional[str] = None) -> bool:
     """Latch *db_path* when *exc* is structural corruption; True when it was. *context* (code,
     operation, replay outcome) is appended to the latched reason."""
-    if not is_structural_corruption_error(exc):
+    if getattr(exc, "hermes_read_corrupt_unconfirmed", False) or not is_structural_corruption_error(exc):
         return False
     mark_storage_corrupt(db_path, f"{exc} [{context}]" if context else exc)
     return True

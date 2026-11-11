@@ -225,6 +225,7 @@ gateway:
     truncated_suffix: "… (مقتطع؛ استخدم `hermes kanban …` في الطرفية للخرج الكامل)"
     no_output: "(لا يوجد خرج)"
     wake:
+      request_withdrawn: "تم سحب الطلب (ليس موافقة أو دليلاً على الإكمال)"
       completed: "اكتملت"
       gave_up: "استسلم (نفدت المحاولات)"
       crashed: "تعطّل (خرج العامل)؛ سيعيد المُوزّع المحاولة"

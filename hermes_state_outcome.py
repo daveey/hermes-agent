@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional
@@ -139,6 +140,8 @@ def validate_declaration(outcome: Any) -> dict[str, Any]:
         if not summary:
             raise ValueError("a done outcome needs a summary")
         out["summary"] = summary[:SUMMARY_CHARS]
+        if outcome.get("keep_crons") is True:
+            out["keep_crons"] = True
     elif kind == "decision":
         raw_items = outcome.get("items")
         items = [_decision_item(i) for i in raw_items] if isinstance(raw_items, list) else []
@@ -451,6 +454,11 @@ def _completion_note(row: dict) -> Optional[dict]:
     if isinstance(meta, str):
         with contextlib.suppress(ValueError, TypeError):
             meta = json.loads(meta)
+    # The notice guarantee also deliberately suppresses turns for validated human
+    # notices. Card ownership still supplies decision/wait outcomes independently;
+    # an incidental recipient resumes classification of its own preceding turn.
+    if isinstance(meta, dict) and row.get("display_kind") == _NOTICE_KIND and meta.get("outcome_informational") is True:
+        return meta
     return meta if isinstance(meta, dict) and meta.get("completion_note") else None
 
 
@@ -574,7 +582,8 @@ def _derive(db: Any, sid: str, *, ignore_live_turn: bool = False,
     crons = _guarded("cron", sid, lambda: _cron_items(_lineage_ids(db, sid)), [])
     named = {"crons": crons} if crons else {}
     if holds and declared.get("kind") in ("done", "waiting"):
-        return {**declared, **(named if declared.get("kind") == "done" else {})}
+        return {**{k: v for k, v in declared.items() if k != "crons"},
+                **(named if declared.get("kind") == "done" else {})}
     if not tail:
         return _outcome("unresolved", now, reason="empty", **carry)
     reason = _tail_reason(tail)
@@ -628,7 +637,23 @@ def declare_outcome(sid: str, outcome: dict, *, db: Any = None) -> dict[str, Any
         tip = _tip(handle, sid)
         if _row(handle, tip) is None:
             raise ValueError(f"unknown session {sid}")
+        # Persist intent before touching the separate cron store. A failed DB
+        # write must never release ownership without a completion receipt.
         _write(handle, tip, declared)
+        if declared["kind"] == "done":
+            from cron.session_ownership import release_for_database
+
+            declared["released_crons"], errors = release_for_database(
+                handle, _lineage_ids(handle, tip), keep=bool(declared.get("keep_crons")))
+            if errors:
+                declared["cron_release_error"] = "; ".join(errors)
+            try:
+                _write(handle, tip, declared)
+            except sqlite3.Error as exc:
+                # The declaration and cron writes already succeeded; report the
+                # receipt failure rather than pretending nothing was committed.
+                previous = declared.get("cron_release_error", "")
+                declared["cron_release_error"] = (previous + "; " if previous else "") + f"Outcome receipt not persisted: {exc}"
     return declared
 
 

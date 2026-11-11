@@ -7,6 +7,8 @@ helpers are reached via the late-binding seam so monkeypatching keeps working.
 """
 
 import asyncio
+import functools
+import inspect
 import json
 import re
 import sqlite3
@@ -21,6 +23,7 @@ from fastapi.responses import StreamingResponse
 from hermes_cli.session_listing import stamp_automated, subagent_listing_scope
 from hermes_cli.session_list_flight import SESSION_LIST_CACHE, data_stamp
 from hermes_cli.web_deps import late
+from hermes_cli.web_read_coalescing import coalesced_read
 from hermes_cli.kanban_session_activity import annotate_kanban_activity, session_tasks as session_kanban_tasks
 from hermes_cli.cron_session_activity import annotate_cron_activity
 from hermes_cli.goal_session_activity import annotate_goal_activity
@@ -169,6 +172,9 @@ def _resolve_session_id(db, session_id: str) -> Optional[str]:
     try:
         return db.resolve_session_id(session_id)
     except sqlite3.DatabaseError as exc:
+        if getattr(exc, "hermes_read_corrupt_unconfirmed", False):
+            from hermes_cli.web_routers._common import corrupt_store_status
+            raise corrupt_store_status(db.db_path, exc) from exc
         if not is_malformed_db_error(exc):
             raise
         _log.error("state.db is corrupt while resolving session %s: %s", session_id, exc)
@@ -198,7 +204,6 @@ def get_session_kanban_tasks(ids: str = Query(..., max_length=4000)):
 
 # ``le=100`` on limit: an unbounded limit lets one request drag every session
 # row (plus correlated-subquery preview work) out of SQLite in a single hit.
-@list_router.get("/api/sessions")
 def get_sessions(
     limit: int = Query(20, ge=0, le=100), offset: int = Query(0, ge=0), min_messages: int = 0,
     archived: str = "exclude", order: str = "created", source: str | None = None, sources: str | None = None,
@@ -224,6 +229,32 @@ def get_sessions(
     # reused for a moment while state.db is unchanged (session_list_flight; t_01a19f5af20a19f6). [daveey]
     return SESSION_LIST_CACHE.get(
         (str(db_path),) + args, data_stamp(db_path), lambda: _list_sessions_payload(*args))
+
+
+# Queue expensive list contenders before consuming the shared HTTP worker pool.
+_sessions_admitted = coalesced_read(get_sessions, admission_key=lambda args: args["profile"], max_concurrent=2)
+
+
+def _peek_sessions(arguments):
+    try:
+        db_path = _session_db_path_for_profile(arguments["profile"])
+    except HTTPException:
+        return False, None  # normal implementation retains the validation error
+    return SESSION_LIST_CACHE.peek((str(db_path), *arguments.values()), data_stamp(db_path))
+
+
+@functools.wraps(_sessions_admitted)
+async def _sessions_http(*args, **kwargs):
+    from starlette.concurrency import run_in_threadpool
+    bound = inspect.signature(get_sessions).bind(*args, **kwargs)
+    bound.apply_defaults()
+    hit, value = await run_in_threadpool(_peek_sessions, bound.arguments)
+    if hit:
+        return value
+    return await _sessions_admitted(*args, **kwargs)
+
+
+list_router.add_api_route("/api/sessions", _sessions_http, methods=["GET"])
 
 
 def _list_sessions_payload(
@@ -298,6 +329,8 @@ def _list_sessions_payload(
                 else "Internal server error"),
         ) from exc
     except sqlite3.DatabaseError as exc:
+        if getattr(exc, "hermes_read_corrupt_unconfirmed", False):
+            raise HTTPException(status_code=503, detail="Session read failed; background integrity check pending.") from exc
         # A damaged store is unavailable, not empty and not an internal error (#72046).
         db_path = _session_db_path_for_profile(profile)
         if not (note_storage_error(db_path, exc) or is_malformed_db_error(exc)):

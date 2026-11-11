@@ -14,16 +14,15 @@ resumed by ``_resume_windows_gateways_after_update`` (which dispatches here on
 ``platform == "posix"``), adopted by the next ``hermes update`` and resumed by the next launch
 when this process dies.
 
-* every gateway is drained first: the control socket's ``pause-for-update`` runs the same
-  ``request_restart`` drain as the post-update restart's SIGUSR1 (refuse new turns, let the
-  in-flight ones finish within ``agent.restart_after_turn_timeout``, then exit), waited for within
-  that restart's budget. The request is recorded before it is sent, and carries no planned-stop
-  marker (the gateway's marker watcher would take the immediate stop path instead).
-* systemd ``hermes-gateway*`` units and launchd ``ai.hermes.gateway*`` jobs are then stopped and
-  later started through their supervisor, so it cannot respawn them on old code mid-update; one
-  that does not take the drain gets its supervisor's stop at once.
-* bare ``gateway run`` processes that do not answer get marker + SIGTERM, and are replayed from
-  their recorded argv + home.
+* each gateway accepts ``pause-if-idle-for-update`` only with no active work, checking and
+  closing admission in one loop callback. Busy gateways defer the update without starting a
+  drain. Unsupported gateways refuse explicitly until restarted on the installed code; a lost
+  reply retains conservative recovery debt. The updater waits at most 30 seconds for accepted
+  stops, not the post-restart after-turn budget. No planned-stop marker is sent.
+* supervised gateways that exit are disarmed through systemd/launchd before mutation and
+  restarted through their supervisor after dependencies are ready.
+* bare gateways are replayed from their recorded argv + home. Refusal settles already-accepted
+  stops before rollback; still-live identities retain durable restart debt rather than twins.
 * the updater never kills itself: a unit whose cgroup holds this process (``/update`` from
   chat: the update runs in the gateway unit's cgroup, which ``systemctl stop`` kills) is
   stopped only after this process moved into a transient scope of its own. A launchd job
@@ -54,6 +53,10 @@ _REPLAY_ENVS: dict[str, dict] = {}
 
 _STOP_TIMEOUT_S = 120.0
 _READY_TIMEOUT_S = 30.0
+# Desktop cannot reconnect while the update lock is held, including to answer an
+# approval the draining turn needs. A pre-swap wait must yield, not spend the
+# post-restart after-turn budget behind that fence.
+_PRE_SWAP_DRAIN_WAIT_S = 30.0
 
 
 class PauseRefused(RuntimeError):
@@ -73,6 +76,7 @@ def arm_pause(*, no_gateway_restart: bool) -> dict | None:
     even an update that never moves the checkout restarts it at exit."""
     global _RUN
     _REPLAY_ENVS.clear()
+    _RUN = None
     if sys.platform == "win32" or no_gateway_restart:
         return None
     from hermes_cli import update_pause_record as pause_record
@@ -420,9 +424,9 @@ def _wait_gone(pids, timeout: float, born: dict | None = None) -> set[int]:
     return live
 
 
-def _ask_to_drain(entry: dict) -> bool:
-    """Ask the gateway over its control socket to finish its in-flight turns and exit; True on its
-    ACK. That is the ``request_restart`` drain the post-update restart uses (SIGUSR1); SIGTERM,
+def _ask_to_drain(entry: dict) -> bool | None:
+    """Ask the gateway to exit only if idle; True on its ACK. Busy/old gateways refuse rather
+    than starting an uncancellable pre-swap drain. SIGTERM,
     ``systemctl stop`` and ``launchctl bootout`` enter ``stop()`` at once and cut a turn off. No
     planned-stop marker on this path: the gateway's marker watcher takes that same immediate
     signal-stop path, and could fire before the request lands. The caller records the request
@@ -430,12 +434,16 @@ def _ask_to_drain(entry: dict) -> bool:
     died still leaves the evidence that keeps the drained gateway's restart debt."""
     from gateway.control_socket import pause_gateway_for_update
     if not entry.get("home"):
-        return False
+        return False  # no request was sent
     try:
-        ack = pause_gateway_for_update(Path(entry["home"]))
-    except Exception:  # health: allow BLE001 -- no answer is the pre-verb gateway: the fallback stop handles it
-        return False
-    return bool(ack and (ack.get("pausing") or ack.get("already_stopping")))
+        ack = pause_gateway_for_update(Path(entry["home"]), idle_only=True)
+    except Exception:  # health: allow BLE001 -- unknown/busy gateways must not authorize a tree mutation
+        return None
+    if ack and (ack.get("pausing") or ack.get("already_stopping")):
+        return True
+    if ack and ack.get("unsupported"):
+        entry["pause_unsupported"] = True
+    return False if ack and (ack.get("busy") or ack.get("unsupported")) else None
 
 
 def _stop_at_once(entry: dict) -> None:
@@ -458,25 +466,34 @@ def _drain_budget() -> float:
 
 
 def _stop_gateways(token: dict, entries: list[dict]) -> None:
-    """Drain every gateway (bare ones SIGTERMed when they do not answer), then wait for all of them
-    within one drain budget. A supervised gateway that exited through the drain is stopped through
+    """Request idle-only stops, then wait within one bounded pre-swap budget.
+    A supervised gateway that exited through the drain is stopped through
     its supervisor at once: its exit 75 asks for a restart, which systemd honours after
-    ``RestartSec=5`` and launchd immediately, still on the old tree. Past the budget a supervised
-    survivor gets its supervisor's stop and a bare one SIGKILL, as the restart path escalates."""
+    ``RestartSec=5`` and launchd immediately, still on the old tree. Past the budget the update
+    defers without forcing active work to stop; the checkout must not move."""
     from hermes_cli import update_pause_record as pause_record
     from hermes_cli.update_cmd_drain_report import drain_progress_reporter
-    budget, waiting = _drain_budget(), []
+    budget, waiting = min(_drain_budget(), _PRE_SWAP_DRAIN_WAIT_S), []
+    refusals = []
     for entry in entries:
         pause_record.mark_stop_sent(token, entry["pid"])  # before the request: see _ask_to_drain
-        if _ask_to_drain(entry):
+        acknowledged = _ask_to_drain(entry)
+        if acknowledged:
             waiting.append(entry)
         else:
-            _stop_at_once(entry)
-            if not entry.get("kind"):
-                waiting.append(entry)  # a SIGTERMed bare gateway is waited for like a drained one
+            if acknowledged is False:
+                pause_record.mark_stop_refused(token, entry["pid"])
+            reason = ("does not support idle pause; restart that gateway on the installed code when idle"
+                      if entry.get("pause_unsupported") else "is busy or cannot acknowledge an idle pause; retry when idle")
+            refusals.append(f"{_names([entry])} {reason}")
+            if acknowledged is None:
+                waiting.append(entry)  # a lost ACK may already be exiting; settle it before rollback
+            break
     if not waiting:
+        if refusals:
+            raise PauseRefused("; ".join(refusals))
         return
-    print(f"  ⏳ Waiting up to {budget:.0f}s for in-flight turns on {_names(waiting)} to finish before the update...")
+    print(f"  ⏳ Waiting up to {budget:.0f}s for paused gateways {_names(waiting)} to exit before the update...")
     ticks = [drain_progress_reporter(Path(e["home"]) if e.get("home") else None, budget_s=budget) for e in waiting]
     deadline = time.monotonic() + budget
     while waiting and time.monotonic() < deadline:
@@ -486,15 +503,10 @@ def _stop_gateways(token: dict, entries: list[dict]) -> None:
         for tick in ticks if waiting else ():
             tick()
         time.sleep(0.2)
-    for entry in waiting:
-        if entry.get("kind"):
-            _stop_at_once(entry)
-        else:
-            with suppress(ProcessLookupError, PermissionError):
-                os.kill(entry["pid"], getattr(signal, "SIGKILL", signal.SIGTERM))
-    bare = [e for e in waiting if not e.get("kind")]
-    if left := _wait_gone([e["pid"] for e in bare], 10.0, {e["pid"]: e.get("ct") for e in bare}):
-        raise PauseRefused("gateway PID(s) " + ", ".join(map(str, sorted(left))) + " did not stop")
+    if waiting:
+        raise PauseRefused(f"{_names(waiting)} still draining after {budget:.0f}s; retry once in-flight turns finish")
+    if refusals:
+        raise PauseRefused("; ".join(refusals))
 
 
 def _disarm(entry: dict) -> None:
@@ -573,10 +585,8 @@ def _describe(token: dict) -> str:
 def pause_at_commit_point() -> str | None:
     """Stop this install's gateways before the first checkout move; once per run.
 
-    Never refuses the update: the pause is protection, not a gate. When it cannot complete
-    (discovery or the durable record fails, a stop fails), the gateways run through the swap and
-    the post-commit restart refreshes them, which is how POSIX updated before the pause existed.
-    Always ``None``; the caller's refusal branch stays for the contract it shares with Windows."""
+    A failed or overlong drain refuses the move. The sticky verdict also fences later
+    commit points in the same update; retrying requires a new run."""
     token = _RUN
     if token is None:
         return None
@@ -598,8 +608,7 @@ def _pause(token: dict) -> str | None:
         units, jobs, notices = _left_running(units, jobs)
         bare, more = _discover_bare({u["pid"] for u in units} | {j["pid"] for j in jobs})
     except Exception as exc:  # health: allow BLE001 -- a discovery that cannot finish stops nothing
-        print(f"  ⚠ Could not list the running gateways ({exc}); they keep running and are restarted after the update")
-        return None
+        return f"could not list running gateways ({exc}); the checkout was not changed"
     for line in notices + more:
         print(line)
     supervised = units + jobs
@@ -630,23 +639,25 @@ def _pause(token: dict) -> str | None:
                 pause_record.discharge(token)
         token.clear()
         token.update(before)
-        print(f"  ⚠ Could not record the gateways to pause ({exc}); they keep running and are restarted after the update")
-        return None
+        return f"could not record gateways to pause ({exc}); the checkout was not changed"
     # From here a refusal or a crash leaves the set owed: the command's own exit resume (registered
     # in ``_cmd_update_impl`` for this token), else the next launch's recovery, restarts it.
     token["posix_stopped"] = True
     try:
         _stop_gateways(token, supervised + bare)
-    except Exception as exc:  # health: allow BLE001 -- roll back: restart the stopped set, update unpaused
-        print(f"  ⚠ Could not pause every gateway ({exc}); restarting them, the update continues without the pause")
+    except BaseException as exc:  # health: allow BLE001 -- interruption must settle before cmd_update releases its fence
+        from hermes_cli.update_cmd_windows import _resume_windows_gateways_after_update
+        print(f"  ↷ Update deferred: {exc or type(exc).__name__}; the checkout was not changed")
         try:
-            resume_paused_set(token)
+            _resume_windows_gateways_after_update(token)
         except Exception as again:  # health: allow BLE001 -- still owed: completion restarts them after the deps
-            print(f"  ⚠ {again}; they restart once the dependencies are synced")
+            print(f"  ⚠ {again}; restart debt is retained for the next launch")
         for restarted in _RESTARTED.values():
             restarted.clear()  # back on the OLD code: the post-commit fleet restart must refresh them
         pause_record.sync(token)
-        return None
+        if not isinstance(exc, Exception):
+            raise
+        return f"gateway pause deferred ({exc}); the checkout was not changed"
     pause_record.sync(token)
     print(f"  ⏸ Paused for the update: {_describe(token)} (restarted once the dependencies are synced)")
     return None
@@ -682,6 +693,23 @@ def _await_root_locks(name: str, pid: int) -> None:
 
 def resume_paused_set(token: dict) -> None:
     """Start every paused runtime again; each leaves *token* only on its own verified start."""
+    from hermes_cli import update_pause_record as pause_record
+    # `systemctl start` on a live draining unit succeeds with its OLD PID. That
+    # is not a restart: retain its obligation until the recorded incarnation exits.
+    pause_record.drop_never_stopped(token)
+    draining = pause_record.split_draining(token)
+    try:
+        _resume_exited_set(token)
+    finally:
+        token["posix_units"] = [*token.get("posix_units", []), *draining["posix_units"]]
+        token["unmapped"] = [*token.get("unmapped", []), *draining["unmapped"]]
+        token["unmapped_pids"] = [e["pid"] for e in token["unmapped"]]
+        token["profiles"] = {**token.get("profiles", {}), **draining["profiles"]}
+        token["resume_needed"] = bool(token["posix_units"] or token["unmapped"] or token["profiles"])
+
+
+def _resume_exited_set(token: dict) -> None:
+    """Resume only exited incarnations; the caller keeps live drain debt even on interruption."""
     failures: list[str] = []
     restarted: list[str] = []
     kept_units = []
@@ -717,13 +745,13 @@ def resume_paused_set(token: dict) -> None:
             failures.append(str(exc))
             kept_bare.append(entry)
     token["unmapped"] = kept_bare
-    token["unmapped_pids"] = [e["pid"] for e in kept_bare]
+    token["unmapped_pids"] = [e["pid"] for e in token["unmapped"]]
     token["profiles"] = {}
     if restarted:
         print(f"  ▶ Restarted paused gateway(s): {', '.join(restarted)}")
     if failures:
         raise RuntimeError("Could not restart every paused gateway: " + "; ".join(failures))
-    token["resume_needed"] = False
+    token["resume_needed"] = bool(token["posix_units"] or token["unmapped"] or token["profiles"])
     token["posix_stopped"] = False
 
 

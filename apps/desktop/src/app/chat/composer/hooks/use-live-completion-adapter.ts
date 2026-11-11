@@ -15,6 +15,8 @@ export interface CompletionEntry {
   /** Optional completion-action id. When set, picking the item runs that action
    *  (e.g. opening an overlay) instead of inserting a chip + waiting for submit. */
   action?: string
+  /** From a `composer.atCompletions` source that set `multiWord`. */
+  multiWord?: boolean
 }
 
 export interface CompletionPayload {
@@ -37,9 +39,15 @@ export function useLiveCompletionAdapter(options: {
    *  an unchanged query would keep serving what it fetched before the source
    *  changed, because the adapter de-dupes on the query alone. */
   epoch?: number | string
+  /** Rows the caller can answer synchronously for a query (in-memory sources).
+   *  While the fetch for a new query is debounced or in flight, `search` shows
+   *  these instead of the previous query's rows, so they appear on the same
+   *  keystroke rather than after the round trip. The fetched answer replaces
+   *  them when it lands. An empty answer keeps the held rows. */
+  instant?: (query: string) => CompletionEntry[]
   toItem: (entry: CompletionEntry, index: number) => Unstable_TriggerItem
 }): { adapter: Unstable_TriggerAdapter; loading: boolean } {
-  const { enabled, debounceMs = 60, epoch = 0, fetcher, isCached, toItem } = options
+  const { enabled, debounceMs = 60, epoch = 0, fetcher, instant, isCached, toItem } = options
 
   const [state, setState] = useState<{ query: string; items: Unstable_TriggerItem[] }>({
     query: EMPTY_QUERY,
@@ -138,20 +146,46 @@ export function useLiveCompletionAdapter(options: {
     [cancelTimer, debounceMs, enabled, fetcher, isCached, toItem]
   )
 
-  const adapter = useMemo<Unstable_TriggerAdapter>(
-    () => ({
+  const adapter = useMemo<Unstable_TriggerAdapter>(() => {
+    // `search` runs on every render of the popover; compute the instant rows
+    // once per query.
+    let held: { query: string; items: Unstable_TriggerItem[] } | null = null
+
+    const instantItems = (query: string): Unstable_TriggerItem[] => {
+      if (!instant || !enabled) {
+        return []
+      }
+
+      if (held?.query !== query) {
+        let entries: CompletionEntry[] = []
+
+        try {
+          entries = instant(query)
+        } catch {
+          entries = []
+        }
+
+        held = { query, items: entries.map((entry, index) => toItem(entry, index)) }
+      }
+
+      return held.items
+    }
+
+    return {
       categories: () => [],
       categoryItems: () => [],
       search: (query: string) => {
-        if (query !== state.query) {
-          scheduleFetch(query)
+        if (query === state.query) {
+          return state.items
         }
 
-        return state.items
+        scheduleFetch(query)
+        const early = instantItems(query)
+
+        return early.length > 0 ? early : state.items
       }
-    }),
-    [scheduleFetch, state]
-  )
+    }
+  }, [enabled, instant, scheduleFetch, state, toItem])
 
   return { adapter, loading }
 }

@@ -14,6 +14,8 @@ import time
 import weakref
 from urllib.parse import unquote
 
+from hermes_cli.kanban_lifecycle_diagnostics import LifecycleLock
+
 _lock = threading.RLock()
 _connections: weakref.WeakSet = weakref.WeakSet()
 _reader_caches: list = []
@@ -30,11 +32,11 @@ def lifecycle_lock(database):
     """
     path = _path(database)
     if path is None:
-        return threading.RLock()
+        return LifecycleLock()
     with _lock:
         lock = _lifecycle_locks.get(path)
         if lock is None:
-            lock = threading.RLock()
+            lock = LifecycleLock()
             _lifecycle_locks[path] = lock
         return lock
 
@@ -46,10 +48,11 @@ class BoardLifecycleBusy(sqlite3.OperationalError):
     busy board to its last good answer) treats it as "busy, retry later" rather than a broken board
     (kanban-359833be53: without the code one busy board marked every sidebar row ``kanban_unknown``)."""
 
-    def __init__(self, message="database is locked: board lifecycle is busy"):
+    def __init__(self, message="database is locked: board lifecycle is busy", *, diagnostic=None):
         super().__init__(message)
         self.sqlite_errorcode = sqlite3.SQLITE_BUSY
         self.sqlite_errorname = "SQLITE_BUSY"
+        self.diagnostic = diagnostic or {}
 
 
 def is_busy(exc) -> bool:
@@ -61,8 +64,13 @@ def is_busy(exc) -> bool:
 def lifecycle_access(database, timeout):
     """A reader keeps its own busy budget even behind a long-timeout opener."""
     lock = lifecycle_lock(database)
+    started = time.monotonic()
     if not lock.acquire(timeout=max(0.0, float(timeout))):
-        raise BoardLifecycleBusy()
+        raise BoardLifecycleBusy(diagnostic={
+            "pid": os.getpid(), "sampled_at": time.time(),
+            "wait_ms": round((time.monotonic() - started) * 1000, 3),
+            **lock.snapshot(),
+        })
     try:
         yield lock
     finally:

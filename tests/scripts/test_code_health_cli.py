@@ -324,12 +324,97 @@ def test_hooks_prefer_the_repo_virtualenv_over_path_python(tmp_path):
     _git(repo, "add", "--", "pkg/b.py")
     proc = _sh(repo, "git", "commit", "-q", "-m", "venv", env=env)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    # control: without a virtualenv the hook falls back to PATH's python3
-    (repo / ".venv").unlink()
-    _write(repo, {"pkg/b.py": "def b():\n    return 3\n"})
+    # Without a virtualenv a python3 that cannot run scripts/check is passed over, not used:
+    # test_hooks_without_a_virtualenv_pass_over_a_path_python3_older_than_3_11.
+
+
+def _shim(path: Path, body: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def _old_python3(fake: Path) -> None:
+    """macOS's /usr/bin/python3 (3.9) as the hook sees it: fails the 3.11 probe, still decodes
+    JSON (as any python does), and can run nothing of scripts/check."""
+    for name in ("python3", "python"):
+        _shim(fake / name, 'case "$2" in\n  *version_info*) exit 1 ;;\n'
+              f"  *json.load*) exec '{sys.executable}' \"$@\" ;;\nesac\n"
+              "echo 'wrong interpreter' >&2\nexit 1")
+
+
+def _recording_python(path: Path, record: Path) -> Path:
+    return _shim(path, f"echo \"$0\" >> '{record}'\nexec '{sys.executable}' \"$@\"")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shims stand in for the interpreters")
+def test_hooks_without_a_virtualenv_pass_over_a_path_python3_older_than_3_11(tmp_path):
+    """The Macs' pm-managed checkouts have no venv/: the hook used to run whatever python3 came
+    first on PATH (an agent shell's /usr/bin/python3 3.9), so scripts/check refused every push.
+    Now it takes the first python on PATH that is 3.11+, under a versioned name too."""
+    repo = _engine_repo(tmp_path)
+    assert _check(repo, "--install-hook", "pre-commit").returncode == 0
+    _old_python3(tmp_path / "old")
+    record = tmp_path / "seen"
+    newer = _recording_python(tmp_path / "new bin" / "python3.14", record)  # a space, as in "Hermes Python.app"
+    env = _env()
+    env["HERMES_HOME"] = str(tmp_path / "hermes-home")  # no installed launcher to borrow
+    env["PATH"] = os.pathsep.join([str(tmp_path / "old"), str(newer.parent), env["PATH"]])
+    _write(repo, {"pkg/b.py": "def b():\n    return 2\n"})
     _git(repo, "add", "--", "pkg/b.py")
     proc = _sh(repo, "git", "commit", "-q", "-m", "path", env=env)
-    assert proc.returncode != 0 and "wrong interpreter" in proc.stderr
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "wrong interpreter" not in proc.stderr and "3.11" not in proc.stderr, proc.stderr
+    assert str(newer) in record.read_text(encoding="utf-8").splitlines()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shims stand in for the interpreters")
+def test_hooks_with_no_python_3_11_anywhere_still_run_the_bare_python3(tmp_path):
+    """Last resort: nothing passes the probe, so PATH's python3 runs scripts/check, whose own
+    guard then explains the 3.11 requirement (test_check_refuses_old_python_before_importing_anything)."""
+    repo = _engine_repo(tmp_path)
+    assert _check(repo, "--install-hook", "pre-commit").returncode == 0
+    old = tmp_path / "old"
+    _old_python3(old)
+    for tool in ("git", "bash", "mktemp", "rm", "sed"):  # what the hook runs, and no other python
+        (old / tool).symlink_to(shutil.which(tool))
+    env = _env()
+    env["HERMES_HOME"] = str(tmp_path / "hermes-home")
+    env["PATH"] = str(old)
+    _write(repo, {"pkg/b.py": "def b():\n    return 2\n"})
+    _git(repo, "add", "--", "pkg/b.py")
+    proc = _sh(repo, "git", "commit", "-q", "-m", "old", env=env)
+    assert proc.returncode != 0 and "wrong interpreter" in proc.stderr, proc.stdout + proc.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shims stand in for the interpreters")
+@pytest.mark.parametrize("where, store", [
+    ("main_checkout", "store"), ("installed_hermes", "store"),
+    ("main_checkout", "st\u00f6re python"),  # json.dumps escapes it: \\u00f6
+])
+def test_hooks_without_a_virtualenv_take_the_launchers_interpreter(tmp_path, where, store):
+    """A pm-managed checkout's .hermes/bin/hermes names the pinned interpreter
+    (`--print-runtime-command`, a JSON list); the hook runs that before searching PATH."""
+    repo = _engine_repo(tmp_path)
+    assert _check(repo, "--install-hook", "pre-commit").returncode == 0
+    _old_python3(tmp_path / "old")
+    record = tmp_path / "seen"
+    pinned = _recording_python(tmp_path / store / "python3", record)
+    hermes_home = tmp_path / "hermes-home"
+    root = repo if where == "main_checkout" else hermes_home / "hermes-agent"
+    argv = json.dumps([str(pinned), "-I", "-c", "pass"])  # what hermes_cli/_launchers.py prints
+    assert "'" not in argv
+    _shim(root / ".hermes/bin/hermes", f"[ \"$1\" = --print-runtime-command ] || exit 64\nprintf '%s\\n' '{argv}'")
+    env = _env()
+    env["HERMES_HOME"] = str(hermes_home)
+    env["PATH"] = os.pathsep.join([str(tmp_path / "old"), env["PATH"]])
+    _write(repo, {"pkg/b.py": "def b():\n    return 2\n"})
+    _git(repo, "add", "--", "pkg/b.py")
+    proc = _sh(repo, "git", "commit", "-q", "-m", "launcher", env=env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "wrong interpreter" not in proc.stderr, proc.stderr
+    assert str(pinned) in record.read_text(encoding="utf-8").splitlines()
 
 
 @pytest.mark.parametrize("where", ["main_checkout", "installed_hermes"])

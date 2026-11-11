@@ -203,7 +203,7 @@ def alert_on_storm(conn: sqlite3.Connection, *, board: Optional[str] = None, now
     walls = ", ".join(f"{p} until {time.strftime('%H:%M', time.localtime(u))}" for p, u in active_walls(now=now).items())
     return _kb.create_task(
         conn, title=f"{host}: {n} rate_limited kanban runs in the last hour (provider quota wall)",
-        body=(f"More than {STORM_THRESHOLD} workers exited on a provider quota wall in an hour on {host}. "
+        body=(f"More than {STORM_THRESHOLD} workers exited on a provider quota wall in an hour on this host ({host}). "
               f"Known walls: {walls or 'none recorded'}. Check `kanban.default_model`/`default_provider`, the "
               "provider's usage limit, and cards pinned to the walled provider (`require_model`)."),
         assignee="default", created_by="rate-limit-alert", priority=80, idempotency_key=f"rate_limit_storm:{host}:{day}",

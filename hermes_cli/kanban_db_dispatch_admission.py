@@ -28,6 +28,11 @@ def lane_admission_refused(conn: sqlite3.Connection, task_id: str, assignee: str
     if (code := dispatch_refusal(conn, task_id, assignee, spawn_fn, dry_run=dry_run)) is not None:
         result.capsule_refused.append((task_id, code))
         return True
+    # No-progress budget: N runs in a row that only parked again leave the lane (kanban_no_progress). [daveey]
+    from hermes_cli.kanban_no_progress import hold as no_progress_hold
+    if not dry_run and (held := no_progress_hold(conn, task_id)) is not None:
+        result.no_progress_held.append((task_id, held))
+        return True
     return False
 
 

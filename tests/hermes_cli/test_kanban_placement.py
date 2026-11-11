@@ -107,7 +107,7 @@ def test_carried_options_are_json_typed_and_skip_defaults():
         "completion_contract": "local-only", "idempotency_key": "k", "requires": "ssh:mini",
         "initial_status": "blocked"})
     assert got == {"skills": ["x"], "goal_mode": True, "max_runtime_seconds": 900, "goal_max_turns": 3,
-                   "model": "m", "provider": "p", "requires": ["ssh:mini"]}
+                   "model": "m", "provider": "p", "requires": ["ssh:mini"], "idempotency_key": "k"}
     assert kp.carried_options({"title": "t"}) == {}
     with pytest.raises(ValueError):
         kp.carried_options({"max_runtime_seconds": "2h"})
@@ -787,6 +787,58 @@ def test_pin_with_an_origin_session_is_refused_not_created_locally(mac):
     assert _local_count() == 0
 
 
+@pytest.mark.parametrize("worker", [False, True])
+@pytest.mark.parametrize("pin", [None, "auto"])
+def test_origin_bound_portable_tool_card_enrolls(mac, monkeypatch, worker, pin):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    if worker:
+        with kbc.connect_closing() as conn:
+            parent = kb.create_task(conn, title="Coordinator", assignee="default")
+            claim = kb.claim_task(conn, parent)
+        monkeypatch.setenv("HERMES_KANBAN_TASK", parent)
+        monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(claim.current_run_id))
+        monkeypatch.setattr(kt, "_is_dispatcher_owned_worker", lambda: True)
+    monkeypatch.setattr(kp, "config", lambda: {"worker_pools": {"macbook": ["worker-1"]}})
+    out = json.loads(kt._handle_create({"title": "Analyze public data", "requires": [],
+                                        "origin_session": "hub:abc123", "placement": pin}))
+    assert out.get("ok"), out
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, out["task_id"]).placement_policy == "worker-first-v1"
+        if worker:
+            created = next(e for e in kb.list_events(conn, out["task_id"]) if e.kind == "created")
+            assert created.payload["creator_task_id"] == parent
+    assert out["placement"]["placement_policy"] == "worker-first-v1"
+    assert "worker pool" in out["runs_where"]
+    assert not mac["calls"]
+
+
+@pytest.mark.parametrize("surface", ["cli", "tool", "origin-tool"])
+def test_current_nondefault_board_does_not_enroll(mac, monkeypatch, surface):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban as cli
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    kb.create_board("other")
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "other")
+    monkeypatch.setattr(kp, "config", lambda: {"worker_pools": {"macbook": ["worker-1"]}})
+    if surface == "cli":
+        output = cli.run_slash("--board other create 'Analyze public data' --assignee default")
+        assert "t_" in output, output
+    else:
+        args = {"title": "Analyze public data", "requires": []}
+        if surface == "origin-tool":
+            args["origin_session"] = "hub:abc123"
+        out = json.loads(kt._handle_create(args))
+        assert out.get("ok"), out
+    with kbc.connect_closing(board="other") as conn:
+        rows = conn.execute("SELECT placement_policy FROM tasks").fetchall()
+        assert len(rows) == 1 and rows[0][0] is None, output if surface == "cli" else out
+
+
 def test_pin_with_a_structural_limit_is_refused_through_the_tool(mac):
     from tools import kanban_tools as kt
     out = json.loads(kt._handle_create({"title": "x", "placement": "hub", "workspace_kind": "dir",
@@ -1034,6 +1086,7 @@ def _forwarder(conn, tid, mac, monkeypatch, *, check=(1, "x"), await_tid=HUB_TID
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_placement_forward as kpf
     from hermes_cli import kanban_wait_check as kwait
+
     monkeypatch.setattr(kwait, "check_remote", lambda gw, kind, tid_, **kw: (1, f"{tid_} ready"))
     claimed = kb.claim_task(conn, tid)
     assert claimed is not None

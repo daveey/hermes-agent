@@ -16,7 +16,7 @@ def test_parse_sums_user_through_steal_and_never_adds_guest_twice():
     total, idle = cm.parse_proc_stat(stat(user=100, nice=10, system=20, idle=500, iowait=30, irq=5, softirq=5,
                                           steal=30, guest=90, guest_nice=9))
     assert total == 100 + 10 + 20 + 500 + 30 + 5 + 5 + 30
-    assert idle == 500 + 30  # iowait is not busy; steal is (unavailable to us)
+    assert idle == 500 + 30 + 10  # iowait and nice are not admission busy; steal is unavailable
 
 
 @pytest.mark.parametrize("text", ["", "intr 1\n", "cpu  1 2 x 4\n", "cpu  1 2 3\n", "cpu  -1 2 3 4 5 6 7 8\n"])
@@ -60,6 +60,13 @@ class FakeHost:
 
 def sample(host, **kw):
     return cm.sample(read=host.read, clock=host.clock, wall=host.wall_clock, sleep=host.sleep, linux=True, **kw)
+
+
+@pytest.mark.parametrize("nice,user,allowed", [(70, 10, True), (0, 80, False)])
+def test_admission_uses_non_nice_busy(nice, user, allowed):
+    out = sample(FakeHost([stat(), stat(user=user, nice=nice, idle=20)]))
+    assert out is not None
+    assert cm.below(out["cpu_busy_pct"], 50) is allowed
 
 
 def test_sample_reports_complete_triple():

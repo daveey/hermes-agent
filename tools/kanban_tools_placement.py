@@ -9,6 +9,22 @@ from tools.registry import tool_error
 logger = logging.getLogger(__name__)
 
 
+def _effective_board_args(args, origin_intent):
+    from hermes_cli import kanban_db as kb
+    return args if origin_intent is not None else {**args, "board": args.get("board") or kb.get_current_board()}
+
+
+def _origin_enrollment(args, origin, marker, **effective):
+    """Chat ownership pins storage, not execution; never forward an origin-bound card."""
+    if origin is None:
+        return marker
+    from hermes_cli import kanban_placement as kp
+    from hermes_cli.kanban_worker_placement import creation_decision
+    cfg, gateway = kp.config(), kp.reg.self_gateway()
+    return creation_decision({**args, **effective}, cfg, gateway,
+                             kp.canonical_pin(args.get("placement") or "auto", gateway, cfg), None)
+
+
 def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:
     """Return a session id only when it is a real chat: present in this profile's state.db and not a
     ``kanban.placement`` creator placeholder (a stray notice can give the placeholder a state.db row,

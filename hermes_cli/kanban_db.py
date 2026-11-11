@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from hermes_cli import kanban_db_sync as _sync
-from hermes_cli.kanban_worker_placement import validate_creation
+from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
 from hermes_cli import kanban_placement_forward as _placement_fwd  # stdlib-only at import: no cycle
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
 from hermes_cli.kanban_db_dispatch_queries import DISPATCH_ORDER  # stdlib-only at import: no cycle
@@ -1228,6 +1228,7 @@ def create_task(
     requires: Optional[list[str]] = None,
     lint_blocked: bool = True, runs_on: Optional[Iterable[str]] = None, require_declaration: bool = False,
     placement_policy: Optional[str] = None,
+    placement_checked: bool = False,
     insert_guard: Optional[Callable[[sqlite3.Connection], None]] = None, placement_audit: Optional[dict] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
@@ -1307,8 +1308,7 @@ def create_task(
     project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
         conn, project_id, project_source_task_id, workspace_kind, workspace_path
     )
-    validate_creation(placement_policy, runs_on=runs_on, workspace_kind=workspace_kind,
-                      workspace_path=workspace_path, project=project_id, origin_intent=None, board=board)
+    placement_policy, placement_audit = resolved_db_placement(locals())
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
 
@@ -2158,7 +2158,7 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     # [daveey] Refuse a held fence, and a lock-free hub CPU advisory (final gate is under the lock), before the lease.
-    if admission_hold_set() or hub_cpu_advisory(task_id):
+    if admission_hold_set(task_id) or hub_cpu_advisory(task_id):
         return None
     gate = _sync.claim_gate(conn, task_id, expires)
     if gate.deferred:
@@ -2198,7 +2198,7 @@ def claim_review_task(
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    if admission_hold_set() or hub_cpu_advisory(task_id):  # [daveey] before the Board-service lease (see claim_task)
+    if admission_hold_set(task_id) or hub_cpu_advisory(task_id):  # [daveey] before the Board-service lease (see claim_task)
         return None
     gate = _sync.claim_gate(conn, task_id, expires, lane="review")
     if gate.deferred:
@@ -3827,12 +3827,6 @@ def specify_triage_task(
     return True
 
 
-def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via: Optional[str] = None,
-                 event_extra: Optional[dict] = None) -> bool:
-    from hermes_cli.kanban_db_archive import archive_task as archive
-    return archive(conn, task_id, signal_fn=signal_fn, via=via, event_extra=event_extra)
-
-
 def _delete_task_relations(conn: sqlite3.Connection, task_id: str) -> None:
     """Delete every row referencing ``task_id`` (schema has no ON DELETE CASCADE)."""
     conn.execute("DELETE FROM task_links WHERE parent_id = ? OR child_id = ?", (task_id, task_id))
@@ -3901,7 +3895,7 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str, *, recovery_tai
     _ctx_prior_attempts(lines, conn, task_id, now)
     _ctx_parent_results(lines, conn, task_id, now)
     _ctx_role_history(lines, conn, task, now)
-    _ctx_comments(lines, list_comments(conn, task_id), now)
+    _ctx_comments(lines, conn, task_id, now)
     from hermes_cli.kanban_worker_recovery import build_recovery_context
     return "\n".join(lines).rstrip() + "\n" + (build_recovery_context(conn, task_id) if recovery_tail else "")
 
@@ -4184,6 +4178,7 @@ def current_run_started_ats(conn: sqlite3.Connection, task_ids: Iterable[str]) -
 # --- Split modules (imported at the tail: they import this module as ``_kb``) ---
 from hermes_cli.kanban_db_comment_ids import (
     add_comment, agent_comment_ids, comment_id_before_run_start, delivered_comment_ids, own_comment_ids, writer_provenance)
+from hermes_cli.kanban_db_archive import archive_task
 from hermes_cli.kanban_db_schedule import schedule_task
 from hermes_cli.kanban_db_edit import PriorityLowerRefused, edit_task
 from hermes_cli.kanban_reason_comment import _awaiting_human_answer

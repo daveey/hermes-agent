@@ -1830,7 +1830,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
         or _m()._desktop_dist_exists(desktop_dir)
         or bool(_m()._installed_desktop_apps()))
 
-    use_zip_update, git_cmd, is_fork = _prepare_git_command(checkout_move=_moves_for(_windows_gateway_resume))
+    # Lockfile/EOL churn changes no executable semantics; keep its cleanup before
+    # fetch without stopping gateways. Stash/switch/merge retain the pause gate.
+    use_zip_update, git_cmd, is_fork = _prepare_git_command(
+        checkout_move=_moves_for(_windows_gateway_resume, pause_gate=False))
 
     completion_request = _source_completion_request(
         opts, _pre_update_plan, pre_update_snapshot_id, _windows_gateway_resume,

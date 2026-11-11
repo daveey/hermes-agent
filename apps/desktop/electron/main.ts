@@ -2201,7 +2201,7 @@ function rememberLog(chunk) {
 // Windows AppHang report can be correlated without changing tray semantics.
 const mainProcessLagWatchdog = createMainProcessLagWatchdog({
   cadenceMs: 1_000,
-  thresholdMs: 2_000,
+  thresholdMs: 1_000,
   now: Date.now,
   log: rememberLog,
   setInterval,

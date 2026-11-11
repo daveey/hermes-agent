@@ -560,7 +560,42 @@ def recover_interrupted_executions() -> int:
     for record in recovered:
         _emit_execution_state(record)
     _end_interrupted_sessions(recovered)
+    if startup_recovery_active():
+        _reschedule_interrupted(recovered)
     return changed
+
+
+_STARTUP_RECOVERY = threading.local()
+
+
+def startup_recovery_active() -> bool:
+    """Whether this thread is inside ``startup_recovery()``."""
+    return bool(getattr(_STARTUP_RECOVERY, "active", False))
+
+
+@contextmanager
+def startup_recovery() -> Iterator[None]:
+    """Mark the recovery pass a fresh scheduler lifecycle runs at startup (cron/scheduler_provider.py):
+    only it reruns attempts its predecessor was cut off in (cron/restart_rerun.py). The periodic
+    dead-owner reap, the cronjob tool and the external-worker waiter only settle the ledger, so a
+    `hermes cron run` killed under a live gateway is not rerun as if a restart had cut it off."""
+    previous = startup_recovery_active()
+    _STARTUP_RECOVERY.active = True
+    try:
+        yield
+    finally:
+        _STARTUP_RECOVERY.active = previous
+
+
+def _reschedule_interrupted(records: list[dict[str, Any]]) -> None:
+    """Rerun each job whose attempt lost its owner process once, right away (cron/restart_rerun.py).
+    Only the dead-owner branch qualifies: a wedged live owner was not cut off by a restart."""
+    try:
+        from cron.restart_rerun import reschedule_interrupted_executions
+
+        reschedule_interrupted_executions(records, _OWNER_GONE_REASON)
+    except Exception:  # health: allow BLE001 -- recovery boundary: the ledger is already settled
+        logger.warning("cron: rescheduling interrupted executions failed", exc_info=True)
 
 
 def _end_interrupted_sessions(records: list[dict[str, Any]]) -> None:

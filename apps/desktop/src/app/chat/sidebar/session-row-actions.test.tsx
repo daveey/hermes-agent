@@ -197,4 +197,52 @@ describe('SidebarSessionRow actions', () => {
     expect(onArchive).toHaveBeenCalledTimes(1)
     expect(onResume).not.toHaveBeenCalled()
   })
+
+  it.each([false, true])('archives in one click from the hover button (card=%s) without resuming', card => {
+    const onArchive = vi.fn()
+    const onResume = vi.fn()
+
+    render(
+      <SidebarSessionRow
+        card={card}
+        isPinned={false}
+        isSelected={false}
+        onArchive={onArchive}
+        onDelete={vi.fn()}
+        onPin={vi.fn()}
+        onResume={onResume}
+        onToggleUnread={vi.fn()}
+        session={session}
+        unread={false}
+      />
+    )
+
+    const button = screen.getByRole('button', { name: 'Archive' })
+    // Sits right before the kebab in the hover cluster.
+    expect(button.nextElementSibling?.getAttribute('aria-label')).toBe('Session actions')
+    fireEvent.pointerDown(button, { button: 0, pointerType: 'mouse' })
+    fireEvent.click(button)
+
+    expect(onArchive).toHaveBeenCalledTimes(1)
+    expect(onResume).not.toHaveBeenCalled()
+  })
+
+  it('shows no hover archive button on an already-archived row', () => {
+    render(
+      <SidebarSessionRow
+        isPinned={false}
+        isSelected={false}
+        onArchive={vi.fn()}
+        onDelete={vi.fn()}
+        onPin={vi.fn()}
+        onResume={vi.fn()}
+        onToggleUnread={vi.fn()}
+        session={{ ...session, archived: true } as SessionInfo}
+        unread={false}
+      />
+    )
+
+    expect(screen.queryByRole('button', { name: 'Archive' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Session actions' })).toBeTruthy()
+  })
 })

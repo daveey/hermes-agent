@@ -487,7 +487,9 @@ class TestPooledRead:
         finally:
             db.close()
 
-    def test_read_confirm_timeout_latches_without_replay(self, tmp_path, confirms, monkeypatch):
+    def test_read_confirm_timeout_fails_read_without_replay_or_latch(self, tmp_path, confirms, monkeypatch):
+        scheduled = []
+        monkeypatch.setattr(cc, "schedule_background_confirmation", lambda *args: scheduled.append(args))
         db = SessionDB(db_path=tmp_path / "state.db")
         try:
             db.create_session("s1", source="cli")
@@ -497,8 +499,10 @@ class TestPooledRead:
                 db._read_one("SELECT id FROM sessions WHERE id = ?", ("s1",))
             assert calls["n"] == 1
             assert [c["result"].outcome for c in confirms] == ["timeout"]
-            assert storage_state(db.db_path) == "corrupt"
-            assert "confirm=timeout" in _reason(db.db_path)
+            assert storage_state(db.db_path) == "ok"
+            assert len(scheduled) == 1
+            assert "confirm=timeout" in scheduled[0][1]
+            db.append_message(session_id="s1", role="user", content="still writable")
         finally:
             db.close()
 

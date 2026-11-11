@@ -293,7 +293,7 @@ def test_sigterm_flush_handler_journals_before_chaining(home, registry, backend,
     assert marker is not None and [j["session_id"] for j in marker["killed_jobs"]] == ["proc_notify"]
 
 
-@pytest.mark.parametrize("pending", ["refused", "held", "queue"])
+@pytest.mark.parametrize("pending", ["refused", "held", "queue", "registry_park", "notification_park"])
 def test_finished_notice_survives_orderly_restart(home, registry, backend, monkeypatch, pending):
     from tools.process_registry_notifications import format_process_notification
     from tui_gateway.exit_job_receipts import journal_background_jobs_before_exit
@@ -303,9 +303,14 @@ def test_finished_notice_survives_orderly_restart(home, registry, backend, monke
     job.append_output("CI passed: release verified\n")
     registry._finish_exited(job, 0)
     session = backend.sessions["sid"] = _session(home, _notif_held=[])
-    if pending == "held":
-        session["_notif_held"].append(registry.completion_queue.get_nowait())
-    elif pending == "refused":
+    from tui_gateway import notification_park
+    monkeypatch.setattr(notification_park, "_parked", [])
+    destinations = {"registry_park": registry.park_unowned_event,
+                    "notification_park": notification_park.park,
+                    "held": session["_notif_held"].append}
+    if pending in destinations:
+        assert destinations[pending](registry.completion_queue.get_nowait()) is not False
+    if pending == "refused":
         event = registry.completion_queue.get_nowait()
         monkeypatch.setattr(server, "_notif_claim_turn", lambda s: True)
         monkeypatch.setattr(server, "_notif_submit", lambda *a, **kw: False)
@@ -329,8 +334,9 @@ def test_finished_notice_survives_orderly_restart(home, registry, backend, monke
     assert "were running" not in text and "jobs stopped" not in text.lower()
 
 
+@pytest.mark.parametrize("pending", ["queue", "registry_park", "notification_park"])
 @pytest.mark.parametrize("control", ["stop", "quiet", "foreign_session", "consumed", "delivered"])
-def test_finished_notice_shutdown_controls(home, registry, backend, monkeypatch, control):
+def test_finished_notice_shutdown_controls(home, registry, backend, monkeypatch, control, pending):
     from tools.process_registry_notifications import format_process_notification
 
     job = _job("proc_done", owner="turn-1", command="true", notify=True)
@@ -351,7 +357,14 @@ def test_finished_notice_shutdown_controls(home, registry, backend, monkeypatch,
      "consumed": lambda: registry._completion_consumed.add(job.id),
      "delivered": delivered}[control]()
     # A stale duplicate must not resurrect an acknowledged or suppressed completion.
-    registry.completion_queue.put(event)
+    if pending == "registry_park":
+        registry.park_unowned_event(event)
+    elif pending == "notification_park":
+        from tui_gateway import notification_park
+        monkeypatch.setattr(notification_park, "_parked", [])
+        assert notification_park.park(event)
+    else:
+        registry.completion_queue.put(event)
     server._shutdown_sessions()
     assert read_turn_marker(home, "session-key") is None
     assert read_turn_marker(home / "other-profile", "session-key") is None
@@ -739,6 +752,83 @@ def test_held_events_taken_for_routing_stay_in_custody(home, registry, backend):
         assert [(j["session_id"], j["exit_code"]) for j in receipts] == [("proc_done", 5)]
     finally:
         release(taken)
+
+
+@pytest.mark.parametrize("park", ["registry", "notification"])
+def test_claimed_parked_notice_keeps_exit_custody(home, registry, backend, monkeypatch, park):
+    from tools.process_registry_awaiting import pending_events, release
+    from tui_gateway import notification_park
+    _, event = _finished_event(registry, exit_code=6)
+    backend.sessions["sid"] = _session(home)
+    monkeypatch.setattr(notification_park, "_parked", [])
+    if park == "registry":
+        registry.park_unowned_event(event)
+        claimed = registry.take_parked_events(lambda evt: True)
+    else:
+        assert notification_park.park(event)
+        claimed = notification_park.claim(lambda evt: True)
+    try:
+        assert claimed == [event]
+        assert event in pending_events(registry.completion_queue)
+        server._shutdown_sessions()
+        marker = read_turn_marker(home, "session-key")
+        assert marker is not None
+        assert [(j["session_id"], j["exit_code"]) for j in marker["killed_jobs"]] == [("proc_done", 6)]
+    finally:
+        release(claimed)
+        if park == "notification":
+            notification_park.unhold(claimed)
+    assert not any(e is event for e in pending_events(registry.completion_queue))
+
+
+@pytest.mark.parametrize("disposal", ["clear", "expire"])
+def test_park_disposal_does_not_release_an_independent_hold(registry, monkeypatch, disposal):
+    from tools.process_registry_awaiting import hold, pending_events, release
+    from tui_gateway import notification_park
+    monkeypatch.setattr(notification_park, "_parked", [])
+    event = {"type": "completion", "session_id": "proc_hold", "owner_task_id": "owner"}
+    hold([event])
+    try:
+        assert notification_park.park(event)
+        if disposal == "clear":
+            notification_park.clear()
+        else:
+            monkeypatch.setattr(notification_park, "time", types.SimpleNamespace(monotonic=lambda: float("inf")))
+            assert notification_park.claim(lambda evt: True) == []
+        assert any(e is event for e in pending_events(registry.completion_queue))
+    finally:
+        release([event])
+
+
+def test_registry_park_claim_rechecks_presence(registry):
+    from tools.process_registry_awaiting import release
+    event = {"session_id": "proc_claim", "owner_task_id": "owner"}
+    registry.park_unowned_event(event)
+    inner = []
+
+    def owns(evt):
+        inner.extend(registry.take_parked_events(lambda e: True))
+        return True
+
+    try:
+        assert registry.take_parked_events(owns) == []
+        assert inner == [event]
+    finally:
+        release(inner)
+
+
+def test_registry_park_routing_releases_custody_on_error(home, registry, backend, monkeypatch):
+    from tools.process_registry_awaiting import pending_events
+    _, event = _finished_event(registry)
+    session = backend.sessions["sid"] = _session(home)
+    registry.park_unowned_event(event)
+
+    def handle(events, deferred):
+        assert any(e is event for e in pending_events(registry.completion_queue))
+        raise RuntimeError("routing refused")
+
+    assert server._notif_take_parked("sid", session, registry, handle) == 0
+    assert not any(e is event for e in pending_events(registry.completion_queue))
 
 
 def test_natural_exit_between_running_snapshot_and_kill_reports_real_result(home, registry, backend, monkeypatch):

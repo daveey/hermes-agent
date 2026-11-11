@@ -22,7 +22,8 @@ from hermes_cli.config import cfg_get, load_config
 from hermes_cli.kanban_capabilities import check_tool_create, declaration_required
 from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc
 from tools.kanban_tools_placement import (_local_placement, _machine_placement, _marker_placement_fields, _persisted_session_id,
-                                          _create_session_id, _placement_origin, _placement_refused, _runs_where)
+                                          _create_session_id, _placement_origin, _placement_refused, _runs_where,
+                                          _effective_board_args, _origin_enrollment)
 from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_park_args import (_blocker_id_arg, _clear_blocker_arg, _blocker_scope_args, _park_guard,
                                           _wake_check_args, _wake_check_echo)
@@ -1513,7 +1514,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         if not placed.get("ok"):
             logger.warning("kanban placement: %s refused the card (%s)",
                            target, placed.get("error"))
-            if kp.explicit_foreign_pin(view, reg.self_gateway()):
+            if placed.get("fatal") or kp.explicit_foreign_pin(view, reg.self_gateway()):
                 return _placement_refused(target, f"{target} refused the card: {placed.get('error')}"), None
             return None, None
         rid = placed["request_id"]
@@ -1535,8 +1536,8 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                        note=note), None
         note = (f"{retry}The card IS created: it is queued on {target} as request {rid} and {target} makes the "
                 f"card from it (it runs there, not here: {decision['why']}). Do NOT call kanban_create again "
-                "for this card: an identical call returns this same request, and any changed call creates a "
-                f"second, duplicate card. Its task id appears once {target} applies the request "
+                "for this card: an identical call returns this same request. Changed calls with an explicit "
+                f"creation key are refused; without one they may duplicate. Its task id appears when {target} applies it "
                 + ("(this chat's tasks, " if session_id else "(")
                 + "`hermes-hub requests`).")
         return _ok(task_id=None, status="queued", **fields, runs_where=target, note=note), None
@@ -1554,11 +1555,11 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         return None, None
 
 
-def _creation_audit(args: dict) -> Optional[dict]:
-    """Worker-pool enrollment audit for the ``created`` event (kanban_worker_placement.creation_audit). [daveey]"""
+def _creation_audit(args: dict, **effective) -> Optional[dict]:
+    """Audit the same normalized fields placement judged, including inherited identity/project. [daveey]"""
     from hermes_cli.kanban_worker_placement import creation_audit
 
-    return creation_audit(args)
+    return creation_audit({**args, **effective})
 
 
 @_kanban_handler("kanban_create")
@@ -1600,6 +1601,7 @@ def _handle_create(args: dict, **kw) -> str:
     human_action_now = _parse_bool_arg(args, "human_action_now")
     with _board(args.get("board")) as (kb, conn):
         _check(*create_ask_check(conn, args, str(assignee)))  # ask line, then its filing probe [daveey]
+        args = _effective_board_args(args, origin_intent)
         # Never infer approval from prose or silently turn a human gate into
         # dispatchable work. Ask the creator to distinguish a future dependency
         # from a human action that can actually be taken while parents are open.
@@ -1663,6 +1665,8 @@ def _handle_create(args: dict, **kw) -> str:
             _pin = _kp.explicit_foreign_pin(args, _reg.self_gateway())
             if _pin:
                 return _placement_refused(_pin, "an origin-bound card is created on this gateway")
+        marker_placement = _origin_enrollment(args, origin, marker_placement, assignee=assignee,
+                                               skills=skills, project_id=project_id)
         try:
             new_tid = kb.create_task(
                 conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
@@ -1679,7 +1683,8 @@ def _handle_create(args: dict, **kw) -> str:
                 max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
                 requires=args.get("requires"), runs_on=runs_on, max_retries=max_retries,
                 placement_policy=(marker_placement or {}).get("placement_policy"),
-                placement_audit=_creation_audit(args),
+                placement_checked=True,  # this front door already checked pins, origins and portability
+                placement_audit=_creation_audit(args, assignee=str(assignee), skills=skills, project_id=project_id),
                 require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
                 model_override=model_override, provider_override=provider_override,
                 goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),

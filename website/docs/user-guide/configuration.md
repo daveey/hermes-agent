@@ -3456,7 +3456,7 @@ kanban:
 
 `kanban.admission.cpu_busy_below_pct` (default unset: off) turns on the measured-CPU admission gate on a host that takes overflow work from the Board's worker-first placement. It is read only from the installation-root `config.yaml`, never from a profile override. When set:
 
-- the metrics reporter attaches a measured CPU busy percentage (two `/proc/stat` snapshots about 1 s apart) to its 10 s Board report, with a 2 s total budget and no replay;
+- the metrics reporter attaches a measured non-nice CPU busy percentage (two `/proc/stat` snapshots about 1 s apart) to its 10 s Board report, with a 2 s total budget and no replay. Positive-nice user time, idle and iowait are excluded; system, IRQ and steal count as busy. This excludes all positive nice values, not only nice >= 10;
 - every new ready/review claim on the host takes an independent full ~1 s sample while `admission.lock` is held, and claims only when busy is strictly below the limit and the host's running count is below the root `kanban.max_in_progress`.
 
 Any unknown (an unreadable config, a non-numeric or out-of-range value, a failed sample, a window outside 1-2 s) refuses the claim rather than admitting it. The Board-side `worker_overflow` setting decides whether the hub is offered overflow at all; with it absent or `{}` nothing is sent to the hub.

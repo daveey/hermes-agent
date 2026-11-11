@@ -65,6 +65,7 @@ import type { ClientSessionState } from '../../types'
 import type { GatewayRequester } from '../types'
 
 import {
+  failTileOpen,
   noteTileOwner,
   settleTileOpen,
   startTileTiming,
@@ -449,7 +450,7 @@ export function useSessionTileDelegate({
         // launch-profile DB and fork the conversation into the wrong profile —
         // the same cross-profile bleed the recovery resumes had (#67603).
         const timing = startTileTiming(storedSessionId, authoritativeSnapshot)
-        let owner = await ownerForStoredSession(storedSessionId)
+        let owner = await ownerForStoredSession(storedSessionId).catch(failTileOpen(timing))
 
         noteTileOwner(timing, owner)
         const restScope = tileRestScope(owner)
@@ -560,7 +561,7 @@ export function useSessionTileDelegate({
 
             return stored
           }
-        )
+        ).catch(failTileOpen(timing))
 
         // [daveey] REST still in flight: paint the cached transcript now and reconcile when the page lands.
         // An explicit refresh (callers await fresh rows) and a read-only fallback wait on REST as before.
@@ -602,6 +603,8 @@ export function useSessionTileDelegate({
         const runtimeId = resumed?.session_id
 
         if (!runtimeId) {
+          timing?.reconciled('failed')
+
           throw new Error('resume returned no session id')
         }
 
@@ -610,6 +613,8 @@ export function useSessionTileDelegate({
         // Another resume/rebind won while this request was in flight. Do not
         // publish the older response into the runtime the tile now owns.
         if (currentBinding && currentBinding !== existing && currentBinding !== runtimeId) {
+          timing?.reconciled('abandoned')
+
           return currentBinding
         }
 

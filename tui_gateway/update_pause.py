@@ -31,6 +31,7 @@ prepares or commits, the turn is left to the successor's startup sweep.
 from __future__ import annotations
 
 import logging
+import _thread
 import threading
 import time
 from pathlib import Path
@@ -51,6 +52,16 @@ UPDATE_MARGIN_S = 600.0
 # of a live turn restarts the auto-continue freshness clock at ``paused_at`` (turn_marker.freshness_since),
 # so ``not_resumable_reason`` no longer rejects a live turn for the age of its ``started_at``.
 PAUSE_RESTARTS_FRESHNESS = True
+# [daveey] t_01a1c7cf6f171e47: capability flag hermes-sync reads from this file's text (never imports it): a
+# turn inside a long tool call no longer holds the update until the call ends. ``MID_TOOL_GRACE_S`` after the
+# later of the request's first sighting and the newest running call's start (so no call is cut before its
+# own grace), a still-running call of an auto-continuable turn
+# is cancelled through the user-Stop interrupt path (``start_mid_tool_cancel``), its result is persisted as
+# ``interrupted_tool_result`` and the turn pauses at the step boundary right after it, as ``boundary_pause_hook``
+# does. Turns ``not_resumable_reason`` rejects are never cancelled.
+MID_TOOL_CANCEL = True
+MID_TOOL_GRACE_S = 30.0
+MID_TOOL_POLL_S = 1.0
 WATCH_POLL_S = 5.0
 WATCH_MAX_S = 6 * 3600.0
 # A skewed backend normally retires once idle and its successor continues the turn. One that is still
@@ -266,6 +277,60 @@ def boundary_pause_hook(session: dict, marker_key: str) -> Callable[[], str | No
         return PAUSE_REASON
 
     return hook
+
+
+def interrupted_tool_result(at: float | None = None) -> str:
+    """The persisted result of a tool call the update cancelled (UTC, whole seconds)."""
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_now() if at is None else at))
+    return f"[interrupted by Hermes update at {stamp}: re-run if still needed]"
+
+
+def mid_tool_cancel_step(session: dict, marker_key: str, agent: Any, state: dict) -> list[str] | None:
+    """One poll of ``start_mid_tool_cancel``: the cancelled call ids once the grace ran out, else None.
+    ``state`` carries the request's first sighting (and the last decline logged) between polls."""
+    from agent import update_pause_cancel
+    if not pause_requested(session):
+        state.clear()  # a later request starts its own grace (and may cancel again)
+        return None
+    if state.get("cancelled"):
+        return None  # one cancel per request: the turn pauses at the next boundary
+    now = _mono()
+    seen = state.setdefault("seen", now)
+    running = update_pause_cancel.in_flight(agent)
+    if not running or now - max(seen, max(running.values())) < MID_TOOL_GRACE_S:
+        return None
+    why = not_resumable_reason(session, marker_key)
+    if why:
+        if state.get("declined") != why:
+            state["declined"] = why
+            logger.info("core-update pause: session %s keeps its running tool call (%s)", marker_key, why)
+        return None
+    cancelled = update_pause_cancel.cancel(agent, interrupted_tool_result())
+    if cancelled:
+        state["cancelled"] = True
+        logger.info("core-update pause: session %s cancelled %d running tool call(s) after %.0fs for a Hermes "
+                    "update: %s", marker_key, len(cancelled), MID_TOOL_GRACE_S, ", ".join(cancelled))
+    return cancelled
+
+
+def start_mid_tool_cancel(session: dict, marker_key: str, agent: Any) -> Callable[[], None]:
+    """Per-turn daemon (one stat per ``MID_TOOL_POLL_S`` while no pause is requested); returns its stop. After
+    a cancel the turn pauses at the next step boundary (turn_iteration_prep), which ends the turn and this
+    watcher; if the request was withdrawn by then the turn goes on, and a later request may cancel again."""
+    stop = threading.Event()
+
+    def run() -> None:
+        state: dict = {}
+        while not stop.wait(MID_TOOL_POLL_S):
+            try:
+                mid_tool_cancel_step(session, marker_key, agent, state)
+            except Exception:
+                logger.debug("core-update mid-tool cancel poll for %s failed", marker_key, exc_info=True)
+
+    # The low-level primitive, not threading.Thread: harnesses that run turn threads inline patch that class,
+    # and an inline watcher would block the turn forever. A _thread thread never holds interpreter exit.
+    _thread.start_new_thread(run, ())
+    return stop.set
 
 
 # [daveey] t_01a18ac84e3491a9: a turn parked in a blocking clarify never reaches a step boundary, so the
