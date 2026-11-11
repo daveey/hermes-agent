@@ -99,6 +99,9 @@ def _account_catalog_token(access_token: Any) -> str | None:
             token = resolve_codex_runtime_credentials(read_only=True).get("api_key")
         except AuthError:  # no Codex login on this profile: unknown, never a refusal
             return None
+        from agent.credential_pool_disabled import token_disabled
+        if token_disabled("openai-codex", token):  # disabled account: its catalog is unknown, not read
+            return None
     return token if isinstance(token, str) and token else None
 
 

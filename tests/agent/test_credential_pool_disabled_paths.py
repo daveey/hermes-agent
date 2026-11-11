@@ -363,3 +363,51 @@ def test_a_reseeded_borrowed_row_with_a_new_id_stays_disabled_by_fingerprint():
     assert cpd.matches(reseeded, keys)
     other = SimpleNamespace(id="new2", label="claude_code", access_token="", extra={"secret_fingerprint": "sha256:def"})
     assert not cpd.matches(other, keys)
+
+
+def _codex_rows(*accounts):
+    rows = [{"id": f"r{i}", "label": f"{a}@example.com", "auth_type": "oauth", "priority": i,
+             "source": "manual:device_code", "access_token": _jwt(f"{a}@example.com", f"acct-{a}"),
+             "refresh_token": f"rt-{a}", "base_url": "https://chatgpt.com/backend-api/codex"} for i, a in enumerate(accounts)]
+    write_credential_pool("openai-codex", rows)
+    return rows
+
+
+def test_codex_catalog_credentials_never_include_a_disabled_account(_no_codex_env):
+    from hermes_cli.codex_models import codex_catalog_credentials
+    from agent.credential_pool import PooledCredential
+    a, b = _codex_rows("a", "b")
+    assert {t for t, _ in codex_catalog_credentials()} == {a["access_token"], b["access_token"]}
+    _disable("openai-codex", PooledCredential.from_dict("openai-codex", a))
+    assert [t for t, _ in codex_catalog_credentials()] == [b["access_token"]]
+    _disable("openai-codex", PooledCredential.from_dict("openai-codex", b))
+    assert codex_catalog_credentials() == []
+
+
+def test_codex_service_tier_lookup_does_not_read_with_a_disabled_account(monkeypatch, _no_codex_env):
+    import hermes_cli.auth_codex as ac
+    from agent import codex_service_tiers as cst
+    from agent.credential_pool import PooledCredential
+    (a,) = _codex_rows("a")
+    monkeypatch.setattr(ac, "resolve_codex_runtime_credentials", lambda **k: {"api_key": a["access_token"]})
+    assert cst._account_catalog_token(None) == a["access_token"]
+    _disable("openai-codex", PooledCredential.from_dict("openai-codex", a))
+    assert cst._account_catalog_token(None) is None
+
+
+def test_codex_model_setup_probe_does_not_send_a_disabled_account(monkeypatch, _no_codex_env):
+    import hermes_cli.model_setup_flows as flows
+    from agent.credential_pool import PooledCredential
+    (a,) = _codex_rows("a")
+    _disable("openai-codex", PooledCredential.from_dict("openai-codex", a))
+    from hermes_cli import auth
+    import hermes_cli.codex_models as cm
+    monkeypatch.setattr(auth, "get_codex_auth_status", lambda: {"logged_in": True, "api_key": a["access_token"],
+                                                                "base_url": a["base_url"]})
+    sent = []
+    monkeypatch.setattr(cm, "get_codex_model_ids", lambda access_token=None, base_url=None: sent.append(access_token) or ["m"])
+    monkeypatch.setattr(flows, "_oauth_gate", lambda *a, **k: True)
+    monkeypatch.setattr(auth, "_prompt_model_selection", lambda *a, **k: None)
+    monkeypatch.setattr(auth, "resolve_codex_runtime_credentials", lambda **k: {"api_key": a["access_token"]})
+    flows._model_flow_openai_codex({}, "")
+    assert sent and a["access_token"] not in sent

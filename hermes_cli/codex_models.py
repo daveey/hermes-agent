@@ -117,12 +117,16 @@ def codex_catalog_credentials() -> list[tuple[str, Optional[str]]]:
     from hermes_cli.auth import _codex_access_token_is_expiring, read_credential_pool, resolve_codex_runtime_credentials
     from hermes_cli.auth_codex import _codex_pool_dicts, _codex_pool_route_base_url
 
+    from agent.credential_pool_disabled import token_disabled
+
     found: list[tuple[str, Optional[str]]] = []
     seen: set[str] = set()
 
     def _add(token: object, base_url: object) -> None:
         tok = str(token or "").strip()
         if not tok or tok in seen or _codex_access_token_is_expiring(tok, 0):
+            return
+        if token_disabled("openai-codex", tok):  # `hermes auth disable`: never sent, not even for a catalog
             return
         seen.add(tok)
         found.append((tok, (str(base_url).strip() if base_url else "") or _codex_pool_route_base_url("") or None))

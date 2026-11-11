@@ -383,12 +383,16 @@ def _model_flow_openai_codex(config, current_model=""):
         _codex_status = get_codex_auth_status()
         if _codex_status.get("logged_in"):
             _codex_token, _codex_base = _codex_status.get("api_key"), _codex_status.get("base_url")
+
     if not _codex_token:
         with contextlib.suppress(Exception):
             from hermes_cli.auth import resolve_codex_runtime_credentials
             _creds = resolve_codex_runtime_credentials()
             _codex_token, _codex_base = _creds.get("api_key"), _creds.get("base_url")
 
+    from agent.credential_pool_disabled import token_disabled
+    if token_disabled("openai-codex", _codex_token):  # status reports it; the catalog probe must not send it
+        _codex_token = _codex_base = None
     codex_models = get_codex_model_ids(access_token=_codex_token, base_url=_codex_base)
     selected = _prompt_model_selection(
         codex_models, current_model=current_model, confirm_provider="openai-codex",
