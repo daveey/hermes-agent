@@ -303,14 +303,14 @@ def test_incomplete_job_evidence_cannot_land(world, fault):
     def corrupt(jobs):
         if fault == "missing":
             jobs.pop()
-        elif fault == "skipped":
-            jobs[-1]["conclusion"] = "skipped"
-        elif fault == "hosted":
-            jobs[-1]["labels"] = ["ubuntu-latest"]
-        elif fault == "unknown-blacksmith":
-            jobs[-1]["labels"] = ["blacksmith-unapproved"]
         else:
-            jobs[-1]["runner_name"] = None
+            updates = {
+                "skipped": {"conclusion": "skipped"},
+                "hosted": {"labels": ["ubuntu-latest"]},
+                "unknown-blacksmith": {"labels": ["blacksmith-unapproved"]},
+                "no-runner": {"runner_name": None},
+            }
+            jobs[-1].update(updates[fault])
     actions.job_override = corrupt
     assert gate(checkout, head, actions) == sync.REFUSED
     assert main_of(root) == before
