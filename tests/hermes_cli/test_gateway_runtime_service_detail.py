@@ -8,6 +8,7 @@ which Desktop prints after the code.
 import json
 import os
 from pathlib import Path
+import shlex
 import sys
 import time
 from types import SimpleNamespace
@@ -154,7 +155,7 @@ def test_ensure_reports_which_unit_check_failed(case, needles, tmp_path, monkeyp
     unit.parent.mkdir(parents=True)
     unit.write_text("[Service]\n", encoding="utf-8")
     command = "/bin/echo hermes_cli.main gateway run" if case == "wrong_command" else (
-        f"{sys.executable} -m hermes_cli.main gateway run")
+        f"{shlex.quote(sys.executable)} -m hermes_cli.main gateway run")
     props = dict(LoadState="loaded", ActiveState="inactive", SubState="dead", UnitFileState="enabled",
                  User=str(os.getuid()), DynamicUser="yes" if case == "dynamic_user" else "no",
                  Environment=f'"HERMES_HOME={home}" "HERMES_SUPERVISED_CHILD=1"',
