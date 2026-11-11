@@ -39,7 +39,7 @@ jobs:
     name: Scan lockfiles
     # fork (daveey/hermes): the reusable workflow pins ubuntu-latest and
     # GitHub-hosted runners do not start on this account; Dependabot covers it.
-    if: github.repository != 'daveey/hermes'
+    if: github.repository != 'softmax-universe/daveey-hermes'
     uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
     with:
       # Scan explicit lockfiles rather than recursing, so we only look at

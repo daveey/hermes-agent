@@ -71,7 +71,7 @@ jobs:
     # matrix, scripts/ci/affected_tests.py); every other event runs all eight.
     if: inputs.python
     name: Run tests (${{ inputs.python_changed != '' && 'affected, ' || '' }}${{ matrix.slice }}/${{ strategy.job-total }})
-    runs-on: [self-hosted, tfgar-tests]
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     # ~10 min expected; 30 leaves room for a cold cache or a dilated file.
     timeout-minutes: 30
     strategy:
@@ -216,7 +216,7 @@ jobs:
     # bind-mount ownership regression ran. This lane is that evidence.
     if: inputs.python
     name: Termux assembly permissions
-    runs-on: [self-hosted, docker-ci]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       - name: Checkout code
@@ -256,7 +256,7 @@ jobs:
     # The core suites spawn real serve / gateway / tui_gateway / MCP / SQLite
     # writer processes per test; a 4-vCPU runner serialises them into timeouts.
     if: inputs.e2e
-    runs-on: [self-hosted, hermes-hub]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - name: Checkout code
@@ -375,7 +375,7 @@ jobs:
     # carries the whole tree's wall time against the 60-minute timeout.
     # Skipping this job skips every e2e-upgrade shard with it.
     if: inputs.e2e_upgrade
-    runs-on: [self-hosted, hermes-hub]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
@@ -427,10 +427,9 @@ jobs:
     # runs ~5-15 min. Sharded by suite directory (see e2e-upgrade-plan).
     name: e2e-upgrade (${{ matrix.shard }})
     needs: e2e-upgrade-plan
-    # [daveey] ci-bwrap: one on-demand VM per job, from the runner AMI that lifts the
-    # userns restriction and proves bwrap at bake time (hosts/hermes-ci-runners/packer).
-    # Never route this to spot: EC2 stops spot hosts and kills in-flight shards.
-    runs-on: [self-hosted, ci-bwrap]
+    # [daveey] Blacksmith VM per shard; the "Install bubblewrap" step lifts Ubuntu 24.04's
+    # AppArmor userns restriction (the old tfgar AMI baked that in).
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 60
     strategy:
       fail-fast: false

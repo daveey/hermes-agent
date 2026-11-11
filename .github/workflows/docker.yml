@@ -88,7 +88,7 @@ jobs:
   # never weakened.
   mode:
     name: Resolve release phase and affected areas
-    runs-on: [self-hosted, docker-ci]
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:
       phase: ${{ steps.resolve.outputs.phase }}
@@ -151,7 +151,7 @@ jobs:
     needs: [mode]
     if: >-
       !cancelled() && needs.mode.result == 'success' &&
-      ((needs.mode.outputs.release != 'true' && (github.repository == 'NousResearch/hermes-agent' || github.repository == 'daveey/hermes') && needs.mode.outputs.build == 'true') || needs.mode.outputs.phase == 'test')
+      ((needs.mode.outputs.release != 'true' && (github.repository == 'NousResearch/hermes-agent' || github.repository == 'softmax-universe/daveey-hermes') && needs.mode.outputs.build == 'true') || needs.mode.outputs.phase == 'test')
     strategy:
       fail-fast: false
       matrix:
@@ -163,7 +163,7 @@ jobs:
         variant: [slim, desktop]
         include:
           - arch: amd64
-            runner: docker-ci
+            runner: blacksmith-8vcpu-ubuntu-2404
             platform: linux/amd64
 
     runs-on: ${{ matrix.runner }}
@@ -351,7 +351,7 @@ jobs:
         variant: [slim, desktop]
         include:
           - arch: amd64
-            runner: docker-ci
+            runner: blacksmith-8vcpu-ubuntu-2404
             platform: linux/amd64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -443,7 +443,7 @@ jobs:
     # `needs` is the whole 4-leg matrix: only publish both :main variants
     # after every arch and variant publisher succeeds.
     if: ${{ !cancelled() && needs.mode.outputs.release != 'true' && github.repository == 'NousResearch/hermes-agent' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: [self-hosted, docker-ci]
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     needs: [mode, publish]
     timeout-minutes: 10
     environment: container-publish
@@ -537,7 +537,7 @@ jobs:
       matrix:
         arch: [amd64]  # fork: no arm64 runner
         variant: [slim, desktop]
-    runs-on: [self-hosted, docker-ci]
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 45
     env:
       ARCH: ${{ matrix.arch }}
@@ -629,7 +629,7 @@ jobs:
     name: Assemble versioned manifest and digest receipt
     if: needs.mode.outputs.phase == 'publish'
     needs: [mode, release-publish]
-    runs-on: [self-hosted, docker-ci]
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     outputs:
       digest: ${{ steps.list.outputs.digest }}
     timeout-minutes: 15
@@ -762,7 +762,7 @@ jobs:
     name: Docker phase requirements met
     if: always() && inputs.release-phase != ''
     needs: [mode, build, release-publish, release-publish-manifest]
-    runs-on: [self-hosted, docker-ci]
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
       - name: Validate phase job results

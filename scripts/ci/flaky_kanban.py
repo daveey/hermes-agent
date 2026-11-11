@@ -579,7 +579,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run-url", default="(local run)")
     ap.add_argument("--branch", default="?")
     ap.add_argument("--from-github", action="store_true")
-    ap.add_argument("--repo", default="daveey/hermes")
+    ap.add_argument("--repo", default="softmax-universe/daveey-hermes")
     ap.add_argument("--state", type=Path, default=DEFAULT_STATE)
     ap.add_argument("--hermes", default=os.environ.get("HERMES_BIN", "hermes"))
     ap.add_argument("--assignee", default="default")

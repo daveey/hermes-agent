@@ -63,7 +63,7 @@ jobs:
   dispatch:
     name: Dispatch state core-contract suites
     # The runner label bb-dev-tests.yml uses (ephemeral hermes-hub VMs, gh preinstalled; see nightly-e2e.yml).
-    runs-on: [self-hosted, hermes-hub]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
       - name: gh workflow run bb-dev-tests.yml / hermes-sync-tests.yml --ref state

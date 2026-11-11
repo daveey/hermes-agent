@@ -60,7 +60,7 @@ from typing import Any, Iterator, Protocol
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from flaky_kanban import CliBoard, CreateRefused
 
-REPO = "daveey/hermes"
+REPO = "softmax-universe/daveey-hermes"
 WORKFLOW = "nightly-e2e.yml"
 E2E_JOB = "e2e"  # the called tests.yml job: reported by GitHub as "e2e / e2e"
 DEADLINE_HOURS = 4.0

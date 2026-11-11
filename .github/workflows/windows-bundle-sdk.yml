@@ -25,7 +25,7 @@ jobs:
     name: Cold Windows SDK (${{ matrix.runner }})
     # fork (daveey/hermes): only self-hosted Linux runners (hermes-hub, docker-ci);
     # GitHub-hosted runners do not start on this account, so these legs skip here.
-    if: github.repository != 'daveey/hermes'
+    if: github.repository != 'softmax-universe/daveey-hermes'
     runs-on: ${{ matrix.runner }}
     # Cold ARM64 package extraction alone can exceed 15 minutes on the hosted runner.
     timeout-minutes: 45

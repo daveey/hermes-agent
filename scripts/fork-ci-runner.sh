@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# [daveey] fork-only: run the Linux jobs of CI on the self-hosted hermes-hub
-# runners (hosts/hermes-hub/gh-runner) because the private fork has no
-# GitHub-hosted minutes. Idempotent; re-run after merging upstream:
+# [daveey] fork-only: pin the Linux jobs of CI to the fork's Blacksmith sizes
+# (softmax-universe org billing; 2vcpu light/poll, 4vcpu suites, 8vcpu docker).
+# Before 2026-11-11 these were self-hosted hermes-hub/tfgar lanes. Idempotent; re-run after merging upstream:
 #   scripts/fork-ci-runner.sh && git commit -am "ci: re-point runners [daveey]"
 # macOS/Windows jobs are skipped and arm64 matrix legs dropped (no such
 # runners; decision in hosts/hermes-hub/gh-runner/README.md "macOS / Windows").
@@ -11,17 +11,18 @@ cd "$(dirname "$0")/../.github/workflows"
 # Blacksmith blacksmith-<N>vcpu-ubuntu-2404 (never the -arm variant: no arm64 runner).
 # The cheap repository guards are steps of ONE repo-guards.yml job (upstream
 # consolidation); it runs `docker run` (hadolint), so it is a DOCKER_FILES entry below.
-UPSTREAM_LINUX='ubuntu-latest(-32-core)?|ubuntu-24\.04|blacksmith-[0-9]+vcpu-ubuntu-2404'
+# Also the fork's retired self-hosted Linux lanes, so an old fork commit is re-pointed too.
+UPSTREAM_LINUX='ubuntu-latest(-32-core)?|ubuntu-24\.04|blacksmith-[0-9]+vcpu-ubuntu-2404|\[self-hosted, (hermes-hub(-poll)?|ci-fast|docker-ci|tfgar-tests|ci-bwrap)\]'
 FILES=(ci.yaml tests.yml lint.yml js-tests.yml rust-tests.yml remote-backends.yml
   bootstrap-installer.yml e2e-desktop-core.yml e2e-desktop-update.yml
   docs-site-checks.yml)
-sed -i.bak -E "s/^([[:space:]]*runs-on:[[:space:]]*)(${UPSTREAM_LINUX})[[:space:]]*\$/\\1[self-hosted, hermes-hub]/" "${FILES[@]}"
+sed -i.bak -E "s/^([[:space:]]*runs-on:[[:space:]]*)(${UPSTREAM_LINUX})[[:space:]]*\$/\\1blacksmith-4vcpu-ubuntu-2404/" "${FILES[@]}"
 rm -f ./*.bak
 
 # Long-lived pollers go to the poll-only runners (label `hermes-hub-poll` ONLY,
 # 0.5 CPU each; hosts/hermes-hub/gh-runner/ci-slice.sh install-poll), so they
 # never hold one of the test runners.
-sed -i.bak -E "s/^([[:space:]]*runs-on:[[:space:]]*)(\\[self-hosted, hermes-hub\\]|${UPSTREAM_LINUX})[[:space:]]*\$/\\1[self-hosted, hermes-hub-poll]/" ci-review-comment.yml
+sed -i.bak -E "s/^([[:space:]]*runs-on:[[:space:]]*)(\\[self-hosted, hermes-hub\\]|${UPSTREAM_LINUX})[[:space:]]*\$/\\1blacksmith-2vcpu-ubuntu-2404/" ci-review-comment.yml
 rm -f ./*.bak
 
 # Aggregator/report jobs run on the bounded ci-fast lane, never the
@@ -59,7 +60,7 @@ for f in sorted(set(COMPLETION) | set(FAST)):
         if name in COMPLETION.get(f, ()):
             new = re.sub(r'(?m)^(    if: )always\(\)$', r"\1${{ !cancelled() }}", new)
         new = re.sub(r'(?m)^(    runs-on: )(?:\[self-hosted, (?:hermes-hub(?:-poll)?|ci-fast)\]|ubuntu-latest|ubuntu-24\.04|blacksmith-[0-9]+vcpu-ubuntu-2404)$',
-                     r'\1[self-hosted, ci-fast]', new)
+                     r'\1blacksmith-2vcpu-ubuntu-2404', new)
         t = t.replace(block, new)
     if f == 'ci.yaml':
         t = re.sub(r"(  detect:\n    name: Detect affected areas\n    runs-on: [^\n]*\n    timeout-minutes: )1\n",
@@ -67,12 +68,25 @@ for f in sorted(set(COMPLETION) | set(FAST)):
     open(f, 'w').write(t)
 PY
 
+# The Python test slices and the bubblewrap e2e-upgrade shards are the heavy
+# lanes (8 vCPU, as on the old tfgar-tests/ci-bwrap VMs).
+python3 - <<'PY'
+import re
+f = 'tests.yml'; t = open(f).read()
+for name in ('test', 'e2e-upgrade'):
+    m = re.search(r'(?m)^  ' + re.escape(name) + r':\n(?:(?!  \S).*\n)*', t)
+    assert m, (f, name)
+    block = m.group(0)
+    t = t.replace(block, re.sub(r'(?m)^(    runs-on: )blacksmith-[0-9]+vcpu-ubuntu-2404$', r'\1blacksmith-8vcpu-ubuntu-2404', block))
+open(f, 'w').write(t)
+PY
+
 # Docker-dependent jobs go to the rootless-docker runners (label `docker-ci`
 # ONLY, so plain [self-hosted, hermes-hub] jobs never land on them;
 # hosts/hermes-hub/gh-runner/setup-ci-docker.sh). Plain ubuntu jobs above stay
 # on the socket-less runners.
 DOCKER_FILES=(repo-guards.yml remote-backends.yml docker.yml nix.yml sandbox-image.yml)
-sed -i.bak -E "s/^([[:space:]]*runs-on:[[:space:]]*)(\\[self-hosted, hermes-hub(, docker)?\\]|${UPSTREAM_LINUX})[[:space:]]*\$/\\1[self-hosted, docker-ci]/" "${DOCKER_FILES[@]}"
+sed -i.bak -E "s/^([[:space:]]*runs-on:[[:space:]]*)(\\[self-hosted, hermes-hub(, docker)?\\]|${UPSTREAM_LINUX})[[:space:]]*\$/\\1blacksmith-8vcpu-ubuntu-2404/" "${DOCKER_FILES[@]}"
 # Matrix-driven image builds: amd64 -> docker-ci runner; no arm64 runner, so
 # drop the arm64 leg; let the secret-free build/test jobs run on the fork
 # (publish/merge jobs stay NousResearch-only: they need Docker Hub secrets).
@@ -80,13 +94,13 @@ python3 - <<'PY'
 import re
 for f in ('docker.yml', 'sandbox-image.yml'):
     t = open(f).read()
-    t = re.sub(r"runner: (?:ubuntu-latest-32-core|blacksmith-[0-9]+vcpu-ubuntu-2404)\n", "runner: docker-ci\n", t)
+    t = re.sub(r"runner: (?:ubuntu-latest-32-core|blacksmith-[0-9]+vcpu-ubuntu-2404)\n", "runner: blacksmith-8vcpu-ubuntu-2404\n", t)
     t = re.sub(r"( *)arch: \[amd64, arm64\]\n", r"\1arch: [amd64]  # fork: no arm64 runner\n", t)
     t = re.sub(r"(?:          #[^\n]*\n)*          - arch: arm64\n            runner: (?:ubuntu-latest-32-arm-core|blacksmith-[0-9]+vcpu-ubuntu-2404-arm)\n            platform: linux/arm64\n", "", t)
     t = re.sub(r"\(\(needs\.mode\.outputs\.release != 'true' && github\.repository == 'NousResearch/hermes-agent' && needs\.(detect|mode)\.outputs\.build",
-               r"((needs.mode.outputs.release != 'true' && (github.repository == 'NousResearch/hermes-agent' || github.repository == 'daveey/hermes') && needs.\1.outputs.build", t)
+               r"((needs.mode.outputs.release != 'true' && (github.repository == 'NousResearch/hermes-agent' || github.repository == 'softmax-universe/daveey-hermes') && needs.\1.outputs.build", t)
     t = t.replace("  build:\n    if: github.repository == 'NousResearch/hermes-agent'\n",
-                  "  build:\n    if: github.repository == 'NousResearch/hermes-agent' || github.repository == 'daveey/hermes'\n")
+                  "  build:\n    if: github.repository == 'NousResearch/hermes-agent' || github.repository == 'softmax-universe/daveey-hermes'\n")
     # One shared hub (not a 32-core hosted runner): a cold amd64 image build
     # takes ~50 min there, past the upstream 45 min cap.
     t = t.replace("    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 45\n",

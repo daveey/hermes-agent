@@ -18,6 +18,11 @@ from ruamel.yaml import YAML
 pytestmark = pytest.mark.fork_guard
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+# Blacksmith sizes since 2026-11-11 (softmax-universe): the light lane is 2 vCPU, suites 4, Docker/heavy 8.
+FAST_LABEL = "blacksmith-2vcpu-ubuntu-2404"
+HEAVY_LABEL = "blacksmith-4vcpu-ubuntu-2404"
+BIG_LABEL = "blacksmith-8vcpu-ubuntu-2404"
+POLL_LABEL = "blacksmith-2vcpu-ubuntu-2404"
 WORKFLOWS = ROOT / ".github" / "workflows"
 FAST = {
     ("ci.yaml", "detect"),
@@ -45,11 +50,12 @@ COMPLETION = {("ci.yaml", "all-checks-pass")}
 # Consolidated check jobs: off the fast lane, on the lane their steps need, and
 # required through the gate like the separate jobs they replaced.
 COMBINED = {
-    ("lint.yml", "lint"): ["self-hosted", "hermes-hub"],
-    ("repo-guards.yml", "guards"): ["self-hosted", "docker-ci"],
+    ("lint.yml", "lint"): HEAVY_LABEL,
+    ("repo-guards.yml", "guards"): BIG_LABEL,
 }
 # Required checks that the ruleset names directly instead of through the gate,
 # so they are outside its needs and keep always(): never !cancelled() or skip.
+OBSERVERS = {("ci-review-comment.yml", "comment")}
 SEPARATE_REQUIRED = {
     ("ci.yaml", "macos-state-required"): ("macOS state required (v1)", {"detect", "hermes-state-macos"}),
 }
@@ -101,10 +107,9 @@ def test_only_bounded_measured_checks_use_fast_lane():
     for wf, data in workflows.items():
         for name, job in data.get("jobs", {}).items():
             labels = _labels(job)
-            if "ci-fast" not in labels:
+            if labels != [FAST_LABEL] or (wf, name) in OBSERVERS:
                 continue
             routed.add((wf, name))
-            assert labels == ["self-hosted", "ci-fast"]
             assert 0 < job["timeout-minutes"] <= 10
             assert "strategy" not in job, "matrix fan-out needs separate admission review"
             assert "container" not in job and "services" not in job
@@ -116,13 +121,13 @@ def test_observers_and_long_work_do_not_compete_for_fast_slots(tmp_path):
     for wf, name in [
         ("ci-review-comment.yml", "comment"),
     ]:
-        assert workflows[wf]["jobs"][name]["runs-on"] == ["self-hosted", "hermes-hub-poll"]
+        assert workflows[wf]["jobs"][name]["runs-on"] == POLL_LABEL
     for wf in ["tests.yml", "js-tests.yml", "docs-site-checks.yml", "rust-tests.yml", "remote-backends.yml"]:
         for job in workflows[wf]["jobs"].values():
-            assert "ci-fast" not in job.get("runs-on", [])
+            assert job.get("runs-on") != FAST_LABEL
     for (wf, name), labels in COMBINED.items():
         assert workflows[wf]["jobs"][name]["runs-on"] == labels, (wf, name)
-    # The combined guards job runs hadolint via `docker run`: only docker-ci has a daemon.
+    # The combined guards job runs hadolint via `docker run` (8 vCPU Docker lane).
     guards = workflows["repo-guards.yml"]["jobs"]["guards"]["steps"]
     assert ["run"] in [call[:1] for call in _docker_calls(guards, tmp_path)]
     # Test suites and E2E stay on the heavy lane even when one run is short.
@@ -132,7 +137,7 @@ def test_observers_and_long_work_do_not_compete_for_fast_slots(tmp_path):
         ("tests.yml", "e2e-upgrade-plan"),
         ("termux-verify.yml", "contracts"),
     ]:
-        assert workflows[wf]["jobs"][name]["runs-on"] == ["self-hosted", "hermes-hub"]
+        assert workflows[wf]["jobs"][name]["runs-on"] == HEAVY_LABEL
 
 
 _HADOLINT_STEP = {"name": "Lint Dockerfiles (hadolint)", "run": "scripts/ci/lint_docker.sh hadolint"}
@@ -181,7 +186,7 @@ def test_a_failing_hadolint_step_fails_the_contract(tmp_path):
 def test_fast_label_is_known_and_checks_cannot_bypass_the_gate():
     workflows = _workflows()
     labels = YAML(typ="safe").load((ROOT / ".github" / "actionlint.yaml").read_text(encoding="utf-8"))
-    assert "ci-fast" in labels["self-hosted-runner"]["labels"]
+    assert FAST_LABEL in labels["self-hosted-runner"]["labels"]
     gate = workflows["ci.yaml"]["jobs"]["all-checks-pass"]
     assert gate["name"] == "All required checks pass (v2)"
     assert gate["if"] == "${{ !cancelled() }}"
@@ -223,7 +228,7 @@ def test_fast_label_is_known_and_checks_cannot_bypass_the_gate():
         assert "always()" in str(step.get("if", "")), step.get("name")
 
 
-@pytest.mark.parametrize("upstream_label", ["ubuntu-latest", "blacksmith-4vcpu-ubuntu-2404", "[self-hosted, hermes-hub]"])
+@pytest.mark.parametrize("upstream_label", ["ubuntu-latest", "blacksmith-4vcpu-ubuntu-2404", "[self-hosted, hermes-hub]", "[self-hosted, ci-fast]"])
 def test_fork_rewriter_keeps_every_fast_job_on_the_fast_lane(tmp_path, upstream_label):
     # An upstream merge brings back ubuntu-latest/Blacksmith (or an older fork commit's
     # hermes-hub) on these lines; the reapply script must pin them back.
@@ -250,7 +255,7 @@ def test_fork_rewriter_keeps_every_fast_job_on_the_fast_lane(tmp_path, upstream_
         subprocess.run(["bash", "scripts/fork-ci-runner.sh"], cwd=tmp_path, check=True, capture_output=True)
         for wf, name in FAST:
             job = yaml.load((tmp_path / ".github/workflows" / wf).read_text(encoding="utf-8"))["jobs"][name]
-            assert _labels(job) == ["self-hosted", "ci-fast"], (wf, name)
+            assert _labels(job) == [FAST_LABEL], (wf, name)
             if (wf, name) in SEPARATE_REQUIRED:
                 # The fast pin must not turn a fail-closed check into a skippable one.
                 assert job["if"] == "always()", (wf, name)
@@ -260,44 +265,35 @@ def test_fork_rewriter_keeps_every_fast_job_on_the_fast_lane(tmp_path, upstream_
         assert job["runs-on"] == labels, (wf, name)
 
 
-def test_e2e_upgrade_runs_only_on_bwrap_capable_slots():
-    # Its probe step refuses to run the updater unsandboxed; a plain hermes-hub slot cannot
-    # start bubblewrap (Docker seccomp/AppArmor, masked /proc, host userns restriction).
-    # hermes-hub is intentionally absent: the bwrap slots are spot, and that label on spot
-    # is what scheduled long jobs onto hosts EC2 stops mid-run.
-    workflows = _workflows()
-    job = workflows["tests.yml"]["jobs"]["e2e-upgrade"]
-    assert _labels(job) == ["self-hosted", "ci-bwrap"]
-    assert "hermes-hub" not in _labels(job)
+def test_e2e_upgrade_runs_on_8vcpu_and_lifts_the_userns_restriction():
+    # Its probe step refuses to run the updater unsandboxed; bubblewrap needs Ubuntu 24.04's
+    # AppArmor userns restriction lifted, which the job does itself on its Blacksmith VM.
+    job = _workflows()["tests.yml"]["jobs"]["e2e-upgrade"]
+    assert _labels(job) == [BIG_LABEL]
     probe = [s for s in job["steps"] if s.get("name") == "Install bubblewrap"]
     assert probe and "assert BWRAP_OK" in probe[0]["run"]
-    labels = YAML(typ="safe").load((ROOT / ".github" / "actionlint.yaml").read_text(encoding="utf-8"))
-    assert "ci-bwrap" in labels["self-hosted-runner"]["labels"]
-    for wf, data in workflows.items():
-        for name, j in data.get("jobs", {}).items():
-            if "ci-bwrap" in _labels(j):
-                assert (wf, name) == ("tests.yml", "e2e-upgrade")
+    assert "sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in probe[0]["run"]
 
 
-def test_plugin_catalog_sandbox_runs_on_the_runner_ami_without_host_setup():
-    # Plugin code in pinned-source-validate runs only inside bubblewrap. Its lane
-    # (hermes-hub, now only tfgar-hub VMs) boots the runner AMI, so the AMI's own
-    # build must keep proving bwrap for the runner user; the job installs and
-    # reconfigures nothing and fails closed through the wrapper's own proof.
+def test_plugin_catalog_sandbox_lifts_userns_then_proves_isolation():
+    # Plugin code in pinned-source-validate runs only inside bubblewrap. On Blacksmith
+    # the job installs bwrap and lifts the userns restriction in ONE named step, before
+    # the proof; every other step stays free of host setup, and the proof fails closed.
     job = _workflows()["plugin-catalog-ci.yml"]["jobs"]["pinned-source-validate"]
-    assert _labels(job) == ["self-hosted", "hermes-hub"]
-    provision = (ROOT / "hosts/hermes-ci-runners/packer/provision.sh").read_text(encoding="utf-8")
-    assert "apt-get install -y bubblewrap" in provision
-    assert "echo 'kernel.apparmor_restrict_unprivileged_userns = 0' > /etc/sysctl.d/" in provision
-    assert "sudo -u ubuntu bwrap --ro-bind / / --unshare-user --unshare-net true ||" in provision
+    assert _labels(job) == [HEAVY_LABEL]
     names = [s.get("name") for s in job["steps"]]
+    setup = job["steps"][names.index("Allow bubblewrap user namespaces")]
     proof = job["steps"][names.index("Prove the plugin validation sandbox")]
+    assert names.index("Allow bubblewrap user namespaces") < names.index("Prove the plugin validation sandbox")
     assert names.index("Prove the plugin validation sandbox") < names.index("Clone each entry at its pinned sha and validate")
-    assert proof["if"] == "steps.changed.outputs.files != ''"
+    assert "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in setup["run"]
+    assert "|| true" not in setup["run"]
+    assert setup["if"] == proof["if"] == "steps.changed.outputs.files != ''"
     assert "python3 -I scripts/ci/plugin_validation_sandbox.py --no-network -- /bin/true" in proof["run"]
     assert "set -euo pipefail" in proof["run"] and "|| true" not in proof["run"]
     for step in job["steps"]:
-        assert not re.search(r"\b(sudo|sysctl -w|apt-get)\b", step.get("run", "")), step.get("name")
+        if step is not setup:
+            assert not re.search(r"\b(sudo|sysctl -w|apt-get)\b", step.get("run", "")), step.get("name")
 
 
 def test_e2e_upgrade_has_release_tags_for_n_minus_1():
@@ -315,12 +311,11 @@ def test_e2e_upgrade_has_release_tags_for_n_minus_1():
     assert fetch["run"].rstrip().endswith("git describe --tags --abbrev=0 --match 'v20[0-9][0-9].*' HEAD~1")
 
 
-def test_termux_assembly_permissions_run_on_docker_ci_and_fail_on_skip():
-    # hermes-hub has no docker daemon, so the file's two parametrizations skip
-    # there. The ownership regression only counts if this lane runs it.
+def test_termux_assembly_permissions_run_with_docker_and_fail_on_skip():
+    # The file's two parametrizations need a docker daemon (Blacksmith VMs have one);
+    # --fail-on-skip keeps a daemon-less host from reporting green.
     job = _workflows()["tests.yml"]["jobs"]["termux-assembly-permissions"]
-    assert _labels(job) == ["self-hosted", "docker-ci"]
-    assert "hermes-hub" not in _labels(job)
+    assert _labels(job) == [HEAVY_LABEL]
     steps = job["steps"]
     names = [s.get("name") for s in steps]
     pull = steps[names.index("Pull the native Linux test image")]
@@ -346,8 +341,8 @@ def test_python_slices_match_their_matrix():
     run = next(step for step in job["steps"] if step.get("name") == "Run tests")
     assert run["env"]["HERMES_TEST_SLICE"] == "${{ matrix.slice }}/${{ strategy.job-total }}"
     assert "${{ matrix.slice }}/${{ strategy.job-total }}" in job["name"]
-    # tfgar-tests is one VM per job: a slice never shares a CPU budget with other jobs.
-    assert job["runs-on"] == ["self-hosted", "tfgar-tests"]
+    # One 8 vCPU Blacksmith VM per slice: a slice never shares a CPU budget with other jobs.
+    assert job["runs-on"] == BIG_LABEL
 
 
 def test_pull_requests_pass_their_affected_plan_to_the_slices():

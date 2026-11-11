@@ -38,7 +38,7 @@ WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 RECOVERY_WORKFLOW = WORKFLOWS / "hermes-state-recovery.yml"
 _YAML = YAML(typ="safe")
 
-REPO = "daveey/hermes"
+REPO = "softmax-universe/daveey-hermes"
 _REPO_OBJ = {"full_name": REPO}
 
 # --- run 41003441463: runner lost communication (real, historical) -----------------
@@ -473,12 +473,12 @@ def test_gh_client_uses_an_argv_without_a_shell(monkeypatch):
 
     monkeypatch.setattr(recover.subprocess, "run", fake_run)
     client = recover.GhApi()
-    assert client.get("repos/daveey/hermes/actions/runs/1") == {"ok": True}
-    client.post("repos/daveey/hermes/actions/runs/1/rerun-failed-jobs")
+    assert client.get("repos/softmax-universe/daveey-hermes/actions/runs/1") == {"ok": True}
+    client.post("repos/softmax-universe/daveey-hermes/actions/runs/1/rerun-failed-jobs")
     (get_argv, get_kw), (post_argv, post_kw) = calls
-    assert get_argv[:2] == ["gh", "api"] and get_argv[-1] == "repos/daveey/hermes/actions/runs/1"
+    assert get_argv[:2] == ["gh", "api"] and get_argv[-1] == "repos/softmax-universe/daveey-hermes/actions/runs/1"
     assert post_argv[:4] == ["gh", "api", "-X", "POST"]
-    assert post_argv[-1] == "repos/daveey/hermes/actions/runs/1/rerun-failed-jobs"
+    assert post_argv[-1] == "repos/softmax-universe/daveey-hermes/actions/runs/1/rerun-failed-jobs"
     assert not get_kw.get("shell") and not post_kw.get("shell")
 
 
@@ -490,7 +490,7 @@ def test_gh_client_error_raises(monkeypatch):
 
     monkeypatch.setattr(recover.subprocess, "run", lambda argv, **kw: Failed())
     with pytest.raises(recover.ApiError, match="403"):
-        recover.GhApi().get("repos/daveey/hermes/actions/runs/1")
+        recover.GhApi().get("repos/softmax-universe/daveey-hermes/actions/runs/1")
 
 
 # --- workflow wiring -------------------------------------------------------------
@@ -559,8 +559,8 @@ def test_recovery_concurrency_is_per_run_and_serialized():
 def test_job_prefilter_requires_trusted_first_attempt_failure():
     (job,) = _wf(RECOVERY_WORKFLOW)["jobs"].values()
     cond = " ".join(job["if"].split())
-    for clause in ("github.repository == 'daveey/hermes'",
+    for clause in ("github.repository == 'softmax-universe/daveey-hermes'",
                    "github.event.workflow_run.conclusion == 'failure'",
                    "github.event.workflow_run.run_attempt == 1",
-                   "github.event.workflow_run.head_repository.full_name == 'daveey/hermes'"):
+                   "github.event.workflow_run.head_repository.full_name == 'softmax-universe/daveey-hermes'"):
         assert clause in cond

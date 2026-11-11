@@ -89,7 +89,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   detect:
     name: Detect affected areas
-    runs-on: [self-hosted, ci-fast]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5  # fork: shared, CPU-capped hub runner
     outputs:
       python: ${{ steps.gate-lanes.outputs.python }}
@@ -459,7 +459,7 @@ jobs:
       contents: read
       actions: read
       pull-requests: read # fork: attribute regressions to changed test files
-    runs-on: [self-hosted, ci-fast]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:
       needs-json: ${{ steps.evaluate.outputs.needs-json }}
@@ -597,7 +597,7 @@ jobs:
     name: macOS state required (v1)
     needs: [detect, hermes-state-macos]
     if: ${{ always() }}
-    runs-on: [self-hosted, ci-fast]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
