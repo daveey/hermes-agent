@@ -116,4 +116,28 @@ describe('stable project order (created sort)', () => {
 
     expect(ids(orderProjectsByIds(projects, ['ordered'], { stable: true }))).toEqual(['ordered', 'just-started'])
   })
+
+  it('sorts by name alone under `alphabetical`, Home first, ignoring activity, hoist and kind', () => {
+    const projects = [
+      { ...named('zeta', 900), label: 'Zeta' },
+      { ...named('beta10', 1), label: 'beta10' },
+      named('mine', 5, false),
+      { ...named('beta2', 50), label: 'Beta2' },
+      home()
+    ]
+
+    expect(ids(sortProjectsForOverview(projects, 'zeta', { alphabetical: true }))).toEqual([
+      NO_PROJECT_ID,
+      'beta2',
+      'beta10',
+      'mine',
+      'zeta'
+    ])
+  })
+
+  it('ignores a saved drag order under `alphabetical`', () => {
+    const projects = [makeProject('a', 1), makeProject('b', 1)]
+
+    expect(orderProjectsByIds(projects, ['b', 'a'], { alphabetical: true })).toBe(projects)
+  })
 })

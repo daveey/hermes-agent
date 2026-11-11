@@ -451,7 +451,7 @@ describe('ChatSidebar section labels', () => {
     label: 'new-project',
     path: '/repos/new-project',
     repos: [],
-    sessionCount: 0
+    sessionCount: 1
   }
 
   // The synthetic Home bucket the backend emits when no project claimed a
@@ -483,6 +483,17 @@ describe('ChatSidebar section labels', () => {
 
     expect(screen.getByText('Projects')).toBeTruthy()
     expect(screen.queryByText('Sessions')).toBeNull()
+  })
+
+  it('hides a project with no sessions, so a lone empty project leaves no switcher', () => {
+    setSidebarAgentsGrouped(true)
+    $projectTree.set([{ ...realProject, isAuto: false, sessionCount: 0 }])
+    $sessions.set(sessionRows)
+
+    renderSidebar('/', 'chat')
+
+    expect(screen.queryByText('new-project')).toBeNull()
+    expect(screen.queryByText('Projects')).toBeNull()
   })
 
   it('keeps the "Sessions" label when grouping is on but no projects exist', () => {

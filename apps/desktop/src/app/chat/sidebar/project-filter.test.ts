@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
-import { filterToSessionBearingProjects, resolveLiveProjectFilter } from './project-filter'
+import {
+  filterToNonEmptyProjects,
+  filterToSessionBearingProjects,
+  projectReorderHandler,
+  resolveLiveProjectFilter,
+  sidebarProjectOrder,
+  sidebarProjectsShown
+} from './project-filter'
 
 describe('resolveLiveProjectFilter', () => {
   const treeA = [{ id: 'p_aaa' }, { id: '/Users/me/repos/alpha' }] as const
@@ -57,5 +64,48 @@ describe('filterToSessionBearingProjects (#53004)', () => {
 
     expect(ids).toContain('explicit_empty')
     expect(ids).toContain('home')
+  })
+})
+
+describe('filterToNonEmptyProjects', () => {
+  const projects = [
+    { id: 'home', isNoProject: true, sessionCount: 0 },
+    { id: 'explicit_empty', isAuto: false, sessionCount: 0 },
+    { id: 'auto_empty', isAuto: true, sessionCount: 0 },
+    { id: 'unknown_count' },
+    { id: 'busy', sessionCount: 3 }
+  ]
+
+  it('drops every empty project, explicit ones included, but keeps Home', () => {
+    expect(filterToNonEmptyProjects(projects).map(p => p.id)).toEqual(['home', 'busy'])
+  })
+
+  it('keeps the entered project even when it is empty', () => {
+    expect(filterToNonEmptyProjects(projects, 'explicit_empty').map(p => p.id)).toEqual([
+      'home',
+      'explicit_empty',
+      'busy'
+    ])
+  })
+})
+
+describe('sidebar project policy (alphabetical, no empties)', () => {
+  it('lists only non-empty projects plus Home and the entered one', () => {
+    const projects = [
+      { id: 'home', isNoProject: true, sessionCount: 0 },
+      { id: 'explicit_empty', isAuto: false, sessionCount: 0 },
+      { id: 'busy', isAuto: true, sessionCount: 2 }
+    ]
+
+    expect(sidebarProjectsShown(projects).map(p => p.id)).toEqual(['home', 'busy'])
+    expect(sidebarProjectsShown(projects, 'explicit_empty').map(p => p.id)).toEqual(['home', 'explicit_empty', 'busy'])
+  })
+
+  it('sorts alphabetically and drops the drag handle', () => {
+    const handler = () => undefined
+
+    expect(sidebarProjectOrder('updated')).toEqual({ alphabetical: true, stable: false })
+    expect(sidebarProjectOrder('created')).toEqual({ alphabetical: true, stable: true })
+    expect(projectReorderHandler(false, handler)).toBeUndefined()
   })
 })

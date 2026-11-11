@@ -86,14 +86,23 @@ const homeFirst = (projects: SidebarProjectTree[]): SidebarProjectTree[] =>
 // the active-project hoist and last activity — so a project keeps its slot
 // while you work in it; ties fall through to the label.
 export interface ProjectOrderOptions {
+  /** Sort by name only (Home still leads); ignores activity, hoist and drag order. */
+  alphabetical?: boolean
   stable?: boolean
 }
+
+const byLabel = (a: SidebarProjectTree, b: SidebarProjectTree): number =>
+  a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: 'base' }) || a.id.localeCompare(b.id)
 
 export function sortProjectsForOverview(
   projects: SidebarProjectTree[],
   activeProjectId: null | string,
-  { stable = false }: ProjectOrderOptions = {}
+  { alphabetical = false, stable = false }: ProjectOrderOptions = {}
 ): SidebarProjectTree[] {
+  if (alphabetical) {
+    return homeFirst([...projects].sort(byLabel))
+  }
+
   const hoistId = stable ? null : activeProjectId
 
   const sorted = [...projects].sort((a, b) => {
@@ -140,9 +149,9 @@ export function sortProjectsForOverview(
 export function orderProjectsByIds(
   projects: SidebarProjectTree[],
   orderIds: string[],
-  { stable = false }: ProjectOrderOptions = {}
+  { alphabetical = false, stable = false }: ProjectOrderOptions = {}
 ): SidebarProjectTree[] {
-  if (!orderIds.length) {
+  if (alphabetical || !orderIds.length) {
     return projects
   }
 

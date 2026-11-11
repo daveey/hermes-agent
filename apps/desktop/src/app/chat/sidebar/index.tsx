@@ -156,7 +156,7 @@ import { orderByIds, reconcileOrderIds, resolveManualSessionOrderIds, sameIds } 
 import { filterSessionsByProfileScope } from './profile-scope'
 import { ProfileRail } from './profile-switcher'
 import { ProjectDialog } from './project-dialog'
-import { filterToSessionBearingProjects, resolveLiveProjectFilter } from './project-filter'
+import { sidebarProjectPolicy as projectPolicy, resolveLiveProjectFilter } from './project-filter'
 import {
   enteredProjectLiveRows,
   excludeProjectSessions,
@@ -891,13 +891,12 @@ export function ChatSidebar({
   )
 
   // ── Projects: the single top-level model (authoritative, from the backend) ──
-  // `projects.tree` already unifies explicit projects + auto repos and folds
-  // linked worktrees under their main repo. The desktop only layers local view
-  // state on top: dismissed auto-projects, persisted repo/lane order, and the
-  // overview sort. Membership is the backend tree's (plus other gateways' rows), never re-derived.
+  // `projects.tree` unifies explicit projects + auto repos (worktrees folded); the desktop only layers view state
+  // (dismissals, repo/lane order, overview sort). Membership is the backend tree's, never re-derived.
   const projectModel = useMemo<SidebarProjectTree[]>(() => {
     const sorted = sortProjectsForOverview(
-      filterToSessionBearingProjects(filterVisibleProjects(gatewayProjectTree, dismissedAutoProjects))
+      projectPolicy
+        .shown(filterVisibleProjects(gatewayProjectTree, dismissedAutoProjects), projectScope)
         // A filtered-out project drops its whole lane, header included — hiding
         // only its rows would leave a row of empty folders behind.
         .filter(project => !projectFilter.length || projectFilter.includes(project.id))
@@ -914,7 +913,7 @@ export function ChatSidebar({
           )
         ),
       activeProjectId,
-      { stable: ordering === 'created' }
+      projectPolicy.order(ordering)
     )
 
     // Manual drag-order over the sorted list; dedupe by id (Windows path casing across profiles).
@@ -930,9 +929,10 @@ export function ChatSidebar({
       return true
     })
 
-    return orderProjectsByIds(deduped, projectOrderIds, { stable: ordering === 'created' })
+    return orderProjectsByIds(deduped, projectOrderIds, projectPolicy.order(ordering))
   }, [
     gatewayProjectTree,
+    projectScope,
     dismissedAutoProjects,
     orderRepos,
     activeProjectId,
@@ -1895,7 +1895,7 @@ export function ChatSidebar({
                 onEnterProject={onEnterProject}
                 onNewSessionInWorkspace={onNewSessionInWorkspace}
                 onNewSessionSplit={onNewSessionSplit}
-                onReorderProjects={showAllProfiles ? undefined : reorderProjects}
+                onReorderProjects={projectPolicy.reorderHandler(showAllProfiles, reorderProjects)}
                 onReorderSessions={showAllProfiles ? undefined : reorderSessions}
                 onResumeSession={onResumeSession}
                 onToggle={() => setSidebarRecentsOpen(!agentsOpen)}
