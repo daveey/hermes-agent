@@ -31,6 +31,9 @@ def arm(context):
 
     context = {key: context[key] for key in ('db', 'task_id', 'run_id', 'claim_lock', 'board') if key in context}
     context.update(writer_pid=os.getpid(), writer_birth=_process_fingerprint(os.getpid()))
+    if sys.platform == 'linux':
+        from hermes_cli.kanban_failed_result_service import arm_service
+        return arm_service(context, startup_seconds=START_SECONDS)
     command = [sys.executable, '-m', __name__, json.dumps(context)]
     launch = restart_safe_gateway_child_argv(
         command, unit_suffix=f'failed-result-{os.getpid()}-{time.monotonic_ns()}',
@@ -68,10 +71,21 @@ def observe(context):
     from hermes_cli.kanban_db_connect import connect_closing
     from hermes_cli.kanban_failed_result import failed_result_proof, process_gone
 
-    with connect_closing(Path(context['db'])) as conn:
+    path = Path(context['db'])
+    if not path.is_file():
+        # A removed board has no run to reconcile. Never recreate it on restart.
+        return
+    with connect_closing(path) as conn:
+        if conn.execute('SELECT 1 FROM tasks WHERE id=? AND current_run_id=?',
+                        (context['task_id'], context['run_id'])).fetchone() is None:
+            return
         # The acknowledgement precedes the writer's result transaction.
-        sys.stdout.buffer.write(READY)
-        sys.stdout.buffer.flush()
+        conn.execute('PRAGMA busy_timeout=250')
+        if context.get('ready_path'):
+            Path(context['ready_path']).write_text(context['observer_unit'], encoding='utf-8')
+        else:
+            sys.stdout.buffer.write(READY)
+            sys.stdout.buffer.flush()
         while True:
             row = conn.execute('SELECT status, current_run_id, claim_lock FROM tasks WHERE id=?',
                                (context['task_id'],)).fetchone()
@@ -99,4 +113,14 @@ def observe(context):
 
 
 if __name__ == '__main__':
-    observe(json.loads(sys.argv[1]))
+    context = json.loads(sys.argv[1])
+    observe(context)
+    # Only a successful terminal observation releases the readiness artifact.
+    # Unexpected errors retain it and exit nonzero for manager restart.
+    if context.get('ready_path'):
+        ready = Path(context['ready_path'])
+        ready.unlink(missing_ok=True)
+        try:
+            ready.parent.rmdir()
+        except FileNotFoundError:
+            pass
