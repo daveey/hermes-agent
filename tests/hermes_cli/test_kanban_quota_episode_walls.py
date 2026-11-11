@@ -265,3 +265,61 @@ def test_class_with_every_route_walled_falls_back_to_strong_tier(board, monkeypa
         seen = []
         dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.model_override, task.provider_override)))
         assert seen == [('claude-opus-5-5', 'anthropic')]
+
+
+LIVE_CFG = {'default_model': 'gpt-6-astra', 'default_provider': 'openai-codex',
+            'strong_model': 'class:deep', 'strong_provider': 'auto'}
+
+
+@pytest.mark.parametrize('evidence', ['provider_file', 'live_pool'])
+def test_fresh_card_skips_a_known_wall_before_its_first_spawn(board, monkeypatch, all_assignees_spawnable, evidence):
+    """A card with no quota episode of its own, default tier on walled codex, strong tier a class selector
+    (the live MacBook config, 2026-11-10): the class alternate must place it before any worker spawns.
+    Before the fix every fresh claim spawned into the codex wall once (exit 75) and only the second claim,
+    judged by the card's own new episode, rerouted: 11 wasted rate_limited runs per hour."""
+    clock = _clock(monkeypatch)
+    config, _ = routing(monkeypatch)
+    route = config['model_routing']['routes']['standard'][0]
+    config['model_routing']['routes'] = {'deep': [dict(route, model='claude-opus-5-5'),
+                                                   dict(route, provider='openai-codex', model='gpt-6-astra')]}
+    monkeypatch.setattr(tier, 'load_tier_config', lambda: LIVE_CFG)
+    codex_reset = float(clock[0] + 5000)
+    if evidence == 'provider_file':
+        monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'openai-codex': codex_reset})
+        monkeypatch.setattr(walls, 'live_quota_wall', lambda *_a, **_k: None)
+    else:
+        monkeypatch.setattr(walls, 'active_walls', lambda **_k: {})
+        monkeypatch.setattr(walls, 'live_quota_wall',
+                            lambda provider, model: codex_reset if provider == 'openai-codex' else None)
+    with kbc.connect() as conn:
+        pinned = kb.create_task(conn, title='needs astra', body=f'{walls.REQUIRE_MODEL_MARKER}', assignee='a')
+        assert tier.resolve_dispatch_tier(conn, kb.get_task(conn, pinned), lane='ready')[:2] == (
+            'gpt-6-astra', 'openai-codex')  # a require_model card is never moved off its model
+        conn.execute("DELETE FROM tasks WHERE id=?", (pinned,))
+        conn.commit()
+        tid = kb.create_task(conn, title='fresh default card', assignee='a')
+        seen = []
+        dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.model_override, task.provider_override)))
+        assert seen == [('claude-opus-5-5', 'anthropic')]
+        receipt = kb._json_dict(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='run_route' "
+                                             "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()[0])
+        assert receipt['tier_reason'] == 'default+wall:openai-codex'
+
+
+def test_fresh_card_class_alternate_never_lands_on_another_wall(board, monkeypatch, all_assignees_spawnable):
+    """Control: the class alternate is walled too (live pool); with no usable route the card keeps its
+    default route rather than being sent into a second wall."""
+    clock = _clock(monkeypatch)
+    config, _ = routing(monkeypatch)
+    route = config['model_routing']['routes']['standard'][0]
+    config['model_routing']['routes'] = {'deep': [dict(route, model='claude-opus-5-5'),
+                                                   dict(route, provider='openai-codex', model='gpt-6-astra')]}
+    monkeypatch.setattr(tier, 'load_tier_config', lambda: LIVE_CFG)
+    monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'openai-codex': float(clock[0] + 5000)})
+    monkeypatch.setattr(walls, 'live_quota_wall',
+                        lambda provider, model: float(clock[0] + 900) if provider == 'anthropic' else None)
+    with kbc.connect() as conn:
+        kb.create_task(conn, title='both walled', assignee='a')
+        seen = []
+        dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.model_override, task.provider_override)))
+        assert seen == [('gpt-6-astra', 'openai-codex')]

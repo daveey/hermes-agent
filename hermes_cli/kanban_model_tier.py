@@ -328,10 +328,36 @@ def resolve_dispatch_tier(conn, task, *, lane, cfg=None):
         from copy import copy
         probe = copy(task)
         probe.model_override, probe.provider_override = base[:2]
-        moved = retier_for_walls(probe, load_tier_config() if cfg is None else cfg)
+        moved = _class_alternate_off_wall(conn, task, base) or retier_for_walls(
+            probe, load_tier_config() if cfg is None else cfg)
         if moved:
             return moved[0], moved[1], f'{base[2]}+wall:{moved[2]}'
     return base
+
+
+def _class_alternate_off_wall(conn, task, base):
+    """``(model, provider, walled_provider)`` from the assignee's routing class when *base*'s provider is walled
+    right now (provider file or live pool), else None. [daveey]
+
+    Same eligibility probe a card's own quota episode uses (``alternate_route``). Without it a fresh card on a
+    walled default provider had no fallback when the strong tier is a class selector (``retier_for_walls``
+    skips ``auto``): every first claim spawned into the wall, exited 75, and only its new episode rerouted."""
+    import time
+    from hermes_cli import kanban_provider_walls as pw
+    from hermes_cli.kanban_quota_episode import alternate_route
+    model, provider = base[0], pw._norm(base[1])
+    if pw.REQUIRE_MODEL_MARKER in f"{getattr(task, 'title', '') or ''}\n{getattr(task, 'body', '') or ''}":
+        return None
+    if not model or not provider or provider == 'auto':
+        return None
+    now = time.time()
+    until = pw.active_walls(now=now).get(provider) or pw.live_quota_wall(provider, model)
+    if not until:
+        return None
+    route = alternate_route(conn, task, {provider: until}, base, now)
+    if not route or pw.live_quota_wall(route[1], route[0]):
+        return None
+    return route[0], route[1], provider
 
 
 def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:
