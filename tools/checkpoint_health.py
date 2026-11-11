@@ -40,7 +40,7 @@ def protected_floor(store: Path, size: int) -> bool:
     if (store / GC_PENDING_NAME).exists():
         return False
     try:
-        receipt = json.loads((store.parent / FLOOR_MARKER).read_text(encoding="utf-8"))
+        receipt = json.loads((store.parent / FLOOR_MARKER).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return False
     if not isinstance(receipt, dict) or receipt.get("size") != size:
