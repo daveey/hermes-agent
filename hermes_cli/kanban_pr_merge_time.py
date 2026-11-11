@@ -19,6 +19,10 @@ def check_receipt(check, sha):
     outcome = check.get("conclusion") if is_run else check["state"]
     return {"name": check.get("name", check.get("context")), "id": check["id"],
             "url": check.get("html_url") or check.get("target_url"),
+            # Retention deletes GitHub runs too. Keep audit rows in pr_acceptance
+            # events, including chronology, rather than only an expiring URL.
+            "html_url": check.get("html_url") or check.get("target_url"),
+            "completed_at": check.get("completed_at") if is_run else check.get("created_at"),
             "head_sha": check.get("head_sha", check.get("sha")),
             "classification": _classify(check, sha, outcome, is_run), "conclusion": outcome}
 

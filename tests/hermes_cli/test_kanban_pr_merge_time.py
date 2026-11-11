@@ -299,6 +299,31 @@ def test_nonfailure_postmerge_checks_do_not_claim_main_is_red(evidence, conclusi
     assert receipt["post_merge_checks"][0]["conclusion"] == conclusion
 
 
+def test_completed_landing_proof_survives_github_expiry(evidence, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect
+    import json
+
+    url = "https://github.com/acme/repo/actions/runs/123/job/456"
+    evidence["runs"][1]["html_url"] = url
+    kb.init_db()
+    with connect() as conn:
+        task = kb.create_task(conn, title="Archive landing", completion_contract="acme/repo")
+        assert kb.complete_task(conn, task, summary="verified", metadata={
+            "published_pr": "https://github.com/acme/repo/pull/7"})
+    # The producer has completed. No GitHub result remains for the auditor.
+    evidence["runs"] = []
+    monkeypatch.setattr(acceptance, "_api", lambda *a, **kw: pytest.fail("offline audit contacted GitHub"))
+    with connect() as conn:
+        receipt = json.loads(conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (task,)).fetchone()[0])
+    assert receipt["ok"] and receipt["pr_state"] == "MERGED"
+    row, = receipt["checks"]
+    assert {key: row[key] for key in ("name", "head_sha", "conclusion", "completed_at", "html_url")} == {
+        "name": NAME, "head_sha": SHA, "conclusion": "success",
+        "completed_at": PRE["completed_at"], "html_url": url}
+
+
 @pytest.mark.parametrize("owner_state", ["ready", "done", "archived", None])
 def test_completion_receipt_names_main_health_owner(evidence, owner_state):
     from hermes_cli import kanban_db as kb
