@@ -745,6 +745,7 @@ class ClaimGate:
                  ids: Optional[tuple[str, str, str]] = None) -> None:
         self.expires, self.deferred, self.lease, self._ids = expires, deferred, lease, ids
         self.consumed = False
+        self.echo = None  # [daveey] proven own-grant echo, bound under the claim txn (kanban_grant_echo, review F5)
 
     def __enter__(self) -> ClaimGate:
         return self

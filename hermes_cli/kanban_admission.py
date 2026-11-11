@@ -15,6 +15,7 @@ from pathlib import Path
 
 ADVISORY_MAX_AGE_MS = 15_000
 _consumed = threading.local()
+_decision = threading.local()  # the last cap count this thread's final gate read (refusal log / claimed event)
 
 
 def _now() -> float:
@@ -78,11 +79,17 @@ def _expired(gate):
     return gate is not None and getattr(gate, "expires", None) is not None and gate.expires <= int(_now())
 
 
-def _cap_full():
+def _cap_full(echo=None):
+    """Whole-host cap check. ``echo`` (:func:`kanban_grant_echo.own_grant_echo`, proven under this claim's write
+    txn) excludes only that one row: this claim's own unused Board grant echoed before the txn (review F5)."""
     from hermes_cli import machine_metrics
 
     ok, cap = _root_max_in_progress()
-    active = machine_metrics.active_card_runs()
+    detail = {}
+    active = machine_metrics.active_card_runs(exclude=echo, detail=detail) if echo else machine_metrics.active_card_runs()
+    _decision.counts = {"active_before": active + detail.get("excluded", 0) if type(active) is int else None,
+                        "active_after": active, "cap": cap,
+                        **({"excluded_run_uid": echo.run_uid} if detail.get("excluded") else {})}
     return not ok or type(active) is not int or active < 0 or (cap is not None and active >= cap)
 
 
@@ -109,12 +116,13 @@ def _final_hub_gate(gate, started=None):
     a waiting turn's BUSY_WAIT_S budget is never outlasted by an admitted claim (final review N1)."""
     from hermes_cli import machine_cpu_metrics as cpu
 
+    echo = getattr(gate, "echo", None)
     state, limit = cpu.root_limit()
     if state == cpu.OFF:
         return None, None
     if state != cpu.ON:
         return "hub_cpu_unknown", None
-    if _cap_full():
+    if _cap_full(echo):
         return "hub_capacity_full", None
     if _expired(gate):
         return "hub_cpu_unknown", None
@@ -129,11 +137,15 @@ def _final_hub_gate(gate, started=None):
         return "hub_cpu_at_or_above_limit", None
     if _expired(gate):
         return "hub_cpu_unknown", None  # the claim/lease deadline passed while sampling: never start
-    if _cap_full():  # the spec's recount immediately before commit
+    if _cap_full(echo):  # the spec's recount immediately before commit
         return "hub_capacity_full", None
     if _over_budget(started):
         return "hub_cpu_unknown", None  # the hold overran its budget: refuse rather than outlast waiting turns
-    return None, {**{k: measured[k] for k in cpu.FIELDS}, "limit_pct": limit}
+    counts = getattr(_decision, "counts", None) or {}
+    admission = {k: counts[k] for k in ("active_before", "active_after", "excluded_run_uid")} \
+        if counts.get("excluded_run_uid") else None
+    return None, {**{k: measured[k] for k in cpu.FIELDS}, "limit_pct": limit,
+                  **({"hub_admission": admission} if admission else {})}
 
 
 def consumed_hub_cpu():
@@ -147,15 +159,23 @@ def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, even
 
     # Activity belongs to this run, not the previous worker. Seed it atomically
     # so the first expired TTL cannot treat a freshly woken worker as wedged.
+    # [daveey] Review F5: this claim's own grant may already have been echoed ``running`` (own holder, its run uid,
+    # no lock) before the txn; ``gate.echo`` is that proof, re-checked here in the same txn, so the CAS adopts the
+    # row instead of losing to it. Any other ``running`` row still loses.
+    echo = getattr(gate, "echo", None)
+    if echo is not None:
+        from hermes_cli.kanban_grant_echo import match_rows
+        if match_rows(conn, echo) != [echo.run_id]:
+            return None
     cur = conn.execute(
         """
         UPDATE tasks
            SET status = 'running', human_request = NULL, claim_lock = ?,
                claim_expires = ?, started_at = COALESCE(started_at, ?),
                last_heartbeat_at = ?
-         WHERE id = ? AND status = ? AND claim_lock IS NULL
+         WHERE id = ? AND claim_lock IS NULL AND (status = ? OR (? AND status = 'running' AND current_run_id = ?))
         """,
-        (lock, expires, now, now, task_id, source_status),
+        (lock, expires, now, now, task_id, source_status, echo is not None, echo.run_id if echo else None),
     )
     if cur.rowcount != 1:
         return None
@@ -169,7 +189,9 @@ def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, even
     # capture trigger is installed (see ``stage_claim``). A Board echo of this claim pulled before this txn left
     # a ``pending_sync`` placeholder with that uid: that row becomes the run, never a second one. [daveey]
     placeholder = conn.execute(
-        "SELECT id FROM task_runs WHERE uid = ? AND task_id = ? AND status = 'pending_sync'", (run_uid, task_id),
+        "SELECT id FROM task_runs WHERE uid = ? AND task_id = ? AND (status = 'pending_sync' OR "
+        "(id = ? AND status = 'running' AND claim_lock IS NULL AND ended_at IS NULL))",
+        (run_uid, task_id, echo.run_id if echo and echo.run_uid == run_uid else None),
     ).fetchone() if run_uid else None
     if placeholder is not None:
         run_id = placeholder[0]
@@ -189,11 +211,13 @@ def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, even
         )
         run_id = run_cur.lastrowid
     conn.execute("UPDATE tasks SET current_run_id = ? WHERE id = ?", (run_id, task_id))
-    hub_cpu = consumed_hub_cpu()
+    hub_cpu = dict(consumed_hub_cpu() or {})
+    admission = hub_cpu.pop("hub_admission", None)
     kb._append_event(
         conn, task_id, "claimed",
         {"lock": lock, "expires": expires, "run_id": run_id, **(event_extra or {}),
-         **({"hub_cpu": hub_cpu} if hub_cpu else {})}, run_id=run_id,
+         **({"hub_cpu": hub_cpu} if hub_cpu else {}), **({"hub_admission": admission} if admission else {})},
+        run_id=run_id,
     )
     return run_id
 
@@ -217,6 +241,14 @@ def admission_hold_set(task_id=None):
         return False
 
 
+def _bind_echo(conn, task_id, gate):
+    """Under the claim's write txn: attach the proven echo of the gate's own unused grant (or None) to the gate."""
+    if gate is None or task_id is None:
+        return
+    from hermes_cli.kanban_grant_echo import own_grant_echo
+    gate.echo = own_grant_echo(conn, task_id, gate)
+
+
 @contextlib.contextmanager
 def claim_transaction(conn, *, task_id=None, gate=None):
     """Fence check, the hub CPU/cap gate and real SQL commit share admission.lock (never a savepoint).
@@ -232,6 +264,7 @@ def claim_transaction(conn, *, task_id=None, gate=None):
         raise RuntimeError("Kanban claim cannot run inside an existing transaction")
     if not SUPPORTED:
         with write_txn(conn):
+            _bind_echo(conn, task_id, gate)
             yield True
         return
     # BEGIN IMMEDIATE can wait through SQLite's busy timeout and retries. Do
@@ -270,9 +303,12 @@ def claim_transaction(conn, *, task_id=None, gate=None):
                 return
             # Frozen contract: an independent full CPU sample is taken HERE, with admission.lock held, and the
             # claim commits before the lock is released, so a concurrent claimer sees this run in its recount.
+            _bind_echo(conn, task_id, gate)
+            _decision.counts = None
             reason, evidence = _final_hub_gate(gate, started)
             if reason is not None:
-                logging.getLogger(__name__).info("Hub admission refused Kanban claim %s: %s", task_id, reason)
+                logging.getLogger(__name__).info("Hub admission refused Kanban claim %s: %s %s", task_id, reason,
+                                                 getattr(_decision, "counts", None) or {})
                 _defer(task_id, reason)
                 yield False
                 return
