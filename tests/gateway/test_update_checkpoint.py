@@ -1,4 +1,5 @@
 """Instant updates negotiate a bounded checkpoint, never waive unknown admission."""
+import asyncio
 import json
 import os
 import time
@@ -44,11 +45,11 @@ def invoke(checkpoint, runner, nonce="episode-one", before=None):
 
 
 def test_known_managed_work_uses_existing_restart_checkpoint(checkpoint):
-    module, _home, runner, _intent = checkpoint
+    module, home, runner, _intent = checkpoint
     result = invoke(module, runner)
     assert result["pausing"] and result["checkpoint"]
     assert result["drain_timeout"] >= 60
-    runner.request_restart.assert_called_once_with(detached=False, via_service=True)
+    runner.request_restart.assert_called_once_with(detached=False, via_service=True, update_intent=home / "core-update/intent")
 
 
 @pytest.mark.parametrize("change", ["no-hold", "expired", "dead-owner", "wrong-kind", "no-checkpoint", "nonce"])
@@ -167,3 +168,34 @@ def test_cron_inventory_lock_acquisition_is_bounded(monkeypatch):
         lock.release()
     assert known_cron_reservations() == set()
 
+
+
+@pytest.mark.parametrize("stage", ["during-preserve", "after-snapshot"])
+def test_withdrawal_after_admission_cancels_real_restart_without_stop(checkpoint, monkeypatch, stage):
+    """Real runner: an intent removed after admission must not be rediscovered as 'no update'."""
+    from unittest.mock import AsyncMock
+    from tests.gateway.restart_test_helpers import make_restart_runner
+    module, home, _fake, _intent = checkpoint
+    path = home / "core-update/intent"
+    runner, _adapter = make_restart_runner()
+    runner.stop = AsyncMock()
+    runner.config = object()
+    monkeypatch.setattr(module, "kanban_managed_count", lambda r: 0)
+    if stage == "during-preserve":
+        monkeypatch.setattr(module, "preserve_cron_slots", lambda config: path.unlink())
+    else:
+        real = runner.request_restart
+        def withdrawn(**kw):
+            accepted = real(**kw)
+            path.unlink()
+            return accepted
+        monkeypatch.setattr(runner, "request_restart", withdrawn)
+    async def scenario():
+        result = module.checkpoint_for_update(
+            runner, SimpleNamespace(call_soon_threadsafe=lambda cb: cb()), {"nonce": "episode-one"})
+        assert result["pausing"] is True
+        assert runner._restart_update_intent == path
+        await asyncio.wait_for(runner._restart_task, 5)
+    asyncio.run(scenario())
+    runner.stop.assert_not_awaited()
+    assert runner._restart_requested is False and runner._draining is False

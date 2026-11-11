@@ -110,7 +110,7 @@ def test_explicit_intent_negotiates_the_checkpoint_for_known_managed_work(episod
     result, entry, idle = ask(episode)
     assert result is True and idle == []
     assert entry["checkpoint_drain_timeout"] == checkpoint.CHECKPOINT_DRAIN_S == 70.0
-    episode.runner.request_restart.assert_called_once_with(detached=False, via_service=True)
+    episode.runner.request_restart.assert_called_once_with(detached=False, via_service=True, update_intent=episode.home / "core-update/intent")
 
 
 def test_exactly_known_cron_reservation_is_accepted(episode):

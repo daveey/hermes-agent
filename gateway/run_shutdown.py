@@ -1630,10 +1630,11 @@ class GatewayShutdownMixin(GatewayRestartWaitMixin, GatewaySessionEndMixin, Gate
         logger.info("Restart deferred wait complete — active work drained; proceeding to stop()")
         return True
 
-    def request_restart(self, *, detached: bool = False, via_service: bool = False) -> bool:
+    def request_restart(self, *, detached: bool = False, via_service: bool = False, update_intent=None) -> bool:
         if self._restart_task_started:
             return False
-        self._restart_update_intent = self._core_update_intent_path()
+        # An explicit path stays armed even if already gone, so the wait cancels instead of stopping.
+        self._restart_update_intent = self._core_update_intent_path() if update_intent is None else update_intent
         self._restart_requested = True
         self._restart_detached = detached
         self._restart_via_service = via_service

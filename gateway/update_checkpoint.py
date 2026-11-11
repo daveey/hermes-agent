@@ -70,6 +70,7 @@ def checkpoint_for_update(runner, loop, params):
     root = get_default_hermes_root(home=home)
     refused = {"pausing": False, "already_stopping": False, "busy": True, "pid": os.getpid()}
     intent = checkpoint_intent(home)
+    intent_path = Path(home) / "core-update/intent"
     if intent is None or params.get("nonce") != intent["nonce"]:
         return refused
     # No admission lock is held while reading cron's lock (cron uses the reverse order).
@@ -107,7 +108,8 @@ def checkpoint_for_update(runner, loop, params):
                 if cancelled or time.monotonic() >= deadline:
                     return
                 claimed = True
-            accepted = runner.request_restart(detached=False, via_service=True)
+            # The admitted path, not a fresh lookup: a withdrawal during preserve must still cancel.
+            accepted = runner.request_restart(detached=False, via_service=True, update_intent=intent_path)
             result.append({"pausing": bool(accepted), "already_stopping": not accepted,
                            "checkpoint": True, "nonce": intent["nonce"], "pid": os.getpid(), "drain_timeout": CHECKPOINT_DRAIN_S})
         except (OSError, TimeoutError, ValueError, TypeError, KeyError):
