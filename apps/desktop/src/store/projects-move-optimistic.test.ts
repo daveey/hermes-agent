@@ -7,7 +7,13 @@ import { $activeGatewayProfile, setShowAllProfiles } from '@/store/profile'
 import { $sessions, setSessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
 
-import { $projectOwnerBySessionId, $projectTree, moveSessionToProject, refreshProjectTree } from './projects'
+import {
+  $projectOwnerBySessionId,
+  $projectTree,
+  createProjectAndMoveSession,
+  moveSessionToProject,
+  refreshProjectTree
+} from './projects'
 import { reassignTreeSession } from './projects-move-optimistic'
 
 vi.mock('@/i18n', () => ({ translateNow: (key: string) => key }))
@@ -168,5 +174,99 @@ describe('reassignTreeSession', () => {
     const tree = treeWith('p_src')
 
     expect(reassignTreeSession(tree, 's1', 'p_nope', null, matches)).toBe(tree)
+  })
+})
+
+describe('createProjectAndMoveSession shows the row in the new project at once', () => {
+  let releaseCreate: (() => void) | undefined
+  let created: boolean
+  let failCreate: boolean
+
+  const withNew = (): SidebarProjectTree[] => [
+    { ...treeWith('p_src')[0], previewSessions: [], sessionCount: 0, sessionIds: [] },
+    {
+      id: 'p_new',
+      label: 'Fresh Idea',
+      path: '/home/u/code/fresh-idea',
+      previewSessions: [row('s1', '/home/u/code/fresh-idea')],
+      repos: [],
+      sessionCount: 1,
+      sessionIds: ['s1']
+    }
+  ]
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setShowAllProfiles(false)
+    $activeGatewayProfile.set('default')
+    created = false
+    failCreate = false
+    releaseCreate = undefined
+    $projectTree.set(treeWith('p_src'))
+    setSessions(() => [row('s1', '/repos/src')])
+
+    const request = vi.fn(async (method: string) => {
+      if (method === 'projects.tree') {
+        return { active_id: null, projects: created ? withNew() : treeWith('p_src'), scoped_session_ids: ['s1'] }
+      }
+
+      if (method === 'shell.exec') {
+        return { code: 0, stderr: '', stdout: '' }
+      }
+
+      if (method === 'projects.create') {
+        await new Promise<void>(resolve => (releaseCreate = resolve))
+
+        if (failCreate) {
+          throw new Error('create failed')
+        }
+
+        return { project: { folders: [], id: 'p_new', name: 'Fresh Idea', primary_path: '/home/u/code/fresh-idea' } }
+      }
+
+      if (method === 'session.workspace.move') {
+        created = true
+
+        return { branch: null, cwd: '/home/u/code/fresh-idea', git_repo_root: null }
+      }
+
+      return { active_id: null, projects: [] }
+    })
+
+    vi.mocked(activeGateway).mockReturnValue({ connectionState: 'open', request } as never)
+  })
+
+  it('files the row under a provisional node before projects.create returns, then the real one', async () => {
+    const done = createProjectAndMoveSession('s1', 'Fresh Idea')
+    const owner = $projectOwnerBySessionId.get().get('s1')
+
+    expect(owner).toMatch(/^provisional:/)
+    expect($projectTree.get().find(n => n.id === owner)?.label).toBe('Fresh Idea')
+
+    // A refresh before the create landed keeps the provisional node and the row in it.
+    await refreshProjectTree()
+    expect($projectOwnerBySessionId.get().get('s1')).toBe(owner)
+
+    await vi.waitFor(() => expect(releaseCreate).toBeTypeOf('function'))
+    releaseCreate?.()
+    await done
+    await refreshProjectTree()
+
+    expect($projectOwnerBySessionId.get().get('s1')).toBe('p_new')
+    expect($projectTree.get().some(n => n.id.startsWith('provisional:'))).toBe(false)
+  })
+
+  it('removes the provisional node and restores the old owner when the create fails', async () => {
+    failCreate = true
+    const done = createProjectAndMoveSession('s1', 'Fresh Idea')
+
+    expect($projectOwnerBySessionId.get().get('s1')).toMatch(/^provisional:/)
+    await vi.waitFor(() => expect(releaseCreate).toBeTypeOf('function'))
+    releaseCreate?.()
+    await expect(done).rejects.toThrow('create failed')
+    await refreshProjectTree()
+
+    expect($projectOwnerBySessionId.get().get('s1')).toBe('p_src')
+    expect($projectTree.get().some(n => n.id.startsWith('provisional:'))).toBe(false)
   })
 })

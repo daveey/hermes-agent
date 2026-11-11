@@ -74,6 +74,7 @@ import { fetchRemoteProjectTree, type ProjectTreePayload } from './project-tree-
 import {
   applyPendingMoves,
   consumeMoveFollowSuppression,
+  showCreatedAtOnce,
   showMovedAtOnce,
   suppressMoveFollow,
   treeSessionRows
@@ -87,6 +88,7 @@ import {
   shellPath,
   type ShellResult
 } from './projects-move-paths'
+import { renameProjectSessions } from './projects-rename-sessions'
 import { repoDiscoveryPolicyFromConfig, repoDiscoveryPolicySignature } from './projects-repo-discovery'
 
 export {
@@ -916,59 +918,6 @@ export function applyRenamedSessionTitle(sessionId: string, title: string | null
   void refreshProjectTree()
 }
 
-/** Patch every cached copy of the renamed conversation inside one project
- *  node (lane rows + overview previews), keeping the node's reference when
- *  nothing matched — the tree keeps unchanged nodes by reference so the
- *  drill-in doesn't refetch on a no-op (#77591). */
-function renameProjectSessions(
-  project: SidebarProjectTree,
-  sessionId: string,
-  next: string | null
-): SidebarProjectTree {
-  let changed = false
-
-  const rename = (sessions: SessionInfo[]): SessionInfo[] =>
-    sessions.map(session => {
-      if (!sessionMatchesStoredId(session, sessionId) || session.title === next) {
-        return session
-      }
-
-      changed = true
-
-      return { ...session, title: next }
-    })
-
-  const repos = project.repos.map(repo => {
-    let repoChanged = false
-
-    const groups = repo.groups.map(group => {
-      const sessions = rename(group.sessions)
-
-      if (sessions === group.sessions) {
-        return group
-      }
-
-      repoChanged = true
-
-      return { ...group, sessions }
-    })
-
-    if (!repoChanged) {
-      return repo
-    }
-
-    return { ...repo, groups, sessionCount: groups.reduce((n, g) => n + g.sessions.length, 0) }
-  })
-
-  const previewSessions = project.previewSessions ? rename(project.previewSessions) : project.previewSessions
-
-  if (!changed) {
-    return project
-  }
-
-  return { ...project, previewSessions, repos, sessionCount: repos.reduce((n, repo) => n + repo.sessionCount, 0) }
-}
-
 interface WorkspaceMovePayload {
   branch?: null | string
   cwd?: string
@@ -1223,18 +1172,27 @@ export async function createProjectAndMoveSession(
 
   const target = moveTargetGateway(sessionId, profile, connectionId)
   const projectProfile = target.profile || (target.remote ? 'default' : writableProjectProfile())
-  const listed = await moveTargetRequest<ProjectsPayload>(target, 'projects.list', { profile: projectProfile })
+  const undo = showCreatedAtOnce(sessionId, label)
 
-  const existing = (listed.projects ?? []).find(
-    p => !p.archived && (labelKey(p.name) === labelKey(label) || labelKey(p.slug) === labelKey(label))
-  )
+  try {
+    const listed = await moveTargetRequest<ProjectsPayload>(target, 'projects.list', { profile: projectProfile })
 
-  const cwd =
-    existing?.primary_path ||
-    existing?.folders?.[0]?.path ||
-    (await createProjectFolderOn(target, label, newProjectFolder(label), projectProfile))
+    const existing = (listed.projects ?? []).find(
+      p => !p.archived && (labelKey(p.name) === labelKey(label) || labelKey(p.slug) === labelKey(label))
+    )
 
-  await moveSessionToCwd(target, sessionId, cwd)
+    const cwd =
+      existing?.primary_path ||
+      existing?.folders?.[0]?.path ||
+      (await createProjectFolderOn(target, label, newProjectFolder(label), projectProfile))
+
+    await moveSessionToCwd(target, sessionId, cwd)
+  } catch (error) {
+    undo()
+    void refreshProjectTree()
+
+    throw error
+  }
 }
 
 async function moveSessionToCwd(target: MoveTarget, sessionId: string, cwd: string): Promise<void> {
