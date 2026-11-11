@@ -161,14 +161,36 @@ def launchd_label_foreign_home(label: str, scope: set[Path] | None = None) -> st
     return None
 
 
-def describe_skipped_runtime(kind: str, name: str, home: str | None) -> str:
-    """One notice line for a runtime the update leaves alone (foreign home or unreadable ownership)."""
+def gateway_foreign_code_root(pid: int, home) -> Path | None:
+    """The OTHER checkout the live gateway *pid* provably loads its code from, else ``None``.
+
+    A gateway pinned to its own core (unit ``ExecStart``/``PYTHONPATH`` outside this checkout, e.g.
+    an Ask Eve pinned owner) serves a profile of this home but none of this checkout's code: moving
+    the checkout cannot reach it, and restarting it only brings it back on its pin. Unknown is never
+    foreign: a gateway whose code root cannot be read is treated as this checkout's. [daveey]"""
+    from hermes_cli.update_receipt import _gateway_code_root, _updater_code_root
+    with suppress(Exception):
+        own = _updater_code_root()
+        if own is None or not pid or int(pid) <= 0 or home is None:
+            return None
+        root = _gateway_code_root(int(pid), Path(home))
+        if root is not None and root != own:
+            return root
+    return None
+
+
+def describe_skipped_runtime(kind: str, name: str, home: str | None, code_root: Path | None = None) -> str:
+    """One notice line for a runtime the update leaves alone (foreign home, its own checkout, or
+    unreadable ownership)."""
+    if code_root is not None:
+        return (f"  ↷ {name}: {kind} running its own checkout ({code_root}), which this update does not "
+                "change — left alone (not paused, not restarted)")
     if home is None:
         return f"  ↷ {name}: {kind} whose Hermes home could not be read — left alone (not restarted)"
     return f"  ↷ {name}: {kind} of another Hermes home ({home}) — left alone (not restarted)"
 
 
-def announce_skipped_runtime(kind: str, name: str, home: str | None) -> None:
+def announce_skipped_runtime(kind: str, name: str, home: str | None, code_root: Path | None = None) -> None:
     """Print :func:`describe_skipped_runtime` once per update run, and name the runtime on its receipt.
 
     The pre-swap pause and the post-swap restart phase each scope the same host-wide gateway list,
@@ -176,10 +198,10 @@ def announce_skipped_runtime(kind: str, name: str, home: str | None) -> None:
     that process) knows what the pause already announced. No open receipt: every call prints.
     """
     from hermes_cli import update_receipt
-    entry = [kind, name, home]
+    entry = [kind, name, str(code_root) if code_root is not None else home]
     current = update_receipt._current.get()
     announced = list((current.data if current is not None else {}).get("runtimes_left_alone") or [])
     if entry in announced:
         return
-    print(describe_skipped_runtime(kind, name, home))
+    print(describe_skipped_runtime(kind, name, home, code_root))
     update_receipt.record_fact("runtimes_left_alone", [*announced, entry])

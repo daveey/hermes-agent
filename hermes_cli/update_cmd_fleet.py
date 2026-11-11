@@ -734,11 +734,23 @@ def _systemd_unit_owned_by_update(scope_cmd: list, svc_name: str) -> bool:
     to drain and restart the account's real ``hermes-gateway.service`` because the unit was
     listed, not because it ran the updated code. Foreign or unreadable ownership prints a notice
     and leaves the unit alone; it is not a failed restart.
+
+    The same holds for a unit of THIS home whose live gateway loads another checkout (a drop-in
+    pinning ``ExecStart``/``PYTHONPATH`` to its own core, e.g. an Ask Eve pinned owner): the update
+    moves none of its code, so the pre-swap pause must not wait on it (an old pinned core answers
+    the idle pause ``unsupported`` forever and deferred every hub update on 2026-11-11) and the
+    restart must not bounce it: it would only come back on its pin. [daveey]
     """
-    from hermes_cli.update_fleet_scope import announce_skipped_runtime, systemd_unit_hermes_home, home_in_update_scope
+    from hermes_cli.update_fleet_scope import (
+        announce_skipped_runtime, gateway_foreign_code_root, home_in_update_scope, systemd_unit_hermes_home,
+    )
     home = systemd_unit_hermes_home(scope_cmd, svc_name)
     if home is not None and home_in_update_scope(home):
-        return True
+        pinned = gateway_foreign_code_root(_unit_main_pid(scope_cmd, svc_name), home)
+        if pinned is None:
+            return True
+        announce_skipped_runtime("systemd unit", svc_name, home, code_root=pinned)
+        return False
     announce_skipped_runtime("systemd unit", svc_name, home)
     return False
 

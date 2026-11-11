@@ -1088,6 +1088,13 @@ def _gateway_code_root(pid: int, home: Path) -> Optional[Path]:
         import psutil  # type: ignore
 
         process = psutil.Process(pid)
+        # The import path outranks where the interpreter lives: ``python -m hermes_cli.main`` under a
+        # PYTHONPATH naming a checkout runs THAT checkout whatever venv the python came from, and
+        # names no other path at all (an Ask Eve pinned owner's unit). [daveey]
+        with suppress(Exception):
+            for probe in ((process.environ() or {}).get("PYTHONPATH") or "").split(os.pathsep):
+                if probe and os.path.isabs(probe) and (Path(probe) / "hermes_cli" / "main.py").is_file():
+                    return Path(probe).resolve()
         with suppress(Exception):
             root = _code_root_for_path((process.environ() or {}).get("VIRTUAL_ENV"))
             if root:

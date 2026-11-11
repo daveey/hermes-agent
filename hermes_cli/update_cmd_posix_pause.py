@@ -14,6 +14,9 @@ resumed by ``_resume_windows_gateways_after_update`` (which dispatches here on
 ``platform == "posix"``), adopted by the next ``hermes update`` and resumed by the next launch
 when this process dies.
 
+* a gateway of this home that loads ANOTHER checkout (a unit pinned to its own core, e.g. an Ask
+  Eve pinned owner) is not in the set at all: the move cannot reach its code, so it is named and
+  left running, neither paused here nor restarted afterwards (``_systemd_unit_owned_by_update``).
 * each gateway accepts ``pause-if-idle-for-update`` only with no active work, checking and
   closing admission in one loop callback. Busy gateways defer the update without starting a
   drain. Unsupported gateways refuse explicitly until restarted on the installed code; a lost
