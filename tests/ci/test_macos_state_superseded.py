@@ -86,7 +86,7 @@ def test_workflow_passes_delegation_only_for_nonrelease_pr(event, release, expec
     step = next(step for step in job["steps"] if "run" in step)
     env = {key: gha.to_string(gha.render(value, ctx)) for key, value in step["env"].items()}
     # Execute the workflow's shell argument construction, recording its CLI boundary.
-    shim = 'python3() { printf "%s\\n" "$@"; }; export -f python3\n'
+    shim = 'python3() { cat >/dev/null; printf "%s\\n" "$@"; }; export -f python3\n'
     proc = subprocess.run(["bash", "-eo", "pipefail", "-c", shim + gha.render(step["run"], ctx)],
                           cwd=ROOT, env=env, text=True, encoding="utf-8", capture_output=True,
                           timeout=30, check=False)
