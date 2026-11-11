@@ -139,12 +139,35 @@ runs:
                 return 1
             done
           }
+          # API fallback: the same list from the checked-out PR merge commit.
+          # The GITHUB_TOKEN REST quota is shared by every workflow in the repo;
+          # when it ran out, every PR failed open and queued the one-runner macOS
+          # state lane (16 jobs, ~9 h). git fetch does not spend that quota.
+          # Only used when HEAD is exactly the event's merge commit and its
+          # second parent is the event's head SHA; anything else fails open as
+          # before. --no-renames lists a rename under both names, as the
+          # classifier expects. The diff against the merge's first parent is
+          # exactly what the merge commit under test changes.
+          merge_files() {
+            local head parents
+            head="$(git rev-parse HEAD 2>/dev/null)" || return 1
+            [ -n "${GITHUB_SHA:-}" ] && [ "$head" = "$GITHUB_SHA" ] || return 1
+            git fetch --no-tags --quiet --depth=2 origin "$head" || return 1
+            read -r -a parents <<< "$(git rev-list --parents -n 1 "$head")"
+            [ "${#parents[@]}" -eq 3 ] && [ "${parents[2]}" = "$HEAD_SHA" ] || return 1
+            git diff --no-renames --name-only "${parents[1]}" "$head"
+          }
           CHANGED=""
           for i in 1 2 3; do
             if CHANGED="$(compare_files)"; then
 
               break
             fi
+            if CHANGED="$(merge_files)" && [ -n "$CHANGED" ]; then
+              echo "::warning::compare API failed; using the PR merge commit's git diff instead"
+              break
+            fi
+            CHANGED=""
             if [ "$i" = 3 ]; then
               echo "::warning::compare API failed after 3 attempts — failing open (all lanes run)"
               CHANGED=""
