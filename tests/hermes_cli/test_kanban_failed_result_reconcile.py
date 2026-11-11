@@ -95,3 +95,57 @@ def test_failed_child_reconciles_without_owner_progress(board, entry):
     crashes = conn.execute("SELECT id FROM task_events WHERE run_id=? AND kind='crashed'",
                            (context['run_id'],)).fetchall()
     assert len(crashes) == 1
+
+
+def test_board_only_proof_accepts_real_dead_child(board):
+    from hermes_cli.kanban_failed_result import failed_result_proof
+    conn, context = board
+    result = _failed_child(conn, context)
+    proof = failed_result_proof(conn, context['task_id'], context['run_id'], context['claim_lock'])
+    assert proof is not None
+    assert proof['source_result_event_id'] == result['id']
+    assert proof['result_recorded_at'] == result['created_at']
+
+
+@pytest.mark.parametrize('state', ['live', 'recycled', 'unreadable', 'denied', 'gone'])
+def test_process_proof_fails_closed(monkeypatch, state):
+    from hermes_cli import kanban_failed_result as reconcile
+    def probe(pid, signal):
+        assert (pid, signal) == (123, 0)
+        if state == 'gone':
+            raise ProcessLookupError()
+        if state == 'denied':
+            raise PermissionError()
+    monkeypatch.setattr(reconcile.os, 'kill', probe)
+    monkeypatch.setattr(kbd, '_process_fingerprint',
+                        lambda pid: {'live': 'epoch|1', 'recycled': 'epoch|2'}.get(state))
+    assert reconcile.process_gone(123, 'epoch|1') is (state == 'gone')
+
+
+@pytest.mark.parametrize('birth', [None, '', 'UNVERIFIED', 12])
+def test_missing_birth_never_proves_death(monkeypatch, birth):
+    from hermes_cli import kanban_failed_result as reconcile
+    def unexpected(*args):
+        pytest.fail('invalid binding must not query OS')
+    monkeypatch.setattr(reconcile.os, 'kill', unexpected)
+    assert not reconcile.process_gone(123, birth)
+
+
+@pytest.mark.parametrize('change', ['run', 'claim', 'outer_live', 'bound_live', 'success', 'wrong_pid'])
+def test_proof_rejects_changed_identity(board, monkeypatch, change):
+    from hermes_cli import kanban_failed_result as reconcile
+    conn, context = board
+    _failed_child(conn, context)
+    if change in ('run', 'claim'):
+        context = {**context, 'run_id': -1} if change == 'run' else {**context, 'claim_lock': 'foreign:1'}
+    elif change in ('outer_live', 'bound_live'):
+        calls = iter([False] if change == 'outer_live' else [True, False])
+        monkeypatch.setattr(reconcile, 'process_gone', lambda *args: next(calls))
+    else:
+        row = conn.execute("SELECT payload FROM task_events WHERE run_id=? AND kind='worker_result'",
+                           (context['run_id'],)).fetchone()
+        payload = json.loads(row['payload'])
+        payload['exit_code' if change == 'success' else 'pid'] = 0
+        with kb.write_txn(conn):
+            kb._append_event(conn, context['task_id'], 'worker_result', payload, run_id=context['run_id'])
+    assert reconcile.failed_result_proof(conn, context['task_id'], context['run_id'], context['claim_lock']) is None
