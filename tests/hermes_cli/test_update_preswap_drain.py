@@ -284,7 +284,7 @@ def _busy_gateway_at_commit_point(tmp_path, monkeypatch, *, active_work=7):
     monkeypatch.setattr(cron_pause, "preserve_cron_slots", Mock())
     inline = SimpleNamespace(call_soon_threadsafe=lambda callback: callback())
     monkeypatch.setattr(control_socket, "pause_gateway_for_update",
-                        lambda home, *, idle_only=False: cron_pause.pause_for_update(
+                        lambda home, *, idle_only=False, timeout=2.0: cron_pause.pause_for_update(
                             runner, inline, idle_only=idle_only))
     entry = {"pid": 4242, "kind": "systemd", "scope": "user", "unit": "busy.service", "home": str(tmp_path)}
     monkeypatch.setattr(pause, "_RUN", pause._empty_token())
@@ -301,7 +301,9 @@ def _busy_gateway_at_commit_point(tmp_path, monkeypatch, *, active_work=7):
     monkeypatch.setattr(record, "sync", lambda token: None)
     monkeypatch.setattr(pause, "_drain_budget", lambda: 1885.0)
     monkeypatch.setattr(pause, "_alive", lambda *args: True)  # its turns never finish on their own
-    monkeypatch.setattr(pause, "_stop_at_once", lambda e: order.append(("stop", e["unit"], head())))
+    monkeypatch.setattr(pause, "_stop_at_once",
+                        lambda e, deadline, procs, **kw: order.append(("stop", e["unit"], head())))
+    monkeypatch.setattr(pause, "_stopped", lambda *args: ("stop", "busy.service", head()) in order)
     from hermes_cli import update_cmd_windows as windows
     monkeypatch.setattr(windows, "_resume_windows_gateways_after_update", lambda token: order.append("resume"))
     monkeypatch.setattr(commit, "arm_commit_obligations", lambda *args: order.append("arm"))
@@ -319,7 +321,7 @@ def test_opted_in_update_stops_a_busy_gateway_within_the_bound_before_any_tree_m
 
     # Drain first (turns keep their resume markers), one bounded wait, supervisor stop, only then the move.
     assert order == ["drain", ("stop", "busy.service", start_head), "arm", "move-armed"]
-    assert 29.0 <= now[0] <= 31.0  # the 30 s pre-swap cap, not the 1885 s after-turn budget
+    assert 20.0 <= now[0] <= 30.0  # drained for the 30 s pre-swap cap less the stop reserve, not 1885 s
     runner.request_restart.assert_called_once_with(detached=False, via_service=True)
     assert pause.gateways_paused()
 
@@ -354,13 +356,15 @@ def test_opted_in_update_stops_a_gateway_that_predates_the_pause_verbs_at_once(m
     monkeypatch.setattr(pause, "_ask_to_drain", Mock(side_effect=AssertionError("idle verb on the opted-in path")))
     stop = Mock()
     monkeypatch.setattr(pause, "_stop_at_once", stop)
+    monkeypatch.setattr(pause, "_stopped", lambda *args: True)
     monkeypatch.setenv(pause.STOP_BUSY_ENV, "1")
     entry = {"pid": 4242, "kind": "systemd", "unit": "pinned.service", "home": "/fixture"}
 
     pause._stop_gateways({}, [entry])
 
-    assert asked == [{}]  # the ordinary drain verb, never idle_only
-    stop.assert_called_once_with(entry)
+    assert asked and all("idle_only" not in kw for kw in asked)  # the ordinary drain verb, never idle_only
+    stop.assert_called_once()
+    assert stop.call_args.args[0] is entry
     assert now[0] == 0.0  # a supervised gateway that cannot drain is not waited for
 
 

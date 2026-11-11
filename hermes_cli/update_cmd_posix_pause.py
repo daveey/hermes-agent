@@ -345,7 +345,17 @@ def _left_running(units: list[dict], jobs: list[dict]) -> tuple[list[dict], list
 
 # --------------------------------------------------------------------------- stop / start
 
+#: ``_manage_cmd`` answers for this pause (its sudo probes are subprocesses): resolved once, during discovery.
+_MANAGE_CMDS: dict[str, list | None] = {}
+
+
 def _manage_cmd(scope: str) -> list | None:
+    if scope not in _MANAGE_CMDS:
+        _MANAGE_CMDS[scope] = _resolve_manage_cmd(scope)
+    return _MANAGE_CMDS[scope]
+
+
+def _resolve_manage_cmd(scope: str) -> list | None:
     from hermes_cli.update_cmd_fleet import _needs_sudo, _sudo_noninteractive_ok
     cmd = ["systemctl", "--user"] if scope == "user" else ["systemctl"]
     cmd = cmd + ["--no-ask-password"]
@@ -517,31 +527,173 @@ def _ask_to_drain(entry: dict) -> bool | None:
     return False if ack and (ack.get("busy") or ack.get("unsupported")) else None
 
 
-def _ask_busy_to_drain(entry: dict) -> bool:
+def _ask_busy_to_drain(entry: dict, timeout: float) -> bool:
     """The ordinary drain request (``request_restart``: in-flight turns get the gateway's own drain
     window and keep their resume markers); True on its ACK. Only for the opted-in stop: unlike
-    the idle-only verb it cannot be taken back, and gateways older than that verb answer it."""
+    the idle-only verb it cannot be taken back, and gateways older than that verb answer it.
+    *timeout* is what the transaction deadline leaves for this one request."""
     from gateway.control_socket import pause_gateway_for_update
-    if not entry.get("home"):
+    if not entry.get("home") or timeout <= 0:
         return False
     try:
-        ack = pause_gateway_for_update(Path(entry["home"]))
+        ack = pause_gateway_for_update(Path(entry["home"]), timeout=timeout)
     except Exception:  # health: allow BLE001 -- no answer: the supervisor stop below handles it
         return False
     return bool(ack and (ack.get("pausing") or ack.get("already_stopping")))
 
 
-def _stop_at_once(entry: dict) -> None:
-    """The stop for a gateway that did not take the drain: its supervisor's, else marker + SIGTERM."""
+#: The opted-in stop keeps this much of its deadline (at most) for the supervisor stops and kills,
+#: so a gateway that is still draining when the wait ends has time to be stopped and verified.
+_STOP_RESERVE_S = 8.0
+_POLL_S = 0.2
+
+
+def _left(deadline: float) -> float:
+    return deadline - time.monotonic()
+
+
+def _unit_state(unit: dict, deadline: float) -> dict[str, str]:
+    """``ActiveState``/``MainPID``/``Job`` of *unit*, read within the deadline; ``{}`` when unknown."""
+    from hermes_cli.update_cmd_fleet import _systemctl
+    if (left := _left(deadline)) <= 0:
+        return {}
+    try:
+        show = _systemctl(_scope_cmd(unit) + ["show", unit["unit"], "--property=ActiveState,SubState,MainPID,Job"],
+                          timeout=min(5.0, left))
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if show.returncode != 0:
+        return {}
+    return dict(line.partition("=")[::2] for line in (show.stdout or "").splitlines() if "=" in line)
+
+
+def _systemctl_async(unit: dict, args: list[str], deadline: float, *, must: bool) -> None:
+    """Queue a unit job without waiting for it (``stop --no-block``) or signal it (``kill``); the
+    client call itself is bounded by the deadline. *must*: a failure to queue refuses."""
+    from hermes_cli.update_cmd_fleet import _systemctl
+    cmd = _manage_cmd(unit["scope"])
+    if cmd is None:
+        raise PauseRefused(f"no privilege to stop system unit {unit['unit']}")
+    try:
+        result = _systemctl(cmd + [*args, unit["unit"]], timeout=max(0.1, min(10.0, _left(deadline))))
+    except (OSError, subprocess.SubprocessError) as exc:
+        if must:
+            raise PauseRefused(f"systemctl {args[0]} {unit['unit']} did not complete: {exc}") from exc
+        return
+    if must and result.returncode != 0:
+        raise PauseRefused(f"systemctl {args[0]} {unit['unit']} failed: {(result.stderr or '').strip()}")
+
+
+def _begin_launchd_bootout(job: dict) -> subprocess.Popen:
+    return subprocess.Popen(["launchctl", "bootout", f"{job['domain']}/{job['label']}"], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _stop_at_once(entry: dict, deadline: float, procs: dict, *, drained: bool = False) -> None:
+    """Start the stop of a gateway that did not take the drain, without waiting for it: its
+    supervisor's job is only queued (``stop --no-block``; a launchd bootout runs in the
+    background), a bare process gets marker + SIGTERM. ``_stopped`` verifies the outcome."""
     from hermes_cli.update_cmd_windows import _write_update_planned_stop_marker
-    if entry.get("kind") == "systemd":
-        _stop_unit(entry)
-    elif entry.get("kind") == "launchd":
-        _stop_job(entry)
-    else:
+    kind = entry.get("kind")
+    if kind == "systemd":
+        _systemctl_async(entry, ["stop", "--no-block"], deadline, must=True)
+        return
+    if entry.get("home") and not drained:
         _write_update_planned_stop_marker(Path(entry["home"]), entry["pid"])
+    if kind == "launchd":
+        procs[entry["pid"]] = _begin_launchd_bootout(entry)
+    else:
         with suppress(ProcessLookupError, PermissionError):
             os.kill(entry["pid"], signal.SIGTERM)
+
+
+def _force(entry: dict, deadline: float, procs: dict) -> None:
+    """The last resort inside the deadline: SIGKILL through the supervisor (the stop job then
+    finishes at once), or straight at a launchd/bare process."""
+    if entry.get("kind") == "systemd":
+        _systemctl_async(entry, ["kill", "--kill-whom=all", "--signal=SIGKILL"], deadline, must=False)
+        return
+    if (proc := procs.get(entry["pid"])) is not None and proc.poll() is None:
+        with suppress(OSError):
+            proc.kill()
+    with suppress(ProcessLookupError, PermissionError):
+        os.kill(entry["pid"], getattr(signal, "SIGKILL", signal.SIGTERM))
+
+
+def _stopped(entry: dict, deadline: float, procs: dict) -> bool:
+    """Verified stopped: the process incarnation is gone and, for a supervised gateway, the
+    supervisor holds no job or restart for it (so nothing respawns it on the old tree)."""
+    if _alive(entry["pid"], entry.get("ct")):
+        return False
+    if entry.get("kind") == "systemd":
+        state = _unit_state(entry, deadline)
+        return state.get("ActiveState") in ("inactive", "failed") and not state.get("Job") \
+            and state.get("MainPID", "0") in ("0", "")
+    if entry.get("kind") == "launchd":
+        from hermes_cli.gateway import _locate_launchd_gateway_service
+        if (proc := procs.get(entry["pid"])) is not None and proc.poll() is None:
+            return False
+        return (_locate_launchd_gateway_service(entry["label"])[1] or 0) <= 0
+    return True
+
+
+def _stop_busy_gateways(token: dict, entries: list[dict], deadline: float) -> None:
+    """The opted-in stop: ONE transaction against the absolute *deadline*, which the caller started
+    before discovery and the serial drain requests. Every gateway is asked to drain; one wait for
+    all of them ends early enough to leave a reserve; the survivors are then stopped through their
+    supervisor (a bare one is killed) and finally killed outright; every stop is queued, never
+    awaited blocking, and verified. Anything not verified stopped at the deadline refuses, and the
+    caller rolls everything back: the checkout never moves with a gateway possibly still running."""
+    from hermes_cli import update_pause_record as pause_record
+    total = max(0.0, _left(deadline))
+    reserve = min(_STOP_RESERVE_S, total * 0.3)
+    drain_end, force_at = deadline - reserve, deadline - reserve / 2
+    procs: dict[int, subprocess.Popen] = {}
+    waiting: list[dict] = []   # drain accepted: expected to exit on its own
+    settling: list[dict] = []  # a stop is under way: must be verified
+    try:
+        for entry in entries:
+            pause_record.mark_stop_sent(token, entry["pid"])  # before the request: see _ask_to_drain
+            if _ask_busy_to_drain(entry, min(2.0, max(0.1, _left(drain_end)))):
+                waiting.append(entry)
+            else:
+                _stop_at_once(entry, deadline, procs)
+                settling.append(entry)
+        if waiting:
+            print(f"  ⏳ Waiting up to {max(0.0, _left(drain_end)):.0f}s for in-flight turns on {_names(waiting)}, "
+                  "then stopping them for the update...")
+        while waiting and _left(drain_end) > 0:
+            for entry in [e for e in waiting if not _alive(e["pid"], e.get("ct"))]:
+                waiting.remove(entry)
+                if entry.get("kind"):
+                    _stop_at_once(entry, deadline, procs, drained=True)  # keep the supervisor from bringing it back
+                settling.append(entry)
+            if waiting:
+                time.sleep(_POLL_S)
+        if waiting:
+            print(f"  ↷ Stopping {_names(waiting)} with work still running (the caller asked for it)")
+        for entry in waiting:
+            _stop_at_once(entry, deadline, procs, drained=True)
+            settling.append(entry)
+        forced: set[int] = set()
+        while True:
+            settling = [e for e in settling if not _stopped(e, deadline, procs)]
+            if not settling:
+                return
+            if _left(deadline) <= 0:
+                break
+            if _left(force_at) <= 0:
+                for entry in settling:
+                    if entry["pid"] not in forced:
+                        forced.add(entry["pid"])
+                        _force(entry, deadline, procs)
+            time.sleep(min(_POLL_S, max(0.0, _left(deadline))))
+        raise PauseRefused(f"{_names(settling)} did not stop within {total:.0f}s; the checkout was not changed")
+    finally:
+        for proc in procs.values():
+            if proc.poll() is None:
+                with suppress(OSError):
+                    proc.kill()
 
 
 def _drain_budget() -> float:
@@ -550,7 +702,7 @@ def _drain_budget() -> float:
     return _gateway_drain_budget()
 
 
-def _stop_gateways(token: dict, entries: list[dict], *, fence_checked: bool = False) -> None:
+def _stop_gateways(token: dict, entries: list[dict], deadline: float | None = None, *, fence_checked: bool = False) -> None:
     """Request idle-only stops, then wait within one bounded pre-swap budget.
     A supervised gateway that exited through the drain is stopped through
     its supervisor at once: its exit 75 asks for a restart, which systemd honours after
@@ -559,9 +711,10 @@ def _stop_gateways(token: dict, entries: list[dict], *, fence_checked: bool = Fa
     from hermes_cli import update_pause_record as pause_record
     from hermes_cli.update_cmd_drain_report import drain_progress_reporter
     from hermes_cli.update_gateway_fence import parked_launchd_launcher
-    budget, waiting = min(_drain_budget(), _PRE_SWAP_DRAIN_WAIT_S), []
     if _stop_busy_opted_in():
-        return _stop_busy_gateways(token, entries, budget)
+        return _stop_busy_gateways(token, entries, deadline if deadline is not None
+                                   else time.monotonic() + _PRE_SWAP_DRAIN_WAIT_S)
+    budget, waiting = min(_drain_budget(), _PRE_SWAP_DRAIN_WAIT_S), []
     refusals, refused = [], []
     for entry in entries:
         if not fence_checked and parked_launchd_launcher(entry):
@@ -602,43 +755,6 @@ def _stop_gateways(token: dict, entries: list[dict], *, fence_checked: bool = Fa
                            [_names([e]) for e in waiting])
     if refusals:
         raise PauseRefused("; ".join(refusals), refused)
-
-
-def _stop_busy_gateways(token: dict, entries: list[dict], budget: float) -> None:
-    """The opted-in stop: drain every gateway, wait *budget* once for all of them, then stop the
-    survivors through their supervisor (bare ones are killed). The caller chose to update over
-    the work still running, so nothing here defers on it; only a stop that fails refuses."""
-    from hermes_cli import update_pause_record as pause_record
-    waiting = []
-    for entry in entries:
-        pause_record.mark_stop_sent(token, entry["pid"])  # before the request: see _ask_to_drain
-        if _ask_busy_to_drain(entry):
-            waiting.append(entry)
-        else:
-            _stop_at_once(entry)
-            if not entry.get("kind"):
-                waiting.append(entry)  # a SIGTERMed bare gateway is waited for like a drained one
-    if waiting:
-        print(f"  ⏳ Waiting up to {budget:.0f}s for in-flight turns on {_names(waiting)}, then stopping "
-              "them for the update...")
-    deadline = time.monotonic() + budget
-    while waiting and time.monotonic() < deadline:
-        for entry in [e for e in waiting if not _alive(e["pid"], e.get("ct"))]:
-            waiting.remove(entry)
-            _disarm(entry)
-        if waiting:
-            time.sleep(0.2)
-    if waiting:
-        print(f"  ↷ Stopping {_names(waiting)} with work still running (the caller asked for it)")
-    for entry in waiting:
-        if entry.get("kind"):
-            _stop_at_once(entry)
-        else:
-            with suppress(ProcessLookupError, PermissionError):
-                os.kill(entry["pid"], getattr(signal, "SIGKILL", signal.SIGTERM))
-    bare = [e for e in waiting if not e.get("kind")]
-    if left := _wait_gone([e["pid"] for e in bare], 10.0, {e["pid"]: e.get("ct") for e in bare}):
-        raise PauseRefused("gateway PID(s) " + ", ".join(map(str, sorted(left))) + " did not stop")
 
 
 def _disarm(entry: dict) -> None:
@@ -735,6 +851,8 @@ def pause_at_commit_point() -> str | None:
 
 def _pause(token: dict) -> str | None:
     from hermes_cli import update_pause_record as pause_record
+    deadline = time.monotonic() + _PRE_SWAP_DRAIN_WAIT_S  # one clock for discovery, drain requests and stops
+    _MANAGE_CMDS.clear()
     try:
         units, jobs = _discover_systemd(), _discover_launchd()
         units, jobs, notices = _left_running(units, jobs)
@@ -749,6 +867,8 @@ def _pause(token: dict) -> str | None:
     if not supervised and not bare:
         _deferral_streak()
         return None
+    if _stop_busy_opted_in() and _left(deadline) <= 0:
+        return "the pre-swap deadline passed while listing gateways; the checkout was not changed"
     from gateway.status import get_process_start_time
     from hermes_cli.update_cmd_windows import _planned_stop_marker_path
     before = copy.deepcopy(token)  # what this attempt may add; a failed record puts it back
@@ -781,7 +901,7 @@ def _pause(token: dict) -> str | None:
     try:
         # Exemption and restart custody were decided together before recording. Re-evaluating
         # here could skip a newly parked launcher while retaining its durable restart debt.
-        _stop_gateways(token, supervised + bare, fence_checked=True)
+        _stop_gateways(token, supervised + bare, deadline, fence_checked=True)
     except BaseException as exc:  # health: allow BLE001 -- interruption must settle before cmd_update releases its fence
         from hermes_cli.update_cmd_windows import _resume_windows_gateways_after_update
         print(f"  ↷ Update deferred: {exc or type(exc).__name__}; the checkout was not changed")
