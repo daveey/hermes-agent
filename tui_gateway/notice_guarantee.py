@@ -99,14 +99,16 @@ def candidates(db: Any, now: float) -> list[dict]:
     out = []
     for row in rows:
         # Cache structure, not age: a notice can become due (or expire) without a commit.
-        if row["last_active"] is None or row["last_active"] < now - LOOKBACK_S:
+        meta = _decode(row["display_metadata"])
+        deferred_due = _deferred_due(meta, now)
+        # Discovery lookback must not expire a durable retry during a long quota reset.
+        if row["last_active"] is None or (row["last_active"] < now - LOOKBACK_S and not deferred_due):
             continue
         if not isinstance(row["timestamp"], (int, float)):
             continue
         if row["timestamp"] > now - GRACE_S:
             continue
-        meta = _decode(row["display_metadata"])
-        if "closeout" not in meta or _deferred_due(meta, now):
+        if "closeout" not in meta or deferred_due:
             out.append({"sid": str(row["sid"]), "msg_id": int(row["msg_id"]), "content": str(row["content"] or ""),
                         "meta": meta, "raw_meta": row["display_metadata"]})
     return out

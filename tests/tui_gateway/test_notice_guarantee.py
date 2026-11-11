@@ -74,8 +74,9 @@ def test_an_unanswered_notice_gets_one_closeout_wake(db):
     assert _run(db) == ([], [])  # claimed: never woken twice
 
 
-def test_young_notice_waits_for_the_grace_window(db):
-    _notice(db, "✔ Kanban t_aaa done — deploy card", age=30)
+@pytest.mark.parametrize("meta", [{}, {"closeout": {"state": "deferred", "retry_at": 0, "attempts": 1}}])
+def test_young_notice_waits_for_the_grace_window(db, meta):
+    _notice(db, "✔ Kanban t_aaa done — deploy card", age=30, **meta)
     assert _run(db) == ([], [])
 
 
@@ -117,6 +118,27 @@ def test_a_failed_wake_is_deferred_and_offered_again_after_retry_at(db, monkeypa
     state, _retry, attempts = _closeout_meta(db, row)
     assert (state, attempts) == ("started", 2)
     assert _run(db, now=now + 99999) == ([], [])  # started: never woken again
+
+
+def test_deferred_wake_survives_a_quota_reset_beyond_discovery_lookback(db, monkeypatch):
+    from tui_gateway import server
+
+    now = time.time()
+    reset = now + 8 * 86400
+    monkeypatch.setattr(server, "_find_live_session_by_key",
+                        lambda key: (key, {"agent_failure": {"failure_resets_at": reset}}))
+    row = _notice(db, "completed before a long quota reset")
+    assert _run(db, verdict="error", now=now)[1] == [(CHAT, row)]
+    due = reset + ng.DEFER_SLACK_S
+    assert tuple(_closeout_meta(db, row)) == ("deferred", due, 1)
+
+    # No writes or fresh activity: the same durable row must age into eligibility.
+    assert _run(db, now=due - 1) == ([], [])
+    assert [c["msg_id"] for c in ng.candidates(db, due)] == [row]
+    out, calls = _run(db, now=due)
+    assert calls == [(CHAT, row)] and [o["result"] for o in out] == ["dispatched"]
+    assert (_closeout_meta(db, row)[0], _closeout_meta(db, row)[2]) == ("started", 2)
+    assert _run(db, now=due + 1) == ([], [])
 
 
 def test_failed_wakes_stop_after_max_attempts(db, monkeypatch):
