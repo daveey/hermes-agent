@@ -1,6 +1,7 @@
 """Run generated launchers with a real interpreter and captured entrypoint."""
 from __future__ import annotations
 
+from contextlib import suppress
 import json
 import os
 from pathlib import Path
@@ -94,11 +95,14 @@ def test_verifier_stops_detached_descendants_before_cleanup(tmp_path):
     try:
         stop_child_tree(child)
         assert child.poll() is not None
-        assert not descendant.is_running() or descendant.status() == psutil.STATUS_ZOMBIE
+        # Reaping between these probes also proves the descendant stopped.
+        with suppress(psutil.NoSuchProcess):
+            assert not descendant.is_running() or descendant.status() == psutil.STATUS_ZOMBIE
     finally:
         if child.poll() is None:
             child.kill()
-        if descendant.is_running() and descendant.status() != psutil.STATUS_ZOMBIE:
-            descendant.kill()
+        with suppress(psutil.NoSuchProcess):
+            if descendant.is_running() and descendant.status() != psutil.STATUS_ZOMBIE:
+                descendant.kill()
         child.wait(timeout=10)
         child.stdout.close()

@@ -20,6 +20,16 @@ def run(argv: list[str], env: dict[str, str], cwd: Path) -> subprocess.Completed
     return result
 
 
+def _still_running(process) -> bool:
+    import psutil
+
+    try:
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        # Reaping between the liveness and status probes is successful cleanup.
+        return False
+
+
 def stop_child_tree(child: subprocess.Popen) -> None:
     import psutil
     from agent.deadline import kill_process_tree
@@ -31,7 +41,7 @@ def stop_child_tree(child: subprocess.Popen) -> None:
     child.wait(timeout=10)
     deadline = time.monotonic() + 10
     while descendants and time.monotonic() < deadline:
-        descendants = [p for p in descendants if p.is_running() and p.status() != psutil.STATUS_ZOMBIE]
+        descendants = [p for p in descendants if _still_running(p)]
         if descendants:
             time.sleep(0.05)
     if descendants:
