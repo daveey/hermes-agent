@@ -2644,7 +2644,9 @@ def complete_task(
     acceptance = prepare_acceptance(conn, task_id, expected_run_id, metadata)
     if acceptance is False:
         return False
-    with write_txn(conn):
+    from hermes_cli.kanban_metadata_files import discard_on_error
+    staged: list[Path] = []
+    with discard_on_error(staged), write_txn(conn):
         # Hard invariant even for human review approval: a parent may have
         # reopened while this task waited.
         if not _parents_satisfied(conn, task_id):
@@ -2688,7 +2690,7 @@ def complete_task(
         if conn.execute(sql, params).rowcount != 1:
             return False
         if isinstance(metadata, dict):
-            _stage_completion_artifacts(conn, task_id, metadata, now)
+            staged.extend(_stage_completion_artifacts(conn, task_id, metadata, now))
         run_id = _end_run(
             conn, task_id, outcome="completed", status="done", summary=handoff_summary,
             metadata=metadata,
@@ -2707,6 +2709,8 @@ def complete_task(
             event_summary = _REVIEW_APPROVED_NOTE
         from hermes_cli.kanban_db_completion_payload import completed_event_payload
         completion_payload = completed_event_payload(result, event_summary, verified_cards, metadata, acceptance)
+        if isinstance(metadata, dict) and "completion_receipt" in metadata:
+            completion_payload["completion_receipt_admission"] = 1
         if goal_event_id is not None:
             conn.execute('UPDATE task_events SET run_id=? WHERE id=? AND task_id=?',
                          (run_id, goal_event_id, task_id))
@@ -2735,6 +2739,8 @@ def complete_task(
     return True
 
 
+# Capability belongs to this loaded writer, not to helper files newly on disk.
+complete_task.completion_receipt_admission = 1
 _REVIEW_APPROVED_NOTE = "Review approved without additional evidence."
 
 
@@ -2794,40 +2800,7 @@ def _flag_phantom_prose_refs(
             )
 
 
-def _merge_completion_prose_artifacts(
-    conn: sqlite3.Connection, task_id: str, metadata: Optional[dict], *, summary: Optional[str],
-    result: Optional[str],
-) -> Optional[dict]:
-    """Legacy workers named deliverables only by absolute path in prose; add
-    those that exist under the scratch workspace to ``metadata["artifacts"]``
-    before cleanup can erase them."""
-    workspace = _scratch_workspace(conn, task_id)
-    if workspace is None:
-        return metadata
-    if not _is_managed_scratch_path(workspace):
-        return metadata
-    text = "\n".join(part for part in (summary, result) if part)
-    if not text:
-        return metadata
-    prefix = re.escape(str(workspace))
-    discovered: list[str] = []
-    for match in re.finditer(prefix + r"(?:[/\\][^\s`\"'<>]+)", text):
-        raw = match.group(0).rstrip(".,;:!?)]}")
-        candidate = Path(raw)
-        if candidate.is_file():
-            discovered.append(str(candidate))
-    if not discovered:
-        return metadata
-    updated = dict(metadata) if isinstance(metadata, dict) else {}
-    existing = updated.get("artifacts")
-    merged = list(existing) if isinstance(existing, (list, tuple)) else []
-    seen = {str(path) for path in merged}
-    for path in discovered:
-        if path not in seen:
-            merged.append(path)
-            seen.add(path)
-    updated["artifacts"] = merged
-    return updated
+from hermes_cli.kanban_metadata_files import merge_completion_prose_artifacts as _merge_completion_prose_artifacts
 
 
 def _persist_scratch_completion_artifacts(

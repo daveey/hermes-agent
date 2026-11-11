@@ -24,6 +24,8 @@ def test_projection_preserves_exact_receipt_and_source(conn):
     event = conn.execute("SELECT * FROM task_events WHERE id=?", (source["event_id"],)).fetchone()
     assert source["run_id"] == event["run_id"]
     assert source["completed_at"] == event["created_at"]
+    import json
+    assert json.loads(event["payload"])["completion_receipt_admission"] == 1
     # Returned dictionaries cannot mutate the canonical handoff.
     out["completion_receipt"]["items"][0]["disposition"] = "delivered"
     assert read(conn, tid)["completion_receipt"] == value
@@ -37,6 +39,17 @@ def test_later_noncompleted_run_never_replaces_historical_receipt(conn):
         kb._synthesize_ended_run(conn, tid, outcome="review", summary="Not acceptance",
                                 metadata={"completion_receipt": receipt("delivered")})
     assert read(conn, tid) == before
+
+
+@pytest.mark.parametrize("marker", [None, True, "1", 0, 2])
+def test_old_or_unadmitted_metadata_is_not_a_receipt(conn, marker):
+    tid = fixtures.task(conn)
+    with kb.write_txn(conn):
+        run = kb._synthesize_ended_run(conn, tid, outcome="completed", summary="Old writer",
+                                     metadata={"completion_receipt": receipt()})
+        kb._append_event(conn, tid, "completed", {"completion_receipt_admission": marker}, run_id=run)
+    assert read(conn, tid) is None
+
 
 
 def test_review_receipt_alone_is_not_delivery(conn):

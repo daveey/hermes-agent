@@ -30,6 +30,9 @@ def read_completed(conn, task_id, *, gateway, board):
     if row is None or row["receipt_outcome"] != "completed":
         return None
     try:
+        event = json.loads((row["payload"] if "payload" in row.keys() else None) or "{}")
+        if not isinstance(event, dict) or type(event.get("completion_receipt_admission")) is not int or event["completion_receipt_admission"] != 1:
+            return None  # older writers may have stored arbitrary unadmitted metadata
         metadata = json.loads(row["receipt_metadata"] or "{}")
         if not isinstance(metadata, dict) or "completion_receipt" not in metadata:
             return None
@@ -37,9 +40,41 @@ def read_completed(conn, task_id, *, gateway, board):
     except (ValueError, TypeError):
         return None
     event_uid = row["uid"] if "uid" in row.keys() else None
-    return {"completion_receipt": receipt, "completion_receipt_source": {
+    source = {
         "kind": "task_run", "ref": f"@task:{board}@{gateway}/{task_id}",
         "event_id": row["id"], "event_uid": event_uid,
         "run_id": row["run_id"], "run_uid": row["receipt_run_uid"],
         "completed_at": row["created_at"],
-    }}
+    }
+    relocations = metadata.get("attached_from_workspace")
+    if isinstance(relocations, dict):
+        # Evidence keeps its observed identity. Carry the existing relocation
+        # provenance alongside it, not as a new evidence observation.
+        refs = {e["ref"] for item in receipt["items"] for e in item["evidence"]}
+        refs.update(item["superseded_by"] for item in receipt["items"] if "superseded_by" in item)
+        source["attached_from_workspace"] = {ref: dest for ref, dest in relocations.items()
+                                             if ref in refs and isinstance(dest, str)}
+    return {"completion_receipt": receipt, "completion_receipt_source": source}
+
+
+def read_inventory(conn, task_id, *, board, gateway=None):
+    """Optional projection for existing inventories, including older board schemas.
+
+    A synced task's created_on is its authority even when another worker picked
+    it up. Unsynced local boards use the configured gateway name. Unknown source
+    or an old schema means no receipt, never fabricated acceptance.
+    """
+    import sqlite3
+    from hermes_cli.kanban_origin import gateway_names
+
+    try:
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None:
+            return None
+        source = row["created_on"] if "created_on" in row.keys() else None
+        source = source or gateway or gateway_names()[0]
+        if not source:
+            return None
+        return read_completed(conn, task_id, gateway=source, board=board)
+    except sqlite3.Error:
+        return None
