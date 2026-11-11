@@ -28,6 +28,8 @@ from pathlib import Path
 # supervisor declaration and every fleet scan read as "an installed, KeepAlive service".
 LABEL_PREFIX = "com.nousresearch.hermes.runtime."
 _POLL_INTERVAL_S = 0.5
+#: [daveey] A test that really exercises launchd sets this; any other test process never reaches it.
+ALLOW_IN_TESTS_ENV = "HERMES_TEST_ALLOW_LAUNCHD"
 
 
 def _budget(deadline: float | None, cap: float) -> float:
@@ -127,11 +129,26 @@ def responsible_app(command: list[str]) -> Path | None:
     return None
 
 
+def _refused_in_tests() -> bool:
+    """[daveey] A test process (pytest env, or a pytest ancestor once a child's env was rebuilt) must not
+    load jobs into the developer's real GUI domain: e2e ``hermes chat`` homes did, and the jobs' teardown
+    exits read as failing LaunchAgents. ``ALLOW_IN_TESTS_ENV`` opts a launchd test back in."""
+    if os.environ.get(ALLOW_IN_TESTS_ENV) == "1":
+        return False
+    try:
+        from hermes_state_guard import _in_test_context
+    except ImportError:  # a bare interpreter without the checkout root on sys.path
+        return False
+    return _in_test_context()
+
+
 def start_gateway_job(command: list[str], *, env: dict[str, str], cwd: str | Path,
                       log_path: str | Path, deadline: float | None = None) -> GatewayJob | None:
     """Run ``command`` as a one-off job in this user's GUI launchd domain. ``None`` when launchd
     cannot take it (no GUI session, e.g. over SSH): the caller starts it as a plain child instead.
     ``deadline`` (monotonic) bounds every launchctl call, here and in the job's ``poll()``."""
+    if _refused_in_tests():
+        return None
     from hermes_cli.gateway_launchd import launchd_program_arguments
     _remove_finished_jobs(deadline)
     label = f"{LABEL_PREFIX}{uuid.uuid4().hex[:12]}"

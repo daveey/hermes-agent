@@ -28,7 +28,8 @@ def _command_of(pid: int) -> str:
 
 
 @pytest.mark.platforms("macos")
-def test_gateway_job_is_a_launchd_osascript_child_that_reads_as_unsupervised(tmp_path):
+def test_gateway_job_is_a_launchd_osascript_child_that_reads_as_unsupervised(monkeypatch, tmp_path):
+    monkeypatch.setenv(runtime.ALLOW_IN_TESTS_ENV, "1")  # this test exists to exercise real launchd
     report = tmp_path / "report.json"
     release = tmp_path / "release"
     child = (
@@ -65,8 +66,12 @@ def test_gateway_job_is_a_launchd_osascript_child_that_reads_as_unsupervised(tmp
         assert job.poll() is None
     finally:
         release.write_text("", encoding="utf-8")
-    assert wait_until(lambda: job.poll() is not None, timeout=30)
-    assert job.poll() == 0
+    try:
+        assert wait_until(lambda: job.poll() is not None, timeout=30)
+        assert job.poll() == 0
+    finally:  # leave the developer's GUI domain as we found it
+        subprocess.run(["launchctl", "remove", job.target.rsplit("/", 1)[-1]], capture_output=True, check=False,
+                       stdin=subprocess.DEVNULL)
 
 
 def _job_program_arguments(monkeypatch, tmp_path, command):
@@ -79,6 +84,7 @@ def _job_program_arguments(monkeypatch, tmp_path, command):
         return subprocess.CompletedProcess(["launchctl", *args], 0, "", "")
 
     monkeypatch.setattr(runtime, "_launchctl", fake_launchctl)
+    monkeypatch.setenv(runtime.ALLOW_IN_TESTS_ENV, "1")
     assert start_gateway_job(command, env={}, cwd=tmp_path, log_path=tmp_path / "gateway-stdio.log") is not None
     return seen["plist"]["ProgramArguments"]
 
@@ -130,3 +136,72 @@ def test_a_job_keeps_reporting_its_exit_past_the_spawn_deadline_once_the_ensure_
     job.extend_deadline(time.monotonic() + 60)
     job._checked = 0.0
     assert job.poll() == 1
+
+
+def _recording_launchctl(monkeypatch):
+    calls = []
+
+    def launchctl(*args, timeout):
+        calls.append(args)
+        return subprocess.CompletedProcess(["launchctl", *args], 0, "", "")
+    monkeypatch.setattr(runtime, "_launchctl", launchctl)
+    return calls
+
+
+def test_a_test_process_never_touches_the_real_launchd_domain(monkeypatch, tmp_path):
+    """[daveey] e2e ``hermes chat`` children bootstrapped real jobs into gui/<uid>; their teardown exits then
+    read as failing LaunchAgents on the developer Mac. Under a test, the caller's plain-child fallback runs."""
+    calls = _recording_launchctl(monkeypatch)
+    monkeypatch.delenv(runtime.ALLOW_IN_TESTS_ENV, raising=False)
+    assert start_gateway_job([sys.executable, "-c", "pass"], env={}, cwd=tmp_path,
+                             log_path=tmp_path / "gateway-stdio.log") is None
+    assert calls == []  # no bootstrap, and no ``remove`` of somebody else's finished job either
+    assert not list(tmp_path.glob(".*.plist"))
+
+
+def test_the_opt_in_lets_a_test_reach_launchd(monkeypatch, tmp_path):
+    calls = _recording_launchctl(monkeypatch)
+    monkeypatch.setenv(runtime.ALLOW_IN_TESTS_ENV, "1")
+    assert start_gateway_job([sys.executable, "-c", "pass"], env={}, cwd=tmp_path,
+                             log_path=tmp_path / "gateway-stdio.log") is not None
+    assert [c[0] for c in calls] == ["list", "bootstrap"]
+
+
+def test_outside_a_test_the_job_is_bootstrapped(monkeypatch, tmp_path):
+    import hermes_state_guard
+    calls = _recording_launchctl(monkeypatch)
+    monkeypatch.delenv(runtime.ALLOW_IN_TESTS_ENV, raising=False)
+    monkeypatch.setattr(hermes_state_guard, "_in_test_context", lambda: False)
+    assert start_gateway_job([sys.executable, "-c", "pass"], env={}, cwd=tmp_path,
+                             log_path=tmp_path / "gateway-stdio.log") is not None
+    assert [c[0] for c in calls] == ["list", "bootstrap"]
+
+
+def test_a_child_with_a_rebuilt_env_still_reads_as_a_test_by_ancestry(tmp_path):
+    """The e2e homes pass an allowlisted env (no PYTEST_*, no HERMES_TEST_ISOLATION): ancestry must hold."""
+    root = str(Path(runtime.__file__).resolve().parents[1])
+    log = str(tmp_path / "gateway-stdio.log")
+    probe = (
+        f"import subprocess, sys, pathlib; sys.path.insert(0, {root!r})\n"
+        "from hermes_cli import gateway_launchd_runtime as r\n"
+        "calls = []\n"
+        "r._launchctl = lambda *a, timeout: calls.append(a) or subprocess.CompletedProcess(a, 0, '', '')\n"
+        f"job = r.start_gateway_job([sys.executable, '-c', 'pass'], env={{}}, cwd={str(tmp_path)!r}, "
+        f"log_path=pathlib.Path({log!r}))\n"
+        "print(job is None, calls)\n"
+    )
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("PYTEST") and k not in ("HERMES_TEST_ISOLATION", runtime.ALLOW_IN_TESTS_ENV)}
+    out = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True, text=True, encoding="utf-8",
+                         check=False, stdin=subprocess.DEVNULL, timeout=60)
+    assert out.stdout.strip() == "True []", out.stdout + out.stderr
+
+
+def test_a_bare_interpreter_without_the_guard_module_still_starts_the_job(monkeypatch, tmp_path):
+    """The restart watcher imports this module from a bare store Python; a missing guard must not strand it."""
+    calls = _recording_launchctl(monkeypatch)
+    monkeypatch.delenv(runtime.ALLOW_IN_TESTS_ENV, raising=False)
+    monkeypatch.setitem(sys.modules, "hermes_state_guard", None)  # import -> ImportError
+    assert start_gateway_job([sys.executable, "-c", "pass"], env={}, cwd=tmp_path,
+                             log_path=tmp_path / "gateway-stdio.log") is not None
+    assert [c[0] for c in calls] == ["list", "bootstrap"]
