@@ -621,3 +621,57 @@ def test_unfinished_agrees_with_the_title_producer(result, unfinished):
                                                       async_delegation_display_unfinished)
     for evt in ({"goal": "g", **result}, {"is_batch": True, "goals": ["g"], "results": [{"task_index": 0, **result}]}):
         assert async_delegation_display_unfinished(async_delegation_display_text(evt)) is unfinished
+
+# ── a reply naming an unfinished card the reader does not count is never done ──
+
+REAL_UNFINISHED = (
+    "Resumed and cleared the placement blocker: refreshed the registry and moved the existing owner back.\n\n"
+    "The saved evidence records the core change merged and independent safety review passed.\n\n"
+    "**Remaining:** verify the loaded serving code and complete final acceptance review.\n\n"
+    "The existing owner **t_01a1c7b8ebe8316f** is verified **ready at priority 9001**, not yet running.")
+
+
+@pytest.mark.parametrize("verdict", [True, None])
+def test_reply_naming_unfinished_uncounted_card_is_not_done(db, verdict):
+    so.register_outcome_judge(lambda sid, text: verdict)
+    turn(db, REAL_UNFINISHED)
+    out = so.refresh_outcome("chat", "turn_end", db=db)
+    assert (out["kind"], out["reason"]) == ("unresolved", "no_summary")
+
+
+def test_same_unfinished_reply_with_the_card_counted_is_waiting(db, board):
+    add_card(board, "t_01a1c7b8ebe8316f", "chat", "ready")
+    so.register_outcome_judge(lambda sid, text: True)
+    turn(db, REAL_UNFINISHED)
+    out = so.refresh_outcome("chat", "turn_end", db=db)
+    assert out["kind"] == "waiting" and out["on"][0]["id"] == "t_01a1c7b8ebe8316f"
+
+
+@pytest.mark.parametrize("reply", [
+    SUMMARY,  # no card named
+    "Shipped the fix in t_01a1c7b8ebe8316f, which merged; all 12 tests pass and nothing else is open.",  # card done
+    "Nothing else to do. The explanation: stale cache, cleared, verified by running the suite twice.",
+])
+def test_truly_done_replies_stay_done(db, reply):
+    so.register_outcome_judge(lambda sid, text: True)
+    turn(db, reply)
+    assert so.refresh_outcome("chat", "turn_end", db=db)["kind"] == "done"
+
+
+def test_card_read_failure_never_vouches_for_a_named_card(db, monkeypatch):
+    def boom(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(ksa, "session_tasks", boom)
+    so.register_outcome_judge(lambda sid, text: True)
+    turn(db, "Fixed and merged via t_01a1c7b8ebe8316f; all 12 tests pass.")
+    assert so.refresh_outcome("chat", "turn_end", db=db)["reason"] == "no_summary"
+    say(db, "user", "and the other one?")
+    say(db, "assistant", SUMMARY)  # no card named: a failed read alone does not downgrade a done report
+    assert so.refresh_outcome("chat", "turn_end", db=db)["kind"] == "done"
+
+
+def test_human_decision_card_still_outranks_the_reply(db, board):
+    add_card(board, "t_01a1c7b8ebe8316f", "chat", "blocked", HUMAN_REQUEST)
+    so.register_outcome_judge(lambda sid, text: True)
+    turn(db, REAL_UNFINISHED)
+    assert so.refresh_outcome("chat", "turn_end", db=db)["kind"] == "decision"
