@@ -81,6 +81,64 @@ def _gateway_homes() -> list[Path]:
     return unique
 
 
+def parked_launchd_launcher(entry: dict) -> bool:
+    """Prove a launchd PID is only a launcher parked at this updater's ancestor fence.
+
+    A socket answer or any launcher child means the gateway may still be running.
+    Never exempt an unresponsive gateway merely because an intent exists.
+    """
+    if entry.get("kind") != "launchd" or not entry.get("home"):
+        return False
+    home = Path(entry["home"])
+    owner = ancestor_fence_owner([home])
+    if owner is None:
+        return False
+    try:
+        import psutil
+    except ImportError:
+        return False
+    try:
+        from gateway.control_socket import query_gateway_control
+        from gateway.status import get_process_start_time
+        from hermes_cli.gateway_launchd import _SIGNED_WRAPPER_SOURCE, gateway_launcher_path
+
+        if query_gateway_control(home, "identify", timeout=0.5) is not None:
+            return False
+        root = psutil.Process(entry["pid"])
+        if not root.is_running():
+            return False
+        if entry.get("ct") is not None and get_process_start_time(entry["pid"]) != entry["ct"]:
+            return False
+
+        def launcher(proc):
+            argv = proc.cmdline()
+            # Direct executable or interpreter + script, never a substring in a shim's -c source.
+            offset = next((i for i in range(min(2, len(argv)))
+                           if Path(argv[i]).name == "hermes-gateway-launcher"), None)
+            return (offset is not None and len(argv) > offset + 4
+                    and Path(argv[offset]).resolve() == gateway_launcher_path(str(home)).resolve()
+                    and argv[offset + 1] == "--home"
+                    and Path(argv[offset + 2]).resolve() == home.resolve()
+                    and argv[offset + 3] == "--")
+
+        candidate = root
+        if not launcher(root):
+            argv = root.cmdline()
+            app_bin = Path.home() / "Applications/Hermes Python.app/Contents/MacOS"
+            if (len(argv) != 5 or argv[1:4] != ["-I", "-c", _SIGNED_WRAPPER_SOURCE]
+                    or Path(argv[0]).parent != app_bin or not Path(argv[0]).name.startswith("python3")
+                    or not argv[4].startswith("exec ")):
+                return False
+            children = root.children()
+            if len(children) != 1:
+                return False
+            candidate = children[0]  # signed Python's forwarding shim directly owns the launcher
+        return bool(launcher(candidate) and candidate.is_running() and not candidate.children()
+                    and ancestor_fence_owner([home]) == owner)
+    except (ImportError, OSError, ValueError, KeyError, TypeError, psutil.Error):
+        return False
+
+
 def ancestor_fence_owner(homes: Optional[Iterable[Path]] = None) -> Optional[int]:
     """Pid of a live ancestor of this process holding a core-update intent on a gateway home, else None.
 

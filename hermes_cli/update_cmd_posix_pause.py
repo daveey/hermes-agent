@@ -524,7 +524,7 @@ def _drain_budget() -> float:
     return _gateway_drain_budget()
 
 
-def _stop_gateways(token: dict, entries: list[dict]) -> None:
+def _stop_gateways(token: dict, entries: list[dict], *, fence_checked: bool = False) -> None:
     """Request idle-only stops, then wait within one bounded pre-swap budget.
     A supervised gateway that exited through the drain is stopped through
     its supervisor at once: its exit 75 asks for a restart, which systemd honours after
@@ -532,9 +532,12 @@ def _stop_gateways(token: dict, entries: list[dict]) -> None:
     defers without forcing active work to stop; the checkout must not move."""
     from hermes_cli import update_pause_record as pause_record
     from hermes_cli.update_cmd_drain_report import drain_progress_reporter
+    from hermes_cli.update_gateway_fence import parked_launchd_launcher
     budget, waiting = min(_drain_budget(), _PRE_SWAP_DRAIN_WAIT_S), []
     refusals, refused = [], []
     for entry in entries:
+        if not fence_checked and parked_launchd_launcher(entry):
+            continue  # the ancestor fence owns starting and verifying this job
         pause_record.mark_stop_sent(token, entry["pid"])  # before the request: see _ask_to_drain
         acknowledged = _ask_to_drain(entry)
         if acknowledged:
@@ -675,7 +678,9 @@ def _pause(token: dict) -> str | None:
         return f"could not list running gateways ({exc}); the checkout was not changed"
     for line in notices + more:
         print(line)
-    supervised = units + jobs
+    from hermes_cli.update_gateway_fence import parked_launchd_launcher
+    # Do not acquire restart custody for a job already stopped by the caller's fence.
+    supervised = [entry for entry in units + jobs if not parked_launchd_launcher(entry)]
     if not supervised and not bare:
         _deferral_streak()
         return None
@@ -709,7 +714,9 @@ def _pause(token: dict) -> str | None:
     # in ``_cmd_update_impl`` for this token), else the next launch's recovery, restarts it.
     token["posix_stopped"] = True
     try:
-        _stop_gateways(token, supervised + bare)
+        # Exemption and restart custody were decided together before recording. Re-evaluating
+        # here could skip a newly parked launcher while retaining its durable restart debt.
+        _stop_gateways(token, supervised + bare, fence_checked=True)
     except BaseException as exc:  # health: allow BLE001 -- interruption must settle before cmd_update releases its fence
         from hermes_cli.update_cmd_windows import _resume_windows_gateways_after_update
         print(f"  ↷ Update deferred: {exc or type(exc).__name__}; the checkout was not changed")
