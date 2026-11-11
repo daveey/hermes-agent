@@ -354,13 +354,7 @@ def _prune_checkpoints(
             if result["deleted_orphan"] + result["deleted_stale"] or pruner.gc_pending():
                 pruner.reclaim()
             if not pruner.enforce_size(max_total_size_mb * 1024 * 1024):
-                from tools.checkpoint_health import record_floor
-                if record_floor(store):
-                    result["protected_floor"] = True
-                    logger.info("Checkpoint store above cap: protected floor; final snapshots retained")
-                else:
-                    result["errors"] += 1
-                    logger.warning("Checkpoint store remains over its size cap; maintenance incomplete")
+                _record_size_outcome(store, result)
         except (PruneError, OSError) as exc:
             result["errors"] += 1
             logger.warning("Checkpoint pruning stopped: %s", exc)
@@ -370,6 +364,16 @@ def _prune_checkpoints(
     result["bytes_freed"] = max(result["bytes_freed"], delta)
 
     return result
+
+
+def _record_size_outcome(store: Path, result: dict[str, int]) -> None:
+    from tools.checkpoint_health import record_floor
+    if record_floor(store):
+        result["protected_floor"] = True
+        logger.info("Checkpoint store above cap: protected floor; final snapshots retained")
+    else:
+        result["errors"] += 1
+        logger.warning("Checkpoint store remains over its size cap; maintenance incomplete")
 
 
 def maybe_auto_prune_checkpoints(
