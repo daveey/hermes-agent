@@ -133,7 +133,7 @@ function progress(out: ExecutionObservation, now: number): void {
     at <= now &&
     typeof kind === 'string' &&
     PROGRESS_KINDS.includes(kind) &&
-    text(ref) &&
+    nonblank(ref) &&
     isObject(evidence) &&
     get(evidence, 'successful') === true &&
     get(evidence, 'evidence_ref') === ref &&
@@ -194,19 +194,27 @@ function humanRequest(value: unknown, waitKind?: unknown): boolean {
   return true
 }
 
-/** Private probe commands never enter an observation; the input is not mutated. */
-function stripProbes(raw: Record<string, unknown>): Record<string, unknown> {
-  const request = get(raw, 'human_request')
-
-  if (!isObject(request) || !PROBE_FIELDS.some(k => has(request, k))) {return raw}
-
+/** Private probe commands never enter singular or retained visible requests. */
+function stripRequest(request: unknown): unknown {
+  if (!isObject(request)) {return request}
   const kept: Record<string, unknown> = {}
 
   for (const k of Object.keys(request)) {
     if (!PROBE_FIELDS.includes(k)) {Object.defineProperty(kept, k, { value: request[k], enumerable: true, writable: true, configurable: true })}
   }
 
-  return { ...raw, human_request: kept }
+  return kept
+}
+
+function stripProbes(raw: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...raw }
+
+  if (has(raw, 'human_request')) {out.human_request = stripRequest(get(raw, 'human_request'))}
+  const retained = get(raw, 'retained_human_requests')
+
+  if (Array.isArray(retained)) {out.retained_human_requests = retained.map(stripRequest)}
+
+  return out
 }
 
 function freshness(source: Record<string, unknown>, now: number, sourceClass: ObservationSourceClass): ExecutionObservation {
@@ -288,9 +296,8 @@ function freshness(source: Record<string, unknown>, now: number, sourceClass: Ob
   return out
 }
 
-function delivered(out: ExecutionObservation): boolean {
-  const receipt = get(out, 'delivery_receipt')
-  const key = executionIdentityKey(get(out, 'identity'))
+function receiptValid(receipt: unknown, identity: unknown): boolean {
+  const key = executionIdentityKey(identity)
 
   return (
     key !== null &&
@@ -302,10 +309,91 @@ function delivered(out: ExecutionObservation): boolean {
   )
 }
 
+function delivered(out: ExecutionObservation): boolean {
+  return receiptValid(get(out, 'delivery_receipt'), get(out, 'identity'))
+}
+
+/** Typed structural key shared with Python: code-point text, IEEE-754 number bits.
+ * Canonical ordering is not evidence authority. Bool differs from number; -0/0 share a key. */
+function jsonOrder(value: unknown): string {
+  if (value === null) {return 'n'}
+
+  if (typeof value === 'boolean') {return value ? 'b1' : 'b0'}
+
+  if (typeof value === 'number') {
+    const bytes = new Uint8Array(8)
+    new DataView(bytes.buffer).setFloat64(0, value === 0 ? 0 : value)
+
+    return 'd' + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+  }
+
+  if (typeof value === 'string') {return 's' + Array.from(value, c => c.codePointAt(0)!.toString(16).padStart(8, '0')).join('') + ';'}
+
+  if (Array.isArray(value)) {return 'a[' + value.map(jsonOrder).join('') + ']'}
+
+  if (isObject(value)) {
+    const keys = Object.keys(value).sort((a, b) => jsonOrder(a) < jsonOrder(b) ? -1 : jsonOrder(a) > jsonOrder(b) ? 1 : 0)
+
+    return 'o{' + keys.map(k => jsonOrder(k) + jsonOrder(value[k])).join('') + '}'
+  }
+
+  return 'x'
+}
+
+function unique(values: unknown[]): unknown[] {
+  const byKey = new Map(values.map(v => [jsonOrder(v), v]))
+
+  return [...byKey.keys()].sort().map(k => copy(byKey.get(k)))
+}
+
+function array(out: ExecutionObservation, field: string): unknown[] {
+  const value = get(out, field)
+
+  return Array.isArray(value) ? value : []
+}
+
+function requests(out: ExecutionObservation): unknown[] {
+  const retained = array(out, 'retained_human_requests').filter(v => humanRequest(v))
+
+  if (humanRequest(get(out, 'human_request'), waitKind(out))) {retained.push(out.human_request)}
+
+  return unique(retained)
+}
+
+function receipts(out: ExecutionObservation): unknown[] {
+  return unique([...array(out, 'historical_delivery_receipts'), get(out, 'delivery_receipt')].filter(v => receiptValid(v, get(out, 'identity'))))
+}
+
+function preserve(out: ExecutionObservation, matches: Record<string, unknown>[], now: number, sourceClass: ObservationSourceClass): ExecutionObservation {
+  if (out.state !== 'unknown') {return out}
+  const projected = matches.map(v => projectExecutionObservation(v, now, sourceClass))
+  const asks = unique(projected.flatMap(requests))
+  const historical = unique(projected.flatMap(receipts))
+  out.retained_human_requests = asks
+  out.historical_delivery_receipts = historical
+
+  const fields: [string, unknown[], boolean][] = [
+    ['human_request', asks, humanRequest(get(out, 'human_request'), waitKind(out))],
+    ['delivery_receipt', historical, delivered(out)]
+  ]
+
+  for (const [field, values, valid] of fields) {
+    if (!valid) {
+      delete out[field]
+
+      if (values.length === 1) {out[field] = copy(values[0])}
+    }
+  }
+
+  if (historical.length > 0) {out.last_known_state = 'done'}
+
+  return out
+}
+
 /** Never claim done without a matching verified delivered receipt, whatever the source of the value. */
 function lastKnown(out: ExecutionObservation): ExecutionObservation {
   const known = out.last_known_state
-  const valid = stateOf(known) && known !== 'unknown' && (known !== 'done' || delivered(out))
+  const valid = stateOf(known) && known !== 'unknown' && (known !== 'done' || receipts(out).length > 0)
 
   out.last_known_state = valid ? known : null
 
@@ -371,18 +459,22 @@ export function selectExecutionObservation(
 
   if (matches.length === 0) {return projectExecutionObservation(base, now, sourceClass)}
 
+  let out: ExecutionObservation
+
   if (matches.some(v => !epoch(get(v, 'observed_at')))) {
-    return unknown(projectExecutionObservation(base, now, sourceClass), 'invalid_candidate_timing')
+    out = unknown(projectExecutionObservation(base, now, sourceClass), 'invalid_candidate_timing')
+  } else {
+    const latestAt = matches.reduce((at, v) => Math.max(at, get(v, 'observed_at') as number), 0)
+    const latest = matches.filter(v => get(v, 'observed_at') === latestAt)
+
+    if (latest.slice(1).some(v => !sameJson(v, latest[0])) || matches.slice(1).some(v => !sameJson(get(v, 'source'), get(matches[0], 'source')))) {
+      out = unknown(projectExecutionObservation(base, now, sourceClass), 'conflicting_source_evidence')
+    } else {
+      out = projectExecutionObservation(latest[0], now, sourceClass)
+    }
   }
 
-  const latestAt = Math.max(...matches.map(v => get(v, 'observed_at') as number))
-  const latest = matches.filter(v => get(v, 'observed_at') === latestAt)
-
-  if (latest.slice(1).some(v => !sameJson(v, latest[0])) || matches.slice(1).some(v => !sameJson(get(v, 'source'), get(matches[0], 'source')))) {
-    return unknown(projectExecutionObservation(base, now, sourceClass), 'conflicting_source_evidence')
-  }
-
-  return projectExecutionObservation(latest[0], now, sourceClass)
+  return preserve(out, matches, now, sourceClass)
 }
 
 export function summarizeExecutionObservations(values: readonly unknown[], now: number, sourceClass: ObservationSourceClass = 'sidebar') {
@@ -393,7 +485,7 @@ export function summarizeExecutionObservations(values: readonly unknown[], now: 
   for (const observation of observations) {
     counts[observation.state]++
 
-    if (humanRequest(observation.human_request, waitKind(observation))) {outstanding++}
+    outstanding += requests(observation).length
   }
 
   return { observations, counts, outstanding_human_requests: outstanding, uncertain: observations.length === 0 || counts.unknown > 0 }

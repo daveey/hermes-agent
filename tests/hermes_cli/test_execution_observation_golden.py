@@ -50,6 +50,11 @@ def subset(actual, expected):
 
 def present(value, path):
     for key in path.split("."):
+        if isinstance(value, list) and key.isdecimal():
+            if int(key) >= len(value):
+                return False
+            value = value[int(key)]
+            continue
         if not isinstance(value, dict) or key not in value:
             return False
         value = value[key]
@@ -84,6 +89,9 @@ def test_shared_semantics(case):
 def test_shared_select(case):
     values = deepcopy(case["values_raw"]) if "values_raw" in case else [item_input(i) for i in case["items"]]
     before = deepcopy(values)
+    if "repeat_count" in case:
+        values *= case["repeat_count"]
+        before *= case["repeat_count"]
     identity = case.get("identity", FIXTURE["base"]["identity"])
     actual = select(values, identity=deepcopy(identity), now=case["now"], source_class=case.get("source_class", "sidebar"))
     check(actual, case)
@@ -91,7 +99,24 @@ def test_shared_select(case):
     if isinstance(values, list) and not case.get("values_raw"):  # arrival order never changes the verdict
         again = select(list(reversed(values)), identity=deepcopy(identity), now=case["now"],
                        source_class=case.get("source_class", "sidebar"))
-        assert subset(again, {k: actual[k] for k in ("state", "unknown_reason") if k in actual})
+        assert same_json(again, actual)
+    if "outstanding" in case:
+        for observation in (actual, project(actual, now=case["now"]),
+                            select([actual], identity=identity, now=case["now"])):
+            assert same_json(observation.get("retained_human_requests"), actual.get("retained_human_requests"))
+            assert same_json(observation.get("historical_delivery_receipts"), actual.get("historical_delivery_receipts"))
+            assert all(not any(k in request for k in ("resolved_check", "resolved_check_every"))
+                       for request in observation["retained_human_requests"])
+            summary = summarize([observation], now=case["now"])
+            assert summary["outstanding_human_requests"] == case["outstanding"]
+            assert summary["counts"]["unknown"] == 1
+            assert summary["counts"]["done"] == 0
+            repeated = summarize(summary["observations"], now=case["now"])
+            assert same_json(repeated, summary)
+            doubled = summarize([observation, observation], now=case["now"])
+            assert doubled["outstanding_human_requests"] == 2 * case["outstanding"]
+            assert doubled["counts"]["unknown"] == 2
+
 
 
 @pytest.mark.parametrize("case", FIXTURE["summarize_cases"], ids=lambda case: case["id"])

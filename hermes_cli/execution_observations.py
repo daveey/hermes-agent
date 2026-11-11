@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import math
+import struct
 
 VERSION = 1
 MAX_SAFE_INTEGER = 9007199254740991
@@ -208,7 +209,7 @@ def _progress(out, now):
     kind, ref = out.get("last_progress_kind"), out.get("last_progress_ref")
     valid = (epoch(at) and epoch(now) and epoch(observed) and at <= observed and at <= now
              and isinstance(kind, str) and kind in PROGRESS_KINDS
-             and isinstance(ref, str) and bool(ref)
+             and nonblank(ref)
              and isinstance(evidence, dict) and evidence.get("successful") is True
              and evidence.get("evidence_ref") == ref
              and epoch(evidence.get("observed_at")) and evidence["observed_at"] == at)
@@ -245,13 +246,19 @@ def human_request_valid(value, *, wait_kind=None):
     return True
 
 
+def _strip_request(value):
+    return {k: v for k, v in value.items() if k not in PROBE_FIELDS} if isinstance(value, dict) else value
+
+
 def _strip_probes(value):
-    """Private probe commands never enter an observation: copy without them, original untouched."""
+    """Private probe commands never enter singular or retained visible requests."""
     raw = value if isinstance(value, dict) else {}
-    request = raw.get("human_request")
-    if not isinstance(request, dict) or not any(k in request for k in PROBE_FIELDS):
-        return raw
-    return {**raw, "human_request": {k: v for k, v in request.items() if k not in PROBE_FIELDS}}
+    out = dict(raw)
+    if "human_request" in raw:
+        out["human_request"] = _strip_request(raw["human_request"])
+    if isinstance(raw.get("retained_human_requests"), list):
+        out["retained_human_requests"] = [_strip_request(v) for v in raw["retained_human_requests"]]
+    return out
 
 
 def _wait_kind(out):
@@ -259,19 +266,83 @@ def _wait_kind(out):
     return wait.get("kind") if isinstance(wait, dict) else None
 
 
-def _delivered(out):
-    receipt = out.get("delivery_receipt")
-    key = identity_key(out.get("identity"))
+def _receipt_valid(receipt, identity):
+    key = identity_key(identity)
     return (key is not None and isinstance(receipt, dict) and receipt.get("verified") is True
             and receipt.get("disposition") == "delivered"
             and nonblank(receipt.get("evidence_ref")) and identity_key(receipt.get("identity")) == key)
+
+
+def _delivered(out):
+    return _receipt_valid(out.get("delivery_receipt"), out.get("identity"))
+
+
+def _json_order(value):
+    """Typed structural key, shared with TS: code-point text and IEEE-754 number bits.
+
+    Object key order is irrelevant, bool differs from number, and -0/0 and 7/7.0
+    share keys. The ordering is canonical, not a ranking of evidence authority.
+    """
+    if value is None:
+        return "n"
+    if isinstance(value, bool):
+        return "b1" if value else "b0"
+    if isinstance(value, (int, float)):
+        return "d" + struct.pack(">d", 0.0 if value == 0 else value).hex()
+    if isinstance(value, str):
+        return "s" + value.encode("utf-32-be", errors="surrogatepass").hex() + ";"
+    if isinstance(value, list):
+        return "a[" + "".join(_json_order(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return "o{" + "".join(_json_order(k) + _json_order(value[k]) for k in sorted(value, key=_json_order)) + "}"
+    return "x"
+
+
+def _unique(values):
+    by_key = {_json_order(v): v for v in values}
+    return [deepcopy(by_key[k]) for k in sorted(by_key)]
+
+
+def _array(out, field):
+    value = out.get(field)
+    return value if isinstance(value, list) else []
+
+
+def _requests(out):
+    retained = [v for v in _array(out, "retained_human_requests") if human_request_valid(v)]
+    if human_request_valid(out.get("human_request"), wait_kind=_wait_kind(out)):
+        retained.append(out["human_request"])
+    return _unique(retained)
+
+
+def _receipts(out):
+    return _unique(v for v in [*_array(out, "historical_delivery_receipts"), out.get("delivery_receipt")]
+                   if _receipt_valid(v, out.get("identity")))
+
+
+def _preserve(out, matches, now, source_class):
+    if out["state"] != "unknown":
+        return out
+    projected = [project(v, now=now, source_class=source_class) for v in matches]
+    asks = _unique(v for candidate in projected for v in _requests(candidate))
+    receipts = _unique(v for candidate in projected for v in _receipts(candidate))
+    out.update(retained_human_requests=asks, historical_delivery_receipts=receipts)
+    for field, values, valid in (("human_request", asks, human_request_valid(out.get("human_request"), wait_kind=_wait_kind(out))),
+                                 ("delivery_receipt", receipts, _delivered(out))):
+        if not valid:
+            out.pop(field, None)
+            if len(values) == 1:
+                out[field] = deepcopy(values[0])
+    if receipts:
+        out["last_known_state"] = "done"
+    return out
 
 
 def _last_known(out):
     """Never claim done without a matching verified delivered receipt, whatever the source of the value."""
     known = out.get("last_known_state")
     valid = isinstance(known, str) and known in STATES - {"unknown"}
-    out["last_known_state"] = known if valid and (known != "done" or _delivered(out)) else None
+    out["last_known_state"] = known if valid and (known != "done" or bool(_receipts(out))) else None
 
 
 def _project(value, now, source_class, expected_identity):
@@ -324,13 +395,16 @@ def select(values, *, identity, now, source_class="sidebar"):
     if not matches:
         return project(base, now=now, source_class=source_class)
     if any(not epoch(v.get("observed_at")) for v in matches):
-        return _unknown(project(base, now=now, source_class=source_class), "invalid_candidate_timing")
-    latest_at = max(v["observed_at"] for v in matches)
-    latest = [v for v in matches if v["observed_at"] == latest_at]
-    if (any(not same_json(v, latest[0]) for v in latest[1:])
-            or any(not same_json(v.get("source"), matches[0].get("source")) for v in matches[1:])):
-        return _unknown(project(base, now=now, source_class=source_class), "conflicting_source_evidence")
-    return project(latest[0], now=now, source_class=source_class)
+        out = _unknown(project(base, now=now, source_class=source_class), "invalid_candidate_timing")
+    else:
+        latest_at = max(v["observed_at"] for v in matches)
+        latest = [v for v in matches if v["observed_at"] == latest_at]
+        if (any(not same_json(v, latest[0]) for v in latest[1:])
+                or any(not same_json(v.get("source"), matches[0].get("source")) for v in matches[1:])):
+            out = _unknown(project(base, now=now, source_class=source_class), "conflicting_source_evidence")
+        else:
+            out = project(latest[0], now=now, source_class=source_class)
+    return _preserve(out, matches, now, source_class)
 
 
 def summarize(values, *, now, source_class="sidebar"):
@@ -346,6 +420,6 @@ def summarize(values, *, now, source_class="sidebar"):
     outstanding = 0
     for observation in observations:
         counts[observation["state"]] += 1
-        outstanding += human_request_valid(observation.get("human_request"), wait_kind=_wait_kind(observation))
+        outstanding += len(_requests(observation))
     return {"observations": observations, "counts": counts, "outstanding_human_requests": outstanding,
             "uncertain": not observations or bool(counts["unknown"])}

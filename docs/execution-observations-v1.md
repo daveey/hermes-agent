@@ -54,14 +54,14 @@ and treats `version: true` as unsupported.
   names are invalid. `required_sources: null` is invalid.
 - `unknown_reason` is kept only when a nonempty string, else `source_unknown`.
 - **Human requests**: `resolved_check`/`resolved_check_every` are stripped from
-  `human_request` on projector entry (input untouched), before validation and output;
-  all other fields and expired asks are retained. Visible semantics (five text fields,
+  `human_request` and each `retained_human_requests` entry on projector entry (input
+  untouched), before validation and output; all other fields and expired asks are retained. Visible semantics (five text fields,
   interaction set, 2-6 distinct `{label<=60, value<=120}` choices by code point) are
   implemented identically in both languages. `needs_user` with a `time`,
   `dependency` or `transient` wait is unknown (`invalid_human_wait`).
   `summarize(...).outstanding_human_requests` counts retained valid requests
   regardless of freshness or state (a request with such a nonhuman wait is not valid).
-- **Progress** needs an explicit successful, referenced evidence record and
+- **Progress** needs an explicit successful, nonblank referenced evidence record and
   `last_progress <= observed_at` and `<= now`; kinds are never coerced.
 - **last_known_state** is a known non-unknown state or null, and `done` survives only
   with a matching verified `delivered` receipt (also for stale and legacy input). The
@@ -71,6 +71,38 @@ and treats `version: true` as unsupported.
   future-dated winner, different sources, or conflicting same-time records, using
   JSON equality (bool is not a number; 7 equals 7.0).
 - TS output is a deep copy (own keys defined as data, so `__proto__` is inert).
+
+### Unknown selection preserves outstanding evidence
+
+When `select` has exact identity-matched candidates but its result is `unknown`, it
+projects each matched candidate before collecting evidence. Conflicts, invalid timing,
+future-dated winners and expiration do not resolve an outstanding human request or
+revoke verified historical delivery. The additive result fields are:
+
+- `retained_human_requests`: every distinct valid visible request, including previously
+  retained requests. Singular requests accompanied by nonhuman waits are excluded.
+- `historical_delivery_receipts`: every distinct verified `delivered` receipt whose
+  identity matches the selected execution, including previously historical receipts.
+
+Both arrays use structural JSON-semantic deduplication, independent of object property
+order (7 and 7.0 coincide; booleans, missing/null and array order remain distinct).
+They have a canonical typed structural ordering, using code-point string encoding and
+IEEE-754 number bits with zero normalized. This is deterministic, **not** an ordering
+of authority, chronology, request resolution or execution outcomes. Only exact matched
+candidates contribute: another gateway, profile, board, run or generation is fenced out.
+
+A valid already-selected singular `human_request` / `delivery_receipt` stays selected.
+Otherwise a unique retained value also fills its singular field; multiple distinct values
+stay in the arrays without inventing a winner. Matching verified historical receipts
+support `last_known_state: done`, but **never** change `state: unknown` to current success.
+Re-projection preserves these arrays and strips their private request probes again.
+Summarization counts the union of valid retained and singular requests **per observation**
+without double counting, while work state counts remain one per observation. Historical
+receipts are not additional completed work.
+
+This change does not wire a consumer. Two review notes remain explicit future design:
+expected-identity mismatch output retains its existing shape, and no-match selection
+retains its existing reason rather than adding a new no-match reason.
 
 ## Diagnostics
 

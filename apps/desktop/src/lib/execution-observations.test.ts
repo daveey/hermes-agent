@@ -20,6 +20,8 @@ interface Case extends Patch {
   expected_absent?: string[]
   identity?: unknown
   items?: Item[]
+  repeat_count?: number
+  outstanding?: number
   values_raw?: unknown
 }
 
@@ -66,6 +68,13 @@ function subset(actual: unknown, expected: unknown): boolean {
 
 function present(value: unknown, path: string): boolean {
   for (const key of path.split('.')) {
+    if (Array.isArray(value) && /^\d+$/.test(key)) {
+      if (Number(key) >= value.length) {return false}
+      value = value[Number(key)]
+
+      continue
+    }
+
     if (!isObject(value) || !Object.hasOwn(value, key)) {return false}
 
     value = value[key]
@@ -116,7 +125,8 @@ describe('shared execution observation semantic contract', () => {
 
   for (const test of selectCases) {
     it(`select: ${test.id}`, () => {
-      const values = 'values_raw' in test ? clone(test.values_raw) : test.items!.map(itemInput)
+      const items = 'values_raw' in test ? clone(test.values_raw) : test.items!.map(itemInput)
+      const values = test.repeat_count ? Array.from({ length: test.repeat_count }, () => (items as unknown[])[0]) : items
       const before = clone(values)
       const identity = test.identity ?? fixture.base.identity
       const result = selectExecutionObservation(values as unknown[], clone(identity), test.now as number, cls(test))
@@ -127,8 +137,29 @@ describe('shared execution observation semantic contract', () => {
       if (Array.isArray(values) && !test.values_raw) {
         const again = selectExecutionObservation([...values].reverse(), clone(identity), test.now as number, cls(test))
 
-        expect(again.state).toBe(result.state)
-        expect(again.unknown_reason).toBe(result.unknown_reason)
+        expect(again).toEqual(result)
+      }
+
+      if (test.outstanding !== undefined) {
+        for (const observation of [result, projectExecutionObservation(result, test.now as number),
+          selectExecutionObservation([result], identity, test.now as number)]) {
+          expect(observation.retained_human_requests).toEqual(result.retained_human_requests)
+          expect(observation.historical_delivery_receipts).toEqual(result.historical_delivery_receipts)
+
+          for (const request of observation.retained_human_requests as Record<string, unknown>[]) {
+            expect(request).not.toHaveProperty('resolved_check')
+            expect(request).not.toHaveProperty('resolved_check_every')
+          }
+
+          const summary = summarizeExecutionObservations([observation], test.now as number)
+          expect(summary.outstanding_human_requests).toBe(test.outstanding)
+          expect(summary.counts.unknown).toBe(1)
+          expect(summary.counts.done).toBe(0)
+          expect(summarizeExecutionObservations(summary.observations, test.now as number)).toEqual(summary)
+          const doubled = summarizeExecutionObservations([observation, observation], test.now as number)
+          expect(doubled.outstanding_human_requests).toBe(2 * test.outstanding)
+          expect(doubled.counts.unknown).toBe(2)
+        }
       }
     })
   }
