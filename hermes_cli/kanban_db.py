@@ -3004,7 +3004,7 @@ def block_task(
     human_request: Optional[dict] = None, awaiting: Any = None, clear_blocker: bool = False,
     comment: Optional[tuple[str, str]] = None, goal_rejection=None,
     blocker_provider: Optional[str] = None, blocker_model: Optional[str] = None,
-    blocker_lane: Optional[str] = None,
+    blocker_lane: Optional[str] = None, actor: Optional[str] = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
     :func:`kanban_block_routing.route_block`). A wait on time -- ``kind='time'``, a ``dependency``
@@ -3096,7 +3096,7 @@ def block_task(
                 return False
             sync_row(conn, task_id)
             payload = {"kind": kind, "reason": reason, "classified_in_place": True,
-                       "human_request": human_request, **filing_fields(conn, human_request), **run_meta}
+                       "human_request": human_request, **filing_fields(conn, human_request), **run_meta, **({"actor": actor} if actor else {})}
             if requested_kind == "assignment":
                 payload.update(requested_kind=requested_kind, rekind_reason=rekind_reason)
             if kind == "assignment":
@@ -3171,7 +3171,7 @@ def block_task(
         ):
             return False
         store_request(conn, task_id, human_request)
-        payload.update(human_request=human_request, **(filing_fields(conn, human_request) if new_status == "blocked" else {}))
+        payload.update(human_request=human_request, **({"actor": actor} if actor else {}), **(filing_fields(conn, human_request) if new_status == "blocked" else {}))
         from hermes_cli.kanban_shared_blockers import CLEAR_FLAG
         payload.update(run_meta)
         if clear_blocker:

@@ -1392,6 +1392,7 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
 
 
 def _cmd_block(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_cli_actor import cli_actor
     reason = _joined_words(args.reason)
     kind = getattr(args, "kind", None)
     routed = _cli_route_needs("block", args, reason)
@@ -1453,7 +1454,7 @@ def _cmd_block(args: argparse.Namespace) -> int:
         op = _guarded_park(conn, "block", wake, refused, _commented(
             reason, author, "BLOCKED", lambda tid, comment: kb.block_task(
                 conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid),
-                human_request=request, awaiting=awaiting, comment=comment,
+                human_request=request, awaiting=awaiting, comment=comment, actor=cli_actor(),
                 wake_check=wake[0], check_every=wake[1], clock_only=wake[2])),
             awaiting=awaiting, reason=reason, kind=kind)
         return _bulk_apply(ids, op, ok_msg, lambda tid: refused.get(tid) or f"cannot block {tid}")
@@ -1489,6 +1490,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
 
 
 def _cmd_unblock(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_cli_actor import cli_actor
     if os.environ.get("HERMES_KANBAN_TASK"):
         return _err("kanban unblock is orchestrator-only; workers must hand off their assigned task")
     ids, rc = _require_ids(args, _REASON_FLAG_HINT)
@@ -1501,7 +1503,7 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
         rc = _ids_error(ids, _REASON_FLAG_HINT, conn)
         if rc:
             return rc
-        op = _commented(reason, author, "UNBLOCK", lambda tid, comment: kb.unblock_task(conn, tid, comment=comment))
+        op = _commented(reason, author, "UNBLOCK", lambda tid, comment: kb.unblock_task(conn, tid, comment=comment, event_extra={"actor": cli_actor()}))
         return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
                            lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)")
 

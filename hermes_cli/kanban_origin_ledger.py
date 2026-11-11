@@ -221,6 +221,9 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
             legacy = bool(legacy and contract_ok)
             verified = legacy
     payload = {k: v for k, v in task.items() if k != 'origin_observation'}
+    if row[0] == 'blocked':
+        from hermes_cli.kanban_block_notice import blocked_actor_fields
+        payload.update(blocked_actor_fields(conn, task['id']))
     # Only post-rollout events opt in: do not replay the replica's historical done-card inventory.
     if terminal and event and json.loads(event[3] or '{}').get('notice_version') == 1:
         payload['completion_notice'] = {'event_id': event[0], 'created_at': event[2],

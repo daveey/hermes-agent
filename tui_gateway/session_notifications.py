@@ -645,7 +645,7 @@ def _format_kanban_event_text(sub: dict, task, ev, board_slug: str) -> Optional[
     payload = getattr(ev, "payload", None) or {}
     if getattr(ev, "kind", "") == "blocked":
         from hermes_cli.kanban_block_notice import block_notice
-        return f"{prefix}Kanban {task_id} " + block_notice(task, task_id, board_slug, reason=str(payload.get("reason") or ""))
+        return f"{prefix}Kanban {task_id} " + block_notice(task, task_id, board_slug, reason=str(payload.get("reason") or ""), actor=str(payload.get("actor") or ""))
     if getattr(ev, "kind", "") == "completed":
         # A worker refused a send into this chat put its message in the summary as a FINAL SEND line. [daveey]
         from hermes_cli.kanban_final_send import final_send_for_chat

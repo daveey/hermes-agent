@@ -469,7 +469,7 @@ def _fmt_block_loop_detected(ev, n) -> tuple:
 
 def _fmt_blocked(ev, n) -> tuple:
     from hermes_cli.kanban_block_notice import block_notice
-    body = block_notice(n.task, n.task_id, n.board_slug, reason=str(_payload(ev, "reason") or ""))
+    body = block_notice(n.task, n.task_id, n.board_slug, reason=str(_payload(ev, "reason") or ""), actor=str(_payload(ev, "actor") or ""))
     return f"⏸ {n.head} {body}", body, None
 
 
