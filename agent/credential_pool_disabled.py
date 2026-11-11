@@ -55,7 +55,7 @@ def _file_keys(path: Optional[Path], provider: str) -> tuple[frozenset[str], fro
         st = os.stat(path)
     except OSError:
         return _EMPTY
-    stamp = (st.st_mtime_ns, st.st_size)
+    stamp = (st.st_mtime_ns, st.st_size, st.st_ino)  # ino: the atomic-rename save always changes it
     key = (str(path), provider)
     with _cache_lock:
         hit = _cache.get(key)
@@ -155,3 +155,68 @@ def disabled_by_root(provider: str, entry: Any) -> bool:
     if root is None or root == Path(auth_mod._auth_file_path()):
         return False
     return matches(entry, _file_keys(root, provider))
+
+
+def token_disabled(provider: str, token: Optional[str]) -> bool:
+    """Whether *token* belongs to a disabled pool row of *provider*.
+
+    For the resolvers that hand out a token without selecting it from the pool (the auth.json
+    singleton, env tokens, the Claude Code file): the pool row seeded from them carries the same token.
+    Costs nothing while nothing is disabled.
+    """
+    if not token:
+        return False
+    keys = disabled_keys(provider)
+    if not keys[0] and not keys[1]:
+        return False
+    from agent.credential_pool import load_pool
+    try:
+        entries = load_pool(provider).entries()
+    except Exception:
+        logger.warning("disabled-credential check: %s pool unreadable; token allowed", provider, exc_info=True)
+        return False
+    token = token.strip()
+    return any(
+        matches(e, keys) and token in (getattr(e, "runtime_api_key", None), getattr(e, "access_token", None))
+        for e in entries
+    )
+
+
+def rebind_off_disabled(agent: Any) -> None:
+    """Pre-request: move a Codex/xAI session whose bound pool row was disabled onto an enabled row.
+
+    Anthropic sessions get the same through the pinned-token check (``credential_pool_pin``).
+    Raises ``AuthError`` when every row of the pool is disabled, so no request goes out on the old token.
+    """
+    pool = getattr(agent, "_credential_pool", None)
+    provider = getattr(pool, "provider", None)
+    if pool is None or provider not in ("openai-codex", "xai-oauth") or getattr(agent, "provider", None) != provider:
+        return
+    keys = disabled_keys(provider)
+    if not keys[0] and not keys[1]:
+        return
+    entry_id, api_key = getattr(agent, "_credential_pool_entry_id", None), str(getattr(agent, "api_key", "") or "")
+    entries = pool.entries()
+    bound = next((e for e in entries if entry_id and e.id == entry_id), None) or next(
+        (e for e in entries if api_key and getattr(e, "runtime_api_key", None) == api_key), None)
+    if bound is None or not matches(bound, keys):
+        return
+    nxt = pool.select()
+    token = (getattr(nxt, "runtime_api_key", None) or "").strip() if nxt is not None else ""
+    if not token:
+        _raise_all_disabled(provider)
+    logger.warning("%s pool entry %s was disabled; moving the session to %s", provider, bound.id, nxt.id)
+    agent._adopt_openai_credentials(token, str(agent.base_url or ""), reason="credential_disabled")
+    agent._credential_pool_entry_id = nxt.id
+
+
+def _raise_all_disabled(provider: str) -> None:
+    from hermes_cli.auth import AuthError
+    raise AuthError(f"Every {provider} account is disabled; run `hermes auth enable {provider} <account>`",
+                    provider=provider, code="credentials_disabled")
+
+
+def refuse_disabled_token(provider: str, token: Optional[str]) -> None:
+    """Raise ``AuthError`` when a session would keep sending *token* of a disabled account."""
+    if token_disabled(provider, token):
+        _raise_all_disabled(provider)

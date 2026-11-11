@@ -441,6 +441,9 @@ class ClientLifecycleMixin:
 
     def _create_request_openai_client(self, *, reason: str, api_kwargs: Optional[dict] = None) -> Any:
         from unittest.mock import Mock
+
+        from agent.credential_pool_disabled import rebind_off_disabled
+        rebind_off_disabled(self)  # `hermes auth disable` mid-session: never send the disabled account's token
         primary_client = self._ensure_primary_openai_client(reason=reason)
         if self.provider == "moa" or isinstance(primary_client, Mock):
             return primary_client
@@ -869,7 +872,11 @@ class ClientLifecycleMixin:
             logger.debug("Anthropic credential refresh failed: %s", exc)
             return False
         new_token = new_token.strip() if isinstance(new_token, str) else ""
-        if not new_token or new_token == self._anthropic_api_key:
+        if not new_token:
+            from agent.credential_pool_disabled import refuse_disabled_token
+            refuse_disabled_token("anthropic", current_key)  # nothing enabled to move to: never resend it
+            return False
+        if new_token == self._anthropic_api_key:
             return False
         if not self._adopt_anthropic_token(new_token):
             return False

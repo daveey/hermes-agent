@@ -2377,7 +2377,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         self, credential_id: Optional[str],
     ) -> tuple[Optional[str], list[PooledCredential]]:
         with self._lock:
-            if credential_id:
+            if credential_id and any(e.id == credential_id for e in self._enabled_entries()):  # disabled: pick another
                 self._active_leases[credential_id] = self._active_leases.get(credential_id, 0) + 1
                 self._current_id = credential_id
                 return credential_id, []
@@ -2435,7 +2435,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
 
     def _try_refresh_current_unlocked(self, failed_key: Optional[str] = None) -> Optional[PooledCredential]:
         entry = self._current_unlocked()
-        if entry is None:
+        if entry is None or all(e.id != entry.id for e in self._enabled_entries()):  # never refresh a disabled row
             return None
         refreshed = self._refresh_entry(entry, force=True, failed_key=failed_key)
         if refreshed is not None:

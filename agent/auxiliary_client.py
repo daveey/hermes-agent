@@ -2116,8 +2116,7 @@ def _read_codex_singleton_token() -> Optional[str]:
         access_token = _read_codex_tokens().get("tokens", {}).get("access_token")
         if not isinstance(access_token, str) or not access_token.strip():
             return None
-        # Expired JWTs would block the auto chain and prevent fallback to working providers.
-        try:
+        try:  # expired JWTs would block the auto chain and prevent fallback to working providers
             import base64
             payload = access_token.split(".")[1]
             payload += "=" * (-len(payload) % 4)
@@ -2127,7 +2126,8 @@ def _read_codex_singleton_token() -> Optional[str]:
                 return None
         except Exception:
             pass  # Non-JWT token or decode error — use as-is
-        return access_token.strip()
+        from agent.credential_pool_disabled import token_disabled
+        return None if token_disabled("openai-codex", access_token) else access_token.strip()
     except Exception as exc:
         logger.debug("Could not read Codex auth for auxiliary client: %s", exc)
         return None

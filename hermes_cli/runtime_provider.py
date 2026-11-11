@@ -854,6 +854,10 @@ def _resolve_oauth_runtime(provider, requested_provider, model_cfg, target_model
     stale/revoked/benched (``_ladder_rungs`` decides whether an "auto" request falls through)."""
     spec = _OAUTH_RUNTIME_PROVIDERS[provider]
     creds = spec.resolve()
+    from agent.credential_pool_disabled import token_disabled
+    if token_disabled(provider, creds.get("api_key")):  # the singleton is the disabled pool row's account
+        raise AuthError(f"The {provider} account is disabled (hermes auth enable)", provider=provider,
+                        code="credentials_disabled")
     api_mode = spec.api_mode(_effective_model(model_cfg, target_model)) if callable(spec.api_mode) else spec.api_mode
     return _runtime(provider, api_mode, (creds.get("base_url") or "").rstrip("/") or spec.default_base_url,
                     creds.get("api_key", ""), source=creds.get("source", spec.default_source),

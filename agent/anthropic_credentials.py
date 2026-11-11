@@ -692,8 +692,11 @@ def _available_anthropic_token(token: Optional[str], model: Optional[str]) -> Op
     Only model-aware callers (the API-call paths) are gated: diagnostics that
     resolve a token without a model (usage display, model discovery) keep it.
     """
-    if not token or not model:
-        return token or None
+    from agent.credential_pool_disabled import token_disabled
+    if not token or token_disabled("anthropic", token):  # a disabled account, for every caller
+        return None
+    if not model:
+        return token
     try:
         from agent.credential_pool import load_pool
         if load_pool("anthropic").token_is_blocked(token, model=model):
