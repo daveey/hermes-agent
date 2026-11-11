@@ -140,6 +140,11 @@ def _run_receipt_output(conn, task_id, run_id, pid, claim_lock):
         "SELECT payload FROM task_events WHERE task_id=? AND run_id=? "
         "AND kind='worker_bound' ORDER BY id DESC LIMIT 1", (task_id, run_id),
     ).fetchone()
+    from hermes_cli.kanban_failed_result_identity import modern_receipt
+    modern, selected = modern_receipt(conn, task_id, run_id, claim_lock)
+    if modern:
+        output = selected[1].get('last_output') if selected else None
+        return True, output if isinstance(output, str) else None
     bound = kb._json_dict(bound_row[0]) if bound_row else {}
     pids = {pid}
     if bound.get('claim_lock') == claim_lock and bound.get('pid') is not None:

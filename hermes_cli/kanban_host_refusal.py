@@ -108,6 +108,10 @@ def proven(conn: sqlite3.Connection, task_id: str, run_id, claim_lock, *, admitt
     results = _run_events(conn, task_id, run_id, "worker_result")
     if len(results) != 1:
         return None
+    from hermes_cli.kanban_failed_result_identity import modern_receipt
+    modern, selected = modern_receipt(conn, task_id, run_id, claim_lock)
+    if modern and selected is None:
+        return None
     (result,) = results
     proof = result.get(PROOF_KEY)
     if (result.get("claim_lock") != claim_lock or result.get("exit_code") != KANBAN_OWNER_UNAVAILABLE_EXIT_CODE

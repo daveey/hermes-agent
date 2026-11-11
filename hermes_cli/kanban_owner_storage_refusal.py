@@ -12,6 +12,16 @@ def proven(conn, task_id, run_id, claim_lock):
     """
     if conn is None or run_id is None or not claim_lock:
         return None
+    from hermes_cli.kanban_failed_result_identity import modern_receipt
+    modern, selected = modern_receipt(conn, task_id, run_id, claim_lock)
+    if modern:
+        if selected is None:
+            return None
+        result = selected[1]
+        if (result.get('exit_code') != 1
+                or result.get('last_output') != 'Worker failed: WorkerPersistenceError: storage_unavailable'):
+            return None
+        return {'kind': OWNER_STORAGE_UNAVAILABLE, 'phase': 'midrun', 'reason': 'storage_unavailable'}
     bound = _run_events(conn, task_id, run_id, "worker_bound")
     if not bound or bound[-1].get("claim_lock") != claim_lock or bound[-1].get("pid") is None:
         return None

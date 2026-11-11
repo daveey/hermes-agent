@@ -68,6 +68,14 @@ def _relative_seconds(text):
 def _owned_receipt(conn, task_id, run_id):
     """The exact attempt's quota-exit receipt under its own claim, or None."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_failed_result_identity import modern_receipt
+    run = conn.execute('SELECT claim_lock FROM task_runs WHERE id=? AND task_id=?', (run_id, task_id)).fetchone()
+    if run is not None:
+        modern, selected = modern_receipt(conn, task_id, run_id, run['claim_lock'])
+        if modern:
+            if selected is None or selected[1].get('exit_code') != kb.KANBAN_RATE_LIMIT_EXIT_CODE:
+                return None
+            return selected[1], kb._to_epoch(selected[0]['created_at'])
     row = conn.execute(
         "SELECT e.payload, e.created_at, r.claim_lock FROM task_events e JOIN task_runs r "
         "ON r.id=e.run_id AND r.task_id=e.task_id WHERE e.task_id=? AND e.run_id=? "

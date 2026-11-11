@@ -5,6 +5,27 @@ import json
 from typing import cast
 
 
+def modern_receipt(conn, task_id, run_id, claim_lock):
+    """Return (modern, selected result event/payload), including a strict veto.
+
+    Classifiers also run after closure, so this checks receipt attribution, not
+    task liveness. A modern but ambiguous history must never use legacy logs.
+    """
+    from hermes_cli.kanban_failed_result import modern_result_recorded
+    if not modern_result_recorded(conn, task_id, run_id):
+        return False, None
+    selected = attributable_events(conn, task_id, run_id)
+    if selected is None:
+        return True, None
+    (_, bound), result, _ = selected
+    payload = result[1]
+    if (bound is None or payload is None or bound.get('claim_lock') != claim_lock
+            or payload.get('claim_lock') != claim_lock
+            or bound.get('pid') is None or payload.get('pid') != bound.get('pid')):
+        return True, None
+    return True, (result[0], payload)
+
+
 def _payload(event):
     try:
         value = json.loads(event['payload'])

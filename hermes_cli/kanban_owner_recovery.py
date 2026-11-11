@@ -301,6 +301,12 @@ def managed_run_exit_code(conn, task_id, worker_pid, claim_lock):
             return {}
         return payload if isinstance(payload, dict) else {}
 
+    from hermes_cli.kanban_failed_result_identity import modern_receipt
+    task = conn.execute('SELECT current_run_id FROM tasks WHERE id=?', (task_id,)).fetchone()
+    if task is not None:
+        modern, selected = modern_receipt(conn, task_id, task['current_run_id'], claim_lock)
+        if modern:
+            return selected[1].get('exit_code') if selected else None
     result, bound = latest('worker_result'), latest('worker_bound')
     pids = {worker_pid, *([bound.get('pid')] if bound.get('claim_lock') == claim_lock else [])}
     return result.get('exit_code') if result.get('claim_lock') == claim_lock and result.get('pid') in pids else None
