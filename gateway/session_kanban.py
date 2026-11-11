@@ -425,12 +425,15 @@ def _record_worker_result(context, code, last_output, failure=None, extra=None, 
             if observer_error:
                 kb._append_event(conn, context['task_id'], 'worker_result_observer_failed',
                                  {'error': observer_error}, run_id=context['run_id'])
+            from hermes_cli.kanban_failed_result_identity import result_identity_fields
+            identity_fields = result_identity_fields(conn, context) if strict_death_proof else {}
             # Closing a run clears its claim/PID and replaces metadata; keep the
             # result in the immutable attempt event stream instead.
             kb._append_event(conn, context['task_id'], 'worker_result',
                 {'pid': os.getpid(), 'claim_lock': context['claim_lock'], 'exit_code': code,
                  'last_output': last_output, **quota_fields(failure), **route_fields(failure, agent),
-                 **(extra or {}), **({'death_proof_version': 1} if strict_death_proof else {})},
+                 **(extra or {}), **identity_fields,
+                 **({'death_proof_version': 1} if strict_death_proof else {})},
                 run_id=context['run_id'])
 
 

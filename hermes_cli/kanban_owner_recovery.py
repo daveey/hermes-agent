@@ -255,6 +255,13 @@ def owner_reclaim_blocked(conn, task_id, *, crash_sweep=False) -> bool:
     the shape that used to be unreclaimable forever, because ``bound_interpreter_gone`` was the
     only override and it needs the ``worker_bound`` event that run never wrote.
     """
+    from hermes_cli.kanban_failed_result import modern_result_recorded
+    run = conn.execute('SELECT current_run_id FROM tasks WHERE id=?', (task_id,)).fetchone()
+    if run is not None and modern_result_recorded(conn, task_id, run['current_run_id']):
+        # Only the strict failed-result finalizer may close a marked attempt.
+        # TTL/heartbeat paths must not bypass its two-process death proof merely
+        # because the owner admission has already become terminal.
+        return True
     if not owner_reclaim_paused(conn, task_id):
         return False
     if crash_sweep and bound_interpreter_gone(conn, task_id):

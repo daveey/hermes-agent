@@ -282,6 +282,33 @@ def test_failed_receipt_veto_cannot_fall_back_to_legacy_reclaim(board, monkeypat
                             (context['run_id'],)).fetchone()
 
 
+def test_modern_receipt_survives_remapped_event_ids(board):
+    from hermes_cli.kanban_failed_result import failed_result_proof
+    conn, context = board
+    result = _failed_child(conn, context)
+    # Replica replay can allocate bound after result; integers are not causal.
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_events SET id=? WHERE run_id=? AND kind='worker_bound'",
+                     (result['id'] + 1000, context['run_id']))
+    proof = failed_result_proof(conn, context['task_id'], context['run_id'], context['claim_lock'])
+    assert proof is not None
+
+
+def test_modern_result_carries_portable_binding_when_schema_supports_uid(board):
+    conn, context = board
+    # Real sync capture schema/triggers, without contacting the Board service.
+    from tests.hermes_cli import kanban_sync_support as support
+    support.write_sync_config(kb.kanban_home(), True)
+    kb.init_db(Path(context['db']))
+    result = _failed_child(conn, context)
+    payload = json.loads(result['payload'])
+    assert payload['result_sequence'] == 1
+    bound = conn.execute("SELECT uid FROM task_events WHERE run_id=? AND kind='worker_bound'",
+                         (context['run_id'],)).fetchone()
+    assert bound['uid']
+    assert payload['bound_event_identity']['uid'] == bound['uid']
+
+
 @pytest.mark.parametrize('entry', ['dispatcher', 'observer'])
 @pytest.mark.parametrize('damage', ['missing_bound', 'malformed_bound', 'wrong_claim', 'wrong_pid'])
 def test_modern_receipt_invalid_binding_still_vetoes_reclaim(board, monkeypatch, entry, damage):

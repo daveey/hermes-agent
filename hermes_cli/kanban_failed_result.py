@@ -92,30 +92,21 @@ def failed_result_receipt(conn, task_id, run_id, claim_lock):
                        (run_id, task_id)).fetchone()
     if run is None or run['status'] != 'running' or run['ended_at'] is not None:
         return None
-    events = {}
-    for kind in ('worker_bound', 'worker_result'):
-        event = conn.execute(
-            'SELECT id, created_at, payload FROM task_events '
-            'WHERE task_id=? AND run_id=? AND kind=? ORDER BY id DESC LIMIT 1',
-            (task_id, run_id, kind),
-        ).fetchone()
-        if event is None:
-            return None
-        try:
-            payload = json.loads(event['payload'])
-        except (TypeError, ValueError):
-            return None
-        if not isinstance(payload, dict) or payload.get('claim_lock') != claim_lock:
-            return None
-        events[kind] = (event, payload)
-    bound_event, bound = events['worker_bound']
-    result_event, result = events['worker_result']
+    from hermes_cli.kanban_failed_result_identity import attributable_events
+    events = attributable_events(conn, task_id, run_id)
+    if events is None:
+        return None
+    (bound_event, bound), (result_event, result), modern = events
+    if (bound is None or result is None or bound.get('claim_lock') != claim_lock
+            or result.get('claim_lock') != claim_lock):
+        return None
     code = result.get('exit_code')
     if (not isinstance(code, int) or isinstance(code, bool) or code == 0
-            or result.get('continuable') or result_event['id'] <= bound_event['id']
+            or result.get('continuable') or (not modern and result_event['id'] <= bound_event['id'])
             or result.get('pid') != bound.get('pid')):
         return None
-    return {'source_result_event_id': result_event['id'],
+    portable = {'source_result_event_uid': result_event['uid']} if 'uid' in result_event.keys() else {}
+    return {'source_result_event_id': result_event['id'], **portable,
             'result_recorded_at': result_event['created_at'], 'result': result,
             'outer': (row['worker_pid'], row['worker_started_at']),
             'bound': (bound.get('pid'), bound.get('started_at'))}
@@ -146,6 +137,14 @@ def reclaim_proof(conn, row, *, failed_results_only=False):
     proof = failed_result_proof(conn, *identity)
     hold = proof is None and (failed_results_only or modern_result_recorded(conn, *identity[:2]))
     return proof, hold
+
+
+def result_exit_code(conn, row, proof):
+    """Use the causally selected result; legacy launches retain legacy lookup."""
+    if proof is not None:
+        return proof['result']['exit_code']
+    from hermes_cli.kanban_owner_recovery import managed_run_exit_code
+    return managed_run_exit_code(conn, row['id'], row['worker_pid'], row['claim_lock'])
 
 
 def failed_result_proof(conn, task_id, run_id, claim_lock):

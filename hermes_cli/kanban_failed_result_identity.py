@@ -1,0 +1,68 @@
+"""Portable causal evidence for modern failed worker results."""
+from __future__ import annotations
+
+import json
+from typing import cast
+
+
+def _payload(event):
+    try:
+        value = json.loads(event['payload'])
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _identity(event, payload):
+    value = {key: payload.get(key) for key in ('pid', 'started_at', 'claim_lock')}
+    if 'uid' in event.keys() and event['uid']:
+        value['uid'] = event['uid']
+    return value
+
+
+def result_identity_fields(conn, context):
+    """Called under the result writer transaction, after its binding check."""
+    params = (context['task_id'], context['run_id'])
+    bound = conn.execute("SELECT * FROM task_events WHERE task_id=? AND run_id=? "
+                         "AND kind='worker_bound' ORDER BY id DESC LIMIT 1", params).fetchone()
+    if bound is None or (payload := _payload(bound)) is None:
+        raise ValueError('result binding missing')
+    sequences = [0]
+    for event in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? "
+                              "AND kind='worker_result'", params):
+        prior = _payload(event)
+        seq = prior.get('result_sequence') if prior else None
+        if type(seq) is int and seq > 0:
+            sequences.append(seq)
+    return {'bound_event_identity': _identity(bound, payload), 'result_sequence': max(sequences) + 1}
+
+
+def attributable_events(conn, task_id, run_id):
+    """Choose modern evidence by writer sequence, never replica insertion order.
+
+    Ambiguous sequences or mixed legacy/modern results fail closed. Rebindings
+    with distinct identities also require ordinary operator recovery, not an
+    inferred causal order from replica-local integers.
+    """
+    rows = conn.execute("SELECT * FROM task_events WHERE task_id=? AND run_id=? "
+                        "AND kind IN ('worker_result','worker_bound') ORDER BY id", (task_id, run_id)).fetchall()
+    results = [(row, _payload(row)) for row in rows if row['kind'] == 'worker_result']
+    bounds = [(row, _payload(row)) for row in rows if row['kind'] == 'worker_bound']
+    if not results or not bounds:
+        return None
+    modern = any(p and p.get('death_proof_version') == 1 for _, p in results)
+    if not modern:
+        return bounds[-1], results[-1], False
+    sequences = [p.get('result_sequence') if p else None for _, p in results]
+    if any(type(seq) is not int or seq <= 0 for seq in sequences) or len(set(sequences)) != len(sequences):
+        return None
+    result = results[sequences.index(max(cast(list[int], sequences)))]
+    assert result[1] is not None  # validated alongside its positive sequence above
+    identity = result[1].get('bound_event_identity')
+    if not isinstance(identity, dict):
+        return None
+    # Require every visible binding to agree; a later live rebind cannot be
+    # hidden by importing its row before the earlier failed result.
+    if any(payload is None or _identity(row, payload) != identity for row, payload in bounds):
+        return None
+    return bounds[-1], result, True
