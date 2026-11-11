@@ -87,7 +87,11 @@ def placement(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]
         return None
     fits = sorted(name for name, have in carried.items() if wanted <= have)
     if fits:
-        return {"lane": "machine", "runs_on": labels, "machines": fits}
+        place: dict[str, Any] = {"lane": "machine", "runs_on": labels, "machines": fits}
+        held = [name for name in fits if (machines.get(name) or {}).get("hold")]
+        if held:  # a held machine imports and leases nothing: the wait has no end until an operator releases it
+            place["held"] = held
+        return place
     every = set().union(*carried.values())
     return {"lane": "unplaceable", "runs_on": labels, "missing": [lb for lb in labels if lb not in every],
             "machines": sorted(machines)}
@@ -139,6 +143,13 @@ def describe(place: Optional[dict[str, Any]]) -> Optional[str]:
                 else "no machine carries all of " + ", ".join(place.get("runs_on") or []))
         return (f"unplaceable: no machine can run it ({what}; known: {', '.join(place.get('machines') or [])}). "
                 "Re-place it (`hermes kanban move <id> --runs-on <label> --reason ...`); waiting will not start it")
+    if lane == "machine" and place.get("held") and set(place["held"]) >= set(place.get("machines") or []):
+        held = ", ".join(place["held"])
+        return (f"waiting for {held} (runs_on {', '.join(place.get('runs_on') or [])}), which is ON HOLD in the "
+                "Board registry: it claims no cards until an operator releases the hold (`hermes-mail admin "
+                f"machine-audit {place['held'][0]}` shows who set it and when). Not started by waiting: re-place it "
+                "(`hermes kanban move <id> --runs-on <label> --reason ...`) or wait for the release; do not clear "
+                "a hold to start a card")
     if lane == "machine":
         return (f"waiting for {', '.join(place.get('machines') or [])} (runs_on "
                 f"{', '.join(place.get('runs_on') or [])}); this machine cannot lease it. " + _NOT_STUCK)

@@ -85,6 +85,9 @@ def test_options_a_new_client_carries_go_to_the_target(extra):
     ({"tenant": "acme"}, "tenant"),
     ({"goal_mode": True, "tenant": "acme"}, "tenant"),
     ({"max_retries": 5}, "max_retries"),  # hermes-hub create-task has no retry breaker option [daveey]
+    # 11-11: placement="hub" + runs_on=[machine:worker-1] ran on the hub's own queue, labels dropped. [daveey]
+    ({"runs_on": ["machine:worker-1"]}, "runs_on"),
+    ({"runs_on": []}, "runs_on"),  # an explicit "any machine" is a placement too
 ])
 def test_options_no_client_carries_stay_local(extra, why):
     d = decide({"title": "Fix the flaky test", **extra}, carries=True)

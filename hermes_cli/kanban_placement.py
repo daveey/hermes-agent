@@ -153,7 +153,11 @@ TARGET_HOST_MARKERS = (r"\bhermes-hub\b", r"\bon the hub\b", r"\bthe hub's\b")
 UNKNOWN_GATEWAY = "no gateway is named"
 # kanban_create options hermes-hub create-task cannot carry: a card using them stays local.
 UNCARRIED_OPTIONS = ("initial_status", "human_request", "workspace_path", "project", "project_id", "tenant",
-                     "max_retries")  # hermes-hub create-task has no retry breaker option [daveey]
+                     "max_retries",  # hermes-hub create-task has no retry breaker option [daveey]
+                     # nor machine labels: before this a courier create dropped them and the card ran on the
+                     # target's own queue (11-11: placement="hub", runs_on=[machine:worker-1]). The labels work
+                     # from the creating board (Board lease), so such a card stays here; with a pin it is refused.
+                     "runs_on")
 # kanban_create options a hermes-hub client with `create-task --option KEY=JSON` carries to the card.
 # (hermes-hub also allows reasoning_effort, but kanban_create has no such parameter.)
 CARRIED_OPTIONS = ("skills", "max_runtime_seconds", "priority", "model", "provider", "goal_mode",
@@ -620,6 +624,8 @@ def _uncarried(args: dict, c: _Cfg, carries: Optional[bool]) -> list[str]:
     """The options of ``args`` hermes-hub cannot carry. ``carries`` None probes the client, only
     when an option an older client lacks is actually used."""
     used = [k for k in UNCARRIED_OPTIONS if args.get(k) not in (None, "", False, [])]
+    if args.get("runs_on") is not None and "runs_on" not in used:
+        used.append("runs_on")  # an explicit [] ("any machine") is a placement too: never dropped
     legacy = [k for k in LEGACY_UNCARRIED if args.get(k) not in (None, "", False, [])]
     if (args.get("completion_contract") or "local-only") != "local-only":
         legacy.append("completion_contract")

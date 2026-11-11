@@ -103,11 +103,18 @@ def describe(record: Optional[dict[str, Any]] = None) -> str:
 
 def placement_runs_on(conn: Any, placement: Any) -> Optional[list[str]]:
     """``kanban_worker_node.placement_runs_on``, except None while sync is down: a machine pin then takes the
-    gateway route (the placement relay) instead of a local ``runs_on`` row nothing can push. [daveey]"""
+    gateway route (the placement relay) instead of a local ``runs_on`` row nothing can push. [daveey]
+
+    Raises ``MachinePinRefused`` (``placement_unavailable``) when the machine is on Board ``hold``: it imports
+    nothing while held (11-11: a ``placement="worker-1"`` create returned ok during a migration hold and the card
+    sat unclaimed 48 min). Not checked while sync is down: the gateway route is unchanged there."""
     if down():
         return None
     from hermes_cli import kanban_worker_node as wn
-    return wn.placement_runs_on(conn, placement)
+    labels = wn.placement_runs_on(conn, placement)
+    if labels is not None:
+        wn.check_machine_pins(conn, labels)
+    return labels
 
 
 def explicit_runs_on(conn: Any, value: Any, *, courier: bool = False) -> Optional[list[str]]:

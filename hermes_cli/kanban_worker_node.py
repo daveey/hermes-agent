@@ -90,12 +90,28 @@ class MachinePinRefused(Exception):  # not ValueError: label-syntax handlers mus
 
     Such a card sits ``ready`` forever: only that machine may lease it, and it never looks (10-28: three hub cards
     with ``runs_on=[machine:macbook]`` were never claimed). Nothing was written; the working route is a
-    cross-gateway create on the machine's own gateway (``placement="<name>"``)."""
+    cross-gateway create on the machine's own gateway (``placement="<name>"``).
+
+    ``held`` is the other way a pin strands: the machine copies cards, but an operator set ``hold`` on it in the
+    Board registry, so its pickup imports nothing and the Board refuses its leases (11-11: worker-1 was held for
+    an AZ migration, a MacBook ``placement="worker-1"`` create returned ok and the card sat unclaimed for 48 min).
+    Its own gateway is held too, so the remedy is another machine (``others``), not a cross-gateway create."""
 
     code = "placement_unavailable"
 
-    def __init__(self, machine: str, why: str):
+    def __init__(self, machine: str, why: str, *, held: bool = False, others: Iterable[str] = ()):
         self.machine = machine
+        self.held = held
+        self.others = sorted(others)
+        if held:
+            alt = (f"Pin a machine that is not held instead ({', '.join(self.others)})" if self.others
+                   else "No other machine that picks up cards is unheld right now")
+            super().__init__(
+                f"The pin names machine:{machine}, but {why}, so no worker would claim the card until an operator "
+                f"releases the hold. Nothing was written. {alt}, or leave placement and runs_on out so the card "
+                f"takes the default route. `hermes-mail admin machine-audit {machine}` shows who set the hold and "
+                "when; a hold is deliberate (a drain or a migration), so do not clear it to place a card.")
+            return
         super().__init__(
             f"runs_on names machine:{machine}, but {why}, so no worker would ever claim the card on this board. "
             f"Nothing was written. Create it on that machine's own gateway instead (a cross-gateway create): "
@@ -104,7 +120,18 @@ class MachinePinRefused(Exception):  # not ValueError: label-syntax handlers mus
 
     @property
     def tool_error_fields(self) -> dict:
+        if self.held:
+            return {"machine": self.machine, "created": False, "rejection": "machine_held", "unheld": self.others}
         return {"machine": self.machine, "placement": self.machine, "created": False}
+
+
+HELD_WHY = "that machine is on hold in the Board registry (hold=true: it copies and leases no new cards)"
+
+
+def unheld_pickup_machines(pool: Mapping[str, Mapping[str, Any]], *, skip: str = "") -> list[str]:
+    """Active registry machines that pick up other gateways' cards and are not on hold (``skip`` left out)."""
+    return sorted(n for n, e in pool.items() if n != skip and e and e.get("state", "active") == "active"
+                  and not e.get("hold") and advertises_pickup(e))
 
 
 def check_machine_pins(conn: sqlite3.Connection, runs_on: Any, *,
@@ -113,7 +140,8 @@ def check_machine_pins(conn: sqlite3.Connection, runs_on: Any, *,
     """Refuse (:class:`MachinePinRefused`) a ``runs_on`` naming ``machine:<x>`` (x not this machine) unless x is an
     active registry machine that advertises pickup (:func:`advertises_pickup`; null or missing = no pickup).
     Labels other than ``machine:*`` are not checked. A no-op off a Board primary (``set_runs_on`` refuses there).
-    The registry unreachable fails closed: pickup cannot be confirmed."""
+    The registry unreachable fails closed: pickup cannot be confirmed. A machine on ``hold`` is refused too
+    (``held``): placement-derived pins (``placement=<machine>``) are passed through here for that check."""
     if runs_on is None:
         return
     labels = normalize_runs_on(runs_on if isinstance(runs_on, str) else list(runs_on))
@@ -139,6 +167,8 @@ def check_machine_pins(conn: sqlite3.Connection, runs_on: Any, *,
         if not advertises_pickup(entry):
             raise MachinePinRefused(name, "that machine does not pick up other gateways' cards (its /v2/machines "
                                           f"entry has pickup={entry.get('pickup')!r})")
+        if entry.get("hold"):  # its pickup imports nothing and the Board refuses its leases while held
+            raise MachinePinRefused(name, HELD_WHY, held=True, others=unheld_pickup_machines(pool, skip=name))
 
 
 def explicit_runs_on(conn: sqlite3.Connection, value: Any) -> Optional[list[str]]:
