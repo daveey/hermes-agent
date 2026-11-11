@@ -59,7 +59,7 @@ def apply(conn, path: Path, *, undo: bool = False, allow_legacy_rollback: bool =
     """
     from hermes_cli import kanban_db as kb
 
-    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest = json.loads(path.read_text(encoding="utf-8-sig"))
     if manifest.get("version") != 1 or manifest.get("cap") != PRIORITY_CAP:
         raise ValueError("unknown priority migration manifest")
     rows = manifest["rows"]
