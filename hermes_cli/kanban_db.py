@@ -1407,10 +1407,8 @@ def _board_meta_for(board: Optional[str]) -> dict:
 
 
 def _link(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
-    conn.execute(
-        "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
-        (parent_id, child_id),
-    )
+    from hermes_cli.kanban_dependency_validation import insert_link
+    insert_link(conn, parent_id, child_id)
 
 
 def _missing_task_ids(conn: sqlite3.Connection, ids: Iterable[str]) -> list[str]:

@@ -2,6 +2,23 @@
 import sqlite3
 
 
+def insert_link(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
+    """Validate internal graph writes too, inside the caller's transaction.
+
+    Cross-board dependencies use explicit waits; sync imports retain their own
+    replica-aware ingestion path rather than manufacturing local task rows.
+    """
+    from hermes_cli.kanban_db import _missing_task_ids
+
+    missing = _missing_task_ids(conn, [parent_id, child_id])
+    if missing:
+        raise missing_dependency_error(missing)
+    conn.execute(
+        "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+        (parent_id, child_id),
+    )
+
+
 def would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
     """True iff ``parent_id`` is already a descendant of ``child_id``."""
     seen = set()
