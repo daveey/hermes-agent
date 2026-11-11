@@ -77,7 +77,7 @@ def release_claims(session: dict, log_failure, logger) -> None:
             try:
                 from tui_gateway import kanban_remote_notices as _krn
                 _krn.release(claim["remote"])
-            except Exception as exc:  # health: allow BLE001 -- log_failure is the poller's rate-limited traceback logger
+            except Exception as exc:  # health: allow BLE001 -- preserve poller-stop best-effort release and existing stderr diagnostic
                 log_failure("remote kanban notice release on poller stop failed", exc)
             continue
         try:
@@ -85,7 +85,7 @@ def release_claims(session: dict, log_failure, logger) -> None:
                 _kbn.rewind_notify_cursor(
                     conn, task_id=claim["task_id"], platform=claim["platform"], chat_id=claim["chat_id"],
                     thread_id=claim.get("thread_id") or "", claimed_cursor=claim["new"], old_cursor=claim["old"])
-        except Exception as exc:  # health: allow BLE001 -- log_failure is the poller's rate-limited traceback logger
+        except Exception as exc:  # health: allow BLE001 -- preserve poller-stop best-effort release and existing stderr diagnostic
             log_failure("kanban notice release on poller stop failed", exc)
     # This process stops serving the chat: any marker it still holds for these subs (a durable claim never acked,
     # an earlier claim it lost track of) goes back too, or the chat's next consumer waits behind this live
