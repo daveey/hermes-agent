@@ -1,0 +1,91 @@
+{
+  "repository": "daveey/hermes-hub",
+  "commit": "dd80655bcbb8d0dadc0d68dd80512ef6420feeef",
+  "row_fields": {
+    "tasks": [
+      "title",
+      "body",
+      "assignee",
+      "status",
+      "priority",
+      "created_by",
+      "created_at",
+      "started_at",
+      "completed_at",
+      "workspace_kind",
+      "branch_name",
+      "tenant",
+      "result",
+      "idempotency_key",
+      "consecutive_failures",
+      "last_failure_error",
+      "max_runtime_seconds",
+      "current_run_uid",
+      "workflow_template_id",
+      "current_step_key",
+      "skills",
+      "requires",
+      "model_override",
+      "model_pin_mandatory",
+      "provider_override",
+      "reasoning_effort",
+      "max_retries",
+      "goal_mode",
+      "goal_max_turns",
+      "block_kind",
+      "human_request",
+      "block_recurrences",
+      "completion_contract",
+      "runs_on",
+      "placement_policy"
+    ],
+    "task_links": [
+      "parent_id",
+      "child_id"
+    ],
+    "task_comments": [
+      "task_id",
+      "author",
+      "body",
+      "created_at"
+    ],
+    "task_events": [
+      "task_id",
+      "run_uid",
+      "kind",
+      "payload",
+      "created_at"
+    ],
+    "task_runs": [
+      "task_id",
+      "profile",
+      "step_key",
+      "status",
+      "max_runtime_seconds",
+      "started_at",
+      "ended_at",
+      "outcome",
+      "summary",
+      "metadata",
+      "error"
+    ],
+    "task_attachments": [
+      "task_id",
+      "filename",
+      "content_type",
+      "size",
+      "uploaded_by",
+      "created_at",
+      "blob_key"
+    ],
+    "task_chat_links": [
+      "task_id",
+      "chat_gateway",
+      "chat_profile",
+      "chat_session",
+      "kind",
+      "released",
+      "created_at"
+    ]
+  }
+}

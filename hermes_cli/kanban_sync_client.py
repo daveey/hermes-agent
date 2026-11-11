@@ -1661,6 +1661,8 @@ def reconcile(slug: str, path: Optional[Path] = None, hub: Optional[Hub] = None)
                 after = str(page["next"])
         missing = {table: live_uids[table] - service_uids[table] - tombstoned.get(table, set())
                    for table in IMPORT_ORDER}
+        from hermes_cli.kanban_sync_reconcile_links import existing_task_chat_links
+        missing["task_chat_links"] &= existing_task_chat_links(live, service_uids["tasks"])
         queued = import_board(live, only=missing)
         queued.pop("cleared_rejected", None)
         pushed = push(live, hub, slug, ident.gateway, primary=mode == "primary")
