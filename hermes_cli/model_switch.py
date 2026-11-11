@@ -18,7 +18,7 @@ from hermes_cli.providers import (
     host_mandated_api_mode, is_aggregator, normalize_provider, resolve_provider_full)
 from hermes_cli.model_normalize import normalize_model_for_provider
 from agent.models_dev import (
-    ModelCapabilities, ModelInfo, get_model_capabilities, get_model_info, list_provider_models)
+    ModelCapabilities, ModelInfo, get_model_capabilities, get_model_info, list_provider_models, models_dev_network_scope)
 from utils import base_url_host_matches, base_url_hostname, base_url_origin
 # Re-exported: callers/tests patch hermes_cli.model_switch.<name>.
 from hermes_cli.model_switch_providers import list_authenticated_providers
@@ -1378,10 +1378,15 @@ def _route_configured_provider(st: _Switch) -> Optional[ModelSwitchResult] | boo
     st.target_provider = match_slugs[0]
     st.new_model = cfg_matches[st.target_provider]
     logger.debug("Configured-provider detection routed '%s' to %s", st.new_model, st.target_provider)
-    # providers.<slug> endpoints resolve in the credential block via resolve_user_provider(),
-    # which is gated on explicit_provider; custom:* slugs resolve at runtime directly.
+    # A built-in-named entry with its own base_url is the user's endpoint (custom:<key>, #151775);
+    # a tuning-only one (no base_url) keeps the built-in. One predicate decides both.
     if isinstance(st.user_providers, dict) and st.target_provider in st.user_providers:
-        st.explicit_provider = st.target_provider
+        from hermes_cli.runtime_provider_custom import persisted_provider_id
+        persisted = persisted_provider_id(st.target_provider, st.user_providers)
+        if persisted != st.target_provider:
+            st.target_provider = persisted
+        else:
+            st.explicit_provider = st.target_provider
     return True
 
 
@@ -1745,6 +1750,8 @@ def model_derived_api_mode(provider: str, model: str, api_key: str = "") -> Opti
 
 def _build_switch_result(st: _Switch) -> ModelSwitchResult:
     """COMMON PATH part 3: final api_mode / base_url shaping, metadata, warnings."""
+    from hermes_cli.runtime_provider_custom import persisted_provider_id
+    st.target_provider = persisted_provider_id(st.target_provider, st.user_providers)
     derived = model_derived_api_mode(st.target_provider, st.new_model, st.api_key)
     if derived is not None:
         st.api_mode = derived
@@ -1798,11 +1805,8 @@ def switch_model(
     Route (PATH A with ``--provider``, else PATH B) -> credentials -> validation -> result; each
     step returns a failure :class:`ModelSwitchResult` to stop the chain, or ``None`` to continue.
     ``user_providers`` / ``custom_providers`` are the config.yaml ``providers:`` dict and
-    ``custom_providers:`` list. ``allow_network=False`` makes all models.dev lookups
-    cache-only, including indirect provider and alias resolution. Provider endpoint
-    validation is unchanged; this flag only controls the metadata registry."""
-    from agent.models_dev import models_dev_network_scope
-
+    ``custom_providers:`` list. ``allow_network=False`` makes every models.dev lookup (provider and
+    alias resolution included) cache-only; provider endpoint validation is unchanged."""
     st = _Switch(
         raw_input=raw_input, current_provider=current_provider, current_model=current_model,
         current_base_url=current_base_url, current_api_key=current_api_key, is_global=is_global,

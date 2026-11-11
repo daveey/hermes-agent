@@ -38,6 +38,8 @@ jobs:
 
       - name: Install zsh and a virtual display for Electron
         if: runner.os == 'Linux'
+        # Refresh the package index first, like every other apt step here: a
+        # runner image without a populated list can't resolve zsh/libnotify4.
         run: |
           # tfgar AMIs are baked in us-west-2; cloud-init rewrites apt sources to
           # the regional mirror on boot, so baked lists are stale (#259). Fail on

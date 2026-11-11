@@ -509,6 +509,8 @@ def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float | None = 
                 time.sleep(min(0.1, remaining(deadline)))
                 continue
             if observed.state not in {"absent", "starting"}:
+                from hermes_cli.gateway_runtime_service import refresh_ready_owner_launcher
+                refresh_ready_owner_launcher(home, observed)
                 return observed
             if (verdict := _exited_start_verdict(home, observed, status, child, child_home, child_offset)) is not None:
                 return verdict
@@ -560,7 +562,7 @@ def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float | None = 
     except TimeoutError:
         return GatewayDiscovery("starting", reason_code="deadline")
     except RuntimeStartError as exc:
-        return GatewayDiscovery(exc.state, reason_code=exc.reason)
+        return GatewayDiscovery(exc.state, reason_code=exc.reason, detail=exc.detail)
     except PermissionError:
         return _refused(home)
     except OSError:

@@ -62,6 +62,20 @@ def _cleanup_env(env: Any, *, force_remove: Optional[bool] = None) -> None:
         env.terminate()
 
 
+def _settle_env_processes(env: Any) -> None:
+    """Settle background processes polled through *env* as lost once it is closed: their
+    pollers can no longer reach them and would otherwise poll a closed environment forever.
+    Called only after a teardown that succeeded or found the sandbox already gone: a failed
+    one (Modal's sync-back raising before terminate) may leave the sandbox and its processes
+    running and reachable."""
+    from tools.process_registry import process_registry
+    # WARNING, not _quiet's DEBUG: a failed settle leaves pollers spinning on a closed env.
+    with _quiet("settling processes of a closed environment failed", level=logging.WARNING):
+        settled = process_registry.settle_env_closed(env)
+        if settled:
+            logger.info("Marked %d background process(es) lost: their environment was closed", settled)
+
+
 def _teardown_env(env: Any, task_id: str, *, force_remove: Optional[bool] = None, done_msg: str = "Cleaned up inactive environment for task: %s", stop_idle: bool = False) -> None:
     """``_cleanup_env`` (or, with *stop_idle*, the backend's ``stop_idle``) plus outcome logging.
     A 404/"not found" error means the sandbox is already gone — logged at info."""
@@ -77,6 +91,8 @@ def _teardown_env(env: Any, task_id: str, *, force_remove: Optional[bool] = None
             logger.info("Environment for task %s already cleaned up", task_id)
         else:
             logger.warning("Error cleaning up environment for task %s: %s", task_id, e)
+            return
+    _settle_env_processes(env)
 
 
 def _clear_file_ops_cache(task_id: str) -> None:
@@ -140,16 +156,13 @@ def _cleanup_inactive_envs(lifetime_seconds: int = 300):
     )
     current_time = time.time()
 
-    # Sandboxes with active background processes stay alive (refresh activity).
+    # Sandboxes with active background processes stay alive (refresh activity). Match the
+    # environment key or object, never the spawning owner id: the key is ``session:<id>``,
+    # a workspace digest or ``default``, while ``owner_task_id`` is the raw task id.
     try:
         from tools.process_registry import process_registry
         for task_id in list(_last_activity.keys()):
-            # ``has_active_processes`` matches the RAW owner id, but envs are keyed by the collapsed
-            # container key (``profile:<name>``, ``default``, a workspace digest): also keep the env
-            # while any process it hosts is still running. Reaping it kills the job's watcher, which
-            # then reported a still-running job as lost (alpha-askeve, 2026-10-30). [daveey]
-            if process_registry.has_active_processes(task_id) or process_registry._any_running(
-                    lambda s, key=task_id: s.task_id == key):
+            if process_registry.has_running_in_env(task_id, _active_environments.get(task_id)):
                 _last_activity[task_id] = current_time
     except ImportError:
         pass
@@ -328,7 +341,6 @@ def _evict_environment_for_task(task_id: Optional[str]) -> None:
             env = _active_environments.pop(key, None)
             _last_activity.pop(key, None)
             if env is not None:
-                evicted.append(env)
-    for env in evicted:
-        with _quiet("cleanup of degraded environment failed"):
-            env.cleanup()
+                evicted.append((key, env))
+    for key, env in evicted:
+        _teardown_env(env, key, done_msg="Evicted degraded environment for task: %s")
