@@ -2427,7 +2427,7 @@ def _dispatch_once_locked(
     may_spawn, spawn_budget = _tick_spawn_budget(conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress,
                                                  board=board)
     if not may_spawn:
-        return result
+        return _kb._sync.worker_pickup_capped(conn, result, dry_run, _profile_exists_fn)  # record why cards wait
 
     result.scheduling_admitted = not dry_run
     if not dry_run:

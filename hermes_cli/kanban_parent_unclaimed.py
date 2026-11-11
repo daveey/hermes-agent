@@ -125,6 +125,8 @@ def safe_sweep(conn) -> int:
     except Exception:  # health: allow BLE001 -- a notice failure must never stop dispatch
         _log.warning("kanban dispatcher: parent-unclaimed notice sweep failed", exc_info=True)
         posted = 0
+    from hermes_cli import kanban_pickup_stall
+    kanban_pickup_stall.safe_sweep(conn)  # pinned foreign cards this worker node has not picked up [daveey]
     return posted + kanban_chat_wait.safe_sweep(conn)
 
 

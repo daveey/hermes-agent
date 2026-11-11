@@ -28,6 +28,7 @@ from hermes_cli import kanban_swarm as ks
 from hermes_cli import kanban_workflow
 from hermes_cli import kanban_contract_cli as _contract_cli
 from hermes_cli import kanban_foreign_card as _foreign_card
+from hermes_cli.kanban_cli_triage_lines import _decompose_ok_line, _retitled_suffix
 from hermes_cli.kanban_output import (
     _ATTACHMENT_FIELDS, _RUNS_RUN_FIELDS, _SHOW_RUN_FIELDS, _bulk_apply, _err,
     _fmt_counts, _fmt_task_line, _fmt_ts, _json_out, _obj_dict, _print_json,
@@ -756,7 +757,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
     with kbc.connect_closing() as conn:
         task = kb.get_task(conn, args.task_id)
         if not task:
-            return _err(f"no such task: {args.task_id}")
+            from hermes_cli.kanban_pickup_stall import not_here_note
+            return _err(f"no such task: {args.task_id}{not_here_note(conn, args.task_id)}")
         comments = kb.list_comments(conn, args.task_id)
         events = kb.list_events(conn, args.task_id)
         parents = kb.parent_ids(conn, args.task_id)
@@ -1836,10 +1838,6 @@ def _run_triage_sweep(args: argparse.Namespace, verb: str, mod, run_one, json_ke
     return 0 if (ok_count > 0 or not ids) else 1
 
 
-def _retitled_suffix(outcome) -> str:
-    return f" — retitled: {outcome.new_title!r}" if outcome.new_title else ""
-
-
 def _cmd_specify(args: argparse.Namespace) -> int:
     """Spec a triage task (or all) via the auxiliary LLM, promote to todo."""
     from hermes_cli import kanban_specify as spec
@@ -1847,13 +1845,6 @@ def _cmd_specify(args: argparse.Namespace) -> int:
     return _run_triage_sweep(args, "specify", spec, spec.specify_task, "specified",
                              ("task_id", "ok", "reason", "new_title"),
                              lambda o: f"Specified {o.task_id} → todo{_retitled_suffix(o)}")
-
-
-def _decompose_ok_line(o) -> str:
-    if o.fanout and o.child_ids:
-        return (f"Decomposed {o.task_id} → {len(o.child_ids)} "
-                f"children ({', '.join(o.child_ids)}); root promoted to todo")
-    return f"Specified {o.task_id} → todo (no fanout){_retitled_suffix(o)}"
 
 
 def _cmd_decompose(args: argparse.Namespace) -> int:

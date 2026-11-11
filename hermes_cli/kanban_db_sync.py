@@ -1053,6 +1053,19 @@ def worker_pickup(conn: sqlite3.Connection, budget: Optional[int], dry_run: bool
         _log.warning("kanban: worker-node pickup failed", exc_info=True)
 
 
+def worker_pickup_capped(conn: sqlite3.Connection, result: Any, dry_run: bool, profile_exists_fn: Any) -> Any:
+    """Dispatcher seam for a tick with no spawn slot: pickup does not run, so record why the cards pinned to this
+    machine wait (``budget_exhausted`` for the ones a slot would start; ``kanban_pickup_stall``). Returns ``result``."""
+    if dry_run or board_mode(conn) != "primary":
+        return result
+    from hermes_cli import kanban_worker_node as wn
+    try:
+        wn.note_capped(conn, profile_exists_fn())
+    except Exception:  # health: allow BLE001 -- pickup evidence must not stop the tick
+        _log.warning("kanban: worker-node capped pickup note failed", exc_info=True)
+    return result
+
+
 def run_uid(conn: sqlite3.Connection, run_id: Optional[int]) -> Optional[str]:
     if run_id is None or board_mode(conn) == "off":
         return None
