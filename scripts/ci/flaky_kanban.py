@@ -50,7 +50,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 
 try:
     from scripts.ci import flaky_artifact_poll as fap
@@ -582,7 +582,8 @@ def _poll_run(repo: str, token: str, run: dict[str, Any], board: Board, state: d
 
 
 def poll_github(repo: str, token: str, board: Board, state: dict[str, Any], *,
-                lookback_hours: float = 6.0, relay: HubRelay | None = None) -> list[str]:
+                lookback_hours: float = 6.0, relay: HubRelay | None = None,
+                deadline: float | None = None, checkpoint: Callable[[], None] | None = None) -> list[str]:
     """File cards from the metadata artifacts of recently completed runs not seen before.
 
     ``lookback_hours`` must outlast the slowest workflow plus any cron outage, and stay
@@ -594,6 +595,11 @@ def poll_github(repo: str, token: str, board: Board, state: dict[str, Any], *,
     expected slice must supply a valid artifact before any card is touched. When a run was newly
     observed the log ends with ``POLL complete=<n> empty=<n> unavailable=<n> not_applicable=<n>``
     (``complete`` counts every run with readable data, ``empty`` the subset with no flakes).
+
+    The cron wrapper kills a poll that overruns its timeout and drops all of that poll's results, so
+    while GitHub is slow every poll would redo and lose the same work. ``checkpoint`` runs after each
+    run (``main`` saves the state there), and no run starts once ``time.monotonic()`` reaches
+    ``deadline``: the rest stay unprocessed behind a ``FAILED poll_budget deferred=<n>`` line.
     """
     if not isinstance(repo, str) or fap.fa._REPO.fullmatch(repo) is None:
         return ["FAILED runs_unavailable"]
@@ -607,11 +613,16 @@ def poll_github(repo: str, token: str, board: Board, state: dict[str, Any], *,
     log: list[str] = []
     counts = {"complete": 0, "empty": 0, "unavailable": 0, "not_applicable": 0}
     fresh = [r for r in sorted(runs, key=lambda r: r["id"]) if f"{r['id']}/{r.get('run_attempt', 1)}" not in done]
-    for run in fresh:
+    for index, run in enumerate(fresh):
+        if deadline is not None and time.monotonic() >= deadline:
+            log.append(f"FAILED poll_budget deferred={len(fresh) - index}")
+            break
         outcome, lines = _poll_run(repo, token, run, board, state, relay)
         log += lines
         counts[outcome] += 1
         counts["complete"] += outcome == "empty"    # an empty result is a complete one
+        if checkpoint is not None:
+            checkpoint()
     if fresh:
         log.append("POLL " + " ".join(f"{k}={v}" for k, v in counts.items()))
     return log
@@ -631,6 +642,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--hub-cli", default="hermes-hub", help="hermes-hub CLI, for cards on other gateways")
     ap.add_argument("--hub-db", type=Path, default=None, help="hermes-hub replica (default: its state dir)")
     ap.add_argument("--hub-wait", type=float, default=90.0, help="seconds to wait for a cross-gateway comment")
+    ap.add_argument("--budget", type=float, default=420.0,
+                    help="--from-github: seconds after which no further run is started (the cron kills it at 600)")
     args = ap.parse_args(argv)
 
     if args.annotate:
@@ -652,7 +665,9 @@ def main(argv: list[str] | None = None) -> int:
         if not token:
             print("flaky_kanban: GH_TOKEN/GITHUB_TOKEN not set", file=sys.stderr)
             return 2
-        log = poll_github(args.repo, token, board, state, relay=relay)
+        log = poll_github(args.repo, token, board, state, relay=relay,
+                          deadline=time.monotonic() + args.budget,
+                          checkpoint=lambda: save_state(args.state, state))
     else:
         entries: list[dict[str, str]] = []
         for path in args.report:
