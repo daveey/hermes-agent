@@ -181,3 +181,48 @@ def test_best_effort_restart_skips_a_pinned_unit(host):
     failed: list[str] = []
     fleet._restart_systemd_gateway_units_best_effort(failed, fleet._systemd_gateway_unit_listings())
     assert failed == [] and host["writes"] == []
+
+
+def test_recovery_and_manual_sweeps_honour_the_same_verdict(host):
+    """Restart-abort recovery (which may run before any unit was looked at) and the manual-process
+    sweep (reached when the unit PID lookup fails) both leave the pinned gateway alone."""
+    from types import SimpleNamespace
+
+    from hermes_cli.update_fleet_scope import drop_gateways_on_another_checkout
+    plan = SimpleNamespace(runtimes=[SimpleNamespace(kind="gateway", profile="askeve-builder", supervisor="systemd")])
+    pinned = _run_pinned(host, status_record=True)
+
+    candidates, skipped = fleet._gateway_recovery_partition(plan)
+    assert candidates == {} and [s["profile"] for s in skipped] == ["askeve-builder"]
+    assert str(host["core"]) in skipped[0]["reason"]
+
+    control = _run_on_checkout(host)
+    assert drop_gateways_on_another_checkout([pinned, control]) == [control]
+    (host["home"] / "gateway_state.json").write_text(json.dumps({"pid": control, "argv": ["-c"]}))
+    assert fleet._gateway_recovery_partition(plan) == ({"askeve-builder": "systemd"}, [])
+
+
+def test_working_directory_outranks_pythonpath_without_safe_path(host):
+    """``python -m`` puts the working directory ahead of PYTHONPATH: a gateway started in checkout A
+    with PYTHONPATH naming B runs A, and must not be read as pinned to B."""
+    from hermes_cli.update_receipt import _gateway_code_root
+    here = host["core"].parent / "checkout-a"
+    (here / "hermes_cli").mkdir(parents=True)
+    (here / "hermes_cli" / "__init__.py").write_text("")
+    (here / "hermes_cli" / "main.py").write_text((host["core"] / "hermes_cli" / "main.py").read_text())
+    env = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "PYTHONPATH", "PYTHONSAFEPATH")}
+    env["PYTHONPATH"] = str(host["core"])
+    proc = _spawn([sys.executable, "-m", "hermes_cli.main", "gateway", "run"], env, here)
+    host["procs"].append(proc)
+    assert _gateway_code_root(proc.pid, host["home"]) == here.resolve()
+
+
+def test_auto_migration_does_not_fold_a_pinned_gateway(host):
+    """The post-update multiplex migration would stop and uninstall the unit just left alone."""
+    from hermes_cli.gateway_migrate import ProfileGateway
+    from hermes_cli.gateway_migrate_guards import _guard_code_root
+    profile = ProfileGateway(name="askeve-builder", home=host["home"], pid=_run_pinned(host, status_record=True))
+    assert str(host["core"]) in (_guard_code_root(None, profile) or "")
+    (host["home"] / "gateway_state.json").unlink()
+    profile.pid = _run_on_checkout(host)
+    assert _guard_code_root(None, profile) is None

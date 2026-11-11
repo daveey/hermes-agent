@@ -179,6 +179,44 @@ def gateway_foreign_code_root(pid: int, home) -> Path | None:
     return None
 
 
+def profiles_on_another_checkout() -> dict[str, Path]:
+    """Profile → the other checkout its live gateway runs, read fresh from each profile's own
+    status record. Restart-abort recovery asks this itself: it can run before the restart phase
+    looked at any unit, so nothing an earlier pass remembered is there to rely on."""
+    import json
+
+    import psutil
+    from hermes_cli.update_receipt import _profile_homes
+    pinned: dict[str, Path] = {}
+    with suppress(Exception):
+        for profile, home in _profile_homes():
+            with suppress(Exception):
+                pid = int(json.loads((home / "gateway_state.json").read_text(encoding="utf-8-sig")).get("pid") or 0)
+                root = gateway_foreign_code_root(pid, home) if pid > 0 and psutil.pid_exists(pid) else None
+                if root is not None:
+                    pinned[profile] = root
+    return pinned
+
+
+def drop_gateways_on_another_checkout(pids) -> list[int]:
+    """*pids* minus the gateway processes that provably run another checkout (each named once).
+
+    The manual sweep stops every gateway process of this home that no supervisor claims; a pinned
+    unit's gateway lands there whenever its unit PID lookup fails, and it is not stale either."""
+    from hermes_cli.dashboard_procs import _hermes_home_for_pid
+    kept = []
+    for pid in pids:
+        home = None
+        with suppress(Exception):
+            home = _hermes_home_for_pid(pid)
+        root = gateway_foreign_code_root(pid, home)
+        if root is None:
+            kept.append(pid)
+        else:
+            announce_skipped_runtime("gateway process", f"PID {pid}", home, code_root=root)
+    return kept
+
+
 def describe_skipped_runtime(kind: str, name: str, home: str | None, code_root: Path | None = None) -> str:
     """One notice line for a runtime the update leaves alone (foreign home, its own checkout, or
     unreadable ownership)."""

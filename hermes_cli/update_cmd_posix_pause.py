@@ -353,13 +353,13 @@ def _stop_unit(unit: dict) -> None:
     from hermes_cli.update_cmd_fleet_unit_budget import UNIT_JOB_STILL_RUNNING, run_unit_job
     cmd = _manage_cmd(unit["scope"])
     if cmd is None:
-        raise PauseRefused(f"no privilege to stop system unit {unit['unit']}")
+        raise PauseRefused(f"no privilege to stop system unit {unit['unit']}", [unit["unit"]])
     result = run_unit_job(cmd, _scope_cmd(unit), "stop", unit["unit"], timeout=_STOP_TIMEOUT_S)
     if result.returncode == UNIT_JOB_STILL_RUNNING and not _alive(unit["pid"], unit.get("ct")) \
             and _unit_main_pid(_scope_cmd(unit), unit["unit"]) <= 0:
         return
     if result.returncode != 0:
-        raise PauseRefused(f"systemctl stop {unit['unit']} failed: {(result.stderr or '').strip()}")
+        raise PauseRefused(f"systemctl stop {unit['unit']} failed: {(result.stderr or '').strip()}", [unit["unit"]])
 
 
 def _start_unit(unit: dict) -> int:
@@ -394,7 +394,7 @@ def _stop_job(job: dict, *, drained: bool = False) -> None:
     _wait_gone([job["pid"]], 30.0)
     # KeepAlive may have respawned the drained gateway already: the job, not the old PID, decides.
     if result.returncode != 0 and (_locate_launchd_gateway_service(job["label"])[1] or 0) > 0:
-        raise PauseRefused(f"launchctl bootout {job['label']} failed: {(result.stderr or '').strip()}")
+        raise PauseRefused(f"launchctl bootout {job['label']} failed: {(result.stderr or '').strip()}", [job["label"]])
 
 
 def _start_job(job: dict) -> None:

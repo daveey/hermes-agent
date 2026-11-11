@@ -28,6 +28,14 @@ def test_refused_units_ride_the_refusal(monkeypatch):
     assert refused.value.units == ["old-gw"]
 
 
+def test_a_supervisor_that_cannot_be_disarmed_names_its_gateway(monkeypatch):
+    """A drained gateway whose unit cannot be stopped defers the update too: it must be counted."""
+    monkeypatch.setattr(pause, "_manage_cmd", lambda scope: None)
+    with pytest.raises(pause.PauseRefused) as refused:
+        pause._stop_unit({"unit": "old-gw", "scope": "system", "pid": 4242})
+    assert refused.value.units == ["old-gw"]
+
+
 def _board(tmp_path, monkeypatch) -> Path:
     from hermes_cli.config import save_config
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "board.db"))

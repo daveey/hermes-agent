@@ -1083,6 +1083,8 @@ def _gateway_recovery_partition(plan, *, skip_profiles: set[str] | None = None) 
     skip_profiles = skip_profiles or set()
     candidates: dict[str, str] = {}
     skipped: list[dict] = []
+    from hermes_cli.update_fleet_scope import profiles_on_another_checkout
+    pinned = profiles_on_another_checkout()  # recovery would only bounce these onto their pin [daveey]
     with _best_effort('Could not prepare fresh gateway restart profiles: %s'):
         for runtime in getattr(plan, "runtimes", ()) or ():
             kind = getattr(runtime, "kind", None)
@@ -1092,6 +1094,10 @@ def _gateway_recovery_partition(plan, *, skip_profiles: set[str] | None = None) 
                 continue
             if kind == "gateway":
                 if profile in skip_profiles:
+                    continue
+                if profile in pinned:
+                    skipped.append({"profile": profile, "kind": "gateway", "supervisor": str(supervisor),
+                                    "reason": f"runs its own checkout ({pinned[profile]}), which this update does not change"})
                     continue
                 if supervisor in _FRESH_RESTART_SUPERVISORS:
                     candidates.setdefault(profile, str(supervisor))
@@ -1555,7 +1561,10 @@ def _restart_manual_gateways(out: _GatewayRestartOutcome, _drain_budget) -> None
     from hermes_cli.update_cmd_posix_pause import already_restarted
     # Plus the gateways this update paused and already restarted on the new code.
     service_pids = _get_service_pids(all_profiles=True) | already_restarted()["pids"]
-    manual_pids = find_gateway_pids(exclude_pids=service_pids, all_profiles=True)
+    from hermes_cli.update_fleet_scope import drop_gateways_on_another_checkout
+    # A pinned unit's gateway reaches this sweep whenever its unit PID lookup failed above. [daveey]
+    manual_pids = drop_gateways_on_another_checkout(
+        find_gateway_pids(exclude_pids=service_pids, all_profiles=True))
     profile_processes = {
         proc.pid: proc
         for proc in find_profile_gateway_processes(exclude_pids=service_pids)
