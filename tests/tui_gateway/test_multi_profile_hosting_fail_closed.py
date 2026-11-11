@@ -140,6 +140,49 @@ def test_rpc_scope_reaches_llm_oneshot_and_model_options(two_homes, monkeypatch)
     assert seen["options"] == (b, B_VAL, None)
 
 
+@pytest.mark.usefixtures("two_homes")
+def test_session_title_suggest_runs_under_the_requested_profiles_scope(monkeypatch):
+    """⌘⇧E rename pre-fill: the aux call must see the requested profile's secrets. Unscoped on a
+    multiplexed gateway, its credential read raised UnscopedSecretError, suggest_short_name swallowed
+    it and the dialog silently got ``title: null``."""
+    import contextlib
+
+    from agent.secret_scope import UnscopedSecretError, get_secret, is_multiplex_active
+
+    seen = []
+
+    class _DB:
+        def resolve_session_id(self, target):
+            return target
+
+        def get_messages(self, key):
+            return [{"role": "user", "content": "rename me"}]
+
+    @contextlib.contextmanager
+    def fake_profile_db(params=None, *, writer=False):
+        yield _DB()
+
+    def fake_suggest(messages, **kwargs):
+        try:
+            seen.append((get_secret("A_ONLY_TOKEN"), get_secret("B_ONLY_TOKEN")))
+        except UnscopedSecretError:
+            seen.append("unscoped")
+            return None
+        return "renamed chat"
+
+    monkeypatch.setattr(server, "_profile_db", fake_profile_db)
+    monkeypatch.setattr("agent.title_generator.suggest_short_name", fake_suggest)
+
+    r = server._methods["session.title.suggest"]("r1", {"session_key": "s1", "profile": "b"})
+    assert r["result"]["title"] == "renamed chat", (r, seen)
+    assert seen[-1] == (None, B_VAL)
+    assert is_multiplex_active()
+    # The launch profile on the now-multiplexed gateway (the hub's own sessions): its own scope.
+    r = server._methods["session.title.suggest"]("r2", {"session_key": "s2"})
+    assert r["result"]["title"] == "renamed chat", (r, seen)
+    assert seen[-1] == (A_VAL, None)
+
+
 @pytest.mark.parametrize("route", ["session.compress", "slash.compress"])
 def test_manual_compress_routes_bind_the_sessions_full_runtime_scope(two_homes, monkeypatch, route):
     """Manual compression must resolve secrets from its session across an A→B→A sequence."""

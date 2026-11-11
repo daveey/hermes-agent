@@ -37,9 +37,11 @@ def test_suggest_lowercases_and_parses_json():
     assert calls[0]["task"] == "title_generation"
 
 
-def test_suggest_fails_open():
+def test_suggest_fails_open(caplog):
     def boom(**kw):
         raise RuntimeError("no provider")
 
-    assert suggest_short_name([{"role": "user", "content": "x"}], llm=boom) is None
+    with caplog.at_level("WARNING", logger="agent.title_generator"):
+        assert suggest_short_name([{"role": "user", "content": "x"}], llm=boom) is None
+    assert "Short-name suggestion failed: RuntimeError: no provider" in caplog.text
     assert suggest_short_name([], llm=boom) is None

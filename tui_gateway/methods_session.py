@@ -1262,9 +1262,10 @@ def _(rid, params: dict, session: dict, db) -> dict:
 
 
 @method("session.title.suggest")
+@_profile_scoped
 def _(rid, params: dict) -> dict:
-    """Suggest a short recognizable name (2-4 lowercase words) for a session from its transcript —
-    Desktop's ⌘⇧N rename pre-fill. Read-only; ``title`` is None when nothing could be suggested."""
+    """A 2-4 lowercase-word name from the transcript (⌘⇧E rename pre-fill), ``title`` None if none. Scoped: unscoped,
+    its aux credential read raised UnscopedSecretError on a multiplexed gateway (always null)."""
     from agent.title_generator import suggest_short_name
     target = str(params.get("session_key") or params.get("session_id") or "")
     if not target:
@@ -1274,10 +1275,8 @@ def _(rid, params: dict) -> dict:
         if db is None:
             return _db_unavailable_error(rid, code=5007)
         try:
-            if live is not None:
-                key = live["session_key"]
-            else:
-                key = (db.resolve_session_id(target) if hasattr(db, "resolve_session_id") else None) or target
+            key = live["session_key"] if live is not None else (
+                (db.resolve_session_id(target) if hasattr(db, "resolve_session_id") else None) or target)
             messages = db.get_messages(key)
         except Exception as e:
             return _err(rid, 5007, str(e))
