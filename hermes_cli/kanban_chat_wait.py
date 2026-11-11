@@ -88,6 +88,11 @@ def notice_text(payload: Any) -> str:
     tid = str(payload.get("parent") or "<card>")[:64]
     title = str(payload.get("parent_title") or "").strip()[:120]
     named = f"{tid} ({title})" if title else tid
+    if payload.get("core_update_hold"):
+        return (f"{named}, which this chat waits on, has been ready {payload.get('ready_minutes', '?')} min "
+                "with no worker: claims are held for a pending Hermes update "
+                f"(hold started {payload.get('core_update_started') or 'at an unknown time'}). "
+                "The hold lasts until the update applies or the drain's hard max.")
     if payload.get("missing_shared_board"):
         return (f"{named}, which this chat waits on, has been ready {payload.get('ready_minutes', '?')} min "
                 f"with no worker because it isn't on the shared Board (claim_deferred: not_found). "
@@ -152,8 +157,9 @@ def _clock_hold_unchecked(conn, task_id: str, since: int, now: float) -> dict[st
 
 def sweep(conn, *, now: Optional[float] = None) -> int:
     """Append the once-per-ready-episode notice for every qualifying card; returns how many were appended."""
-    from hermes_cli.kanban_sync_diagnostics import missing_board
+    from hermes_cli.kanban_sync_diagnostics import missing_board, update_hold
     now = time.time() if now is None else now
+    drain = update_hold()
     posted = 0
     rows = conn.execute(_CANDIDATES, (int(now - MAX_EPISODE_SECONDS), int(now - THRESHOLD_SECONDS))).fetchall()
     for row in rows:
@@ -163,7 +169,7 @@ def sweep(conn, *, now: Optional[float] = None) -> int:
             continue
         if pu.post_notice(conn, row["id"], row["id"], wait_key=f"ready@{since}", waited_seconds=ready_for,
                           ready_seconds=ready_for, parent_title=row["title"], kind=NOTICE_KIND,
-                          extra={**_clock_hold(conn, row["id"], since, now),
+                          extra={**drain, **_clock_hold(conn, row["id"], since, now),
                                  **missing_board(conn, row["id"], since)}):
             posted += 1
     return posted

@@ -27,6 +27,22 @@ def record_claim(conn, task_id: str, reason: str) -> None:
         kb._append_event(conn, task_id, "claim_deferred", {"reason": reason, "gateway": gateway})
 
 
+def update_hold() -> dict:
+    """Use admission's live marker reader, not an independent existence-only diagnosis."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from hermes_cli.kanban_gateway_drain import core_update_hold
+    hold = core_update_hold()
+    if hold is None:
+        return {}
+    try:
+        started = datetime.fromtimestamp(float(hold["started_at"]), ZoneInfo("America/Los_Angeles"))
+        stamp = started.strftime("%Y-%m-%d %H:%M:%S %Z")
+    except (KeyError, ValueError, TypeError, OverflowError, OSError):
+        stamp = "at an unknown time"
+    return {"core_update_hold": True, "core_update_started": stamp}
+
+
 def missing_board(conn, task_id: str, since: int) -> dict:
     """Only this gateway's latest claim in this ready episode can diagnose a missing Board row."""
     state = sync.sync_state(conn)
