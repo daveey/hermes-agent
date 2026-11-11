@@ -45,7 +45,7 @@ def test_unfenced_evidence_still_keeps_the_card_home():
 
 @pytest.mark.parametrize("body", [
     # a host need in the work text outside the fence still counts
-    "Then run `systemctl restart hermes` yourself.\n" + fenced("quoted"),
+    "Then run systemctl restart hermes yourself.\n" + fenced("quoted"),
     # an unterminated fence exempts nothing (a producer bug must not open every card)
     f"{OPEN}\n{EVIDENCE}\n",
     # a closing marker alone exempts nothing
