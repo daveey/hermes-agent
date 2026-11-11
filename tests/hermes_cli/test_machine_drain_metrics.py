@@ -14,6 +14,7 @@ def hold(tmp_path, monkeypatch):
     path = tmp_path / "drain-hold"
     monkeypatch.setattr(drain, "hold_paths", lambda: [path])
     monkeypatch.setattr(drain, "_pid_alive", lambda pid: pid == 123)
+    monkeypatch.setattr(drain.time, "time", lambda: 200)
     return path
 
 
@@ -24,15 +25,29 @@ def test_actual_producer_bound_and_dead_writer(hold):
     assert md.collect() == {"drain_active": 0}
 
 
-@pytest.mark.parametrize("extra", [{}, {"max_s": None}, {"max_s": "1200"}, {"max_s": -1}])
+@pytest.mark.parametrize("extra", [{}, {"max_s": "1200"}])
 def test_never_invents_end(hold, extra):
     hold.write_text(json.dumps({"pid": 123, "started_at": 100, **extra}))
     assert md.collect() == {"drain_active": 1}
 
 
-def test_absent_and_unparseable(hold):
+@pytest.mark.parametrize("max_s", [None, -1, 0, "bad", float("nan"), float("inf")])
+def test_invalid_lease_is_inactive(hold, max_s):
+    hold.write_text(json.dumps({"pid": 123, "started_at": 100, "max_s": max_s}))
+    assert md.collect() == {"drain_active": 0}
+
+
+@pytest.mark.parametrize("now", [1300, 1301])
+def test_expired_live_writer_is_inactive(hold, monkeypatch, now):
+    monkeypatch.setattr(drain.time, "time", lambda: now)
+    hold.write_text(json.dumps({"pid": 123, "started_at": 100, "max_s": 1200}))
+    assert md.collect() == {"drain_active": 0}
+
+
+def test_absent_and_unparseable(hold, monkeypatch):
     assert md.collect() == {"drain_active": 0}
     hold.write_text("{")
+    monkeypatch.setattr(drain.time, "time", lambda: hold.stat().st_mtime)
     assert md.collect() == {"drain_active": 1}
 
 
