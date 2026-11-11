@@ -86,6 +86,27 @@ def _item(value: Any) -> dict:
     return out
 
 
+def historical_fields(outcome):
+    """The last receipt and its original provenance, independent of current kind.
+
+    This retains one historical declaration in the existing outcome object; it
+    does not infer acceptance for later work or turn a refresh into verification.
+    """
+    if not isinstance(outcome, dict):
+        return {}
+    candidate = outcome if "completion_receipt" in outcome else outcome.get("declared")
+    if not isinstance(candidate, dict) or "completion_receipt" not in candidate:
+        return {}
+    try:
+        receipt = validate_completion_receipt(candidate["completion_receipt"])
+    except ValueError:
+        return {}
+    source = candidate.get("completion_receipt_source")
+    if not isinstance(source, dict):
+        source = {"kind": "session_declaration", "declared_at": candidate.get("at")}
+    return {"completion_receipt": receipt, "completion_receipt_source": dict(source)}
+
+
 def validate_completion_receipt(value: Any) -> dict:
     """Validate the entire v1 value before any write; return an independent copy.
 

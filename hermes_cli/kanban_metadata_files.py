@@ -37,6 +37,16 @@ _SKIP_KEYS = frozenset({"artifacts", "_staged_artifacts", ATTACHED_KEY, SKIPPED_
 _TRAILING_PUNCT = ".,;:!?)]}"
 
 
+def cleaned_artifact_paths(metadata: Any) -> list[str]:
+    """Non-blank string paths declared in ``metadata[\"artifacts\"]``."""
+    if not isinstance(metadata, dict):
+        return []
+    raw = metadata.get("artifacts")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(p).strip() for p in raw if isinstance(p, str) and str(p).strip()]
+
+
 def _iter_strings(value: Any, top: bool = True) -> Iterator[str]:
     if isinstance(value, str):
         yield value

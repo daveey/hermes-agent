@@ -30,6 +30,30 @@ def test_persisted_receipt_survives_refresh_and_reopen(db, monkeypatch):
         reopened.close()
 
 
+@pytest.mark.parametrize("next_state", ["new_turn", "running", "muted", "decision"])
+def test_historical_receipt_survives_new_current_state(db, monkeypatch, next_state):
+    import hermes_state_outcome as so
+
+    fixtures.turn(db)
+    value = receipt("rejected")
+    declared = so.declare_outcome("chat", {"kind": "done", "summary": "Assessment complete",
+                                         "completion_receipt": value}, db=db)
+    if next_state == "decision":
+        so.declare_outcome("chat", {"kind": "decision", "items": [{"question": "Next?", "choices": ["yes", "no"]}]}, db=db)
+    else:
+        fixtures.say(db, "user", "New unrelated work")
+    monkeypatch.setattr(so, "_live_turn", lambda *_: next_state == "running")
+    if next_state == "muted":
+        out = so.set_muted("chat", True, db=db)
+    else:
+        out = so.refresh_outcome("chat", "manual", db=db)
+    if next_state != "decision":
+        assert out["kind"] != "done"
+    assert out.get("completion_receipt") == value
+    assert out["completion_receipt_source"]["declared_at"] == declared["at"]
+    assert so.get_outcome("chat", db=db)["completion_receipt"] == value
+
+
 def test_malformed_declaration_leaves_existing_outcome_unchanged(db):
     import hermes_state_outcome as so
 
@@ -40,6 +64,43 @@ def test_malformed_declaration_leaves_existing_outcome_unchanged(db):
         so.declare_outcome("chat", {"kind": "done", "summary": "Invalid replacement",
                                    "completion_receipt": {"version": 1, "items": []}}, db=db)
     assert so.get_outcome("chat", db=db) == before
+
+
+@pytest.mark.parametrize("rows", [[], [{"id": "t_owner", "board": "default", "gateway": "away",
+                                      "status": "running", "stale": True}],
+                                  [{"id": "t_owner", "board": "other", "gateway": "away", "status": "running"}],
+                                  [{"id": "t_owner", "board": "default", "gateway": "here", "status": "running"}]])
+def test_declaration_rejects_unverified_pending_owner_without_write(db, monkeypatch, rows):
+    import hermes_state_outcome as so
+    from hermes_cli import kanban_origin, kanban_session_activity
+
+    fixtures.turn(db)
+    monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("here", {"here", "away"}))
+    monkeypatch.setattr(kanban_session_activity, "session_tasks", lambda *_args, **_kw: rows)
+    value = receipt("contained")
+    value["items"][0]["remaining"] = [{"scope": "cause", "state": "pending",
+                                       "owner": "@task:default@away/t_owner", "reason": "follow-up"}]
+    before = so.get_outcome("chat", db=db)
+    with pytest.raises(ValueError, match="completion_receipt"):
+        so.declare_outcome("chat", {"kind": "done", "summary": "Containment complete",
+                                   "completion_receipt": value}, db=db)
+    assert so.get_outcome("chat", db=db) == before
+
+
+def test_declaration_accepts_existing_linked_local_owner(db, board, monkeypatch):
+    import hermes_state_outcome as so
+    from hermes_cli import kanban_origin
+
+    fixtures.turn(db)
+    fixtures.add_card(board, "t_owner", "chat", "running")
+    monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("here", {"here"}))
+    value = receipt("contained")
+    value["items"][0]["remaining"] = [{"scope": "cause", "state": "pending",
+                                       "owner": "@task:default@here/t_owner", "reason": "follow-up"}]
+    out = so.declare_outcome("chat", {"kind": "done", "summary": "Containment complete",
+                                    "completion_receipt": value}, db=db)
+    assert out["completion_receipt"] == value
+    assert so.get_outcome("chat", db=db)["completion_receipt"] == value
 
 
 def receipt(disposition="delivered"):

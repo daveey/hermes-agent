@@ -2628,6 +2628,8 @@ def complete_task(
     whitespace-only evidence raises :class:`EmptyCompletionError` after an
     auditable event. Approving a card out of ``review`` stays exempt.
     """
+    from hermes_cli import kanban_completion_receipt as receipt_admission
+    metadata, receipt_owners = receipt_admission.prepare(conn, task_id, metadata)
     now = int(time.time())
     # Cheap pre-check; re-checked inside the txn to close the parent-reopen race.
     if not _parents_satisfied(conn, task_id):
@@ -2647,6 +2649,7 @@ def complete_task(
         # reopened while this task waited.
         if not _parents_satisfied(conn, task_id):
             return False
+        receipt_admission.recheck(conn, task_id, receipt_owners)
         from hermes_cli.kanban_assignment_routing import validate_repair_completion
         validate_repair_completion(conn, task_id)
         from hermes_cli.kanban_goal_receipt import record as record_goal
@@ -2769,14 +2772,7 @@ from hermes_cli.kanban_completion_evidence import gate_empty_completion as _gate
 from hermes_cli.kanban_metadata_files import stage_completion_artifacts as _stage_completion_artifacts
 
 
-def _cleaned_artifact_paths(metadata: Any) -> list[str]:
-    """Non-blank string paths declared in ``metadata["artifacts"]``."""
-    if not isinstance(metadata, dict):
-        return []
-    raw = metadata.get("artifacts")
-    if not isinstance(raw, (list, tuple)):
-        return []
-    return [str(p).strip() for p in raw if isinstance(p, str) and str(p).strip()]
+from hermes_cli.kanban_metadata_files import cleaned_artifact_paths as _cleaned_artifact_paths
 
 
 def _flag_phantom_prose_refs(

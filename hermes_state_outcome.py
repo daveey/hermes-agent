@@ -564,6 +564,14 @@ def _live_work(db: Any, sid: str, ids: list[str]) -> tuple[list[dict], list[dict
 
 def _derive(db: Any, sid: str, *, ignore_live_turn: bool = False,
             pending_reply: Optional[str] = None) -> dict[str, Any]:
+    from hermes_completion_receipt import historical_fields
+    historical = historical_fields(_parse((_row(db, sid) or {}).get("outcome_json")))
+    current = _derive_current(db, sid, ignore_live_turn=ignore_live_turn, pending_reply=pending_reply)
+    return {**historical, **current}
+
+
+def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
+                    pending_reply: Optional[str] = None) -> dict[str, Any]:
     now = time.time()
     row = _row(db, sid) or {}
     stored = _parse(row.get("outcome_json"))
@@ -643,6 +651,19 @@ def declare_outcome(sid: str, outcome: dict, *, db: Any = None) -> dict[str, Any
         tip = _tip(handle, sid)
         if _row(handle, tip) is None:
             raise ValueError(f"unknown session {sid}")
+        if "completion_receipt" in declared:
+            from hermes_cli.kanban_completion_receipt import check_session_declaration
+            check_session_declaration(declared["completion_receipt"], _lineage_ids(handle, tip))
+            from hermes_cli.kanban_origin import gateway_names
+            from hermes_cli.profiles import get_active_profile_name
+            declared["completion_receipt_source"] = {
+                "kind": "session_declaration", "session_id": tip,
+                "profile": get_active_profile_name(), "gateway": gateway_names()[0] or None,
+                "declared_at": declared["at"],
+            }
+        else:
+            from hermes_completion_receipt import historical_fields
+            declared.update(historical_fields(_parse((_row(handle, tip) or {}).get("outcome_json"))))
         # Persist intent before touching the separate cron store. A failed DB
         # write must never release ownership without a completion receipt.
         _write(handle, tip, declared)
