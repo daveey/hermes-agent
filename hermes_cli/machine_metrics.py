@@ -19,7 +19,6 @@ import os
 import re
 import shutil
 import sqlite3
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -56,12 +55,9 @@ def _mem_used_pct() -> Optional[float]:
         if sys.platform.startswith("linux"):
             return _linux_mem_used_pct(Path("/proc/meminfo").read_text(encoding="utf-8"))
         if sys.platform == "darwin":
-            def out(argv: list[str]) -> str:
-                return subprocess.run(argv, capture_output=True, timeout=5, check=True).stdout.decode("utf-8", "replace")
-            memsize = int(out(["/usr/sbin/sysctl", "-n", "hw.memsize"]).strip())
-            vm = out(["/usr/bin/vm_stat"])
-            return _macos_mem_used_pct(memsize, vm)
-    except (OSError, ValueError, subprocess.SubprocessError):
+            from hermes_cli.machine_memory_darwin import read_used_pct
+            return read_used_pct()
+    except (OSError, ValueError):
         return None
     return None
 
