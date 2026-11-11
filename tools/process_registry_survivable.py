@@ -165,7 +165,8 @@ class SurvivableForeground:
             return None
         from gateway.session_context import async_delivery_supported, get_session_env
 
-        proc = subprocess.Popen(  # noqa: subprocess-stdin — stdin is DEVNULL or the caller's piped data
+        # noqa: subprocess-stdin — stdin is DEVNULL or the caller's piped data
+        proc = subprocess.Popen(
             argv, text=True, env=systemd_user_bus_env(run_env), encoding="utf-8", errors="replace",
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,

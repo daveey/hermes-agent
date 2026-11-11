@@ -362,6 +362,11 @@ def test_user_stop_still_kills_a_long_foreground_command(tmp_path, monkeypatch):
         wait_until(marker.exists, timeout=8, what="a command a user Stop should have killed")
 
 
+# A self-daemonizing tool (the shell '&' form is refused by the foreground guard): the child keeps stdout.
+DAEMONIZE = ("python3 -c 'import os, sys, time\nif os.fork():\n    print(\"started\", flush=True); sys.exit(0)\n"
+             "open(sys.argv[1], \"w\").write(str(os.getpid())); time.sleep(120)' {pidfile}")
+
+
 @pytest.mark.live_system_guard_bypass
 @pytest.mark.platforms("linux")
 @pytest.mark.skipif(not _user_systemd(), reason="needs a user systemd bus")
@@ -370,8 +375,9 @@ def test_long_foreground_command_leaving_a_daemon_returns_promptly_and_keeps_it(
     left running as without the key."""
     pidfile = tmp_path / "daemon.pid"
     started = time.monotonic()
-    result = _run_owner(tmp_path, monkeypatch, {"command": f"sleep 120 & echo $! > {pidfile}; echo started",
+    result = _run_owner(tmp_path, monkeypatch, {"command": DAEMONIZE.format(pidfile=pidfile),
                                                 "timeout": 65}, key_on=True, interrupt=False)
+    wait_until(pidfile.exists, timeout=10, what=f"the daemon's pid file ({result})")
     daemon = int(pidfile.read_text())
     try:
         assert result["exit_code"] == 0 and result["output"].strip() == "started", result
