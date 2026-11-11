@@ -43,7 +43,7 @@ except ImportError:  # mid-update: an older process cached agent.interrupt_contr
 from agent.message_sanitization import coalesce_tool_call_id
 from agent.observation_seam import terminal as _observe_terminal, terminal_commit as _observe_terminal_commit
 from agent.onboarding import observe_tool_result as observe_onboarding_result
-from agent import plugin_live_notes
+from agent import plugin_live_notes, update_pause_cancel as _update_cancel
 from agent.lsp import deferred as lsp_deferred
 from agent.prompt_cache_scope import conversation_id
 from agent.inline_tool_executors import (
@@ -758,6 +758,7 @@ def _dispatch_authorized_once(
             return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
         finally:
             state.data_use = frozenset(data_use)
+            _update_cancel.finished(agent, ref.call_id)
 
 
 def _run_agent_tool_execution_middleware(
@@ -1026,6 +1027,7 @@ def _begin_tool_execution(agent, ref: _ToolCallRef, display_index: int | None) -
             print(f"  📞 {prefix}: {function_name}({list(function_args.keys())}) - {_preview(json.dumps(display_args, ensure_ascii=False), agent.log_prefix_chars)}")
 
     agent._current_tool = function_name
+    _update_cancel.started(agent, tool_call_id)  # [daveey] in flight for the mid-tool core-update cancel
     agent._touch_activity(f"executing tool: {function_name}")
     _set_worker_activity_callback(agent)
 
@@ -1124,6 +1126,7 @@ def _commit_tool_result(
             logging.debug("Tool result (%d chars): %s", len(_log_result), _log_result)
 
     agent._current_tool = None
+    function_result, _upd_cancelled = _update_cancel.committed(agent, tool_call_id, function_result)  # [daveey] update
     _status_suffix = " (error)" if is_error else ""
     agent._touch_activity(f"tool completed: {function_name} ({tool_duration:.1f}s){_status_suffix}")
 
@@ -1143,7 +1146,7 @@ def _commit_tool_result(
     _record_persisted_path_for_stub(agent, tool_call_id, persisted_result)
     note_tool_result(agent, function_name, tool_call_id, function_result, persisted_result)
 
-    subdir_hints = agent._subdirectory_hints.check_tool_call(function_name, function_args)
+    subdir_hints = not _upd_cancelled and agent._subdirectory_hints.check_tool_call(function_name, function_args)
     if subdir_hints:
         if _is_multimodal_tool_result(persisted_result):
             # Hint goes on the text summary part so the model still sees it; image blocks untouched.

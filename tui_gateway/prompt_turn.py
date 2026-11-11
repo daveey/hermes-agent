@@ -1011,10 +1011,12 @@ def _invoke_agent(
         "session.title", sid, {"session_id": _k, "title": t})
     _usage_stop, _usage_thread = _start_usage_ticker(sid, agent)
     # [daveey] Core-update pause: consulted by the agent loop at each step boundary of this turn only.
-    from tui_gateway.update_pause import boundary_pause_hook, install_clarify_pause_provider
+    from tui_gateway.update_pause import boundary_pause_hook, install_clarify_pause_provider, start_mid_tool_cancel
     agent.step_boundary_pause = boundary_pause_hook(session, st.marker_key) if st.marker_key else None
+    _mid_tool_stop = None
     if st.marker_key:
         install_clarify_pause_provider()  # a blocked clarify is withdrawn so the pause can land
+        _mid_tool_stop = start_mid_tool_cancel(session, st.marker_key, agent)  # so is a long tool call, after a grace
     try:
         from agent.notification_presentation import notification_turn, event_presentation_muted
         with notification_turn(agent, muted=event_presentation_muted("message.delta", sid), session_id=sid):
@@ -1030,6 +1032,8 @@ def _invoke_agent(
                 agent._pending_cli_user_message = None
     finally:
         agent.step_boundary_pause = None
+        if _mid_tool_stop is not None:
+            _mid_tool_stop()
         # Stop AND join before anything emits: a tick surviving past message.complete would
         # roll the client's usage back to a stale snapshot (unbounded join: same worst case).
         _usage_stop.set()

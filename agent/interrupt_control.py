@@ -24,6 +24,9 @@ _REASON_USER_INTERRUPT = "user interrupt"
 USER_INTERRUPT_REASONS = frozenset({_REASON_HARD_STOP, _REASON_NEW_MESSAGE, _REASON_USER_INTERRUPT})
 # ``tool_reason`` the gateway's restart/shutdown stop passes (gateway.run._INTERRUPT_TOOL_REASON_GATEWAY_SHUTDOWN).
 _REASON_GATEWAY_SHUTDOWN = "gateway shutdown"
+# [daveey] ``tool_reason`` of the core-update pause's mid-tool cancel (agent/update_pause_cancel.py). It never
+# relabels any interrupt already pending (a Stop or a redirect wins) and is not a user intervention.
+_REASON_UPDATE_PAUSE = "hermes update pause"
 
 
 def interrupt_issuer(agent) -> Optional[str]:
@@ -224,12 +227,15 @@ class InterruptControlMixin:
             # A shutdown stop never relabels a user Stop already pending (the user's Stop wins): the turn
             # records the first cause, so it is not announced as interrupted by the restart. A pending
             # redirect (a mid-request correction) is not a Stop: the restart drops it and is the cause.
-            if not (tool_reason == _REASON_GATEWAY_SHUTDOWN and getattr(self, "_interrupt_requested", False)
+            _pending = getattr(self, "_interrupt_requested", False)
+            if not (_pending and tool_reason == _REASON_UPDATE_PAUSE) and not (
+                    tool_reason == _REASON_GATEWAY_SHUTDOWN and _pending
                     and getattr(self, "_tool_interrupt_reason", None) in USER_INTERRUPT_REASONS):
                 self._interrupt_message = message
                 self._tool_interrupt_reason = tool_interrupt_reason
             self._interrupt_requested = True
-            self._turn_user_intervened = True
+            if tool_reason != _REASON_UPDATE_PAUSE:
+                self._turn_user_intervened = True
             # The turn record and the log must agree on WHO asked for the stop (#112647).
             logger.info("Interrupt requested (%s): %s", "hard" if hard_cancel else "soft", tool_interrupt_reason)
             _hard_event = getattr(self, "_hard_interrupt_requested", None) if hard_cancel else None
@@ -306,7 +312,8 @@ class InterruptControlMixin:
         override interrupt(message=None) without hard_cancel."""
         InterruptControlMixin.interrupt(self, message, hard_cancel=True, tool_reason=tool_reason)
 
-    def clear_interrupt(self, *, preserve_redirect: bool = False, hard_cancel: bool = False) -> bool:
+    def clear_interrupt(self, *, preserve_redirect: bool = False, hard_cancel: bool = False,
+                        only_reason: str | None = None) -> bool:
         """Clear the interrupt request and per-thread tool signal. ``preserve_redirect`` is only for the
         conversation loop rebuilding the same logical turn after cancelling a model request.
         ``hard_cancel`` also drops an unconsumed pending steer: the aborted turn's next tool iteration
@@ -314,9 +321,13 @@ class InterruptControlMixin:
         user. Every other caller (redirect rebuild, error recovery, turn-boundary hygiene) continues
         this session, so the already-accepted steer must survive: it stays buffered for the existing
         drains — the pre-API inject, the post-batch append, or the finalizer's leftover handoff —
-        instead of silently vanishing after the surface was told it was delivered."""
+        instead of silently vanishing after the surface was told it was delivered.
+        [daveey] ``only_reason`` clears only while the pending interrupt still carries that ``tool_reason``,
+        checked under the lock ``interrupt`` publishes under, so a Stop that relabelled it is never wiped."""
         with _ic_lock(self, "_pending_redirect_lock"):
             if preserve_redirect and not _ic_slot(self, "_pending_redirect_lock", "_pending_redirect"):
+                return False
+            if only_reason is not None and getattr(self, "_tool_interrupt_reason", None) != only_reason:
                 return False
             self._interrupt_requested = False
             self._interrupt_message = self._tool_interrupt_reason = None
