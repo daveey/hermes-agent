@@ -92,11 +92,24 @@ finally:
             time.sleep(.1)
         raise AssertionError((text, output, log_path.read_text()))
 
+    tmux_pid = None
+
     def launch(*args):
+        nonlocal tmux_pid
         command = shlex.join([sys.executable, str(wrapper), *args])
         result = tmux("new-session", "-d", "-s", "chat", "-x", "160", "-y", "45", "-c", str(cwd),
                       command + '; rc=$?; printf "\\nCLI_RC=%s\\n" "$rc"; sleep 120')
         assert result.returncode == 0, result.stderr
+        # Killing the last chat must not race tmux's exit-empty shutdown against
+        # the next new-session. The fixture owns this server until kill-server.
+        if tmux_pid is None:
+            keep_alive = tmux("set-option", "-s", "exit-empty", "off")
+            assert keep_alive.returncode == 0, keep_alive.stderr
+        server = tmux("display-message", "-p", "#{pid}")
+        assert server.returncode == 0, server.stderr
+        if tmux_pid is not None:
+            assert server.stdout == tmux_pid, "tmux server restarted between clients"
+        tmux_pid = server.stdout
 
     log_path = tmp_path / "gateway.log"
     with log_path.open("w") as log:
