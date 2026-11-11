@@ -12,7 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from tools.environments.local import build_subprocess_env
+
 
 # Only whole roots, never subpaths (which may name ignored local artifacts).
 _PATH = re.compile(r"(?:~|/home/[^/\s]+)/code/_wt(?:-[\w-]+)?/[\w-]+(?=$|[\s`'\",:;)]|\.(?=\s|$))")
@@ -73,6 +73,8 @@ def without_published_worktrees(text: str) -> str:
 def _published(path: Path, deadline: float, text: str) -> bool:
     if not (path / '.git').is_file() or (path / '.gitmodules').exists():
         return False
+    from tools.environments.local import build_subprocess_env
+
     env = build_subprocess_env(extra={
         'GIT_TERMINAL_PROMPT': '0', 'GIT_OPTIONAL_LOCKS': '0',
         'GIT_SSH_COMMAND': 'ssh -o BatchMode=yes -o ConnectTimeout=2',

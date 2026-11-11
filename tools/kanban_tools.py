@@ -1557,11 +1557,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         return None, None
 
 
-def _creation_audit(args: dict, **effective) -> Optional[dict]:
-    """Audit the same normalized fields placement judged, including inherited identity/project. [daveey]"""
-    from hermes_cli.kanban_worker_placement import creation_audit
-
-    return creation_audit({**args, **effective})
+from hermes_cli.kanban_db_creation import tool_creation_audit as _creation_audit
 
 
 @_kanban_handler("kanban_create")
