@@ -3828,9 +3828,11 @@ def specify_triage_task(
 
 
 def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via: Optional[str] = None,
-                 event_extra: Optional[dict] = None) -> bool:
+                 event_extra: Optional[dict] = None, comment: Optional[tuple[str, str]] = None,
+                 precondition: Optional[Callable[[sqlite3.Connection], Optional[str]]] = None) -> bool:
     from hermes_cli.kanban_db_archive import archive_task as archive
-    return archive(conn, task_id, signal_fn=signal_fn, via=via, event_extra=event_extra)
+    return archive(conn, task_id, signal_fn=signal_fn, via=via, event_extra=event_extra,
+                   comment=comment, precondition=precondition)
 
 
 def _delete_task_relations(conn: sqlite3.Connection, task_id: str) -> None:

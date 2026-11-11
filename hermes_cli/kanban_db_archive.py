@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Optional
+from typing import Callable, Optional
 
 
 def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via: Optional[str] = None,
-                 event_extra: Optional[dict] = None) -> bool:
+                 event_extra: Optional[dict] = None, comment: Optional[tuple[str, str]] = None,
+                 precondition: Optional[Callable[[sqlite3.Connection], Optional[str]]] = None) -> bool:
     """Archive a task; a *running* task's host-local worker is terminated.
 
     Clearing ``worker_pid`` in the DB alone left the OS process running past its
@@ -18,10 +19,16 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via:
     lock. Post-release kill is safe here because ``archived`` is terminal: no
     dispatcher can spawn a duplicate worker off the released claim. The
     termination outcome lands as its own ``archive_worker_termination`` event so
-    the ``archived`` event stays atomic with the status flip.
+    the ``archived`` event stays atomic with the status flip. Optional ``precondition``
+    runs inside that transaction; a nonempty refusal leaves no transition or comment.
+    ``comment`` and ``event_extra`` commit with the archive, before post-commit cleanup.
     """
     from hermes_cli import kanban_db as kb
-    with kb.write_txn(conn):
+    from hermes_cli.kanban_reason_comment import reason_comment
+
+    with kb.write_txn(conn), reason_comment(conn, task_id, comment) as noted:
+        if precondition is not None and precondition(conn):
+            return False
         row = conn.execute(
             "SELECT status, human_request, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?",
             (task_id,),
@@ -53,6 +60,7 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via:
         # for the dispatcher sweep (kanban_placement_forward.sweep_unresolved_archives).
         from hermes_cli.kanban_placement_forward import record_cancel_intent
         record_cancel_intent(conn, task_id, "archived")
+        noted.keep()
     if was_running:
         termination = kb._terminate_reclaimed_worker(prev_pid, prev_lock, signal_fn=signal_fn, started_at=prev_started)
         with kb.write_txn(conn):
