@@ -68,15 +68,19 @@ def usable() -> bool:
         return False
     from tools import process_registry as pr
 
-    if shutil.which("systemd-run") and pr._systemd_run_user_scope_available():
+    from tools.process_registry_persist_scope import kanban_run_scope_cgroup, user_unit_cgroup
+
+    # The same decision persisted_job_scope_argv makes: a process in no user unit gets no scope.
+    in_unit = kanban_run_scope_cgroup() is not None or user_unit_cgroup() is not None
+    if in_unit and shutil.which("systemd-run") and pr._systemd_run_user_scope_available():
         return True
     with _warn_lock:
         if not _warned:
             _warned = True
             logger.warning(
                 "terminal.update_survivable_processes is on but systemd-run --user --scope is unusable here "
-                "(no systemd-run or no reachable user D-Bus session): terminal processes keep dying with "
-                "the backend on a restart")
+                "(no systemd-run, no reachable user D-Bus session, or this process runs in no systemd user "
+                "unit): terminal processes keep dying with the backend on a restart")
     return False
 
 
@@ -113,15 +117,24 @@ def survivable_interrupt_reason(*thread_ids: Optional[int]) -> Optional[str]:
     return None
 
 
+TEE_DRAIN_WAIT_TICKS = 10  # x 0.1 s: tee normally drains in milliseconds; a daemon holding stdout keeps it open
+
+
 def tee_wrapped(cmd_string: str, log: Path) -> str:
     """``cmd_string`` with its stdout+stderr teed into ``log`` and its exit status written beside it.
     ``tee -p`` ignores a closed pipe: once the waiting backend is gone the command keeps writing its log
-    instead of dying of SIGPIPE, and the next backend tails that log."""
+    instead of dying of SIGPIPE, and the next backend tails that log. bash does not wait for the tee (a
+    process substitution) beyond a short drain: a command that leaves a daemon holding its stdout
+    (``server &``) returns when bash exits, as without the tee, instead of waiting out the timeout."""
     from tools.process_registry_output_log import _exit_path
 
     exit_file = shlex.quote(_exit_path(log).as_posix())
-    return (f"{{ {cmd_string}\n}} 2>&1 | tee -p -a {shlex.quote(str(log))}\n"
-            f"__hermes_rc=${{PIPESTATUS[0]}}; printf '%s\\n' \"$__hermes_rc\" > {exit_file}; exit \"$__hermes_rc\"")
+    return "\n".join((
+        f"exec 3> >(exec tee -p -a {shlex.quote(str(log))}); __hermes_tee=$!",
+        f"( {cmd_string}\n) >&3 2>&3 3>&-",  # a subshell: the wrapper script ends in its own ``exit``
+        "__hermes_rc=$?; exec 3>&-",
+        f"for _ in $(seq {TEE_DRAIN_WAIT_TICKS}); do kill -0 \"$__hermes_tee\" 2>/dev/null || break; sleep 0.1; done",
+        f"printf '%s\\n' \"$__hermes_rc\" > {exit_file}; exit \"$__hermes_rc\""))
 
 
 class SurvivableForeground:
@@ -133,7 +146,8 @@ class SurvivableForeground:
         self.session = None
         self.converted = False
 
-    def spawn(self, args: list[str], run_env: dict, cwd: str, stdin_data: Optional[str]) -> Optional[subprocess.Popen]:
+    def spawn(self, args: list[str], run_env: dict, cwd: str, stdin_data: Optional[str],
+              markers: tuple = ()) -> Optional[subprocess.Popen]:
         """Start ``args`` (``[bash, ..., "-c", script]``) in its own scope, held in the registry; None when
         no scope can be had any more (the caller spawns as usual)."""
         from tools.process_registry import process_registry, systemd_user_bus_env
@@ -141,7 +155,7 @@ class SurvivableForeground:
         from tools.process_registry_persist_scope import persisted_job_scope_argv
 
         session = process_registry._new_session(self.command, self.task_id, self.owner_task_id, self.session_key,
-                                                cwd, persist_on_release=True)
+                                                cwd, persist_on_release=True, shell_markers=[m for m in markers if m])
         log = worker_output_log(session.id, persist=True)
         if log is None:
             return None

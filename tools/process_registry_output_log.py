@@ -87,13 +87,13 @@ def record_exit_command(log: Path, command: str) -> str:
     return f"__hermes_exit_file={target}; trap 'printf \"%s\\n\" \"$?\" > \"$__hermes_exit_file\"' EXIT\n{command}"
 
 
-# The foreground wrapper's own trailer (PIPESTATUS and cwd markers, base_session_env): a survivable foreground
-# command handed to the background tees it into its log after the user's output. [daveey]
-_SHELL_MARKER_RE = re.compile(r"\n?__HERMES_(?:PIPE|CWD)_\w+?__[^\n]*?__HERMES_(?:PIPE|CWD)_\w+?__\n?")
-
-
-def strip_shell_markers(text: str) -> str:
-    return _SHELL_MARKER_RE.sub("", text) if "__HERMES_" in text else text
+def strip_shell_markers(text: str, markers) -> str:
+    """Drop the foreground wrapper's own trailer lines (``printf '\\n<m>...<m>\\n'``, base_session_env) for
+    exactly ``markers``: a survivable foreground command handed to the background tees them into its log. [daveey]"""
+    for marker in markers or ():
+        if marker and marker in text:
+            text = re.sub(rf"\n{re.escape(marker)}[^\n]*?{re.escape(marker)}\n", "", text)
+    return text
 
 
 def recorded_exit_code(log) -> Optional[int]:
@@ -119,7 +119,7 @@ class ProcessOutputLogMixin:
 
         def ingest(text: str) -> None:
             nonlocal head_noise
-            text = strip_shell_markers(text)
+            text = strip_shell_markers(text, session.shell_markers)
             if head_noise:  # ``bash -lic`` startup warnings, as the pipe reader strips them
                 text = self._clean_shell_noise(text)
                 head_noise = not text.strip()

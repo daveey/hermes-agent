@@ -33,8 +33,11 @@ REPO = str(Path(pr.__file__).resolve().parents[1])
 @pytest.fixture
 def key(monkeypatch):
     """Set the config key (and pretend Linux + a usable scope) without touching config.yaml."""
-    state = {"on": True, "scope": True}
+    state = {"on": True, "scope": True, "unit": True}
     monkeypatch.setattr(pr, "_IS_LINUX", True)
+    monkeypatch.setattr("tools.process_registry_persist_scope.kanban_run_scope_cgroup", lambda: None)
+    monkeypatch.setattr("tools.process_registry_persist_scope.user_unit_cgroup",
+                        lambda: Path("/sys/fs/cgroup/app.slice/x.service") if state["unit"] else None)
     monkeypatch.setattr(pr.ProcessRegistry, "_config_value",
                         staticmethod(lambda section, k, fallback: state["on"] if k == surv.CONFIG_KEY else fallback))
     monkeypatch.setattr(pr, "_systemd_run_user_scope_available", lambda: state["scope"])
@@ -61,6 +64,15 @@ def test_key_on_without_a_scope_keeps_todays_behaviour_and_warns_once(key, caplo
         assert surv.usable() is False
     warnings = [r for r in caplog.records if surv.CONFIG_KEY in r.getMessage()]
     assert len(warnings) == 1
+
+
+def test_key_on_outside_any_user_unit_gets_no_scope_so_keeps_todays_behaviour(key, caplog):
+    """persisted_job_scope_argv makes no scope for a process in no user unit (login scope, tmux): the key
+    must not then flip jobs to persisted log jobs that still die with their owner."""
+    key["unit"] = False
+    with caplog.at_level("WARNING", logger="tools.process_registry"):
+        assert surv.default_persist(None, "local") is False
+    assert any(surv.CONFIG_KEY in r.getMessage() for r in caplog.records)
 
 
 def test_key_off_or_non_linux_is_disabled(key, monkeypatch):
@@ -101,13 +113,15 @@ def test_only_update_and_shutdown_interrupts_are_survivable():
         set_interrupt(False, tid)
 
 
-def test_log_tail_drops_the_foreground_wrappers_markers():
+def test_log_tail_drops_only_this_sessions_wrapper_markers():
     from tools.process_registry_output_log import strip_shell_markers
 
-    text = ("fg-done\n\n__HERMES_PIPE_181265ba766b__0__HERMES_PIPE_181265ba766b__\n\n"
-            "__HERMES_CWD_181265ba766b__/home/u__HERMES_CWD_181265ba766b__\n")
-    assert strip_shell_markers(text) == "fg-done\n"
-    assert strip_shell_markers("plain __HERMES_ text\n") == "plain __HERMES_ text\n"
+    pipe, cwd = "__HERMES_PIPE_181265ba766b__", "__HERMES_CWD_181265ba766b__"
+    text = f"fg-done\n\n{pipe}0{pipe}\n\n{cwd}/home/u{cwd}\n"
+    assert strip_shell_markers(text, [pipe, cwd]) == "fg-done\n"
+    assert strip_shell_markers(text, []) == text, "a session without markers keeps its output verbatim"
+    other = "line1\n__HERMES_CWD_a1__/p__HERMES_CWD_a1__\nline3\n"  # e.g. a grep of this very file
+    assert strip_shell_markers(other, [pipe, cwd]) == other
 
 
 def test_tee_wrapper_records_the_commands_own_exit_status(tmp_path):
@@ -118,6 +132,38 @@ def test_tee_wrapper_records_the_commands_own_exit_status(tmp_path):
     assert proc.stdout == "out\nerr\n"
     assert log.read_text() == "out\nerr\n"
     assert (tmp_path / "proc_x.exit").read_text().strip() == "7"
+
+
+def test_a_shutdown_after_a_user_stop_keeps_the_stop_reason_on_the_tool_thread():
+    """A user Stop followed by the restart's shutdown interrupt must still kill a survivable command: the tool
+    thread's reason stays the Stop's, as the agent's does."""
+    import threading
+
+    from agent.interrupt_compat import request_hard_interrupt
+    from run_agent import AIAgent
+
+    def agent():
+        a = AIAgent.__new__(AIAgent)
+        a._interrupt_requested = False
+        a._interrupt_message = a._tool_interrupt_reason = None
+        a._hard_interrupt_requested = threading.Event()
+        a._execution_thread_id = threading.get_ident()
+        a._interrupt_thread_signal_pending = False
+        a._active_children, a._active_children_lock = [], threading.Lock()
+        a.quiet_mode = True
+        return a
+
+    tid = threading.get_ident()
+    try:
+        stopped = agent()
+        request_hard_interrupt(stopped)  # the user's Stop
+        request_hard_interrupt(stopped, "restart", tool_reason="gateway shutdown")
+        assert surv.survivable_interrupt_reason(tid) is None
+        set_interrupt(False, tid)
+        request_hard_interrupt(agent(), "restart", tool_reason="gateway shutdown")
+        assert surv.survivable_interrupt_reason(tid) == "gateway shutdown"
+    finally:
+        set_interrupt(False, tid)
 
 
 def test_held_foreground_command_is_checkpointed_until_released(tmp_path, monkeypatch):
@@ -152,16 +198,19 @@ import json, os, sys, threading, time
 sys.path.insert(0, {repo!r})
 from tools.interrupt import set_interrupt
 from tools.terminal_tool import _handle_terminal
-args, reason, out = json.loads({args!r}), {reason!r}, {out!r}
+args, reason, out, interrupt = json.loads({args!r}), {reason!r}, {out!r}, {interrupt!r}
 box = {{}}
 def run():
     box["result"] = json.loads(_handle_terminal(args, task_id="survive-task"))
 t = threading.Thread(target=run)
 t.start()
-if not args.get("background"):
+if interrupt:
     time.sleep(3)
     set_interrupt(True, t.ident, reason=reason)
 t.join(90)
+# What a gateway stop does next (gateway/run_shutdown.py): sweep the registry before exiting.
+from tools.process_registry import process_registry
+process_registry.kill_all(source="gateway_shutdown")
 open(out + ".tmp", "w").write(json.dumps(box.get("result")))
 os.replace(out + ".tmp", out)
 time.sleep(600)
@@ -176,7 +225,7 @@ def _alive(pid: int) -> bool:
     return state != "Z"
 
 
-def _run_owner(tmp_path, monkeypatch, args: dict, *, key_on: bool, reason=None) -> dict:
+def _run_owner(tmp_path, monkeypatch, args: dict, *, key_on: bool, reason=None, interrupt=None) -> dict:
     """Start the terminal tool in a transient user service (as the gateway runs), get its tool result, then
     stop the service (SIGTERM to its whole cgroup, KillMode=control-group). Returns the tool result."""
     monkeypatch.setattr(pr, "_SYSTEMD_SCOPE_AVAILABLE", None)
@@ -187,7 +236,8 @@ def _run_owner(tmp_path, monkeypatch, args: dict, *, key_on: bool, reason=None) 
     monkeypatch.setenv("HERMES_HOME", str(home))
     out = tmp_path / "result.json"
     script = tmp_path / "owner.py"
-    script.write_text(OWNER.format(repo=REPO, args=json.dumps(args), reason=reason, out=str(out)))
+    interrupt = not args.get("background") if interrupt is None else interrupt
+    script.write_text(OWNER.format(repo=REPO, args=json.dumps(args), reason=reason, out=str(out), interrupt=interrupt))
     unit = f"hermes-test-survive-owner-{uuid.uuid4().hex[:8]}.service"
     env = pr.systemd_user_bus_env() or dict(os.environ)
     subprocess.run(["systemd-run", "--user", "--quiet", "--collect", "--unit", unit,
@@ -310,3 +360,22 @@ def test_user_stop_still_kills_a_long_foreground_command(tmp_path, monkeypatch):
     assert registry.recover_from_checkpoint() == 0
     with pytest.raises(AssertionError):  # the command would have touched it ~5 s after the stop
         wait_until(marker.exists, timeout=8, what="a command a user Stop should have killed")
+
+
+@pytest.mark.live_system_guard_bypass
+@pytest.mark.platforms("linux")
+@pytest.mark.skipif(not _user_systemd(), reason="needs a user systemd bus")
+def test_long_foreground_command_leaving_a_daemon_returns_promptly_and_keeps_it(tmp_path, monkeypatch):
+    """`server &` in a scoped foreground call returns when bash exits (not at the timeout), and the daemon is
+    left running as without the key."""
+    pidfile = tmp_path / "daemon.pid"
+    started = time.monotonic()
+    result = _run_owner(tmp_path, monkeypatch, {"command": f"sleep 120 & echo $! > {pidfile}; echo started",
+                                                "timeout": 65}, key_on=True, interrupt=False)
+    daemon = int(pidfile.read_text())
+    try:
+        assert result["exit_code"] == 0 and result["output"].strip() == "started", result
+        assert time.monotonic() - started < 40, "the call waited for the daemon instead of returning"
+        assert _alive(daemon)
+    finally:
+        _cleanup(daemon)

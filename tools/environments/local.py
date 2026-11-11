@@ -1165,7 +1165,8 @@ class LocalEnvironment(BaseEnvironment):
         args = [bash, *(["-l"] if login else []), "-c", cmd_string]
         self._recover_cwd()
         # [daveey] terminal.update_survivable_processes: own scope, not owned by this process.
-        if survivable is not None and (proc := survivable.spawn(args, run_env, self.cwd, stdin_data)) is not None:
+        if survivable is not None and (proc := survivable.spawn(args, run_env, self.cwd, stdin_data,
+                                                                  (self._pipe_marker, self._cwd_marker))) is not None:
             if stdin_data is not None:
                 _pipe_stdin(proc, stdin_data)
             return proc

@@ -224,6 +224,7 @@ class InterruptControlMixin:
         )
 
         def _publish_interrupt_state() -> None:
+            nonlocal tool_interrupt_reason
             # A shutdown stop never relabels a user Stop already pending (the user's Stop wins): the turn
             # records the first cause, so it is not announced as interrupted by the restart. A pending
             # redirect (a mid-request correction) is not a Stop: the restart drops it and is the cause.
@@ -233,6 +234,8 @@ class InterruptControlMixin:
                     and getattr(self, "_tool_interrupt_reason", None) in USER_INTERRUPT_REASONS):
                 self._interrupt_message = message
                 self._tool_interrupt_reason = tool_interrupt_reason
+            else:  # tool threads keep the Stop's reason too: a survivable command must still die [daveey]
+                tool_interrupt_reason = self._tool_interrupt_reason
             self._interrupt_requested = True
             if tool_reason != _REASON_UPDATE_PAUSE:
                 self._turn_user_intervened = True
