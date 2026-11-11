@@ -61,18 +61,15 @@ def test_live_answering_gateway_still_waits(parked):
 
 @pytest.mark.parametrize('case', ['foreign-fence', 'wrong-home', 'has-child', 'unknown-argv', 'dead', 'systemd'])
 def test_only_positively_parked_launcher_is_exempt(parked, case):
-    if case == 'foreign-fence':
-        parked.owner.return_value = None
-    elif case == 'wrong-home':
-        parked.launcher.cmdline.return_value[3] = '/another/home'
-    elif case == 'has-child':
-        parked.launcher.children.return_value = [Mock()]
-    elif case == 'unknown-argv':
-        parked.launcher.cmdline.side_effect = psutil.AccessDenied(4242)
-    elif case == 'dead':
-        parked.launcher.is_running.return_value = False
-    else:
-        parked.entry['kind'] = 'systemd'
+    setups = {
+        'foreign-fence': lambda: setattr(parked.owner, 'return_value', None),
+        'wrong-home': lambda: parked.launcher.cmdline.return_value.__setitem__(3, '/another/home'),
+        'has-child': lambda: setattr(parked.launcher.children, 'return_value', [Mock()]),
+        'unknown-argv': lambda: setattr(parked.launcher.cmdline, 'side_effect', psutil.AccessDenied(4242)),
+        'dead': lambda: setattr(parked.launcher.is_running, 'return_value', False),
+        'systemd': lambda: parked.entry.__setitem__('kind', 'systemd'),
+    }
+    setups[case]()
     with pytest.raises(pause.PauseRefused):
         pause._stop_gateways({}, [parked.entry])
     parked.ask.assert_called_once()
@@ -101,23 +98,21 @@ def test_ambiguous_wrapper_and_identity_fail_closed(parked, monkeypatch, case):
     wrapper.children.return_value = [parked.launcher]
     wrapper.is_running.return_value = True
     monkeypatch.setattr(psutil, 'Process', Mock(return_value=wrapper))
-    if case == 'unknown-wrapper':
-        wrapper.cmdline.return_value[3] = 'unrelated source'
-    elif case == 'wrapped-child':
-        parked.launcher.children.return_value = [Mock()]
-    elif case == 'wrapped-socket':
-        parked.query.return_value = {}
-    elif case == 'multiple':
-        wrapper.children.return_value.append(Mock())
-    elif case == 'birth':
+    def wrong_birth():
         parked.entry['ct'] = 123
         monkeypatch.setattr(status, 'get_process_start_time', lambda pid: 456)
-    elif case == 'owner-changed':
-        parked.owner.side_effect = [77, 78]
-    elif case == 'children-error':
-        parked.launcher.children.side_effect = psutil.AccessDenied(4242)
-    elif case == 'wrong-launcher':
-        parked.launcher.cmdline.return_value[1] = '/untrusted/hermes-gateway-launcher'
+
+    setups = {
+        'unknown-wrapper': lambda: wrapper.cmdline.return_value.__setitem__(3, 'unrelated source'),
+        'wrapped-child': lambda: setattr(parked.launcher.children, 'return_value', [Mock()]),
+        'wrapped-socket': lambda: setattr(parked.query, 'return_value', {}),
+        'multiple': lambda: wrapper.children.return_value.append(Mock()),
+        'birth': wrong_birth,
+        'owner-changed': lambda: setattr(parked.owner, 'side_effect', [77, 78]),
+        'children-error': lambda: setattr(parked.launcher.children, 'side_effect', psutil.AccessDenied(4242)),
+        'wrong-launcher': lambda: parked.launcher.cmdline.return_value.__setitem__(1, '/untrusted/hermes-gateway-launcher'),
+    }
+    setups[case]()
     with pytest.raises(pause.PauseRefused):
         pause._stop_gateways({}, [parked.entry])
     parked.ask.assert_called_once()
@@ -160,3 +155,58 @@ def test_pause_discovery_leaves_restart_custody_with_fence(parked, monkeypatch, 
     else:
         write.assert_not_called()
         stop.assert_not_called()
+
+
+def test_missing_home_fails_closed(parked):
+    parked.entry.pop('home')
+    assert not fence.parked_launchd_launcher(parked.entry)
+    parked.entry['home'] = ''
+    assert not fence.parked_launchd_launcher(parked.entry)
+
+
+@pytest.mark.parametrize('case', ['home-flag', 'separator', 'no-command', 'offset-two'])
+def test_launcher_exact_argv(parked, case):
+    argv = parked.launcher.cmdline.return_value
+    mutations = {
+        'home-flag': lambda: argv.__setitem__(2, '--other'),
+        'separator': lambda: argv.__setitem__(4, 'other'),
+        'no-command': lambda: argv.__delitem__(slice(5, None)),
+        'offset-two': lambda: argv.insert(1, '-X'),
+    }
+    mutations[case]()
+    assert not fence.parked_launchd_launcher(parked.entry)
+
+
+@pytest.mark.parametrize('case', ['dead-root', 'dead-child', 'extra-arg', 'wrong-dir', 'wrong-name', 'no-exec'])
+def test_wrapper_exact_identity(parked, monkeypatch, case):
+    from hermes_cli.gateway_launchd import _SIGNED_WRAPPER_SOURCE
+    wrapper = Mock()
+    argv = [str(Path.home() / 'Applications/Hermes Python.app/Contents/MacOS/python3'),
+            '-I', '-c', _SIGNED_WRAPPER_SOURCE, 'exec launcher']
+    wrapper.cmdline.return_value = argv
+    wrapper.children.return_value = [parked.launcher]
+    wrapper.is_running.return_value = True
+    mutations = {
+        'dead-root': lambda: setattr(wrapper.is_running, 'return_value', False),
+        'dead-child': lambda: setattr(parked.launcher.is_running, 'return_value', False),
+        'extra-arg': lambda: argv.append('extra'),
+        'wrong-dir': lambda: argv.__setitem__(0, '/untrusted/python3'),
+        'wrong-name': lambda: argv.__setitem__(0, str(Path(argv[0]).parent / 'bash')),
+        'no-exec': lambda: argv.__setitem__(4, 'launcher'),
+    }
+    mutations[case]()
+    monkeypatch.setattr(psutil, 'Process', Mock(return_value=wrapper))
+    assert not fence.parked_launchd_launcher(parked.entry)
+
+
+def test_missing_psutil_fails_closed(parked, monkeypatch):
+    import builtins
+    real_import = builtins.__import__
+
+    def missing(name, *args, **kwargs):
+        if name == 'psutil':
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, '__import__', missing)
+    assert not fence.parked_launchd_launcher(parked.entry)
