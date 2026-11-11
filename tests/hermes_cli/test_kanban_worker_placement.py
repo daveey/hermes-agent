@@ -31,6 +31,21 @@ def test_portable_reason_retains_conservative_exclusions(fields):
     assert pooled == legacy
 
 
+@pytest.mark.parametrize("status,reason", [(None, None), ("running", None), ("blocked", "uncarried option")])
+def test_explicit_default_initial_status_preserves_portability(status, reason):
+    args = {"title": "Analyze public data", "requires": ["terminal"], "initial_status": status}
+    before = dict(args)
+    assert placement.portable_reason(args, {}) == reason
+    result = placement.decide(args, cfg={"worker_pools": {"hub": ["worker-1"]}}, self_gw="hub")
+    assert (result.get("placement_policy") == "worker-first-v1") == (reason is None)
+    assert args == before
+
+
+def test_running_status_does_not_hide_other_uncarried_options():
+    args = {"title": "Analyze public data", "initial_status": "running", "max_retries": 2}
+    assert placement.portable_reason(args, {}) == "uncarried option"
+
+
 def test_extra_home_marker_remains_an_exclusion():
     assert placement.portable_reason({"title": "Inspect special-device"}, {"extra_home_markers": ["special-device"]})
 

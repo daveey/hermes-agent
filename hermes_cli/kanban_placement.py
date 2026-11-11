@@ -420,7 +420,10 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
         return "non-default board"
     if (args.get("assignee") or "default") not in c.assignees():
         return "assignee not allowlisted"
-    if any(args.get(k) not in (None, "", [], False) for k in UNCARRIED_OPTIONS):
+    # Explicit tool defaults are equivalent to omission, as on the CLI path.
+    # A blocked initial status still needs origin-side human-request handling.
+    if any(args.get(k) not in (None, "", [], False)
+           for k in UNCARRIED_OPTIONS if not (k == "initial_status" and args.get(k) == "running")):
         return "uncarried option"
     reqs = args.get("requires") or []
     reqs = [reqs] if isinstance(reqs, str) else list(reqs)
