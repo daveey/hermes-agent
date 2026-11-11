@@ -257,6 +257,7 @@ class DispatchResult:
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
     Reclaim/promotion bookkeeping still ran; deferred tasks stay queued."""
+    core_update_drain_hold: Optional[dict] = None  # live hermes-sync hold that refused every claim [daveey]
 
 
 from hermes_cli.kanban_db_dispatch_stuck import (  # re-exports for the stuck detectors [daveey]
@@ -2035,17 +2036,7 @@ def dispatch_once(
     return run_owned_tick(conn, _locked_tick, dispatcher_id, board, dry_run)
 
 
-def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -> Optional[int]:
-    """Back-compat: older spawn_fn signatures (and test stubs) accept only
-    ``(task, workspace)``; pass ``board`` only when the callable supports it."""
-    import inspect
-    try:
-        sig = inspect.signature(spawn_fn)
-        if "board" in sig.parameters:
-            return spawn_fn(task, workspace, board=board)
-        return spawn_fn(task, workspace)
-    except (TypeError, ValueError):
-        return spawn_fn(task, workspace)
+from hermes_cli.kanban_db_dispatch_spawn_call import call_spawn_fn as _call_spawn_fn  # moved out [daveey]
 
 
 def _dispatch_lane_task(
@@ -2430,6 +2421,10 @@ def _dispatch_once_locked(
         except Exception:
             logger = _kb._log
             logger.warning("kanban worker placement failed; continuing local dispatch", exc_info=True)
+    from hermes_cli.kanban_gateway_drain import core_update_hold
+    result.core_update_drain_hold = core_update_hold()
+    if result.core_update_drain_hold is not None:  # every caller (CLI, dashboard, gateway) claims nothing
+        return result
     may_spawn, spawn_budget = _tick_spawn_budget(conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress,
                                                  board=board)
     if not may_spawn:

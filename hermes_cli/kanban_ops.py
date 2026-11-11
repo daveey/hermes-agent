@@ -57,6 +57,15 @@ def _cmd_tail(args: argparse.Namespace) -> int:
     return _poll_loop(args.interval, tick)
 
 
+def _print_zero_spawn_reasons(res) -> None:
+    """Name a full cap or a core-update drain hold so "Spawned: 0" is not misread as stuck. [daveey]"""
+    if res.at_capacity:
+        print(f"At capacity:  {res.at_capacity} (ready work waits for a running worker to finish)")
+    if hold := res.core_update_drain_hold:
+        print(f"Held: core-update drain (pid {hold.get('pid')}, {hold.get('path')}); no new claims, "
+              "running workers continue")
+
+
 def _cmd_dispatch(args: argparse.Namespace) -> int:
     # Honour kanban.default_assignee, kanban.max_in_progress,
     # kanban.max_in_progress_per_profile and kanban.max_spawn with the same
@@ -125,6 +134,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             # A full host/board cap is the usual reason for zero spawns; without it a
             # bare "spawned: []" reads as a stuck dispatcher. [daveey]
             "at_capacity": res.at_capacity,
+            # A live hermes-sync core-update drain hold refused every claim this tick. [daveey]
+            "core_update_drain_hold": res.core_update_drain_hold,
         }, ascii=True)
         return 0
     print(f"Reclaimed:    {res.reclaimed}")
@@ -141,8 +152,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             print(f"  {', '.join(items)}")
     print(f"Promoted:     {res.promoted}")
     print(f"Spawned:      {len(res.spawned)}")
-    if res.at_capacity:  # name the full cap so "Spawned: 0" is not misread as stuck [daveey]
-        print(f"At capacity:  {res.at_capacity} (ready work waits for a running worker to finish)")
+    _print_zero_spawn_reasons(res)
     tag = " (dry)" if args.dry_run else ""
     for tid, who, ws in res.spawned:
         print(f"  - {tid}  ->  {who}  @ {ws or '-'}{tag}")
