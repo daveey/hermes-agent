@@ -4,10 +4,11 @@ import path from 'node:path'
 import { Worker } from 'node:worker_threads'
 
 import { build } from 'esbuild'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { TranscriptCacheStore } from './transcript-cache'
 import {
+  CALL_TIMEOUT_MS,
   inlineClient,
   MAX_WORKER_STARTS,
   type StoreWorkerPort,
@@ -191,6 +192,51 @@ describe('[daveey] transcript cache store off the main thread', () => {
     clients.push(client)
 
     await expect(client.call('read', [key], { timeoutMs: 50 })).rejects.toThrow(/read timed out after 50ms/)
+  })
+
+  it('a call with no timeout of its own gives up after CALL_TIMEOUT_MS; the late reply is dropped', async () => {
+    vi.useFakeTimers()
+
+    try {
+      let deliver: (reply: unknown) => void = () => undefined
+      const posted: { id: number }[] = []
+
+      const client = workerClient({
+        fallback: () => {
+          throw new Error('no fallback expected')
+        },
+        log: () => undefined,
+        // A worker that is alive but never answers (stuck on the disk).
+        spawn: () => ({
+          on: (event, listener) => {
+            if (event === 'message') {
+              deliver = listener
+            }
+          },
+          postMessage: message => posted.push(message),
+          terminate: () => undefined
+        })
+      })
+
+      clients.push(client)
+
+      let outcome = 'pending'
+      const stuck = client.call('putLatest', [key, rows]).catch(error => (outcome = (error as Error).message))
+
+      await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_MS - 1)
+      expect(outcome).toBe('pending')
+      await vi.advanceTimersByTimeAsync(1)
+      await stuck
+      expect(outcome).toBe(`transcript cache putLatest timed out after ${CALL_TIMEOUT_MS}ms`)
+
+      // The worker answers at last: nothing is waiting, and the next call still works.
+      deliver({ id: posted[0]!.id, ms: 40_000, ok: true, result: true })
+      const next = client.call('stats')
+      deliver({ id: posted[1]!.id, ms: 1, ok: true, result: { bytes: 0, sessions: 0 } })
+      await expect(next).resolves.toEqual({ bytes: 0, sessions: 0 })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it(`a worker that keeps dying is restarted ${MAX_WORKER_STARTS} times, then the in-thread store takes over`, async () => {
