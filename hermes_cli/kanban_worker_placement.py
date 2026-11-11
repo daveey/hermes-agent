@@ -25,6 +25,15 @@ RESERVE_KEEPALIVE_S = 60.0
 _queued: dict[tuple[str, str], tuple[int, str | None, float]] = {}
 
 
+def _remember_queued(reply, key, revision, identity):
+    if reply.get("state") == "queued":
+        # Never adopt an arbitrary post-pull revision: it may be somebody else's edit.
+        version = reply.get("task_version", revision)
+        _queued[key] = (version, identity, time.monotonic() + RESERVE_KEEPALIVE_S)
+        if len(_queued) > 1024:
+            del _queued[next(iter(_queued))]
+
+
 def _local_identity(conn, task_id):
     from hermes_cli import kanban_repin_notice as repin
 
@@ -289,10 +298,10 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
     try:
         for row in rows:
             last = row["id"]
-            from hermes_cli.kanban_placement_recovery import recovery_mode, unchanged_ready
-            if not unchanged_ready(conn, row):
+            from hermes_cli import kanban_placement_recovery as recovery
+            if not recovery.unchanged_ready(conn, row):
                 continue
-            mode = recovery_mode(conn, dict(row), cfg)
+            mode = recovery.available_mode(conn, dict(row), cfg, hub, board, gateway)
             if row["placement_policy"] is None and mode is None:
                 continue
             key = (board, row["id"])
@@ -327,12 +336,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                 else:
                     from hermes_cli.kanban_placement_recovery import request_assignment
                     reply = request_assignment(hub, board, row, mode, candidates)
-                    if reply.get("state") == "queued":
-                        # Never adopt an arbitrary post-pull revision: it may be somebody else's edit.
-                        version = reply.get("task_version", row["sync_version"])
-                        _queued[key] = (version, identity, time.monotonic() + RESERVE_KEEPALIVE_S)
-                        if len(_queued) > 1024:
-                            del _queued[next(iter(_queued))]
+                    _remember_queued(reply, key, row["sync_version"], identity)
                     queue.try_record(queue.record_reply, conn, row["id"], gateway, reply, candidates)
                 attempted += 1
             except OSError as exc:
@@ -342,6 +346,9 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                 return attempted
             except client.HubError as exc:
                 timing = queue.call_timing(budget, started, time.monotonic())
+                if recovery.unavailable_endpoint(hub, board, gateway, exc, mode):
+                    logger.info("Board recovery endpoint unavailable; backing off for %ss", recovery.RECOVERY_RETRY_S)
+                    continue
                 fence = None
                 if rejection_code(exc) == "not_claimable":
                     # The Board already has it leased or not ready: our copy is behind. Back off at this revision.

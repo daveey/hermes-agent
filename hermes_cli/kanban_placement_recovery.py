@@ -5,6 +5,33 @@ import json
 import math
 import time
 
+RECOVERY_RETRY_S = 600.0
+_unsupported: dict[tuple, float] = {}
+
+
+def endpoint_key(hub, board, gateway):
+    ident = getattr(hub, "ident", None)
+    return (ident.url if ident is not None else hub, board, gateway)
+
+
+def endpoint_available(hub, board, gateway):
+    return time.monotonic() >= _unsupported.get(endpoint_key(hub, board, gateway), 0)
+
+
+def unavailable_endpoint(hub, board, gateway, error, mode):
+    """Bound old-server probes across cards without disabling ordinary reserves."""
+    if not mode or error.status not in (404, 405, 501):
+        return False
+    _unsupported[endpoint_key(hub, board, gateway)] = time.monotonic() + RECOVERY_RETRY_S
+    if len(_unsupported) > 1024:
+        del _unsupported[next(iter(_unsupported))]
+    return True
+
+
+def available_mode(conn, row, cfg, hub, board, gateway):
+    # Existing policy cards still renew through reserve while recovery is unavailable.
+    return recovery_mode(conn, row, cfg) if endpoint_available(hub, board, gateway) else None
+
 
 def request_assignment(hub, board, row, mode, candidates):
     """Keep recovery opt-in; ordinary reservations retain their existing wire contract."""
