@@ -37,7 +37,7 @@ from hermes_cli.kanban_output import (
     _task_to_dict,
 )
 from hermes_cli.kanban_boards import _dispatch_boards
-from hermes_cli.kanban_cli_metadata import parse_metadata_flag as _parse_metadata_flag, receipt_refusal
+from hermes_cli.kanban_cli_metadata import ReceiptEditRefused, parse_metadata_flag as _parse_metadata_flag, receipt_refusal
 from hermes_cli.kanban_cli_park import (
     _REASON_FLAG_HINT, _REASON_WORDS_HINT, _cli_awaiting, _cli_wake_check, _commented, _guarded_park, _ids_error,
     _parked_msg,
@@ -1362,7 +1362,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
                     result=result, summary=summary, metadata=metadata,
                     priority_reason=reason, require_lower_reason=True,
                 )
-            except kb.PriorityLowerRefused as exc:
+            except (kb.PriorityLowerRefused, ReceiptEditRefused) as exc:
                 return _err(f"kanban edit: {exc}")
             if not ok:
                 return _err(f"cannot edit {args.task_id} (unknown id, or --result used on a task that is not done)")

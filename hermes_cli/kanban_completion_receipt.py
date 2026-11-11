@@ -171,3 +171,34 @@ def recheck(conn, task_id, owners):
             _, scope, gateway, identity = owner_parts(ref)
             if not _remote_link(conn, task_id, scope, gateway, identity):
                 raise refusal(ref, "ownership link changed during admission")
+
+
+class ReceiptEditRefused(ValueError):
+    """``kanban edit`` tried to change a completion receipt; only completion admits one."""
+
+
+def keep_admitted_receipt(conn, run_id, metadata):
+    """Edited handoff metadata for ``run_id`` with the run's admitted receipt kept verbatim.
+
+    A completed-run receipt is admitted once, by ``complete_task`` (owners checked, admission
+    marker on the completed event). An edit may rewrite other handoff fields, but a different
+    ``completion_receipt`` would ride the original admission marker unchecked, so it is refused;
+    omitting it keeps the admitted one. ``run_id=None`` (no completed run) has none admitted.
+    """
+    import json
+
+    prior = None
+    if run_id is not None:
+        row = conn.execute("SELECT metadata FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+        try:
+            stored = json.loads(row[0]) if row and row[0] else {}
+        except (TypeError, ValueError):
+            stored = {}
+        prior = stored.get("completion_receipt") if isinstance(stored, dict) else None
+    if "completion_receipt" in metadata and metadata["completion_receipt"] != prior:
+        raise ReceiptEditRefused("completion_receipt: only kanban complete admits a receipt; "
+                                 "edit keeps the admitted one (omit completion_receipt)")
+    edited = {k: v for k, v in metadata.items() if k != "completion_receipt"}
+    if prior is not None:
+        edited["completion_receipt"] = prior
+    return edited

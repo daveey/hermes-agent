@@ -9,7 +9,10 @@ from __future__ import annotations
 import json
 from typing import Optional
 
+from hermes_cli.kanban_completion_receipt import ReceiptEditRefused
 from hermes_cli.kanban_output import _err
+
+__all__ = ["ReceiptEditRefused", "parse_metadata_flag", "receipt_refusal"]
 
 
 def parse_metadata_flag(raw: Optional[str]) -> tuple[Optional[dict], int]:
