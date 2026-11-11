@@ -72,6 +72,14 @@ def _paths(conn, task_id, text=''):
             continue
         if isinstance(data, dict):
             texts.extend(str(data.get(key) or '') for key in ('checkpoint', 'worktree', 'worktrees'))
+            # Carry server-observed custody forward even after checkpoint prose
+            # rolls out of the bounded history window or the worktree disappears.
+            receipts = data.get('workspace_publications')
+            if isinstance(receipts, list):
+                for receipt in receipts:
+                    raw = receipt.get('path') if isinstance(receipt, dict) else None
+                    if isinstance(raw, str) and Path(raw).is_absolute():
+                        found[raw] = Path(raw)
     for value in texts:
         for raw in re.findall(r"(?:/|~/)[^\s`'\"<>;,()\[\]]+", value):
             path = Path(raw.rstrip('.')).expanduser()

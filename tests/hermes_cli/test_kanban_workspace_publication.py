@@ -155,6 +155,23 @@ def test_explicit_retention_reason_records_host_custody(git_task):
         assert receipt['workspace_publication']['retention_reason'] == 'contains private evidence'
 
 
+def test_external_custody_survives_repeated_checkpoint_rollover(git_task, tmp_path):
+    tid, _, git = git_task
+    repo = tmp_path / 'retained-worktree'
+    git('worktree', 'add', '-b', 'retained-implementation', str(repo))
+    scratch = tmp_path / 'scratch'
+    scratch.mkdir()
+    with kbc.connect_closing() as conn:
+        kw.set_workspace_path(conn, tid, scratch)
+        checkpoint = f'Worktree {repo}\nUNPUBLISHED_WORK_REASON=review corrections pending'
+        for _ in range(4):
+            assert kc.continue_task(conn, tid, checkpoint=checkpoint)['ok']
+            assert kb.claim_task(conn, tid)
+            checkpoint = 'UNPUBLISHED_WORK_REASON=review corrections still pending'
+        with pytest.raises(ValueError, match='unpublished_workspace'):
+            kc.continue_task(conn, tid, checkpoint='Resume from prior state')
+
+
 def test_crash_records_unknown_custody_without_network(git_task, monkeypatch):
     import json
     from hermes_cli import kanban_workspace_publication as pub
