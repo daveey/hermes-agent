@@ -836,22 +836,23 @@ _hermes_site_packages: list[Path] | None = None  # lazily cached by local_python
 
 
 # --- Login-shell init files ---
-_shell_init_config_cache: tuple[tuple[str, ...], bool] | None = None
+_shell_init_config_cache: dict[str, tuple[tuple[str, ...], bool]] = {}
 _shell_init_config_warned: set[tuple[type[Exception], str]] = set()
 
 
 def _read_terminal_shell_init_config() -> tuple[list[str], bool]:
-    """Read startup policy, retaining the last successful process-local resolution on failure."""
-    global _shell_init_config_cache
+    """Retain the last successful policy for this config path on read failure."""
+    config_path = ""  # Unresolved paths have no cached policy.
     try:
-        from hermes_cli.config import load_config
+        from hermes_cli.config import get_config_path, load_config
+        config_path = str(get_config_path())
         terminal_cfg = (load_config() or {}).get("terminal") or {}
         files = terminal_cfg.get("shell_init_files") or []
         if not isinstance(files, list):
             files = []
         resolved = (tuple(str(f) for f in files if f), bool(terminal_cfg.get("auto_source_bashrc", True)))
     except Exception as exc:
-        resolved = _shell_init_config_cache
+        resolved = _shell_init_config_cache.get(config_path)
         key = (type(exc), str(exc))
         if key not in _shell_init_config_warned:
             _shell_init_config_warned.add(key)
@@ -862,7 +863,7 @@ def _read_terminal_shell_init_config() -> tuple[list[str], bool]:
         if resolved is None:
             return [], True
     else:
-        _shell_init_config_cache = resolved
+        _shell_init_config_cache[config_path] = resolved
     return list(resolved[0]), resolved[1]
 
 

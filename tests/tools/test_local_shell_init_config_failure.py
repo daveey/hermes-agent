@@ -12,7 +12,7 @@ from tools.environments import local
 
 @pytest.fixture(autouse=True)
 def isolated_shell_init_cache(monkeypatch):
-    monkeypatch.setattr(local, "_shell_init_config_cache", None, raising=False)
+    monkeypatch.setattr(local, "_shell_init_config_cache", {}, raising=False)
     monkeypatch.setattr(local, "_shell_init_config_warned", set(), raising=False)
 
 
@@ -26,6 +26,30 @@ def test_read_error_keeps_previous_shell_init(caplog):
     assert "OSError: injected config read failure" in caplog.text
     assert "previously resolved shell init is kept" in caplog.text
     assert caplog.records[-1].levelno == logging.WARNING
+
+
+def test_profile_first_failure_never_reuses_another_profiles_policy(tmp_path, caplog):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(tmp_path / "a")
+    try:
+        with patch("hermes_cli.config.load_config", return_value={
+            "terminal": {"shell_init_files": ["/custom/a.sh"], "auto_source_bashrc": False},
+        }):
+            assert local._read_terminal_shell_init_config() == (["/custom/a.sh"], False)
+        other = set_hermes_home_override(tmp_path / "b")
+        try:
+            with patch("hermes_cli.config.load_config", side_effect=OSError("profile B failed")):
+                assert local._read_terminal_shell_init_config() == ([], True)
+            assert "configured shell init was not applied" in caplog.text
+        finally:
+            reset_hermes_home_override(other)
+        caplog.clear()
+        with patch("hermes_cli.config.load_config", side_effect=OSError("profile A failed")):
+            assert local._read_terminal_shell_init_config() == (["/custom/a.sh"], False)
+        assert "previously resolved shell init is kept" in caplog.text
+    finally:
+        reset_hermes_home_override(token)
 
 
 def test_first_read_error_warns_about_default_home_profiles(caplog):
