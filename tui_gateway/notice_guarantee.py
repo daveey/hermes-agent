@@ -15,6 +15,13 @@ unloaded sweeper's loop therefore looks, in every profile store, for chats whose
   verdict;
 - a chat whose close-out budget (``WAKES_PER_HOUR`` started close-outs in its lineage) is spent, or whose wake did
   not start, gets a refresh instead, which stores ``unresolved{notice_tail}``. The auditor repairs those.
+- a wake that failed (``"error"``: the agent build hit a quota wall, the store refused a write) is not final: the row
+  is stamped ``closeout = {state: "deferred", retry_at, attempts}`` and offered again once ``retry_at`` passes (the
+  build failure's recorded ``failure_resets_at`` plus ``DEFER_SLACK_S``, so the in-process automation replay at the
+  reset goes first), at most ``MAX_ATTEMPTS`` wakes per row; the last failure stamps ``error``. The replay's timer
+  dies with its backend and its own failure gives up, so before this a close-out refused by a quota window that a
+  restart (or a still-broken store) outlived was never offered again (two hub chats, 2026-11-10). A deferred row
+  is durable: any backend's pass picks it up. [daveey]
 
 Ownership follows the unloaded sweeper's: a chat another live backend holds is that backend's (its own pass
 handles it); a chat with a live turn is skipped. The close-out prompt row is itself a notice, stamped as claimed,
@@ -45,6 +52,10 @@ logger = logging.getLogger(__name__)
 
 GRACE_S = 300.0
 WAKES_PER_HOUR = 2
+# A failed close-out wake is offered again (see module doc): at most this many wakes per notice row, the next one
+# no sooner than the failure's quota/route reset (or the automation replay's floor) plus this slack.
+MAX_ATTEMPTS = 3
+DEFER_SLACK_S = 600.0
 LOOKBACK_S = 3 * 86400.0
 MAX_PARALLEL_WAKES = 2
 CLOSEOUT_TEXT = (
@@ -95,10 +106,25 @@ def candidates(db: Any, now: float) -> list[dict]:
         if row["timestamp"] > now - GRACE_S:
             continue
         meta = _decode(row["display_metadata"])
-        if "closeout" not in meta:
+        if "closeout" not in meta or _deferred_due(meta, now):
             out.append({"sid": str(row["sid"]), "msg_id": int(row["msg_id"]), "content": str(row["content"] or ""),
                         "meta": meta, "raw_meta": row["display_metadata"]})
     return out
+
+
+def _deferred_due(meta: dict, now: float) -> bool:
+    """A row whose failed close-out was deferred (``closeout.state == "deferred"``) and whose ``retry_at`` passed."""
+    closeout = meta.get("closeout")
+    if not isinstance(closeout, dict) or closeout.get("state") != "deferred":
+        return False
+    retry_at = closeout.get("retry_at")
+    return isinstance(retry_at, (int, float)) and not isinstance(retry_at, bool) and retry_at <= now
+
+
+def _attempts(meta: Any) -> int:
+    closeout = meta.get("closeout") if isinstance(meta, dict) else None
+    n = closeout.get("attempts") if isinstance(closeout, dict) else None
+    return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 0
 
 
 def started_last_hour(db: Any, sid: str, now: float) -> int:
@@ -107,16 +133,17 @@ def started_last_hour(db: Any, sid: str, now: float) -> int:
 
 
 def _claim(db: Any, cand: dict, now: float) -> bool:
-    meta = {**cand["meta"], "closeout": {"state": "claimed", "at": now, "pid": os.getpid()}}
+    meta = {**cand["meta"], "closeout": {"state": "claimed", "at": now, "pid": os.getpid(),
+                                         "attempts": _attempts(cand["meta"]) + 1}}
     return db._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
                               (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"])) == 1
 
 
-def _stamp(db: Any, msg_id: int, verdict: str) -> None:
+def _stamp(db: Any, msg_id: int, verdict: str, **extra: Any) -> None:
     from tui_gateway.notice_fanout import _decode
     row = db._read_one("SELECT display_metadata FROM messages WHERE id = ?", (msg_id,))
     meta = _decode(row["display_metadata"] if row else None)
-    meta["closeout"] = {**(meta.get("closeout") or {}), "state": verdict}
+    meta["closeout"] = {**(meta.get("closeout") or {}), **extra, "state": verdict}
     db._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ?",
                        (json.dumps(meta, ensure_ascii=False), msg_id))
 
@@ -222,17 +249,40 @@ def _refresh(db: Any, sid: str) -> bool:
     return _outcome.refresh_outcomes_quietly([sid], "notice", db=db) > 0
 
 
-def _closeout_job(session_db, wake, sid: str, msg_id: int) -> str:
-    """Worker: the wake, then the verdict on the claimed row; a wake that did not start refreshes the outcome."""
+def _retry_at(sid: str, now: float) -> float:
+    """When a failed close-out of ``sid`` may be offered again: the automation replay's due time for the chat's
+    recorded build failure (its ``failure_resets_at`` when it is a typed quota/route wall) plus ``DEFER_SLACK_S``."""
+    from tui_gateway import automation_replay
+    resets_at = None
+    with contextlib.suppress(Exception):
+        from tui_gateway import server
+        live = server._find_live_session_by_key(sid)
+        failure = live[1].get("agent_failure") if live else None
+        resets_at = failure.get("failure_resets_at") if isinstance(failure, dict) else None
+    return automation_replay.replay_due(now, resets_at) + DEFER_SLACK_S
+
+
+def _closeout_job(session_db, wake, sid: str, msg_id: int, attempts: int = 1,
+                  retry_at: Optional[Callable[[str, float], float]] = None) -> str:
+    """Worker: the wake, then the verdict on the claimed row; a wake that did not start refreshes the outcome.
+    A failed wake (``"error"``) with attempts left is stamped ``deferred`` for a later pass (module doc)."""
     try:
         try:
             verdict = str(wake(sid, msg_id) or "error")
         except Exception:
             logger.warning("notice close-out wake of %s failed", sid, exc_info=True)
             verdict = "error"
+        extra: dict = {}
+        if verdict == "error" and attempts < MAX_ATTEMPTS:
+            now = time.time()
+            try:
+                extra = {"retry_at": float((retry_at or _retry_at)(sid, now)), "attempts": attempts}
+                verdict = "deferred"
+            except Exception:
+                logger.warning("notice close-out of %s: no retry time; stamped error", sid, exc_info=True)
         with session_db(sid) as (db, tip):
             if db is not None:
-                _stamp(db, msg_id, verdict)
+                _stamp(db, msg_id, verdict, **extra)
                 if verdict != "started":
                     _refresh(db, tip or sid)
         logger.info("notice close-out of %s: %s", sid, verdict)
@@ -297,7 +347,8 @@ def _handle(db, cand: dict, now: float, *, holders, session_db, wake, spawn, see
         _wake_slots.release()
         return "skipped:claimed"
     try:
-        spawn(lambda: _closeout_job(session_db, wake, sid, cand["msg_id"]))
+        attempts = _attempts(cand["meta"]) + 1
+        spawn(lambda: _closeout_job(session_db, wake, sid, cand["msg_id"], attempts=attempts))
     except Exception:
         _wake_slots.release()
         _stamp(db, cand["msg_id"], "error")

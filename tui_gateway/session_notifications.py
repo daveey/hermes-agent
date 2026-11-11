@@ -1679,8 +1679,9 @@ def _replay_failed_wake(key: str, text: str, session: dict, display_kind: str | 
     could start (agent build): ONE delayed replay, at the build failure's recorded quota/route reset when it has one
     (``agent_failure.failure_resets_at``), else ``REPLAY_MIN_DELAY_S``. The delivery is not in the transcript, so a
     later successful turn does not cancel it. A replay's own failure gives up. A chat close-out wake is included:
-    ``notice_guarantee`` stamps its row ``closeout.state = "error"`` and never offers it again, and the replay
-    keeps the close-out's own ``closeout`` metadata, so it cannot start another close-out."""
+    ``notice_guarantee`` stamps its row ``closeout.state = "deferred"`` with a ``retry_at`` after this replay's due
+    time (the durable fallback when this in-process timer dies with its backend), and the replay keeps the
+    close-out's own ``closeout`` metadata, so it cannot start another close-out."""
     from tui_gateway import automation_replay
     meta = display_metadata if isinstance(display_metadata, dict) else {}
     if not automation_replay.is_automation(display_kind):
