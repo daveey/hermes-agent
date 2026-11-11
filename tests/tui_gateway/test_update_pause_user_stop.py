@@ -94,7 +94,22 @@ def _stop_right_after_the_hook(monkeypatch):
     return fired
 
 
-STOPS = {"during_hook": _stop_while_the_hook_runs, "after_hook": _stop_right_after_the_hook}
+def _stop_during_payload(monkeypatch):
+    """Stop after payload construction has begun, before terminal publication."""
+    real, fired = server._complete_turn_payload, []
+
+    def complete(*args, **kwargs):
+        payload = real(*args, **kwargs)
+        fired.append(1)
+        _user_stop()
+        return payload
+
+    monkeypatch.setattr(server, "_complete_turn_payload", complete)
+    return fired
+
+
+STOPS = {"during_hook": _stop_while_the_hook_runs, "after_hook": _stop_right_after_the_hook,
+         "during_payload": _stop_during_payload}
 
 
 def _turn(env, monkeypatch, path):
