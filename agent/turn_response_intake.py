@@ -221,6 +221,10 @@ def normalize_model_response(
     if agent.api_mode == "codex_responses" and assistant_message.finish_reason == "incomplete":
         # Toolless commentary-only answer becomes a final text response before hooks and guards run.
         promote_toolless_codex_commentary(agent, assistant_message, response)
+    # A request-local recovery hint has now been consumed. Clear it before any
+    # response guard can continue; another empty response may queue a fresh hint.
+    agent._empty_response_retry_hint = None
+
     finish_reason = assistant_message.finish_reason
 
     def _verdict(action: str, result: Optional[dict[str, Any]] = None) -> ResponseIntakeVerdict:

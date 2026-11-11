@@ -179,8 +179,7 @@ TERMINAL_TOOL_DESCRIPTION = """Run shell commands on the OS/shell/backend named 
 
 Use read_file, search_files, patch and write_file instead of cat/head/tail, grep/find/ls, sed/awk and echo/heredoc. Output is auto-truncated with the full text saved to a file; never pipe through head/tail to shorten it.
 
-Foreground (default) returns as soon as the command finishes. To wait a fixed time, run the wait in the foreground; never background a sleep or polling loop. Background is only for commands that must keep running after this call returns; health-check a server in a separate call and manage jobs with process_manage. When a command changes directory, trust the result's "cwd" instead of prefixing later commands with cd.
-"""
+Foreground (default) returns as soon as the command finishes. To wait a fixed time, run the wait in the foreground; never background a sleep or polling loop. Health-check a background server in a separate call and manage jobs with process_manage. When a command changes directory, trust the result's "cwd" instead of prefixing later commands with cd."""
 
 # Environment lifecycle state.
 _active_environments: dict[str, Any] = {}
@@ -1683,10 +1682,7 @@ TERMINAL_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "command": {
-                "type": "string",
-                "description": "The shell command to execute"
-            },
+            "command": {"type": "string"},
             "http_readback": {
                 "type": "boolean",
                 "default": False,
@@ -1694,7 +1690,7 @@ TERMINAL_SCHEMA = {
             },
             "background": {
                 "type": "boolean",
-                "description": "Keep running after this call returns; returns a session_id.",
+                "description": "Only for commands that must keep running after this call returns; returns a session_id.",
                 "default": False
             },
             "timeout": {

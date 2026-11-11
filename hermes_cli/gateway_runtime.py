@@ -443,11 +443,12 @@ def _observe_replacing_stale(home: Path, deadline: float, replaced: set[Path]) -
 
 def _recover_start_refusal(home: Path, deadline: float, refusal: GatewayDiscovery) -> GatewayDiscovery:
     if refusal.reason_code == "service_identity_unverified":
-        return _await_unverified_service_owner(home, deadline)
+        return _await_unverified_service_owner(home, deadline, refusal)
     return refusal
 
 
-def _await_unverified_service_owner(home: Path, deadline: float) -> GatewayDiscovery:
+def _await_unverified_service_owner(home: Path, deadline: float,
+                                    refusal: GatewayDiscovery | None = None) -> GatewayDiscovery:
     """Observe only during a supervisor restart gap; never run an unverified definition.
 
     A custom launcher cannot be safely interpreted, but its returning private
@@ -469,7 +470,8 @@ def _await_unverified_service_owner(home: Path, deadline: float) -> GatewayDisco
                 return observed
             time.sleep(min(0.1, remaining(deadline)))
     except TimeoutError:
-        return GatewayDiscovery("inaccessible", reason_code="service_identity_unverified")
+        # The start refusal itself, with its detail (which unit check failed), not a bare code.
+        return refusal or GatewayDiscovery("inaccessible", reason_code="service_identity_unverified")
 
 
 def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float | None = None,
@@ -540,6 +542,8 @@ def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float | None = 
                 time.sleep(min(0.1, remaining(deadline)))
                 continue
             if observed.state not in {"absent", "starting"}:
+                from hermes_cli.gateway_runtime_service import refresh_ready_owner_launcher
+                refresh_ready_owner_launcher(home, observed)
                 return observed
             if (verdict := _exited_start_verdict(home, observed, status, child, child_home, child_offset)) is not None:
                 return verdict
@@ -591,7 +595,7 @@ def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float | None = 
     except TimeoutError:
         return GatewayDiscovery("starting", reason_code="deadline")
     except RuntimeStartError as exc:
-        return _recover_start_refusal(home, deadline, GatewayDiscovery(exc.state, reason_code=exc.reason))
+        return _recover_start_refusal(home, deadline, GatewayDiscovery(exc.state, reason_code=exc.reason, detail=exc.detail))
     except PermissionError:
         return _refused(home)
     except OSError:

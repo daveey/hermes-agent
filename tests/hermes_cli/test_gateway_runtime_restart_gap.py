@@ -139,3 +139,14 @@ def test_observation_keeps_waiting_through_starting_until_owner_verdict(tmp_path
     monkeypatch.setattr(runtime, "discover_gateway_endpoint", lambda *args, **kwargs: next(seq))
     monkeypatch.setattr(time, "sleep", lambda duration: None)
     assert runtime._await_unverified_service_owner(tmp_path, time.monotonic() + 5) is ready
+
+
+def test_an_owner_that_never_returns_keeps_the_start_refusal_and_its_detail(tmp_path, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(time, "sleep", lambda duration: now.__setitem__(0, now[0] + duration))
+    monkeypatch.setattr(runtime, "_update_fenced", lambda homes: False)
+    monkeypatch.setattr(runtime, "discover_gateway_endpoint", lambda *args, **kwargs: runtime.GatewayDiscovery("absent"))
+    refusal = runtime.GatewayDiscovery("inaccessible", reason_code="service_identity_unverified",
+                                       detail="unit runs as DynamicUser=yes")
+    assert runtime._await_unverified_service_owner(tmp_path, 105.0, refusal) == refusal
