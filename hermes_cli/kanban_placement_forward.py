@@ -447,6 +447,7 @@ def remote_args(conn: sqlite3.Connection, task, *, self_gw: str) -> dict:
         "model": task.model_override, "provider": task.provider_override if task.model_override else None,
         "goal_mode": bool(task.goal_mode), "goal_max_turns": task.goal_max_turns if task.goal_mode else None,
         "completion_contract": task.completion_contract,
+        "review_required": bool(task.review_required),
 
     }
 

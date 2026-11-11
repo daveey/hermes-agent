@@ -480,6 +480,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 max_retries=max_retries, model_override=getattr(args, "model_override", None),
                 provider_override=getattr(args, "provider_override", None), pin_mandatory=bool(getattr(args, "pin_mandatory", False)),
                 goal_mode=bool(getattr(args, "goal_mode", False)),
+                review_required=bool(getattr(args, "review_required", False)),
                 goal_max_turns=getattr(args, "goal_max_turns", None),
                 reasoning_effort=getattr(args, "reasoning_effort", None),
                 completion_contract=getattr(args, "completion_contract", None),
@@ -1219,6 +1220,7 @@ def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: 
 
 def _cmd_complete(args: argparse.Namespace) -> int:
     """Mark one or more tasks done. Supports a single id or a list."""
+    from hermes_cli.kanban_review_required import ReviewRequiredError
     ids, rc = _require_ids(args)
     if rc:
         return rc
@@ -1260,6 +1262,9 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             except _review_contract.IndependenceRefused as outside:  # --force does not override it [daveey]
                 fail_msg[tid] = f"cannot complete {tid}: {outside}"
                 return False
+            except ReviewRequiredError as review_err:
+                fail_msg[tid] = str(review_err)
+                return False
             except kb.LiveClaimError:
                 fail_msg[tid] = (f"cannot complete {tid}: a live worker is running it. Wait for the "
                                  f"worker, `hermes kanban reclaim {tid}` to release it, or re-run with "
@@ -1287,7 +1292,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
         return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__)
 
 
-_OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runtime_seconds", "session_id")
+_OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runtime_seconds", "session_id", "review_required")
 
 
 def _cmd_edit(args: argparse.Namespace) -> int:
@@ -1312,6 +1317,8 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     operator = {name: getattr(args, name, None) for name in _OPERATOR_EDIT_FLAGS}
     if operator["goal_mode"] is not None:
         operator["goal_mode"] = operator["goal_mode"] == "on"
+    if operator["review_required"] is not None:
+        operator["review_required"] = operator["review_required"] == "on"
     has_operator = any(value is not None for value in operator.values())
     has_admission = any(value is not None for value in admission.values())
     if has_operator and has_admission:
@@ -1321,7 +1328,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     if all(value is None for value in (title, body, priority, priority_bump, result)) and not (has_operator or has_admission):
         return _err(
             "kanban edit: provide --title, --body, --priority, --result, --max-retries, --goal-mode, "
-            "--goal-max-turns, --max-runtime-seconds, --session-id, or --completion-contract", 2,
+            "--goal-max-turns, --max-runtime-seconds, --session-id, --review-required, or --completion-contract", 2,
         )
     if getattr(args, "force", False) and operator["session_id"] is None:
         return _err("kanban edit: --force only applies to --session-id", 2)

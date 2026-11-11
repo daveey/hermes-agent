@@ -651,6 +651,7 @@ class Task:
     # done / budget exhausted (-> kanban_block); ``goal_max_turns`` None -> goals default.
     goal_mode: bool = False
     goal_max_turns: Optional[int] = None
+    review_required: bool = False
     session_id: Optional[str] = None         # originating HERMES_SESSION_ID; NULL from CLI/dashboard
     # VALID_BLOCK_KINDS or None (legacy); kept across unblock so a same-kind re-block reads as a loop.
     block_kind: Optional[str] = None
@@ -679,6 +680,7 @@ class Task:
             human_request=_json_or(g("human_request")),
             requires=_json_or(g("requires")) or [],
             goal_mode=bool(g("goal_mode")),
+            review_required=bool(g("review_required", 0)),
             block_recurrences=int(g("block_recurrences") or 0),
             admission_class=g("admission_class", "normal"),
             admission_frees=g("admission_frees"),
@@ -853,13 +855,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- case) falls through to the dispatcher-level ``kanban.failure_limit``
     -- config and then ``DEFAULT_FAILURE_LIMIT``.
     max_retries          INTEGER,
-    -- When 1, the dispatched worker runs in a Ralph-style goal loop: an
-    -- auxiliary judge re-evaluates the worker's response against the
-    -- card title/body after each turn and feeds a continuation prompt
-    -- back into the SAME session until the judge agrees the work is done
-    -- or ``goal_max_turns`` is exhausted. NULL/0 = classic single-shot
-    -- worker (the default).
+    -- Goal loop: an auxiliary judge checks each turn against the card title/body,
+    -- continuing in the SAME session until done or ``goal_max_turns`` is exhausted.
+    -- NULL/0 = classic single-shot worker (the default).
     goal_mode            INTEGER NOT NULL DEFAULT 0,
+    review_required      INTEGER NOT NULL DEFAULT 0,
     -- Goal-loop turn budget for ``goal_mode`` workers. NULL = use the
     -- goals-engine default.
     goal_max_turns       INTEGER,
@@ -1195,7 +1195,7 @@ def create_task(
     goal_mode: bool = False, goal_max_turns: Optional[int] = None, initial_status: str = "running",
     session_id: Optional[str] = None, board: Optional[str] = None, project_id: Optional[str] = None,
     project_source_task_id: Optional[str] = None, creator_task_id: Optional[str] = None,
-    completion_contract: Optional[str] = None,
+    completion_contract: Optional[str] = None, review_required: bool = False,
     validate_workspace: bool = False, validate_skills: bool = False,
     human_request: Optional[dict] = None,
     origin_intent: Optional[dict] = None, chat_origin: Optional[str] = None,
@@ -1348,8 +1348,8 @@ def create_task(
                         branch_name, project_id, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, model_override, provider_override, model_pin_mandatory, reasoning_effort,
                         goal_mode, goal_max_turns, session_id, completion_contract, requires, placement_policy,
-                        admission_class, admission_frees
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        admission_class, admission_frees, review_required
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id, title.strip(), body, assignee, task_status, kanban_priority.bounded(priority),
@@ -1358,7 +1358,7 @@ def create_task(
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, pin_column,
                         reasoning_effort, 1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
-                        json.dumps(required), placement_policy, admission_class, admission_frees,
+                        json.dumps(required), placement_policy, admission_class, admission_frees, int(bool(review_required)),
                     ),
                 )
                 _sync.set_runs_on(conn, task_id, runs_on)  # placement labels (RFC "Placement"), synced boards only
@@ -2504,10 +2504,11 @@ def complete_task(
     whitespace-only evidence raises :class:`EmptyCompletionError` after an
     auditable event. Approving a card out of ``review`` stays exempt.
     """
+    from hermes_cli.kanban_review_required import require_review
+    require_review(conn, task_id, expected_run_id, placement_settled=placement_settled)
     from hermes_cli import kanban_completion_receipt as receipt_admission
     metadata, receipt_owners = receipt_admission.prepare(conn, task_id, metadata)
     now = int(time.time())
-    # Cheap pre-check; re-checked inside the txn to close the parent-reopen race.
     if not _parents_satisfied(conn, task_id):
         return False
     from hermes_cli.kanban_pr_acceptance_store import prepare_acceptance, record_acceptance
@@ -2523,8 +2524,7 @@ def complete_task(
     from hermes_cli.kanban_metadata_files import discard_on_error
     staged: list[Path] = []
     with discard_on_error(staged), write_txn(conn):
-        # Hard invariant even for human review approval: a parent may have
-        # reopened while this task waited.
+        require_review(conn, task_id, expected_run_id, placement_settled=placement_settled)
         if not _parents_satisfied(conn, task_id):
             return False
         receipt_admission.recheck(conn, task_id, receipt_owners)

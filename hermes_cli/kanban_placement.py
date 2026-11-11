@@ -214,11 +214,11 @@ POOL_CARRIED_OPTIONS = ("pin_mandatory",)
 # kanban_create options a hermes-hub client with `create-task --option KEY=JSON` carries to the card.
 # (hermes-hub also allows reasoning_effort, but kanban_create has no such parameter.)
 CARRIED_OPTIONS = ("skills", "max_runtime_seconds", "priority", "model", "provider", "goal_mode",
-                   "goal_max_turns", "completion_contract", "idempotency_key", "requires", "triage",
+                   "goal_max_turns", "completion_contract", "idempotency_key", "requires", "triage", "review_required",
                    "distinct_from", "distinct_reason", "admission_class", "admission_frees")
 IDENTITY_OPTIONS = ("idempotency_key", "distinct_from", "distinct_reason")
 # Of those, the ones an older client (no --option) cannot express at all: the card stays local.
-LEGACY_UNCARRIED = ("model", "provider", "goal_mode", "triage", *IDENTITY_OPTIONS,
+LEGACY_UNCARRIED = ("model", "provider", "goal_mode", "triage", "review_required", *IDENTITY_OPTIONS,
                     "admission_class", "admission_frees")
 HELP_CACHE_SECONDS = 600
 # Profile tools (``requires`` entries) a target can satisfy when it does not publish its profiles'
@@ -706,7 +706,7 @@ def carried_options(args: dict) -> dict:
             continue
         if v in (None, "", [], False):
             continue
-        if k in ("goal_mode", "triage"):
+        if k in ("goal_mode", "triage", "review_required"):
             if _bool(v):
                 out[k] = True
         elif k in ("max_runtime_seconds", "priority", "goal_max_turns"):

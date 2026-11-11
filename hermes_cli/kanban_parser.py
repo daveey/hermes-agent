@@ -309,6 +309,7 @@ _SPECS = [
                   "Requires --model."),
         _arg("--completion-contract", metavar="CONTRACT",
              help="local-only (default), OWNER/REPO for publication, or exact GitHub PR URL; required CI gates done."),
+        _arg("--review-required", action="store_true", help="Require a reviewer before completion"),
         _arg("--goal", action="store_true", dest="goal_mode",
              help="Run the worker in a goal loop: after each turn a judge checks the "
                   "response against the card title/body and, if not done, the worker "
@@ -504,6 +505,7 @@ _SPECS = [
              help="Per-task failure circuit breaker: block on the Nth consecutive failure"),
         _arg("--goal-mode", choices=["on", "off"], dest="goal_mode",
              help="Run the worker in a goal loop (on) or single-shot (off)"),
+        _arg("--review-required", choices=["on", "off"], help="Require review (workers cannot turn it off)"),
         _arg("--goal-max-turns", type=int, metavar="N", dest="goal_max_turns",
              help="Turn budget for goal-mode workers"),
         _arg("--max-runtime-seconds", type=int, metavar="N", dest="max_runtime_seconds",

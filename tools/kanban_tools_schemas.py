@@ -908,6 +908,7 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "assignee's profile."
             ),
         },
+        "review_required": _prop("boolean", "Require a reviewer before completion. Defaults to false."),
         "goal_mode": _prop("boolean", (
                 "Run the dispatched worker in a goal loop. When true, "
                 "after each turn an auxiliary judge checks the worker's "

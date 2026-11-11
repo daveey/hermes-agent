@@ -1075,6 +1075,7 @@ _LATER_TASK_COLUMNS = (
     ("reasoning_effort", "reasoning_effort TEXT"),
     # Ralph-style goal loop toggle; 0 = classic single-shot worker.
     ("goal_mode", "goal_mode INTEGER NOT NULL DEFAULT 0"),
+    ("review_required", "review_required INTEGER NOT NULL DEFAULT 0"),
     ("goal_max_turns", "goal_max_turns INTEGER"),
     ("completion_contract", "completion_contract TEXT"),
     ("placement_policy", "placement_policy TEXT"),

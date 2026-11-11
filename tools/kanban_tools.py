@@ -156,7 +156,7 @@ def _check(cond: Any, message: str, rejection: Optional[str] = None) -> None:
 # Stable ``rejection`` classes on every kanban_complete tool_error. Consumers
 # (coach digests, board analytics) key on these strings: add, never rename.
 COMPLETE_REJECTION_CLASSES = frozenset({
-    "goal_judge",     # goal-mode completion judge said not done / blocked
+    "review_required", "goal_judge",  # required review or goal-mode judge refused completion
     "phantom_cards",  # created_cards names ids this worker did not create
     "artifacts",      # declared artifacts could not be preserved
     "empty",          # no summary/result, or an evidence-free completion
@@ -536,7 +536,7 @@ def _opt_int(value: Any, default: Optional[int] = None) -> Optional[int]:
 _TASK_FIELDS = tuple(
     "id title body assignee status tenant priority workspace_kind workspace_path created_by "
     "created_at started_at completed_at result current_run_id model_override "
-    "provider_override completion_contract last_failure_error block_kind human_request".split())
+    "provider_override completion_contract review_required last_failure_error block_kind human_request".split())
 _TASK_SUMMARY_FIELDS = tuple(
     "id title assignee status priority tenant workspace_kind workspace_path project_id created_by "
     "created_at started_at completed_at current_run_id model_override provider_override block_kind human_request".split())
@@ -873,6 +873,7 @@ def _handle_list(args: dict, **kw) -> str:
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff. Every refusal
     carries a ``rejection`` class from ``COMPLETE_REJECTION_CLASSES``."""
+    from hermes_cli.kanban_review_required import ReviewRequiredError
     try:
         tid = _worker_guard("kanban_complete", args)
     except _Reject as e:
@@ -914,12 +915,10 @@ def _handle_complete(args: dict, **kw) -> str:
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
                 created_cards=created_cards, expected_run_id=run_id, goal_verification=goal_verification)
+        except ReviewRequiredError as review_err:
+            return tool_error(str(review_err), rejection="review_required")
         except kb.ArtifactPreservationError as artifact_err:
-            # Structured rejection — surface the phantom ids so the worker can retry with a corrected list
-            # or drop the field. Audit event already landed in the DB. The task itself was NOT mutated (the
-            # gate runs before the write txn), so the worker can simply call kanban_complete again. Spell
-            # that out — without it the model often interprets a tool_error as a terminal failure and either
-            # blocks or crashes the run instead of retrying. See #22923.
+            # Artifact admission runs before writes: keep the worker in-flight for a corrected retry.
             return tool_error(
                 f"kanban_complete could not preserve the declared artifacts: {artifact_err}. "
                 f"Your task is still in-flight and its scratch workspace was kept. Fix the "
@@ -1568,9 +1567,9 @@ def _handle_create(args: dict, **kw) -> str:
     # See #67567. ``project=""`` is an explicit "no project" (no ``or`` collapse, #106342).
     project_id = args["project"] if "project" in args else args.get("project_id")
     project_source_task_id = None
-    triage, skills, goal_mode, pin_mandatory = (
+    triage, skills, goal_mode, pin_mandatory, review_required = (
         _parse_bool_arg(args, "triage"), _coerce_str_list(args.get("skills"), "skills", "skill names"),
-        _parse_bool_arg(args, "goal_mode"), _parse_bool_arg(args, "pin_mandatory"))
+        _parse_bool_arg(args, "goal_mode"), _parse_bool_arg(args, "pin_mandatory"), _parse_bool_arg(args, "review_required"))
     model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     max_retries = _ca.max_retries_arg(args)
@@ -1685,6 +1684,7 @@ def _handle_create(args: dict, **kw) -> str:
                 require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
                 model_override=model_override, provider_override=provider_override, pin_mandatory=pin_mandatory,
                 goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
+                review_required=review_required,
                 completion_contract=args.get("completion_contract"),
                 initial_status=str(args.get("initial_status") or "running"),
                 human_request=kb.redact_review_value(args.get("human_request")),
