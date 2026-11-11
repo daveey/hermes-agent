@@ -345,13 +345,20 @@ def test_launch_installed_macos_desktop_app_gates_on_bundle_and_platform(tmp_pat
     exe = Path("/Applications/Hermes.app/Contents/MacOS/Hermes")
     monkeypatch.setattr(main_desktop.Path, "is_file", lambda self: exists if self == exe else Path.is_file(self))
     calls = []
+    envs = []
+    monkeypatch.setenv("HERMES_AGENT", "true")
+    monkeypatch.setenv("AI_AGENT", "hermes-agent")
     if exists and platform == "darwin":
         from hermes_cli import bundled_app
-        monkeypatch.setattr(bundled_app, "launch_detached", lambda argv, **kw: calls.append(argv) or 4321)
+        monkeypatch.setattr(bundled_app, "launch_detached",
+                            lambda argv, **kw: calls.append(argv) or envs.append(kw.get("env")) or 4321)
 
     assert main_desktop._launch_installed_macos_desktop_app() is (exists and platform == "darwin")
     if exists and platform == "darwin":
         assert calls == [[str(exe)]]
+        # The app starts without main()'s agent markers (Kanban drawer comment provenance).
+        assert envs[0] is not None and not {"HERMES_AGENT", "AI_AGENT"} & envs[0].keys()
+        assert envs[0].get("PATH") == os.environ.get("PATH")
 
 
 # ── Content-hash stamp tests ──────────────────────────────────────────

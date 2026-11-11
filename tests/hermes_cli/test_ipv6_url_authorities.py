@@ -101,7 +101,7 @@ class TestBrowserOpenUrl:
 
     def test_maybe_open_browser_brackets_ipv6_loopback(self, monkeypatch):
         """The browser auto-open URL needs brackets around an IPv6 authority."""
-        import webbrowser
+        from hermes_cli import top_level_env
 
         opened = []
 
@@ -114,7 +114,7 @@ class TestBrowserOpenUrl:
 
         monkeypatch.setattr(web_server_lifecycle.threading, "Thread", _ImmediateThread)
         monkeypatch.setattr(web_server_lifecycle.time, "sleep", lambda _s: None)
-        monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
+        monkeypatch.setattr(top_level_env, "open_url_for_person", lambda url: opened.append(url))
         monkeypatch.setenv("DISPLAY", ":0")
 
         web_server_lifecycle._maybe_open_browser("::1", 9119, True, "worker_x")
@@ -134,11 +134,11 @@ class TestAttachUrl:
 
     def test_attach_brackets_ipv6_host_in_browser_url(self, monkeypatch):
         """Named-profile attach to a running IPv6 dashboard must open a valid URL."""
-        import webbrowser
         from gateway import host_rendezvous as hr
+        from hermes_cli import top_level_env
 
         opened = []
-        monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
+        monkeypatch.setattr(top_level_env, "open_url_for_person", lambda url: opened.append(url))
         record = types.SimpleNamespace(host="::1", port=9119, pid=4242, role="dashboard")
         monkeypatch.setattr(main_dashboard, "_host_backend_attachment", lambda: record)
         monkeypatch.setattr(main_dashboard, "_is_desktop_owned_backend", lambda: False)

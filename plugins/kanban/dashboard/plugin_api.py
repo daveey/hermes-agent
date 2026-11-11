@@ -923,10 +923,10 @@ def _set_status_direct(conn: sqlite3.Connection, task_id: str, new_status: str) 
 # --- Comments / links -------------------------------------------------------
 
 @router.post("/tasks/{task_id}/comments")
-def add_comment(task_id: str, payload: CommentBody, board: Optional[str] = Query(None)):
+def add_comment(task_id: str, payload: CommentBody, request: Request, board: Optional[str] = Query(None)):
     if not payload.body.strip():
         raise HTTPException(status_code=400, detail="body is required")
-    writer_kind, writer_session = comment_writer(payload)  # [daveey] agent courier vs GUI human
+    writer_kind, writer_session = comment_writer(payload, request.scope)
     with _board_conn(board) as (board, conn):
         _foreign_card_409(conn, task_id)
         _require_task(conn, task_id)

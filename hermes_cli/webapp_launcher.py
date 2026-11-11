@@ -94,10 +94,13 @@ def _control(home, verb: str, params: dict | None = None) -> dict:
 def _open(url: str) -> bool:
     import webbrowser
     from hermes_cli.auth_device_flow import _can_open_graphical_browser
+    from hermes_cli.top_level_env import open_url_for_person_checked
     if not _can_open_graphical_browser():
         return False
     try:
-        return bool(webbrowser.open(url))
+        # [daveey] a clean child: a browser this command starts must not carry main()'s agent
+        # markers, or a person's Kanban drawer notes typed there would record as an agent's.
+        return open_url_for_person_checked(url)
     except (webbrowser.Error, OSError):
         return False
 

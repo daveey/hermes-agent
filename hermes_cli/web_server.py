@@ -1262,15 +1262,18 @@ def _build_uvicorn_server(host: str, port: int, *, ssh_isolated: bool = False):
         ping_interval, ping_timeout = TUNNEL_WS_PING_INTERVAL_S, TUNNEL_WS_PING_TIMEOUT_S
 
     _uvicorn_console_logging()  # log_config=None: uvicorn's dictConfig would close every live handler
+    from hermes_cli.web_server_transport import transport_observed_app
+
+    forwarded_allow_ips = _dashboard_forwarded_allow_ips(_dash_cfg)
+    served_app = transport_observed_app(
+        served_app, proxy_headers=bool(app.state.auth_required), forwarded_allow_ips=forwarded_allow_ips)
     config = uvicorn.Config(
         served_app, host=host, port=port, log_level="warning", log_config=None,
-        # Off by default so _ws_client_is_allowed sees the real peer, not
-        # X-Forwarded-For. Gated mode runs behind a TLS terminator and needs
-        # X-Forwarded-Proto for cookie Secure flags.
-        proxy_headers=bool(app.state.auth_required),
+        # Composed inside raw transport observation above, with the same trust policy.
+        proxy_headers=False,
         # Loopback-only unless the operator trusts a bounded upstream proxy, so
         # spoofed X-Forwarded-* from arbitrary callers is never honoured.
-        forwarded_allow_ips=_dashboard_forwarded_allow_ips(_dash_cfg),
+        forwarded_allow_ips=forwarded_allow_ips,
         ws_ping_interval=ping_interval,
         ws_ping_timeout=ping_timeout,
         # Per-frame zlib on the loop buys nothing for a local client (build_listener_server); a peer

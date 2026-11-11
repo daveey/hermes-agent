@@ -32,9 +32,9 @@ parent of ``explorer.exe``) leaves every walk inconclusive. Out of reach: a same
 deliberately destroys its marked ancestry (``exec env -i`` replacing the tool shell, double-fork
 daemonizing) or hands its command to a process outside its ancestry (``tmux send-keys``, ``at``,
 ``ssh <host> hermes kanban comment``, whose remote sshd session starts clean) — evasion or a
-handoff, not provenance, which needs real authentication. Not covered here: the dashboard API
-(``POST /api/plugins/kanban/tasks/<id>/comments``) still records ``human`` for any token holder
-that omits ``writer_kind`` (``plugin_api_comment_actor``); that server-side gap is a follow-up.
+handoff, not provenance, which needs real authentication. The dashboard API uses this ancestry
+reader for resolved raw loopback TCP peers (``kanban_http_comment_writer``); remote/unresolvable
+HTTP peers retain the legacy human default, not a claim of authenticated human identity.
 """
 from __future__ import annotations
 

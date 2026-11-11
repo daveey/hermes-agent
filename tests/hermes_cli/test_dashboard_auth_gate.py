@@ -51,6 +51,25 @@ def test_should_require_auth_truth_table(host, allow_public, expected):
 # ---------------------------------------------------------------------------
 
 
+def _record_proxy_wrapping(monkeypatch):
+    """Record the proxy policy start_server composes inside raw-transport observation.
+
+    Uvicorn's automatic ``proxy_headers`` stays off: the same ProxyHeadersMiddleware runs
+    inside ``transport_observed_app`` so provenance can still read the raw TCP peer.
+    """
+    from hermes_cli import web_server_transport
+
+    seen: dict = {}
+    original = web_server_transport.transport_observed_app
+
+    def recording(app, *, proxy_headers, forwarded_allow_ips):
+        seen.update(proxy_headers=proxy_headers, forwarded_allow_ips=forwarded_allow_ips)
+        return original(app, proxy_headers=proxy_headers, forwarded_allow_ips=forwarded_allow_ips)
+
+    monkeypatch.setattr(web_server_transport, "transport_observed_app", recording)
+    return seen
+
+
 def _stub_uvicorn_run(monkeypatch):
     """Replace uvicorn.Config/Server with no-op fakes so start_server
     returns immediately (rather than blocking on the event loop). Returns the dict
@@ -180,8 +199,9 @@ def test_start_server_gate_with_provider_proceeds_and_sets_proxy_headers(monkeyp
 
     The SystemExit-refusing-to-bind guard is REPLACED in gated mode by
     "the gate engages", so as long as a provider is registered the bind
-    succeeds.  uvicorn is called with proxy_headers=True so X-Forwarded-Proto
-    from Fly's TLS terminator is honoured for cookie Secure-flag decisions.
+    succeeds.  Proxy headers are honoured (via ProxyHeadersMiddleware composed inside
+    raw-transport observation) so X-Forwarded-Proto from Fly's TLS terminator is
+    honoured for cookie Secure-flag decisions.
     """
     from hermes_cli.dashboard_auth import clear_providers, register_provider
     from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
@@ -189,6 +209,7 @@ def test_start_server_gate_with_provider_proceeds_and_sets_proxy_headers(monkeyp
     clear_providers()
     register_provider(StubAuthProvider())
     captured = _stub_uvicorn_run(monkeypatch)
+    proxy = _record_proxy_wrapping(monkeypatch)
     try:
         web_server.app.state.auth_required = None
         web_server.start_server(
@@ -197,7 +218,8 @@ def test_start_server_gate_with_provider_proceeds_and_sets_proxy_headers(monkeyp
         )
         assert web_server.app.state.auth_required is True
         assert captured["kwargs"].get("host") == "0.0.0.0"
-        assert captured["kwargs"].get("proxy_headers") is True
+        assert captured["kwargs"].get("proxy_headers") is False
+        assert proxy == {"proxy_headers": True, "forwarded_allow_ips": ["127.0.0.1", "::1"]}
         assert captured["kwargs"].get("forwarded_allow_ips") == [
             "127.0.0.1",
             "::1",
@@ -328,6 +350,7 @@ def test_start_server_loopback_public_url_enables_gate(monkeypatch):
     clear_providers()
     register_provider(StubAuthProvider())
     captured = _stub_uvicorn_run(monkeypatch)
+    proxy = _record_proxy_wrapping(monkeypatch)
     _restore_app_state_after_test(
         monkeypatch,
         "auth_required",
@@ -345,7 +368,8 @@ def test_start_server_loopback_public_url_enables_gate(monkeypatch):
             {"dashboard.example.test"}
         )
         assert captured["kwargs"].get("host") == "127.0.0.1"
-        assert captured["kwargs"].get("proxy_headers") is True
+        assert captured["kwargs"].get("proxy_headers") is False
+        assert proxy["proxy_headers"] is True
     finally:
         clear_providers()
 

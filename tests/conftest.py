@@ -809,6 +809,11 @@ def _neutralize_webbrowser(monkeypatch):
     for name in ("open", "open_new", "open_new_tab"):
         monkeypatch.setattr(_webbrowser, name, _record, raising=False)
     monkeypatch.setattr(_webbrowser, "get", lambda *_args, **_kwargs: browser)
+    # The dashboard opens its URL from a clean child interpreter (agent markers dropped),
+    # which the in-process stubs above can't reach.
+    from hermes_cli import top_level_env as _top_level_env
+    monkeypatch.setattr(_top_level_env, "open_url_for_person", _record)
+    monkeypatch.setattr(_top_level_env, "open_url_for_person_checked", _record)
 
     return opened
 

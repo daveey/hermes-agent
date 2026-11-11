@@ -232,8 +232,6 @@ def _maybe_open_browser(host: str, actual_port: int, open_browser: bool, initial
     if not open_browser:
         return
 
-    import webbrowser
-
     _has_display = sys.platform != "linux" or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if not _has_display:
         _log.debug(
@@ -253,7 +251,9 @@ def _maybe_open_browser(host: str, actual_port: int, open_browser: bool, initial
     def _open():
         try:
             time.sleep(1.0)
-            webbrowser.open(_open_url)
+            from hermes_cli.top_level_env import open_url_for_person
+
+            open_url_for_person(_open_url)  # [daveey] no agent markers in a person's browser
         except Exception:
             pass
 
@@ -623,15 +623,18 @@ def build_listener_server(served_app, host: str, port: int, *, auth_required: bo
         ws_ping = (None, None) if host in _LOOPBACK_HOST_VALUES else (
             _ws_ping_setting("ws_ping_interval"), _ws_ping_setting("ws_ping_timeout"))
     _uvicorn_console_logging()
+    from hermes_cli.web_server_transport import transport_observed_app
+
+    forwarded_allow_ips = _dashboard_forwarded_allow_ips(dash_cfg)
+    served_app = transport_observed_app(
+        served_app, proxy_headers=auth_required, forwarded_allow_ips=forwarded_allow_ips)
     config = uvicorn.Config(
         served_app, host=host, port=port, log_level="warning", log_config=None,
-        # Off by default so _ws_client_is_allowed sees the real peer, not
-        # X-Forwarded-For. Gated mode runs behind a TLS terminator and needs
-        # X-Forwarded-Proto for cookie Secure flags.
-        proxy_headers=auth_required,
+        # Composed inside raw transport observation above, with the same trust policy.
+        proxy_headers=False,
         # Loopback-only unless the operator trusts a bounded upstream proxy, so
         # spoofed X-Forwarded-* from arbitrary callers is never honoured.
-        forwarded_allow_ips=_dashboard_forwarded_allow_ips(dash_cfg),
+        forwarded_allow_ips=forwarded_allow_ips,
         ws_ping_interval=ws_ping[0],
         ws_ping_timeout=ws_ping[1],
         ws_per_message_deflate=per_message_deflate,

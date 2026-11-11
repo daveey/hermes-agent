@@ -1802,19 +1802,18 @@ def _site_packages_install_kind(project_root: Path) -> Optional[str]:
 
 
 def _launch_installed_macos_desktop_app() -> bool:
-    """Launch a separately installed ``/Applications/Hermes.app``, if present.
-
-    Returns True only when the app bundle exists and a detached launch was
-    started — the caller then exits without touching the build ladder.
-    """
+    """Return True after launching installed ``/Applications/Hermes.app``; skip the build ladder."""
     if sys.platform != "darwin":
         return False
     executable = Path("/Applications/Hermes.app/Contents/MacOS/Hermes")
     if not executable.is_file():
         return False
     from hermes_cli.bundled_app import launch_detached
+    from hermes_cli.top_level_env import clean_launch_env
 
-    pid = launch_detached([str(executable)], cwd=executable.parent)
+    # [daveey] Electron is not an agent: main()'s HERMES_AGENT/AI_AGENT would otherwise mark
+    # the app, and the Kanban drawer's comments would record as an agent's.
+    pid = launch_detached([str(executable)], env=clean_launch_env(), cwd=executable.parent)
     print(f"→ Launched the installed Hermes Desktop app: {executable} (pid {pid})")
     return True
 

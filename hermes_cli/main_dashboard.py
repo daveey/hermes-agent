@@ -1026,8 +1026,8 @@ def _attach_to_host_backend(args, headless_backend: bool) -> None:
     print(f"  Managing profile '{wanted}': {url}")
     if not headless_backend and not args.no_open:
         with contextlib.suppress(Exception):
-            import webbrowser
-            webbrowser.open(url)
+            from hermes_cli.top_level_env import open_url_for_person
+            open_url_for_person(url)  # [daveey] no agent markers in a person's browser
     sys.exit(0)
 
 

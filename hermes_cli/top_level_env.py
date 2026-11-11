@@ -57,6 +57,46 @@ def clean_launch_env(base: Optional[MutableMapping[str, str]] = None) -> dict[st
     return drop_agent_attribution(env)
 
 
+def url_opener_command(url: str) -> list[str]:
+    """argv that opens ``url`` with the stdlib browser registry in a fresh interpreter (exit 0 = opened)."""
+    import sys
+    return [sys.executable, "-I", "-c",
+            "import sys, webbrowser; sys.exit(0 if webbrowser.open(sys.argv[1]) else 1)", url]
+
+
+def open_url_for_person(url: str) -> None:
+    """Open ``url`` in the person's browser without handing it the agent markers. [daveey]
+
+    main() advertises ``HERMES_AGENT``/``AI_AGENT`` in ``os.environ`` for every command, so an
+    in-process ``webbrowser.open`` gives a newly launched browser (``xdg-open`` -> Firefox) those
+    markers at start time. The dashboard comment endpoint reads a loopback peer's start-time
+    ancestry (``kanban_http_comment_writer``): notes a person typed in that browser would be
+    recorded as an agent's. The opener runs in a child with :func:`clean_launch_env` instead of
+    mutating this (multi-threaded) process's environment."""
+    _spawn_clean_url_opener(url)
+
+
+def open_url_for_person_checked(url: str, timeout: float = 15.0) -> bool:
+    """:func:`open_url_for_person` for callers that report whether a browser opened.
+
+    True when the child's ``webbrowser.open`` succeeded, or is still running at ``timeout``
+    (a browser being launched); False on its failure or a spawn error."""
+    try:
+        proc = _spawn_clean_url_opener(url)
+    except OSError:
+        return False
+    try:
+        return proc.wait(timeout) == 0
+    except subprocess.TimeoutExpired:
+        return True
+
+
+def _spawn_clean_url_opener(url: str) -> subprocess.Popen:
+    return subprocess.Popen(url_opener_command(url), env=clean_launch_env(), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # no console flash
+
+
 def _first_positional(argv: Sequence[str]) -> str:
     return next((arg for arg in argv if arg and not arg.startswith("-")), "")
 
