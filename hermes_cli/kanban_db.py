@@ -3827,14 +3827,6 @@ def specify_triage_task(
     return True
 
 
-def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via: Optional[str] = None,
-                 event_extra: Optional[dict] = None, comment: Optional[tuple[str, str]] = None,
-                 precondition: Optional[Callable[[sqlite3.Connection], Optional[str]]] = None) -> bool:
-    from hermes_cli.kanban_db_archive import archive_task as archive
-    return archive(conn, task_id, signal_fn=signal_fn, via=via, event_extra=event_extra,
-                   comment=comment, precondition=precondition)
-
-
 def _delete_task_relations(conn: sqlite3.Connection, task_id: str) -> None:
     """Delete every row referencing ``task_id`` (schema has no ON DELETE CASCADE)."""
     conn.execute("DELETE FROM task_links WHERE parent_id = ? OR child_id = ?", (task_id, task_id))
@@ -4186,6 +4178,7 @@ def current_run_started_ats(conn: sqlite3.Connection, task_ids: Iterable[str]) -
 # --- Split modules (imported at the tail: they import this module as ``_kb``) ---
 from hermes_cli.kanban_db_comment_ids import (
     add_comment, agent_comment_ids, comment_id_before_run_start, delivered_comment_ids, own_comment_ids, writer_provenance)
+from hermes_cli.kanban_db_archive import archive_task
 from hermes_cli.kanban_db_schedule import schedule_task
 from hermes_cli.kanban_db_edit import PriorityLowerRefused, edit_task
 from hermes_cli.kanban_reason_comment import _awaiting_human_answer
