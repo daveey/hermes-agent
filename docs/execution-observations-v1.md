@@ -34,6 +34,44 @@ and nullable `last_progress` are independent: claim, heartbeat, poll and comment
 alone never establish substantive progress. Missing progress does not mean stalled.
 A wait, when present, carries qualified target, predicate, since, due_at and owner.
 
+## Work projection hardening (additive; adapter semantics unchanged)
+
+`hermes_cli/execution_observations.py` (`project`, `select`, `summarize`) and
+`apps/desktop/src/lib/execution-observations.ts` (`projectExecutionObservation`,
+`selectExecutionObservation`, `summarizeExecutionObservations`) are pure and share
+`schemas/fixtures/execution-observations-v1.json`; both test suites load that one
+file, so verdicts live only there. `adapt` keeps its published behavior and existing
+tests; it additionally rejects non-string/bool/array values instead of raising,
+and treats `version: true` as unsupported.
+
+- **Attempt identity**: `run_id`/`generation` is an integral JSON number in
+  1..9007199254740991 (7.0 is the integer 7, never "7") or a nonblank identifier
+  string. Booleans, fractions, unsafe integers, arrays are invalid. Identifier
+  strings (identity, owner, wait target) must be nonempty with no leading/trailing
+  whitespace; whitespace set = union of Python `str.isspace` and JS `trim`.
+- **TTL lookup** is own-property and string-typed first. A required source's
+  `source_class` absent inherits the envelope; explicit null/array/unknown/inherited
+  names are invalid. `required_sources: null` is invalid.
+- `unknown_reason` is kept only when a nonempty string, else `source_unknown`.
+- **Human requests**: `resolved_check`/`resolved_check_every` are stripped from
+  `human_request` on projector entry (input untouched), before validation and output;
+  all other fields and expired asks are retained. Visible semantics (five text fields,
+  interaction set, 2-6 distinct `{label<=60, value<=120}` choices by code point) are
+  implemented identically in both languages. `needs_user` with a `time`,
+  `dependency` or `transient` wait is unknown (`invalid_human_wait`).
+  `summarize(...).outstanding_human_requests` counts retained valid requests
+  regardless of freshness or state (a request with such a nonhuman wait is not valid).
+- **Progress** needs an explicit successful, referenced evidence record and
+  `last_progress <= observed_at` and `<= now`; kinds are never coerced.
+- **last_known_state** is a known non-unknown state or null, and `done` survives only
+  with a matching verified `delivered` receipt (also for stale and legacy input). The
+  verified historical receipt itself is retained through expiration.
+- **select** matches the exact normalized identity key, ignores malformed entries,
+  is independent of input order, and returns unknown for invalid candidate timing, a
+  future-dated winner, different sources, or conflicting same-time records, using
+  JSON equality (bool is not a number; 7 equals 7.0).
+- TS output is a deep copy (own keys defined as data, so `__proto__` is inert).
+
 ## Diagnostics
 
 Concurrent diagnostics carry `code`, `native_code`, `phase`, `evidence_ref`.
