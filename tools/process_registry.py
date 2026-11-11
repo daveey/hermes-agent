@@ -30,15 +30,14 @@ from tools.environments.local import _append_dropped_path_entries, _resolve_safe
 from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import MISSING, dataclass, field
 from typing import Any, Dict, List, Literal, NamedTuple, Optional
-
 from hermes_cli.config import get_hermes_home
-
 from tools.process_registry_notifications import (
     format_process_notification, heartbeat_output_tail, is_child_process_notification, should_surface_notification)
 from tools.process_registry_checkpoint import ProcessCheckpointMixin
 from tools.process_registry_env_scope import ProcessEnvScopeMixin
 from tools.process_registry_readopt import ProcessReadoptMixin
 from tools.process_registry_output_log import ProcessOutputLogMixin, open_output_log, record_exit_command, spawn_output_log
+from tools.process_registry_survivable import ProcessForegroundHoldMixin, enabled as survivable_enabled
 from tools.process_registry_ownership import ProcessOwnershipMixin
 from tools.process_registry_termination import ProcessTerminationMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
@@ -568,6 +567,7 @@ class ProcessSession:
                                                 # sweeps), per terminal(background=true, persist_on_release=true) (#41225)
     output_log: str = ""                        # file the process writes to (worker spawns; no pipe to lose)
     pty_fallback: str = ""                      # why a pty=true local spawn runs in pipe mode instead
+    shell_markers: list = field(default_factory=list)  # foreground wrapper trailer markers its log carries [daveey]
     # Sandbox spawns: how a later process re-opens the sandbox (``env.reattach_handle()``) and where the
     # wrapper's hermes_bg_<id>.{log,pid,exit} files live, so a restart can re-attach the watcher. [daveey]
     sandbox_handle: dict = field(default_factory=dict)
@@ -668,7 +668,7 @@ _CHECKPOINT_FIELDS = (
     "started_at", "task_id", "owner_task_id", "session_key",
     *(f"watcher_{k}" for k in _WATCHER_ROUTE_KEYS), "watcher_interval",
     "parent_session_id", "notify_on_complete", "completion_output_chars", "watch_patterns",
-    "heartbeat_seconds", "persist_on_release", "output_log", "sandbox_handle", "sandbox_temp_dir")
+    "heartbeat_seconds", "persist_on_release", "output_log", "sandbox_handle", "sandbox_temp_dir", "shell_markers")
 _CHECKPOINT_DEFAULTS = {
     f.name: (f.default if f.default is not MISSING
              else f.default_factory() if f.default_factory is not MISSING else MISSING)  # type: ignore[misc]
@@ -684,7 +684,7 @@ _WSL_CHAIN_NOTE = (
 )
 
 
-class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessReadoptMixin, ProcessOutputLogMixin, ProcessOwnershipMixin, ProcessEnvScopeMixin):
+class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessReadoptMixin, ProcessOutputLogMixin, ProcessOwnershipMixin, ProcessEnvScopeMixin, ProcessForegroundHoldMixin):
     """In-memory registry of running and finished background processes.
     Thread-safe: accessed from executor threads (terminal_tool, process handlers),
     the gateway asyncio loop (watchers, reset checks) and the cleanup thread."""
@@ -2442,8 +2442,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
         Sessions with ``persist_on_release=True`` are skipped when ``source`` is an
         agent-lifecycle sweep (the default ``kill_all`` release path, a gateway turn
         timeout, ``agent_close``, a gateway restart): an explicitly persisted background job must survive
-        session end / compression / error recovery / restart (#41225). ``gateway_shutdown`` reaches only the
-        persisted jobs it spawned, never one it adopted (a Kanban worker's) [daveey]. An explicit operator stop
+        session end / compression / error recovery / restart (#41225). ``gateway_shutdown`` spares one only
+        once it left the unit (detached, or its own scope: terminal.update_survivable_processes) [daveey]. An explicit operator stop
         (``process.kill`` via process_manage, CLI /stop) passes its own source and still
         reaches them, so the user can always stop a persisted process on purpose."""
         lifecycle, host_exit = source in self._LIFECYCLE_KILL_SOURCES, source == "gateway_shutdown"
@@ -2452,7 +2452,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
                 s for s in (*self._running.values(), *self._finished.values())
                 if (task_id is None or s.owner_task_id == task_id)
                 and s.id not in exclude_ids and (not s.exited or s._scope_stop_pending)
-                and not (s.persist_on_release and (lifecycle or (host_exit and s.detached)))
+                and not (s.persist_on_release and (lifecycle or (host_exit and (s.detached or (s.systemd_unit and survivable_enabled())))))
             ]
         results = [self.kill_process(s.id, source=source, consume_output=consume_output) for s in targets]
         return sum(

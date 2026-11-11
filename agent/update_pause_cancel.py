@@ -14,6 +14,7 @@ pause does (marker kept with ``reason: core_update_pause``, reservation released
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -73,8 +74,23 @@ def committed(agent: Any, call_id: str, result: Any) -> tuple[Any, bool]:
     finished(agent, call_id)
     record = _slots(agent).get(_CANCEL)
     if record and call_id in record["calls"] and interrupt_issuer(agent) == _ISSUER:
-        return record["text"], True
+        # A survivable foreground command (terminal.update_survivable_processes) was not killed: it became a
+        # background job, and its result names it (``process continues as <id>``). Stamping "re-run if still
+        # needed" over it would hide a still-running job from the resumed turn and invite a duplicate run.
+        return (result, True) if _continues_in_background(result) else (record["text"], True)
     return result, False
+
+
+def _continues_in_background(result: Any) -> bool:
+    """``result`` is the terminal tool's JSON for a foreground command handed to the background."""
+    if not isinstance(result, str) or '"continues_in_background"' not in result:
+        return False
+    try:
+        parsed = json.loads(result)
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and parsed.get("status") == "continues_in_background" \
+        and bool(parsed.get("session_id"))
 
 
 def take_pending(agent: Any) -> bool:

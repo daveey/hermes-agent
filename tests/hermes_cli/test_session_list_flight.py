@@ -6,6 +6,8 @@ state.db must invalidate the cached result.
 """
 
 import sqlite3
+import subprocess
+import sys
 import threading
 
 import pytest
@@ -40,6 +42,37 @@ def test_data_stamp_is_stable_across_reads_and_changes_on_every_write(tmp_path):
     conn.execute("INSERT INTO sessions VALUES ('b', 'second')")
     conn.commit()
     assert slf.data_stamp(path) not in (before, after_write)
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_data_stamp_keeps_this_process_wal_locks(tmp_path):
+    """hermes-hub 2026-11-11: data_stamp() did open()/close() on -shm, and POSIX drops every lock a process
+    holds on a file when it closes any descriptor for it. SQLite's WAL writer lock lives on -shm, so a
+    GET /api/sessions during a write transaction let another process write concurrently (corrupt indexes).
+    A real write transaction is held here; a second process must still be locked out after data_stamp()."""
+    path, conn = _wal_db(tmp_path)
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("UPDATE sessions SET title = 'held' WHERE id = 'a'")
+    probe = (
+        "import sqlite3, sys\n"
+        "c = sqlite3.connect(sys.argv[1], timeout=0)\n"
+        "try:\n"
+        "    c.execute('BEGIN IMMEDIATE')\n"
+        "except sqlite3.OperationalError as e:\n"
+        "    print('locked' if 'locked' in str(e) else 'error:' + str(e))\n"
+        "else:\n"
+        "    print('acquired')\n"
+    )
+
+    def other_process_writer():
+        return subprocess.run([sys.executable, "-I", "-c", probe, str(path)], capture_output=True, text=True,
+                              timeout=60, check=True).stdout.strip()
+
+    assert other_process_writer() == "locked"  # the transaction above really holds the writer lock
+    for _ in range(3):
+        assert slf.data_stamp(path) is not None
+    assert other_process_writer() == "locked"
+    conn.rollback()
 
 
 def test_no_wal_means_no_stamp_and_no_caching(tmp_path):

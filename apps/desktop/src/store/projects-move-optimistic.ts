@@ -10,6 +10,7 @@ import { $sessions, sessionMatchesStoredId, setSessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
 
 import { $projectTree } from './project-tree'
+import { labelKey } from './projects-move-paths'
 
 type Matcher = (session: SessionInfo, storedSessionId: string) => boolean
 
@@ -124,13 +125,16 @@ function backendAgrees(tree: SidebarProjectTree[], sessionId: string, projectId:
 /**
  * Re-apply moves still pending to a freshly built tree. A move ends once a
  * payload agrees with it (the backend has the row there now) or after the TTL.
+ * A provisional project (one "+ Create project" is still creating) stays in
+ * the tree until the backend lists a project of that name; its moves then
+ * retarget to the real node.
  */
 export function applyPendingMoves(tree: SidebarProjectTree[], matches: Matcher): SidebarProjectTree[] {
   const now = Date.now()
-  let out = tree
+  let out = withProvisionalProjects(tree, now)
 
   for (const [sessionId, move] of pendingMoves) {
-    if (now - move.at > PENDING_MOVE_TTL_MS || backendAgrees(tree, sessionId, move.projectId)) {
+    if (now - move.at > PENDING_MOVE_TTL_MS || backendAgrees(out, sessionId, move.projectId)) {
       pendingMoves.delete(sessionId)
 
       continue
@@ -140,6 +144,66 @@ export function applyPendingMoves(tree: SidebarProjectTree[], matches: Matcher):
   }
 
   return out
+}
+
+// ── Provisional projects ("+ Create project") ─────────────────────────────────
+const PROVISIONAL_PREFIX = 'provisional:'
+const provisionalProjects = new Map<string, { at: number; node: SidebarProjectTree }>()
+
+export const isProvisionalProjectId = (id: string): boolean => id.startsWith(PROVISIONAL_PREFIX)
+
+const sameNamed = (tree: readonly SidebarProjectTree[], label: string, except = ''): SidebarProjectTree | undefined =>
+  tree.find(node => node.id !== except && !node.isNoProject && !node.archived && labelKey(node.label) === labelKey(label))
+
+function withProvisionalProjects(tree: SidebarProjectTree[], now: number): SidebarProjectTree[] {
+  let out = tree
+
+  for (const [id, { at, node }] of provisionalProjects) {
+    const real = sameNamed(tree, node.label, id)
+
+    if (real || now - at > PENDING_MOVE_TTL_MS) {
+      provisionalProjects.delete(id)
+
+      for (const move of pendingMoves.values()) {
+        if (move.projectId === id && real) {
+          move.projectId = real.id
+        }
+      }
+
+      continue
+    }
+
+    if (!out.some(n => n.id === id)) {
+      out = [node, ...out]
+    }
+  }
+
+  return out
+}
+
+/**
+ * "+ Create project" paints at once: the row moves into the same-named project
+ * the tree already has, else into a provisional node named `label`. Returns the
+ * undo for a failed create/move (the caller then refetches the tree).
+ */
+export function showCreatedAtOnce(sessionId: string, label: string): () => void {
+  const existing = sameNamed($projectTree.get(), label)
+
+  if (existing) {
+    return showMovedAtOnce(sessionId, existing.id, '')
+  }
+
+  const id = `${PROVISIONAL_PREFIX}${labelKey(label)}`
+  const node: SidebarProjectTree = { id, label, path: null, repos: [], sessionCount: 0, sessionIds: [] }
+  provisionalProjects.set(id, { at: Date.now(), node })
+  $projectTree.set([node, ...$projectTree.get().filter(n => n.id !== id)])
+  const undoMove = showMovedAtOnce(sessionId, id, '')
+
+  return () => {
+    undoMove()
+    provisionalProjects.delete(id)
+    $projectTree.set($projectTree.get().filter(n => n.id !== id))
+  }
 }
 
 /** Every session row the cached tree carries (previews and lanes). */

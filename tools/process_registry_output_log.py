@@ -11,6 +11,7 @@ import codecs
 from contextlib import suppress
 import logging
 import os
+import re
 from pathlib import Path
 import time
 from typing import Optional
@@ -86,6 +87,15 @@ def record_exit_command(log: Path, command: str) -> str:
     return f"__hermes_exit_file={target}; trap 'printf \"%s\\n\" \"$?\" > \"$__hermes_exit_file\"' EXIT\n{command}"
 
 
+def strip_shell_markers(text: str, markers) -> str:
+    """Drop the foreground wrapper's own trailer lines (``printf '\\n<m>...<m>\\n'``, base_session_env) for
+    exactly ``markers``: a survivable foreground command handed to the background tees them into its log. [daveey]"""
+    for marker in markers or ():
+        if marker and marker in text:
+            text = re.sub(rf"\n{re.escape(marker)}[^\n]*?{re.escape(marker)}\n", "", text)
+    return text
+
+
 def recorded_exit_code(log) -> Optional[int]:
     try:
         return int(_exit_path(log).read_text(encoding="utf-8-sig").strip())
@@ -105,10 +115,22 @@ class ProcessOutputLogMixin:
         # poll()/wait() reconcile asks this reader to finish instead of reading a pipe itself.
         session._reader_selectable = True
 
-        head_noise = True
+        head_noise, held = True, ""
 
-        def ingest(text: str) -> None:
-            nonlocal head_noise
+        def ingest(text: str, final: bool = False) -> None:
+            nonlocal head_noise, held
+            if session.shell_markers:
+                # A wrapper marker line (``\n<m>...<m>\n``) can straddle two reads: an unfinished one is the
+                # text from the last newline, so hold that back while it could still become one. [daveey]
+                text = strip_shell_markers(held + text, session.shell_markers)
+                cut = text.rfind("\n")
+                tail = text[cut + 1:] if cut >= 0 and not final else None
+                if tail is not None and any(m.startswith(tail) or tail.startswith(m) for m in session.shell_markers):
+                    text, held = text[:cut], text[cut:]
+                else:
+                    held = ""
+            if not text:
+                return
             if head_noise:  # ``bash -lic`` startup warnings, as the pipe reader strips them
                 text = self._clean_shell_noise(text)
                 head_noise = not text.strip()
@@ -138,11 +160,10 @@ class ProcessOutputLogMixin:
                     time.sleep(_TAIL_SECONDS)
         except OSError as exc:
             logger.warning("Process output log %s unreadable: %s", session.output_log, exc)
+        ingest(decoder.decode(b"", final=True), final=True)
         if proc is not None:
             self._finish_reader(session, decoder, ingest, "Log", proc.wait, lambda: proc.returncode)
             return
-        if tail := decoder.decode(b"", final=True):
-            ingest(tail)
         code = recorded_exit_code(session.output_log)
         if code is None:
             # SIGKILL / exec past the trap: the spawner is gone and no status was recorded.

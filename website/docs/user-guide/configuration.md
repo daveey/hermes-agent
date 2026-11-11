@@ -383,6 +383,21 @@ real_home = Path(os.environ.get("HERMES_REAL_HOME", os.environ["HOME"]))
 The agent has the same filesystem access as your user account. Use `hermes tools` to disable tools you don't want, or switch to Docker for sandboxing.
 :::
 
+#### `terminal.update_survivable_processes`
+
+Default `false`. On Linux with a usable `systemd-run --user --scope`, setting it to `true` lets terminal
+processes outlive a gateway or backend restart (for example a Hermes update):
+
+- every `terminal(background=true)` job runs in its own transient scope with a file-backed log, as if it
+  had `persist_on_release=true` (an explicit `persist_on_release=false` still wins; `pty=true` jobs keep
+  their PTY and are not covered). The next backend re-attaches it by PID and start time, `process_manage`
+  works on it, and its completion notice reaches the owning chat or Kanban run once;
+- a foreground command whose timeout is above 60 seconds runs in its own scope too. If an update pause, a
+  gateway shutdown or a backend exit interrupts it, it keeps running as a background job of the session and
+  the result ends with `process continues as <session_id>`. A user Stop still kills it.
+
+Without a usable scope the setting logs one warning and nothing changes.
+
 ### Docker Backend
 
 Runs commands inside a Docker container with security hardening (all capabilities dropped, no privilege escalation, PID limits).

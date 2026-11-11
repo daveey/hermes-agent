@@ -4,6 +4,7 @@ The run scope is OOMPolicy=stop / KillMode=control-group and is stopped when the
 it ends, which killed a persisted paid-rental watchdog (hub, 2026-11-03 03:42Z).
 """
 
+import contextlib
 import json
 import os
 import subprocess
@@ -206,8 +207,12 @@ def test_real_persisted_job_survives_stop_of_its_spawning_user_service(tmp_path,
         # systemd-run execs the job only once its scope exists; stopping the spawner earlier tests nothing.
         wait_until(lambda: spawned["unit"] and Path(f"/proc/{pid}/cgroup").read_text().rstrip().endswith(
             "/" + spawned["unit"]), what="the job's own scope")
+        # ...and only once the command itself runs: until then the scope holds ``bash -lic``, which ignores
+        # SIGTERM, so a stop in that window is lost and waits out TimeoutStopSec (a loaded host widens it).
         if chatty:
             wait_until(ticks.exists, what="the job's first output")
+        else:
+            wait_until(lambda: "sleep" in _scope_comms(pid), what="the job's command to start")
         # ``stop`` returns once systemd has killed the unit's whole cgroup (KillMode=control-group).
         subprocess.run(["systemctl", "--user", "stop", unit], check=True, timeout=30, env=env)
         assert subprocess.run(["systemctl", "--user", "is-active", "--quiet", unit],
@@ -225,6 +230,16 @@ def test_real_persisted_job_survives_stop_of_its_spawning_user_service(tmp_path,
             subprocess.run(["systemctl", "--user", "stop", spawned["unit"]], check=False, timeout=30, env=env)
         if spawned.get("pid") and _alive(spawned["pid"]):
             os.kill(spawned["pid"], 9)
+
+
+def _scope_comms(pid: int) -> set:
+    """Command names of every process in ``pid``'s cgroup."""
+    rel = Path(f"/proc/{pid}/cgroup").read_text().strip().split("::", 1)[-1]
+    comms = set()
+    for member in (Path("/sys/fs/cgroup") / rel.lstrip("/") / "cgroup.procs").read_text().split():
+        with contextlib.suppress(OSError):
+            comms.add(Path(f"/proc/{member}/comm").read_text().strip())
+    return comms
 
 
 def _in_real_run_scope() -> bool:
@@ -252,6 +267,8 @@ def test_real_persisted_job_lands_outside_run_scope(tmp_path, monkeypatch):
         assert session.systemd_unit and cgroup.rstrip().endswith("/" + session.systemd_unit), cgroup
         assert f"/{KANBAN_SLICE}/" in cgroup
         assert "hermes-worker-kanban-" not in cgroup
+        # A stop before the command runs hits ``bash -lic`` (ignores SIGTERM) and waits out TimeoutStopSec.
+        wait_until(lambda: "sleep" in _scope_comms(session.pid), what="the job's command to start")
     finally:
         subprocess.run(["systemctl", "--user", "stop", session.systemd_unit], check=False, timeout=15,
                        env=pr.systemd_user_bus_env() or os.environ)
