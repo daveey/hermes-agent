@@ -252,9 +252,11 @@ def target_info(target: str, *, now: float, remote: Optional[dict] = None) -> di
         name = c["name"]
         if not name.startswith(prefix):
             continue
-        tools = {} if tools is None else tools
         raw = c.get("checked_at")
-        if not c.get("ok") or isinstance(raw, bool) or not isinstance(raw, (int, float)) or now - raw > limit:
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0 <= now - raw <= limit:
+            continue
+        tools = {} if tools is None else tools
+        if not c.get("ok"):
             continue
         _, prof, tool = name.split(":", 2)
         tools.setdefault(prof, set()).add(tool)
