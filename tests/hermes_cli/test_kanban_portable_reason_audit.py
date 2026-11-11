@@ -133,3 +133,34 @@ def test_create_task_records_a_passed_reason(kanban_home):
         tid = kb.create_task(conn, title="tool card", placement_audit={"portable_reason": "local marker"})
     assert created_payload(tid)["portable_reason"] == "local marker"
     assert json.dumps(created_payload(tid))  # stays JSON
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_db_policy_is_creation_time_not_later_state(kanban_home, monkeypatch, pinned):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    monkeypatch.setattr(placement.reg, "self_gateway", lambda: "hub")
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="Implement cloneable repository fix", assignee="default",
+                             requires=["terminal", "file", "git"], placement_checked=pinned,
+                             placement_audit={"portable_reason": None, "placement_policy": "untrusted"})
+        expected = None if pinned else "worker-first-v1"
+        assert kb.get_task(conn, tid).placement_policy == expected
+        # Simulate subsequent assignment changes in this isolated fixture, never production.
+        conn.execute("UPDATE tasks SET placement_policy=NULL WHERE id=?", (tid,))
+    assert created_payload(tid)["placement_policy"] == expected
+
+
+def test_runtime_pin_does_not_disable_cloneable_implementation():
+    from hermes_cli.kanban_worker_placement import creation_audit
+
+    cfg = {"worker_pools": {"hub": ["worker-1"]}}
+    repo = {"title": "Implement owner-feed regression in a cloneable repository",
+            "requires": ["terminal", "file", "git"], "assignee": "default"}
+    runtime = {**repo, "title": "Investigate stale session-idle owner evidence",
+               "runs_on": ["machine:hub"], "placement": "local"}
+    assert creation_audit(runtime, cfg)["portable_reason"] is not None
+    assert "placement_policy" not in placement.decide(runtime, cfg=cfg, self_gw="hub")
+    assert creation_audit(repo, cfg)["portable_reason"] is None
+    assert placement.decide(repo, cfg=cfg, self_gw="hub")["placement_policy"] == "worker-first-v1"

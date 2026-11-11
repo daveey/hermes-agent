@@ -23,7 +23,7 @@ def tool_creation_audit(args: dict, **effective) -> dict | None:
 def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
                    tenant, workspace_kind, workspace_path, branch_name, project_id,
                    skills, goal_mode, model_override, provider_override, created_by, requires,
-                   human_request=None, placement_audit=None):
+                   placement_policy, human_request=None, placement_audit=None):
     from hermes_cli import kanban_db as kb
 
     kb._append_event(conn, task_id, "created", {
@@ -43,6 +43,8 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
         "provider_override": provider_override,
         # Why a worker pool can or cannot take it (kanban_worker_placement.creation_audit); absent with no pool.
         **(placement_audit if isinstance(placement_audit, dict) else {}),
+        # Final insertion policy, not a later assignment or a caller's diagnostic override.
+        "placement_policy": placement_policy,
     })
     if status == "blocked":
         # A creation-time human ask is a decision wait: validate_human_request

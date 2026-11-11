@@ -48,3 +48,5 @@ def test_effective_creation_audit_preserves_enrollment(kanban_home, tmp_path, mo
         assert task.project_id == (project_id if case == "inherited-project" else None)
         assert task.workspace_kind == ("worktree" if case == "inherited-project" else "scratch")
         assert event.payload["portable_reason"] == reason
+        assert "placement_policy" in event.payload
+        assert event.payload["placement_policy"] == policy

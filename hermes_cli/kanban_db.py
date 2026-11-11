@@ -1390,7 +1390,7 @@ def create_task(
                     workspace_path=workspace_path, branch_name=branch_name, project_id=project_id,
                     skills=skills_list, goal_mode=goal_mode, model_override=model_override,
                     provider_override=provider_override, created_by=created_by, requires=required,
-                    human_request=human_request, placement_audit=placement_audit,
+                    human_request=human_request, placement_audit=placement_audit, placement_policy=placement_policy,
                 )
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 initialize_ownership(conn, task_id, creator_task_id, parents, now, chat_origin)
