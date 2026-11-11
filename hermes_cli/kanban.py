@@ -1299,6 +1299,12 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 fail_msg[tid] = (f"cannot complete {tid}: {empty_err}. Pass --result/--summary "
                                  f"describing what was done (an empty completion is not evidence).")
                 return False
+            except ValueError as receipt_err:
+                if not str(receipt_err).startswith("completion_receipt"):
+                    raise
+                # Malformed receipt or unverified pending owner: admission wrote nothing.
+                fail_msg[tid] = f"cannot complete {tid}: {receipt_err}"
+                return False
             if not done:
                 # complete_task returns bare False for a dependency refusal too;
                 # name the open parents instead of claiming the id is unknown.
