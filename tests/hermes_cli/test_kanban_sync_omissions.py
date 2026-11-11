@@ -175,6 +175,28 @@ def test_duplicate_original_verdict_cannot_grant_another_retry(live, svc):
                         (original['op_id'],)).fetchone()[0] == receipt['compat_op_id']
 
 
+def test_successful_delete_without_wire_fields_retires_outbox(live, svc):
+    tid = kb.create_task(live, title='delete control', assignee='worker')
+    client.push(live, svc.hub('macbook'), 'default', 'macbook', primary=True)
+    live.execute('DELETE FROM tasks WHERE id=?', (tid,))
+    live.commit()
+    assert live.execute("SELECT 1 FROM kanban_sync_outbox WHERE op='delete'").fetchone()
+    client.push(live, svc.hub('macbook'), 'default', 'macbook', primary=True)
+    assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE op='delete'").fetchone()
+
+
+def test_applied_recalled_row_does_not_acknowledge_unsent_value(live, svc):
+    tid = omit_pin(live, svc)
+    live.execute('UPDATE tasks SET model_pin_mandatory=0 WHERE id=?', (tid,))
+    live.commit()
+    def recalled(board, batch):
+        # Board board.ts stores and recalls its original Outcome, including row.
+        return {'results': [{'client_op_id': op['client_op_id'], 'status': 'applied',
+            'row': {'uid': op['uid'], 'model_pin_mandatory': 1}} for op in batch]}
+    client.push(live, SimpleNamespace(ops=recalled), 'default', 'macbook', primary=True)
+    assert live.execute("SELECT 1 FROM kanban_sync_omissions WHERE state!='delivered'").fetchone()
+
+
 def test_transient_restore_identity_change_still_releases_custody(live, svc):
     tid = omit_pin(live, svc)
     version = live.execute('SELECT sync_version FROM tasks WHERE id=?', (tid,)).fetchone()[0]
