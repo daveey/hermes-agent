@@ -63,6 +63,8 @@ def present(value, path):
 
 def check(actual, case):
     expected = case["expected"]
+    if case.get("full_output"):
+        assert same_json(actual, expected), {"expected": expected, "actual": actual}
     view = {**actual, "states": [o["state"] for o in actual.get("observations", [])]}
     assert subset(view, expected), {"expected": expected, "actual": {k: view.get(k) for k in expected}}
     for path in case.get("expected_absent", []):
@@ -78,7 +80,8 @@ def test_fixture_sections_are_nonempty_and_unique():
 def test_shared_semantics(case):
     value = case_input(case)
     before = deepcopy(value)
-    actual = project(value, now=case.get("now", 1001), source_class=case.get("source_class", "sidebar"))
+    actual = project(value, now=case.get("now", 1001), source_class=case.get("source_class", "sidebar"),
+                     expected_identity=case.get("expected_identity"))
     check(actual, case)
     assert value == before  # pure: input (including private probes) is never mutated
     if "delivery_receipt" in value and case["expected"].get("state") == "done":

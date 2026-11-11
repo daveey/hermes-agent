@@ -346,12 +346,15 @@ def _last_known(out):
 
 
 def _project(value, now, source_class, expected_identity):
-    out = adapt(_strip_probes(value), now=now, source_class=source_class)
-    _progress(out, now)
     if expected_identity is not None:
         expected = identity_key(expected_identity)
-        if expected is None or expected != identity_key(out.get("identity")):
-            return _unknown(out, "execution_identity_mismatch")
+        raw_identity = value.get("identity") if isinstance(value, dict) else None
+        if expected is None or expected != identity_key(raw_identity):
+            # Foreign execution fields are not history of the requested execution.
+            out = _project({"identity": deepcopy(expected_identity)}, now, source_class, None)
+            return _unknown(out, "invalid_requested_identity" if expected is None else "execution_identity_mismatch")
+    out = adapt(_strip_probes(value), now=now, source_class=source_class)
+    _progress(out, now)
     if out["state"] == "unknown":
         return out
     if out["identity"]["kind"] not in WORK_KINDS:
@@ -371,7 +374,8 @@ def project(value, *, now, source_class="sidebar", expected_identity=None):
     """Strict work semantics on the published freshness envelope; no I/O or authority writes.
 
     Receipt adapters must supply existing verification, never infer it from a status
-    label. Historical receipts/requests survive every failure, including expiration.
+    label. Same-execution receipts/requests survive uncertainty, including expiration;
+    an expected-identity mismatch returns only the requested identity, without foreign history.
     Private ``resolved_check*`` probe fields are stripped from ``human_request`` on entry.
     """
     out = _project(value, now, source_class, expected_identity)
@@ -393,7 +397,8 @@ def select(values, *, identity, now, source_class="sidebar"):
                and identity_key(v.get("identity")) == key]
     base = {"identity": deepcopy(identity)}
     if not matches:
-        return project(base, now=now, source_class=source_class)
+        return _unknown(project(base, now=now, source_class=source_class),
+                        "invalid_requested_identity" if key is None else "no_observation")
     if any(not epoch(v.get("observed_at")) for v in matches):
         out = _unknown(project(base, now=now, source_class=source_class), "invalid_candidate_timing")
     else:

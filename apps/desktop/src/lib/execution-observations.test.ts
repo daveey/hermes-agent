@@ -18,6 +18,8 @@ interface Case extends Patch {
   source_class?: string
   expected: Record<string, unknown>
   expected_absent?: string[]
+  full_output?: boolean
+  expected_identity?: unknown
   identity?: unknown
   items?: Item[]
   repeat_count?: number
@@ -84,6 +86,7 @@ function present(value: unknown, path: string): boolean {
 }
 
 function check(actual: Record<string, unknown>, test: Case) {
+  if (test.full_output) {expect(actual).toEqual(test.expected)}
   const observations = (actual.observations ?? []) as { state: string }[]
   const view = { ...actual, states: observations.map(o => o.state) }
 
@@ -112,7 +115,7 @@ describe('shared execution observation semantic contract', () => {
     it(test.id, () => {
       const value = caseInput(test)
       const before = clone(value)
-      const result = projectExecutionObservation(value, (test.now ?? 1001) as number, cls(test))
+      const result = projectExecutionObservation(value, (test.now ?? 1001) as number, cls(test), test.expected_identity)
 
       check(result, test)
       expect(value).toEqual(before)

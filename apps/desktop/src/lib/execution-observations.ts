@@ -217,6 +217,58 @@ function stripProbes(raw: Record<string, unknown>): Record<string, unknown> {
   return out
 }
 
+function envelopeReject(raw: Record<string, unknown>): string | null {
+  const version = get(raw, 'version')
+
+  if (!(typeof version === 'number' && version === 1)) {return 'legacy_or_unsupported_version'}
+
+  if (!validIdentity(get(raw, 'identity'))) {return 'missing_qualified_identity'}
+
+  if (!qualified(get(raw, 'owner'))) {return 'missing_qualified_owner'}
+
+  const refs = get(raw, 'evidence_refs')
+
+  if (!Array.isArray(refs) || refs.length === 0 || !refs.every(nonblank)) {return 'missing_evidence_references'}
+
+  if (!nonblank(get(raw, 'source')) || !nonblank(get(raw, 'source_revision'))) {return 'missing_source_identity'}
+
+  return null
+}
+
+/** Freshness boundary across the envelope and every required source, or the unknown reason. */
+function timingBoundary(raw: Record<string, unknown>, now: number, sourceClass: ObservationSourceClass): { boundary: number } | string {
+  const observed = get(raw, 'observed_at')
+  const until = get(raw, 'valid_until')
+  const ttl = ttlOf(sourceClass)
+
+  if (ttl === undefined || !epoch(now) || !epoch(observed) || !epoch(until)) {return 'missing_or_invalid_source_timing'}
+
+  if (until < observed || now < observed) {return 'clock_inconsistent'}
+
+  let boundary = Math.min(until, observed + ttl)
+  const sources = has(raw, 'required_sources') ? raw.required_sources : []
+
+  if (!Array.isArray(sources)) {return 'invalid_required_sources'}
+
+  for (const s of sources) {
+    const at = get(s, 'observed_at')
+    const end = get(s, 'valid_until')
+
+    if (!epoch(at) || !epoch(end)) {return 'missing_required_source_timing'}
+
+    if (end < at || now < at) {return 'clock_inconsistent'}
+
+    // Absent inherits the envelope class; explicit null/array/unknown is invalid.
+    const sourceTTL = has(s as object, 'source_class') ? ttlOf((s as Record<string, unknown>).source_class) : ttl
+
+    if (sourceTTL === undefined) {return 'invalid_required_source_class'}
+
+    boundary = Math.min(boundary, end, at + sourceTTL)
+  }
+
+  return { boundary }
+}
+
 function freshness(source: Record<string, unknown>, now: number, sourceClass: ObservationSourceClass): ExecutionObservation {
   const raw = copy(source)
   const state = get(raw, 'state')
@@ -233,48 +285,16 @@ function freshness(source: Record<string, unknown>, now: number, sourceClass: Ob
     last_known_state: stateOf(state) && state !== 'unknown' ? state : get(raw, 'last_known_state')
   }
 
-  const version = get(raw, 'version')
+  const rejected = envelopeReject(raw)
 
-  if (!(typeof version === 'number' && version === 1)) {return unknown(out, 'legacy_or_unsupported_version')}
+  if (rejected) {return unknown(out, rejected)}
 
-  if (!validIdentity(get(raw, 'identity'))) {return unknown(out, 'missing_qualified_identity')}
+  const timing = timingBoundary(raw, now, sourceClass)
 
-  if (!qualified(get(raw, 'owner'))) {return unknown(out, 'missing_qualified_owner')}
+  if (typeof timing === 'string') {return unknown(out, timing)}
 
-  const refs = get(raw, 'evidence_refs')
-
-  if (!Array.isArray(refs) || refs.length === 0 || !refs.every(nonblank)) {return unknown(out, 'missing_evidence_references')}
-
-  if (!nonblank(get(raw, 'source')) || !nonblank(get(raw, 'source_revision'))) {return unknown(out, 'missing_source_identity')}
-
-  const observed = get(raw, 'observed_at')
-  const until = get(raw, 'valid_until')
-  const ttl = ttlOf(sourceClass)
-
-  if (ttl === undefined || !epoch(now) || !epoch(observed) || !epoch(until)) {return unknown(out, 'missing_or_invalid_source_timing')}
-
-  if (until < observed || now < observed) {return unknown(out, 'clock_inconsistent')}
-
-  let boundary = Math.min(until, observed + ttl)
-  const sources = has(raw, 'required_sources') ? raw.required_sources : []
-
-  if (!Array.isArray(sources)) {return unknown(out, 'invalid_required_sources')}
-
-  for (const s of sources) {
-    const at = get(s, 'observed_at')
-    const end = get(s, 'valid_until')
-
-    if (!epoch(at) || !epoch(end)) {return unknown(out, 'missing_required_source_timing')}
-
-    if (end < at || now < at) {return unknown(out, 'clock_inconsistent')}
-
-    // Absent inherits the envelope class; explicit null/array/unknown is invalid.
-    const sourceTTL = has(s as object, 'source_class') ? ttlOf((s as Record<string, unknown>).source_class) : ttl
-
-    if (sourceTTL === undefined) {return unknown(out, 'invalid_required_source_class')}
-
-    boundary = Math.min(boundary, end, at + sourceTTL)
-  }
+  const boundary = timing.boundary
+  const observed = get(raw, 'observed_at') as number
 
   out.valid_until = boundary
   out.age_seconds = now - observed
@@ -403,15 +423,20 @@ function lastKnown(out: ExecutionObservation): ExecutionObservation {
 const waitKind = (out: ExecutionObservation): unknown => get(get(out, 'wait'), 'kind')
 
 function project(value: unknown, now: number, sourceClass: ObservationSourceClass, expectedIdentity?: unknown): ExecutionObservation {
-  const out = freshness(stripProbes(object(value)), now, sourceClass)
-
-  progress(out, now)
-
   if (expectedIdentity !== undefined) {
     const expected = executionIdentityKey(expectedIdentity)
 
-    if (expected === null || expected !== executionIdentityKey(out.identity)) {return unknown(out, 'execution_identity_mismatch')}
+    if (expected === null || expected !== executionIdentityKey(get(value, 'identity'))) {
+      // Foreign execution fields are not history of the requested execution.
+      const out = project({ identity: copy(expectedIdentity) }, now, sourceClass)
+
+      return unknown(out, expected === null ? 'invalid_requested_identity' : 'execution_identity_mismatch')
+    }
   }
+
+  const out = freshness(stripProbes(object(value)), now, sourceClass)
+
+  progress(out, now)
 
   if (out.state === 'unknown') {return out}
 
@@ -457,7 +482,9 @@ export function selectExecutionObservation(
 
   const base = { identity: copy(identity) }
 
-  if (matches.length === 0) {return projectExecutionObservation(base, now, sourceClass)}
+  if (matches.length === 0) {
+    return unknown(projectExecutionObservation(base, now, sourceClass), key === null ? 'invalid_requested_identity' : 'no_observation')
+  }
 
   let out: ExecutionObservation
 
