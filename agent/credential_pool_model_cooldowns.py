@@ -67,9 +67,12 @@ class CredentialPoolModelCooldownMixin:
         selecting it from the pool (env / borrowed credentials). Tokens the
         pool does not know fail open: no row can attribute a cooldown to them.
         """
+        from agent.credential_pool_disabled import disabled_keys, matches
+        disabled = disabled_keys(self.provider)  # a user-disabled account is blocked for every model
         with self._lock:
             return any(
-                entry.runtime_api_key == token and model_cooldown_until(entry, model) is not None
+                entry.runtime_api_key == token
+                and (matches(entry, disabled) or model_cooldown_until(entry, model) is not None)
                 for entry in self._entries
             )
 

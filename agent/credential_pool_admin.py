@@ -23,6 +23,11 @@ class CredentialNotSavedError(RuntimeError):
 
 
 class CredentialPoolAdminMixin:
+    def _enabled_entries(self) -> list[PooledCredential]:
+        """Pool rows minus the ones the user disabled (``hermes auth disable``); call under ``_lock``."""
+        from agent.credential_pool_disabled import enabled_entries
+        return enabled_entries(self.provider, self._entries)
+
     def reset_status(self, credential_id: str) -> Optional[PooledCredential]:
         """Clear only the target's local error state, preserving sibling cooldowns."""
         with self._lock:

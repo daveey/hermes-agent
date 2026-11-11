@@ -509,6 +509,31 @@ def auth_priority_command(args) -> None:
     _report_priority(provider, pool, moved, requested, "Set", "to")
 
 
+def _auth_set_disabled(args, disabled: bool) -> None:
+    """`hermes auth disable|enable <provider> <target>`: switch one pooled credential off or back on."""
+    from agent.credential_pool_disabled import disabled_by_root, set_credential_disabled
+    provider = _normalize_provider(getattr(args, "provider", ""))
+    target = getattr(args, "target", None)
+    pool = load_pool(provider)
+    index, matched, error = pool.resolve_target(target)
+    if matched is None or index is None:
+        raise SystemExit(f"{error} Provider: {provider}.")
+    changed = set_credential_disabled(provider, matched, disabled)
+    verb = "Disabled" if disabled else "Enabled"
+    state = "" if changed else " (already " + ("disabled" if disabled else "enabled") + ")"
+    print(f"{verb} {provider} credential #{index} ({matched.label}){state}")
+    if not disabled and disabled_by_root(provider, matched):
+        print("note: the global Hermes home also disables this credential; run `hermes auth enable` there too.")
+
+
+def auth_disable_command(args) -> None:
+    _auth_set_disabled(args, True)
+
+
+def auth_enable_command(args) -> None:
+    _auth_set_disabled(args, False)
+
+
 def _free_tier_lines() -> tuple[str, str]:
     """The two-line free-tier rendering shared by every auth display surface (R-USR-1)."""
     from hermes_cli.anon_auth import FREE_TIER_LABEL, GUEST_MODEL, UPGRADE_HINT
@@ -536,6 +561,8 @@ def auth_list_command(args) -> None:
         if not entries:
             continue
         current = pool.peek()
+        from agent.credential_pool_disabled import disabled_keys, matches as _is_disabled
+        disabled = disabled_keys(provider)
         if provider == "nous" and all(_is_free_tier_entry(e) for e in entries):
             # The free tier is not a credential the user added; never list it as one.
             label, hint = _free_tier_lines()
@@ -546,7 +573,7 @@ def auth_list_command(args) -> None:
         print(f"{provider} ({len(entries)} credentials):")
         for idx, entry in enumerate(entries, start=1):
             marker = "← " if current is not None and entry.id == current.id else "  "
-            status = _format_exhausted_status(entry)
+            status = _format_exhausted_status(entry) + (" [disabled]" if _is_disabled(entry, disabled) else "")
             source = _display_source(entry.source)
             row = (
                 f"  #{idx}  {entry.label:<20} {entry.auth_type:<7} "
@@ -916,6 +943,7 @@ def auth_upgrade_command(args) -> None:
 _AUTH_ACTIONS = {
     "add": auth_add_command, "list": auth_list_command, "remove": auth_remove_command,
     "reset": auth_reset_command, "priority": auth_priority_command, "refresh": auth_refresh_command, "status": auth_status_command,
+    "disable": auth_disable_command, "enable": auth_enable_command,
     "logout": auth_logout_command, "upgrade": auth_upgrade_command}
 
 

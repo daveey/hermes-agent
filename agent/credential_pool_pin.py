@@ -28,6 +28,10 @@ def pinned_anthropic_pool_token(pool: Any, credential_id: str) -> tuple[bool, Op
     entry = next((e for e in pool.entries() if e.id == credential_id), None)
     if entry is None:
         return False, None
+    from agent.credential_pool_disabled import is_credential_disabled
+    if is_credential_disabled(getattr(pool, "provider", "anthropic"), entry):
+        # Disabled mid-session: report it gone so the caller re-resolves onto an enabled account.
+        return False, None
     if entry.auth_type == AUTH_TYPE_OAUTH:
         # Token authority: the shared Claude Code file for the borrowed row, the pool store otherwise.
         if entry.source == "claude_code":

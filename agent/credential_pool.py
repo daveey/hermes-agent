@@ -2055,7 +2055,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         available: list[PooledCredential] = []
         pending_refresh: list[PooledCredential] = []
         sole_credential = self._is_sole_credential()
-        for entry in self._entries:
+        for entry in self._enabled_entries():  # rows switched off by ``hermes auth disable`` never serve
             if self._allowed_auth_types is not None and entry.auth_type not in self._allowed_auth_types:
                 continue
             # Borrowed credentials persist as metadata-only references and are
