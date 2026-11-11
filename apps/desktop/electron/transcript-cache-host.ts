@@ -4,6 +4,11 @@
  * prefetcher against every registry gateway. main.ts injects its backend routing
  * (ensureRegistryBackend + getJsonForBackend) so this module never dials on its own.
  *
+ * The store itself runs on a worker thread (`spawnWorker`, transcript-cache-client.ts): its
+ * SQLite calls are synchronous, and on the main thread a write that waited on the disk froze
+ * the whole app for 1-1.8 s. Everything here awaits the client; the renderer's sync read is
+ * answered when the worker replies (the renderer blocks on it either way, the main loop does not).
+ *
  * IPC (preload exposes it as `hermesDesktop.transcriptCache`):
  *   hermes:transcript-cache:read             sendSync  {connectionId, profile, sessionId} -> entry | null
  *   hermes:transcript-cache:put              send      {key, messages, kind: 'latest' | 'older'}
@@ -18,6 +23,14 @@ import path from 'node:path'
 import type { IpcMain } from 'electron'
 
 import { type TranscriptCacheKey, TranscriptCacheStore } from './transcript-cache'
+import {
+  inlineClient,
+  spawnStoreWorker,
+  type StoreOp,
+  type StoreWorkerPort,
+  type TranscriptCacheClient,
+  workerClient
+} from './transcript-cache-client'
 import { type HubSessionRecord, TranscriptPrefetcher } from './transcript-prefetch'
 
 export interface TranscriptCacheHostDeps {
@@ -28,8 +41,24 @@ export interface TranscriptCacheHostDeps {
   log: (line: string) => void
   /** Registry snapshot: the primary id ('' connection ids mean it) and every connection id. */
   registry: () => { connectionIds: string[]; primary: string }
+  /** Tests: start the store worker themselves. The app passes `workerFile` instead. */
+  spawnWorker?: (file: string) => StoreWorkerPort
   userDataDir: string
+  /**
+   * The built worker script (dist/electron-transcript-cache-worker.js) that owns the cache file.
+   * Omitted (tests) or unusable: the store runs in this thread.
+   */
+  workerFile?: string
 }
+
+/** The registry as this module reads it (main.ts keeps the registry file's own shape). */
+export const registrySnapshot = (registry: { connections: readonly { id: string }[]; primary: string }) => ({
+  connectionIds: registry.connections.map(connection => connection.id),
+  primary: registry.primary
+})
+
+/** The renderer's sync read gives up (a cache miss: it falls back to REST) after this long. */
+export const READ_TIMEOUT_MS = 1_500
 
 const GATEWAY_NAME_PREFIX = 'hub-gateway:'
 const HUB_LIST_LIMIT = 2000
@@ -90,7 +119,21 @@ export function markInboxSessions(records: HubSessionRecord[], inbox: readonly O
 }
 
 export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
-  const store = new TranscriptCacheStore(path.join(deps.userDataDir, 'transcript-cache.sqlite'))
+  const file = path.join(deps.userDataDir, 'transcript-cache.sqlite')
+  let inlineStore: null | TranscriptCacheStore = null
+
+  const openInline = (): TranscriptCacheClient => {
+    inlineStore = new TranscriptCacheStore(file)
+
+    return inlineClient(inlineStore, deps.log)
+  }
+
+  const { workerFile } = deps
+  const spawnWorker = deps.spawnWorker ?? (workerFile ? (cache: string) => spawnStoreWorker(workerFile, cache) : null)
+
+  const client: TranscriptCacheClient = spawnWorker
+    ? workerClient({ fallback: openInline, log: deps.log, spawn: () => spawnWorker(file) })
+    : openInline()
 
   const normalizeKey = (raw: any): TranscriptCacheKey | null => {
     const sessionId = String(raw?.sessionId ?? '').trim()
@@ -113,19 +156,38 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
     passive: connectionId !== (deps.registry().primary || 'local')
   })
 
-  const guarded = <T>(label: string, fn: () => T, fallback: T): T => {
-    try {
-      return fn()
-    } catch (error) {
+  /** Fire-and-forget store call: a failure is logged, never thrown out of an IPC listener. */
+  const send = (label: string, op: StoreOp, args: unknown[]) => {
+    void client.call(op, args).catch(error => {
       deps.log(`transcript cache ${label} failed: ${(error as Error)?.message || error}`)
-
-      return fallback
-    }
+    })
   }
 
   deps.ipcMain.on('hermes:transcript-cache:read', (event, raw) => {
     const key = normalizeKey(raw)
-    event.returnValue = key ? guarded('read', () => store.read(key), null) : null
+
+    // Sync IPC: the renderer stays blocked until returnValue is set, so every path sets it once.
+    const reply = (value: unknown) => {
+      try {
+        event.returnValue = value
+      } catch {
+        // the window went away while the read was in flight
+      }
+    }
+
+    if (!key) {
+      reply(null)
+
+      return
+    }
+
+    client.call('read', [key], { timeoutMs: READ_TIMEOUT_MS }).then(
+      entry => reply(entry ?? null),
+      error => {
+        deps.log(`transcript cache read failed: ${(error as Error)?.message || error}`)
+        reply(null)
+      }
+    )
   })
 
   deps.ipcMain.on('hermes:transcript-cache:put', (_event, payload) => {
@@ -135,11 +197,7 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
       return
     }
 
-    guarded(
-      'put',
-      () => (payload.kind === 'older' ? store.putOlder(key, payload.messages) : store.putLatest(key, payload.messages)),
-      false
-    )
+    send('put', payload.kind === 'older' ? 'putOlder' : 'putLatest', [key, payload.messages])
   })
 
   deps.ipcMain.on('hermes:transcript-cache:drop', (_event, payload) => {
@@ -147,7 +205,7 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
       const sessionId = String(payload.sessionId ?? '').trim()
 
       if (sessionId) {
-        guarded('drop', () => store.dropEverywhere(sessionId), undefined)
+        send('drop', 'dropEverywhere', [sessionId])
       }
 
       return
@@ -156,7 +214,7 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
     const key = normalizeKey(payload?.key)
 
     if (key) {
-      guarded('drop', () => store.drop(key), undefined)
+      send('drop', 'drop', [key])
     }
   })
 
@@ -165,14 +223,14 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
     const from = String(payload?.from ?? '').trim() || 'default'
     const to = String(payload?.to ?? '').trim() || 'default'
 
-    guarded('migrate', () => store.migrateProfile(connectionId, from, to), undefined)
+    send('migrate', 'migrateProfile', [connectionId, from, to])
   })
 
   deps.ipcMain.on('hermes:transcript-cache:clear', () => {
-    guarded('clear', () => store.clear(), undefined)
+    send('clear', 'clear', [])
   })
 
-  deps.ipcMain.handle('hermes:transcript-cache:stats', () => store.stats())
+  deps.ipcMain.handle('hermes:transcript-cache:stats', () => client.call('stats'))
 
   // Hub gateway name -> registry connection id, learned from each connection's own
   // hub-sync status and remembered in the cache file so it survives restarts.
@@ -180,7 +238,7 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
 
   const connectionForGateway = async (gateway: string): Promise<string | undefined> => {
     const { connectionIds } = deps.registry()
-    const remembered = store.getMeta(GATEWAY_NAME_PREFIX + gateway)
+    const remembered = await client.call<null | string>('getMeta', [GATEWAY_NAME_PREFIX + gateway])
 
     if (remembered && connectionIds.includes(remembered)) {
       return remembered
@@ -199,7 +257,7 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
         const name = typeof status?.gateway === 'string' ? status.gateway.trim() : ''
 
         if (name) {
-          store.setMeta(GATEWAY_NAME_PREFIX + name, connectionId)
+          await client.call('setMeta', [GATEWAY_NAME_PREFIX + name, connectionId])
 
           if (name === gateway) {
             return connectionId
@@ -267,7 +325,11 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
       }
     },
     log: deps.log,
-    store
+    store: {
+      meta: key => client.call('meta', [key]),
+      metaMany: keys => client.call('metaMany', [keys]),
+      putLatest: (key, latest, meta) => client.call<boolean>('putLatest', [key, latest, meta])
+    }
   })
 
   // [daveey] An `@session` ref chip rendered/hovered: warm that session so its first click paints from cache.
@@ -280,12 +342,21 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
   })
 
   return {
+    client,
     prefetcher,
     start: () => prefetcher.start(),
     stop: () => {
       prefetcher.stop()
-      guarded('close', () => store.close(), undefined)
+
+      try {
+        client.close()
+      } catch (error) {
+        deps.log(`transcript cache close failed: ${(error as Error)?.message || error}`)
+      }
     },
-    store
+    /** The in-thread store, or null while a worker thread owns the file. */
+    get store() {
+      return inlineStore
+    }
   }
 }

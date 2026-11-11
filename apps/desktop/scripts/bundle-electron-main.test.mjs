@@ -1,12 +1,13 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { Worker } from 'node:worker_threads'
 
 import { afterAll, beforeAll, expect, test } from 'vitest'
 
-import { bundleElectronMain } from './bundle-electron-main.mjs'
+import { bundleElectronMain, electronOutputs } from './bundle-electron-main.mjs'
 
 const repo = resolve(import.meta.dirname, '../../..')
 let root
@@ -132,4 +133,43 @@ test('the bundled entry reads desktop.electron_flags from the parent of a profil
       HERMES_HOME: join(home, 'profiles', 'alpha')
     })
   ).toEqual({ relaunched: ['.', '--ozone-platform=x11'] })
+})
+
+// [daveey] main.ts evals this file's text in a worker thread, so the cache's SQLite I/O stays off
+// Electron's main loop. It must be emitted, need nothing but node builtins, and answer the store protocol.
+test('the transcript cache worker bundle runs from its text alone in a worker thread', async () => {
+  const file = join(root, 'dist', electronOutputs.transcriptCacheWorker)
+
+  expect(electronOutputs.transcriptCacheWorker).toBe('electron-transcript-cache-worker.js')
+  expect(existsSync(file)).toBe(true)
+
+  const source = readFileSync(file, 'utf8')
+  const required = [...source.matchAll(/require\("([^"]+)"\)/g)].map(match => match[1])
+  expect(required.filter(name => !name.startsWith('node:'))).toEqual([])
+
+  const worker = new Worker(source, { eval: true, workerData: { file: join(root, 'worker-cache.sqlite') } })
+
+  const ask = (id, op, args) =>
+    new Promise((done, fail) => {
+      worker.once('message', done)
+      worker.once('error', fail)
+      worker.postMessage({ args, id, op })
+    })
+
+  const key = { connectionId: 'mini', profile: 'default', sessionId: 's1' }
+
+  try {
+    expect(await ask(1, 'putLatest', [key, [{ content: 'hi', id: 1, role: 'user' }], { activity: 3 }])).toMatchObject({
+      id: 1,
+      ok: true,
+      result: true
+    })
+    expect(await ask(2, 'read', [key])).toMatchObject({
+      id: 2,
+      ok: true,
+      result: { activity: 3, messages: [{ content: 'hi', id: 1, role: 'user' }] }
+    })
+  } finally {
+    await worker.terminate()
+  }
 })

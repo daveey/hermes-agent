@@ -607,7 +607,7 @@ import { installSystemCaTrust } from './system-ca'
 import { terminalGatewayTarget } from './terminal-gateway-target'
 import { registerTerminalIpc } from './terminal-ipc'
 import { applyTitleBarOverlay, isHexColor, nativeOverlayWidth, titleBarOverlayOptions } from './titlebar-overlay-width'
-import { installTranscriptCache } from './transcript-cache-host'
+import { installTranscriptCache, registrySnapshot } from './transcript-cache-host'
 import {
   applyWindowsBackdrop,
   defaultTranslucencyState,
@@ -17834,12 +17834,9 @@ app.whenReady().then(() => {
       getJson: (descriptor, requestPath, opts) => getJsonForBackend(descriptor, requestPath, opts),
       ipcMain,
       log: line => rememberLog(`[transcript-cache] ${line}`),
-      registry: () => {
-        const registry = readDesktopConnectionsRegistry()
-
-        return { connectionIds: registry.connections.map(c => c.id), primary: registry.primary }
-      },
-      userDataDir: app.getPath('userData')
+      registry: () => registrySnapshot(readDesktopConnectionsRegistry()),
+      userDataDir: app.getPath('userData'),
+      workerFile: path.join(APP_ROOT, 'dist', 'electron-transcript-cache-worker.js')
     })
     setTimeout(() => transcriptCacheHost?.start(), 15_000).unref?.()
   } catch (error) {
