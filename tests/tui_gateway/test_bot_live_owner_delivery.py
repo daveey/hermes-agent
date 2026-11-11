@@ -91,9 +91,19 @@ def test_viewer_poller_never_discovers_or_claims_bot_execution(monkeypatch, tmp_
     events.put({'type': 'owned-completion'})
     monkeypatch.setattr(process_registry, 'completion_queue', events)
     delivered = []
+    import logging
+
+    def unexpected_failure(what, exc):
+        raise AssertionError(f"{what}: {exc}") from exc
+
+    # Server installation rebinds helpers too; a shallow copy of module globals does not.
+    release_claims = rebind(session_notifications._kb_release_claims, {
+        '_notif_log_failure': unexpected_failure, 'logger': logging.getLogger(__name__),
+    })
     # Start from the module's own globals: the fork's poller also reads its parked/held handoff helpers.
     poll = rebind(session_notifications._notification_poller_scoped_loop, {
         **vars(session_notifications),
+        '_kb_release_claims': release_claims, '_notif_log_failure': unexpected_failure,
         'time': time, '_LOOP_POLL_SECONDS': 0, '_KANBAN_POLL_SECONDS': 0,
         '_poll_bot_live_delivery_once': lambda *a: calls.append('legacy-claim'),
         '_maybe_fire_tui_loop_tick': lambda *a: None,
