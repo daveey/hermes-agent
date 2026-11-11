@@ -223,6 +223,19 @@ def superseding_run_id(fetch: Callable[[str], Any] = _github_get) -> int | None:
     return None
 
 
+def delegated_run(fetch: Callable[[str], Any]) -> int | None:
+    """Share the bounded, fail-closed duplicate lookup between required gates."""
+    try:
+        duplicate = superseding_run_id(fetch)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        print(f"Superseding-run lookup failed, keeping the failure: {exc}")
+        return None
+    if duplicate is not None:
+        print(f"::notice::Cancelled duplicate run: run {duplicate} on the same head SHA "
+              "carries the required verdict")
+    return duplicate
+
+
 def compact_results(needs: dict[str, dict[str, Any]] | None) -> dict[str, str]:
     """{job_name: result} for every entry, for the PR comment assembler."""
     return {name: (info or {}).get("result", "") for name, info in (needs or {}).items()}
@@ -266,6 +279,13 @@ def main(argv: list[str] | None = None, fetch: Callable[[str], Any] = _github_ge
     needs = json.load(sys.stdin)
     if args.macos_state:
         verdict = evaluate_macos_state(needs)
+        # Repair only the cancellation to check that selection is known and
+        # detect succeeded. No skipped, missing or failed lane may delegate.
+        lane = ((needs or {}).get(MACOS_STATE_JOB) or {}).get("result")
+        repaired = {**(needs or {}), MACOS_STATE_JOB: {"result": "success"}}
+        if (args.allow_superseded and lane == "cancelled"
+                and evaluate_macos_state(repaired)["ok"] and delegated_run(fetch) is not None):
+            return 0
         print(("" if verdict["ok"] else "::error::") + verdict["reason"])
         return 0 if verdict["ok"] else 1
     verdict = evaluate_gate(needs, release=args.release)
@@ -279,16 +299,11 @@ def main(argv: list[str] | None = None, fetch: Callable[[str], Any] = _github_ge
     print(f"{NEEDS_JSON_OUTPUT}={json.dumps(compact)}")
     duplicate = None
     if args.allow_superseded and only_cancellations(needs, verdict):
-        try:
-            duplicate = superseding_run_id(fetch)
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:  # fail closed
-            print(f"Superseding-run lookup failed, keeping the failure: {exc}")
+        duplicate = delegated_run(fetch)
     for line in render_report(needs, verdict):
         if duplicate is None or not line.startswith("::error::"):
             print(line)
     if duplicate is not None:
-        print(f"::notice::Cancelled duplicate run: run {duplicate} on the same head SHA "
-              "carries the required verdict")
         return 0
     if verdict["ok"]:
         print("All checks passed" if args.release else "All checks passed (or were skipped)")

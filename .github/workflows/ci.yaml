@@ -616,4 +616,11 @@ jobs:
       - name: Require the selected macOS state lane
         env:
           NEEDS: ${{ toJSON(needs) }}
-        run: printf '%s' "$NEEDS" | python3 scripts/ci/required_results.py --macos-state
+          RELEASE: ${{ inputs.release }}
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(--macos-state)
+          if [ "$RELEASE" = true ]; then args+=(--release);
+          elif [ "$EVENT_NAME" = pull_request ]; then args+=(--allow-superseded); fi
+          printf '%s' "$NEEDS" | python3 scripts/ci/required_results.py "${args[@]}"

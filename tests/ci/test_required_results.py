@@ -338,6 +338,19 @@ def test_without_flag_cancelled_duplicate_still_fails(monkeypatch, capsys):
     assert code == 1
 
 
+@pytest.mark.parametrize("other", [_dup(status="pending"), _dup(status="completed", conclusion="success")])
+def test_macos_cancelled_selected_lane_delegates(monkeypatch, capsys, other):
+    needs = {"detect": {"result": "success", "outputs": {"hermes_state": "true"}},
+             "hermes-state-macos": {"result": "cancelled"}}
+    fetch, calls = _fake_fetch([other])
+    code, out = _run_main(monkeypatch, capsys, needs,
+                          ["--macos-state", "--allow-superseded"], fetch)
+    assert code == 0
+    assert "run 2 on the same head SHA" in out
+    assert "::error::" not in out
+    assert len(calls) == 2
+
+
 def test_release_rejects_allow_superseded(monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         _run_main(monkeypatch, capsys, _CANCELLED_DETECT, ["--release", "--allow-superseded"],
