@@ -406,6 +406,9 @@ def reconcile(conn: sqlite3.Connection, *, now: Optional[int] = None) -> dict:
                 out["dropped"].append(tid)
     if not missing:
         return out
+    from hermes_cli.kanban_ask_resolved_backfill import backfill
+
+    backfill(conn)  # legacy drops without a mark; a no-op once marked
     own = kwc.own_gateway(conn)
     foreign = kwc.foreign_ids(conn, own)
     terminal = (BROKEN_EVENT, EVENT, LOST_EVENT)

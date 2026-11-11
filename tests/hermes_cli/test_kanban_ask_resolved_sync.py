@@ -9,6 +9,7 @@ comment on the home board, never an unblock and never a second probe there.
 """
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -161,6 +162,74 @@ def test_the_home_board_comments_once_when_a_relayed_asks_probe_host_went_silent
     worker.round()
     home.round()
     assert _status(home.conn, tid) == "ready"
+
+
+def _stored_request(conn, tid):
+    value = kb.get_task(conn, tid).human_request
+    return json.loads(value) if isinstance(value, str) else value
+
+
+@pytest.mark.parametrize("drop_reason", [kar.BROKEN_EVENT, kar.LOST_EVENT])
+def test_dropped_ask_mark_and_refile_clearing_cross_the_sync_transport(gws, tmp_path, drop_reason):
+    """Use real outbox/push/pull, not an injected replica row, for both metadata writes."""
+    from hermes_cli.kanban_human_request_migration import classify_parked_request
+
+    home, worker = gws
+    request = _ask(_probe(tmp_path / "flag"))
+    tid = _relayed_ask(home, worker, request)
+    home.round()
+    assert _stored_request(home.conn, tid) == request
+    assert kwc.get_state(home.conn, tid) is None
+    worker.enter()
+    state = kwc.get_state(worker.conn, tid)
+    now = int(time.time())
+    if drop_reason == kar.BROKEN_EVENT:
+        for i in range(kwc.BROKEN_AFTER):
+            outcome = kar.apply_result(worker.conn, tid, state["cmd"], 255, "connection closed",
+                                       generation=state["generation"], now=now + kar.BROKEN_MIN_SECONDS * i)
+        assert outcome == drop_reason
+        dropped_at = now + kar.BROKEN_MIN_SECONDS * (kwc.BROKEN_AFTER - 1)
+    else:
+        _lose(worker.conn, tid)
+        assert kar.reconcile(worker.conn, now=now)["restored"] == [tid]
+        _lose(worker.conn, tid)
+        dropped_at = now + 1
+        assert kar.reconcile(worker.conn, now=dropped_at)["lost"] == [tid]
+    marked = {**request, "resolved_check_dropped_at": dropped_at, "resolved_check_drop_reason": drop_reason}
+    assert _stored_request(worker.conn, tid) == marked
+    assert kwc.get_state(worker.conn, tid) is None
+    worker.round()
+    wire = worker.svc.board("default")["rows"]["tasks"][tid]["human_request"]
+    assert (json.loads(wire) if isinstance(wire, str) else wire) == marked
+    home.round()
+    assert _stored_request(home.conn, tid) == marked
+    assert _status(home.conn, tid) == "blocked"
+    assert len(_events(home.conn, tid, drop_reason)) == 1
+    home.enter()
+    assert not any(kar.reconcile(home.conn, now=dropped_at + 100_000).values())
+    assert kwc.get_state(home.conn, tid) is None
+
+    # Re-file the same command, including a stale copy of its dropped metadata.
+    worker.enter()
+    assert classify_parked_request(worker.conn, tid, human_request=marked, actor="op", reason="retry probe")
+    fresh = kwc.get_state(worker.conn, tid)
+    assert fresh["generation"] != state["generation"] and fresh["fails"] == 0
+    assert _stored_request(worker.conn, tid) == request
+    worker.round()
+    wire = worker.svc.board("default")["rows"]["tasks"][tid]["human_request"]
+    assert (json.loads(wire) if isinstance(wire, str) else wire) == request
+    home.round()
+    assert _stored_request(home.conn, tid) == request
+    assert _status(home.conn, tid) == "blocked"
+    assert _events(home.conn, tid, "blocked")[-1].payload["probe_host"] == WORKER
+    assert len(_events(home.conn, tid, drop_reason)) == 1  # historical drop survives, active mark does not
+    home.enter()
+    assert not any(kar.reconcile(home.conn, now=int(time.time())).values())
+    assert kwc.get_state(home.conn, tid) is None
+    worker.round()
+    home.round()
+    assert _stored_request(worker.conn, tid) == _stored_request(home.conn, tid) == request
+    assert kwc.get_state(worker.conn, tid) == fresh
 
 
 # --- one board: lost, restored, exhausted ------------------------------------------------------------------------
