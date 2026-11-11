@@ -14,7 +14,7 @@ def _refs(store: Path) -> str | None:
                            store, str(store.parent))
     if not ok or not refs.strip():
         return None
-    if any(not line.startswith(_REFS_PREFIX) for line in refs.splitlines()):
+    if any(not line.startswith(_REFS_PREFIX + "/") for line in refs.splitlines()):
         return None
     return refs
 

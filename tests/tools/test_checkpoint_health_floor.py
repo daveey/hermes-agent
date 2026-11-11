@@ -62,7 +62,7 @@ def test_floor_record_fails_closed(tmp_path, monkeypatch, fault):
     def git(args, *rest):
         if args[0] == "for-each-ref":
             refs = "" if fault == "empty" else (
-                "refs/heads/foreign abc" if fault == "foreign" else checkpoints._REFS_PREFIX + "project abc")
+                "refs/heads/foreign abc" if fault == "foreign" else checkpoints._REFS_PREFIX + "/project abc")
             return fault != "refs_failed", refs, ""
         return fault != "parents_failed", "abc" if fault == "parents" else "", ""
     monkeypatch.setattr(health, "_run_git", git)
@@ -75,7 +75,7 @@ def test_floor_receipt_invalidated(tmp_path, monkeypatch, fault):
     from tools import checkpoint_health as health
     store = tmp_path / "store"
     store.mkdir()
-    refs = checkpoints._REFS_PREFIX + "project abc"
+    refs = checkpoints._REFS_PREFIX + "/project abc"
     receipt = {"refs": "different" if fault == "refs" else refs,
                "size": 11 if fault == "size" else 10}
     marker = tmp_path / health.FLOOR_MARKER
@@ -86,6 +86,23 @@ def test_floor_receipt_invalidated(tmp_path, monkeypatch, fault):
         (store / ".gc-pending").touch()
     monkeypatch.setattr(health, "_run_git", lambda *args: (fault != "git_failure", refs, ""))
     assert health.protected_floor(store, 10) is False
+
+
+@pytest.mark.parametrize("ref", ["refs/hermes-foreign/unrelated", "refs/hermesproject"])
+def test_near_prefix_foreign_refs_rejected(tmp_path, monkeypatch, ref):
+    from tools import checkpoint_health as health
+    base, _ = _over_cap_store(tmp_path, monkeypatch, 1)
+    store = base / "store"
+    ok, refs, _ = checkpoints._run_git(["for-each-ref", "--format=%(objectname)"], store, str(tmp_path))
+    assert ok
+    assert checkpoints._run_git(["update-ref", ref, refs.splitlines()[0]], store, str(tmp_path))[0]
+    assert health.record_floor(store) is False
+    # Even a legacy receipt must fail closed during revalidation.
+    ok, listing, _ = checkpoints._run_git(["for-each-ref", "--format=%(refname) %(objectname)"], store, str(tmp_path))
+    assert ok
+    size = checkpoints._dir_size_bytes(store)
+    (base / health.FLOOR_MARKER).write_text(json.dumps({"refs": listing, "size": size}))
+    assert health.protected_floor(store, size) is False
 
 
 def test_busy_store_defers_health_observation(tmp_path, monkeypatch, caplog):
