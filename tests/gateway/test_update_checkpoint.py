@@ -56,14 +56,9 @@ def test_invalid_episode_never_starts_restart(checkpoint, change):
     module, home, runner, intent = checkpoint
     if change == "no-hold":
         admission_fence.clear_hold(home)
-    elif change == "expired":
-        intent["expires_at"] = time.time() - 1
-    elif change == "dead-owner":
-        intent["pid"] = -1
-    elif change == "wrong-kind":
-        intent["kind"] = "fenced"
-    elif change == "no-checkpoint":
-        intent["checkpoint"] = False
+    changes = {"expired": {"expires_at": time.time() - 1}, "dead-owner": {"pid": -1},
+               "wrong-kind": {"kind": "fenced"}, "no-checkpoint": {"checkpoint": False}}
+    intent.update(changes.get(change, {}))
     (home / "core-update/intent").write_text(json.dumps(intent))
     result = invoke(module, runner, nonce="wrong" if change == "nonce" else "episode-one")
     assert not result["pausing"]
