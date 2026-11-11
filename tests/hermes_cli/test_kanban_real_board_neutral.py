@@ -145,6 +145,8 @@ def test_neutral_release_with_split_feed_and_reopened_store(tmp_path, monkeypatc
             dispatch.detect_crashed_workers(conn)
             poll()
             assert db.get_messages('neutral-chat') == messages
+        from hermes_cli.kanban_neutral_release import pending
+        assert not pending(conn)
         assert len(hooks) == (0 if alarm_first else 1)
         if hooks:
             assert hooks[0]["outcome"] == outcome

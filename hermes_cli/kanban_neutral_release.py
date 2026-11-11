@@ -58,7 +58,10 @@ def drain(conn):
                                 "JOIN task_runs r ON r.uid=e.run_uid AND r.task_id=c.task_id "
                                 "WHERE e.done=0 AND r.ended_at IS NOT NULL").fetchall():
             hook = json.loads(row["hook"])
-            if row["outcome"] != hook["outcome"]:
+            expired = conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND run_id=? AND kind='reclaimed'",
+                                   (row["task_id"], row["run_id"])).fetchone()
+            if row["outcome"] != hook["outcome"] or expired:
+                # Restart and alarm both end as reclaimed; the alarm event disambiguates.
                 # Board expiry won the fence: never replay the losing neutral observation.
                 conn.execute("UPDATE kanban_neutral_effects SET done=1 WHERE run_uid=?", (row["run_uid"],))
                 continue

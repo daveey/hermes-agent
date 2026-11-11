@@ -34,6 +34,8 @@ def test_wall_failure_keeps_task_gated_then_retries_fixed_deadline(live, monkeyp
     monkeypatch.setattr(quota, 'persist_wall', fail)
     assert neutral.drain(live) == []
     assert quota.pending_task(live, tid)
+    # Expire the ordinary episode gate: only the durable pending receipt may hold admission.
+    monkeypatch.setattr(quota.time, 'time', lambda: 20000)
     for lane in ('ready', 'review'):
         assert dispatch.check_respawn_guard(live, tid, lane=lane) == 'rate_limit_cooldown'
     state = json.loads(live.execute('SELECT state FROM kanban_quota_effects').fetchone()[0])
