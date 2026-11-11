@@ -15,8 +15,9 @@ A record ``{"id", "label", "account", "fp", "src"}`` matches a row by any of:
   a row whose token names a different one, so disabling the Codex singleton slot does not disable
   whoever signs into that slot next;
 - ``fp``: a non-reversible fingerprint of the token at disable time;
-- ``src``: for borrowed sources (the Claude Code login, ``env:VAR``), the source itself, so the token
-  that source holds NOW is refused too (Claude Code refreshes its own token outside Hermes).
+- ``src``: for the Claude Code login, the source itself, so the token it holds NOW is refused too (it
+  refreshes its own token outside Hermes). This disables that login slot: another account signed into
+  Claude Code later stays refused until ``hermes auth enable``.
 
 Readers union the active store's section with the global root's, so a disable in the root home
 applies to every profile on the host. Reads are cached by each file's (mtime, size), so a
@@ -103,7 +104,9 @@ def fingerprint_of(entry: Any) -> Optional[str]:
 
 def _borrowed_source(entry: Any) -> str:
     source = str(getattr(entry, "source", "") or "")
-    return source if source == "claude_code" or source.startswith("env:") else ""
+    # Only the Claude Code login rotates its own token outside Hermes; an env var keeps its value, which
+    # the fingerprint already covers, and matching env:VAR by source would refuse any key put there later.
+    return source if source == "claude_code" else ""
 
 
 def _source_tokens(provider: str, source: str) -> set[str]:
@@ -193,7 +196,7 @@ def matches(entry: Any, keys: tuple) -> bool:
     fp = fingerprint_of(entry) or ""
     src = _borrowed_source(entry)
     for rid, rlabel, racct, rfp, rsrc in keys[2]:
-        if racct and acct and racct != acct:
+        if racct and acct and racct != acct and not acct.startswith(racct + "/"):  # older records: workspace only
             continue
         if ((rid and rid == entry_id) or (rlabel and rlabel == label) or (racct and racct == acct)
                 or (rfp and rfp == fp) or (rsrc and rsrc == src)):

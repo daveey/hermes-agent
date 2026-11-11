@@ -458,3 +458,17 @@ def test_fingerprint_follows_the_live_token_after_a_rotation():
     from agent.credential_persistence import fingerprint_secret_value
     row = SimpleNamespace(access_token="fixture-new", extra={"secret_fingerprint": fingerprint_secret_value("fixture-old")})
     assert cpd.fingerprint_of(row) == fingerprint_secret_value("fixture-new")
+
+
+def test_older_workspace_only_codex_record_still_matches_its_seat():
+    seat = SimpleNamespace(id="r0", label="device_code", access_token=_seat("ws-team", "user-a", "a@x.com"))
+    keys = cpd._keys_from_records([{"id": "r0", "label": "device_code", "account": "ws-team"}])
+    assert cpd.matches(seat, keys)
+
+
+def test_an_env_var_source_is_not_disabled_as_a_slot(monkeypatch):
+    row = SimpleNamespace(id="e0", label="anthropic_token", source="env:ANTHROPIC_TOKEN", access_token="fixture-env-1")
+    keys = cpd._keys_from_records([{"id": "e0", "label": "anthropic_token", "fp": cpd.fingerprint_of(row),
+                                    "src": cpd._borrowed_source(row)}])
+    other = SimpleNamespace(id="e1", label="anthropic_token", source="env:ANTHROPIC_TOKEN", access_token="fixture-env-2")
+    assert cpd.matches(row, keys) and not cpd.matches(other, keys)
