@@ -93,6 +93,15 @@ jobs:
           command -v tmux >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq tmux; }
           tmux -V
 
+      - name: Install bubblewrap and allow user namespaces
+        # tests/ci/test_plugin_*sandbox*.py run real bubblewrap. Blacksmith's Ubuntu 24.04 image
+        # ships no bwrap and restricts unprivileged userns (the old tfgar AMI did both at bake time).
+        run: |
+          set -euo pipefail
+          command -v bwrap >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap; }
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --ro-bind / / --unshare-user --unshare-pid true
+
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
         with:
