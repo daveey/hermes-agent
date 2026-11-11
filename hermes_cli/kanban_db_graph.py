@@ -34,11 +34,46 @@ def note_missing_parents(
     )
     if cur.rowcount != 1:
         return False
+    repair_id = missing_parent_repair(conn, task_id, missing)
     kb._append_event(conn, task_id, "blocked", {
-        "reason": reason + f" (unlink it with `hermes kanban unlink <parent> {task_id}`, then unblock)",
+        "reason": reason + f"; repair card {repair_id} owns investigation and recovery",
         "kind": "transient", "source": "parent_missing", "parents": missing,
+        "repair_task_id": repair_id,
     })
     return True
+
+
+def missing_parent_repair(conn: sqlite3.Connection, task_id: str, missing: list[str]) -> str:
+    """Compose repair admission in the readiness transaction, once per open incident."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_triage_sweep import _supervisor_profile
+    existing = conn.execute(
+        "SELECT t.id FROM task_events e JOIN tasks t "
+        "ON t.id = json_extract(e.payload, '$.repair_task_id') "
+        "WHERE e.task_id = ? AND e.kind = 'blocked' "
+        "AND json_extract(e.payload, '$.source') = 'parent_missing' "
+        "AND t.status NOT IN ('done', 'archived') ORDER BY e.id DESC LIMIT 1", (task_id,),
+    ).fetchone()
+    if existing is not None:
+        return existing['id']
+    # create_task opts into a savepoint. Failure rolls back the child's block
+    # too, leaving the next readiness tick free to retry the whole transition.
+    task = conn.execute("SELECT title, tenant FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return kb.create_task(
+        conn, title=f"Recover missing dependencies for {task_id}",
+        body=(f"Card {task_id} ({task['title']}) has waited at least "
+              f"{kb.PARENT_MISSING_BLOCK_SECONDS} seconds for unknown parent(s): "
+              + ", ".join(missing) + ".\n\n"
+              "Inspect the owning gateway, full Board replica and authoritative Board row evidence. "
+              "A missing local row is not proof of Board loss; check sync freshness and pickup eligibility. "
+              "Recover missing publication or dependency state, then unblock the child. "
+              "Do not unlink a required dependency merely to make it run. Record evidence and verify "
+              "the child resumes. This is agent-owned repair, not a human decision."),
+        assignee=_supervisor_profile(), created_by="missing-parent-detector",
+        workspace_kind="scratch", tenant=task['tenant'],
+        requires=["terminal", "file", "kanban"],
+        creator_task_id=task_id,
+    )
 
 
 def inherit_creator_origin(
