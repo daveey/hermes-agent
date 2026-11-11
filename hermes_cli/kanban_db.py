@@ -648,6 +648,7 @@ class Task:
     requires: Optional[list] = None          # Configured assignment capabilities
     model_override: Optional[str] = None
     provider_override: Optional[str] = None  # provider ``model_override`` belongs to
+    model_pin_mandatory: Optional[int] = None  # 1 = never rerouted around a quota wall
     reasoning_effort: Optional[str] = None   # VALID_REASONING_EFFORTS | "none"; NULL = profile's
     # Breaker trip count; None -> ``kanban.failure_limit`` -> DEFAULT_FAILURE_LIMIT.
     max_retries: Optional[int] = None
@@ -695,7 +696,7 @@ _TASK_EPOCH_COLUMNS = ("created_at", "started_at", "completed_at", "claim_expire
 _TASK_OPTIONAL_COLUMNS = (
     "branch_name", "project_id", "tenant", "result", "idempotency_key", "worker_pid",
     "max_runtime_seconds", "current_run_id", "workflow_template_id",
-    "current_step_key", "max_retries", "session_id", "completion_contract", "placement_policy",
+    "current_step_key", "max_retries", "session_id", "completion_contract", "placement_policy", "model_pin_mandatory",
 )
 # Text columns where "" is stored/read as "not set".
 _TASK_EMPTY_IS_NULL_COLUMNS = (
@@ -1217,7 +1218,7 @@ def create_task(
     parents: Iterable[str] = (), triage: bool = False, idempotency_key: Optional[str] = None,
     max_runtime_seconds: Optional[int] = None, skills: Optional[Iterable[str]] = None,
     max_retries: Optional[int] = None, model_override: Optional[str] = None,
-    provider_override: Optional[str] = None, reasoning_effort: Optional[str] = None,
+    provider_override: Optional[str] = None, reasoning_effort: Optional[str] = None, pin_mandatory: bool = False,
     goal_mode: bool = False, goal_max_turns: Optional[int] = None, initial_status: str = "running",
     session_id: Optional[str] = None, board: Optional[str] = None, project_id: Optional[str] = None,
     project_source_task_id: Optional[str] = None, creator_task_id: Optional[str] = None,
@@ -1278,6 +1279,8 @@ def create_task(
         raise ValueError(_lint)
     completion_contract = validate_contract(completion_contract)
     model_override, provider_override = _validate_model_override(model_override, provider_override)
+    from hermes_cli.kanban_pin_reroute import mandatory_column
+    pin_column = mandatory_column(pin_mandatory, model_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
     assignee = _canonical_assignee(assignee)
     if not title or not title.strip():
@@ -1366,23 +1369,19 @@ def create_task(
                 conn.execute(
                     """
                     INSERT INTO tasks (
-                        id, title, body, assignee, status, priority,
-                        created_by, created_at, workspace_kind, workspace_path,
-                        branch_name, project_id, tenant, idempotency_key,
-                        max_runtime_seconds,
-                        skills, max_retries, model_override, provider_override,
-                        reasoning_effort,
+                        id, title, body, assignee, status, priority, created_by, created_at, workspace_kind, workspace_path,
+                        branch_name, project_id, tenant, idempotency_key, max_runtime_seconds,
+                        skills, max_retries, model_override, provider_override, model_pin_mandatory, reasoning_effort,
                         goal_mode, goal_max_turns, session_id, completion_contract, requires, placement_policy
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id, title.strip(), body, assignee, task_status, priority,
                         created_by, now, workspace_kind, workspace_path,
-                        branch_name, project_id, tenant, idempotency_key,
-                        _opt_int(max_runtime_seconds),
+                        branch_name, project_id, tenant, idempotency_key, _opt_int(max_runtime_seconds),
                         json.dumps(skills_list) if skills_list is not None else None,
-                        _opt_int(max_retries), model_override, provider_override, reasoning_effort,
-                        1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
+                        _opt_int(max_retries), model_override, provider_override, pin_column,
+                        reasoning_effort, 1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
                         json.dumps(required), placement_policy,
                     ),
                 )
@@ -1528,8 +1527,9 @@ def set_model_override(
         from hermes_cli.kanban_model_assignment import validate_task_pin
         model, provider = validate_task_pin(conn, task_id, model, provider)
     return _set_task_override(
-        conn, task_id,
-        "UPDATE tasks SET model_override = ?, provider_override = ? WHERE id = ?", (model, provider),
+        conn, task_id,  # clearing the pin clears its mandatory mark; a new pin keeps the card's mark
+        "UPDATE tasks SET model_override = ?, provider_override = ?, model_pin_mandatory = CASE WHEN ? IS NULL "
+        "THEN NULL ELSE model_pin_mandatory END WHERE id = ?", (model, provider, model),
         "model_override_set", {"model": model, "provider": provider},
         ("model_override", "provider_override"), archived_msg="cannot set model override",
     )

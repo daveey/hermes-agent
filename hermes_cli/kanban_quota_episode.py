@@ -182,6 +182,7 @@ def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
         unknown = unknown or not names
         for name in names:
             walls[name] = max(walls.get(name, 0), wall['until'])
+    episode_walls = dict(walls)  # this episode's own walls: a pin moves only off a wall its own run hit
     try:
         base = base or resolve_model_tier(conn, task, lane=lane, cfg=cfg)
         target = _base_route(task, base)
@@ -202,7 +203,13 @@ def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
         # An unrecorded wall may be any provider: no route can be proven to avoid it.
         return held, None
     try:
-        route = alternate_route(conn, task, walls, base, now) or _strong_fallback(task, base, walls, cfg, now)
+        if base[2] == 'pinned':
+            from hermes_cli.kanban_model_tier import load_tier_config
+            from hermes_cli.kanban_pin_reroute import pinned_route
+            route = pinned_route(conn, task, lane=lane, now=now, current=episode_walls,
+                                 cfg=load_tier_config() if cfg is None else cfg)
+        else:
+            route = alternate_route(conn, task, walls, base, now) or _strong_fallback(task, base, walls, cfg, now)
     except sqlite3.Error:
         raise
     except Exception:

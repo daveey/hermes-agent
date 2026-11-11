@@ -527,7 +527,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 idempotency_key=idem_key,
                 max_runtime_seconds=max_runtime, skills=getattr(args, "skills", None) or None,
                 max_retries=max_retries, model_override=getattr(args, "model_override", None),
-                provider_override=getattr(args, "provider_override", None),
+                provider_override=getattr(args, "provider_override", None), pin_mandatory=bool(getattr(args, "pin_mandatory", False)),
                 goal_mode=bool(getattr(args, "goal_mode", False)),
                 goal_max_turns=getattr(args, "goal_max_turns", None),
                 reasoning_effort=getattr(args, "reasoning_effort", None),
@@ -867,12 +867,16 @@ def _cmd_set_model(args: argparse.Namespace) -> int:
     provider = getattr(args, "provider", None)
     try:
         with kbc.connect_closing() as conn:
-            ok = kb.set_model_override(conn, args.task_id, model, provider=provider)
+            from hermes_cli.kanban_pin_reroute import set_model_cli
+            ok, wrote = set_model_cli(conn, args.task_id, args.model, model, provider, getattr(args, "mandatory", None))
     except (ValueError, RuntimeError) as exc:
         return _err(f"kanban: {exc}", 2)
     if not ok:
         return _err(f"no such task: {args.task_id}")
-    if model:
+    if not wrote:
+        print(f"{args.task_id}: model pin " + ("mandatory: a quota wall never moves it" if args.mandatory
+                                               else "reroutable: a far quota wall may move it within its class"))
+    elif model:
         label = f"{provider}:{model}" if provider else model
         print(f"Set model override on {args.task_id}: {label} (applies on next dispatch)")
     else:

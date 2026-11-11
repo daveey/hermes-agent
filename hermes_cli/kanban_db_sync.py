@@ -57,7 +57,7 @@ SYNCED_COLUMNS: dict[str, frozenset[str]] = {
         "completed_at", "workspace_kind", "branch_name", "tenant", "result", "idempotency_key",
         "consecutive_failures", "last_failure_error", "max_runtime_seconds", "current_run_id",
         "workflow_template_id", "current_step_key", "skills", "requires", "model_override",
-        "provider_override", "reasoning_effort", "max_retries", "goal_mode", "goal_max_turns",
+        "provider_override", "model_pin_mandatory", "reasoning_effort", "max_retries", "goal_mode", "goal_max_turns",
         "block_kind", "human_request", "block_recurrences", "completion_contract", "runs_on", "placement_policy",
     }),
     "task_links": frozenset({"parent_id", "child_id"}),

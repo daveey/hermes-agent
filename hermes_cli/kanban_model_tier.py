@@ -292,6 +292,20 @@ def resolve_dispatch_tier(conn, task, *, lane, cfg=None):
     from hermes_cli.kanban_quota_episode import active, decision
     base = resolve_model_tier(conn, task, lane=lane, cfg=cfg)
     _, route = decision(conn, task, lane=lane, cfg=cfg, base=base)
+    if base[2] == 'pinned':
+        from hermes_cli.kanban_pin_reroute import REASON, pinned_route
+        if not route and not active(conn, task.id):
+            # The episode is closed (a rerouted run ended) but the pin's wall may still be up.
+            import time
+            try:
+                route = pinned_route(conn, task, lane=lane, now=time.time(),
+                                     cfg=load_tier_config() if cfg is None else cfg)
+            except sqlite3.Error:
+                raise
+            except Exception:
+                logger.warning('kanban pin reroute: resolve failed for %s; keeping the pin', task.id, exc_info=True)
+        if route:
+            return *route, f'pinned+{REASON}:{str(task.provider_override).strip().lower()}'
     if route:
         return *route, f'{base[2]}+quota_reroute'
     if active(conn, task.id):
@@ -339,6 +353,8 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
                            model, why, getattr(task, "id", "?"))
             reason = f"{reason}+unroutable:{model}:{why}"
             model = provider = None
+    origin = (getattr(task, "model_override", None), getattr(task, "provider_override", None))
+    repinned = bool(model) and reason.startswith("pinned+pin_quota_reroute")
     if model:
         task.model_override = model
         task.provider_override = provider
@@ -350,7 +366,17 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
                        "lane": lane}
             with _kb.write_txn(conn):
                 _kb._append_event(conn, task.id, "model_tier", payload, run_id=getattr(task, "current_run_id", None))
+                if repinned:
+                    # The pin moves for this run only (in memory); the reroute is always on the record.
+                    from hermes_cli.kanban_pin_reroute import record
+                    record(conn, task, (_str(origin[0]), _str(origin[1]).lower()), (_str(model), _str(provider)))
         except Exception as exc:
+            if repinned:
+                # Never an unrecorded reroute: the run goes back to its pin (and its wall).
+                logger.warning("kanban model tier: pin reroute record failed for %s; keeping the pin (%s)",
+                               getattr(task, "id", "?"), exc, exc_info=True)
+                task.model_override, task.provider_override = origin
+                return "pinned+pin_quota_reroute_unrecorded"
             logger.debug("kanban model tier: event write failed for %s (%s)", getattr(task, "id", "?"), exc,
                          exc_info=True)
     return reason

@@ -1580,9 +1580,9 @@ def _handle_create(args: dict, **kw) -> str:
     # See #67567. ``project=""`` is an explicit "no project" (no ``or`` collapse, #106342).
     project_id = args["project"] if "project" in args else args.get("project_id")
     project_source_task_id = None
-    triage, skills, goal_mode = (
+    triage, skills, goal_mode, pin_mandatory = (
         _parse_bool_arg(args, "triage"), _coerce_str_list(args.get("skills"), "skills", "skill names"),
-        _parse_bool_arg(args, "goal_mode"))
+        _parse_bool_arg(args, "goal_mode"), _parse_bool_arg(args, "pin_mandatory"))
     model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     max_retries = _ca.max_retries_arg(args)
@@ -1686,7 +1686,7 @@ def _handle_create(args: dict, **kw) -> str:
                 placement_checked=True,  # this front door already checked pins, origins and portability
                 placement_audit=_creation_audit(args, assignee=str(assignee), skills=skills, project_id=project_id),
                 require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
-                model_override=model_override, provider_override=provider_override,
+                model_override=model_override, provider_override=provider_override, pin_mandatory=pin_mandatory,
                 goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
                 completion_contract=args.get("completion_contract"),
                 initial_status=str(args.get("initial_status") or "running"),
