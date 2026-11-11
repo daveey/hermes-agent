@@ -15,6 +15,8 @@ Workers always win. The Board reserves the origin hub for a portable card only w
 
 ## Creation and schema
 
+Producers put job, workflow and repository names in backticks (for example, `macOS CI gate` or `babybear`). Complete matching backtick spans, including fenced code, and complete `<!-- placement:evidence -->` / `<!-- /placement:evidence -->` blocks are not scanned for placement markers. Unmatched delimiters exempt nothing. Describe real execution needs outside quoted names, or declare them through requirements, workspace and machine labels: quoting a command is not a host constraint. These exclusions do not relax structured capabilities or explicit pins.
+
 Tool, CLI and direct DB producers enroll portable light and heavy cards, including worker children and origin-bound chats. The shared conservative `portable_reason` preserves scratch/default-board, assignee, carried-option, host/local/skill marker, project and gateway-requirement exclusions. Explicit local/foreign placement and `runs_on` (including `[]`) bypass automatic enrollment. Courier creation keeps its immutable owner placement; a chat origin alone does not pin execution. Parent and chat links are not replaced. The internal `placement_checked` flag preserves a front door's already-resolved decision, including deliberate non-enrollment.
 
 The admission CPU sample measures **non-nice busy**: `100 * (delta_total - delta_idle - delta_iowait - delta_nice) / delta_total`. All positive-nice user CPU is excluded, not only nice >= 10; system, IRQ and steal still count. This does not relax memory, slot, drain or freshness guards. A busy batch workload is not evidence that the host has recovered memory or I/O capacity.
