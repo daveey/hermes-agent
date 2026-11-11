@@ -478,6 +478,16 @@ _HEALTH_PRUNE_STALE_S = 48 * 3600
 
 
 def check_store_health(base: Path, cap_mb: float) -> bool:
+    """Skip a busy store: maintenance in progress is not evidence of failed maintenance."""
+    from tools.checkpoint_pruning import PruneError, store_lock
+    try:
+        with store_lock(base):
+            return _check_store_health(base, cap_mb)
+    except (PruneError, OSError):
+        return False
+
+
+def _check_store_health(base: Path, cap_mb: float) -> bool:
     """Daily ERROR for over-cap stores: twice the cap OR no successful prune in 48 h.
     A verified compacted floor is an INFO exception, never permission to delete final snapshots.
     The daily marker bounds observation cost. Returns whether it reported an error."""
@@ -510,14 +520,9 @@ def check_store_health(base: Path, cap_mb: float) -> bool:
     stale = last is None or now - last >= _HEALTH_PRUNE_STALE_S
     if size <= 2 * cap_bytes and not stale:
         return False
-    from tools.checkpoint_pruning import PruneError, store_lock
-    try:
-        with store_lock(base):
-            if protected_floor(store, _dir_size_bytes(store)):
-                logger.info("Checkpoint store above cap: protected floor; final snapshots retained (%s)", store)
-                return False
-    except (PruneError, OSError):
-        pass  # An unverified floor is not an exemption.
+    if protected_floor(store, size):
+        logger.info("Checkpoint store above cap: protected floor; final snapshots retained (%s)", store)
+        return False
     when = "never" if last is None else f"{(now - last) / 3600:.0f} h ago"
     logger.error("checkpoint store over cap: %.2f GB / %g MB, last prune %s (%s); "
                  "set checkpoints.auto_prune: true or run `hermes checkpoints prune`",

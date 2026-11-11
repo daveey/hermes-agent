@@ -86,3 +86,14 @@ def test_floor_receipt_invalidated(tmp_path, monkeypatch, fault):
         (store / ".gc-pending").touch()
     monkeypatch.setattr(health, "_run_git", lambda *args: (fault != "git_failure", refs, ""))
     assert health.protected_floor(store, 10) is False
+
+
+def test_busy_store_defers_health_observation(tmp_path, monkeypatch, caplog):
+    from tools.checkpoint_pruning import store_lock
+    base, _ = _over_cap_store(tmp_path, monkeypatch, 1)
+    caplog.set_level(logging.ERROR)
+    with store_lock(base):
+        assert maintenance.check_store_health(base, 0.5) is False
+    assert not (base / ".last_health_check").exists()
+    assert not caplog.records
+    assert maintenance.check_store_health(base, 0.5) is True
