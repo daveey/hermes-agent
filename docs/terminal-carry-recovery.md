@@ -67,3 +67,12 @@ uses the established completion verifier without weakening the ordinary reader.
 NULL/wrong-profile identity, missing owner runs/events, goal-mode without receipts,
 changed completion generation, corrupt registration, stale/current Board state,
 both snapshot carry entry points, and standard release capture/reopen restoration.
+
+Review robustness follow-up: a missing Board column raises `IndexError` from
+`sqlite3.Row`, and excessive JSON nesting raises `RecursionError`. Neither was in
+the evidence-reader exception lists, so invalid evidence could abort the entire
+projection instead of retaining unknown. Existing malformed-JSON/schema tests
+covered syntax errors and unreadable databases, not these exception classes.
+The recovery seam now handles these specific evidence failures (not a blanket
+exception catch); both after-release regressions fail before and pass after the
+fix. Proof-loss remains unknown/unreleased; no completion predicate is weakened.

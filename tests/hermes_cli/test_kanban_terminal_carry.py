@@ -227,16 +227,24 @@ def test_receiptless_goal_mode_never_uses_other_tasks_judge_epoch(world):
     assert not world['receipt'].exists()
 
 
-@pytest.mark.parametrize('failure', ['json', 'shape', 'missing_shadow', 'corrupt_shadow'])
+@pytest.mark.parametrize('failure', ['json', 'shape', 'missing_shadow', 'corrupt_shadow',
+                                     'nested_json', 'schema_skew'])
 def test_storage_failure_after_release_restores_unknown(world, failure):
     register(world)
     released = carry.reconcile_carry([world['card']])[0]
     assert released['released'] is True
+    def nested_json():
+        # Python 3.14's decoder uses a C-stack budget, not sys.getrecursionlimit().
+        depth = 100000
+        world['receipt'].write_text('[' * depth + '0' + ']' * depth)
+
     mutations = {
         'json': lambda: world['receipt'].write_text('{'),
         'shape': lambda: world['receipt'].write_text('[]'),
         'missing_shadow': world['replica'].unlink,
         'corrupt_shadow': lambda: world['replica'].write_bytes(b'not sqlite'),
+        'nested_json': nested_json,
+        'schema_skew': lambda: edit(world['replica'], 'ALTER TABLE tasks DROP COLUMN body'),
     }
     mutations[failure]()
     row = carry.reconcile_carry([released])[0]

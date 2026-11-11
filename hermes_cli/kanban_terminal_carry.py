@@ -186,7 +186,7 @@ def reconcile_carry(cards: list[dict]) -> list[dict]:
             key = tuple(identity[k] for k in _IDENTITY)
             # Duplicate registrations are ambiguous rather than last-file-wins.
             receipts[key] = None if key in receipts else receipt
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, RecursionError):
             continue
     result = []
     for card in cards:
@@ -209,7 +209,7 @@ def reconcile_carry(cards: list[dict]) -> list[dict]:
                                         terminal_carry_verified=True)
                 finally:
                     conn.close()
-        except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+        except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, IndexError, RecursionError):
             pass  # Missing/corrupt evidence preserves the explicit unknown obligation.
         result.append(restored)
     return result
