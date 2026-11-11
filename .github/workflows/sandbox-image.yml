@@ -39,13 +39,13 @@ env:
 jobs:
   # PR code: secret-free build + smoke per arch.
   build:
-    if: github.repository == 'NousResearch/hermes-agent' || github.repository == 'daveey/hermes'
+    if: github.repository == 'NousResearch/hermes-agent' || github.repository == 'softmax-universe/daveey-hermes'
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: amd64
-            runner: docker-ci
+            runner: blacksmith-4vcpu-ubuntu-2404
             platform: linux/amd64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120  # fork: shared hub runner
@@ -80,7 +80,7 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: docker-ci
+            runner: blacksmith-4vcpu-ubuntu-2404
             platform: linux/amd64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -126,7 +126,7 @@ jobs:
   merge:
     if: ${{ !cancelled() && github.repository == 'NousResearch/hermes-agent' && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish)) }}
     needs: [publish]
-    runs-on: [self-hosted, docker-ci]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     environment: container-publish
     steps:

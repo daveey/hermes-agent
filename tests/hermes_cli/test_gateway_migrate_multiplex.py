@@ -1002,3 +1002,48 @@ def test_standalone_profile_is_listed_left_alone_and_not_a_fold_target(fleet):
     assert payload["standalone_by_config"] == list(plan.standalone_by_config)
     assert "ops" not in [p["profile"] for p in payload["profiles"]]
     assert any("ops" in line for line in gm.format_plan(plan, dry_run=True))
+
+
+def _pin_coder(monkeypatch, fleet):
+    """``coder``'s live gateway runs another checkout (an Ask Eve pinned owner)."""
+    from pathlib import Path as _P
+    pinned_pid = fleet.pids["coder"]
+    monkeypatch.setattr("hermes_cli.update_fleet_scope.gateway_foreign_code_root",
+                        lambda pid, home: _P("/pinned/core-d426474bc63b") if pid == pinned_pid else None)
+
+
+def _write_unfinished_manifest(fleet):
+    gm._write_manifest(fleet.root, {
+        "version": 1, "flag_was": False, "default": {"service": None},
+        "secondaries": [{"profile": n, "home": str(fleet.root / "profiles" / n), "pid": fleet.pids[n],
+                         "service": {"kind": "systemd", "system": False}} for n in ("coder", "ops")]})
+
+
+def test_update_hook_resume_never_folds_a_pinned_gateway(fleet, monkeypatch, capsys):
+    """A manifest turns the update hook into a resume that skips blockers; the foreign-code boundary
+    is the exception: the pinned secondary stays installed and running, the manifest stays."""
+    _pin_coder(monkeypatch, fleet)
+    _write_unfinished_manifest(fleet)
+    gm.maybe_auto_migrate_after_update()
+    out = capsys.readouterr().out
+    assert [op for op in fleet.ops if op[0] == "coder"] == [], "the pinned gateway was touched"
+    assert "coder" in fleet.services and "coder" in fleet.pids
+    assert _config_flag(fleet.root) is None, "the multiplex flag was flipped over a pinned gateway"
+    assert "/pinned/core-d426474bc63b" in out
+    assert (fleet.root / gm.MANIFEST_NAME).exists()
+
+
+def test_explicit_resume_never_folds_a_pinned_gateway(fleet, monkeypatch, capsys):
+    """Same boundary through ``apply_migration`` itself (the explicit command's resume)."""
+    _pin_coder(monkeypatch, fleet)
+    _write_unfinished_manifest(fleet)
+    assert gm.apply_migration(gm.build_migration_plan(), served_wait=0.1) is False
+    assert fleet.ops == [] and "coder" in fleet.services and "coder" in fleet.pids
+    assert "/pinned/core-d426474bc63b" in capsys.readouterr().out
+    assert (fleet.root / gm.MANIFEST_NAME).exists()
+
+
+def test_resume_still_proceeds_when_nothing_is_pinned(fleet, capsys):
+    """Control: other resume semantics are unchanged (blockers other than the code root are ignored)."""
+    _write_unfinished_manifest(fleet)
+    assert gm.apply_migration(gm.build_migration_plan(), served_wait=5.0) is True

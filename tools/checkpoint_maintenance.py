@@ -187,7 +187,11 @@ def prune_checkpoints(
 
     try:
         with store_lock(base):
-            return _prune_checkpoints(base, result, retention_days, delete_orphans, max_total_size_mb, orphan_allowlist)
+            result = _prune_checkpoints(base, result, retention_days, delete_orphans, max_total_size_mb, orphan_allowlist)
+            if not result["errors"]:
+                from tools.checkpoint_health import SUCCESS_MARKER
+                (base / SUCCESS_MARKER).write_text(str(time.time()), encoding="utf-8")
+            return result
     except (PruneError, OSError) as exc:
         result["errors"] += 1
         logger.warning("Checkpoint maintenance stopped: %s", exc)
@@ -350,8 +354,7 @@ def _prune_checkpoints(
             if result["deleted_orphan"] + result["deleted_stale"] or pruner.gc_pending():
                 pruner.reclaim()
             if not pruner.enforce_size(max_total_size_mb * 1024 * 1024):
-                result["errors"] += 1
-                logger.warning("Checkpoint store remains over its size cap; minimum history retained")
+                _record_size_outcome(store, result)
         except (PruneError, OSError) as exc:
             result["errors"] += 1
             logger.warning("Checkpoint pruning stopped: %s", exc)
@@ -361,6 +364,16 @@ def _prune_checkpoints(
     result["bytes_freed"] = max(result["bytes_freed"], delta)
 
     return result
+
+
+def _record_size_outcome(store: Path, result: dict[str, int]) -> None:
+    from tools.checkpoint_health import record_floor
+    if record_floor(store):
+        result["protected_floor"] = True
+        logger.info("Checkpoint store above cap: protected floor; final snapshots retained")
+    else:
+        result["errors"] += 1
+        logger.warning("Checkpoint store remains over its size cap; maintenance incomplete")
 
 
 def maybe_auto_prune_checkpoints(
@@ -465,9 +478,19 @@ _HEALTH_PRUNE_STALE_S = 48 * 3600
 
 
 def check_store_health(base: Path, cap_mb: float) -> bool:
-    """At most once a day: log an ERROR when the store is over twice its cap and no prune has run
-    for 48 h (or ever), so the self-heal lane files it. The size walk itself is gated by the daily
-    marker, so the housekeeping tick stays cheap. Returns whether it reported."""
+    """Skip a busy store: maintenance in progress is not evidence of failed maintenance."""
+    from tools.checkpoint_pruning import PruneError, store_lock
+    try:
+        with store_lock(base):
+            return _check_store_health(base, cap_mb)
+    except (PruneError, OSError):
+        return False
+
+
+def _check_store_health(base: Path, cap_mb: float) -> bool:
+    """Daily ERROR for over-cap stores: twice the cap OR no successful prune in 48 h.
+    A verified compacted floor is an INFO exception, never permission to delete final snapshots.
+    The daily marker bounds observation cost. Returns whether it reported an error."""
     if cap_mb <= 0:
         return False
     store = _store_path(base)
@@ -486,13 +509,19 @@ def check_store_health(base: Path, cap_mb: float) -> bool:
         pass
     size = _dir_size_bytes(store)
     cap_bytes = cap_mb * 1024 * 1024
-    if size <= 2 * cap_bytes:
+    from tools.checkpoint_health import SUCCESS_MARKER, protected_floor
+
+    if size <= cap_bytes:
         return False
     try:
-        last = float((base / _PRUNE_MARKER_NAME).read_text(encoding="utf-8-sig").strip())
+        last = float((base / SUCCESS_MARKER).read_text(encoding="utf-8-sig").strip())
     except (OSError, ValueError):
         last = None
-    if last is not None and now - last < _HEALTH_PRUNE_STALE_S:
+    stale = last is None or now - last >= _HEALTH_PRUNE_STALE_S
+    if size <= 2 * cap_bytes and not stale:
+        return False
+    if protected_floor(store, size):
+        logger.info("Checkpoint store above cap: protected floor; final snapshots retained (%s)", store)
         return False
     when = "never" if last is None else f"{(now - last) / 3600:.0f} h ago"
     logger.error("checkpoint store over cap: %.2f GB / %g MB, last prune %s (%s); "

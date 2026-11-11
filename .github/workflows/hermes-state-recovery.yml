@@ -35,11 +35,11 @@ jobs:
     name: Rerun a runner-lost macOS state job
     # Cheap pre-filter only; the script re-checks all of it against the API.
     if: >-
-      github.repository == 'daveey/hermes'
+      github.repository == 'softmax-universe/daveey-hermes'
       && github.event.workflow_run.conclusion == 'failure'
       && github.event.workflow_run.run_attempt == 1
-      && github.event.workflow_run.head_repository.full_name == 'daveey/hermes'
-    runs-on: [self-hosted, hermes-hub]
+      && github.event.workflow_run.head_repository.full_name == 'softmax-universe/daveey-hermes'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       actions: write

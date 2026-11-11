@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import functools
 import json
+
+from hermes_cli.kanban_published_worktree import publication_scope
 import logging
 import os
 import time
@@ -891,7 +893,7 @@ def _handle_complete(args: dict, **kw) -> str:
     if artifacts:
         metadata = _merge_artifacts(metadata, artifacts)
     _check(summary or result, "provide at least one of: summary (preferred), result", "empty")
-    _require_dict_metadata(metadata)
+    _kc.require_completion_metadata(metadata, _require_dict_metadata)  # dict + receipt shape before the judge
     metadata = _stamp_worker_session_metadata(tid, metadata)
     with _board(args.get("board")) as (kb, conn):
         from hermes_cli import kanban_foreign_card as _kfc
@@ -1555,14 +1557,11 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         return None, None
 
 
-def _creation_audit(args: dict, **effective) -> Optional[dict]:
-    """Audit the same normalized fields placement judged, including inherited identity/project. [daveey]"""
-    from hermes_cli.kanban_worker_placement import creation_audit
-
-    return creation_audit({**args, **effective})
+from hermes_cli.kanban_db_creation import tool_creation_audit as _creation_audit
 
 
 @_kanban_handler("kanban_create")
+@publication_scope
 def _handle_create(args: dict, **kw) -> str:
     """Create a (child) task; orchestrator workers use this to fan out."""
     # Only an explicitly local create is board-scoped: any other placement or an origin binding can write a
@@ -1580,9 +1579,9 @@ def _handle_create(args: dict, **kw) -> str:
     # See #67567. ``project=""`` is an explicit "no project" (no ``or`` collapse, #106342).
     project_id = args["project"] if "project" in args else args.get("project_id")
     project_source_task_id = None
-    triage, skills, goal_mode = (
+    triage, skills, goal_mode, pin_mandatory = (
         _parse_bool_arg(args, "triage"), _coerce_str_list(args.get("skills"), "skills", "skill names"),
-        _parse_bool_arg(args, "goal_mode"))
+        _parse_bool_arg(args, "goal_mode"), _parse_bool_arg(args, "pin_mandatory"))
     model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     max_retries = _ca.max_retries_arg(args)
@@ -1686,7 +1685,7 @@ def _handle_create(args: dict, **kw) -> str:
                 placement_checked=True,  # this front door already checked pins, origins and portability
                 placement_audit=_creation_audit(args, assignee=str(assignee), skills=skills, project_id=project_id),
                 require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
-                model_override=model_override, provider_override=provider_override,
+                model_override=model_override, provider_override=provider_override, pin_mandatory=pin_mandatory,
                 goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
                 completion_contract=args.get("completion_contract"),
                 initial_status=str(args.get("initial_status") or "running"),

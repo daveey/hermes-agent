@@ -257,6 +257,7 @@ class DispatchResult:
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
     Reclaim/promotion bookkeeping still ran; deferred tasks stay queued."""
+    core_update_drain_hold: Optional[dict] = None  # live hermes-sync hold that refused every claim [daveey]
 
 
 from hermes_cli.kanban_db_dispatch_stuck import (  # re-exports for the stuck detectors [daveey]
@@ -2035,17 +2036,7 @@ def dispatch_once(
     return run_owned_tick(conn, _locked_tick, dispatcher_id, board, dry_run)
 
 
-def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -> Optional[int]:
-    """Back-compat: older spawn_fn signatures (and test stubs) accept only
-    ``(task, workspace)``; pass ``board`` only when the callable supports it."""
-    import inspect
-    try:
-        sig = inspect.signature(spawn_fn)
-        if "board" in sig.parameters:
-            return spawn_fn(task, workspace, board=board)
-        return spawn_fn(task, workspace)
-    except (TypeError, ValueError):
-        return spawn_fn(task, workspace)
+from hermes_cli.kanban_db_dispatch_spawn_call import call_spawn_fn as _call_spawn_fn  # moved out [daveey]
 
 
 def _dispatch_lane_task(
@@ -2144,11 +2135,10 @@ def _dispatch_lane_task(
         # Force-load sdlc-review; the kanban lifecycle is already in every
         # worker's system prompt via KANBAN_GUIDANCE.
         claimed.skills = list(dict.fromkeys([*(claimed.skills or []), "sdlc-review"]))
-    # Default model tier (kanban.default_model): pins a cheaper model on the in-memory task unless the card is
-    # pinned, a review, a retry after a failure or matches a keep pattern. Never raises. [daveey]
+    # Apply inside spawn accounting: an unavailable independent reviewer fails closed.
     from hermes_cli.kanban_model_tier import apply_model_tier
-    apply_model_tier(conn, claimed, lane=lane)
     try:
+        apply_model_tier(conn, claimed, lane=lane)
         pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
         if pid:
             _set_worker_pid(conn, claimed.id, int(pid), run_id=claimed.current_run_id, claim_lock=claimed.claim_lock)
@@ -2162,10 +2152,10 @@ def _dispatch_lane_task(
         return True
     except Exception as exc:
         from tools.process_registry import RestartSafeScopeUnavailable
+        from hermes_cli.kanban_review_model import ReviewModelUnavailable
 
-        # The host refused the spawn (no restart-safe scope): nothing about the
-        # card ran, so it must not spend the card's retry budget (#114720).
-        infrastructure = isinstance(exc, RestartSafeScopeUnavailable)
+        # Admission failed before any worker ran; preserve its retry budget.
+        infrastructure = isinstance(exc, (RestartSafeScopeUnavailable, ReviewModelUnavailable))
         if infrastructure:
             _kb._log.warning("kanban dispatcher: spawn of %s deferred, host cannot place the worker: %s", claimed.id, exc)
         if _record_task_failure(
@@ -2430,10 +2420,14 @@ def _dispatch_once_locked(
         except Exception:
             logger = _kb._log
             logger.warning("kanban worker placement failed; continuing local dispatch", exc_info=True)
+    from hermes_cli.kanban_gateway_drain import core_update_hold
+    result.core_update_drain_hold = core_update_hold()
+    if result.core_update_drain_hold is not None:  # every caller (CLI, dashboard, gateway) claims nothing
+        return result
     may_spawn, spawn_budget = _tick_spawn_budget(conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress,
                                                  board=board)
     if not may_spawn:
-        return result
+        return _kb._sync.worker_pickup_capped(conn, result, dry_run, _profile_exists_fn)  # record why cards wait
 
     result.scheduling_admitted = not dry_run
     if not dry_run:

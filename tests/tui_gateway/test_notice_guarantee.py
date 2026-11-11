@@ -43,7 +43,7 @@ def _notice(db, text, *, age=600.0, **meta):
     return row
 
 
-def _run(db, verdict="started"):
+def _run(db, verdict="started", now=None):
     calls = []
 
     def wake(sid, msg_id):
@@ -54,7 +54,7 @@ def _run(db, verdict="started"):
     def opener(chat_id):
         yield db, db.get_compression_tip(chat_id) or chat_id
 
-    out = ng.guarantee_pass(stores=lambda: iter([db]), holders=list, session_db=opener, wake=wake,
+    out = ng.guarantee_pass(now=now, stores=lambda: iter([db]), holders=list, session_db=opener, wake=wake,
                             spawn=lambda job: job())
     return out, calls
 
@@ -74,8 +74,9 @@ def test_an_unanswered_notice_gets_one_closeout_wake(db):
     assert _run(db) == ([], [])  # claimed: never woken twice
 
 
-def test_young_notice_waits_for_the_grace_window(db):
-    _notice(db, "✔ Kanban t_aaa done — deploy card", age=30)
+@pytest.mark.parametrize("meta", [{}, {"closeout": {"state": "deferred", "retry_at": 0, "attempts": 1}}])
+def test_young_notice_waits_for_the_grace_window(db, meta):
+    _notice(db, "✔ Kanban t_aaa done — deploy card", age=30, **meta)
     assert _run(db) == ([], [])
 
 
@@ -87,6 +88,91 @@ def test_a_refused_wake_leaves_the_outcome_notice_tail(db):
     assert len(calls) == 1 and _closeout(db, row) == "refused"
     stored = so.get_outcome(CHAT, db=db)
     assert (stored["kind"], stored["reason"]) == ("unresolved", "notice_tail")
+
+
+def _closeout_meta(db, row):
+    return db._read_one("SELECT json_extract(display_metadata, '$.closeout.state'), "
+                        "json_extract(display_metadata, '$.closeout.retry_at'), "
+                        "json_extract(display_metadata, '$.closeout.attempts') FROM messages WHERE id = ?", (row,))
+
+
+def test_a_failed_wake_is_deferred_and_offered_again_after_retry_at(db, monkeypatch):
+    # Two hub chats (2026-11-10): the close-out's agent build hit a quota wall, the row was stamped "error" and the
+    # quota reset never brought it back. A failed wake is now retried durably at the reset.
+    now = time.time()
+    monkeypatch.setattr(ng, "_retry_at", lambda sid, t: now + 3600, raising=False)
+    row = _notice(db, "✔ Kanban t_aaa done — deploy card")
+
+    out, calls = _run(db, verdict="error", now=now)
+
+    assert calls == [(CHAT, row)] and [o["result"] for o in out] == ["dispatched"]
+    state, retry_at, attempts = _closeout_meta(db, row)
+    assert (state, retry_at, attempts) == ("deferred", now + 3600, 1)
+    stored = so.get_outcome(CHAT, db=db)
+    assert (stored["kind"], stored["reason"]) == ("unresolved", "notice_tail")
+    assert _run(db, now=now + 3599) == ([], [])  # not before retry_at
+
+    out, calls = _run(db, verdict="started", now=now + 3601)
+
+    assert calls == [(CHAT, row)] and [o["result"] for o in out] == ["dispatched"]
+    state, _retry, attempts = _closeout_meta(db, row)
+    assert (state, attempts) == ("started", 2)
+    assert _run(db, now=now + 99999) == ([], [])  # started: never woken again
+
+
+def test_deferred_wake_survives_a_quota_reset_beyond_discovery_lookback(db, monkeypatch):
+    from tui_gateway import server
+
+    now = time.time()
+    reset = now + 8 * 86400
+    monkeypatch.setattr(server, "_find_live_session_by_key",
+                        lambda key: (key, {"agent_failure": {"failure_resets_at": reset}}))
+    row = _notice(db, "completed before a long quota reset")
+    assert _run(db, verdict="error", now=now)[1] == [(CHAT, row)]
+    due = reset + ng.DEFER_SLACK_S
+    assert tuple(_closeout_meta(db, row)) == ("deferred", due, 1)
+
+    # No writes or fresh activity: the same durable row must age into eligibility.
+    assert _run(db, now=due - 1) == ([], [])
+    assert [c["msg_id"] for c in ng.candidates(db, due)] == [row]
+    out, calls = _run(db, now=due)
+    assert calls == [(CHAT, row)] and [o["result"] for o in out] == ["dispatched"]
+    assert (_closeout_meta(db, row)[0], _closeout_meta(db, row)[2]) == ("started", 2)
+    assert _run(db, now=due + 1) == ([], [])
+
+
+def test_failed_wakes_stop_after_max_attempts(db, monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(ng, "_retry_at", lambda sid, t: t + 60, raising=False)
+    row = _notice(db, "✔ Kanban t_aaa done — deploy card")
+    wakes = 0
+    for n in range(ng.MAX_ATTEMPTS + 2):
+        _out, calls = _run(db, verdict="error", now=now + n * 1000)
+        wakes += len(calls)
+
+    assert wakes == ng.MAX_ATTEMPTS
+    state, _retry, attempts = _closeout_meta(db, row)
+    assert (state, attempts) == ("error", ng.MAX_ATTEMPTS)
+
+
+@pytest.mark.parametrize("verdict", ["refused", "busy", "missing"])
+def test_only_a_failed_wake_is_deferred(db, verdict):
+    row = _notice(db, "✔ Kanban t_aaa done — deploy card")
+    _run(db, verdict=verdict)
+    assert _closeout(db, row) == verdict
+    assert _run(db, now=time.time() + 99999) == ([], [])
+
+
+def test_retry_at_follows_the_build_failures_quota_reset(monkeypatch):
+    from tui_gateway import automation_replay, server
+    now = 1_000_000.0
+    reset = now + 7200
+    monkeypatch.setattr(server, "_find_live_session_by_key",
+                        lambda key: (key, {"agent_failure": {"failure_resets_at": reset}}))
+    assert ng._retry_at(CHAT, now) == reset + ng.DEFER_SLACK_S
+
+    monkeypatch.setattr(server, "_find_live_session_by_key", lambda key: None)
+    assert ng._retry_at(CHAT, now) == now + automation_replay.REPLAY_MIN_DELAY_S + ng.DEFER_SLACK_S
 
 
 def test_a_spent_budget_refreshes_instead_of_waking(db):

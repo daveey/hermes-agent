@@ -40,7 +40,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-TRUSTED_REPOSITORY = "daveey/hermes"
+TRUSTED_REPOSITORY = "softmax-universe/daveey-hermes"
 RUNNER_NAME = "mini-hermes-state-1"
 MACOS_JOB = "tests/hermes_state (macOS, mini)"
 

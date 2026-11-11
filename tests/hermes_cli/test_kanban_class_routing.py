@@ -90,11 +90,17 @@ def test_dispatch_tick_reads_class_default_and_keeps_review_deep(board, routable
         assert pins[tid] == (model, "auto")
 
 
-def test_explicit_pin_survives_review_class_default(board, monkeypatch):
+@pytest.mark.parametrize("lane", ["ready", "review"])
+def test_explicit_lane_pin_survives_class_default(board, monkeypatch, lane):
     with kbc.connect() as conn:
         task = kb.get_task(conn, kb.create_task(conn, title="review", assignee="default",
                             model_override="unknown-exact-model", provider_override="custom"))
-        tier.apply_model_tier(conn, task, lane="review", cfg={"default_model": "class:standard"})
+        if lane == "review":
+            kb.claim_task(conn, task.id)
+            kb.request_review(conn, task.id, metadata={"review_model": "unknown-exact-model",
+                                                       "review_provider": "custom"})
+            task = kb.claim_review_task(conn, task.id)
+        tier.apply_model_tier(conn, task, lane=lane, cfg={"default_model": "class:standard"})
         assert owner_pin(task, conn) == ("unknown-exact-model", "custom")
 
 

@@ -32,7 +32,12 @@ _NOTIFY_DELIVERY_MODES = ("notify", "notify+wake", "wake")
 # ``shepherd`` = explicit notify-subscribe (incl. hermes-hub's shepherd action), ``touch`` = comment/unblock/link.
 # [daveey]
 OWNING_SUB_REASONS = ("create", "origin")
-OBSERVER_SUB_REASONS = ("shepherd", "touch")
+# ``send_refused`` (session-mentions ``subscribe_refused_chat``): a Kanban worker was refused a cross_session send
+# into this chat, so the chat gets the card's done notice instead. A notice destination, like ``touch``: it never
+# owns the card's progress (sidebar counts, derived ``waiting``, Board chat links) and is never inherited. It held an
+# archived Ask Eve origin ``waiting`` on the very card whose drop needed it not waiting (hub, 2026-11-11). [daveey]
+UNCOUNTED_SUB_REASONS = ("touch", "send_refused")
+OBSERVER_SUB_REASONS = ("shepherd",) + UNCOUNTED_SUB_REASONS
 
 _SCALAR_TYPES = (str, int, float, bool)
 
@@ -210,6 +215,14 @@ def add_notify_sub(
             if (existing_metadata.get("reason") in OWNING_SUB_REASONS
                     and merged_metadata.get("reason") not in OWNING_SUB_REASONS):
                 merged_metadata["reason"] = existing_metadata["reason"]
+            # Nor does a notice-only reason (a refused send into a chat that already shepherds the card, or a
+            # legacy unstamped row) release a counted sub: the chat keeps the obligation it had. [daveey]
+            if (existing is not None and merged_metadata.get("reason") in UNCOUNTED_SUB_REASONS
+                    and existing_metadata.get("reason") not in UNCOUNTED_SUB_REASONS):
+                if "reason" in existing_metadata:
+                    merged_metadata["reason"] = existing_metadata["reason"]
+                else:
+                    merged_metadata.pop("reason", None)
         metadata_json = _encode_notify_delivery_metadata(merged_metadata) if merged_metadata else None
         conn.execute(
             """

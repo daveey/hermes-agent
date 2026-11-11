@@ -48,7 +48,7 @@ jobs:
       github.event.workflow_run.head_repository.full_name == github.repository
     # [daveey] poll-only runners (label hermes-hub-poll ONLY, 0.5 CPU each): this
     # poller lives up to 40-60 min and used to hold a test runner slot.
-    runs-on: [self-hosted, hermes-hub-poll]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 60
     steps:
       - name: Checkout trusted default branch

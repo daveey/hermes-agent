@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   structural:
-    runs-on: [self-hosted, hermes-hub]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
@@ -151,7 +151,7 @@ jobs:
     # installs bubblewrap, persists kernel.apparmor_restrict_unprivileged_userns=0
     # and fails the image build unless the runner user can start bwrap. The
     # sandbox step below proves it on every run and fails closed if not.
-    runs-on: [self-hosted, hermes-hub]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     # [daveey] An upstream sync re-validates every catalog entry upstream
     # touched (126 in the c314285 sync, ~18 s each): 30 min cancelled it at 88.
     timeout-minutes: 75
@@ -377,12 +377,23 @@ jobs:
           toolchain: python
           extras: '[]'
 
+      - name: Allow bubblewrap user namespaces
+        # Blacksmith's Ubuntu 24.04 image restricts unprivileged user namespaces
+        # (the old tfgar runner AMI lifted this at bake time). The proof below
+        # still fails closed if the host cannot isolate.
+        if: steps.changed.outputs.files != ''
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq bubblewrap
+          # Blacksmith kernels have no AppArmor userns knob (unrestricted already).
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
+
       - name: Prove the plugin validation sandbox
         if: steps.changed.outputs.files != ''
         run: |
           set -euo pipefail
-          # The runner AMI ships bubblewrap with unprivileged user namespaces
-          # allowed (see runs-on); nothing is installed or reconfigured here. A
+          # The previous step installed bubblewrap and allowed unprivileged user
+          # namespaces; nothing else is reconfigured here. A
           # runner without them fails this step: the exact wrapper the validate
           # step uses never runs a command it could not isolate (exit 125 setup,
           # 126 self-check, bwrap's own 1), so a broken host fails once, here.

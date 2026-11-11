@@ -1088,6 +1088,20 @@ def _gateway_code_root(pid: int, home: Path) -> Optional[Path]:
         import psutil  # type: ignore
 
         process = psutil.Process(pid)
+        # ``python -m hermes_cli.main`` names no path at all, so the import path decides, in the
+        # interpreter's own order: the working directory (unless safe-path mode drops it), then
+        # PYTHONPATH, and only then the venv the python came from (an Ask Eve pinned owner's unit
+        # runs another venv's python under a PYTHONPATH naming its pinned core). [daveey]
+        with suppress(Exception):
+            cmdline, env = process.cmdline() or [], process.environ() or {}
+            # Interpreter options end at the first ``-m``; any other option (``-P``, ``-I``, ``-E``,
+            # ``-u``…) may change the import path, so only the two plain shapes are read here.
+            if cmdline[1:2] == ["-m"]:
+                safe = bool(env.get("PYTHONSAFEPATH"))
+                probes = ([] if safe else [process.cwd()]) + (env.get("PYTHONPATH") or "").split(os.pathsep)
+                for probe in probes:
+                    if probe and os.path.isabs(probe) and (Path(probe) / "hermes_cli" / "main.py").is_file():
+                        return Path(probe).resolve()
         with suppress(Exception):
             root = _code_root_for_path((process.environ() or {}).get("VIRTUAL_ENV"))
             if root:

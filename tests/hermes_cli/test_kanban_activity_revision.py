@@ -121,16 +121,19 @@ def test_claim_and_heartbeat_columns_are_bookkeeping(board):
     assert ksa._board_content_key(path) != before
 
 
-def test_a_missing_trigger_falls_back_to_the_file_stat(board):
+def test_a_missing_trigger_falls_back_to_the_file_stat(board, monkeypatch):
     kb.create_task(board, title="work", assignee="worker", session_id="s_chat")
     path = ksa._board_db_paths()[0]
     assert rev.is_revision(ksa._board_content_key(path))
     board.execute("DROP TRIGGER kanban_activity_rev_task_events_insert")
     board.commit()
+    frozen_stat = rev.file_stat(path)
+    monkeypatch.setattr(rev, "file_stat", lambda _path: frozen_stat)
     key = ksa._board_content_key(path)
     assert key[0] == "stat"  # the counter no longer vouches for task_events: never trusted
+    assert ksa._board_content_key(path) == key
     _bookkeeping(board)
-    assert ksa._board_content_key(path) != key  # back to the old behaviour: any write moves it
+    assert ksa._board_content_key(path) != key  # even when the filesystem tick did not move
 
 
 def test_reinstall_after_a_gap_moves_the_key(board, home):

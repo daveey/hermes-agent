@@ -62,7 +62,10 @@ def test_content_key_on_busy_board_falls_back_without_waiting(busy_board, monkey
 
     monkeypatch.setattr(kanban_generation.time, "sleep", lambda s: sleeps.append(s))
     blocker.execute("BEGIN EXCLUSIVE")
-    assert activity._board_content_key(board) == stat_key
+    first = activity._board_content_key(board)
+    second = activity._board_content_key(board)
+    assert first[:2] == second[:2] == stat_key
+    assert first != second  # a busy read is unknown, not proof of unchanged content
     assert sleeps == []  # no open retry loop behind a busy board
     assert not has_live_connection(board)
 

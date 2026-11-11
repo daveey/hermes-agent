@@ -178,6 +178,7 @@ def effective_cache_ttl(ttl: str | None, *, model: str = "", provider: str = "")
 def _apply_system_cache_markers(
     message: dict, cache_marker: dict, static_system_prefix: str | None, *,
     native_anthropic: bool, mark_suffix: bool = True, fallback_to_whole: bool = True,
+    mark_prefix: bool = True,
 ) -> int:
     """Mark the static system prefix (and optionally the full prompt); returns markers applied.
 
@@ -190,9 +191,9 @@ def _apply_system_cache_markers(
     if isinstance(static_system_prefix, str) and static_system_prefix and isinstance(content, str) and content.startswith(static_system_prefix):
         suffix = content[len(static_system_prefix):]
         if suffix.strip():
-            message["content"] = [_text_part(static_system_prefix, cache_marker),
+            message["content"] = [_text_part(static_system_prefix, cache_marker if mark_prefix else None),
                                   _text_part(suffix, cache_marker if mark_suffix else None)]
-            return 2 if mark_suffix else 1
+            return int(mark_prefix) + int(mark_suffix)
     elif not fallback_to_whole:
         return 0
     _apply_cache_marker(message, cache_marker, native_anthropic=native_anthropic)
@@ -314,6 +315,7 @@ def build_prompt_cache_plan(
     api_messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, *,
     cache_ttl: str = "5m", native_anthropic: bool = False, static_system_prefix: str | None = None,
     direct_native_tool_cache: bool = False, tool_part_markers: bool = True,
+    cache_full_system: bool = False,
 ) -> PromptCachePlan:
     """Build copy-on-write cache sections for one resolved request destination
     (``tool_part_markers=False`` keeps markers off role:tool parts on LiteLLM-style routes)."""
@@ -328,11 +330,13 @@ def build_prompt_cache_plan(
     messages = _strip_prior_decoration(list(api_messages or []))
     marker = _build_marker(cache_ttl)
     if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
-        # Tool-cache layout: only the static prefix carries a system-side marker; the
-        # volatile suffix's budget is spent on the tools array.
+        # Desktop sessions spend the ONE system marker on the full shared prompt.
+        # Keep tools and both transaction endpoints; never choose by round count.
+        # Other callers keep the static-prefix fallback for differing system tails.
         messages[0] = copy.deepcopy(messages[0])
         _apply_system_cache_markers(messages[0], marker, static_system_prefix,
-                                    native_anthropic=True, mark_suffix=False, fallback_to_whole=False)
+                                    native_anthropic=True, mark_suffix=cache_full_system,
+                                    mark_prefix=not cache_full_system, fallback_to_whole=cache_full_system)
     planned_tools[-1]["cache_control"] = dict(marker)
     for endpoint in _completed_transaction_endpoint_indexes(messages, native_anthropic=True)[-2:]:
         messages[endpoint] = copy.deepcopy(messages[endpoint])

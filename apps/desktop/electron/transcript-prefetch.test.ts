@@ -379,3 +379,74 @@ function deferredRows() {
 
   return { promise, resolve }
 }
+
+describe('[daveey] prefetch over an asynchronous store (the worker-thread cache)', () => {
+  function harness(records: HubSessionRecord[]) {
+    const clock = 1_000_000
+    const inner = new TranscriptCacheStore(':memory:', { now: () => clock })
+    const later = <T>(value: () => T) => new Promise<T>(resolve => setTimeout(() => resolve(value()), 1))
+
+    const store = {
+      meta: vi.fn((key: TranscriptCacheKey) => later(() => inner.meta(key))),
+      metaMany: vi.fn((keys: readonly TranscriptCacheKey[]) => later(() => keys.map(key => inner.meta(key)))),
+      putLatest: vi.fn((key: TranscriptCacheKey, latest: readonly unknown[], meta?: object) =>
+        later(() => inner.putLatest(key, latest, meta))
+      )
+    }
+
+    const fetchLatest = vi.fn(async (key: TranscriptCacheKey) => [{ content: key.sessionId, id: 1 }])
+
+    const prefetcher = new TranscriptPrefetcher({
+      connectionForGateway: gateway => CONNECTIONS[gateway],
+      fetchLatest,
+      listHubSessions: async () => records,
+      now: () => clock,
+      store
+    })
+
+    return { fetchLatest, inner, prefetcher, store }
+  }
+
+  it('checks a whole pass in one batched meta read and awaits each write before counting it', async () => {
+    const h = harness([record('mini', 'a', 1), record('mini', 'b', 2), record('hub', 'c', 3)])
+
+    expect(await h.prefetcher.tick()).toMatchObject({ failed: 0, fetched: 3, targets: 3 })
+    expect(h.store.metaMany).toHaveBeenCalledTimes(1)
+    expect(h.store.meta).not.toHaveBeenCalled()
+    expect(h.inner.stats().sessions).toBe(3)
+
+    expect(await h.prefetcher.tick()).toMatchObject({ fetched: 0, skipped: 3 })
+    expect(h.fetchLatest).toHaveBeenCalledTimes(3)
+  })
+
+  it('a write the store refuses (resolves false) is not counted as fetched', async () => {
+    const h = harness([record('mini', 'a', 1)])
+    h.store.putLatest.mockResolvedValue(false)
+
+    expect(await h.prefetcher.tick()).toMatchObject({ fetched: 0, skipped: 1 })
+  })
+
+  it('asks for one key while its freshness check is still in flight share that check: one fetch', async () => {
+    const h = harness([])
+    const key = { connectionId: 'mac-mini', profile: 'default', sessionId: 'ref' }
+    const asks = [h.prefetcher.prefetchKey(key), h.prefetcher.prefetchKey(key), h.prefetcher.prefetchKey(key)]
+
+    expect(await Promise.all(asks)).toEqual(['fetched', 'queued', 'queued'])
+    expect(h.store.meta).toHaveBeenCalledTimes(1)
+    expect(h.fetchLatest).toHaveBeenCalledTimes(1)
+    await expect(h.prefetcher.prefetchKey(key)).resolves.toBe('current')
+  })
+
+  it('a store that fails the freshness check reports failed and leaves the key askable again', async () => {
+    const h = harness([])
+    const key = { connectionId: 'mac-mini', profile: 'default', sessionId: 'ref' }
+    h.store.meta.mockRejectedValueOnce(new Error('transcript cache worker lost (exit 1)'))
+
+    expect(await Promise.all([h.prefetcher.prefetchKey(key), h.prefetcher.prefetchKey(key)])).toEqual([
+      'failed',
+      'failed'
+    ])
+    expect(h.fetchLatest).not.toHaveBeenCalled()
+    await expect(h.prefetcher.prefetchKey(key)).resolves.toBe('fetched')
+  })
+})

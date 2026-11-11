@@ -238,15 +238,12 @@ def test_walled_concrete_default_model_reroutes_to_class_peer(board, monkeypatch
         clock[0] += 301
         seen = []
         dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.model_override, task.provider_override)))
-        if pinned:
-            # Explicit pins keep their model and wait for the reset.
-            assert seen == []
-            assert dispatch.check_respawn_guard(conn, tid) == 'subscription_quota_reset'
-        else:
-            assert seen == [('claude-opus-5-5', 'anthropic')]
-            route = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='run_route' "
-                                 "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()[0]
-            assert '"provider": "anthropic"' in route and 'quota_reroute' in route
+        # A non-mandatory pin moves within its class too (t_01a19990897b9d9b); only its reason differs.
+        assert seen == [('claude-opus-5-5', 'anthropic')]
+        route = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='run_route' "
+                             "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()[0]
+        assert '"provider": "anthropic"' in route
+        assert ('pin_quota_reroute:openai-codex' if pinned else 'quota_reroute') in route
 
 
 def test_new_unpinned_card_created_after_a_known_wall_never_routes_to_it(board, monkeypatch, all_assignees_spawnable):
@@ -414,7 +411,9 @@ def test_changed_explicit_pin_is_judged_by_its_own_provider(board, monkeypatch, 
     _, cfg = routing(monkeypatch)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='pinned', assignee='a')
-        conn.execute("UPDATE tasks SET model_override='claude-sonnet-5-5', provider_override='anthropic' WHERE id=?", (tid,))
+        # Mandatory: a far wall would otherwise move this in-class pin (kanban_pin_reroute).
+        conn.execute("UPDATE tasks SET model_override='claude-sonnet-5-5', provider_override='anthropic', "
+                     "model_pin_mandatory=1 WHERE id=?", (tid,))
         conn.commit()
         reap(conn, tid, text='resets in ~11h')
         assert dispatch.check_respawn_guard(conn, tid) == 'subscription_quota_reset'

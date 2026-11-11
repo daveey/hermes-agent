@@ -845,6 +845,11 @@ def test_hub_session_rows_do_not_invalidate_the_remote_links_projection(kanban_r
     backend's GIL time); a tasks or gateway write still must."""
     path = _make_replica(kanban_root / "hub-state", "macbook", [
         {"_gw": "hub", "id": "t_r1", "status": "running", "sessions": [_shep("s_mac")]}])
+    # Model Blacksmith's same-size commits within one mtime/ctime tick.
+    from pathlib import Path
+    original_stat = Path.stat
+    frozen = {p: p.stat() for p in (path, Path(str(path) + '-wal')) if p.exists()}
+    monkeypatch.setattr(Path, 'stat', lambda p, *a, **kw: frozen[p] if p in frozen else original_stat(p, *a, **kw))
     projections: list[int] = []
     real = ksa._project_remote_links
     monkeypatch.setattr(ksa, "_project_remote_links", lambda: projections.append(1) or real())
@@ -869,13 +874,8 @@ def test_hub_session_rows_do_not_invalidate_the_remote_links_projection(kanban_r
 def test_hub_signature_is_reused_until_the_file_changes_and_falls_back_on_old_replicas(kanban_root, tmp_path, monkeypatch):
     path = _make_replica(kanban_root / "hub-state", "macbook", [])
     queries: list[str] = []
-    real_open = ksa._open_ro
-
-    def _spy_open(p, *a, **k):
-        queries.append(str(p))
-        return real_open(p, *a, **k)
-
-    monkeypatch.setattr(ksa, "_open_ro", _spy_open)
+    with ksa.cached_ro(path) as conn:
+        conn.set_trace_callback(lambda sql: queries.append(sql) if sql.startswith('SELECT coll,') else None)
     a = ksa._hub_content_signature(path)
     b = ksa._hub_content_signature(path)
     assert a == b and len(queries) == 1  # unchanged file: the memo answers

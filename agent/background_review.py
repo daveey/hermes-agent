@@ -1036,6 +1036,7 @@ def build_cache_parity_fork(
     # routed fork build its own.
     if not _routed:
         review_agent._cached_system_prompt = agent._cached_system_prompt
+        review_agent._cache_full_system = getattr(agent, "_cache_full_system", False)
         review_agent.session_start = agent.session_start
         # Cache-scope parity (#109964): the fork shares the parent's physical session_id and
         # byte-identical prefix, but is _persist_disabled (declared scope fails closed) and

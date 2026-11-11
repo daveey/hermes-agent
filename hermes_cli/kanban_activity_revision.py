@@ -13,8 +13,9 @@ that only touch bookkeeping columns (``BOOKKEEPING_COLUMNS``: claim/lease/heartb
 marks) do not bump it; no activity reader selects those columns.
 
 Readers (``content_key``) only trust the counter when every table they read that exists in the file carries all three
-of its triggers; otherwise (older writer, dropped trigger, rebuilt file) they fall back to the file's stat, the
-previous behaviour. The key also carries the file identity and ``schema_version``, so a replaced file or a schema
+of its triggers; otherwise (older writer, dropped trigger, rebuilt file) they fall back to the file's stat plus a
+connection-scoped SQLite data_version. Equal timestamps alone never prove an absence of commits. The key also
+carries the file identity and ``schema_version``, so a replaced file or a schema
 change always reads afresh.
 
 The update trigger names each read column, so SQLite refuses ``ALTER TABLE ... DROP COLUMN`` of a watched column
@@ -185,7 +186,24 @@ def _covered_read(conn: sqlite3.Connection, path: Path, db: tuple | None, tables
     return revision
 
 
+# Zero-budget SQLite probes must not race each other's reader lifecycle opens.
+# The reader cache is shared, not thread-local: serialize probes before entering
+# it, so concurrent healthy readers compare the SAME connection's data_version
+# rather than turning local lock contention into unrelated unknown keys. Stripes
+# bound lock storage without retaining paths/connections indefinitely.
+_PROBE_LOCKS = tuple(threading.RLock() for _ in range(64))
+
+
+def probe_lock(path: Path):
+    return _PROBE_LOCKS[hash(str(path)) % len(_PROBE_LOCKS)]
+
+
 def content_key(path: Path, tables: Iterable[str], open_ro: Callable) -> tuple:
+    with probe_lock(path):
+        return _content_key(path, tables, open_ro)
+
+
+def _content_key(path: Path, tables: Iterable[str], open_ro: Callable) -> tuple:
     """A key that changes whenever any row of ``tables`` that the readers read changes in ``path`` (and on file
     replacement or schema change), but not on bookkeeping-only writes. ``open_ro(path)`` is a context manager
     yielding a read-only connection (a kept one: the read is one indexed row plus the schema table). Falls back to
@@ -196,11 +214,16 @@ def content_key(path: Path, tables: Iterable[str], open_ro: Callable) -> tuple:
     db = stat[0]
     try:
         with open_ro(path) as conn:
+            # data_version is meaningful only on the SAME connection. Retain its identity
+            # too, so an evicted/reopened reader cannot reuse an old version's cache entry.
+            version = conn.execute("PRAGMA data_version").fetchone()[0]
             revision = _covered_read(conn, path, db, tables)
+            fallback = ("stat", stat, conn, version)
     except sqlite3.Error:
         revision = None
+        fallback = ("stat", stat, object())  # unreadable is unknown, never proof of unchanged content
     if revision is None or db is None:
-        return ("stat", stat)
+        return fallback
     return ("revision", db[0], db[1], *revision)
 
 

@@ -32,6 +32,9 @@ import sys
 import threading
 from typing import Dict, Optional, Set, Tuple
 
+# Imported at load, never lazily under a lock: building its ctypes path makes releasing syscalls.
+from hermes_state_lockguard_fdscan import identity as _fd_identity, open_fd_identities
+
 logger = logging.getLogger("hermes_state")
 
 # SQLite's unix VFS lock geometry (os_unix.c): the SHARED range on the main file and the
@@ -115,7 +118,15 @@ def _identity(path: str) -> Optional[Identity]:
 
 def _own_fds_for(identities: set[Identity]):
     """Yield ``(fd, identity)`` for every descriptor of this process on one of *identities*
-    (SQLite's own connection descriptors; the cached header-probe fd too, harmless)."""
+    (SQLite's own connection descriptors; the cached header-probe fd too, harmless). The per-fd
+    ``fstat`` keeps the GIL (``hermes_state_lockguard_fdscan``): a GIL hand-off per descriptor made
+    this scan take seconds whenever another thread was busy."""
+    swept = open_fd_identities()
+    if swept is not None:
+        for fd, ident in swept:
+            if ident in identities:
+                yield fd, ident
+        return
     for fd_dir in ("/proc/self/fd", "/dev/fd"):
         try:
             names = os.listdir(fd_dir)
@@ -125,12 +136,8 @@ def _own_fds_for(identities: set[Identity]):
             if not name.isdigit():
                 continue
             fd = int(name)
-            try:
-                st = os.fstat(fd)
-            except OSError:
-                continue
-            ident = (st.st_dev, st.st_ino)
-            if ident in identities:
+            ident = _fd_identity(fd)
+            if ident is not None and ident in identities:
                 yield fd, ident
         return
 

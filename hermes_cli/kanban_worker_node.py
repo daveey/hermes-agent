@@ -404,54 +404,141 @@ def import_cards(conn: sqlite3.Connection, replica: sqlite3.Connection, ids: Ite
     return done
 
 
+def open_replica(conn: sqlite3.Connection) -> Optional[sqlite3.Connection]:
+    """Read-only connection to this board's full replica, or None when there is none yet."""
+    path = _replica_path(conn)
+    if not path.exists():
+        return None
+    from hermes_cli import kanban_lockguard
+    replica = kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+    replica.row_factory = sqlite3.Row
+    return replica
+
+
+def pinned_rows(replica: sqlite3.Connection, own: str, *, now_ms: Optional[int] = None,
+                statuses: tuple[str, ...] = ("ready", "review")) -> list[sqlite3.Row]:
+    """Foreign ``statuses`` cards without a live lease whose ``runs_on`` names ``machine:<own>`` (parents ignored)."""
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    return replica.execute(
+        f"SELECT * FROM tasks WHERE status IN ({','.join('?' * len(statuses))}) AND created_on IS NOT NULL "
+        "AND created_on != ? AND (lease_holder IS NULL OR COALESCE(lease_expires, 0) < ?) AND json_valid(runs_on) "
+        "AND EXISTS (SELECT 1 FROM json_each(tasks.runs_on) WHERE value = ?)",
+        (*statuses, own, now_ms, f"machine:{own}")).fetchall()
+
+
+def _unimported_pinned(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str) -> set[str]:
+    try:
+        return {r["id"] for r in pinned_rows(replica, own)
+                if not conn.execute("SELECT 1 FROM tasks WHERE id = ?", (r["id"],)).fetchone()}
+    except Exception:  # health: allow BLE001 -- pickup evidence must never stop a pickup
+        _log.warning("kanban worker node: could not list pinned cards for pickup evidence", exc_info=True)
+        return set()
+
+
+def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *, mode: str, limit: int,
+              profile_exists: Optional[Callable[[str], bool]], full_detail: str,
+              ) -> tuple[list[str], dict[str, tuple[str, Optional[str]]]]:
+    """One pass over the candidates: ids to copy (at most ``limit``, in candidate order) and, for each card pinned
+    to this machine that the pass leaves on the Board, why. ``budget_exhausted`` only for a card this pass would
+    otherwise have copied, so a refusal is never hidden behind a full queue."""
+    from hermes_cli.kanban_db_dispatch import review_dispatch_enabled
+    mine = _unimported_pinned(conn, replica, own)
+    reg = registry()
+    if not reg:
+        return [], {tid: ("other", "machine registry unavailable") for tid in mine}
+    review_enabled = review_dispatch_enabled()
+    listed = candidates(replica, own)
+    skips: dict[str, tuple[str, Optional[str]]] = {
+        tid: ("parents_incomplete", "a parent is not done") for tid in mine - {c["id"] for c in listed}}
+    picked: list[str] = []
+    for card in listed:
+        full = len(picked) >= limit
+        if full and card["id"] not in mine:
+            continue
+        reason = _skip_reason(conn, card, own, reg["machines"], mode=mode, review_enabled=review_enabled,
+                              profile_exists=profile_exists)
+        if reason is None and full:
+            reason = ("budget_exhausted", full_detail)
+        if reason is None:
+            picked.append(card["id"])
+        elif reason[0] and card["id"] in mine:
+            skips[card["id"]] = reason
+    return picked, skips
+
+
+def note_capped(conn: sqlite3.Connection, profile_exists: Optional[Callable[[str], bool]] = None) -> None:
+    """A tick with no spawn budget runs no pickup: record why this machine's pinned cards wait (``budget_exhausted``
+    for the ones a slot would start). Evidence only (``kanban_pickup_stall``); copies nothing."""
+    mode = pickup_mode()
+    if sync.board_mode(conn) != "primary" or mode is None:
+        return
+    replica = open_replica(conn)
+    if replica is None:
+        return
+    try:
+        _, skips = _evaluate(conn, replica, _own(conn), mode=mode, limit=0, profile_exists=profile_exists,
+                             full_detail="no spawn slot this tick")
+    finally:
+        replica.close()
+    _record_skips(conn, skips)
+
+
 def pickup(conn: sqlite3.Connection, *, budget: Optional[int],
            profile_exists: Optional[Callable[[str], bool]] = None) -> list[str]:
     """One tick's pickup: evict finished copies, then copy up to ``budget`` eligible foreign cards. Returns the
-    ids copied. A no-op unless the board is primary and ``kanban.sync.pickup`` is on."""
+    ids copied. A no-op unless the board is primary and ``kanban.sync.pickup`` is on. Each card pinned to this
+    machine that the pass does not import gets its reason recorded (``kanban_pickup_stall.record``)."""
     mode = pickup_mode()
     if sync.board_mode(conn) != "primary" or mode is None:
         return []
     evict(conn)
     limit = DEFAULT_PICKUP_BATCH if budget is None else budget
     if limit <= 0:
+        note_capped(conn, profile_exists)
         return []
-    reg = registry()
-    if not reg:
+    replica = open_replica(conn)
+    if replica is None:
         return []
-    own = _own(conn)
-    machines = reg["machines"]
-    path = _replica_path(conn)
-    if not path.exists():
-        return []
-    from hermes_cli import kanban_lockguard
-    replica = kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
-    replica.row_factory = sqlite3.Row
-    from hermes_cli.kanban_db_dispatch import review_dispatch_enabled
-    review_enabled = review_dispatch_enabled()
     try:
-        picked: list[str] = []
-        for card in candidates(replica, own):
-            if len(picked) >= limit:
-                break
-            if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (card["id"],)).fetchone():
-                continue
-            if (mode == "explicit" or card["status"] == "review") and card["runs_on"] is None:
-                continue  # a default-placement review stays with its creator
-            if card["status"] == "review" and not review_enabled:
-                continue
-            if eligible(dict(card), own, machines) is not None:
-                continue
-            if profile_exists is not None and card["assignee"] and not profile_exists(card["assignee"]):
-                continue
-            # [daveey] Never claim a card this machine's profile cannot satisfy: it would run, then fail its own
-            # handoffs here (t_01a184ac93d31979). Left on the Board for a machine that can.
-            from hermes_cli.kanban_runs_on_capabilities import claim_refusal
-            if claim_refusal(dict(card), me=own) is not None:
-                continue
-            picked.append(card["id"])
+        picked, skips = _evaluate(conn, replica, _own(conn), mode=mode, limit=limit, profile_exists=profile_exists,
+                                  full_detail="pickup batch full this tick")
         imported = import_cards(conn, replica, picked)
     finally:
         replica.close()
+    skips.update({tid: ("other", "import failed") for tid in picked if tid not in imported})
+    _record_skips(conn, {tid: why for tid, why in skips.items() if tid not in imported})
     if imported:
         _log.info("kanban worker node: picked up %d card(s) from other gateways: %s", len(imported), imported)
     return imported
+
+
+def _record_skips(conn: sqlite3.Connection, skips: dict[str, tuple[str, Optional[str]]]) -> None:
+    from hermes_cli import kanban_pickup_stall as kps
+    try:
+        kps.record(conn, skips)
+    except Exception:  # health: allow BLE001 -- pickup evidence must never undo or stop a pickup
+        _log.warning("kanban worker node: could not record pickup skips", exc_info=True)
+
+
+def _skip_reason(conn: sqlite3.Connection, card: sqlite3.Row, own: str, machines: Mapping[str, Mapping[str, Any]], *,
+                 mode: str, review_enabled: bool,
+                 profile_exists: Optional[Callable[[str], bool]]) -> Optional[tuple[str, Optional[str]]]:
+    """None when this machine may copy ``card``; else ``(reason, detail)`` (reason ``""``: nothing to record)."""
+    if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (card["id"],)).fetchone():
+        return "", None  # already here
+    if (mode == "explicit" or card["status"] == "review") and card["runs_on"] is None:
+        return "", None  # a default-placement review stays with its creator
+    if card["status"] == "review" and not review_enabled:
+        return "other", "review dispatch disabled"
+    refused = eligible(dict(card), own, machines)
+    if refused is not None:
+        return ("hold" if refused == "held" else "capability_missing"), refused
+    if profile_exists is not None and card["assignee"] and not profile_exists(card["assignee"]):
+        return "profile_ineligible", f"no profile {card['assignee']!r} here"
+    # [daveey] Never claim a card this machine's profile cannot satisfy: it would run, then fail its own
+    # handoffs here (t_01a184ac93d31979). Left on the Board for a machine that can.
+    from hermes_cli.kanban_runs_on_capabilities import claim_refusal
+    refusal = claim_refusal(dict(card), me=own)
+    if refusal is not None:
+        return "capability_missing", str(refusal)
+    return None

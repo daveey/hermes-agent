@@ -3490,6 +3490,13 @@ kanban:
 
 `kanban.strong_model` names the model dispatched for strong-tier cards; `kanban.strong_provider` optionally pins its provider, otherwise it is inferred from the model name.
 
+```yaml
+kanban:
+  pin_quota_reroute_min_hours: 6   # a card pin walled this long runs on a same-class peer
+```
+
+A card pinned to a model (`kanban_create(model=...)`, `hermes kanban create --model`) normally runs on exactly that model. When the card's own run hits that provider's subscription quota and the reset is `kanban.pin_quota_reroute_min_hours` (default 6) or more away, each later run until the reset uses another eligible, unwalled route of the pinned model's routing class (`model_routing.routes`). The card row keeps its pin, so the first run after the reset is back on it. Every such run records a `model_reroute` event and a `pinned+pin_quota_reroute:<provider>` route reason, and the card gets one comment per quota episode. A pin whose model sits in no class (or in two) still waits, as does any review-lane run. To make a pin always wait for its reset, create the card with `pin_mandatory=true` / `--pin-mandatory`, or run `hermes kanban set-model <id> --mandatory` (`--no-mandatory` undoes it); a card body containing `require_model` is treated the same way.
+
 `kanban.auto_recover_corruption` (default `true`): when a board's table b-trees fail `integrity_check` (damage `REINDEX` can't fix), its dispatch pauses and the gateway dispatcher also starts `hermes kanban recover` for it in a child process (salvage, fill from the newest healthy backup, write back in place, loss report and a follow-up card). Set it to `false` to keep only the pause. `kanban.recovery_card_assignee` (default `default`) is the assignee of that follow-up card.
 
 ## Kanban default placement

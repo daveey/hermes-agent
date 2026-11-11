@@ -85,7 +85,7 @@ def held_chats(conn: sqlite3.Connection, task_id: str) -> list[str]:
                 reason = (json.loads(meta) or {}).get("reason") if meta else None
             except (TypeError, ValueError, AttributeError):
                 reason = None
-            if reason != "touch":
+            if reason not in kbn.UNCOUNTED_SUB_REASONS:  # touch / send_refused are notice-only [daveey]
                 chats.append(str(chat))
     except sqlite3.Error:
         pass

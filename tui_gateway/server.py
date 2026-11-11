@@ -202,6 +202,9 @@ _LONG_HANDLERS = frozenset({
     "onboarding.start", "onboarding.state", "subagent.roster",
     "session.take_over",  # take_over waits for the old owner's ack
     "command.dispatch",  # /goal draft invokes the auxiliary model; never block the RPC reader
+    # Skill/plugin/quick-command walk for the session's profile + workspace (1.9 s cold, 5.5 s under
+    # load). Desktop sends it right after session.create, so inline it held the first prompt.submit.
+    "commands.catalog",
     "shared_metrics.set",  # consent reconcile waits on the metrics store's write lock
     "session.title.suggest",  # aux-model call (⌘⇧N rename pre-fill)
 })

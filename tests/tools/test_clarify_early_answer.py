@@ -55,10 +55,21 @@ def _answer(commits, decisions=(DECISION,)):
         {"status": "answered_elsewhere", "decisions": list(decisions)}, commit=lambda: commits.append("done"))
 
 
+def _bound(fn):
+    """A provider that answers for the exact question shown (echoes its digest): the bound-question contract."""
+    def provider(sid, tcid, question=None):
+        early = fn(sid, tcid)
+        if early is not None and question is not None:
+            early.result["binding"] = {"toolCallId": tcid, "questionDigest": question["digest"]}
+        return early
+    provider.accepts_question = True
+    return provider
+
+
 def test_pending_decision_is_returned_instead_of_asking():
     """(c) check before asking."""
     commits, seen = [], []
-    clarify_early.register_provider(lambda sid, tcid: seen.append((sid, tcid)) or _answer(commits))
+    clarify_early.register_provider(_bound(lambda sid, tcid: seen.append((sid, tcid)) or _answer(commits)))
     cb = Blocking()
     out = json.loads(clarify_tool(QUESTIONS, callback=cb, session_id="s1", tool_call_id="call_1"))
     assert cb.calls == 0
@@ -73,7 +84,7 @@ def test_pending_decision_is_returned_instead_of_asking():
 def test_decision_recorded_while_blocked_ends_the_clarify():
     """(a) end the clarify early."""
     commits, state = [], {"ready": False}
-    clarify_early.register_provider(lambda sid, tcid: _answer(commits) if state["ready"] else None)
+    clarify_early.register_provider(_bound(lambda sid, tcid: _answer(commits) if state["ready"] else None))
     cb = Blocking()
     box = {}
     t = threading.Thread(target=lambda: box.update(
@@ -102,7 +113,7 @@ def test_decision_for_another_session_does_not_end_the_clarify():
             polled_enough.set()
         return _answer(commits) if sid == "other" else None
 
-    clarify_early.register_provider(provider)
+    clarify_early.register_provider(_bound(provider))
     cb = Blocking()
     box = {}
     t = threading.Thread(target=lambda: box.update(
@@ -121,7 +132,7 @@ def test_decision_for_another_session_does_not_end_the_clarify():
 def test_a_real_answer_that_wins_the_race_is_not_replaced():
     """The human answered at the same moment: their answer is returned and the decision stays undelivered."""
     commits, state = [], {"ready": False}
-    clarify_early.register_provider(lambda sid, tcid: _answer(commits) if state["ready"] else None)
+    clarify_early.register_provider(_bound(lambda sid, tcid: _answer(commits) if state["ready"] else None))
 
     class Uncancellable(Blocking):
         def cancel_early(self, reason):

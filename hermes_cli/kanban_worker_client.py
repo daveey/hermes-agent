@@ -18,11 +18,15 @@ from typing import Optional
 from hermes_cli.gateway_client import GatewayClientError as _GatewayClientError
 
 # [daveey] The promise hermes-sync's ``kanban_workers_restart_safe`` asks of this core: a gateway restart
-# (the one in ``hermes update``) neither fails nor strands a running Kanban run. The run carries on, or
-# it is requeued without a failure counted. #266 keeps it: a draining owner's refusals refresh this
-# worker's silence budget up to the owner's own after-turn cap (``_Claim.note_refusal``); an admitted
-# turn the restart ends raises ``OwnerRestartLost`` and exits ``KANBAN_OWNER_RESTART_EXIT_CODE``; and the
-# dead-worker sweep requeues that exit as ``reclaimed`` with no failure counted. hermes-sync reads this
+# (the one in ``hermes update``) neither fails nor strands a running Kanban run. The run CONTINUES: the
+# old owner checkpoints the turn its restart Stop ends (``gateway.session_kanban_restart``), this worker
+# keeps its pid and claim, waits up to ``CONTINUE_WAIT_S`` for the next owner and asks ``kanban.run`` for
+# the same attempt again, and that owner continues the turn in the same session
+# (``gateway.session_kanban_continue``), so no reclaim, crash or failure is booked. A draining owner's
+# refusals refresh the silence budget up to its own after-turn cap (``_Claim.note_refusal``). Only when
+# continuation cannot be proven safe (no checkpoint, the owner refuses it, or no owner within the wait)
+# does the worker raise ``OwnerRestartLost`` and exit ``KANBAN_OWNER_RESTART_EXIT_CODE``, which the
+# dead-worker sweep requeues as ``reclaimed`` with no failure counted. hermes-sync reads this
 # file's text with the regex ``^GATEWAY_RESTART_SAFE\s*(?::\s*bool\s*)?=\s*True\b``: without a match every
 # core-update drain holds new Kanban claims for up to 20 min. Pinned by
 # tests/hermes_cli/test_kanban_worker_owner_restart.py.
@@ -35,6 +39,11 @@ GATEWAY_RESTART_SAFE = True
 # ``OWNER_WAIT_S`` is the longest the owner may stay silent between answers before the worker
 # gives up (the first ``kanban.run`` answer has its own wait, ``admission_answer_budget``).
 OWNER_WAIT_S = 180.0
+# [daveey] After the owner checkpointed this attempt's turn for its restart, the silence the worker waits
+# out for the next owner: the old owner's exit, ``hermes update``'s tree move and the new owner's start.
+CONTINUE_WAIT_S = 300.0
+# A restart storm never loops one attempt forever: past this many checkpoints it is requeued uncounted.
+MAX_CONTINUATIONS = 8
 _TRANSIENT_OWNER_STATES = frozenset({'draining', 'starting'})
 # In-band owner refusals that leave the attempt intact: a draining owner admits nothing new, and a
 # retired authority's successor holds the admission the next connection reads.
@@ -101,6 +110,18 @@ class _Claim:
     waiting: Optional[float] = None  # monotonic time the owner's current restart wait was first seen
     alive: float = float('-inf')  # monotonic time the owner last refused us from inside that wait
     restarted: bool = False  # the owner restarted (or began to) during this attempt
+    continuing: bool = False  # the owner checkpointed the turn: the next ``kanban.run`` asks to continue it
+    checkpoints: tuple = ()  # checkpoint tokens already continued (each is continued at most once)
+
+    def silence_budget(self):
+        return CONTINUE_WAIT_S if self.continuing else OWNER_WAIT_S
+
+    def continue_after(self, token):
+        """The owner checkpointed this attempt's turn: ask the next owner to continue it. [daveey]"""
+        self.checkpoints = (*self.checkpoints, token)
+        self.continuing = self.restarted = True
+        self.admission_id = None
+        self.answered = time.monotonic()
 
     def silent_for(self):
         return time.monotonic() - max(self.answered, self.alive)
@@ -120,7 +141,7 @@ class _Claim:
             draining = exc.reason_code != 'idle_exit'
         else:
             return
-        self.restarted = self.admission_id is not None
+        self.restarted = self.restarted or self.continuing or self.admission_id is not None
         if not draining:
             return
         now = time.monotonic()
@@ -175,9 +196,18 @@ async def run(params, board_db):
                 raise
             host_refusal = _host_refusal(exc, claim)
             if not (host_refusal or _restartable(exc)):
+                if claim.continuing:
+                    # The next owner would not continue the checkpointed turn (``kanban_continuation_unsafe``,
+                    # a moved claim): today's uncounted requeue, which resumes this transcript. [daveey]
+                    raise OwnerRestartLost(f'Kanban owner did not continue the checkpointed turn: {exc}') from exc
                 raise
             claim.note_refusal(exc)
-            if claim.silent_for() >= OWNER_WAIT_S:
+            if (claim.silent_for() >= OWNER_WAIT_S and not claim.continuing
+                    and await asyncio.to_thread(_checkpoint, params, board_db, claim) is not None):
+                # [daveey] The stopping owner checkpointed this attempt's turn before the gap (a ``hermes
+                # update`` refuses us in its restart wait, then the tree moves): wait out the restart.
+                claim.continuing = claim.restarted = True
+            if claim.silent_for() >= claim.silence_budget():
                 # WebSocket errors can embed remote bodies; only our own messages are quoted.
                 status = getattr(getattr(exc, 'response', None), 'status_code', None)
                 detail = exc if isinstance(exc, GatewayClientError) else type(exc).__name__ + (
@@ -198,6 +228,15 @@ async def run(params, board_db):
                 error.host_refusal = str(exc) if host_refusal else None
                 raise error from exc
         else:
+            token = None if receipt['status'] != 'terminal' else await asyncio.to_thread(
+                _checkpoint, params, board_db, claim)
+            if token is not None:
+                print('Kanban owner restarting: turn checkpointed; waiting for the next owner to continue it',
+                      file=sys.stderr, flush=True)
+                claim.continue_after(token)
+                failures = 0
+                await asyncio.sleep(jittered_backoff(1, base_delay=1.0, max_delay=8.0, jitter_ratio=1.0))
+                continue
             if receipt['status'] == 'unknown' and claim.restarted:
                 raise OwnerRestartLost('Kanban execution unknown after an owner restart; retained by owner')
             return _exit_code(receipt, params, board_db)
@@ -205,6 +244,22 @@ async def run(params, board_db):
         # Jittered (1-2 s first, up to 16 s): workers of one dead owner do not all redial, and so
         # start a replacement, in the same instant.
         await asyncio.sleep(jittered_backoff(failures, base_delay=1.0, max_delay=8.0, jitter_ratio=1.0))
+
+
+def _checkpoint(params, board_db, claim):
+    """The token of a turn checkpoint the owner booked as this attempt's result (``continuable``) that this
+    worker has not continued yet, or None (the result is final). [daveey]"""
+    import sqlite3
+    from gateway.session_kanban import worker_result
+    try:
+        result = worker_result(board_db, params)
+    except (OSError, sqlite3.Error, ValueError, KeyError):
+        return None
+    token = result.get('checkpoint')
+    if (result.get('continuable') is not True or not isinstance(token, str) or not token
+            or token in claim.checkpoints or len(claim.checkpoints) >= MAX_CONTINUATIONS):
+        return None
+    return token
 
 
 def _restartable(exc):
@@ -221,7 +276,7 @@ def _owner_down(exc, claim):
     """True for a persistent pre-admission service state (``kanban_owner_down.PERSISTENT_CODES``). [daveey]"""
     from hermes_cli.gateway_client import GatewayUnavailableError
     from hermes_cli.kanban_owner_down import persistent
-    return (claim.admission_id is None and isinstance(exc, GatewayUnavailableError)
+    return (claim.admission_id is None and not claim.continuing and isinstance(exc, GatewayUnavailableError)
             and persistent(exc.reason_code))
 
 
@@ -229,7 +284,7 @@ def _host_refusal(exc, claim):
     """True for an owner refusal that is the host's condition (``_HOST_REFUSAL_REASONS``) while no
     admission exists: nothing ran, so asking again is safe. [daveey]"""
     from hermes_cli.gateway_client import GatewayRPCError
-    return (claim.admission_id is None and isinstance(exc, GatewayRPCError)
+    return (claim.admission_id is None and not claim.continuing and isinstance(exc, GatewayRPCError)
             and str(exc) in _HOST_REFUSAL_REASONS)
 
 
@@ -253,6 +308,7 @@ async def _await_receipt(client, params, board_db, claim):
         accepted = await client.rpc('kanban.run', _timeout=admission_answer_budget(), **dict(params, db=db))
         receipt = accepted['receipt']
         claim.session_id, claim.admission_id = accepted['session_id'], receipt['admission_id']
+        claim.continuing = False  # [daveey] continued (or first) turn admitted: ordinary owner-loss rules again
         print(f'Session: {claim.session_id}', file=sys.stderr)
     else:
         receipt = await _receipt(client, claim)

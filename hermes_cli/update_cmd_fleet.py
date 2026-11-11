@@ -734,11 +734,23 @@ def _systemd_unit_owned_by_update(scope_cmd: list, svc_name: str) -> bool:
     to drain and restart the account's real ``hermes-gateway.service`` because the unit was
     listed, not because it ran the updated code. Foreign or unreadable ownership prints a notice
     and leaves the unit alone; it is not a failed restart.
+
+    The same holds for a unit of THIS home whose live gateway loads another checkout (a drop-in
+    pinning ``ExecStart``/``PYTHONPATH`` to its own core, e.g. an Ask Eve pinned owner): the update
+    moves none of its code, so the pre-swap pause must not wait on it (an old pinned core answers
+    the idle pause ``unsupported`` forever and deferred every hub update on 2026-11-11) and the
+    restart must not bounce it: it would only come back on its pin. [daveey]
     """
-    from hermes_cli.update_fleet_scope import announce_skipped_runtime, systemd_unit_hermes_home, home_in_update_scope
+    from hermes_cli.update_fleet_scope import (
+        announce_skipped_runtime, gateway_foreign_code_root, home_in_update_scope, systemd_unit_hermes_home,
+    )
     home = systemd_unit_hermes_home(scope_cmd, svc_name)
     if home is not None and home_in_update_scope(home):
-        return True
+        pinned = gateway_foreign_code_root(_unit_main_pid(scope_cmd, svc_name), home)
+        if pinned is None:
+            return True
+        announce_skipped_runtime("systemd unit", svc_name, home, code_root=pinned)
+        return False
     announce_skipped_runtime("systemd unit", svc_name, home)
     return False
 
@@ -1026,7 +1038,10 @@ def _surviving_gateway_pids_after_failed_restart():
     """
     try:
         from hermes_cli.gateway import find_gateway_pids
-        return _scoped_manual_gateway_pids(find_gateway_pids(all_profiles=True), quiet=True)
+        from hermes_cli.update_fleet_scope import drop_gateways_on_another_checkout
+        # A gateway on another checkout survives by design: it is not stale. [daveey]
+        return _scoped_manual_gateway_pids(
+            drop_gateways_on_another_checkout(find_gateway_pids(all_profiles=True), quiet=True), quiet=True)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Could not probe for surviving gateways after update: %s", exc)
         return None
@@ -1071,6 +1086,12 @@ def _gateway_recovery_partition(plan, *, skip_profiles: set[str] | None = None) 
     skip_profiles = skip_profiles or set()
     candidates: dict[str, str] = {}
     skipped: list[dict] = []
+    from hermes_cli.update_fleet_scope import profiles_on_another_checkout  # loaded before the checkout moved
+    # Recovery would only bounce these onto their pin; the inventory's live PIDs outrank status files [daveey]
+    live_pids = {r.profile: r.pid for r in getattr(plan, "runtimes", ()) or ()
+                 if getattr(r, "kind", None) == "gateway" and isinstance(getattr(r, "profile", None), str)
+                 and isinstance(getattr(r, "pid", None), int) and r.pid > 0}
+    pinned = profiles_on_another_checkout(live_pids)
     with _best_effort('Could not prepare fresh gateway restart profiles: %s'):
         for runtime in getattr(plan, "runtimes", ()) or ():
             kind = getattr(runtime, "kind", None)
@@ -1080,6 +1101,10 @@ def _gateway_recovery_partition(plan, *, skip_profiles: set[str] | None = None) 
                 continue
             if kind == "gateway":
                 if profile in skip_profiles:
+                    continue
+                if profile in pinned:
+                    skipped.append({"profile": profile, "kind": "gateway", "supervisor": str(supervisor), "pinned": True,
+                                    "reason": f"runs its own checkout ({pinned[profile]}), which this update does not change"})
                     continue
                 if supervisor in _FRESH_RESTART_SUPERVISORS:
                     candidates.setdefault(profile, str(supervisor))
@@ -1543,7 +1568,10 @@ def _restart_manual_gateways(out: _GatewayRestartOutcome, _drain_budget) -> None
     from hermes_cli.update_cmd_posix_pause import already_restarted
     # Plus the gateways this update paused and already restarted on the new code.
     service_pids = _get_service_pids(all_profiles=True) | already_restarted()["pids"]
-    manual_pids = find_gateway_pids(exclude_pids=service_pids, all_profiles=True)
+    from hermes_cli.update_fleet_scope import drop_gateways_on_another_checkout
+    # A pinned unit's gateway reaches this sweep whenever its unit PID lookup failed above. [daveey]
+    manual_pids = drop_gateways_on_another_checkout(
+        find_gateway_pids(exclude_pids=service_pids, all_profiles=True))
     profile_processes = {
         proc.pid: proc
         for proc in find_profile_gateway_processes(exclude_pids=service_pids)
@@ -1694,7 +1722,9 @@ def _recover_after_restart_phase_abort(
     )
     if _abort_recovery_is_complete(
         planned_gateway_profiles=_planned_gateway_profiles,
-        covered_gateway_profiles=_already_restarted_profiles | _recovery_verified,
+        # A profile recovery left on its own checkout is settled, not owed. [daveey]
+        covered_gateway_profiles=_already_restarted_profiles | _recovery_verified | {
+            row.get("profile") for row in _recovery_result.get("skipped") or () if row.get("pinned")},
         recovery_result=_recovery_result,
         stale_runtime_rows=_stale_runtime_rows,
     ):

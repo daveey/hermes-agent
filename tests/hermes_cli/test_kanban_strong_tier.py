@@ -87,7 +87,8 @@ def test_pins_and_out_of_scope_profiles_ignore_strong_model(board):
         pinned = kb.get_task(conn, kb.create_task(conn, title="impl", assignee="default", model_override=SONNET,
                                                       provider_override="anthropic"))
         other = kb.get_task(conn, kb.create_task(conn, title="impl", assignee="bb-dev"))
-        assert tier.resolve_model_tier(conn, pinned, lane="review", cfg=cfg) == (None, None, "pinned")
+        assert tier.resolve_model_tier(conn, pinned, lane="ready", cfg=cfg) == (None, None, "pinned")
+        assert tier.resolve_model_tier(conn, pinned, lane="review", cfg=cfg) == (OPUS, "anthropic", "review_unpinned")
         assert tier.resolve_model_tier(conn, other, lane="review", cfg=cfg) == (None, None, "profile_out_of_scope")
 
 

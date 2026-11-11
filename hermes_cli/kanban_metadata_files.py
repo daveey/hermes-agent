@@ -15,6 +15,9 @@ an attachment row. The metadata string is rewritten to the copy, and
 declared artifact, a named file that cannot be kept never fails the
 transition: it is skipped, the reason is logged, and it is recorded under
 ``attached_from_workspace_skipped``. Paths outside the workspace are untouched.
+Completion receipts are the exception: their observed identities are never rewritten,
+and completion refuses any scratch evidence that cannot be preserved. The existing
+attachment map locates the durable copy without pretending it was observed anew.
 """
 
 from __future__ import annotations
@@ -37,6 +40,52 @@ _SKIP_KEYS = frozenset({"artifacts", "_staged_artifacts", ATTACHED_KEY, SKIPPED_
 _TRAILING_PUNCT = ".,;:!?)]}"
 
 
+def merge_completion_prose_artifacts(
+    conn: sqlite3.Connection, task_id: str, metadata: Optional[dict], *, summary: Optional[str],
+    result: Optional[str],
+) -> Optional[dict]:
+    """Legacy workers' scratch deliverables named only in completion prose."""
+    from hermes_cli import kanban_db as kb
+
+    workspace = kb._scratch_workspace(conn, task_id)
+    if workspace is None:
+        return metadata
+    if not kb._is_managed_scratch_path(workspace):
+        return metadata
+    text = "\n".join(part for part in (summary, result) if part)
+    if not text:
+        return metadata
+    prefix = re.escape(str(workspace))
+    discovered: list[str] = []
+    for match in re.finditer(prefix + r"(?:[/\\][^\s`\"'<>]+)", text):
+        raw = match.group(0).rstrip(".,;:!?)]}")
+        candidate = Path(raw)
+        if candidate.is_file():
+            discovered.append(str(candidate))
+    if not discovered:
+        return metadata
+    updated = dict(metadata) if isinstance(metadata, dict) else {}
+    existing = updated.get("artifacts")
+    merged = list(existing) if isinstance(existing, (list, tuple)) else []
+    seen = {str(path) for path in merged}
+    for path in discovered:
+        if path not in seen:
+            merged.append(path)
+            seen.add(path)
+    updated["artifacts"] = merged
+    return updated
+
+
+def cleaned_artifact_paths(metadata: Any) -> list[str]:
+    """Non-blank string paths declared in ``metadata[\"artifacts\"]``."""
+    if not isinstance(metadata, dict):
+        return []
+    raw = metadata.get("artifacts")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(p).strip() for p in raw if isinstance(p, str) and str(p).strip()]
+
+
 def _iter_strings(value: Any, top: bool = True) -> Iterator[str]:
     if isinstance(value, str):
         yield value
@@ -57,7 +106,7 @@ def _rewrite(value: Any, mapping: dict[str, str], top: bool = True) -> Any:
         return value
     if isinstance(value, dict):
         return {
-            key: item if top and key in _SKIP_KEYS else _rewrite(item, mapping, top=False)
+            key: item if top and key in (_SKIP_KEYS | {"completion_receipt"}) else _rewrite(item, mapping, top=False)
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -203,19 +252,70 @@ def stage_completion_artifacts(
     (:func:`preserve_metadata_files`). [daveey]"""
     from hermes_cli import kanban_db as kb
 
-    declared = kb._cleaned_artifact_paths(metadata)
-    kb._persist_scratch_completion_artifacts(conn, task_id, metadata)
-    staged = [Path(stored_path) for stored_path in metadata.pop("_staged_artifacts", [])]
-    for path in staged:
-        kb._insert_completion_attachment(
-            conn, task_id, filename=path.name, stored_path=str(path),
-            size=path.stat().st_size, created_at=now, uploaded_by=uploaded_by,
-        )
-    known: dict[str, str] = {}
-    for original, kept in zip(declared, kb._cleaned_artifact_paths(metadata)):
-        if kept != original:
-            with contextlib.suppress(OSError):
-                known[str(Path(original).expanduser().resolve())] = kept
-    return staged + preserve_metadata_files(
-        conn, task_id, metadata, now, uploaded_by=uploaded_by, known=known,
-    )
+    staged: list[Path] = []
+    if "completion_receipt" in metadata:
+        # Only this staging pass can attest relocation; caller-provided maps
+        # must not make missing receipt evidence appear preserved.
+        metadata.pop(ATTACHED_KEY, None)
+        metadata.pop(SKIPPED_KEY, None)
+    with discard_on_error(staged):
+        declared = kb._cleaned_artifact_paths(metadata)
+        kb._persist_scratch_completion_artifacts(conn, task_id, metadata)
+        staged.extend(Path(stored_path) for stored_path in metadata.pop("_staged_artifacts", []))
+        for path in staged:
+            kb._insert_completion_attachment(
+                conn, task_id, filename=path.name, stored_path=str(path),
+                size=path.stat().st_size, created_at=now, uploaded_by=uploaded_by,
+            )
+        known: dict[str, str] = {}
+        for original, kept in zip(declared, kb._cleaned_artifact_paths(metadata)):
+            if kept != original:
+                with contextlib.suppress(OSError):
+                    known[str(Path(original).expanduser().resolve())] = kept
+        staged.extend(preserve_metadata_files(
+            conn, task_id, metadata, now, uploaded_by=uploaded_by, known=known,
+        ))
+        if uploaded_by == "kanban_complete" and "completion_receipt" in metadata:
+            _verify_receipt_files(conn, task_id, metadata)
+    return staged
+
+
+@contextlib.contextmanager
+def discard_on_error(staged: list[Path]):
+    """File copies share the caller's transaction fate, including commit failure."""
+    succeeded = False
+    try:
+        yield
+        succeeded = True
+    finally:
+        if not succeeded:
+            for path in staged:
+                with contextlib.suppress(OSError):
+                    path.unlink(missing_ok=True)
+
+
+def _verify_receipt_files(conn, task_id: str, metadata: dict) -> None:
+    """Keep observed identity immutable; existing attachment mapping locates copies."""
+    from hermes_completion_receipt import validate_completion_receipt
+    from hermes_cli.kanban_db import ArtifactPreservationError
+    from hermes_cli.kanban_db_workspace import _scratch_workspace, _managed_scratch_path_info
+
+    receipt = validate_completion_receipt(metadata["completion_receipt"])
+    workspace = _scratch_workspace(conn, task_id)
+    if workspace is None or not _managed_scratch_path_info(workspace)[0]:
+        return
+    prefixes = {str(workspace).rstrip("/"), str(workspace.resolve()).rstrip("/")}
+    refs = {e["ref"] for item in receipt["items"] for e in item["evidence"]}
+    refs.update(item["superseded_by"] for item in receipt["items"] if "superseded_by" in item)
+    attached = metadata.get(ATTACHED_KEY, {})
+    for ref in refs:
+        # Never normalize an evidence identity silently. Workspace aliases and
+        # embedded paths must be resubmitted as the exact absolute file reference
+        # that this staging pass preserved (not lost during scratch cleanup).
+        scratch_ref = any(prefix + "/" in ref for prefix in prefixes)
+        if ref.startswith(("./", "../", "~/")):
+            path = Path(ref).expanduser()
+            path = path if path.is_absolute() else workspace / path
+            scratch_ref = scratch_ref or path.resolve().is_relative_to(workspace.resolve())
+        if scratch_ref and ref not in attached:
+            raise ArtifactPreservationError("completion_receipt evidence could not be preserved: " + ref)

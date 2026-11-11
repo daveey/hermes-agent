@@ -26,6 +26,21 @@ export interface SessionOutcomeWaitingOn {
   eta?: number
 }
 
+/** Historical scoped claims, not current execution status or permission to run remaining work. */
+export interface CompletionReceipt {
+  version: 1
+  items: {
+    scope: string
+    disposition: 'delivered' | 'superseded' | 'contained' | 'rejected'
+    evidence: { ref: string; observed_at: string; verification: 'reported' | 'independently_checked' }[]
+    remaining: { scope: string; state: 'pending' | 'deferred'; owner: string | null; reason: string }[]
+    superseded_by?: string
+  }[]
+}
+
+/** Source revision/namespace is projected unchanged, including future additive provenance fields. */
+export type CompletionReceiptSource = Record<string, unknown>
+
 /** [daveey] A chat's stored outcome, as list rows carry it (`row.outcome`). */
 export interface SessionOutcome {
   kind: SessionOutcomeKind | string
@@ -38,4 +53,7 @@ export interface SessionOutcome {
   /** Recurring jobs a `done` chat owns: they never end, so they are named, not waited on. */
   crons?: SessionOutcomeWaitingOn[]
   reason?: SessionOutcomeReason | string
+  /** Last admitted receipt; can remain historical while kind describes new work. Absence is unspecified. */
+  completion_receipt?: CompletionReceipt
+  completion_receipt_source?: CompletionReceiptSource
 }

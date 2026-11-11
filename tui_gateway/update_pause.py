@@ -241,6 +241,8 @@ def boundary_pause_hook(session: dict, marker_key: str) -> Callable[[], str | No
     def hook() -> str | None:
         if not marker_key or not pause_requested(session):
             return None
+        if user_stop_pending(session):  # before the marker is stamped or any job stopped; rechecked below
+            return None
         why = not_resumable_reason(session, marker_key)
         if why:
             if not declined:
@@ -270,6 +272,9 @@ def boundary_pause_hook(session: dict, marker_key: str) -> Callable[[], str | No
             return None
         drainer_lock = _drainer_lock(session)  # request disappears when the window ends
         with session["history_lock"]:
+            if user_stop_pending(session):  # under the lock user_stop_wins takes: one of the two sees the other
+                logger.info("core-update pause: session %s was stopped by the user; not pausing it", marker_key)
+                return None
             session["_update_pause_marker_key"] = marker_key
             session["_update_pause_drainer_lock"] = drainer_lock
             session.pop("_update_pause_parked_stamp", None)  # a new pause starts unparked
@@ -277,6 +282,51 @@ def boundary_pause_hook(session: dict, marker_key: str) -> Callable[[], str | No
         return PAUSE_REASON
 
     return hook
+
+
+def user_stop_pending(session: dict) -> bool:
+    """A user's Stop is pending on the session's agent (never a backend exit's or a lease takeover's interrupt)."""
+    from agent.update_pause_cancel import user_stop_pending as pending
+    return pending(session.get("agent"))
+
+
+def _drop_pause(session: dict) -> None:
+    """Under ``history_lock``: the session no longer keeps its turn's marker for a continuation."""
+    session.pop("_update_pause_marker_key", None)
+    session.pop("_update_pause_drainer_lock", None)
+
+
+def publication_lock(session: dict):
+    """Serialize pause publication with Stop without nesting the non-reentrant history lock."""
+    with session["history_lock"]:
+        return session.setdefault("_update_pause_publication_lock", threading.Lock())
+
+
+def user_stop_wins(session: dict) -> bool:
+    """[daveey] t_01a1c895eb0596b2: a user Stop of the RUNNING turn drops the pause its hook already paid, so
+    the marker (stamped ``core_update_pause``) retires like any stopped turn's and neither the next backend nor
+    the in-place watcher continues what the user stopped. Call after the interrupt reached the agent and before
+    the Stop retires the marker. Only that turn's own pause: a pause whose turn already ended, or an earlier
+    turn's under a synthesized turn, is kept. True when a pause was dropped."""
+    with publication_lock(session), session["history_lock"]:
+        key = session.get("_update_pause_marker_key")
+        if not key or not session.get("running") or key != session.get("_active_turn_marker_key"):
+            return False
+        _drop_pause(session)
+    logger.info("core-update pause: session %s was stopped by the user; its pause is dropped", key)
+    return True
+
+
+def pause_stands(session: dict, marker_key: str, result: Any) -> bool:
+    """The turn's end: it ended paused for the update AND the session still keeps this turn's marker (a Stop
+    that won dropped it). A turn whose hook paused it but which did not end paused (the Stop won in the agent
+    loop) drops the session's keep here, before its marker is retired."""
+    with session["history_lock"]:
+        mine = bool(marker_key) and session.get("_update_pause_marker_key") == marker_key
+        stands = mine and isinstance(result, dict) and bool(result.get("paused_for_update"))
+        if mine and not stands and not session.get("_exit_keeps_turn_marker"):
+            _drop_pause(session)
+    return stands
 
 
 def interrupted_tool_result(at: float | None = None) -> str:

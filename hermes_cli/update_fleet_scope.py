@@ -161,14 +161,89 @@ def launchd_label_foreign_home(label: str, scope: set[Path] | None = None) -> st
     return None
 
 
-def describe_skipped_runtime(kind: str, name: str, home: str | None) -> str:
-    """One notice line for a runtime the update leaves alone (foreign home or unreadable ownership)."""
+def gateway_foreign_code_root(pid: int, home) -> Path | None:
+    """The OTHER checkout the live gateway *pid* provably loads its code from, else ``None``.
+
+    A gateway pinned to its own core (unit ``ExecStart``/``PYTHONPATH`` outside this checkout, e.g.
+    an Ask Eve pinned owner) serves a profile of this home but none of this checkout's code: moving
+    the checkout cannot reach it, and restarting it only brings it back on its pin. Unknown is never
+    foreign: a gateway whose code root cannot be read is treated as this checkout's. [daveey]"""
+    from hermes_cli.update_receipt import _gateway_code_root, _updater_code_root
+    with suppress(Exception):
+        own = _updater_code_root()
+        if own is None or not pid or int(pid) <= 0 or home is None:
+            return None
+        root = _gateway_code_root(int(pid), Path(home))
+        if root is not None and root != own:
+            return root
+    return None
+
+
+def profiles_on_another_checkout(live_pids: dict[str, int] | None = None) -> dict[str, Path]:
+    """Profile → the other checkout its live gateway runs. A live PID is resolved in the order the
+    inventory itself discovers gateways: *live_pids* (the pre-update inventory's PID per profile),
+    then the profile's control socket, then its ``gateway_state.json`` record. A gateway found only
+    through the socket or a PID file has no status record, so the record alone missed it.
+    Restart-abort recovery asks this itself: it can run before the restart phase looked at any unit.
+
+    Total by contract: recovery runs in the pre-update interpreter over the replaced checkout,
+    where a first import can fail in any way; every failure reads as "no pinned profile"."""
+    pinned: dict[str, Path] = {}
+    try:
+        import json
+
+        import psutil
+        from hermes_cli.update_receipt import _profile_homes, _socket_identity
+        for profile, home in _profile_homes():
+            with suppress(Exception):
+                pid = int((live_pids or {}).get(profile) or 0)
+                if pid <= 0:
+                    sock = _socket_identity(home)
+                    pid = int(sock[0]) if sock else 0
+                if pid <= 0:
+                    pid = int(json.loads((home / "gateway_state.json").read_text(encoding="utf-8-sig")).get("pid") or 0)
+                    # A crashed gateway's recorded PID may belong to anything by now.
+                    if pid <= 0 or "gateway" not in psutil.Process(pid).cmdline():
+                        continue
+                root = gateway_foreign_code_root(pid, home)
+                if root is not None:
+                    pinned[profile] = root
+    except (Exception, SystemExit):  # health: allow BLE001 -- see "Total by contract" above
+        return {}
+    return pinned
+
+
+def drop_gateways_on_another_checkout(pids, *, quiet: bool = False) -> list[int]:
+    """*pids* minus the gateway processes that provably run another checkout (each named once).
+
+    The manual sweep stops every gateway process of this home that no supervisor claims; a pinned
+    unit's gateway lands there whenever its unit PID lookup fails, and it is not stale either."""
+    from hermes_cli.dashboard_procs import _hermes_home_for_pid
+    kept = []
+    for pid in pids:
+        home = None
+        with suppress(Exception):
+            home = _hermes_home_for_pid(pid)
+        root = gateway_foreign_code_root(pid, home)
+        if root is None:
+            kept.append(pid)
+        elif not quiet:
+            announce_skipped_runtime("gateway process", f"PID {pid}", home, code_root=root)
+    return kept
+
+
+def describe_skipped_runtime(kind: str, name: str, home: str | None, code_root: Path | None = None) -> str:
+    """One notice line for a runtime the update leaves alone (foreign home, its own checkout, or
+    unreadable ownership)."""
+    if code_root is not None:
+        return (f"  ↷ {name}: {kind} running its own checkout ({code_root}), which this update does not "
+                "change — left alone (not paused, not restarted)")
     if home is None:
         return f"  ↷ {name}: {kind} whose Hermes home could not be read — left alone (not restarted)"
     return f"  ↷ {name}: {kind} of another Hermes home ({home}) — left alone (not restarted)"
 
 
-def announce_skipped_runtime(kind: str, name: str, home: str | None) -> None:
+def announce_skipped_runtime(kind: str, name: str, home: str | None, code_root: Path | None = None) -> None:
     """Print :func:`describe_skipped_runtime` once per update run, and name the runtime on its receipt.
 
     The pre-swap pause and the post-swap restart phase each scope the same host-wide gateway list,
@@ -176,10 +251,10 @@ def announce_skipped_runtime(kind: str, name: str, home: str | None) -> None:
     that process) knows what the pause already announced. No open receipt: every call prints.
     """
     from hermes_cli import update_receipt
-    entry = [kind, name, home]
+    entry = [kind, name, str(code_root) if code_root is not None else home]
     current = update_receipt._current.get()
     announced = list((current.data if current is not None else {}).get("runtimes_left_alone") or [])
     if entry in announced:
         return
-    print(describe_skipped_runtime(kind, name, home))
+    print(describe_skipped_runtime(kind, name, home, code_root))
     update_receipt.record_fact("runtimes_left_alone", [*announced, entry])

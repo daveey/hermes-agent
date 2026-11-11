@@ -527,6 +527,12 @@ _STREAM_STATE: dict[str, Any] = {
 
 
 def _init_prompt_cache_config(agent):
+    from agent.session_source import is_attended, session_source_for
+    # Pin the layout, not the round: Desktop shares its full system across fresh chats.
+    # Machine-paced sources retain the static-prefix fallback for differing tails.
+    agent._cache_full_system = (
+        is_attended(agent) and session_source_for(getattr(agent, "platform", None)) == "desktop"
+    )
     # Anthropic prompt caching (~75% input savings): auto-enabled for Claude on native
     # Anthropic, OpenRouter and anthropic_messages gateways. See _anthropic_prompt_cache_policy.
     agent._use_prompt_caching, agent._use_native_cache_layout = (
@@ -537,11 +543,6 @@ def _init_prompt_cache_config(agent):
     # (1h when a person paces the session, 5m when a machine does); unknown values keep "5m". A falsy/off value disables caching entirely (OAuth plans
     # billing cache writes, proxies adding their own cache_control); the disable survives
     # /model switches and fallback re-derivation.
-    # Anthropic supports "5m" (default) and "1h" cache TTL tiers. Read from config.yaml under
-    # prompt_caching.cache_ttl; unknown values keep "5m". 1h tier costs 2x on write vs 1.25x for 5m, but
-    # amortizes across long sessions with >5-minute pauses between turns (#14971). This is useful for OAuth
-    # subscription users where cache writes bill against "extra usage" or for third-party proxies that
-    # inject their own cache_control markers (#13477).
     agent._cache_ttl = "5m"
     try:
         from hermes_cli.config import load_config_readonly as _load_pc_cfg
@@ -554,7 +555,6 @@ def _init_prompt_cache_config(agent):
         elif _ttl == AUTO_CACHE_TTL:
             # Decided once per session from its source (a delegated child is clamped to 5m again
             # in delegate_tool regardless).
-            from agent.session_source import session_source_for
             agent._cache_ttl = auto_cache_ttl_for_source(session_source_for(getattr(agent, "platform", None)))
         elif cache_ttl_means_disabled(_ttl):
             agent._use_prompt_caching = False

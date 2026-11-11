@@ -19,7 +19,6 @@ import os
 import re
 import shutil
 import sqlite3
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -56,21 +55,23 @@ def _mem_used_pct() -> Optional[float]:
         if sys.platform.startswith("linux"):
             return _linux_mem_used_pct(Path("/proc/meminfo").read_text(encoding="utf-8"))
         if sys.platform == "darwin":
-            def out(argv: list[str]) -> str:
-                return subprocess.run(argv, capture_output=True, timeout=5, check=True).stdout.decode("utf-8", "replace")
-            memsize = int(out(["/usr/sbin/sysctl", "-n", "hw.memsize"]).strip())
-            vm = out(["/usr/bin/vm_stat"])
-            return _macos_mem_used_pct(memsize, vm)
-    except (OSError, ValueError, subprocess.SubprocessError):
+            from hermes_cli.machine_memory_darwin import read_used_pct
+            return read_used_pct()
+    except (OSError, ValueError):
         return None
     return None
 
 
-def active_card_runs() -> Optional[int]:
+def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[int]:
     """All profiles share the kanban root. Count its execution boards, not replicas.
 
     Unreadable/schema-unknown boards invalidate the whole sample. Conservative
     stale local runs consume slots until the normal reaper accounts for them.
+
+    ``exclude`` (final admission only, a :class:`kanban_grant_echo.GrantEcho`): on the board whose file identity is
+    ``exclude.db_identity``, the ONE row that is still exactly the echo of the claimer's own unused grant is not
+    counted (review F5); it is re-proven here on this read connection, and more than one match fails closed.
+    ``detail`` receives ``{"excluded": n}``.
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_boards import named_board_db_files
@@ -78,7 +79,7 @@ def active_card_runs() -> Optional[int]:
     try:
         default = kb.kanban_home() / "kanban.db"
         paths = [default, *(p for _, p in named_board_db_files())]
-        total = 0
+        total = excluded = 0
         seen = set()
         for path in paths:
             try:
@@ -103,10 +104,19 @@ def active_card_runs() -> Optional[int]:
                     total += db.execute("SELECT count(*) FROM tasks WHERE status='running' AND "
                                         "(claim_lock IS NOT NULL OR lease_holder IS NULL OR lease_holder=?)",
                                         (own[0],)).fetchone()[0]
+                    if exclude is not None and identity == tuple(exclude.db_identity) and own[0] == exclude.gateway_id:
+                        from hermes_cli.kanban_grant_echo import match_rows
+                        matched = match_rows(db, exclude)
+                        if matched and matched != [exclude.run_id]:
+                            return None  # the proven row moved or duplicated under us: unknown, fail closed
+                        total -= len(matched)
+                        excluded += len(matched)
                 else:
                     total += db.execute("SELECT count(*) FROM tasks WHERE status='running'").fetchone()[0]
             finally:
                 db.close()
+        if detail is not None:
+            detail["excluded"] = excluded
         return total
     except (OSError, sqlite3.Error):
         return None

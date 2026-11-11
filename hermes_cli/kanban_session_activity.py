@@ -180,9 +180,12 @@ def _counted_sub_clause(conn: sqlite3.Connection) -> str:
     if "delivery_metadata" not in cols:
         return "1"
     # CASE avoids json_extract on invalid legacy metadata (SQLite need not
-    # short-circuit boolean OR expressions). Only proven incidental touches release.
+    # short-circuit boolean OR expressions). Only proven notice-only provenance
+    # (``kanban_db_notify.UNCOUNTED_SUB_REASONS``: ``touch``, ``send_refused``) releases.
+    from hermes_cli.kanban_db_notify import UNCOUNTED_SUB_REASONS
+    uncounted = ", ".join(f"'{r}'" for r in UNCOUNTED_SUB_REASONS)
     return (f"({owner} OR CASE WHEN json_valid(s.delivery_metadata) "
-            "THEN COALESCE(json_extract(s.delivery_metadata, '$.reason'), '') != 'touch' "
+            f"THEN COALESCE(json_extract(s.delivery_metadata, '$.reason'), '') NOT IN ({uncounted}) "
             "ELSE 1 END)")
 
 
@@ -827,8 +830,12 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
         closed = (gw, owner_profile, board, tid) in released
         prefix = f'{gw}/{owner_profile}/{board}' if owner_profile is not None else f'{gw}/{board}'
         ref = f'{prefix}/{tid}'
+        from hermes_cli.kanban_completion_receipt_projection import remote_fields
+        historical = remote_fields(raw[(gw, owner_profile, board, tid)], gateway=gw,
+                                   profile=owner_profile, board=board, task_id=tid)
         for sid in sids:
             found[(sid, ref)] = {
+                **historical,
                 **{f: t.get(f) for f in _REMOTE_FIELDS},
                 "id": tid, "board": board, "gateway": gw, "key": ref, "session": sid,
                 "via": "shepherd", "root": ref, "remote": True,

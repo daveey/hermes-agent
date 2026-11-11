@@ -29,7 +29,7 @@ concurrency:
 jobs:
   catalog-tests:
     name: Catalog tests
-    runs-on: [self-hosted, hermes-hub]  # fork: upstream uses Blacksmith runners
+    runs-on: blacksmith-4vcpu-ubuntu-2404  # fork: upstream uses Blacksmith runners
     timeout-minutes: 15
     steps:
       - name: Checkout code

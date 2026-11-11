@@ -901,6 +901,14 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "the profile's provider and will fail if it belongs "
                 "to a different one. Requires 'model'."
         )),
+        "pin_mandatory": _prop("boolean", (
+                "Mark the 'model' pin mandatory. Without it, when the "
+                "pinned provider's subscription quota is out for 6 h or "
+                "more, single runs use another provider's model of the "
+                "same class until the reset (recorded on the card). Set "
+                "true only when the work must run on exactly this model. "
+                "Requires 'model'."
+        )),
     },
     ["title"],
 )

@@ -252,9 +252,11 @@ def target_info(target: str, *, now: float, remote: Optional[dict] = None) -> di
         name = c["name"]
         if not name.startswith(prefix):
             continue
-        tools = {} if tools is None else tools
         raw = c.get("checked_at")
-        if not c.get("ok") or isinstance(raw, bool) or not isinstance(raw, (int, float)) or now - raw > limit:
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0 <= now - raw <= limit:
+            continue
+        tools = {} if tools is None else tools
+        if not c.get("ok"):
             continue
         _, prof, tool = name.split(":", 2)
         tools.setdefault(prof, set()).add(tool)
@@ -352,7 +354,8 @@ def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
 # and the Board CLI name ``hermes-hub`` kept ~3 of every 4 ready hub cards off the worker pool, so the hub's
 # local execution cap throttled the whole queue. What stays local: an existing worktree on this host
 # (``~/code/_wt/<slug>``, ``~/code/_wt-remote/<slug>``, ``<repo>/.claude/worktrees/<x>``,
-# ``~/code/<repo>/.worktrees/<x>``, ``~/.hermes/hermes-agent/.worktrees/<x>`` hold unpushed work), Hermes
+# ``~/code/<repo>/.worktrees/<x>``, ``~/.hermes/hermes-agent/.worktrees/<x>`` may hold unpushed work).
+# Clean _wt roots with exact origin publication and explicit checkout identity are exempt. Hermes
 # state under ``~/.hermes`` other than the code checkout (``~/.hermes/skills`` is host state: curator ledger,
 # usage counts, live-patched skills), a
 # ``hermes-hub <subcommand>`` run (it acts with this gateway's key and replica), and a card that declares
@@ -420,7 +423,10 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
         return "non-default board"
     if (args.get("assignee") or "default") not in c.assignees():
         return "assignee not allowlisted"
-    if any(args.get(k) not in (None, "", [], False) for k in UNCARRIED_OPTIONS):
+    # Explicit tool defaults are equivalent to omission, as on the CLI path.
+    # A blocked initial status still needs origin-side human-request handling.
+    if any(args.get(k) not in (None, "", [], False)
+           for k in UNCARRIED_OPTIONS if not (k == "initial_status" and args.get(k) == "running")):
         return "uncarried option"
     reqs = args.get("requires") or []
     reqs = [reqs] if isinstance(reqs, str) else list(reqs)
@@ -431,23 +437,38 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
     title, body = args.get("title") or "", without_evidence(without_placement_note(args.get("body") or ""))
     if _local_marker(title, body, args.get("skills"), c):
         return "local marker"
-    full = f"{title}\n{body}"
+    from hermes_cli import kanban_placement_coordination as coordination
+    from hermes_cli.kanban_carried_evidence import without_carried_inputs
+    from hermes_cli.kanban_published_worktree import without_published_worktrees
+
+    full = without_carried_inputs(f"{title}\n{body}", c.raw)
+    if refusal := coordination.check(full, c.raw, skills=args.get("skills")):
+        return refusal
+    marker_full = coordination.marker_text(full)
     extra = c.raw.get("extra_home_markers")
-    pats = list(HOME_GATEWAY_MARKERS) + (list(extra) if isinstance(extra, list) else [])
-    for p in pats:
+    exemptible = (HUB_CLI_COMMAND, r"\btoken-broker\b")
+    pats = [(p, marker_full if p in exemptible else full)
+            for p in HOME_GATEWAY_MARKERS if p != HOST_WORKTREE_PATH]
+    pats += [(p, full) for p in extra] if isinstance(extra, list) else []
+    for p, text in pats:
         try:
-            if re.search(p, full, re.IGNORECASE):
+            if re.search(p, text, re.IGNORECASE):
                 return "home gateway marker"
         except re.error:
             continue
+    # Avoid filesystem/network probes when a cheap marker already pins the card.
+    if re.search(HOST_WORKTREE_PATH, full, re.IGNORECASE):
+        if re.search(HOST_WORKTREE_PATH, without_published_worktrees(full), re.IGNORECASE):
+            return "home gateway marker"
     return None
 
 
 def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
                      machine_ok: Optional[Callable[[str], bool]], *, skip: bool = False) -> Optional[dict]:
     """Legacy heavy routing; worker pools reuse portability without changing this opt-out path."""
+    from hermes_cli.kanban_placement_coordination import legacy_refusal
     worker = c.heavy_target(self_gw)
-    if skip or not worker or portable_reason(args, c.raw):
+    if skip or not worker or legacy_refusal(args) or portable_reason(args, c.raw):
         return None
     title, body = args.get("title") or "", args.get("body") or ""
     heavy = _heavy_marker(title, body, c)

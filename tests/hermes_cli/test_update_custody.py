@@ -194,10 +194,10 @@ def _assert_fetch_dies_with_killed_owner(repo, tmp_path, prelude: str) -> None:
         owner.kill()
         owner.wait(timeout=10)
         for _ in range(100):
-            if not Path(f"/proc/{fetch_pid}").exists() or "Z" in _state(fetch_pid):
+            if _fetch_exited(fetch_pid):
                 break
             time.sleep(0.05)
-        assert not Path(f"/proc/{fetch_pid}").exists() or "Z" in _state(fetch_pid), \
+        assert _fetch_exited(fetch_pid), \
             "git fetch outlived its killed update owner"
     finally:
         if owner.poll() is None:
@@ -207,10 +207,15 @@ def _assert_fetch_dies_with_killed_owner(repo, tmp_path, prelude: str) -> None:
             subprocess.run(["kill", "-9", blocker_pid.read_text(encoding="utf-8-sig").strip()], capture_output=True, check=False)
 
 
+def _fetch_exited(pid: int) -> bool:
+    # Linux can expose X (dead) before the proc entry disappears, not only Z.
+    return _state(pid) in {"X", "Z"}
+
+
 def _state(pid: int) -> str:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8-sig")
-    except OSError:
+    except FileNotFoundError:
         return "Z"
     return stat[stat.rfind(")") + 2:][:1]
 

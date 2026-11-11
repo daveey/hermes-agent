@@ -645,7 +645,7 @@ def _format_kanban_event_text(sub: dict, task, ev, board_slug: str) -> Optional[
     payload = getattr(ev, "payload", None) or {}
     if getattr(ev, "kind", "") == "blocked":
         from hermes_cli.kanban_block_notice import block_notice
-        return f"{prefix}Kanban {task_id} " + block_notice(task, task_id, board_slug, reason=str(payload.get("reason") or ""))
+        return f"{prefix}Kanban {task_id} " + block_notice(task, task_id, board_slug, reason=str(payload.get("reason") or ""), actor=str(payload.get("actor") or ""))
     if getattr(ev, "kind", "") == "completed":
         # A worker refused a send into this chat put its message in the summary as a FINAL SEND line. [daveey]
         from hermes_cli.kanban_final_send import final_send_for_chat
@@ -1679,8 +1679,9 @@ def _replay_failed_wake(key: str, text: str, session: dict, display_kind: str | 
     could start (agent build): ONE delayed replay, at the build failure's recorded quota/route reset when it has one
     (``agent_failure.failure_resets_at``), else ``REPLAY_MIN_DELAY_S``. The delivery is not in the transcript, so a
     later successful turn does not cancel it. A replay's own failure gives up. A chat close-out wake is included:
-    ``notice_guarantee`` stamps its row ``closeout.state = "error"`` and never offers it again, and the replay
-    keeps the close-out's own ``closeout`` metadata, so it cannot start another close-out."""
+    ``notice_guarantee`` stamps its row ``closeout.state = "deferred"`` with a ``retry_at`` after this replay's due
+    time (the durable fallback when this in-process timer dies with its backend), and the replay keeps the
+    close-out's own ``closeout`` metadata, so it cannot start another close-out."""
     from tui_gateway import automation_replay
     meta = display_metadata if isinstance(display_metadata, dict) else {}
     if not automation_replay.is_automation(display_kind):

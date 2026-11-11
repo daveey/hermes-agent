@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+
+from hermes_cli.kanban_published_worktree import publication_scope
 import logging
 import os
 import re
@@ -28,12 +30,14 @@ from hermes_cli import kanban_swarm as ks
 from hermes_cli import kanban_workflow
 from hermes_cli import kanban_contract_cli as _contract_cli
 from hermes_cli import kanban_foreign_card as _foreign_card
+from hermes_cli.kanban_cli_triage_lines import _decompose_ok_line, _retitled_suffix
 from hermes_cli.kanban_output import (
     _ATTACHMENT_FIELDS, _RUNS_RUN_FIELDS, _SHOW_RUN_FIELDS, _bulk_apply, _err,
     _fmt_counts, _fmt_task_line, _fmt_ts, _json_out, _obj_dict, _print_json,
     _task_to_dict,
 )
 from hermes_cli.kanban_boards import _dispatch_boards
+from hermes_cli.kanban_cli_metadata import ReceiptEditRefused, parse_metadata_flag as _parse_metadata_flag, receipt_refusal
 from hermes_cli.kanban_cli_park import (
     _REASON_FLAG_HINT, _REASON_WORDS_HINT, _cli_awaiting, _cli_wake_check, _commented, _guarded_park, _ids_error,
     _parked_msg,
@@ -44,14 +48,9 @@ from hermes_cli.kanban_ops import (
 from hermes_cli.kanban_parser import build_parser
 from hermes_cli.kanban_sync_cli import cmd_sync as _cmd_sync
 from hermes_cli.kanban_archive_scope import (  # moved here from this module; re-exported for callers
-    _capability_owner_waiting_card,
-    _creator_task_id,
-    _is_stranded_runs_on_copy,
-    _worker_may_archive_capability_owner,
-    _worker_may_archive_own,
-    archive_scope_for,
-    worker_archive_scope,
-    worker_may_archive,
+    _capability_owner_waiting_card, _creator_task_id, _is_stranded_runs_on_copy,
+    _worker_may_archive_capability_owner, _worker_may_archive_own,
+    archive_scope_for, worker_archive_scope, worker_may_archive,
 )
 from hermes_cli.kanban_requeue import (  # moved here from this module; re-exported for callers
     OWNER_WAKE_REQUEUE_STATUSES, _is_owner_wake_supervisor, _is_self_heal_fix_card, has_requeue_grant,
@@ -64,19 +63,6 @@ from hermes_cli.kanban_requeue import (  # moved here from this module; re-expor
 def _none_profile(value: str) -> Optional[str]:
     """``none`` / ``-`` / ``null`` mean "unassign"."""
     return None if value.lower() in {"none", "-", "null"} else value
-
-
-def _parse_metadata_flag(raw: Optional[str]) -> tuple[Optional[dict], int]:
-    """Parse ``--metadata`` JSON; returns ``(dict|None, rc)`` with rc=2 on error."""
-    if not raw:
-        return None, 0
-    try:
-        metadata = json.loads(raw)
-        if not isinstance(metadata, dict):
-            raise ValueError("must be a JSON object")
-    except (ValueError, json.JSONDecodeError) as exc:
-        return None, _err(f"kanban: --metadata: {exc}", 2)
-    return metadata, 0
 
 
 def _run_state_kwargs(args: argparse.Namespace, cmd: str) -> tuple[Optional[dict[str, str]], int]:
@@ -427,6 +413,7 @@ def _print_overlap_refusal(args: argparse.Namespace, refused: str) -> int:
     return 2
 
 
+@publication_scope
 def _cmd_create(args: argparse.Namespace) -> int:
     from agent.delegation_context import is_dispatcher_owned_worker_context
 
@@ -527,7 +514,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 idempotency_key=idem_key,
                 max_runtime_seconds=max_runtime, skills=getattr(args, "skills", None) or None,
                 max_retries=max_retries, model_override=getattr(args, "model_override", None),
-                provider_override=getattr(args, "provider_override", None),
+                provider_override=getattr(args, "provider_override", None), pin_mandatory=bool(getattr(args, "pin_mandatory", False)),
                 goal_mode=bool(getattr(args, "goal_mode", False)),
                 goal_max_turns=getattr(args, "goal_max_turns", None),
                 reasoning_effort=getattr(args, "reasoning_effort", None),
@@ -756,7 +743,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
     with kbc.connect_closing() as conn:
         task = kb.get_task(conn, args.task_id)
         if not task:
-            return _err(f"no such task: {args.task_id}")
+            from hermes_cli.kanban_pickup_stall import not_here_note
+            return _err(f"no such task: {args.task_id}{not_here_note(conn, args.task_id)}")
         comments = kb.list_comments(conn, args.task_id)
         events = kb.list_events(conn, args.task_id)
         parents = kb.parent_ids(conn, args.task_id)
@@ -867,12 +855,16 @@ def _cmd_set_model(args: argparse.Namespace) -> int:
     provider = getattr(args, "provider", None)
     try:
         with kbc.connect_closing() as conn:
-            ok = kb.set_model_override(conn, args.task_id, model, provider=provider)
+            from hermes_cli.kanban_pin_reroute import set_model_cli
+            ok, wrote = set_model_cli(conn, args.task_id, args.model, model, provider, getattr(args, "mandatory", None))
     except (ValueError, RuntimeError) as exc:
         return _err(f"kanban: {exc}", 2)
     if not ok:
         return _err(f"no such task: {args.task_id}")
-    if model:
+    if not wrote:
+        print(f"{args.task_id}: model pin " + ("mandatory: a quota wall never moves it" if args.mandatory
+                                               else "reroutable: a far quota wall may move it within its class"))
+    elif model:
         label = f"{provider}:{model}" if provider else model
         print(f"Set model override on {args.task_id}: {label} (applies on next dispatch)")
     else:
@@ -1295,6 +1287,9 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 fail_msg[tid] = (f"cannot complete {tid}: {empty_err}. Pass --result/--summary "
                                  f"describing what was done (an empty completion is not evidence).")
                 return False
+            except (kb.ArtifactPreservationError, ValueError) as receipt_err:
+                fail_msg[tid] = receipt_refusal(tid, receipt_err)  # nothing written; re-raises other errors
+                return False
             if not done:
                 # complete_task returns bare False for a dependency refusal too;
                 # name the open parents instead of claiming the id is unknown.
@@ -1367,7 +1362,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
                     result=result, summary=summary, metadata=metadata,
                     priority_reason=reason, require_lower_reason=True,
                 )
-            except kb.PriorityLowerRefused as exc:
+            except (kb.PriorityLowerRefused, ReceiptEditRefused) as exc:
                 return _err(f"kanban edit: {exc}")
             if not ok:
                 return _err(f"cannot edit {args.task_id} (unknown id, or --result used on a task that is not done)")
@@ -1392,6 +1387,7 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
 
 
 def _cmd_block(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_cli_actor import cli_actor
     reason = _joined_words(args.reason)
     kind = getattr(args, "kind", None)
     routed = _cli_route_needs("block", args, reason)
@@ -1453,7 +1449,7 @@ def _cmd_block(args: argparse.Namespace) -> int:
         op = _guarded_park(conn, "block", wake, refused, _commented(
             reason, author, "BLOCKED", lambda tid, comment: kb.block_task(
                 conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid),
-                human_request=request, awaiting=awaiting, comment=comment,
+                human_request=request, awaiting=awaiting, comment=comment, actor=cli_actor(),
                 wake_check=wake[0], check_every=wake[1], clock_only=wake[2])),
             awaiting=awaiting, reason=reason, kind=kind)
         return _bulk_apply(ids, op, ok_msg, lambda tid: refused.get(tid) or f"cannot block {tid}")
@@ -1489,6 +1485,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
 
 
 def _cmd_unblock(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_cli_actor import cli_actor
     if os.environ.get("HERMES_KANBAN_TASK"):
         return _err("kanban unblock is orchestrator-only; workers must hand off their assigned task")
     ids, rc = _require_ids(args, _REASON_FLAG_HINT)
@@ -1501,7 +1498,7 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
         rc = _ids_error(ids, _REASON_FLAG_HINT, conn)
         if rc:
             return rc
-        op = _commented(reason, author, "UNBLOCK", lambda tid, comment: kb.unblock_task(conn, tid, comment=comment))
+        op = _commented(reason, author, "UNBLOCK", lambda tid, comment: kb.unblock_task(conn, tid, comment=comment, event_extra={"actor": cli_actor()}))
         return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
                            lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)")
 
@@ -1830,10 +1827,6 @@ def _run_triage_sweep(args: argparse.Namespace, verb: str, mod, run_one, json_ke
     return 0 if (ok_count > 0 or not ids) else 1
 
 
-def _retitled_suffix(outcome) -> str:
-    return f" — retitled: {outcome.new_title!r}" if outcome.new_title else ""
-
-
 def _cmd_specify(args: argparse.Namespace) -> int:
     """Spec a triage task (or all) via the auxiliary LLM, promote to todo."""
     from hermes_cli import kanban_specify as spec
@@ -1841,13 +1834,6 @@ def _cmd_specify(args: argparse.Namespace) -> int:
     return _run_triage_sweep(args, "specify", spec, spec.specify_task, "specified",
                              ("task_id", "ok", "reason", "new_title"),
                              lambda o: f"Specified {o.task_id} → todo{_retitled_suffix(o)}")
-
-
-def _decompose_ok_line(o) -> str:
-    if o.fanout and o.child_ids:
-        return (f"Decomposed {o.task_id} → {len(o.child_ids)} "
-                f"children ({', '.join(o.child_ids)}); root promoted to todo")
-    return f"Specified {o.task_id} → todo (no fanout){_retitled_suffix(o)}"
 
 
 def _cmd_decompose(args: argparse.Namespace) -> int:

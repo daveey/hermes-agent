@@ -30,6 +30,8 @@ function productIdentity(source, stamp) {
 /** Every file bundleElectronMain writes: the only outputs that bake the install stamp. */
 export const electronOutputs = Object.freeze({
   main: 'electron-main.mjs', preload: 'electron-preload.js', previewGuestPreload: 'preview-guest-preload.js',
+  // [daveey] Worker thread owning the transcript cache's SQLite file (electron/transcript-cache-worker.ts).
+  transcriptCacheWorker: 'electron-transcript-cache-worker.js',
 })
 
 /** Bundle main/preload using only the prepared workspace's compiler. */
@@ -85,6 +87,13 @@ export async function bundleElectronMain({ source, out, stamp, dev = false }) {
     entryPoints: [join(source, 'apps/desktop/electron/preview-guest-preload-entry.ts')],
     format: 'cjs',
     outfile: join(out, electronOutputs.previewGuestPreload),
+  })
+  // Self-contained (node builtins only): main.ts evals this file's text in a worker thread.
+  await build({
+    ...common,
+    entryPoints: [join(source, 'apps/desktop/electron/transcript-cache-worker.ts')],
+    format: 'cjs',
+    outfile: join(out, electronOutputs.transcriptCacheWorker),
   })
   return { stampClock: bakedStamp }
 }

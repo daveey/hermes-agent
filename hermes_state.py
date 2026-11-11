@@ -62,6 +62,7 @@ from hermes_state_schema import SessionSchemaMixin
 import hermes_state_holders as _state_holders
 import hermes_state_lockguard as _lockguard
 from hermes_state_lockowners import log_write_lock_holders
+from hermes_state_write_diagnostics import log_write_duration
 from hermes_state_dbfile import (
     _connect_tracked_db, _fd_is_truly_unlinked, _prepare_connection_retirement,
     _read_sqlite_application_id, _stat_sqlite_sidecar_identity,
@@ -1117,16 +1118,16 @@ class SessionDB(
                             stage = "commit"
                             self._conn.commit()
                             stage = "committed"
-                            held_s = time.monotonic() - held_since
-                            if held_s >= _WRITE_HOLD_WARN_S:  # the log names waiters; this names the holder's code
-                                logger.warning("state.db write lock held %.1fs by %s (pid %d)", held_s,
-                                               getattr(fn, "__qualname__", repr(fn)), os.getpid())
                         except BaseException:
                             try:
                                 self._conn.rollback()
                             except Exception:
                                 pass
                             raise
+                        finally:
+                            held_s = time.monotonic() - held_since
+                            if held_s >= _WRITE_HOLD_WARN_S:
+                                log_write_duration(held_s, stage, fn)
                 # Success — periodic best-effort checkpoint + FTS merge.
                 self._note_unconfirmed_corruption(fn, first_corrupt)
                 self._write_count += 1

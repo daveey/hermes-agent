@@ -20,7 +20,10 @@ def test_recent_stat_board_same_tick_write_is_read_after_ttl(clock, spies, tmp_p
         before = ksa._activity_fingerprint()
         conn.execute("UPDATE tasks SET status = 'archived'")
         os.utime(path, ns=(recent, recent))
-        assert ksa._activity_fingerprint() == before
+        # Equal file stats no longer hide commits or replacement reader identities.
+        after = ksa._activity_fingerprint()
+        assert after[0][1][1] == before[0][1][1]  # same filesystem stat
+        assert after != before
         helpers._advance(clock, ksa._CACHE_TTL_S + 0.5)
         assert "kanban_active" not in helpers._poll()
         assert spies["recompute"] == 2
@@ -43,7 +46,10 @@ def test_replaced_reader_cannot_reuse_same_stat_board_row(clock, spies, tmp_path
         conn.execute("UPDATE tasks SET status = 'archived'")
         os.utime(path, ns=(recent, recent))
         ksa.evict_readers(os.path.realpath(path))
-        assert ksa._activity_fingerprint() == before
+        # Equal file stats no longer hide commits or replacement reader identities.
+        after = ksa._activity_fingerprint()
+        assert after[0][1][1] == before[0][1][1]  # same filesystem stat
+        assert after != before
         with ksa.cached_ro(path) as reader:
             assert reader is not evicted
         helpers._advance(clock, ksa._CACHE_TTL_S + 0.5)

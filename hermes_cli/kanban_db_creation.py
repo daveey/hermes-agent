@@ -2,6 +2,24 @@
 import json
 
 
+def default_ready_assignee() -> str:
+    """``kanban.default_assignee`` (config) or the ``default`` profile."""
+    try:
+        from hermes_cli.config import load_config
+
+        name = str(((load_config().get("kanban") or {}).get("default_assignee")) or "").strip()
+    except Exception:
+        name = ""
+    return name or "default"
+
+
+def tool_creation_audit(args: dict, **effective) -> dict | None:
+    """Audit the same normalized fields placement judged, including inherited identity/project. [daveey]"""
+    from hermes_cli.kanban_worker_placement import creation_audit
+
+    return creation_audit({**args, **effective})
+
+
 def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
                    tenant, workspace_kind, workspace_path, branch_name, project_id,
                    skills, goal_mode, model_override, provider_override, created_by, requires,

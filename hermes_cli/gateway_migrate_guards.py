@@ -151,10 +151,22 @@ def _guard_home_tree(plan: MigrationPlan, profile: ProfileGateway) -> Optional[s
             f"the multiplexer would serve {profile.home} instead of the live home.")
 
 
+def _guard_code_root(plan: MigrationPlan, profile: ProfileGateway) -> Optional[str]:
+    """A gateway pinned to its own core (an Ask Eve pinned owner) must not be folded into a
+    multiplexer running this checkout: that would silently drop its pin. [daveey]"""
+    from hermes_cli.update_fleet_scope import gateway_foreign_code_root
+    root = gateway_foreign_code_root(profile.pid or 0, profile.runtime_home or profile.home)
+    if root is None:
+        return None
+    return (f"Profile '{profile.name}' runs its gateway from another checkout ({root}): "
+            "the multiplexer would serve it from this one instead of its pinned code.")
+
+
 _AUTO_MIGRATION_GUARDS: tuple[Callable[[MigrationPlan, ProfileGateway], Optional[str]], ...] = (
     _guard_service_domain,
     _guard_unix_user,
     _guard_home_tree,
+    _guard_code_root,
 )
 
 

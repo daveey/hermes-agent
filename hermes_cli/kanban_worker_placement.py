@@ -174,7 +174,8 @@ def execution_refusal(conn, row):
     own = state.get("gateway_id")
     if not own or labels != [f"machine:{own}"]:
         return WAITING
-    return None
+    from hermes_cli.kanban_placement_coordination import claim_refusal
+    return claim_refusal(row, own)
 
 
 def local_refusals(conn, status):

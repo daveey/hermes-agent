@@ -45,6 +45,7 @@ def classify_parked_request(conn, task_id: str, *, human_request: dict | None,
 def classify_cli_request(args, request, reason):
     """Explicit CLI metadata-only mode, separate from the block lifecycle."""
     from hermes_cli import kanban as cli
+    from hermes_cli.kanban_cli_actor import cli_actor
 
     if not hasattr(args, "human_request") or not reason:
         raise ValueError("metadata-only requires --human-request and a reason")
@@ -54,6 +55,6 @@ def classify_cli_request(args, request, reason):
         return cli._bulk_apply(
             cli._bulk_ids(args),
             lambda tid: classify_parked_request(conn, tid, human_request=request,
-                                               actor=cli._profile_author(), reason=reason),
+                                               actor=cli_actor(), reason=reason),
             lambda tid: f"Classified {tid} (metadata only; remains parked)",
             lambda tid: f"cannot classify {tid} (requires parked card without a current run)")

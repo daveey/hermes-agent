@@ -1071,6 +1071,7 @@ _LATER_TASK_COLUMNS = (
     ("max_retries", "max_retries INTEGER"),
     ("model_override", "model_override TEXT"),
     ("provider_override", "provider_override TEXT"),
+    ("model_pin_mandatory", "model_pin_mandatory INTEGER"),  # 1 = a quota wall never moves the pin
     ("reasoning_effort", "reasoning_effort TEXT"),
     # Ralph-style goal loop toggle; 0 = classic single-shot worker.
     ("goal_mode", "goal_mode INTEGER NOT NULL DEFAULT 0"),

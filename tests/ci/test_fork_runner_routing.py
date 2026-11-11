@@ -21,9 +21,11 @@ from ruamel.yaml import YAML
 _YAML = YAML(typ="safe")
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
-HEAVY = "hermes-hub"
-POLL = "hermes-hub-poll"
-FAST = "ci-fast"
+# Blacksmith sizes since 2026-11-11 (softmax-universe billing); before: self-hosted
+# hermes-hub / hermes-hub-poll / ci-fast lanes.
+HEAVY = "blacksmith-4vcpu-ubuntu-2404"
+POLL = "blacksmith-2vcpu-ubuntu-2404"
+FAST = "blacksmith-2vcpu-ubuntu-2404"
 COMPLETION = {
     "ci.yaml": ("all-checks-pass",),
 }
@@ -64,13 +66,13 @@ def test_no_always_job_waits_for_a_heavy_hub_runner():
 def test_aggregators_do_not_wait_for_observers_and_skip_on_cancel(wf, name):
     data = _YAML.load((WORKFLOWS / wf).read_text(encoding="utf-8"))
     job = data["jobs"][name]
-    assert _labels(job) == {"self-hosted", FAST}
-    assert POLL not in _labels(job) and HEAVY not in _labels(job)
+    assert _labels(job) == {FAST}
+    assert HEAVY not in _labels(job)
     cond = str(job.get("if", ""))
     assert "!cancelled()" in cond and "always()" not in cond
 
 
-@pytest.mark.parametrize("original_label", [POLL, HEAVY, FAST, "ubuntu-latest", "blacksmith-4vcpu-ubuntu-2404"])
+@pytest.mark.parametrize("original_label", ["hermes-hub-poll", "hermes-hub", "ci-fast", "ubuntu-latest", HEAVY])
 def test_fork_rewriter_preserves_completion_capacity(tmp_path, original_label):
     # Run the real upstream-reapply entry point twice, without touching the checkout.
     shutil.copytree(ROOT / ".github", tmp_path / ".github")
@@ -85,7 +87,7 @@ def test_fork_rewriter_preserves_completion_capacity(tmp_path, original_label):
             match = re.search(r"(?m)^  " + re.escape(name) + r":\n(?:(?!  \S).*\n)*", text)
             assert match
             block = match.group(0)
-            label = original_label if original_label in ("ubuntu-latest", "blacksmith-4vcpu-ubuntu-2404") else f"[self-hosted, {original_label}]"
+            label = original_label if original_label in ("ubuntu-latest", HEAVY) else f"[self-hosted, {original_label}]"
             changed = re.sub(r"(?m)^    runs-on: .*$", f"    runs-on: {label}", block)
             changed = re.sub(r"(?m)^    if: .*$", "    if: always()", changed)
             text = text.replace(block, changed)
@@ -96,23 +98,25 @@ def test_fork_rewriter_preserves_completion_capacity(tmp_path, original_label):
             data = _YAML.load((tmp_path / ".github/workflows" / wf).read_text())
             for name in names:
                 job = data["jobs"][name]
-                assert _labels(job) == {"self-hosted", FAST}
+                assert _labels(job) == {FAST}
                 assert job["if"] == "${{ !cancelled() }}"
         observer = _YAML.load((tmp_path / ".github/workflows/ci-review-comment.yml").read_text())
-        assert _labels(observer["jobs"]["comment"]) == {"self-hosted", POLL}
+        assert _labels(observer["jobs"]["comment"]) == {POLL}
 
 
-def test_fork_linux_jobs_never_require_blacksmith_runners():
-    # PR classifiers can skip a new job even while its workflow is green.
-    # Check every Linux routing declaration, including matrix runner values.
+def test_fork_linux_jobs_never_use_self_hosted_lanes():
+    # The tfgar/hermes-hub Linux lanes don't serve softmax-universe/daveey-hermes.
+    # Only the mini's macOS state runner and the tfgar probe stay self-hosted.
+    # Check every routing declaration, including matrix runner values.
+    retired = r"hermes-hub|docker-ci|ci-fast|ci-bwrap|tfgar-tests|hermes-hub-poll|hermes-hub-ci"
     offenders = [
         f"{wf}:{name}"
         for wf, name, job in _jobs()
-        if re.search(r"blacksmith-[^'\"\s,\]}]*ubuntu", str({
+        if re.search(r"(?<![\\w-])(" + retired + r")(?![\\w-])", str({
             "runs-on": job.get("runs-on"), "strategy": job.get("strategy"),
         }))
     ]
-    assert not offenders, f"Fork has no Blacksmith Linux runners: {offenders}"
+    assert not offenders, f"retired self-hosted Linux lane: {offenders}"
 
 
 def test_nix_jobs_use_portable_checkout():
@@ -127,6 +131,6 @@ def test_detect_timeout_tolerates_a_loaded_hub():
     assert data["jobs"]["detect"]["timeout-minutes"] >= 5
 
 
-def test_poll_label_is_registered_for_actionlint():
+def test_poll_label_is_known_to_actionlint():
     cfg = _YAML.load((ROOT / ".github" / "actionlint.yaml").read_text(encoding="utf-8"))
     assert POLL in cfg["self-hosted-runner"]["labels"]

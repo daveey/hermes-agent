@@ -59,7 +59,7 @@ jobs:
     name: bundle ${{ matrix.target.label }}
     # fork (daveey/hermes): only self-hosted Linux runners (hermes-hub, docker-ci);
     # GitHub-hosted runners do not start on this account, so these legs skip here.
-    if: github.repository != 'daveey/hermes'
+    if: github.repository != 'softmax-universe/daveey-hermes'
     runs-on: ${{ matrix.target.runner }}
     # Leave time for setup, cache saves and smoke tests around the wheel build.
     timeout-minutes: 180

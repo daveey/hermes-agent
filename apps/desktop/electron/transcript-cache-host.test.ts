@@ -73,6 +73,8 @@ describe('transcript cache host', () => {
 
     const event: { returnValue?: any } = {}
     on.get('hermes:transcript-cache:read')!(event, { connectionId: '', profile: '', sessionId: 'l1' })
+    // The store is awaited (it runs on a worker thread in the app), so the reply lands after the listener returns.
+    await vi.waitFor(() => expect(event.returnValue).toBeDefined())
     expect(event.returnValue?.messages).toEqual([{ content: 'row of local', id: 1, role: 'user' }])
     host.stop()
   })

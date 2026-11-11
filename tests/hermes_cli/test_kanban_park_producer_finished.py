@@ -79,7 +79,12 @@ def _assert_woken(conn, tid, ref, gateway_word):
     note = [c for c in kb.list_comments(conn, tid) if c.author == "kanban-dispatcher"][-1].body
     assert f"Woken: producer card {ref} on {gateway_word} is done" in note, note
     assert "hermes kanban show` reads only this host's board" in note, note
-    assert f"hermes kanban wait-check task {ref} --gateway" in note, note
+    if gateway_word == "this board":
+        # Same-host producer: the probe reads this board, so the note must not send the waiter to a --gateway.
+        assert f"hermes kanban wait-check task {ref}`" in note, note
+        assert "--gateway" not in note, note
+    else:
+        assert f"hermes kanban wait-check task {ref} --gateway" in note, note
     assert "add `--from <that status>`. Those statuses count as met" in note, note
     ctx = kwc.render_wake_context(conn, tid)
     assert "producer card" in ctx and ref in ctx, ctx

@@ -46,9 +46,18 @@ export interface PrefetchTarget {
   meta: { activity: null | number; messageCount: null | number }
 }
 
+type CachedMeta = { activity: null | number; messageCount: null | number; savedAt: number } | null
+type MaybePromise<T> = Promise<T> | T
+
+/**
+ * The cache as the prefetcher sees it. Every call may be asynchronous: Desktop runs the SQLite store on a worker
+ * thread (transcript-cache-client.ts), because a write that waits on the disk froze Electron's main loop for
+ * 1-1.8 s. `metaMany` answers a whole pass's freshness checks in one round trip.
+ */
 export interface PrefetchStore {
-  meta(key: TranscriptCacheKey): { activity: null | number; messageCount: null | number; savedAt: number } | null
-  putLatest(key: TranscriptCacheKey, latest: readonly unknown[], meta?: TranscriptCacheMeta): boolean
+  meta(key: TranscriptCacheKey): MaybePromise<CachedMeta>
+  metaMany?(keys: readonly TranscriptCacheKey[]): MaybePromise<CachedMeta[]>
+  putLatest(key: TranscriptCacheKey, latest: readonly unknown[], meta?: TranscriptCacheMeta): MaybePromise<boolean>
 }
 
 export interface PrefetchDeps {
@@ -141,11 +150,7 @@ export function selectPrefetchTargets(
 }
 
 /** Whether a cached entry is behind the hub's view of the session. */
-export function needsRefresh(
-  cached: { activity: null | number; messageCount: null | number; savedAt: number } | null,
-  target: PrefetchTarget,
-  now: number
-): boolean {
+export function needsRefresh(cached: CachedMeta, target: PrefetchTarget, now: number): boolean {
   if (!cached) {
     return true
   }
@@ -173,6 +178,8 @@ export class TranscriptPrefetcher {
   private readonly demandWaiters = new Map<string, ((outcome: PrefetchKeyOutcome) => void)[]>()
   private readonly demandQueues = new Map<string, TranscriptCacheKey[]>()
   private readonly demandActive = new Map<string, number>()
+  /** Keys whose freshness check is in flight (the store answers asynchronously): later asks share its answer. */
+  private readonly demandChecks = new Map<string, Promise<boolean>>()
   /** [daveey] On-demand keys whose fetch stored nothing (404, empty): not retried within MIN_REFETCH_MS. */
   private readonly demandMissed = new Map<
     string,
@@ -206,17 +213,15 @@ export class TranscriptPrefetcher {
    * DEMAND_CONCURRENCY fetches per gateway at a time and DEMAND_QUEUE_MAX queued behind them.
    */
   prefetchKey(raw: TranscriptCacheKey): Promise<PrefetchKeyOutcome> {
-    try {
-      return this.enqueueDemand(raw)
-    } catch (error) {
-      // A store read can throw (closed at quit, SQLITE_BUSY): never out of an IPC listener.
+    return this.enqueueDemand(raw).catch(error => {
+      // A store read can fail (closed at quit, SQLITE_BUSY, worker gone): never out of an IPC listener.
       this.deps.log?.(`transcript prefetch (ref) skipped: ${(error as Error)?.message || error}`)
 
-      return Promise.resolve('failed')
-    }
+      return 'failed' as const
+    })
   }
 
-  private enqueueDemand(raw: TranscriptCacheKey): Promise<PrefetchKeyOutcome> {
+  private async enqueueDemand(raw: TranscriptCacheKey): Promise<PrefetchKeyOutcome> {
     const key: TranscriptCacheKey = {
       connectionId: String(raw?.connectionId ?? '').trim(),
       profile: profileOf(raw?.profile),
@@ -227,25 +232,37 @@ export class TranscriptPrefetcher {
     const now = this.deps.now?.() ?? Date.now()
 
     if (!key.connectionId || !key.sessionId) {
-      return Promise.resolve('invalid')
+      return 'invalid'
     }
 
     if (this.demandWaiters.has(id)) {
-      return Promise.resolve('queued')
+      return 'queued'
     }
 
     if ((this.downUntil.get(key.connectionId) ?? 0) > now) {
-      return Promise.resolve('backoff')
+      return 'backoff'
     }
 
-    if (!this.demandDue(key, now)) {
-      return Promise.resolve('current')
+    const checking = this.demandChecks.get(id)
+
+    if (checking) {
+      return (await checking) ? 'queued' : 'current'
+    }
+
+    const check = Promise.resolve()
+      .then(() => this.demandDue(key, now))
+      .finally(() => this.demandChecks.delete(id))
+
+    this.demandChecks.set(id, check)
+
+    if (!(await check)) {
+      return 'current'
     }
 
     const queue = this.demandQueues.get(key.connectionId) ?? []
 
     if (queue.length >= DEMAND_QUEUE_MAX) {
-      return Promise.resolve('dropped')
+      return 'dropped'
     }
 
     return new Promise<PrefetchKeyOutcome>(resolve => {
@@ -256,9 +273,9 @@ export class TranscriptPrefetcher {
     })
   }
 
-  private demandDue(key: TranscriptCacheKey, now: number): boolean {
+  private async demandDue(key: TranscriptCacheKey, now: number): Promise<boolean> {
     const id = keyString(key)
-    const cached = this.deps.store.meta(key) ?? this.unstored.get(id) ?? this.demandMissed.get(id) ?? null
+    const cached = (await this.deps.store.meta(key)) ?? this.unstored.get(id) ?? this.demandMissed.get(id) ?? null
     const listed = this.listed.get(id)
 
     if (!cached) {
@@ -321,7 +338,7 @@ export class TranscriptPrefetcher {
     try {
       const rows = await this.deps.fetchLatest(key, LATEST_ROWS)
 
-      if (rows.length > 0 && this.deps.store.putLatest(key, rows, meta)) {
+      if (rows.length > 0 && (await this.deps.store.putLatest(key, rows, meta))) {
         this.demandMissed.delete(id)
         this.deps.log?.(`transcript prefetch (ref): cached ${key.connectionId}/${key.profile}/${key.sessionId}`)
 
@@ -426,8 +443,12 @@ export class TranscriptPrefetcher {
       }
     }
 
-    const due = targets.filter(target =>
-      needsRefresh(this.deps.store.meta(target.key) ?? this.unstored.get(keyOf(target)) ?? null, target, now)
+    const keys = targets.map(target => target.key)
+    const { store } = this.deps
+    const cached = store.metaMany ? await store.metaMany(keys) : await Promise.all(keys.map(key => store.meta(key)))
+
+    const due = targets.filter((target, index) =>
+      needsRefresh(cached[index] ?? this.unstored.get(keyOf(target)) ?? null, target, now)
     )
 
     result.skipped = targets.length - due.length
@@ -458,7 +479,7 @@ export class TranscriptPrefetcher {
             try {
               const rows = await this.deps.fetchLatest(target.key, LATEST_ROWS)
 
-              if (rows.length > 0 && this.deps.store.putLatest(target.key, rows, target.meta)) {
+              if (rows.length > 0 && (await this.deps.store.putLatest(target.key, rows, target.meta))) {
                 this.unstored.delete(keyOf(target))
                 result.fetched += 1
               } else {

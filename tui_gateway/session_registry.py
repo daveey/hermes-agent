@@ -309,8 +309,8 @@ def _start_agent_build(sid: str, session: dict) -> None:
             current["agent_error"] = str(e)
             # Logged: a failed build otherwise leaves no trace, so a prompt waiting on it reads in agent.log as
             # a message that "never ran" (the client only got an event, which a disconnect can lose). [daveey]
-            logger.warning("agent build failed for session %s (%s): %s: %s",
-                           sid, key, type(e).__name__, str(e)[:300])
+            from tui_gateway.build_diagnostics import log_build_failure
+            log_build_failure(logger, sid, key, e)
             # A client can route "no provider is set up" to its setup flow instead of a dead-end
             # error toast — but only if it can tell. The sentence is for the reader, the code is
             # for the client; older clients keep matching the text.

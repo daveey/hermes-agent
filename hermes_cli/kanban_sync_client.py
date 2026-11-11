@@ -833,10 +833,13 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
     """Apply every feed page after this file's cursor. Returns the number of changes read. On a board with an
     outbox (primary), fields with an unanswered local edit are not overwritten; ``partition`` (a gateway name)
     keeps only that gateway's cards."""
+    from hermes_cli.kanban_sync_stop import checkpoint
     total = 0
     cursor = int((sync.sync_state(conn) or {}).get("cursor") or 0)
     while True:
+        checkpoint()
         page = hub.changes(board, cursor)
+        checkpoint()
         changes = [c for c in (adapt(ch) for ch in page.get("changes", [])) if c is not None]
         if partition is not None:
             changes = own_partition(conn, changes, partition)
@@ -864,12 +867,15 @@ def _applying(conn: sqlite3.Connection) -> bool:
 def resync(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool, partition: Optional[str] = None) -> int:
     """Rebuild from the service snapshot (every live row, paged per table), then resume the feed at its head.
     ``partition`` keeps only that gateway's cards (a primary board's live file)."""
+    from hermes_cli.kanban_sync_stop import checkpoint
     head: Optional[int] = None
     count = 0
     for table in IMPORT_ORDER:
         after = ""
         while True:
+            checkpoint()
             page = hub.snapshot_page(board, table, after)
+            checkpoint()
             head = page["head"] if head is None else head
             rows = page.get("rows", [])
             changes = [_row_change(table, r) for r in rows]
@@ -1442,16 +1448,8 @@ def run_forever(keep_running: Callable[[], bool], interval: Optional[float] = No
     feed socket per synced board. Connected boards pull on feed/local invalidation; disconnected boards and
     failed pulls retain the poll period. An independent full recovery audits all boards at least every 60s
     (or the configured period if longer), subject to in-flight IO and the next poll tick."""
-    from hermes_cli import kanban_sync_runstate as runstate
-    # Record why the loop is not running, so the stuck-dispatcher warning, ``sync status`` and create name it
-    # instead of a board that silently stalls behind the Board lease (MacBook, 2026-11-02). [daveey]
-    try:
-        _run_forever(keep_running, interval, runstate)
-    except BaseException as exc:
-        runstate.record_down(f"kanban sync loop crashed: {type(exc).__name__}: {exc}")
-        raise
-    finally:
-        sync_timing.stop()
+    from hermes_cli.kanban_sync_stop import run_loop
+    run_loop(_run_forever, keep_running, interval)
 
 
 def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], runstate: Any) -> None:

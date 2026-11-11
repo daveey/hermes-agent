@@ -11,12 +11,26 @@ def claim_if_admitting(conn, task_id, assignee, lane, ttl_seconds, admission_che
         owner_home = resolve_profile_env(assignee)
     except FileNotFoundError:
         owner_home = None
-    if dispatch_paused(owner_home):
+    if dispatch_paused(owner_home) or core_update_hold() is not None:  # hold may start mid-tick [daveey]
         return None
     claim = kb.claim_review_task if lane == 'review' else kb.claim_task
     if admission_check is None:
         return claim(conn, task_id, ttl_seconds=ttl_seconds)
     return claim(conn, task_id, ttl_seconds=ttl_seconds, admission_check=admission_check)
+
+
+def core_update_hold():
+    """The live hermes-sync core-update drain hold (``agent.core_update_drain``), or None.
+
+    The gateway watcher already holds its own ticks; ``dispatch_once`` checks this too so ``hermes kanban
+    dispatch`` and the dashboard nudge cannot claim inside a hold (hermes-hub 2026-11-11: a CLI dispatch
+    claimed run 165540 inside one). A dead writer's hold does not count (``read_hold``). [daveey]
+    """
+    try:
+        from agent.core_update_drain import active_hold
+    except ImportError:
+        return None
+    return active_hold()
 
 
 def dispatch_paused(home=None):

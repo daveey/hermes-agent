@@ -14,6 +14,9 @@ resumed by ``_resume_windows_gateways_after_update`` (which dispatches here on
 ``platform == "posix"``), adopted by the next ``hermes update`` and resumed by the next launch
 when this process dies.
 
+* a gateway of this home that loads ANOTHER checkout (a unit pinned to its own core, e.g. an Ask
+  Eve pinned owner) is not in the set at all: the move cannot reach its code, so it is named and
+  left running, neither paused here nor restarted afterwards (``_systemd_unit_owned_by_update``).
 * each gateway accepts ``pause-if-idle-for-update`` only with no active work, checking and
   closing admission in one loop callback. Busy gateways defer the update without starting a
   drain. Unsupported gateways refuse explicitly until restarted on the installed code; a lost
@@ -60,7 +63,12 @@ _PRE_SWAP_DRAIN_WAIT_S = 30.0
 
 
 class PauseRefused(RuntimeError):
-    """The pause could not be completed; everything it stopped was started again."""
+    """The pause could not be completed; everything it stopped was started again. ``units``
+    names the gateways that refused (``update_pause_deferrals`` counts their streaks)."""
+
+    def __init__(self, message: str = "", units=()):
+        super().__init__(message)
+        self.units = list(units)
 
 
 def _empty_token() -> dict:
@@ -345,13 +353,13 @@ def _stop_unit(unit: dict) -> None:
     from hermes_cli.update_cmd_fleet_unit_budget import UNIT_JOB_STILL_RUNNING, run_unit_job
     cmd = _manage_cmd(unit["scope"])
     if cmd is None:
-        raise PauseRefused(f"no privilege to stop system unit {unit['unit']}")
+        raise PauseRefused(f"no privilege to stop system unit {unit['unit']}", [unit["unit"]])
     result = run_unit_job(cmd, _scope_cmd(unit), "stop", unit["unit"], timeout=_STOP_TIMEOUT_S)
     if result.returncode == UNIT_JOB_STILL_RUNNING and not _alive(unit["pid"], unit.get("ct")) \
             and _unit_main_pid(_scope_cmd(unit), unit["unit"]) <= 0:
         return
     if result.returncode != 0:
-        raise PauseRefused(f"systemctl stop {unit['unit']} failed: {(result.stderr or '').strip()}")
+        raise PauseRefused(f"systemctl stop {unit['unit']} failed: {(result.stderr or '').strip()}", [unit["unit"]])
 
 
 def _start_unit(unit: dict) -> int:
@@ -386,7 +394,7 @@ def _stop_job(job: dict, *, drained: bool = False) -> None:
     _wait_gone([job["pid"]], 30.0)
     # KeepAlive may have respawned the drained gateway already: the job, not the old PID, decides.
     if result.returncode != 0 and (_locate_launchd_gateway_service(job["label"])[1] or 0) > 0:
-        raise PauseRefused(f"launchctl bootout {job['label']} failed: {(result.stderr or '').strip()}")
+        raise PauseRefused(f"launchctl bootout {job['label']} failed: {(result.stderr or '').strip()}", [job["label"]])
 
 
 def _start_job(job: dict) -> None:
@@ -474,7 +482,7 @@ def _stop_gateways(token: dict, entries: list[dict]) -> None:
     from hermes_cli import update_pause_record as pause_record
     from hermes_cli.update_cmd_drain_report import drain_progress_reporter
     budget, waiting = min(_drain_budget(), _PRE_SWAP_DRAIN_WAIT_S), []
-    refusals = []
+    refusals, refused = [], []
     for entry in entries:
         pause_record.mark_stop_sent(token, entry["pid"])  # before the request: see _ask_to_drain
         acknowledged = _ask_to_drain(entry)
@@ -486,12 +494,13 @@ def _stop_gateways(token: dict, entries: list[dict]) -> None:
             reason = ("does not support idle pause; restart that gateway on the installed code when idle"
                       if entry.get("pause_unsupported") else "is busy or cannot acknowledge an idle pause; retry when idle")
             refusals.append(f"{_names([entry])} {reason}")
+            refused.append(_names([entry]))
             if acknowledged is None:
                 waiting.append(entry)  # a lost ACK may already be exiting; settle it before rollback
             break
     if not waiting:
         if refusals:
-            raise PauseRefused("; ".join(refusals))
+            raise PauseRefused("; ".join(refusals), refused)
         return
     print(f"  ⏳ Waiting up to {budget:.0f}s for paused gateways {_names(waiting)} to exit before the update...")
     ticks = [drain_progress_reporter(Path(e["home"]) if e.get("home") else None, budget_s=budget) for e in waiting]
@@ -504,9 +513,10 @@ def _stop_gateways(token: dict, entries: list[dict]) -> None:
             tick()
         time.sleep(0.2)
     if waiting:
-        raise PauseRefused(f"{_names(waiting)} still draining after {budget:.0f}s; retry once in-flight turns finish")
+        raise PauseRefused(f"{_names(waiting)} still draining after {budget:.0f}s; retry once in-flight turns finish",
+                           [_names([e]) for e in waiting])
     if refusals:
-        raise PauseRefused("; ".join(refusals))
+        raise PauseRefused("; ".join(refusals), refused)
 
 
 def _disarm(entry: dict) -> None:
@@ -613,6 +623,7 @@ def _pause(token: dict) -> str | None:
         print(line)
     supervised = units + jobs
     if not supervised and not bare:
+        _deferral_streak()
         return None
     from gateway.status import get_process_start_time
     from hermes_cli.update_cmd_windows import _planned_stop_marker_path
@@ -657,10 +668,25 @@ def _pause(token: dict) -> str | None:
         pause_record.sync(token)
         if not isinstance(exc, Exception):
             raise
+        _deferral_streak(exc)
         return f"gateway pause deferred ({exc}); the checkout was not changed"
     pause_record.sync(token)
+    _deferral_streak()
     print(f"  ⏸ Paused for the update: {_describe(token)} (restarted once the dependencies are synced)")
     return None
+
+
+def _deferral_streak(refusal: BaseException | None = None) -> None:
+    """Count this run on each refusing gateway's streak of deferred updates (a third in a row files
+    a repair card), or end every streak when the pause went through. Never changes the verdict."""
+    try:
+        from hermes_cli import update_pause_deferrals as deferrals
+        if refusal is None:
+            deferrals.note_pause_ok()
+        else:
+            deferrals.note_deferral(getattr(refusal, "units", ()), str(refusal))
+    except Exception as exc:  # health: allow BLE001 -- bookkeeping must not turn a deferral into a crash
+        print(f"  ⚠ Could not record the deferral streak: {exc}")
 
 
 # --------------------------------------------------------------------------- resume

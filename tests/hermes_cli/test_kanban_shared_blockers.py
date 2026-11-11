@@ -256,7 +256,7 @@ def test_historical_route_not_replaced_by_current_pin(kanban_home, scoped_routin
         _route_run(conn, tid, "openai-codex")
         with kb.write_txn(conn):
             kb._end_run(conn, tid, outcome="review_requested")
-            conn.execute("UPDATE tasks SET status='review', model_override='claude-opus-4', "
+            conn.execute("UPDATE tasks SET status='review', model_override='claude-sonnet-4', "
                          "provider_override='anthropic' WHERE id=?", (tid,))
         st = ksb.blocker_states(conn)[BID]
         assert st.is_open and not st.probe_starts

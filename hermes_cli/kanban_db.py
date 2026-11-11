@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+
+from hermes_cli.kanban_published_worktree import publication_scope
 import os
 import re
 import secrets
@@ -648,6 +650,7 @@ class Task:
     requires: Optional[list] = None          # Configured assignment capabilities
     model_override: Optional[str] = None
     provider_override: Optional[str] = None  # provider ``model_override`` belongs to
+    model_pin_mandatory: Optional[int] = None  # 1 = never rerouted around a quota wall
     reasoning_effort: Optional[str] = None   # VALID_REASONING_EFFORTS | "none"; NULL = profile's
     # Breaker trip count; None -> ``kanban.failure_limit`` -> DEFAULT_FAILURE_LIMIT.
     max_retries: Optional[int] = None
@@ -695,7 +698,7 @@ _TASK_EPOCH_COLUMNS = ("created_at", "started_at", "completed_at", "claim_expire
 _TASK_OPTIONAL_COLUMNS = (
     "branch_name", "project_id", "tenant", "result", "idempotency_key", "worker_pid",
     "max_runtime_seconds", "current_run_id", "workflow_template_id",
-    "current_step_key", "max_retries", "session_id", "completion_contract", "placement_policy",
+    "current_step_key", "max_retries", "session_id", "completion_contract", "placement_policy", "model_pin_mandatory",
 )
 # Text columns where "" is stored/read as "not set".
 _TASK_EMPTY_IS_NULL_COLUMNS = (
@@ -1198,17 +1201,10 @@ def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str
     return cleaned
 
 
-def _default_ready_assignee() -> str:
-    """``kanban.default_assignee`` (config) or the ``default`` profile."""
-    try:
-        from hermes_cli.config import load_config
-
-        name = str(((load_config().get("kanban") or {}).get("default_assignee")) or "").strip()
-    except Exception:
-        name = ""
-    return name or "default"
+from hermes_cli.kanban_db_creation import default_ready_assignee as _default_ready_assignee
 
 
+@publication_scope
 def create_task(
     conn: sqlite3.Connection, *, title: str, body: Optional[str] = None,
     assignee: Optional[str] = None, created_by: Optional[str] = None,
@@ -1217,7 +1213,7 @@ def create_task(
     parents: Iterable[str] = (), triage: bool = False, idempotency_key: Optional[str] = None,
     max_runtime_seconds: Optional[int] = None, skills: Optional[Iterable[str]] = None,
     max_retries: Optional[int] = None, model_override: Optional[str] = None,
-    provider_override: Optional[str] = None, reasoning_effort: Optional[str] = None,
+    provider_override: Optional[str] = None, reasoning_effort: Optional[str] = None, pin_mandatory: bool = False,
     goal_mode: bool = False, goal_max_turns: Optional[int] = None, initial_status: str = "running",
     session_id: Optional[str] = None, board: Optional[str] = None, project_id: Optional[str] = None,
     project_source_task_id: Optional[str] = None, creator_task_id: Optional[str] = None,
@@ -1278,6 +1274,8 @@ def create_task(
         raise ValueError(_lint)
     completion_contract = validate_contract(completion_contract)
     model_override, provider_override = _validate_model_override(model_override, provider_override)
+    from hermes_cli.kanban_pin_reroute import mandatory_column
+    pin_column = mandatory_column(pin_mandatory, model_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
     assignee = _canonical_assignee(assignee)
     if not title or not title.strip():
@@ -1366,23 +1364,19 @@ def create_task(
                 conn.execute(
                     """
                     INSERT INTO tasks (
-                        id, title, body, assignee, status, priority,
-                        created_by, created_at, workspace_kind, workspace_path,
-                        branch_name, project_id, tenant, idempotency_key,
-                        max_runtime_seconds,
-                        skills, max_retries, model_override, provider_override,
-                        reasoning_effort,
+                        id, title, body, assignee, status, priority, created_by, created_at, workspace_kind, workspace_path,
+                        branch_name, project_id, tenant, idempotency_key, max_runtime_seconds,
+                        skills, max_retries, model_override, provider_override, model_pin_mandatory, reasoning_effort,
                         goal_mode, goal_max_turns, session_id, completion_contract, requires, placement_policy
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id, title.strip(), body, assignee, task_status, priority,
                         created_by, now, workspace_kind, workspace_path,
-                        branch_name, project_id, tenant, idempotency_key,
-                        _opt_int(max_runtime_seconds),
+                        branch_name, project_id, tenant, idempotency_key, _opt_int(max_runtime_seconds),
                         json.dumps(skills_list) if skills_list is not None else None,
-                        _opt_int(max_retries), model_override, provider_override, reasoning_effort,
-                        1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
+                        _opt_int(max_retries), model_override, provider_override, pin_column,
+                        reasoning_effort, 1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
                         json.dumps(required), placement_policy,
                     ),
                 )
@@ -1528,8 +1522,9 @@ def set_model_override(
         from hermes_cli.kanban_model_assignment import validate_task_pin
         model, provider = validate_task_pin(conn, task_id, model, provider)
     return _set_task_override(
-        conn, task_id,
-        "UPDATE tasks SET model_override = ?, provider_override = ? WHERE id = ?", (model, provider),
+        conn, task_id,  # clearing the pin clears its mandatory mark; a new pin keeps the card's mark
+        "UPDATE tasks SET model_override = ?, provider_override = ?, model_pin_mandatory = CASE WHEN ? IS NULL "
+        "THEN NULL ELSE model_pin_mandatory END WHERE id = ?", (model, provider, model),
         "model_override_set", {"model": model, "provider": provider},
         ("model_override", "provider_override"), archived_msg="cannot set model override",
     )
@@ -2633,6 +2628,8 @@ def complete_task(
     whitespace-only evidence raises :class:`EmptyCompletionError` after an
     auditable event. Approving a card out of ``review`` stays exempt.
     """
+    from hermes_cli import kanban_completion_receipt as receipt_admission
+    metadata, receipt_owners = receipt_admission.prepare(conn, task_id, metadata)
     now = int(time.time())
     # Cheap pre-check; re-checked inside the txn to close the parent-reopen race.
     if not _parents_satisfied(conn, task_id):
@@ -2647,11 +2644,14 @@ def complete_task(
     acceptance = prepare_acceptance(conn, task_id, expected_run_id, metadata)
     if acceptance is False:
         return False
-    with write_txn(conn):
+    from hermes_cli.kanban_metadata_files import discard_on_error
+    staged: list[Path] = []
+    with discard_on_error(staged), write_txn(conn):
         # Hard invariant even for human review approval: a parent may have
         # reopened while this task waited.
         if not _parents_satisfied(conn, task_id):
             return False
+        receipt_admission.recheck(conn, task_id, receipt_owners)
         from hermes_cli.kanban_assignment_routing import validate_repair_completion
         validate_repair_completion(conn, task_id)
         from hermes_cli.kanban_goal_receipt import record as record_goal
@@ -2690,7 +2690,7 @@ def complete_task(
         if conn.execute(sql, params).rowcount != 1:
             return False
         if isinstance(metadata, dict):
-            _stage_completion_artifacts(conn, task_id, metadata, now)
+            staged.extend(_stage_completion_artifacts(conn, task_id, metadata, now))
         run_id = _end_run(
             conn, task_id, outcome="completed", status="done", summary=handoff_summary,
             metadata=metadata,
@@ -2709,6 +2709,8 @@ def complete_task(
             event_summary = _REVIEW_APPROVED_NOTE
         from hermes_cli.kanban_db_completion_payload import completed_event_payload
         completion_payload = completed_event_payload(result, event_summary, verified_cards, metadata, acceptance)
+        if isinstance(metadata, dict) and "completion_receipt" in metadata:
+            completion_payload["completion_receipt_admission"] = 1
         if goal_event_id is not None:
             conn.execute('UPDATE task_events SET run_id=? WHERE id=? AND task_id=?',
                          (run_id, goal_event_id, task_id))
@@ -2737,6 +2739,8 @@ def complete_task(
     return True
 
 
+# Capability belongs to this loaded writer, not to helper files newly on disk.
+complete_task.completion_receipt_admission = 1
 _REVIEW_APPROVED_NOTE = "Review approved without additional evidence."
 
 
@@ -2774,14 +2778,7 @@ from hermes_cli.kanban_completion_evidence import gate_empty_completion as _gate
 from hermes_cli.kanban_metadata_files import stage_completion_artifacts as _stage_completion_artifacts
 
 
-def _cleaned_artifact_paths(metadata: Any) -> list[str]:
-    """Non-blank string paths declared in ``metadata["artifacts"]``."""
-    if not isinstance(metadata, dict):
-        return []
-    raw = metadata.get("artifacts")
-    if not isinstance(raw, (list, tuple)):
-        return []
-    return [str(p).strip() for p in raw if isinstance(p, str) and str(p).strip()]
+from hermes_cli.kanban_metadata_files import cleaned_artifact_paths as _cleaned_artifact_paths
 
 
 def _flag_phantom_prose_refs(
@@ -2803,40 +2800,7 @@ def _flag_phantom_prose_refs(
             )
 
 
-def _merge_completion_prose_artifacts(
-    conn: sqlite3.Connection, task_id: str, metadata: Optional[dict], *, summary: Optional[str],
-    result: Optional[str],
-) -> Optional[dict]:
-    """Legacy workers named deliverables only by absolute path in prose; add
-    those that exist under the scratch workspace to ``metadata["artifacts"]``
-    before cleanup can erase them."""
-    workspace = _scratch_workspace(conn, task_id)
-    if workspace is None:
-        return metadata
-    if not _is_managed_scratch_path(workspace):
-        return metadata
-    text = "\n".join(part for part in (summary, result) if part)
-    if not text:
-        return metadata
-    prefix = re.escape(str(workspace))
-    discovered: list[str] = []
-    for match in re.finditer(prefix + r"(?:[/\\][^\s`\"'<>]+)", text):
-        raw = match.group(0).rstrip(".,;:!?)]}")
-        candidate = Path(raw)
-        if candidate.is_file():
-            discovered.append(str(candidate))
-    if not discovered:
-        return metadata
-    updated = dict(metadata) if isinstance(metadata, dict) else {}
-    existing = updated.get("artifacts")
-    merged = list(existing) if isinstance(existing, (list, tuple)) else []
-    seen = {str(path) for path in merged}
-    for path in discovered:
-        if path not in seen:
-            merged.append(path)
-            seen.add(path)
-    updated["artifacts"] = merged
-    return updated
+from hermes_cli.kanban_metadata_files import merge_completion_prose_artifacts as _merge_completion_prose_artifacts
 
 
 def _persist_scratch_completion_artifacts(
@@ -3004,7 +2968,7 @@ def block_task(
     human_request: Optional[dict] = None, awaiting: Any = None, clear_blocker: bool = False,
     comment: Optional[tuple[str, str]] = None, goal_rejection=None,
     blocker_provider: Optional[str] = None, blocker_model: Optional[str] = None,
-    blocker_lane: Optional[str] = None,
+    blocker_lane: Optional[str] = None, actor: Optional[str] = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
     :func:`kanban_block_routing.route_block`). A wait on time -- ``kind='time'``, a ``dependency``
@@ -3096,7 +3060,7 @@ def block_task(
                 return False
             sync_row(conn, task_id)
             payload = {"kind": kind, "reason": reason, "classified_in_place": True,
-                       "human_request": human_request, **filing_fields(conn, human_request), **run_meta}
+                       "human_request": human_request, **filing_fields(conn, human_request), **run_meta, **({"actor": actor} if actor else {})}
             if requested_kind == "assignment":
                 payload.update(requested_kind=requested_kind, rekind_reason=rekind_reason)
             if kind == "assignment":
@@ -3171,7 +3135,7 @@ def block_task(
         ):
             return False
         store_request(conn, task_id, human_request)
-        payload.update(human_request=human_request, **(filing_fields(conn, human_request) if new_status == "blocked" else {}))
+        payload.update(human_request=human_request, **({"actor": actor} if actor else {}), **(filing_fields(conn, human_request) if new_status == "blocked" else {}))
         from hermes_cli.kanban_shared_blockers import CLEAR_FLAG
         payload.update(run_meta)
         if clear_blocker:

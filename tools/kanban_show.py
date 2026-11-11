@@ -27,6 +27,9 @@ def show(args: dict) -> str:
                 owner = kfc.created_on(replica, tid)
                 out = _detail(kb, replica, task, args, replica=True)
                 out["owner"] = None if owner is kfc._UNSET else owner
+                from hermes_cli.kanban_pickup_stall import latest as pickup_skip
+                if skip := pickup_skip(conn, tid):  # why this host's pickup has not imported it [daveey]
+                    out["pickup_skip"] = skip
                 return json.dumps(out)
         kt._existing_task(kb, conn, tid)  # preserve the existing not-found error
     raise AssertionError("missing task lookup must reject")
