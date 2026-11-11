@@ -96,9 +96,33 @@ def test_failed_child_reconciles_without_owner_progress(board, entry):
     assert run['ended_at'] >= result['created_at']
     # A subsequent healthy tick cannot close/account the same failed run twice.
     kbd.detect_crashed_workers(conn)
-    crashes = conn.execute("SELECT id FROM task_events WHERE run_id=? AND kind='crashed'",
+    crashes = conn.execute("SELECT id, payload FROM task_events WHERE run_id=? AND kind='crashed'",
                            (context['run_id'],)).fetchall()
     assert len(crashes) == 1
+    payload = json.loads(crashes[0]['payload'])
+    assert payload['source_result_event_id'] == result['id']
+    assert payload['result_recorded_at'] == result['created_at']
+    assert payload['reconciled_at'] >= result['created_at']
+    assert payload['reconciled_by'] == ('dispatcher' if entry == 'dispatcher' else 'observer')
+
+
+def test_observer_dispatcher_race_closes_and_accounts_once(board):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    conn, context = board
+    _failed_child(conn, context)
+    barrier = Barrier(2)
+    def sweep(observer):
+        with connect_closing(Path(context['db'])) as connection:
+            barrier.wait(timeout=10)
+            return kbd.detect_crashed_workers(connection, failed_results_only=observer)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(sweep, [False, True]))
+    assert sum(len(result) for result in results) == 1
+    assert conn.execute('SELECT consecutive_failures FROM tasks WHERE id=?',
+                        (context['task_id'],)).fetchone()[0] == 1
+    assert len(conn.execute("SELECT 1 FROM task_events WHERE run_id=? AND kind='crashed'",
+                            (context['run_id'],)).fetchall()) == 1
 
 
 def test_board_only_proof_accepts_real_dead_child(board):
@@ -181,6 +205,81 @@ def test_observer_waits_for_distinct_outer_process(board):
         if outer.poll() is None:
             outer.kill()
             outer.wait()
+
+
+@pytest.mark.parametrize('entry', ['dispatcher', 'observer'])
+def test_failed_receipt_waits_for_real_bound_process(board, entry):
+    conn, context = board
+    outer = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read(1)'],
+                             stdin=subprocess.PIPE, env=build_subprocess_env())
+    child = None
+    try:
+        kbd._set_worker_pid(conn, context['task_id'], outer.pid)
+        assert outer.stdin is not None
+        outer.stdin.close()
+        outer.wait(timeout=5)
+        script = _CHILD.replace('sys.stdin.read(1)', 'pass').replace(
+            'raise SystemExit(1)', "print('RESULT_COMMITTED', flush=True)\nsys.stdin.read(1)\nraise SystemExit(1)")
+        child = subprocess.Popen(
+            [sys.executable, '-c', script, json.dumps(context),
+             'observe' if entry == 'observer' else 'unit'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=build_subprocess_env(), text=True, encoding='utf-8',
+            cwd=str(Path(__file__).resolve().parents[2]))
+        assert child.stdout is not None
+        import select
+        ready, _, _ = select.select([child.stdout], [], [], 15)
+        assert ready, 'child did not commit its result'
+        assert child.stdout.readline().strip() == 'RESULT_COMMITTED'
+        hold_until = time.monotonic() + 1
+        while time.monotonic() < hold_until:
+            if entry == 'dispatcher':
+                kbd.detect_crashed_workers(conn)
+            assert child.poll() is None
+            assert conn.execute('SELECT status FROM task_runs WHERE id=?',
+                                (context['run_id'],)).fetchone()[0] == 'running'
+            time.sleep(.05)
+        child.communicate('x', timeout=5)
+        deadline = time.monotonic() + 5
+        state = 'running'
+        while time.monotonic() < deadline:
+            if entry == 'dispatcher':
+                kbd.detect_crashed_workers(conn)
+            state = conn.execute('SELECT status FROM task_runs WHERE id=?',
+                                 (context['run_id'],)).fetchone()[0]
+            if state != 'running':
+                break
+            time.sleep(.05)
+        assert state == 'crashed'
+    finally:
+        for proc in (child, outer):
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+
+@pytest.mark.parametrize('entry', ['dispatcher', 'observer'])
+@pytest.mark.parametrize('veto', ['bound_live', 'outer_recycled', 'bound_recycled', 'unknown_birth'])
+def test_failed_receipt_veto_cannot_fall_back_to_legacy_reclaim(board, monkeypatch, entry, veto):
+    from hermes_cli import kanban_failed_result as reconcile
+    from hermes_cli import kanban_owner_recovery as owner
+    conn, context = board
+    _failed_child(conn, context)
+    calls = []
+    def gone(pid, birth):
+        calls.append((pid, birth))
+        return len(calls) == 1 if veto.startswith('bound') else False
+    monkeypatch.setattr(reconcile, 'process_gone', gone)
+    # Model legacy liveness accepting dead/recycled outer identity. It must not
+    # override the stronger two-process failed-result veto, or consult state.db.
+    monkeypatch.setattr(kbd, '_worker_alive', lambda *args: False)
+    monkeypatch.setattr(owner, 'owner_reclaim_blocked', lambda *a, **k: False)
+    monkeypatch.setattr(owner, 'apply_attempt_note', lambda *a, **k: None)
+    kbd.detect_crashed_workers(conn, failed_results_only=entry == 'observer')
+    assert conn.execute('SELECT status FROM task_runs WHERE id=?',
+                        (context['run_id'],)).fetchone()[0] == 'running'
+    assert not conn.execute("SELECT 1 FROM task_events WHERE run_id=? AND kind='crashed'",
+                            (context['run_id'],)).fetchone()
 
 
 @pytest.mark.skipif(sys.platform != 'linux', reason='Linux zombie identity proof')

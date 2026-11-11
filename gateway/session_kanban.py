@@ -407,15 +407,19 @@ def _record_worker_result(context, code, last_output, failure=None, extra=None, 
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_quota_receipt import quota_fields, route_fields
     observer_error = None
+    strict_death_proof = False
     if code and not (extra or {}).get('continuable'):
+        from hermes_cli.kanban_failed_result import recorded_process_witnesses
         with connect_closing(Path(context['db'])) as conn:
             if not _bound_worker_matches(conn, context):
                 return
-        from hermes_cli.kanban_failed_result_observer import arm
-        try:
-            arm(context)
-        except (OSError, RuntimeError) as exc:
-            observer_error = str(exc)[:300]
+            strict_death_proof = recorded_process_witnesses(conn, context)
+        if strict_death_proof:
+            from hermes_cli.kanban_failed_result_observer import arm
+            try:
+                arm(context)
+            except (OSError, RuntimeError) as exc:
+                observer_error = str(exc)[:300]
     with connect_closing(Path(context['db'])) as conn, kb.write_txn(conn):
         if _bound_worker_matches(conn, context):
             if observer_error:
@@ -426,7 +430,7 @@ def _record_worker_result(context, code, last_output, failure=None, extra=None, 
             kb._append_event(conn, context['task_id'], 'worker_result',
                 {'pid': os.getpid(), 'claim_lock': context['claim_lock'], 'exit_code': code,
                  'last_output': last_output, **quota_fields(failure), **route_fields(failure, agent),
-                 **(extra or {})},
+                 **(extra or {}), **({'death_proof_version': 1} if strict_death_proof else {})},
                 run_id=context['run_id'])
 
 

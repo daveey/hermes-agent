@@ -51,8 +51,32 @@ def process_gone(pid, birth) -> bool:
     return False
 
 
-def failed_result_proof(conn, task_id, run_id, claim_lock):
-    """Return latest attributable failed result only after both processes exit."""
+def recorded_process_witnesses(conn, context):
+    """Whether this claim was launched with the modern two-process identity contract.
+
+    Legacy imports and unverified launches cannot opt into bounded reconciliation;
+    their pre-existing dispatcher policy is intentionally unchanged.
+    """
+    row = conn.execute('SELECT worker_started_at FROM tasks WHERE id=? AND current_run_id=? AND claim_lock=?',
+                       (context['task_id'], context['run_id'], context['claim_lock'])).fetchone()
+    bound = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? "
+                         "AND kind='worker_bound' ORDER BY id DESC LIMIT 1",
+                         (context['task_id'], context['run_id'])).fetchone()
+    if row is None or bound is None:
+        return False
+    try:
+        birth = json.loads(bound['payload']).get('started_at')
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return all(isinstance(value, str) and '|' in value for value in (row['worker_started_at'], birth))
+
+
+def failed_result_receipt(conn, task_id, run_id, claim_lock):
+    """Return an attributable failure independently of its process death proof.
+
+    A receipt with an unproven death must veto legacy reclaim, not fall through
+    to its weaker outer-process-only checks.
+    """
     from hermes_cli import kanban_db as kb
 
     row = conn.execute(
@@ -90,9 +114,17 @@ def failed_result_proof(conn, task_id, run_id, claim_lock):
             or result.get('continuable') or result_event['id'] <= bound_event['id']
             or result.get('pid') != bound.get('pid')):
         return None
-    if not process_gone(row['worker_pid'], row['worker_started_at']):
-        return None
-    if not process_gone(bound.get('pid'), bound.get('started_at')):
-        return None
     return {'source_result_event_id': result_event['id'],
-            'result_recorded_at': result_event['created_at'], 'result': result}
+            'result_recorded_at': result_event['created_at'], 'result': result,
+            'outer': (row['worker_pid'], row['worker_started_at']),
+            'bound': (bound.get('pid'), bound.get('started_at'))}
+
+
+def failed_result_proof(conn, task_id, run_id, claim_lock):
+    """Return latest attributable failed result only after both processes exit."""
+    receipt = failed_result_receipt(conn, task_id, run_id, claim_lock)
+    if receipt is None:
+        return None
+    if not process_gone(*receipt.pop('outer')) or not process_gone(*receipt.pop('bound')):
+        return None
+    return receipt
