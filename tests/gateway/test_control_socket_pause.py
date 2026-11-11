@@ -132,7 +132,7 @@ def test_unix_exchange_has_one_deadline_for_a_trickling_peer(tmp_path, monkeypat
                     conn.sendall(b"x")
                 except OSError:
                     return
-                _time.sleep(0.1)
+                _time.sleep(0.1)  # health: allow HX013 -- delayed bytes exercise a peer stretching per-read timeouts
     threading.Thread(target=trickle, daemon=True).start()
     started = _time.monotonic()
     cs._query_unix_socket(tmp_path, b"{}\n", 0.5)
