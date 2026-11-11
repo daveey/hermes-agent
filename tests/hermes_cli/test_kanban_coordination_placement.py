@@ -140,6 +140,107 @@ def test_skill_pin_requires_attestation(fleet, skill):
     assert kp.portable_reason(args, cfg) == "needs worker coordination capability"
 
 
-def test_development_title_is_not_cli_execution(fleet):
+@pytest.mark.parametrize("text", [
+    "hermes-hub client: retry a 409 from the Board",
+    "Build a `hermes-hub` CLI shim",
+    "Fix the `cross_task` endpoint",
+    "Live check on\nhermes-hub reports no tools and exits 0",
+    "crash storm on hermes-hub) was detected yesterday",
+    "hermes-hub error receipt PR75",
+    "hosts/hermes-hub/bin/hub-core-update",
+    'connection="hermes-hub"',
+    "Fix cross_task comments being labeled human through Desktop endpoint",
+    "Check cross_task comment179201 wrongly writer_kind=human",
+    "Test actual agent cross_task path and human UI path independently",
+])
+def test_development_or_hostname_mentions_add_no_requirement(fleet, text):
+    from hermes_cli import kanban_placement_coordination as coord
+    cfg, entry, _ = fleet
+    entry["labels"] = []
+    assert coord.requirements(text) == (set(), None)
+    assert reason(text, cfg) is None
+
+
+@pytest.mark.parametrize("text", [
+    "Run hermes-hub frobnicate", "`hermes-hub frobnicate`",
+    "hermes-hub unknown-command", "hermes-hub --new-option",
+    "hermes-hub status; hermes-hub create-task title",
+    "Use cross_task comment", "cross_task comment task-id",
+    'cross_task(action="comment", target="task")',
+    "cross_task read; cross_task unknown-command", "cross_task",
+])
+def test_explicit_execution_is_fail_closed(fleet, text):
+    from hermes_cli import kanban_placement_coordination as coord
+    assert coord.requirements(text)[1] == coord.ACTION_REASON
+
+
+@pytest.mark.parametrize("text", ["hermes-hub status", "hermes-hub pull", "cross_task read", "cross_task list"])
+def test_each_read_needs_fresh_attestation(fleet, text):
+    cfg, entry, _ = fleet
+    assert reason(text, cfg) is None
+    entry["labels"] = []
+    assert reason(text, cfg) == "needs worker coordination capability"
+
+
+@pytest.mark.parametrize("pools", [None, [], "worker", {}, {"hub": [" "]},
+                                        {"hub": ["worker"] * 65}])
+def test_missing_or_invalid_current_pool(fleet, pools):
     cfg, _, _ = fleet
-    assert reason("hermes-hub client: retry a 409 from the Board", cfg) is None
+    cfg["worker_pools"] = pools
+    assert reason("cross_task read", cfg) == "needs worker coordination capability"
+
+
+@pytest.mark.parametrize("snapshot", [None, [], {}, {"machines": None},
+                                           {"machines": []}, {"machines": {}},
+                                           {"machines": {"worker": None}}])
+def test_invalid_registry_or_missing_destination(fleet, monkeypatch, snapshot):
+    cfg, _, _ = fleet
+    monkeypatch.setattr(wn, "registry", lambda: snapshot)
+    assert reason("cross_task read", cfg) == "needs worker coordination capability"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("labels", None), ("labels", [1, "capability:coordination-read"]),
+    ("last_seen", None), ("last_seen", float("nan")),
+    ("last_seen", 10**1000), ("last_seen", float("-inf")),
+])
+def test_malformed_attestation_fields(fleet, field, value):
+    cfg, entry, _ = fleet
+    entry[field] = value
+    assert reason("cross_task read", cfg) == "needs worker coordination capability"
+
+
+def test_explicit_destination_does_not_borrow_current_pool(fleet):
+    from hermes_cli import kanban_placement_coordination as coord
+    cfg, _, _ = fleet
+    assert coord.check("cross_task read", cfg, target="missing") == coord.REASON
+    cfg["worker_pools"] = None
+    assert coord.check("cross_task read", cfg, target="worker") is None
+
+
+def test_marker_exemption_preserves_legacy_and_other_text():
+    from hermes_cli import kanban_placement_coordination as coord
+    text = "hermes-hub status; hermes-hub sessions; token-broker; ssh server"
+    assert coord.marker_text(text) == "; hermes-hub sessions; ; ssh server"
+
+
+@pytest.mark.parametrize("command", [
+    "sync", "sessions", "inbox", "tasks", "where", "links", "request", "requests",
+    "inspect-legacy", "reconcile-legacy", "inspect-alias", "retire-alias",
+    "adopt-task", "create-task", "depend", "outcomes", "install-watch", "watch", "diff-shared",
+])
+def test_every_legacy_cli_marker_still_refuses(fleet, command):
+    cfg, _, _ = fleet
+    assert reason("hermes-hub " + command, cfg) == "needs home coordination action"
+    # The old marker permits arbitrary whitespace; narrowing intent detection
+    # must never turn a non-exempt old marker into a portable card.
+    assert reason("hermes-hub\n" + command, cfg) is not None
+
+
+def test_ordinary_work_does_not_read_registry(monkeypatch):
+    from hermes_cli import kanban_placement_coordination as coord
+    def unexpected():
+        pytest.fail("ordinary source work must not need registry availability")
+    monkeypatch.setattr(wn, "registry", unexpected)
+    assert coord.check("Fix cross_task comments in the endpoint", {}) is None
+    assert coord.legacy_refusal({"title": "Fix cross_task comments"}) is False

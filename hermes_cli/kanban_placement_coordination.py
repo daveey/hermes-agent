@@ -13,8 +13,43 @@ import time
 REASON = "needs worker coordination capability"
 ACTION_REASON = "needs home coordination action"
 # Intentionally narrower than the CLI: status and pull are the reader install's proof.
-_HUB = re.compile(r"\bhermes-hub\b(?!\s+client\b)(?:\s+([\w-]+))?", re.IGNORECASE)
-_CROSS = re.compile(r"\bcross_task\b(?:\s+(read|list)\b)?", re.IGNORECASE)
+_HUB = re.compile(r"(?<![\w/.-])hermes-hub\b(?![/.-])", re.IGNORECASE)
+_CROSS = re.compile(r"(?<![\w/.-])cross_task\b(?![/.-])", re.IGNORECASE)
+_HUB_ACTIONS = set(("status pull sync sessions inbox tasks where links request requests "
+                    "inspect-legacy reconcile-legacy inspect-alias retire-alias adopt-task "
+                    "create-task depend outcomes install-watch watch diff-shared").split())
+_EXECUTION = re.compile(r"(?:\b(?:run|execute|invoke|call|use|via|with)\s+`?|`|[;$|&]\s*)$", re.IGNORECASE)
+
+
+def _actions(text, tool, known):
+    """Recognize action tokens or explicit invocations, not host/repository names.
+
+    Unknown commands fail closed in command syntax (quotes, execution verbs,
+    shell separators, or a standalone command line). A prose mention alone is
+    not execution intent. Do not exempt the containing sentence/line: other
+    home markers remain independently binding.
+    """
+    for match in tool.finditer(text):
+        tail = text[match.end():]
+        action = re.match(r"[ \t]+([\w-]+)(?![\w-])", tail)
+        # Also accept the actual tool-call spelling, including unknown actions.
+        call = re.match(r"\(\s*action\s*=\s*['\"]([^'\"]+)['\"]", tail)
+        value = (call.group(1) if call else action.group(1) if action else "").lower()
+        prefix = text[:match.start()]
+        line = prefix.rsplit("\n", 1)[-1]
+        standalone = not line.strip() and not tail.strip(" \t`\n")
+        command_line = (not line.strip() and action is not None
+                        and not tail[action.end():].strip(" \t`\n"))
+        explicit = _EXECUTION.search(prefix)
+        # A quoted executable name (`hermes-hub` CLI shim) is documentation,
+        # unlike a quoted command with an action (`hermes-hub unknown-command`).
+        if explicit and explicit.group().strip() == "`" and not action:
+            explicit = None
+        if call or value in known or explicit or standalone or command_line:
+            end = match.end() + (call.end() if call else action.end() if action else 0)
+            yield match.start(), end, value
+
+
 _TOOLS = {
     "token-broker": "capability:token-broker",
     "hermes-core-wt": "capability:core-ship",
@@ -25,12 +60,12 @@ _TOOLS = {
 def requirements(text):
     """Return required labels and an unsupported-action refusal, without changing text."""
     labels = set()
-    for match in _HUB.finditer(text):
-        if (match.group(1) or "").lower() not in ("status", "pull"):
+    for _, _, action in _actions(text, _HUB, _HUB_ACTIONS):
+        if action not in ("status", "pull"):
             return labels, ACTION_REASON
         labels.add("capability:coordination-read")
-    for match in _CROSS.finditer(text):
-        if not match.group(1):
+    for _, _, action in _actions(text, _CROSS, {"read", "list", "comment"}):
+        if action not in ("read", "list"):
             return labels, ACTION_REASON
         labels.add("capability:coordination-read")
     if re.search(r"\b(?:parent|sibling)[ -]card (?:lookup|read)|\bkanban_show\b", text, re.IGNORECASE):
@@ -92,7 +127,9 @@ def check(text, cfg, *, target=None, skills=None):
 
 def marker_text(text):
     """Only called after check succeeds. Extra operator markers use ORIGINAL text."""
-    text = _HUB.sub("", text)
+    for start, end, action in reversed(list(_actions(text, _HUB, _HUB_ACTIONS))):
+        if action in ("status", "pull"):
+            text = text[:start] + text[end:]
     return re.sub(r"\btoken-broker\b", "", text, flags=re.IGNORECASE)
 
 
