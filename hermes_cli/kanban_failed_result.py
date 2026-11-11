@@ -72,7 +72,7 @@ def recorded_process_witnesses(conn, context):
     return all(valid_birth(value) for value in (row['worker_started_at'], birth))
 
 
-def failed_result_receipt(conn, task_id, run_id, claim_lock):
+def failed_result_receipt(conn, task_id, run_id, claim_lock, *, allow_continuable=False):
     """Return an attributable failure independently of its process death proof.
 
     A receipt with an unproven death must veto legacy reclaim, not fall through
@@ -97,12 +97,16 @@ def failed_result_receipt(conn, task_id, run_id, claim_lock):
     if events is None:
         return None
     (bound_event, bound), (result_event, result), modern = events
-    if (bound is None or result is None or bound.get('claim_lock') != claim_lock
+    owner = modern and result is not None and result.get('result_role') == 'owner_restart'
+    if (bound is None or result is None or (not owner and bound.get('claim_lock') != claim_lock)
             or result.get('claim_lock') != claim_lock):
+        return None
+    if owner and (bound.get('pid'), bound.get('started_at')) != (row['worker_pid'], row['worker_started_at']):
         return None
     code = result.get('exit_code')
     if (not isinstance(code, int) or isinstance(code, bool) or code == 0
-            or result.get('continuable') or (not modern and result_event['id'] <= bound_event['id'])
+            or (result.get('continuable') and not (owner and allow_continuable))
+            or (not modern and result_event['id'] <= bound_event['id'])
             or result.get('pid') != bound.get('pid')):
         return None
     portable = {'source_result_event_uid': result_event['uid']} if 'uid' in result_event.keys() else {}
@@ -134,7 +138,7 @@ def modern_result_recorded(conn, task_id, run_id):
 def reclaim_proof(conn, row, *, failed_results_only=False):
     """Keep strict receipt vetoes distinct from unsupported legacy recovery."""
     identity = (row['id'], row['current_run_id'], row['claim_lock'])
-    proof = failed_result_proof(conn, *identity)
+    proof = failed_result_proof(conn, *identity, allow_continuable=not failed_results_only)
     hold = proof is None and (failed_results_only or modern_result_recorded(conn, *identity[:2]))
     return proof, hold
 
@@ -147,9 +151,14 @@ def result_exit_code(conn, row, proof):
     return managed_run_exit_code(conn, row['id'], row['worker_pid'], row['claim_lock'])
 
 
-def failed_result_proof(conn, task_id, run_id, claim_lock):
-    """Return latest attributable failed result only after both processes exit."""
-    receipt = failed_result_receipt(conn, task_id, run_id, claim_lock)
+def failed_result_proof(conn, task_id, run_id, claim_lock, *, allow_continuable=False):
+    """Return an attributable failure after outer and every bound incarnation exit.
+
+    Only the dispatcher opts into continuable bookings, after their submitter
+    is gone. Observers must leave checkpoints available to a replacement owner.
+    """
+    receipt = failed_result_receipt(conn, task_id, run_id, claim_lock,
+                                    allow_continuable=allow_continuable)
     if receipt is None:
         return None
     if not process_gone(*receipt.pop('outer')) or not process_gone(*receipt.pop('bound')):

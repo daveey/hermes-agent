@@ -80,6 +80,8 @@ def record_restart_interruption(policy, checkpoint=None):
                    'exit_code': KANBAN_OWNER_RESTART_EXIT_CODE,
                    'last_output': 'Kanban attempt interrupted by gateway restart/shutdown; requeued uncounted.',
                    'owner_restart': True}
+        from hermes_cli.kanban_failed_result_identity import owner_restart_identity_fields
+        payload.update(owner_restart_identity_fields(conn, context, task))
         if checkpoint:
             token = uuid.uuid4().hex
             payload.update(continuable=True, checkpoint=token, last_output=(

@@ -5,6 +5,60 @@ import json
 from typing import cast
 
 
+def owner_restart_identity_fields(conn, context, task):
+    """Witness an owner booking against the actual recorded outer launch.
+
+    No observer is started here: an already armed child observer sees the new
+    result; owner-only bookings rely on the dispatcher's next sweep.
+    """
+    from hermes_cli.kanban_failed_result import valid_birth
+    params = (context['task_id'], context['run_id'])
+    birth = conn.execute('SELECT worker_started_at FROM tasks WHERE id=?', (task.id,)).fetchone()[0]
+    spawns = conn.execute("SELECT * FROM task_events WHERE task_id=? AND run_id=? "
+                          "AND kind='spawned' ORDER BY id DESC", params).fetchall()
+    for event in spawns:
+        payload = _payload(event)
+        if (payload is not None and type(payload.get('pid')) is int
+                and payload['pid'] == task.worker_pid
+                and payload.get('started_at') == birth
+                and valid_birth(birth)):
+            rows = conn.execute("SELECT * FROM task_events WHERE task_id=? AND run_id=? "
+                                "AND kind IN ('worker_result','worker_bound')", params).fetchall()
+            sequences = [p['result_sequence'] for row in rows
+                         if (p := _payload(row)) and type(p.get('result_sequence')) is int]
+            return {'death_proof_version': 1, 'result_role': 'owner_restart',
+                    'outer_event_identity': _identity(event, payload),
+                    'result_sequence': max([0, *sequences]) + 1,
+                    'causal_predecessors': [_event_identity(row) for row in rows]}
+    return {}
+
+
+def _owner_restart_events(conn, task_id, run_id, rows, results):
+    """Only a complete causal snapshot and witnessed outer identity authorize 76."""
+    from hermes_cli.kanban_failed_result import valid_birth
+    for event, payload in results:
+        if (payload is None or payload.get('death_proof_version') != 1
+                or payload.get('result_role') != 'owner_restart'
+                or payload.get('owner_restart') is not True
+                or type(payload.get('exit_code')) is not int or payload['exit_code'] != 76
+                or type(payload.get('result_sequence')) is not int or payload['result_sequence'] <= 0):
+            continue
+        prior = payload.get('causal_predecessors')
+        if (not isinstance(prior, list) or not all(isinstance(item, str) for item in prior)
+                or sorted(prior) != sorted(_event_identity(row) for row in rows if row['id'] != event['id'])):
+            continue
+        identity = payload.get('outer_event_identity')
+        spawns = conn.execute("SELECT * FROM task_events WHERE task_id=? AND run_id=? "
+                              "AND kind='spawned'", (task_id, run_id)).fetchall()
+        matches = [(row, p) for row in spawns if (p := _payload(row)) is not None
+                   and _identity(row, p) == identity]
+        if (len(matches) == 1 and type(payload.get('pid')) is int and payload['pid'] > 0
+                and payload['pid'] == matches[0][1].get('pid')
+                and valid_birth(matches[0][1].get('started_at'))):
+            return matches[0], (event, payload), True
+    return None
+
+
 def modern_receipt(conn, task_id, run_id, claim_lock):
     """Return (modern, selected result event/payload), including a strict veto.
 
@@ -19,7 +73,8 @@ def modern_receipt(conn, task_id, run_id, claim_lock):
         return True, None
     (_, bound), result, _ = selected
     payload = result[1]
-    if (bound is None or payload is None or bound.get('claim_lock') != claim_lock
+    owner = payload is not None and payload.get('result_role') == 'owner_restart'
+    if (bound is None or payload is None or (not owner and bound.get('claim_lock') != claim_lock)
             or payload.get('claim_lock') != claim_lock
             or bound.get('pid') is None or payload.get('pid') != bound.get('pid')):
         return True, None
@@ -59,6 +114,7 @@ def _observed_history(rows, results, bounds):
     """
     for event, payload in results:
         if (payload is None or payload.get('death_proof_version') != 1
+                or 'result_role' in payload or 'outer_event_identity' in payload
                 or type(payload.get('result_sequence')) is not int or payload['result_sequence'] <= 0):
             continue
         prior = payload.get('causal_predecessors')
@@ -106,9 +162,15 @@ def attributable_events(conn, task_id, run_id):
                         "AND kind IN ('worker_result','worker_bound') ORDER BY id", (task_id, run_id)).fetchall()
     results = [(row, _payload(row)) for row in rows if row['kind'] == 'worker_result']
     bounds = [(row, _payload(row)) for row in rows if row['kind'] == 'worker_bound']
-    if not results or not bounds:
+    if not results:
         return None
     modern = any(p and p.get('death_proof_version') == 1 for _, p in results)
+    if modern:
+        owner = _owner_restart_events(conn, task_id, run_id, rows, results)
+        if owner is not None:
+            return owner
+    if not bounds:
+        return None
     if not modern:
         return bounds[-1], results[-1], False
     sequences = [p.get('result_sequence') if p else None for _, p in results]
@@ -116,6 +178,8 @@ def attributable_events(conn, task_id, run_id):
         return _observed_history(rows, results, bounds)
     result = results[sequences.index(max(cast(list[int], sequences)))]
     assert result[1] is not None  # validated alongside its positive sequence above
+    if 'result_role' in result[1] or 'outer_event_identity' in result[1]:
+        return None  # owner roles are accepted only through their witnessed path
     identity = result[1].get('bound_event_identity')
     if not isinstance(identity, dict):
         return None
