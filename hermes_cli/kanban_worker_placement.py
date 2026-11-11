@@ -280,12 +280,8 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
             or not all(isinstance(name, str) and name for name in candidates)):
         return 0
     cursor = (sync.sync_state(conn) or {}).get("worker_reserve_cursor") or ""
-    rows = conn.execute(
-        "SELECT * FROM tasks WHERE (placement_policy=? OR placement_policy IS NULL) AND status='ready' "
-        "AND created_on=? AND claim_lock IS NULL AND lease_holder IS NULL AND sync_version IS NOT NULL "
-        "AND NOT EXISTS (SELECT 1 FROM kanban_sync_outbox o WHERE o.table_name='tasks' "
-        "AND o.row_uid=tasks.id AND o.state='pending') ORDER BY (id <= ?), id LIMIT ?",
-        (POLICY, gateway, cursor, MAX_RESERVES_PER_TICK)).fetchall()
+    from hermes_cli import kanban_placement_recovery as recovery
+    rows = recovery.select_rows(conn, board, gateway, cursor, MAX_RESERVES_PER_TICK)
     from hermes_cli import kanban_queue_reason as queue
 
     attempted = 0
@@ -297,8 +293,8 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
     now = time.monotonic()
     try:
         for row in rows:
-            last = row["id"]
-            from hermes_cli import kanban_placement_recovery as recovery
+            if row["placement_policy"] is not None:
+                last = row["id"]
             if not recovery.unchanged_ready(conn, row):
                 continue
             mode = recovery.available_mode(conn, dict(row), cfg, hub, board, gateway)

@@ -7,6 +7,31 @@ import time
 
 RECOVERY_RETRY_S = 600.0
 _unsupported: dict[tuple, float] = {}
+_scan_cursor: dict[tuple, str] = {}
+
+
+def select_rows(conn, board, gateway, cursor, limit):
+    """Give recovery its own bounded scan; legacy exclusions cannot starve renewals.
+
+    Reservation priority and its durable cursor remain unchanged. The extra recovery
+    lane shares the caller's network deadline and rotates within this process.
+    """
+    from hermes_cli.kanban_db_connect import _main_db_file
+    from hermes_cli.kanban_worker_placement import POLICY
+
+    query = (
+        "SELECT * FROM tasks WHERE placement_policy IS ? AND status='ready' "
+        "AND created_on=? AND claim_lock IS NULL AND lease_holder IS NULL AND sync_version IS NOT NULL "
+        "AND NOT EXISTS (SELECT 1 FROM kanban_sync_outbox o WHERE o.table_name='tasks' "
+        "AND o.row_uid=tasks.id AND o.state IN ('pending','rejected')) ORDER BY (id <= ?), id LIMIT ?")
+    policy = conn.execute(query, (POLICY, gateway, cursor, limit)).fetchall()
+    key = (_main_db_file(conn), board, gateway)
+    legacy = conn.execute(query, (None, gateway, _scan_cursor.get(key, ""), limit)).fetchall()
+    if legacy:
+        _scan_cursor[key] = legacy[-1]["id"]
+        if len(_scan_cursor) > 1024:
+            del _scan_cursor[next(iter(_scan_cursor))]
+    return policy + legacy
 
 
 def endpoint_key(hub, board, gateway):
