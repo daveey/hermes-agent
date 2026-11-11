@@ -272,7 +272,25 @@ def test_moved_main_gets_a_non_forced_merge_of_the_tested_head(world):
     assert parents == [moved, head]  # main kept, tested head merged, nothing rewritten
 
 
-@pytest.mark.parametrize("fault", ["missing", "skipped", "hosted", "no-runner"])
+def test_migrated_blacksmith_full_suite_can_land(world):
+    root, checkout = world
+    upstream_commit(root, {"u.txt": "u\n"}, "upstream")
+    head = merge_upstream(checkout)
+    before = main_of(root)
+    actions = FakeActions(root / "origin.git", root)
+    gate(checkout, head, actions)
+    actions.ci()
+
+    def migrated(jobs):
+        for job in jobs:
+            job["labels"] = ["blacksmith-4vcpu-ubuntu-2404"]
+            job["runner_name"] = "blacksmith-4vcpu-ubuntu-2404-fixture"
+    actions.job_override = migrated
+    assert gate(checkout, head, actions) == sync.LANDED
+    assert landed_by_merge(root, head, before)
+
+
+@pytest.mark.parametrize("fault", ["missing", "skipped", "hosted", "no-runner", "unknown-blacksmith"])
 def test_incomplete_job_evidence_cannot_land(world, fault):
     root, checkout = world
     upstream_commit(root, {"u.txt": "u\n"}, "upstream")
@@ -289,6 +307,8 @@ def test_incomplete_job_evidence_cannot_land(world, fault):
             jobs[-1]["conclusion"] = "skipped"
         elif fault == "hosted":
             jobs[-1]["labels"] = ["ubuntu-latest"]
+        elif fault == "unknown-blacksmith":
+            jobs[-1]["labels"] = ["blacksmith-unapproved"]
         else:
             jobs[-1]["runner_name"] = None
     actions.job_override = corrupt

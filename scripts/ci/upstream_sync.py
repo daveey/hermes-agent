@@ -6,8 +6,8 @@
 
 A candidate X (a commit that brings upstream/main commits into the fork) is pushed to its own
 branch ``sync/upstream-<X>``. ``.github/workflows/upstream-sync.yml`` runs the full suite there
-(all eight Python slices and e2e, self-hosted, never cancelled by main's concurrency). Only an X whose
-run completed green, with every required job succeeding on a self-hosted runner at exactly X, is
+(all eight Python slices and e2e, on fork runners, never cancelled by main's concurrency). Only an X whose
+run completed green, with every required job succeeding on an approved fork runner at exactly X, is
 landed through a pull request from that same branch. main is protected for admins too: GitHub
 refuses any direct push whose exact sha lacks a green "All required checks pass (v2)" (ci.yaml).
 The gate opens (or reuses) the PR, waits across calls until that check is green on exactly X, then
@@ -147,7 +147,8 @@ def _jobs_green(gh_repo, run_id, request) -> bool:
     jobs = {job["name"].rsplit(" / ", 1)[-1]: job for page in pages for job in page["jobs"]}
     return all(name in jobs and jobs[name]["status"] == "completed"
                and jobs[name]["conclusion"] == "success"
-               and "self-hosted" in (jobs[name].get("labels") or []) and jobs[name].get("runner_name")
+               and {"self-hosted", "blacksmith-4vcpu-ubuntu-2404"}.intersection(jobs[name].get("labels") or [])
+               and jobs[name].get("runner_name")
                for name in REQUIRED_JOBS)
 
 
