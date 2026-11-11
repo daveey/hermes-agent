@@ -182,23 +182,31 @@ def gateway_foreign_code_root(pid: int, home) -> Path | None:
 def profiles_on_another_checkout() -> dict[str, Path]:
     """Profile → the other checkout its live gateway runs, read fresh from each profile's own
     status record. Restart-abort recovery asks this itself: it can run before the restart phase
-    looked at any unit, so nothing an earlier pass remembered is there to rely on."""
-    import json
+    looked at any unit, so nothing an earlier pass remembered is there to rely on.
 
-    import psutil
-    from hermes_cli.update_receipt import _profile_homes
+    Total by contract: recovery runs in the pre-update interpreter over the replaced checkout,
+    where a first import can fail in any way; every failure reads as "no pinned profile"."""
     pinned: dict[str, Path] = {}
-    with suppress(Exception):
+    try:
+        import json
+
+        import psutil
+        from hermes_cli.update_receipt import _profile_homes
         for profile, home in _profile_homes():
             with suppress(Exception):
                 pid = int(json.loads((home / "gateway_state.json").read_text(encoding="utf-8-sig")).get("pid") or 0)
-                root = gateway_foreign_code_root(pid, home) if pid > 0 and psutil.pid_exists(pid) else None
+                # A crashed gateway's recorded PID may belong to anything by now.
+                if pid <= 0 or "gateway" not in psutil.Process(pid).cmdline():
+                    continue
+                root = gateway_foreign_code_root(pid, home)
                 if root is not None:
                     pinned[profile] = root
+    except (Exception, SystemExit):  # health: allow BLE001 -- see "Total by contract" above
+        return {}
     return pinned
 
 
-def drop_gateways_on_another_checkout(pids) -> list[int]:
+def drop_gateways_on_another_checkout(pids, *, quiet: bool = False) -> list[int]:
     """*pids* minus the gateway processes that provably run another checkout (each named once).
 
     The manual sweep stops every gateway process of this home that no supervisor claims; a pinned
@@ -212,7 +220,7 @@ def drop_gateways_on_another_checkout(pids) -> list[int]:
         root = gateway_foreign_code_root(pid, home)
         if root is None:
             kept.append(pid)
-        else:
+        elif not quiet:
             announce_skipped_runtime("gateway process", f"PID {pid}", home, code_root=root)
     return kept
 

@@ -183,7 +183,7 @@ def test_best_effort_restart_skips_a_pinned_unit(host):
     assert failed == [] and host["writes"] == []
 
 
-def test_recovery_and_manual_sweeps_honour_the_same_verdict(host):
+def test_recovery_and_manual_sweeps_honour_the_same_verdict(host, monkeypatch):
     """Restart-abort recovery (which may run before any unit was looked at) and the manual-process
     sweep (reached when the unit PID lookup fails) both leave the pinned gateway alone."""
     from types import SimpleNamespace
@@ -194,11 +194,28 @@ def test_recovery_and_manual_sweeps_honour_the_same_verdict(host):
 
     candidates, skipped = fleet._gateway_recovery_partition(plan)
     assert candidates == {} and [s["profile"] for s in skipped] == ["askeve-builder"]
-    assert str(host["core"]) in skipped[0]["reason"]
+    assert skipped[0]["pinned"] is True and str(host["core"]) in skipped[0]["reason"]
+    monkeypatch.setattr("hermes_cli.gateway.find_gateway_pids", lambda **k: [pinned])
+    assert fleet._surviving_gateway_pids_after_failed_restart() == [], "a pinned gateway was reported stale"
 
     control = _run_on_checkout(host)
     assert drop_gateways_on_another_checkout([pinned, control]) == [control]
+    # A recorded PID that is no gateway (reused after a crash), or no pin at all: recovery restarts it.
     (host["home"] / "gateway_state.json").write_text(json.dumps({"pid": control, "argv": ["-c"]}))
+    assert fleet._gateway_recovery_partition(plan) == ({"askeve-builder": "systemd"}, [])
+
+
+@pytest.mark.parametrize("failure", [ImportError("skewed module"), SystemExit(2)], ids=["import-error", "system-exit"])
+def test_a_pin_lookup_that_fails_never_breaks_recovery(host, monkeypatch, failure):
+    """Recovery runs in the pre-update interpreter over the replaced checkout: a lookup that cannot
+    even import must read as "no pinned profile", never escape the abort handler."""
+    from types import SimpleNamespace
+    plan = SimpleNamespace(runtimes=[SimpleNamespace(kind="gateway", profile="askeve-builder", supervisor="systemd")])
+    _run_pinned(host, status_record=True)
+
+    def boom():
+        raise failure
+    monkeypatch.setattr("hermes_cli.update_receipt._profile_homes", boom)
     assert fleet._gateway_recovery_partition(plan) == ({"askeve-builder": "systemd"}, [])
 
 

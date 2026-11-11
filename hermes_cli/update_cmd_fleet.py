@@ -1038,7 +1038,10 @@ def _surviving_gateway_pids_after_failed_restart():
     """
     try:
         from hermes_cli.gateway import find_gateway_pids
-        return _scoped_manual_gateway_pids(find_gateway_pids(all_profiles=True), quiet=True)
+        from hermes_cli.update_fleet_scope import drop_gateways_on_another_checkout
+        # A gateway on another checkout survives by design: it is not stale. [daveey]
+        return _scoped_manual_gateway_pids(
+            drop_gateways_on_another_checkout(find_gateway_pids(all_profiles=True), quiet=True), quiet=True)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Could not probe for surviving gateways after update: %s", exc)
         return None
@@ -1083,7 +1086,7 @@ def _gateway_recovery_partition(plan, *, skip_profiles: set[str] | None = None) 
     skip_profiles = skip_profiles or set()
     candidates: dict[str, str] = {}
     skipped: list[dict] = []
-    from hermes_cli.update_fleet_scope import profiles_on_another_checkout
+    from hermes_cli.update_fleet_scope import profiles_on_another_checkout  # loaded before the checkout moved
     pinned = profiles_on_another_checkout()  # recovery would only bounce these onto their pin [daveey]
     with _best_effort('Could not prepare fresh gateway restart profiles: %s'):
         for runtime in getattr(plan, "runtimes", ()) or ():
@@ -1096,7 +1099,7 @@ def _gateway_recovery_partition(plan, *, skip_profiles: set[str] | None = None) 
                 if profile in skip_profiles:
                     continue
                 if profile in pinned:
-                    skipped.append({"profile": profile, "kind": "gateway", "supervisor": str(supervisor),
+                    skipped.append({"profile": profile, "kind": "gateway", "supervisor": str(supervisor), "pinned": True,
                                     "reason": f"runs its own checkout ({pinned[profile]}), which this update does not change"})
                     continue
                 if supervisor in _FRESH_RESTART_SUPERVISORS:
@@ -1715,7 +1718,9 @@ def _recover_after_restart_phase_abort(
     )
     if _abort_recovery_is_complete(
         planned_gateway_profiles=_planned_gateway_profiles,
-        covered_gateway_profiles=_already_restarted_profiles | _recovery_verified,
+        # A profile recovery left on its own checkout is settled, not owed. [daveey]
+        covered_gateway_profiles=_already_restarted_profiles | _recovery_verified | {
+            row.get("profile") for row in _recovery_result.get("skipped") or () if row.get("pinned")},
         recovery_result=_recovery_result,
         stale_runtime_rows=_stale_runtime_rows,
     ):
