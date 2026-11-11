@@ -23,10 +23,12 @@ import { sessionProjectLabel } from '@/lib/session-project-label'
 import { SESSION_ROW_AREAS } from '@/lib/session-row-slots'
 import { handoffOriginSource, sessionSourceLabel } from '@/lib/session-source'
 import { coarseElapsed } from '@/lib/time'
+import { useExecutionObservationClock } from '@/lib/use-execution-observation-clock'
 import { useSessionDotState } from '@/lib/use-session-dot-state'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
+import { rowExecution } from '@/store/execution-observation-row'
 import { sessionGatewayId } from '@/store/gateway-visibility'
 import { $sidebarRowMeta } from '@/store/layout'
 import { normalizeProfileKey } from '@/store/profile'
@@ -55,10 +57,10 @@ import {
 } from './chrome'
 import { shellOwnsPress } from './reorderable-list'
 import { SessionContextMenu } from './session-actions-menu'
-import { sessionKanbanLabel } from './session-kanban-label'
 import { sessionRowDetails } from './session-row-details'
 import { resolveSessionRowClick } from './session-row-gesture'
 import { RowHoverActions } from './session-row-hover-actions'
+import { sessionRowKanbanCounts } from './session-row-kanban'
 import { gatewayMarks } from './session-row-offline'
 import { SessionRowSlot } from './session-row-slots'
 import { SessionRowStatusStripe, useSessionRowStripe } from './session-row-stripe'
@@ -210,54 +212,10 @@ function SidebarSessionRowImpl({
 
   const gatewayIcon = gatewayMarks(session, gatewayRegistry, gatewayId)
 
-  // [daveey] Kanban work this session is waiting on: open (queued/running)
-  // and blocked task counts, after the age and before the gateway glyph.
-  const kanbanOpen = session.kanban_active ?? 0
-  const kanbanBlocked = session.kanban_blocked ?? 0
-  // [daveey] Done cards whose handoff admits dropped work with no follow-up.
-  const kanbanAttention = session.kanban_attention ?? 0
-  // [daveey] Parked cards nothing is producing for over 2 h (agent-owned waits): amber, not grey or red. The count
-  // shows even while other cards run (they don't make the stalled one move); only the stripe defers to live work.
-  const kanbanStalled = session.kanban_stalled ?? 0
-
-  const kanbanLabel = sessionKanbanLabel(session, r)
-
-  const kanbanCounts =
-    kanbanOpen > 0 || kanbanBlocked > 0 || kanbanAttention > 0 ? (
-      <Tip label={kanbanLabel} side="top">
-        <span
-          aria-label={kanbanLabel}
-          className="pointer-events-auto ml-1 inline-flex items-center gap-1 align-[-1px] tabular-nums"
-          data-testid="session-row-kanban-counts"
-          role="img"
-        >
-          {kanbanOpen > 0 && (
-            <span className="inline-flex items-center gap-px" data-kanban-count="open">
-              <Codicon name="project" size="0.625rem" />
-              {kanbanOpen}
-            </span>
-          )}
-          {kanbanBlocked > 0 && (
-            <span className="inline-flex items-center gap-px text-amber-500" data-kanban-count="blocked">
-              <Codicon name="question" size="0.625rem" />
-              {kanbanBlocked}
-            </span>
-          )}
-          {kanbanStalled > 0 && (
-            <span className="inline-flex items-center gap-px text-amber-500" data-kanban-count="stalled">
-              <Codicon name="watch" size="0.625rem" />
-              {kanbanStalled}
-            </span>
-          )}
-          {kanbanAttention > 0 && (
-            <span className="inline-flex items-center gap-px text-amber-500" data-kanban-count="attention">
-              <Codicon name="warning" size="0.625rem" />
-              {kanbanAttention}
-            </span>
-          )}
-        </span>
-      </Tip>
-    ) : null
+  // Keep the existing expiry clock: unknown evidence must repaint even with no new page.
+  const executionNow = useExecutionObservationClock(session)
+  const executionUnknown = rowExecution(session, executionNow)?.unknown ?? 0
+  const kanbanCounts = sessionRowKanbanCounts(session, executionUnknown, r)
 
   // [daveey] Live background processes holding this row off green: a process
   // glyph beside the kanban badge; hover lists them with Stop, click opens.

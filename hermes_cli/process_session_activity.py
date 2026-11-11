@@ -26,12 +26,17 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS
+from hermes_cli.turn_process_execution_observations import PROCESS_SOURCES, process, profile_for_state_path, replace
+
 _log = logging.getLogger(__name__)
 
 _CACHE_TTL_S = 3.0
 _cache_lock = threading.Lock()
 _cache: tuple[float, dict[str, frozenset[str]]] | None = None
 _details: dict[str, dict[str, Any]] = {}
+# Evidence behind _details for execution observations; never copied into row detail lists.
+_evidence: dict[str, dict[str, Any]] = {}
 
 _SESSION_PREFIX = "session:"
 # Per-row detail list caps: the sidebar tooltip shows a handful, and the list
@@ -103,8 +108,9 @@ def _detail(proc_id: str, command: Any, started_at: Any, pid: Any) -> dict[str, 
 
 
 def _collect() -> dict[str, frozenset[str]]:
-    global _details
+    global _details, _evidence
     details: dict[str, dict[str, Any]] = {}
+    evidence: dict[str, dict[str, Any]] = {}
     pairs: set[tuple[str, str]] = set()
     try:
         from tools.process_registry import process_registry
@@ -118,6 +124,9 @@ def _collect() -> dict[str, frozenset[str]]:
                     "owner_task_id": s.owner_task_id, "task_id": s.task_id}
             pairs.update((sid, s.id) for sid in _owner_ids(item))
             details[s.id] = _detail(s.id, s.command, s.started_at, s.pid)
+            evidence[s.id] = {"id": s.id, "pid": s.pid, "host_start_time": s.host_start_time, "profile": None,
+                              "source": "process.registry", "observed_at": time.time(),
+                              "owners": frozenset(_owner_ids(item))}
     except Exception:
         _log.debug("in-process registry unavailable", exc_info=True)
     for path in _checkpoint_paths():
@@ -131,6 +140,11 @@ def _collect() -> dict[str, frozenset[str]]:
             if not _live(item.get("pid"), item.get("host_start_time")):
                 continue
             proc_id = str(item.get("session_id") or item.get("pid"))
+            if proc_id not in evidence:  # a pid-only checkpoint has no id: its observation stays unknown
+                evidence[proc_id] = {"id": item.get("session_id") or None, "pid": item.get("pid"),
+                                     "host_start_time": item.get("host_start_time"),
+                                     "profile": profile_for_state_path(path), "source": "process.checkpoint",
+                                     "observed_at": time.time(), "owners": frozenset(_owner_ids(item))}
             pairs.update((sid, proc_id) for sid in _owner_ids(item))
             details.setdefault(proc_id, _detail(proc_id, item.get("command"), item.get("started_at"),
                                                 item.get("pid")))
@@ -138,6 +152,7 @@ def _collect() -> dict[str, frozenset[str]]:
     for sid, proc in pairs:
         owned.setdefault(sid, set()).add(proc)
     _details = details
+    _evidence = evidence
     return {sid: frozenset(procs) for sid, procs in owned.items()}
 
 
@@ -179,8 +194,29 @@ def annotate_background_activity(rows: list[dict[str, Any]]) -> list[dict[str, A
         _log.debug("background activity unavailable", exc_info=True)
         return rows
     details = _details
+    evidence = _evidence
+    now = time.time()
+    try:
+        from hermes_cli.kanban_execution_observations import local_scope
+        gateway, local_profile = local_scope()
+    except ADAPTER_ERRORS:
+        _log.debug("process gateway identity unavailable", exc_info=True)
+        gateway = local_profile = None
     for row in rows:
-        procs = set().union(*(owned.get(sid, ()) for sid in _row_ids(row)))
+        ids = set(_row_ids(row))
+        procs = set().union(*(owned.get(sid, ()) for sid in ids))
+        try:
+            observations = []
+            for proc_id in sorted(procs):
+                entry = evidence.get(proc_id)
+                if entry is None:
+                    continue
+                owners = sorted(entry["owners"] & ids)
+                observations.append(process(entry, gateway=gateway, profile=entry["profile"] or local_profile,
+                                            session=owners[0] if owners else None, now=now))
+            replace(row, PROCESS_SOURCES, observations)
+        except ADAPTER_ERRORS:
+            _log.debug("process execution observation unavailable", exc_info=True)
         if procs:
             row["background_active"] = len(procs)
             listed = [details.get(p) or {"id": p, "command": "background process"} for p in procs]

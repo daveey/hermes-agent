@@ -599,7 +599,11 @@ def test_unverified_completion_keeps_origin_and_other_sessions_finish_normally(k
     _make_board(kanban_root / "kanban.db", [("t_x", "done", "s_other")])
     ann = [{"id": "s_origin"}, {"id": "s_other"}]
     ksa.annotate_kanban_activity(ann)
-    assert [{k: v for k, v in row.items() if k != 'kanban_observed_at'} for row in ann] == [
+    observations = ann[0]['execution_observations']
+    assert len(observations) == 13 and all(value['state'] == 'unknown' for value in observations)
+    assert all(value['last_known_state'] is None for value in observations)
+    assert [{k: v for k, v in row.items() if k not in {'kanban_observed_at', 'execution_observations'}}
+            for row in ann] == [
         # [daveey] Unverified = still the chat's (counted active) but nobody works it: parked, so it paints waiting.
         {"id": "s_origin", "kanban_active": 13, "kanban_parked": 13}, {"id": "s_other"}]
     cards = ksa.session_tasks(["s_origin"])

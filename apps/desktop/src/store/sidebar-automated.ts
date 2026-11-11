@@ -33,9 +33,11 @@ type AutomatedRow = Pick<
   | 'pinned'
   | 'review_wait'
 > &
-  Partial<Pick<SessionInfo, 'muted'>>
+  Partial<Pick<SessionInfo, 'execution_observations' | 'kanban_stalled' | 'muted'>>
 
 export interface AutomatedRowContext {
+  /** Explicit render clock for memoized filters; imperative callers use the current clock. */
+  nowSeconds?: number
   /** Dot state for the row; defaults to `$sessionDotStateById`. */
   dotState?: SessionDotState
   /** Local pin ids; defaults to `$pinnedSessionIds`. */
@@ -45,23 +47,25 @@ export interface AutomatedRowContext {
 }
 
 /** A bot row that is waiting on the user: needs input, or a red / grey stripe. */
-export function automatedRowNeedsAttention(row: AutomatedRow, state: SessionDotState, userBlocked: boolean): boolean {
+export function automatedRowNeedsAttention(row: AutomatedRow, state: SessionDotState, userBlocked: boolean, nowSeconds?: number): boolean {
   if (state === 'needs-input' || state === 'stalled') {
     return true
   }
+
+  const counts = kanbanStripeCounts(row, nowSeconds)
 
   const stripe = sessionStatusStripe(
     state,
     (row.message_count ?? 0) > 0,
     userBlocked,
-    kanbanStripeCounts(row).blocked,
+    counts.blocked,
     row.cron_active === true,
     row.review_wait,
     row.kanban_attention ?? 0,
-    kanbanStripeCounts(row).waiting,
+    counts.waiting,
     // [daveey] No `row.outcome`: an automated row resurfaces only on the signals it always did. An outcome-derived
     // stripe (e.g. `unresolved` → amber) on bot / smoke-test traffic would flood the sidebar with it.
-    kanbanStripeCounts(row).stalled
+    counts.stalled
   )
 
   return stripe === 'stuck' || stripe === 'blocked' || stripe === 'attention' || stripe === 'stalled'
@@ -85,5 +89,5 @@ export function sessionHiddenAsAutomated(
   const state = ctx.dotState ?? $sessionDotStateById.get()[row.id] ?? 'idle'
   const userBlocked = ctx.userBlocked ?? isSessionParked(row.id, row)
 
-  return !automatedRowNeedsAttention(row, state, userBlocked)
+  return !automatedRowNeedsAttention(row, state, userBlocked, ctx.nowSeconds)
 }

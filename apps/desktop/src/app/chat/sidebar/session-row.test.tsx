@@ -25,7 +25,10 @@ import { SidebarSessionRow } from './session-row'
 
 afterEach(cleanup)
 
-vi.mock('@/i18n', () => ({
+vi.mock('@/i18n', async () => {
+  const { enSessionRowStatus } = await import('@/i18n/en_session_row_status')
+
+  return {
   useI18n: () => ({
     t: {
       sidebar: {
@@ -35,6 +38,7 @@ vi.mock('@/i18n', () => ({
           home: 'Home'
         },
         row: {
+          ...enSessionRowStatus,
           ageMin: 'm',
           ageNow: 'now',
           kanbanTasks: (open: number, blocked: number) => `${open} open, ${blocked} blocked`,
@@ -69,7 +73,8 @@ vi.mock('@/i18n', () => ({
       }
     }
   })
-}))
+  }
+})
 
 vi.mock('@/app/chat/profile-tag', () => ({ ProfileTag: () => null }))
 vi.mock('@/app/chat/session-drag', () => ({ startSessionDrag: vi.fn() }))
@@ -630,6 +635,44 @@ describe('SidebarSessionRow kanban counts', () => {
 
     expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).not.toBe('stuck')
     expect(screen.getByTestId('session-row-kanban-counts').getAttribute('aria-label')).toBe('2 open, 0 blocked')
+  })
+
+  afterEach(() => vi.useRealTimers())
+  it('shows time-only expiry even when the row stays background and its props do not change', async () => {
+    const { $kanbanObservationTick } = await import('@/store/kanban-observation')
+    const fixture = await import('../../../../../../schemas/fixtures/execution-observations-v1.json')
+    vi.useFakeTimers()
+    vi.setSystemTime(1001_000)
+
+    const { container } = renderRow(makeSession({
+      execution_observations: [{ ...fixture.base, valid_until: 1010 }],
+      kanban_active: 1, kanban_parked: 1, message_count: 2, title: 'Expiry'
+    }))
+
+    expect(container.querySelector('[data-kanban-count="unknown"]')).toBeNull()
+    expect(container.querySelector('[data-sidebar-stripe]')).toBeNull()
+    await act(async () => {
+      vi.setSystemTime(1011_000)
+      $kanbanObservationTick.set($kanbanObservationTick.get() + 1)
+    })
+    expect(container.querySelector('[data-kanban-count="unknown"]')?.textContent).toBe('1')
+    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('waiting')
+  })
+
+  it('explains unknown work in the accessible label and tooltip without implying a new poll', () => {
+    vi.useFakeTimers()
+    renderRow(makeSession({ execution_observations: [{ source: 'unavailable.work' }], title: 'Unknown' }))
+    const counts = screen.getByTestId('session-row-kanban-counts')
+    const explanation = '1 work item has unknown current status: evidence is missing, expired or unverified. This does not mean done; no new check was requested.'
+
+    expect(counts.querySelector('[data-kanban-count="unknown"]')?.textContent).toBe('1')
+    expect(counts.getAttribute('aria-label')).toBe(explanation)
+    act(() => {
+      fireEvent.pointerMove(counts, { pointerType: 'mouse' })
+      vi.advanceTimersByTime(700)
+    })
+    expect(screen.getByRole('tooltip').textContent).toBe(explanation)
+    vi.useRealTimers()
   })
 
   it('shows open and blocked counts right after the age', () => {

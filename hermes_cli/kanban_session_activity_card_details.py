@@ -32,8 +32,11 @@ def _add_card_details(conn: sqlite3.Connection, found: dict[str, dict[str, Any]]
         except sqlite3.Error:
             return []
 
-    for r in rows(f"SELECT task_id, kind, MAX(created_at) AS at FROM task_events WHERE task_id IN ({ph}) GROUP BY task_id"):
+    for r in rows(f"SELECT *, MAX(created_at) AS at FROM task_events WHERE task_id IN ({ph}) GROUP BY task_id"):
         found[r["task_id"]].update(activity_kind=r["kind"], activity_at=r["at"])
+        event = dict(r)
+        found[r["task_id"]]["_execution_event"] = {
+            k: event.get(k) for k in ("id", "run_id", "created_at", "kind")}
     notes: dict[str, tuple[Any, str]] = {}
     prs: dict[str, tuple[Any, str]] = {}
 

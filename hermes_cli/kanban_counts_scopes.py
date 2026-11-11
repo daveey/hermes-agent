@@ -11,7 +11,17 @@ from collections import OrderedDict
 MAX_SCOPES = 32
 _entries: OrderedDict[tuple[str, ...], tuple] = OrderedDict()
 _FIELDS = ("_cache", "_cache_fingerprint", "_cache_read_at", "_cache_revalidatable", "_cache_generation")
-_BOXES = ("_waiting_cache", "_parked_cache", "_stalled_cache", "_remote_keys_cache", "_local_keys_cache")
+_BOXES = ("_waiting_cache", "_parked_cache", "_stalled_cache", "_remote_keys_cache", "_local_keys_cache", "_execution_cache")
+
+
+class CountSnapshot(tuple):
+    """Keep the legacy nine-part read shape, with evidence bound to that generation."""
+    execution: dict
+
+    def __new__(cls, values, execution):
+        snapshot = super().__new__(cls, values)
+        snapshot.execution = execution
+        return snapshot
 
 
 def remember_locked() -> None:
@@ -57,8 +67,9 @@ def result_locked(include_waiting: bool, include_snapshot: bool) -> tuple:
     counts = ksa._cache[1:5]
     if include_snapshot:
         parked, held = ksa._parked_cache[0]
-        return (*counts, dict(ksa._waiting_cache[0]), parked, held, ksa._stalled_cache[0],
-                ksa._identity.merge_keys(ksa._remote_keys_cache[0], ksa._local_keys_cache[0]))
+        return CountSnapshot((*counts, dict(ksa._waiting_cache[0]), parked, held, ksa._stalled_cache[0],
+                              ksa._identity.merge_keys(ksa._remote_keys_cache[0], ksa._local_keys_cache[0])),
+                             ksa._execution_cache[0])
     return (*counts, dict(ksa._waiting_cache[0])) if include_waiting else counts
 
 

@@ -1,4 +1,5 @@
 """Card identity helpers for local and remote session activity snapshots."""
+from copy import deepcopy
 
 
 def local_keys(path, reads, board=None):
@@ -73,7 +74,7 @@ def row_ids(row):
 def freeze_annotation(parts):
     """Copy a read so a later recompute cannot mutate a poll still using it."""
     (active, blocked, unseen, remote_stale, waiting, parked, held, stalled, card_keys, extra,
-     attention) = parts
+     attention) = parts[:11]
     return (
         dict(active), dict(blocked), dict(unseen), dict(remote_stale),
         {sid: frozenset(ids) for sid, ids in waiting.items()},
@@ -81,7 +82,7 @@ def freeze_annotation(parts):
         {sid: frozenset(keys) for sid, keys in card_keys.items()},
         {sid: frozenset(ids) for sid, ids in extra.items()},
         dict(attention),
-    )
+    ) + ((deepcopy(parts[11]),) if len(parts) > 11 else ())
 
 
 def stamp_blocked_owners(row, card_keys, ids, cap):

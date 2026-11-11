@@ -196,6 +196,7 @@ export const zhHantChrome = {
     messageCount: count => `${count} 條訊息`,
     toolCallCount: count => `${count} 次工具調用`,
     row: {
+      kanbanUnknown: count => `${count} 項工作的目前狀態未知：證據缺失、已過期或未經驗證。這不表示已完成；未要求新的檢查。`,
       pausedQueue: '重新啟動前排入佇列的訊息可能未執行：請重新傳送或捨棄',
       pin: '釘選',
       unpin: '取消釘選',

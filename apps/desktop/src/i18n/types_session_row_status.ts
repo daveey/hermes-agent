@@ -4,6 +4,7 @@ export interface SessionRowStatusCopy {
   kanbanTasks: (open: number, blocked: number) => string
   kanbanAttention: (count: number) => string
   kanbanStalled: (count: number) => string
+  kanbanUnknown: (count: number) => string
   outcomeDone: string
   outcomeCrons: (names: string[]) => string
   outcomeDecision: string

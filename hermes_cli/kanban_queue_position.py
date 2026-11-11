@@ -342,7 +342,15 @@ def detail_fields(conn, task, board=None):
     except Exception:  # health: allow BLE001 -- diagnostics cannot fail a card read
         capacity = evidence._unknown("observation_unavailable")
     observation = capacity.get("execution_observation")
-    out.update(capacity_evidence=capacity, execution_observations=[observation] if observation else [])
+    from dataclasses import asdict
+    from hermes_cli.kanban_execution_observations import add_cards
+    from hermes_cli.kanban_execution_source import assemble, transaction
+    from hermes_cli.kanban_execution_observations import local_scope
+    gateway, profile = local_scope()
+    with transaction(conn) as read_at:
+        sources = assemble(conn, [task.id], board=board or "default", gateway=gateway, profile=profile, observed_at=read_at)
+    work = add_cards([{**asdict(task), "board": board or "default", "_execution_source": sources.get(task.id)}])[0]["execution_observations"]
+    out.update(capacity_evidence=capacity, execution_observations=([observation] if observation else []) + work)
     out["capacity_note"] = evidence.describe(capacity)
     return out
 

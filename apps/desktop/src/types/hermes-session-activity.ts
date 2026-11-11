@@ -31,6 +31,10 @@ export interface SessionActivityFields {
   kanban_unknown?: boolean
   /** Origin projection observation lower bound (epoch seconds), including known zero work. */
   kanban_observed_at?: number
+  /** Optional v1 execution observations (source/identity/timing/evidence; see lib/execution-observations.ts).
+   *  Additive: absent or empty means "no evidence" and the legacy stamps above decide alone. Capacity diagnostics
+   *  are separate fields, never work state. Entries are untrusted JSON until projected. */
+  execution_observations?: unknown[]
   /** [daveey] How many of `kanban_active`/`kanban_blocked` are cards on another
    *  gateway known only from a stale hermes-hub replica (last-known status).
    *  Absent when zero. */

@@ -23,6 +23,7 @@ from hermes_cli import kanban_session_activity_busy as _busy
 from hermes_cli import kanban_session_activity_hub as _hub_signature
 from hermes_cli import kanban_session_activity_revalidate as _revalidate
 from hermes_cli import kanban_counts_scopes as _count_scopes
+from hermes_cli.kanban_execution_source import transaction as _execution_transaction
 from hermes_cli import kanban_session_activity_recent_done as _recent_done
 from hermes_cli.kanban_session_activity_origin_snapshot import remote_snapshot as _remote_snapshot
 from hermes_cli.kanban_session_activity_hub import _hub_content_signature
@@ -80,6 +81,7 @@ _stalled_cache: list[dict[str, int]] = [{}]
 _remote_keys_cache: list[dict[str, frozenset[tuple[str, str, bool]]]] = [{}]
 _local_keys_cache: list[dict[str, frozenset[tuple[str, str, bool]]]] = [{}]
 _local_keys_sink = threading.local()
+_execution_cache = [{}]
 _pairs_lock = threading.Lock()
 # _all_counts single flight: held for a whole recompute; the generation bumps when one publishes.
 _counts_flight = threading.Lock()
@@ -1262,6 +1264,8 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
     _parked_sink.stalled = stalled
     local_keys: dict[str, set[tuple[str, str, bool]]] = {}
     _local_keys_sink.keys = local_keys
+    execution = {}
+    _local_keys_sink.execution = execution
     _busy.begin_recompute()
     try:
         pairs = _read_local_pairs_into(active, blocked, unseen)
@@ -1269,6 +1273,7 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         _parked_sink.maps = None
         _parked_sink.stalled = None
         _local_keys_sink.keys = None
+        _local_keys_sink.execution = None
     waiting: dict[str, set[str]] = {}
     for sid, tid in pairs:
         waiting.setdefault(sid, set()).add(tid)
@@ -1318,6 +1323,7 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         _stalled_cache[0] = stalled
         _remote_keys_cache[0] = remote_ids
         _local_keys_cache[0] = local_ids
+        _execution_cache[0] = execution
         _count_scopes.remember_locked()
         return _cached_count_result(include_waiting, include_snapshot)
 
@@ -1348,6 +1354,7 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
     failed (unseen/stalled log and count nothing, as before); such a read is not memoized, so the next pass retries."""
     global _pairs_sink
     reads: dict[str, Any] = {}
+    read_at = time.time()
     complete = True
     with cached_ro(path) as conn:
         conn.execute("BEGIN")
@@ -1365,6 +1372,12 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                 reads["blocked"] = _counts_on(conn, BLOCKED_STATUSES)
                 reads["blocked_pairs"] = _pairs_sink
                 reads["pairs"] = reads["active_pairs"] | reads["blocked_pairs"]
+                from hermes_cli.kanban_execution_source import assemble, raw
+                from hermes_cli.kanban_execution_observations import local_scope
+                gateway, profile = local_scope()
+                sources = assemble(conn, {tid for _, tid in reads["pairs"]}, board=_board_slug(path),
+                                   gateway=gateway, profile=profile, observed_at=read_at)
+                reads["execution"] = {tid: raw(source["task"], source) for tid, source in sources.items()}
             finally:
                 _pairs_sink = outer
             if parked:
@@ -1384,6 +1397,17 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
         finally:
             conn.execute("COMMIT")
     return reads, complete
+
+
+def _collect_execution_evidence(reads: dict[str, Any], path: Path) -> None:
+    """Copy this board's per-card execution sources into the active evidence sink, keyed by board/card."""
+    evidence = getattr(_local_keys_sink, "execution", None)
+    if evidence is None:
+        return
+    for sid, tid in reads["pairs"]:
+        value = reads.get("execution", {}).get(tid)
+        if value is not None:
+            evidence.setdefault(sid, {})[f"{_board_slug(path)}/{tid}"] = value
 
 
 def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: dict[str, int]) -> None:
@@ -1422,6 +1446,7 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
                     stalled[sid] = stalled.get(sid, 0) + n
             except Exception as exc:  # display-only: a failed read never fails the counts
                 _log.debug("kanban stalled read failed for %s: %s", path, exc)
+        _collect_execution_evidence(reads, path)
         keys = getattr(_local_keys_sink, "keys", None)
         if keys is not None:
             for sid, cards in _identity.local_keys(path, {**reads, "stalled_pairs": stalled_pairs},
@@ -1550,7 +1575,8 @@ def blocked_task_counts() -> dict[str, int]:
 # What a session's task strip lists: the sidebar's open + blocked sets, plus
 # ``review`` (also waiting on a human). [daveey]
 LISTED_STATUSES = tuple(dict.fromkeys(ACTIVE_STATUSES + BLOCKED_STATUSES + ("review",)))
-_TASK_FIELDS = ("id", "title", "status", "assignee", "session_id", "created_at", "started_at", "block_kind", "human_request")
+_TASK_FIELDS = ("id", "title", "status", "assignee", "session_id", "created_at", "started_at", "block_kind", "human_request",
+                "current_run_id", "last_heartbeat_at")
 
 
 def _board_slug(path: Path) -> str:
@@ -1562,7 +1588,7 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
     of, in ``statuses`` — the same pairs ``_read_counts`` counts."""
     sid_ph = ",".join("?" for _ in ids)
     st_ph = ",".join("?" for _ in statuses)
-    with cached_ro(path) as conn:
+    with cached_ro(path) as conn, _execution_transaction(conn) as read_at:
         conn.row_factory = sqlite3.Row
         cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
         if "session_id" not in cols:
@@ -1571,7 +1597,7 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
         run_start = "NULL"
         if "current_run_id" in cols and conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_runs'").fetchone():
-            run_start = "(SELECT r.started_at FROM task_runs r WHERE r.id = t.current_run_id)"
+            run_start = "(SELECT r.started_at FROM task_runs r WHERE r.id = t.current_run_id AND r.task_id = t.id)"
         found: dict[str, dict[str, Any]] = {}
         watch = _not_watch(conn)  # [daveey] a watch park is not the chat's open card (close-out gate)
         for row in conn.execute(
@@ -1586,6 +1612,13 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
                 found.setdefault(row["id"], {**dict(row), "via": "subscribed"})
         except sqlite3.Error:  # board predates notify subscriptions
             pass
+        from hermes_cli.kanban_execution_source import assemble
+        from hermes_cli.kanban_execution_observations import local_scope
+        gateway, profile = local_scope()
+        sources = assemble(conn, found, board=_board_slug(path), gateway=gateway, profile=profile,
+                           observed_at=read_at)
+        for tid, source in sources.items():
+            found[tid]["_execution_source"] = source
         _add_card_details(conn, found)
         try:
             for tid, info in _local_wait_info(conn, found).items():
@@ -1642,7 +1675,8 @@ def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED
             if wait is not None:
                 row["wait"] = wait
             out.append(row)
-    return out
+    from hermes_cli.kanban_execution_observations import add_cards
+    return add_cards([dict(row) for row in out])
 
 
 # [daveey] A "done" card can still need the user: its handoff admits part of the
@@ -1719,22 +1753,23 @@ def attention_task_counts(now: float | None = None) -> dict[str, int]:
 
 
 def _read_annotation_parts() -> tuple:
-    (active, blocked, unseen, remote_stale, waiting, parked, held, stalled,
-     remote_keys) = _all_counts(include_snapshot=True)
+    snapshot = _all_counts(include_snapshot=True)
+    active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys = snapshot[:9]
+    execution = getattr(snapshot, "execution", {})
     extra = _extra_waiting()
     try:
         attention = attention_task_counts()
     except Exception:
         _log.debug("kanban attention unavailable", exc_info=True)
         attention = {}
-    raw = (active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra, attention)
+    raw = (active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra, attention, execution)
     # [daveey] Nothing moved since the last read of this scope: return that read's frozen copy instead of freezing an
     # equal one. Safe: frozen parts are never mutated (every poll already shares one), and ``==`` per part (sets and
     # frozensets compare by members) proves the copy is exactly what freezing ``raw`` would build. The same object
     # also lets ``_annotation_copy.published`` skip its deep comparison.
     scope = _origin_scope()
     previous = _frozen_parts.get(scope)
-    if previous is not None and all(old is new or old == new for old, new in zip(previous, raw)):
+    if previous is not None and len(previous) == len(raw) and all(old is new or old == new for old, new in zip(previous, raw)):
         return previous
     frozen = _identity.freeze_annotation(raw)
     _frozen_parts[scope] = frozen
@@ -1839,7 +1874,13 @@ def one_annotation_snapshot() -> Iterator[None]:
         _annotation_scope.reads = _annotation_scope.attention = _annotation_scope.links = None
 
 
-_mark_kanban_unknown = _identity.mark_unknown
+def _mark_kanban_unknown(rows):
+    from hermes_cli.kanban_execution_observations import count_snapshot
+
+    _identity.mark_unknown(rows)
+    for row in rows:
+        count_snapshot(row, ())
+    return rows
 
 
 def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1857,7 +1898,8 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     try:
         if shared:
             *parts, copy_at = shared[0]
-            active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra = parts
+            active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra = parts[:10]
+            execution = parts[10] if len(parts) > 10 else {}
         else:
             parts = _annotation_snapshot()
             copy_at = _annotation_copy.observed_at(parts)  # [daveey] a previous process's copy keeps its own date
@@ -1869,10 +1911,11 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
                 _log.warning("kanban annotation unavailable (no snapshot); rows marked kanban_unknown")
                 return _mark_kanban_unknown(rows)
             (active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra,
-             attention) = parts
+             attention) = parts[:11]
+            execution = parts[11] if len(parts) > 11 else {}
             if shared is not None:
                 shared.append((active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys,
-                               extra, copy_at))
+                               extra, execution, copy_at))
                 _annotation_scope.attention = attention
     except Exception:
         # [daveey] A failed read is "unknown", never "no work": stamp ``kanban_unknown`` (the sidebar keeps the
@@ -1933,6 +1976,9 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             row["kanban_waiting_on"] = ids_waiting[:WAITING_ON_CAP]
         else:
             row.pop("kanban_waiting_on", None)
+        from hermes_cli.kanban_execution_observations import count_snapshot
+        count_snapshot(row, [key for sid in ids for key in remote_keys.get(sid, ())],
+                       evidence={key: value for sid in ids for key, value in execution.get(sid, {}).items()})
     return rows
 
 
@@ -1968,6 +2014,7 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
         _parked_cache[0] = ({}, {})
         _stalled_cache[0] = {}
         _local_keys_cache[0] = {}
+        _execution_cache[0] = {}
         _remote_keys_cache[0] = {}
     with _RO_CACHE_LOCK:
         held = [entry[0] for entry in _RO_CACHE.values()]

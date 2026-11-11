@@ -1,6 +1,7 @@
 import type { CSSProperties, ReactNode } from 'react'
 
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
+import { useExecutionObservationClock } from '@/lib/use-execution-observation-clock'
 import { useSessionDotState } from '@/lib/use-session-dot-state'
 import { useSessionParked } from '@/lib/use-session-parked'
 import { kanbanStripeCounts, sessionStatusStripe } from '@/store/session-dot-state'
@@ -19,20 +20,24 @@ export function SessionTabAccent({ children, session, storedSessionId }: Session
   const state = useSessionDotState(id, session)
   const blocked = useSessionParked(id, session)
 
+  const nowSeconds = useExecutionObservationClock(session)
+  const counts = kanbanStripeCounts(session ?? {}, nowSeconds)
+
   const stripe = session?.archived
     ? null
     : sessionStatusStripe(
         state,
         (session?.message_count ?? 0) > 0,
         blocked,
-        kanbanStripeCounts(session ?? {}).blocked,
+        counts.blocked,
         session?.cron_active,
         session?.review_wait,
         session?.kanban_attention,
-        kanbanStripeCounts(session ?? {}).waiting,
-        kanbanStripeCounts(session ?? {}).stalled,
+        counts.waiting,
+        counts.stalled,
         session?.outcome
       )
+
 
   return (
     <span

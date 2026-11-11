@@ -2246,6 +2246,7 @@ export const jaOverrides = {
     messageCount: count => `${count} 件のメッセージ`,
     toolCallCount: count => `${count} 件のツール呼び出し`,
     row: {
+      kanbanUnknown: count => `${count} 件の作業の現在の状態が不明です。証拠がない、期限切れ、または未検証です。完了を意味しません。新しい確認は要求されていません。`,
       pausedQueue: '再起動前にキューに入れたメッセージが実行されていない可能性があります：再送信するか破棄してください',
       pin: 'ピン留め',
       unpin: 'ピン留めを解除',

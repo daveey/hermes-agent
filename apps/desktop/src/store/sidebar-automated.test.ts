@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
+import fixture from '../../../../schemas/fixtures/execution-observations-v1.json'
+
 import { $pinnedSessionIds, $sidebarFiltersActive, $sidebarShowAutomated, resetSidebarView } from './layout'
 import { $blockedSessionIds } from './session-blocked'
 import { sessionHiddenAsAutomated } from './sidebar-automated'
@@ -15,6 +17,16 @@ afterEach(() => {
 })
 
 describe('sessionHiddenAsAutomated [daveey]', () => {
+  it('uses the caller render clock when expiring live evidence reveals a stalled parked card', () => {
+    const row = {
+      ...bot, kanban_active: 1, kanban_parked: 1, kanban_stalled: 1,
+      execution_observations: [{ ...fixture.base, valid_until: 1010 }]
+    }
+
+    expect(sessionHiddenAsAutomated(row, false, { dotState: 'background', nowSeconds: 1001 })).toBe(true)
+    expect(sessionHiddenAsAutomated(row, false, { dotState: 'background', nowSeconds: 1011 })).toBe(false)
+  })
+
   it('hides automated rows when the toggle is off, never human or unstamped rows', () => {
     expect(sessionHiddenAsAutomated(bot, false, { dotState: 'idle' })).toBe(true)
     expect(sessionHiddenAsAutomated(human, false, { dotState: 'idle' })).toBe(false)

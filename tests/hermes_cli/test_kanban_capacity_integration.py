@@ -81,6 +81,10 @@ def test_tool_cli_rest_read_actual_persisted_evidence(capacity_board, monkeypatc
             for payload in (tool, command, response.json()):
                 assert reason in [r["code"] for r in payload["capacity_evidence"]["reasons"]]
                 assert payload["capacity_evidence"]["observed_at_ms"] == tool["capacity_evidence"]["observed_at_ms"]
+                work = [value for value in payload["execution_observations"] if value["source"] == "kanban.card"]
+                assert len(work) == 1 and work[0]["state"] == ("waiting" if tid == child else "queued")
+                assert work[0]["identity"]["work_id"] == tid
+                assert work[0]["last_progress"] is None
                 if tid == child:
                     assert "queue" not in payload
                     assert payload["capacity_evidence"]["eligible_backlog"] is False
