@@ -126,11 +126,14 @@ def test_log_tail_drops_only_this_sessions_wrapper_markers():
 
 @pytest.mark.parametrize("split", [1, 5, 9, 20, 40, 60, 75])
 def test_log_reader_drops_a_marker_trailer_split_across_reads(tmp_path, monkeypatch, split):
+    _read_split_log(tmp_path, monkeypatch, split)
+
+
+def _read_split_log(tmp_path, monkeypatch, split, body="x" * 100 + "\nfg-done\n"):
     """The reader reads 64 KiB at a time: a trailer straddling two reads must still go."""
     import tools.process_registry_output_log as olog
 
     pipe, cwd = "__HERMES_PIPE_181265ba766b__", "__HERMES_CWD_181265ba766b__"
-    body = "x" * 100 + "\nfg-done\n"
     data = (body + f"\n{pipe}0{pipe}\n\n{cwd}/home/u{cwd}\n").encode()
     reads = [data[:len(body) + split], data[len(body) + split:]]
     log = tmp_path / "proc_split.log"
@@ -158,9 +161,20 @@ def test_log_reader_drops_a_marker_trailer_split_across_reads(tmp_path, monkeypa
     session._reader_finish_requested.set()
     finished = []
     monkeypatch.setattr(registry, "_finish_exited", lambda s, code, **k: finished.append(code))
+    seen = []
+    real_ingest = registry._ingest_output
+    monkeypatch.setattr(registry, "_ingest_output", lambda s, text: seen.append(text) or real_ingest(s, text))
     registry._log_reader_loop(session)
     assert session.output_buffer == body
     assert finished == [0]
+    return seen
+
+
+def test_log_reader_holds_back_only_a_possible_marker_start(tmp_path, monkeypatch):
+    """A progress line with no newline yet is shown from the first read, not held until the next newline."""
+    body = "start\nDownloading... 10%\rDownloading... 50%\nok\n"
+    seen = _read_split_log(tmp_path, monkeypatch, -(len("50%\nok\n")), body=body)
+    assert seen[0] == "start\nDownloading... 10%\rDownloading... "
 
 
 def test_tee_wrapper_records_the_commands_own_exit_status(tmp_path):
@@ -197,8 +211,11 @@ def test_a_shutdown_after_a_user_stop_keeps_the_stop_reason_on_the_tool_thread()
         for later in sorted(surv.SURVIVABLE_INTERRUPT_REASONS):
             stopped = agent()
             request_hard_interrupt(stopped)  # the user's Stop
+            stop_reason = stopped._tool_interrupt_reason
             request_hard_interrupt(stopped, "restart", tool_reason=later)
             assert surv.survivable_interrupt_reason(tid) is None, later
+            # The turn keeps it too, so a later re-signal of the turn's reason (tool_executor) cannot revive it.
+            assert stopped._tool_interrupt_reason == stop_reason, later
             set_interrupt(False, tid)
         request_hard_interrupt(agent(), "restart", tool_reason="gateway shutdown")
         assert surv.survivable_interrupt_reason(tid) == "gateway shutdown"
@@ -220,6 +237,10 @@ def test_shutdown_sweep_spares_only_persisted_jobs_that_left_the_unit(tmp_path, 
         registry._running[s.id] = s
     registry.kill_all(source="gateway_shutdown")
     assert killed == [plain.id]
+    key["on"] = False  # key off: today's rule, a scoped (non-detached) persisted job is killed too
+    killed.clear()
+    registry.kill_all(source="gateway_shutdown")
+    assert sorted(killed) == sorted([plain.id, scoped.id])
 
 
 def test_held_foreground_command_is_checkpointed_until_released(tmp_path, monkeypatch):

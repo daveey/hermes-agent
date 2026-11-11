@@ -36,7 +36,7 @@ from tools.process_registry_notifications import (
 from tools.process_registry_checkpoint import ProcessCheckpointMixin
 from tools.process_registry_readopt import ProcessReadoptMixin
 from tools.process_registry_output_log import ProcessOutputLogMixin, open_output_log, record_exit_command, spawn_output_log
-from tools.process_registry_survivable import ProcessForegroundHoldMixin
+from tools.process_registry_survivable import ProcessForegroundHoldMixin, enabled as survivable_enabled
 from tools.process_registry_ownership import ProcessOwnershipMixin
 from tools.process_registry_termination import ProcessTerminationMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
@@ -2452,7 +2452,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
                 s for s in (*self._running.values(), *self._finished.values())
                 if (task_id is None or s.owner_task_id == task_id)
                 and s.id not in exclude_ids and (not s.exited or s._scope_stop_pending)
-                and not (s.persist_on_release and (lifecycle or (host_exit and (s.detached or s.systemd_unit))))
+                and not (s.persist_on_release and (lifecycle or (host_exit and (s.detached or (s.systemd_unit and survivable_enabled())))))
             ]
         results = [self.kill_process(s.id, source=source, consume_output=consume_output) for s in targets]
         return sum(

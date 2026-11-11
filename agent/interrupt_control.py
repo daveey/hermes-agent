@@ -23,8 +23,6 @@ _REASON_HARD_STOP = "explicit stop requested"
 _REASON_NEW_MESSAGE = "user sent a new message"
 _REASON_USER_INTERRUPT = "user interrupt"
 USER_INTERRUPT_REASONS = frozenset({_REASON_HARD_STOP, _REASON_NEW_MESSAGE, _REASON_USER_INTERRUPT})
-# ``tool_reason`` the gateway's restart/shutdown stop passes (gateway.run._INTERRUPT_TOOL_REASON_GATEWAY_SHUTDOWN).
-_REASON_GATEWAY_SHUTDOWN = "gateway shutdown"
 # [daveey] ``tool_reason`` of the core-update pause's mid-tool cancel (agent/update_pause_cancel.py). It never
 # relabels any interrupt already pending (a Stop or a redirect wins) and is not a user intervention.
 _REASON_UPDATE_PAUSE = "hermes update pause"
@@ -226,19 +224,18 @@ class InterruptControlMixin:
 
         def _publish_interrupt_state() -> None:
             nonlocal tool_interrupt_reason
-            _pending = getattr(self, "_interrupt_requested", False)
-            stop_pending = _pending and getattr(self, "_tool_interrupt_reason", None) in USER_INTERRUPT_REASONS
-            stop_reason = getattr(self, "_tool_interrupt_reason", None)
-            # A shutdown stop never relabels a user Stop already pending (the user's Stop wins): the turn
-            # records the first cause, so it is not announced as interrupted by the restart. A pending
+            # A shutdown/backend-exit/update stop never relabels a user Stop already pending (the user's Stop
+            # wins): the turn and its tool threads keep the first cause, so the turn is not announced as
+            # interrupted by the restart and a survivable terminal command still dies [daveey]. A pending
             # redirect (a mid-request correction) is not a Stop: the restart drops it and is the cause.
-            if not (_pending and tool_reason == _REASON_UPDATE_PAUSE) and not (
-                    tool_reason == _REASON_GATEWAY_SHUTDOWN and stop_pending):
+            # The update pause's mid-tool cancel relabels no pending interrupt at all (a redirect wins too).
+            _pending = getattr(self, "_interrupt_requested", False)
+            if (tool_reason in SURVIVABLE_INTERRUPT_REASONS and _pending
+                    and getattr(self, "_tool_interrupt_reason", None) in USER_INTERRUPT_REASONS):
+                tool_interrupt_reason = self._tool_interrupt_reason
+            elif not (_pending and tool_reason == _REASON_UPDATE_PAUSE):
                 self._interrupt_message = message
                 self._tool_interrupt_reason = tool_interrupt_reason
-            if stop_pending and tool_reason in SURVIVABLE_INTERRUPT_REASONS:
-                # Tool threads keep the Stop's reason: a survivable terminal command must still die. [daveey]
-                tool_interrupt_reason = stop_reason
             self._interrupt_requested = True
             if tool_reason != _REASON_UPDATE_PAUSE:
                 self._turn_user_intervened = True

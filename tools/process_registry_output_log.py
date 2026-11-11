@@ -120,11 +120,15 @@ class ProcessOutputLogMixin:
         def ingest(text: str, final: bool = False) -> None:
             nonlocal head_noise, held
             if session.shell_markers:
-                # A wrapper marker line (``\n<m>...<m>\n``) can straddle two reads: hold back from the last
-                # newline, which an unfinished marker line always starts at, until the next read. [daveey]
+                # A wrapper marker line (``\n<m>...<m>\n``) can straddle two reads: an unfinished one is the
+                # text from the last newline, so hold that back while it could still become one. [daveey]
                 text = strip_shell_markers(held + text, session.shell_markers)
-                cut = len(text) if final else max(text.rfind("\n"), 0)
-                text, held = text[:cut], text[cut:]
+                cut = text.rfind("\n")
+                tail = text[cut + 1:] if cut >= 0 and not final else None
+                if tail is not None and any(m.startswith(tail) or tail.startswith(m) for m in session.shell_markers):
+                    text, held = text[:cut], text[cut:]
+                else:
+                    held = ""
             if not text:
                 return
             if head_noise:  # ``bash -lic`` startup warnings, as the pipe reader strips them
