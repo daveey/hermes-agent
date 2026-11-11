@@ -94,6 +94,19 @@ def test_actual_claim_rechecks_changed_labels(fleet, monkeypatch):
     assert rc.claim_refusal(card, me="worker") is None
 
 
+def test_execution_rechecks_already_imported_card(fleet, monkeypatch):
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_worker_placement as wp
+    _, entry, _ = fleet
+    monkeypatch.setattr(sync, "board_mode", lambda _: "primary")
+    monkeypatch.setattr(sync, "sync_state", lambda _: {"gateway_id": "worker"})
+    card = {"title": "cross_task read", "placement_policy": "worker-first-v1",
+            "runs_on": '["machine:worker"]'}
+    assert wp.execution_refusal(None, card) is None
+    entry["labels"] = []
+    assert wp.execution_refusal(None, card) == "needs worker coordination capability"
+
+
 def test_legacy_target_cannot_borrow_pool_labels(fleet):
     cfg, _, _ = fleet
     args = {"title": "Run pytest", "body": "hermes-hub status"}
