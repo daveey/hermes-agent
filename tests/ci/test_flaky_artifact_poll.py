@@ -86,6 +86,23 @@ def test_no_python_test_jobs_is_not_applicable_and_distinct_from_empty(gh, jobs)
     assert state["runs"] == ["5/1"] and gh.downloads == [] and not board.cards
 
 
+@pytest.mark.parametrize("jobs", [
+    # Metadata-only projection of Actions run 43074641622's actual job shape.
+    [{"id": 130711154736, "name": "CI review comment (live)",
+      "status": "completed", "conclusion": "cancelled", "run_attempt": 1}],
+    [],
+])
+def test_cancelled_non_test_run_is_not_applicable_and_deduped(gh, jobs):
+    gh.run()
+    gh.runs[0]["conclusion"] = "cancelled"
+    gh.jobs[(5, 1)] = jobs
+    log, board, state = _poll()
+    assert log == ["POLL complete=0 empty=0 unavailable=0 not_applicable=1"]
+    assert state["runs"] == ["5/1"] and not board.cards and not gh.downloads
+    assert not any("/artifacts" in url for url in gh.urls)
+    assert _poll(board, state)[0] == []
+
+
 def test_affected_job_names_are_recognised(gh):
     gh.simple()
     gh.jobs[(5, 1)] = [job(9, name="Python tests / Run tests (affected, 1/1)")]
@@ -322,8 +339,9 @@ def test_explicit_other_or_malformed_job_attempt_is_unavailable(gh, own):
     assert not state["runs"] and not board.cards and not gh.downloads
 
 
-@pytest.mark.parametrize("jobs", [[], [job(9, conclusion="skipped")], [job(9)]])
-def test_cancelled_run_never_means_no_flakes(gh, jobs):
+@pytest.mark.parametrize("jobs", [[job(9, conclusion="skipped")], [job(9)],
+                                  [job(9, conclusion="cancelled")]])
+def test_cancelled_test_run_never_means_no_flakes(gh, jobs):
     gh.run()["conclusion"] = "cancelled"
     gh.jobs[(5, 1)] = jobs
     log, board, state = _poll()

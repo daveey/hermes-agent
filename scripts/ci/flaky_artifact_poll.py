@@ -90,11 +90,13 @@ def _job_attempt(job: dict[str, Any], attempt: int) -> int:
 def expected_jobs(jobs: list[dict[str, Any]], attempt: int = 1, *,
                   cancelled: bool = False) -> tuple[int, dict[int, tuple[int, int]]]:
     """``(slices, {slice: (job id, producing attempt)})``; no Python jobs means not applicable."""
-    if cancelled:
-        raise Unavailable("jobs_unavailable")
     by_slice: dict[int, tuple[int, int]] = {}
     totals: set[int] = set()
     for job in jobs:
+        # Even skipped test jobs in a cancelled attempt cannot prove a full matrix.
+        name = job.get("name")
+        if cancelled and isinstance(name, str) and "Run tests" in name:
+            raise Unavailable("jobs_unavailable")
         found = _job_slice(job)
         if found is None:
             continue
