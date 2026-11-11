@@ -1337,24 +1337,11 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             _host_reboot.note(dead, row, now_boot, reboot_victims)  # [daveey]
             apply_attempt_note(conn, row["id"], pid, dead)
             _owner_death.note(dead, conn, row["id"], row["current_run_id"])  # owner died under it [daveey]
-            retry_status = _kb._retry_status_for_run(conn, row["id"])
-            dead.event_payload["retry_status"] = retry_status
-            cur = conn.execute(
-                "UPDATE tasks SET status = ?, claim_lock = NULL, "
-                "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
-                "WHERE id = ? AND status = 'running' "
-                "  AND worker_pid = ? AND claim_lock IS ?",
-                (retry_status, row["id"], pid, row["claim_lock"]),
-            )
-            if cur.rowcount != 1:
+            from hermes_cli.kanban_run_finalizer import close_dead_run
+            closed = close_dead_run(conn, row, dead)
+            if closed is None:
                 continue
-            run_id = _kb._end_run(
-                conn, row["id"],
-                outcome=dead.run_outcome, status=dead.run_outcome,
-                error=dead.error_text,
-                metadata=dict(dead.event_payload),
-            )
-            _kb._append_event(conn, row["id"], dead.event_kind, dead.event_payload, run_id=run_id)
+            run_id, retry_status = closed
             sweep.exited_hook_payloads.append({
                 "task_id": row["id"],
                 "assignee": row["assignee"],
@@ -1454,6 +1441,7 @@ def _record_task_failure(
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
     infrastructure: bool = False, block_kind: str = "transient",
+    allow_nested: bool = False,
 ) -> bool:
     """Record a non-success outcome and maybe trip the circuit breaker; every
     non-success path funnels through here so ``consecutive_failures`` stays
@@ -1476,7 +1464,7 @@ def _record_task_failure(
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     error = error[:500]
-    with _kb.write_txn(conn):
+    with _kb.write_txn(conn, allow_nested=allow_nested):
         row = conn.execute(
             "SELECT consecutive_failures, status, max_retries, current_run_id "
             "FROM tasks WHERE id = ?", (task_id,),
