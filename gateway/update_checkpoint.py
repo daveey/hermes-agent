@@ -14,6 +14,7 @@ from pathlib import Path
 from hermes_constants import get_default_hermes_root, get_hermes_home
 from hermes_cli import admission_fence
 from gateway.cron_pause import preserve_cron_slots
+from gateway.status import _pid_exists
 from gateway.session_runtime_workers import kanban_managed_count
 from gateway.run_shutdown_restart_wait import CORE_UPDATE_KANBAN_WAIT_S, CORE_UPDATE_KANBAN_STOP_LEASH_S
 
@@ -25,7 +26,7 @@ CHECKPOINT_DRAIN_S = CORE_UPDATE_KANBAN_WAIT_S + CORE_UPDATE_KANBAN_STOP_LEASH_S
 def checkpoint_intent(home):
     """Return the bounded, live unfenced episode, or None (never infer authority from an env flag)."""
     try:
-        data = json.loads((Path(home) / "core-update/intent").read_text(encoding="utf-8"))
+        data = json.loads((Path(home) / "core-update/intent").read_text(encoding="utf-8-sig"))
         now = time.time()
         if (not isinstance(data, dict) or data.get("kind") != "unfenced"
                 or data.get("checkpoint") is not True or type(data.get("pid")) is not int
@@ -33,7 +34,8 @@ def checkpoint_intent(home):
                 or not 0 <= now - float(data["created_at"]) < 180
                 or not now < float(data["expires_at"]) <= float(data["created_at"]) + 180):
             return None
-        os.kill(data["pid"], 0)
+        if not _pid_exists(data["pid"]):
+            return None
         root = get_default_hermes_root(home=home)
         if not admission_fence.is_held(Path(root) / "core-update"):
             return None
