@@ -20,6 +20,7 @@ applies to every profile on the host. Reads are cached by each file's (mtime, si
 from __future__ import annotations
 
 import json
+import re
 import logging
 import os
 import threading
@@ -48,8 +49,13 @@ def _records(store: dict[str, Any], provider: str) -> list[dict[str, Any]]:
     return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
 
 
+_GENERIC_RE = re.compile(r"api-key-\d+|[a-z][a-z0-9]*(_[a-z0-9]+)+")  # numbered keys, env-var/slot names
+
+
 def _generic(label: str) -> bool:
-    return label in _GENERIC_LABELS or label.startswith(("env:", "env ")) or not label
+    """Labels naming a slot or a counter, not an account: reused by unrelated rows, so never matched."""
+    return not label or label in _GENERIC_LABELS or label.startswith(("env:", "env ")) or bool(
+        _GENERIC_RE.fullmatch(label))
 
 
 def account_of(entry: Any) -> Optional[str]:
@@ -179,6 +185,31 @@ def set_credential_disabled(provider: str, entry: Any, disabled: bool) -> bool:
             records = [r for r in records if not matches(entry, _keys_from_records([r]))]
         if records:
             section[provider] = records
+        else:
+            section.pop(provider, None)
+        if section:
+            store[SECTION] = section
+        else:
+            store.pop(SECTION, None)
+        auth_mod._save_auth_store(store)
+    return True
+
+
+def forget_removed(provider: str, removed: Any, remaining: Iterable[Any]) -> bool:
+    """After ``hermes auth remove``: drop the records that disabled *removed* and match no remaining row,
+    so a later row reusing its id or label is not born disabled. Active store only."""
+    from hermes_cli import auth as auth_mod
+    remaining = list(remaining)
+    with auth_mod._auth_store_lock():
+        store = auth_mod._load_auth_store()
+        records = _records(store, provider)
+        keep = [r for r in records if not matches(removed, _keys_from_records([r]))
+                or any(matches(e, _keys_from_records([r])) for e in remaining)]
+        if len(keep) == len(records):
+            return False
+        section = store.get(SECTION) if isinstance(store.get(SECTION), dict) else {}
+        if keep:
+            section[provider] = keep
         else:
             section.pop(provider, None)
         if section:

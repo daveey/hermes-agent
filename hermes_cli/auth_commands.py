@@ -616,6 +616,8 @@ def auth_remove_command(args) -> None:
     if removed is None:
         raise SystemExit(f'No credential matching "{target}" for provider {provider}.')
     print(f"Removed {provider} credential #{index} ({removed.label})")
+    from agent.credential_pool_disabled import forget_removed
+    forget_removed(provider, removed, pool.entries())
 
     # Every credential source Hermes reads from (env vars, external OAuth files, auth.json blocks,
     # custom config) has a RemovalStep in agent.credential_sources; it does the source-specific

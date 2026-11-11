@@ -78,3 +78,10 @@ def test_enable_warns_when_root_disables(home, monkeypatch, tmp_path, capsys):
     _run("enable", "acct0", parse=False)
     out = capsys.readouterr().out
     assert "(already enabled)" in out and "global Hermes home also disables" in out
+
+
+def test_remove_forgets_the_disable_so_a_re_added_row_is_not_born_disabled(home):
+    from hermes_cli.auth_commands import auth_remove_command
+    _run("disable", "acct0")
+    auth_remove_command(SimpleNamespace(provider="anthropic", target="acct0"))
+    assert "disabled_credentials" not in json.loads((home / "auth.json").read_text())

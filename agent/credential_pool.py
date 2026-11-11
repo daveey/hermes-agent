@@ -1008,14 +1008,14 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 until
                 for until in (
                     _exhausted_until(entry, sole_credential=sole_credential)
-                    for entry in self._entries
+                    for entry in self._enabled_entries()
                     if entry.last_status == STATUS_EXHAUSTED
                 )
                 if until is not None
             ]
             candidates.extend(
                 until
-                for entry in self._entries
+                for entry in self._enabled_entries()
                 if entry.last_status != STATUS_DEAD
                 for until in (model_cooldown_until(entry, model),)
                 if until is not None

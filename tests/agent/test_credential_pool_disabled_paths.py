@@ -1,5 +1,6 @@
 """Paths that hand out a token without pool selection also refuse a `hermes auth disable`d account."""
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -265,3 +266,36 @@ def test_a_disabled_row_is_not_a_fallback_and_never_binds_a_delegated_child(monk
     child = SimpleNamespace(_credential_pool=pool, base_url="https://child.example", _swap_credential=bound.append)
     _, lease = _lease_child_credential(child)
     assert bound == [] and lease is None
+
+
+def test_counter_and_slot_labels_never_disable_an_unrelated_row():
+    for label in ("api-key-2", "device_code", "hermes_pkce", "claude_code", "anthropic_token", "env:ANTHROPIC_TOKEN"):
+        keys = cpd._keys_from_records([{"id": "gone", "label": label}])
+        assert not cpd.matches(SimpleNamespace(id="new", label=label, access_token=""), keys), label
+    keys = cpd._keys_from_records([{"id": "gone", "label": "A@Example.com"}])
+    assert cpd.matches(SimpleNamespace(id="new", label="a@example.com", access_token=""), keys)
+
+
+def test_auth_remove_forgets_the_disable_unless_another_row_of_that_account_remains():
+    rows = [PooledCredential(provider="anthropic", id=f"row{i}", label=label, source="manual", auth_type="api_key",
+                             access_token=f"fixture-anthropic-{i}", priority=i)
+            for i, label in enumerate(["a@example.com", "a@example.com", "b@example.com"])]
+    write_credential_pool("anthropic", [e.to_dict() for e in rows])
+    _disable("anthropic", rows[0])
+    _disable("anthropic", rows[2])
+    assert cpd.forget_removed("anthropic", rows[0], rows[1:]) is False  # row1 is the same account: keep
+    assert cpd.forget_removed("anthropic", rows[2], rows[:2]) is True
+    cpd._cache.clear()
+    assert cpd.is_credential_disabled("anthropic", rows[1])
+    assert not cpd.is_credential_disabled("anthropic", SimpleNamespace(id="row2", label="b@example.com", access_token=""))
+
+
+def test_next_available_at_ignores_disabled_rows():
+    import time
+    pool = _pool("openai-codex")
+    soon, later = time.time() + 60, time.time() + 3600
+    pool._entries = [replace(e, last_status="exhausted", last_error_reset_at=t)
+                     for e, t in zip(pool._entries, (soon, later))]
+    assert abs(pool.next_available_at() - soon) < 1
+    _disable("openai-codex", pool.entries()[0])
+    assert abs(pool.next_available_at() - later) < 1
