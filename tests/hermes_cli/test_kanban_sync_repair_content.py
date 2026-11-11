@@ -25,6 +25,15 @@ clock = window.clock
 def test_event_only_feed_skips_content_but_keeps_partition_repairs(
     live, svc, kanban_home, monkeypatch, clock, mode,
 ):
+    # Checkpoints deliberately invalidate file identity. This case isolates
+    # event-only WAL writes; checkpoint invalidation is exercised separately.
+    connect = kbc.connect
+    def no_autocheckpoint(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        return conn
+    monkeypatch.setattr(kbc, "connect", no_autocheckpoint)
+    live.execute("PRAGMA wal_autocheckpoint=0")
     with connection_scope():
         parent, _ = window._settle(live, svc, kanban_home, mode)
         window._round(kanban_home, svc)
@@ -90,6 +99,46 @@ def test_relevant_changes_rearm(pair, side, change):
             conn.execute("UPDATE tasks SET title = 'capture gap' WHERE id = ?", (pair.parent,))
     pair.run()
     assert pair.calls == {"repair_divergence": 1, "repair_missing_children": 1}
+
+
+@pytest.mark.parametrize("change", ["insert", "update", "delete"])
+def test_omission_only_change_rearms_content(pair, change):
+    pair.live.execute("PRAGMA wal_autocheckpoint=0")
+    with kbc.write_txn(pair.live):
+        pair.live.execute(
+            "INSERT INTO kanban_sync_omissions "
+            "(original_op_id,table_name,row_uid,field,compat_op_id) VALUES (?,?,?,?,?)",
+            ("original", "tasks", pair.parent, "title", "compat"))
+    pair.run()
+    pair.run()
+    before = dict(pair.calls)
+    with kbc.write_txn(pair.live):
+        if change == "insert":
+            pair.live.execute(
+                "INSERT INTO kanban_sync_omissions "
+                "(original_op_id,table_name,row_uid,field,compat_op_id) VALUES (?,?,?,?,?)",
+                ("other", "tasks", pair.parent, "body", "other-compat"))
+        elif change == "update":
+            pair.live.execute("UPDATE kanban_sync_omissions SET state='delivered'")
+        else:
+            pair.live.execute("DELETE FROM kanban_sync_omissions")
+    pair.run()
+    assert pair.calls == {name: count + 1 for name, count in before.items()}
+
+
+def test_checkpoint_rearms_content_without_revision_change(pair):
+    pair.replica.execute("PRAGMA wal_autocheckpoint=0")
+    with kbc.write_txn(pair.replica):
+        pair.replica.execute("CREATE TABLE checkpoint_payload (value TEXT)")
+        pair.replica.execute("INSERT INTO checkpoint_payload VALUES (?)", ("x" * 10000,))
+    pair.run()
+    pair.run()
+    before = dict(pair.calls)
+    revision = pair.replica.execute("SELECT revision FROM kanban_repair_revision").fetchone()[0]
+    assert pair.replica.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+    assert pair.replica.execute("SELECT revision FROM kanban_repair_revision").fetchone()[0] == revision
+    pair.run()
+    assert pair.calls == {name: count + 1 for name, count in before.items()}
 
 
 @pytest.mark.parametrize("side", ["live", "replica"])

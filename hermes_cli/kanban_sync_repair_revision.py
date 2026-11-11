@@ -9,7 +9,7 @@ import sqlite3
 # repairing writes made while capture is absent is the reason these scans exist.
 TABLES = (
     "tasks", "task_runs", "task_links", "task_chat_links",
-    "kanban_sync_outbox", "kanban_sync_tombstones", "kanban_sync_remote_parents",
+    "kanban_sync_outbox", "kanban_sync_tombstones", "kanban_sync_remote_parents", "kanban_sync_omissions",
 )
 REVISION_TABLE = "kanban_repair_revision"
 
