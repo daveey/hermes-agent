@@ -1322,7 +1322,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None,
             # Launch-window grace so a freshly-spawned worker isn't reclaimed
             # before its PID is visible on /proc.
             started_at = _kb._to_epoch(_kb._row_get(row, "started_at"))
-            if started_at is not None and time.time() - started_at < _kb._resolve_crash_grace_seconds():
+            if not failed_results_only and started_at is not None and time.time() - started_at < _kb._resolve_crash_grace_seconds():
                 continue
             if _worker_alive(row["worker_pid"], _kb._row_get(row, "worker_started_at")):
                 continue
@@ -1404,7 +1404,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None,
     return sweep
 
 
-def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None) -> list[str]:
+def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None,
+                           *, failed_results_only: bool = False) -> list[str]:
     """Reclaim ``running`` tasks whose worker PID is no longer alive.
 
     Restores the source phase immediately (no waiting for the claim TTL), for
@@ -1414,7 +1415,7 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     wall, released WITHOUT counting a failure and surfaced via the
     ``_last_rate_limited`` attribute (the return stays crashed-only).
     """
-    sweep = _reclaim_dead_workers(conn, board=board)
+    sweep = _reclaim_dead_workers(conn, board=board, failed_results_only=failed_results_only)
     # Closure and accounting committed together; only external observers remain.
     auto_blocked = sweep.auto_blocked
     for _, _, _, dead in sweep.crash_details:

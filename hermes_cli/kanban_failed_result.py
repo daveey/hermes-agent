@@ -8,14 +8,16 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+from pathlib import Path
 
 
 def process_gone(pid, birth) -> bool:
     """Prove the recorded incarnation gone; fail closed on live/recycled PIDs.
 
     A birth witness is required even for an absent PID, rejecting legacy and
-    unverified bindings. A currently occupied PID is never acted on, including
-    one recycled since the recorded birth. Permission failures remain unknown.
+    unverified bindings. An occupied live or recycled PID is never acted on.
+    An exact-identity Linux zombie is exited; permission failures stay unknown.
     """
     from hermes_cli import kanban_db_dispatch as dispatch
 
@@ -26,14 +28,26 @@ def process_gone(pid, birth) -> bool:
     if birth == dispatch.UNVERIFIED_WORKER_FINGERPRINT:
         return False
     try:
+        dispatch._start_components(birth.split('|', 1)[1])
+    except ValueError:
+        return False
+    try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return True
     except (PermissionError, OSError):
         return False
-    # Read birth even though both a matching live process and a recycled PID
-    # veto closure. Never treat an unreadable birth as evidence of death.
-    dispatch._process_fingerprint(pid)
+    # A matching Linux zombie has exited even if its wedged parent has not
+    # reaped it. Read identity on both sides of the state observation; an
+    # occupied recycled PID and unreadable identity always remain vetoes.
+    if sys.platform == 'linux' and dispatch._process_fingerprint(pid) == birth:
+        try:
+            stat = Path(f'/proc/{pid}/stat').read_text(encoding='utf-8')
+            fields = stat.rsplit(')', 1)[1].split()
+            if fields[0] == 'Z' and dispatch._process_fingerprint(pid) == birth:
+                return True
+        except (OSError, IndexError):
+            return False
     return False
 
 

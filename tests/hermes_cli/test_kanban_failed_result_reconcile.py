@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -42,6 +43,9 @@ from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli.kanban_db_connect import connect_closing
 from gateway.session_kanban import _record_worker_result
 context = json.loads(sys.argv[1])
+if sys.argv[2] != 'observe':
+    import hermes_cli.kanban_failed_result_observer as observer
+    observer.arm = lambda context: None
 sys.stdin.read(1)
 with connect_closing(Path(context['db'])) as conn, kb.write_txn(conn):
     kb._append_event(conn, context['task_id'], 'worker_bound',
@@ -52,15 +56,15 @@ raise SystemExit(1)
 '''
 
 
-def _failed_child(conn, context):
+def _failed_child(conn, context, *, observe=False, outer_pid=None):
     proc = subprocess.Popen(
-        [sys.executable, '-c', _CHILD, json.dumps(context)],
+        [sys.executable, '-c', _CHILD, json.dumps(context), 'observe' if observe else 'unit'],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding='utf-8', env=build_subprocess_env(),
         cwd=str(Path(__file__).resolve().parents[2]),
     )
     try:
-        kbd._set_worker_pid(conn, context['task_id'], proc.pid)
+        kbd._set_worker_pid(conn, context['task_id'], outer_pid or proc.pid)
         stdout, stderr = proc.communicate('x', timeout=30)
         assert proc.returncode == 1, (stdout, stderr)
         result = conn.execute(
@@ -78,7 +82,7 @@ def _failed_child(conn, context):
 @pytest.mark.parametrize('entry', ['stalled_owner', 'dispatcher'])
 def test_failed_child_reconciles_without_owner_progress(board, entry):
     conn, context = board
-    result = _failed_child(conn, context)
+    result = _failed_child(conn, context, observe=entry == 'stalled_owner')
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         if entry == 'dispatcher':
@@ -117,6 +121,7 @@ def test_process_proof_fails_closed(monkeypatch, state):
         if state == 'denied':
             raise PermissionError()
     monkeypatch.setattr(reconcile.os, 'kill', probe)
+    monkeypatch.setattr(reconcile.Path, 'read_text', lambda *args, **kwargs: '123 (fixture) S')
     monkeypatch.setattr(kbd, '_process_fingerprint',
                         lambda pid: {'live': 'epoch|1', 'recycled': 'epoch|2'}.get(state))
     assert reconcile.process_gone(123, 'epoch|1') is (state == 'gone')
@@ -149,3 +154,51 @@ def test_proof_rejects_changed_identity(board, monkeypatch, change):
         with kb.write_txn(conn):
             kb._append_event(conn, context['task_id'], 'worker_result', payload, run_id=context['run_id'])
     assert reconcile.failed_result_proof(conn, context['task_id'], context['run_id'], context['claim_lock']) is None
+
+
+def test_observer_waits_for_distinct_outer_process(board):
+    conn, context = board
+    outer = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
+                             stdin=subprocess.PIPE, env=build_subprocess_env())
+    try:
+        _failed_child(conn, context, observe=True, outer_pid=outer.pid)
+        time.sleep(1)
+        assert conn.execute('SELECT status FROM task_runs WHERE id=?',
+                            (context['run_id'],)).fetchone()[0] == 'running'
+        assert outer.stdin is not None
+        outer.stdin.close()
+        outer.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        state = 'running'
+        while time.monotonic() < deadline:
+            state = conn.execute('SELECT status FROM task_runs WHERE id=?',
+                                 (context['run_id'],)).fetchone()[0]
+            if state != 'running':
+                break
+            time.sleep(.05)
+        assert state == 'crashed'
+    finally:
+        if outer.poll() is None:
+            outer.kill()
+            outer.wait()
+
+
+@pytest.mark.skipif(sys.platform != 'linux', reason='Linux zombie identity proof')
+def test_real_zombie_is_dead_only_with_matching_birth():
+    from hermes_cli.kanban_failed_result import process_gone
+    proc = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read(1)'],
+                            stdin=subprocess.PIPE, env=build_subprocess_env())
+    try:
+        birth = kbd._process_fingerprint(proc.pid)
+        assert birth is not None
+        assert not process_gone(proc.pid, birth)
+        assert proc.stdin is not None
+        proc.stdin.write(b'x')
+        proc.stdin.flush()
+        os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+        assert not process_gone(proc.pid, 'foreign|1')
+        assert process_gone(proc.pid, birth)
+    finally:
+        if proc.stdin:
+            proc.stdin.close()
+        proc.wait(timeout=5)
