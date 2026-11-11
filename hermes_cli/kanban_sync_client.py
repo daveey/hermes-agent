@@ -565,7 +565,7 @@ def translate(row: dict, hlc: str) -> dict:
         return {**op, "op": "delete"}
     fields = row["fields"] if isinstance(row["fields"], dict) else json.loads(row["fields"])
     out = {**op, "op": "upsert", "fields": _wire_fields(row["table_name"], fields)}
-    if row["op"] == "import" and row["table_name"] == "tasks":
+    if row["op"] in ("import", "compat_import") and row["table_name"] == "tasks":
         out["import"] = True
     return out
 
@@ -578,6 +578,10 @@ def _full_row_if_unseen(conn: sqlite3.Connection, row: dict) -> dict:
     Child rows (runs, comments, events, attachments, chat links) are small and always go whole: an update captured
     for a row whose insert the service refused earlier (a deploy still rolling out) would otherwise reach it with no
     ``task_id`` and be refused ``not_found``."""
+    if row["op"] in ("compat", "compat_import") and row["table_name"] == "tasks":
+        from hermes_cli.kanban_worker_placement import acknowledged_outbox
+        task = conn.execute("SELECT * FROM tasks WHERE id = ?", (row["row_uid"],)).fetchone()
+        return acknowledged_outbox(row, task)
     if row["op"] != "upsert":
         return row
     if row["table_name"] in sync._UID_TABLES:
@@ -618,6 +622,10 @@ def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -
     if not any(r["table_name"] != "tasks" for r in rows):
         return []
     in_batch = {r["row_uid"] for r in rows if r["table_name"] == "tasks"}
+    # A persisted parent (including a failed compatibility retry) already owns delivery.
+    # Resynthesizing it for its diagnostic child would reset the one-retry bound.
+    in_batch.update(r[0] for r in conn.execute(
+        "SELECT row_uid FROM kanban_sync_outbox WHERE table_name='tasks' AND state IN ('pending', 'rejected')"))
     wanted: list[str] = []
     for r in rows:
         if r["table_name"] == "tasks":
@@ -645,15 +653,8 @@ def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -
 
 
 def _record_live_claim_rejection(conn: sqlite3.Connection, row: dict, reason: str) -> None:
-    """A card write the Board refused because another gateway holds the card's live lease leaves a
-    ``sync_rejected`` event on the card (inside the push txn), so ``kanban show`` says the write never happened
-    instead of the card silently reverting to the service's row. [daveey]"""
-    from hermes_cli import kanban_db as kb
-    fields = row["fields"] if isinstance(row["fields"], dict) else json.loads(row["fields"] or "{}")
-    if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (row["row_uid"],)).fetchone() is None:
-        return
-    kb._append_event(conn, row["row_uid"], "sync_rejected",
-                     {"reason": reason[:300], "fields": sorted(fields), "op_id": row["op_id"]})
+    from hermes_cli.kanban_sync_compat import record_rejection
+    record_rejection(conn, row, reason)
 
 
 @dataclass
@@ -679,7 +680,9 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
             break
         with write_txn(conn):
             wire = [translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway)) for r in rows]
+            from hermes_cli.kanban_sync_compat import persist_parents
             parents = _unacked_parents(conn, rows, gateway)
+            rows = persist_parents(conn, parents) + rows
             wire = [op for op, _tid in parents] + wire
         try:
             resp = hub.ops(board, wire)
@@ -690,15 +693,9 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
             raise
         out.sent += len(rows)
         authoritative: list[sync.RemoteChange] = []
-        parent_ops = {op["client_op_id"]: tid for op, tid in parents}
         with write_txn(conn):
             for res in resp.get("results", []):
                 status, op_id = res.get("status"), res.get("client_op_id")
-                if op_id in parent_ops:
-                    if status in ("applied", "merged") and res.get("version"):
-                        conn.execute("UPDATE tasks SET sync_version = MAX(COALESCE(sync_version, 0), ?) WHERE id = ?",
-                                     (res["version"], parent_ops[op_id]))
-                    continue
                 row = next((r for r in rows if r["op_id"] == op_id), None)
                 if row is None:
                     continue
@@ -731,7 +728,12 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                                  "WHERE op_id = ?", (reason[:500], op_id))
                     out.rejected += 1
                     _log.warning("kanban sync: %s %s %s rejected (%s)", board, row["table_name"], row["row_uid"], reason)
-                    if row["table_name"] == "tasks" and res.get("reason") in ("live_claim", "forbidden_field"):
+                    if res.get("reason") == "forbidden_field":
+                        from hermes_cli.kanban_sync_compat import enqueue_retry, record_rejection
+                        sent_op = next(op for op in wire if op["client_op_id"] == op_id)
+                        enqueue_retry(conn, row, sent_op, res)
+                        record_rejection(conn, row, reason)
+                    elif row["table_name"] == "tasks" and res.get("reason") == "live_claim":
                         _record_live_claim_rejection(conn, row, reason)
                     if primary and res.get("row"):
                         authoritative.append(_row_change(row["table_name"], res["row"]))
