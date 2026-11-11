@@ -10,6 +10,26 @@ from typing import Any
 logger = logging.getLogger("agent.conversation_compression")
 
 
+def compression_context_window(agent, aux_model, aux_base_url, aux_api_key, aux_provider):
+    """Concrete metadata for allocated helpers; attested windows for deferred classes."""
+    from agent.conversation_compression import (
+        _aux_inherits_main_route, _configured_compression_context_length, _configured_custom_providers)
+    from agent.model_metadata import get_model_context_length
+    from agent.model_routing import is_class_selector
+
+    if is_class_selector(aux_model):
+        # Readiness must neither allocate nor send a selector into the model catalog.
+        from gateway.run_class_routing import class_context_length
+        return class_context_length(aux_model)
+    configured = _configured_compression_context_length(agent)
+    if configured is None and _aux_inherits_main_route(agent, aux_model, aux_base_url):
+        # Reuse the main route's resolved window, including its explicit context pin.
+        return int(agent.context_compressor.context_length)
+    return get_model_context_length(
+        aux_model, base_url=aux_base_url, api_key=aux_api_key, config_context_length=configured,
+        provider=aux_provider, custom_providers=_configured_custom_providers(agent))
+
+
 def _probe(agent: Any) -> None:
     from agent.conversation_compression import check_compression_model_feasibility
     check_compression_model_feasibility(agent)

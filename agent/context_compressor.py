@@ -2205,12 +2205,8 @@ class ContextCompressor(
 
     @property
     def threshold_tokens(self) -> int:
-        if self._threshold_tokens is None:
-            # Resolve the window first: it may floor threshold_percent as a side effect.
-            _ctx = self.context_length
-            self._threshold_tokens = self._compute_threshold_tokens(_ctx, self.threshold_percent, self.max_tokens)
-            self._apply_threshold_tokens_cap()
-        return self._threshold_tokens
+        from agent.context_compressor_threshold import threshold_tokens
+        return threshold_tokens(self)
 
     @threshold_tokens.setter
     def threshold_tokens(self, value: int) -> None:
@@ -2681,6 +2677,7 @@ class ContextCompressor(
         if max_tokens is not None:
             self.max_tokens = self._coerce_max_tokens(max_tokens)
         if runtime_changed:
+            self._route_context_ceiling = None
             # The aux ceiling was probed against the previous main runtime (an "auto" aux route follows the
             # main model); the caller re-runs the feasibility probe. A same-runtime recompute (overflow-reported
             # window, grown local window, tier cap) keeps it: the summariser did not change (#114707).
@@ -2741,11 +2738,11 @@ class ContextCompressor(
         """Clamp threshold_tokens to the configured cap (itself clamped to the context length) and to the
         auxiliary summariser's window when the feasibility probe installed one."""
         cap = self._effective_threshold_cap(self.context_length)
-        if cap is not None and cap < self.threshold_tokens:
+        if cap is not None and cap < self._threshold_tokens:
             self.threshold_tokens = cap
         # Durable, so every recomputation honours it rather than a one-time assignment (#114707).
         _aux_ceiling = getattr(self, "_aux_context_ceiling", None)
-        if isinstance(_aux_ceiling, int) and 0 < _aux_ceiling < self.threshold_tokens:
+        if isinstance(_aux_ceiling, int) and 0 < _aux_ceiling < self._threshold_tokens:
             self.threshold_tokens = _aux_ceiling
 
     @staticmethod

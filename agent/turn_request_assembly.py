@@ -289,6 +289,11 @@ def assemble_api_request(
         request_pressure_tokens = _pressure_with_real_floor(
             agent.context_compressor, request_pressure_tokens
         )
+    from agent.model_routing_request import route_preflight_pressure
+
+    request_pressure_tokens = route_preflight_pressure(agent, {
+        "model": agent.model, "messages": api_messages, "tools": tools_for_api,
+    }, request_pressure_tokens)
     # Measured: the request-only replay price must not reach a provider.
     from agent.message_metadata import drop_request_reasoning_tokens
 

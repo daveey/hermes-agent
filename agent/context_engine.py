@@ -57,7 +57,18 @@ class ContextEngine(ABC):
     last_prompt_tokens: int = 0
     last_completion_tokens: int = 0
     last_total_tokens: int = 0
-    threshold_tokens: int = 0
+    _engine_threshold_tokens: int = 0
+
+    @property
+    def threshold_tokens(self) -> int:
+        cap = getattr(self, "_route_context_ceiling", None)
+        return min(self._engine_threshold_tokens, cap) if isinstance(cap, int) else self._engine_threshold_tokens
+
+    @threshold_tokens.setter
+    def threshold_tokens(self, value: int) -> None:
+        self._engine_threshold_tokens = value
+        self._route_context_ceiling = None
+
     context_length: int = 0
     compression_count: int = 0
     # Compaction parameters (read by run_agent.py for preflight). protect_first_n counts

@@ -17,6 +17,10 @@ class ModelRoutingError(ValueError):
     """Fail closed; deliberately not AuthError (legacy paid fallbacks catch it)."""
 
 
+class RouteContextOverflow(ModelRoutingError):
+    """An otherwise eligible route only needs a smaller request; never authorize failover."""
+
+
 def is_class_selector(model):
     return isinstance(model, str) and model.startswith("class:")
 

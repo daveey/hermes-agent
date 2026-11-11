@@ -93,7 +93,8 @@ def run_preflight_gate(
         # An anchored figure is real usage + delta: never deferred. Only a whole-context rough
         # estimate waits for the provider's count.
         defer_preflight=(
-            (lambda _t: False) if getattr(agent, "_request_pressure_anchored", False)
+            (lambda _t: False) if (getattr(agent, "_request_pressure_anchored", False)
+                                  or getattr(agent, "_route_context_pressure", False))
             else getattr(_compressor, "should_defer_preflight_to_real_usage", lambda _t: False)
         ),
         moa_prepared_request=_moa_prepared_request, system_message=system_message,

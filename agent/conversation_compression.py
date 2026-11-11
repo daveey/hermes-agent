@@ -2037,7 +2037,7 @@ def check_compression_model_feasibility(agent: Any) -> None:
             _resolve_task_provider_model, _try_configured_fallback_for_unavailable_client,
             get_text_auxiliary_client,
         )
-        from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, get_model_context_length
+        from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
         # Provider may be "auto"; fall back to the client's base_url hostname so the
         # user can tell where the compression model is actually called.
         try:
@@ -2078,17 +2078,8 @@ def check_compression_model_feasibility(agent: Any) -> None:
         _aux_provider = (
             _aux_cfg_provider if _aux_cfg_provider and _aux_cfg_provider != "auto" else getattr(agent, "provider", "")
         )
-        _aux_cfg_ctx = _configured_compression_context_length(agent)
-        if _aux_cfg_ctx is None and _aux_inherits_main_route(agent, aux_model, aux_base_url):
-            # Same model on the same route: reuse the main model's already-resolved window (which honours
-            # model.context_length / provider pins). Re-resolving from scratch lost the pin and auto-lowered
-            # the session threshold to a catch-all catalog value (#89500, #45519).
-            aux_context = int(agent.context_compressor.context_length)
-        else:
-            aux_context = get_model_context_length(
-                aux_model, base_url=aux_base_url, api_key=aux_api_key, config_context_length=_aux_cfg_ctx,
-                provider=_aux_provider, custom_providers=_configured_custom_providers(agent),
-            )
+        from agent.conversation_compression_feasibility import compression_context_window
+        aux_context = compression_context_window(agent, aux_model, aux_base_url, aux_api_key, _aux_provider)
         # Aux model must meet MINIMUM_CONTEXT_LENGTH like the main model, else it cannot summarise a full window.
         if aux_context and aux_context < MINIMUM_CONTEXT_LENGTH:
             raise ValueError(
@@ -2111,6 +2102,9 @@ def check_compression_model_feasibility(agent: Any) -> None:
             # replayed (``replay_compression_warning``) for a session that is no longer clamped (#114707).
             agent._last_feasibility_notice = None
             agent._compression_warning = None
+        if getattr(agent.context_compressor, "_route_context_ceiling", None) is not None:
+            # Keep a masked aux limit: removing the route cap must not lose it.
+            agent.context_compressor._aux_context_ceiling = aux_context
     except ValueError:
         # Hard rejections (aux below minimum context) must propagate so the session refuses to start.
         raise

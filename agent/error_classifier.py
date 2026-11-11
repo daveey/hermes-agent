@@ -1130,6 +1130,9 @@ def classify_api_error(
     ``api_key`` identifies an anonymous request; a host or fairshare reason alone does not.
     The credential is never included in the returned context."""
     from hermes_cli.anon_auth import is_anonymous_request
+    from agent.model_routing import RouteContextOverflow
+    if isinstance(error, RouteContextOverflow):
+        return ClassifiedError(provider=provider, model=model, message=str(error), **_V_CONTEXT_OVERFLOW)
     status_code = _extract_status_code(error)
     # Some SDK RateLimitError / AuthenticationError classes set no .status_code; the class names it.
     if status_code is None:
