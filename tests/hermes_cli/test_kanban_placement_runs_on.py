@@ -38,6 +38,15 @@ def test_runs_on_is_never_among_the_options_sent_to_the_target():
     assert "runs_on" not in kp.carried_options({"title": "t", "runs_on": ["machine:worker-1"]})
 
 
+def test_mandatory_model_pin_is_refused_not_silently_relaxed(mac):
+    from tools import kanban_tools as kt
+    mac["result"]["help"] = helpers.NEW_HELP
+    out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "placement": "hub",
+                                        "model": "example-model", "pin_mandatory": True}))
+    assert out.get("code") == "placement_unavailable" and "pin_mandatory" in out["error"], out
+    assert mac["calls"] == [] and helpers._local_count() == 0
+
+
 def test_runs_on_card_is_not_pool_portable():
     """A worker pool never re-places a card whose creator named its machines."""
     assert kp.portable_reason({"title": "Fix the flaky test", "runs_on": ["machine:worker-1"]},

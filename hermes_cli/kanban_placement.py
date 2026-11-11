@@ -157,7 +157,7 @@ UNCARRIED_OPTIONS = ("initial_status", "human_request", "workspace_path", "proje
                      # nor machine labels: before this a courier create dropped them and the card ran on the
                      # target's own queue (11-11: placement="hub", runs_on=[machine:worker-1]). The labels work
                      # from the creating board (Board lease), so such a card stays here; with a pin it is refused.
-                     "runs_on")
+                     "runs_on", "pin_mandatory")  # courier cannot preserve mandatory model pins either
 # kanban_create options a hermes-hub client with `create-task --option KEY=JSON` carries to the card.
 # (hermes-hub also allows reasoning_effort, but kanban_create has no such parameter.)
 CARRIED_OPTIONS = ("skills", "max_runtime_seconds", "priority", "model", "provider", "goal_mode",
