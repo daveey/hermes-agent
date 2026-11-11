@@ -24,17 +24,11 @@ import json
 import logging
 import os
 import shlex
-import shutil
 import subprocess
 import threading
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Optional
-
-# ``tool_reason`` slugs a survivable foreground command outlives: card A's update pause, the gateway's
-# restart/shutdown stop and a TUI/Desktop backend exit (session_reaper's ``backend_exit``). A user Stop, a
-# new message, a timeout and every watchdog are not in it: those still kill the command.
-from tools.interrupt import SURVIVABLE_INTERRUPT_REASONS
 
 logger = logging.getLogger("tools.process_registry")
 
@@ -72,7 +66,8 @@ def usable() -> bool:
 
     # The same decision persisted_job_scope_argv makes: a process in no user unit gets no scope.
     in_unit = kanban_run_scope_cgroup() is not None or user_unit_cgroup() is not None
-    if in_unit and shutil.which("systemd-run") and pr._systemd_run_user_scope_available():
+    # The probe resolves systemd-run itself (no binary = unusable).
+    if in_unit and pr._systemd_run_user_scope_available():
         return True
     with _warn_lock:
         if not _warned:
@@ -109,7 +104,11 @@ def foreground_eligible(env: Any, env_type: str, effective_timeout: Any) -> bool
 def survivable_interrupt_reason(*thread_ids: Optional[int]) -> Optional[str]:
     """The pending interrupt of ``thread_ids`` (the waiter, the tool thread it acts for) when it is one a
     survivable command outlives; None for any other interrupt (a user Stop kills the command)."""
-    from tools.interrupt import thread_interrupt_reason
+    # ``SURVIVABLE_INTERRUPT_REASONS``: the ``tool_reason`` slugs a survivable foreground command outlives
+    # (card A's update pause, the gateway's restart/shutdown stop, a TUI/Desktop backend exit). A user Stop,
+    # a new message, a timeout and every watchdog are not in it: those still kill the command. Imported here,
+    # not at module level: terminal_tool imports this module, and harnesses stub tools.interrupt.
+    from tools.interrupt import SURVIVABLE_INTERRUPT_REASONS, thread_interrupt_reason
 
     for tid in thread_ids:
         if tid and (reason := thread_interrupt_reason(tid)) in SURVIVABLE_INTERRUPT_REASONS:

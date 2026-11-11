@@ -21,7 +21,7 @@ import pytest
 import tools.process_registry as pr
 import tools.process_registry_survivable as surv
 from tests.waiting import wait_until
-from tools.interrupt import set_interrupt
+from tools.interrupt import SURVIVABLE_INTERRUPT_REASONS, set_interrupt
 from tools.process_registry import ProcessRegistry
 
 REPO = str(Path(pr.__file__).resolve().parents[1])
@@ -41,7 +41,6 @@ def key(monkeypatch):
     monkeypatch.setattr(pr.ProcessRegistry, "_config_value",
                         staticmethod(lambda section, k, fallback: state["on"] if k == surv.CONFIG_KEY else fallback))
     monkeypatch.setattr(pr, "_systemd_run_user_scope_available", lambda: state["scope"])
-    monkeypatch.setattr(surv.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(surv, "_warned", False)
     return state
 
@@ -208,7 +207,7 @@ def test_a_shutdown_after_a_user_stop_keeps_the_stop_reason_on_the_tool_thread()
 
     tid = threading.get_ident()
     try:
-        for later in sorted(surv.SURVIVABLE_INTERRUPT_REASONS):
+        for later in sorted(SURVIVABLE_INTERRUPT_REASONS):
             stopped = agent()
             request_hard_interrupt(stopped)  # the user's Stop
             stop_reason = stopped._tool_interrupt_reason
