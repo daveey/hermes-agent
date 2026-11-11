@@ -426,6 +426,39 @@ def test_long_foreground_command_outlives_a_shutdown_interrupt(tmp_path, monkeyp
 @pytest.mark.live_system_guard_bypass
 @pytest.mark.platforms("linux")
 @pytest.mark.skipif(not _user_systemd(), reason="needs a user systemd bus")
+def test_update_pause_cancel_keeps_the_surviving_jobs_result(tmp_path, monkeypatch):
+    """Card A's mid-tool update cancel commits the cancelled call's result: for a survivable foreground
+    command it is the real ``process continues as <id>`` result, not the "re-run if still needed" stamp."""
+    from agent import update_pause_cancel
+
+    result = _run_owner(tmp_path, monkeypatch, {"command": "sleep 8; echo fg-done", "timeout": 120},
+                        key_on=True, reason=update_pause_cancel.CANCEL_TOOL_REASON)
+    pid = result.get("pid") or 0
+    try:
+        sid = result["session_id"]
+        assert result["status"] == "continues_in_background"
+        assert _alive(pid), "the update-paused foreground command did not survive its owner's stop"
+
+        class _Agent:
+            _interrupt_requested = False
+
+            def interrupt(self, message=None, *, tool_reason=None, **_kw):
+                self._interrupt_requested, self._tool_interrupt_reason = True, tool_reason
+
+        agent = _Agent()
+        update_pause_cancel.started(agent, "c1")
+        assert update_pause_cancel.cancel(agent, "[interrupted by Hermes update: re-run if still needed]") == ["c1"]
+        tool_text = json.dumps(result, ensure_ascii=False)
+        committed, cancelled = update_pause_cancel.committed(agent, "c1", tool_text)
+        assert cancelled is True
+        assert json.loads(committed)["output"].splitlines()[-1] == f"process continues as {sid}"
+    finally:
+        _cleanup(pid)
+
+
+@pytest.mark.live_system_guard_bypass
+@pytest.mark.platforms("linux")
+@pytest.mark.skipif(not _user_systemd(), reason="needs a user systemd bus")
 def test_user_stop_still_kills_a_long_foreground_command(tmp_path, monkeypatch):
     marker = tmp_path / "ran-past-stop"
     result = _run_owner(tmp_path, monkeypatch, {"command": f"sleep 8; touch {marker}", "timeout": 120},

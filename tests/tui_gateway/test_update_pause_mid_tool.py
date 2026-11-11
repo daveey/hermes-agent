@@ -443,6 +443,33 @@ def test_the_cancel_is_not_a_user_intervention(tmp_path):
     assert update_pause_cancel.committed(agent, "c1", "partial") == ("stamp", True)
 
 
+def test_a_foreground_command_handed_to_the_background_keeps_its_result(tmp_path):
+    """terminal.update_survivable_processes: the cancel did not kill the command, it became a job. Its result
+    (``process continues as <id>``) is kept, so the resumed turn sees the job instead of "re-run"."""
+    import json
+
+    agent = _make_agent(tmp_path, "long_job")
+    update_pause_cancel.started(agent, "c1")
+    assert update_pause_cancel.cancel(agent, "stamp") == ["c1"]
+    survived = json.dumps({"output": "[interrupted by hermes update pause]\nprocess continues as proc_1",
+                           "exit_code": None, "status": "continues_in_background", "session_id": "proc_1"})
+    assert update_pause_cancel.committed(agent, "c1", survived) == (survived, True)
+
+
+@pytest.mark.parametrize("result", [
+    None, {"status": "continues_in_background", "session_id": "proc_1"},  # not the tool's JSON text
+    'output mentions "continues_in_background" but is not JSON',
+    '{"status": "completed", "note": "continues_in_background"}',
+    '["continues_in_background"]',
+    '{"status": "continues_in_background", "session_id": ""}',
+])
+def test_any_other_result_of_a_cancelled_call_is_stamped(tmp_path, result):
+    agent = _make_agent(tmp_path, "long_job")
+    update_pause_cancel.started(agent, "c1")
+    assert update_pause_cancel.cancel(agent, "stamp") == ["c1"]
+    assert update_pause_cancel.committed(agent, "c1", result) == ("stamp", True)
+
+
 def test_a_later_request_in_the_same_turn_cancels_again(home, monkeypatch):
     monkeypatch.setattr(up, "MID_TOOL_GRACE_S", 30.0)
     record_turn_start(home, "session-key", "p")
