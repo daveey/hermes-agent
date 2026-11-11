@@ -241,23 +241,31 @@ def _text(content: Any) -> str:
 # ── Derivation ─────────────────────────────────────────────────────────────
 
 
-def _live_turn(db: Any, sid: str) -> bool:
+def _live_turn(db: Any, sid: str, concluding: frozenset[str] = frozenset()) -> bool:
     """A live turn has a durable writer lease, a live TUI marker, or a gateway active-turn token.
 
     Managed workers and CLI turns need no TUI marker or gateway routing entry. Their shared
-    turn-facade lease is the cross-process evidence; an idle attached session is not a turn."""
+    turn-facade lease is the cross-process evidence; an idle attached session is not a turn.
+    ``concluding`` [daveey]: tokens of the turn that is concluding (``capture_turn_identity``); evidence
+    carrying one of them is that turn's own, not a live turn."""
+    return any(token not in concluding for token in _live_turn_tokens(db, sid))
+
+
+def _live_turn_tokens(db: Any, sid: str) -> Iterator[str]:
+    """Identity token of each live-turn evidence, lazily (``_live_turn`` stops at the first foreign one)."""
     from tui_gateway.turn_marker import marker_writer_state, read_turn_marker
 
     home = Path(db.db_path).parent
     marker = read_turn_marker(home, sid)
     if marker and marker_writer_state(marker) == "alive":
-        return True
-    if _guarded("durable turn", sid, lambda: _durable_turn_live(db, sid), False):
-        return True
-    return _guarded("gateway turn", sid, lambda: _gateway_turn_live(db, sid), False)
+        yield f"marker:{marker.get('writer_pid')}:{marker.get('started_at')}"
+    owner = _guarded("durable turn", sid, lambda: _durable_turn_owner(db, sid), None)
+    if owner is not None:
+        yield f"lease:{owner['holder']}:{owner.get('acquired_at')}"
+    yield from _guarded("gateway turn", sid, lambda: list(_gateway_turn_tokens(db, sid)), [])
 
 
-def _durable_turn_live(db: Any, sid: str) -> bool:
+def _durable_turn_owner(db: Any, sid: str) -> Optional[dict[str, Any]]:
     """Read the compression-root writer without reclaiming it; expired authority is not liveness.
 
     The store rejects dead local owners. Expiry also bounds abandoned releases and unknown
@@ -266,15 +274,17 @@ def _durable_turn_live(db: Any, sid: str) -> bool:
     from hermes_state_compression import _turn_lease_abandoned
 
     owner = db.session_turn_lease_owner(sid)
-    return (owner is not None and float(owner["expires_at"]) > time.time()
-            and not _turn_lease_abandoned(db.db_path, owner["holder"]))
+    if (owner is not None and float(owner["expires_at"]) > time.time()
+            and not _turn_lease_abandoned(db.db_path, owner["holder"])):
+        return owner
+    return None
 
 
 # [daveey] A gateway turn token older than this is a leaked marker (its CAS clear failed), not a live turn.
 _GATEWAY_TURN_MAX_AGE_S = 6 * 3600.0
 
 
-def _gateway_turn_live(db: Any, sid: str) -> bool:
+def _gateway_turn_tokens(db: Any, sid: str) -> Iterator[str]:
     """[daveey] A gateway routing entry for ``sid`` carries ``active_turn_token`` (``mark_turn_active`` at
     turn start, CAS-cleared at its end) and the gateway owning that routing scope is running. A crashed
     gateway leaves the token behind until its next start recovers it, so a dead gateway reads not-live."""
@@ -289,8 +299,11 @@ def _gateway_turn_live(db: Any, sid: str) -> bool:
         scope = str(routing_scope or "")
         gateway_home = Path(scope).parent if scope else Path(db.db_path).parent
         if _gateway_running(gateway_home):
-            return True
-    return False
+            yield f"gateway:{scope}:{entry.get('active_turn_token')}:{entry.get('active_turn_started_at')}"
+
+
+def _gateway_turn_live(db: Any, sid: str) -> bool:
+    return next(_gateway_turn_tokens(db, sid), None) is not None
 
 
 def _iso_epoch(value: Any) -> Optional[float]:
@@ -655,9 +668,11 @@ def _lineage_accounted_at(db: Any, ids: list[str]) -> Optional[float]:
 
 
 def _derive(db: Any, sid: str, *, ignore_live_turn: bool = False,
-            pending_reply: Optional[str] = None) -> dict[str, Any]:
+            pending_reply: Optional[str] = None,
+            concluding: frozenset[str] = frozenset()) -> dict[str, Any]:
     stored = _parse((_row(db, sid) or {}).get("outcome_json"))
-    current = _derive_kept_receipt(db, sid, stored, ignore_live_turn=ignore_live_turn, pending_reply=pending_reply)
+    current = _derive_kept_receipt(db, sid, stored, ignore_live_turn=ignore_live_turn, pending_reply=pending_reply,
+                                  concluding=concluding)
     if current.get("source") == "declared":
         return current
     accounted = _lineage_accounted_at(db, _lineage_ids(db, sid))
@@ -669,10 +684,12 @@ def _derive(db: Any, sid: str, *, ignore_live_turn: bool = False,
 
 
 def _derive_kept_receipt(db: Any, sid: str, stored: Optional[dict], *, ignore_live_turn: bool,
-                         pending_reply: Optional[str]) -> dict[str, Any]:
+                         pending_reply: Optional[str],
+                         concluding: frozenset[str] = frozenset()) -> dict[str, Any]:
     from hermes_completion_receipt import historical_fields
     historical = historical_fields(stored)
-    current = _derive_current(db, sid, ignore_live_turn=ignore_live_turn, pending_reply=pending_reply)
+    current = _derive_current(db, sid, ignore_live_turn=ignore_live_turn, pending_reply=pending_reply,
+                              concluding=concluding)
     if current.get("kind") == "done":
         # A declared done carries its own receipt (or none: unspecified). A derived
         # done keeps the last receipt only while no newer user request arrived, i.e.
@@ -688,14 +705,19 @@ def _derive_kept_receipt(db: Any, sid: str, stored: Optional[dict], *, ignore_li
 
 
 def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
-                    pending_reply: Optional[str] = None) -> dict[str, Any]:
+                    pending_reply: Optional[str] = None,
+                    concluding: frozenset[str] = frozenset()) -> dict[str, Any]:
     now = time.time()
     row = _row(db, sid) or {}
     stored = _parse(row.get("outcome_json"))
     if row.get("muted"):
         return _outcome("muted", now, **({"declared": _declared(stored)} if _declared(stored) else {}))
-    if not ignore_live_turn and _live_turn(db, sid):
-        return _outcome("running", now)
+    if not ignore_live_turn and _live_turn(db, sid, concluding):
+        # [daveey] A running turn keeps the declaration it already stored: a refresh that sees a newer turn live
+        # must not erase it, or the next refresh judges the reply alone and paints done what the agent declared
+        # waiting (local-9c06dfbb…, 2026-11-11).
+        declared = _declared(stored)
+        return _outcome("running", now, **({"declared": declared} if declared else {}))
     ids = _lineage_ids(db, sid)
     decisions, waits, card_read_failed = _live_work(db, sid, ids)
     tail = _without_finished_notes(_tail(db, sid))
@@ -827,14 +849,27 @@ def derive_outcome(sid: str, *, db: Any = None, ignore_live_turn: bool = False,
         return _derive(handle, _tip(handle, sid), ignore_live_turn=ignore_live_turn, pending_reply=pending_reply)
 
 
-def refresh_outcome(sid: str, trigger: str, *, db: Any = None) -> dict[str, Any]:
-    """Derive, write when it changed, and return the outcome now stored."""
+def capture_turn_identity(sid: str, *, db: Any = None) -> frozenset[str]:
+    """[daveey] The live-turn evidence ``sid`` holds right now, as opaque tokens (TUI marker pid+start, turn-lease
+    holder+acquisition, gateway routing token+start). A turn's conclusion captures this BEFORE it schedules its
+    ``turn_end`` refresh and hands it to ``refresh_outcome(concluding_turn=...)``: the refresh then discounts
+    exactly that turn's not-yet-released evidence, while a turn that started afterwards (different token) is
+    still a live turn. Callers treat a failed capture as nothing to discount."""
+    with _db_scope(db) as handle:
+        return frozenset(_live_turn_tokens(handle, _tip(handle, sid)))
+
+
+def refresh_outcome(sid: str, trigger: str, *, db: Any = None,
+                    concluding_turn: Optional[Iterable[str]] = None) -> dict[str, Any]:
+    """Derive, write when it changed, and return the outcome now stored. ``concluding_turn``: the
+    ``capture_turn_identity`` of the turn whose conclusion is refreshing (``turn_end``): only that turn's own
+    evidence is not a live turn; any other live turn derives ``running``."""
     if trigger not in TRIGGERS:
         raise ValueError(f"unknown outcome trigger {trigger!r}")
     with _db_scope(db) as handle:
         tip = _tip(handle, sid)
         row = _row(handle, tip)
-        derived = _derive(handle, tip)
+        derived = _derive(handle, tip, concluding=frozenset(concluding_turn or ()))
         if row is None:
             return derived
         stored = _parse(row.get("outcome_json"))

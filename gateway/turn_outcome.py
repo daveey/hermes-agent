@@ -15,11 +15,24 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-def _refresh(sid: str, db) -> None:
+def _capture(sid: str, db) -> frozenset:
+    """The concluding turn's own live-turn evidence (routing token, turn lease, marker), taken now, before the
+    refresh is scheduled. The refresh runs later on an unawaited thread: a newer turn may have started by then,
+    and only this turn's evidence may be discounted. Nothing captured = nothing discounted."""
+    try:
+        from hermes_state_outcome import capture_turn_identity
+
+        return capture_turn_identity(sid, db=db)
+    except Exception:  # health: allow BLE001 -- best-effort; an unreadable store discounts nothing
+        logger.warning("gateway turn identity capture failed for %s", sid, exc_info=True)
+        return frozenset()
+
+
+def _refresh(sid: str, db, concluding_turn: frozenset) -> None:
     try:
         from hermes_state_outcome import refresh_outcome
 
-        refresh_outcome(sid, "turn_end", db=db)
+        refresh_outcome(sid, "turn_end", db=db, concluding_turn=concluding_turn)
     except Exception:  # health: allow BLE001 -- the turn already concluded; a failed refresh is logged
         logger.warning("gateway turn-end outcome refresh failed for %s", sid, exc_info=True)
 
@@ -34,7 +47,8 @@ def refresh_gateway_turn_outcome(runner, session_entry) -> Optional[threading.Th
     try:
         from agent.memory_provider import spawn_context_thread
 
-        thread = spawn_context_thread(_refresh, name="gateway-turn-outcome", args=(sid, db))
+        thread = spawn_context_thread(
+            _refresh, name="gateway-turn-outcome", args=(sid, db, _capture(sid, db)))
         thread.start()
         return thread
     except Exception:  # health: allow BLE001 -- a thread that can't start skips one refresh; logged

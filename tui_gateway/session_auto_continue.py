@@ -123,6 +123,11 @@ def _schedule_refused_turn_retry(sid: str, session: dict, marker_key: str) -> No
     if delay is None:
         return
 
+    # [daveey] The refused turn's own evidence, taken when it concluded: a turn the user starts during the wait is
+    # a live turn the refresh must not paint over.
+    from tui_gateway.turn_outcome import capture_concluding_turn
+    concluding = capture_concluding_turn(session, session.get("agent"))
+
     def fire() -> None:
         from tui_gateway.update_pause import _detect_skew
         if _detect_skew() is not None:
@@ -130,7 +135,7 @@ def _schedule_refused_turn_retry(sid: str, session: dict, marker_key: str) -> No
         if _maybe_schedule_auto_continue(sid, session, marker_key) is None \
                 and read_turn_marker(_session_home(session), marker_key) is None:
             from tui_gateway.turn_outcome import refresh_turn_outcome
-            refresh_turn_outcome(session, session.get("agent"))
+            refresh_turn_outcome(session, session.get("agent"), concluding)
 
     timer = threading.Timer(delay, fire)
     timer.daemon = True
