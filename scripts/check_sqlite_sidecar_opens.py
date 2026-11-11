@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail when production code opens a SQLite ``-shm``/``-wal`` sidecar with a plain file call.
+"""Fail when production code opens a SQLite database or sidecar with a plain file call.
 
 POSIX cancels every advisory lock a process holds on a file when that process closes ANY
 descriptor for it. SQLite keeps its WAL locks (the writer lock included) as POSIX locks on
@@ -21,10 +21,11 @@ opens, reads, writes or copies a file
   (``os``, ``io``, ``shutil`` under any alias, a ``Path``; the method name alone decides)
 
 when it names a sidecar: ANY argument (or the receiver, unless that is ``os``/``io``/``shutil``) contains a
-``str``/``bytes`` literal ending in ``-shm`` or ``-wal`` (each f-string fragment counts, so do
+``str``/``bytes`` literal ending in ``.db``, ``-shm``, ``-wal`` or ``-journal`` (f-string fragments count, so do
 ``name + "-wal"`` and ``"%s-wal" % db``), or a name assigned from such an expression. A literal
 that is only tested (``name.endswith("-wal")``, ``x == "-shm"``) does not count.
 
+Read/write text/bytes methods inspect only the receiver, not content or encoding arguments.
 Names are tracked without flow, and err toward flagging (rename the variable or mark the line):
 
   variables      per function: assignment, ``for``/comprehension target, ``with ... as``,
@@ -38,8 +39,8 @@ Names are tracked without flow, and err toward flagging (rename the variable or 
 
 Not caught: a sidecar path built in another file, by a helper defined elsewhere, or passed in
 as a parameter; one stored under a subscript (``d["wal"] = ...; open(d["wal"])``); an aliased
-import (``from os import open as os_open``); a plain open of the main database file (no
-literal names it); ``open`` under another name (``op = open``); a global one function writes
+import (``from os import open as os_open``); a database path with no identifying literal;
+``open`` under another name (``op = open``); a global one function writes
 and another opens; a copy made by a child process; and descriptors opened from C extensions. The runtime side of this rule is ``hermes_state``'s WAL
 lock guard; a review still has to catch those.
 
@@ -71,10 +72,10 @@ MARKER = "sqlite-sidecar-open: ok"
 # The lock-safe readers themselves: the one place a raw descriptor on a sidecar is the point.
 HELPER_FILES = {"hermes_cli/sqlite_safe_read.py"}
 SCAN_TREES = ("agent", "cron", "gateway", "hermes_cli", "plugins", "tools", "tui_gateway", "acp_adapter", "pm")
-SCAN_ROOT_FILES = ("cli.py", "run_agent.py", "hermes_state.py", "utils.py", "hermes_constants.py")
+SCAN_ROOT_FILES = (":(top,glob)*.py",)
 SKIP_PARTS = {"tests", "__pycache__", "evals", "node_modules"}
-_SUFFIXES = ("-shm", "-wal")
-_BYTE_SUFFIXES = (b"-shm", b"-wal")
+_SUFFIXES = (".db", "-shm", "-wal", "-journal")
+_BYTE_SUFFIXES = tuple(suffix.encode("ascii") for suffix in _SUFFIXES)
 # Cheap text prefilter: only files mentioning a sidecar suffix are parsed.
 _NEEDLES = _SUFFIXES
 _TEST_METHODS = {"endswith", "startswith", "removesuffix", "removeprefix", "count", "find", "index"}
@@ -176,6 +177,8 @@ def _file_call_paths(node: ast.Call) -> list[ast.AST]:
     if not isinstance(func, ast.Attribute):
         return []
     owner = func.value.id if isinstance(func.value, ast.Name) else None
+    if func.attr in {"read_bytes", "read_text", "write_bytes", "write_text"}:
+        return [func.value]  # payload/encoding are not paths
     if func.attr in _FILE_METHODS or func.attr in _SHUTIL_FUNCS:
         # os.open(path, ...), shutil.copyfile(src, dst): only the arguments are paths. For
         # Path(path).open(), path.read_bytes(), path.copy(dst) the receiver is one too.
@@ -193,7 +196,19 @@ def sidecar_open_lines(text: str) -> list[int]:
         return []
     # Attribute names (``self.shm = db + "-shm"``) are shared by the whole file: the method that
     # sets one is rarely the method that opens it.
-    attrs = frozenset(n for n in _tainted_names(list(ast.walk(tree)), frozenset()) if n.startswith("."))
+    attrs: frozenset[str] = frozenset()
+    while True:
+        found_attrs = set(attrs)
+        pending: list[tuple[ast.AST, frozenset[str]]] = [(tree, attrs)]
+        while pending:
+            scope, inherited = pending.pop()
+            nodes = _scope_nodes(scope)
+            tainted = _tainted_names(nodes, inherited)
+            found_attrs.update(n for n in tainted if n.startswith("."))
+            pending.extend((node, tainted) for node in nodes if isinstance(node, _SCOPES))
+        if found_attrs == attrs:
+            break
+        attrs = frozenset(found_attrs)
     lines: set[int] = set()
     scopes: list[tuple[ast.AST, frozenset[str]]] = [(tree, attrs)]
     while scopes:
@@ -301,10 +316,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.strict_baseline:
         problems.extend(advisories)
     if not problems:
-        print("no plain file calls on SQLite -shm/-wal sidecars outside sqlite_safe_read")
+        print("no plain file calls on SQLite .db/-shm/-wal/-journal paths outside sqlite_safe_read")
         return 0
     print("\n".join(problems))
-    print(f"\n{len(problems)} plain file call(s) on a SQLite -shm/-wal sidecar. Closing any descriptor on a "
+    print(f"\n{len(problems)} plain file call(s) on a SQLite database or sidecar. Closing any descriptor on a "
           "sidecar cancels this process's SQLite locks on it (a write transaction's writer lock included), "
           "so another process can write the same WAL. Read it with hermes_cli.sqlite_safe_read "
           "(pread_lock_safe / read_header_lock_safe / sha256_lock_safe, copy_file_out_of_process), or mark a "

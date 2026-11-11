@@ -1327,10 +1327,8 @@ def _create_quick_snapshot_locked(
             continue
 
         if src.is_dir():
-            # Walk the directory and record each file individually in the
-            # manifest so restore can treat them uniformly.  Empty dirs are
-            # skipped (nothing to snapshot).
-            for sub in src.rglob("*"):
+            # Record each file; SQLite backup captures sidecars, which must never be raw-copied.
+            for sub in filter(lambda p: not p.name.endswith(_SQLITE_SIDECAR_SUFFIXES), src.rglob("*")):
                 if not sub.is_file():
                     continue
                 sub_rel = sub.relative_to(home).as_posix()
@@ -1363,6 +1361,7 @@ def _create_quick_snapshot_locked(
                                 )
                             continue
                     else:
+                        # sqlite-sidecar-open: ok — sidecars skipped above; .db uses _safe_copy_db.
                         shutil.copy2(sub, dst)
                     manifest[sub_rel] = dst.stat().st_size
                 except (OSError, PermissionError) as exc:
@@ -1395,6 +1394,7 @@ def _create_quick_snapshot_locked(
                         )
                     continue
             else:
+                # sqlite-sidecar-open: ok — _QUICK_STATE_FILES has no sidecars; .db uses _safe_copy_db.
                 shutil.copy2(src, dst)
             manifest[rel] = dst.stat().st_size
         except (OSError, PermissionError) as exc:

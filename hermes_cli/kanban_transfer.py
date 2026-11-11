@@ -324,6 +324,7 @@ def import_board(
 
         board_root = kb.board_dir(target)
         board_root.mkdir(parents=True, exist_ok=True)
+        # sqlite-sidecar-open: ok — detached archive extract, new board slug, no open connection.
         shutil.move(str(staged_db), str(board_root / "kanban.db"))
         for tree in ("attachments", "logs"):
             src = extracted / tree

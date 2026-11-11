@@ -118,6 +118,31 @@ def test_quick_snapshot_tree_is_owner_only_under_permissive_umask(tmp_path) -> N
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in files)
 
 
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+def test_quick_snapshot_never_raw_copies_board_sidecars(tmp_path, monkeypatch, suffix):
+    from hermes_cli import backup
+
+    home = tmp_path / "home"
+    board = home / "kanban" / "boards" / "example"
+    board.mkdir(parents=True)
+    sidecar = board / ("kanban.db" + suffix)
+    sidecar.write_bytes(b"sidecar sentinel")
+    metadata = board / "board.json"
+    metadata.write_text("{}", encoding="utf-8")
+    original_copy = backup.shutil.copy2
+
+    def copy_without_sidecars(src, dst, *args, **kwargs):
+        assert Path(src) != sidecar, "must not open a live SQLite sidecar"
+        return original_copy(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(backup.shutil, "copy2", copy_without_sidecars)
+    snapshot_id = create_quick_snapshot(hermes_home=home)
+    assert snapshot_id
+    copied_board = home / "state-snapshots" / snapshot_id / "kanban" / "boards" / "example"
+    assert (copied_board / "board.json").read_text(encoding="utf-8") == "{}"
+    assert not (copied_board / sidecar.name).exists()
+
+
 def test_quick_snapshot_listing_ignores_partial_directories(tmp_path) -> None:
     home = tmp_path / ".hermes"
     partial = home / "state-snapshots" / ".unfinished.1.partial"

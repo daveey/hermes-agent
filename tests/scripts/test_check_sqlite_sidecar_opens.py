@@ -22,6 +22,13 @@ def _load():
         # hermes-hub 2026-11-11: this exact line released the WAL writer lock on every session-list call.
         'with open(f"{db}-shm", "rb") as f: head = f.read(96)',
         'open(str(db) + "-wal", "rb")',
+        'open("state.db", "rb")',
+        'os.open("kanban.db", os.O_RDONLY)',
+        'Path("cache.db").open("rb")',
+        'Path("state.db").read_bytes()',
+        'open(f"{db}-journal", "rb")',
+        'open(b"state.db", "rb")',
+        'db = root / "state.db"\nopen(db)',
         'fd = os.open(f"{db}-shm", os.O_RDONLY)',
         'io.open(db_path + "-wal")',
         'Path(f"{db}-shm").read_bytes()',
@@ -39,7 +46,7 @@ def _load():
     ],
 )
 def test_sidecar_file_calls_are_flagged(src):
-    assert _load().sidecar_open_lines(src) == [1]
+    assert _load().sidecar_open_lines(src) == [src.count("\n") + 1]
 
 
 def test_a_variable_assigned_from_a_sidecar_path_is_followed():
@@ -108,6 +115,13 @@ def test_names_are_tracked_per_function_without_flow_and_any_argument_counts():
         'pread_lock_safe(f"{db}-shm", 0, 96)',
         'copy_file_out_of_process(f"{db}-wal", dest)',
         'os.stat(f"{db}-wal")',
+        'os.stat("state.db")',
+        'Path("kanban.db").stat()',
+        'os.stat(f"{db}-journal")',
+        'sqlite3.connect("state.db")',
+        'Path("report.txt").write_text("state.db")',
+        'Path("report.txt").write_bytes(b"-journal")',
+        'def a():\n    path = "state.db"\ndef b(path):\n    self.output = path\n    Path(self.output).write_text("x")',
         'Path(f"{db}-shm").exists()',
         'os.unlink(str(db) + "-wal")',
         'open(db_path, "rb")',

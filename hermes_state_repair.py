@@ -361,6 +361,7 @@ def _backup_content_identity(db_path: Path) -> Optional[str]:
             # Length-delimit every member (main file included) so the concatenation is prefix-free; otherwise a
             # main-file tail could coincide with a main+sidecar split and dedupe two images together.
             hasher.update(f"\0{label}:{path.stat().st_size}\0".encode())
+            # sqlite-sidecar-open: ok — _read_offline fences this callback against live connections.
             with open(path, "rb") as fh:
                 for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                     hasher.update(chunk)
@@ -474,6 +475,7 @@ def _publish_backup_bundle(db_path: Path, staging: Path, backup_path: Path) -> N
     published: list[Path] = []
     try:
         for src, staged, _dst in (main, *sidecars):
+            # sqlite-sidecar-open: ok — _backup_db_file refuses while this database has a live connection.
             shutil.copy2(src, staged)
         for _src, staged, dst in (*sidecars, main):
             os.replace(staged, dst)
