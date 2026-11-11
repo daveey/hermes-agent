@@ -60,6 +60,11 @@ _TOOLS = {
 def requirements(text):
     """Return required labels and an unsupported-action refusal, without changing text."""
     labels = set()
+    # Reader/broker attestations do not grant managed-worker board administration.
+    if re.search(r"\binstall-boards\.py\b|\bhermes kanban boards (?:create|subscribe)\b|"
+                 r"\bcreate board replicas\b|\battach primary/pickup subscriptions\b",
+                 text, re.IGNORECASE):
+        return labels, ACTION_REASON
     for _, _, action in _actions(text, _HUB, _HUB_ACTIONS):
         if action not in ("status", "pull"):
             return labels, ACTION_REASON

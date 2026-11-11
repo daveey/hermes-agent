@@ -23,6 +23,24 @@ def reason(body, cfg):
     return kp.portable_reason({"title": "Read coordination evidence", "body": body}, cfg)
 
 
+def test_independent_broker_state_path_stays_home(fleet):
+    cfg, _, _ = fleet
+    assert reason("Inspect ~/.hermes/token-broker", cfg) == "home gateway marker"
+
+
+def test_board_provisioning_is_not_reader_capability(fleet):
+    cfg, _, _ = fleet
+    body = ("Worker-local implementation: create board replicas and attach primary/pickup "
+            "subscriptions; token-broker exec for gh read")
+    assert reason(body, cfg) == "needs home coordination action"
+
+
+@pytest.mark.parametrize("body", ["run install-boards.py", "hermes kanban boards create runners"])
+def test_board_admin_commands_stay_home(fleet, body):
+    cfg, _, _ = fleet
+    assert reason(body, cfg) == "needs home coordination action"
+
+
 def test_attested_reader_and_broker_are_portable(fleet):
     cfg, _, _ = fleet
     assert reason("cross_task read; hermes-hub status; token-broker exec for gh read", cfg) is None

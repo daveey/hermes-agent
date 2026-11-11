@@ -444,7 +444,9 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
         return refusal
     marker_full = coordination.marker_text(full)
     extra = c.raw.get("extra_home_markers")
-    pats = [(p, marker_full) for p in HOME_GATEWAY_MARKERS if p != HOST_WORKTREE_PATH]
+    exemptible = (HUB_CLI_COMMAND, r"\btoken-broker\b")
+    pats = [(p, marker_full if p in exemptible else full)
+            for p in HOME_GATEWAY_MARKERS if p != HOST_WORKTREE_PATH]
     pats += [(p, full) for p in extra] if isinstance(extra, list) else []
     for p, text in pats:
         try:
