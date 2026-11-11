@@ -255,7 +255,7 @@ def _card_body(entry: dict[str, str], run_url: str, branch: str, previous: str |
         f"It failed on its first attempt and passed when CI retried it ({run_url}, branch `{branch}`).",
         "The retry keeps the job green, so this card is the only signal. Fix the cause, don't widen the retry.",
         "",
-        "Usual cause on the hub runners: a fixed wall-clock deadline (sleep, short wait/join timeout, short",
+        "Usual cause on the CI runners: a fixed wall-clock deadline (sleep, short wait/join timeout, short",
         "lease) that a CPU-throttled container misses. Wait on events or use generous timeouts that return",
         "as soon as the condition holds. Reproduce by starving the process (SIGSTOP/SIGCONT duty cycle) rather",
         "than on a quiet laptop.",
