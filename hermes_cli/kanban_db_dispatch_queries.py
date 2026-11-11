@@ -1,6 +1,7 @@
 """Read-only native dispatcher lane queries, plus the reaper's live-owner check."""
 import os
 import sqlite3
+from hermes_cli.kanban_priority import PRIORITY_CAP
 
 
 # Compute rather than store inheritance: edits, imported edges and unlinking take
@@ -19,8 +20,8 @@ EFFECTIVE_PRIORITY = (
     f"SELECT w.id {_WAITERS} UNION "
     "SELECT w.id FROM waiting a JOIN task_links wl ON wl.parent_id = a.id "
     f"JOIN tasks w ON w.id = wl.child_id WHERE {_OPEN_WAITER}"
-    ") SELECT MAX(COALESCE(tasks.priority, 0), "
-    "COALESCE(MAX(w.priority), COALESCE(tasks.priority, 0))) "
+    f") SELECT MIN({PRIORITY_CAP}, MAX(COALESCE(tasks.priority, 0), "
+    "COALESCE(MAX(w.priority), COALESCE(tasks.priority, 0)))) "
     "FROM waiting a JOIN tasks w ON w.id = a.id)"
 )
 DISPATCH_ORDER = (

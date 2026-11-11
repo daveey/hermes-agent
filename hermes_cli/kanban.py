@@ -1312,7 +1312,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     if getattr(args, "completion_contract", None) is not None:
         return _contract_cli.cmd_edit_contract(args)
     reason = getattr(args, "reason", None)
-    if reason is not None and getattr(args, "priority", None) is None:
+    if reason is not None and getattr(args, "priority", None) is None and getattr(args, "priority_bump", None) is None:
         return _err("kanban edit: --reason only applies to --completion-contract or --priority", 2)
     result = getattr(args, "result", None)
     raw_metadata = getattr(args, "metadata", None)
@@ -1320,13 +1320,19 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     title = getattr(args, "title", None)
     body = getattr(args, "body", None)
     priority = getattr(args, "priority", None)
+    priority_bump = getattr(args, "priority_bump", None)
+    if priority_bump is not None and (priority is not None or priority_bump <= 0):
+        return _err("--priority-bump must be positive and cannot be combined with --priority", 2)
+    from hermes_cli.kanban_priority import bounded
+    if priority is not None:
+        priority = bounded(priority)
     operator = {name: getattr(args, name, None) for name in _OPERATOR_EDIT_FLAGS}
     if operator["goal_mode"] is not None:
         operator["goal_mode"] = operator["goal_mode"] == "on"
     has_operator = any(value is not None for value in operator.values())
     if result is None and (summary is not None or raw_metadata is not None):
         return _err("kanban edit: --summary and --metadata require --result", 2)
-    if all(value is None for value in (title, body, priority, result)) and not has_operator:
+    if all(value is None for value in (title, body, priority, priority_bump, result)) and not has_operator:
         return _err(
             "kanban edit: provide --title, --body, --priority, --result, --max-retries, --goal-mode, "
             "--goal-max-turns, --max-runtime-seconds, --session-id, or --completion-contract", 2,
@@ -1338,12 +1344,13 @@ def _cmd_edit(args: argparse.Namespace) -> int:
         return rc
     with kbc.connect_closing() as conn:
         changed: dict = {}
-        if priority is not None and has_operator and not (reason or "").strip():
+        if (priority is not None or priority_bump is not None) and has_operator and not (reason or "").strip():
             # Refuse before the operator columns commit, so a refused lowering applies nothing;
             # edit_task re-checks inside its own write transaction. [daveey]
             row = conn.execute("SELECT priority FROM tasks WHERE id = ?", (args.task_id,)).fetchone()
-            if row is not None and priority < int(row[0] or 0):
-                return _err(f"kanban edit: {kb.PriorityLowerRefused(args.task_id, int(row[0] or 0), priority)}")
+            requested = priority if priority is not None else bounded(int(row[0] or 0) + priority_bump) if row else None
+            if row is not None and requested < int(row[0] or 0):
+                return _err(f"kanban edit: {kb.PriorityLowerRefused(args.task_id, int(row[0] or 0), requested)}")
         if has_operator:
             # Operator columns first: a refusal (e.g. a session_id overwrite) must leave the
             # whole edit unapplied rather than half of it. [daveey]
@@ -1355,12 +1362,12 @@ def _cmd_edit(args: argparse.Namespace) -> int:
                 return _err(f"kanban edit: {exc}")
             if changed is None:
                 return _err(f"cannot edit {args.task_id} (unknown id)")
-        if any(value is not None for value in (title, body, priority, result)):
+        if any(value is not None for value in (title, body, priority, priority_bump, result)):
             try:
                 ok = kb.edit_task(
                     conn, args.task_id, title=title, body=body, priority=priority,
                     result=result, summary=summary, metadata=metadata,
-                    priority_reason=reason, require_lower_reason=True,
+                    priority_reason=reason, require_lower_reason=True, priority_bump=priority_bump,
                 )
             except (kb.PriorityLowerRefused, ReceiptEditRefused) as exc:
                 return _err(f"kanban edit: {exc}")

@@ -148,7 +148,8 @@ def test_chat_owned_wait_on_unclaimed_parent_notifies_once(conn, waiting):
     assert len(notices) == 1
     assert notices[0]["parent"] == parent
     text = pu.notice_text(notices[0])
-    assert parent in text and "bump" in text and "re-place" in text and "here" in text
+    assert parent in text and "capacity first" in text and "re-place" in text
+    assert "--priority" not in text  # Already heads its lane; another raise cannot add capacity.
     assert pu.sweep(conn) == 0
     assert len(_notices(conn, child)) == 1
 
@@ -206,7 +207,8 @@ def test_kanban_show_hints_a_long_ready_card(conn, waiting, monkeypatch):
     out = json.loads(kanban_show.show({"task_id": parent}))
     hint = out.get("queue_hint") or ""
     assert "a card that can't start is no fix" in hint
-    assert "bump" in hint and "re-place" in hint
+    assert "capacity first" in hint and "re-place" in hint
+    assert "--priority" not in hint
 
 
 def test_kanban_show_has_no_hint_for_a_fresh_ready_card(conn, monkeypatch):

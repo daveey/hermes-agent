@@ -31,7 +31,7 @@ THRESHOLD_SECONDS = pu.THRESHOLD_SECONDS
 # A ready episode older than this when first seen is backlog, not a wait the chat just promised; kanban_show's
 # queue_hint covers it. This also bounds the burst on the first tick after deploy.
 MAX_EPISODE_SECONDS = 6 * 3600
-NO_PROMISE = "bump priority, re-place, or do it in this chat; don't promise a pickup"
+NO_PROMISE = "check placement and available capacity first; re-place if suitable; don't promise a pickup"
 
 
 # --- priority on a chat's human-approval unblock ---------------------------------------------------------------
@@ -103,7 +103,8 @@ def notice_text(payload: Any) -> str:
         stamp = time.strftime("%H:%M:%SZ", time.gmtime(int(payload["hold_until"])))
         hold = f"; dispatcher hold {payload['hold_reason']} until {stamp}"
     return (f"{named}, which this chat waits on, has been ready {payload.get('ready_minutes', '?')} min with no "
-            f"worker ({payload.get('queue') or 'queue place unknown'}{hold}). " + pu._options(tid) + ".")
+            f"worker ({payload.get('queue') or 'queue place unknown'}{hold}). "
+            + pu._options(tid, payload.get("priority_evidence")) + ".")
 
 
 def _floor_kinds() -> str:

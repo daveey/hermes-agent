@@ -1221,6 +1221,9 @@ def _local_fields(conn: sqlite3.Connection, table: str, fields: Mapping[str, Any
         value = _from_wire(fields[wire])
         if column in SECONDS_COLUMNS.get(table, ()):
             value = to_seconds(value)
+        if table == "tasks" and column == "priority" and value is not None:
+            from hermes_cli.kanban_priority import bounded
+            value = bounded(value)
         out[column] = _local_run_id(conn, value, task_id) if (table, column) in REF_COLUMNS else value
     return out
 

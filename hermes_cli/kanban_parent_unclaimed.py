@@ -58,9 +58,9 @@ def _queue_words(place: dict[str, Any]) -> str:
     return words
 
 
-def _options(parent_id: str) -> str:
-    return (f"{NO_FIX}: bump its priority (`hermes kanban edit {parent_id} --priority 10`), re-place it on a "
-            f"gateway with capacity, or do the work here")
+def _options(parent_id: str, evidence: Optional[dict[str, Any]] = None) -> str:
+    from hermes_cli.kanban_priority import advice
+    return f"{NO_FIX}: " + advice(parent_id, evidence)
 
 
 def notice_text(payload: Any) -> str:
@@ -71,7 +71,7 @@ def notice_text(payload: Any) -> str:
     named = f"{parent} ({title})" if title else parent
     return (f"Waiting {payload.get('wait_minutes', '?')} min on parent {named}, which has been ready "
             f"{payload.get('ready_minutes', '?')} min with no worker ({payload.get('queue') or 'queue place unknown'}). "
-            + _options(parent) + ".")
+            + _options(parent, payload.get("priority_evidence")) + ".")
 
 
 def ready_hint(conn, task, *, now: Optional[float] = None) -> Optional[str]:
@@ -82,7 +82,9 @@ def ready_hint(conn, task, *, now: Optional[float] = None) -> Optional[str]:
     waited = now - ready_since(conn, task.id, task.created_at)
     if waited < THRESHOLD_SECONDS:
         return None
-    return f"Ready {_minutes(waited)} min, unclaimed; {_queue_words(_place(conn, task.id))}. " + _options(task.id) + "."
+    from hermes_cli.kanban_priority import lane_evidence
+    return (f"Ready {_minutes(waited)} min, unclaimed; {_queue_words(_place(conn, task.id))}. "
+            + _options(task.id, lane_evidence(conn, task.id)) + ".")
 
 
 _CANDIDATES = (
@@ -147,9 +149,11 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
         still = conn.execute("SELECT status, claim_lock FROM tasks WHERE id = ?", (waiting_on,)).fetchone()
         if still is None or still["status"] != "ready" or still["claim_lock"]:
             return False
+        from hermes_cli.kanban_priority import lane_evidence
         kb._append_event(conn, task_id, kind, {
             "parent": waiting_on, "parent_title": parent_title, "wait_event_id": wait_key,
             "wait_minutes": _minutes(waited_seconds), "ready_minutes": _minutes(ready_seconds),
             "queue": _queue_words(_place(conn, waiting_on)), **(extra or {}),
+            "priority_evidence": lane_evidence(conn, waiting_on),
         })
     return True

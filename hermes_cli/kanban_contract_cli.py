@@ -82,7 +82,7 @@ def cmd_edit_contract(args: argparse.Namespace) -> int:
             "card's gate. Block without a human_request so the owning chat re-points it", 2,
         )
     others = [f"--{name.replace('_', '-')}" for name in (
-        "title", "body", "priority", "result", "summary", "metadata", *_OPERATOR_EDIT_FLAGS,
+        "title", "body", "priority", "priority_bump", "result", "summary", "metadata", *_OPERATOR_EDIT_FLAGS,
     ) if getattr(args, name, None) is not None]
     if others or getattr(args, "force", False):
         return _err(

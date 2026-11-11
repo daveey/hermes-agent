@@ -121,9 +121,9 @@ def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Opt
     return {"lane": "local", "ahead": _ahead(conn, task), "running": running, "limit": limit, "approximate": True}
 
 
-_NOT_STUCK = ("queued, not stuck: the dispatcher starts it; do not run its work outside the dispatcher "
-              "(two workers on one card). To start it sooner, raise its priority (`hermes kanban edit <id> "
-              "--priority 10`)")
+_NOT_STUCK = ("queued, not stuck: check placement and available capacity first; re-place if suitable. "
+              "Do not run its work outside the dispatcher (two workers on one card). "
+              "Only consider a bounded relative priority bump when below the lane median")
 
 
 def describe(place: Optional[dict[str, Any]]) -> Optional[str]:

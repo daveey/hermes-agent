@@ -26,6 +26,7 @@ def edit_task(
     result: Optional[str] = None, summary: Optional[str] = None,
     metadata: Optional[dict] = None, board: Optional[str] = None,
     priority_reason: Optional[str] = None, require_lower_reason: bool = False,
+    priority_bump: Optional[int] = None,
 ) -> bool:
     """Edit task fields, optionally backfilling a completed task's result.
 
@@ -35,6 +36,11 @@ def edit_task(
     stale read can't slip past it. ``priority_reason`` lands in the ``reprioritized``
     event payload. [daveey]
     """
+    from hermes_cli.kanban_priority import bounded
+    if priority_bump is not None and (priority is not None or priority_bump <= 0):
+        raise ValueError("priority_bump must be positive and cannot be combined with priority")
+    if priority is not None:
+        priority = bounded(priority)
     changed_fields = [
         field for field, value in (("title", title), ("body", body), ("priority", priority))
         if value is not None
@@ -43,6 +49,10 @@ def edit_task(
         status = _kb._task_status(conn, task_id)
         if status is None or (result is not None and status != "done"):
             return False
+        previous_priority = conn.execute("SELECT priority FROM tasks WHERE id=?", (task_id,)).fetchone()[0] or 0
+        if priority_bump is not None:
+            priority = bounded(previous_priority + priority_bump)
+            changed_fields.append("priority")
         if priority is not None and require_lower_reason and not (priority_reason or "").strip():
             row = conn.execute("SELECT priority FROM tasks WHERE id = ?", (task_id,)).fetchone()
             current = int(row[0] or 0) if row else 0
@@ -66,6 +76,10 @@ def edit_task(
         )
         if priority is not None:
             payload: dict = {"priority": priority}
+            if priority_bump is not None:
+                payload["previous_priority"] = previous_priority
+                payload["relative_bump"] = priority_bump
+                payload["applied_delta"] = priority - previous_priority
             if priority_reason and priority_reason.strip():
                 payload["reason"] = priority_reason.strip()
             _kb._append_event(conn, task_id, "reprioritized", payload)

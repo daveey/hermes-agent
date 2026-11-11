@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from hermes_cli import kanban_db_sync as _sync
+from hermes_cli import kanban_db_sync as _sync, kanban_priority
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
 from hermes_cli import kanban_placement_forward as _placement_fwd  # stdlib-only at import: no cycle
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
@@ -1371,7 +1371,7 @@ def create_task(
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        task_id, title.strip(), body, assignee, task_status, priority,
+                        task_id, title.strip(), body, assignee, task_status, kanban_priority.bounded(priority),
                         created_by, now, workspace_kind, workspace_path,
                         branch_name, project_id, tenant, idempotency_key, _opt_int(max_runtime_seconds),
                         json.dumps(skills_list) if skills_list is not None else None,
