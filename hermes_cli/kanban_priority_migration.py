@@ -41,6 +41,44 @@ def plan(conn) -> dict:
     ]}
 
 
+def plan_global(rows: list[dict], *, board_id: str, exceptions: list[str]) -> dict:
+    """Rank one complete authoritative inventory, never separately on each origin.
+
+    Exceptions are ordered low to high and retain terminal resolution evidence.
+    Missing requested cards are unknown, not implicitly terminal.
+    """
+    if not board_id:
+        raise ValueError("missing board identity")
+    if len(set(exceptions)) != len(exceptions):
+        raise ValueError("duplicate exception")
+    indexed = {r["id"]: r for r in rows}
+    if len(indexed) != len(rows):
+        raise ValueError("duplicate task in inventory")
+    if set(exceptions) - indexed.keys():
+        raise ValueError("unresolved exception; canonical evidence required")
+    if any(not r.get("created_on") for r in rows):
+        raise ValueError("missing origin in inventory")
+    if any(type(r["priority"]) is not int for r in rows):
+        raise ValueError("priority must be an integer")
+    resolved = [{"id": key, "status": indexed[key]["status"],
+                 "origin": indexed[key]["created_on"], "old": indexed[key]["priority"]}
+                for key in exceptions]
+    active = [r for r in rows if r["status"] not in ("done", "archived")]
+    reserved = [key for key in exceptions if indexed[key]["status"] not in ("done", "archived")]
+    ceiling = PRIORITY_CAP - HEADROOM
+    band = ceiling - len(reserved)
+    values = sorted({r["priority"] for r in active if r["priority"] > 0 and r["id"] not in reserved})
+    if band < 0 or len(values) > band:
+        raise ValueError("too many distinct priorities for lossless normalization")
+    ranks = {value: (i + 1) * band // len(values) for i, value in enumerate(values)}
+    special = {key: band + i + 1 for i, key in enumerate(reserved)}
+    return {"version": 2, "cap": PRIORITY_CAP, "board_id": board_id, "ceiling": ceiling,
+            "exceptions": resolved, "rows": [
+                {"id": r["id"], "origin": r["created_on"], "old": r["priority"],
+                 "new": special.get(r["id"], ranks.get(r["priority"], r["priority"]))}
+                for r in sorted(active, key=lambda r: r["id"])]}
+
+
 def save_manifest(path: Path, manifest: dict) -> None:
     """Durably record original values, refusing to overwrite an earlier backup."""
     with path.open("x", encoding="utf-8") as stream:
