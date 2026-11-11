@@ -1320,6 +1320,9 @@ _OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runti
 
 
 def _cmd_edit(args: argparse.Namespace) -> int:
+    if getattr(args, "requires", None) is not None:
+        from hermes_cli.kanban_requires_edit import cmd_edit_requires
+        return cmd_edit_requires(args)
     if getattr(args, "completion_contract", None) is not None:
         return _contract_cli.cmd_edit_contract(args)
     reason = getattr(args, "reason", None)
