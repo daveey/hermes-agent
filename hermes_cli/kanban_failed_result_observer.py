@@ -5,6 +5,7 @@ result in a commit-to-launch gap. Never reads the owner's session store.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import select
@@ -66,16 +67,43 @@ def arm(context):
     raise RuntimeError('independent failed-result observer did not acknowledge startup')
 
 
+@contextlib.contextmanager
+def connect_existing(path):
+    """Bounded native access without schema/init locks or board creation.
+
+    The result writer has already initialized this board. Preserve native inode,
+    generation and raw-file guards, but do not repeat migrations in the observer.
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_dispatch_owner import connect_with_identity
+    from hermes_state_guard import ensure_kanban_test_isolation
+
+    path = Path(path)
+    ensure_kanban_test_isolation(path)
+    with contextlib.closing(connect_with_identity(
+            path, existing_only=True, isolation_level=None, timeout=.25)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.text_factory = kb._lossy_text
+        conn.execute('PRAGMA busy_timeout=250')
+        conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA synchronous=FULL')
+        conn.execute('PRAGMA secure_delete=ON')
+        conn.execute('PRAGMA cell_size_check=ON')
+        # Missing/old schema fails visibly instead of being migrated here.
+        conn.execute('SELECT current_run_id, claim_lock FROM tasks LIMIT 0')
+        conn.execute('SELECT ended_at FROM task_runs LIMIT 0')
+        yield conn
+
+
 def observe(context):
     from hermes_cli import kanban_db_dispatch as dispatch
-    from hermes_cli.kanban_db_connect import connect_closing
     from hermes_cli.kanban_failed_result import failed_result_proof, process_gone
 
     path = Path(context['db'])
     if not path.is_file():
         # A removed board has no run to reconcile. Never recreate it on restart.
         return
-    with connect_closing(path) as conn:
+    with connect_existing(path) as conn:
         if conn.execute('SELECT 1 FROM tasks WHERE id=? AND current_run_id=?',
                         (context['task_id'], context['run_id'])).fetchone() is None:
             return

@@ -9,7 +9,7 @@ import sqlite3
 import tempfile
 
 
-def connect_with_identity(path, **kwargs):
+def connect_with_identity(path, *, existing_only=False, **kwargs):
     """Capture the opened inode while native archive/delete cannot relocate it.
 
     Ordinary clients may still connect during a tick. Such handles cannot later
@@ -30,7 +30,10 @@ def connect_with_identity(path, **kwargs):
     def open_once(remaining):
         with lifecycle_access(canonical, remaining) as lock, _dispatch_tick_lock(canonical) as held:
             recover(str(canonical))
-            conn = connect_tracked(str(canonical), wait_for_tracking=False, **kwargs)
+            # Observer opens must never resurrect an archived/deleted board.
+            database = canonical.as_uri() + '?mode=rw' if existing_only else str(canonical)
+            options = {**kwargs, 'uri': True} if existing_only else kwargs
+            conn = connect_tracked(database, wait_for_tracking=False, **options)
             conn._hermes_lifecycle_lock = lock
             try:
                 prepare_connection(conn, timeout)
