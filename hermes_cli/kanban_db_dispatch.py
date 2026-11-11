@@ -225,6 +225,7 @@ class DispatchResult:
     (quota/auth error — also auto-blocked), ``"shared_blocker"`` (parked behind
     a declared shared blocker another card is probing), ``"recent_success"`` (completed run
     within guard window), ``"active_pr"`` (GitHub PR URL in a recent comment)."""
+    no_progress_held: list[tuple[str, str]] = field(default_factory=list)  # (task_id, action): kanban_no_progress
     clock_held: dict[str, tuple[str, int]] = field(default_factory=dict)
     """``task_id -> (guard reason, epoch the hold ends)`` for guarded cards waiting on a known clock (quota reset,
     cooldowns; ``kanban_db_dispatch_clock``). The stuck warning names the deadline and stays quiet when every
@@ -2092,8 +2093,7 @@ def _dispatch_lane_task(
         return False
 
     def _count_spawn(name: str) -> None:
-        # Later rows in this tick respect the per-profile cap; subsequent
-        # ticks re-query from the DB.
+        # Later rows in this tick respect the per-profile cap; subsequent ticks re-query from the DB.
         if per_profile_cap is not None and name:
             per_profile_running[name] = per_profile_running.get(name, 0) + 1
 

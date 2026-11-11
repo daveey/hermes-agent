@@ -15,6 +15,7 @@ from pathlib import Path
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli.kanban_no_progress import held_json, print_held
 from hermes_cli.kanban_output import _err, _fmt_ts, _print_json
 
 
@@ -110,6 +111,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 for (tid, reason) in res.respawn_guarded
             ],
             "rate_limited": res.rate_limited,
+            "no_progress_held": held_json(res.no_progress_held),
             # Cards this machine cannot lease (runs_on / placement) and claims the Board deferred. [daveey]
             "skipped_ineligible": [{"task_id": tid, "reason": reason} for (tid, reason) in res.skipped_ineligible],
             "claim_deferred": [{"task_id": tid, "reason": reason} for (tid, reason) in res.claim_deferred],
@@ -160,6 +162,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         )
     for tid, reason in res.respawn_guarded:
         print(f"Guarded ({reason}): {tid}")
+    print_held(res.no_progress_held)
     for tid, reason in res.skipped_ineligible:
         print(f"Skipped (this machine cannot lease it: {reason}): {tid}")
     for tid, reason in res.claim_deferred:
