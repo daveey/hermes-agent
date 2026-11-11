@@ -2230,14 +2230,6 @@ def goal_run_status(
     return task.status
 
 
-def _extend_run_claim(conn: sqlite3.Connection, task_id: str, expires: int) -> Optional[int]:
-    """Mirror a task claim extension onto its active run row; returns that run id."""
-    run_id = _current_run_id(conn, task_id)
-    if run_id is not None:
-        conn.execute("UPDATE task_runs SET claim_expires = ? WHERE id = ?", (expires, run_id))
-    return run_id
-
-
 def release_stale_claims(
     conn: sqlite3.Connection, *, signal_fn=None, failure_limit: Optional[int] = None,
 ) -> int:

@@ -26,7 +26,8 @@ def _extend_live_stale_claim(conn: sqlite3.Connection, row: sqlite3.Row, now: in
         )
         if cur.rowcount != 1:
             return
-        run_id = _kb._extend_run_claim(conn, row["id"], new_expires)
+        from hermes_cli.kanban_db_heartbeat import _extend_run_claim
+        run_id = _extend_run_claim(conn, row["id"], new_expires)
         _kb._append_event(
             conn, row["id"], "claim_extended",
             {

@@ -8,7 +8,7 @@ import contextlib
 import threading
 
 from .method_ctx import bind_module
-from .kanban_notice_text import chat_wait_suffix as _kb_chat_wait
+from .kanban_notice_text import chat_wait_suffix as _kb_chat_wait, failure_suffix as _kb_failure
 
 
 def _notif_locked_sessions(fn, default):
@@ -607,12 +607,6 @@ def _kb_repin_notice(payload: dict) -> str:
 def _kb_parent_unclaimed(payload: dict) -> str:
     from hermes_cli.kanban_parent_unclaimed import notice_text
     return ": " + notice_text(payload)
-
-
-def _kb_failure(kind: str, payload: dict, title: str) -> str:
-    """Cause-accurate gave_up/crashed wording; pid/exit/raw output only under ``Details:``. [daveey]"""
-    from hermes_cli.kanban_failure_summary import describe_failure
-    return describe_failure(kind, title, payload)
 
 
 # kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
