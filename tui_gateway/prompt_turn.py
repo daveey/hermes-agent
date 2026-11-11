@@ -1442,7 +1442,7 @@ def _run_admitted_prompt(
                 note_task_done(session, st.result, st.agent, display_kind)
             # Payload construction may yield to Stop. Decide and publish under the same lock
             # that drops the pause, rather than carrying a pre-construction pause snapshot.
-            with session["history_lock"]:
+            with update_pause.publication_lock(session):
                 paused_for_update = update_pause.pause_stands(session, st.marker_key, st.result)
                 if paused_for_update:
                     update_pause.announce_pause(sid, payload)

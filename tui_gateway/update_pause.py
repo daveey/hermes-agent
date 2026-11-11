@@ -296,13 +296,19 @@ def _drop_pause(session: dict) -> None:
     session.pop("_update_pause_drainer_lock", None)
 
 
+def publication_lock(session: dict):
+    """Serialize pause publication with Stop without nesting the non-reentrant history lock."""
+    with session["history_lock"]:
+        return session.setdefault("_update_pause_publication_lock", threading.Lock())
+
+
 def user_stop_wins(session: dict) -> bool:
     """[daveey] t_01a1c895eb0596b2: a user Stop of the RUNNING turn drops the pause its hook already paid, so
     the marker (stamped ``core_update_pause``) retires like any stopped turn's and neither the next backend nor
     the in-place watcher continues what the user stopped. Call after the interrupt reached the agent and before
     the Stop retires the marker. Only that turn's own pause: a pause whose turn already ended, or an earlier
     turn's under a synthesized turn, is kept. True when a pause was dropped."""
-    with session["history_lock"]:
+    with publication_lock(session), session["history_lock"]:
         key = session.get("_update_pause_marker_key")
         if not key or not session.get("running") or key != session.get("_active_turn_marker_key"):
             return False

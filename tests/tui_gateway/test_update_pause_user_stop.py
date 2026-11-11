@@ -124,7 +124,7 @@ def _turn(env, monkeypatch, path):
     monkeypatch.setattr("model_tools.handle_function_call", _tool)
     agent.client.chat.completions.create.side_effect = [mt._response(mt._call("job", "call_1")), mt._response(),
                                                         mt._response()]
-    session = {"agent": agent, "session_key": KEY, "history": [], "history_lock": threading.RLock(),
+    session = {"agent": agent, "session_key": KEY, "history": [], "history_lock": threading.Lock(),
                "history_version": 0, "running": True, "attached_images": [], "image_counter": 0, "cols": 80,
                "slash_worker": None, "show_reasoning": False, "tool_progress_mode": "all", "inflight_turn": None,
                "profile_home": str(env.home)}
@@ -267,6 +267,26 @@ def test_a_stop_of_the_running_turn_drops_its_pause(home):
     assert "_update_pause_marker_key" not in session
     server._retire_turn_marker(session, KEY)  # what the Stop (or the turn's end) does next
     assert read_turn_marker(home, KEY) is None
+
+
+def test_stop_cannot_revoke_pause_in_the_middle_of_publication(home):
+    session = _paused_session(home, running=True, history_lock=threading.Lock())
+    entered, finished = threading.Event(), threading.Event()
+
+    def stop():
+        entered.set()
+        up.user_stop_wins(session)
+        finished.set()
+
+    with up.publication_lock(session):
+        thread = threading.Thread(target=stop, daemon=True)
+        thread.start()
+        assert entered.wait(2)
+        assert not finished.wait(0.1)
+        assert up.pause_stands(session, KEY, {"paused_for_update": up.PAUSE_REASON})
+    thread.join(2)
+    assert finished.is_set()
+    assert not session.get("_update_pause_marker_key")
 
 
 def test_a_stop_never_drops_another_turns_pause(home):
