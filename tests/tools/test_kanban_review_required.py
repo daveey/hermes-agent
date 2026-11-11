@@ -14,7 +14,7 @@ def board(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_PROFILE", "default")
     for key in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_DB",
-                "HERMES_KANBAN_BOARD", "HERMES_SESSION_ID"):
+                "HERMES_KANBAN_BOARD", "HERMES_SESSION_ID", "HERMES_KANBAN_WORKER_TASK"):
         monkeypatch.delenv(key, raising=False)
     kb._INITIALIZED_PATHS.clear()
     with kbc.connect_closing() as conn:
@@ -76,6 +76,19 @@ def test_operator_can_approve_review_but_implementer_cannot(board, monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_TASK")
     monkeypatch.delenv("HERMES_KANBAN_RUN_ID")
     assert kb.complete_task(board, tid, summary="operator approved")
+
+
+@pytest.mark.parametrize("identity", ["HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKER_TASK"])
+def test_pending_review_worker_cli_cannot_approve(board, monkeypatch, identity):
+    from hermes_cli import kanban
+    tid, run = claimed(board, monkeypatch)
+    assert kb.request_review(board, tid, summary="implemented", expected_run_id=run)
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID")
+    monkeypatch.setenv(identity, tid)
+    assert kanban._cmd_complete(argparse.Namespace(
+        task_ids=[tid], result=None, summary="self approval", metadata=None, force=True)) != 0
+    assert kb.get_task(board, tid).status == "review"
 
 
 def test_rework_requires_another_review(board, monkeypatch):

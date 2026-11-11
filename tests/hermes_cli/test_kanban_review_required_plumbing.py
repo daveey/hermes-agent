@@ -21,7 +21,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(h))
     monkeypatch.setenv("HERMES_PROFILE", "default")
     for var in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_DB",
-                "HERMES_KANBAN_BOARD", "HERMES_SESSION_ID"):
+                "HERMES_KANBAN_BOARD", "HERMES_SESSION_ID", "HERMES_KANBAN_WORKER_TASK"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(kc, "_check_dispatcher_presence", lambda **kw: (True, ""))
     kb._INITIALIZED_PATHS.clear()
@@ -92,9 +92,10 @@ def test_cli_edit_review_required_alone_is_a_valid_edit(home):
     assert kc._cmd_edit(parse("edit", tid, "--review-required", "on")) == 0  # no "provide --title..." error
 
 
-def test_cli_edit_worker_cannot_disable(home, monkeypatch, capsys):
+@pytest.mark.parametrize("identity", ["HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKER_TASK"])
+def test_cli_edit_worker_cannot_disable(home, monkeypatch, capsys, identity):
     tid = make(True)
-    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv(identity, tid)
     assert kc._cmd_edit(parse("edit", tid, "--review-required", "off")) != 0
     assert "orchestrator" in capsys.readouterr().err
     assert flag(tid) is True

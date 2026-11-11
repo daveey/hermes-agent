@@ -14,7 +14,8 @@ def require_review(conn, task_id: str, expected_run_id: int | None, *, placement
     task = kb.get_task(conn, task_id)
     if task is None or not task.review_required or placement_settled:
         return
-    if task.status == "review" and expected_run_id is None and not os.environ.get("HERMES_KANBAN_TASK"):
+    worker = os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("HERMES_KANBAN_WORKER_TASK")
+    if task.status == "review" and expected_run_id is None and not worker:
         return  # An operator may approve a pending review without claiming it.
     if (task.status == "running" and task.current_run_id is not None
             and (expected_run_id is None or expected_run_id == task.current_run_id)

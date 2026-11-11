@@ -41,7 +41,8 @@ def edit_operator_fields(
     if goal_mode is not None:
         wanted["goal_mode"] = 1 if goal_mode else 0
     if review_required is not None:
-        if not review_required and os.environ.get("HERMES_KANBAN_TASK"):
+        worker = os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("HERMES_KANBAN_WORKER_TASK")
+        if not review_required and worker:
             raise KanbanEditRefused("review_required can only be disabled by an orchestrator, not a worker")
         wanted["review_required"] = int(bool(review_required))
     if session_id is not None:
