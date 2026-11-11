@@ -3,13 +3,28 @@ import os
 import sqlite3
 
 
-# A card another card waits on (a ``todo`` child) is dispatched first among its effective priority, and that
-# priority is the highest of its own and its waiting children's. Before 11-09 the lane was priority then age only:
-# a p0 parent of a waiting rollout sat ready 2 h behind 61 older p0 leaves (kanban-447c98343f). The stored
-# priority never changes; explicit priority still wins. Rows of ``tasks`` (unaliased) only. [daveey]
-_WAITERS = "FROM task_links wl JOIN tasks w ON w.id = wl.child_id WHERE wl.parent_id = tasks.id AND w.status = 'todo'"
+# Compute rather than store inheritance: edits, imported edges and unlinking take
+# effect on the next read, without overwriting user priorities or foreign-owned
+# rows. A parent is the prerequisite; child_id is the card waiting on it.
+# Include open waiters before they park, and traverse the entire active chain.
+# UNION (not UNION ALL) terminates even if imported edges contain a cycle.
+# Expressions require an unaliased outer ``tasks`` table. [daveey]
+_OPEN_WAITER = "w.status NOT IN ('done', 'archived')"
+_WAITERS = (
+    "FROM task_links wl JOIN tasks w ON w.id = wl.child_id "
+    f"WHERE wl.parent_id = tasks.id AND {_OPEN_WAITER}"
+)
+EFFECTIVE_PRIORITY = (
+    "(WITH RECURSIVE waiting(id) AS ("
+    f"SELECT w.id {_WAITERS} UNION "
+    "SELECT w.id FROM waiting a JOIN task_links wl ON wl.parent_id = a.id "
+    f"JOIN tasks w ON w.id = wl.child_id WHERE {_OPEN_WAITER}"
+    ") SELECT MAX(COALESCE(tasks.priority, 0), "
+    "COALESCE(MAX(w.priority), COALESCE(tasks.priority, 0))) "
+    "FROM waiting a JOIN tasks w ON w.id = a.id)"
+)
 DISPATCH_ORDER = (
-    f"MAX(COALESCE(tasks.priority, 0), COALESCE((SELECT MAX(COALESCE(w.priority, 0)) {_WAITERS}), 0)) DESC, "
+    f"{EFFECTIVE_PRIORITY} DESC, "
     f"EXISTS (SELECT 1 {_WAITERS}) DESC, tasks.created_at ASC"
 )
 
