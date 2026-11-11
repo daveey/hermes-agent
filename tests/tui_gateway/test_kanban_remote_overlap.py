@@ -4,9 +4,12 @@ import pytest
 from hermes_state import SessionDB
 from hermes_state_errors import KanbanNoticeOverlapError
 
-from tests.tui_gateway.test_kanban_remote_late import arrival, _rows
+from tests.tui_gateway import test_kanban_remote_late as helpers
+from tests.tui_gateway.test_kanban_remote_late import _rows
 from tests.tui_gateway.test_kanban_remote_notices import CHAT
 from tui_gateway import kanban_remote_notices as krn
+
+arrival = helpers.arrival
 
 
 def _seed_member(db, group):
