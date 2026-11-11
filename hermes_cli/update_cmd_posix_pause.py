@@ -24,7 +24,7 @@ when this process dies.
   stops, not the post-restart after-turn budget. No planned-stop marker is sent.
 * an automated caller that already drained what it is willing to wait for (hermes-sync's apply)
   sets ``HERMES_UPDATE_PRESWAP_STOP_BUSY=1`` (Linux only; macOS ignores it and stays idle-only):
-  every gateway then gets the ordinary drain request, which pinned and older gateways know too,
+  every gateway in the set gets the ordinary drain request, which older gateways know too,
   and what is still up is stopped through its supervisor (a bare one is killed), so a busy host
   still converges. Discovery, drain requests and stops share ONE absolute 30 s deadline (every
   discovery subprocess and every control-socket exchange is clamped to what is left, nothing is
