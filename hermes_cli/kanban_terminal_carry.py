@@ -36,8 +36,14 @@ def _identity(card: dict) -> dict:
 
 
 def _ro(path: Path, *, immutable: bool = False):
-    conn = sqlite3.connect(path.resolve().as_uri() + ('?mode=ro&immutable=1' if immutable else '?mode=ro'),
-                           uri=True, timeout=0.5)
+    from hermes_cli import kanban_lockguard
+
+    uri = path.resolve().as_uri()
+    if immutable:
+        # Offline hash-pinned evidence has no live WAL generation to guard/recover.
+        conn = sqlite3.connect(uri + '?mode=ro&immutable=1', uri=True, timeout=0.5)  # noqa: kanban-lockguard
+    else:
+        conn = kanban_lockguard.connect(uri + '?mode=ro', uri=True, timeout=0.5)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA query_only=ON')
     conn.execute('BEGIN')

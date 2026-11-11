@@ -10,6 +10,30 @@ import pytest
 from hermes_cli import kanban_terminal_carry as carry
 
 
+def test_readers_guard_current_databases_but_not_immutable_evidence(tmp_path, monkeypatch):
+    from hermes_cli import kanban_lockguard
+
+    path = tmp_path / 'readers.db'
+    with sqlite3.connect(path) as conn:
+        conn.execute('CREATE TABLE evidence(value TEXT)')
+    calls = []
+    original = kanban_lockguard.connect
+
+    def guarded(database, **kwargs):
+        calls.append(database)
+        return original(database, **kwargs)
+
+    monkeypatch.setattr(kanban_lockguard, 'connect', guarded)
+    for immutable in (False, True):
+        conn = carry._ro(path, immutable=immutable)
+        try:
+            assert conn.execute('PRAGMA query_only').fetchone()[0] == 1
+            assert conn.execute('SELECT count(*) FROM evidence').fetchone()[0] == 0
+        finally:
+            conn.close()
+    assert calls == [path.resolve().as_uri() + '?mode=ro']
+
+
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
