@@ -64,6 +64,37 @@ def _read_proc_stat() -> str:
     return Path("/proc/stat").read_text(encoding="ascii")
 
 
+def begin(*, read: Callable[[], str] = _read_proc_stat,
+          clock: Callable[[], float] = time.monotonic, linux: Optional[bool] = None) -> tuple:
+    """Capture A without waiting. Keep its monotonic start even when the read is unknown."""
+    t0 = clock()
+    if linux is None:
+        linux = sys.platform.startswith("linux")
+    try:
+        first = parse_proc_stat(read()) if linux else None
+    except (OSError, UnicodeError, ValueError):
+        first = None
+    return t0, first
+
+
+def finish(first: tuple, *, read: Callable[[], str] = _read_proc_stat,
+           clock: Callable[[], float] = time.monotonic,
+           wall: Callable[[], float] = time.time) -> Optional[dict[str, Any]]:
+    """Capture B without waiting; validate exactly the synchronous sampler's window and arithmetic."""
+    try:
+        second = parse_proc_stat(read())
+        window_ms = (clock() - first[0]) * 1000.0
+        end_ms = int(wall() * 1000)
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not math.isfinite(window_ms) or not MIN_WINDOW_MS <= round(window_ms, 6) <= MAX_WINDOW_MS:
+        return None
+    pct = busy_pct(first[1], second)
+    if pct is None:
+        return None
+    return {"cpu_busy_pct": pct, "cpu_busy_window_ms": round(window_ms), "cpu_busy_sample_end_ms": end_ms}
+
+
 def sample(window_s: float = WINDOW_S, *, read: Callable[[], str] = _read_proc_stat,
            clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time,
            sleep: Callable[[float], None] = time.sleep, linux: Optional[bool] = None) -> Optional[dict[str, Any]]:

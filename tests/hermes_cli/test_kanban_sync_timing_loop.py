@@ -148,7 +148,11 @@ def test_real_loop_records_full_report_cost_and_matches_a_change_to_its_boards_s
     change = chg[0]
     rep = next(r for r in recs if r["ev"] == "rep" and "send_t0" in r)
     assert rep["send_t0"] <= change["t"] <= rep["send_t1"], "the frame arrived while the POST was in flight"
-    assert rep["cpu_t1"] - rep["cpu_t0"] >= 1_000_000_000
+    begin = next(r for r in recs if r['ev'] == 'rep' and 'limit_t0' in r and 'send_t0' not in r)
+    assert begin['res'] == 'not_sent' and begin['t1'] <= rep['t0']
+    assert rep['cpu_t0'] - begin['t0'] >= 1_000_000_000
+    assert 1000 <= rep['cpu_win_ms'] <= 2000  # observation window, not blocked loop time
+    assert rep['cpu_t1'] >= rep['cpu_t0']
     assert rep["send_t1"] - rep["send_t0"] >= int(POST_DELAY_S * 1e9)
     assert rep["send_out"] == "ok" and rep["res"] == "sent" and rep["cpu_win_ms"] >= 1000
     assert rep["t1"] - rep["t0"] >= (rep["cpu_t1"] - rep["cpu_t0"]) + (rep["send_t1"] - rep["send_t0"])
@@ -182,7 +186,7 @@ def test_off_loop_creates_no_diagnostic_file_or_thread(tmp_path, monkeypatch):
     monkeypatch.setattr(client, "publish_pickup_if_changed", lambda _h: None)
     monkeypatch.setattr(client, "reconcile_links", lambda *a, **k: None)
     reports = []
-    monkeypatch.setattr(mm, "Reporter", lambda _send: type("R", (), {"report_due": lambda self: reports.append(1)})())
+    monkeypatch.setattr(mm, "Reporter", lambda _send: type("R", (), {"report_due": lambda self: reports.append(1), "pending_wake_in": lambda self: None})())
 
     def wait(*_a):
         rounds.append(1)

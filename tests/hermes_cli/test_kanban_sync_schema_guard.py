@@ -196,7 +196,7 @@ def test_run_forever_starts_on_a_board_migrated_from_before_the_rename(kanban_ho
     monkeypatch.setattr(ksc.sync, "set_lease_client", lambda value: None)  # no process-global lease client leaks
     monkeypatch.setattr(ksc, "board_paths", lambda: [(BOARD, kanban_home / "kanban.db")])
     monkeypatch.setattr(ksc, "reconcile_links", lambda *args, **kwargs: None)
-    monkeypatch.setattr(machine_metrics, "Reporter", lambda *args: type("R", (), {"report_due": lambda self: None})())
+    monkeypatch.setattr(machine_metrics, "Reporter", lambda *args: type("R", (), {"report_due": lambda self: None, "pending_wake_in": lambda self: None})())
     monkeypatch.setattr(hub, "report_metrics", lambda *args: None, raising=False)
     feeds = []
 
@@ -253,7 +253,7 @@ def _run_sync_loop(kanban_home, svc, monkeypatch, rounds=1):
     monkeypatch.setattr(ksc.sync, "set_lease_client", lambda value: None)
     monkeypatch.setattr(ksc, "board_paths", lambda: [(BOARD, kanban_home / "kanban.db")])
     monkeypatch.setattr(ksc, "reconcile_links", lambda *args, **kwargs: None)
-    monkeypatch.setattr(machine_metrics, "Reporter", lambda *args: type("R", (), {"report_due": lambda self: None})())
+    monkeypatch.setattr(machine_metrics, "Reporter", lambda *args: type("R", (), {"report_due": lambda self: None, "pending_wake_in": lambda self: None})())
     monkeypatch.setattr(hub, "report_metrics", lambda *args: None, raising=False)
 
     class Feed:

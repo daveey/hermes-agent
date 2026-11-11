@@ -25,9 +25,13 @@ def test_advisory_is_recorded_before_the_send_so_a_board_outage_does_not_starve_
 
     def send(_sample):
         raise TimeoutError("Board unreachable")
+    now = [100.0]
     reporter = mm.Reporter(send, collect_fn=lambda: {"cpus": 4}, cpu_limit_fn=lambda: (cm.ON, 50.0),
-                           cpu_sample_fn=lambda: {"cpu_busy_pct": 12.5, "cpu_busy_window_ms": 1000,
-                                                  "cpu_busy_sample_end_ms": end})
+                           clock=lambda: now[0], cpu_begin_fn=lambda **kw: (now[0], None),
+                           cpu_finish_fn=lambda *a, **kw: {"cpu_busy_pct": 12.5, "cpu_busy_window_ms": 1000,
+                                                          "cpu_busy_sample_end_ms": end})
+    assert reporter.report_due() is False  # begin never sends
+    now[0] += 1
     assert reporter.report_due() is False  # the send failed and nothing raised into the sync loop
     assert mm.read_hub_cpu_sample(tmp_path) == {"cpu_busy_pct": 12.5, "cpu_busy_window_ms": 1000,
                                                "cpu_busy_sample_end_ms": end}

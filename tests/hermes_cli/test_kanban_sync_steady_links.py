@@ -422,7 +422,7 @@ def test_the_sync_loop_skips_unchanged_links_passes(live, ledger, svc, kanban_ho
     monkeypatch.setattr(ksc, "FeedWatcher", lambda *a, **k: SimpleNamespace(run=lambda: None))
     monkeypatch.setattr(ksc, "sync_all_once", lambda *a, **k: [])
     monkeypatch.setattr(ksc, "LINKS_EVERY_S", 0.0)
-    monkeypatch.setattr(machine_metrics, "Reporter", lambda *args: SimpleNamespace(report_due=lambda: None))
+    monkeypatch.setattr(machine_metrics, "Reporter", lambda *args: SimpleNamespace(report_due=lambda: None, pending_wake_in=lambda: None))
     per_iteration: list[int] = []
 
     def wait(*args):

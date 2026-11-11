@@ -95,16 +95,23 @@ def cpu_reporter(send, *, limit=("on", 50.0), cpu=lambda: dict(CPU), calls=None,
         calls.append("collect")
         return {"cpus": 4, "drain_active": 0}
 
-    def sample():
+    def sample(*args, **kwargs):
         calls.append("cpu")
         return cpu()
     return mm.Reporter(send, collect_fn=collect, clock=lambda: now[0], cpu_limit_fn=lambda: limit,
-                       cpu_sample_fn=sample)
+                       cpu_begin_fn=lambda **kw: (now[0], None), cpu_finish_fn=sample)
+
+
+def finish_report(reporter, now):
+    assert reporter.report_due() is False
+    now[0] += 1
+    return reporter.report_due()
 
 
 def test_cpu_triple_only_when_root_gate_configured_and_sampled_last():
     sent, calls = [], []
-    assert cpu_reporter(sent.append, calls=calls).report_due()
+    now = [1000.0]
+    assert finish_report(cpu_reporter(sent.append, calls=calls, now=now), now)
     assert sent == [{"cpus": 4, "drain_active": 0, **CPU}] and calls == ["collect", "cpu"]
     for limit in (("off", None), ("unknown", None)):
         sent, calls = [], []
@@ -114,7 +121,8 @@ def test_cpu_triple_only_when_root_gate_configured_and_sampled_last():
 
 def test_incomplete_cpu_measurement_is_omitted_never_coerced_to_idle():
     sent = []
-    assert cpu_reporter(sent.append, cpu=lambda: None).report_due()
+    now = [1000.0]
+    assert finish_report(cpu_reporter(sent.append, cpu=lambda: None, now=now), now)
     assert not CPU_KEYS & set(sent[0])
 
 
@@ -125,7 +133,8 @@ def test_old_board_fallback_strips_cpu_and_drain_fields_once():
         sent.append(value)
         if CPU_KEYS & set(value) or "drain_active" in value:
             raise ksc.HubError(400, "unknown metric")
-    assert cpu_reporter(send).report_due()
+    now = [1000.0]
+    assert finish_report(cpu_reporter(send, now=now), now)
     assert sent[1] == {"cpus": 4} and len(sent) == 2  # the retry never carries the (now older) CPU sample
 
 
@@ -140,9 +149,9 @@ def test_failed_cpu_report_is_never_replayed_next_round_takes_a_fresh_sample():
         sent.append(value)
         raise TimeoutError("CPU metrics report exceeded its 2 s budget")
     r = cpu_reporter(send, cpu=cpu, now=now)
-    assert r.report_due() is False and len(sent) == 1  # a timeout is not retried in-round
-    now[0] += mm.REPORT_EVERY_S
-    assert r.report_due() is False and len(sent) == 2
+    assert finish_report(r, now) is False and len(sent) == 1  # a timeout is not retried in-round
+    now[0] = 1000.0 + mm.REPORT_EVERY_S
+    assert finish_report(r, now) is False and len(sent) == 2
     assert sent[0]["cpu_busy_sample_end_ms"] != sent[1]["cpu_busy_sample_end_ms"]
 
 

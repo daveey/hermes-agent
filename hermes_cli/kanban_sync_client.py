@@ -1512,6 +1512,9 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
         deferred_due = next_deferred_repair(boards)
         if deferred_due is not None:
             remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
+        pending_wake = metrics.pending_wake_in()
+        if pending_wake is not None:
+            remaining = min(remaining, pending_wake)
         sync_timing.wait(wait_for_work, wake, [p for _s, p in boards], remaining, keep_running)
     runstate.record_down("stopped (gateway stopping, or the host sync lease went to another gateway)")
 

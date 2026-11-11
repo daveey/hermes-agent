@@ -27,7 +27,7 @@ def test_feed_wake_only_pulls_changed_board_and_local_outbox(monkeypatch):
     monkeypatch.setattr(client, 'outbox_pending', lambda paths: any(p in pending for p in paths))
     monkeypatch.setattr(client, 'time', SimpleNamespace(monotonic=lambda: clock[0], sleep=lambda _: None))
     from hermes_cli import machine_metrics
-    monkeypatch.setattr(machine_metrics, 'Reporter', lambda _: SimpleNamespace(report_due=lambda: None))
+    monkeypatch.setattr(machine_metrics, 'Reporter', lambda _: SimpleNamespace(report_due=lambda: None, pending_wake_in=lambda: None))
 
     class Watcher:
         def __init__(self, ident, board, wake, keep_running, **kwargs):
