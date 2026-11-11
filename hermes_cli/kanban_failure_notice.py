@@ -36,16 +36,3 @@ def fresh_events(events, delivered):
         if uid:
             seen.add(uid)
     return result
-
-
-def fresh_texts(batch, delivered):
-    """Deduplicate both persisted keys and repeats within one delivery batch."""
-    seen = set(delivered)
-    fresh = []
-    for text in batch:
-        keys = set(getattr(text, "_kb_keys", ()) or ())
-        if keys and keys <= seen:
-            continue
-        fresh.append(text)
-        seen.update(keys)
-    return fresh
