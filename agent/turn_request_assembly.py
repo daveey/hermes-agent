@@ -221,6 +221,7 @@ def assemble_api_request(
                 _static_system_prefix if isinstance(_static_system_prefix, str) else None
             ),
             direct_native_tool_cache=agent._direct_native_anthropic_tool_cache_capability(),
+            cache_full_system=getattr(agent, "_cache_full_system", False),
             # LiteLLM-style envelope routes forward part-level markers into
             # tool_result.content[] → non-retryable 400.
             tool_part_markers=envelope_tool_part_cache_markers_supported(

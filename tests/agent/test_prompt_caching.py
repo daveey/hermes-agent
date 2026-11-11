@@ -183,42 +183,8 @@ class TestPromptCachePlan:
             direct_native_tool_cache=True,
         )
 
-        # tools + static prefix + system suffix (spare budget); the pending endpoint takes none.
-        assert _count_cache_markers(plan.messages, plan.tools) == 3
+        assert _count_cache_markers(plan.messages, plan.tools) == 2
         assert "cache_control" not in plan.messages[-1]
-
-    def test_first_turn_marks_the_system_suffix_with_spare_budget(self):
-        """A new session's first request has one endpoint, so a slot is free: spend it on the
-        end of the system prompt. Every new chat shares that prefix (project context, skills
-        index, memory), so the next new chat reads it from cache instead of re-writing ~15k
-        tokens before its first token."""
-        messages = [
-            {"role": "system", "content": "stable prefix\nvolatile suffix"},
-            {"role": "user", "content": "first request"},
-        ]
-        plan = build_prompt_cache_plan(
-            messages, _tool_heavy_native_tools(), native_anthropic=True,
-            static_system_prefix="stable prefix", direct_native_tool_cache=True,
-        )
-
-        system = plan.messages[0]["content"]
-        assert [part["text"] for part in system] == ["stable prefix", "\nvolatile suffix"]
-        assert all(part.get("cache_control") == MARKER for part in system)
-        assert plan.tools[-1]["cache_control"] == MARKER
-        assert "cache_control" in plan.messages[-1]["content"][-1]
-        assert _count_cache_markers(plan.messages, plan.tools) == 4
-
-    def test_two_endpoints_keep_the_suffix_unmarked(self):
-        """Once two transaction endpoints exist they own the budget; the suffix rides unmarked."""
-        plan = build_prompt_cache_plan(
-            _tool_heavy_native_history(), _tool_heavy_native_tools(), native_anthropic=True,
-            static_system_prefix="stable prefix", direct_native_tool_cache=True,
-        )
-
-        system = plan.messages[0]["content"]
-        assert system[0].get("cache_control") == MARKER
-        assert "cache_control" not in system[1]
-        assert _count_cache_markers(plan.messages, plan.tools) == 4
 
     def test_static_prefix_equal_to_whole_prompt_emits_no_empty_block(self):
         """Empty volatile suffix must not produce an empty text block.
