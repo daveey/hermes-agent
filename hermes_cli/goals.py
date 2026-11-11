@@ -1689,7 +1689,8 @@ def run_kanban_goal_loop(
 
     def _block(message: str) -> None:
         try:
-            block_fn(message)
+            from hermes_cli.kanban_workspace_publication import involuntary_park
+            involuntary_park(task_id, block_fn, message)
         except Exception as exc:
             _log(f"kanban goal loop: block_fn failed ({exc})")
 

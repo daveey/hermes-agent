@@ -54,6 +54,12 @@ Before voluntary continue, block, schedule or review handoff of an active run:
   is the first receipt for compact readers; the plural field is authoritative for
   multiple roots. Involuntary/unguarded endings record unverified custody without
   a remote probe and without preventing run recovery.
+  Kernel goal-loop budget, non-finalization and unachievable parks are involuntary;
+  a kernel-only call scope preserves their existing transition/ownership checks.
+- Carry forward the newest unresolved receipt per path. An exactly published
+  receipt releases historical custody (including older unpublished receipts and
+  checkpoint mentions); a current explicit reference or declared workspace is
+  still checked anew. Removing an unpublished root does not release custody.
 
 No staging, automatic commit, push, credential grant, host-marker removal or move
 exception is performed. In particular, copied databases, ignored build outputs,
@@ -69,8 +75,11 @@ and disposable bare origins. It covers unpublished/dirty/untracked work, deleted
 remote branches with stale tracking refs, successful exact publication, explicit
 retention reasons, final-local-state races, crash audit, and the scratch + external
 linked-worktree pattern through current checkpoint, metadata and prior checkpoint.
-A source checkout mentioned incidentally for read-only runtime inspection is not
-inferred to be an owned implementation worktree. Existing placement refusals remain.
+A plain clone mentioned in scratch text is not inferred to be owned, even if it
+contains unpublished commits. Linked-worktree mentions are checked regardless of
+prose such as "read-only"; declared Git workspaces are always checked. Existing
+placement refusals remain. Recovery regressions in `test_kanban_publication_recovery.py`
+cover kernel stops, release after publication, caller receipt stripping and malformed paths.
 
 DB entrypoints are exercised directly. CLI/tool transport, natural deployed
 recovery and cross-worker reconstruction are separate acceptance, not inferred

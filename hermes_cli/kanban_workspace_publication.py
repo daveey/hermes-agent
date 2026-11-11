@@ -15,6 +15,7 @@ import subprocess
 import time
 
 _receipt: ContextVar[tuple | None] = ContextVar('workspace_publication', default=None)
+_kernel_park: ContextVar[str | None] = ContextVar('workspace_kernel_park', default=None)
 _deadline: ContextVar[float | None] = ContextVar('workspace_publication_deadline', default=None)
 _REASON = re.compile(r'^UNPUBLISHED_WORK_REASON=([^\r\n]+)', re.MULTILINE)
 
@@ -63,7 +64,8 @@ def _paths(conn, task_id, text=''):
         found[str(declared)] = declared
     retained = conn.execute('SELECT summary, metadata FROM task_runs WHERE task_id=? '
                             'ORDER BY id DESC LIMIT 3', (task_id,)).fetchall()
-    texts = [text]
+    texts = []
+    latest = {}
     for summary, metadata in retained:
         texts.append(summary or '')
         try:
@@ -79,10 +81,13 @@ def _paths(conn, task_id, text=''):
                 for receipt in receipts:
                     raw = receipt.get('path') if isinstance(receipt, dict) else None
                     if isinstance(raw, str) and Path(raw).is_absolute():
-                        found[raw] = Path(raw)
-    for value in texts:
+                        latest.setdefault(raw, receipt.get('state'))
+    found.update((raw, Path(raw)) for raw, state in latest.items() if state != 'published')
+    for value, historical in [(value, True) for value in texts] + [(text, False)]:
         for raw in re.findall(r"(?:/|~/)[^\s`'\"<>;,()\[\]]+", value):
             path = Path(raw.rstrip('.')).expanduser()
+            if historical and latest.get(str(path)) == 'published':
+                continue
             if (path / '.git').is_file():
                 found[str(path)] = path
     return list(found.values())
@@ -106,15 +111,26 @@ def _observe(path):
             receipt['reason'] = 'workspace_changed_during_probe'
             return receipt
         receipt.update(state='published', reason='exact_origin_branch')
-    except (OSError, subprocess.SubprocessError, UnicodeError):
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
         pass  # Unknown publication must never become a successful publication receipt.
     return receipt
+
+
+def involuntary_park(task_id, fn, *args, **kwargs):
+    """Kernel-only call scope; never inferred from worker metadata or reason text."""
+    token = _kernel_park.set(task_id)
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        _kernel_park.reset(token)
 
 
 def publication_guard(fn):
     """Observe before any transition transaction; exceptions leave run ownership intact."""
     @wraps(fn)
     def wrapped(conn, task_id, *args, **kwargs):
+        if _kernel_park.get() == task_id:
+            return fn(conn, task_id, *args, **kwargs)
         row = conn.execute('SELECT status, current_run_id FROM tasks WHERE id = ?', (task_id,)).fetchone()
         text = kwargs.get('checkpoint') or kwargs.get('reason') or kwargs.get('summary') or ''
         metadata = kwargs.get('metadata') or {}
@@ -149,11 +165,13 @@ def publication_guard(fn):
 
 def closed_metadata(conn, task_id, run_id, metadata):
     """Server-owned receipt; involuntary exits cannot be refused by network failure."""
+    metadata = {key: value for key, value in (metadata or {}).items()
+                if key not in ('workspace_publication', 'workspace_publications')}
     current = _receipt.get()
     paths = _paths(conn, task_id)
     observations = [{'path': str(path), 'state': 'unverified', 'reason': 'involuntary_or_unguarded_exit'}
                     for path in paths]
-    if current and current[:3] == (id(conn), task_id, run_id):
+    if _kernel_park.get() != task_id and current and current[:3] == (id(conn), task_id, run_id):
         observations = [dict(item) for item in current[3]]
         deadline = time.monotonic() + 1
         for observed in observations:

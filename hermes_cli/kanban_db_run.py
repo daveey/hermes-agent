@@ -16,6 +16,7 @@ def _end_run(
     row: they are the only evidence left of the OS process once the task row
     is wiped, and :func:`kanban_db_dispatch.reap_terminal_workers` needs them
     to end a worker that survived its own terminal transition."""
+    from hermes_cli import kanban_db as _kb
     now = int(time.time())
     run_id = _kb._current_run_id(conn, task_id)
     if run_id is None:
@@ -39,5 +40,3 @@ def _end_run(
     )
     conn.execute("UPDATE tasks SET current_run_id = NULL WHERE id = ?", (task_id,))
     return run_id
-
-from hermes_cli import kanban_db as _kb
