@@ -107,6 +107,37 @@ def test_ordinary_parent_outside_batch_does_not_suppress_prepend(live, svc, stat
     assert tid in svc.board("default")["rows"]["tasks"]
 
 
+@pytest.mark.parametrize("status,version,expected", [
+    ("applied", 12, 12), ("merged", 12, 12), ("applied", 3, 7),
+    ("applied", None, 7), ("rejected", 12, 7),
+])
+def test_synthetic_parent_acknowledgement_is_successful_version_only(live, status, version, expected):
+    from hermes_cli import kanban_sync_compat as compat
+    tid = kb.create_task(live, title="parent acknowledgement", assignee="worker")
+    live.execute("UPDATE tasks SET sync_version=7 WHERE id=?", (tid,))
+    result = {"client_op_id": "parent-op", "status": status}
+    if version is not None:
+        result["version"] = version
+    assert compat.rejected_parent(live, [({"client_op_id": "parent-op"}, tid)], result) is None
+    assert live.execute("SELECT sync_version FROM tasks WHERE id=?", (tid,)).fetchone()[0] == expected
+
+
+@pytest.mark.parametrize("kind", ["created", "sync_rejected"])
+def test_child_rejection_records_payload_but_diagnostic_rejection_does_not_recurse(live, kind):
+    from hermes_cli import kanban_sync_compat as compat
+    tid = kb.create_task(live, title="diagnostic custody", assignee="worker")
+    fields = {"task_id": tid, "kind": kind, "payload": "{}"}
+    row = {"op_id": "rejected-child", "table_name": "task_events", "row_uid": "event-uid",
+           "fields": json.dumps(fields)}
+    compat.record_rejection(live, row, "forbidden_field: unsupported")
+    events = live.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='sync_rejected'", (tid,)).fetchall()
+    if kind == "sync_rejected":
+        assert not events
+    else:
+        assert [json.loads(event[0]) for event in events] == [{
+            "reason": "forbidden_field: unsupported", "fields": sorted(fields), "op_id": "rejected-child"}]
+
+
 @pytest.mark.parametrize("importing", [False, True])
 def test_compat_retry_survives_reconnect_and_transport_loss_without_rehydration(live, svc, kanban_home, importing):
     from hermes_cli import kanban_db_connect as kbc
