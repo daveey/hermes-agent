@@ -327,14 +327,17 @@ def build_prompt_cache_plan(
 
     messages = _strip_prior_decoration(list(api_messages or []))
     marker = _build_marker(cache_ttl)
+    endpoints = _completed_transaction_endpoint_indexes(messages, native_anthropic=True)[-2:]
     if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
-        # Tool-cache layout: only the static prefix carries a system-side marker; the
-        # volatile suffix's budget is spent on the tools array.
+        # Tool-cache layout: the tools array takes the suffix's usual slot. With fewer than two
+        # endpoints (a new session's first requests) a slot is spare: mark the suffix too, so
+        # the next new chat reads the whole shared system prompt instead of re-writing it.
         messages[0] = copy.deepcopy(messages[0])
         _apply_system_cache_markers(messages[0], marker, static_system_prefix,
-                                    native_anthropic=True, mark_suffix=False, fallback_to_whole=False)
+                                    native_anthropic=True, mark_suffix=len(endpoints) < 2,
+                                    fallback_to_whole=False)
     planned_tools[-1]["cache_control"] = dict(marker)
-    for endpoint in _completed_transaction_endpoint_indexes(messages, native_anthropic=True)[-2:]:
+    for endpoint in endpoints:
         messages[endpoint] = copy.deepcopy(messages[endpoint])
         _apply_cache_marker(messages[endpoint], marker, native_anthropic=True)
     _split_unmarked_scaffolds(messages)
