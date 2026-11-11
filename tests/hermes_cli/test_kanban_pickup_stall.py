@@ -161,6 +161,20 @@ def test_a_card_pinned_to_another_host_raises_nothing_here(gws, monkeypatch):
     assert kps.latest(worker.conn, tid) is None  # nothing recorded for a card pinned elsewhere
 
 
+def test_first_tick_after_drain_waits_for_skip_evidence_before_filing(gws):
+    hub, worker = gws
+    targets = [_pinned(hub, title=f"old-{i}") for i in range(4)]
+    worker.round()
+    for tid in targets:
+        _age(worker, tid, 900)
+    worker.tick(max_spawn=0)  # sweep precedes note_capped on the first post-drain tick
+    assert not _repairs(worker.conn)
+    worker.tick(max_spawn=0)
+    [repair] = _repairs(worker.conn)
+    assert "queue" in repair["title"].lower()
+    assert all(tid in repair["body"] for tid in targets)
+
+
 def test_a_full_queue_files_one_card_per_host_naming_the_oldest(gws):
     hub, worker = gws
     old = _pinned(hub, title="oldest")
@@ -177,6 +191,43 @@ def test_a_full_queue_files_one_card_per_host_naming_the_oldest(gws):
     [card] = _repairs(worker.conn)
     assert old in card["title"] and "queue" in card["title"].lower()
     assert "budget_exhausted" in card["body"] and new in card["body"]
+
+
+@pytest.mark.parametrize("reason", ["budget_exhausted", "hold", "other"])
+@pytest.mark.parametrize("initial", [2, 25])
+def test_same_cause_burst_refreshes_all_targets_without_comment_churn(gws, reason, initial):
+    from hermes_cli import kanban_pickup_stall as kps
+    _, worker = gws
+    worker.enter()
+    cards = [{"id": f"target-{i:03}", "title": "waiting", "tenant": None, "since_ms": 1,
+              "skip": {"reason": reason, "first_at": 1, "last_at": 1, "passes": 1,
+                       "detail": "machine registry unavailable" if reason == "other" else None}}
+             for i in range(25)]
+    [tid] = kps.file_repairs(worker.conn, WORKER, cards[:initial])
+    assert kps.file_repairs(worker.conn, WORKER, cards) == [tid]
+    comments = kb.list_comments(worker.conn, tid)
+    repair = kb.get_task(worker.conn, tid)
+    assert repair is not None
+    text = (repair.body or "") + "\n".join(c.body for c in comments)
+    assert all(c["id"] in text for c in cards)
+    kps.file_repairs(worker.conn, WORKER, cards)
+    assert len(kb.list_comments(worker.conn, tid)) == len(comments)
+    other = {**cards[0], "skip": {**cards[0]["skip"], "reason": "capability_missing"}}
+    assert kps.file_repairs(worker.conn, WORKER, [other]) != [tid]
+    assert len(_repairs(worker.conn)) == 2
+
+
+@pytest.mark.parametrize("status", ["done", "archived"])
+def test_refresh_does_not_append_to_closed_repairs(gws, status):
+    from hermes_cli import kanban_pickup_stall as kps
+    _, worker = gws
+    worker.enter()
+    tid = kb.create_task(worker.conn, title="closed repair", assignee="default")
+    with kb.write_txn(worker.conn):
+        worker.conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, tid))
+    kps._refresh_targets(worker.conn, tid, [{"id": "target-new", "title": "new", "since_ms": 1}], 1000)
+    assert not kb.list_comments(worker.conn, tid)
+    kps._refresh_targets(worker.conn, "missing-repair", [], 1000)
 
 
 def test_a_stall_with_another_last_reason_gets_its_own_card_beside_the_queue_card(gws):

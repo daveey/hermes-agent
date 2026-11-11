@@ -221,6 +221,24 @@ def _group(card: Mapping[str, Any]) -> Optional[str]:
     return skip.get("reason") if skip.get("reason") in ("budget_exhausted", "hold") else None
 
 
+def _refresh_targets(conn, task_id: str, members: list[dict[str, Any]], now_ms: int) -> None:
+    """Append newly affected targets only; unchanged ticks must not churn the thread."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_comment_ids import add_comment
+    with kb.write_txn(conn):
+        task = kb.get_task(conn, task_id)
+        if task is None or task.status in ("done", "archived"):
+            return
+        seen = (task.body or "") + "\n" + "\n".join(
+            c.body for c in kb.list_comments(conn, task_id) if c.author == DETECTOR)
+        added = [c for c in members if f"- {c['id']} (" not in seen]
+        if added:
+            lines = "\n".join(f"- {c['id']} ({c['title']}), ready {_minutes(c['since_ms'], now_ms)} min"
+                              for c in added)
+            add_comment(conn, task_id, DETECTOR, "Additional targets for this pickup cause:\n\n" + lines)
+            _log.info("pickup-stall refreshed card=%s added_targets=%d", task_id, len(added))
+
+
 def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[float] = None) -> list[str]:
     """One repair per stalled card with a card-specific last reason; one per host per host-wide cause
     (:data:`_HOST_GROUPS`), naming the oldest card. Returns the covering repair ids."""
@@ -228,6 +246,11 @@ def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[f
     ids: list[str] = []
     groups: dict[str, list[dict[str, Any]]] = {}
     for card in cards:
+        # The sweep precedes pickup/note_capped. A first post-drain tick may
+        # have old ready rows but no observation yet: missing evidence is not
+        # a target-specific cause. Let this tick record it before filing.
+        if not card["skip"]:
+            continue
         group = _group(card)
         if group is not None:
             groups.setdefault(group, []).append(card)
@@ -253,6 +276,7 @@ def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[f
             body=(f"{len(members)} card(s) pinned to machine:{own} have waited past {stall_seconds()} s, and {why}"
                   f"\n\nOldest: {oldest['id']} ({oldest['title']}), last skip {describe(oldest['skip'])}."
                   f"\n\n{listed}")))
+        _refresh_targets(conn, ids[-1], members, now_ms)
     return ids
 
 
