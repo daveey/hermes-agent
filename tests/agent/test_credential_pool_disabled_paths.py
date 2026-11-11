@@ -166,3 +166,102 @@ def test_anthropic_session_pinned_to_its_only_row_stops_when_that_row_is_disable
     _disable("anthropic", pool.entries()[0])
     with pytest.raises(AuthError, match="Every anthropic account is disabled"):
         agent._try_refresh_anthropic_client_credentials()
+
+
+def _jwt(email, acct, exp_in=6 * 3600):
+    import base64
+    import json
+    import time
+    def enc(d):
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
+    claims = {"exp": int(time.time()) + exp_in, "https://api.openai.com/profile": {"email": email},
+              "https://api.openai.com/auth": {"chatgpt_account_id": acct}}
+    return f"{enc({'alg': 'none'})}.{enc(claims)}.sig"
+
+
+def _codex_singleton(token, refresh="rt-fixture"):
+    import json
+    import time
+    from hermes_cli.auth import _auth_file_path
+    path = _auth_file_path()
+    store = json.loads(path.read_text()) if path.exists() else {"version": 1, "providers": {}}
+    store["providers"]["openai-codex"] = {"tokens": {"access_token": token, "refresh_token": refresh},
+                                         "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                         "auth_mode": "chatgpt"}
+    path.write_text(json.dumps(store))
+    cpd._cache.clear()
+
+
+@pytest.fixture
+def _no_codex_env(monkeypatch):
+    for key in [k for k in os.environ if k.startswith(("OPENAI", "CODEX", "HERMES_CODEX"))]:
+        monkeypatch.delenv(key)
+
+
+@pytest.mark.parametrize("exp_in", [6 * 3600, 30])
+def test_codex_singleton_resolver_refuses_a_disabled_account_before_any_refresh(monkeypatch, _no_codex_env, exp_in):
+    """Covers every resolve_codex_runtime_credentials caller (plugin requests, usage, aux); no grant is spent."""
+    import hermes_cli.auth_codex as ac
+    from agent.credential_pool import load_pool
+    _codex_singleton(_jwt("a@example.com", "acct-a", exp_in))
+    spent = []
+    monkeypatch.setattr(ac, "_refresh_codex_auth_tokens", lambda tokens, timeout: spent.append(1) or tokens)
+    for entry in load_pool("openai-codex").entries():
+        _disable("openai-codex", entry)
+    with pytest.raises(AuthError, match="disabled"):
+        ac.resolve_codex_runtime_credentials()
+    assert spent == []
+    assert ac.resolve_codex_runtime_credentials(read_only=True)["api_key"]  # status still reports it
+
+
+def test_disabling_the_codex_singleton_slot_does_not_disable_the_next_account_signed_in(_no_codex_env):
+    from agent.credential_pool import load_pool
+    _codex_singleton(_jwt("a@example.com", "acct-a"))
+    (row,) = load_pool("openai-codex").entries()
+    _disable("openai-codex", row)
+    assert load_pool("openai-codex").select() is None
+    _codex_singleton(_jwt("b@example.com", "acct-b"), refresh="rt-b")  # sign in as someone else
+    pool = load_pool("openai-codex")
+    assert pool.entries()[0].id == row.id  # same slot id ...
+    assert pool.select() is not None  # ... different account: usable
+    # A stays disabled wherever its row reappears (a hub pull labelled with the email) and by token.
+    assert cpd.is_credential_disabled("openai-codex", SimpleNamespace(id="other", label="a@example.com", access_token=""))
+    assert cpd.token_disabled("openai-codex", _jwt("a@example.com", "acct-a")) is True
+
+
+def test_xai_singleton_resolver_refuses_a_disabled_account(monkeypatch):
+    from hermes_cli import auth_xai
+    rows = [{"id": "row0", "label": "a@example.com", "auth_type": "oauth", "priority": 0, "source": "manual:device_code",
+             "access_token": "xai-fixture-access", "refresh_token": "xai-fixture-rt", "base_url": "https://api.x.ai/v1"}]
+    write_credential_pool("xai-oauth", rows)
+    _disable("xai-oauth", SimpleNamespace(**rows[0]))
+    monkeypatch.setattr(auth_xai, "_read_xai_oauth_tokens", lambda: {"tokens": {
+        "access_token": "xai-fixture-access", "refresh_token": "xai-fixture-rt"}})
+    with pytest.raises(AuthError, match="disabled"):
+        auth_xai.resolve_xai_oauth_runtime_credentials()
+
+
+def test_cli_refuses_disabling_providers_whose_env_and_fallback_paths_ignore_it():
+    from hermes_cli.auth_commands import auth_disable_command
+    _pool("deepseek", n=1)
+    with pytest.raises(SystemExit, match="hermes auth remove deepseek"):
+        auth_disable_command(SimpleNamespace(provider="deepseek", target="1"))
+
+
+def test_a_disabled_row_is_not_a_fallback_and_never_binds_a_delegated_child(monkeypatch):
+    import contextlib
+    import agent.credential_pool as cp
+    import tools.delegate_tool_routes as routes
+    from tools.delegate_tool_child_run import _lease_child_credential
+    pool = _pool("openai-codex", n=3)
+    assert pool._is_sole_credential() is False
+    _disable("openai-codex", pool.entries()[1])
+    _disable("openai-codex", pool.entries()[2])
+    assert pool._is_sole_credential() is True
+    # The leased row 0 serves another endpoint; only the disabled rows serve the child's.
+    monkeypatch.setattr(cp, "credential_pool_entry_serves_endpoint", lambda e, url: e is not None and e.id != "row0")
+    monkeypatch.setattr(routes, "child_profile_scope", lambda c: contextlib.nullcontext())
+    bound = []
+    child = SimpleNamespace(_credential_pool=pool, base_url="https://child.example", _swap_credential=bound.append)
+    _, lease = _lease_child_credential(child)
+    assert bound == [] and lease is None

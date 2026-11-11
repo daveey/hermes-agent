@@ -432,6 +432,9 @@ def resolve_xai_oauth_runtime_credentials(
 
     data = _read_xai_oauth_tokens()
     tokens = dict(data["tokens"])
+    if refresh_if_expiring or force_refresh:  # status (refresh_if_expiring=False) only reports
+        from agent.credential_pool_disabled import refuse_disabled_token  # never send/spend a disabled account's
+        refuse_disabled_token("xai-oauth", tokens.get("access_token"), tokens.get("refresh_token"))
     refresh_timeout_seconds = env_float("HERMES_XAI_REFRESH_TIMEOUT_SECONDS", 20)
     if _should_refresh(data):
         with _auth_store_lock(timeout_seconds=max(float(AUTH_LOCK_TIMEOUT_SECONDS), refresh_timeout_seconds + 5.0)):

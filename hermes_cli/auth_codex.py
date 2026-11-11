@@ -672,6 +672,9 @@ def resolve_codex_runtime_credentials(
                          "codex_auth_missing", relogin=True)
     tokens = dict(data["tokens"])
     access_token = _stripped(tokens.get("access_token"))
+    if not read_only:  # a disabled account: never send its token, never spend its refresh grant
+        from agent.credential_pool_disabled import refuse_disabled_token
+        refuse_disabled_token("openai-codex", access_token, tokens.get("refresh_token"))
     refresh_timeout_seconds = env_float("HERMES_CODEX_REFRESH_TIMEOUT_SECONDS", 20)
 
     def _should_refresh(token: str) -> bool:

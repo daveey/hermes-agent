@@ -6,9 +6,12 @@ pulls) rewrites rows from its in-memory copy, so a flag stored on a row would be
 flush from any process that loaded the pool before the user disabled it. Only
 :func:`set_credential_disabled` writes this section, under the auth-store lock.
 
-A record matches a row by id OR by case-insensitive label. Label matching keeps an account disabled
-when its row is recreated with a new id (a re-login, a hub pull, a singleton re-seed), which all keep
-the account's label (its email).
+A record ``{"id", "label", "account"}`` matches a row by id OR by case-insensitive label, so an account
+stays disabled when its row is recreated with a new id (a re-login, a hub pull). Generic labels that
+name a slot, not an account (``device_code``, ``claude_code``, ``env:...``), never match by label.
+``account`` is the identity in the row's JWT (email or ChatGPT account id) when it has one: a row
+whose token names a DIFFERENT account never matches, so disabling the Codex/xAI singleton slot does
+not also disable whoever signs into that slot next.
 
 Readers union the active store's section with the global root's, so a disable in the root home
 applies to every profile on the host. Reads are cached by each file's (mtime, size), so a
@@ -29,7 +32,10 @@ SECTION = "disabled_credentials"
 
 _cache_lock = threading.Lock()
 _cache: dict[tuple[str, str], tuple[tuple[int, int], tuple[frozenset[str], frozenset[str]]]] = {}
-_EMPTY: tuple[frozenset[str], frozenset[str]] = (frozenset(), frozenset())
+_EMPTY: tuple = (frozenset(), frozenset(), frozenset())
+_GENERIC_LABELS = frozenset({"device_code", "claude_code", "hermes_pkce", "manual", "oauth", "api_key", "env"})
+# Only the providers whose every token path checks this list (pool, singleton, env/borrowed tokens).
+SUPPORTED_PROVIDERS = frozenset({"anthropic", "openai-codex", "xai-oauth"})
 
 
 def _norm_label(label: Any) -> str:
@@ -42,13 +48,36 @@ def _records(store: dict[str, Any], provider: str) -> list[dict[str, Any]]:
     return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
 
 
-def _keys_from_records(records: Iterable[dict[str, Any]]) -> tuple[frozenset[str], frozenset[str]]:
+def _generic(label: str) -> bool:
+    return label in _GENERIC_LABELS or label.startswith(("env:", "env ")) or not label
+
+
+def account_of(entry: Any) -> Optional[str]:
+    """Lowercase account identity from the row's JWT access token (email, else ChatGPT account id)."""
+    from hermes_cli.auth_constants import _decode_jwt_claims
+    claims = _decode_jwt_claims(getattr(entry, "access_token", None) or "")
+    if not isinstance(claims, dict) or not claims:
+        return None
+    profile = claims.get("https://api.openai.com/profile") or {}
+    auth = claims.get("https://api.openai.com/auth") or {}
+    for value in (claims.get("email"), profile.get("email") if isinstance(profile, dict) else None,
+                  auth.get("chatgpt_account_id") if isinstance(auth, dict) else None):
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return None
+
+
+def _keys_from_records(records: Iterable[dict[str, Any]]) -> tuple:
+    """``(ids, labels, guards)``; guards = ``(id, account)`` pairs a matching row's token must not contradict."""
+    records = list(records)
     ids = frozenset(str(r["id"]) for r in records if r.get("id"))
-    labels = frozenset(_norm_label(r.get("label")) for r in records if _norm_label(r.get("label")))
-    return ids, labels
+    labels = frozenset(lab for r in records for lab in (_norm_label(r.get("label")), _norm_label(r.get("account")))
+                       if not _generic(lab))
+    guards = frozenset((str(r["id"]), _norm_label(r["account"])) for r in records if r.get("id") and r.get("account"))
+    return ids, labels, guards
 
 
-def _file_keys(path: Optional[Path], provider: str) -> tuple[frozenset[str], frozenset[str]]:
+def _file_keys(path: Optional[Path], provider: str) -> tuple:
     if path is None:
         return _EMPTY
     try:
@@ -80,25 +109,34 @@ def _root_path() -> Optional[Path]:
     return Path(root) if root is not None else None
 
 
-def disabled_keys(provider: str) -> tuple[frozenset[str], frozenset[str]]:
-    """``(ids, lowercase labels)`` the user disabled for *provider* (active store + global root)."""
+def disabled_keys(provider: str) -> tuple:
+    """``(ids, lowercase labels, guards)`` the user disabled for *provider* (active store + global root)."""
     from hermes_cli import auth as auth_mod
-    active = auth_mod._auth_file_path()
-    root = _root_path()
-    ids, labels = _file_keys(active, provider)
+    try:
+        active, root = auth_mod._auth_file_path(), _root_path()
+    except Exception:  # no resolvable store (or a guarded one) holds no disable records
+        logger.debug("disabled-credential check: auth store path unavailable", exc_info=True)
+        return _EMPTY
+    keys = _file_keys(active, provider)
     if root is not None and root != Path(active):
-        root_ids, root_labels = _file_keys(root, provider)
-        ids, labels = ids | root_ids, labels | root_labels
-    return ids, labels
+        keys = tuple(a | b for a, b in zip(keys, _file_keys(root, provider)))
+    return keys
 
 
-def matches(entry: Any, keys: tuple[frozenset[str], frozenset[str]]) -> bool:
-    ids, labels = keys
+def matches(entry: Any, keys: tuple) -> bool:
+    ids, labels = keys[0], keys[1]
     if not ids and not labels:
         return False
-    return getattr(entry, "id", None) in ids or (
-        bool(labels) and _norm_label(getattr(entry, "label", "")) in labels
-    )
+    acct = account_of(entry)
+    if acct is not None and acct in labels:
+        return True
+    entry_id = getattr(entry, "id", None)
+    if entry_id in ids:
+        wanted = {a for i, a in (keys[2] if len(keys) > 2 else ()) if i == entry_id}
+        if not wanted or acct is None or acct in wanted:
+            return True
+    label = _norm_label(getattr(entry, "label", ""))
+    return not _generic(label) and label in labels
 
 
 def enabled_entries(provider: str, entries: Iterable[Any]) -> list[Any]:
@@ -131,7 +169,10 @@ def set_credential_disabled(provider: str, entry: Any, disabled: bool) -> bool:
         if disabled:
             if hit:
                 return False
-            records.append({"id": entry_id, "label": label})
+            record = {"id": entry_id, "label": label}
+            if (acct := account_of(entry)) is not None:
+                record["account"] = acct
+            records.append(record)
         else:
             if not hit:
                 return False
@@ -157,28 +198,34 @@ def disabled_by_root(provider: str, entry: Any) -> bool:
     return matches(entry, _file_keys(root, provider))
 
 
-def token_disabled(provider: str, token: Optional[str]) -> bool:
-    """Whether *token* belongs to a disabled pool row of *provider*.
+def token_disabled(provider: str, *tokens: Optional[str]) -> bool:
+    """Whether any of *tokens* (access or refresh) belongs to a disabled account of *provider*.
 
     For the resolvers that hand out a token without selecting it from the pool (the auth.json
-    singleton, env tokens, the Claude Code file): the pool row seeded from them carries the same token.
-    Costs nothing while nothing is disabled.
+    singleton, env tokens, the Claude Code file). A JWT naming a disabled account is disabled outright;
+    otherwise the token must be a disabled pool row's access/refresh token. Reads the persisted rows,
+    never ``load_pool`` (seeding may call the very resolver asking). Free while nothing is disabled.
     """
-    if not token:
+    wanted = {t.strip() for t in tokens if isinstance(t, str) and t.strip()}
+    if not wanted:
         return False
     keys = disabled_keys(provider)
     if not keys[0] and not keys[1]:
         return False
-    from agent.credential_pool import load_pool
+    from types import SimpleNamespace
+    if any(account_of(SimpleNamespace(access_token=t)) in keys[1] for t in wanted):
+        return True
+    from hermes_cli import auth as auth_mod
     try:
-        entries = load_pool(provider).entries()
+        rows = auth_mod.read_credential_pool(provider)
     except Exception:
         logger.warning("disabled-credential check: %s pool unreadable; token allowed", provider, exc_info=True)
         return False
-    token = token.strip()
+    rows = [SimpleNamespace(**{k: r.get(k) for k in ("id", "label", "access_token", "refresh_token", "agent_key")})
+            for r in (rows if isinstance(rows, list) else []) if isinstance(r, dict)]
     return any(
-        matches(e, keys) and token in (getattr(e, "runtime_api_key", None), getattr(e, "access_token", None))
-        for e in entries
+        matches(r, keys) and wanted & {r.access_token, r.refresh_token, r.agent_key}
+        for r in rows
     )
 
 
@@ -216,7 +263,7 @@ def _raise_all_disabled(provider: str) -> None:
                     provider=provider, code="credentials_disabled")
 
 
-def refuse_disabled_token(provider: str, token: Optional[str]) -> None:
-    """Raise ``AuthError`` when a session would keep sending *token* of a disabled account."""
-    if token_disabled(provider, token):
+def refuse_disabled_token(provider: str, *tokens: Optional[str]) -> None:
+    """Raise ``AuthError`` when *tokens* (access/refresh) are a disabled account's: never send or spend them."""
+    if token_disabled(provider, *tokens):
         _raise_all_disabled(provider)

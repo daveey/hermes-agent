@@ -511,8 +511,11 @@ def auth_priority_command(args) -> None:
 
 def _auth_set_disabled(args, disabled: bool) -> None:
     """`hermes auth disable|enable <provider> <target>`: switch one pooled credential off or back on."""
-    from agent.credential_pool_disabled import disabled_by_root, set_credential_disabled
+    from agent.credential_pool_disabled import SUPPORTED_PROVIDERS, disabled_by_root, set_credential_disabled
     provider = _normalize_provider(getattr(args, "provider", ""))
+    if disabled and provider not in SUPPORTED_PROVIDERS:
+        raise SystemExit(f"Disabling is supported for {', '.join(sorted(SUPPORTED_PROVIDERS))}, not {provider}; "
+                         f"use `hermes auth remove {provider} <target>` instead.")
     target = getattr(args, "target", None)
     pool = load_pool(provider)
     index, matched, error = pool.resolve_target(target)

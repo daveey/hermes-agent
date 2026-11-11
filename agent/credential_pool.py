@@ -1028,7 +1028,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
 
     def _is_sole_credential(self) -> bool:
         """DEAD entries never re-enter rotation, so <=1 non-DEAD entry means nothing to rotate to."""
-        return sum(1 for e in self._entries if e.last_status != STATUS_DEAD) <= 1
+        return sum(1 for e in self._enabled_entries() if e.last_status != STATUS_DEAD) <= 1  # disabled: not a fallback
 
     def _find(self, predicate: Callable[[PooledCredential], bool]) -> Optional[PooledCredential]:
         return next((e for e in self._entries if predicate(e)), None)

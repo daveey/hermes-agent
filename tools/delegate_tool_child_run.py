@@ -518,8 +518,10 @@ def _lease_child_credential(child: Any) -> tuple[Any, Optional[str]]:
                 leased_entry = next((e for e in child_pool.entries() if e.id == leased_cred_id), None)
                 if not _entry_serves_endpoint(leased_entry, base_url):
                     child_pool.release_lease(leased_cred_id)
+                    from agent.credential_pool_disabled import enabled_entries
                     leased_entry = next(
-                        (e for e in child_pool.entries() if e.last_status != "dead" and _entry_serves_endpoint(e, base_url)),
+                        (e for e in enabled_entries(child_pool.provider, child_pool.entries())
+                         if e.last_status != "dead" and _entry_serves_endpoint(e, base_url)),
                         None,
                     )
                     leased_cred_id = child_pool.acquire_lease(leased_entry.id) if leased_entry is not None else None
