@@ -392,6 +392,29 @@ def _commit_recording_composer_profile(
         raise
 
 
+def _commit_agentless_switch(session: dict, result, override: dict) -> None:
+    """Commit the explicit pick before publishing overrides or retrying a failed build.
+
+    The allocation belongs to the stored session key, never the UI transport id.
+    Use the same ordered event writer as the canonical model mutation; a missing
+    store must fail closed rather than acknowledge a pick the allocator cannot honour.
+    """
+    from agent.model_routing_switch_intent import record_in_transaction
+    key = session.get("session_key")
+    with session.setdefault("agent_build_lock", threading.Lock()):
+        if key:
+            with _session_db(session) as db:
+                if db is None:
+                    raise ValueError("Cannot persist model switch: session store unavailable")
+                def write(conn):
+                    row = conn.execute('SELECT runtime_generation FROM sessions WHERE id=?', (key,)).fetchone()
+                    record_in_transaction(conn, key, result.new_model, result.target_provider, row[0] if row else 0)
+                db._execute_write(write)
+        # Same lock as retry admission: two picks cannot commit A, commit/publish B,
+        # then publish A and build a tuple that no longer matches the newest intent.
+        session["model_override"] = override
+
+
 def _apply_model_switch(
     sid: str, session: dict, raw_input: str, *, confirm_expensive_model: bool = False,
     pin_session_override: bool = True, parsed_flags: Any | None = None,
@@ -439,9 +462,13 @@ def _apply_model_switch(
     # Deliberately NOT written to process-global env (HERMES_MODEL & co.): the desktop hosts
     # every same-profile session in one process, so os.environ would leak the switch to all.
     if pin_session_override and isinstance(session, dict) and not one_turn:
-        session["model_override"] = {
+        override = {
             "model": result.new_model, "provider": result.target_provider,
             "base_url": result.base_url, "api_key": result.api_key, "api_mode": result.api_mode}
+        if agent is None:
+            _commit_agentless_switch(session, result, override)
+        else:
+            session["model_override"] = override
     if persist_global:
         from hermes_cli.model_switch import persist_model_selection
         persist_model_selection(result)
