@@ -1,6 +1,5 @@
 """ABI fixture and policy equivalence for the direct Darwin memory reader."""
 import ctypes
-from types import SimpleNamespace
 
 import pytest
 
@@ -90,6 +89,7 @@ def test_old_kernel_prefix_is_sufficient(kernel):
     assert native.read_used_pct() == _macos_mem_used_pct(kernel.total, kernel.text())
 
 
+@pytest.mark.platforms("macos")
 def test_missing_library_omits_without_spawning(monkeypatch):
     from hermes_cli import machine_metrics as mm
 
@@ -97,7 +97,6 @@ def test_missing_library_omits_without_spawning(monkeypatch):
         raise OSError("libSystem unavailable")
 
     monkeypatch.setattr(native, "_library", unavailable)
-    monkeypatch.setattr(mm, "sys", SimpleNamespace(platform="darwin"))
     assert mm._mem_used_pct() is None
 
 
