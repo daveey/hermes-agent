@@ -197,6 +197,71 @@ def test_applied_recalled_row_does_not_acknowledge_unsent_value(live, svc):
     assert live.execute("SELECT 1 FROM kanban_sync_omissions WHERE state!='delivered'").fetchone()
 
 
+def test_explicit_reconcile_retries_failed_restore_but_feed_does_not(live, svc, kanban_home):
+    tid = omit_pin(live, svc)
+    version = live.execute('SELECT sync_version FROM tasks WHERE id=?', (tid,)).fetchone()[0]
+    change = sync.RemoteChange(100, 'tasks', tid, 'upsert', {'model_pin_mandatory': None}, version+1, '', 'other')
+    sync.apply_remote_changes(live, [change], new_cursor=100, board='default')
+    def reject(board, batch):
+        return {'results': [{'client_op_id': op['client_op_id'], 'status': 'rejected',
+            'reason': 'forbidden_field', 'detail': 'not writable on tasks: model_pin_mandatory'} for op in batch]}
+    client.push(live, SimpleNamespace(ops=reject), 'default', 'macbook', primary=True)
+    failed = live.execute("SELECT restore_op_id FROM kanban_sync_omissions WHERE row_uid=?", (tid,)).fetchone()[0]
+    for seq in (101, 102):
+        sync.apply_remote_changes(live, [sync.RemoteChange(seq, 'tasks', tid, 'upsert',
+            {'model_pin_mandatory': None}, version+seq, '', 'other')], new_cursor=seq, board='default')
+    assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE op='restore' AND state='pending'").fetchone()
+    # Fresh snapshot from the upgraded Board exposes the field, even though the old restore failed.
+    svc.board('default')['rows']['tasks'][tid]['model_pin_mandatory'] = None
+    client.reconcile('default', kanban_home / 'kanban.db', hub=svc.hub('macbook'))
+    receipt = live.execute('SELECT * FROM kanban_sync_omissions WHERE row_uid=?', (tid,)).fetchone()
+    assert receipt['state'] == 'delivered'
+    assert receipt['restore_op_id'] != failed
+    assert svc.board('default')['rows']['tasks'][tid]['model_pin_mandatory'] == 1
+
+
+@pytest.mark.parametrize('failed_compat', [False, True])
+def test_omitted_parent_does_not_hold_missing_chat_link_repair(live, svc, failed_compat):
+    import sqlite3
+    from tests.hermes_cli.test_kanban_sync_client import _gap_link
+    tid = omit_pin(live, svc)
+    shadow = sqlite3.connect(':memory:')
+    shadow.row_factory = sqlite3.Row
+    live.backup(shadow)
+    try:
+        uid = _gap_link(live, 'task_chat_links', tid, tid)
+        if failed_compat:
+            live.execute("INSERT INTO kanban_sync_outbox "
+                "(op_id,table_name,row_uid,op,fields,hlc,created_at,state) "
+                "VALUES ('failed-compat','tasks',?,'compat','{}','',1,'rejected')", (tid,))
+            live.commit()
+        client.repair_missing_children(live, shadow, 'macbook')
+        pending = live.execute("SELECT row_uid FROM kanban_sync_outbox "
+            "WHERE table_name='task_chat_links' AND state='pending'").fetchall()
+        assert [r[0] for r in pending] == ([] if failed_compat else [uid])
+    finally:
+        shadow.close()
+
+
+@pytest.mark.parametrize('condition', ['pending', 'missing_field', 'delivered'])
+def test_reconcile_restore_controls(live, svc, condition):
+    from hermes_cli.kanban_sync_omissions import reconcile_page
+    tid = omit_pin(live, svc)
+    row = {'uid': tid, 'model_pin_mandatory': None}
+    reconcile_page(live, 'tasks', [row])
+    before = [dict(r) for r in live.execute("SELECT * FROM kanban_sync_outbox WHERE op='restore'")]
+    if condition == 'missing_field':
+        row.pop('model_pin_mandatory')
+        live.execute("UPDATE kanban_sync_outbox SET state='rejected' WHERE op='restore'")
+    elif condition == 'delivered':
+        live.execute("UPDATE kanban_sync_omissions SET state='delivered'")
+    live.commit()
+    identity = live.execute('SELECT restore_op_id FROM kanban_sync_omissions WHERE row_uid=?', (tid,)).fetchone()[0]
+    reconcile_page(live, 'tasks', [row])
+    assert live.execute('SELECT restore_op_id FROM kanban_sync_omissions WHERE row_uid=?', (tid,)).fetchone()[0] == identity
+    assert live.execute("SELECT COUNT(*) FROM kanban_sync_outbox WHERE op='restore'").fetchone()[0] == len(before)
+
+
 def test_transient_restore_identity_change_still_releases_custody(live, svc):
     tid = omit_pin(live, svc)
     version = live.execute('SELECT sync_version FROM tasks WHERE id=?', (tid,)).fetchone()[0]

@@ -1653,6 +1653,8 @@ def reconcile(slug: str, path: Optional[Path] = None, hub: Optional[Hub] = None)
                 page = hub.snapshot_page(slug, table, after)
                 rows = page.get("rows", [])
                 service_uids[table].update(str(r["uid"]) for r in rows)
+                from hermes_cli.kanban_sync_omissions import reconcile_page
+                reconcile_page(live, table, rows)
                 if mode == "primary":
                     candidates = [r for r in rows if str(r["uid"]) not in live_uids[table]]
                     # Rows written locally since live_uids was read reached the service meanwhile: re-check.
@@ -1793,8 +1795,9 @@ def repair_missing_children(live: sqlite3.Connection, shadow: sqlite3.Connection
         "SELECT id, sync_version FROM tasks WHERE (created_on = ? OR created_on IS NULL) AND sync_version IS NOT NULL",
         (gateway,))}
     with write_txn(live):
-        held = {(t, u) for t, u in live.execute(
-            "SELECT table_name, row_uid FROM kanban_sync_outbox WHERE state IN ('pending', 'rejected')")}
+        from hermes_cli.kanban_sync_omissions import repair_holds
+        held = {(table, uid) for table in ('tasks', 'task_links', 'task_chat_links')
+                for uid in repair_holds(live, table)}
         # Event deletion history can dwarf the links. The tombstone PK starts with table_name;
         # read only the types consulted below, retaining task tombstones as a settlement veto.
         tombstones_sql = ("SELECT table_name, row_uid FROM kanban_sync_tombstones "

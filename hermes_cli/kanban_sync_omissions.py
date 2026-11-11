@@ -77,6 +77,23 @@ def acknowledge(conn, op_id, authoritative, *, sent=None):
             _queue_restore(conn, op['table_name'], op['row_uid'], authoritative, {field})
 
 
+def reconcile_page(conn, table, rows):
+    """Explicit recovery may retry exhausted restoration, never duplicate an in-flight op."""
+    from hermes_cli.kanban_db_connect import write_txn
+    with write_txn(conn):
+        for row in rows:
+            uid = str(row['uid'])
+            held = held_fields(conn, table, uid) & row.keys()
+            for field in held:
+                conn.execute(
+                    "UPDATE kanban_sync_omissions SET restore_op_id=NULL,state='held' "
+                    "WHERE table_name=? AND row_uid=? AND field=? AND state!='delivered' "
+                    "AND NOT EXISTS (SELECT 1 FROM kanban_sync_outbox o "
+                    "WHERE o.op_id=kanban_sync_omissions.restore_op_id AND o.state='pending')",
+                    (table, uid, field))
+            _queue_restore(conn, table, uid, row, held)
+
+
 def remap(conn, old_id, new_id):
     """Follow the existing bounded transient retry's fresh Board verdict identity."""
     for column in ('compat_op_id', 'restore_op_id'):
