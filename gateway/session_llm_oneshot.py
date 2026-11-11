@@ -34,7 +34,27 @@ _ADMITTED = 16
 
 
 def handlers(connection):
-    return {'llm.oneshot': partial(oneshot, connection)}
+    return {'llm.oneshot': partial(oneshot, connection),
+            'session.title.suggest': partial(suggest_title, connection)}
+
+
+async def suggest_title(connection, ref, params):
+    """Read-only rename pre-fill, using the owner's transcript and auxiliary secret scope."""
+    from gateway.session_contract import SessionRef
+    target = params.get('session_key') or params.get('session_id')
+    if not isinstance(target, str) or not target:
+        raise RuntimeStoreError('invalid_params', field='session_key')
+    authority = connection.authority
+    ref = SessionRef(ref.profile_id, target)
+    authorize(connection, ref, params, 'session:read')
+
+    def work():
+        from agent.title_generator import suggest_short_name
+        from gateway.session_authorities import owner_scope
+        with owner_scope(authority):
+            messages = authority.db.get_messages(ref.session_id)
+            return {'session_key': ref.session_id, 'title': suggest_short_name(messages)}
+    return DeferredReply(work)
 
 
 class _Pool:
