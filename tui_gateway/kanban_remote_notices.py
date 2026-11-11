@@ -363,7 +363,7 @@ def remote_blocked_on_human(task: dict) -> bool:
         return False
 
 
-def _notice_item(card: dict, session_key: str, me: str, profile: str) -> dict:
+def _notice_item(card: dict, session_key: str, me: str, profile: str, now: Optional[float] = None) -> dict:
     task = card["task"]
     sid = card.get("sid") or session_key
     text = _completion_text(card["gw"], card["key"], task, me, profile, sid)
@@ -374,6 +374,10 @@ def _notice_item(card: dict, session_key: str, me: str, profile: str) -> dict:
         item["event_key"] = _event_key(card["gw"], card["key"], task["completion_notice"])
     elif task.get("status") == "blocked" or _withdrawal(task) is not None:
         item["event_key"] = _shared_key(card["gw"], card["key"], task, profile, sid)
+    if now is not None:
+        from tui_gateway.kanban_remote_late import owner_time
+        item["owner_at"] = owner_time(task, now)
+    item.setdefault("event_key", _shared_key(card["gw"], card["key"], task, profile, sid))
     return item
 
 
@@ -412,7 +416,7 @@ def _reconcile_legacy(conn, session_key: str, cards: list, now: float, transcrip
             "WHERE session=? AND ref=? AND state=? AND delivered=1 AND IFNULL(legacy_seen,0)=0",
             (pid, start, key, session_key, row["ref"], row["state"]))
         if cur.rowcount == 1:
-            out.append(_notice_item(card, session_key, me, profile))
+            out.append(_notice_item(card, session_key, me, profile, now))
     if stale:
         logger.info("remote kanban: left %d delivered notice(s) unreoffered "
                     "(older than %.0fh, or not in the replica)", stale, FRESH_S / 3600)
@@ -541,8 +545,10 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
                 out.extend(_reconcile_legacy(conn, session_key, cards, now, transcript_has, me, profile))
             offered = {(item["ref"], item["state"]) for item in out}
             for card in cards:
-                if len(out) >= MAX_PER_POLL:
-                    break
+                from tui_gateway.kanban_remote_late import owner_time
+                if owner_time(card["task"], now) is None and sum(
+                        item.get("owner_at") is None for item in out) >= MAX_PER_POLL:
+                    continue
                 task = card["task"]
                 ref = f"{card['gw']}/{card['key']}"
                 state = _notice_state(task)
@@ -564,10 +570,18 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
                                         notice_key=key, task_id=str(task["id"]), transcript_has=transcript_has,
                                         swept_key=swept_key, settle_reason=reason)
                 if verdict == "offer":
-                    out.append(_notice_item(card, session_key, me, profile))
+                    out.append(_notice_item(card, session_key, me, profile, now))
+                    offered.add((ref, state))
         finally:
             conn.close()
-        return out
+        from tui_gateway.kanban_remote_late import collect_groups, release_undelivered
+        try:
+            return collect_groups(out, now)
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+            logger.warning("remote kanban: grouping late notices failed; releasing %d claim(s)", len(out),
+                           exc_info=True)
+            release_undelivered(out, ledger)
+            return []
     except Exception:
         logger.debug("remote kanban collect failed", exc_info=True)
         return []
@@ -575,6 +589,9 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
 
 def ack(claim: dict, *, ledger: Optional[Path] = None) -> bool:
     """The notice is in the transcript: the in-flight row is delivered. Idempotent."""
+    if claim.get("children"):
+        results = [ack(child, ledger=ledger) for child in claim["children"]]
+        return all(results)
     _forget_woken((claim.get("session"), claim.get("ref"), claim.get("state")))
     try:
         conn = _ledger(ledger)
@@ -605,6 +622,9 @@ def ack(claim: dict, *, ledger: Optional[Path] = None) -> bool:
 
 def release(claim: dict, *, ledger: Optional[Path] = None) -> bool:
     """Hand a refused notice back so the chat's owning backend claims it on its next poll."""
+    if claim.get("children"):
+        results = [release(child, ledger=ledger) for child in claim["children"]]
+        return all(results)
     try:
         conn = _ledger(ledger)
         try:
@@ -876,8 +896,10 @@ def _settle_claim(claim: dict, memo_key: tuple, ledger) -> None:
     """The notice is in the chat's transcript (a written row, or a started turn's row found by its key): ledger
     delivered, memo and ``swept`` set."""
     ack(claim, ledger=ledger)
-    _record_swept([memo_key], ledger, reason="delivered")
-    _remember_delivered(memo_key)
+    keys = claim.get("memo_keys", [memo_key])
+    _record_swept(keys, ledger, reason="delivered")
+    for key in keys:
+        _remember_delivered(key)
 
 
 def _settle_started(session_db, profile: str, sid: str, event_key: str, claim: dict, memo_key: tuple,
@@ -895,6 +917,10 @@ def _settle_started(session_db, profile: str, sid: str, event_key: str, claim: d
     [daveey] The claim also follows the woken turn (``_track_woken``): the live session is looked up BEFORE the
     transcript check, so a turn that ends with no row (context refused, an error before the persist) is
     re-offered by this process's next pass instead of waiting for the backend to exit."""
+    if claim.get("children"):
+        results = [_settle_started(session_db, profile, child["session"], child["event_key"], child, key, ledger)
+                   for child, key in zip(claim["children"], claim["memo_keys"])]
+        return all(results)
     tip = None
     session = _live_woken_session(sid)
     try:
@@ -1044,6 +1070,20 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
 
 def _deliver_fresh(cards, fresh_times, me, now, path, live, session_db, ledger, settled, delivered, swept,
                    counts, waker=None) -> None:
+    from tui_gateway.kanban_remote_late import SweepBatches
+
+    batches = SweepBatches(waker, session_db, ledger, now)
+    try:
+        _deliver_fresh_cards(cards, fresh_times, me, now, path, live, session_db, ledger, settled, delivered,
+                             swept, counts, waker, batches)
+    finally:  # claims taken before an error still reach the flush, which delivers or releases them
+        delivered.extend(batches.flush())
+
+
+def _deliver_fresh_cards(cards, fresh_times, me, now, path, live, session_db, ledger, settled, delivered, swept,
+                         counts, waker, batches) -> None:
+    from tui_gateway.kanban_remote_late import owner_time
+
     for owner, key, task, links in cards:
         ref, state = f"{owner}/{key}", _notice_state(task)
         observed_at = fresh_times.get((owner, key, state), _fresh_at(task))
@@ -1051,9 +1091,12 @@ def _deliver_fresh(cards, fresh_times, me, now, path, live, session_db, ledger, 
             counts["stale"] = counts.get("stale", 0) + 1
             continue
         for link in links:
+            late = owner_time(task, now) is not None
+            target = batches.target(owner, key, task, link, path) if late else waker
+            results = [] if late else delivered
             _deliver_link(owner, key, task, link, me=me, ref=ref, state=state, path=path, live=live,
                           session_db=session_db, ledger=ledger, settled=settled,
-                          delivered=delivered, swept=swept, waker=waker, observed_at=observed_at, now=now)
+                          delivered=results, swept=swept, waker=target, observed_at=observed_at, now=now)
 
 
 def _sweep_snapshot(path, me: str) -> tuple:

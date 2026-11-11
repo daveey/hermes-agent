@@ -455,11 +455,11 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
     def record_kanban_notice(self, session_id: str, content: str, metadata: dict[str, Any], *,
                              message: Optional[dict[str, Any]] = None,
                              reject_active_turn: bool = True) -> tuple[int, bool]:
-        """:meth:`append_kanban_notice` returning ``(row id, inserted)``. Besides ``notice_id``, any of
-        ``metadata['kanban_event_keys']`` already present in the session's lineage counts as delivered (no row is
-        written and that row's id is returned), checked in the same writer txn. ``message`` supplies the
-        stamped dict (timestamp, uid) a live turn will adopt; ``reject_active_turn=False`` is for the backend
-        that just admitted the turn itself. [daveey]"""
+        """:meth:`append_kanban_notice` returning ``(row id, inserted)``. A keyed batch is already delivered
+        only when ALL its keys are present in the session's lineage, checked again in the writer txn.
+        Partial overlap raises ``KanbanNoticeOverlapError``: callers must re-render the missing members,
+        never acknowledge an existing row as custody for absent keys. ``message`` supplies the stamped dict
+        a live turn will adopt; ``reject_active_turn=False`` is for the backend that admitted that turn. [daveey]"""
         notice_id = metadata.get("notice_id")
         if not notice_id:
             raise ValueError("Kanban notice requires a stable notice_id")
@@ -474,13 +474,19 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
 
         def _existing(conn):
             existing = conn.execute(_LINEAGE_CTE_SQL + _NOTICE_BY_ID_SQL, (session_id, session_id, notice_id)).fetchone()
-            if existing is None and keys:
-                existing = conn.execute(
-                    _LINEAGE_CTE_SQL + " SELECT m.id FROM messages m, "
+            if keys:
+                rows = conn.execute(
+                    _LINEAGE_CTE_SQL + " SELECT m.id, j.value FROM messages m, "
                     "json_each(json_extract(m.display_metadata, '$.kanban_event_keys')) j "
                     "WHERE m.session_id IN (SELECT id FROM lineage) AND m.display_kind = 'kanban_notice' "
-                    "AND json_valid(m.display_metadata) AND j.value IN (" + ",".join("?" * len(keys)) + ") LIMIT 1",
-                    (session_id, session_id, *keys)).fetchone()
+                    "AND json_valid(m.display_metadata) AND j.value IN (" + ",".join("?" * len(keys)) + ")",
+                    (session_id, session_id, *keys)).fetchall()
+                covered = {str(row[1]) for row in rows}
+                if set(keys) <= covered:
+                    return rows[0]
+                if existing is not None or covered:
+                    from hermes_state_errors import KanbanNoticeOverlapError
+                    raise KanbanNoticeOverlapError("Kanban notice partial key overlap; retry missing members")
             return existing
 
         # Already delivered (the common case: the unloaded sweep re-offers every done card each tick): answer

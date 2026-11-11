@@ -6,6 +6,11 @@ import errno
 import re
 import sqlite3
 
+
+class KanbanNoticeOverlapError(ValueError):
+    """Only part of a notice batch is durable; re-render its missing members and retry."""
+
+
 # Malformed schema: ``sqlite_master`` itself is inconsistent (typically a DUPLICATE
 # ``CREATE VIRTUAL TABLE messages_fts`` row). SQLite parses the whole schema while
 # preparing the FIRST statement, so EVERY statement raises (even ``PRAGMA

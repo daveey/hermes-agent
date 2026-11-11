@@ -925,8 +925,9 @@ def _collect_remote_kanban_notifications(session_key: str, claims: list | None) 
     texts = []
     for item in found:
         text = _KanbanText(item["text"])
+        text._kb_remote = item
         if item.get("event_key"):
-            text._kb_keys = (item["event_key"],)  # type: ignore[attr-defined]  # same identity the sweeper records
+            text._kb_keys = tuple(item.get("event_keys") or [item["event_key"]])  # type: ignore[attr-defined]
         text._kb_blocked = bool(item.get("blocked_on_human"))  # type: ignore[attr-defined]  # notice guarantee
         texts.append(text)
         if claims is not None:
@@ -1127,7 +1128,7 @@ def _kb_persist_batch(session: dict, batch: list, diagnostic: bool) -> tuple:
     keys = _kb_text_keys(batch)
     if not keys:
         return "unkeyed", batch, {}
-    from hermes_state_errors import CompressionSessionClosedError, SessionTurnLeaseLostError
+    from hermes_state_errors import CompressionSessionClosedError, KanbanNoticeOverlapError, SessionTurnLeaseLostError
     try:
         with _session_db(session) as db:
             if db is None or not hasattr(db, "record_kanban_notice"):
@@ -1137,7 +1138,8 @@ def _kb_persist_batch(session: dict, batch: list, diagnostic: bool) -> tuple:
                 return "unkeyed", batch, {}
             done = db.kanban_notice_keys_delivered(target, keys)
             from tui_gateway.kanban_claim_custody import fresh_texts
-            fresh = fresh_texts(batch, done)
+            from tui_gateway.kanban_remote_late import missing_texts
+            fresh = fresh_texts(missing_texts(batch, done), done)
             if not fresh:
                 return "delivered", [], {}
             text = "\n".join(fresh)
@@ -1159,7 +1161,7 @@ def _kb_persist_batch(session: dict, batch: list, diagnostic: bool) -> tuple:
                 return "busy", batch, {}  # raced another consumer for some of these keys: re-filter next poll
             from hermes_state_outcome import refresh_outcomes_quietly
             refresh_outcomes_quietly([target], "notice", db=db)  # [daveey] until its turn ends, the notice is the tail
-    except (SessionTurnLeaseLostError, CompressionSessionClosedError):
+    except (SessionTurnLeaseLostError, CompressionSessionClosedError, KanbanNoticeOverlapError):
         return "busy", batch, {}
     except Exception as exc:
         _notif_log_failure("kanban notice row write failed; the turn records it instead", exc)
