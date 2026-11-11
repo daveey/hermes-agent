@@ -6,12 +6,17 @@ pulls) rewrites rows from its in-memory copy, so a flag stored on a row would be
 flush from any process that loaded the pool before the user disabled it. Only
 :func:`set_credential_disabled` writes this section, under the auth-store lock.
 
-A record ``{"id", "label", "account"}`` matches a row by id OR by case-insensitive label, so an account
-stays disabled when its row is recreated with a new id (a re-login, a hub pull). Generic labels that
-name a slot, not an account (``device_code``, ``claude_code``, ``env:...``), never match by label.
-``account`` is the identity in the row's JWT (email or ChatGPT account id) when it has one: a row
-whose token names a DIFFERENT account never matches, so disabling the Codex/xAI singleton slot does
-not also disable whoever signs into that slot next.
+A record ``{"id", "label", "account", "fp", "src"}`` matches a row by any of:
+- ``id``: the row itself (survives token refreshes, which keep the id);
+- ``label`` (case-insensitive), unless it names a slot or counter, not an account (``device_code``,
+  ``claude_code``, ``api-key-3``, env-var names like ``anthropic_token``): keeps a re-added row disabled;
+- ``account``: the identity in the row's JWT (Codex: ChatGPT workspace id + user subject, so Team seats
+  and one email's two workspaces stay separate; else the email). A record naming an account never hits
+  a row whose token names a different one, so disabling the Codex singleton slot does not disable
+  whoever signs into that slot next;
+- ``fp``: a non-reversible fingerprint of the token at disable time;
+- ``src``: for borrowed sources (the Claude Code login, ``env:VAR``), the source itself, so the token
+  that source holds NOW is refused too (Claude Code refreshes its own token outside Hermes).
 
 Readers union the active store's section with the global root's, so a disable in the root home
 applies to every profile on the host. Reads are cached by each file's (mtime, size), so a
@@ -49,7 +54,9 @@ def _records(store: dict[str, Any], provider: str) -> list[dict[str, Any]]:
     return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
 
 
-_GENERIC_RE = re.compile(r"api-key-\d+|[a-z][a-z0-9]*(_[a-z0-9]+)+")  # numbered keys, env-var/slot names
+# Numbered keys and env-var names (``anthropic_api_key``, ``claude_code_oauth_token``). Not every a_b:
+# users name accounts ``work_main`` or ``david_personal``.
+_GENERIC_RE = re.compile(r"api-key-\d+|[a-z0-9_]*_(api_key|key|token|oauth_token|secret)")
 
 
 def _generic(label: str) -> bool:
@@ -59,38 +66,68 @@ def _generic(label: str) -> bool:
 
 
 def account_of(entry: Any) -> Optional[str]:
-    """Lowercase account identity from the row's JWT access token: the ChatGPT account (workspace) id when
-    present (one email can own a personal and a Team workspace), else the email."""
+    """Lowercase account identity from the row's JWT access token: ``<chatgpt_account_id>/<sub or email>``
+    (Team seats share the workspace id; one email can own two workspaces), else the email, else the
+    workspace id."""
     from hermes_cli.auth_constants import _decode_jwt_claims
     claims = _decode_jwt_claims(getattr(entry, "access_token", None) or "")
     if not isinstance(claims, dict) or not claims:
         return None
     profile = claims.get("https://api.openai.com/profile") or {}
     auth = claims.get("https://api.openai.com/auth") or {}
-    for value in (auth.get("chatgpt_account_id") if isinstance(auth, dict) else None, claims.get("email"),
-                  profile.get("email") if isinstance(profile, dict) else None):
+    workspace = auth.get("chatgpt_account_id") if isinstance(auth, dict) else None
+    subject = claims.get("sub")
+    email = claims.get("email") or (profile.get("email") if isinstance(profile, dict) else None)
+    if isinstance(workspace, str) and workspace.strip():
+        for who in (subject, email):  # a seat of the workspace
+            if isinstance(who, str) and who.strip():
+                return f"{workspace.strip()}/{who.strip()}".lower()
+    for value in (email, workspace):
         if isinstance(value, str) and value.strip():
             return value.strip().lower()
     return None
 
 
 def fingerprint_of(entry: Any) -> Optional[str]:
-    """The row's secret fingerprint: kept on borrowed/env rows, whose persisted copy has no secret."""
+    """Fingerprint of the row's live token; else the saved ``secret_fingerprint`` (borrowed/env rows persist
+    no secret). Live first: right after a rotation the saved value still names the old token."""
+    from agent.credential_persistence import fingerprint_secret_value
+    live = fingerprint_secret_value(getattr(entry, "access_token", None) or "")
+    if live:
+        return live
     extra = getattr(entry, "extra", None)
     fp = (extra.get("secret_fingerprint") if isinstance(extra, dict) else None) or getattr(
         entry, "secret_fingerprint", None)
-    if isinstance(fp, str) and fp:
-        return fp
-    from agent.credential_persistence import fingerprint_secret_value
-    return fingerprint_secret_value(getattr(entry, "access_token", None) or "")
+    return fp if isinstance(fp, str) and fp else None
+
+
+def _borrowed_source(entry: Any) -> str:
+    source = str(getattr(entry, "source", "") or "")
+    return source if source == "claude_code" or source.startswith("env:") else ""
+
+
+def _source_tokens(provider: str, source: str) -> set[str]:
+    """Tokens a borrowed source holds right now (refreshed outside Hermes, so not in any record)."""
+    if source.startswith("env:"):
+        value = os.environ.get(source[4:], "").strip()
+        return {value} if value else set()
+    if source == "claude_code" and provider == "anthropic":
+        try:
+            from agent.anthropic_credentials import read_claude_code_credentials
+            creds = read_claude_code_credentials() or {}
+        except Exception:
+            logger.debug("disabled-credential check: Claude Code login unreadable", exc_info=True)
+            return set()
+        return {str(creds[k]).strip() for k in ("accessToken", "refreshToken") if creds.get(k)}
+    return set()
 
 
 def _keys_from_records(records: Iterable[dict[str, Any]]) -> tuple:
     """``(ids, markers, records)``: ids and markers only say "something is disabled" cheaply; ``records``
-    holds one ``(id, label, account, fingerprint)`` tuple per record, matched one record at a time."""
+    holds one ``(id, label, account, fingerprint, borrowed source)`` tuple per record, matched one record at a time."""
     recs = frozenset(
         (str(r.get("id") or ""), "" if _generic(_norm_label(r.get("label"))) else _norm_label(r.get("label")),
-         _norm_label(r.get("account")), str(r.get("fp") or ""))
+         _norm_label(r.get("account")), str(r.get("fp") or ""), str(r.get("src") or ""))
         for r in records)
     recs = frozenset(t for t in recs if any(t))
     ids = frozenset(t[0] for t in recs if t[0])
@@ -154,10 +191,12 @@ def matches(entry: Any, keys: tuple) -> bool:
     label = "" if _generic(label) else label
     acct = account_of(entry) or ""
     fp = fingerprint_of(entry) or ""
-    for rid, rlabel, racct, rfp in keys[2]:
+    src = _borrowed_source(entry)
+    for rid, rlabel, racct, rfp, rsrc in keys[2]:
         if racct and acct and racct != acct:
             continue
-        if (rid and rid == entry_id) or (rlabel and rlabel == label) or (racct and racct == acct) or (rfp and rfp == fp):
+        if ((rid and rid == entry_id) or (rlabel and rlabel == label) or (racct and racct == acct)
+                or (rfp and rfp == fp) or (rsrc and rsrc == src)):
             return True
     return False
 
@@ -196,7 +235,9 @@ def set_credential_disabled(provider: str, entry: Any, disabled: bool) -> bool:
             if (acct := account_of(entry)) is not None:
                 record["account"] = acct
             if (fp := fingerprint_of(entry)) is not None:
-                record["fp"] = fp  # non-reversible; keeps a re-seeded borrowed/env row disabled
+                record["fp"] = fp  # non-reversible
+            if src := _borrowed_source(entry):
+                record["src"] = src  # whatever token this source holds later is refused too
             records.append(record)
         else:
             if not hit:
@@ -268,6 +309,8 @@ def token_disabled(provider: str, *tokens: Optional[str]) -> bool:
     fps = {fingerprint_secret_value(t) for t in wanted}
     if any(matches(SimpleNamespace(id="", label="", access_token=t, extra={}), keys) for t in wanted):
         return True  # fingerprint or JWT account of a disabled record
+    if any(wanted & _source_tokens(provider, rsrc) for *_, rsrc in keys[2] if rsrc):
+        return True  # the current token of a disabled borrowed source (Claude Code login, env var)
     from agent.credential_pool import PooledCredential
     from hermes_cli import auth as auth_mod
     try:

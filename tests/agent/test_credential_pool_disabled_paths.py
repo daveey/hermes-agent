@@ -349,7 +349,8 @@ def test_one_email_two_codex_workspaces_are_separate_accounts():
 
 
 def test_a_record_naming_an_account_never_matches_a_namesake_row_holding_another_accounts_token():
-    keys = cpd._keys_from_records([{"id": "r0", "label": "a@example.com", "account": "acct-a"}])
+    mine = SimpleNamespace(access_token=_jwt("a@example.com", "acct-a"))
+    keys = cpd._keys_from_records([{"id": "r0", "label": "a@example.com", "account": cpd.account_of(mine)}])
     other = SimpleNamespace(id="zz", label="a@example.com", access_token=_jwt("b@example.com", "acct-b"))
     assert not cpd.matches(other, keys)
     same = SimpleNamespace(id="zz", label="a@example.com", access_token=_jwt("a@example.com", "acct-a"))
@@ -411,3 +412,49 @@ def test_codex_model_setup_probe_does_not_send_a_disabled_account(monkeypatch, _
     monkeypatch.setattr(auth, "resolve_codex_runtime_credentials", lambda **k: {"api_key": a["access_token"]})
     flows._model_flow_openai_codex({}, "")
     assert sent and a["access_token"] not in sent
+
+
+def _seat(workspace, sub, email):
+    import base64
+    enc = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
+    claims = {"sub": sub, "https://api.openai.com/profile": {"email": email},
+              "https://api.openai.com/auth": {"chatgpt_account_id": workspace}}
+    return f"{enc({'alg': 'none'})}.{enc(claims)}.sig"
+
+
+def test_disabling_one_team_seat_leaves_the_other_seats_of_that_workspace_usable():
+    a = SimpleNamespace(id="r0", label="a@x.com", access_token=_seat("ws-team", "user-a", "a@x.com"))
+    b = SimpleNamespace(id="r1", label="b@x.com", access_token=_seat("ws-team", "user-b", "b@x.com"))
+    keys = cpd._keys_from_records([{"id": "r0", "label": "a@x.com", "account": cpd.account_of(a)}])
+    assert cpd.matches(a, keys) and not cpd.matches(b, keys)
+    relogin = SimpleNamespace(id="new", label="device_code", access_token=_seat("ws-team", "user-a", "a@x.com"))
+    assert cpd.matches(relogin, keys)
+
+
+def test_a_claude_code_login_refreshed_outside_hermes_is_still_refused(monkeypatch):
+    import agent.anthropic_credentials as ac
+    creds = {"accessToken": "fixture-cc-access-1", "refreshToken": "fixture-cc-refresh-1"}
+    monkeypatch.setattr(ac, "read_claude_code_credentials", lambda: dict(creds))
+    row = PooledCredential(provider="anthropic", id="cc", label="claude_code", source="claude_code",
+                           auth_type="oauth", access_token="fixture-cc-access-1", priority=0)
+    write_credential_pool("anthropic", [row.to_dict()])
+    _disable("anthropic", row)
+    creds.update(accessToken="fixture-cc-access-2", refreshToken="fixture-cc-refresh-2")  # Claude Code refreshed
+    assert cpd.token_disabled("anthropic", "fixture-cc-access-2") is True
+    reseeded = SimpleNamespace(id="other", label="claude_code", source="claude_code", access_token="fixture-cc-access-2")
+    assert cpd.is_credential_disabled("anthropic", reseeded)
+    assert cpd.token_disabled("anthropic", "fixture-unrelated") is False
+
+
+def test_user_chosen_snake_case_labels_still_match_by_label():
+    keys = cpd._keys_from_records([{"id": "gone", "label": "work_main"}])
+    assert cpd.matches(SimpleNamespace(id="readded", label="work_main", access_token=""), keys)
+    for generic in ("anthropic_api_key", "claude_code_oauth_token", "openai_key"):
+        keys = cpd._keys_from_records([{"id": "gone", "label": generic}])
+        assert not cpd.matches(SimpleNamespace(id="readded", label=generic, access_token=""), keys), generic
+
+
+def test_fingerprint_follows_the_live_token_after_a_rotation():
+    from agent.credential_persistence import fingerprint_secret_value
+    row = SimpleNamespace(access_token="fixture-new", extra={"secret_fingerprint": fingerprint_secret_value("fixture-old")})
+    assert cpd.fingerprint_of(row) == fingerprint_secret_value("fixture-new")
