@@ -127,8 +127,12 @@ async def test_cooperative_stop_booking_before_admission_settlement(monkeypatch,
     monkeypatch.setattr('gateway.session_policy.workspace_ready', lambda _: True)
     recorded = MagicMock()
     monkeypatch.setattr(booking, 'record_restart_interruption', recorded)
-    assert await managed.admit_managed(authority, None, row, policy) == 'reply'
+    assert await managed.admit_managed(authority, SimpleNamespace(session_id='s'), row, policy) == 'reply'
     assert recorded.call_count == int(expected)
+    if expected:
+        # [daveey] A clean restart/shutdown Stop is a continuation checkpoint (session_kanban_continue).
+        assert recorded.call_args.kwargs['checkpoint'] == {'session_id': 's', 'request_id': None,
+                                                           'admission_id': 'a', 'cause': cause}
 
 
 @pytest.mark.asyncio

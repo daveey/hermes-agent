@@ -202,6 +202,11 @@ async def run(params, board_db):
                     raise OwnerRestartLost(f'Kanban owner did not continue the checkpointed turn: {exc}') from exc
                 raise
             claim.note_refusal(exc)
+            if (claim.silent_for() >= OWNER_WAIT_S and not claim.continuing
+                    and await asyncio.to_thread(_checkpoint, params, board_db, claim) is not None):
+                # [daveey] The stopping owner checkpointed this attempt's turn before the gap (a ``hermes
+                # update`` refuses us in its restart wait, then the tree moves): wait out the restart.
+                claim.continuing = claim.restarted = True
             if claim.silent_for() >= claim.silence_budget():
                 # WebSocket errors can embed remote bodies; only our own messages are quoted.
                 status = getattr(getattr(exc, 'response', None), 'status_code', None)

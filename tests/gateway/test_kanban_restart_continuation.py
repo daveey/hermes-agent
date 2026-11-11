@@ -219,6 +219,26 @@ def test_the_continued_turn_waits_out_a_restart_longer_than_owner_wait(board, cl
     assert clock[0] >= kanban_worker_client.OWNER_WAIT_S
 
 
+def test_an_update_gap_longer_than_owner_wait_still_continues(board, clock, monkeypatch, capsys):
+    # ``hermes update``: the old owner checkpoints the turn but its restart wait refuses us, then it exits
+    # and the tree moves. No terminal receipt is ever seen before the gap; the board shows the checkpoint.
+    owner = _RestartingOwner(board, clock, gap=kanban_worker_client.OWNER_WAIT_S + 90)
+    monkeypatch.setattr(gateway_client, 'connect_gateway', owner.connect())
+    assert asyncio.run(kanban_worker_client.run(board.params, board.db)) == 0
+    assert clock[0] >= kanban_worker_client.OWNER_WAIT_S + 90
+    assert len(owner.runs) == 2
+
+
+def test_an_owner_gap_with_no_checkpoint_still_fails_at_owner_wait(board, clock, monkeypatch):
+    # Without a checkpoint on the board the old bound holds: silence past OWNER_WAIT_S ends the worker.
+    owner = _RestartingOwner(board, clock, gap=kanban_worker_client.OWNER_WAIT_S + 90)
+    monkeypatch.setattr(kanban_worker_client, '_checkpoint', lambda *a: None)
+    monkeypatch.setattr(gateway_client, 'connect_gateway', owner.connect())
+    with pytest.raises(gateway_client.GatewayClientError, match='silent'):
+        asyncio.run(kanban_worker_client.run(board.params, board.db))
+    assert clock[0] < kanban_worker_client.OWNER_WAIT_S + 30
+
+
 def test_an_owner_that_will_not_continue_falls_back_to_the_uncounted_requeue(board, clock, monkeypatch, capsys):
     owner = _RestartingOwner(board, clock, refusal='kanban_continuation_unsafe')
     monkeypatch.setattr(gateway_client, 'connect_gateway', owner.connect())
@@ -347,6 +367,40 @@ def test_the_new_owner_answers_the_interrupted_tool_call_and_records_the_continu
     assert kinds[-2:] == ['owner_admitted', 'restart_continued'], kinds
     # Proven continuations only once: the same checkpoint again is a retry, not a second continuation.
     assert pending_admission(board.db, board.params, board.request)[1] is None
+
+
+def test_a_retried_ask_racing_the_first_writes_one_interrupted_result(board, tmp_path, monkeypatch):
+    import threading
+    from gateway import session_kanban_continue as cont
+    from gateway.session_kanban_restart import record_restart_interruption
+    record_restart_interruption(_policy(board), checkpoint={'session_id': 's1', 'request_id': board.request,
+                                                            'admission_id': 'a1', 'cause': 'restart'})
+    _target, checkpoint = cont.pending_admission(board.db, board.params, board.request)
+    assert checkpoint is not None
+    db = _session_db(tmp_path, [{'role': m['role'], 'content': m['content'], 'tool_calls': m.get('tool_calls')}
+                                for m in _MID_TOOL])
+    real, both = cont._unanswered, threading.Barrier(2)
+
+    def unanswered(history):
+        calls = real(history)
+        try:
+            both.wait(timeout=1.5)  # both read the history before either writes, unless serialized
+        except threading.BrokenBarrierError:
+            pass
+        return calls
+    monkeypatch.setattr(cont, '_unanswered', unanswered)
+    import hermes_state_runtime
+    monkeypatch.setattr(hermes_state_runtime, 'find_session_admission',
+                        lambda *a, **k: {'status': 'terminal', 'outcome': 'interrupted', 'admission_id': 'a1'})
+    target = cont.continuation_request_id(board.request, checkpoint['checkpoint'])
+    kwargs = dict(principal_id='p', session_id='s1', context={'db': board.db, **board.params}, checkpoint=checkpoint,
+                  request_id=target, owner_db=str(board.home / 'state.db'))
+    threads = [threading.Thread(target=cont.prepare, args=(SimpleNamespace(db=db),), kwargs=kwargs) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert [m['tool_call_id'] for m in db.get_messages_as_conversation('s1') if m['role'] == 'tool'] == ['call-1']
 
 
 @pytest.mark.parametrize('case', ['session_mismatch', 'admission_not_interrupted', 'session_empty', 'attempt_superseded',

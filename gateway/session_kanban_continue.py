@@ -26,6 +26,7 @@ import logging
 import os
 from pathlib import Path
 import sqlite3
+import threading
 import time
 from typing import NoReturn
 
@@ -42,6 +43,10 @@ CONTINUE_TEXT = (CONTINUE_PREFIX + ' The gateway restarted (a Hermes update) whi
 INTERRUPTED_RESULT = '[interrupted by Hermes update at {at}: re-run if still needed]'
 CONTINUED_EVENT = 'restart_continued'
 REFUSED_EVENT = 'restart_continue_refused'
+# One continuation prepare per session at a time: a retried ``kanban.run`` racing the first must not
+# append a second synthetic result for the same interrupted tool call (prepare runs off the owner loop).
+_PREPARING: dict[str, threading.Lock] = {}
+_PREPARING_GUARD = threading.Lock()
 
 
 def interrupted_result(at) -> str:
@@ -135,10 +140,17 @@ def _answer_interrupted_calls(session_db, session_id, at) -> int:
     return int(session_db._execute_write(write))
 
 
-def prepare(authority, *, principal_id, session_id, context, checkpoint, request_id, owner_db) -> dict:
+def prepare(authority, *, session_id, **kwargs) -> dict:
     """Prove the checkpointed turn can continue in ``session_id``, answer its interrupted tool calls and
     record the continuation as the run's newest ``owner_admitted``. Off the owner loop; raises
     ``RuntimeStoreError(UNSAFE)`` (booked, logged) when continuation cannot be proven safe."""
+    with _PREPARING_GUARD:
+        lock = _PREPARING.setdefault(session_id, threading.Lock())
+    with lock:
+        return _prepare(authority, session_id=session_id, **kwargs)
+
+
+def _prepare(authority, *, principal_id, session_id, context, checkpoint, request_id, owner_db) -> dict:
     if checkpoint.get('unsafe'):
         _refuse(context, checkpoint, checkpoint['unsafe'])
     if checkpoint.get('session_id') != session_id:
