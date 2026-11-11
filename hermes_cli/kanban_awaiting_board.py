@@ -57,7 +57,9 @@ def cross_board_cycle(conn, task_id, awaiting):
         if key in seen:
             return None
         if len(seen) >= 32:
-            return "producer dependency graph exceeds the bounded cycle check"
+            # Preserve the existing bounded, best-effort local cycle check:
+            # a large acyclic fan-in is not evidence of a cycle.
+            return None
         seen.add(key)
         row = owner.execute("SELECT status FROM tasks WHERE id=?", (ref,)).fetchone()
         if not row:

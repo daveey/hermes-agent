@@ -93,6 +93,23 @@ def test_cross_board_cycle_cannot_close_through_local_edge(boards):
             kb.schedule_task(left, a, awaiting={"kind": "card", "ref": b})
 
 
+def test_large_local_fan_in_preserves_bounded_check_behavior(boards):
+    with kbc.connect_closing(db_path=boards[0]) as conn:
+        parents = [kb.create_task(conn, title=f"Parent {i}", assignee="worker") for i in range(40)]
+        producer = kb.create_task(conn, title="Fan-in", assignee="worker", parents=parents)
+        waiter = kb.create_task(conn, title="Waiter", assignee="worker")
+        assert kb.schedule_task(conn, waiter, awaiting={"kind": "card", "ref": producer})
+
+
+def test_producer_note_names_board():
+    from hermes_cli.kanban_wake_check import producer_note
+    note = producer_note({"ref": "t_12345678", "board": "runners", "gateway": None,
+                          "producer_status": "archived", "completed_at": "now"})
+    assert "on runners" in note
+    assert "--board runners" in note
+    assert "--gateway <gw>" not in note
+
+
 def test_same_board_qualifier_keeps_descendant_guard(boards):
     with kbc.connect_closing(db_path=boards[0]) as conn:
         parent = kb.create_task(conn, title="Parent", assignee="worker")

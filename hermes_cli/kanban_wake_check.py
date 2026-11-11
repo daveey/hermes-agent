@@ -761,11 +761,14 @@ def finished_producer(conn: sqlite3.Connection, task_id: str, cmd: str) -> Optio
 
 def producer_note(hit: dict) -> str:
     ref, gw = hit["ref"], hit.get("gateway")
-    where = gw or "this board"
+    board = hit.get("board")
+    where = gw or board or "this board"
+    scope = f" --gateway {gw}" if gw else ""
+    scope += f" --board {board}" if board else ""
     return (f"Woken: producer card {ref} on {where} is {hit['producer_status']} (completed {hit['completed_at']}), but this park's "
             f"wake_check still exits 1, so it can't see that card (`hermes kanban show` reads only this host's "
-            f"board). Read {ref}'s result and act on it. To wait on a card on another gateway, use "
-            f"`hermes kanban wait-check task {ref} --gateway {gw or '<gw>'}`, or omit wake_check: a card wait gets "
+            f"board). Read {ref}'s result and act on it. To wait on the producer's board, use "
+            f"`hermes kanban wait-check task {ref}{scope}`, or omit wake_check: a card wait gets "
             "that probe automatically. If that card is already blocked, in review or in triage, add "
             "`--from <that status>`. Those statuses count as met, so without it the probe passes at once.")
 
