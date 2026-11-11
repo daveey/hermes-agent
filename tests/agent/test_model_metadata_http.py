@@ -15,8 +15,8 @@ def servers():
 
     def start(handler):
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        server.daemon_threads = True
-        thread = Thread(target=server.serve_forever, daemon=True)
+        server.daemon_threads = False
+        thread = Thread(target=server.serve_forever)
         thread.start()
         active.append((server, thread))
         return f"http://127.0.0.1:{server.server_port}"
@@ -24,8 +24,8 @@ def servers():
     yield start
     for server, thread in reversed(active):
         server.shutdown()
+        thread.join()
         server.server_close()
-        thread.join(timeout=5)
 
 
 def test_redirect_credentials_and_proxy_routing_are_preserved(servers, monkeypatch):

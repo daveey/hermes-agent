@@ -95,9 +95,12 @@ def test_cpu_report_has_hard_total_budget(server, monkeypatch):
 def test_cpu_report_succeeds_inside_budget_and_plain_report_keeps_normal_path(server, monkeypatch):
     monkeypatch.setattr(ksc.urllib.request, "getproxies", dict)
     h = hub(server.url)
-    assert h.report_metrics({"cpus": 4, **CPU}) == {"ok": True}
-    assert h.report_metrics({"cpus": 4}) == {"ok": True}
-    assert len(server.requests) == 2
+    try:
+        assert h.report_metrics({"cpus": 4, **CPU}) == {"ok": True}
+        assert h.report_metrics({"cpus": 4}) == {"ok": True}
+        assert len(server.requests) == 2
+    finally:
+        h.close()
 
 
 def test_cpu_report_budget_is_two_seconds():

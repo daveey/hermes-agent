@@ -66,8 +66,9 @@ def fake_bedrock(monkeypatch):
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    server.daemon_threads = True
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    server.daemon_threads = False
+    serve_thread = threading.Thread(target=server.serve_forever)
+    serve_thread.start()
     monkeypatch.setenv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", f"http://127.0.0.1:{server.server_port}")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA-FAKE")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "fake-secret")
@@ -81,6 +82,7 @@ def fake_bedrock(monkeypatch):
     finally:
         release.set()
         server.shutdown()
+        serve_thread.join()
         server.server_close()
         bedrock_adapter.reset_client_cache()
 

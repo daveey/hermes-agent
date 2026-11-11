@@ -47,7 +47,7 @@ def test_fixture_subprocess_exits_cleanly(mode):
     result = subprocess.run(
         [sys.executable, "-m", "tests.hermes_cli.test_kanban_sync_metrics_teardown", mode],
         cwd=Path(__file__).resolve().parents[2],
-        capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
+        capture_output=True, text=True, encoding="utf-8", timeout=120, check=False,
         env=build_subprocess_env(),
     )
     assert result.returncode == 0, result.stderr

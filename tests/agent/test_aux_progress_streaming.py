@@ -315,9 +315,10 @@ class TestAggregateChatStream:
                     pass
 
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-        server.daemon_threads = True
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        return server
+        server.daemon_threads = False
+        serve_thread = threading.Thread(target=server.serve_forever)
+        serve_thread.start()
+        return server, serve_thread
 
     @pytest.fixture
     def sse(self, monkeypatch):
@@ -326,7 +327,7 @@ class TestAggregateChatStream:
         import openai
 
         gates = {name: threading.Event() for name in ("release", "a", "b", "b_started", "usage")}
-        server = self._sse_server(gates)
+        server, serve_thread = self._sse_server(gates)
         monkeypatch.setattr("agent.auxiliary_client._AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS", 3.0)
         monkeypatch.setattr("agent.auxiliary_client._get_task_no_progress_timeout",
                             lambda task: 0.4 if task == "compression" else None)
@@ -350,7 +351,9 @@ class TestAggregateChatStream:
             for gate in gates.values():
                 gate.set()
             server.shutdown()
+            serve_thread.join()
             client.close()
+            server.server_close()
 
     @pytest.mark.parametrize("via_relay_seam", [False, True], ids=["primary", "recovery_rung"])
     def test_silent_stream_fails_fast_through_the_real_transport(self, sse, via_relay_seam):
