@@ -99,7 +99,9 @@ def creation_audit(args, cfg=None):
 
     try:
         cfg = placement.config() if cfg is None else cfg
-        return {"portable_reason": placement.portable_reason(args, cfg)}
+        explicit = args.get("placement") not in (None, "", "auto") or args.get("runs_on") is not None
+        return {"portable_reason": placement.portable_reason(args, cfg),
+                "placement_intent": "explicit" if explicit else "auto"}
     except Exception:  # health: allow BLE001 -- an audit field never blocks a create
         logger.warning("portable_reason audit failed", exc_info=True)
         return {"portable_reason": "audit failed"}
@@ -270,7 +272,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
         return 0
     cursor = (sync.sync_state(conn) or {}).get("worker_reserve_cursor") or ""
     rows = conn.execute(
-        "SELECT id, sync_version FROM tasks WHERE placement_policy=? AND status='ready' "
+        "SELECT * FROM tasks WHERE (placement_policy=? OR placement_policy IS NULL) AND status='ready' "
         "AND created_on=? AND claim_lock IS NULL AND lease_holder IS NULL AND sync_version IS NOT NULL "
         "AND NOT EXISTS (SELECT 1 FROM kanban_sync_outbox o WHERE o.table_name='tasks' "
         "AND o.row_uid=tasks.id AND o.state='pending') ORDER BY (id <= ?), id LIMIT ?",
@@ -287,6 +289,10 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
     try:
         for row in rows:
             last = row["id"]
+            from hermes_cli.kanban_placement_recovery import promotion_mode
+            mode = promotion_mode(conn, dict(row), cfg) if row["placement_policy"] is None else None
+            if row["placement_policy"] is None and mode is None:
+                continue
             key = (board, row["id"])
             held = _refused.get(key)
             if held and held[0] == row["sync_version"] and now < held[1]:
@@ -296,7 +302,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                 for stale in [k for k, (_, until) in _refused.items() if until <= now]:
                     del _refused[stale]
             labels = requested_move(conn, row["id"])
-            stage = "reserve" if labels is None else "repin"  # provenance for a failure below
+            stage = "recover" if mode else ("reserve" if labels is None else "repin")
             held = _queued.get(key)
             identity = _local_identity(conn, row["id"]) if labels is None else None
             if labels is None and held and held[:2] == (row["sync_version"], identity) and now < held[2]:
@@ -317,8 +323,12 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                         logger.warning("repinned %s on the Board but could not record it locally", row["id"],
                                        exc_info=True)
                 else:
-                    reply = hub.reserve(board, task_id=row["id"], expected_revision=row["sync_version"],
-                                        candidates=candidates)
+                    if mode:
+                        reply = hub.recover(board, task_id=row["id"], expected_revision=row["sync_version"],
+                                            mode=mode, candidates=candidates)
+                    else:
+                        reply = hub.reserve(board, task_id=row["id"], expected_revision=row["sync_version"],
+                                            candidates=candidates)
                     if reply.get("state") == "queued":
                         # Never adopt an arbitrary post-pull revision: it may be somebody else's edit.
                         version = reply.get("task_version", row["sync_version"])
@@ -483,7 +493,8 @@ def dispatch_tick(conn):
     if sync.board_mode(conn) != "primary":
         return
     state = sync.sync_state(conn) or {}
-    if not conn.execute("SELECT 1 FROM tasks WHERE placement_policy=? AND status='ready' LIMIT 1", (POLICY,)).fetchone():
+    if not conn.execute("SELECT 1 FROM tasks WHERE status='ready' AND created_on=? LIMIT 1",
+                        (state.get("gateway_id"),)).fetchone():
         return
     try:
         ident = client.load_identity()

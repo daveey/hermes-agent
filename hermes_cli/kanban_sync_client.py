@@ -438,6 +438,13 @@ class Hub:
         return self._call("POST", f"/v2/boards/{board}/placement/repin", {
             "task_id": task_id, "expected_revision": expected_revision, "runs_on": runs_on})
 
+    def recover(self, board: str, *, task_id: str, expected_revision: int, mode: str,
+                candidates: list[str]) -> dict:
+        """Creator/CAS recovery; pull authoritative state after success or uncertain delivery."""
+        return self._call("POST", f"/v2/boards/{board}/placement/recover", {
+            "task_id": task_id, "expected_revision": expected_revision, "mode": mode,
+            "policy": "worker-first-v1", "candidates": candidates})
+
     def reserve(self, board: str, *, task_id: str, expected_revision: int, candidates: list[str]) -> dict:
         """Atomic Board placement; errors leave the persisted local queue fence intact."""
         return self._call("POST", f"/v2/boards/{board}/placement/reserve", {
