@@ -82,7 +82,7 @@ _KILLED_AFTER_RECORDING = """
     m._discover_launchd = lambda: []
     m._left_running = lambda units, jobs: (units, jobs, [])
     m._discover_bare = lambda service_pids: ([] if kind == "systemd" else [entry], [])
-    def killed(token, entries, *, fence_checked=False):  # the update dies mid-stop
+    def killed(token, entries, deadline=None, *, fence_checked=False):  # the update dies mid-stop
         assert fence_checked  # custody already classified the entries
         if asked:
             r.mark_stop_sent(token, pid)

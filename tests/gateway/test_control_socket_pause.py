@@ -107,3 +107,34 @@ def test_pause_client_none_when_gateway_lacks_verb(tmp_path):
 
 def test_pause_client_none_when_no_socket(tmp_path):
     assert pause_gateway_for_update(tmp_path, timeout=0.5) is None
+
+
+@pytest.mark.platforms("posix")
+def test_unix_exchange_has_one_deadline_for_a_trickling_peer(tmp_path, monkeypatch):
+    """A peer that sends a byte at a time, each inside the per-call timeout, must not stretch the
+    exchange past the single deadline."""
+    import socket as _socket
+    import threading
+    import time as _time
+    from gateway import control_socket as cs
+    path = tmp_path / "s.sock"
+    srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    srv.bind(str(path))
+    srv.listen(1)
+    monkeypatch.setattr(cs, "resolve_client_socket_path", lambda home: path)
+
+    def trickle():
+        conn, _ = srv.accept()
+        with conn:
+            conn.recv(4096)
+            for _ in range(40):
+                try:
+                    conn.sendall(b"x")
+                except OSError:
+                    return
+                _time.sleep(0.1)
+    threading.Thread(target=trickle, daemon=True).start()
+    started = _time.monotonic()
+    cs._query_unix_socket(tmp_path, b"{}\n", 0.5)
+    assert _time.monotonic() - started <= 0.5 + 0.3
+    srv.close()

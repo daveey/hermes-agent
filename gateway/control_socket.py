@@ -655,11 +655,24 @@ def _query_unix_socket(home: Path, request: bytes, timeout: float) -> Optional[b
     if path is None:
         return None
     # OSError covers ConnectionRefusedError / FileNotFoundError on connect and socket.timeout on read.
+    # ONE deadline for the whole exchange (connect, send, every read): each socket call gets only
+    # what is left, so a peer that trickles bytes cannot stretch it past ``timeout``.
+    deadline = time.monotonic() + timeout
+
+    def left() -> float:
+        if (remaining := deadline - time.monotonic()) <= 0:
+            raise TimeoutError("control-socket deadline")
+        return remaining
+
+    def recv() -> bytes:
+        sock.settimeout(left())
+        return sock.recv(65536)
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock, contextlib.suppress(OSError):
-        sock.settimeout(timeout)
+        sock.settimeout(left())
         sock.connect(str(path))
+        sock.settimeout(left())
         sock.sendall(request)
-        return _read_response_line(lambda: sock.recv(65536), time.monotonic() + timeout)
+        return _read_response_line(recv, deadline)
     return None
 
 

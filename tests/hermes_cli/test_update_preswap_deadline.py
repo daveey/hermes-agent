@@ -275,3 +275,148 @@ def test_discovery_that_spent_the_whole_budget_stops_nothing(monkeypatch):
     verdict = pause._pause(pause._empty_token())
     assert "deadline" in verdict and "the checkout was not changed" in verdict
     assert not stop
+
+
+# ----------------------------------------------------------------- strict deadline, discovery, platform
+
+def test_many_entries_end_inside_the_bound_and_issue_nothing_after_it(fake, monkeypatch):
+    """60 gateways with 1 s RPCs: the serial asks cannot add up past the deadline, and no systemctl
+    is dispatched once it passed (no 0.1 s floor)."""
+    from gateway import control_socket
+    monkeypatch.setattr(control_socket, "pause_gateway_for_update",
+                        lambda home, **kw: time.sleep(min(1.0, kw.get("timeout", 1.0))))  # health: allow HX013 -- slow RPC under test
+    units = [fake.unit(f"m{i}.service", "unkillable", ignore_term=False) for i in range(60)]
+    stamps = []
+    real = pause._systemctl_async
+    monkeypatch.setattr(pause, "_systemctl_async",
+                        lambda *a, **k: (stamps.append(time.monotonic()), real(*a, **k))[1])
+    started = time.monotonic()
+    elapsed, error = _run(units)
+    assert isinstance(error, pause.PauseRefused)
+    assert elapsed <= BOUND + SLACK
+    assert all(t <= started + BOUND + 0.05 for t in stamps), "systemctl dispatched after the deadline"
+
+
+def test_expired_deadline_dispatches_nothing():
+    unit = {"kind": "systemd", "scope": "user", "unit": "x.service", "pid": 1}
+    gone = time.monotonic() - 1
+    pause._MANAGE_CMDS["user"] = ["systemctl", "--user"]
+    try:
+        with pytest.raises(pause.PauseRefused, match="deadline"):
+            pause._systemctl_async(unit, ["stop", "--no-block"], gone, must=True)
+        pause._systemctl_async(unit, ["kill"], gone, must=False)  # silently nothing
+        with pytest.raises(pause.PauseRefused, match="deadline"):
+            pause._stop_at_once(unit, gone, {})
+        bare = {"pid": os.getpid(), "home": "/nope"}
+        with pytest.raises(pause.PauseRefused, match="deadline"):
+            pause._stop_at_once(bare, gone, {})  # not SIGTERMed, no marker written
+        assert pause._unit_state(unit, gone) == {}
+    finally:
+        pause._MANAGE_CMDS.clear()
+
+
+def _discovery_env(monkeypatch, units=(), bare=(), notices=(), more=()):
+    from hermes_cli import update_pause_record as record
+    monkeypatch.setenv(pause.STOP_BUSY_ENV, "1")
+    monkeypatch.setattr(pause, "_PRE_SWAP_DRAIN_WAIT_S", BOUND)
+    monkeypatch.setattr(pause, "_discover_systemd", lambda: list(units))
+    monkeypatch.setattr(pause, "_discover_launchd", list)
+    monkeypatch.setattr(pause, "_left_running", lambda u, j: (u, j, list(notices)))
+    monkeypatch.setattr(pause, "_discover_bare", lambda pids: (list(bare), list(more)))
+    monkeypatch.setattr(record, "record_pause", lambda *a: pytest.fail("recorded"))
+    stops = []
+    monkeypatch.setattr(pause, "_stop_gateways", lambda *a, **k: stops.append(1))
+    return stops
+
+
+def test_slow_discovery_subprocess_is_clamped_and_refuses_not_empty(monkeypatch):
+    """A listing helper whose own timeout (60 s) outlasts the bound is cut at the deadline; the
+    timeout is an unfinished listing, never 'no gateways'."""
+    stops = _discovery_env(monkeypatch)
+
+    def slow_discovery():
+        try:
+            subprocess.run(["sleep", "30"], timeout=60, check=False)
+        except subprocess.TimeoutExpired:
+            pass  # the real helpers swallow timeouts and carry on with fewer units
+        return []
+    monkeypatch.setattr(pause, "_discover_systemd", slow_discovery)
+    real_run = subprocess.run
+    started = time.monotonic()
+    verdict = pause._pause(pause._empty_token())
+    assert time.monotonic() - started <= BOUND + SLACK
+    assert verdict and "deadline" in verdict and "the checkout was not changed" in verdict
+    assert not stops
+    assert subprocess.run is real_run  # the clamp is scoped to discovery
+
+
+def test_a_helper_timeout_before_the_deadline_still_refuses(monkeypatch):
+    _discovery_env(monkeypatch)
+
+    def flaky():
+        try:
+            subprocess.run(["sleep", "5"], timeout=0.2, check=False)
+        except subprocess.TimeoutExpired:
+            pass
+        return []
+    monkeypatch.setattr(pause, "_discover_systemd", flaky)
+    # any helper timeout (the helpers swallow it and list fewer units) is an unfinished listing
+    verdict = pause._pause(pause._empty_token())
+    assert verdict and "while listing gateways" in verdict
+
+
+@pytest.mark.parametrize("where", ["notices", "more"])
+def test_unmanageable_gateway_refuses_under_opt_in_instead_of_continuing(monkeypatch, where):
+    line = "  ↷ hermes-gateway.service keeps running until after the update (no privilege)"
+    stops = _discovery_env(monkeypatch, **{where: [line]},
+                           bare=[{"pid": 1, "argv": ["g"], "home": "/h"}])
+    verdict = pause._pause(pause._empty_token())
+    assert "cannot be stopped" in verdict and "hermes-gateway.service" in verdict
+    assert "the checkout was not changed" in verdict
+    assert not stops
+
+
+def test_idle_only_still_prints_and_continues_on_unmanageable(monkeypatch, capsys):
+    _discovery_env(monkeypatch)
+    monkeypatch.delenv(pause.STOP_BUSY_ENV)
+    monkeypatch.setattr(pause, "_left_running", lambda u, j: (u, j, ["  ↷ x keeps running"]))
+    assert pause._pause(pause._empty_token()) is None  # nothing left to stop: unchanged behaviour
+    assert "x keeps running" in capsys.readouterr().out
+
+
+def test_macos_ignores_the_opt_in_and_stays_idle_only(monkeypatch, capsys):
+    monkeypatch.setenv(pause.STOP_BUSY_ENV, "1")
+    monkeypatch.setattr(pause, "_is_linux", lambda: False)
+    assert not pause._stop_busy_opted_in()
+    monkeypatch.setattr(pause, "_stop_busy_gateways", lambda *a: pytest.fail("busy stop on macOS"))
+    asked = []
+    monkeypatch.setattr(pause, "_ask_to_drain", lambda e: asked.append(e) or False)
+    from hermes_cli import update_pause_record as record
+    monkeypatch.setattr(record, "mark_stop_sent", lambda *a: None)
+    monkeypatch.setattr(record, "mark_stop_refused", lambda *a: None)
+    with pytest.raises(pause.PauseRefused):
+        pause._stop_gateways({}, [{"pid": 4242, "kind": "launchd", "label": "ai.hermes.gateway", "home": "/h"}])
+    assert asked  # the idle-only verb, which a busy gateway answers with a deferral
+
+
+def test_recovery_is_announced_as_its_own_phase(monkeypatch, capsys):
+    from hermes_cli import update_pause_record as record
+    from hermes_cli import update_cmd_windows as windows
+    monkeypatch.setenv(pause.STOP_BUSY_ENV, "1")
+    unit = {"kind": "systemd", "scope": "user", "unit": "r.service", "pid": 5, "home": "/h"}
+    monkeypatch.setattr(pause, "_discover_systemd", lambda: [unit])
+    monkeypatch.setattr(pause, "_discover_launchd", list)
+    monkeypatch.setattr(pause, "_left_running", lambda u, j: (u, j, []))
+    monkeypatch.setattr(pause, "_discover_bare", lambda pids: ([], []))
+    from gateway import status
+    monkeypatch.setattr(status, "get_process_start_time", lambda pid: 1)
+    monkeypatch.setattr(record, "identity", lambda pid=None: {"ct": "ct:1"})
+    for name in ("record_pause", "mark_stop_requested", "sync"):
+        monkeypatch.setattr(record, name, lambda *a, **k: None)
+    monkeypatch.setattr(pause, "_stop_gateways", lambda *a, **k: (_ for _ in ()).throw(pause.PauseRefused("stuck")))
+    resumed = []
+    monkeypatch.setattr(windows, "_resume_windows_gateways_after_update", lambda t: resumed.append(1))
+    verdict = pause._pause(pause._empty_token())
+    out = capsys.readouterr().out
+    assert resumed and "stuck" in verdict
+    assert "Recovery (a separate phase" in out
