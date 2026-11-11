@@ -160,6 +160,14 @@ async def run_task(connection, params):
                     record_resume_event(conn, task.id, task.current_run_id, resume_plan, copied)
     from gateway.session_runtime_workers import tracked_write
     await tracked_write(authority, admit_claim)
+    target = request_id
+    if saved:  # [daveey] a turn checkpointed at the last owner's restart continues here (session_kanban_continue)
+        from functools import partial
+        from gateway import session_kanban_continue as cont
+        target, checkpoint = await asyncio.to_thread(cont.pending_admission, context['db'], params, request_id)
+        if checkpoint is not None:
+            await tracked_write(authority, partial(cont.prepare, authority, principal_id=connection.actor.subject,
+                session_id=ref.session_id, context=context, checkpoint=checkpoint, request_id=target, owner_db=owner_db))
     await connection.resume(ref, {})
     # Finite like the `chat -q` worker it replaced: nobody can answer an approval or clarify in a
     # card (approvals.single_query_mode applies). Never unattended: that is `-z`'s auto-approval.
@@ -177,7 +185,11 @@ async def run_task(connection, params):
     card = None
     if committed is None or 'kanban_card_v1' in committed['payload']:
         card = {'board': context.get('board'), 'task_id': params['task_id'], 'run_id': params['run_id']}
-    receipt = await authority.submit(connection.actor, Submission(request_id, ref, payload, 'queue'),
+    if target != request_id:
+        from gateway.session_kanban_continue import CONTINUE_TEXT
+        payload = {'text': CONTINUE_TEXT, 'finite': True}
+        card = {'board': context.get('board'), 'task_id': params['task_id'], 'run_id': params['run_id']}
+    receipt = await authority.submit(connection.actor, Submission(target, ref, payload, 'queue'),
                                      _kanban_card=card)
     return {'session_id': ref.session_id, 'receipt': asdict(receipt)}
 
@@ -484,21 +496,13 @@ KANBAN_TURN_AUTHOR = {'id': 'kanban:dispatcher', 'name': 'Kanban dispatcher', 'i
 
 
 def _run_task_turns(agent, frame, history, context):
-    from agent.skill_commands import build_preloaded_skills_prompt
-    skills, _loaded, missing = build_preloaded_skills_prompt(context['skills'], task_id=agent.session_id)
-    # Pins were validated when the card was created; a later removal must reach the worker,
-    # not crash it before it can report or recover the stale prerequisite.
-    from hermes_cli.kanban_skill_check import unavailable_pin_note
-    warning = unavailable_pin_note(missing)
-    if warning:
-        import logging
-        logging.getLogger(__name__).warning('%s', warning)
-    from gateway.session_kanban_resume import compact_resumed_history
-    from gateway.session_kanban_capsule import capsule_prompt_context
-    # [daveey] An over-headroom resumed transcript is compacted before the first model call (or dropped).
-    history = compact_resumed_history(agent, context, history)
-    card = capsule_prompt_context(context, history)  # [daveey] resumed after an owner restart, or the tail
-    prompt = '\n\n'.join(p for p in (skills, warning, card, frame['text']) if p)
+    from gateway.session_kanban_continue import is_continuation
+    if is_continuation(frame.get('text')) and history:
+        # [daveey] The turn checkpointed at the last owner's restart continues: its skills and card
+        # context are already in the session's history, so only the continuation note is new.
+        prompt = frame['text']
+    else:
+        prompt, history = _first_turn_prompt(agent, frame, history, context)
     result = agent.run_conversation(prompt, conversation_history=history, turn_author=KANBAN_TURN_AUTHOR)
 
     def recover(nudge):
@@ -543,3 +547,22 @@ def _run_task_turns(agent, frame, history, context):
         first_response=result.get('final_response', ''), unachievable_fn=unachievable)
     # A broken loop exits non-zero; a parked or dispatcher-owned stop keeps the settled result (rc 0).
     return kanban_goal_loop_turn_result(result, loop)
+
+
+def _first_turn_prompt(agent, frame, history, context):
+    """``(prompt, history)`` of an attempt's first turn: pinned skills, the card context and the frame text."""
+    from agent.skill_commands import build_preloaded_skills_prompt
+    skills, _loaded, missing = build_preloaded_skills_prompt(context['skills'], task_id=agent.session_id)
+    # Pins were validated when the card was created; a later removal must reach the worker,
+    # not crash it before it can report or recover the stale prerequisite.
+    from hermes_cli.kanban_skill_check import unavailable_pin_note
+    warning = unavailable_pin_note(missing)
+    if warning:
+        import logging
+        logging.getLogger(__name__).warning('%s', warning)
+    from gateway.session_kanban_resume import compact_resumed_history
+    from gateway.session_kanban_capsule import capsule_prompt_context
+    # [daveey] An over-headroom resumed transcript is compacted before the first model call (or dropped).
+    history = compact_resumed_history(agent, context, history)
+    card = capsule_prompt_context(context, history)  # [daveey] resumed after an owner restart, or the tail
+    return '\n\n'.join(p for p in (skills, warning, card, frame['text']) if p), history

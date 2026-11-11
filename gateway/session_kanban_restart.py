@@ -1,38 +1,63 @@
-"""Owner-side disposition of a Kanban turn interrupted by a runtime Stop."""
+"""Owner-side disposition of a Kanban turn interrupted by a runtime Stop.
+
+[daveey] A turn the restart Stop ended cleanly (the managed child returned its interrupted result, so
+its transcript and tool results are persisted) is a *checkpoint*, not a loss: the run keeps its id,
+claim, submitter and session, and the next owner continues it (``gateway.session_kanban_continue``).
+The booking is still the uncounted owner-restart exit, now marked ``continuable`` with a one-time
+``checkpoint`` token, plus a ``restart_checkpoint`` event (``reason: core_update_pause``) naming the
+admission that stopped. A submitter that cannot continue (an old client, no owner within its wait, an
+owner refusing the continuation) exits on that same booking: today's uncounted requeue.
+A lost child (no clean result: the admission settles ``unknown``) is never continued: its booking
+carries no checkpoint, so the run is requeued as before.
+"""
 import asyncio
 from functools import partial
 import json
 import logging
 from pathlib import Path
+import time
+import uuid
 
 logger = logging.getLogger(__name__)
+
+CHECKPOINT_EVENT = 'restart_checkpoint'
+CHECKPOINT_REASON = 'core_update_pause'  # the Desktop update pause's marker reason (tui_gateway.update_pause)
+
+
+def _restart_stop(cause) -> bool:
+    from gateway.run import _INTERRUPT_REASON_GATEWAY_RESTART, _INTERRUPT_REASON_GATEWAY_SHUTDOWN
+    return cause in (_INTERRUPT_REASON_GATEWAY_RESTART, _INTERRUPT_REASON_GATEWAY_SHUTDOWN)
 
 
 async def close_and_book_restart_loss(authority, policy, worker):
     """Return final cleanup; a restart-lost child is closed and booked before unknown publishes.
 
     Closing first prevents its late130 from overwriting76. Other losses retain ordinary cleanup.
-    The returned no-op means the caller's finally never closes that same child twice.
+    The returned no-op means the caller's finally never closes that same child twice. The child was
+    lost (no clean result), so this booking is never a continuation checkpoint.
     """
-    from gateway.run import _INTERRUPT_REASON_GATEWAY_RESTART, _INTERRUPT_REASON_GATEWAY_SHUTDOWN
-    if (not policy.kanban_json or worker.stop_cause not in
-            (_INTERRUPT_REASON_GATEWAY_RESTART, _INTERRUPT_REASON_GATEWAY_SHUTDOWN)):
+    if not policy.kanban_json or not _restart_stop(worker.stop_cause):
         return worker.close
     await asyncio.to_thread(worker.close)
+    logger.info('Kanban restart: not checkpointing the turn (managed worker lost before its result); '
+                'the run is requeued uncounted')
     await book_restart_interruption(authority, policy)
     return lambda: None
 
 
-async def book_restart_interruption(authority, policy):
-    """Best-effort booking: a failed board write must never skip settlement of the admission."""
+async def book_restart_interruption(authority, policy, checkpoint=None):
+    """Best-effort booking: a failed board write must never skip settlement of the admission.
+
+    ``checkpoint`` (``{'session_id', 'request_id', 'admission_id', 'cause'}``) marks a turn that stopped
+    cleanly at the restart: the booking is then continuable by the next owner."""
     from gateway.session_runtime_workers import tracked_write
     try:
-        await tracked_write(authority, partial(record_restart_interruption, policy))
+        await tracked_write(authority, partial(record_restart_interruption, policy, checkpoint=checkpoint))
     except Exception:
         logger.warning('Kanban restart-loss booking failed; settling without it', exc_info=True)
 
 
-def record_restart_interruption(policy):
+def record_restart_interruption(policy, checkpoint=None):
     """Supersede the child's interrupted exit with an uncounted owner-restart exit.
 
     Called before admission settlement, including a Stop before worker bootstrap. Fence on
@@ -51,7 +76,18 @@ def record_restart_interruption(policy):
                 or task.claim_lock != context['claim_lock'] or run is None
                 or tuple(run) != ('running', context['claim_lock'], context['task_id'])):
             return
-        kb._append_event(conn, task.id, 'worker_result', {
-            'pid': task.worker_pid, 'claim_lock': context['claim_lock'], 'exit_code': KANBAN_OWNER_RESTART_EXIT_CODE,
-            'last_output': 'Kanban attempt interrupted by gateway restart/shutdown; requeued uncounted.',
-            'owner_restart': True}, run_id=context['run_id'])
+        payload = {'pid': task.worker_pid, 'claim_lock': context['claim_lock'],
+                   'exit_code': KANBAN_OWNER_RESTART_EXIT_CODE,
+                   'last_output': 'Kanban attempt interrupted by gateway restart/shutdown; requeued uncounted.',
+                   'owner_restart': True}
+        if checkpoint:
+            token = uuid.uuid4().hex
+            payload.update(continuable=True, checkpoint=token, last_output=(
+                'Kanban turn checkpointed at a gateway restart/shutdown; the next owner continues it '
+                '(requeued uncounted if it cannot).'))
+            kb._append_event(conn, task.id, CHECKPOINT_EVENT, {
+                'reason': CHECKPOINT_REASON, 'checkpoint': token, 'at': int(time.time()),
+                'claim_lock': context['claim_lock'],
+                **{k: checkpoint.get(k) for k in ('session_id', 'request_id', 'admission_id', 'cause')}},
+                run_id=context['run_id'])
+        kb._append_event(conn, task.id, 'worker_result', payload, run_id=context['run_id'])

@@ -640,8 +640,11 @@ async def admit_managed(authority, ref, row, policy):
             (_INTERRUPT_REASON_GATEWAY_RESTART, _INTERRUPT_REASON_GATEWAY_SHUTDOWN)):
         # The child booked exit 130 (or never bootstrapped). Supersede it BEFORE the
         # receipt becomes terminal: a runtime Stop must not spend the card's retries.
+        # [daveey] A clean stop is a checkpoint the next owner continues (session_kanban_continue).
         from gateway.session_kanban_restart import book_restart_interruption
-        await book_restart_interruption(authority, policy)
+        await book_restart_interruption(authority, policy, checkpoint={
+            'session_id': ref.session_id, 'request_id': row.get('request_id'),
+            'admission_id': row.get('admission_id'), 'cause': pending.get('runtime_stop_cause')})
     return reply
 
 
