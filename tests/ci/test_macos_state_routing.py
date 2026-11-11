@@ -125,7 +125,9 @@ def test_standalone_pushes_collapse_without_superseding_required_calls():
 
 @pytest.mark.parametrize('selected', ['true', 'false', None, '', 'TRUE', 0, 1, True, False])
 @pytest.mark.parametrize('result', ['success', 'skipped', 'failure', 'cancelled', None])
-def test_required_consumer_executes_real_cli(selected, result):
+def test_required_consumer_executes_real_cli(selected, result, monkeypatch):
+    # This policy replay has no duplicate run; never query the host's real CI run.
+    monkeypatch.delenv('GITHUB_REPOSITORY', raising=False)
     needs = {'detect': {'result': 'success', 'outputs': {'hermes_state': selected}}}
     if result is not None:
         needs['hermes-state-macos'] = {'result': result}
