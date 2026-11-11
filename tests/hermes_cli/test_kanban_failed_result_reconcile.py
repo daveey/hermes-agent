@@ -282,6 +282,46 @@ def test_failed_receipt_veto_cannot_fall_back_to_legacy_reclaim(board, monkeypat
                             (context['run_id'],)).fetchone()
 
 
+@pytest.mark.parametrize('entry', ['dispatcher', 'observer'])
+@pytest.mark.parametrize('damage', ['missing_bound', 'malformed_bound', 'wrong_claim', 'wrong_pid'])
+def test_modern_receipt_invalid_binding_still_vetoes_reclaim(board, monkeypatch, entry, damage):
+    from hermes_cli import kanban_owner_recovery as owner
+    conn, context = board
+    _failed_child(conn, context)
+    with kb.write_txn(conn):
+        if damage == 'missing_bound':
+            conn.execute("DELETE FROM task_events WHERE run_id=? AND kind='worker_bound'",
+                         (context['run_id'],))
+        else:
+            row = conn.execute("SELECT payload FROM task_events WHERE run_id=? AND kind='worker_bound'",
+                               (context['run_id'],)).fetchone()
+            payload = json.loads(row['payload'])
+            if damage == 'wrong_claim':
+                payload['claim_lock'] = 'foreign:1'
+            elif damage == 'wrong_pid':
+                payload['pid'] = 1
+            else:
+                payload = []
+            conn.execute("UPDATE task_events SET payload=? WHERE run_id=? AND kind='worker_bound'",
+                         (json.dumps(payload), context['run_id']))
+    monkeypatch.setattr(kbd, '_worker_alive', lambda *a: False)
+    monkeypatch.setattr(owner, 'owner_reclaim_blocked', lambda *a, **k: False)
+    monkeypatch.setattr(owner, 'apply_attempt_note', lambda *a, **k: None)
+    kbd.detect_crashed_workers(conn, failed_results_only=entry == 'observer')
+    assert conn.execute('SELECT status FROM task_runs WHERE id=?',
+                        (context['run_id'],)).fetchone()[0] == 'running'
+
+
+@pytest.mark.parametrize('birth', ['|1', 'epoch|-1', 'epoch|0', 'epoch|+1',
+                                  'epoch| 1', 'epoch|1@-2', 'epoch|1|2'])
+def test_malformed_birth_never_queries_process(monkeypatch, birth):
+    from hermes_cli import kanban_failed_result as reconcile
+    def unexpected(*args):
+        pytest.fail('malformed birth must fail before querying process')
+    monkeypatch.setattr(reconcile.os, 'kill', unexpected)
+    assert not reconcile.process_gone(123, birth)
+
+
 @pytest.mark.skipif(sys.platform != 'linux', reason='Linux zombie identity proof')
 def test_real_zombie_is_dead_only_with_matching_birth():
     from hermes_cli.kanban_failed_result import process_gone
