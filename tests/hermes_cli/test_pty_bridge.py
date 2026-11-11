@@ -433,9 +433,11 @@ class TestPtyBridgeClose:
             "while :; do sleep 0.05; done\n"
         )
         bridge = PtyBridge.spawn(["/bin/sh", "-c", f"/bin/sh {script} & exec sleep 60"])
-        _read_until(bridge, b"armed", timeout=10.0)  # the helper's trap is installed
-
-        bridge.close()
+        try:
+            output = _read_until(bridge, b"armed", timeout=10.0)
+            assert b"armed" in output, output  # the helper's trap is installed
+        finally:
+            bridge.close()
 
         assert marker.read_text().strip() == "ok"
 

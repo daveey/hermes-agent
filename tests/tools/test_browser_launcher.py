@@ -394,7 +394,7 @@ def test_a_crashed_launchers_shared_browser_is_reaped_only_after_its_last_holder
 
 
 @pytest.mark.platforms("posix")
-def test_a_throwaway_profile_left_by_a_process_that_died_mid_launch_is_reclaimed():
+def test_a_throwaway_profile_left_by_a_process_that_died_mid_launch_is_reclaimed(monkeypatch):
     """A process that dies between creating its throwaway profile and writing the launch record (a first
     launch can wait 120 s) leaves no record behind. The next reap reclaims the dir by its owner's pid and
     start time; the dir of a live process is never touched."""
@@ -414,6 +414,10 @@ def test_a_throwaway_profile_left_by_a_process_that_died_mid_launch_is_reclaimed
         held = Path(alive.stdout.readline().strip())
         assert died.is_dir() and held.is_dir() and died.parent == held.parent
 
+        # Only the fixture owner is alive; unrelated host Chromium argv can name
+        # protected real-home profiles. Keep real owner identity/liveness checks.
+        import psutil
+        monkeypatch.setattr(psutil, "process_iter", lambda *a, **kw: iter([psutil.Process(alive.pid)]))
         launcher.reap_orphaned_browsers()
         assert not died.exists()
         assert held.is_dir()

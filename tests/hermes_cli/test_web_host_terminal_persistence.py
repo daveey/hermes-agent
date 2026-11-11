@@ -165,12 +165,17 @@ def test_real_shell_survives_disconnect_and_explicit_close(host_app, tmp_path):
             assert closed.value.code == 1000
             assert not bridge.is_alive()
             import psutil
-            try:
-                child_process = psutil.Process(foreground_pid)
-            except psutil.NoSuchProcess:
-                pass
-            else:
-                assert child_process.status() == psutil.STATUS_ZOMBIE
+            from tests.waiting import wait_until
+
+            def foreground_has_exited():
+                try:
+                    return psutil.Process(foreground_pid).status() == psutil.STATUS_ZOMBIE
+                except psutil.NoSuchProcess:
+                    return True
+
+            # The terminal hangup initiates exit in the foreground job's separate
+            # group; a same-instant process-status sample can precede kernel exit.
+            wait_until(foreground_has_exited, timeout=3.0, what="foreground job exit after close")
         with client.websocket_connect(url("&attach=" + token)) as ws:
             with pytest.raises(WebSocketDisconnect) as expired:
                 ws.receive_bytes()

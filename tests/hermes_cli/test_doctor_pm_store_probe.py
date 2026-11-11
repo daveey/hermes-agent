@@ -20,8 +20,10 @@ from pm.store import current_target, tree_digest
 
 @pytest.fixture
 def tool_store(tmp_path, monkeypatch):
-    rg = shutil.which("rg")
-    assert rg is not None, "this executable parity test requires ripgrep"
+    # Exercise real executable selection without reading the host's PM tool store.
+    rg = tmp_path / "fixture-rg"
+    rg.write_text("#!/bin/sh\nprintf 'ripgrep 15.2.0\\n'\n", encoding="utf-8")
+    rg.chmod(0o755)
     version_output = subprocess.run(
         [rg, "--version"], capture_output=True, text=True, check=True, timeout=10,
     ).stdout

@@ -2,7 +2,6 @@
 import json
 from types import SimpleNamespace
 
-import fal_client
 import httpx
 import pytest
 
@@ -13,7 +12,12 @@ from tools.fal_common import (
 
 
 @pytest.fixture
-def transport(monkeypatch):
+def fal_client():
+    return pytest.importorskip("fal_client")
+
+
+@pytest.fixture
+def transport(monkeypatch, fal_client):
     requests, responses, clients = [], [], []
     original = httpx.Client.__init__
 
@@ -47,7 +51,7 @@ def accepted():
 
 
 @pytest.mark.parametrize("path", ["sub/path", "/sub/path"])
-def test_sdk_submit_preserves_wire_contract(transport, path):
+def test_sdk_submit_preserves_wire_contract(transport, path, fal_client):
     requests, replies = transport
     replies.append(accepted())
     client = _ManagedFalSyncClient(fal_client, key="test-token", queue_run_origin="  https://queue.test///  ")
@@ -77,7 +81,7 @@ def test_sdk_submit_preserves_wire_contract(transport, path):
 
 @pytest.mark.parametrize("status", [402, 409, 429, 503, "transport"])
 @pytest.mark.parametrize("keyed", [True, False])
-def test_keyed_errors_survive_without_duplicate_submission(transport, status, keyed):
+def test_keyed_errors_survive_without_duplicate_submission(transport, status, keyed, fal_client):
     requests, replies = transport
     body = {"error": {"code": "BILLING_ERROR", "message": "meter disabled",
                        "details": {"upstreamPayload": {"code": "meter_missing", "error": "not configured"}}}}
@@ -122,7 +126,7 @@ def test_exception_status_shapes(response_status, status, expected):
     ("_client", "SyncClient._client"), ("_maybe_retry_request", "request helpers"),
     ("_raise_for_status", "request helpers"), ("SyncRequestHandle", "SyncRequestHandle"),
 ])
-def test_missing_sdk_surface_is_actionable(transport, monkeypatch, missing, message):
+def test_missing_sdk_surface_is_actionable(transport, monkeypatch, missing, message, fal_client):
     owner = fal_client if missing in {"SyncClient", "client"} else fal_client.client
     if missing == "_client":
         owner = fal_client.SyncClient
@@ -135,7 +139,7 @@ def test_missing_sdk_surface_is_actionable(transport, monkeypatch, missing, mess
     ("add_priority_header", {"priority": "low"}, "add_priority_header"),
     ("add_timeout_header", {"start_timeout": 60}, "add_timeout_header"),
 ])
-def test_optional_sdk_surface_refused_before_http(transport, monkeypatch, helper, options, message):
+def test_optional_sdk_surface_refused_before_http(transport, monkeypatch, helper, options, message, fal_client):
     monkeypatch.setattr(fal_client.client, helper, None)
     client = _ManagedFalSyncClient(fal_client, key="token", queue_run_origin="https://queue.test")
     with pytest.raises(RuntimeError, match=message):
@@ -144,7 +148,7 @@ def test_optional_sdk_surface_refused_before_http(transport, monkeypatch, helper
 
 
 @pytest.mark.parametrize("failure", [None, ImportError("external SDK"), RuntimeError("PM acquisition failed")])
-def test_import_adapter_keeps_pm_failure_policy(monkeypatch, failure):
+def test_import_adapter_keeps_pm_failure_policy(monkeypatch, failure, fal_client):
     import pm
     calls = []
 
@@ -162,20 +166,20 @@ def test_import_adapter_keeps_pm_failure_policy(monkeypatch, failure):
     assert calls == ["fal"]
 
 
-def test_import_adapter_runs_real_pm_availability_without_install(monkeypatch):
+def test_import_adapter_runs_real_pm_availability_without_install(monkeypatch, fal_client):
     import pm.client
     monkeypatch.setattr(pm.client, "sync_venv", lambda *a, **kw: pytest.fail("available SDK must not install"))
     assert import_fal_client() is fal_client
 
 
-def test_external_sdk_remains_importable_without_pm(monkeypatch):
+def test_external_sdk_remains_importable_without_pm(monkeypatch, fal_client):
     import sys
     monkeypatch.setitem(sys.modules, "pm", None)
     assert import_fal_client() is fal_client
 
 
 @pytest.mark.parametrize("timeout,expected", [(None, 120.0), (300.0, 300.0)])
-def test_older_sdk_timeout_default_and_optional_hint(transport, monkeypatch, timeout, expected):
+def test_older_sdk_timeout_default_and_optional_hint(transport, monkeypatch, timeout, expected, fal_client):
     monkeypatch.setattr(fal_client.client, "add_hint_header", None)
     client = _ManagedFalSyncClient(fal_client, key="token", queue_run_origin="https://queue.test")
     # Keep its real HTTP client and request helpers, vary only older SDK metadata.
@@ -186,7 +190,7 @@ def test_older_sdk_timeout_default_and_optional_hint(transport, monkeypatch, tim
     assert "x-fal-runner-hint" not in transport[0][0].headers
 
 
-def test_image_wait_polls_queue_status_at_gateway_cadence(transport, monkeypatch):
+def test_image_wait_polls_queue_status_at_gateway_cadence(transport, monkeypatch, fal_client):
     """The SDK's ``handle.get()`` polls every 0.1 s: one job alone burns the gateway's 200 req/min."""
     import tools.image_generation_tool as image_tool
     from tools.fal_common import FAL_QUEUE_POLL_SECONDS
