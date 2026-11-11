@@ -93,9 +93,13 @@ def _requirement_matches(matches, machines, requires, skills, *, me=None, assign
         # The origin need not advertise worker-pickup labels. Read its actual profile rather than
         # rejecting a return home because the worker registry omits local checkout/skill inventory.
         from hermes_cli import kanban_capabilities as caps
-        available = {f"capability:{c}" for c in caps._profile_capabilities(assignee)}
-        with caps._profile_policy(assignee):
-            available.update(f"skill:{pin}" for pin in skills if caps._skill_frontmatter(pin) is not None)
+        available = set()
+        try:
+            available = {f"capability:{c}" for c in caps._profile_capabilities(assignee)}
+            with caps._profile_policy(assignee):
+                available.update(f"skill:{pin}" for pin in skills if caps._skill_frontmatter(pin) is not None)
+        except (OSError, ValueError):
+            available = set()  # unknown local inventory cannot veto a capable remote candidate
         lacking[me] = sorted(required - available)
     capable = [name for name in matches if not lacking[name]]
     if not capable:

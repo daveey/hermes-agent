@@ -126,3 +126,20 @@ def test_queued_return_uses_local_inventory_not_worker_labels(gws, monkeypatch, 
     result = km.move_queued(hub.conn, tid, runs_on=['machine:hub'], reason='return home',
                             machines={'hub': {'state': 'active'}}, me='hub')
     assert result['ok'] is (missing is None), result
+
+
+@pytest.mark.parametrize('remote', [False, True])
+def test_missing_local_profile_does_not_veto_capable_remote(gws, monkeypatch, remote):
+    hub, _ = gws
+    tid = _card(hub, requires=['host_repo'], skills=['plan'])
+    hub.conn.execute("UPDATE tasks SET assignee = 'remote-only' WHERE id = ?", (tid,))
+    machines = {'hub': {'state': 'active', 'labels': ['linux']}}
+    if remote:
+        machines.update(_machines('linux', 'capability:host_repo', 'skill:plan'))
+    result = km.move_queued(hub.conn, tid, runs_on=['linux'], reason='remote profile',
+                            machines=machines, me='hub')
+    assert result['ok'] is remote, result
+    if remote:
+        assert result['matches'] == ['worker-1']
+    else:
+        assert result['reason_code'] == 'capability_mismatch'
