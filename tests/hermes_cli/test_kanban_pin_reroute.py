@@ -128,7 +128,7 @@ def test_wall_shorter_than_the_threshold_holds(board, monkeypatch, all_assignees
         assert _tick(conn) == ([PEER] if moved else [])
 
 
-def test_review_lane_pin_holds(board, monkeypatch):
+def test_review_lane_selects_independent_model_despite_author_wall(board, monkeypatch):
     clock = _clock(monkeypatch)
     _deep(monkeypatch)
     with kbc.connect() as conn:
@@ -137,11 +137,15 @@ def test_review_lane_pin_holds(board, monkeypatch):
         conn.commit()
         reap(conn, tid, lane='review', provider='openai-codex', **_codex_wall(clock[0] + 55 * 3600))
         clock[0] += 301
-        assert dispatch.check_respawn_guard(conn, tid, lane='review') == 'subscription_quota_reset'
+        assert dispatch.check_respawn_guard(conn, tid, lane='review') is None
+        task = kb.get_task(conn, tid)
+        assert tier.resolve_dispatch_tier(conn, task, lane='review') == (*PEER, 'review_unpinned')
+        assert (task.model_override, task.provider_override) == PIN
+        assert _events(conn, tid, 'model_reroute') == []
 
 
-def test_review_lane_after_a_closed_episode_keeps_the_pin(board, monkeypatch, all_assignees_spawnable):
-    """The closed-episode path (history walls) also leaves review runs on the pin."""
+def test_review_lane_after_a_closed_episode_selects_independent_model(board, monkeypatch, all_assignees_spawnable):
+    """Historical author walls cannot override the independent review selection."""
     clock = _clock(monkeypatch)
     _, cfg = _deep(monkeypatch)
     with kbc.connect() as conn:
@@ -150,7 +154,10 @@ def test_review_lane_after_a_closed_episode_keeps_the_pin(board, monkeypatch, al
         kb.reclaim_task(conn, tid, reason='test')
         task = kb.get_task(conn, tid)
         assert tier.resolve_dispatch_tier(conn, task, lane='ready')[:2] == PEER
-        assert tier.resolve_dispatch_tier(conn, task, lane='review')[:2] != PEER
+        assert tier.resolve_dispatch_tier(conn, task, lane='review') == (*PEER, 'review_unpinned')
+        assert (task.model_override, task.provider_override) == PIN
+        # Only the preceding ready run was quota-rerouted; review is its own policy.
+        assert len(_events(conn, tid, 'model_reroute')) == 1
 
 
 @pytest.mark.parametrize('classes', [0, 2])
