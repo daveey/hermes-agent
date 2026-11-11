@@ -47,14 +47,9 @@ from hermes_cli.kanban_ops import (
 from hermes_cli.kanban_parser import build_parser
 from hermes_cli.kanban_sync_cli import cmd_sync as _cmd_sync
 from hermes_cli.kanban_archive_scope import (  # moved here from this module; re-exported for callers
-    _capability_owner_waiting_card,
-    _creator_task_id,
-    _is_stranded_runs_on_copy,
-    _worker_may_archive_capability_owner,
-    _worker_may_archive_own,
-    archive_scope_for,
-    worker_archive_scope,
-    worker_may_archive,
+    _capability_owner_waiting_card, _creator_task_id, _is_stranded_runs_on_copy,
+    _worker_may_archive_capability_owner, _worker_may_archive_own,
+    archive_scope_for, worker_archive_scope, worker_may_archive,
 )
 from hermes_cli.kanban_requeue import (  # moved here from this module; re-exported for callers
     OWNER_WAKE_REQUEUE_STATUSES, _is_owner_wake_supervisor, _is_self_heal_fix_card, has_requeue_grant,
