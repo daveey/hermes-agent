@@ -567,6 +567,17 @@ def _derive(db: Any, sid: str, *, ignore_live_turn: bool = False,
     from hermes_completion_receipt import historical_fields
     historical = historical_fields(_parse((_row(db, sid) or {}).get("outcome_json")))
     current = _derive_current(db, sid, ignore_live_turn=ignore_live_turn, pending_reply=pending_reply)
+    if current.get("kind") == "done":
+        # A declared done carries its own receipt (or none: unspecified). A derived
+        # done keeps the last receipt only while no newer user request arrived, i.e.
+        # it still describes the turn that declared it; later work is unspecified.
+        if current.get("source") == "declared":
+            return current
+        declared_at = (historical.get("completion_receipt_source") or {}).get("declared_at")
+        if not isinstance(declared_at, (int, float)) or db._read_one(
+                "SELECT 1 FROM messages WHERE session_id = ? AND active = 1 AND role = 'user' AND timestamp > ?"
+                " LIMIT 1", (sid, declared_at)):
+            return current
     return {**historical, **current}
 
 
@@ -661,7 +672,9 @@ def declare_outcome(sid: str, outcome: dict, *, db: Any = None) -> dict[str, Any
                 "profile": get_active_profile_name(), "gateway": gateway_names()[0] or None,
                 "declared_at": declared["at"],
             }
-        else:
+        elif declared["kind"] != "done":
+            # A new non-done state keeps the last receipt as history. A new done
+            # without a receipt is new work whose artifact acceptance is unspecified.
             from hermes_completion_receipt import historical_fields
             declared.update(historical_fields(_parse((_row(handle, tip) or {}).get("outcome_json"))))
         # Persist intent before touching the separate cron store. A failed DB

@@ -893,7 +893,7 @@ def _handle_complete(args: dict, **kw) -> str:
     if artifacts:
         metadata = _merge_artifacts(metadata, artifacts)
     _check(summary or result, "provide at least one of: summary (preferred), result", "empty")
-    _require_dict_metadata(metadata)
+    _kc.require_completion_metadata(metadata, _require_dict_metadata)  # dict + receipt shape before the judge
     metadata = _stamp_worker_session_metadata(tid, metadata)
     with _board(args.get("board")) as (kb, conn):
         from hermes_cli import kanban_foreign_card as _kfc

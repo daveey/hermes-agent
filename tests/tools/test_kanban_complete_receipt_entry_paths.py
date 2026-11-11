@@ -178,3 +178,22 @@ def test_terminal_subprocess_path_rejects_then_admits(board, tmp_path):
     good = _subprocess(tid, value, tmp_path)
     assert good.returncode == 0, good
     assert _stored_receipt(board, tid)["completion_receipt"] == value
+
+
+def test_malformed_receipt_refused_before_goal_judge(board, monkeypatch):
+    """No judge call (and so no judge-driven park) for a structurally invalid receipt."""
+    from hermes_cli import kanban as cli
+    from tools import kanban_tools as kt
+
+    def judge(*_a, **_k):
+        raise AssertionError("goal judge consulted before receipt validation")
+
+    monkeypatch.setattr(kt, "_goal_gate", judge)
+    monkeypatch.setattr(cli, "_goal_gate_error", judge)
+    tid = _task(board, monkeypatch)
+    before = _state(board, tid)
+    assert "completion_receipt" in _direct(_args(MALFORMED))["error"]
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID")
+    assert _cli(tid, MALFORMED) != 0
+    assert _state(board, tid) == before

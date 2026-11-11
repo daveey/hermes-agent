@@ -269,9 +269,17 @@ describe('completion receipt tooltip projection', () => {
         state: 'pending',
         owner: '@task:default@other/t_example',
         reason: 'Accepted linked investigation.'
+      },
+      {
+        scope: 'later rollout',
+        state: 'deferred',
+        owner: '@task:default@other/t_later',
+        reason: 'Deferred to a named card.'
       }
     ]
     const text = outcomeTooltip(outcome, r)!
+    expect(text).toContain('owner (unverified): @task:default@other/t_later')
+    expect(text).toContain('remaining pending: cause investigation · owner: @task:default@other/t_example')
     expect(text).toContain('deferred: enforcement')
     expect(text).toContain('User deferred; no execution authorized.')
     expect(text).toContain('@task:default@other/t_example')

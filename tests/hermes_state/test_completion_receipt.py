@@ -215,3 +215,26 @@ def test_sidebar_rows_and_cli_json_project_receipt_and_source(db, monkeypatch, c
     printed = json.loads(capsys.readouterr().out)
     assert printed["outcome"]["completion_receipt"] == value
     assert printed["outcome"]["completion_receipt_source"] == row["outcome"]["completion_receipt_source"]
+
+
+@pytest.mark.parametrize("later", ["declared", "derived"])
+def test_later_plain_done_does_not_inherit_earlier_receipt(db, monkeypatch, later):
+    """A receipt belongs to the declaration that made it, never to a later done."""
+    import hermes_state_outcome as so
+
+    monkeypatch.setattr(so, "_live_turn", lambda *_: False)
+    fixtures.turn(db)
+    so.declare_outcome("chat", {"kind": "done", "summary": "A delivered.",
+                                "completion_receipt": receipt("delivered")}, db=db)
+    fixtures.say(db, "user", "Now do B")
+    if later == "declared":
+        out = so.declare_outcome("chat", {"kind": "done", "summary": "B plain"}, db=db)
+    else:
+        fixtures.say(db, "assistant", fixtures.SUMMARY)
+        out = so.refresh_outcome("chat", "manual", db=db)
+    assert out["kind"] == "done"
+    assert "completion_receipt" not in out and "completion_receipt_source" not in out
+    stored = so.get_outcome("chat", db=db)
+    assert "completion_receipt" not in stored
+    row = next(r for r in db.list_sessions_rich(limit=5) if r["id"] == "chat")
+    assert "completion_receipt" not in row["outcome"]

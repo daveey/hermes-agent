@@ -251,8 +251,11 @@ const receiptTooltip = (outcome: SessionOutcome): string | null => {
         return null
       }
 
+      // Only pending owners are admitted against live ownership; a deferred owner is an unverified reference.
+      const ownerLabel = remaining.state === 'deferred' && remaining.owner !== null ? 'owner (unverified)' : 'owner'
+
       lines.push(
-        `  remaining ${remaining.state}: ${receiptValue(remaining.scope)} · owner: ${receiptValue(String(remaining.owner))} · ${receiptValue(remaining.reason)}`
+        `  remaining ${remaining.state}: ${receiptValue(remaining.scope)} · ${ownerLabel}: ${receiptValue(String(remaining.owner))} · ${receiptValue(remaining.reason)}`
       )
     }
   }

@@ -71,3 +71,15 @@ def pr_acceptance_refused(conn, tid: str, mark: int) -> bool:
     except (TypeError, ValueError):
         return False
     return isinstance(payload, dict) and payload.get("ok") is False and not payload.get("waived")
+
+
+def require_completion_metadata(metadata, require_dict) -> None:
+    """``require_dict(metadata)``, then the receipt's structure, before the goal judge or any write.
+
+    Owner admission still runs inside canonical ``complete_task``; this only refuses a malformed
+    ``completion_receipt`` early so no judge call (and no judge-driven park) precedes the refusal.
+    """
+    require_dict(metadata)
+    if isinstance(metadata, dict) and "completion_receipt" in metadata:
+        from hermes_completion_receipt import validate_completion_receipt
+        validate_completion_receipt(metadata["completion_receipt"])
