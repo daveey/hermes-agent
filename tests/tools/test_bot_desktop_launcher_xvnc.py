@@ -19,8 +19,18 @@ def test_xvnc_never_sends_the_holders_clipboard_to_watchers(tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     argv_log = tmp_path / "xvnc-argv"
-    (bindir / "Xvnc").write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{argv_log}"\nexec sleep 3\n', encoding="utf-8")
-    for stub in ("xdpyinfo", "setxkbmap", "xsetroot", "xset", "dbus-run-session", "xauth"):
+    captured = tmp_path / "argv-captured"
+    os.mkfifo(captured)
+    # The fake session must not exit (and trigger the launcher's Xvnc kill) until
+    # argv is fully written. A successful fake xdpyinfo is not that guarantee.
+    (bindir / "Xvnc").write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$@" > "{argv_log}"\nprintf "ready\\n" > "{captured}"\n',
+        encoding="utf-8",
+    )
+    (bindir / "dbus-run-session").write_text(
+        f'#!/bin/sh\nread -r ready < "{captured}"\n', encoding="utf-8",
+    )
+    for stub in ("xdpyinfo", "setxkbmap", "xsetroot", "xset", "xauth"):
         (bindir / stub).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     for exe in bindir.iterdir():
         exe.chmod(0o755)
