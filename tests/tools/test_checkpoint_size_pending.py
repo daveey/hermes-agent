@@ -119,7 +119,7 @@ def test_auto_prune_off_without_pending_size_work_stays_skipped(tmp_path, monkey
 def test_store_stuck_over_cap_logs_one_error_per_day(tmp_path, monkeypatch, caplog, last_prune_age_h):
     base, _ = _over_cap_store(tmp_path, monkeypatch, 1)  # ~1.3 MB store > 2 x 0.5 MB cap
     if last_prune_age_h is not None:
-        (base / ".last_prune").write_text(str(time.time() - last_prune_age_h * 3600), encoding="utf-8")
+        (base / ".last_prune_success").write_text(str(time.time() - last_prune_age_h * 3600), encoding="utf-8")
     caplog.set_level(logging.ERROR, logger="tools.checkpoint_maintenance")
     assert checkpoint_maintenance.check_store_health(base, cap_mb=0.5) is True
     errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
@@ -134,8 +134,9 @@ def test_store_health_quiet_when_pruned_recently_or_under_cap(tmp_path, monkeypa
     base, _ = _over_cap_store(tmp_path, monkeypatch, 1)
     caplog.set_level(logging.ERROR, logger="tools.checkpoint_maintenance")
     assert checkpoint_maintenance.check_store_health(base, cap_mb=500) is False  # under the cap
-    (base / ".last_prune").write_text(str(time.time() - 3600), encoding="utf-8")
-    assert checkpoint_maintenance.check_store_health(base, cap_mb=0.5) is False  # pruned 1h ago
+    (base / ".last_health_check").unlink()  # independently exercise the recent-prune branch
+    (base / ".last_prune_success").write_text(str(time.time() - 3600), encoding="utf-8")
+    assert checkpoint_maintenance.check_store_health(base, cap_mb=1) is False  # <2x and pruned 1h ago
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
