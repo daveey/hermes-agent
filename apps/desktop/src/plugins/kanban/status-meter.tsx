@@ -1,8 +1,9 @@
 /**
  * [daveey] Status-bar task meter: one bar split by where open cards stand.
  * yellow = not ready yet (triage/todo/scheduled), green = ready, red = blocked
- * (waiting on the user), blue = running. Segment widths are proportional to
- * the counts; review/done/archived cards are not open work and are left out.
+ * (waiting on the user), blue = running (review counts as running: an agent is
+ * still working it). Segment widths are proportional to the counts; only
+ * done/archived cards are left out.
  */
 
 import type { KanbanBoard } from './types'
@@ -23,6 +24,7 @@ export const METER_COLORS: Record<MeterSegment, string> = {
 const SEGMENT_OF: Record<string, MeterSegment> = {
   blocked: 'blocked',
   ready: 'ready',
+  review: 'running',
   running: 'running',
   scheduled: 'notReady',
   todo: 'notReady',

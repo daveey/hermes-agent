@@ -10,7 +10,7 @@ const col = (name: string, n: number) => ({ name, tasks: Array.from({ length: n 
 afterEach(cleanup)
 
 describe('kanban status meter', () => {
-  it('maps lanes to segments: triage/todo/scheduled are not ready; review/done/archived are left out', () => {
+  it('maps lanes to segments: triage/todo/scheduled are not ready, review runs; done/archived are left out', () => {
     const counts = meterCounts({
       columns: [
         col('triage', 1),
@@ -25,8 +25,16 @@ describe('kanban status meter', () => {
       ]
     })
 
-    expect(counts).toEqual({ blocked: 6, notReady: 6, ready: 4, running: 5 })
-    expect(meterTotal(counts)).toBe(21)
+    expect(counts).toEqual({ blocked: 6, notReady: 6, ready: 4, running: 12 })
+    expect(meterTotal(counts)).toBe(28)
+  })
+
+  it('a review-only board still counts (the pill must not vanish), and running -> review keeps the total', () => {
+    expect(meterTotal(meterCounts({ columns: [col('review', 1)] }))).toBe(1)
+    const before = meterCounts({ columns: [col('running', 2), col('ready', 1)] })
+    const after = meterCounts({ columns: [col('running', 1), col('review', 1), col('ready', 1)] })
+    expect(meterTotal(after)).toBe(meterTotal(before))
+    expect(after.running).toBe(before.running)
   })
 
   it('draws one coloured segment per non-empty state, widths proportional to the counts', () => {
