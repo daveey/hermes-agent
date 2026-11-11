@@ -836,18 +836,34 @@ _hermes_site_packages: list[Path] | None = None  # lazily cached by local_python
 
 
 # --- Login-shell init files ---
+_shell_init_config_cache: tuple[tuple[str, ...], bool] | None = None
+_shell_init_config_warned: set[tuple[type[Exception], str]] = set()
+
+
 def _read_terminal_shell_init_config() -> tuple[list[str], bool]:
-    """(shell_init_files, auto_source_bashrc) from config.yaml; defaults on any
-    failure so terminal execution never breaks."""
+    """Read startup policy, retaining the last successful process-local resolution on failure."""
+    global _shell_init_config_cache
     try:
         from hermes_cli.config import load_config
         terminal_cfg = (load_config() or {}).get("terminal") or {}
         files = terminal_cfg.get("shell_init_files") or []
         if not isinstance(files, list):
             files = []
-        return [str(f) for f in files if f], bool(terminal_cfg.get("auto_source_bashrc", True))
-    except Exception:
-        return [], True
+        resolved = (tuple(str(f) for f in files if f), bool(terminal_cfg.get("auto_source_bashrc", True)))
+    except Exception as exc:
+        resolved = _shell_init_config_cache
+        key = (type(exc), str(exc))
+        if key not in _shell_init_config_warned:
+            _shell_init_config_warned.add(key)
+            detail = ("previously resolved shell init is kept" if resolved is not None else
+                      "configured shell init was not applied; default home profiles are sourced instead")
+            logger.warning("Shell init config read failed (%s: %s); %s", type(exc).__name__, str(exc), detail,
+                           exc_info=True)
+        if resolved is None:
+            return [], True
+    else:
+        _shell_init_config_cache = resolved
+    return list(resolved[0]), resolved[1]
 
 
 def _resolve_shell_init_files() -> list[str]:
