@@ -405,6 +405,36 @@ describe('[daveey] transcript cache host with a store worker', () => {
     host.stop()
   })
 
+  it('neither the worker nor the in-thread store can open the file: every call rejects, the sync read answers null', async () => {
+    const dir = fs.mkdtempSync(path.join(root, 'host-broken-'))
+    const logs: string[] = []
+    const on = new Map<string, (event: any, payload?: any) => void>()
+    // The cache path is a directory: SQLite cannot open it, on any thread.
+    fs.mkdirSync(path.join(dir, 'transcript-cache.sqlite'))
+
+    const host = installTranscriptCache({
+      backendFor: async (connectionId: string) => ({ connectionId }),
+      getJson: async () => ({}),
+      ipcMain: { handle: () => undefined, on: (channel: string, fn: any) => on.set(channel, fn) } as never,
+      log: line => logs.push(line),
+      registry: () => ({ connectionIds: ['local'], primary: 'local' }),
+      userDataDir: dir,
+      workerFile: path.join(root, 'absent.js')
+    })
+
+    clients.push(host.client)
+
+    const read = syncEvent()
+    on.get('hermes:transcript-cache:read')!(read.event, key) // must not throw out of the listener
+    expect(await read.replied).toBeNull()
+    on.get('hermes:transcript-cache:put')!({}, { key, kind: 'latest', messages: rows })
+    await expect(host.client.call('stats')).rejects.toThrow(/^transcript cache unavailable: /)
+    // Opened (and reported) once, not on every call.
+    expect(logs.filter(line => line.startsWith('transcript cache unavailable: '))).toHaveLength(1)
+    expect(logs.filter(line => line.startsWith('store worker unavailable'))).toHaveLength(1)
+    host.stop()
+  })
+
   it('the sync read always answers: null for a bad key, a miss, and a worker that cannot reply', async () => {
     const { host, logs, on } = install(() =>
       spawnSource(`require('node:worker_threads').parentPort.on('message', () => { throw new Error('disk gone') })`)

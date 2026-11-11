@@ -81,6 +81,8 @@ export const WORKER_READY_LINE = 'store worker answering: cache I/O runs off the
 
 /** A store op slower than this is logged with where it ran. */
 export const SLOW_STORE_OP_MS = 250
+/** A worker call with no timeout of its own gives up (rejects) after this long. */
+export const CALL_TIMEOUT_MS = 30_000
 /** Worker (re)starts before the client gives up on it for the rest of the run. */
 export const MAX_WORKER_STARTS = 3
 
@@ -151,7 +153,7 @@ interface Pending {
   op: StoreOp
   reject: (error: Error) => void
   resolve: (value: any) => void
-  timer: null | ReturnType<typeof setTimeout>
+  timer: ReturnType<typeof setTimeout>
 }
 
 /**
@@ -170,6 +172,7 @@ export function workerClient(deps: {
   let nextId = 1
   let closed = false
   let inline: null | TranscriptCacheClient = null
+  let unusable: Error | null = null
   let announced = false
 
   const settle = (id: number): Pending | undefined => {
@@ -177,10 +180,7 @@ export function workerClient(deps: {
 
     if (entry) {
       pending.delete(id)
-
-      if (entry.timer) {
-        clearTimeout(entry.timer)
-      }
+      clearTimeout(entry.timer)
     }
 
     return entry
@@ -260,24 +260,33 @@ export function workerClient(deps: {
 
       // No worker: a start that threw (no retry: a missing worker file stays missing) or MAX_WORKER_STARTS deaths.
       if (!target) {
-        if (!inline) {
+        if (!inline && !unusable) {
           deps.log('store worker unavailable: the cache runs on the main thread for the rest of this run')
-          inline = deps.fallback()
+
+          try {
+            inline = deps.fallback()
+          } catch (error) {
+            // The file will not open here either (locked, corrupt): no cache this run. Every call rejects,
+            // none throws: the renderer's sync read must still get its answer.
+            unusable = new Error(`transcript cache unavailable: ${(error as Error)?.message || error}`)
+            deps.log(unusable.message)
+          }
         }
 
-        return inline.call<T>(op, args, opts)
+        return inline ? inline.call<T>(op, args, opts) : Promise.reject(unusable)
       }
 
       return new Promise<T>((resolve, reject) => {
         const id = nextId++
+        // Every call is bounded: a worker stuck on the disk must not leave a prefetch pass pending forever.
+        // Its late reply is dropped (the id is settled); the write itself still lands when the disk answers.
+        const timeoutMs = opts.timeoutMs ?? CALL_TIMEOUT_MS
 
-        const timer = opts.timeoutMs
-          ? setTimeout(() => {
-              settle(id)?.reject(new Error(`transcript cache ${op} timed out after ${opts.timeoutMs}ms`))
-            }, opts.timeoutMs)
-          : null
+        const timer = setTimeout(() => {
+          settle(id)?.reject(new Error(`transcript cache ${op} timed out after ${timeoutMs}ms`))
+        }, timeoutMs)
 
-        timer?.unref?.()
+        timer.unref?.()
         pending.set(id, { op, reject, resolve, timer })
 
         try {
