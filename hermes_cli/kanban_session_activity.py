@@ -180,9 +180,12 @@ def _counted_sub_clause(conn: sqlite3.Connection) -> str:
     if "delivery_metadata" not in cols:
         return "1"
     # CASE avoids json_extract on invalid legacy metadata (SQLite need not
-    # short-circuit boolean OR expressions). Only proven incidental touches release.
+    # short-circuit boolean OR expressions). Only proven notice-only provenance
+    # (``kanban_db_notify.UNCOUNTED_SUB_REASONS``: ``touch``, ``send_refused``) releases.
+    from hermes_cli.kanban_db_notify import UNCOUNTED_SUB_REASONS
+    uncounted = ", ".join(f"'{r}'" for r in UNCOUNTED_SUB_REASONS)
     return (f"({owner} OR CASE WHEN json_valid(s.delivery_metadata) "
-            "THEN COALESCE(json_extract(s.delivery_metadata, '$.reason'), '') != 'touch' "
+            f"THEN COALESCE(json_extract(s.delivery_metadata, '$.reason'), '') NOT IN ({uncounted}) "
             "ELSE 1 END)")
 
 
