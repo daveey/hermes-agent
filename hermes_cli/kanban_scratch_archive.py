@@ -354,7 +354,7 @@ def verify_complete_archive(archive: Path) -> dict:
     """Re-read the payload and prove it matches its manifest; raise :class:`ArchiveRefused` if not."""
     base = Path(archive) / PAYLOAD_DIR
     try:
-        manifest = json.loads((base / _MANIFEST).read_text(encoding="utf-8"))
+        manifest = json.loads((base / _MANIFEST).read_text(encoding="utf-8-sig"))
         if manifest.get("version") != PAYLOAD_VERSION:
             raise ArchiveRefused(f"unsupported payload version {manifest.get('version')!r}")
         if _sha256_file(base / _TREE) != manifest["tree_sha256"]:
