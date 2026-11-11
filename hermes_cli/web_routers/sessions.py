@@ -21,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from hermes_cli.session_listing import stamp_automated, subagent_listing_scope
 from hermes_cli.session_list_flight import SESSION_LIST_CACHE, data_stamp
 from hermes_cli.web_deps import late
+from hermes_cli.web_read_coalescing import coalesced_read
 from hermes_cli.kanban_session_activity import annotate_kanban_activity, session_tasks as session_kanban_tasks
 from hermes_cli.cron_session_activity import annotate_cron_activity
 from hermes_cli.goal_session_activity import annotate_goal_activity
@@ -201,7 +202,6 @@ def get_session_kanban_tasks(ids: str = Query(..., max_length=4000)):
 
 # ``le=100`` on limit: an unbounded limit lets one request drag every session
 # row (plus correlated-subquery preview work) out of SQLite in a single hit.
-@list_router.get("/api/sessions")
 def get_sessions(
     limit: int = Query(20, ge=0, le=100), offset: int = Query(0, ge=0), min_messages: int = 0,
     archived: str = "exclude", order: str = "created", source: str | None = None, sources: str | None = None,
@@ -227,6 +227,14 @@ def get_sessions(
     # reused for a moment while state.db is unchanged (session_list_flight; t_01a19f5af20a19f6). [daveey]
     return SESSION_LIST_CACHE.get(
         (str(db_path),) + args, data_stamp(db_path), lambda: _list_sessions_payload(*args))
+
+
+# Queue expensive list contenders before consuming the shared HTTP worker pool.
+list_router.add_api_route(
+    "/api/sessions",
+    coalesced_read(get_sessions, admission_key=lambda args: args["profile"], max_concurrent=2),
+    methods=["GET"],
+)
 
 
 def _list_sessions_payload(
