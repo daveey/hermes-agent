@@ -104,6 +104,22 @@ def cap_source(capacity: str) -> str:
     return ""
 
 
+def held_cards(results: Iterable[Optional[Any]]) -> str:
+    """Name every recorded per-card hold, not just the buckets in the summary."""
+    held = set()
+    for res in results:
+        if res is None:
+            continue
+        for field in ("respawn_guarded", "claim_deferred", "skipped_ineligible", "capsule_refused"):
+            held.update(f"{tid}={reason}" for tid, reason in getattr(res, field, ()))
+        for field in ("skipped_unassigned", "skipped_nonspawnable", "rate_limited"):
+            held.update(f"{tid}={field}" for tid in getattr(res, field, ()))
+        held.update(f"{tid}=profile_capacity({profile},{count})"
+                    for tid, profile, count in res.skipped_per_profile_capped)
+        held.update(f"{tid}=owner_down({profile},{code})" for tid, profile, code in res.owner_down)
+    return "; ".join(sorted(held))
+
+
 def stuck_warning(bad_ticks: int, results: Iterable[Optional[Any]]) -> str:
     """The "dispatcher stuck" line for the CLI daemon and the embedded gateway dispatcher.
 
@@ -114,6 +130,13 @@ def stuck_warning(bad_ticks: int, results: Iterable[Optional[Any]]) -> str:
     repin = manual_repin_ids(results)
     msg = (f"kanban dispatcher stuck: ready queue non-empty for {bad_ticks} consecutive ticks but 0 workers "
            f"spawned.{f' Last tick held back: {held}.' if held else ''}")
+    cards = held_cards(results)
+    if cards:
+        msg += f" Held cards: {cards}."
+    if any(res is not None and any(reason == "update_admission_hold" for _, reason in res.claim_deferred)
+           for res in results):
+        return (msg + " Local updater admission hold blocks claims before the Board lease; "
+                "inspect core-update/holds/hermes-sync and its updater owner.")
     if repin:
         # No pool worker can run these (Board ``no_eligible_worker``); each card carries the repin command.
         msg += f" Not a stall, waiting for a manual repin: {', '.join(repin)}."

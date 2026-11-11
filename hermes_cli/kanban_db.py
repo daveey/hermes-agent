@@ -2158,7 +2158,7 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     # [daveey] Refuse a held fence, and a lock-free hub CPU advisory (final gate is under the lock), before the lease.
-    if admission_hold_set() or hub_cpu_advisory(task_id):
+    if admission_hold_set(task_id) or hub_cpu_advisory(task_id):
         return None
     gate = _sync.claim_gate(conn, task_id, expires)
     if gate.deferred:
@@ -2198,7 +2198,7 @@ def claim_review_task(
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    if admission_hold_set() or hub_cpu_advisory(task_id):  # [daveey] before the Board-service lease (see claim_task)
+    if admission_hold_set(task_id) or hub_cpu_advisory(task_id):  # [daveey] before the Board-service lease (see claim_task)
         return None
     gate = _sync.claim_gate(conn, task_id, expires, lane="review")
     if gate.deferred:
