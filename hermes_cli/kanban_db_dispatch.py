@@ -2104,7 +2104,7 @@ def _dispatch_lane_task(
     claimed = admitted_claim(conn, task_id, assignee, lane, ttl_seconds, spawn_fn, result)
     if claimed is None:
         deferral = _kb._sync.pop_claim_deferral(task_id)
-        if deferral is not None:  # the Board said no this tick: the caller moves on to the next candidate
+        if deferral is not None:  # the lane decides whether this refusal permits later candidates
             result.claim_deferred.append((task_id, deferral))
         return False
     try:
@@ -2486,8 +2486,8 @@ def _dispatch_once_locked(
     next_ready = 0
 
     def _run_ready(limit: Optional[int]) -> None:
-        # Resumable: a deferred or refused claim never ends the tick, the loop moves on to the next row, and
-        # a second call after the review lane continues where this one stopped.
+        # Resume after review unless Board capacity refused a higher-priority row. A slot can free mid-pass;
+        # retry from DISPATCH_ORDER next tick rather than hand it to whichever lower row we reach afterward.
         nonlocal spawned, next_ready
         while next_ready < len(ready_rows):
             if limit is not None and spawned >= limit:
@@ -2507,6 +2507,8 @@ def _dispatch_once_locked(
                 result.auto_assigned_default.append(row["id"])
             if _dispatch_lane_task(conn, row, row_assignee, result, lane="ready", **lane_kwargs):
                 spawned += 1
+            elif (row["id"], "capacity") in result.claim_deferred:
+                next_ready = len(ready_rows)  # also fence the post-review resume in this tick
 
     _run_ready(ready_budget)
 
@@ -2522,18 +2524,15 @@ def _dispatch_once_locked(
             continue
         if _dispatch_lane_task(conn, row, row["assignee"], result, lane="review", **lane_kwargs):
             spawned += 1
+        elif (row["id"], "capacity") in result.claim_deferred:
+            break  # preserve priority within the review lane too
     # The review reservation is only a hold: a slot no review took (its claim deferred, guarded, capped) goes
     # back to the ready rows still waiting this tick.
     _run_ready(spawn_budget)
     return result
 
 
-def _positive_int(value: Any, default: int, *, minimum: int = 1) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed >= minimum else default
+from hermes_cli.kanban_db_dispatch_limits import _positive_int  # re-export for ops and worker logs
 
 
 def _module_hermes_argv() -> list[str]:
