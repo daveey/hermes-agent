@@ -90,10 +90,12 @@ def requirements(text):
     for tool, label in _TOOLS.items():
         if re.search(r"\b" + re.escape(tool) + r"\b", text, re.IGNORECASE):
             labels.add(label)
-    for rx, needed in _ACCESS:
-        if rx.search(text):
-            labels.update(needed)
     return labels, None
+
+
+def access_requirements(text):
+    """Labels the ssh / hub-read mentions in ``text`` would need; never a refusal (unmet = markers keep binding)."""
+    return {label for rx, needed in _ACCESS if rx.search(text) for label in needed}
 
 
 def destinations(cfg, target=None):
@@ -137,9 +139,12 @@ def attested(names, required):
     return True
 
 
-def check(text, cfg, *, target=None, skills=None):
+def check(text, cfg, *, target=None, skills=None, access=False):
+    """``access`` adds the ssh / hub-read labels (claim revalidation); placement leaves them to :func:`access_text`."""
     required, refusal = requirements(text)
     required.update(skill_requirements(skills))
+    if access:
+        required.update(access_requirements(text))
     if refusal or not required:
         return refusal
     return None if attested(destinations(cfg, target), required) else REASON
@@ -153,13 +158,14 @@ def marker_text(text):
     return re.sub(r"\btoken-broker\b", "", text, flags=re.IGNORECASE)
 
 
-def access_text(text):
-    """``text`` minus the remote-access mentions :func:`check` required an attestation for (ssh, hub reads).
+def access_text(text, cfg, *, target=None):
+    """``text`` minus the remote-access mentions (ssh, hub reads) whose labels EVERY destination attests.
 
-    Only called after check succeeds, so every destination holds the labels; kept apart from
-    :func:`marker_text` so a card that never needed the attestation keeps its markers."""
-    for rx, _ in _ACCESS:
-        text = rx.sub("", text)
+    An unattested mention stays in the text, so its home marker still pins the card exactly as before.
+    Kept apart from :func:`marker_text` so a card that never needed the attestation keeps its markers."""
+    for rx, needed in _ACCESS:
+        if rx.search(text) and attested(destinations(cfg, target), set(needed)):
+            text = rx.sub("", text)
     return text
 
 
@@ -170,7 +176,7 @@ def claim_refusal(card, me):
     from hermes_cli.kanban_placement import without_evidence, without_placement_note
     text = f"{card.get('title') or ''}\n{without_evidence(without_placement_note(card.get('body') or ''))}"
     from hermes_cli.kanban_runs_on_capabilities import _loads
-    return check(text, {}, target=me, skills=_loads(card.get("skills"), []))
+    return check(text, {}, target=me, skills=_loads(card.get("skills"), []), access=True)
 
 
 def legacy_refusal(args):

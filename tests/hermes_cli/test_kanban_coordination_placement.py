@@ -270,7 +270,7 @@ ACCESS = ["capability:ssh-mbp", "capability:ssh-mini", "capability:hub-read"]
 
 def test_ssh_card_needs_mac_ssh_attestation(fleet):
     cfg, entry, _ = fleet
-    assert reason("ssh mini and check the watcher output", cfg) == "needs worker coordination capability"
+    assert reason("ssh mini and check the watcher output", cfg) == "home gateway marker"
     entry["labels"] += ACCESS
     assert reason("ssh mini and check the watcher output", cfg) is None
 
@@ -278,14 +278,14 @@ def test_ssh_card_needs_mac_ssh_attestation(fleet):
 def test_ssh_attestation_needs_both_mac_keys(fleet):
     cfg, entry, _ = fleet
     entry["labels"] += ["capability:ssh-mini"]
-    assert reason("SSH to the MacBook for the log", cfg) == "needs worker coordination capability"
+    assert reason("SSH to the MacBook for the log", cfg) == "home gateway marker"
 
 
 @pytest.mark.parametrize("body", ["read the log on the hub", "the hub's log output", "journalctl -u x",
                                     "query kanban.db for the run"])
 def test_hub_reads_need_hub_read_attestation(fleet, body):
     cfg, entry, _ = fleet
-    assert reason(body, cfg) == "needs worker coordination capability"
+    assert reason(body, cfg) == "home gateway marker"
     entry["labels"] += ["capability:hub-read"]
     assert reason(body, cfg) is None
 
@@ -305,3 +305,10 @@ def test_claim_refusal_revalidates_access_labels(fleet):
     assert claim_refusal(card, "worker") == "needs worker coordination capability"
     entry["labels"] += ACCESS
     assert claim_refusal(card, "worker") is None
+
+
+def test_unattested_access_leaves_cards_home_as_before(fleet):
+    cfg, entry, _ = fleet
+    entry["labels"] += ["capability:hub-read"]  # hub reads attested, ssh not
+    assert reason("ssh mini and read the log on the hub", cfg) == "home gateway marker"
+    assert reason("read the log on the hub", cfg) is None
