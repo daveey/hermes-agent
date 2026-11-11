@@ -175,6 +175,39 @@ def test_first_tick_after_drain_waits_for_skip_evidence_before_filing(gws):
     assert all(tid in repair["body"] for tid in targets)
 
 
+@pytest.mark.parametrize("failure", [OSError, TimeoutError])
+def test_missing_evidence_after_failed_pickup_escalates_once_after_grace(gws, monkeypatch, failure):
+    from hermes_cli import kanban_pickup_stall as kps
+    hub, worker = gws
+    targets = [_pinned(hub, title=f"failed-{i}") for i in range(4)]
+    worker.round()
+    for tid in targets:
+        _age(worker, tid, 900)
+    clock = [kps._now_ms()]
+    monkeypatch.setattr(kps, "_now_ms", lambda now=None: clock[0])
+
+    def broken(conn, replica, ids):
+        raise failure("pickup failed before skip recording")
+
+    monkeypatch.setattr(wn, "import_cards", broken)
+    worker.tick()
+    assert not _repairs(worker.conn)  # first post-drain pass still gets grace
+    clock[0] += 599_000
+    worker.tick()
+    assert not _repairs(worker.conn)
+    clock[0] += 1_000
+    worker.tick()
+    [repair] = _repairs(worker.conn)
+    assert "evidence" in repair["title"].lower()
+    assert all(tid in repair["body"] for tid in targets)
+    worker.tick()
+    assert len(_repairs(worker.conn)) == 1
+    # A real target-specific observation remains separate, not hidden by the host alert.
+    kps.record(worker.conn, {targets[0]: ("capability_missing", "labels_mismatch")})
+    worker.tick()
+    assert len(_repairs(worker.conn)) == 2
+
+
 def test_a_full_queue_files_one_card_per_host_naming_the_oldest(gws):
     hub, worker = gws
     old = _pinned(hub, title="oldest")
@@ -193,7 +226,7 @@ def test_a_full_queue_files_one_card_per_host_naming_the_oldest(gws):
     assert "budget_exhausted" in card["body"] and new in card["body"]
 
 
-@pytest.mark.parametrize("reason", ["budget_exhausted", "hold", "other"])
+@pytest.mark.parametrize("reason", ["budget_exhausted", "hold", "other", "evidence_missing"])
 @pytest.mark.parametrize("initial", [2, 25])
 def test_same_cause_burst_refreshes_all_targets_without_comment_churn(gws, reason, initial):
     from hermes_cli import kanban_pickup_stall as kps

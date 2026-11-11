@@ -14,7 +14,9 @@ read back: pickup kept no record of why a pass skipped a candidate.
   ``ready_since`` is older than ``kanban.sync.pickup_stall_seconds`` (default 600) gets ONE agent repair card on this
   host (an open one, or one closed less than :data:`REPLACE_AFTER_SECONDS` ago, is reused). Host-wide causes share
   ONE card per host naming the oldest card: ``budget_exhausted`` (the queue is simply full), ``hold`` and an
-  unreadable machine registry. ``budget_exhausted`` is recorded only for a card a slot would have started, so a
+  unreadable machine registry. Missing evidence gets one additional stall interval of durable grace, then one
+  host alert (not a fabricated refusal); a failed pickup must not silence the detector forever.
+  ``budget_exhausted`` is recorded only for a card a slot would have started, so a
   refusal is never hidden behind a full queue. No Inbox post, no human ask.
 """
 from __future__ import annotations
@@ -26,7 +28,8 @@ from typing import Any, Mapping, Optional
 _log = logging.getLogger(__name__)
 
 TABLE = "kanban_pickup_skips"
-REASONS = ("budget_exhausted", "profile_ineligible", "capability_missing", "parents_incomplete", "hold", "other")
+REASONS = ("budget_exhausted", "profile_ineligible", "capability_missing", "parents_incomplete", "hold", "other",
+           "evidence_missing")
 DEFAULT_STALL_SECONDS = 600
 REFRESH_SECONDS = 60
 RETENTION_SECONDS = 7 * 86400
@@ -201,6 +204,10 @@ def _create(conn, *, key: str, title: str, body: str, tenant: Optional[str], own
 
 # Host-wide causes: one card per host, never one per pinned card. ``hold`` is an operator's deliberate state.
 _HOST_GROUPS = {
+    "evidence_missing": ("evidence-missing", "Pickup evidence missing on {own}",
+                         "the detector has observed missing pickup evidence for an additional stall interval. "
+                         "This is not a recorded pickup refusal: inspect pickup exceptions/timeouts and the "
+                         "dispatcher logs before attributing a cause."),
     "budget_exhausted": (QUEUE_FULL, "Pickup queue full on {own}",
                          "the last pickup skip of each is budget_exhausted (no spawn slot on this host). Decide "
                          "whether the queue drains on its own (running cards near done) or work must move to a "
@@ -218,7 +225,7 @@ def _group(card: Mapping[str, Any]) -> Optional[str]:
     skip = card["skip"] or {}
     if skip.get("reason") == "other" and skip.get("detail") == "machine registry unavailable":
         return "registry"
-    return skip.get("reason") if skip.get("reason") in ("budget_exhausted", "hold") else None
+    return skip.get("reason") if skip.get("reason") in ("budget_exhausted", "hold", "evidence_missing") else None
 
 
 def _refresh_targets(conn, task_id: str, members: list[dict[str, Any]], now_ms: int) -> None:
@@ -248,8 +255,13 @@ def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[f
     for card in cards:
         # The sweep precedes pickup/note_capped. A first post-drain tick may
         # have old ready rows but no observation yet: missing evidence is not
-        # a target-specific cause. Let this tick record it before filing.
+        # a target-specific cause. Persist the first observation so a crashing
+        # pickup cannot suppress alerts forever (including across restarts).
         if not card["skip"]:
+            record(conn, {card["id"]: ("evidence_missing", "detector observation; no pickup skip recorded")}, now=now)
+            continue
+        if (card["skip"]["reason"] == "evidence_missing"
+                and now_ms - card["skip"]["first_at"] < stall_seconds() * 1000):
             continue
         group = _group(card)
         if group is not None:
