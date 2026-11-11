@@ -1357,7 +1357,7 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
 
 _HEADER_BASE = (
     "Drive a real browser for JS pages, logins, forms and clicks (Browser Use CLI). `code` runs as full "
-    "Python (stdlib available) with pre-imported browser helpers; stdout comes back in the result. Start `code` with a one-line "
+    "Python (stdlib available); print(...) any data you need back. Start `code` with a one-line "
     "comment describing the step for the user in plain language, max 60 chars "
     "(e.g. `# Searching Amazon for paper towels`) — the UI shows it as the step label.\n\n"
     "STATE: the browser session and workspace persist across calls; Python variables do NOT (fresh "
@@ -1366,8 +1366,8 @@ _HEADER_BASE = (
     "('all N products / every entry'), append each batch to a JSON/CSV file in the workspace, then read it "
     "back and aggregate in code — dedupe/count/sort with Python, not in your head — and verify the "
     "collected count against what was asked before answering.\n\n"
-    "Batch each sub-procedure (navigate, wait, extract, act) into one call — do not spend a call per "
-    "action — but for long extractions prefer several medium calls that append to workspace files over "
+    "Batch each sub-procedure (navigate, wait, extract, act) into one call, but for long extractions "
+    "prefer several medium calls that append to workspace files over "
     "one giant call, so progress survives timeouts."
 )
 
@@ -1456,10 +1456,10 @@ BROWSER_EXEC_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "code": {"type": "string", "description": "Python code to execute using the pre-imported browser helpers. Use print(...) for any data you need back."},
+            "code": {"type": "string", "description": "Python using the pre-imported browser helpers."},
             "session": {"type": "string", "description": "Omit for normal work: the shared default session is reused across sites, tabs and calls. Set a name only when this task runs at the same time as another browser task and needs its own tab (or, on cloud backends, its own browser); each name starts another daemon and browser connection, stopped when its agent exits. Reuse the same name on every related call; never invent per-site or per-job names."},
             "timeout_s": {"type": "integer", "default": _DEFAULT_TIMEOUT_S,
-                          "description": f"Max seconds to wait for the code to finish (default {_DEFAULT_TIMEOUT_S}, max {_MAX_TIMEOUT_S})."},
+                          "description": f"Max seconds to wait for the code to finish (max {_MAX_TIMEOUT_S})."},
         },
         "required": ["code"],
     },
