@@ -1346,7 +1346,7 @@ def _local_row_is_newer(conn: sqlite3.Connection, table: str, ch: RemoteChange, 
     gone) or the Board's lease-grant copy, pulled after the run ended here, reopened it as ``running`` and the next
     push sent that back to the Board."""
     if conn.execute("SELECT 1 FROM kanban_sync_outbox WHERE table_name = ? AND row_uid = ? AND state = 'pending' "
-                    "LIMIT 1", (table, ch.uid)).fetchone():
+                    "AND op != 'restore' LIMIT 1", (table, ch.uid)).fetchone():
         return True
     if table != "task_runs" or not ch.version:
         return False

@@ -701,7 +701,8 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                     continue
                 if status in ("applied", "merged"):
                     from hermes_cli.kanban_sync_omissions import acknowledge
-                    acknowledge(conn, op_id, res.get("row") if status == "merged" else None)
+                    sent = next(op['fields'] for op in wire if op['client_op_id'] == op_id)
+                    acknowledge(conn, op_id, res.get("row") if status == "merged" else sent, sent=sent)
                     conn.execute("DELETE FROM kanban_sync_outbox WHERE op_id = ?", (op_id,))
                     if row["table_name"] == "tasks" and res.get("version"):
                         conn.execute("UPDATE tasks SET sync_version = MAX(COALESCE(sync_version, 0), ?) WHERE id = ?",

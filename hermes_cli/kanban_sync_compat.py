@@ -52,10 +52,12 @@ def enqueue_retry(conn: sqlite3.Connection, row: dict, wire: dict, result: dict)
         return False
     reduced = {k: v for k, v in fields.items() if k != match[2]}
     retry_id = sync.uuid7()
-    conn.execute(
-        "INSERT INTO kanban_sync_omissions (original_op_id, table_name, row_uid, field, compat_op_id) "
+    inserted = conn.execute(
+        "INSERT OR IGNORE INTO kanban_sync_omissions (original_op_id, table_name, row_uid, field, compat_op_id) "
         "VALUES (?, ?, ?, ?, ?)",
-        (row["op_id"], row["table_name"], row["row_uid"], match[2], retry_id))
+        (row["op_id"], row["table_name"], row["row_uid"], match[2], retry_id)).rowcount
+    if not inserted:
+        return False
     conn.execute(
         "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

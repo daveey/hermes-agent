@@ -39,28 +39,42 @@ def _queue_restore(conn, table, uid, authoritative, held):
         if any(r[1] for r in receipts) or field not in current:
             continue
         op_id = sync.uuid7()
+        payload = {field: current[field]}
+        if table != 'tasks':
+            routing = ('parent_id', 'child_id') if table == 'task_links' else ('task_id',)
+            payload.update({key: current[key] for key in routing if key in current})
         conn.execute(
             "INSERT INTO kanban_sync_outbox (op_id,table_name,row_uid,op,fields,hlc,created_at) "
-            "VALUES (?,?,?,'restore',?,'',?)", (op_id, table, uid, json.dumps({field: current[field]}), int(time.time()*1000)))
+            "VALUES (?,?,?,'restore',?,'',?)", (op_id, table, uid, json.dumps(payload), int(time.time()*1000)))
         conn.execute("UPDATE kanban_sync_omissions SET restore_op_id=?,state='restoring' "
                      "WHERE table_name=? AND row_uid=? AND field=? AND state!='delivered'", (op_id, table, uid, field))
 
 
-def acknowledge(conn, op_id, authoritative=None):
-    """Release only a delivered current value, not an older concurrent edit or a losing merge."""
+def acknowledge(conn, op_id, authoritative, *, sent=None):
+    """Release only fields whose actual delivery matches their current local value."""
     import json
     from hermes_cli import kanban_sync_client as client
     from hermes_cli.kanban_sync_rejections import _local
-    op = conn.execute("SELECT * FROM kanban_sync_outbox WHERE op_id=? AND op='restore'", (op_id,)).fetchone()
-    if op is None:
+    op = conn.execute("SELECT * FROM kanban_sync_outbox WHERE op_id=?", (op_id,)).fetchone()
+    if op is None or not isinstance(authoritative, dict):
         return
     row = _local(conn, op['table_name'], op['row_uid'])
     current = client._row_fields(conn, op['table_name'], row) if row else {}
-    sent = json.loads(op['fields'])
-    delivered = all(k in current and current[k] == v and
-                    (authoritative is None or (k in authoritative and authoritative[k] == v)) for k, v in sent.items())
-    conn.execute("UPDATE kanban_sync_omissions SET state=? WHERE restore_op_id=?",
-                 ('delivered' if delivered else 'held', op_id))
+    sent = json.loads(op['fields']) if sent is None else sent
+    for field in held_fields(conn, op['table_name'], op['row_uid']) & sent.keys():
+        value = sent[field]
+        if field not in authoritative or authoritative[field] != value or field not in current:
+            continue
+        if current[field] == value:
+            conn.execute("UPDATE kanban_sync_omissions SET state='delivered' "
+                         "WHERE table_name=? AND row_uid=? AND field=?",
+                         (op['table_name'], op['row_uid'], field))
+        else:
+            # Proven delivery of an older local value permits one attempt at the newer value.
+            # A losing merge or a missing row must never reset the bound.
+            conn.execute("UPDATE kanban_sync_omissions SET state='held',restore_op_id=NULL "
+                         "WHERE restore_op_id=? AND field=? AND state!='delivered'", (op_id, field))
+            _queue_restore(conn, op['table_name'], op['row_uid'], authoritative, {field})
 
 
 def remap(conn, old_id, new_id):
