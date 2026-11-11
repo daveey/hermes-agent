@@ -1326,15 +1326,9 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None,
                 continue
             if _worker_alive(row["worker_pid"], _kb._row_get(row, "worker_started_at")):
                 continue
-            # An ambiguous receipt holds the card while the attempt may still run; once nothing
-            # can be executing it (a dead bound interpreter, or a run that never bound one): crash.
-            from hermes_cli.kanban_failed_result import failed_result_proof, failed_result_receipt
-            proof = failed_result_proof(conn, row['id'], row['current_run_id'], row['claim_lock'])
-            receipt = failed_result_receipt(conn, row['id'], row['current_run_id'], row['claim_lock'])
-            if proof is None and (failed_results_only or (
-                    receipt is not None and receipt['result'].get('death_proof_version') == 1)):
-                # Versioned receipts require the two-process fence even during
-                # ordinary dispatch. Historical receipts retain legacy recovery.
+            from hermes_cli.kanban_failed_result import reclaim_proof
+            proof, hold = reclaim_proof(conn, row, failed_results_only=failed_results_only)
+            if hold:
                 continue
             if proof is None and owner_reclaim_blocked(conn, row["id"], crash_sweep=True):
                 continue

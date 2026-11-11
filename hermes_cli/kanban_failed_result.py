@@ -120,6 +120,16 @@ def failed_result_receipt(conn, task_id, run_id, claim_lock):
             'bound': (bound.get('pid'), bound.get('started_at'))}
 
 
+def reclaim_proof(conn, row, *, failed_results_only=False):
+    """Keep strict receipt vetoes distinct from unsupported legacy recovery."""
+    identity = (row['id'], row['current_run_id'], row['claim_lock'])
+    proof = failed_result_proof(conn, *identity)
+    receipt = failed_result_receipt(conn, *identity)
+    hold = proof is None and (failed_results_only or (
+        receipt is not None and receipt['result'].get('death_proof_version') == 1))
+    return proof, hold
+
+
 def failed_result_proof(conn, task_id, run_id, claim_lock):
     """Return latest attributable failed result only after both processes exit."""
     receipt = failed_result_receipt(conn, task_id, run_id, claim_lock)

@@ -186,7 +186,7 @@ def test_observer_waits_for_distinct_outer_process(board):
                              stdin=subprocess.PIPE, env=build_subprocess_env())
     try:
         _failed_child(conn, context, observe=True, outer_pid=outer.pid)
-        time.sleep(1)
+        time.sleep(1)  # health: allow HX013 -- prove the observer does not close during a live-outer window
         assert conn.execute('SELECT status FROM task_runs WHERE id=?',
                             (context['run_id'],)).fetchone()[0] == 'running'
         assert outer.stdin is not None
@@ -238,7 +238,7 @@ def test_failed_receipt_waits_for_real_bound_process(board, entry):
             assert child.poll() is None
             assert conn.execute('SELECT status FROM task_runs WHERE id=?',
                                 (context['run_id'],)).fetchone()[0] == 'running'
-            time.sleep(.05)
+            time.sleep(.05)  # health: allow HX013 -- bounded negative observation while bound worker stays live
         child.communicate('x', timeout=5)
         deadline = time.monotonic() + 5
         state = 'running'

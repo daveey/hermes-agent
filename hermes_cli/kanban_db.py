@@ -1568,8 +1568,7 @@ def link_tasks(
     parent_id: str,
     child_id: str,
     *,
-    expected_child_run_id: Optional[int] = None,
-    allow_nested: bool = False,
+    expected_child_run_id: Optional[int] = None, allow_nested: bool = False,
 ) -> bool:
     """Link ``parent_id -> child_id``. Returns True when the link gated a
     ``ready`` child back to ``todo`` (the new parent is not yet terminal), so
