@@ -1,0 +1,43 @@
+"""Run terminal persistence; late-bound DB facade for compatibility."""
+from __future__ import annotations
+
+import sqlite3
+import time
+from typing import Optional
+
+def _end_run(
+    conn: sqlite3.Connection, task_id: str, *, outcome: str, summary: Optional[str] = None,
+    error: Optional[str] = None, metadata: Optional[dict] = None, status: Optional[str] = None,
+) -> Optional[int]:
+    """Close the active run (``status`` defaults to ``outcome``) and clear
+    ``current_run_id``; None when no run was active (never-claimed task).
+
+    ``worker_pid`` / ``worker_started_at`` / ``claim_lock`` stay on the closed
+    row: they are the only evidence left of the OS process once the task row
+    is wiped, and :func:`kanban_db_dispatch.reap_terminal_workers` needs them
+    to end a worker that survived its own terminal transition."""
+    now = int(time.time())
+    run_id = _kb._current_run_id(conn, task_id)
+    if run_id is None:
+        return None
+    from hermes_cli.kanban_workspace_publication import closed_metadata
+    metadata = closed_metadata(conn, task_id, run_id, metadata)
+    conn.execute(
+        """
+        UPDATE task_runs
+           SET status        = ?,
+               outcome       = ?,
+               summary       = ?,
+               error         = ?,
+               metadata      = ?,
+               ended_at      = ?,
+               claim_expires = NULL
+         WHERE id = ?
+           AND ended_at IS NULL
+        """,
+        (status or outcome, outcome, summary, error, _kb._json_or_null(metadata), now, run_id),
+    )
+    conn.execute("UPDATE tasks SET current_run_id = NULL WHERE id = ?", (task_id,))
+    return run_id
+
+from hermes_cli import kanban_db as _kb

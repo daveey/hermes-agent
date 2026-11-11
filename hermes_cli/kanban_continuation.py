@@ -22,6 +22,8 @@ import sqlite3
 import time
 from typing import Callable, Any, Optional
 
+from hermes_cli.kanban_workspace_publication import publication_guard
+
 CONTINUED_OUTCOME = "continued"
 CONTINUATION_WOKEN_EVENT = "continuation_woken"
 DEFAULT_SOFT_DEADLINE_FRACTION = 0.85
@@ -81,6 +83,7 @@ def consecutive_continuations(conn: sqlite3.Connection, task_id: str) -> int:
     return count
 
 
+@publication_guard
 def continue_task(
     conn: sqlite3.Connection, task_id: str, *, checkpoint: str,
     resume_after_seconds: int = 0, expected_run_id: Optional[int] = None,

@@ -9,7 +9,10 @@ import sqlite3
 import time as _time
 from typing import Any, Optional
 
+from hermes_cli.kanban_workspace_publication import publication_guard
 
+
+@publication_guard
 def schedule_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     expected_run_id: Optional[int] = None, wake_check: Optional[str] = None,
