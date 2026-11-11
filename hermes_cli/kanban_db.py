@@ -1569,6 +1569,7 @@ def link_tasks(
     child_id: str,
     *,
     expected_child_run_id: Optional[int] = None,
+    allow_nested: bool = False,
 ) -> bool:
     """Link ``parent_id -> child_id``. Returns True when the link gated a
     ``ready`` child back to ``todo`` (the new parent is not yet terminal), so
@@ -1582,7 +1583,7 @@ def link_tasks(
     if parent_id == child_id:
         raise ValueError("a task cannot depend on itself")
     gated = False
-    with write_txn(conn):
+    with write_txn(conn, allow_nested=allow_nested):
         from hermes_cli.kanban_dependency_validation import check_link_parent, missing_dependency_error
         missing = _missing_task_ids(conn, [parent_id, child_id])
         if missing:

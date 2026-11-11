@@ -1298,9 +1298,11 @@ class _CrashSweep:
     # Worker-exit observer payloads, fired only after every reclaim/accounting
     # txn has committed.
     exited_hook_payloads: list[dict] = field(default_factory=list)
+    auto_blocked: list[str] = field(default_factory=list)
 
 
-def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None) -> _CrashSweep:
+def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None,
+                          *, failed_results_only: bool = False) -> _CrashSweep:
     """Release every host-local ``running`` task whose worker PID is dead."""
     sweep = _CrashSweep()
     with _kb.write_txn(conn):
@@ -1326,7 +1328,11 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 continue
             # An ambiguous receipt holds the card while the attempt may still run; once nothing
             # can be executing it (a dead bound interpreter, or a run that never bound one): crash.
-            if owner_reclaim_blocked(conn, row["id"], crash_sweep=True):
+            from hermes_cli.kanban_failed_result import failed_result_proof
+            proof = failed_result_proof(conn, row['id'], row['current_run_id'], row['claim_lock'])
+            if failed_results_only and proof is None:
+                continue
+            if proof is None and owner_reclaim_blocked(conn, row["id"], crash_sweep=True):
                 continue
 
             pid = int(row["worker_pid"])
@@ -1335,7 +1341,12 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             dead = _classify_dead_worker(pid, row["claim_lock"], exit_code, task_id=row["id"], board=board,
                                          run_id=row["current_run_id"], conn=conn)
             _host_reboot.note(dead, row, now_boot, reboot_victims)  # [daveey]
-            apply_attempt_note(conn, row["id"], pid, dead)
+            if proof is None:
+                apply_attempt_note(conn, row["id"], pid, dead)
+            else:
+                dead.event_payload.update({k: v for k, v in proof.items() if k != 'result'})
+                dead.event_payload['reconciled_at'] = int(time.time())
+                dead.event_payload['reconciled_by'] = 'observer' if failed_results_only else 'dispatcher'
             _owner_death.note(dead, conn, row["id"], row["current_run_id"])  # owner died under it [daveey]
             from hermes_cli.kanban_run_finalizer import close_dead_run
             closed = close_dead_run(conn, row, dead)
@@ -1388,6 +1399,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             else:
                 sweep.crashed.append(row["id"])
                 sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead))
+        if sweep.crash_details:
+            sweep.auto_blocked = _account_crashes(conn, sweep.crash_details, allow_nested=True)
     return sweep
 
 
@@ -1402,8 +1415,8 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     ``_last_rate_limited`` attribute (the return stays crashed-only).
     """
     sweep = _reclaim_dead_workers(conn, board=board)
-    # Outside the main txn: account each crash and maybe trip the breaker.
-    auto_blocked = _account_crashes(conn, sweep.crash_details) if sweep.crash_details else []
+    # Closure and accounting committed together; only external observers remain.
+    auto_blocked = sweep.auto_blocked
     for _, _, _, dead in sweep.crash_details:
         _worker_scope.release_failure(dead.event_payload)
     # Side-channel attributes keep the public ``list[str]`` return stable;

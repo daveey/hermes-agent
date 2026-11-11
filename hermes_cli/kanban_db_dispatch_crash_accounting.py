@@ -11,7 +11,7 @@ from typing import Optional
 from hermes_cli import kanban_systemic_crash as _systemic
 
 
-def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]:
+def _account_crashes(conn: sqlite3.Connection, crash_details: list, *, allow_nested: bool = False) -> list[str]:
     """Count each crash against the breaker; returns the task ids it tripped.
 
     Protocol violations get a BOUNDED violation-only budget independent of
@@ -64,6 +64,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 force_trip=True,
                 release_claim=False,
                 end_run=False,
+                allow_nested=allow_nested,
                 event_payload_extra={
                     "pid": pid,
                     "claimer": claimer,
@@ -83,6 +84,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 force_trip=True,
                 release_claim=False,
                 end_run=False,
+                allow_nested=allow_nested,
                 event_payload_extra={"pid": pid, "claimer": claimer, flag: dead.reboot_culprit or True},
                 block_kind="transient" if dead.terminal_provider else "capability" if dead.reboot_culprit else "assignment",
             )
@@ -108,10 +110,11 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 failure_limit=1 if is_systemic else None,
                 release_claim=False,
                 end_run=False,
+                allow_nested=allow_nested,
                 event_payload_extra=extra,
             )
-            if tripped and fix_id and not _systemic.attach(conn, fix_id, tid):
-                with _d._kb.write_txn(conn):  # unlinked: never let recompute_ready respawn it into the same wall
+            if tripped and fix_id and not _systemic.attach(conn, fix_id, tid, allow_nested=allow_nested):
+                with _d._kb.write_txn(conn, allow_nested=allow_nested):  # unlinked: keep it held
                     _d._kb._append_event(conn, tid, "gave_up", {**extra, "sticky": True, "fix_card_link_failed": True})
         if tripped:
             auto_blocked.append(tid)

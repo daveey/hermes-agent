@@ -70,11 +70,11 @@ def ensure_fix_card(conn: sqlite3.Connection, fingerprint: str, task_ids: list[s
     return None
 
 
-def attach(conn: sqlite3.Connection, fix_id: str, task_id: str) -> bool:
+def attach(conn: sqlite3.Connection, fix_id: str, task_id: str, *, allow_nested: bool = False) -> bool:
     """Link a tripped card under its fix card and say so on the card. False when the link failed."""
     from hermes_cli import kanban_db as kb
     try:
-        kb.link_tasks(conn, fix_id, task_id)
+        kb.link_tasks(conn, fix_id, task_id, **({'allow_nested': True} if allow_nested else {}))
     except (sqlite3.Error, ValueError):
         _log.warning("kanban: linking %s under systemic fix card %s failed", task_id, fix_id, exc_info=True)
         return False

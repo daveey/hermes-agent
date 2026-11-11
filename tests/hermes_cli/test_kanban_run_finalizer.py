@@ -1,4 +1,6 @@
 """Exact-run CAS and atomic accounting composition for failed results."""
+import json
+
 import pytest
 
 from hermes_cli import kanban_db as kb
@@ -61,3 +63,63 @@ def test_close_requires_transaction(board):
     row, dead = _inputs(conn, context)
     with pytest.raises(RuntimeError, match='caller-owned'):
         close_dead_run(conn, row, dead)
+
+
+def test_failed_result_sweep_avoids_owner_store_and_preserves_times(board, monkeypatch):
+    from hermes_cli import kanban_owner_recovery as owner
+    conn, context = board
+    result = fixtures._failed_child(conn, context)
+    def forbidden(*args, **kwargs):
+        pytest.fail('failed-result reconciliation must not consult owner state.db')
+    monkeypatch.setattr(owner, 'owner_reclaim_blocked', forbidden)
+    monkeypatch.setattr(owner, 'apply_attempt_note', forbidden)
+    sweep = kbd._reclaim_dead_workers(conn, failed_results_only=True)
+    assert sweep.crashed == [context['task_id']]
+    row = conn.execute('SELECT metadata FROM task_runs WHERE id=?', (context['run_id'],)).fetchone()
+    metadata = json.loads(row[0])
+    assert metadata['source_result_event_id'] == result['id']
+    assert metadata['result_recorded_at'] == result['created_at']
+    assert metadata['reconciled_at'] >= result['created_at']
+    assert metadata['reconciled_by'] == 'observer'
+    assert kbd._reclaim_dead_workers(conn, failed_results_only=True).crashed == []
+    assert conn.execute('SELECT consecutive_failures FROM tasks WHERE id=?',
+                        (context['task_id'],)).fetchone()[0] == 1
+
+
+def test_sweep_accounting_exception_rolls_back_real_closure(board, monkeypatch):
+    conn, context = board
+    fixtures._failed_child(conn, context)
+    real_account = kbd._account_crashes
+    def fail_after_account(*args, **kwargs):
+        real_account(*args, **kwargs)
+        raise RuntimeError('after accounting')
+    monkeypatch.setattr(kbd, '_account_crashes', fail_after_account)
+    with pytest.raises(RuntimeError, match='after accounting'):
+        kbd._reclaim_dead_workers(conn, failed_results_only=True)
+    assert conn.execute('SELECT status, consecutive_failures FROM tasks WHERE id=?',
+                        (context['task_id'],)).fetchone()[:] == ('running', 0)
+    assert conn.execute('SELECT status, ended_at FROM task_runs WHERE id=?',
+                        (context['run_id'],)).fetchone()[:] == ('running', None)
+
+
+def test_systemic_batch_preserves_one_fix_owner_inside_transaction(board):
+    conn, context = board
+    contexts = [context]
+    for index in range(2):
+        tid = kb.create_task(conn, title=f'additional failed result {index}', assignee='default')
+        task = kb.claim_task(conn, tid, claimer=kb._claimer_id())
+        assert task is not None
+        contexts.append({**context, 'task_id': tid, 'run_id': task.current_run_id,
+                         'claim_lock': task.claim_lock})
+    for item in contexts:
+        fixtures._failed_child(conn, item)
+    sweep = kbd._reclaim_dead_workers(conn, failed_results_only=True)
+    assert set(sweep.auto_blocked) == {item['task_id'] for item in contexts}
+    fixes = conn.execute("SELECT id FROM tasks WHERE idempotency_key LIKE 'systemic-crash:%'").fetchall()
+    assert len(fixes) == 1
+    children = conn.execute('SELECT child_id FROM task_links WHERE parent_id=?', (fixes[0][0],)).fetchall()
+    assert {row[0] for row in children} == {item['task_id'] for item in contexts}
+    assert kbd._reclaim_dead_workers(conn, failed_results_only=True).crashed == []
+    for item in contexts:
+        assert conn.execute('SELECT consecutive_failures FROM tasks WHERE id=?',
+                            (item['task_id'],)).fetchone()[0] == 1
