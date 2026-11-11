@@ -91,6 +91,7 @@ class FakeActions:
         self.gh_calls: list[tuple] = []
         self.gh_fail: dict[str, str] = {}  # "comment" / "close" -> stderr of a failing gh pr <verb>
         self.on_close: Callable[[dict], None] | None = None
+        self.canonical_owner = "example"  # a transferred repo: origin's slug owner != GitHub's real owner
 
     def ci(self):
         """Run 'CI' for every staged branch that has no run yet (status pending until finish())."""
@@ -136,8 +137,9 @@ class FakeActions:
             open_prs = [p for p in self.pulls if p["state"] == "open"]
             if "head=" not in endpoint:
                 return [open_prs]
-            branch = endpoint.split("head=", 1)[1].split("&", 1)[0].split(":", 1)[1]
-            return [[p for p in open_prs if p["head"]["ref"] == branch]]
+            owner, branch = endpoint.split("head=", 1)[1].split("&", 1)[0].split(":", 1)
+            # GitHub filters by the PR's real (canonical) owner, not the slug origin happens to name
+            return [[p for p in open_prs if p["head"]["ref"] == branch and owner == self.canonical_owner]]
         if "/check-runs?" in endpoint:
             assert f"check_name={sync.REQUIRED_CHECK.replace(' ', '%20')}" in endpoint
             return [{"check_runs": self.check_runs(endpoint.split("/commits/", 1)[1].split("/", 1)[0])}]
@@ -422,6 +424,19 @@ def test_landing_pr_merges_only_on_a_green_required_check_at_the_exact_head(worl
         actions.aggregate = ("completed", "success")
         assert gate(checkout, head, actions) == sync.LANDED
         assert landed_by_merge(root, head, before) and len(actions.pulls) == 1
+
+
+def test_an_open_landing_pr_is_reused_when_origin_names_a_transferred_repo(world, capsys):
+    """origin daveey/hermes redirects to softmax-universe/daveey-hermes: an ``head=<slug owner>:`` filter misses
+    the open PR, and re-creating it fails with "already exists" on every run, so nothing ever lands."""
+    root, checkout, head, actions, before = green_candidate(world)
+    actions.aggregate = ("in_progress", None)
+    assert gate(checkout, head, actions) == sync.NOT_YET  # opens the landing PR
+    actions.canonical_owner = "new-owner"  # the repo moved; origin's URL still says example/fork
+    actions.aggregate = ("completed", "success")
+    assert gate(checkout, head, actions) == sync.LANDED, capsys.readouterr().out
+    assert landed_by_merge(root, head, before) and len(actions.pulls) == 1
+    assert len([c for c in actions.gh_calls if c[:2] == ("pr", "create")]) == 1
 
 
 GH006 = ("remote: error: GH006: Protected branch update failed for refs/heads/main.\n"

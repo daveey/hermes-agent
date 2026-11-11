@@ -221,11 +221,15 @@ def _land_pr(repo, cand: Candidate, gh_repo, request, gh) -> dict:
         raise GateError(f"{branch} now points at {remote[:10]}, not the tested head {cand.head[:10]}")
     if not remote:  # the staged branch went away: put the tested head back (same sha, same evidence)
         _push(repo, cand.head, f"refs/heads/{branch}", "stage")
-    owner = gh_repo.split("/", 1)[0]
-    pulls = [pr for page in request(f"repos/{gh_repo}/pulls?state=open&head={owner}:{branch}&per_page=100")
-             for pr in page if isinstance(pr, dict) and (pr.get("base") or {}).get("ref") == "main"]
+    # Match the head ref, not ``head=<owner>:<branch>``: origin's slug may name a renamed/transferred repo
+    # (daveey/hermes -> softmax-universe/daveey-hermes), so the owner filter missed the open PR and
+    # ``gh pr create`` then failed with "already exists" on every run.
+    pulls = [pr for page in request(f"repos/{gh_repo}/pulls?state=open&base=main&per_page=100")
+             for pr in page if isinstance(pr, dict) and (pr.get("base") or {}).get("ref") == "main"
+             and (pr.get("head") or {}).get("ref") == branch]
     if pulls:
-        pr = max(pulls, key=lambda p: p["number"])
+        exact = [p for p in pulls if p["head"].get("sha") == cand.head]
+        pr = max(exact or pulls, key=lambda p: p["number"])
         if pr["head"]["sha"] != cand.head:
             raise GateError(f"PR #{pr['number']} head is {pr['head']['sha'][:10]}, not the tested head {cand.head[:10]}")
         return pr

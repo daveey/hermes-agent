@@ -64,8 +64,8 @@ if "/jobs" in endpoint:
             for n in [f"Run tests ({{i}}/8)" for i in range(1, 9)] + ["e2e"]]
     print(json.dumps([{{"jobs": jobs}}]))
 elif "/pulls?" in endpoint:
-    branch = endpoint.split("head=", 1)[1].split("&", 1)[0].split(":", 1)[1]
-    print(json.dumps([[p for p in pulls if p["state"] == "open" and p["head"]["ref"] == branch]]))
+    branch = endpoint.split("head=", 1)[1].split("&", 1)[0].split(":", 1)[1] if "head=" in endpoint else None
+    print(json.dumps([[p for p in pulls if p["state"] == "open" and branch in (None, p["head"]["ref"])]]))
 elif "/check-runs?" in endpoint:
     sha = endpoint.split("/commits/", 1)[1].split("/", 1)[0]
     verdict = checks.get(sha) if any(p["head"]["sha"] == sha for p in pulls) else None
