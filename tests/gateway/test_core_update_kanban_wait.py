@@ -136,6 +136,25 @@ async def test_cooperative_stop_booking_before_admission_settlement(monkeypatch,
 
 
 @pytest.mark.asyncio
+async def test_a_stop_before_the_child_bootstrapped_is_not_a_checkpoint(monkeypatch):
+    # [daveey] The turn never ran: a copied transcript's tail is the previous run's, so continuing it
+    # would skip this run's first prompt and rewrite the old run's tool results. Plain requeue instead.
+    from gateway import session_managed_worker as managed
+    from gateway import session_kanban_restart as booking
+    authority = SimpleNamespace(pending_results={}, _mutation_tasks=set())
+    row = {'admission_id': 'a'}
+
+    async def execute(*_):
+        return managed._interrupted_before_bootstrap(authority, row, 'Gateway restarting')
+    monkeypatch.setattr(managed, 'execute_managed', execute)
+    monkeypatch.setattr('gateway.session_policy.workspace_ready', lambda _: True)
+    recorded = MagicMock()
+    monkeypatch.setattr(booking, 'record_restart_interruption', recorded)
+    await managed.admit_managed(authority, SimpleNamespace(session_id='s'), row, SimpleNamespace(kanban_json='{}'))
+    assert recorded.call_count == 1 and recorded.call_args.kwargs['checkpoint'] is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('has_intent', [True, False])
 async def test_restart_line_states_whether_the_kanban_cap_is_armed(monkeypatch, tmp_path, caplog, has_intent):
     """The hub's missing cap (14:38Z) could not be read from the log: the line showed only cap=1800s."""

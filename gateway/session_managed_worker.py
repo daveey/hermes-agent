@@ -459,7 +459,7 @@ def _launch_env_only_credentials(home, env):
 def _interrupted_before_bootstrap(authority, row, cause=None):
     authority.pending_results[row['admission_id']] = {
         'result': {'final_response': '', 'interrupted': True, **({'interrupt_message': cause} if cause else {})},
-        'usage': {}, 'runtime_stop_cause': cause}
+        'usage': {}, 'runtime_stop_cause': cause, 'before_bootstrap': True}
     return ''
 
 
@@ -642,7 +642,9 @@ async def admit_managed(authority, ref, row, policy):
         # receipt becomes terminal: a runtime Stop must not spend the card's retries.
         # [daveey] A clean stop is a checkpoint the next owner continues (session_kanban_continue).
         from gateway.session_kanban_restart import book_restart_interruption
-        await book_restart_interruption(authority, policy, checkpoint={
+        # A turn stopped before its child bootstrapped never ran: nothing to continue (a copied
+        # transcript's tail is the previous run's), so it takes the plain uncounted requeue.
+        await book_restart_interruption(authority, policy, checkpoint=None if pending.get('before_bootstrap') else {
             'session_id': ref.session_id, 'request_id': row.get('request_id'),
             'admission_id': row.get('admission_id'), 'cause': pending.get('runtime_stop_cause')})
     return reply
