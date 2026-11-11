@@ -622,10 +622,9 @@ def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -
     if not any(r["table_name"] != "tasks" for r in rows):
         return []
     in_batch = {r["row_uid"] for r in rows if r["table_name"] == "tasks"}
-    # A persisted parent (including a failed compatibility retry) already owns delivery.
-    # Resynthesizing it for its diagnostic child would reset the one-retry bound.
+    # Only omission custody suppresses resynthesis; ordinary parent backoff retains its old path.
     in_batch.update(r[0] for r in conn.execute(
-        "SELECT row_uid FROM kanban_sync_outbox WHERE table_name='tasks' AND state IN ('pending', 'rejected')"))
+        "SELECT row_uid FROM kanban_sync_omissions WHERE table_name='tasks' AND state!='delivered'"))
     wanted: list[str] = []
     for r in rows:
         if r["table_name"] == "tasks":
@@ -680,9 +679,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
             break
         with write_txn(conn):
             wire = [translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway)) for r in rows]
-            from hermes_cli.kanban_sync_compat import persist_parents
             parents = _unacked_parents(conn, rows, gateway)
-            rows = persist_parents(conn, parents) + rows
             wire = [op for op, _tid in parents] + wire
         try:
             resp = hub.ops(board, wire)
@@ -697,6 +694,9 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
             for res in resp.get("results", []):
                 status, op_id = res.get("status"), res.get("client_op_id")
                 row = next((r for r in rows if r["op_id"] == op_id), None)
+                if row is None:
+                    from hermes_cli.kanban_sync_compat import rejected_parent
+                    row = rejected_parent(conn, parents, res)
                 if row is None:
                     continue
                 if status in ("applied", "merged"):

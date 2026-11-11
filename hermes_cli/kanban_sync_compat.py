@@ -9,16 +9,19 @@ import time
 from hermes_cli import kanban_db_sync as sync
 
 
-def persist_parents(conn: sqlite3.Connection, parents: list[tuple[dict, str]]) -> list[dict]:
-    """Synthetic parents need the same durable acknowledgement/retry path as captured rows."""
-    rows = []
+def rejected_parent(conn: sqlite3.Connection, parents: list[tuple[dict, str]], result: dict) -> dict | None:
+    """Persist only schema-refused parents; every other synthetic verdict keeps its existing path."""
+    if result.get("status") != "rejected" or result.get("reason") != "forbidden_field":
+        return None
     for op, tid in parents:
+        if op["client_op_id"] != result.get("client_op_id"):
+            continue
         conn.execute(
             "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, hlc, created_at) "
             "VALUES (?, 'tasks', ?, 'upsert', ?, ?, ?)",
             (op["client_op_id"], tid, json.dumps(op["fields"]), op["hlc"], int(time.time() * 1000)))
-        rows.append(dict(conn.execute("SELECT * FROM kanban_sync_outbox WHERE op_id=?", (op["client_op_id"],)).fetchone()))
-    return rows
+        return dict(conn.execute("SELECT * FROM kanban_sync_outbox WHERE op_id=?", (op["client_op_id"],)).fetchone())
+    return None
 
 
 def record_rejection(conn: sqlite3.Connection, row: dict, reason: str) -> None:

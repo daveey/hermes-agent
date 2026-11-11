@@ -80,6 +80,82 @@ def test_other_rejections_do_not_get_compatibility_retries(live, reason, detail,
     assert [(r[0], r[1]) for r in rows] == [("upsert", state)]
 
 
+@pytest.mark.parametrize("reason", ["live_claim", "not_found", "storage_error"])
+def test_synthetic_parent_non_schema_rejections_retain_existing_retry_handling(live, reason):
+    kb.create_task(live, title="synthetic parent", assignee="worker")
+    live.execute("DELETE FROM kanban_sync_outbox WHERE table_name='tasks'")
+    live.commit()
+    def ops(board, batch):
+        return {"results": [{"client_op_id": op["client_op_id"], "status": "rejected",
+                             "reason": reason, "detail": "no task missing"} for op in batch]}
+    client.push(live, SimpleNamespace(ops=ops), "default", "macbook", primary=True, max_batches=1)
+    assert live.execute("SELECT COUNT(*) FROM kanban_sync_outbox WHERE table_name='tasks'").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("state", ["pending", "rejected"])
+def test_ordinary_parent_outside_batch_does_not_suppress_prepend(live, svc, state):
+    tid = kb.create_task(live, title="parent outside batch", assignee="worker")
+    live.execute("UPDATE kanban_sync_outbox SET state=?,retry_after=9999999999 WHERE table_name='tasks'", (state,))
+    live.commit()
+    calls = []
+    hub = svc.hub("macbook")
+    def ops(board, batch):
+        calls.extend(copy.deepcopy(batch))
+        return hub.ops(board, batch)
+    client.push(live, SimpleNamespace(ops=ops), "default", "macbook", primary=True, max_batches=1)
+    assert calls[0]["table"] == "tasks" and calls[0]["uid"] == tid
+    assert tid in svc.board("default")["rows"]["tasks"]
+
+
+@pytest.mark.parametrize("importing", [False, True])
+def test_compat_retry_survives_reconnect_and_transport_loss_without_rehydration(live, svc, kanban_home, importing):
+    from hermes_cli import kanban_db_connect as kbc
+    tid = kb.create_task(live, title="durable downgrade", assignee="worker")
+    live.execute("UPDATE tasks SET model_pin_mandatory=1 WHERE id=?", (tid,))
+    live.execute("DELETE FROM kanban_sync_outbox WHERE table_name!='tasks' OR rowid NOT IN "
+                 "(SELECT MIN(rowid) FROM kanban_sync_outbox WHERE table_name='tasks')")
+    if importing:
+        live.execute("UPDATE kanban_sync_outbox SET op='import'")
+    live.commit()
+    calls = []
+    hub = svc.hub("macbook")
+    lost = False
+    def ops(board, batch):
+        nonlocal lost
+        results = []
+        for op in batch:
+            if op["table"] == "tasks":
+                calls.append(copy.deepcopy(op))
+                if "model_pin_mandatory" in op["fields"]:
+                    results.append({"client_op_id": op["client_op_id"], "status": "rejected",
+                                    "reason": "forbidden_field", "detail": "not writable on tasks: model_pin_mandatory"})
+                    continue
+                if not lost:
+                    lost = True
+                    raise OSError("reply unavailable")
+            results.extend(hub.ops(board, [op])["results"])
+        return {"results": results}
+    compat_hub = SimpleNamespace(ops=ops)
+    client.push(live, compat_hub, "default", "macbook", primary=True, max_batches=1)
+    reconnect = kbc.connect(kanban_home / "kanban.db")
+    try:
+        with pytest.raises(OSError, match="reply unavailable"):
+            client.push(reconnect, compat_hub, "default", "macbook", primary=True, max_batches=1)
+    finally:
+        reconnect.close()
+    reconnect = kbc.connect(kanban_home / "kanban.db")
+    try:
+        client.push(reconnect, compat_hub, "default", "macbook", primary=True, max_batches=1)
+        assert reconnect.execute("SELECT model_pin_mandatory FROM tasks WHERE id=?", (tid,)).fetchone()[0] == 1
+    finally:
+        reconnect.close()
+    assert len(calls) == 3
+    assert calls[0]["client_op_id"] != calls[1]["client_op_id"] == calls[2]["client_op_id"]
+    assert "model_pin_mandatory" not in calls[1]["fields"] and "model_pin_mandatory" not in calls[2]["fields"]
+    assert all(bool(op.get("import")) == importing for op in calls)
+    assert tid in svc.board("default")["rows"]["tasks"]
+
+
 def test_a_second_forbidden_column_is_final_not_an_unbounded_downgrade(live):
     kb.create_task(live, title="two unsupported fields", assignee="worker")
     live.execute("DELETE FROM kanban_sync_outbox WHERE table_name!='tasks'")

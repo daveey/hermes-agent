@@ -4,7 +4,7 @@ from contextlib import closing
 
 import pytest
 
-from hermes_cli import kanban_placement
+from hermes_cli import kanban_db_sync, kanban_placement
 from hermes_cli import kanban_sync_client as client
 
 
@@ -21,6 +21,7 @@ def _db():
             fields TEXT, base_version INTEGER, hlc TEXT, created_at INTEGER, state TEXT DEFAULT 'pending');
         INSERT INTO tasks VALUES ('parent', 1, 'macbook'), ('child', 1, 'macbook');
     """)
+    conn.executescript(kanban_db_sync.SYNC_SCHEMA_SQL)
     return conn
 
 
