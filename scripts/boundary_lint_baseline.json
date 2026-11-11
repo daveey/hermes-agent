@@ -226,6 +226,7 @@
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.web_read_coalescing.coalesced_read": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.web_server_chat": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.web_server_sessions._open_session_db_for_profile": 1,
+    "plugins/kanban/dashboard/plugin_api_comment_actor.py hermes_cli.kanban_http_comment_writer.http_comment_writer": 1,
     "plugins/kanban/dashboard/plugin_api_human_request.py hermes_cli.kanban_ask_resolved.create_context": 1,
     "plugins/kanban/dashboard/plugin_api_human_request.py hermes_cli.kanban_ask_resolved.create_filing_error": 1,
     "plugins/kanban/dashboard/plugin_api_human_request.py hermes_cli.kanban_ask_resolved.filing_refusal": 1,
