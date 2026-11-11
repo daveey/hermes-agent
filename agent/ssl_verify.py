@@ -309,7 +309,9 @@ def resolve_httpx_verify(
     2. explicit ``ca_bundle`` (the provider's ``ssl_ca_cert``) — that
        bundle INSTEAD of the platform store, for an endpoint whose chain
        the machine has no reason to trust
-    3. ``True`` — the platform store, via the process-wide install, or the
+    3. ``SSL_CERT_FILE``/``SSL_CERT_DIR`` exported — ``platform_ssl_context()``:
+       an existing ``SSL_CERT_FILE`` bundle ON TOP of the platform store
+    4. ``True`` — the platform store, via the process-wide install, or the
        platform context when the certifi bundle this process resolved at
        import no longer exists (a replaced install environment)
 
@@ -336,8 +338,11 @@ def resolve_httpx_verify(
             effective_ca,
         )
     # HTTPX reads CA env vars before the injected verifier gets control. Pass
-    # the platform context directly so stale paths cannot break construction;
-    # proxy environment handling remains enabled.
+    # the shared context directly so stale paths cannot break construction;
+    # proxy environment handling remains enabled. An existing SSL_CERT_FILE
+    # bundle is trusted on top of the platform store (platform_ssl_context):
+    # macOS's Security.framework never reads SSL_CERT_FILE itself, so the
+    # platform-only context rejected a private CA exported that way.
     if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
-        return _shared_context(None)
+        return platform_ssl_context()
     return _default_verify()

@@ -132,3 +132,45 @@ def test_pinned_clients_share_transport_not_close_state(local_tls, insecure):
     finally:
         a.close()
         b.close()
+
+
+def test_ssl_cert_file_private_ca_reaches_the_agent_client(tmp_path, monkeypatch):
+    """A private CA exported only through SSL_CERT_FILE verifies a real handshake on the agent's
+    keep-alive client. macOS's verifier never reads SSL_CERT_FILE, so a platform-only context
+    rejected it there ("certificate is not trusted") while Linux OpenSSL read the env var itself."""
+    from run_agent import AIAgent
+    from tests.fakes.providers.gemini_native import _write_tls_material
+
+    ca, cert, key = _write_tls_material(tmp_path / "tls")
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    context = _original_SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("SSL_CERT_FILE", str(ca))
+    monkeypatch.setattr(ssl_verify, "_CA_CONTEXTS", {})
+    url = f"https://127.0.0.1:{server.server_port}"
+    try:
+        client = AIAgent._build_keepalive_http_client(url, verify=ssl_verify.resolve_httpx_verify(base_url=url))
+        assert client is not None
+        with client:
+            assert client.get(url + "/v1/models").status_code == 204
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
