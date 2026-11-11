@@ -168,7 +168,7 @@ def test_unblock_result_carries_queue_and_the_no_promise_hint_when_the_queue_is_
     assert queue.get("ahead") == 3 and queue.get("limit") == 2
     hint = out.get("queue_hint") or ""
     assert "don't promise a pickup" in hint
-    assert "bump priority" in hint and "re-place" in hint and "this chat" in hint
+    assert "capacity first" in hint and "re-place" in hint and "bump" not in hint
 
 
 def test_unblock_result_has_queue_but_no_hint_when_a_slot_is_near(board, monkeypatch):
@@ -212,7 +212,7 @@ def test_subscribed_card_ready_31_min_gets_one_notice(board):
         notices = _notices(conn, tid)
         assert len(notices) == 1
         text = cw.notice_text(notices[0])
-        assert tid in text and "bump" in text and "re-place" in text and "here" in text
+        assert tid in text and "capacity first" in text and "re-place" in text and "bump" not in text
         assert cw.sweep(conn) == 0
         assert len(_notices(conn, tid)) == 1
     finally:

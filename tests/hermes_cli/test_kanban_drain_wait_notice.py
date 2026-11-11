@@ -49,4 +49,5 @@ def test_dead_drain_writer_does_not_hide_capacity_advice(live, tmp_path, monkeyp
     marker.write_text(json.dumps({"pid": 12345, "started_at": START}))
     monkeypatch.setattr(drain, "hold_paths", lambda: [marker])
     monkeypatch.setattr(drain, "_pid_alive", lambda pid: False)
-    assert "priority" in helpers._notice(live, helpers._card(live))
+    text = helpers._notice(live, helpers._card(live))
+    assert "capacity first" in text and "bump" not in text

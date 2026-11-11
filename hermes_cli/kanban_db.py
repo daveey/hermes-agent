@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from hermes_cli import kanban_db_sync as _sync, kanban_priority
+from hermes_cli.kanban_db_values import _first_line, _opt_int, _json_or_null
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
 from hermes_cli import kanban_placement_forward as _placement_fwd  # stdlib-only at import: no cycle
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
@@ -1890,22 +1891,6 @@ def _end_run(
     )
     conn.execute("UPDATE tasks SET current_run_id = NULL WHERE id = ?", (task_id,))
     return run_id
-
-
-def _first_line(text: Optional[str], limit: int) -> str:
-    """First non-blank-stripped line of ``text`` capped at ``limit`` chars; "" when empty."""
-    lines = (text or "").strip().splitlines()
-    return lines[0][:limit] if lines else ""
-
-
-def _opt_int(value: Any) -> Optional[int]:
-    """``int(value)`` or ``None`` when ``value`` is ``None`` (NULL column passthrough)."""
-    return int(value) if value is not None else None
-
-
-def _json_or_null(obj: Any) -> Optional[str]:
-    """JSON text for a payload/metadata column; falsy -> NULL."""
-    return json.dumps(obj, ensure_ascii=False) if obj else None
 
 
 def _task_status(conn: sqlite3.Connection, task_id: str) -> Optional[str]:

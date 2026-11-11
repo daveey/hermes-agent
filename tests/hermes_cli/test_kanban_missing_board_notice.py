@@ -65,12 +65,13 @@ def test_changed_claim_reason_does_not_reuse_missing_board_diagnosis(live, monke
     assert sync.claim_gate(live, tid, int(time.time()) + 900).deferred
     text = _notice(live, tid)
     assert "isn't on the shared Board" not in text
-    assert "priority" in text
+    assert "capacity" in text and "bump" not in text
 
 
-def test_real_capacity_wait_retains_priority_advice(live):
+def test_real_capacity_wait_recommends_capacity_before_escalation(live):
     tid = _card(live)
-    assert "priority" in _notice(live, tid)
+    text = _notice(live, tid)
+    assert "capacity first" in text and "bump" not in text
 
 
 @pytest.mark.parametrize("change", ["old_episode", "foreign_gateway", "sync_off", "granted"])
@@ -92,7 +93,7 @@ def test_stale_or_foreign_missing_row_evidence_is_not_a_current_diagnosis(live, 
     live.commit()
     text = _notice(live, tid)
     assert "isn't on the shared Board" not in text
-    assert "priority" in text
+    assert "capacity" in text and "bump" not in text
 
 
 def test_push_rejection_reaches_missing_board_notice(live):
