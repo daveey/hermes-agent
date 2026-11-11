@@ -426,6 +426,15 @@ def fire_claim_fence(job_id: str, *, expected_owner: str):
 # Fields that must never change after creation: ``id`` is a path component under OUTPUT_DIR, so an
 # update could leak ``../escape``/absolute/nested values into output writes/deletes.
 _IMMUTABLE_JOB_FIELDS = frozenset({"id"})
+# With the authored fields (cron/job_definition.py), the operator edits update_job stamps as
+# ``edited_at``: pause, resume and run-now all rewrite these.
+_LIFECYCLE_EDIT_FIELDS = frozenset({"enabled", "state", "next_run_at"})
+
+
+def stamp_edited(job: dict[str, Any]) -> None:
+    """Record an operator edit (cron/restart_rerun.py: an attempt cut off by a restart is not
+    rerun over an edit, pause, resume, re-arm or run-now made since it was claimed)."""
+    job["edited_at"] = _hermes_now().isoformat()
 
 
 def _job_output_dir(job_id: str) -> Path:
@@ -2165,6 +2174,10 @@ def update_job(job_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]
             # An explicit schedule/lifecycle rewrite supersedes any occurrence the dispatcher
             # left unclaimed — pause/resume/edit must not resurrect a slot from before the edit.
             updated.pop("pending_slot", None)
+        from cron.job_definition import JOB_DEFINITION_FIELDS
+
+        if (JOB_DEFINITION_FIELDS | _LIFECYCLE_EDIT_FIELDS).intersection(updates):
+            stamp_edited(updated)
         _fill_missing_next_run(updated)
         _reject_terminal_activation(job, updated, job_id)
         jobs[i] = updated
@@ -2301,6 +2314,7 @@ def rearm_oneshot(job_id: str, run_at: Any) -> Optional[dict[str, Any]]:
             repeat=repeat, run_claim=None, fire_claim=None)
         _activate_job_record(job)
         job["next_run_at"] = next_run_at
+        stamp_edited(job)
         save_jobs(jobs)
         return _normalize_job_record(job)
 
@@ -2486,6 +2500,10 @@ def _record_run_outcome(
         job["last_failure"] = {"at": now, "detail": error or (status or "run failed")}
     if not keep_verdict:
         job["last_delivery_error"] = delivery_error
+    if not shutdown_interrupted:
+        # A run reached a real outcome: a restart rerun is settled (cron/restart_rerun.py), so a
+        # later interruption may be rescheduled again. A shutdown stop settles nothing.
+        job.pop("restart_rerun", None)
     # Clear both claims: the run is over, so the job is claimable again.
     job["fire_claim"] = None
     job.pop("pending_slot", None)
