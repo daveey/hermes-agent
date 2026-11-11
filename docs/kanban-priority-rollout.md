@@ -62,6 +62,17 @@ or restart a busy gateway by hand. Use the normal reviewed core-update route.
    additionally requires `allow_legacy_rollback=True`: this is an explicit rollback
    of the priority policy and must be coordinated with deployment, not normal
    editing. No lifecycle state, lease, parent edge or run is reverted.
+   Both apply and undo refuse atomically if any recorded card has become terminal
+   or disappeared. Undo allows newly created cards, leaving them untouched; apply
+   requires exact open membership. Movement among open statuses is safe.
+
+Legacy terminal priorities remain historical until reopened. The shared descendant
+invalidation path bounds the reopened root and every invalidated descendant in the
+same transaction, recording each original value in a `reprioritized` event.
+Review found both omissions because initial tests exercised input edits and value
+CAS, not lifecycle re-entry or membership loss. Five added regressions failed on
+the reviewed head and passed after correction (ancestor/descendant audit plus
+done/archived departures on apply/undo).
 
 Normalization is intentionally not an implicit connection-time migration: clipping
 before saving originals would destroy the very order the operator asked to retain.

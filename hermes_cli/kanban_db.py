@@ -3598,11 +3598,14 @@ def invalidate_descendants_for_parent_reopen(
     Returns ``{"invalidated": [{id, prior_status, new_status, resume_status}],
     "terminations": [(worker_pid, claim_lock, worker_started_at)]}``.
     """
+    from hermes_cli.kanban_priority import bound_reopened
+
     caller_owns_txn = bool(conn.in_transaction)
     now = int(time.time())
     invalidated: list[dict[str, Any]] = []
     terminations: list[tuple[Optional[int], Optional[str], Optional[int]]] = []
     with write_txn(conn, allow_nested=True):
+        bound_reopened(conn, task_id)
         rows = conn.execute(
             """
             WITH RECURSIVE descendants(id) AS (
@@ -3641,6 +3644,7 @@ def invalidate_descendants_for_parent_reopen(
                 "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
                 "current_run_id = NULL, consecutive_failures = 0, human_request = NULL WHERE id = ?", (row["id"],),
             )
+            bound_reopened(conn, row["id"])
             entry = {
                 "id": row["id"], "prior_status": previous_status,
                 "new_status": "todo", "resume_status": resume_status,

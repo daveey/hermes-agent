@@ -83,9 +83,12 @@ def apply(conn, path: Path, *, undo: bool = False, allow_legacy_rollback: bool =
                                    (identity["gateway_id"],)).fetchone()
             if foreign is not None:
                 raise ValueError("foreign-owned rows require normalization on their origin writer")
+        live_ids = {r[0] for r in conn.execute("SELECT id FROM tasks WHERE status NOT IN ('done','archived')")}
+        recorded_ids = {r["id"] for r in rows}
+        if recorded_ids - live_ids:
+            raise ValueError("open membership changed since snapshot; terminal rows cannot be normalized or undone")
         if not undo:
-            live_ids = {r[0] for r in conn.execute("SELECT id FROM tasks WHERE status NOT IN ('done','archived')")}
-            if live_ids - {r["id"] for r in rows}:
+            if live_ids - recorded_ids:
                 raise ValueError("new open cards since snapshot; capture a new manifest")
         current = {r["id"]: conn.execute("SELECT priority FROM tasks WHERE id=?", (r["id"],)).fetchone()
                    for r in rows}

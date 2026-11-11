@@ -11,6 +11,20 @@ def bounded(value: int) -> int:
     return min(PRIORITY_CAP, int(value))
 
 
+def bound_reopened(conn, task_id: str) -> None:
+    """Bound an opened legacy row in the caller's transaction, retaining its audit."""
+    from hermes_cli import kanban_db as kb
+
+    row = conn.execute("SELECT priority FROM tasks WHERE id=? AND status NOT IN ('done','archived')",
+                       (task_id,)).fetchone()
+    if row is None or row[0] <= PRIORITY_CAP:
+        return
+    conn.execute("UPDATE tasks SET priority=? WHERE id=?", (PRIORITY_CAP, task_id))
+    kb._append_event(conn, task_id, "reprioritized", {
+        "previous_priority": row[0], "priority": PRIORITY_CAP, "reason": "legacy priority bounded on reopen",
+    })
+
+
 def lane_evidence(conn, task_id: str) -> dict:
     """Compare effective priorities in the same ready/assignee/placement lane.
 
