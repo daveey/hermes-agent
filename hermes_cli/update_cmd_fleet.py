@@ -1087,7 +1087,11 @@ def _gateway_recovery_partition(plan, *, skip_profiles: set[str] | None = None) 
     candidates: dict[str, str] = {}
     skipped: list[dict] = []
     from hermes_cli.update_fleet_scope import profiles_on_another_checkout  # loaded before the checkout moved
-    pinned = profiles_on_another_checkout()  # recovery would only bounce these onto their pin [daveey]
+    # Recovery would only bounce these onto their pin; the inventory's live PIDs outrank status files [daveey]
+    live_pids = {r.profile: r.pid for r in getattr(plan, "runtimes", ()) or ()
+                 if getattr(r, "kind", None) == "gateway" and isinstance(getattr(r, "profile", None), str)
+                 and isinstance(getattr(r, "pid", None), int) and r.pid > 0}
+    pinned = profiles_on_another_checkout(live_pids)
     with _best_effort('Could not prepare fresh gateway restart profiles: %s'):
         for runtime in getattr(plan, "runtimes", ()) or ():
             kind = getattr(runtime, "kind", None)

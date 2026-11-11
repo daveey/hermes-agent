@@ -243,3 +243,37 @@ def test_auto_migration_does_not_fold_a_pinned_gateway(host):
     (host["home"] / "gateway_state.json").unlink()
     profile.pid = _run_on_checkout(host)
     assert _guard_code_root(None, profile) is None
+
+
+def test_recovery_classifies_an_inventoried_pinned_gateway_without_a_status_record(host):
+    """A pinned gateway found through the control socket / PID file has no ``gateway_state.json``;
+    the inventory already holds its live PID, so recovery must not pick it as a restart candidate
+    (``gateway restart --interrupt --detach`` would bounce it onto its pin)."""
+    from types import SimpleNamespace
+    pid = _run_pinned(host, status_record=False)
+    assert not (host["home"] / "gateway_state.json").exists(), "premise: no status record"
+    plan = SimpleNamespace(runtimes=[
+        SimpleNamespace(kind="gateway", profile="askeve-builder", supervisor="systemd", pid=pid)])
+
+    candidates, skipped = fleet._gateway_recovery_partition(plan)
+
+    assert candidates == {}, f"a pinned gateway was selected for restart recovery: {candidates}"
+    assert [s["profile"] for s in skipped] == ["askeve-builder"] and skipped[0]["pinned"] is True
+    assert str(host["core"]) in skipped[0]["reason"]
+
+
+def test_recovery_reads_a_socket_declared_pin_and_keeps_a_checkout_gateway_restartable(host, monkeypatch):
+    """With no inventoried PID the control socket is asked next; the same profile on this checkout
+    (control) is still a restart candidate, and an unreadable pid fails safe to the old behaviour."""
+    from types import SimpleNamespace
+    plan = SimpleNamespace(runtimes=[SimpleNamespace(kind="gateway", profile="askeve-builder", supervisor="systemd")])
+    pinned = _run_pinned(host, status_record=False)
+    monkeypatch.setattr("hermes_cli.update_receipt._socket_identity", lambda home: (pinned, {}))
+    candidates, skipped = fleet._gateway_recovery_partition(plan)
+    assert candidates == {} and skipped[0]["pinned"] is True
+
+    control = _run_on_checkout(host)
+    monkeypatch.setattr("hermes_cli.update_receipt._socket_identity", lambda home: (control, {}))
+    assert fleet._gateway_recovery_partition(plan) == ({"askeve-builder": "systemd"}, [])
+    plan.runtimes[0].pid = control
+    assert fleet._gateway_recovery_partition(plan) == ({"askeve-builder": "systemd"}, [])

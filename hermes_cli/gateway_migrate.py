@@ -1041,6 +1041,14 @@ def apply_migration(plan: MigrationPlan, *, served_wait: float = _SERVED_WAIT_SE
     target, run_as_user = _resume_target(plan)
     manifest = plan.manifest
     if manifest is not None:
+        # A resume skips the plan's blockers, but not the foreign-code boundary: folding a gateway
+        # pinned to its own checkout into this one silently drops the pin. [daveey]
+        from hermes_cli.gateway_migrate_guards import _guard_code_root
+        pinned = list(dict.fromkeys(f for p in plan.standalone_secondaries if (f := _guard_code_root(plan, p))))
+        if pinned:
+            _print(["✗ Migration resume refused before changing anything:", *[f"  • {b}" for b in pinned],
+                    f"  Re-run {MIGRATE_COMMAND} once those gateways run this checkout (or restore from the manifest)."])
+            return False
         # A manifest on disk means an earlier apply got past its first destructive step: it either
         # died mid-way (``interrupted``) or its compensator did not finish. Either way the manifest
         # is the ONLY record of the units that existed, so resume from it and never overwrite it.

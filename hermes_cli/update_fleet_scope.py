@@ -179,10 +179,12 @@ def gateway_foreign_code_root(pid: int, home) -> Path | None:
     return None
 
 
-def profiles_on_another_checkout() -> dict[str, Path]:
-    """Profile → the other checkout its live gateway runs, read fresh from each profile's own
-    status record. Restart-abort recovery asks this itself: it can run before the restart phase
-    looked at any unit, so nothing an earlier pass remembered is there to rely on.
+def profiles_on_another_checkout(live_pids: dict[str, int] | None = None) -> dict[str, Path]:
+    """Profile → the other checkout its live gateway runs. A live PID is resolved in the order the
+    inventory itself discovers gateways: *live_pids* (the pre-update inventory's PID per profile),
+    then the profile's control socket, then its ``gateway_state.json`` record. A gateway found only
+    through the socket or a PID file has no status record, so the record alone missed it.
+    Restart-abort recovery asks this itself: it can run before the restart phase looked at any unit.
 
     Total by contract: recovery runs in the pre-update interpreter over the replaced checkout,
     where a first import can fail in any way; every failure reads as "no pinned profile"."""
@@ -191,13 +193,18 @@ def profiles_on_another_checkout() -> dict[str, Path]:
         import json
 
         import psutil
-        from hermes_cli.update_receipt import _profile_homes
+        from hermes_cli.update_receipt import _profile_homes, _socket_identity
         for profile, home in _profile_homes():
             with suppress(Exception):
-                pid = int(json.loads((home / "gateway_state.json").read_text(encoding="utf-8-sig")).get("pid") or 0)
-                # A crashed gateway's recorded PID may belong to anything by now.
-                if pid <= 0 or "gateway" not in psutil.Process(pid).cmdline():
-                    continue
+                pid = int((live_pids or {}).get(profile) or 0)
+                if pid <= 0:
+                    sock = _socket_identity(home)
+                    pid = int(sock[0]) if sock else 0
+                if pid <= 0:
+                    pid = int(json.loads((home / "gateway_state.json").read_text(encoding="utf-8-sig")).get("pid") or 0)
+                    # A crashed gateway's recorded PID may belong to anything by now.
+                    if pid <= 0 or "gateway" not in psutil.Process(pid).cmdline():
+                        continue
                 root = gateway_foreign_code_root(pid, home)
                 if root is not None:
                     pinned[profile] = root
