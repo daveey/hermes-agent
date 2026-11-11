@@ -73,7 +73,27 @@ def _ro(path: Path) -> sqlite3.Connection:
         return conn
 
 
+def drop_mark(task: dict) -> Optional[float]:
+    """``human_request.resolved_check_dropped_at`` of a blocked remote card (the owner's dropped-probe mark).
+
+    A drop is a new state of the block, so it is the state's time: the dropped card gets its own ledger identity
+    (``blocked@<dropped_at>``) and notifies each origin once more, even after the earlier block was delivered."""
+    request = task.get("human_request")
+    if isinstance(request, str):
+        try:
+            request = json.loads(request)
+        except ValueError:
+            return None
+    if task.get("status") != "blocked" or not isinstance(request, dict):
+        return None
+    with contextlib.suppress(TypeError, ValueError):
+        return float(request.get("resolved_check_dropped_at")) or None
+    return None
+
+
 def _terminal_at(task: dict) -> Optional[float]:
+    if (dropped := drop_mark(task)) is not None:
+        return dropped
     run = task.get("run") if isinstance(task.get("run"), dict) else {}
     for value in (task.get("completed_at") if task.get("status") == "done" else None, run.get("ended_at")):
         with contextlib.suppress(TypeError, ValueError):

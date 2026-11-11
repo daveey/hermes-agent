@@ -226,6 +226,8 @@ gateway:
     no_output: "(geen uitvoer)"
     wake:
       request_withdrawn: "versoek teruggetrek (nie goedkeuring of bewys van voltooiing nie)"
+      resolved_check_broken: "outomatiese opsporing van jou stap het gestop (die toets het aanhou misluk); die versoek moet weer ingedien word om self te hervat"
+      resolved_check_lost: "outomatiese opsporing van jou stap het gestop (die toets het verdwyn); die versoek moet weer ingedien word om self te hervat"
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
       crashed: "crashed (worker exited); dispatcher will retry"

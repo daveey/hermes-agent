@@ -226,6 +226,8 @@ gateway:
     no_output: "(출력 없음)"
     wake:
       request_withdrawn: "요청 철회됨 (승인 또는 완료 증명이 아님)"
+      resolved_check_broken: "사용자 단계의 자동 감지가 중단되었습니다 (확인 검사가 계속 실패함). 자동으로 재개되려면 요청을 다시 제출해야 합니다"
+      resolved_check_lost: "사용자 단계의 자동 감지가 중단되었습니다 (확인 검사가 사라짐). 자동으로 재개되려면 요청을 다시 제출해야 합니다"
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
       crashed: "crashed (worker exited); dispatcher will retry"

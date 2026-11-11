@@ -229,6 +229,8 @@ gateway:
     no_output: "(no output)"
     wake:
       request_withdrawn: "request withdrawn (not approval or proof of completion)"
+      resolved_check_broken: "automatic detection of your step stopped (its probe kept failing); the ask must be re-filed to resume on its own"
+      resolved_check_lost: "automatic detection of your step stopped (its probe went missing); the ask must be re-filed to resume on its own"
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
       crashed: "crashed (worker exited); dispatcher will retry"

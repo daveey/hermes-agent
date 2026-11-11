@@ -19,6 +19,7 @@ from agent.i18n import t
 
 from gateway.kanban_watchers_common import _list_boards, _to_thread_process_service, logger
 from gateway.wake import session_owned_by_profile
+from hermes_cli.kanban_block_notice import coalesce_superseded_blocks
 
 
 def _kbc():
@@ -50,10 +51,10 @@ def _pin_first():
 # ``dependency_parent_unclaimed`` (hermes_cli.kanban_parent_unclaimed) wakes the waiting chat: it must act on the
 # parent that cannot start (bump, re-place, do it here), not answer "ready but not started" when asked. [daveey]
 # ``chat_wait_unclaimed`` (hermes_cli.kanban_chat_wait) does the same for a card the chat waits on directly.
-TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "quota_episode_notice", "worker_repin_notice", "dependency_parent_unclaimed", "chat_wait_unclaimed", "request_withdrawn")
+TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "quota_episode_notice", "worker_repin_notice", "dependency_parent_unclaimed", "chat_wait_unclaimed", "request_withdrawn", "resolved_check_broken", "resolved_check_lost")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
-_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected", "dependency_parent_unclaimed", "chat_wait_unclaimed", "request_withdrawn", "failure_finalized")
+_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected", "dependency_parent_unclaimed", "chat_wait_unclaimed", "request_withdrawn", "failure_finalized", "resolved_check_broken", "resolved_check_lost")
 TERMINAL_KINDS = (*TERMINAL_KINDS, "failure_finalized")
 
 
@@ -332,6 +333,7 @@ class _Collector:
         )
         if not events:
             return None
+        events = coalesce_superseded_blocks(events)  # cursor range stays whole; only the render is coalesced
         task = self.kb.get_task(conn, sub["task_id"])
         logger.debug("kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                      len(events), sub["task_id"], slug, old_cursor, cursor)
@@ -534,6 +536,14 @@ def _fmt_timed_out(ev, n) -> tuple:
     return t("gateway.kanban.ping.timed_out", head=n.head, span=span), None, None
 
 
+def _fmt_resolved_check_drop(ev, n) -> tuple:
+    """The ask's probe was dropped (resolved_check_broken/_lost): the block notice plus the loss of automatic
+    detection, delivered once per drop event through the subscription cursor. [daveey]"""
+    from hermes_cli.kanban_block_notice import block_notice
+    body = block_notice(n.task, n.task_id, n.board_slug, reason=str(_payload(ev, "reason") or ""), drop_event=ev.kind)
+    return f"⏸ {n.head} {body}", body, None
+
+
 def _fmt_request_withdrawn(ev, n):
     detail = ("the card was archived. No answer is needed for this request; "
               "this is not approval and not proof of completion.")
@@ -545,6 +555,8 @@ def _fmt_request_withdrawn(ev, n):
 # never wake the creator.
 _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
     "request_withdrawn": _fmt_request_withdrawn,
+    "resolved_check_broken": _fmt_resolved_check_drop,
+    "resolved_check_lost": _fmt_resolved_check_drop,
     "completed": _fmt_completed,
     "blocked": _fmt_blocked,
     "failure_finalized": _fmt_failure("failure_finalized"),

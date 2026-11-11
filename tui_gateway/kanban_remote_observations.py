@@ -61,6 +61,8 @@ _decoded_files: dict[str, tuple | None] = {}  # replica -> file identity its _de
 
 
 def _summary(task) -> dict | None:
+    from tui_gateway.kanban_remote_notices import drop_mark
+
     if not isinstance(task, dict):
         return None
     withdrawal = _withdrawal(task)
@@ -74,6 +76,8 @@ def _summary(task) -> dict | None:
     notice = notice if isinstance(notice, dict) else {}
     return {"status": task.get("status"), "completed_at": task.get("completed_at"),
             "run": {"ended_at": run.get("ended_at")},
+            "human_request": ({"resolved_check_dropped_at": drop_mark(task)}
+                              if drop_mark(task) is not None else None),
             "completion_notice": {"created_at": notice.get("created_at")}}
 
 

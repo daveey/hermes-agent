@@ -226,6 +226,8 @@ gateway:
     no_output: "(sin salida)"
     wake:
       request_withdrawn: "solicitud retirada (no es aprobación ni prueba de finalización)"
+      resolved_check_broken: "la detección automática de tu paso se detuvo (su comprobación siguió fallando); hay que volver a presentar la solicitud para que se reanude sola"
+      resolved_check_lost: "la detección automática de tu paso se detuvo (su comprobación se perdió); hay que volver a presentar la solicitud para que se reanude sola"
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
       crashed: "crashed (worker exited); dispatcher will retry"

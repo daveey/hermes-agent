@@ -226,6 +226,8 @@ gateway:
     no_output: "(nessun output)"
     wake:
       request_withdrawn: "richiesta ritirata (non è approvazione né prova di completamento)"
+      resolved_check_broken: "il rilevamento automatico del tuo passaggio si è interrotto (il controllo continuava a fallire); la richiesta va ripresentata per riprendere da sola"
+      resolved_check_lost: "il rilevamento automatico del tuo passaggio si è interrotto (il controllo è andato perso); la richiesta va ripresentata per riprendere da sola"
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
       crashed: "crashed (worker exited); dispatcher will retry"

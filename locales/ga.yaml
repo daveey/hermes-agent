@@ -226,6 +226,8 @@ gateway:
     no_output: "(gan aschur)"
     wake:
       request_withdrawn: "iarratas tarraingthe siar (ní ceadú ná cruthúnas ar chríochnú é)"
+      resolved_check_broken: "stop an bhrath uathoibríoch ar do chéim (lean an tástáil ag teipeadh); caithfear an t-iarratas a athsholáthar le go bhfeidhmeoidh sé arís leis féin"
+      resolved_check_lost: "stop an bhrath uathoibríoch ar do chéim (chaill an tástáil); caithfear an t-iarratas a athsholáthar le go bhfeidhmeoidh sé arís leis féin"
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
       crashed: "crashed (worker exited); dispatcher will retry"

@@ -226,6 +226,8 @@ gateway:
     no_output: "(немає виводу)"
     wake:
       request_withdrawn: "запит відкликано (не є схваленням або підтвердженням завершення)"
+      resolved_check_broken: "автоматичне виявлення вашого кроку зупинено (перевірка постійно завершувалася помилкою); щоб продовжити самостійно, запит треба подати знову"
+      resolved_check_lost: "автоматичне виявлення вашого кроку зупинено (перевірка зникла); щоб продовжити самостійно, запит треба подати знову"
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
       crashed: "crashed (worker exited); dispatcher will retry"

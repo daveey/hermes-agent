@@ -226,6 +226,8 @@ gateway:
     no_output: "(keine Ausgabe)"
     wake:
       request_withdrawn: "Anfrage zurückgezogen (keine Genehmigung oder Bestätigung des Abschlusses)"
+      resolved_check_broken: "automatische Erkennung deines Schritts wurde eingestellt (die Prüfung schlug wiederholt fehl); die Anfrage muss neu gestellt werden, damit sie von selbst fortgesetzt wird"
+      resolved_check_lost: "automatische Erkennung deines Schritts wurde eingestellt (die Prüfung ging verloren); die Anfrage muss neu gestellt werden, damit sie von selbst fortgesetzt wird"
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
       crashed: "crashed (worker exited); dispatcher will retry"

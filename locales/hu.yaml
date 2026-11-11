@@ -229,6 +229,8 @@ gateway:
     no_output: "(nincs kimenet)"
     wake:
       request_withdrawn: "kérés visszavonva (nem jóváhagyás és nem bizonyítja a befejezést)"
+      resolved_check_broken: "a lépésed automatikus észlelése leállt (az ellenőrzés újra és újra meghiúsult); a kérést újra be kell nyújtani, hogy magától folytatódjon"
+      resolved_check_lost: "a lépésed automatikus észlelése leállt (az ellenőrzés elveszett); a kérést újra be kell nyújtani, hogy magától folytatódjon"
       completed: "befejeződött"
       gave_up: "feladva (az újrapróbálkozások elfogytak)"
       crashed: "összeomlott (a worker kilépett); a diszpécser újrapróbálja"

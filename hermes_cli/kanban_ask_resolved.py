@@ -24,8 +24,9 @@ pair button, flipped the Settings toggle), so the card does not sit blocked unti
   needs its own card id is filed with ``kanban block`` after the create. An idempotent create that returns an
   existing card runs no probe.
 * One exit 0 appends an ``ask_resolved`` event, comments, and unblocks through the normal unblock path
-  (``ready``, or ``todo`` behind an open parent). ``BROKEN_AFTER`` failures in a row comment once, drop the probe
-  and leave the card blocked: a broken probe never answers for David and is never restored.
+  (``ready``, or ``todo`` behind an open parent). ``BROKEN_AFTER`` consecutive failures spanning at least
+  ``BROKEN_MIN_SECONDS`` drop the probe, mark the ask and notify its origins once. Exit 1 resets the streak.
+  The card stays blocked: a broken probe never answers for David and is never restored until re-filed.
 """
 from __future__ import annotations
 
@@ -47,6 +48,7 @@ RESTORED_EVENT = "resolved_check_restored"
 LOST_EVENT = "resolved_check_lost"
 ALIVE_EVENT = "resolved_check_alive"
 SILENT_EVENT = "resolved_check_host_silent"
+BROKEN_MIN_SECONDS = 6 * 60 * 60
 
 
 def _request(value: Any) -> Optional[dict]:
@@ -231,6 +233,10 @@ def filing_fields(conn: sqlite3.Connection, human_request: Any) -> dict:
 
 def store_request(conn: sqlite3.Connection, task_id: str, human_request: Optional[dict]) -> None:
     """Write the card's human_request and (re)register its resolved_check probe. Caller holds the write txn."""
+    if human_request:
+        human_request = dict(human_request)
+        human_request.pop("resolved_check_dropped_at", None)
+        human_request.pop("resolved_check_drop_reason", None)
     conn.execute("UPDATE tasks SET human_request = ? WHERE id = ?",
                  (json.dumps(human_request) if human_request else None, task_id))
     sync_row(conn, task_id)
@@ -261,6 +267,14 @@ def sync_row(conn: sqlite3.Connection, task_id: str, *, now: Optional[int] = Non
 def satisfied_note(cmd: str, tail: str) -> str:
     return (f"David's ask was satisfied outside Hermes (probe `{cmd}` exited 0: `{tail}`). "
             "Verify the state and continue; don't redo the asked action.")
+
+
+def mark_dropped(conn: sqlite3.Connection, task_id: str, kind: str, now: int) -> None:
+    """Persist probe custody loss alongside its event; keep the filed action intact."""
+    row = conn.execute("SELECT human_request FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    request = _request(row[0]) or {}
+    request.update(resolved_check_dropped_at=now, resolved_check_drop_reason=kind)
+    conn.execute("UPDATE tasks SET human_request = ? WHERE id = ?", (json.dumps(request), task_id))
 
 
 def broken_note(cmd: str, rc: Any, fails: int, tail: str) -> str:
@@ -313,18 +327,22 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
             return None
         nxt = now + int(state["every"])
         if rc == 1:
-            conn.execute("UPDATE task_wake_checks SET last_at = ?, last_rc = 1, last_out = ?, fails = 0, next_at = ? "
+            conn.execute("UPDATE task_wake_checks SET last_at = ?, last_rc = 1, last_out = ?, fails = 0, first_failure_at = NULL, next_at = ? "
                          "WHERE task_id = ?", (now, tail, nxt, task_id))
             note_alive(conn, task_id, cmd, now)
             return None
         fails = int(state["fails"] or 0) + 1
+        first = conn.execute("SELECT first_failure_at FROM task_wake_checks WHERE task_id = ?", (task_id,)).fetchone()[0]
+        # Legacy rows have a count but no start time: grant a fresh grace period.
+        first = now if first is None else int(first)
         rc_col = rc if isinstance(rc, int) else -1
-        if fails < kwc.BROKEN_AFTER:
-            conn.execute("UPDATE task_wake_checks SET last_at = ?, last_rc = ?, last_out = ?, fails = ?, next_at = ? "
-                         "WHERE task_id = ?", (now, rc_col, tail, fails, nxt, task_id))
+        if fails < kwc.BROKEN_AFTER or now - first < BROKEN_MIN_SECONDS:
+            conn.execute("UPDATE task_wake_checks SET last_at = ?, last_rc = ?, last_out = ?, fails = ?, next_at = ?, first_failure_at = ? "
+                         "WHERE task_id = ?", (now, rc_col, tail, fails, nxt, first, task_id))
             note_alive(conn, task_id, cmd, now)
             return None
         conn.execute("DELETE FROM task_wake_checks WHERE task_id = ?", (task_id,))
+        mark_dropped(conn, task_id, BROKEN_EVENT, now)
         kb._append_event(conn, task_id, BROKEN_EVENT, {"cmd": cmd, "rc": rc, "fails": fails, "output": tail})
         kb.add_comment(conn, task_id, AUTHOR, broken_note(cmd, rc, fails, tail))
         return BROKEN_EVENT
@@ -446,6 +464,7 @@ def reconcile(conn: sqlite3.Connection, *, now: Optional[int] = None) -> dict:
                                                               **({"probe_host": host} if host else {})})
                 out["restored"].append(tid)
             else:
+                mark_dropped(conn, tid, LOST_EVENT, now)
                 kb._append_event(conn, tid, LOST_EVENT, {"cmd": cmd, "filed_event_id": filed_id})
                 kb.add_comment(conn, tid, AUTHOR, lost_note(cmd))
                 out["lost"].append(tid)

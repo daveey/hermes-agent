@@ -226,6 +226,8 @@ gateway:
     no_output: "（无输出）"
     wake:
       request_withdrawn: "请求已撤回（不代表批准或完成证明）"
+      resolved_check_broken: "你的步骤自动检测已停止（其检查持续失败）；必须重新提交请求才能自行恢复"
+      resolved_check_lost: "你的步骤自动检测已停止（其检查已丢失）；必须重新提交请求才能自行恢复"
       completed: "已完成"
       gave_up: "已放弃（重试次数耗尽）"
       crashed: "崩溃（worker 异常退出），dispatcher 将重试"

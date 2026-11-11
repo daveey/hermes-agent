@@ -169,7 +169,8 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 # past them and they can't wedge a later completed/blocked event behind an unclaimed row.
 _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked",
                         "quota_episode_notice", "worker_repin_notice", "dependency_parent_unclaimed",
-                        "chat_wait_unclaimed", "request_withdrawn", "failure_finalized")
+                        "chat_wait_unclaimed", "request_withdrawn", "failure_finalized", "resolved_check_broken",
+                        "resolved_check_lost")
 # kanban, /loop + /heartbeat and the bot mailbox share one idle-poll cadence; probing the lease registry on
 # every 0.5s queue timeout cost ~a core at 11 sessions (#108005).
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0
@@ -615,6 +616,8 @@ def _kb_parent_unclaimed(payload: dict) -> str:
 _KANBAN_EVENT_FORMATTERS = {
     "request_withdrawn": ("ℹ", lambda t, p, title: " request withdrawn: the card was archived. "
                          "No answer is needed for this request; this is not approval and not proof of completion."),
+    "resolved_check_broken": ("⏸", lambda t, p, title: " blocked"),  # body rendered by block_notice in the formatter
+    "resolved_check_lost": ("⏸", lambda t, p, title: " blocked"),
     "completed": ("✔", _kb_completed),
     "blocked": ("⏸", lambda t, p, title: " blocked" + (f": {str(p.get('reason'))[:160]}" if p.get("reason") else "")),
     "failure_finalized": ("✖", lambda t, p, title: _kb_failure("failure_finalized", p, title)),
@@ -643,12 +646,14 @@ def _format_kanban_event_text(sub: dict, task, ev, board_slug: str) -> Optional[
     who = getattr(task, "assignee", None) or ""
     prefix = f"{glyph} " + (f"[{board_slug}] " if board_slug else "") + (f"@{who} " if who else "")
     payload = getattr(ev, "payload", None) or {}
-    if getattr(ev, "kind", "") == "blocked":
+    if getattr(ev, "kind", "") in ("blocked", "resolved_check_broken", "resolved_check_lost"):
         from hermes_cli.kanban_block_notice import ask_update_notice, block_notice, is_metadata_only
-        if is_metadata_only(payload):  # an ask amendment, not a new block; silent for the editing chat [daveey]
+        if ev.kind == "blocked" and is_metadata_only(payload):  # an ask amendment, not a new block [daveey]
             body = ask_update_notice(task, task_id, board_slug, payload, chat_id=sub.get("chat_id"))
             return f"{prefix}Kanban {task_id} {body}" if body is not None else None
-        return f"{prefix}Kanban {task_id} " + block_notice(task, task_id, board_slug, reason=str(payload.get("reason") or ""), actor=str(payload.get("actor") or ""))
+        return f"{prefix}Kanban {task_id} " + block_notice(task, task_id, board_slug, reason=str(payload.get("reason") or ""),
+                                                         actor=str(payload.get("actor") or ""),
+                                                         drop_event=ev.kind if ev.kind != "blocked" else "")
     if getattr(ev, "kind", "") == "completed":
         # A worker refused a send into this chat put its message in the summary as a FINAL SEND line. [daveey]
         from hermes_cli.kanban_final_send import final_send_for_chat
@@ -790,10 +795,10 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
                          "claimed_mono": time.monotonic()}
                 claims.append(claim)
             task = _kb.get_task(conn, sub["task_id"])
-            from gateway.kanban_watchers_notifier import diagnostic_event
+            from gateway.kanban_watchers_notifier import coalesce_superseded_blocks, diagnostic_event
             from gateway.warning_notifications import DiagnosticText
             sub_texts = []
-            for ev in events:
+            for ev in coalesce_superseded_blocks(events):  # a block superseded by a drop in this batch renders once
                 text = _format_kanban_event_text(sub, task, ev, slug)
                 if text:
                     text = DiagnosticText(text) if diagnostic_event(ev) else _KanbanText(text)

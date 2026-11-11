@@ -218,7 +218,7 @@ def test_an_exhausted_probe_is_never_restored_until_the_ask_is_refiled(board, tm
     tid = _blocked(board, f"sh {script}")
     now = int(time.time())
     for i in range(kwc.BROKEN_AFTER):
-        kwc.run_due_wake_checks(board, now=now + 200 * (i + 1), wait=True)
+        kwc.run_due_wake_checks(board, now=now + 200 + kar.BROKEN_MIN_SECONDS * i, wait=True)
     assert len(_events(board, tid, kar.BROKEN_EVENT)) == 1 and kwc.get_state(board, tid) is None
     for i in range(3):
         kwc.run_due_wake_checks(board, now=now + 5000 + 200 * i, wait=True)
@@ -260,7 +260,7 @@ def test_a_permanently_stopped_probe_takes_no_write_txn(board, tmp_path, monkeyp
     broken = _blocked(board, f"sh {script}")
     now = int(time.time())
     for i in range(kwc.BROKEN_AFTER):
-        kwc.run_due_wake_checks(board, now=now + 200 * (i + 1), wait=True)
+        kwc.run_due_wake_checks(board, now=now + 200 + kar.BROKEN_MIN_SECONDS * i, wait=True)
     lost = _blocked(board, "exit 1")
     for _ in range(2):
         _lose(board, lost)
