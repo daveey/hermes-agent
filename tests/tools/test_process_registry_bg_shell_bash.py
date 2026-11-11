@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import shlex
 import subprocess
 import time
 
@@ -41,15 +42,25 @@ def test_background_uses_bash_semantics_with_zsh_login_shell(monkeypatch):
     assert _run(PROBE, monkeypatch, "/bin/zsh").endswith(EXPECT)
 
 
+@pytest.mark.parametrize("shell", ["bash", "/bin/sh"])
 @pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
-def test_login_environment_still_loaded_and_bg_var_hidden(tmp_path, monkeypatch):
-    (tmp_path / ".profile").write_text("export HERMES_LOGIN_MARKER=from-login-rc\n")
-    (tmp_path / ".bash_profile").write_text("export HERMES_LOGIN_MARKER=from-login-rc\n")
+def test_login_environment_still_loaded_and_bg_var_hidden(tmp_path, monkeypatch, shell):
+    # The host's /etc/profile may reset HOME (Blacksmith does). Keep the real
+    # login invocation, but load our explicit rc instead of trusting host policy.
+    rc = tmp_path / "login.rc"
+    rc.write_text("export HERMES_LOGIN_MARKER=from-login-rc\n")
+    monkeypatch.delenv("HERMES_LOGIN_MARKER", raising=False)
+    login = tmp_path / shell.rsplit("/", 1)[-1]
+    executable = shlex.quote(shutil.which(shell))
+    options = "--noprofile " if shell == "bash" else ""
+    login.write_text(
+        '#!/bin/sh\n[ "$1" = "-lic" ] || exit 97\n'
+        f'exec {executable} {options}-lic {shlex.quote(". " + shlex.quote(str(rc)) + "; ")}"$2"\n'
+    )
+    login.chmod(0o700)
     out = _run('echo "marker=$HERMES_LOGIN_MARKER bg=${HERMES_BG_COMMAND:-unset}"',
-               monkeypatch, shutil.which("bash"), home=tmp_path)
+               monkeypatch, str(login), home=tmp_path)
     assert out.endswith("marker=from-login-rc bg=unset")
-    out = _run('echo "marker=$HERMES_LOGIN_MARKER"', monkeypatch, "/bin/sh", home=tmp_path)
-    assert out.endswith("marker=from-login-rc")
 
 
 @pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
