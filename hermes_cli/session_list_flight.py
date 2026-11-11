@@ -28,6 +28,8 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Hashable, Optional
 
+from hermes_cli.sqlite_safe_read import pread_lock_safe
+
 TTL_S = 2.0
 MAX_ENTRIES = 64
 # A follower never waits longer than this on a leader; then it computes itself.
@@ -38,9 +40,14 @@ _SHM_HEADER = 48  # one WalIndexHdr copy; the second copy follows at offset 48
 def data_stamp(db_path: os.PathLike | str) -> Optional[tuple]:
     """Fingerprint that changes with every committed write to *db_path* (WAL mode), else ``None``."""
     db = Path(db_path)
+    # Never open()/close() the -shm here: SQLite keeps its WAL locks (the writer lock included) as POSIX
+    # locks on that file, and close() on ANY descriptor for it cancels them all for this process. A list
+    # call landing inside a write transaction then let a second process write the same WAL: hermes-hub
+    # index corruption 2026-11-04..11. The lock-safe reader preads from a cached fd it never closes.
+    head = pread_lock_safe(f"{db}-shm", 0, 2 * _SHM_HEADER)
+    if head is None:
+        return None
     try:
-        with open(f"{db}-shm", "rb") as f:
-            head = f.read(2 * _SHM_HEADER)
         st_db = os.stat(db)
         st_wal = os.stat(f"{db}-wal")
     except OSError:
