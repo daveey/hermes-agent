@@ -41,6 +41,40 @@ def _identity(event, payload):
     return value
 
 
+def _event_identity(event):
+    if 'uid' in event.keys() and event['uid']:
+        return event['uid']
+    import hashlib
+    # Unsynced boards lack UIDs; hash exact content instead of local integers.
+    return hashlib.sha256(json.dumps(
+        [event['kind'], event['created_at'], event['payload']],
+        separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def _observed_history(rows, results, bounds):
+    """Complete predecessor snapshots supersede legacy receipts, not live PIDs.
+
+    Dropping unmarked receipts would hide later results; require the writer to
+    have observed every other result/binding, independent of import order.
+    """
+    for event, payload in results:
+        if (payload is None or payload.get('death_proof_version') != 1
+                or type(payload.get('result_sequence')) is not int or payload['result_sequence'] <= 0):
+            continue
+        prior = payload.get('causal_predecessors')
+        expected = [_event_identity(row) for row in rows if row['id'] != event['id']]
+        if not isinstance(prior, list) or not all(isinstance(item, str) for item in prior):
+            continue
+        if sorted(prior) != sorted(expected):
+            continue
+        identity = payload.get('bound_event_identity')
+        matching = [(row, bound) for row, bound in bounds
+                    if bound is not None and _identity(row, bound) == identity]
+        if len(matching) == 1:
+            return matching[0], (event, payload), True
+    return None
+
+
 def result_identity_fields(conn, context):
     """Called under the result writer transaction, after its binding check."""
     params = (context['task_id'], context['run_id'])
@@ -55,7 +89,10 @@ def result_identity_fields(conn, context):
         seq = prior.get('result_sequence') if prior else None
         if type(seq) is int and seq > 0:
             sequences.append(seq)
-    return {'bound_event_identity': _identity(bound, payload), 'result_sequence': max(sequences) + 1}
+    history = conn.execute("SELECT * FROM task_events WHERE task_id=? AND run_id=? "
+                           "AND kind IN ('worker_result','worker_bound')", params).fetchall()
+    return {'bound_event_identity': _identity(bound, payload), 'result_sequence': max(sequences) + 1,
+            'causal_predecessors': [_event_identity(event) for event in history]}
 
 
 def attributable_events(conn, task_id, run_id):
@@ -76,7 +113,7 @@ def attributable_events(conn, task_id, run_id):
         return bounds[-1], results[-1], False
     sequences = [p.get('result_sequence') if p else None for _, p in results]
     if any(type(seq) is not int or seq <= 0 for seq in sequences) or len(set(sequences)) != len(sequences):
-        return None
+        return _observed_history(rows, results, bounds)
     result = results[sequences.index(max(cast(list[int], sequences)))]
     assert result[1] is not None  # validated alongside its positive sequence above
     identity = result[1].get('bound_event_identity')
@@ -85,5 +122,5 @@ def attributable_events(conn, task_id, run_id):
     # Require every visible binding to agree; a later live rebind cannot be
     # hidden by importing its row before the earlier failed result.
     if any(payload is None or _identity(row, payload) != identity for row, payload in bounds):
-        return None
+        return _observed_history(rows, results, bounds)
     return bounds[-1], result, True

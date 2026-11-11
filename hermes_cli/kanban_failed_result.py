@@ -154,4 +154,15 @@ def failed_result_proof(conn, task_id, run_id, claim_lock):
         return None
     if not process_gone(*receipt.pop('outer')) or not process_gone(*receipt.pop('bound')):
         return None
+    # Continued attempts can have historical bindings. Superseding their result
+    # does not remove their process-liveness fence.
+    for event in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? "
+                              "AND kind='worker_bound'", (task_id, run_id)):
+        try:
+            bound = json.loads(event['payload'])
+        except (TypeError, ValueError):
+            return None
+        if (not isinstance(bound, dict) or bound.get('claim_lock') != claim_lock
+                or not process_gone(bound.get('pid'), bound.get('started_at'))):
+            return None
     return receipt
