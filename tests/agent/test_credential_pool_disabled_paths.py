@@ -472,3 +472,16 @@ def test_an_env_var_source_is_not_disabled_as_a_slot(monkeypatch):
                                     "src": cpd._borrowed_source(row)}])
     other = SimpleNamespace(id="e0", label="anthropic_token", source="env:ANTHROPIC_TOKEN", access_token="fixture-env-2")
     assert cpd.matches(row, keys) and not cpd.matches(other, keys)
+
+
+def test_codex_service_tier_lookup_never_sends_a_passed_in_disabled_token(monkeypatch, _no_codex_env):
+    from agent import codex_service_tiers as cst
+    from agent import model_metadata_http
+    from agent.credential_pool import PooledCredential
+    (a,) = _codex_rows("a")
+    _disable("openai-codex", PooledCredential.from_dict("openai-codex", a))
+    sent = []
+    monkeypatch.setattr(model_metadata_http, "get", lambda *args, **kw: sent.append(kw) or None, raising=False)
+    assert cst._account_catalog_token(a["access_token"]) is None
+    cst.codex_account_offers_tier("gpt-5", "priority", access_token=a["access_token"])
+    assert not any(a["access_token"] in json.dumps(k, default=str) for k in sent)
