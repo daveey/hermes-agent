@@ -374,6 +374,7 @@ async def _start_gateway_start_control_socket(runner):
         _main_loop = asyncio.get_running_loop()
 
         from gateway.cron_pause import pause_for_update
+        from gateway.update_checkpoint import checkpoint_for_update, checkpoint_inventory
 
         def _rescan_profiles_handler() -> dict:
             """``hermes profile create/delete`` asks the multiplexer to reconcile ``profiles/`` now
@@ -393,6 +394,8 @@ async def _start_gateway_start_control_socket(runner):
         _control_server = GatewayControlServer(
             verb_handlers={"pause-for-update": lambda: pause_for_update(runner, _main_loop),
                            "pause-if-idle-for-update": lambda: pause_for_update(runner, _main_loop, idle_only=True),
+                           "checkpoint-for-update": lambda params: checkpoint_for_update(runner, _main_loop, params),
+                           "checkpoint-inventory": checkpoint_inventory,
                            "identify": _identify_runtime,
                            "rescan-profiles": _rescan_profiles_handler,
                            "migrate-profile-identity": migrate_profile_identity_verb(runner),

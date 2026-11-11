@@ -60,6 +60,10 @@ _READY_TIMEOUT_S = 30.0
 # approval the draining turn needs. A pre-swap wait must yield, not spend the
 # post-restart after-turn budget behind that fence.
 _PRE_SWAP_DRAIN_WAIT_S = 30.0
+# Guarded checkpoint requests may already be claimed when their reply is lost.
+# Both acknowledged drains and unknown-outcome settlement are bounded at 70s;
+# settlement alone never authorizes mutation.
+_CHECKPOINT_DRAIN_WAIT_S = 70.0
 
 
 class PauseRefused(RuntimeError):
@@ -432,6 +436,29 @@ def _wait_gone(pids, timeout: float, born: dict | None = None) -> set[int]:
     return live
 
 
+def _checkpoint_nonce(entry: dict) -> str | None:
+    """The nonce of a valid, live explicit instant-update intent for this gateway's home, else
+    ``None`` (never inferred from an environment flag; any doubt keeps the idle-only contract)."""
+    if not entry.get("home"):
+        return None
+    try:
+        from gateway.update_checkpoint import checkpoint_intent
+        intent = checkpoint_intent(Path(entry["home"]))
+    except Exception:  # health: allow BLE001 -- no provable intent means idle-only
+        return None
+    nonce = intent.get("nonce") if isinstance(intent, dict) else None
+    return nonce if isinstance(nonce, str) and nonce else None
+
+
+def _valid_checkpoint_ack(ack: dict, entry: dict, nonce: str) -> bool:
+    """A checkpoint ACK is believed only when it is from the gateway we asked (pid), for this
+    episode (required nonce echo), names the checkpoint, and states a sane bounded drain."""
+    drain = ack.get("drain_timeout")
+    return (ack.get("checkpoint") is True and type(ack.get("pid")) is int and ack["pid"] == entry.get("pid")
+            and ack.get("nonce") == nonce
+            and isinstance(drain, (int, float)) and not isinstance(drain, bool) and 0 < drain)
+
+
 def _ask_to_drain(entry: dict) -> bool | None:
     """Ask the gateway to exit only if idle; True on its ACK. Busy/old gateways refuse rather
     than starting an uncancellable pre-swap drain. SIGTERM,
@@ -439,12 +466,36 @@ def _ask_to_drain(entry: dict) -> bool | None:
     planned-stop marker on this path: the gateway's marker watcher takes that same immediate
     signal-stop path, and could fire before the request lands. The caller records the request
     (``mark_stop_sent``) BEFORE sending it, so a request that reaches the gateway after this update
-    died still leaves the evidence that keeps the drained gateway's restart debt."""
-    from gateway.control_socket import pause_gateway_for_update
+    died still leaves the evidence that keeps the drained gateway's restart debt.
+
+    With an explicit live instant-update intent (``checkpoint_intent``) the request is the guarded
+    ``checkpoint-for-update`` carrying its nonce: the gateway itself refuses unknown reservations
+    or work. Only a validated checkpoint ACK sets ``entry['checkpoint_drain_timeout']``, which
+    ``_stop_gateways`` turns into the longer wait. There is no forced-stop fallback."""
+    from gateway.control_socket import pause_gateway_for_update, query_gateway_control
     if not entry.get("home"):
         return False  # no request was sent
+    entry.pop("checkpoint_drain_timeout", None)
+    entry.pop("checkpoint_settle_timeout", None)
+    nonce = _checkpoint_nonce(entry)
     try:
-        ack = pause_gateway_for_update(Path(entry["home"]), idle_only=True)
+        if nonce is not None:
+            # A lost reply does not revoke a request already claimed by the loop.
+            # This extends settlement only, never authorizes a checkout move.
+            entry["checkpoint_settle_timeout"] = _CHECKPOINT_DRAIN_WAIT_S
+            ack = query_gateway_control(Path(entry["home"]), "checkpoint-for-update",
+                                        params={"nonce": nonce}, timeout=8.0, report_unsupported=True)
+            if ack and ack.get("unsupported"):  # old gateway: the stricter idle-only request still applies
+                entry.pop("checkpoint_settle_timeout", None)
+                ack = pause_gateway_for_update(Path(entry["home"]), idle_only=True)
+            elif ack and (ack.get("pausing") or ack.get("already_stopping")):
+                if not _valid_checkpoint_ack(ack, entry, nonce):
+                    return None  # unbelievable ACK: may be exiting; settle it, never extend the wait
+                if ack.get("pausing"):
+                    entry["checkpoint_drain_timeout"] = float(ack["drain_timeout"])
+                return True
+        else:
+            ack = pause_gateway_for_update(Path(entry["home"]), idle_only=True)
     except Exception:  # health: allow BLE001 -- unknown/busy gateways must not authorize a tree mutation
         return None
     if ack and (ack.get("pausing") or ack.get("already_stopping")):
@@ -502,6 +553,9 @@ def _stop_gateways(token: dict, entries: list[dict]) -> None:
         if refusals:
             raise PauseRefused("; ".join(refusals), refused)
         return
+    if acked := [e.get("checkpoint_drain_timeout") or e.get("checkpoint_settle_timeout")
+                 for e in waiting if e.get("checkpoint_drain_timeout") or e.get("checkpoint_settle_timeout")]:
+        budget = max(budget, min(max(acked), _CHECKPOINT_DRAIN_WAIT_S))
     print(f"  ⏳ Waiting up to {budget:.0f}s for paused gateways {_names(waiting)} to exit before the update...")
     ticks = [drain_progress_reporter(Path(e["home"]) if e.get("home") else None, budget_s=budget) for e in waiting]
     deadline = time.monotonic() + budget

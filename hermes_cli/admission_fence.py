@@ -195,10 +195,11 @@ def extend(home, *, timeout=0.05):
             raise
 
 
-def _state_locked(root):
+def _state_locked(root, *, details=False):
     import fcntl
 
     count = 0
+    reservation_ids = []
     directory = root / "reservations"
     try:
         paths = list(directory.iterdir())
@@ -216,16 +217,20 @@ def _state_locked(root):
                 if exc.errno not in (errno.EAGAIN, errno.EACCES):
                     raise
                 count += 1
+                reservation_ids.append(path.name)
             else:
                 path.unlink(missing_ok=True)  # crashed owner; no age/PID heuristic
         finally:
             os.close(fd)
-    return {"version": 1, "held": is_held(root), "reservations": count}
+    result = {"version": 1, "held": is_held(root), "reservations": count}
+    if details:
+        result["reservation_ids"] = sorted(reservation_ids)
+    return result
 
 
-def state(home):
-    with admission_lock(home) as root:
-        return _state_locked(root)
+def state(home, *, details=False, timeout=10.0):
+    with admission_lock(home, timeout=timeout) as root:
+        return _state_locked(root, details=details)
 
 
 def set_hold(home):
@@ -295,7 +300,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("capability", "state", "hold", "release"))
+    parser.add_argument("action", choices=("capability", "state", "state-details", "hold", "release"))
     parser.add_argument("--home", type=Path)
     args = parser.parse_args()
     if args.action == "capability":
@@ -303,7 +308,8 @@ def main():
     else:
         if args.home is None:
             parser.error("--home must name the explicit installation root")
-        result = {"state": state, "hold": set_hold, "release": clear_hold}[args.action](args.home)
+        result = (state(args.home, details=True) if args.action == "state-details" else
+                  {"state": state, "hold": set_hold, "release": clear_hold}[args.action](args.home))
     print(json.dumps(result))
 
 
