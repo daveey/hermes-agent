@@ -572,6 +572,8 @@ def translate(row: dict, hlc: str) -> dict:
     if row["op"] == "delete":
         return {**op, "op": "delete"}
     fields = row["fields"] if isinstance(row["fields"], dict) else json.loads(row["fields"])
+    if row["op"] == "release":
+        return {**fields, "client_op_id": row["op_id"], "op": "release", "task": row["row_uid"]}
     out = {**op, "op": "upsert", "fields": _wire_fields(row["table_name"], fields)}
     if row["op"] in ("import", "compat_import") and row["table_name"] == "tasks":
         out["import"] = True
@@ -712,7 +714,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                     sent = next(op.get('fields', {}) for op in wire if op['client_op_id'] == op_id)
                     acknowledge(conn, op_id, res.get("row"), sent=sent)
                     conn.execute("DELETE FROM kanban_sync_outbox WHERE op_id = ?", (op_id,))
-                    if row["table_name"] == "tasks" and res.get("version"):
+                    if row["table_name"] == "tasks" and row["op"] != "release" and res.get("version"):
                         conn.execute("UPDATE tasks SET sync_version = MAX(COALESCE(sync_version, 0), ?) WHERE id = ?",
                                      (res["version"], row["row_uid"]))
                     elif row["table_name"] == "task_runs" and res.get("version"):
@@ -784,7 +786,7 @@ def pending_task_fields(conn: sqlite3.Connection) -> dict[str, set[str]]:
     """Wire fields per task with a local edit still in the outbox (not rejected)."""
     out: dict[str, set[str]] = {}
     for uid, fields in conn.execute("SELECT row_uid, fields FROM kanban_sync_outbox "
-                                    "WHERE table_name = 'tasks' AND state != 'rejected'"):
+                                    "WHERE table_name = 'tasks' AND op IN ('upsert', 'import') AND state != 'rejected'"):
         out.setdefault(uid, set()).update(json.loads(fields))
     return out
 

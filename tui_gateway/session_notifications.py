@@ -169,7 +169,7 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 # past them and they can't wedge a later completed/blocked event behind an unclaimed row.
 _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked",
                         "quota_episode_notice", "worker_repin_notice", "dependency_parent_unclaimed",
-                        "chat_wait_unclaimed", "request_withdrawn")
+                        "chat_wait_unclaimed", "request_withdrawn", "failure_finalized")
 # kanban, /loop + /heartbeat and the bot mailbox share one idle-poll cadence; probing the lease registry on
 # every 0.5s queue timeout cost ~a core at 11 sessions (#108005).
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0
@@ -621,6 +621,7 @@ _KANBAN_EVENT_FORMATTERS = {
                          "No answer is needed for this request; this is not approval and not proof of completion."),
     "completed": ("✔", _kb_completed),
     "blocked": ("⏸", lambda t, p, title: " blocked" + (f": {str(p.get('reason'))[:160]}" if p.get("reason") else "")),
+    "failure_finalized": ("✖", lambda t, p, title: _kb_failure("failure_finalized", p, title)),
     "gave_up": ("✖", lambda t, p, title: _kb_failure("gave_up", p, title)),
     "crashed": ("✖", lambda t, p, title: _kb_failure("crashed", p, title)),
     "timed_out": ("⏱", _kb_timed_out),
@@ -635,6 +636,9 @@ _KANBAN_EVENT_FORMATTERS = {
 def _format_kanban_event_text(sub: dict, task, ev, board_slug: str) -> Optional[str]:
     """Single-line notification text for one kanban event; wording mirrors gateway/kanban_watchers.py (reads the same
     as on Telegram). None for silent kinds."""
+    from hermes_cli.kanban_failure_notice import provisional_failure
+    if provisional_failure(ev):
+        return None
     if (entry := _KANBAN_EVENT_FORMATTERS.get(getattr(ev, "kind", ""))) is None:
         return None
     glyph, fmt = entry
@@ -795,7 +799,8 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
                 text = _format_kanban_event_text(sub, task, ev, slug)
                 if text:
                     text = DiagnosticText(text) if diagnostic_event(ev) else _KanbanText(text)
-                    text._kb_keys = (f"{slug}:{int(ev.id)}",)  # type: ignore[attr-defined]  # event-id identity
+                    from hermes_cli.kanban_failure_notice import event_key
+                    text._kb_keys = (event_key(slug, ev),)  # type: ignore[attr-defined]
                     texts.append(text)
                     sub_texts.append(text)
                     if claim is not None:

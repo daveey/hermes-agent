@@ -890,6 +890,11 @@ def advance_notify_cursor(
         )
 
 
+def notify_failure_receipts(conn, **kwargs):
+    from hermes_cli.kanban_notify_receipts import notify_failure_receipts as receipts
+    return receipts(conn, **kwargs)
+
+
 def record_notify_ping(
     conn: sqlite3.Connection, *, task_id: str, platform: str, chat_id: str,
     thread_id: Optional[str] = None, event_id: int,

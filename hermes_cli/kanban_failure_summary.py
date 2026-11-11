@@ -99,16 +99,19 @@ def describe_failure(kind: str, title: str, payload: Mapping[str, Any]) -> str:
     limit = _as_int(payload.get("effective_limit"))
     attempts = ""
     if failures:
-        attempts = f"{failures} of {limit}" if limit else str(failures)
+        attempts = f"{min(failures, limit)} of {limit}" if limit else str(failures)
 
-    retry = str(payload.get("retry_status") or "")
-    if kind == "gave_up":
+    retry = str(payload.get("final_status") if kind == "failure_finalized" else payload.get("retry_status") or "")
+    if kind == "failure_finalized" and retry == "triage":
+        state = (f"stopped after {attempts} failed attempt(s); task is in automatic triage" if attempts
+                 else "task is in automatic triage")
+    elif kind == "gave_up":
         state = (f"stopped after {attempts} failed attempt(s); task is Blocked" if attempts
                  else "stopped after repeated failed attempts; task is Blocked")
     elif retry == "blocked" or cls == "provider_config":
         state = "task is Blocked"
-    elif retry_promised(payload):
-        # Only the recorded retry policy may promise a retry.
+    elif retry in ("ready", "review"):
+        # Only the recorded final disposition may promise a retry.
         state = f"task returned to {retry}; the dispatcher's normal retry policy applies"
     else:
         state = "retry state was not recorded"

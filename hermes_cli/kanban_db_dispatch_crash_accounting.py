@@ -42,6 +42,10 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list, *, allow_nes
     for tid, pid, claimer, dead in crash_details:
         error_text = dead.error_text
         if dead.protocol_violation:
+            from hermes_cli.kanban_failure_release import queue
+            if queue(conn, tid, dead.run_id, outcome="crashed", error=error_text,
+                     protocol_violation=True, failure_limit=_d._PROTOCOL_VIOLATION_FAILURE_LIMIT):
+                continue  # Board computes the streak from authoritative closed runs.
             streak = _d._protocol_violation_streak(conn, tid)
             trow = conn.execute("SELECT max_retries FROM tasks WHERE id = ?", (tid,)).fetchone()
             if trow is None:
@@ -51,13 +55,18 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list, *, allow_nes
                 int(task_override) if task_override is not None else _d._PROTOCOL_VIOLATION_FAILURE_LIMIT
             )
             if streak < violation_limit:
-                # Below budget: already back at ``ready`` with the error stamped.
-                # No ``_record_task_failure`` — must not consume the unified budget.
+                # Finalize the exempt run too, so a late reclaim cannot charge it.
+                from hermes_cli import kanban_local_failure as local
+                if local.admit(conn, tid, dead.run_id):
+                    failures = conn.execute("SELECT consecutive_failures FROM tasks WHERE id=?", (tid,)).fetchone()[0]
+                    local.finalized(conn, tid, dead.run_id, failures=failures, effective_limit=violation_limit,
+                                    error=error_text, trigger_outcome="crashed", protocol_violations=streak,
+                                    protocol_violation_limit=violation_limit, tripped=False)
                 continue
             # ``force_trip``: the decision (incl. per-task ``max_retries``) was
             # already made against the violation streak above.
             tripped = _d._record_task_failure(
-                conn, tid,
+                conn, tid, run_id=dead.run_id,
                 error=error_text,
                 outcome="crashed",
                 failure_limit=violation_limit,
@@ -78,7 +87,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list, *, allow_nes
             flag = "unknown_skill" if dead.unknown_skill else "stdlib_shadow" if dead.stdlib_shadow else \
                 "reboot_culprit" if dead.reboot_culprit else "terminal_provider"
             tripped = _d._record_task_failure(
-                conn, tid,
+                conn, tid, run_id=dead.run_id,
                 error=error_text,
                 outcome="crashed",
                 force_trip=True,
@@ -104,7 +113,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list, *, allow_nes
                 # No fix card could be opened: trips at 1, held for an operator.
                 extra["sticky"] = True
             tripped = _d._record_task_failure(
-                conn, tid,
+                conn, tid, run_id=dead.run_id,
                 error=error_text,
                 outcome="crashed",
                 failure_limit=1 if is_systemic else None,
@@ -113,9 +122,6 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list, *, allow_nes
                 allow_nested=allow_nested,
                 event_payload_extra=extra,
             )
-            if tripped and fix_id and not _systemic.attach(conn, fix_id, tid, allow_nested=allow_nested):
-                with _d._kb.write_txn(conn, allow_nested=allow_nested):  # unlinked: keep it held
-                    _d._kb._append_event(conn, tid, "gave_up", {**extra, "sticky": True, "fix_card_link_failed": True})
         if tripped:
             auto_blocked.append(tid)
     return auto_blocked

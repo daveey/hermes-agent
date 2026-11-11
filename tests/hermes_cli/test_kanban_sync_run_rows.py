@@ -84,14 +84,56 @@ def _assert_ended(live, svc, uid, outcome):
     assert not dangling
 
 
+def _expire_board_lease(svc, tid, uid):
+    """Model the authoritative expiry/feed (the fake has no DO alarm).
+
+    Real alarm/crash races are covered by the Worker suite; here retain the
+    sync regression: an earlier grant/push echo must not reopen the ended run.
+    """
+    b = svc.board(BOARD)
+    lease = b["leases"].pop(tid)
+    assert lease["run_uid"] == uid
+    clock = "9999999999999-0001-board"
+    svc._put(b, "task_runs", uid,
+             {"status": "reclaimed", "outcome": "reclaimed", "ended_at": int(time.time())},
+             "server", None, clock)
+    fields = {"status": "ready", "current_run_uid": None, "lease_holder": None, "lease_expires": None}
+    clocks = {**b["rows"]["tasks"][tid].get("field_hlc", {}), **dict.fromkeys(fields, clock)}
+    svc._put(b, "tasks", tid, {**fields, "field_hlc": clocks}, "server", None, clock)
+
+
 def test_stale_lock_reclaim_survives_the_echo_of_the_runs_earlier_push(live, kanban_home, svc):
     tid, uid = _claimed(live, kanban_home, svc, "stale lock")
     _round(kanban_home, svc)  # the run's insert reaches the Board; its echo now waits in the feed
     live.execute("UPDATE tasks SET claim_expires = ?, worker_pid = NULL WHERE id = ?", (int(time.time()) - 5, tid))
-    assert kb.release_stale_claims(live) == 1
+    assert kb.release_stale_claims(live) == 0
+    assert _run(live, uid)["status"] == "running"  # no competing local finalization
+    _expire_board_lease(svc, tid, uid)
     _round(kanban_home, svc)  # pull (the stale echo) then push (the end)
     _round(kanban_home, svc)
     _assert_ended(live, svc, uid, "reclaimed")
+
+
+@pytest.mark.parametrize("mode,remote_end,local_end,seen,version,expected", [
+    ("primary", 10, None, None, 2, False),
+    ("primary", None, None, None, 2, True),
+    ("shadow", 10, None, None, 2, True),
+    ("primary", 10, 9, None, 2, True),
+    ("primary", 10, None, 2, 2, True),
+    ("primary", 10, None, 3, 2, True),
+])
+def test_pending_run_start_does_not_mask_newer_authoritative_end(
+    live, kanban_home, svc, mode, remote_end, local_end, seen, version, expected,
+):
+    tid, uid = _claimed(live, kanban_home, svc, "pending start fence")
+    rid = live.execute("SELECT id FROM task_runs WHERE uid=?", (uid,)).fetchone()[0]
+    live.execute("UPDATE task_runs SET ended_at=?, sync_version=? WHERE id=?", (local_end, seen, rid))
+    live.commit()
+    sync.set_mode(live, mode)
+    change = sync.RemoteChange(seq=1, table="task_runs", uid=uid, op="upsert", version=version,
+                               hlc="", origin_gateway="server",
+                               fields={"task_id": tid, "ended_at": remote_end, "status": "reclaimed"})
+    assert sync._local_row_is_newer(live, "task_runs", change, rid) is expected
 
 
 def test_orphan_sweep_survives_the_echo_of_the_runs_earlier_push(live, kanban_home, svc):
@@ -173,7 +215,9 @@ def test_a_run_that_ends_before_its_first_push_survives_the_grants_own_run_row(l
     run already ended (a slow round) must not reopen it."""
     tid, uid = _claimed(live, kanban_home, svc, "slow round")
     live.execute("UPDATE tasks SET claim_expires = ?, worker_pid = NULL WHERE id = ?", (int(time.time()) - 5, tid))
-    assert kb.release_stale_claims(live) == 1
+    assert kb.release_stale_claims(live) == 0
+    assert _run(live, uid)["status"] == "running"  # no competing local finalization
+    _expire_board_lease(svc, tid, uid)
     _round(kanban_home, svc)
     _round(kanban_home, svc)
     _assert_ended(live, svc, uid, "reclaimed")

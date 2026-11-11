@@ -222,11 +222,14 @@ def test_lease_gap_stops_the_worker_once_the_lease_is_really_gone(primary, lease
         else:
             _lapse(conn, tid, sync.LEASE_DARK_HOLD_SECONDS + 60)
             lease_client.renew_mode = "offline"
-        assert kb.release_stale_claims(conn) == 1
+        before = _run_rows(conn, tid)
+        assert kb.release_stale_claims(conn) == 0
         reaper.join(timeout=30)
         assert proc.poll() is not None, "worker kept running after its lease was gone"
-        assert kb.get_task(conn, tid).status == "ready"
-        assert _run_rows(conn, tid)[-1][1:] == ("lease_lost", "lease_lost")
+        # The worker is stopped locally; only the authoritative feed ends its run.
+        assert kb.get_task(conn, tid).status == "running"
+        assert _run_rows(conn, tid) == before
+        assert kb.get_task(conn, tid).consecutive_failures == 0
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -327,10 +330,12 @@ def test_lease_moved_to_another_gateway_stops_the_local_worker(primary, lease_cl
         sync.apply_remote_changes(conn, [sync.RemoteChange(
             1, "tasks", tid, "lease", {"lease_holder": "gw_other", "lease_expires": far}, 9, "", "gw_other",
         )], new_cursor=1)
-        assert kb.release_stale_claims(conn) == 1
+        before = _run_rows(conn, tid)
+        assert kb.release_stale_claims(conn) == 0
         reaper.join(timeout=30)
         assert proc.poll() is not None
-        assert _run_rows(conn, tid)[-1][1] == "lease_lost"
+        assert _run_rows(conn, tid) == before
+        assert kb.get_task(conn, tid).consecutive_failures == 0
     finally:
         if proc.poll() is None:
             proc.kill()
