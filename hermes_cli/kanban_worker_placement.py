@@ -289,8 +289,8 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
     try:
         for row in rows:
             last = row["id"]
-            from hermes_cli.kanban_placement_recovery import promotion_mode
-            mode = promotion_mode(conn, dict(row), cfg) if row["placement_policy"] is None else None
+            from hermes_cli.kanban_placement_recovery import recovery_mode
+            mode = recovery_mode(conn, dict(row), cfg)
             if row["placement_policy"] is None and mode is None:
                 continue
             key = (board, row["id"])
@@ -301,7 +301,7 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
             if len(_refused) > 1024:  # cards that left the query never come back to clear their entry
                 for stale in [k for k, (_, until) in _refused.items() if until <= now]:
                     del _refused[stale]
-            labels = requested_move(conn, row["id"])
+            labels = None if mode else requested_move(conn, row["id"])
             stage = "recover" if mode else ("reserve" if labels is None else "repin")
             held = _queued.get(key)
             identity = _local_identity(conn, row["id"]) if labels is None else None
