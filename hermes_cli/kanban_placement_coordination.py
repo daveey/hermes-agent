@@ -57,15 +57,14 @@ _TOOLS = {
 }
 
 
-# Remote access a worker holds through a restricted key, attested on its Board labels by the operator (the keys
-# are installed by hand: a worker-2 key in the MacBook's and mini's authorized_keys, and a forced-command
-# read-only `hub-read` login on the hub). A bare mention is conservative: a card that wants more than the key
-# gives blocks with needs=[...] and capability routing opens the owner card. Other home markers (launchd, cron,
-# systemctl, gateway restart, hub paths) stay binding either way.
+# Explicit task contracts, not authority inferred from prose. These declarations
+# describe existing restricted access; they never install credentials or grant writes.
+ACCESS_LABELS = {"ssh:mbp": "capability:ssh-mbp", "ssh:mini": "capability:ssh-mini",
+                 "hub:read": "capability:hub-read"}
 _ACCESS = (
-    (re.compile(r"\bssh\b", re.IGNORECASE), ("capability:ssh-mbp", "capability:ssh-mini")),
+    (re.compile(r"\bssh\b", re.IGNORECASE), {"ssh:mbp", "ssh:mini"}),
     (re.compile(r"\bon the hub\b|\bthe hub's\b|\bjournalctl\b|\bkanban\.db\b", re.IGNORECASE),
-     ("capability:hub-read",)),
+     {"hub:read"}),
 )
 
 
@@ -93,9 +92,9 @@ def requirements(text):
     return labels, None
 
 
-def access_requirements(text):
-    """Labels the ssh / hub-read mentions in ``text`` would need; never a refusal (unmet = markers keep binding)."""
-    return {label for rx, needed in _ACCESS if rx.search(text) for label in needed}
+def access_requirements(requires):
+    """Labels for declared access; unknown names remain gateway-scoped."""
+    return {ACCESS_LABELS[r] for r in requires or [] if r in ACCESS_LABELS}
 
 
 def destinations(cfg, target=None):
@@ -139,12 +138,11 @@ def attested(names, required):
     return True
 
 
-def check(text, cfg, *, target=None, skills=None, access=False):
-    """``access`` adds the ssh / hub-read labels (claim revalidation); placement leaves them to :func:`access_text`."""
+def check(text, cfg, *, target=None, skills=None, requires=None):
+    """Revalidate coordination tools and explicitly declared remote access."""
     required, refusal = requirements(text)
     required.update(skill_requirements(skills))
-    if access:
-        required.update(access_requirements(text))
+    required.update(access_requirements(requires))
     if refusal or not required:
         return refusal
     return None if attested(destinations(cfg, target), required) else REASON
@@ -158,13 +156,17 @@ def marker_text(text):
     return re.sub(r"\btoken-broker\b", "", text, flags=re.IGNORECASE)
 
 
-def access_text(text, cfg, *, target=None):
+def access_text(text, cfg, *, target=None, requires=None):
     """``text`` minus the remote-access mentions (ssh, hub reads) whose labels EVERY destination attests.
 
     An unattested mention stays in the text, so its home marker still pins the card exactly as before.
     Kept apart from :func:`marker_text` so a card that never needed the attestation keeps its markers."""
+    declared = set(requires or [])
+    labels = access_requirements(declared)
+    if not labels or not attested(destinations(cfg, target), labels):
+        return text
     for rx, needed in _ACCESS:
-        if rx.search(text) and attested(destinations(cfg, target), set(needed)):
+        if declared & needed:
             text = rx.sub("", text)
     return text
 
@@ -176,7 +178,8 @@ def claim_refusal(card, me):
     from hermes_cli.kanban_placement import without_evidence, without_placement_note
     text = f"{card.get('title') or ''}\n{without_evidence(without_placement_note(card.get('body') or ''))}"
     from hermes_cli.kanban_runs_on_capabilities import _loads
-    return check(text, {}, target=me, skills=_loads(card.get("skills"), []), access=True)
+    return check(text, {}, target=me, skills=_loads(card.get("skills"), []),
+                 requires=_loads(card.get("requires"), []))
 
 
 def legacy_refusal(args):
@@ -184,7 +187,8 @@ def legacy_refusal(args):
     from hermes_cli.kanban_placement import without_evidence, without_placement_note
     text = f"{args.get('title') or ''}\n{without_evidence(without_placement_note(args.get('body') or ''))}"
     required, refusal = requirements(text)
-    return bool(refusal or required or skill_requirements(args.get("skills")))
+    return bool(refusal or required or skill_requirements(args.get("skills"))
+                or access_requirements(args.get("requires")))
 
 
 def skill_requirements(skills):

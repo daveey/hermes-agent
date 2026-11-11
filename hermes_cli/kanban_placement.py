@@ -434,9 +434,11 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
         return "uncarried option"
     reqs = args.get("requires") or []
     reqs = [reqs] if isinstance(reqs, str) else list(reqs)
-    if any(reg.is_gateway_need(r) for r in reqs):
+    from hermes_cli import kanban_placement_coordination as coordination
+    ordinary = [r for r in reqs if r not in coordination.ACCESS_LABELS]
+    if any(reg.is_gateway_need(r) for r in ordinary):
         return "gateway-scoped requirement"
-    if any(str(r) not in c.carried_requires() for r in reqs):
+    if any(str(r) not in c.carried_requires() for r in ordinary):
         return "uncarried requirement"
     title, body = args.get("title") or "", without_evidence(without_placement_note(args.get("body") or ""))
     if _local_marker(title, body, args.get("skills"), c):
@@ -446,9 +448,9 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
     from hermes_cli.kanban_published_worktree import without_published_worktrees
 
     full = without_carried_inputs(f"{title}\n{body}", c.raw)
-    if refusal := coordination.check(full, c.raw, skills=args.get("skills")):
+    if refusal := coordination.check(full, c.raw, skills=args.get("skills"), requires=reqs):
         return refusal
-    marker_full = coordination.access_text(coordination.marker_text(full), c.raw)
+    marker_full = coordination.access_text(coordination.marker_text(full), c.raw, requires=reqs)
     extra = c.raw.get("extra_home_markers")
     exemptible = (HUB_CLI_COMMAND, r"\btoken-broker\b", r"\bssh\b", r"\bon the hub\b", r"\bthe hub's\b",
                   r"\bjournalctl\b", r"\bkanban\.db\b")  # coordination.check() proved the worker attests each

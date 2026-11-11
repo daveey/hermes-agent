@@ -19,8 +19,9 @@ def fleet(monkeypatch):
     return cfg, entry, machines
 
 
-def reason(body, cfg):
-    return kp.portable_reason({"title": "Read coordination evidence", "body": body}, cfg)
+def reason(body, cfg, requires=None):
+    return kp.portable_reason({"title": "Read coordination evidence", "body": body,
+                               "requires": requires}, cfg)
 
 
 def test_independent_broker_state_path_stays_home(fleet):
@@ -272,13 +273,13 @@ def test_ssh_card_needs_mac_ssh_attestation(fleet):
     cfg, entry, _ = fleet
     assert reason("ssh mini and check the watcher output", cfg) == "home gateway marker"
     entry["labels"] += ACCESS
-    assert reason("ssh mini and check the watcher output", cfg) is None
+    assert reason("ssh mini and check the watcher output", cfg, ["ssh:mini"]) is None
 
 
-def test_ssh_attestation_needs_both_mac_keys(fleet):
+def test_ssh_attestation_needs_the_declared_mac_key(fleet):
     cfg, entry, _ = fleet
     entry["labels"] += ["capability:ssh-mini"]
-    assert reason("SSH to the MacBook for the log", cfg) == "home gateway marker"
+    assert reason("SSH to the MacBook for the log", cfg, ["ssh:mbp"]) is not None
 
 
 @pytest.mark.parametrize("body", ["read the log on the hub", "the hub's log output", "journalctl -u x",
@@ -287,7 +288,7 @@ def test_hub_reads_need_hub_read_attestation(fleet, body):
     cfg, entry, _ = fleet
     assert reason(body, cfg) == "home gateway marker"
     entry["labels"] += ["capability:hub-read"]
-    assert reason(body, cfg) is None
+    assert reason(body, cfg, ["hub:read"]) is None
 
 
 def test_access_labels_do_not_exempt_other_home_markers(fleet):
@@ -301,7 +302,8 @@ def test_access_labels_do_not_exempt_other_home_markers(fleet):
 def test_claim_refusal_revalidates_access_labels(fleet):
     from hermes_cli.kanban_placement_coordination import claim_refusal
     _, entry, _ = fleet
-    card = {"placement_policy": "worker-first-v1", "title": "t", "body": "ssh mini then read the log"}
+    card = {"placement_policy": "worker-first-v1", "title": "t", "body": "ssh mini then read the log",
+            "requires": '["ssh:mini"]'}
     assert claim_refusal(card, "worker") == "needs worker coordination capability"
     entry["labels"] += ACCESS
     assert claim_refusal(card, "worker") is None
@@ -311,4 +313,4 @@ def test_unattested_access_leaves_cards_home_as_before(fleet):
     cfg, entry, _ = fleet
     entry["labels"] += ["capability:hub-read"]  # hub reads attested, ssh not
     assert reason("ssh mini and read the log on the hub", cfg) == "home gateway marker"
-    assert reason("read the log on the hub", cfg) is None
+    assert reason("read the log on the hub", cfg, ["hub:read"]) is None
