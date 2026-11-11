@@ -189,14 +189,36 @@ jobs:
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
 
+      - name: Export flaky metadata
+        # Runs after a green AND a red test step: a red slice can still carry flakes in other
+        # files. scripts/ci/flaky_artifact.py keeps only each pass-on-retry test's canonical id
+        # (no failure output, no parameters) plus run provenance; a missing/malformed runner report
+        # becomes an explicit complete=false record, never an empty success. The hub's
+        # ci-flaky-cards cron (scripts/ci/flaky_kanban.py --from-github) downloads these artifacts
+        # and files one deflake card per test id.
+        if: ${{ !cancelled() }}
+        env:
+          REPORT: ${{ runner.temp }}/flaky-tests/slice-${{ matrix.slice }}.json
+          OUTPUT: ${{ runner.temp }}/flaky-metadata/flaky-metadata.json
+          FLAKY_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SLICE: ${{ matrix.slice }}
+          SLICES: ${{ strategy.job-total }}
+        run: python3 scripts/ci/flaky_artifact.py --report "$REPORT" --output "$OUTPUT" --slice "$SLICE" --slices "$SLICES"
+
+      - name: Upload flaky metadata
+        if: ${{ !cancelled() }}
+        # Advisory: a quota failure must not fail the slice; the poller reports a missing artifact
+        # as an unavailable run (left unprocessed for retry), never as "no flakes".
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flaky-metadata-v1-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slice }}
+          path: ${{ runner.temp }}/flaky-metadata/flaky-metadata.json
+          if-no-files-found: error
+          retention-days: 3
+
       - name: Report flaky tests
-        # Runs after a green AND a red test step: a red slice can still carry
-        # flakes in other files. Each pass-on-retry test becomes one warning
-        # annotation titled "FLAKY (passed only on retry)": first message line
-        # = test id, then the first attempt's failure tail. The hub's
-        # ci-flaky-cards cron (scripts/ci/flaky_kanban.py --from-github) reads
-        # these annotations and files one deflake card per test id.
-        # Annotations, not artifacts: artifact storage is not reliable here.
+        # Local warning annotations for a human reading the run; the cron reads the artifact above.
         if: ${{ !cancelled() }}
         env:
           REPORT: ${{ runner.temp }}/flaky-tests/slice-${{ matrix.slice }}.json

@@ -236,16 +236,13 @@ def test_failed_delivery_leaves_the_github_run_unprocessed_for_the_next_poll(env
     env.remote("macbook", "default/hermes/t_remote", "ready", f"Deflake {TEST}", f"`{TEST}`")
     env.refuse({"id": "t_remote", "gateway": "macbook", "board": "hermes", "status": "ready", "title": "z"})
     monkeypatch.setenv("FAKE_HUB_MODE", "reject")
-    api = "https://api.github.com/repos/o/r"
+    from scripts.ci import flaky_artifact as fa
+    from tests.ci.flaky_artifact_fakes import FakeGitHub
 
-    def fake_gh(url, token):
-        if url.startswith(f"{api}/actions/runs?"):
-            return {"workflow_runs": [{"id": 5, "run_attempt": 1, "head_branch": "main", "html_url": "u"}]}
-        if "/jobs" in url:
-            return {"jobs": [{"id": 9, "name": "Run tests (1/2)", "html_url": RUN}]}
-        return [{"title": fk.ANNOTATION_TITLE, "message": f"{TEST}\nboom"}]
-
-    monkeypatch.setattr(fk, "_gh", fake_gh)
+    gh = FakeGitHub()
+    gh.simple(tests=(TEST,))
+    monkeypatch.setattr(fk, "_gh", gh.gh)
+    monkeypatch.setattr(fa, "download_zip", gh.download)
     state = fk.load_state(env.tmp / "absent.json")
     log = fk.poll_github("o/r", "tok", fk.CliBoard(env.hermes), state, relay=fk.HubRelay())
     assert log[0].startswith("FAILED") and state["runs"] == []

@@ -175,39 +175,33 @@ def test_open_foreign_card_for_the_test_id_is_commented_not_duplicated():
     assert state["cards"][a]["card"] == "t_other"
 
 
-def test_annotations_round_trip_through_the_github_poll(monkeypatch):
-    """CI prints FLAKY annotations; the hub poll reads them back into one card per id."""
+def test_annotations_still_render_locally_with_escaping():
+    """--annotate keeps printing FLAKY warnings for a local report (the cron no longer reads them)."""
     excerpt = "E   AssertionError: 100% starved\nline two"
     lines = fk.annotations([_entry("tests/x.py::test_a", excerpt), _entry("tests/y.py")])
     assert lines[0].startswith("::warning title=FLAKY (passed only on retry)::tests/x.py::test_a%0A")
     assert "100%25 starved" in lines[0]                      # workflow-command escaping
-    messages = [line.split("::", 2)[2].replace("%0A", "\n").replace("%25", "%") for line in lines]
+    assert lines[1] == "::warning title=FLAKY (passed only on retry)::tests/y.py%0AAssertionError: boom"
 
-    api = "https://api.github.com/repos/o/r"
-    calls = []
 
-    def fake_gh(url, token):
-        calls.append(url)
-        if url.startswith(f"{api}/actions/runs?"):
-            return {"workflow_runs": [{"id": 5, "run_attempt": 1, "head_branch": "main",
-                                       "html_url": "https://github.com/o/r/actions/runs/5"}]}
-        if url.startswith(f"{api}/actions/runs/5/attempts/1/jobs"):
-            return {"jobs": [{"id": 9, "name": "Python tests / Run tests (1/2)", "html_url": "https://job/9"},
-                             {"id": 10, "name": "Lint", "html_url": "https://job/10"}]}
-        if url.startswith(f"{api}/check-runs/9/annotations"):
-            return [{"title": "FLAKY (passed only on retry)", "message": m} for m in messages] + [
-                {"title": "other warning", "message": "tests/z.py::nope"}]
-        raise AssertionError(url)
+def test_artifacts_round_trip_through_the_github_poll(monkeypatch):
+    """CI uploads metadata artifacts; the hub poll reads them back into one card per id."""
+    from scripts.ci import flaky_artifact as fa
+    from tests.ci.flaky_artifact_fakes import FakeGitHub, job, meta
 
-    monkeypatch.setattr(fk, "_gh", fake_gh)
+    gh = FakeGitHub()
+    gh.simple(run_id=5, tests=("tests/x.py::test_a", "tests/y.py"), art_id=100)
+    gh.jobs[(5, 1)] = [job(9, 1, 1), job(10, name="Lint")]
+    monkeypatch.setattr(fk, "_gh", gh.gh)
+    monkeypatch.setattr(fa, "download_zip", gh.download)
     board, state = FakeBoard(), fk.load_state(Path("/nonexistent/state.json"))
     log = fk.poll_github("o/r", "tok", board, state)
-    assert [line.split()[0] for line in log] == ["opened", "opened"]
+    assert [line.split()[0] for line in log] == ["opened", "opened", "POLL"]
     assert sorted(c["title"] for c in board.cards.values()) == ["Deflake tests/x.py::test_a", "Deflake tests/y.py"]
     card_a = board.cards[state["cards"]["tests/x.py::test_a"]["card"]]
-    assert "100% starved" in card_a["body"] and "https://job/9" in card_a["body"]
+    assert "https://github.com/o/r/actions/runs/5/job/9" in card_a["body"]
     assert state["cards"]["tests/y.py"] and state["runs"] == ["5/1"]
-    assert not any("check-runs/10" in u for u in calls)      # only test jobs are read
+    assert not any("check-runs" in u or "logs" in u for u in gh.urls)          # annotations are not read
 
     # The same run attempt is never filed twice.
     assert fk.poll_github("o/r", "tok", board, state) == []
@@ -218,38 +212,26 @@ def test_poll_pages_past_newer_runs_to_reach_a_long_test_run(monkeypatch):
     """A long test run completes after more newer runs than one page holds.
 
     Regression: PR run 40764402730 (37 min of tests) finished behind 53 newer
-    completed runs; the poll read only the newest 40, so its three FLAKY
-    annotations never became cards.
+    completed runs; the poll read only the newest 40, so its flakes never became cards.
     """
-    api = "https://api.github.com/repos/o/r"
-    # Newest first, as GitHub orders them; the slow test run is the oldest.
-    runs = [{"id": 1000 - i, "run_attempt": 1, "head_branch": "b", "html_url": f"https://r/{1000 - i}"}
-            for i in range(150)]
-    slow = runs[-1]["id"]
-    seen_urls = []
+    from scripts.ci import flaky_artifact as fa
+    from tests.ci.flaky_artifact_fakes import FakeGitHub
 
-    def fake_gh(url, token):
-        seen_urls.append(url)
-        if url.startswith(f"{api}/actions/runs?"):
-            query = dict(part.split("=", 1) for part in url.split("?", 1)[1].split("&"))
-            per_page, page = int(query["per_page"]), int(query.get("page", 1))
-            return {"workflow_runs": runs[(page - 1) * per_page: page * per_page]}
-        if url.startswith(f"{api}/actions/runs/{slow}/attempts/1/jobs"):
-            return {"jobs": [{"id": 7, "name": "Python tests / Run tests (1/2)", "html_url": "https://job/7"}]}
-        if "/attempts/" in url:
-            return {"jobs": []}
-        if url.startswith(f"{api}/check-runs/7/annotations"):
-            return [{"title": fk.ANNOTATION_TITLE, "message": "tests/slow.py::test_flaky\nE  boom"}]
-        raise AssertionError(url)
-
-    monkeypatch.setattr(fk, "_gh", fake_gh)
+    gh = FakeGitHub()
+    for i in range(149):                                # newer runs without Python test jobs
+        gh.run(1000 - i)
+    slow = 1000 - 149                                   # the slow test run is the oldest
+    gh.simple(run_id=slow, tests=("tests/slow.py::test_flaky",), art_id=7)
+    monkeypatch.setattr(fk, "_gh", gh.gh)
+    monkeypatch.setattr(fa, "download_zip", gh.download)
     board, state = FakeBoard(), fk.load_state(Path("/nonexistent/state.json"))
     log = fk.poll_github("o/r", "tok", board, state)
 
-    assert log == [f"opened {state['cards']['tests/slow.py::test_flaky']['card']} tests/slow.py::test_flaky"]
-    assert f"{slow}/1" in state["runs"] and len(state["runs"]) == len(runs)
+    assert log[0] == f"opened {state['cards']['tests/slow.py::test_flaky']['card']} tests/slow.py::test_flaky"
+    assert f"{slow}/1" in state["runs"] and len(state["runs"]) == len(gh.runs)
+    assert log[-1] == "POLL complete=1 empty=0 unavailable=0 not_applicable=149"
     # Bounded by a creation window, not by a page count.
-    assert all("created=%3E%3D" in u for u in seen_urls if u.startswith(f"{api}/actions/runs?"))
+    assert all("created=%3E%3D" in u for u in gh.urls if "/actions/runs?" in u)
 
 
 def test_annotate_mode_tolerates_a_missing_report(tmp_path, capsys):

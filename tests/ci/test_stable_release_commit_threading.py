@@ -120,6 +120,7 @@ CONTROLLER_REFERENCES = (
     ("-${{ github.sha }}", "artifact display name, unique per run"),
     ("description:", "input documentation"),
     ("HEAD_REF:", "label on the lint summary"),
+    ("FLAKY_HEAD_SHA:", "flaky-artifact provenance matched against the runs API head_sha; the tested commit is source_sha"),
     ("key: visual-baselines-${{ github.ref_name }}", "restores main's baselines and never writes them for a stable run"),
     ("inputs.ref == github.sha", "saves candidates only for the triggering commit, so a stable claim never writes"),
     ("inputs.channel-build != '' && inputs.controller-sha", "smoke tests the staged artifact with the dispatched ref's scripts"),

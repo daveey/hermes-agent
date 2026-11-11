@@ -4,10 +4,10 @@
 scripts/run_tests_parallel.py retries a failed test once in the same job. A
 test that passes only on that retry keeps the job green but must never pass
 silently: the runner writes it to ``--flaky-report`` JSON, the CI step
-``flaky_kanban.py --annotate <report>`` turns each entry into a warning
-annotation titled ``FLAKY (passed only on retry)`` (first message line = test
-id, then the failure tail), and the hub cron reads those annotations back and
-files one card per test id.
+``flaky_artifact.py`` exports a metadata-only artifact (bounded test identity plus
+run provenance, no failure output; scripts/ci/flaky_artifact.py) and the hub cron
+downloads those artifacts and files one card per test id. ``--annotate`` still prints
+local warning annotations (``FLAKY (passed only on retry)``) for a report.
 
 * first flake of a test id: create a card (idempotency key ``deflake:<id>``)
 * later flakes while that card is open: append a comment to it
@@ -28,7 +28,7 @@ Modes:
 
   flaky_kanban.py --annotate flaky.json               # CI step: emit annotations
   flaky_kanban.py --report flaky.json [--report ...] --run-url URL [--branch B]
-  flaky_kanban.py --from-github --repo OWNER/NAME     # hub cron: poll annotations
+  flaky_kanban.py --from-github --repo OWNER/NAME     # hub cron: poll metadata artifacts
 
 ``--from-github`` reads ``GH_TOKEN``/``GITHUB_TOKEN``, walks recently completed
 workflow runs, and remembers processed run attempts in ``--state`` so each run
@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -50,6 +51,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Iterable, Protocol
+
+try:
+    from scripts.ci import flaky_artifact_poll as fap
+except ImportError:  # run as a script: scripts/ci is sys.path[0]
+    import flaky_artifact_poll as fap  # type: ignore[no-redef]
 
 ANNOTATION_TITLE = "FLAKY (passed only on retry)"
 CLOSED = {"done", "archived"}
@@ -263,7 +269,8 @@ def _card_body(entry: dict[str, str], run_url: str, branch: str, previous: str |
         lines += ["", f"An earlier deflake card {previous} was closed, but the test flaked again."]
     if entry.get("retried") == "file":
         lines += ["", "The failure could not be pinned to test ids (collection error or crash), so the whole file was retried."]
-    lines += ["", "First-attempt output (tail):", "```", excerpt, "```"]
+    if excerpt:
+        lines += ["", "First-attempt output (tail):", "```", excerpt, "```"]
     return "\n".join(lines)
 
 
@@ -379,7 +386,8 @@ class _Flake:
         self.test_id, self.run_url, self.board, self.state, self.relay, self.self_gw = (
             test_id, run_url, board, state, relay, self_gw)
         # The test id and job URL lead the comment: a cross-gateway read-back sees only the first 500 chars.
-        self.comment = f"Flaked again: `{test_id}` in {run_url} (branch `{branch}`).\n\n```\n{excerpt[-1500:]}\n```"
+        self.comment = f"Flaked again: `{test_id}` in {run_url} (branch `{branch}`)." + (
+            f"\n\n```\n{excerpt[-1500:]}\n```" if excerpt else "")
 
     def noted(self, comments: Iterable[str]) -> bool:
         return any(self.run_url in c and self.test_id in c for c in comments)
@@ -493,12 +501,7 @@ def annotations(entries: Iterable[dict[str, str]], excerpt_limit: int = 1500) ->
     return lines
 
 
-def parse_annotation(message: str) -> dict[str, str]:
-    test_id, _, excerpt = message.partition("\n")
-    return {"test_id": test_id.strip(), "first_attempt_excerpt": excerpt, "retried": "tests" if "::" in test_id else "file"}
-
-
-# --- Hub side: annotations -> cards (cron) ---------------------------------------
+# --- Hub side: metadata artifacts -> cards (cron) ---------------------------------------
 
 
 def _gh(url: str, token: str) -> Any:
@@ -511,7 +514,7 @@ def _gh(url: str, token: str) -> Any:
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 return json.loads(resp.read())
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as exc:
             if (isinstance(exc, urllib.error.HTTPError) and exc.code < 500) or attempt == attempts - 1:
                 raise
             time.sleep(2 ** attempt)
@@ -525,50 +528,92 @@ def _completed_runs(api: str, token: str, *, since: float, per_page: int = 100) 
     (it used to be the newest 40) silently skipped exactly the long test runs that carry
     FLAKY annotations. A creation-time window, paged out, keeps them in view until they
     complete; ``state["runs"]`` dedupes across polls.
+
+    Bounded and validated: at most ``fap.MAX_PAGES`` pages (a listing that is still full after
+    that is rejected, never followed forever), each page a list of at most ``per_page`` run
+    objects with in-range integer ``id``/``run_attempt``. Any other shape raises ``ValueError``,
+    which ``poll_github`` reports as the fixed ``runs_unavailable`` receipt.
     """
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(since))
     runs: list[dict[str, Any]] = []
-    page = 1
-    while True:
-        batch = _gh(f"{api}/actions/runs?status=completed&created=%3E%3D{created}"
-                    f"&per_page={per_page}&page={page}", token).get("workflow_runs", [])
+    for page in range(1, fap.MAX_PAGES + 1):
+        body = _gh(f"{api}/actions/runs?status=completed&created=%3E%3D{created}"
+                   f"&per_page={per_page}&page={page}", token)
+        batch = body.get("workflow_runs") if isinstance(body, dict) else None
+        if not isinstance(batch, list) or len(batch) > per_page:
+            raise ValueError("runs_unavailable")
+        for run in batch:
+            if not (isinstance(run, dict) and fap.fa._int_in(run.get("id"), 1, fap.fa.MAX_INT)
+                    and fap.fa._int_in(run.get("run_attempt", 1), 1, fap.fa.MAX_INT)):
+                raise ValueError("runs_unavailable")
         runs += batch
         if len(batch) < per_page:
             return runs
-        page += 1
+    raise ValueError("runs_unavailable")
+
+
+def _filing(result: Any, run: dict[str, Any], repo: str, board: Board, state: dict[str, Any],
+            relay: HubRelay | None) -> list[str]:
+    """Card lines for every slice of a fully validated run. Job URLs come from validated numeric ids only."""
+    lines: list[str] = []
+    for job_id, entries in result.jobs:
+        if entries:
+            url = f"https://github.com/{repo}/actions/runs/{run['id']}/job/{job_id}"
+            lines += file_cards(entries, run_url=url, branch=run["head_sha"], board=board, state=state, relay=relay)
+    return lines
+
+
+def _poll_run(repo: str, token: str, run: dict[str, Any], board: Board, state: dict[str, Any],
+              relay: HubRelay | None) -> tuple[str, list[str]]:
+    """``(outcome, log lines)``; outcome is complete|empty|not_applicable|unavailable (unavailable = retry later)."""
+    key = f"{run['id']}/{run.get('run_attempt', 1)}"
+    try:
+        result = fap.assess_run(repo, run, lambda url: _gh(url, token), token)
+    except fap.Unavailable as exc:
+        return "unavailable", [f"FAILED run={key} code={exc.code}"]
+    if result.kind == "not_applicable":
+        state["runs"].append(key)
+        return "not_applicable", []
+    lines = _filing(result, run, repo, board, state, relay)
+    if any(line.startswith("FAILED") for line in lines):
+        return "unavailable", lines
+    state["runs"].append(key)
+    return ("complete" if any(entries for _, entries in result.jobs) else "empty"), lines
 
 
 def poll_github(repo: str, token: str, board: Board, state: dict[str, Any], *,
                 lookback_hours: float = 6.0, relay: HubRelay | None = None) -> list[str]:
-    """File cards for FLAKY annotations on recently completed runs not seen before.
+    """File cards from the metadata artifacts of recently completed runs not seen before.
 
     ``lookback_hours`` must outlast the slowest workflow plus any cron outage, and stay
     well under ``save_state``'s 1000-run dedupe memory (the repo sees ~50 runs/hour).
-    A run with a ``FAILED`` line stays unprocessed, so the next poll retries it (filed ids
-    are not filed twice: a comment already on the card for this job is not repeated).
+    A run whose artifacts are unavailable, or whose card filing failed, stays unprocessed
+    (``FAILED`` line) so the next poll retries it; filed ids are not filed twice.
+    Cancelled/timed-out jobs and incomplete reports also remain unavailable and unprocessed.
+    Every
+    expected slice must supply a valid artifact before any card is touched. When a run was newly
+    observed the log ends with ``POLL complete=<n> empty=<n> unavailable=<n> not_applicable=<n>``
+    (``complete`` counts every run with readable data, ``empty`` the subset with no flakes).
     """
+    if not isinstance(repo, str) or fap.fa._REPO.fullmatch(repo) is None:
+        return ["FAILED runs_unavailable"]
     api = f"https://api.github.com/repos/{repo}"
-    log: list[str] = []
     done = set(state["runs"])
     since = time.time() - lookback_hours * 3600
-    for run in sorted(_completed_runs(api, token, since=since), key=lambda r: r["id"]):
-        key = f"{run['id']}/{run.get('run_attempt', 1)}"
-        if key in done:
-            continue
-        jobs = _gh(f"{api}/actions/runs/{run['id']}/attempts/{run.get('run_attempt', 1)}/jobs?per_page=100", token)
-        filed: list[str] = []
-        for job in jobs.get("jobs", []):
-            if "Run tests" not in job.get("name", ""):
-                continue
-            entries = [parse_annotation(a.get("message", ""))
-                       for a in _gh(f"{api}/check-runs/{job['id']}/annotations?per_page=100", token)
-                       if a.get("title") == ANNOTATION_TITLE]
-            if entries:
-                filed += file_cards(entries, run_url=job.get("html_url") or run["html_url"],
-                                    branch=run.get("head_branch") or "?", board=board, state=state, relay=relay)
-        log += filed
-        if not any(line.startswith("FAILED") for line in filed):
-            state["runs"].append(key)
+    try:
+        runs = _completed_runs(api, token, since=since)
+    except (OSError, ValueError, http.client.HTTPException):
+        return ["FAILED runs_unavailable"]
+    log: list[str] = []
+    counts = {"complete": 0, "empty": 0, "unavailable": 0, "not_applicable": 0}
+    fresh = [r for r in sorted(runs, key=lambda r: r["id"]) if f"{r['id']}/{r.get('run_attempt', 1)}" not in done]
+    for run in fresh:
+        outcome, lines = _poll_run(repo, token, run, board, state, relay)
+        log += lines
+        counts[outcome] += 1
+        counts["complete"] += outcome == "empty"    # an empty result is a complete one
+    if fresh:
+        log.append("POLL " + " ".join(f"{k}={v}" for k, v in counts.items()))
     return log
 
 
