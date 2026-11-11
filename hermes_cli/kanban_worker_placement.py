@@ -62,19 +62,19 @@ def creation_decision(args, cfg, gateway, pin, origin_intent):
 
 
 def creation_audit(args, cfg=None):
-    """``{"portable_reason": <why it cannot leave its origin> | None}`` for the card's ``created`` event, or None when
-    no worker pool is configured (nothing to audit). Records the structural check every create runs, so the share of
-    cards a pool never sees, and why, is a query instead of a replay (kanban-12ee0e4b65). Never raises. [daveey]"""
+    """Record structural portability for every create, independent of pool enrollment.
+
+    None means structurally portable, not admitted. Use the caller's placement config even without worker_pools;
+    its assignee allowlist and host markers still apply. A failed audit is explicit, never portable. [daveey]
+    """
     from hermes_cli import kanban_placement as placement
 
     try:
         cfg = placement.config() if cfg is None else cfg
-        if not isinstance(cfg, dict) or not cfg.get("worker_pools"):
-            return None
         return {"portable_reason": placement.portable_reason(args, cfg)}
     except Exception:  # health: allow BLE001 -- an audit field never blocks a create
         logger.warning("portable_reason audit failed", exc_info=True)
-        return None
+        return {"portable_reason": "audit failed"}
 
 
 def resolved_db_placement(fields):

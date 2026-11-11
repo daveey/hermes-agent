@@ -112,7 +112,7 @@ def test_tool_created_event_records_portable_reason(kanban_home, monkeypatch, re
     assert payload["portable_reason"] == reason
 
 
-def test_created_event_omits_audit_when_no_pool_is_configured(tmp_path, monkeypatch):
+def test_created_event_records_audit_when_no_pool_is_configured(tmp_path, monkeypatch):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
 
@@ -122,7 +122,8 @@ def test_created_event_omits_audit_when_no_pool_is_configured(tmp_path, monkeypa
     kb.init_db()
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="plain")
-    assert "portable_reason" not in created_payload(tid)
+    assert created_payload(tid)["portable_reason"] is None
+    assert created_payload(tid)["placement_policy"] is None
 
 
 def test_create_task_records_a_passed_reason(kanban_home):
