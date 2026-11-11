@@ -36,10 +36,11 @@ import { $blockedSectionOpen, BlockedTasksSection } from './blocked-section'
 import { KanbanBoardPage } from './board'
 import { KANBAN_LOCALES } from './i18n'
 import { installOpenTaskHook } from './open-task'
+import { meterCounts, meterTotal, TaskMeter } from './status-meter'
 import { $newTaskLane, useKanban } from './ui'
 
-// Live "N running / ready" pill — one glance at fleet activity from anywhere,
-// clicks through to the board. Shares the board query (one cache, one poll with
+// Live task pill — a bar of open cards by state (status-meter.tsx) plus their
+// count, one glance at fleet activity from anywhere; clicks through to the board. Shares the board query (one cache, one poll with
 // the page); hidden when nothing is in flight (or unloaded).
 function KanbanCount() {
   const k = useKanban()
@@ -57,15 +58,16 @@ function KanbanCount() {
     return null
   }
 
-  const count = (name: string) => board.columns.find(col => col.name === name)?.tasks.length ?? 0
-  const active = count('running') + count('ready')
+  // [daveey] A bar of every open card (running/ready/not ready/blocked), not just in-flight.
+  const counts = meterCounts(board)
+  const total = meterTotal(counts)
 
-  if (active === 0) {
+  if (total === 0) {
     return null
   }
 
   return (
-    <Tip label={k.countTip(count('running'), count('ready'))}>
+    <Tip label={k.countTip(counts)}>
       <button
         className={cn(
           'inline-flex h-full items-center gap-1 rounded-none px-1.5 text-[0.6875rem] tabular-nums transition-colors',
@@ -75,7 +77,8 @@ function KanbanCount() {
         type="button"
       >
         <Codicon name="project" size="0.7rem" />
-        <span>{active}</span>
+        <TaskMeter counts={counts} />
+        <span>{total}</span>
       </button>
     </Tip>
   )

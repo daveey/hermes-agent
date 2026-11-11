@@ -8,13 +8,15 @@
 import { type PluginLocaleBundles, type PluginTranslate, usePluginI18n } from '@hermes/plugin-sdk'
 import { useMemo } from 'react'
 
+import type { MeterCounts } from './status-meter'
+
 type KanbanMessages = {
   nav: string
   openBoard: string
   /** Command label — shows in the ⌘K palette AND as the keybind panel row,
    *  so it carries the "Kanban: " prefix the palette convention wants. */
   newTaskCommand: string
-  countTip: (running: number, ready: number) => string
+  countTip: (c: MeterCounts) => string
   col: Record<
     'archived' | 'blocked' | 'done' | 'ready' | 'review' | 'running' | 'scheduled' | 'todo' | 'triage',
     { label: string; help: string }
@@ -250,7 +252,8 @@ export const en: KanbanMessages = {
   nav: 'Kanban',
   openBoard: 'Kanban: Open board',
   newTaskCommand: 'Kanban: New task',
-  countTip: (running, ready) => `Kanban — ${running} running, ${ready} ready`,
+  countTip: c =>
+    `Kanban — ${c.running} running · ${c.ready} ready · ${c.notReady} not ready · ${c.blocked} blocked on you`,
   col: {
     triage: { label: 'Triage', help: 'Raw ideas — a specifier fleshes out the spec.' },
     todo: { label: 'Todo', help: 'Waiting on dependencies, or unassigned.' },
@@ -496,7 +499,8 @@ const ja: KanbanMessages = {
   nav: 'カンバン',
   openBoard: 'カンバン: ボードを開く',
   newTaskCommand: 'カンバン: 新しいタスク',
-  countTip: (running, ready) => `カンバン — 実行中 ${running}、待機 ${ready}`,
+  countTip: c =>
+    `カンバン — 実行中 ${c.running}、待機 ${c.ready}、未準備 ${c.notReady}、あなた待ち ${c.blocked}`,
   col: {
     triage: { label: 'トリアージ', help: '生のアイデア — スペシファイアが仕様に整えます。' },
     todo: { label: 'Todo', help: '依存関係の待ち、または未割り当て。' },
@@ -741,7 +745,7 @@ const zh: KanbanMessages = {
   nav: '看板',
   openBoard: '看板：打开面板',
   newTaskCommand: '看板：新建任务',
-  countTip: (running, ready) => `看板 — 运行中 ${running}、就绪 ${ready}`,
+  countTip: c => `看板 — 运行中 ${c.running}、就绪 ${c.ready}、未就绪 ${c.notReady}、等你处理 ${c.blocked}`,
   col: {
     triage: { label: '分诊', help: '原始想法 — 由细化代理整理出规格。' },
     todo: { label: '待办', help: '等待依赖，或未分配。' },
@@ -983,7 +987,7 @@ const zhHant: KanbanMessages = {
   nav: '看板',
   openBoard: '看板：開啟面板',
   newTaskCommand: '看板：新增任務',
-  countTip: (running, ready) => `看板 — 執行中 ${running}、就緒 ${ready}`,
+  countTip: c => `看板 — 執行中 ${c.running}、就緒 ${c.ready}、未就緒 ${c.notReady}、等你處理 ${c.blocked}`,
   col: {
     triage: { label: '分類', help: '原始想法 — 由細化代理整理出規格。' },
     todo: { label: '待辦', help: '等待相依項目，或未指派。' },
