@@ -1,0 +1,50 @@
+name: Native memory (macOS)
+
+# The generic OS lane is disabled in this fork. These ABI and no-fork
+# regressions must execute on Darwin before a memory-reader change lands.
+on:
+  pull_request:
+    paths: &memory-paths
+      - 'hermes_cli/machine_memory_darwin.py'
+      - 'hermes_cli/machine_metrics.py'
+      - 'tests/hermes_cli/test_machine_memory_darwin.py'
+      - 'tests/hermes_cli/test_machine_memory_nofork.py'
+      - '.github/workflows/native-memory-macos.yml'
+      - 'tests/ci/test_native_memory_workflow.py'
+  push:
+    branches: [main]
+    paths: *memory-paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-memory-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native-memory:
+    name: Native memory ABI and no-fork tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macOS, hermes-state]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Exercise native memory APIs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c "import sys; assert sys.platform == 'darwin'"
+          HERMES_HOME="$(mktemp -d "${RUNNER_TEMP:-/tmp}/native-memory-home.XXXXXX")"
+          export HERMES_HOME
+          trap 'rm -rf "$HERMES_HOME"' EXIT
+          taskpolicy -c utility scripts/run_tests.sh \
+            tests/hermes_cli/test_machine_memory_darwin.py \
+            tests/hermes_cli/test_machine_memory_nofork.py -j 1 --file-retries 0
+        env:
+          OPENROUTER_API_KEY: ''
+          OPENAI_API_KEY: ''
+          NOUS_API_KEY: ''
