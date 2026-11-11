@@ -50,6 +50,8 @@ def repository(ws, state):
     git(repo, "init", "--bare" if state == "bare" else "--quiet")
     if state == "bare":
         return repo
+    # Snapshot all Git metadata without racing a detached auto-maintenance job.
+    git(repo, "config", "maintenance.auto", "false")
     git(repo, "config", "user.email", "test@example.invalid")
     git(repo, "config", "user.name", "Test")
     (repo / "tracked").write_text("initial")
@@ -64,6 +66,21 @@ def repository(ws, state):
         (repo / "tracked").write_text("local commit")
         git(repo, "commit", "-qam", "unpushed")
     return repo
+
+
+def test_repository_setup_does_not_spawn_background_maintenance(tmp_path, monkeypatch):
+    # Even a tiny commit launches auto-maintenance, which can briefly create
+    # objects/maintenance.lock after the foreground Git command has returned.
+    trace = tmp_path / "git-trace.jsonl"
+    monkeypatch.setenv("GIT_TRACE2_EVENT", str(trace))
+    repository(tmp_path / "workspace", "unpushed")
+    children = [json.loads(line) for line in trace.read_text().splitlines()]
+    maintenance = [
+        event for event in children
+        if event.get("event") == "child_start"
+        and event.get("argv", [])[:2] == ["git", "maintenance"]
+    ]
+    assert not maintenance, maintenance
 
 
 def snapshot(ws):
