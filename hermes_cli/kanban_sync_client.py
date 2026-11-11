@@ -731,7 +731,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                                  "WHERE op_id = ?", (reason[:500], op_id))
                     out.rejected += 1
                     _log.warning("kanban sync: %s %s %s rejected (%s)", board, row["table_name"], row["row_uid"], reason)
-                    if row["table_name"] == "tasks" and res.get("reason") == "live_claim":
+                    if row["table_name"] == "tasks" and res.get("reason") in ("live_claim", "forbidden_field"):
                         _record_live_claim_rejection(conn, row, reason)
                     if primary and res.get("row"):
                         authoritative.append(_row_change(row["table_name"], res["row"]))

@@ -776,6 +776,7 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
     without a grant the card stays ``ready`` (no offline claims: every card is
     at-most-once in v1). A grant bounds the local claim to the lease deadline."""
     from hermes_cli.kanban_worker_placement import execution_refusal
+    from hermes_cli.kanban_sync_diagnostics import record_claim
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
     if row is not None and (reason := execution_refusal(conn, row)):
         _CLAIM_DEFERRALS[task_id] = reason
@@ -791,11 +792,14 @@ def claim_gate(conn: sqlite3.Connection, task_id: str, expires: int, lane: str =
     except _CLIENT_ERRORS as exc:  # fail closed: an unreachable service defers the claim
         _log.info("claim_deferred: offline task=%s (%s: %s)", task_id, type(exc).__name__, exc)
         _CLAIM_DEFERRALS[task_id] = "offline"
+        record_claim(conn, task_id, "offline")
         return ClaimGate(expires, deferred=True)
     if not lease.granted:
         _log.info("claim_deferred: %s task=%s holder=%s", lease.reason or "denied", task_id, lease.holder)
         _CLAIM_DEFERRALS[task_id] = lease.reason or "denied"
+        record_claim(conn, task_id, lease.reason or "denied")
         return ClaimGate(expires, deferred=True)
+    record_claim(conn, task_id, "granted")
     deadline = lease.expires_ms // 1000 - LEASE_SAFETY_MARGIN_SECONDS
     gate = ClaimGate(min(expires, deadline), lease=lease, ids=ids)
     # Review ruling 2: the worker load formula guards a WORKER's claim of someone else's card. The origin claiming
