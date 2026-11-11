@@ -38,9 +38,9 @@ def record_rejection(conn: sqlite3.Connection, row: dict, reason: str) -> None:
 def enqueue_retry(conn: sqlite3.Connection, row: dict, wire: dict, result: dict) -> bool:
     """Retain the rejected original; one fresh, non-hydrated upsert carries the reduced payload.
 
-    The local-only op kind survives crashes and transient retries. The retained original prevents
-    divergence repair from repeatedly requeueing the deliberately omitted local value and keeps
-    the schema mismatch visible until the Board is deployed and reconciliation retries it.
+    The local-only op kind survives crashes and transient retries. The durable omission ledger
+    protects the local value while allowing unrelated fields to converge; a fresh authoritative
+    field appearance can queue a current-value restore, never replay the rejected historical row.
     """
     if result.get("reason") != "forbidden_field" or row["op"] not in ("upsert", "import"):
         return False
@@ -51,10 +51,15 @@ def enqueue_retry(conn: sqlite3.Connection, row: dict, wire: dict, result: dict)
     if match[2] not in fields:
         return False
     reduced = {k: v for k, v in fields.items() if k != match[2]}
+    retry_id = sync.uuid7()
+    conn.execute(
+        "INSERT INTO kanban_sync_omissions (original_op_id, table_name, row_uid, field, compat_op_id) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (row["op_id"], row["table_name"], row["row_uid"], match[2], retry_id))
     conn.execute(
         "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (sync.uuid7(), row["table_name"], row["row_uid"],
+        (retry_id, row["table_name"], row["row_uid"],
          "compat_import" if wire.get("import") else "compat", json.dumps(reduced),
          row.get("base_version"), wire["hlc"], row["created_at"]))
     return True

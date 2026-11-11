@@ -187,6 +187,16 @@ CREATE TABLE IF NOT EXISTS kanban_sync_outbox (
     state        TEXT NOT NULL DEFAULT 'pending'
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_pending ON kanban_sync_outbox(state, created_at);
+CREATE TABLE IF NOT EXISTS kanban_sync_omissions (
+    original_op_id TEXT PRIMARY KEY,
+    table_name TEXT NOT NULL,
+    row_uid TEXT NOT NULL,
+    field TEXT NOT NULL,
+    compat_op_id TEXT NOT NULL,
+    restore_op_id TEXT,
+    state TEXT NOT NULL DEFAULT 'held'
+);
+CREATE INDEX IF NOT EXISTS idx_sync_omissions_row ON kanban_sync_omissions(table_name, row_uid);
 CREATE TABLE IF NOT EXISTS kanban_sync_remote_parents (
     parent_id    TEXT PRIMARY KEY,
     status       TEXT NOT NULL,
@@ -1164,6 +1174,9 @@ def apply_remote_changes(
 def _apply_one(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: ApplyResult) -> None:
     if ch.table not in SYNCED_COLUMNS:
         raise ValueError(f"apply_remote_changes: unknown table {ch.table!r}")
+    if ch.client_op_id:
+        from hermes_cli.kanban_sync_omissions import acknowledge
+        acknowledge(conn, ch.client_op_id, ch.fields)
     if ch.client_op_id and conn.execute(
             "DELETE FROM kanban_sync_outbox WHERE op_id = ?", (ch.client_op_id,)).rowcount:
         if ch.table == "tasks":
@@ -1219,7 +1232,8 @@ def _upsert_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: A
     if old is not None and old["sync_version"] is not None and ch.version < old["sync_version"]:  # equal = the same row (a re-send or a revert)
         return False
     fields = _without_unacked_fields(conn, ch) if result.local_pending_wins else ch.fields
-    cols = _local_fields(conn, "tasks", fields, ch.uid)
+    from hermes_cli.kanban_sync_omissions import without_held
+    cols = _local_fields(conn, "tasks", without_held(conn, "tasks", ch.uid, fields), ch.uid)
     if old is None:
         names = ["id", *cols, "sync_version"]
         conn.execute(f"INSERT INTO tasks ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
@@ -1294,7 +1308,8 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
     task_id = ch.fields.get("task_id") or ch.fields.get("parent_id")
     if _tombstoned(conn, "tasks", task_id) or (table != "task_links" and _tombstoned(conn, table, ch.uid)):
         return False
-    cols = _local_fields(conn, table, ch.fields, task_id)
+    from hermes_cli.kanban_sync_omissions import without_held
+    cols = _local_fields(conn, table, without_held(conn, table, ch.uid, ch.fields), task_id)
     if table == "task_links":
         return conn.execute("INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
                             (cols["parent_id"], cols["child_id"])).rowcount == 1
