@@ -830,8 +830,12 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
         closed = (gw, owner_profile, board, tid) in released
         prefix = f'{gw}/{owner_profile}/{board}' if owner_profile is not None else f'{gw}/{board}'
         ref = f'{prefix}/{tid}'
+        from hermes_cli.kanban_completion_receipt_projection import remote_fields
+        historical = remote_fields(raw[(gw, owner_profile, board, tid)], gateway=gw,
+                                   profile=owner_profile, board=board, task_id=tid)
         for sid in sids:
             found[(sid, ref)] = {
+                **historical,
                 **{f: t.get(f) for f in _REMOTE_FIELDS},
                 "id": tid, "board": board, "gateway": gw, "key": ref, "session": sid,
                 "via": "shepherd", "root": ref, "remote": True,

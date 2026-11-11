@@ -494,7 +494,9 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                 closed = bool(current and status == 'archived' and not released and _owner_evidence(task))
                 if not current or not known or (status in ('done', 'archived') and not released and not closed):
                     status = 'unknown'
+                from hermes_cli.kanban_completion_receipt_projection import remote_fields
                 result.append({
+                    **remote_fields(task, **owner),
                     **{k: task.get(k) for k in ('title', 'assignee', 'block_kind', 'created_at', 'started_at', 'priority')},
                     **owner, 'id': owner['task_id'],
                     'key': '/'.join(owner[k] for k in ('gateway', 'profile', 'board', 'task_id')),
