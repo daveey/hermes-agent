@@ -177,7 +177,7 @@ def reconcile_carry(cards: list[dict]) -> list[dict]:
     receipts = {}
     for path in paths:
         try:
-            receipt = json.loads(path.read_text())
+            receipt = json.loads(path.read_text(encoding='utf-8-sig'))
             if not isinstance(receipt, dict):
                 continue
             identity = _identity(receipt['identity'])

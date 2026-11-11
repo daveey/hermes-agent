@@ -227,6 +227,35 @@ def test_receiptless_goal_mode_never_uses_other_tasks_judge_epoch(world):
     assert not world['receipt'].exists()
 
 
+@pytest.mark.parametrize('failure', ['json', 'shape', 'missing_shadow', 'corrupt_shadow'])
+def test_storage_failure_after_release_restores_unknown(world, failure):
+    register(world)
+    released = carry.reconcile_carry([world['card']])[0]
+    assert released['released'] is True
+    mutations = {
+        'json': lambda: world['receipt'].write_text('{'),
+        'shape': lambda: world['receipt'].write_text('[]'),
+        'missing_shadow': world['replica'].unlink,
+        'corrupt_shadow': lambda: world['replica'].write_bytes(b'not sqlite'),
+    }
+    mutations[failure]()
+    row = carry.reconcile_carry([released])[0]
+    assert (row['status'], row['unfinished'], row['released']) == ('unknown', True, False)
+
+
+def test_fresh_owner_reopen_supersedes_verified_snapshot(world, monkeypatch):
+    from hermes_cli import kanban_session_activity as activity
+    register(world)
+    released = carry.reconcile_carry([world['card']])[0]
+    fresh = {**world['card'], 'stale': False, 'status': 'ready', 'reported_status': 'ready'}
+    monkeypatch.setattr(activity, '_remote_last', None)
+    monkeypatch.setattr(activity, '_snapshot_saved', None)
+    monkeypatch.setattr(activity, '_remote_snapshot', lambda cards=None: [released] if cards is None else cards)
+    monkeypatch.setattr(activity, '_hub_db_path', lambda: world['replica'])
+    monkeypatch.setattr(activity, '_read_remote_links', lambda *a, **kw: [fresh])
+    assert activity._legacy_remote_links() == [fresh]
+
+
 def test_standard_reconciler_captures_release_and_restores_on_reopen(world, monkeypatch):
     from hermes_cli import kanban_db_connect as kbc, kanban_chat_links as links
     from hermes_cli import kanban_sync_client as sync, kanban_session_activity as activity
