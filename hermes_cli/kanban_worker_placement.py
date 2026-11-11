@@ -97,14 +97,14 @@ def creation_audit(args, cfg=None):
     """
     from hermes_cli import kanban_placement as placement
 
+    explicit = args.get("placement") not in (None, "", "auto") or args.get("runs_on") is not None
+    intent = "explicit" if explicit else "auto"
     try:
         cfg = placement.config() if cfg is None else cfg
-        explicit = args.get("placement") not in (None, "", "auto") or args.get("runs_on") is not None
-        return {"portable_reason": placement.portable_reason(args, cfg),
-                "placement_intent": "explicit" if explicit else "auto"}
+        return {"portable_reason": placement.portable_reason(args, cfg), "placement_intent": intent}
     except Exception:  # health: allow BLE001 -- an audit field never blocks a create
         logger.warning("portable_reason audit failed", exc_info=True)
-        return {"portable_reason": "audit failed"}
+        return {"portable_reason": "audit failed", "placement_intent": intent}
 
 
 def resolved_db_placement(fields):
@@ -289,7 +289,9 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
     try:
         for row in rows:
             last = row["id"]
-            from hermes_cli.kanban_placement_recovery import recovery_mode
+            from hermes_cli.kanban_placement_recovery import recovery_mode, unchanged_ready
+            if not unchanged_ready(conn, row):
+                continue
             mode = recovery_mode(conn, dict(row), cfg)
             if row["placement_policy"] is None and mode is None:
                 continue
@@ -323,12 +325,8 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                         logger.warning("repinned %s on the Board but could not record it locally", row["id"],
                                        exc_info=True)
                 else:
-                    if mode:
-                        reply = hub.recover(board, task_id=row["id"], expected_revision=row["sync_version"],
-                                            mode=mode, candidates=candidates)
-                    else:
-                        reply = hub.reserve(board, task_id=row["id"], expected_revision=row["sync_version"],
-                                            candidates=candidates)
+                    from hermes_cli.kanban_placement_recovery import request_assignment
+                    reply = request_assignment(hub, board, row, mode, candidates)
                     if reply.get("state") == "queued":
                         # Never adopt an arbitrary post-pull revision: it may be somebody else's edit.
                         version = reply.get("task_version", row["sync_version"])
