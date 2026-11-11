@@ -435,16 +435,22 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
     if _local_marker(title, body, args.get("skills"), c):
         return "local marker"
     from hermes_cli.kanban_carried_evidence import without_carried_inputs
+    from hermes_cli.kanban_published_worktree import without_published_worktrees
 
     full = without_carried_inputs(f"{title}\n{body}", c.raw)
     extra = c.raw.get("extra_home_markers")
-    pats = list(HOME_GATEWAY_MARKERS) + (list(extra) if isinstance(extra, list) else [])
+    pats = [p for p in HOME_GATEWAY_MARKERS if p != HOST_WORKTREE_PATH]
+    pats += list(extra) if isinstance(extra, list) else []
     for p in pats:
         try:
             if re.search(p, full, re.IGNORECASE):
                 return "home gateway marker"
         except re.error:
             continue
+    # Avoid filesystem/network probes when a cheap marker already pins the card.
+    if re.search(HOST_WORKTREE_PATH, full, re.IGNORECASE):
+        if re.search(HOST_WORKTREE_PATH, without_published_worktrees(full), re.IGNORECASE):
+            return "home gateway marker"
     return None
 
 
