@@ -172,12 +172,13 @@ def _legacy_unchanged(receipt):
     return matches == [(Path(evidence["state_db"]), evidence["session"], evidence["runs"][0]["id"])]
 
 
-def _safe(conn, receipt, path):
+def _safe(conn, receipt, path, *, tree=None):
     tid = receipt["task_id"]
     current = conn.execute(f"SELECT * FROM {_TABLE} WHERE task_id=?", (tid,)).fetchone()
     if current is None or dict(current) != receipt or conn.execute("SELECT 1 FROM tasks WHERE id=?", (tid,)).fetchone():
         return False
-    if path.is_symlink() or not path.is_dir() or not ws._is_managed_scratch_path(path):
+    tree = path if tree is None else tree
+    if tree.is_symlink() or not tree.is_dir() or not ws._is_managed_scratch_path(path):
         return False
     if ws._has_active_children(conn, tid):
         return False
@@ -193,7 +194,8 @@ def _safe(conn, receipt, path):
     if ws._workspace_in_use_by_other(conn, tid, path) is not None:
         return False
     from hermes_cli.kanban_workspace_jobs import defer_owned_job_cleanup
-    return _sessions_idle(path) and not defer_owned_job_cleanup(tid, path)
+    return (_sessions_idle(path) and _sessions_idle(tree)
+            and not defer_owned_job_cleanup(tid, tree))
 
 
 class _DetachUncommitted(Exception):
@@ -236,6 +238,16 @@ def _remove(conn, receipt, owner, days, board):
     if not ws._scratch_tree_removable(path):
         archive = sa.archive_workspace(path, kb.kanban_home() / "archive" / "scratch" / board / tid,
                                        task_id=tid, completed_at=owner["completed_at"])
+    if archive is not None:
+        ws.release_lsp_clients(str(path))
+
+        def guard(tree):
+            return _safe(conn, receipt, path, tree=tree)
+
+        def finalize():
+            conn.execute(f"DELETE FROM {_TABLE} WHERE task_id=?", (tid,))
+
+        return sa.remove_archived(conn, path, archive, guard, finalize)
     # Remote resumption does not use this tree. Local pickup does, and shares this lock.
     trash = path.with_name(f".{path.name}.gc-{os.getpid()}")
     renamed = False

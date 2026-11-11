@@ -168,12 +168,13 @@ def _archive_and_remove_scratch(conn: sqlite3.Connection, task_id: str, path: Pa
     re-checked under the write lock after archiving, and the tree is renamed
     away inside that lock so a resumed card can never see it half-deleted.
     """
-    import shutil
     import subprocess
 
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_scratch_archive as sa
 
+    owner = conn.execute("SELECT workspace_kind, workspace_path, completed_at FROM tasks WHERE id=?",
+                         (task_id,)).fetchone()
     archive_dir = kb.kanban_home() / "archive" / "scratch" / _board_slug(conn) / task_id
     try:
         final = sa.archive_workspace(path, archive_dir, task_id=task_id, completed_at=completed_at)
@@ -181,26 +182,31 @@ def _archive_and_remove_scratch(conn: sqlite3.Connection, task_id: str, path: Pa
         log.info("Keeping aged scratch workspace for task %s: %s (%s)", task_id, path, exc)
         return 0
     ws.release_lsp_clients(str(path))
-    trash = path.with_name(f".{path.name}.gc-{os.getpid()}")
-    with kb.write_txn(conn):
-        if (not ws._is_terminal_task(conn, task_id) or ws._has_active_children(conn, task_id)
-                or ws._defer_shared_workspace_cleanup(conn, task_id, path)
-                or defer_owned_job_cleanup(task_id, path)):
-            log.info("Keeping scratch workspace for task %s after archiving it to %s: "
-                     "the card is live again or shares the path: %s", task_id, final, path)
-            return 0
-        try:
-            path.rename(trash)
-        except OSError as exc:
-            log.info("Keeping aged scratch workspace for task %s: cannot move %s away (%s); "
-                     "archive at %s", task_id, path, exc, final)
-            return 0
+
+    def _row_path(row):
+        # Same expression as candidate selection; raw-row equality below still fences mutation.
+        return Path(row["workspace_path"] or (kb.workspaces_root() / task_id)).expanduser()
+
+    def guard(tree):
+        current = conn.execute("SELECT workspace_kind, workspace_path, completed_at FROM tasks WHERE id=?",
+                               (task_id,)).fetchone()
+        return (owner is not None and current is not None and tuple(current) == tuple(owner)
+                and owner["workspace_kind"] == "scratch" and _row_path(owner) == path
+                and owner["completed_at"] == completed_at
+                and ws._is_terminal_task(conn, task_id) and not ws._has_active_children(conn, task_id)
+                and not ws._defer_shared_workspace_cleanup(conn, task_id, path)
+                and not defer_owned_job_cleanup(task_id, tree))
+
+    def finalize():
         kb._append_event(conn, task_id, "workspace_archived", {"path": str(path), "archive": str(final)})
         ws._log_scratch_removal(conn, task_id, path, "scratch workspace (aged, git archived)")
-    shutil.rmtree(trash, ignore_errors=True)
-    if trash.exists():
-        log.warning("Archived scratch workspace for task %s was not fully removed: %s", task_id, trash)
-    return 1
+
+    try:
+        return sa.remove_archived(conn, path, final, guard, finalize)
+    except (sa.ArchiveRefused, OSError) as exc:
+        log.info("Keeping archived scratch workspace for task %s (or detached recovery tree): %s (%s)",
+                 task_id, path, exc)
+        return 0
 
 
 def gc_task_worktrees(conn: sqlite3.Connection, *, older_than_days: int = 7,

@@ -254,3 +254,534 @@ def test_named_board_archives_under_its_slug(board, remote):
         assert gc_task_scratch(conn, older_than_days=7) == 1
     assert not path.exists()
     assert (_archive(tid, "other") / "repo" / "meta.json").is_file()
+
+
+# --- complete filesystem payload (non-git trees, ignored/sibling files) ---------------
+
+PAYLOAD = ".hermes-complete-archive-v1"
+
+
+def _members(tid):
+    with tarfile.open(_archive(tid) / PAYLOAD / "tree.tar.gz") as tar:
+        return {m.name: (m, tar.extractfile(m).read() if m.isfile() else None) for m in tar.getmembers()}
+
+
+def _plain_task(build):
+    tid, path = _task()
+    (path / "link").symlink_to("notes.txt")  # symlink makes the tree non-removable -> archive path
+    build(path)
+    return tid, path
+
+
+def test_non_git_symlink_tree_is_archived_completely_then_removed(board):
+    outside = board / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("must not be copied")
+
+    def build(p):
+        (p / "empty").mkdir()
+        (p / "deep" / "er").mkdir(parents=True)
+        (p / "deep" / "er" / "run.sh").write_text("#!/bin/sh\n")
+        (p / "deep" / "er" / "run.sh").chmod(0o750)
+        (p / "home").symlink_to(outside)
+        (p / "dangling").symlink_to("nowhere/at/all")
+
+    tid, path = _plain_task(build)
+    assert _gc() == 0
+    assert not path.exists()
+    m = _members(tid)
+    assert m["empty"][0].isdir() and m["deep/er/run.sh"][0].mode == 0o750
+    assert m["deep/er/run.sh"][1] == b"#!/bin/sh\n" and m["notes.txt"][1] == b"scratch"
+    assert m["home"][0].issym() and m["home"][0].linkname == str(outside)
+    assert m["dangling"][0].issym() and m["dangling"][0].linkname == "nowhere/at/all"
+    assert not any(n.startswith("home/") for n in m)
+    assert (outside / "secret.txt").read_text() == "must not be copied"
+    from hermes_cli import kanban_scratch_archive as sa
+    sa.verify_complete_archive(_archive(tid))
+
+
+def test_mixed_git_tree_keeps_ignored_and_sibling_files(board, remote):
+    tid, path = _task(remote=remote)
+    (path / "repo" / ".gitignore").write_text("cache/\n")
+    (path / "repo" / "cache").mkdir()
+    (path / "repo" / "cache" / "blob.bin").write_bytes(b"\x00\x01ignored")
+    (path / "sibling").mkdir()
+    (path / "sibling" / "evidence.txt").write_text("only here")
+    assert _gc() == 0
+    assert not path.exists()
+    m = _members(tid)
+    assert m["repo/cache/blob.bin"][1] == b"\x00\x01ignored"
+    assert m["sibling/evidence.txt"][1] == b"only here"
+    assert (_archive(tid) / "repo" / "meta.json").is_file()  # existing layout untouched
+
+
+def test_source_mutation_during_archive_keeps_workspace(board, monkeypatch):
+    tid, path = _plain_task(lambda p: (p / "deep").mkdir())
+    real = tarfile.TarFile.addfile
+    state = {"done": False}
+
+    def racing(self, tarinfo, fileobj=None):
+        out = real(self, tarinfo, fileobj)
+        if not state["done"] and tarinfo.isfile():
+            state["done"] = True
+            (path / "deep" / "late.txt").write_text("written mid-archive")
+        return out
+
+    monkeypatch.setattr(tarfile.TarFile, "addfile", racing)
+    assert _gc() == 0
+    assert (path / "deep" / "late.txt").read_text() == "written mid-archive"
+    assert (path / "notes.txt").exists()
+    parent = _archive(tid).parent
+    assert not parent.exists() or list(parent.iterdir()) == []
+
+
+def test_nested_rewrite_of_archived_file_keeps_workspace(board, monkeypatch):
+    tid, path = _plain_task(lambda p: ((p / "a").mkdir(), (p / "a" / "f.txt").write_text("v1")))
+    real = tarfile.TarFile.close
+
+    def racing(self):
+        real(self)
+        (path / "a" / "f.txt").write_text("v2-longer")
+
+    monkeypatch.setattr(tarfile.TarFile, "close", racing)
+    assert _gc() == 0
+    assert (path / "a" / "f.txt").read_text() == "v2-longer"
+    assert not _archive(tid).exists()
+
+
+def test_payload_write_failure_keeps_workspace(board, monkeypatch):
+    tid, path = _plain_task(lambda p: None)
+
+    def boom(self, *a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tarfile.TarFile, "addfile", boom)
+    assert _gc() == 0
+    assert (path / "notes.txt").read_text() == "scratch"
+    parent = _archive(tid).parent
+    assert not parent.exists() or list(parent.iterdir()) == []
+
+
+def test_special_file_keeps_workspace(board):
+    tid, path = _plain_task(lambda p: os.mkfifo(p / "pipe"))
+    assert _gc() == 0
+    assert (path / "notes.txt").exists()
+    assert not _archive(tid).exists()
+
+
+def test_reserved_metadata_name_collision_keeps_workspace(board):
+    tid, path = _plain_task(lambda p: (p / PAYLOAD).mkdir())
+    assert _gc() == 0
+    assert (path / PAYLOAD).is_dir() and (path / "notes.txt").exists()
+    assert not _archive(tid).exists()
+
+
+def test_verify_rejects_tampered_payload(board):
+    from hermes_cli import kanban_scratch_archive as sa
+    tid, _path = _plain_task(lambda p: None)
+    assert _gc() == 0
+    sa.verify_complete_archive(_archive(tid))
+    tar_path = _archive(tid) / PAYLOAD / "tree.tar.gz"
+    tar_path.write_bytes(tar_path.read_bytes()[:-20])
+    with pytest.raises(sa.ArchiveRefused):
+        sa.verify_complete_archive(_archive(tid))
+
+
+# --- snapshot enforcement at detach, ctime, descriptor traversal -------------------------
+
+def _hook_check_snapshot(monkeypatch, when, action):
+    """Run *action(path)* just before the *when*-th (0-based) check_snapshot call."""
+    from hermes_cli import kanban_scratch_archive as sa
+    real, calls = sa.check_snapshot, []
+
+    def wrapper(path, snapshot, **kw):
+        if len(calls) == when:
+            action(Path(path))
+        calls.append(path)
+        return real(path, snapshot, **kw)
+
+    monkeypatch.setattr(sa, "check_snapshot", wrapper)
+    return calls
+
+
+@pytest.mark.parametrize("when", [0, 1], ids=["pre_detach", "detached_before_rmtree"])
+def test_nested_change_after_archive_keeps_or_restores_workspace(board, monkeypatch, when):
+    _tid, path = _plain_task(lambda p: ((p / "a" / "b").mkdir(parents=True), (p / "a" / "b" / "f").write_text("v1")))
+    calls = _hook_check_snapshot(monkeypatch, when, lambda root: (root / "a" / "b" / "late.txt").write_text("late"))
+    assert _gc() == 0
+    assert len(calls) == when + 1
+    assert (path / "a" / "b" / "late.txt").read_text() == "late"
+    assert (path / "notes.txt").exists()
+    assert not [p for p in path.parent.iterdir() if ".gc-" in p.name]
+
+
+def test_equal_size_rewrite_with_restored_mtime_is_detected(board, monkeypatch):
+    tid, path = _plain_task(lambda p: (p / "a.txt").write_text("v1"))
+    ext = board / "hardlink-ext"
+    os.link(path / "a.txt", ext)  # rewrite arrives through a second hardlink
+    st = (path / "a.txt").stat()
+    real = tarfile.TarFile.close
+
+    def racing(self):
+        real(self)
+        ext.write_text("v2")  # same size
+        os.utime(ext, ns=(st.st_atime_ns, st.st_mtime_ns))  # mtime restored; ctime cannot be
+
+    monkeypatch.setattr(tarfile.TarFile, "close", racing)
+    assert _gc() == 0
+    assert (path / "a.txt").read_text() == "v2"
+    assert not _archive(tid).exists()
+
+
+def test_equal_size_rewrite_after_return_is_detected_at_detach(board, monkeypatch):
+    _tid, path = _plain_task(lambda p: (p / "a.txt").write_text("v1"))
+    st = (path / "a.txt").stat()
+
+    def rewrite(root):
+        (root / "a.txt").write_text("v2")
+        os.utime(root / "a.txt", ns=(st.st_atime_ns, st.st_mtime_ns))
+
+    _hook_check_snapshot(monkeypatch, 0, rewrite)
+    assert _gc() == 0
+    assert (path / "a.txt").read_text() == "v2"
+
+
+def test_ancestor_directory_swapped_for_external_symlink_is_not_followed(board, monkeypatch):
+    outside = board / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("must not be read")
+    tid, path = _plain_task(lambda p: ((p / "deep").mkdir(), (p / "deep" / "f.txt").write_text("x")))
+    real = tarfile.TarFile.addfile
+    state = {"done": False}
+
+    def racing(self, tarinfo, fileobj=None):
+        out = real(self, tarinfo, fileobj)
+        if not state["done"] and tarinfo.name == "deep":
+            state["done"] = True
+            import shutil
+            shutil.rmtree(path / "deep")
+            (path / "deep").symlink_to(outside)
+        return out
+
+    monkeypatch.setattr(tarfile.TarFile, "addfile", racing)
+    assert _gc() == 0
+    assert state["done"] and (path / "deep").is_symlink()
+    assert (outside / "secret.txt").read_text() == "must not be read"
+    assert not _archive(tid).exists()
+
+
+def test_scan_refuses_symlink_root_and_swapped_ancestor(board):
+    from hermes_cli import kanban_scratch_archive as sa
+    real = board / "real"
+    (real / "d").mkdir(parents=True)
+    (board / "link").symlink_to(real)
+    with pytest.raises(sa.ArchiveRefused):
+        sa._scan(board / "link")
+    with pytest.raises(sa.ArchiveRefused):
+        sa.find_repos(board / "link")
+    # O_NOFOLLOW on the final component alone does not reject this path.
+    with pytest.raises(sa.ArchiveRefused):
+        sa._scan(board / "link" / "d")
+    with pytest.raises(sa.ArchiveRefused):
+        sa.find_repos(board / "link" / "d")
+
+
+def test_regular_file_replaced_by_fifo_before_open_refuses_without_blocking(board, monkeypatch):
+    from hermes_cli import kanban_scratch_archive as sa
+    root = board / "fifo-race"
+    root.mkdir()
+    victim = root / "file"
+    victim.write_text("original")
+    real_open = os.open
+    raced = []
+
+    def racing(name, flags, *args, **kwargs):
+        if name == "file" and kwargs.get("dir_fd") is not None:
+            # Assert before opening: a regression must fail, not hang the suite.
+            assert flags & os.O_NONBLOCK
+            victim.unlink()
+            os.mkfifo(victim)
+            raced.append(True)
+        return real_open(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", racing)
+    with tarfile.open(board / "fifo-race.tar", "w") as tar:
+        with pytest.raises(sa.ArchiveRefused, match="changed during archive"):
+            sa._scan(root, tar, {})
+    assert raced == [True]
+
+
+@pytest.mark.parametrize("race", ["none", "pickup", "reoccupied", "job", "mutation"])
+def test_archive_scans_outside_transactions_and_rechecks_after_postscan(board, monkeypatch, race):
+    from hermes_cli import kanban_scratch_archive as sa
+    from hermes_cli import kanban_worktree_gc as gc
+    tid, path = _plain_task(lambda p: (p / "nested").mkdir())
+    with kbc.connect_closing() as conn:
+        scan, check = sa._scan, sa.check_snapshot
+        calls = []
+        job = []
+
+        def scan_unlocked(*args, **kwargs):
+            assert not conn.in_transaction, "recursive archive scan holds the Board writer lock"
+            return scan(*args, **kwargs)
+
+        def postscan(tree, snapshot, **kwargs):
+            assert not conn.in_transaction
+            check(tree, snapshot, **kwargs)
+            calls.append(tree)
+            if kwargs.get("renamed"):
+                def pickup():
+                    # Use a second connection: proves a pickup can commit while scanning.
+                    with kbc.connect_closing() as other, kb.write_txn(other):
+                        other.execute("UPDATE tasks SET status='running' WHERE id=?", (tid,))
+
+                def mutate():
+                    (tree / "nested" / "late.txt").write_text("late")
+                    check(tree, snapshot, **kwargs)
+
+                actions = {"none": lambda: None, "pickup": pickup,
+                           "reoccupied": path.mkdir, "job": lambda: job.append(True),
+                           "mutation": mutate}
+                actions[race]()
+
+        monkeypatch.setattr(sa, "_scan", scan_unlocked)
+        monkeypatch.setattr(sa, "check_snapshot", postscan)
+        monkeypatch.setattr(gc, "defer_owned_job_cleanup", lambda *_: bool(job))
+        assert gc._archive_and_remove_scratch(conn, tid, path, OLD) == (race == "none")
+        assert len(calls) == 2
+        events = conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='workspace_archived'",
+                              (tid,)).fetchall()
+        assert bool(events) == (race == "none")
+        if race == "pickup":
+            assert conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()[0] == "running"
+        intents = list(_archive(tid).glob("detach-*.json"))
+        if race == "none":
+            assert not path.exists() and not intents
+        elif race == "reoccupied":
+            assert path.is_dir() and list(path.iterdir()) == []
+            record = json.loads(intents[0].read_text())
+            assert record["original"] == str(path)
+            assert (Path(record["detached"]) / "notes.txt").read_text() == "scratch"
+        else:
+            assert (path / "notes.txt").read_text() == "scratch"
+            if race == "mutation":
+                assert (path / "nested" / "late.txt").read_text() == "late"
+
+
+@pytest.mark.platforms("linux")
+def test_process_crash_after_detach_leaves_recoverable_intent(board):
+    import sys
+    from tools.environments.local import build_subprocess_env
+    from hermes_cli import kanban_scratch_archive as sa
+    from hermes_cli import kanban_worktree_gc as gc
+    tid, path = _plain_task(lambda p: None)
+    script = """
+import os
+import sys
+from pathlib import Path
+from hermes_cli import kanban_scratch_archive as sa
+from hermes_cli import kanban_db_connect as kbc
+path, dest = map(Path, sys.argv[1:3])
+saved = sa.archive_workspace(path, dest, task_id=path.name, completed_at=None)
+real = sa.check_snapshot
+def crash(tree, snapshot, **kwargs):
+    if kwargs.get('renamed'):
+        os._exit(79)  # no finally/restore: abrupt process death, not a Python exception
+    real(tree, snapshot, **kwargs)
+sa.check_snapshot = crash
+with kbc.connect_closing() as conn:
+    sa.remove_archived(conn, path, saved, lambda tree: True, lambda: None)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(path), str(_archive(tid))],
+        env=build_subprocess_env(extra={"HERMES_HOME": str(kb.kanban_home()), "HOME": str(board)}),
+        capture_output=True, text=True, encoding="utf-8", timeout=60, check=False,
+    )
+    assert result.returncode == 79, result.stderr
+    assert not path.exists()
+    intents = list(_archive(tid).glob("detach-*.json"))
+    assert len(intents) == 1
+    record = json.loads(intents[0].read_text())
+    detached = Path(record["detached"])
+    assert record["original"] == str(path) and record["archive"] == str(_archive(tid))
+    assert detached.stat().st_ino == record["root_identity"][4]
+    assert (detached / "notes.txt").read_text() == "scratch"
+    sa.verify_complete_archive(Path(record["archive"]))
+    # A subsequent pass must not guess that this unowned hidden tree is deletable.
+    with kbc.connect_closing() as conn:
+        assert gc.gc_task_scratch(conn, older_than_days=7) == 0
+    assert detached.is_dir() and intents[0].exists()
+    sa._rename_noreplace(detached, path)  # demonstrate receipt-guided manual recovery
+    assert (path / "notes.txt").read_text() == "scratch"
+
+
+@pytest.mark.parametrize("failure", ["intent_fsync", "commit", "remove", "restore"])
+def test_archive_detach_faults_preserve_recovery_evidence(board, monkeypatch, failure):
+    import contextlib
+    import sqlite3
+    from hermes_cli import kanban_scratch_archive as sa
+    tid, path = _plain_task(lambda p: None)
+    saved = sa.archive_workspace(path, _archive(tid), task_id=tid, completed_at=OLD)
+    real_txn = kb.write_txn
+    calls = []
+
+    @contextlib.contextmanager
+    def fail_final_commit(conn):
+        with real_txn(conn):
+            calls.append(True)
+            yield
+            if len(calls) == 2:
+                raise sqlite3.OperationalError("injected final commit failure")
+
+    def fail(*args, **kwargs):
+        raise OSError("injected filesystem failure")
+
+    if failure == "intent_fsync":
+        monkeypatch.setattr(sa.os, "fsync", fail)
+    elif failure == "commit":
+        monkeypatch.setattr(kb, "write_txn", fail_final_commit)
+    elif failure == "remove":
+        monkeypatch.setattr(sa.shutil, "rmtree", fail)
+    else:
+        real_check, real_rename = sa.check_snapshot, sa._rename_noreplace
+
+        def change(tree, snapshot, **kwargs):
+            if kwargs.get("renamed"):
+                (tree / "late.txt").write_text("unarchived")
+            real_check(tree, snapshot, **kwargs)
+
+        def cannot_restore(source, dest):
+            if dest == path:
+                fail()
+            real_rename(source, dest)
+
+        monkeypatch.setattr(sa, "check_snapshot", change)
+        monkeypatch.setattr(sa, "_rename_noreplace", cannot_restore)
+    with kbc.connect_closing() as conn:
+        def finalize():
+            conn.execute("UPDATE tasks SET title='finalized' WHERE id=?", (tid,))
+
+        with pytest.raises((OSError, sqlite3.Error, sa.ArchiveRefused)):
+            sa.remove_archived(conn, path, saved, lambda tree: True, finalize)
+        title = conn.execute("SELECT title FROM tasks WHERE id=?", (tid,)).fetchone()[0]
+        assert (title == "finalized") == (failure == "remove")
+    intents = list(saved.glob("detach-*.json"))
+    assert len(intents) == 1
+    record = json.loads(intents[0].read_text())
+    if failure in ("intent_fsync", "commit"):
+        assert (path / "notes.txt").read_text() == "scratch"
+        assert not Path(record["detached"]).exists()
+    else:
+        assert not path.exists()
+        assert (Path(record["detached"]) / "notes.txt").read_text() == "scratch"
+        if failure == "restore":
+            assert (Path(record["detached"]) / "late.txt").read_text() == "unarchived"
+
+
+@pytest.mark.parametrize("when", [0, 1], ids=["pre_detach", "postscan"])
+def test_root_replaced_after_scan_is_never_removed(board, monkeypatch, when):
+    from hermes_cli import kanban_scratch_archive as sa
+    tid, path = _plain_task(lambda p: None)
+    saved = sa.archive_workspace(path, _archive(tid), task_id=tid, completed_at=OLD)
+    check, calls = sa.check_snapshot, []
+    preserved = path.with_name(path.name + "-preserved")
+
+    def swap_after_scan(tree, snapshot, **kwargs):
+        check(tree, snapshot, **kwargs)
+        if len(calls) == when:
+            tree.rename(preserved)
+            tree.mkdir()
+        calls.append(tree)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("must not remove a root whose identity changed after scan")
+
+    monkeypatch.setattr(sa, "check_snapshot", swap_after_scan)
+    monkeypatch.setattr(sa.shutil, "rmtree", forbidden)
+    with kbc.connect_closing() as conn:
+        if when:
+            with pytest.raises(sa.ArchiveRefused):
+                sa.remove_archived(conn, path, saved, lambda tree: True, forbidden)
+        else:
+            assert sa.remove_archived(conn, path, saved, lambda tree: True, forbidden) == 0
+    assert (preserved / "notes.txt").read_text() == "scratch"
+    assert path.is_dir() and list(path.iterdir()) == []
+
+
+# ---- review fixes: durability before publication, raw-row path equality -------------------------------
+
+
+def _fd_path(fd):
+    return os.readlink(f"/proc/self/fd/{fd}")
+
+
+def test_archive_fsyncs_all_artifacts_bottom_up_before_publication_and_detach(board, monkeypatch):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    tid, path = _plain_task(lambda p: ((p / "sub").mkdir(), (p / "sub" / "f.txt").write_text("x")))
+    events = []
+    real_fsync, real_detach, real_rename = os.fsync, sa._rename_noreplace, Path.rename
+
+    def spy_fsync(fd):
+        events.append(("fsync", _fd_path(fd)))
+        return real_fsync(fd)
+
+    def spy_detach(src, dst):
+        events.append(("detach", str(src)))
+        return real_detach(src, dst)
+
+    def spy_publish(self, target):
+        if ".partial-" in self.name:
+            events.append(("publish", str(self)))
+        return real_rename(self, target)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(sa, "_rename_noreplace", spy_detach)
+    monkeypatch.setattr(Path, "rename", spy_publish)
+    assert _gc() == 0 and not path.exists()
+    kinds = [k for k, _ in events]
+    pub, det = kinds.index("publish"), kinds.index("detach")
+    assert pub < det
+    partial = events[pub][1]
+    before = [p for k, p in events[:pub] if k == "fsync"]
+    tree = next(i for i, p in enumerate(before) if p.endswith("tree.tar.gz"))
+    manifest = next(i for i, p in enumerate(before) if p.endswith("manifest.json"))
+    payload_dir = before.index(str(Path(partial) / sa.PAYLOAD_DIR))
+    assert max(tree, manifest) < payload_dir < before.index(partial)  # files, then dir, then parent dir
+    assert str(_archive(tid).parent) in [p for k, p in events[pub:det] if k == "fsync"]
+
+
+@pytest.mark.parametrize("target", ["file", "directory", "publication_parent"])
+def test_fsync_failure_fails_closed_without_publication(board, monkeypatch, target):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    tid, path = _plain_task(lambda p: None)
+    real_fsync = os.fsync
+
+    def flaky(fd):
+        link = _fd_path(fd)
+        hit = {"file": link.endswith("manifest.json"), "directory": link.endswith(sa.PAYLOAD_DIR),
+               "publication_parent": link == str(_archive(tid).parent)}[target]
+        if hit:
+            raise OSError(5, "EIO")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", flaky)
+    assert _gc() == 0
+    assert (path / "notes.txt").read_text() == "scratch"
+    parent = _archive(tid).parent
+    assert not parent.exists() or list(parent.iterdir()) == []
+
+
+@pytest.mark.parametrize("raw", [None, "~/hermes/kanban/workspaces/{tid}"], ids=["null_path", "tilde_path"])
+def test_null_or_tilde_row_path_is_archived_and_repeat_gc_is_idempotent(board, monkeypatch, raw):
+    monkeypatch.setenv("HOME", str(board))
+    tid, path = _plain_task(lambda p: None)
+    with kbc.connect_closing() as conn, kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET workspace_path=? WHERE id=?", (raw.format(tid=tid) if raw else None, tid))
+    assert _gc() == 0
+    assert not path.exists()
+    assert (_archive(tid) / PAYLOAD / "manifest.json").exists()
+    assert [k for k, _ in _events(tid)].count("workspace_archived") == 1
+    assert _gc() == 0
+    assert [k for k, _ in _events(tid)].count("workspace_archived") == 1

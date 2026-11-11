@@ -915,3 +915,78 @@ def test_post_detach_cleanup_failure_is_reported_accurately(env, monkeypatch, ca
     assert _receipt(env, tid) is None
     assert "detached but not removed" in caplog.text and "receipt=consumed" in caplog.text
     assert str(_trash(path)) in caplog.text and "Scratch custody preserved" not in caplog.text
+
+
+@pytest.mark.parametrize("when", [0, 1], ids=["pre_detach", "detached_before_rmtree"])
+def test_archived_tree_changed_at_detach_keeps_tree_and_receipt(env, remote, monkeypatch, when):
+    tid, path, _ = evicted(env)
+    helpers._run("clone", "-q", str(remote), str(path / "repo"))
+    real, calls = archive.check_snapshot, []
+
+    def wrapper(p, snapshot, **kw):
+        if len(calls) == when:
+            (Path(p) / "repo" / "late.txt").write_text("late")
+        calls.append(p)
+        return real(p, snapshot, **kw)
+
+    monkeypatch.setattr(archive, "check_snapshot", wrapper)
+    assert gc.gc_task_scratch(env.conn, older_than_days=7) == 0
+    assert len(calls) == when + 1
+    assert (path / "repo" / "late.txt").read_text() == "late"
+    assert env.conn.execute("SELECT 1 FROM kanban_scratch_custody WHERE task_id=?", (tid,)).fetchone()
+    assert not [p for p in path.parent.iterdir() if ".gc-" in p.name]
+
+
+@pytest.mark.parametrize("race", ["none", "pickup", "receipt", "reoccupied", "job"])
+def test_custody_archive_unlocked_scans_and_final_fence(env, remote, monkeypatch, race):
+    from hermes_cli import kanban_workspace_jobs as jobs
+    tid, path, _ = evicted(env)
+    helpers._run("clone", "-q", str(remote), str(path / "repo"))
+    original_receipt = _receipt(env, tid)
+    scan, check = archive._scan, archive.check_snapshot
+    calls, busy = [], []
+
+    def unlocked(*args, **kwargs):
+        assert not env.conn.in_transaction, "recursive archive scan holds Board writer lock"
+        return scan(*args, **kwargs)
+
+    def after_scan(tree, snapshot, **kwargs):
+        assert not env.conn.in_transaction
+        check(tree, snapshot, **kwargs)
+        calls.append(tree)
+        if kwargs.get("renamed"):
+            # Custody must still be durable throughout the unlocked postscan.
+            assert _receipt(env, tid) == original_receipt
+            def pickup():
+                sync.apply_remote_changes(env.conn, [sync.RemoteChange(
+                    1, "tasks", tid, "upsert", {"title": "picked up", "status": "ready",
+                    "created_on": "other", "created_at": OLD, "workspace_kind": "scratch",
+                    "workspace_path": None}, 1, "", "")], new_cursor=1, observers=False)
+                assert kb.get_task(env.conn, tid) is not None  # prove import actually committed
+
+            def change_receipt():
+                with kb.write_txn(env.conn):
+                    env.conn.execute("UPDATE kanban_scratch_custody SET evidence=json_set(evidence, '$.changed', 1) "
+                                     "WHERE task_id=?", (tid,))
+
+            actions = {"none": lambda: None, "pickup": pickup, "receipt": change_receipt,
+                       "reoccupied": path.mkdir, "job": lambda: busy.append(True)}
+            actions[race]()
+
+    monkeypatch.setattr(archive, "_scan", unlocked)
+    monkeypatch.setattr(archive, "check_snapshot", after_scan)
+    monkeypatch.setattr(jobs, "defer_owned_job_cleanup", lambda *_: bool(busy))
+    assert gc.gc_task_scratch(env.conn, older_than_days=7) == (race == "none")
+    assert len(calls) == 2
+    if race == "none":
+        assert not path.exists() and _receipt(env, tid) is None
+    else:
+        assert _receipt(env, tid) is not None
+        if race == "reoccupied":
+            assert list(path.iterdir()) == []
+            intent_paths = list((kb.kanban_home() / "archive" / "scratch" / "default" / tid).glob("detach-*.json"))
+            assert len(intent_paths) == 1
+            intent = json.loads(intent_paths[0].read_text())
+            assert (Path(intent["detached"]) / "repo" / "tracked.txt").exists()
+        else:
+            assert (path / "repo" / "tracked.txt").exists()
