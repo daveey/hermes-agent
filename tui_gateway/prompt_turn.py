@@ -1431,13 +1431,13 @@ def _run_admitted_prompt(
                 display_metadata, turn_author, text)
             status_note = _absorb_turn_result(
                 sid, session, st, text, display_kind, display_metadata)
+            from tui_gateway import update_pause  # [daveey] before the marker is retired: a user Stop beats the pause
+            paused_for_update = update_pause.pause_stands(session, st.marker_key, st.result)
             payload, raw, status = _complete_turn_payload(session, st, status_note, cols)
             if status == "error":  # [daveey] module calls: harnesses rebind this body with minimal globals
                 automation_replay.plan_for_turn(st, st.result)
-            paused_for_update = isinstance(st.result, dict) and bool(st.result.get("paused_for_update"))
             if paused_for_update:
-                from tui_gateway.update_pause import announce_pause
-                announce_pause(sid, payload)
+                update_pause.announce_pause(sid, payload)
             # [daveey] A client Stop ended this turn: persist "Stopped by <login>" so the chat says why it
             # went quiet (methods_session_interrupt._record_stop_notice; a no-op for any other ending).
             _record_stop_notice(session, status)
@@ -1453,7 +1453,6 @@ def _run_admitted_prompt(
             automation_replay.schedule_for_turn(session, st)
             if paused_for_update:
                 # The new backend continues it; if no update replaces this one, continue it here.
-                from tui_gateway import update_pause
                 update_pause.start_in_place_watcher(sid, session, st.marker_key)
             goal_followup = _goal_followup_after_turn(sid, session, st.result, status, raw)
             if status == "complete":

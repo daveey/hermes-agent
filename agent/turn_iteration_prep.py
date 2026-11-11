@@ -418,6 +418,10 @@ def begin_iteration(
     # installs ``step_boundary_pause`` per turn; a reason ends the turn as an interrupt it auto-continues
     # on the updated backend. Persist first, so the next backend sees every finished tool result.
     _pause = _pause or _step_boundary_pause(agent, messages, api_call_count)
+    if update_pause_cancel.user_stop_pending(agent):
+        interrupted = True  # a Stop landed while (or right after) the hook ran: it wins, the turn ends stopped
+        _turn_exit_reason = "interrupted_by_user"
+        return _verdict("break")
     if _pause:
         agent._persist_session(messages, conversation_history)
         agent._step_boundary_paused = _pause

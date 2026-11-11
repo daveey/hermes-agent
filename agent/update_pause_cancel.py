@@ -103,6 +103,12 @@ def take_pending(agent: Any) -> bool:
     return bool(getattr(agent, "_interrupt_requested", False)) and interrupt_issuer(agent) == _ISSUER
 
 
+def user_stop_pending(agent: Any) -> bool:
+    """A user's interrupt (Stop, or a new message) is pending on the agent. It beats a core-update pause of the
+    turn it stops: that turn ends stopped and nothing continues it after the update (t_01a1c895eb0596b2)."""
+    return bool(getattr(agent, "_interrupt_requested", False)) and interrupt_issuer(agent) is None
+
+
 def reset(agent: Any) -> None:
     """Turn start: no call of an earlier turn (an abandoned worker) is in flight, and no cancel is pending."""
     slots = _slots(agent)

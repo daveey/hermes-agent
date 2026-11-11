@@ -220,6 +220,8 @@ def _(rid, params: dict) -> dict:
         # Retire the crash-recovery marker NOW: until the run thread's finally, a backend exit looks like a crash
         # and session.resume auto-continues the turn the user just stopped (the extra key covers compression
         # rotating session_key mid-turn).
+        from tui_gateway.update_pause import user_stop_wins
+        user_stop_wins(session)  # [daveey] a Stop of the running turn beats the update pause its hook already paid
         with session["history_lock"]:
             active_marker_key = str(session.pop("_active_turn_marker_key", "") or "")
         _retire_turn_marker(session, active_marker_key)
