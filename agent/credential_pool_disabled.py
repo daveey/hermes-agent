@@ -111,9 +111,6 @@ def _borrowed_source(entry: Any) -> str:
 
 def _source_tokens(provider: str, source: str) -> set[str]:
     """Tokens a borrowed source holds right now (refreshed outside Hermes, so not in any record)."""
-    if source.startswith("env:"):
-        value = os.environ.get(source[4:], "").strip()
-        return {value} if value else set()
     if source == "claude_code" and provider == "anthropic":
         try:
             from agent.anthropic_credentials import read_claude_code_credentials
@@ -195,8 +192,12 @@ def matches(entry: Any, keys: tuple) -> bool:
     acct = account_of(entry) or ""
     fp = fingerprint_of(entry) or ""
     src = _borrowed_source(entry)
+    # An env:VAR row keeps its id when the variable's value changes: there the record means that value.
+    env_row = str(getattr(entry, "source", "") or "").startswith("env:")
     for rid, rlabel, racct, rfp, rsrc in keys[2]:
         if racct and acct and racct != acct and not acct.startswith(racct + "/"):  # older records: workspace only
+            continue
+        if env_row and rfp and fp and rfp != fp:
             continue
         if ((rid and rid == entry_id) or (rlabel and rlabel == label) or (racct and racct == acct)
                 or (rfp and rfp == fp) or (rsrc and rsrc == src)):
@@ -313,7 +314,7 @@ def token_disabled(provider: str, *tokens: Optional[str]) -> bool:
     if any(matches(SimpleNamespace(id="", label="", access_token=t, extra={}), keys) for t in wanted):
         return True  # fingerprint or JWT account of a disabled record
     if any(wanted & _source_tokens(provider, rsrc) for *_, rsrc in keys[2] if rsrc):
-        return True  # the current token of a disabled borrowed source (Claude Code login, env var)
+        return True  # the current token of a disabled Claude Code login
     from agent.credential_pool import PooledCredential
     from hermes_cli import auth as auth_mod
     try:

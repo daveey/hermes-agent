@@ -470,5 +470,5 @@ def test_an_env_var_source_is_not_disabled_as_a_slot(monkeypatch):
     row = SimpleNamespace(id="e0", label="anthropic_token", source="env:ANTHROPIC_TOKEN", access_token="fixture-env-1")
     keys = cpd._keys_from_records([{"id": "e0", "label": "anthropic_token", "fp": cpd.fingerprint_of(row),
                                     "src": cpd._borrowed_source(row)}])
-    other = SimpleNamespace(id="e1", label="anthropic_token", source="env:ANTHROPIC_TOKEN", access_token="fixture-env-2")
+    other = SimpleNamespace(id="e0", label="anthropic_token", source="env:ANTHROPIC_TOKEN", access_token="fixture-env-2")
     assert cpd.matches(row, keys) and not cpd.matches(other, keys)
