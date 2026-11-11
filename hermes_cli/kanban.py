@@ -37,6 +37,7 @@ from hermes_cli.kanban_output import (
     _task_to_dict,
 )
 from hermes_cli.kanban_boards import _dispatch_boards
+from hermes_cli.kanban_cli_metadata import parse_metadata_flag as _parse_metadata_flag, receipt_refusal
 from hermes_cli.kanban_cli_park import (
     _REASON_FLAG_HINT, _REASON_WORDS_HINT, _cli_awaiting, _cli_wake_check, _commented, _guarded_park, _ids_error,
     _parked_msg,
@@ -62,19 +63,6 @@ from hermes_cli.kanban_requeue import (  # moved here from this module; re-expor
 def _none_profile(value: str) -> Optional[str]:
     """``none`` / ``-`` / ``null`` mean "unassign"."""
     return None if value.lower() in {"none", "-", "null"} else value
-
-
-def _parse_metadata_flag(raw: Optional[str]) -> tuple[Optional[dict], int]:
-    """Parse ``--metadata`` JSON; returns ``(dict|None, rc)`` with rc=2 on error."""
-    if not raw:
-        return None, 0
-    try:
-        metadata = json.loads(raw)
-        if not isinstance(metadata, dict):
-            raise ValueError("must be a JSON object")
-    except (ValueError, json.JSONDecodeError) as exc:
-        return None, _err(f"kanban: --metadata: {exc}", 2)
-    return metadata, 0
 
 
 def _run_state_kwargs(args: argparse.Namespace, cmd: str) -> tuple[Optional[dict[str, str]], int]:
@@ -1269,12 +1257,6 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     metadata, rc = _parse_metadata_flag(raw_meta)
     if rc:
         return rc
-    if isinstance(metadata, dict) and "completion_receipt" in metadata:
-        from hermes_completion_receipt import validate_completion_receipt
-        try:  # structural refusal before the goal judge or any write
-            validate_completion_receipt(metadata["completion_receipt"])
-        except ValueError as receipt_err:
-            return _err(f"kanban complete: {receipt_err}", 1)
     fail_msg: dict[str, str] = {}
     with kbc.connect_closing() as conn:
         def op(tid):
@@ -1305,15 +1287,8 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 fail_msg[tid] = (f"cannot complete {tid}: {empty_err}. Pass --result/--summary "
                                  f"describing what was done (an empty completion is not evidence).")
                 return False
-            except kb.ArtifactPreservationError as preserve_err:
-                # Receipt evidence could not be preserved durably: the completion rolled back.
-                fail_msg[tid] = f"cannot complete {tid}: {preserve_err}"
-                return False
-            except ValueError as receipt_err:
-                if not str(receipt_err).startswith("completion_receipt"):
-                    raise
-                # Malformed receipt or unverified pending owner: admission wrote nothing.
-                fail_msg[tid] = f"cannot complete {tid}: {receipt_err}"
+            except (kb.ArtifactPreservationError, ValueError) as receipt_err:
+                fail_msg[tid] = receipt_refusal(tid, receipt_err)  # nothing written; re-raises other errors
                 return False
             if not done:
                 # complete_task returns bare False for a dependency refusal too;

@@ -161,7 +161,7 @@ def _subprocess(tid, value, tmp_path):
     return subprocess.run(
         [sys.executable, "-m", "hermes_cli.main", "kanban", "complete", tid,
          "--summary", "Assessment finished.", "--metadata", json.dumps({"completion_receipt": value})],
-        cwd=REPO, env=env, capture_output=True, text=True, timeout=240)
+        cwd=REPO, env=env, capture_output=True, text=True, timeout=240, check=False)
 
 
 def test_terminal_subprocess_path_rejects_then_admits(board, tmp_path):
