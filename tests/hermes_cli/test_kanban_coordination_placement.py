@@ -262,3 +262,46 @@ def test_ordinary_work_does_not_read_registry(monkeypatch):
     monkeypatch.setattr(wn, "registry", unexpected)
     assert coord.check("Fix cross_task comments in the endpoint", {}) is None
     assert coord.legacy_refusal({"title": "Fix cross_task comments"}) is False
+
+
+# --- remote access capabilities (operator attestations on the worker's Board labels) -------------------------
+ACCESS = ["capability:ssh-mbp", "capability:ssh-mini", "capability:hub-read"]
+
+
+def test_ssh_card_needs_mac_ssh_attestation(fleet):
+    cfg, entry, _ = fleet
+    assert reason("ssh mini and check the watcher output", cfg) == "needs worker coordination capability"
+    entry["labels"] += ACCESS
+    assert reason("ssh mini and check the watcher output", cfg) is None
+
+
+def test_ssh_attestation_needs_both_mac_keys(fleet):
+    cfg, entry, _ = fleet
+    entry["labels"] += ["capability:ssh-mini"]
+    assert reason("SSH to the MacBook for the log", cfg) == "needs worker coordination capability"
+
+
+@pytest.mark.parametrize("body", ["read the log on the hub", "the hub's log output", "journalctl -u x",
+                                    "query kanban.db for the run"])
+def test_hub_reads_need_hub_read_attestation(fleet, body):
+    cfg, entry, _ = fleet
+    assert reason(body, cfg) == "needs worker coordination capability"
+    entry["labels"] += ["capability:hub-read"]
+    assert reason(body, cfg) is None
+
+
+def test_access_labels_do_not_exempt_other_home_markers(fleet):
+    cfg, entry, _ = fleet
+    entry["labels"] += ACCESS
+    for body in ("ssh mini then launchctl via launchd", "on the hub: systemctl restart x",
+                 "ssh mini and edit hermes-sync state", "read the log on the hub, then restart the gateway"):
+        assert reason(body, cfg) in ("home gateway marker", "local marker"), body
+
+
+def test_claim_refusal_revalidates_access_labels(fleet):
+    from hermes_cli.kanban_placement_coordination import claim_refusal
+    _, entry, _ = fleet
+    card = {"placement_policy": "worker-first-v1", "title": "t", "body": "ssh mini then read the log"}
+    assert claim_refusal(card, "worker") == "needs worker coordination capability"
+    entry["labels"] += ACCESS
+    assert claim_refusal(card, "worker") is None

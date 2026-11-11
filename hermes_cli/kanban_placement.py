@@ -448,9 +448,10 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
     full = without_carried_inputs(f"{title}\n{body}", c.raw)
     if refusal := coordination.check(full, c.raw, skills=args.get("skills")):
         return refusal
-    marker_full = coordination.marker_text(full)
+    marker_full = coordination.access_text(coordination.marker_text(full))
     extra = c.raw.get("extra_home_markers")
-    exemptible = (HUB_CLI_COMMAND, r"\btoken-broker\b")
+    exemptible = (HUB_CLI_COMMAND, r"\btoken-broker\b", r"\bssh\b", r"\bon the hub\b", r"\bthe hub's\b",
+                  r"\bjournalctl\b", r"\bkanban\.db\b")  # coordination.check() proved the worker attests each
     pats = [(p, marker_full if p in exemptible else full)
             for p in HOME_GATEWAY_MARKERS if p != HOST_WORKTREE_PATH]
     pats += [(p, full) for p in extra] if isinstance(extra, list) else []

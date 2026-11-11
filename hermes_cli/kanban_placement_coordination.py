@@ -57,6 +57,18 @@ _TOOLS = {
 }
 
 
+# Remote access a worker holds through a restricted key, attested on its Board labels by the operator (the keys
+# are installed by hand: a worker-2 key in the MacBook's and mini's authorized_keys, and a forced-command
+# read-only `hub-read` login on the hub). A bare mention is conservative: a card that wants more than the key
+# gives blocks with needs=[...] and capability routing opens the owner card. Other home markers (launchd, cron,
+# systemctl, gateway restart, hub paths) stay binding either way.
+_ACCESS = (
+    (re.compile(r"\bssh\b", re.IGNORECASE), ("capability:ssh-mbp", "capability:ssh-mini")),
+    (re.compile(r"\bon the hub\b|\bthe hub's\b|\bjournalctl\b|\bkanban\.db\b", re.IGNORECASE),
+     ("capability:hub-read",)),
+)
+
+
 def requirements(text):
     """Return required labels and an unsupported-action refusal, without changing text."""
     labels = set()
@@ -78,6 +90,9 @@ def requirements(text):
     for tool, label in _TOOLS.items():
         if re.search(r"\b" + re.escape(tool) + r"\b", text, re.IGNORECASE):
             labels.add(label)
+    for rx, needed in _ACCESS:
+        if rx.search(text):
+            labels.update(needed)
     return labels, None
 
 
@@ -136,6 +151,16 @@ def marker_text(text):
         if action in ("status", "pull"):
             text = text[:start] + text[end:]
     return re.sub(r"\btoken-broker\b", "", text, flags=re.IGNORECASE)
+
+
+def access_text(text):
+    """``text`` minus the remote-access mentions :func:`check` required an attestation for (ssh, hub reads).
+
+    Only called after check succeeds, so every destination holds the labels; kept apart from
+    :func:`marker_text` so a card that never needed the attestation keeps its markers."""
+    for rx, _ in _ACCESS:
+        text = rx.sub("", text)
+    return text
 
 
 def claim_refusal(card, me):
