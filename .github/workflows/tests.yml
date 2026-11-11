@@ -99,7 +99,8 @@ jobs:
         run: |
           set -euo pipefail
           command -v bwrap >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap; }
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # Blacksmith kernels have no AppArmor userns knob (unrestricted already).
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
           bwrap --ro-bind / / --unshare-user --unshare-pid true
 
       - name: Set up locked Python and test dependencies
