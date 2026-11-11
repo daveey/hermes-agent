@@ -10,12 +10,15 @@ from hermes_cli import kanban_db_sync as sync
 
 
 def rejected_parent(conn: sqlite3.Connection, parents: list[tuple[dict, str]], result: dict) -> dict | None:
-    """Persist only schema-refused parents; every other synthetic verdict keeps its existing path."""
-    if result.get("status") != "rejected" or result.get("reason") != "forbidden_field":
-        return None
+    """Keep successful parent versions; persist only schema-refused synthetic verdicts."""
     for op, tid in parents:
         if op["client_op_id"] != result.get("client_op_id"):
             continue
+        if result.get("status") in ("applied", "merged") and result.get("version"):
+            conn.execute("UPDATE tasks SET sync_version = MAX(COALESCE(sync_version, 0), ?) WHERE id = ?",
+                         (result["version"], tid))
+        if result.get("status") != "rejected" or result.get("reason") != "forbidden_field":
+            return None
         conn.execute(
             "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, hlc, created_at) "
             "VALUES (?, 'tasks', ?, 'upsert', ?, ?, ?)",
