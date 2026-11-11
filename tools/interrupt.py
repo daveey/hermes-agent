@@ -120,6 +120,12 @@ def get_interrupt_reason() -> str | None:
         return _interrupt_reasons.get(threading.current_thread().ident)
 
 
+def thread_interrupt_reason(thread_id: int | None) -> str | None:
+    """The pending interrupt cause of *thread_id*, if one was given. [daveey]"""
+    with _lock:
+        return _interrupt_reasons.get(thread_id) if thread_id is not None else None
+
+
 def clear_current_thread_interrupt() -> None:
     """Clear any interrupt bit on the CURRENT thread: gives a user-approved command a clean
     slate right before it spawns its child, so a stale bit that landed during the blocking

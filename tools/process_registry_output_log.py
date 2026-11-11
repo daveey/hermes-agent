@@ -11,6 +11,7 @@ import codecs
 from contextlib import suppress
 import logging
 import os
+import re
 from pathlib import Path
 import time
 from typing import Optional
@@ -86,6 +87,15 @@ def record_exit_command(log: Path, command: str) -> str:
     return f"__hermes_exit_file={target}; trap 'printf \"%s\\n\" \"$?\" > \"$__hermes_exit_file\"' EXIT\n{command}"
 
 
+# The foreground wrapper's own trailer (PIPESTATUS and cwd markers, base_session_env): a survivable foreground
+# command handed to the background tees it into its log after the user's output. [daveey]
+_SHELL_MARKER_RE = re.compile(r"\n?__HERMES_(?:PIPE|CWD)_\w+?__[^\n]*?__HERMES_(?:PIPE|CWD)_\w+?__\n?")
+
+
+def strip_shell_markers(text: str) -> str:
+    return _SHELL_MARKER_RE.sub("", text) if "__HERMES_" in text else text
+
+
 def recorded_exit_code(log) -> Optional[int]:
     try:
         return int(_exit_path(log).read_text(encoding="utf-8-sig").strip())
@@ -109,6 +119,7 @@ class ProcessOutputLogMixin:
 
         def ingest(text: str) -> None:
             nonlocal head_noise
+            text = strip_shell_markers(text)
             if head_noise:  # ``bash -lic`` startup warnings, as the pipe reader strips them
                 text = self._clean_shell_noise(text)
                 head_noise = not text.strip()

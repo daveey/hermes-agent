@@ -17,7 +17,7 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 from hermes_constants import get_hermes_home
 from tools.interrupt import consume_yield, is_interrupted, is_thread_interrupted
@@ -577,6 +577,9 @@ class BaseEnvironment(ABC):
                 trace.iterations += 1
                 if is_interrupted() or is_thread_interrupted(watch_interrupt_tid):
                     trace.interrupted()
+                    if (handed := self._survive_interrupt(proc, output, drain_thread, drain_stop,
+                                                          watch_interrupt_tid)) is not None:
+                        return handed
                     _kill_and_join()
                     return {**self._finalize_wait_result(output, output.render(suffix="\n[Command interrupted]"), 130),
                             "hermes_interrupted": True}
@@ -637,6 +640,30 @@ class BaseEnvironment(ABC):
         return result
 
     _finalize_wait_result = staticmethod(_finalize_wait_result)
+
+    @staticmethod
+    def _survive_interrupt(proc, output, drain_thread, drain_stop, watch_interrupt_tid) -> dict | None:
+        """A survivable command (``terminal.update_survivable_processes``) interrupted by a Hermes update
+        or shutdown keeps running as a background job: its handoff result, else None (kill as usual).
+        [daveey] t_01a1c7d04d9046d2"""
+        survivable = getattr(proc, "_hermes_survivable", None)
+        if survivable is None or drain_stop is None:
+            return None
+        from tools.process_registry_survivable import survivable_interrupt_reason
+
+        reason = survivable_interrupt_reason(threading.current_thread().ident, watch_interrupt_tid)
+        if reason is None:
+            return None
+        drain_stop.set()
+        drain_thread.join(timeout=1)
+        try:
+            handed = survivable.handoff(proc, output.render(), reason=reason)
+        except Exception:
+            logger.warning("survivable command handoff failed; killing it as before", exc_info=True)
+            return None
+        if handed is not None:
+            output.close_spill()
+        return handed
 
     def _kill_process(self, proc: ProcessHandle):
         """Terminate a process. Subclasses may override for process-group kill."""
@@ -702,8 +729,10 @@ class BaseEnvironment(ABC):
         stdin_data: str | None = None,
         rewrite_compound_background: bool = True,
         bounded_capture: bool = False,
-        yield_handler: Callable[[ProcessHandle, str], dict] | None = None) -> dict:
-        """Execute a command, return {"output": str, "returncode": int}. ``bounded_capture=True``
+        yield_handler: Callable[[ProcessHandle, str], dict] | None = None,
+        survivable: Any = None) -> dict:
+        """Execute a command, return {"output": str, "returncode": int}. ``survivable`` (local backend
+        only): a ``process_registry_survivable.SurvivableForeground`` spawning the command in its own scope. ``bounded_capture=True``
         caps retention at ``tool_output.max_bytes`` WHILE draining; only the foreground terminal
         tool may set it — internal full-fidelity consumers (file-op ``cat`` reads feeding the
         patch engine, RPC reads, log reads) MUST leave it False or data is corrupted. The wait is
@@ -751,7 +780,8 @@ class BaseEnvironment(ABC):
                 return {"output": "[host is exiting: command not started]", "returncode": 130}
             spawned = None
             try:
-                spawned = self._run_bash(wrapped, login=login, timeout=effective_timeout, stdin_data=effective_stdin)
+                spawned = self._run_bash(wrapped, login=login, timeout=effective_timeout, stdin_data=effective_stdin,
+                                         **({"survivable": survivable} if survivable is not None else {}))
             finally:
                 fenced = _leave_foreground_spawn(self, spawned)
             proc_holder.append(spawned)

@@ -1153,7 +1153,7 @@ class LocalEnvironment(BaseEnvironment):
         self.cwd = safe_cwd
 
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
-                  stdin_data: str | None = None) -> subprocess.Popen:
+                  stdin_data: str | None = None, survivable=None) -> subprocess.Popen:
         bash = _find_bash()
         run_env = _make_run_env(self.env)
         # Login invocations (init_session's env snapshot) source the user's rc /
@@ -1164,6 +1164,11 @@ class LocalEnvironment(BaseEnvironment):
             cmd_string = _prepend_shell_init(cmd_string, _resolve_shell_init_files())
         args = [bash, *(["-l"] if login else []), "-c", cmd_string]
         self._recover_cwd()
+        # [daveey] terminal.update_survivable_processes: own scope, not owned by this process.
+        if survivable is not None and (proc := survivable.spawn(args, run_env, self.cwd, stdin_data)) is not None:
+            if stdin_data is not None:
+                _pipe_stdin(proc, stdin_data)
+            return proc
         # Not spawn_owned: an awaited command needs no spawn-ledger entry; own_process_groups below hands
         # its group to the owner-death supervisor and _wait_for_process releases it.
         proc = subprocess.Popen(

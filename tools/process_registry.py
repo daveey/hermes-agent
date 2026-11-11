@@ -30,14 +30,13 @@ from tools.environments.local import _append_dropped_path_entries, _resolve_safe
 from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import MISSING, dataclass, field
 from typing import Any, Dict, List, Literal, NamedTuple, Optional
-
 from hermes_cli.config import get_hermes_home
-
 from tools.process_registry_notifications import (
     format_process_notification, heartbeat_output_tail, is_child_process_notification, should_surface_notification)
 from tools.process_registry_checkpoint import ProcessCheckpointMixin
 from tools.process_registry_readopt import ProcessReadoptMixin
 from tools.process_registry_output_log import ProcessOutputLogMixin, open_output_log, record_exit_command, spawn_output_log
+from tools.process_registry_survivable import ProcessForegroundHoldMixin
 from tools.process_registry_ownership import ProcessOwnershipMixin
 from tools.process_registry_termination import ProcessTerminationMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
@@ -684,7 +683,7 @@ _WSL_CHAIN_NOTE = (
 )
 
 
-class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessReadoptMixin, ProcessOutputLogMixin, ProcessOwnershipMixin):
+class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessReadoptMixin, ProcessOutputLogMixin, ProcessOwnershipMixin, ProcessForegroundHoldMixin):
     """In-memory registry of running and finished background processes.
     Thread-safe: accessed from executor threads (terminal_tool, process handlers),
     the gateway asyncio loop (watchers, reset checks) and the cleanup thread."""

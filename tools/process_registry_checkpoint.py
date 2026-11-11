@@ -154,9 +154,12 @@ class ProcessCheckpointMixin:
         writer = self._writer_identity()
         scope = scope_profile()
         with self._lock:
-            own_ids = set(self._running) | set(self._finished) | set(drop_ids)
+            # Survivable foreground commands the tool is waiting on are checkpointed too: a crash
+            # mid-wait leaves them to the next owner (process_registry_survivable). [daveey]
+            held = list(vars(self).get("_foreground_holds", {}).values())
+            own_ids = set(self._running) | set(self._finished) | set(drop_ids) | {s.id for s in held}
             entries = []
-            for s in self._running.values():
+            for s in (*self._running.values(), *held):
                 if s.exited:
                     continue
                 # One registry serves every profile of a multiplexed gateway: a job goes only in its own

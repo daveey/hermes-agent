@@ -19,6 +19,7 @@ import/patch target): ``terminal_tool_config`` (TERMINAL_* reads, ``_quiet``),
 ``terminal_tool_result`` (foreground result post-processing).
 """
 
+import functools
 import json
 import logging
 import os
@@ -961,6 +962,7 @@ from tools.terminal_tool_guards import (
     trailing_amp_background_command,
 )
 from tools.terminal_tool_background import _YIELDED_NOTE, spawn_background_process, yield_to_background_handler
+from tools.process_registry_survivable import default_persist
 from tools.terminal_tool_result import finalize_foreground_result
 
 
@@ -1358,6 +1360,17 @@ def _yield_kwargs(command: str, **ctx) -> dict:
     return {"yield_handler": handler} if handler is not None else {}
 
 
+def _survivable_foreground(command: str, env: Any, plan: _ExecPlan, *, task_id: Optional[str], session_key: str):
+    """A ``SurvivableForeground`` for a long local foreground call under
+    ``terminal.update_survivable_processes``, else None. [daveey] t_01a1c7d04d9046d2"""
+    from tools.process_registry_survivable import SurvivableForeground, foreground_eligible
+
+    if not foreground_eligible(env, plan.env_type, plan.effective_timeout):
+        return None
+    eff = plan.effective_task_id
+    return SurvivableForeground(command=command, task_id=eff, owner_task_id=task_id or eff, session_key=session_key)
+
+
 def _run_foreground(
     command: str, env: Any, plan: _ExecPlan, *,
     task_id: Optional[str], session_id: Optional[str], session_key: str,
@@ -1389,11 +1402,18 @@ def _run_foreground(
             # bounded_capture: model-facing output keeps a head/tail window
             # while streaming so a verbose command can't OOM the gateway;
             # internal env.execute() consumers stay unbounded.
-            result = env.execute(
-                command, timeout=effective_timeout, cwd=command_cwd, bounded_capture=True,
-                **_yield_kwargs(command, env_type=env_type, cwd=command_cwd, effective_task_id=eff,
-                                task_id=task_id, session_key=session_key),
-            )
+            exec_kwargs = _yield_kwargs(command, env_type=env_type, cwd=command_cwd, effective_task_id=eff,
+                                        task_id=task_id, session_key=session_key)
+            survivable = _survivable_foreground(command, env, plan, task_id=task_id, session_key=session_key)
+            if survivable is not None:
+                exec_kwargs.update(survivable=survivable, yield_handler=functools.partial(survivable.handoff, yielded=True))
+            result = None
+            try:
+                result = env.execute(command, timeout=effective_timeout, cwd=command_cwd, bounded_capture=True,
+                                     **exec_kwargs)
+            finally:
+                if survivable is not None:
+                    survivable.release(result)
             break
         except Exception as e:
             # A backend exception (e.g. an SSH connect timeout) never reached an exit status, so it
@@ -1411,6 +1431,9 @@ def _run_foreground(
                          max_retries, _safe_command_preview(command), type(e).__name__, e, eff, env_type)
             return _error_json(_redact_terminal_error_text(f"Command execution failed: {type(e).__name__}: {e}"))
 
+    if result.get("survived_session_id"):  # a Hermes update/shutdown left it running: no exit status yet
+        from tools.process_registry_survivable import survived_result_json
+        return survived_result_json(result)
     if result.get("yielded_session_id"):  # handed to the background: no exit status yet
         return json.dumps({
             "output": result.get("output", ""), "exit_code": None, "error": None,
@@ -1502,7 +1525,7 @@ def terminal_tool(
     _host_local: bool = False,
     _completion_output_chars: int = 0,
     heartbeat: int = 0,
-    persist_on_release: bool = False,
+    persist_on_release: Optional[bool] = None,
     http_readback: bool = False,
 ) -> str:
     """Execute *command* in the configured terminal environment; returns a JSON string.
@@ -1619,7 +1642,7 @@ def terminal_tool(
                     pty_disabled_reason=_PTY_DISABLED_REASON if pty_disabled else None,
                     completion_output_chars=_completion_output_chars,
                     heartbeat_seconds=heartbeat,
-                    persist_on_release=persist_on_release,
+                    persist_on_release=default_persist(persist_on_release, env_type, pty and not pty_disabled),
                     auto_backgrounded=auto_bg is not None and plan.promoted_from_foreground_timeout is None,
                 )
                 if plan.promoted_from_foreground_timeout is not None:
@@ -1739,7 +1762,9 @@ def _handle_terminal(args, **kw):
     notify_on_complete = args.get("notify_on_complete", False)
     watch_patterns = args.get("watch_patterns")
     heartbeat = args.get("heartbeat") or 0
-    persist_on_release = bool(args.get("persist_on_release", False))
+    # None = not given: terminal.update_survivable_processes may default it on for a background job.
+    persist_on_release = args.get("persist_on_release")
+    persist_on_release = None if persist_on_release is None else bool(persist_on_release)
     if not isinstance(heartbeat, int) or isinstance(heartbeat, bool) or heartbeat < 0:
         return tool_error("heartbeat must be a whole number of seconds (0 disables; positive values are clamped to min 60).")
     if not args.get("background", False):
