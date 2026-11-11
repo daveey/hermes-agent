@@ -31,15 +31,15 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Optional
 
+# ``tool_reason`` slugs a survivable foreground command outlives: card A's update pause, the gateway's
+# restart/shutdown stop and a TUI/Desktop backend exit (session_reaper's ``backend_exit``). A user Stop, a
+# new message, a timeout and every watchdog are not in it: those still kill the command.
+from tools.interrupt import SURVIVABLE_INTERRUPT_REASONS
+
 logger = logging.getLogger("tools.process_registry")
 
 CONFIG_KEY = "update_survivable_processes"
 FOREGROUND_MIN_TIMEOUT_S = 60
-# ``tool_reason`` slugs of the interrupts a survivable foreground command outlives: card A's update pause
-# (agent.update_pause_cancel.CANCEL_TOOL_REASON), the gateway's restart/shutdown stop and a TUI/Desktop
-# backend exit (session_reaper's ``backend_exit``). A user Stop, a new message, a timeout and every
-# watchdog are not in it: those still kill the command.
-SURVIVABLE_INTERRUPT_REASONS = frozenset({"hermes update pause", "gateway shutdown", "backend exit"})
 CONTINUES_LINE = "process continues as {session_id}"
 
 _warn_lock = threading.Lock()

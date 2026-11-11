@@ -115,11 +115,18 @@ class ProcessOutputLogMixin:
         # poll()/wait() reconcile asks this reader to finish instead of reading a pipe itself.
         session._reader_selectable = True
 
-        head_noise = True
+        head_noise, held = True, ""
 
-        def ingest(text: str) -> None:
-            nonlocal head_noise
-            text = strip_shell_markers(text, session.shell_markers)
+        def ingest(text: str, final: bool = False) -> None:
+            nonlocal head_noise, held
+            if session.shell_markers:
+                # A wrapper marker line (``\n<m>...<m>\n``) can straddle two reads: hold back from the last
+                # newline, which an unfinished marker line always starts at, until the next read. [daveey]
+                text = strip_shell_markers(held + text, session.shell_markers)
+                cut = len(text) if final else max(text.rfind("\n"), 0)
+                text, held = text[:cut], text[cut:]
+            if not text:
+                return
             if head_noise:  # ``bash -lic`` startup warnings, as the pipe reader strips them
                 text = self._clean_shell_noise(text)
                 head_noise = not text.strip()
@@ -149,11 +156,10 @@ class ProcessOutputLogMixin:
                     time.sleep(_TAIL_SECONDS)
         except OSError as exc:
             logger.warning("Process output log %s unreadable: %s", session.output_log, exc)
+        ingest(decoder.decode(b"", final=True), final=True)
         if proc is not None:
             self._finish_reader(session, decoder, ingest, "Log", proc.wait, lambda: proc.returncode)
             return
-        if tail := decoder.decode(b"", final=True):
-            ingest(tail)
         code = recorded_exit_code(session.output_log)
         if code is None:
             # SIGKILL / exec past the trap: the spawner is gone and no status was recorded.

@@ -10,6 +10,7 @@ from typing import Optional
 
 from agent.interrupt_compat import request_hard_interrupt
 from tools.interrupt import request_yield as _request_yield
+from tools.interrupt import SURVIVABLE_INTERRUPT_REASONS
 from tools.interrupt import set_interrupt as _set_interrupt
 
 # Same logger name as the origin module so log records / caplog filters are unchanged.
@@ -225,17 +226,19 @@ class InterruptControlMixin:
 
         def _publish_interrupt_state() -> None:
             nonlocal tool_interrupt_reason
+            _pending = getattr(self, "_interrupt_requested", False)
+            stop_pending = _pending and getattr(self, "_tool_interrupt_reason", None) in USER_INTERRUPT_REASONS
+            stop_reason = getattr(self, "_tool_interrupt_reason", None)
             # A shutdown stop never relabels a user Stop already pending (the user's Stop wins): the turn
             # records the first cause, so it is not announced as interrupted by the restart. A pending
             # redirect (a mid-request correction) is not a Stop: the restart drops it and is the cause.
-            _pending = getattr(self, "_interrupt_requested", False)
             if not (_pending and tool_reason == _REASON_UPDATE_PAUSE) and not (
-                    tool_reason == _REASON_GATEWAY_SHUTDOWN and _pending
-                    and getattr(self, "_tool_interrupt_reason", None) in USER_INTERRUPT_REASONS):
+                    tool_reason == _REASON_GATEWAY_SHUTDOWN and stop_pending):
                 self._interrupt_message = message
                 self._tool_interrupt_reason = tool_interrupt_reason
-            else:  # tool threads keep the Stop's reason too: a survivable command must still die [daveey]
-                tool_interrupt_reason = self._tool_interrupt_reason
+            if stop_pending and tool_reason in SURVIVABLE_INTERRUPT_REASONS:
+                # Tool threads keep the Stop's reason: a survivable terminal command must still die. [daveey]
+                tool_interrupt_reason = stop_reason
             self._interrupt_requested = True
             if tool_reason != _REASON_UPDATE_PAUSE:
                 self._turn_user_intervened = True

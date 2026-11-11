@@ -36,7 +36,7 @@ from tools.process_registry_notifications import (
 from tools.process_registry_checkpoint import ProcessCheckpointMixin
 from tools.process_registry_readopt import ProcessReadoptMixin
 from tools.process_registry_output_log import ProcessOutputLogMixin, open_output_log, record_exit_command, spawn_output_log
-from tools.process_registry_survivable import ProcessForegroundHoldMixin, enabled as survivable_enabled
+from tools.process_registry_survivable import ProcessForegroundHoldMixin
 from tools.process_registry_ownership import ProcessOwnershipMixin
 from tools.process_registry_termination import ProcessTerminationMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
@@ -2442,8 +2442,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
         Sessions with ``persist_on_release=True`` are skipped when ``source`` is an
         agent-lifecycle sweep (the default ``kill_all`` release path, a gateway turn
         timeout, ``agent_close``, a gateway restart): an explicitly persisted background job must survive
-        session end / compression / error recovery / restart (#41225). ``gateway_shutdown`` reaches only the
-        persisted jobs it spawned, never one it adopted (a Kanban worker's) [daveey]. An explicit operator stop
+        session end / compression / error recovery / restart (#41225). ``gateway_shutdown`` spares one only
+        once it left the unit (detached, or its own scope: terminal.update_survivable_processes) [daveey]. An explicit operator stop
         (``process.kill`` via process_manage, CLI /stop) passes its own source and still
         reaches them, so the user can always stop a persisted process on purpose."""
         lifecycle, host_exit = source in self._LIFECYCLE_KILL_SOURCES, source == "gateway_shutdown"
@@ -2452,7 +2452,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessRe
                 s for s in (*self._running.values(), *self._finished.values())
                 if (task_id is None or s.owner_task_id == task_id)
                 and s.id not in exclude_ids and (not s.exited or s._scope_stop_pending)
-                and not (s.persist_on_release and (lifecycle or (host_exit and (s.detached or survivable_enabled()))))
+                and not (s.persist_on_release and (lifecycle or (host_exit and (s.detached or s.systemd_unit))))
             ]
         results = [self.kill_process(s.id, source=source, consume_output=consume_output) for s in targets]
         return sum(

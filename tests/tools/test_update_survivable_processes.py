@@ -124,6 +124,45 @@ def test_log_tail_drops_only_this_sessions_wrapper_markers():
     assert strip_shell_markers(other, [pipe, cwd]) == other
 
 
+@pytest.mark.parametrize("split", [1, 5, 9, 20, 40, 60, 75])
+def test_log_reader_drops_a_marker_trailer_split_across_reads(tmp_path, monkeypatch, split):
+    """The reader reads 64 KiB at a time: a trailer straddling two reads must still go."""
+    import tools.process_registry_output_log as olog
+
+    pipe, cwd = "__HERMES_PIPE_181265ba766b__", "__HERMES_CWD_181265ba766b__"
+    body = "x" * 100 + "\nfg-done\n"
+    data = (body + f"\n{pipe}0{pipe}\n\n{cwd}/home/u{cwd}\n").encode()
+    reads = [data[:len(body) + split], data[len(body) + split:]]
+    log = tmp_path / "proc_split.log"
+    log.write_bytes(data)
+    (tmp_path / "proc_split.exit").write_text("0\n")
+
+    class Stream:
+        def __init__(self, *a, **k):
+            self.parts = list(reads)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n):
+            return self.parts.pop(0) if self.parts else b""
+
+    monkeypatch.setattr(olog, "open", Stream, raising=False)
+    registry = ProcessRegistry()
+    session = registry._new_session("c", "t", "t", "k", str(tmp_path), persist_on_release=True,
+                                    shell_markers=[pipe, cwd])
+    session.output_log = str(log)
+    session._reader_finish_requested.set()
+    finished = []
+    monkeypatch.setattr(registry, "_finish_exited", lambda s, code, **k: finished.append(code))
+    registry._log_reader_loop(session)
+    assert session.output_buffer == body
+    assert finished == [0]
+
+
 def test_tee_wrapper_records_the_commands_own_exit_status(tmp_path):
     log = tmp_path / "proc_x.log"
     script = surv.tee_wrapped("echo out; echo err >&2; exit 7", log)
@@ -155,15 +194,32 @@ def test_a_shutdown_after_a_user_stop_keeps_the_stop_reason_on_the_tool_thread()
 
     tid = threading.get_ident()
     try:
-        stopped = agent()
-        request_hard_interrupt(stopped)  # the user's Stop
-        request_hard_interrupt(stopped, "restart", tool_reason="gateway shutdown")
-        assert surv.survivable_interrupt_reason(tid) is None
-        set_interrupt(False, tid)
+        for later in sorted(surv.SURVIVABLE_INTERRUPT_REASONS):
+            stopped = agent()
+            request_hard_interrupt(stopped)  # the user's Stop
+            request_hard_interrupt(stopped, "restart", tool_reason=later)
+            assert surv.survivable_interrupt_reason(tid) is None, later
+            set_interrupt(False, tid)
         request_hard_interrupt(agent(), "restart", tool_reason="gateway shutdown")
         assert surv.survivable_interrupt_reason(tid) == "gateway shutdown"
     finally:
         set_interrupt(False, tid)
+
+
+def test_shutdown_sweep_spares_only_persisted_jobs_that_left_the_unit(tmp_path, key):
+    """With the key on, gateway shutdown spares a persisted job in its own scope; an unscoped persisted job
+    (no usable scope: today's behaviour) is still killed, as with the key off."""
+    registry = ProcessRegistry()
+    killed = []
+    registry.kill_process = lambda sid, **k: killed.append(sid) or {"status": "killed"}
+    scoped = registry._new_session("a", "t", "t", "k", str(tmp_path), persist_on_release=True)
+    scoped.systemd_unit = "hermes-proc-a.scope"
+    plain = registry._new_session("b", "t", "t", "k", str(tmp_path), persist_on_release=True)
+    for s in (scoped, plain):
+        s.pid = 10**7
+        registry._running[s.id] = s
+    registry.kill_all(source="gateway_shutdown")
+    assert killed == [plain.id]
 
 
 def test_held_foreground_command_is_checkpointed_until_released(tmp_path, monkeypatch):

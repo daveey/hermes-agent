@@ -120,6 +120,11 @@ def get_interrupt_reason() -> str | None:
         return _interrupt_reasons.get(threading.current_thread().ident)
 
 
+# Interrupts a long terminal command outlives under terminal.update_survivable_processes: an update pause,
+# a gateway shutdown, a backend exit. A user Stop is never one of them. [daveey]
+SURVIVABLE_INTERRUPT_REASONS = frozenset({"hermes update pause", "gateway shutdown", "backend exit"})
+
+
 def thread_interrupt_reason(thread_id: int | None) -> str | None:
     """The pending interrupt cause of *thread_id*, if one was given. [daveey]"""
     with _lock:
