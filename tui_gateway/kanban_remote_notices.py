@@ -117,8 +117,8 @@ def _canonical(rows: list[tuple]) -> list[tuple]:
 
 def _index(path: Path) -> tuple[str, dict]:
     """``(this gateway, {(profile, session): [card, ...]})`` for terminal cards owned by other gateways, cached on
-    the replica observer's change key (an unchanged replica is not read) and, for the same db file, on its task-row
-    signature (one decode per change, shared by every chat's poll)."""
+    the replica observer's change key (an unchanged replica is not read). Per-row routing projections
+    survive unrelated writes and are shared by every chat's poll."""
     global _index_memo
     from tui_gateway.kanban_replica_observer import file_identity, fingerprint
 
@@ -131,29 +131,13 @@ def _index(path: Path) -> tuple[str, dict]:
     try:
         row = conn.execute("SELECT v FROM meta WHERE k = 'gateway'").fetchone()
         me = str(row[0]) if row and row[0] else ""
-        sig = conn.execute("SELECT COUNT(*), MAX(seq), TOTAL(seq) FROM replica WHERE coll = 'tasks'").fetchone()
-        if (memo is not None and stamp is not None and memo[1] == file_identity(stamp) and memo[2:4] == (sig, me)
-                and fingerprint(path) == stamp):
-            _index_memo = (stamp, *memo[1:])  # same file, no task row moved (a meta write or checkpoint)
-            return me, memo[4]
-        rows = _canonical(_task_rows(conn))
+        from tui_gateway.remote_index_projection import snapshot
+        index = snapshot(conn, file_identity(stamp) if stamp is not None else None, me)
         stable = stamp is not None and fingerprint(path) == stamp
     finally:
         conn.close()
-    index: dict[tuple[str, str], list[dict]] = {}
-    for gw, key, _seq, data in rows:
-        if not me or gw == me:
-            continue  # this gateway's own cards notify through local tui subscriptions
-        try:
-            task = json.loads(data)
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(task, dict) or task.get("status") not in _TERMINAL or not task.get("id"):
-            continue
-        for chat in _linked_chats(task, me):
-            index.setdefault(chat, []).append({"gw": str(gw), "key": str(key), "task": task})
     if stable:
-        _index_memo = (stamp, file_identity(stamp), sig, me, index)
+        _index_memo = (stamp, file_identity(stamp), None, me, index)
     return me, index
 
 
@@ -690,7 +674,9 @@ def _reset_for_tests() -> None:
     from tui_gateway.kanban_replica_observer import reset as reset_observers
     from tui_gateway.remote_sweep_projection import reset as reset_projection
 
+    from tui_gateway.remote_index_projection import reset as reset_index_projection
     reset_projection()
+    reset_index_projection()
     global _index_memo, _sweep_memo
     _sweep_memo = None
     reset_observers()
