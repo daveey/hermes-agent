@@ -179,7 +179,8 @@ def test_legacy_drop_is_notified_once_after_backfill(tmp_path, monkeypatch, even
         _assert_drop_wording(texts[0])
         drops = sorted((e for e in kb.list_events(conn, tid) if e.kind == event), key=lambda e: e.id)
         assert len(drops) == 2
-        assert drops[-1].payload == {"backfilled": True, "origin_event_id": original.id}
+        reference = {"origin_event_uid": original.uid} if original.uid else {"origin_event_id": original.id}
+        assert drops[-1].payload == {"backfilled": True, **reference}
         request = kar._request(kb.get_task(conn, tid).human_request)
         assert request["resolved_check_dropped_at"] == DROPPED_AT
         assert request["resolved_check_drop_reason"] == event

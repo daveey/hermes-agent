@@ -50,7 +50,8 @@ def test_old_drop_is_marked_once_with_one_reemitted_event(board, kind):
         assert _count(conn) == events + 1 and kwc.get_state(conn, tid) is None
         emitted = max(kb.list_events(conn, tid), key=lambda e: e.id)
         assert emitted.kind == kind
-        assert emitted.payload == {"backfilled": True, "origin_event_id": original.id}
+        reference = {"origin_event_uid": original.uid} if original.uid else {"origin_event_id": original.id}
+        assert emitted.payload == {"backfilled": True, **reference}
         assert kb.get_task(conn, tid).status == "blocked"
         before = _snapshot(conn)
         assert not any(kar.reconcile(conn, now=199999).values())

@@ -74,6 +74,11 @@ def backfill(conn: sqlite3.Connection) -> list[str]:
             if _latest_drop(conn, tid) != drop or not _eligible(conn, tid):
                 continue
             kar.mark_dropped(conn, tid, drop[2], drop[3])
-            kb._append_event(conn, tid, drop[2], {"backfilled": True, "origin_event_id": drop[1]})
+            # Sync remaps integer IDs but preserves UIDs and payloads verbatim. Older unsynced
+            # schemas have no UID column; only those use the local reference.
+            origin = conn.execute("SELECT * FROM task_events WHERE id = ?", (drop[1],)).fetchone()
+            uid = origin["uid"] if "uid" in origin.keys() else None
+            reference = {"origin_event_uid": uid} if uid else {"origin_event_id": drop[1]}
+            kb._append_event(conn, tid, drop[2], {"backfilled": True, **reference})
             marked.append(tid)
     return marked

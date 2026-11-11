@@ -34,6 +34,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_priority
 from hermes_cli.kanban_db_values import _first_line, _opt_int, _json_or_null
+from hermes_cli.kanban_db_event import Event  # public kb.Event; helpers import lazily: no cycle
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
 from hermes_cli import kanban_placement_forward as _placement_fwd  # stdlib-only at import: no cycle
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
@@ -780,25 +781,6 @@ class Attachment:
             id=r["id"], task_id=r["task_id"], filename=r["filename"],
             stored_path=r["stored_path"], content_type=r["content_type"],
             size=r["size"] or 0, uploaded_by=r["uploaded_by"], created_at=_to_epoch(r["created_at"]) or 0,
-        )
-
-
-@dataclass
-class Event:
-    id: int
-    task_id: str
-    kind: str
-    payload: Optional[dict]
-    created_at: int
-    run_id: Optional[int] = None
-
-    @classmethod
-    def from_row(cls, row: sqlite3.Row) -> Event:
-        run_id = _row_get(row, "run_id")
-        return cls(
-            id=row["id"], task_id=row["task_id"], kind=_lossy_text(row["kind"]),
-            payload=_json_or(_lossy_text(row["payload"])), created_at=_to_epoch(row["created_at"]) or 0,
-            run_id=_opt_int(run_id),
         )
 
 

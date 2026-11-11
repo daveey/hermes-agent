@@ -73,19 +73,28 @@ _DROP_CAUSE = {"resolved_check_broken": "its probe kept failing", "resolved_chec
 def _drop_backfilled_origins(events):
     """Remove a historical drop event when a backfill re-emission in the same batch names it as its origin.
 
-    Only the exact ``origin_event_id`` of a ``backfilled`` drop event of the same kind goes; distinct drops stay.
+    Match stable UIDs across replicas. Integer references are safe only for UID-less,
+    unsynced events; a sender's local ID must never suppress a different receiver event.
     """
     origins = set()
+    local_origins = set()
     for e in events:
         payload = getattr(e, "payload", None)
         if e.kind in DROP_EVENTS and isinstance(payload, dict) and payload.get("backfilled") is True:
+            uid = payload.get("origin_event_uid")
+            if isinstance(uid, str) and uid:
+                origins.add((uid, e.kind))
+                continue
+            if "origin_event_uid" in payload or getattr(e, "uid", None):
+                continue
             try:
-                origins.add((int(payload["origin_event_id"]), e.kind))
+                local_origins.add((int(payload["origin_event_id"]), e.kind))
             except (KeyError, TypeError, ValueError):
                 pass
-    if not origins:
+    if not origins and not local_origins:
         return events
-    return [e for e in events if (int(e.id), e.kind) not in origins]
+    return [e for e in events if (getattr(e, "uid", None), e.kind) not in origins
+            and not (not getattr(e, "uid", None) and (int(e.id), e.kind) in local_origins)]
 
 
 def coalesce_superseded_blocks(events):
