@@ -1087,10 +1087,8 @@ def _handle_block(args: dict, **kw) -> str:
     with _board(args.get("board")) as (kb, conn):
         _check(kind is None or kind in kb.VALID_BLOCK_KINDS,
                f"kind must be one of {sorted(kb.VALID_BLOCK_KINDS)} (or omit it)")
-        # The goal loop treats ANY blocked status as terminal, so kanban_block
-        # would be an escape hatch around the completion judge: goal_mode tasks
-        # may only block on genuine external blockers.
-        # Goal-mode block gate (Issue #38696, sibling of the kanban_complete judge gate in #38367).
+        # Goal-mode blocks terminate the loop, so only genuine external blockers are allowed.
+        # Other stops must pass the completion judge (Issue #38696 / #38367).
         # kanban_block is a second exit path out of the goal loop — run_kanban_goal_loop() treats ANY
         # `blocked` status as terminal, identically to `done`, regardless of kind. Without this, a worker
         # that learns kanban_complete is gated can just call kanban_block(reason="anything") to escape the
@@ -1115,7 +1113,9 @@ def _handle_block(args: dict, **kw) -> str:
         _park_guard(conn, tid, "block", wake, reason=reason, kind=kind, blocker_id=blocker_id,
                     human_request=args.get("human_request"))
         _check(*ask_checks(args.get("human_request"), context=filing_context(conn, tid)))  # lint + probe [daveey]
+        from hermes_cli.kanban_cli_actor import tool_actor
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
+                           actor=tool_actor(worker_task=_own_task_env(tid, "HERMES_KANBAN_TASK")),
                            blocker_id=blocker_id, wake_check=wake[0], check_every=wake[1], awaiting=awaiting,
                            clock_only=wake[2], human_request=kb.redact_review_value(args.get("human_request")),
                            clear_blocker=clear_blocker, **_blocker_scope_args(args))
