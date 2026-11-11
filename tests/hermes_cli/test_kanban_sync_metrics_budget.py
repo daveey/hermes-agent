@@ -21,6 +21,13 @@ class Server:
             def log_message(self, *a):
                 pass
 
+            def handle(self):
+                try:
+                    super().handle()
+                except (BrokenPipeError, ConnectionResetError):
+                    # Deadline clients deliberately close before headers/body arrive.
+                    pass
+
             def do_POST(self):
                 n = int(self.headers.get("content-length") or 0)
                 outer.requests.append((self.path, self.rfile.read(n)))
@@ -51,12 +58,15 @@ class Server:
                     self.wfile.write(body)
 
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
-        self.httpd.daemon_threads = True
-        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        # ThreadingMixIn.server_close joins only non-daemon request threads.
+        self.httpd.daemon_threads = False
+        self.serve_thread = threading.Thread(target=self.httpd.serve_forever)
+        self.serve_thread.start()
         self.url = f"http://127.0.0.1:{self.httpd.server_port}"
 
     def close(self):
         self.httpd.shutdown()
+        self.serve_thread.join()
         self.httpd.server_close()
 
 
