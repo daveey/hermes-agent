@@ -53,7 +53,6 @@ import { pendingSessionReplay, requestGatewayForAgent, retainGatewayForAgent } f
 import { clearSessionGoal } from '@/store/goals'
 import { $pinnedSessionIds } from '@/store/layout'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
-import { archiveIfOfflineCached } from '@/store/offline-session-actions'
 import { sessionActionRow } from '@/store/offline-session-owner'
 import { adoptDraftPreviewTabs, prunePreviewTabsForSession } from '@/store/preview'
 import {
@@ -169,9 +168,9 @@ import {
 import { singleFlightSessionResume } from '../use-prompt-actions/single-flight-resume'
 
 import { archiveOwnerRow } from './archive-owner'
+import { archivePreflight, softHideArchivedRow } from './archive-soft-hide'
 import { branchThroughRowId } from './branch-boundary'
 import { branchCreateKey } from './branch-create-key'
-import { confirmLinkedArchive } from './confirm-linked-archive'
 import type { SessionCreateOverrides } from './create-overrides'
 import { markSessionCreatedThisRun, sessionCreatedThisRun } from './created-this-run'
 import { graftEarlySegmentDeltas, mergeSegmentSnapshotIntoLiveRow } from './current-segment'
@@ -3463,53 +3462,22 @@ export function useSessionActions({
         return
       }
 
-      const stampedProfile = archived?.profile?.trim()
-      const profile = stampedProfile || (await resolveSessionProfile(storedSessionId))
+      // Hide first: the preflight below can take seconds; cancel/failure restores.
+      const hidden = softHideArchivedRow(storedSessionId, archived, listed, listedRow)
+      const archivedIds = hidden.ids
 
-      if (
-        listed &&
-        !stampedProfile &&
-        !profile?.trim() &&
-        $profiles.get().filter(item => item.name.trim()).length > 1
-      ) {
-        notifyError(new Error('Session ownership could not be resolved'), copy.archiveFailed)
-
-        return
-      }
-
-      if (!(await confirmLinkedArchive(storedSessionId, archived, profile, copy, options?.skipLinkedConfirm))) {
-        return
-      }
-
-      try {
-        if (await archiveIfOfflineCached(storedSessionId, copy, archived)) {
-          return
-        }
-      } catch (err) {
-        notifyError(err, copy.archiveFailed)
-
-        return
-      }
-
-      const wasSelected = selectedStoredSessionIdRef.current === storedSessionId
-      const previousPinned = $pinnedSessionIds.get()
-      // Pins are keyed on the durable lineage-root id; the stored id may be the
-      // live tip after compression. Drop both so the pin can't linger.
-      const archivedPinId = archived ? sessionPinId(archived) : storedSessionId
-      const archivedIds = [storedSessionId, archived?.id, archived?._lineage_root_id]
-
-      // Soft-hide: drop from every sidebar slice immediately, keep the data.
-      dropListedSession(storedSessionId)
-      tombstoneSessions(archivedIds)
-      beginSessionMutation(archivedIds)
-      $pinnedSessionIds.set(previousPinned.filter(id => id !== storedSessionId && id !== archivedPinId))
-
-      if (wasSelected) {
+      if (selectedStoredSessionIdRef.current === storedSessionId) {
         if (options?.onDeselect) {
           options.onDeselect()
         } else {
           startFreshSessionDraft(true)
         }
+      }
+
+      const profile = await archivePreflight(storedSessionId, archived, Boolean(listed), hidden, copy, options)
+
+      if (profile === false) {
+        return
       }
 
       try {
@@ -3535,18 +3503,13 @@ export function useSessionActions({
 
         notify({ durationMs: 2_000, kind: 'success', message: copy.archived })
       } catch (err) {
-        // Only a row the sidebar actually listed comes back; an owner resolved
-        // from the project tree or a hint was never in that slice.
-        if (listedRow) {
-          restoreListedSession(listedRow, listed?.slice)
-        }
-
-        untombstoneSessions(archivedIds)
-        $pinnedSessionIds.set(previousPinned)
+        hidden.restore()
         notifyError(err, copy.archiveFailed)
-      } finally {
-        endSessionMutation(archivedIds)
+
+        return
       }
+
+      hidden.end()
     },
     [
       copy,

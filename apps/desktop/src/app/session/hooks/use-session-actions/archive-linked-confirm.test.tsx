@@ -13,6 +13,7 @@ import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $offlineSessions, _resetOfflineSessionsForTests } from '@/store/offline-sessions'
 import { $projectTree } from '@/store/project-tree'
 import { $sessions, _resetSessionOwnerHintsForTests, setSessionOwnerHint, setSessions } from '@/store/session'
+import { $removedSessionIds } from '@/store/session-removal'
 
 import type { ClientSessionState } from '../../../types'
 
@@ -213,6 +214,67 @@ describe('archiveSession linked-work confirmation', () => {
     expect(vi.mocked(setSessionArchived)).not.toHaveBeenCalled()
   })
 
+  // [daveey] The row leaves the sidebar the moment archive is clicked, not
+  // after the preflight reads (seconds on a busy/remote backend) and the RPC.
+  it('hides the row before a slow preflight and archive RPC settle', async () => {
+    setSessions([row()])
+
+    let releaseGuard: (links: never[]) => void = () => {}
+    registerArchiveGuard('plugin:slow', () => new Promise(resolve => (releaseGuard = resolve)))
+
+    let releaseRpc: (value: { ok: boolean }) => void = () => {}
+    vi.mocked(setSessionArchived).mockImplementation(() => new Promise(resolve => (releaseRpc = resolve)))
+    const handle = await mountHarness()
+
+    let done: Promise<void> | undefined
+    act(() => {
+      done = handle.archiveSession('s-1')
+    })
+
+    expect($sessions.get()).toEqual([])
+    expect(vi.mocked(setSessionArchived)).not.toHaveBeenCalled()
+
+    await act(async () => {
+      releaseGuard([])
+      await waitFor(() => expect(vi.mocked(setSessionArchived)).toHaveBeenCalled())
+      releaseRpc({ ok: true })
+      await done
+    })
+
+    expect($sessions.get()).toEqual([])
+  })
+
+  it('hides the row while the linked-work dialog is open; Cancel brings it back', async () => {
+    setSessions([row({ kanban_active: 1 })])
+    const handle = await mountHarness()
+
+    let done: Promise<void> | undefined
+    act(() => {
+      done = handle.archiveSession('s-1')
+    })
+
+    expect($sessions.get()).toEqual([])
+    await waitFor(() => expect($confirmRequest.get()).not.toBeNull())
+    expect($sessions.get()).toEqual([])
+
+    await act(async () => {
+      settleConfirm(false)
+      await done
+    })
+
+    expect($sessions.get().map(session => session.id)).toEqual(['s-1'])
+  })
+
+  it('brings the row back when the archive RPC fails', async () => {
+    setSessions([row()])
+    vi.mocked(setSessionArchived).mockRejectedValue(new Error('boom'))
+    const handle = await mountHarness()
+
+    await act(() => handle.archiveSession('s-1'))
+
+    expect($sessions.get().map(session => session.id)).toEqual(['s-1'])
+  })
+
   it('skipLinkedConfirm archives without asking', async () => {
     setSessions([row({ kanban_active: 3 })])
     const handle = await mountHarness()
@@ -270,6 +332,26 @@ describe('offline archive owner isolation', () => {
     await act(() => handle.archiveSession('s-1', { selectedRow }))
     expect(hubRequest).not.toHaveBeenCalled()
     expect(setSessionArchived).toHaveBeenCalledWith('s-1', true, { connectionId: 'mini', profile: 'work' })
+  })
+  it('hides an offline row at once and brings it back when the queue fails', async () => {
+    const selectedRow = cached()
+    $offlineSessions.set([selectedRow])
+
+    let rejectQueue: (error: Error) => void = () => {}
+    hubRequest.mockImplementationOnce(() => new Promise((_resolve, reject) => (rejectQueue = reject)))
+    const handle = await mountHarness()
+    let done: Promise<void> | undefined
+    act(() => {
+      done = handle.archiveSession('s-1', { selectedRow })
+    })
+    expect($removedSessionIds.get().has('s-1')).toBe(true)
+    await act(async () => {
+      await waitFor(() => expect(hubRequest).toHaveBeenCalled())
+      rejectQueue(new Error('hub down'))
+      await done
+    })
+    expect($removedSessionIds.get().has('s-1')).toBe(false)
+    expect($offlineSessions.get()).toEqual([selectedRow])
   })
   it('keeps linked-work confirmation for an offline row', async () => {
     const selectedRow = { ...cached(), kanban_active: 2 }
