@@ -118,6 +118,16 @@ class SingleFlightCache:
             flight.done.set()
         return self.copy(flight.value)
 
+    def peek(self, key: Hashable, stamp: Optional[tuple]) -> tuple[bool, Any]:
+        """Return a fresh completed result without joining a running computation."""
+        if stamp is None or self.ttl_s <= 0:
+            return False, None
+        with self._lock:
+            hit = self._done.get(key)
+            if hit is not None and hit[0] == stamp and self.clock() - hit[1] < self.ttl_s:
+                return True, self.copy(hit[2])
+        return False, None
+
     def clear(self) -> None:
         with self._lock:
             self._done.clear()

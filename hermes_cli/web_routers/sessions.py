@@ -7,6 +7,8 @@ helpers are reached via the late-binding seam so monkeypatching keeps working.
 """
 
 import asyncio
+import functools
+import inspect
 import json
 import re
 import sqlite3
@@ -230,11 +232,29 @@ def get_sessions(
 
 
 # Queue expensive list contenders before consuming the shared HTTP worker pool.
-list_router.add_api_route(
-    "/api/sessions",
-    coalesced_read(get_sessions, admission_key=lambda args: args["profile"], max_concurrent=2),
-    methods=["GET"],
-)
+_sessions_admitted = coalesced_read(get_sessions, admission_key=lambda args: args["profile"], max_concurrent=2)
+
+
+def _peek_sessions(arguments):
+    try:
+        db_path = _session_db_path_for_profile(arguments["profile"])
+    except HTTPException:
+        return False, None  # normal implementation retains the validation error
+    return SESSION_LIST_CACHE.peek((str(db_path), *arguments.values()), data_stamp(db_path))
+
+
+@functools.wraps(_sessions_admitted)
+async def _sessions_http(*args, **kwargs):
+    from starlette.concurrency import run_in_threadpool
+    bound = inspect.signature(get_sessions).bind(*args, **kwargs)
+    bound.apply_defaults()
+    hit, value = await run_in_threadpool(_peek_sessions, bound.arguments)
+    if hit:
+        return value
+    return await _sessions_admitted(*args, **kwargs)
+
+
+list_router.add_api_route("/api/sessions", _sessions_http, methods=["GET"])
 
 
 def _list_sessions_payload(

@@ -45,6 +45,8 @@ async def test_profile_scan_burst_keeps_status_responsive(monkeypatch, tmp_path,
     db_path.touch()
     monkeypatch.setattr(sessions, '_session_db_path_for_profile', lambda profile: db_path)
     monkeypatch.setattr(sessions, '_list_sessions_payload', payload)
+    monkeypatch.setattr(sessions, 'data_stamp', lambda path: ('stable',))
+    sessions.SESSION_LIST_CACHE.clear()
     monkeypatch.setattr(profiles, 'profile_project_trees', projects)
     monkeypatch.setattr(profiles, '_profile_state_db', lambda home: db_path)
     monkeypatch.setattr(profiles, 'subagent_listing_scope', lambda *a, **kw: (False, None))
@@ -69,7 +71,7 @@ async def test_profile_scan_burst_keeps_status_responsive(monkeypatch, tmp_path,
     limiter.total_tokens = 2
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
-            cached_route = param != 'limit'
+            cached_route = param != 'limit' or route == '/api/sessions'
             if cached_route:
                 release.set()
                 warm = await client.get(route, params={param: 99})
@@ -108,3 +110,24 @@ async def test_profile_scan_burst_keeps_status_responsive(monkeypatch, tmp_path,
             assert (await client.get('/api/profiles/sessions?archived=bogus')).status_code == 400
     finally:
         limiter.total_tokens = previous
+        sessions.SESSION_LIST_CACHE.clear()
+
+
+def test_session_list_peek_requires_fresh_matching_stamp():
+    from hermes_cli.session_list_flight import SingleFlightCache, copy_session_list
+    now = [0.0]
+    cache = SingleFlightCache(clock=lambda: now[0], copy=copy_session_list)
+    assert cache.peek('missing', ('a',)) == (False, None)
+    cache.get('key', ('a',), lambda: {'sessions': [{'id': 'first'}]})
+    found, value = cache.peek('key', ('a',))
+    assert found
+    value['sessions'][0]['id'] = 'changed'
+    assert cache.peek('key', ('a',))[1]['sessions'][0]['id'] == 'first'
+    assert cache.peek('key', ('b',)) == (False, None)
+    assert cache.peek('key', None) == (False, None)
+    cache.ttl_s = 0
+    assert cache.peek('key', ('a',)) == (False, None)
+    cache.ttl_s = 2
+    now[0] = 2.0
+    assert cache.peek('key', ('a',)) == (False, None)
+
