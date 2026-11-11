@@ -234,6 +234,9 @@ def claim_refusal(card: Mapping[str, Any], *, me: str = "") -> Optional[str]:
     card and reason so a card no machine can take is visible in the worker's log. Pinned skills are not a
     pickup gate: a worker that cannot load one runs with the missing-skill note (``missing_pin_note``), so a
     remote card whose create skipped the skill check is never stranded on the Board. [daveey]"""
+    from hermes_cli.kanban_placement_coordination import claim_refusal as coordination_refusal
+    if refusal := coordination_refusal(card, me):
+        return refusal
     assignee = card.get("assignee")
     if not assignee:
         return None

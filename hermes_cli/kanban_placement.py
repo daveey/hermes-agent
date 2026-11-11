@@ -435,16 +435,20 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
     title, body = args.get("title") or "", without_evidence(without_placement_note(args.get("body") or ""))
     if _local_marker(title, body, args.get("skills"), c):
         return "local marker"
+    from hermes_cli import kanban_placement_coordination as coordination
     from hermes_cli.kanban_carried_evidence import without_carried_inputs
     from hermes_cli.kanban_published_worktree import without_published_worktrees
 
     full = without_carried_inputs(f"{title}\n{body}", c.raw)
+    if refusal := coordination.check(full, c.raw, skills=args.get("skills")):
+        return refusal
+    marker_full = coordination.marker_text(full)
     extra = c.raw.get("extra_home_markers")
-    pats = [p for p in HOME_GATEWAY_MARKERS if p != HOST_WORKTREE_PATH]
-    pats += list(extra) if isinstance(extra, list) else []
-    for p in pats:
+    pats = [(p, marker_full) for p in HOME_GATEWAY_MARKERS if p != HOST_WORKTREE_PATH]
+    pats += [(p, full) for p in extra] if isinstance(extra, list) else []
+    for p, text in pats:
         try:
-            if re.search(p, full, re.IGNORECASE):
+            if re.search(p, text, re.IGNORECASE):
                 return "home gateway marker"
         except re.error:
             continue
@@ -458,8 +462,9 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
 def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
                      machine_ok: Optional[Callable[[str], bool]], *, skip: bool = False) -> Optional[dict]:
     """Legacy heavy routing; worker pools reuse portability without changing this opt-out path."""
+    from hermes_cli.kanban_placement_coordination import legacy_refusal
     worker = c.heavy_target(self_gw)
-    if skip or not worker or portable_reason(args, c.raw):
+    if skip or not worker or legacy_refusal(args) or portable_reason(args, c.raw):
         return None
     title, body = args.get("title") or "", args.get("body") or ""
     heavy = _heavy_marker(title, body, c)
