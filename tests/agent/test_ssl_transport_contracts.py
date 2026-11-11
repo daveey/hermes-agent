@@ -171,6 +171,7 @@ def test_ssl_cert_file_private_ca_reaches_the_agent_client(tmp_path, monkeypatch
         with client:
             assert client.get(url + "/v1/models").status_code == 204
     finally:
+        process_bootstrap.close_shared_transports()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
