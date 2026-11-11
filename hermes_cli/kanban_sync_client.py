@@ -254,6 +254,14 @@ class Hub:
         self._ssl_context = None
         self._ssl_lock = _hub_threading.Lock()
 
+    def put_attachment(self, board: str, uid: str, digest: str, data: bytes) -> dict:
+        from hermes_cli.kanban_sync_attachment_http import upload
+        return upload(self, board, uid, digest, data)
+
+    def get_attachment_blob(self, board: str, uid: str) -> bytes:
+        from hermes_cli.kanban_sync_attachment_http import download
+        return download(self, board, uid)
+
     def _headers(self) -> dict:
         return {"authorization": f"Bearer {self.ident.key}", "content-type": "application/json",
                 "user-agent": "hermes-kanban-sync/1"}
@@ -948,6 +956,8 @@ def _pulled_replica(slug: str, hub: Hub, gateway: str):
             sync.mark_pulled(replica)
         except sqlite3.Error as exc:
             _log.warning("kanban sync: %s replica pull not stamped (%s)", slug, exc)
+        from hermes_cli.kanban_sync_attachments import transfer_pending
+        transfer_pending(replica, hub, slug)
         yield replica, pulled, rebuilt
 
 
@@ -1011,6 +1021,8 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
             if mode == "primary":
                 heal_clobbered_completions(live)
         result.push = push(live, hub, slug, gateway, primary=mode == "primary")
+        from hermes_cli.kanban_sync_attachments import transfer_pending
+        transfer_pending(live, hub, slug)
         from hermes_cli.kanban_sync_rejections import resolve_rejections
         result.rejection_resolutions = resolve_rejections(live, hub, slug)
         if mode == "primary":

@@ -321,6 +321,10 @@ def evict(conn: sqlite3.Connection) -> list[str]:
                     "SELECT 1 FROM kanban_sync_outbox WHERE state != 'rejected' AND (row_uid = ? OR "
                     "json_extract(fields, '$.task_id') = ?) LIMIT 1", (tid, tid)).fetchone():
                 continue
+            if conn.execute(
+                    "SELECT 1 FROM task_attachments WHERE task_id=? AND stored_path!='' "
+                    "AND coalesce(blob_key,'')='' LIMIT 1", (tid,)).fetchone():
+                continue  # retain the only byte custodian until private storage acknowledges it
             from hermes_cli.kanban_run_tombstones import retain_ended_runs
             from hermes_cli.kanban_scratch_custody import retain
             retain(conn, tid)
