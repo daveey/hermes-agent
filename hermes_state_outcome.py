@@ -135,6 +135,12 @@ def validate_declaration(outcome: Any) -> dict[str, Any]:
     if kind not in DECLARABLE_KINDS:
         raise ValueError(f"outcome kind must be one of {', '.join(DECLARABLE_KINDS)}")
     out: dict[str, Any] = {"kind": kind}
+    if "completion_receipt" in outcome:
+        from hermes_completion_receipt import validate_completion_receipt
+
+        if kind != "done":
+            raise ValueError("completion_receipt is only valid on a done declaration")
+        out["completion_receipt"] = validate_completion_receipt(outcome["completion_receipt"])
     if kind == "done":
         summary = _str(outcome.get("summary"))
         if not summary:
