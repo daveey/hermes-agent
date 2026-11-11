@@ -657,9 +657,13 @@ test.skipIf(process.platform === 'win32').each([['Ctrl-C reaches the job', 'grou
     addExtraOnly(source, env)
     const dir = mkdtempSync(join(tmpdir(), 'signalled pnpm-'))
     roots.push(dir)
+    // Publish readiness only after owning the sleeper, and reap it in the trap.
+    // Otherwise a slow runner/subreaper can retain an orphaned zombie in the job
+    // after the signal was received, making the process-group exit check time out.
     writeFileSync(join(dir, 'pnpm'), ['#!/bin/sh', 'if [ "$1" = install ]; then',
-      `  trap 'echo INT >> "${dir}/got"; kill $!; exit 130' INT`, `  trap 'echo TERM >> "${dir}/got"; kill $!; exit 143' TERM`,
-      `  touch '${dir}/started'; sleep 30 & wait $!; exit 1`,
+      `  trap 'echo INT >> "${dir}/got"; kill "$sleeper"; wait "$sleeper"; exit 130' INT`,
+      `  trap 'echo TERM >> "${dir}/got"; kill "$sleeper"; wait "$sleeper"; exit 143' TERM`,
+      `  sleep 30 & sleeper=$!; touch '${dir}/started'; wait "$sleeper"; exit 1`,
       'fi', `exec '${pnpmCommand()}' "$@"`, ''].join('\n'))
     chmodSync(join(dir, 'pnpm'), 0o755)
     json(join(dir, 'package.json'), { name: 'pnpm', version: execFileSync(pnpmCommand(), ['--version']).toString().trim() })
