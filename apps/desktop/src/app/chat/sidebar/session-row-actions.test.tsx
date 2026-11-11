@@ -218,8 +218,9 @@ describe('SidebarSessionRow actions', () => {
     )
 
     const button = screen.getByRole('button', { name: 'Archive' })
-    // Sits right before the kebab in the hover cluster.
-    expect(button.nextElementSibling?.getAttribute('aria-label')).toBe('Session actions')
+    // Ends the hover cluster at the row's right edge, after the kebab.
+    expect(button.previousElementSibling?.getAttribute('aria-label')).toBe('Session actions')
+    expect(button.nextElementSibling).toBeNull()
     fireEvent.pointerDown(button, { button: 0, pointerType: 'mouse' })
     fireEvent.click(button)
 

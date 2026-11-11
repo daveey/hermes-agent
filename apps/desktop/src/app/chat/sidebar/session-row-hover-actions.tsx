@@ -20,12 +20,24 @@ interface RowHoverActionsProps {
   menu: MenuProps
 }
 
-/** [daveey] A sidebar row's hover actions: a one-click Archive beside the
- *  kebab. Both ride one cluster that lifts over the row's tail (which reserves
+/** [daveey] A sidebar row's hover actions: the kebab, then a one-click
+ *  Archive at the row's right edge (where the trailing figure, e.g. the
+ *  gateway cloud, sits). Both ride one cluster that lifts over the row's tail (which reserves
  *  their width, see tailHides) and yields to a hovered PR link together. */
 export function RowHoverActions({ actionsLabel, archiveLabel, className, menu }: RowHoverActionsProps) {
   return (
     <span className={cn('flex items-center gap-1', className)}>
+      <SessionActionsMenu {...menu}>
+        <Button
+          aria-label={actionsLabel}
+          className={ROW_ACTION_BUTTON}
+          data-session-actions
+          size="icon"
+          variant="ghost"
+        >
+          <Codicon name="kebab-vertical" size="0.875rem" />
+        </Button>
+      </SessionActionsMenu>
       {!menu.archived && (
         <Tip label={archiveLabel} side="top">
           <Button
@@ -49,17 +61,6 @@ export function RowHoverActions({ actionsLabel, archiveLabel, className, menu }:
           </Button>
         </Tip>
       )}
-      <SessionActionsMenu {...menu}>
-        <Button
-          aria-label={actionsLabel}
-          className={ROW_ACTION_BUTTON}
-          data-session-actions
-          size="icon"
-          variant="ghost"
-        >
-          <Codicon name="kebab-vertical" size="0.875rem" />
-        </Button>
-      </SessionActionsMenu>
     </span>
   )
 }
