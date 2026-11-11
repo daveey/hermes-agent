@@ -65,6 +65,7 @@ class PipeClient:
         self.transport = StdioTransport(lambda: self.writer, threading.Lock())
         self._closed = False
         self.writes = 0
+        self.write_started = threading.Event()
         self.frames = queue.Queue()
         if reading:
             self.thread = threading.Thread(target=self._read, daemon=True)
@@ -83,6 +84,7 @@ class PipeClient:
 
     def write(self, obj):
         self.writes += 1
+        self.write_started.set()
         return self.transport.write(obj)
 
     def close(self):
@@ -115,6 +117,7 @@ class SocketClient(WSTransport):
         loop = asyncio.new_event_loop()
         super().__init__(_SocketWS(self), loop)
         self.writes = 0
+        self.write_started = threading.Event()
         self.loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
         self.loop_thread.start()
         self.frames = queue.Queue()
@@ -126,6 +129,7 @@ class SocketClient(WSTransport):
 
     async def send_text(self, payload):
         self.writes += 1
+        self.write_started.set()
         await self._loop.sock_sendall(self.writer, (payload + "\n").encode())
 
     def _read(self):
@@ -250,6 +254,10 @@ def test_backpressure_never_blocks_later_frames_or_other_subscribers(slow_first,
             assert not errors
             assert [healthy.receive()["params"]["type"] for _ in range(3)] == [
                 "message.start", "message.delta", "message.complete"]
+            # A healthy receipt does not mean the slow drain has taken its first
+            # batch. Without this handshake, a delayed drain can capture >64
+            # flood frames in flight, leaving too few pending to hit the cap.
+            assert slow.write_started.wait(15), "slow writer never entered kernel I/O"
             # Exhaust only the slow peer's bounded backlog; pace the healthy
             # reader by receipts so scheduler latency cannot make it overflow.
             for n in range(FanoutTransport._MAX_PENDING_FRAMES + 64):
