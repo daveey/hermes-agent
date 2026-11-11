@@ -70,6 +70,24 @@ DROP_EVENTS = ("resolved_check_broken", "resolved_check_lost")
 _DROP_CAUSE = {"resolved_check_broken": "its probe kept failing", "resolved_check_lost": "its probe went missing"}
 
 
+def _drop_backfilled_origins(events):
+    """Remove a historical drop event when a backfill re-emission in the same batch names it as its origin.
+
+    Only the exact ``origin_event_id`` of a ``backfilled`` drop event of the same kind goes; distinct drops stay.
+    """
+    origins = set()
+    for e in events:
+        payload = getattr(e, "payload", None)
+        if e.kind in DROP_EVENTS and isinstance(payload, dict) and payload.get("backfilled") is True:
+            try:
+                origins.add((int(payload["origin_event_id"]), e.kind))
+            except (KeyError, TypeError, ValueError):
+                pass
+    if not origins:
+        return events
+    return [e for e in events if (int(e.id), e.kind) not in origins]
+
+
 def coalesce_superseded_blocks(events):
     """Drop ``blocked`` events that a later drop event in the same unseen batch supersedes. [daveey]
 
@@ -78,7 +96,7 @@ def coalesce_superseded_blocks(events):
     in this batch go; an ordinary block, or one re-filed after the drop, is kept. Callers keep the full claimed
     cursor range, so ack/rewind semantics are unchanged.
     """
-    events = list(events)
+    events = _drop_backfilled_origins(list(events))
     last_drop = max((int(e.id) for e in events if e.kind in DROP_EVENTS), default=None)
     if last_drop is None:
         return events

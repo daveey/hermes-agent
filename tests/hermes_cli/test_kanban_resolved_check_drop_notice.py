@@ -136,6 +136,55 @@ def test_tui_origin_gets_one_notice_per_drop_event(event):
         assert server._collect_kanban_notifications({"session_key": "drop-chat"}) == []
 
 
+@pytest.mark.parametrize("event", ["resolved_check_broken", "resolved_check_lost"])
+@pytest.mark.parametrize("platform", ["tui", "telegram"])
+@pytest.mark.parametrize("consumed", [True, False])
+def test_legacy_drop_is_notified_once_after_backfill(tmp_path, monkeypatch, event, platform, consumed):
+    from hermes_cli import kanban_ask_resolved as kar
+    from tests.hermes_cli.test_kanban_ask_backfill import _legacy
+
+    if platform == "telegram":
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "legacy.db"))
+    kb.init_db()
+    chat = "drop-chat" if platform == "tui" else "chat-1"
+    adapter = helpers.RecordingAdapter()
+    runner = helpers._runner(adapter)
+    texts = []
+    with closing(kbc.connect()) as conn:
+        tid = kb.create_task(conn, title="DNS", assignee="worker")
+        kbn.add_notify_sub(conn, task_id=tid, platform=platform, chat_id=chat, delivery_mode="notify+wake")
+        _drop(conn, tid, produce=False)
+        _legacy(conn, tid, event, at=DROPPED_AT)
+        original = max(kb.list_events(conn, tid), key=lambda e: e.id)
+        # Consumed: the old notifier read the event before drop notices existed. Unconsumed: the origin was offline
+        # and sees the historical drop and the backfill re-emission in one unseen batch.
+        with kb.write_txn(conn):
+            conn.execute("UPDATE kanban_notify_subs SET last_event_id=? WHERE task_id=?",
+                         (original.id if consumed else original.id - 1, tid))
+        for _ in range(3):
+            kar.reconcile(conn, now=DROPPED_AT + 100)
+            if platform == "tui":
+                claims = []
+                texts.extend(server._collect_kanban_notifications({"session_key": chat}, claims))
+                for claim in claims:
+                    assert kbn.ack_notify_claim(conn, task_id=tid, platform=platform, chat_id=chat, thread_id="",
+                                                upto=claim["new"], from_cursor=claim["old"])
+            else:
+                runner._running = True
+                asyncio.run(helpers._run_one_tick(monkeypatch, runner))
+        if platform == "telegram":
+            texts = [s["text"] for s in adapter.sent]
+            assert len(adapter.handled) == 1
+        assert len(texts) == 1, texts
+        _assert_drop_wording(texts[0])
+        drops = sorted((e for e in kb.list_events(conn, tid) if e.kind == event), key=lambda e: e.id)
+        assert len(drops) == 2
+        assert drops[-1].payload == {"backfilled": True, "origin_event_id": original.id}
+        request = kar._request(kb.get_task(conn, tid).human_request)
+        assert request["resolved_check_dropped_at"] == DROPPED_AT
+        assert request["resolved_check_drop_reason"] == event
+
+
 # -- remote (hub replica) path -----------------------------------------------------------------------
 
 # -- offline origin: unseen original block followed by a drop ------------------------------------------

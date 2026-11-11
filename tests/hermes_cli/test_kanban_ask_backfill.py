@@ -36,17 +36,21 @@ def _snapshot(conn):
 
 
 @pytest.mark.parametrize("kind", DROPS)
-def test_old_drop_is_marked_once_without_new_events(board, kind):
+def test_old_drop_is_marked_once_with_one_reemitted_event(board, kind):
     with kbc.connect_closing() as conn:
         tid = helpers._blocked_ask(conn, "exit 1")
         _legacy(conn, tid, kind, at=5000)
         events = _count(conn)
+        original = max(kb.list_events(conn, tid), key=lambda e: e.id)
         out = kar.reconcile(conn, now=99999)
         assert out["restored"] == out["lost"] == []
         req = _request(conn, tid)
         assert (req["resolved_check_dropped_at"], req["resolved_check_drop_reason"]) == (5000, kind)
         assert req["resolved_check"] == "exit 1"
-        assert _count(conn) == events and kwc.get_state(conn, tid) is None
+        assert _count(conn) == events + 1 and kwc.get_state(conn, tid) is None
+        emitted = max(kb.list_events(conn, tid), key=lambda e: e.id)
+        assert emitted.kind == kind
+        assert emitted.payload == {"backfilled": True, "origin_event_id": original.id}
         assert kb.get_task(conn, tid).status == "blocked"
         before = _snapshot(conn)
         assert not any(kar.reconcile(conn, now=199999).values())

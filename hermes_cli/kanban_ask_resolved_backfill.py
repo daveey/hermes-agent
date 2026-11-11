@@ -4,9 +4,10 @@ Older cores appended ``BROKEN_EVENT`` / ``LOST_EVENT`` without marking the ask. 
 skips such a card forever (a terminal event follows its latest filing), so nothing tells origins or readers that
 the probe stopped. This marks only a card that is still blocked, still names a resolved_check, has no probe row
 and no mark, and whose *latest* ``blocked`` filing is followed by a drop event and no resolution. The mark takes
-the drop event's own time and kind; no event or comment is written (the drop was already reported), and the read
-pass takes no write txn. A refiled ask has a newer ``blocked`` event, so an older drop never marks it. An ask whose
-probe another gateway owns, or a worker-node copy of another gateway's card, is left to that owner.
+the drop event's own time and kind. The first mark atomically re-emits that kind so local origin cursors that
+consumed the historical event get a notice; no comment is written, and the read pass takes no write txn.
+A refiled ask has a newer ``blocked`` event, so an older drop never marks it. An ask whose probe another gateway
+owns, or a worker-node copy of another gateway's card, is left to that owner.
 """
 from __future__ import annotations
 
@@ -73,5 +74,6 @@ def backfill(conn: sqlite3.Connection) -> list[str]:
             if _latest_drop(conn, tid) != drop or not _eligible(conn, tid):
                 continue
             kar.mark_dropped(conn, tid, drop[2], drop[3])
+            kb._append_event(conn, tid, drop[2], {"backfilled": True, "origin_event_id": drop[1]})
             marked.append(tid)
     return marked

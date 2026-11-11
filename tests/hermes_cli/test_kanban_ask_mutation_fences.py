@@ -164,6 +164,22 @@ def test_coalesce_keeps_other_events_and_uses_latest_drop():
     assert [e.id for e in bn.coalesce_superseded_blocks([_ev(1, "resolved_check_lost"), _ev(2, "blocked")])] == [1, 2]
 
 
+def test_backfill_coalesces_only_exact_same_kind_references():
+    broken, lost = kar.BROKEN_EVENT, kar.LOST_EVENT
+    originals = [_ev(1, broken), _ev(2, broken), _ev(3, lost)]
+    replay = SimpleNamespace(id=4, kind=broken, payload={"backfilled": True, "origin_event_id": 1})
+    assert [e.id for e in bn.coalesce_superseded_blocks(originals + [replay])] == [2, 3, 4]
+    for kind, payload in [("comment", replay.payload), (broken, None), (broken, []),
+                          (broken, {"backfilled": False, "origin_event_id": 1}),
+                          (broken, {"backfilled": True}),
+                          (broken, {"backfilled": True, "origin_event_id": None}),
+                          (broken, {"backfilled": True, "origin_event_id": "bad"}),
+                          (broken, {"backfilled": True, "origin_event_id": 3})]:
+        candidate = SimpleNamespace(id=4, kind=kind, payload=payload)
+        batch = originals + [candidate]
+        assert bn.coalesce_superseded_blocks(batch) == batch
+
+
 def test_drop_warning_names_cause_from_mark_else_from_event():
     assert "its probe kept failing" in bn.drop_warning({"resolved_check_drop_reason": "resolved_check_broken"})
     assert "its probe went missing" in bn.drop_warning({}, "resolved_check_lost")
