@@ -192,3 +192,26 @@ def test_receipt_is_not_allowed_on_decision_declaration():
     with pytest.raises(ValueError, match="completion_receipt"):
         validate_declaration({"kind": "decision", "items": [{"question": "Continue?", "choices": ["yes", "no"]}],
                               "completion_receipt": receipt()})
+
+
+def test_sidebar_rows_and_cli_json_project_receipt_and_source(db, monkeypatch, capsys):
+    """The Desktop list API rows and `hermes sessions outcome --json` carry the stored receipt verbatim."""
+    import argparse
+    import json
+
+    import hermes_state_outcome as so
+    from hermes_cli import sessions_cmd_outcome as cli
+
+    monkeypatch.setattr(so, "_live_turn", lambda *_: False)
+    fixtures.turn(db)
+    value = receipt("superseded")
+    so.declare_outcome("chat", {"kind": "done", "summary": "Migration superseded.",
+                                "completion_receipt": value}, db=db)
+    row = next(r for r in db.list_sessions_rich(order_by_last_active=True, include_pinned=True,
+                                                compact_rows=True) if r["id"] == "chat")
+    assert row["outcome"]["completion_receipt"] == value
+    assert row["outcome"]["completion_receipt_source"]["kind"] == "session_declaration"
+    cli.cmd_outcome(db, argparse.Namespace(session_id="chat", refresh=False, json=True))
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["outcome"]["completion_receipt"] == value
+    assert printed["outcome"]["completion_receipt_source"] == row["outcome"]["completion_receipt_source"]
