@@ -136,7 +136,7 @@ async def test_cooperative_stop_booking_before_admission_settlement(monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_a_stop_before_the_child_bootstrapped_is_not_a_checkpoint(monkeypatch):
+async def test_a_stop_before_the_child_bootstrapped_is_not_a_checkpoint(monkeypatch, caplog):
     # [daveey] The turn never ran: a copied transcript's tail is the previous run's, so continuing it
     # would skip this run's first prompt and rewrite the old run's tool results. Plain requeue instead.
     from gateway import session_managed_worker as managed
@@ -150,8 +150,10 @@ async def test_a_stop_before_the_child_bootstrapped_is_not_a_checkpoint(monkeypa
     monkeypatch.setattr('gateway.session_policy.workspace_ready', lambda _: True)
     recorded = MagicMock()
     monkeypatch.setattr(booking, 'record_restart_interruption', recorded)
-    await managed.admit_managed(authority, SimpleNamespace(session_id='s'), row, SimpleNamespace(kanban_json='{}'))
+    with caplog.at_level('INFO', logger=managed.__name__):
+        await managed.admit_managed(authority, SimpleNamespace(session_id='s'), row, SimpleNamespace(kanban_json='{}'))
     assert recorded.call_count == 1 and recorded.call_args.kwargs['checkpoint'] is None
+    assert 'not checkpointed: stopped before its managed worker bootstrapped' in caplog.text
 
 
 @pytest.mark.asyncio

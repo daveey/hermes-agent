@@ -642,6 +642,10 @@ async def admit_managed(authority, ref, row, policy):
         # receipt becomes terminal: a runtime Stop must not spend the card's retries.
         # [daveey] A clean stop is a checkpoint the next owner continues (session_kanban_continue).
         from gateway.session_kanban_restart import book_restart_interruption
+        if pending.get('before_bootstrap'):
+            import logging
+            logging.getLogger(__name__).info('Kanban turn %s not checkpointed: stopped before its managed worker bootstrapped; '
+                        'the run is requeued uncounted', row.get('admission_id'))
         # A turn stopped before its child bootstrapped never ran: nothing to continue (a copied
         # transcript's tail is the previous run's), so it takes the plain uncounted requeue.
         await book_restart_interruption(authority, policy, checkpoint=None if pending.get('before_bootstrap') else {
