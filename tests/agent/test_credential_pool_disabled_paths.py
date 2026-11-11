@@ -1,4 +1,5 @@
 """Paths that hand out a token without pool selection also refuse a `hermes auth disable`d account."""
+import json
 import os
 from dataclasses import replace
 from types import SimpleNamespace
@@ -141,7 +142,13 @@ def test_cache_sees_a_same_size_same_mtime_replace(tmp_path):
     path = tmp_path / "hermes" / "auth.json"
     assert cpd.is_credential_disabled("openrouter", pool.entries()[0])
     st = path.stat()
-    swapped = path.read_text().replace('"row0"', '"row1"').replace("account0@", "account1@")
+    store = json.loads(path.read_text())
+    (record,) = store["disabled_credentials"]["openrouter"]
+    store["disabled_credentials"]["openrouter"] = [{"id": "row1", "label": "account1@example.com",
+                                                    "fp": record["fp"][:-1] + ("0" if record["fp"][-1] != "0" else "1")}]
+    swapped = json.dumps(store)
+    swapped += " " * (st.st_size - len(swapped.encode()))  # same size
+    assert len(swapped.encode()) == st.st_size
     tmp = path.with_suffix(".new")
     tmp.write_text(swapped)
     os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
@@ -226,7 +233,8 @@ def test_disabling_the_codex_singleton_slot_does_not_disable_the_next_account_si
     assert pool.entries()[0].id == row.id  # same slot id ...
     assert pool.select() is not None  # ... different account: usable
     # A stays disabled wherever its row reappears (a hub pull labelled with the email) and by token.
-    assert cpd.is_credential_disabled("openai-codex", SimpleNamespace(id="other", label="a@example.com", access_token=""))
+    assert cpd.is_credential_disabled("openai-codex", SimpleNamespace(
+        id="other", label="a@example.com", access_token=_jwt("a@example.com", "acct-a")))
     assert cpd.token_disabled("openai-codex", _jwt("a@example.com", "acct-a")) is True
 
 
@@ -299,3 +307,59 @@ def test_next_available_at_ignores_disabled_rows():
     assert abs(pool.next_available_at() - soon) < 1
     _disable("openai-codex", pool.entries()[0])
     assert abs(pool.next_available_at() - later) < 1
+
+
+def test_env_seeded_anthropic_row_stays_refused_although_its_persisted_copy_has_no_secret(monkeypatch):
+    """Borrowed rows persist only secret_fingerprint; the token check must still see them."""
+    import agent.anthropic_credentials as ac
+    from agent.credential_pool import load_pool
+    for key in [k for k in os.environ if k.startswith(("ANTHROPIC", "CLAUDE"))]:
+        monkeypatch.delenv(key)
+    monkeypatch.setattr(ac, "read_claude_code_credentials", lambda: None)
+    monkeypatch.setenv("ANTHROPIC_TOKEN", "fixture-env-anthropic-token")
+    rows = load_pool("anthropic").entries()
+    assert rows
+    for entry in rows:
+        _disable("anthropic", entry)
+    assert load_pool("anthropic").select() is None
+    assert cpd.token_disabled("anthropic", "fixture-env-anthropic-token") is True
+    assert ac._available_anthropic_token("fixture-env-anthropic-token", None) is None
+    assert cpd.token_disabled("anthropic", "fixture-other-token") is False
+
+
+def test_codex_resolver_pool_fallback_skips_disabled_rows(_no_codex_env):
+    import hermes_cli.auth_codex as ac
+    from agent.credential_pool import load_pool
+    token = _jwt("a@example.com", "acct-a")
+    write_credential_pool("openai-codex", [{"id": "r0", "label": "a@example.com", "auth_type": "oauth", "priority": 0,
+                                            "source": "manual:device_code", "access_token": token,
+                                            "refresh_token": "rt-fixture",
+                                            "base_url": "https://chatgpt.com/backend-api/codex"}])
+    (entry,) = load_pool("openai-codex").entries()
+    _disable("openai-codex", entry)
+    with pytest.raises(AuthError):
+        ac.resolve_codex_runtime_credentials()
+
+
+def test_one_email_two_codex_workspaces_are_separate_accounts():
+    personal, team = (SimpleNamespace(id=f"r{i}", label=label, access_token=_jwt("a@example.com", label))
+                      for i, label in enumerate(["personal", "team"]))
+    keys = cpd._keys_from_records([{"id": "r0", "label": "personal", "account": cpd.account_of(personal)}])
+    assert cpd.matches(personal, keys) and not cpd.matches(team, keys)
+
+
+def test_a_record_naming_an_account_never_matches_a_namesake_row_holding_another_accounts_token():
+    keys = cpd._keys_from_records([{"id": "r0", "label": "a@example.com", "account": "acct-a"}])
+    other = SimpleNamespace(id="zz", label="a@example.com", access_token=_jwt("b@example.com", "acct-b"))
+    assert not cpd.matches(other, keys)
+    same = SimpleNamespace(id="zz", label="a@example.com", access_token=_jwt("a@example.com", "acct-a"))
+    assert cpd.matches(same, keys)
+
+
+def test_a_reseeded_borrowed_row_with_a_new_id_stays_disabled_by_fingerprint():
+    first = SimpleNamespace(id="old", label="claude_code", access_token="", extra={"secret_fingerprint": "sha256:abc"})
+    keys = cpd._keys_from_records([{"id": "old", "label": "claude_code", "fp": cpd.fingerprint_of(first)}])
+    reseeded = SimpleNamespace(id="new", label="claude_code", access_token="", extra={"secret_fingerprint": "sha256:abc"})
+    assert cpd.matches(reseeded, keys)
+    other = SimpleNamespace(id="new2", label="claude_code", access_token="", extra={"secret_fingerprint": "sha256:def"})
+    assert not cpd.matches(other, keys)

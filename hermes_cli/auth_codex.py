@@ -638,7 +638,7 @@ def resolve_codex_runtime_credentials(
             if imported:
                 data = {"tokens": imported, "last_refresh": imported.get("last_refresh")}
     if data is None:
-        pool_token, pool_base = _pool_codex_credential()
+        pool_token, pool_base = _pool_codex_credential(skip_disabled=not read_only)
         if pool_token and force_refresh and not read_only:
             # Pool-only setup: a forced refresh must rotate the pool entry, not resend its token.
             from agent.credential_pool import load_pool
@@ -658,7 +658,7 @@ def resolve_codex_runtime_credentials(
             if not read_only and _probe_codex_pool_entry_quota_restored(pool_rate_limit):
                 logger.info("Codex quota restored upstream — clearing stale pool cooldown(s).")
                 clear_codex_pool_quota_cooldowns()
-                pool_token, pool_base = _pool_codex_credential()
+                pool_token, pool_base = _pool_codex_credential(skip_disabled=not read_only)
                 if pool_token:
                     return _codex_runtime_result(
                         pool_token, source="credential_pool", last_refresh=None,
@@ -923,17 +923,21 @@ def _pool_entries(auth_store: dict[str, Any], provider_id: str) -> Optional[list
     return entries if isinstance(entries, list) else None
 
 
-def _pool_codex_credential() -> tuple[str, str]:
+def _pool_codex_credential(*, skip_disabled: bool = True) -> tuple[str, str]:
     """``(access_token, row base_url)`` of the first pool entry with a non-empty access_token that is
     not in an exhaustion cooldown window, so the caller routes the token to the host that row belongs
     to; ``("", "")`` when none is usable.
 
     Fallback for ``resolve_codex_runtime_credentials`` when the singleton has no creds; reads
     through ``read_credential_pool`` so a profile inherits the global-root pool (#34143)."""
-    from agent.credential_pool import _parse_absolute_timestamp
+    from agent.credential_pool import PooledCredential, _parse_absolute_timestamp
+    from agent.credential_pool_disabled import disabled_keys, matches
     from hermes_cli.auth import _nonempty_str, read_credential_pool
     try:
+        keys = disabled_keys("openai-codex") if skip_disabled else None
         for entry in _codex_pool_dicts(read_credential_pool("openai-codex")):
+            if keys and (keys[0] or keys[1]) and matches(PooledCredential.from_dict("openai-codex", entry), keys):
+                continue  # `hermes auth disable`: never hand this row's token out
             token = entry.get("access_token")
             # Same normaliser as ``_codex_pool_rate_limit_status``: a millisecond epoch compared
             # raw reads as far-future here and as elapsed there, hiding a usable entry (#103349).

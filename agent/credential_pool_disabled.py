@@ -59,28 +59,43 @@ def _generic(label: str) -> bool:
 
 
 def account_of(entry: Any) -> Optional[str]:
-    """Lowercase account identity from the row's JWT access token (email, else ChatGPT account id)."""
+    """Lowercase account identity from the row's JWT access token: the ChatGPT account (workspace) id when
+    present (one email can own a personal and a Team workspace), else the email."""
     from hermes_cli.auth_constants import _decode_jwt_claims
     claims = _decode_jwt_claims(getattr(entry, "access_token", None) or "")
     if not isinstance(claims, dict) or not claims:
         return None
     profile = claims.get("https://api.openai.com/profile") or {}
     auth = claims.get("https://api.openai.com/auth") or {}
-    for value in (claims.get("email"), profile.get("email") if isinstance(profile, dict) else None,
-                  auth.get("chatgpt_account_id") if isinstance(auth, dict) else None):
+    for value in (auth.get("chatgpt_account_id") if isinstance(auth, dict) else None, claims.get("email"),
+                  profile.get("email") if isinstance(profile, dict) else None):
         if isinstance(value, str) and value.strip():
             return value.strip().lower()
     return None
 
 
+def fingerprint_of(entry: Any) -> Optional[str]:
+    """The row's secret fingerprint: kept on borrowed/env rows, whose persisted copy has no secret."""
+    extra = getattr(entry, "extra", None)
+    fp = (extra.get("secret_fingerprint") if isinstance(extra, dict) else None) or getattr(
+        entry, "secret_fingerprint", None)
+    if isinstance(fp, str) and fp:
+        return fp
+    from agent.credential_persistence import fingerprint_secret_value
+    return fingerprint_secret_value(getattr(entry, "access_token", None) or "")
+
+
 def _keys_from_records(records: Iterable[dict[str, Any]]) -> tuple:
-    """``(ids, labels, guards)``; guards = ``(id, account)`` pairs a matching row's token must not contradict."""
-    records = list(records)
-    ids = frozenset(str(r["id"]) for r in records if r.get("id"))
-    labels = frozenset(lab for r in records for lab in (_norm_label(r.get("label")), _norm_label(r.get("account")))
-                       if not _generic(lab))
-    guards = frozenset((str(r["id"]), _norm_label(r["account"])) for r in records if r.get("id") and r.get("account"))
-    return ids, labels, guards
+    """``(ids, markers, records)``: ids and markers only say "something is disabled" cheaply; ``records``
+    holds one ``(id, label, account, fingerprint)`` tuple per record, matched one record at a time."""
+    recs = frozenset(
+        (str(r.get("id") or ""), "" if _generic(_norm_label(r.get("label"))) else _norm_label(r.get("label")),
+         _norm_label(r.get("account")), str(r.get("fp") or ""))
+        for r in records)
+    recs = frozenset(t for t in recs if any(t))
+    ids = frozenset(t[0] for t in recs if t[0])
+    markers = frozenset(v for t in recs for v in t[1:] if v)
+    return ids, markers, recs
 
 
 def _file_keys(path: Optional[Path], provider: str) -> tuple:
@@ -130,19 +145,21 @@ def disabled_keys(provider: str) -> tuple:
 
 
 def matches(entry: Any, keys: tuple) -> bool:
-    ids, labels = keys[0], keys[1]
-    if not ids and not labels:
+    """A record hits a row by id, non-generic label, JWT account or secret fingerprint; a record that
+    names an account never hits a row whose token names a different one (a reused slot, a namesake label)."""
+    if not keys[0] and not keys[1]:
         return False
-    acct = account_of(entry)
-    if acct is not None and acct in labels:
-        return True
-    entry_id = getattr(entry, "id", None)
-    if entry_id in ids:
-        wanted = {a for i, a in (keys[2] if len(keys) > 2 else ()) if i == entry_id}
-        if not wanted or acct is None or acct in wanted:
-            return True
+    entry_id = str(getattr(entry, "id", "") or "")
     label = _norm_label(getattr(entry, "label", ""))
-    return not _generic(label) and label in labels
+    label = "" if _generic(label) else label
+    acct = account_of(entry) or ""
+    fp = fingerprint_of(entry) or ""
+    for rid, rlabel, racct, rfp in keys[2]:
+        if racct and acct and racct != acct:
+            continue
+        if (rid and rid == entry_id) or (rlabel and rlabel == label) or (racct and racct == acct) or (rfp and rfp == fp):
+            return True
+    return False
 
 
 def enabled_entries(provider: str, entries: Iterable[Any]) -> list[Any]:
@@ -178,6 +195,8 @@ def set_credential_disabled(provider: str, entry: Any, disabled: bool) -> bool:
             record = {"id": entry_id, "label": label}
             if (acct := account_of(entry)) is not None:
                 record["account"] = acct
+            if (fp := fingerprint_of(entry)) is not None:
+                record["fp"] = fp  # non-reversible; keeps a re-seeded borrowed/env row disabled
             records.append(record)
         else:
             if not hit:
@@ -233,29 +252,34 @@ def token_disabled(provider: str, *tokens: Optional[str]) -> bool:
     """Whether any of *tokens* (access or refresh) belongs to a disabled account of *provider*.
 
     For the resolvers that hand out a token without selecting it from the pool (the auth.json
-    singleton, env tokens, the Claude Code file). A JWT naming a disabled account is disabled outright;
-    otherwise the token must be a disabled pool row's access/refresh token. Reads the persisted rows,
-    never ``load_pool`` (seeding may call the very resolver asking). Free while nothing is disabled.
+    singleton, env tokens, the Claude Code file). Hit when a disabled record carries the token's
+    fingerprint or JWT account, or a disabled persisted row holds the token (or, for borrowed rows that
+    persist no secret, its fingerprint). Reads persisted rows, never ``load_pool`` (seeding may call the
+    very resolver asking). Free while nothing is disabled.
     """
+    from types import SimpleNamespace
+    from agent.credential_persistence import fingerprint_secret_value
     wanted = {t.strip() for t in tokens if isinstance(t, str) and t.strip()}
     if not wanted:
         return False
     keys = disabled_keys(provider)
     if not keys[0] and not keys[1]:
         return False
-    from types import SimpleNamespace
-    if any(account_of(SimpleNamespace(access_token=t)) in keys[1] for t in wanted):
-        return True
+    fps = {fingerprint_secret_value(t) for t in wanted}
+    if any(matches(SimpleNamespace(id="", label="", access_token=t, extra={}), keys) for t in wanted):
+        return True  # fingerprint or JWT account of a disabled record
+    from agent.credential_pool import PooledCredential
     from hermes_cli import auth as auth_mod
     try:
         rows = auth_mod.read_credential_pool(provider)
+        rows = [PooledCredential.from_dict(provider, r) for r in (rows if isinstance(rows, list) else [])
+                if isinstance(r, dict)]
     except Exception:
         logger.warning("disabled-credential check: %s pool unreadable; token allowed", provider, exc_info=True)
         return False
-    rows = [SimpleNamespace(**{k: r.get(k) for k in ("id", "label", "access_token", "refresh_token", "agent_key")})
-            for r in (rows if isinstance(rows, list) else []) if isinstance(r, dict)]
     return any(
-        matches(r, keys) and wanted & {r.access_token, r.refresh_token, r.agent_key}
+        matches(r, keys) and (wanted & {r.access_token, r.refresh_token, getattr(r, "agent_key", None)}
+                              or (fingerprint_of(r) in fps))
         for r in rows
     )
 

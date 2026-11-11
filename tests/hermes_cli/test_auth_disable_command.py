@@ -53,7 +53,9 @@ def test_disable_enable_round_trip(home, capsys):
     assert "[disabled]" in rows["acct0"] and "[disabled]" not in rows["acct1"]
     assert load_pool("anthropic").select().id == "row1"
     stored = json.loads((home / "auth.json").read_text())
-    assert stored["disabled_credentials"] == {"anthropic": [{"id": "row0", "label": "acct0"}]}
+    (record,) = stored["disabled_credentials"]["anthropic"]
+    assert {k: record[k] for k in ("id", "label")} == {"id": "row0", "label": "acct0"}
+    assert record["fp"].startswith("sha256:") and "***" not in json.dumps(stored["disabled_credentials"])
 
     _run("disable", "row0")
     assert "(already disabled)" in capsys.readouterr().out

@@ -170,8 +170,8 @@ def test_disable_never_lands_on_pool_rows():
     pool = _pool(n=2)
     _disable(pool.provider, pool.entries()[0])
     assert all("disabled" not in row for row in read_credential_pool(pool.provider))
-    assert _auth_json_for(pool)["disabled_credentials"] == {
-        pool.provider: [{"id": "row0", "label": "account0@example.com"}]}
+    (record,) = _auth_json_for(pool)["disabled_credentials"][pool.provider]
+    assert {k: record[k] for k in ("id", "label")} == {"id": "row0", "label": "account0@example.com"}
 
 
 def test_other_provider_unaffected():
