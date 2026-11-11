@@ -40,7 +40,7 @@ pull_request / push main
  ├─ nix.yml      (own run; nix flake check)
  └─ path-filtered: pm-bundle, termux-verify, plugin-catalog-ci, sandbox-image, windows-bundle-sdk
 
-workflow_run CI started  → ci-review-comment.yml (live PR comment)
+hourly / manual dispatch → ci-review-comment.yml (batched PR snapshots)
 PR labeled run-e2e       → label-rerun.yml (reruns CI, Docker, Nix)
 
 schedule daily 06:41 UTC → canary-release.yml → (release.py dispatches) desktop-bundled-release.yml
@@ -246,7 +246,7 @@ of every suite that reads it.
 
 Steps inside one job keep what told the old jobs apart: the lane gate is the step's
 `if:`, each guard runs whether or not an earlier one failed (`!cancelled()`), any red
-step fails the job, and the `review-status-*` artifacts the live PR comment reads keep
+step fails the job, and the `review-status-*` artifacts the hourly PR snapshot reads keep
 their names. The jobs were split only by history: each paid its own checkout and a
 full billed minute for a few seconds of work.
 
@@ -339,7 +339,7 @@ branch protection.
 
 | Workflow | Trigger | What it does / skip conditions |
 |---|---|---|
-| `ci-review-comment.yml`, **CI review comment** | `workflow_run` of `CI`, `types: [in_progress]` | Polls the CI run and the sibling Docker run for up to ~50 min. Keeps one live review comment on the PR up to date. Always runs scripts from the default branch. **Skips** non-PR runs and PRs from forks. A first-time contributor's run starts it only after a maintainer approves it, because `in_progress` fires then. One poller per head repo+branch; a newer CI run cancels the old poller. |
+| `ci-review-comment.yml`, **CI review comment** | Hourly (`17 * * * *`) and manual dispatch | One batch snapshots every open same-repository PR using its newest exact-head CI pull-request run and sibling Docker results. Always runs trusted default-branch scripts; no polling or PR code execution. Forks, closed/moved heads, and heads with no CI run are skipped. Comments identify their SHA and hourly refresh cadence. One non-cancelling concurrency group, 15-minute job timeout; 168 scheduled runs/week. |
 | `label-rerun.yml`, **Label rerun** | `pull_request: labeled` | Only for the `run-e2e` label. Cancels the head commit's `ci.yaml`, `docker.yml` and `nix.yml` runs if they are still going, then reruns them. Their `detect` reads the live labels, so Docker and Nix build. Exits if the PR head moved. The E2E suites stay off. |
 
 ---

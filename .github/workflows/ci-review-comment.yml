@@ -1,55 +1,34 @@
 name: CI review comment
 
-# Live-updating PR review comment.
+# Hourly batched PR review summaries.
 #
-# The poller runs for up to 40 minutes.
-# This run lives in its own workflow.
-# A run stays in progress until its last job ends, and GitHub refuses
-# ``gh run rerun`` on a run that is in progress.
+# One scheduled run snapshots every open same-repo PR: the newest CI
+# ``pull_request`` run on the PR's exact head, one comment per PR. It replaces
+# the per-run live poller (one 40-minute per-run poller).
 #
-# ``workflow_run`` starts this when CI starts. It always reads the workflow
-# and the scripts from the default branch, never from the PR head.
-# It makes a write token safe here.
-#
-# The poller reads job results through the API. Thus it watches the CI run
-# and the separate docker run, and it depends on neither.
+# It runs from the default branch only and never checks out or executes PR
+# code, which makes a write token safe here. Fork PRs are skipped.
 
 on:
-  workflow_run:
-    workflows: [CI]
-    # ``in_progress``, not ``requested``: a first-time contributor's run
-    # sits in ``action_required`` until a maintainer approves it, and
-    # ``requested`` fires at creation — the poller would wait out its
-    # whole timeout on a run that never starts. ``in_progress`` fires
-    # when the run actually starts, and it also fires on re-runs, which
-    # ``requested`` does not.
-    types: [in_progress]
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
   actions: read
   pull-requests: write
 
-# One poller per CI run. A new push starts a new CI run, and its poller
-# cancels the poller of the run that GitHub superseded. The group keys
-# on the head repository too: fork PRs often share a branch name
-# (``main``, ``patch-1``), and two PRs must not cancel each other.
+# One batch at a time; a running batch is never cancelled.
 concurrency:
-  group: ci-review-comment-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
-  cancel-in-progress: true
+  group: ci-review-comment
+  cancel-in-progress: false
 
 jobs:
   comment:
-    name: CI review comment (live)
-    # Fork PRs get no comment: the poller needs a write token, and the
-    # ``pull_requests`` payload is empty for a fork run.
-    if: >-
-      github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
-    # [daveey] poll-only runners (label hermes-hub-poll ONLY, 0.5 CPU each): this
-    # poller lives up to 40-60 min and used to hold a test runner slot.
+    name: CI review comment (hourly)
     runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 60
+    timeout-minutes: 15
     steps:
       - name: Checkout trusted default branch
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork: upstream uses useblacksmith/checkout)
@@ -57,26 +36,10 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
-      - name: Run live comment poller
+      - name: Post batched review summaries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # The CI run to report on — not this run. The name must not be
-          # GITHUB_RUN_ID: the runner sets the GITHUB_* defaults itself and
-          # ignores an env: override, so that name silently resolves to THIS
-          # run. The poller then watches itself, which stays in_progress for
-          # as long as the poller runs, and it waits out its whole timeout.
-          CI_RUN_ID: ${{ github.event.workflow_run.id }}
-          # Sibling runs for the same commit that the comment also covers,
-          # one workflow name per line (a name can contain a comma).
-          # The poller resolves each name to its runs through the API.
+          # Sibling workflows whose jobs join each comment, one name per line.
           WATCH_WORKFLOWS: |
             Docker Build, Test, and Publish
-          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
-          RUN_URL: ${{ github.event.workflow_run.html_url }}
-          # Commit info for the review comment header.
-          COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
-          COMMIT_MESSAGE: ${{ github.event.workflow_run.head_commit.message }}
-        run: |
-          python3 -u scripts/ci/live_comment.py \
-            --interval 15 \
-            --timeout 3000
+        run: python3 -u scripts/ci/batch_review_comments.py
