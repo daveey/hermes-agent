@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import time
 
 from hermes_cli import kanban_db_sync as sync
 
@@ -60,7 +59,10 @@ def queue(conn: sqlite3.Connection, task_id: str, run_id: int | None, *,
                             (uid, task_id, op_id)).rowcount
     if inserted:
         fields = {**policy, "run_uid": uid, "outcome": outcome, "error": error[:500]}
+        # Same millisecond clock as captured rows: a release may reference a
+        # systemic fix card created earlier in this transaction.
         conn.execute("INSERT INTO kanban_sync_outbox "
-                     "(op_id,table_name,row_uid,op,fields,hlc,created_at) VALUES (?, 'tasks', ?, 'release', ?, '', ?)",
-                     (op_id, task_id, json.dumps(fields), int(time.time())))
+                     "(op_id,table_name,row_uid,op,fields,hlc,created_at) "
+                     f"VALUES (?, 'tasks', ?, 'release', ?, '', {sync._NOW_MS_SQL})",
+                     (op_id, task_id, json.dumps(fields)))
     return True
