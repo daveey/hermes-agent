@@ -28,6 +28,7 @@ class Fleet:
         self.rep = connect(tmp_path / "replica.db")
         self.gw = {id(self.w): "worker-5", id(self.h): "hub"}
         self.origin: dict[str, str] = {}
+        self.canonical: dict[str, dict] = {}
         self.evidence_down = False
         for c in (self.w, self.h, self.rep):
             for table, col in (("tasks", "created_on"), ("task_events", "uid"), ("task_runs", "uid")):
@@ -72,6 +73,7 @@ class Fleet:
                     self.rep.execute("INSERT INTO task_events (task_id, kind, payload, created_at, uid) "
                                      "VALUES (?,?,?,?,?)", tuple(r))
                     self.origin[r["uid"]] = gw
+                    self.canonical[r["uid"]] = dict(r)
         # The feed: events on each gateway's own cards that another gateway wrote (none here) would come back.
 
     def run_uid(self, conn, tid) -> str:
@@ -102,16 +104,21 @@ def fleet(tmp_path, monkeypatch):
     def evidence(_board, uid):
         if f.evidence_down:
             raise OSError("board unreachable")
-        row = f.rep.execute("SELECT task_id, created_at FROM task_events WHERE uid = ?", (uid,)).fetchone()
-        return {"table": "task_events", "uid": uid,
-                "row": {"origin_gateway": f.origin.get(uid), "task_id": row[0] if row else None,
-                        "created_at": int(time.time() * 1000)}}
+        row = f.canonical.get(uid)
+        return {"table": "task_events", "uid": uid, "state": "live" if row else "never_existed",
+                "row": {**row, "origin_gateway": f.origin.get(uid)} if row else None}
 
     monkeypatch.setattr(kox, "_own_gateway", f.name)
     monkeypatch.setattr(kox, "_replica", replica)
     monkeypatch.setattr(kox, "_synced", lambda conn: True)
     monkeypatch.setattr(kox, "_evidence", evidence)
-    monkeypatch.setattr(kox, "_outbox_rows", lambda c: c.execute("SELECT COUNT(*) FROM task_events").fetchone()[0])
+    def outbox_rows(c):
+        # Production assigns event UIDs in the append transaction, before start logs it.
+        for (eid,) in c.execute("SELECT id FROM task_events WHERE uid IS NULL").fetchall():
+            c.execute("UPDATE task_events SET uid=? WHERE id=?", (str(uuid.uuid4()), eid))
+        return c.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]
+
+    monkeypatch.setattr(kox, "_outbox_rows", outbox_rows)
     monkeypatch.setattr(kox, "_board_slug", lambda conn: "default")
     kox._MARK.clear()
     kox._PERSISTED.clear()
@@ -543,6 +550,7 @@ def test_rebuilt_replica_is_rescanned_even_at_a_reused_position(fleet):
             f.rep.execute("INSERT INTO task_events (task_id, kind, payload, created_at, uid) VALUES (?,?,?,?,?)",
                           (r[0], r[1], r[2], r[3], r[4] + "-rebuilt"))
             f.origin[r[4] + "-rebuilt"] = f.origin.get(r[4])
+            f.canonical[r[4] + "-rebuilt"] = {**f.canonical[r[4]], "uid": r[4] + "-rebuilt"}
     top = f.rep.execute("SELECT MAX(id) FROM task_events").fetchone()[0]
     assert top >= last  # the old watermark position still exists, holding a different event
     kox.apply_incoming(f.h)

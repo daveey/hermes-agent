@@ -2507,7 +2507,7 @@ def complete_task(
     from hermes_cli.kanban_review_required import require_review
     require_review(conn, task_id, expected_run_id, placement_settled=placement_settled)
     from hermes_cli import kanban_completion_receipt as receipt_admission
-    metadata, receipt_owners = receipt_admission.prepare(conn, task_id, metadata)
+    metadata, receipt_owners = receipt_admission.prepare(conn, task_id, metadata, summary=summary or result)
     now = int(time.time())
     if not _parents_satisfied(conn, task_id):
         return False

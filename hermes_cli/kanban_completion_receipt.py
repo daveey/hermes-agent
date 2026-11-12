@@ -85,16 +85,39 @@ def _check_external(conn, task_id, ref):
         raise refusal(ref, "owner is not open")
 
 
-def prepare(conn, task_id, metadata):
+def _unproved(targets):
+    return ("completion_receipt: cross-card claim requires exact operator delivery receipt for "
+            f"{', '.join(sorted(targets))}: attach the applied result's operator_delivery as "
+            "completion_receipt evidence, or word a queued/pending request (or another actor's comment) "
+            "without claiming this card delivered it")
+
+
+def prepare(conn, task_id, metadata, *, summary=None):
     """Return copied metadata and locally recheckable owners; reject before any write.
 
     Legacy metadata is untouched. Refusing unknown ownership is intentional: a
     plausible reference, stale replica, or new created_cards claim is not a link.
     """
+    from hermes_cli.kanban_operator_delivery import gated_claims, verify
+    claims = gated_claims(conn, task_id, summary)
     if not isinstance(metadata, dict) or "completion_receipt" not in metadata:
+        if claims:
+            raise ValueError(_unproved(claims))
         return metadata, ()
     receipt = validate_completion_receipt(metadata["completion_receipt"])
     checks = []
+    proved = set()
+    for item in receipt["items"]:
+        for evidence in item["evidence"]:
+            proof = evidence.get("operator_delivery")
+            if proof:
+                if item["disposition"] != "delivered":
+                    raise ValueError("completion_receipt: operator delivery requires delivered disposition")
+                verify(conn, task_id, proof)
+                checks.append((proof, "operator_delivery"))
+                proved.add(proof["target_task_id"])
+    if claims - proved:
+        raise ValueError(_unproved(claims - proved))
     owners = pending_owners(receipt)
     if owners:
         board, gateway = board_scope(conn)
@@ -165,7 +188,10 @@ def _check_session_local(board, identity, ref):
 def recheck(conn, task_id, owners):
     """Recheck under the completion transaction, before any event/terminal write."""
     for ref, local in owners:
-        if local:
+        if local == "operator_delivery":
+            from hermes_cli.kanban_operator_delivery import verify_local
+            verify_local(conn, task_id, ref)
+        elif local:
             _check_local(conn, task_id, ref)
         else:
             _, scope, gateway, identity = owner_parts(ref)

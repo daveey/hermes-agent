@@ -55,9 +55,15 @@ def _fire_approval_hook(hook_name: str, **kwargs) -> None:
     """Invoke a plugin lifecycle hook (pre_approval_request / post_approval_response).
 
     Lazy-imports the plugin manager (approval.py is imported long before plugins
-    are discovered). Never raises: approval flow is safety-critical, plugin
-    observability is not.
+    are discovered). Plugin observability failures never escape. Core consent
+    persistence runs first: a storage error recording a timeout/deny stop
+    propagates (the command is already refused; the lost stop must not pass
+    silently into later delegation); a failure recording a grant is logged and
+    only leaves the earlier stop in force.
     """
+    if hook_name == "post_approval_response":
+        from hermes_cli.kanban_consent import observe_approval
+        observe_approval({**kwargs, "session_id": kwargs.get("session_id") or _approval_session_id.get()})
     try:
         from hermes_cli.lifecycle import invoke_hook
     except Exception:

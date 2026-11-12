@@ -1,0 +1,246 @@
+"""Exact delivery proof rides the existing operator result, not a second ledger."""
+import hashlib
+import json
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+
+from hermes_cli import kanban_supervisor_requests as requests
+from tests.hermes_cli import test_kanban_operator_call as helpers
+
+fleet = helpers.fleet
+
+
+def test_completion_cannot_claim_delivery_with_unrelated_comment(fleet):
+    f = fleet
+    kb.add_comment(f.h, f.target, "someone-else", "unrelated")
+    with pytest.raises(ValueError, match="exact operator delivery receipt"):
+        kb.complete_task(f.w, f.caller, expected_run_id=f.run_id,
+                         summary=f"Posted the findings to {f.target}.")
+    assert kb.get_task(f.w, f.caller).status == "running"
+
+
+def _receipt(proof):
+    return {"completion_receipt": {"version": 1, "items": [{
+        "scope": "cross-card findings", "disposition": "delivered", "remaining": [],
+        "evidence": [{"ref": "operator request", "observed_at": "2026-11-12T00:00:00Z",
+                      "verification": "independently_checked", "operator_delivery": proof}]}]}}
+
+
+def test_exact_receipt_admitted_at_canonical_completion(fleet):
+    f = fleet
+    submitted = helpers._submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "exact"})
+    helpers._round(f)
+    proof = requests.get_request(f.w, submitted["request_id"])["result"][0]["operator_delivery"]
+    assert kb.complete_task(f.w, f.caller, expected_run_id=f.run_id,
+                            summary=f"Posted the findings to {f.target}.", metadata=_receipt(proof))
+    assert kb.get_task(f.w, f.caller).status == "done"
+
+
+def _delivered(f):
+    submitted = helpers._submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "exact"})
+    helpers._round(f)
+    return requests.get_request(f.w, submitted["request_id"])["result"][0]["operator_delivery"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("content_sha256", "0" * 64), ("caller_gateway", "impostor"),
+    ("request_uid", "wrong-request"), ("target_task_id", "t_0000000000000000"),
+    ("caller_run_uid", "old-run"), ("executor_gateway", "impostor"), ("board", "other"),
+])
+def test_forged_replica_receipt_rejected(fleet, field, value):
+    f = fleet
+    proof = _delivered(f)
+    proof[field] = value
+    # A forged replica and receipt agree; the independent Board copy does not.
+    raw = f.rep.execute("SELECT payload FROM task_events WHERE uid=?", (proof["result_event_uid"],)).fetchone()[0]
+    payload = json.loads(raw)
+    payload["operator_delivery"] = {k: v for k, v in proof.items() if k != "result_event_uid"}
+    if field == "executor_gateway":
+        payload["executor_gateway"] = value
+        f.origin[proof["result_event_uid"]] = value
+    with kb.write_txn(f.rep):
+        f.rep.execute("UPDATE task_events SET payload=? WHERE uid=?", (json.dumps(payload), proof["result_event_uid"]))
+    with pytest.raises(ValueError, match="completion_receipt"):
+        kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, metadata=_receipt(proof))
+    assert kb.get_task(f.w, f.caller).status == "running"
+
+
+@pytest.mark.parametrize("outcome", ["forwarded", "failed", "rejected"])
+def test_nonterminal_or_failed_request_is_not_delivery(fleet, outcome):
+    f = fleet
+    proof = _delivered(f)
+    with kb.write_txn(f.w):
+        f.w.execute("UPDATE operator_calls SET outcome=? WHERE request_uid=?", (outcome, proof["request_uid"]))
+    with pytest.raises(ValueError, match="completion_receipt"):
+        kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, metadata=_receipt(proof))
+
+
+@pytest.mark.parametrize("change", ["args", "actor", "request", "target", "home"])
+def test_canonical_request_must_bind_delivery(fleet, change):
+    f = fleet
+    proof = _delivered(f)
+    uid = f.w.execute("SELECT request_event_uid FROM operator_calls WHERE request_uid=?", (proof["request_uid"],)).fetchone()[0]
+    payload = json.loads(f.canonical[uid]["payload"])
+    container, key, value = {
+        "args": (payload["args"], "text", "different content"),
+        "actor": (payload["caller"], "gateway", "impostor"),
+        "request": (payload, "request_uid", "other"),
+        "target": (payload, "target_task_id", "t_0000000000000000"),
+        "home": (payload, "home", "impostor"),
+    }[change]
+    container[key] = value
+    f.canonical[uid]["payload"] = json.dumps(payload)
+    with pytest.raises(ValueError, match="completion_receipt"):
+        kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, metadata=_receipt(proof))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("outcome", "failed"), ("outcome", "pending"), ("request_uid", "wrong"),
+    ("action", "move"), ("executor_gateway", "impostor"), ("caller", {}),
+    ("operator_delivery", {}),
+])
+def test_canonical_result_must_attest_exact_application(fleet, field, value):
+    f = fleet
+    proof = _delivered(f)
+    row = f.canonical[proof["result_event_uid"]]
+    payload = json.loads(row["payload"])
+    payload[field] = value
+    row["payload"] = json.dumps(payload)
+    with pytest.raises(ValueError, match="completion_receipt"):
+        kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, metadata=_receipt(proof))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("uid", "other"), ("task_id", "t_0000000000000000"), ("kind", "commented"),
+    ("origin_gateway", "impostor"), ("deleted_at", 1), ("payload", "[]"),
+])
+def test_canonical_event_identity_required(fleet, field, value):
+    f = fleet
+    proof = _delivered(f)
+    uid = proof["result_event_uid"]
+    if field == "origin_gateway":
+        f.origin[uid] = value
+    else:
+        f.canonical[uid][field] = value
+    with pytest.raises(ValueError, match="completion_receipt"):
+        kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, metadata=_receipt(proof))
+
+
+def test_rejected_disposition_cannot_prove_delivery(fleet):
+    f = fleet
+    proof = _delivered(f)
+    metadata = _receipt(proof)
+    metadata["completion_receipt"]["items"][0]["disposition"] = "rejected"
+    with pytest.raises(ValueError, match="completion_receipt"):
+        kb.complete_task(f.w, f.caller, expected_run_id=f.run_id,
+                         summary=f"Posted findings to {f.target}.", metadata=metadata)
+
+
+@pytest.mark.parametrize("field,value", [("body", "changed"), ("author", "other"), ("origin_gateway", "other")])
+def test_executor_readback_rejects_changed_comment(fleet, field, value):
+    from hermes_cli.kanban_operator_delivery import applied_proof
+    f = fleet
+    proof = _delivered(f)
+    uid = f.w.execute("SELECT request_event_uid FROM operator_calls WHERE request_uid=?", (proof["request_uid"],)).fetchone()[0]
+    request = json.loads(f.canonical[uid]["payload"])
+    with kb.write_txn(f.h):
+        f.h.execute(f"UPDATE task_comments SET {field}=? WHERE id=?", (value, proof["comment_id"]))
+    with pytest.raises(ValueError, match="operator delivery"):
+        applied_proof(f.h, request, "hub")
+
+
+@pytest.mark.parametrize("field,value", [("comment_id", True), ("comment_id", 0), ("content_sha256", "a" * 16),
+                                         ("extra", "x"), ("caller_gateway", ""), ("board", [])])
+def test_malformed_delivery_schema_rejected(fleet, field, value):
+    f = fleet
+    proof = _delivered(f)
+    proof[field] = value
+    with pytest.raises(ValueError, match="completion_receipt"):
+        kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, metadata=_receipt(proof))
+
+
+def test_applied_result_carries_exact_delivery_identity(fleet):
+    f = fleet
+    text = "Exact payload: café\nsecond line"
+    submitted = helpers._submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": text})
+    helpers._round(f)
+    result = requests.get_request(f.w, submitted["request_id"])["result"][0]
+    proof = result.get("operator_delivery")
+    assert proof, "applied result lost exact delivery proof"
+    assert proof["content_sha256"] == hashlib.sha256(text.encode("utf-8")).hexdigest()
+    assert proof["target_task_id"] == f.target
+    assert proof["caller_task_id"] == f.caller
+    assert proof["caller_run_uid"] == f.w.execute("SELECT uid FROM task_runs WHERE id=?", (f.run_id,)).fetchone()[0]
+    assert proof["executor_gateway"] == "hub"
+    row = f.rep.execute("SELECT task_id, payload FROM task_events WHERE uid=?", (proof["result_event_uid"],)).fetchone()
+    assert row[0] == f.target
+    payload = json.loads(row[1])
+    assert payload["request_uid"] == proof["request_uid"]
+    assert payload["operator_delivery"] == {k: v for k, v in proof.items() if k != "result_event_uid"}
+    comment = f.h.execute("SELECT body, author FROM task_comments WHERE id=?", (proof["comment_id"],)).fetchone()
+    assert tuple(comment) == (text, f"worker-5/{f.caller}")
+
+
+@pytest.mark.parametrize("summary", [
+    "Did not post the findings to {t}.", "Queued a comment to {t}; the home has not applied it yet.",
+    "Will relay the findings to {t} once the home applies it.", "The comment to {t} failed and was not sent.",
+    "The findings weren't posted to {t}.", "Haven't sent anything to {t}.",
+])
+def test_non_delivery_wording_is_not_a_claim(fleet, summary):
+    f = fleet
+    helpers._submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "queued"})
+    assert kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, summary=summary.format(t=f.target))
+
+
+def test_pending_request_cannot_be_claimed_as_delivered(fleet):
+    f = fleet
+    helpers._submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "pending"})
+    with pytest.raises(ValueError, match="exact operator delivery receipt"):
+        kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, summary=f"Posted the findings to {f.target}.")
+    assert kb.get_task(f.w, f.caller).status == "running"
+
+
+def test_local_card_comment_claim_stays_outside_operator_gate(fleet):
+    f = fleet
+    local = f.card(f.w, "local sibling")
+    kb.add_comment(f.w, local, "default", "direct local comment")
+    assert kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, summary=f"Commented the findings on {local}.")
+
+
+def test_own_synced_comment_on_foreign_card_stays_outside_operator_gate(fleet):
+    # A direct hub comment (not an operator call) syncs back authored "<gateway>/<caller>".
+    # Real-row replay: 5 of 261 done cards on worker-3 claimed such deliveries.
+    f = fleet
+    kb.add_comment(f.rep, f.target, f"worker-5/{f.caller}", "findings")
+    assert kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, summary=f"Posted the findings to {f.target}.")
+
+
+@pytest.mark.parametrize("author", ["worker-5/t_00000000deadbeef", "worker-9/{c}", "default"])
+def test_other_authors_synced_comment_is_not_own_delivery(fleet, author):
+    f = fleet
+    kb.add_comment(f.rep, f.target, author.format(c=f.caller), "findings")
+    with pytest.raises(ValueError, match="exact operator delivery receipt"):
+        kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, summary=f"Posted the findings to {f.target}.")
+
+
+def test_own_synced_comment_never_replaces_a_filed_request_receipt(fleet):
+    f = fleet
+    helpers._submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "pending"})
+    kb.add_comment(f.rep, f.target, f"worker-5/{f.caller}", "findings")
+    with pytest.raises(ValueError, match="exact operator delivery receipt"):
+        kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, summary=f"Posted the findings to {f.target}.")
+
+
+def test_unreachable_board_refuses_delivery_proof_cleanly(fleet, monkeypatch):
+    from hermes_cli import kanban_operator_call as calls
+    f = fleet
+    proof = _delivered(f)
+
+    def down(*_a, **_k):
+        raise OSError("board unreachable")
+    monkeypatch.setattr(calls, "_evidence", down)
+    with pytest.raises(ValueError, match="canonical Board evidence unavailable"):
+        kb.complete_task(f.w, f.caller, expected_run_id=f.run_id, metadata=_receipt(proof))
+    assert kb.get_task(f.w, f.caller).status == "running"

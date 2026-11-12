@@ -28,6 +28,7 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
                    skills, goal_mode, model_override, provider_override, created_by, requires,
                    placement_policy, human_request=None, placement_audit=None):
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_consent import snapshot
 
     kb._append_event(conn, task_id, "created", {
         "assignee": assignee,
@@ -48,6 +49,7 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
         **(placement_audit if isinstance(placement_audit, dict) else {}),
         # Final insertion policy, not a later assignment or a caller's diagnostic override.
         "placement_policy": placement_policy,
+        "consent_stops": snapshot(conn, task_id, creator_task_id),
     })
     if isinstance(placement_audit, dict) and placement_audit.get("hub_admission"):
         kb._append_event(conn, task_id, "hub_admission", placement_audit["hub_admission"])

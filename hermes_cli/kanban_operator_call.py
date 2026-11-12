@@ -458,12 +458,16 @@ def _result_for(conn: sqlite3.Connection, target: str, uid: str, home: Optional[
             _log.info("kanban: operator call result evidence for %s unavailable (%s); retrying", euid, exc)
             retry = True
             continue
-        row = ev.get("row") if isinstance(ev, dict) else None
-        if not isinstance(row, dict) or row.get("origin_gateway") != home or row.get("task_id") not in (None, target):
-            _log.warning("kanban: ignoring operator_call_result %s for %s: the Board says %r wrote it, not %r",
-                         euid, uid, (row or {}).get("origin_gateway"), home)
+        from hermes_cli.kanban_operator_delivery import canonical_payload
+        try:
+            canonical = canonical_payload(ev, euid, target, RESULT_KIND, home)
+        except ValueError:
+            _log.warning("kanban: ignoring operator_call_result %s: invalid Board identity", euid)
             continue
-        return p
+        if canonical != p:
+            _log.warning("kanban: ignoring operator_call_result %s: payload differs from Board", euid)
+            continue
+        return {**canonical, "result_event_uid": euid}
     return _RETRY if retry else None
 
 
@@ -499,6 +503,9 @@ def poll(conn: sqlite3.Connection, executor: str, *, now: Optional[int] = None) 
             status = _STATUS.get(outcome, "failed")
         results = [{**op, "outcome": outcome, **({"detail": detail} if detail else {}),
                     "home": res.get("executor_gateway") if res else state.get("home")}]
+        if status == "done" and res and res.get("operator_delivery"):
+            results[0]["operator_delivery"] = {**res["operator_delivery"],
+                                               "result_event_uid": res["result_event_uid"]}
         with kb.write_txn(conn):
             log(conn, request_uid=state["request_uid"], side="request",
                 outcome={"done": "done", "rejected": "rejected"}.get(status, "failed"), detail=detail, finished=True)
@@ -560,9 +567,14 @@ def _caller_refusal(rep: sqlite3.Connection, board: str, event: dict, payload: d
     except Exception as exc:  # health: allow BLE001 -- unreachable Board: retry next tick
         _log.info("kanban: operator call evidence for %s unavailable (%s); retrying", event["uid"], exc)
         return None, True
-    row = ev.get("row") if isinstance(ev, dict) else None
-    if not isinstance(row, dict) or row.get("origin_gateway") != gw or row.get("task_id") not in (None, task):
-        return f"caller_unproven: the Board says the request event came from {(row or {}).get('origin_gateway')}", False
+    from hermes_cli.kanban_operator_delivery import canonical_payload
+    try:
+        canonical = canonical_payload(ev, event["uid"], task, REQUEST_KIND, gw)
+    except ValueError:
+        return "caller_unproven: invalid canonical request identity", False
+    if canonical != payload:
+        return "caller_unproven: request payload differs from the Board", False
+    row = ev["row"]
     created = row.get("created_at")
     when = int(created) if isinstance(created, (int, float)) else int(at)
     if when > 10 ** 11:  # Board timestamps are milliseconds
@@ -733,6 +745,14 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
             handled += 1
             event = {"id": eid, "uid": euid, "task_id": etask}
             refusal, retry = _caller_refusal(rep, board, event, payload)
+            if refusal is None and not retry:
+                from hermes_cli.kanban_consent import enforce
+                from hermes_cli.kanban_supervisor_requests import SupervisorRequestError
+                try:
+                    enforce(rep, (payload.get("caller") or {}).get("task_id"), [{
+                        "op": "operator", "action": payload.get("action"), "task_id": target}])
+                except SupervisorRequestError as exc:
+                    refusal = str(exc)
             if retry:
                 hi = eid - 1
                 break
@@ -767,9 +787,13 @@ def _execute_one(conn: sqlite3.Connection, payload: dict, own: str, refusal: Opt
     op = {"action": action, "task_id": target, **(payload.get("args") or {})}
     if refusal is None and action not in ACTIONS:
         refusal = f"operator_action_refused: {action} stays with the card's owner"
+    proof = None
     if refusal is None:
         try:
             outcome, detail = _apply(conn, payload, own)
+            if action == "comment" and outcome in ("applied", "already_applied"):
+                from hermes_cli.kanban_operator_delivery import applied_proof
+                proof = applied_proof(conn, payload, own)
         except Exception as exc:  # health: allow BLE001 -- recorded as a failed call, never silent
             _log.exception("kanban: operator call %s on %s failed", uid, target)
             outcome, detail = "failed", f"{type(exc).__name__}: {exc}"[:500]
@@ -781,7 +805,8 @@ def _execute_one(conn: sqlite3.Connection, payload: dict, own: str, refusal: Opt
             supervisor_request_id=payload.get("supervisor_request_id"), finished=True)
         kb._append_event(conn, target, RESULT_KIND, {
             "request_uid": uid, "action": action, "outcome": outcome, "detail": detail, "executor_gateway": own,
-            "caller": {k: (payload.get("caller") or {}).get(k) for k in ("gateway", "task_id", "run_id")}})
+            **({"operator_delivery": proof} if proof else {}),
+            "caller": {k: (payload.get("caller") or {}).get(k) for k in ("gateway", "task_id", "run_id", "run_uid")}})
     _log.info("kanban: operator call %s %s on %s from %s: %s", uid, action, target,
               (payload.get("caller") or {}).get("gateway"), outcome)
     return outcome, detail or ""

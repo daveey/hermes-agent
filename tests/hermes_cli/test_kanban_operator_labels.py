@@ -83,6 +83,8 @@ def hub(fleet, monkeypatch):
             f.rep.execute("INSERT INTO task_events (task_id, kind, payload, created_at, uid) VALUES (?,?,?,?,?)",
                           (task_id, kox.RESULT_KIND, json.dumps(payload), int(time.time()), event_uid))
         f.origin[event_uid] = own
+        f.canonical[event_uid] = {"task_id": task_id, "kind": kox.RESULT_KIND,
+                                  "payload": json.dumps(payload), "created_at": int(time.time()), "uid": event_uid}
         return "applied", ""
 
     monkeypatch.setattr(kol, "_admin", reg.admin)

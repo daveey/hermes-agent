@@ -401,6 +401,8 @@ def _submit(conn: sqlite3.Connection, *, env_task: Optional[str], env_run: Optio
 
     norm = normalize_ops(ops)
     requester, run_id = validate_origin(conn, env_task, env_run)
+    from hermes_cli.kanban_consent import enforce
+    enforce(conn, requester, norm)
     verdicts = preflight(conn, requester, norm)
     available = executor_available(conn)
     summary = {"ops": verdicts, "executor_available": available}

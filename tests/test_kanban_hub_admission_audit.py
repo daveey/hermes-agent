@@ -31,6 +31,8 @@ def test_created_emits_separate_admission_event(monkeypatch, receipt):
     events = []
     monkeypatch.setattr(kb, "_append_event", lambda conn, tid, kind, payload:
                         events.append((kind, payload)))
+    from hermes_cli import kanban_consent
+    monkeypatch.setattr(kanban_consent, "snapshot", lambda *_a: [])  # Mock conn has no board rows
     creation.record_created(Mock(), "t_test", assignee="default", status="ready", parents=[],
                             creator_task_id=None, tenant=None, workspace_kind="scratch",
                             workspace_path=None, branch_name=None, project_id=None, skills=[],

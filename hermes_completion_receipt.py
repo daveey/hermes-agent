@@ -47,8 +47,21 @@ def _array(value: Any, name: str, limit: int, *, nonempty: bool = False) -> list
     return value
 
 
+def _operator_delivery(value):
+    fields = {"request_uid", "target_task_id", "board", "caller_task_id", "caller_run_uid",
+              "caller_gateway", "executor_gateway", "comment_id", "content_sha256", "result_event_uid"}
+    raw = _object(value, fields)
+    out = {key: _text(raw[key], key, 128) for key in fields - {"comment_id"}}
+    if type(raw["comment_id"]) is not int or raw["comment_id"] <= 0:
+        raise ValueError("completion_receipt: comment_id needs a positive integer")
+    if not re.fullmatch(r"[0-9a-f]{64}", out["content_sha256"]):
+        raise ValueError("completion_receipt: content_sha256 needs full lowercase SHA256")
+    out["comment_id"] = raw["comment_id"]
+    return out
+
+
 def _evidence(value: Any) -> dict:
-    raw = _object(value, {"ref", "observed_at", "verification"})
+    raw = _object(value, {"ref", "observed_at", "verification"}, {"operator_delivery"})
     observed_at = _text(raw["observed_at"], "observed_at", 64)
     try:
         stamp = datetime.fromisoformat(observed_at)
@@ -56,8 +69,11 @@ def _evidence(value: Any) -> dict:
         raise ValueError("completion_receipt: observed_at needs an ISO8601 timestamp with timezone") from exc
     if stamp.tzinfo is None:
         raise ValueError("completion_receipt: observed_at needs a timezone")
-    return {"ref": _text(raw["ref"], "evidence ref", MAX_REF), "observed_at": observed_at,
-            "verification": _enum(raw["verification"], VERIFICATIONS, "verification")}
+    out = {"ref": _text(raw["ref"], "evidence ref", MAX_REF), "observed_at": observed_at,
+           "verification": _enum(raw["verification"], VERIFICATIONS, "verification")}
+    if "operator_delivery" in raw:
+        out["operator_delivery"] = _operator_delivery(raw["operator_delivery"])
+    return out
 
 
 def _remaining(value: Any) -> dict:
