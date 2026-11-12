@@ -180,6 +180,36 @@ def test_reconcile_after_a_rebuild_that_lost_the_card_restores_its_subscription(
     assert _hub_subs(live, tid) == [("hub/default/chat-a", "origin")]
 
 
+def _lose(live, tid):
+    """A corruption rebuild loses the card, its links and its subscriptions without capture."""
+    with kbc.write_txn(live):
+        live.execute("UPDATE kanban_sync_state SET applying = 1")
+        for table in ("kanban_notify_subs", "task_chat_links", "task_events", "task_runs"):
+            live.execute(f"DELETE FROM {table} WHERE task_id = ?", (tid,))
+        live.execute("DELETE FROM tasks WHERE id = ?", (tid,))
+        live.execute("UPDATE kanban_sync_state SET applying = 0")
+
+
+def test_a_second_loss_of_the_same_card_restores_links_written_after_the_first_restore(live, svc, kanban_home):
+    tid = kb.create_task(live, title="card", assignee="worker", chat_origin="hub/default/chat-a")
+    _round(kanban_home, svc)
+    _lose(live, tid)
+    ksc.reconcile(BOARD, kanban_home / "kanban.db", hub=svc.hub(ME))
+    assert _hub_subs(live, tid) == [("hub/default/chat-a", "origin")]
+    # An hour later a chat on another gateway starts shepherding the card.
+    with kbc.write_txn(live):
+        live.execute("UPDATE kanban_restored_cards SET restored_at = restored_at - 3600 WHERE task_id = ?", (tid,))
+        live.execute("INSERT INTO task_chat_links (uid, task_id, chat_gateway, chat_profile, chat_session, kind, "
+                     "released, created_at) VALUES (?, ?, ?, 'default', 'chat-new', 'shepherd', 0, ?)",
+                     (link_uid(tid, OTHER, "default", "chat-new", "shepherd"), tid, OTHER, int(time.time())))
+    _round(kanban_home, svc)
+    # The card is lost again: the newest restore covers the newer link too.
+    _lose(live, tid)
+    report = ksc.reconcile(BOARD, kanban_home / "kanban.db", hub=svc.hub(ME))
+    assert report["restored"].get("tasks") == 1
+    assert _hub_subs(live, tid) == [("hub/default/chat-a", "origin"), (f"{OTHER}/default/chat-new", "shepherd")]
+
+
 def test_the_replica_copy_and_foreign_cards_get_no_subscriptions(live, svc, kanban_home):
     tid = kb.create_task(live, title="card", assignee="worker", chat_origin="hub/default/chat-a")
     hub = svc.hub(OTHER)

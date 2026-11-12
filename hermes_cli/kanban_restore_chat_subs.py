@@ -22,6 +22,9 @@ wildcard), a released link, a chat on this gateway (a ``tui`` destination, not a
 session, an archived card, a link that arrives later for a card this file already held (that chat's subscription may
 have been retired on purpose), the replica copy (``sync-shadow``) and link-only files (``sync-links``), and foreign
 copies a worker node picks up (their owner delivers). Two links for one chat give one subscription; owning wins.
+
+Known gap: chats on THIS gateway are not rebuilt: a same-gateway chat of another profile (its ``hub`` sub from
+``kanban_creator_chats``) and a local ``tui`` shepherd sub have no exact destination in the synced link row.
 """
 
 from __future__ import annotations
@@ -54,7 +57,10 @@ def note_restored_task(conn: sqlite3.Connection, task_id: str, created_on: Any, 
     if sync.board_mode(conn) != "primary":
         return
     conn.execute(MARKER_DDL)
-    conn.execute("INSERT OR IGNORE INTO kanban_restored_cards (task_id, restored_at) VALUES (?, ?)",
+    # The newest restore wins: this only runs when the file lacked the card, so a card lost again after an earlier
+    # restore must cover the links written since (keeping the first time would drop them).
+    conn.execute("INSERT INTO kanban_restored_cards (task_id, restored_at) VALUES (?, ?) "
+                 "ON CONFLICT(task_id) DO UPDATE SET restored_at = excluded.restored_at",
                  (task_id, int(time.time())))
 
 
