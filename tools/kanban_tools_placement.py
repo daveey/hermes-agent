@@ -14,6 +14,14 @@ def _effective_board_args(args, origin_intent):
     return args if origin_intent is not None else {**args, "board": args.get("board") or kb.get_current_board()}
 
 
+def _courier_landing(conn, args, origin_intent, marker, runs_on, **effective):
+    """A routed create landing here is judged by the receiving hub before its txn. [daveey]"""
+    if origin_intent is None:
+        return marker
+    from hermes_cli.kanban_hub_admission_placement import courier_plan
+    return courier_plan(conn, {**args, **effective}, runs_on) or marker
+
+
 def _origin_enrollment(args, origin, marker, **effective):
     """Chat ownership pins storage, not execution; never forward an origin-bound card."""
     if origin is None:
