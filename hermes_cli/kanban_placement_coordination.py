@@ -98,8 +98,9 @@ _ACCESS = (
 HUB_READ_SUBCOMMANDS = ("cat", "tail", "head", "ls", "grep", "sqlite", "status", "journal", "units", "git", "help")
 _HUB_READ_SSH = re.compile(r"\bssh[ \t]+hermes-hub[ \t]+(?:" + "|".join(HUB_READ_SUBCOMMANDS) + r")(?![\w-])",
                            re.IGNORECASE)
-# A Hermes state path (same roots as ``kanban_placement.HERMES_STATE_PATH``) up to the next space, quote or bracket.
-_STATE_PATH = re.compile(r"(?:~|/home/[^/\s]+)/\.hermes/([^\s`'\"<>()\[\]{},;|]*)")
+# A Hermes state path (same roots as ``kanban_placement.HERMES_STATE_PATH``). The path is an allow-list of path
+# characters, so a shell operator glued to it (``&&``, ``;``, ``:``, ``|``, ``$(``) ends it and stays in the text.
+_STATE_PATH = re.compile(r"(?:~|/home/[^/\s]+)/\.hermes/([\w.@+%~/-]*)")
 
 
 def hub_read_roots(cfg) -> tuple:
@@ -118,9 +119,12 @@ def hub_read_roots(cfg) -> tuple:
 
 
 def _under_roots(path: str, roots) -> bool:
-    segs = path.rstrip(".:!?").rstrip("/").split("/")
-    if any(s in ("", ".", "..") for s in segs):
+    segs = path.rstrip("/").split("/")
+    # Dot-only segments (``.``, ``..``) are refused before a sentence's trailing ``.`` is trimmed, so ``logs/..``
+    # never reads as ``logs``.
+    if any(s.strip(".") == "" for s in segs):
         return False
+    segs[-1] = segs[-1].rstrip(".")
     return any(tuple(segs[:len(r)]) == r for r in roots)
 
 

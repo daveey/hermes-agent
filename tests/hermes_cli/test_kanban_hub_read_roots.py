@@ -40,6 +40,8 @@ def test_declared_read_step_is_portable(attested):
     "ssh hermes-hub ls ~/.hermes/cache/core-update/",
     "ssh hermes-hub sqlite kanban 'select 1'",
     "read `~/.hermes/kanban/boards/x/kanban.db`.",
+    "ssh hermes-hub grep X ~/.hermes/logs/hermes-sync.log.",
+    "ssh hermes-hub cat ~/.hermes/config.yaml: check kanban.placement",
 ])
 def test_other_hub_read_shapes_are_portable(attested, body):
     cfg, _, _ = attested
@@ -80,6 +82,17 @@ def test_malformed_roots_clear_nothing(attested, roots):
     "ssh hermes-hub grep X ~/.hermes/logs/hermes-sync.log, then restart the gateway",
     "ssh hermes-hub grep X ~/.hermes/logs/hermes-sync.log, then systemctl restart hermes-sync",
     "ssh hermes-hub cat ~/.hermes/config.yaml and hermes config set kanban.x 1",
+    # A write glued to a root path is not part of the path (review 5877095261).
+    "ssh hermes-hub cat ~/.hermes/logs/x&&systemctl restart hermes-gateway",
+    "ssh hermes-hub cat ~/.hermes/logs/x&&hermes-sync push",
+    "ssh hermes-hub cat ~/.hermes/logs/x:systemctl restart hermes-gateway",
+    "ssh hermes-hub cat ~/.hermes/logs/x;systemctl restart hermes-gateway",
+    "ssh hermes-hub cat ~/.hermes/logs/x|systemctl restart hermes-gateway",
+    # Dot-only segments never count as under a root.
+    "rm -rf ~/.hermes/logs/..",
+    "rm -rf ~/.hermes/logs/x/..",
+    "rm -rf ~/.hermes/logs/.",
+    "rm -rf ~/.hermes/logs/...",
 ])
 def test_controls_still_pin(attested, body):
     cfg, _, _ = attested
