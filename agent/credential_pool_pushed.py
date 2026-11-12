@@ -32,10 +32,18 @@ def _auth_benched(entry) -> bool:
 def _bench_predates_token(entry) -> bool:
     """The row's 401/403 was seen on an earlier token generation (``bench_token_fp``) than it holds now.
 
-    A peer's newer pair can reach the row through the pool's own persist merge, which keeps the bench."""
+    A peer's newer pair can reach the row through the pool's own persist merge, which keeps the bench.
+    The fingerprint only describes the bench ``_mark_exhausted`` stamped with it (``bench_status_at``):
+    a row recovered and later marked DEAD another way (a rejected refresh grant) keeps the old extra,
+    and reading it would call an all-dead pool transient (exit 75 forever instead of 78)."""
     from agent.credential_pool import fingerprint_secret_value
-    seen = (entry.extra or {}).get("bench_token_fp")
-    return bool(seen and entry.access_token and fingerprint_secret_value(entry.access_token) != seen)
+    extra = entry.extra or {}
+    seen, stamped = extra.get("bench_token_fp"), extra.get("bench_status_at")
+    if not (seen and entry.access_token and isinstance(stamped, (int, float)) and entry.last_status_at):
+        return False
+    if abs(float(entry.last_status_at) - float(stamped)) > 1e-3:
+        return False
+    return fingerprint_secret_value(entry.access_token) != seen
 
 
 def adopt_pushed_replacements(pool: Any, model: Optional[str] = None):

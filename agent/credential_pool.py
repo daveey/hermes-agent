@@ -1165,18 +1165,18 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         # fails immediately until the user removes it (#32849); a row whose
         # refresh grant just went DEAD stays DEAD on the 401 that follows.
         terminal = entry.last_status == STATUS_DEAD or self._is_terminal_auth_failure(status_code, normalized_error)
-        # Carry the classifier's verdict so the cooldown is sized by what
-        # actually failed (a billing 403 must not get the sole-credential
-        # transient cooldown); absent a classification, clear a stale one.
+        # Carry the classifier's verdict so the cooldown is sized by what actually failed (a billing
+        # 403 must not get the sole-credential transient cooldown); absent one, clear a stale one.
         updated_extra = {k: v for k, v in entry.extra.items() if k != "failure_reason"}
         updated_extra.update({"failure_reason": failure_reason} if failure_reason else {})
-        # The generation this failure was seen on: a later token for the row is not under the bench. [daveey]
+        # This bench's token generation and stamp; a later status write supersedes both. [daveey]
         updated_extra["bench_token_fp"] = fingerprint_secret_value(entry.access_token) if entry.access_token else None
+        updated_extra["bench_status_at"] = now = time.time()
         return self._adopt(
             entry,
             persist=persist,
             last_status=STATUS_DEAD if terminal else STATUS_EXHAUSTED,
-            last_status_at=time.time(),
+            last_status_at=now,
             last_error_code=status_code,
             last_error_reason=normalized_error.get("reason"),
             last_error_message=normalized_error.get("message"),

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -59,8 +60,9 @@ def _quota_benched(id_, token, priority):
 def _revoked(id_, token, priority):
     """A row benched on a 401 for ``token`` (by this or a peer process: the bench is persisted)."""
     from agent.credential_pool import fingerprint_secret_value
-    return _pushed(id_, token, priority, last_status="exhausted", last_status_at=time.time(),
-                   last_error_code=401, last_error_reason="auth", bench_token_fp=fingerprint_secret_value(token))
+    now = time.time()
+    return _pushed(id_, token, priority, last_status="exhausted", last_status_at=now, last_error_code=401,
+                   last_error_reason="auth", bench_token_fp=fingerprint_secret_value(token), bench_status_at=now)
 
 
 @pytest.fixture
@@ -193,6 +195,49 @@ def test_revoked_sibling_whose_replacement_was_pushed_meanwhile_recovers_in_the_
     assert _recover_from_revoked(agent) is True
     assert agent._credential_pool_entry_id == "acct-B"
     assert agent._anthropic_api_key == "sk-ant-oat01-b-new"
+
+
+def _refresh_row(id_, token, priority):
+    return {**_pushed(id_, token, priority), "source": "manual:device_code", "refresh_token": f"rt-{id_}"}
+
+
+def test_refresh_dead_rows_with_a_stale_bench_fingerprint_stay_terminal(home):
+    """The bench fingerprint belongs to the bench it was recorded with, not to the row.
+
+    Each row was exhausted on T1 (records fp(T1)), refreshed to T2 and marked OK, then a proactive
+    refresh was rejected with invalid_grant: DEAD on T2 without a new fingerprint. fp(T1) != fp(T2)
+    must not read as "benched on an older token" (exit 75 forever); the pool is all-dead (78)."""
+    from agent.credential_pool import _MARK_OK, load_pool
+    from agent.credential_pool_pushed import auth_wall_is_transient
+
+    _write_pool(home, [_refresh_row("acct-A", "tok-A-old", 0), _refresh_row("acct-B", "tok-B-old", 1)])
+    pool = load_pool("anthropic")
+    for entry in list(pool.entries()):
+        benched = pool._mark_exhausted(entry, 401, {"reason": "auth", "message": "expired"})
+        refreshed = pool._adopt(benched, access_token=entry.access_token.replace("old", "new"), **_MARK_OK)
+        pool._mark_dead_refresh_grant(refreshed, RuntimeError("invalid_grant"))
+
+    pool = load_pool("anthropic")
+    rows = {e.id: e for e in pool.entries()}
+    assert {e.last_status for e in rows.values()} == {"dead"}
+    assert rows["acct-A"].access_token == "tok-A-new"
+    assert auth_wall_is_transient(pool) is False
+
+    code = _worker_exit_code(SimpleNamespace(_credential_pool=pool))
+    assert code == kb.KANBAN_TERMINAL_PROVIDER_EXIT_CODE, code
+
+
+def test_bench_kept_across_a_newer_token_still_reads_transient(home):
+    """Control: the bench a peer's newer token reaches intact (same bench stamp) still predates it."""
+    from agent.credential_pool import load_pool
+    from agent.credential_pool_pushed import auth_wall_is_transient
+
+    _write_pool(home, [_refresh_row("acct-A", "tok-A-old", 0), _refresh_row("acct-B", "tok-B-old", 1)])
+    pool = load_pool("anthropic")
+    for entry in list(pool.entries()):
+        benched = pool._mark_exhausted(entry, 401, {"reason": "auth", "message": "expired"})
+        pool._adopt(benched, access_token=entry.access_token.replace("old", "new"))
+    assert auth_wall_is_transient(load_pool("anthropic")) is True
 
 
 def test_every_account_revoked_after_a_reread_stays_terminal(home):
