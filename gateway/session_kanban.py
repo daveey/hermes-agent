@@ -359,12 +359,15 @@ def record_start_failure(frame, exc):
         return
     from hermes_cli.turn_exit import credential_failure_flags, turn_exit_code
     from hermes_cli.kanban_host_refusal import PROOF_KEY, startup_proof
-    proof = startup_proof(exc)
+    from hermes_cli.kanban_quota_probe import contradicted
+    booked = contradicted(exc)  # [daveey] a typed wall the live usage read disputes books no reset
+    proof = startup_proof(booked)
     if proof is None:
-        code = turn_exit_code(None, kanban_worker=True, **credential_failure_flags(exc))
+        code = turn_exit_code(None, kanban_worker=True, **credential_failure_flags(booked))
     else:
         from hermes_cli.kanban_owner_unavailable import KANBAN_OWNER_UNAVAILABLE_EXIT_CODE as code
-    _record_worker_result(context, code, start_failure_line(exc), exc, extra={PROOF_KEY: proof} if proof else None)
+    _record_worker_result(context, code, start_failure_line(booked), booked,
+                          extra={PROOF_KEY: proof} if proof else None)
     exc._kanban_failure_booked = True
 
 

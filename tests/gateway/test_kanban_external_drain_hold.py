@@ -41,7 +41,7 @@ def _board(monkeypatch):
     from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
     from hermes_cli import kanban_db_dispatch as kbd
 
-    monkeypatch.setattr("hermes_cli.profiles.list_profiles", lambda **kw: [SimpleNamespace(name="default")])
+    monkeypatch.setattr("hermes_cli.profiles.list_profile_names", lambda: ["default"])
     monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: lambda name: name == "default")
     monkeypatch.setattr(kbd, "review_dispatch_enabled", lambda: False)
     monkeypatch.setattr(kbd, "_memory_pressure_level", lambda: "unknown")

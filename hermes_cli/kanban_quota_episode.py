@@ -19,14 +19,19 @@ logger = logging.getLogger(__name__)
 MAX_BACKOFF_SECONDS = 7200
 # A wall this gateway recorded holds as recorded for this long; after it, only while this pool agrees.
 LOCAL_WALL_TRUST_SECONDS = 30 * 60
+# [daveey] An unconfirmed (auth-churn) refusal retries soon: tokens are re-read within minutes, and a
+# short cap keeps its backoff below provider_walls.MIN_WALL_SECONDS, so it never becomes a wall.
+AUTH_CHURN_MAX_BACKOFF_SECONDS = 600
 
 
-def _backoff(ended_at, count):
-    """The doubling-backoff deadline after the *count*-th consecutive rate_limited run ending at *ended_at*."""
+def _backoff(ended_at, count, *, cap=None):
+    """The doubling-backoff deadline after the *count*-th consecutive rate_limited run ending at *ended_at*;
+    *cap* (an auth-churn refusal) bounds the delay below ``MAX_BACKOFF_SECONDS``."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_quota_receipt import valid_deadline
     cooldown = max(0, kb._resolve_rate_limit_cooldown_seconds())
-    delay = min(MAX_BACKOFF_SECONDS, cooldown * 2 ** min(max(count, 1) - 1, 20))
+    limit = MAX_BACKOFF_SECONDS if cap is None else min(cap, MAX_BACKOFF_SECONDS)
+    delay = min(limit, cooldown * 2 ** min(max(count, 1) - 1, 20))
     ended = kb._to_epoch(ended_at)
     # An unreadable end stamp anchors backoff at now; an unrepresentable sum holds one full cap.
     return valid_deadline((ended if ended is not None else time.time()) + delay)
@@ -34,7 +39,7 @@ def _backoff(ended_at, count):
 
 def episode(conn, task_id, *, run_id=None):
     from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_quota_receipt import receipt_deadline, receipt_route
+    from hermes_cli.kanban_quota_receipt import receipt_deadline, receipt_route, receipt_unconfirmed
     runs = []
     bound = conn.execute("SELECT ended_at,id FROM task_runs WHERE task_id=? AND id=? AND ended_at IS NOT NULL",
                          (task_id, run_id)).fetchone() if run_id is not None else None
@@ -58,7 +63,8 @@ def episode(conn, task_id, *, run_id=None):
     if stored:
         return kb._json_dict(stored[0])
     reset = receipt_deadline(conn, task_id, latest['id'])
-    backoff = _backoff(latest['ended_at'], len(runs))
+    churn = receipt_unconfirmed(conn, task_id, latest['id'])
+    backoff = _backoff(latest['ended_at'], len(runs), cap=AUTH_CHURN_MAX_BACKOFF_SECONDS if churn else None)
     # A hint extends the wait, never shortens it below the doubling backoff ('retry after 5s' x N).
     found = [t for t in (reset, backoff) if t is not None]
     until = max(found) if found else None
@@ -74,7 +80,7 @@ def episode(conn, task_id, *, run_id=None):
             'until': until if until is not None else time.time() + MAX_BACKOFF_SECONDS,
             'backoff_until': backoff, 'hinted': reset is not None,
             'provider': actual or admitted, 'providers': providers,
-            'model': route.get('model')}
+            'model': route.get('model'), 'auth_churn': churn}
 
 
 def _providers(state):
@@ -396,8 +402,8 @@ def record_episode(conn, task_id, run_id, *, captured=False):
     the notice's wording falls back to the bare wait, so it can never leave a card running."""
     from hermes_cli import kanban_db as kb
     state = episode(conn, task_id, run_id=run_id if captured else None)
-    if not state or state['run_id'] != run_id:
-        return
+    if not state or state['run_id'] != run_id or state.get('auth_churn'):
+        return  # an auth-churn (unconfirmed) refusal is a short retry, never a recorded quota episode
     exists = conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND run_id=? AND kind='quota_episode'",
                           (task_id, run_id)).fetchone()
     if not exists:

@@ -305,23 +305,26 @@ class _KanbanDispatcher:
         cross-board ranking (``hermes_cli.kanban_board_share``: priority order plus a starvation guard). [daveey]
         """
         self.successful_scopes = []
-        if not suppress_spawn:
-            order = self._fair_board_order()
-            from hermes_cli import kanban_board_share as share
-            quotas = share.shares(order, self.live_max_in_progress())
-            if quotas is not None:
-                return share.run(order, quotas, self.tick_once_for_board)
-            return [(slug, self.tick_once_for_board(slug)) for slug in order]
-        return [(slug, self.tick_once_for_board(slug, suppress_spawn=True)) for slug in self._board_slugs()]
+        from hermes_cli import kanban_board_share as share
+        with share.tick_counts():
+            if not suppress_spawn:
+                order = self._fair_board_order()
+                quotas = share.shares(order, self.live_max_in_progress())
+                if quotas is not None:
+                    return share.run(order, quotas, self.tick_once_for_board)
+                return [(slug, self.tick_once_for_board(slug)) for slug in order]
+            return [(slug, self.tick_once_for_board(slug, suppress_spawn=True)) for slug in self._board_slugs()]
 
     @staticmethod
     def _receipt_scope() -> tuple[set, set]:
         """Only existing profiles admitted by native dispatch policy."""
-        from hermes_cli.profiles import list_profiles
+        from hermes_cli.profiles import list_profile_names
         predicate = _kbd()._profile_exists_fn()
         if predicate is None:
             return set(), set()
-        profiles = {p.name for p in list_profiles(lazy_skill_count=True) if predicate(p.name)}
+        # Names only: ``list_profiles`` also probes each profile's gateway liveness and config, twice per board
+        # per tick (7.6% of hub gateway CPU at 12 boards, 2026-11-12). [daveey]
+        profiles = {name for name in list_profile_names() if predicate(name)}
         lanes = {"ready"}
         if _kbd().review_dispatch_enabled():
             lanes.add("review")

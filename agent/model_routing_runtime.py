@@ -75,6 +75,7 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
         config = load_user_config_effective()
     pools = {}
     unavailable = []
+    churned = []  # [daveey] routes emptied by 401-benched rows: capacity unknown, never a quota reset
     available = []
     dropped = {}  # (provider, model) -> why that route left the candidate list
     if _temporary_resolution.get():
@@ -95,9 +96,11 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
             return True
         dropped[route["provider"], route["model"]] = "no available credential"
         if route["billing"] == "subscription":
-            from agent.model_routing_unavailable import quota_unavailable
+            from agent.model_routing_unavailable import SubscriptionAuthUnavailable, auth_churned, quota_unavailable
             if error := quota_unavailable(pools[key], route["model"]):
                 unavailable.append(error)
+            elif auth_churned(pools[key], route["model"]):
+                churned.append(SubscriptionAuthUnavailable(route["provider"], route["model"]))
         return False
 
     failed = list(excluded)
@@ -129,6 +132,7 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
     rechecked = False
     while True:
         unavailable.clear()
+        churned.clear()
         available.clear()
         try:
             resolve_model_route(model, provider, config=config, session_id=session_id,
@@ -142,7 +146,9 @@ def resolve_class_runtime(model, provider, *, config=None, session_id=None,
         except ModelRoutingError:
             # Only credential eligibility was lost: policy/capability refusals
             # never enter eligible(), and a prepared runtime's errors stay fatal.
-            if unavailable and not available and not resolved:
+            if churned and not available and not resolved and (rechecked or not exact_pin):
+                raise churned[0] from None  # a 401-churned route may serve after re-read: no quota reset
+            if unavailable and not churned and not available and not resolved:
                 raise min(unavailable, key=lambda error: error.resets_at) from None
             if not exact_pin or available or resolved or not dropped:
                 raise

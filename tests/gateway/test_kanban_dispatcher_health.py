@@ -88,7 +88,7 @@ def test_native_loop_publishes_only_actual_board_success(tmp_path, monkeypatch, 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
-    monkeypatch.setattr("hermes_cli.profiles.list_profiles", lambda **kw: [SimpleNamespace(name="default")])
+    monkeypatch.setattr("hermes_cli.profiles.list_profile_names", lambda: ["default"])
     monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: lambda name: name == "default")
     monkeypatch.setattr(kbd, "review_dispatch_enabled", lambda: False)
     monkeypatch.setattr(_KanbanDispatcher, "_board_slugs", lambda self: ["default", "broken"])

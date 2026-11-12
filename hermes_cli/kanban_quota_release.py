@@ -23,10 +23,14 @@ def prepare(conn, row):
         quota.record_episode(conn, row['task_id'], row['run_id'], captured=True)
         event = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? "
                              "AND kind='quota_episode'", (row['task_id'], row['run_id'])).fetchone()
-        if event is None:
+        churn = quota.episode(conn, row['task_id'], run_id=row['run_id']) if event is None else None
+        if churn and churn['run_id'] == row['run_id'] and churn.get('auth_churn'):
+            state = {**churn, 'write_wall': False}  # [daveey] auth churn: no episode event, no wall
+        elif event is None:
             raise RuntimeError('quota release is not the latest ended run; refusing admission')
-        state = kb._json_dict(event[0])
-        state['write_wall'] = bool(state.get('provider') and state['until'] - time.time() >= walls.MIN_WALL_SECONDS)
+        else:
+            state = kb._json_dict(event[0])
+            state['write_wall'] = bool(state.get('provider') and state['until'] - time.time() >= walls.MIN_WALL_SECONDS)
         conn.execute("INSERT INTO kanban_quota_effects (run_uid,state) VALUES (?,?)",
                      (row['run_uid'], json.dumps(state)))
     return state
