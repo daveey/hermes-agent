@@ -212,6 +212,25 @@ def test_body_asking_for_pr_key_is_still_gated():  # T1: fails on 2e870e8f71
     assert [p.split(":")[0] for p in krc.problems(PR_KEY_MD)] == ["reviewed_pr"]
 
 
+def test_refusal_names_its_cause_on_each_path():
+    # Contract path: the body spells the keys out.
+    msg = krc.refusal(SHIP_BODY, {"review_verdict": "approve", "reviewed_sha": SHA, "reviewed_pr": PR}) or ""
+    assert msg.startswith("kanban_complete refused: this card states the ship review contract, ")
+    assert "core-fork pull" not in msg and "metadata.verdict" in msg
+    # names_core_pull path: the body asked for `pr`, so it never stated the contract; name the pull instead.
+    msg = krc.refusal(PR_KEY_BODY, dict(PR_KEY_MD)) or ""
+    assert msg.startswith(f"kanban_complete refused: this card reviews a core-fork pull ({PR_KEY_PULL}), ")
+    assert "states the ship review contract" not in msg and "metadata.reviewed_pr" in msg
+
+
+def test_core_pull_is_the_first_core_fork_pull():
+    other = "https://github.com/daveey/babybear/pull/3730"
+    body = f"see {other} and github.com/Daveey/Hermes/pull/7, then {PR_KEY_PULL}"
+    assert krc.core_pull(body) == "https://github.com/Daveey/Hermes/pull/7"
+    assert krc.core_pull(f"see {other}") is None
+    assert krc.core_pull(None) is None
+
+
 def test_body_asking_for_pr_key_accepts_reviewed_pr():  # T2
     assert krc.refusal(PR_KEY_BODY, {**PR_KEY_MD, "reviewed_pr": PR_KEY_PULL}) is None
 
