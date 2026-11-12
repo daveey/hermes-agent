@@ -366,7 +366,9 @@ def _sweep_sub(conn, slug, sub, grace_s, now, session_db, _kb, _kbn, kinds, fmt,
     if oldest > now - grace_s:
         return None  # a live poller still has time to take it
     done = None
-    from gateway.kanban_wake_sibling import tui_formatter
+    from gateway.kanban_wake_sibling import tui_defer, tui_formatter
+    if tui_defer(conn, sub, now):
+        return None  # the chat's waking local row still owes this event's turn; it settles this row [daveey]
     fmt = tui_formatter(conn, sub, fmt)  # a waking local row's turn carries the events it wakes on [daveey]
     try:
         done = _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, kinds, fmt, wake, holders,

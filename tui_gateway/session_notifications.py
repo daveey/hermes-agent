@@ -766,6 +766,9 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
                 continue
             sub_ident = dict(task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
                              thread_id=sub.get("thread_id") or "")
+            from gateway.kanban_wake_sibling import tui_defer
+            if tui_defer(conn, sub):
+                continue  # the chat's waking local row still owes this event's turn; it settles this row [daveey]
             # durable: the claim stays IN FLIGHT (owned by this process) until the notice is in the transcript
             # (_kb_ack_durable acks it); a process that dies first hands it back. [daveey]
             _old, _new, events = _kbn.claim_unseen_events_for_sub(conn, kinds=_KANBAN_NOTIFY_KINDS,

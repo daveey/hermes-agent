@@ -6,10 +6,13 @@ no-op) and a ``tui`` ``notify`` row (the legacy Desktop poller and the unloaded 
 row and start a turn). Each row has its own cursor, so one completion started two model turns minutes apart
 (t_01a1ce9070eee14c: messages 872084 and 872153 for t_01a1ce83e793e24f).
 
-The waking ``local`` row owns the turn for every event it wakes on. The ``tui`` consumers treat those events as
-silent (claimed and acked, no row, no turn), in whichever order the two legs run, and the wake turn carries the
-notice line the ``tui`` row would have shown (:func:`notice_lines`). Kinds the wake leg does not wake on
-(``status``, quota and re-pin notices) stay with the ``tui`` row. A ``notify``-only ``local`` row covers nothing.
+The waking ``local`` row owns the turn for every event it wakes on, and the wake turn carries the notice line the
+``tui`` row would have shown (:func:`notice_lines`). The ``tui`` consumers stay silent only for events that row has
+already delivered (:func:`tui_cover`); while it still owes a covered event they leave the ``tui`` row unclaimed
+(:func:`tui_defer`), so a wake that never lands (the row dropped after repeated failures, no LOCAL adapter, past
+:data:`DEFER_MAX_S`) still leaves the ``tui`` notice owed and delivered: a duplicate beats a lost notice. Kinds the
+wake leg does not wake on (``status``, quota and re-pin notices) stay with the ``tui`` row. A ``notify``-only
+``local`` row covers nothing.
 """
 
 from __future__ import annotations
@@ -18,6 +21,9 @@ import sqlite3
 from typing import Any, Callable, Optional
 
 WAKE_MODES = ("notify+wake", "wake")
+# How long a ``tui`` row waits for its waking ``local`` sibling to deliver a covered event before delivering it
+# itself. A healthy wake acks at admission to the chat's FIFO, seconds after the event.
+DEFER_MAX_S = 600.0
 
 
 def _sibling(conn: Any, sub: dict, platform: str, modes: Optional[tuple] = None) -> bool:
@@ -40,12 +46,70 @@ def covered(ev: Any) -> bool:
     return getattr(ev, "kind", "") in _WAKE_KINDS and not provisional_failure(ev)
 
 
-def tui_cover(conn: Any, sub: dict) -> Optional[Callable[[Any], bool]]:
-    """For a ``tui`` row: :func:`covered` when a waking ``local`` row for the same card and chat delivers its
-    events, else None (deliver everything as before)."""
+def _local_acked(conn: Any, sub: dict) -> Optional[int]:
+    """The event id up to which the waking ``local`` sibling of this ``tui`` row has delivered (its cursor, or the
+    start of its in-flight claim), or None when there is no such row (or it is unreadable)."""
     if (sub.get("platform") or "").lower() != "tui":
         return None
-    return covered if _sibling(conn, sub, "local", WAKE_MODES) else None
+    try:
+        row = conn.execute(
+            "SELECT last_event_id, inflight_from FROM kanban_notify_subs WHERE task_id = ? AND platform = 'local' "
+            f"AND chat_id = ? AND thread_id = ? AND delivery_mode IN ({','.join('?' * len(WAKE_MODES))}) "
+            "ORDER BY last_event_id LIMIT 1",
+            (sub["task_id"], sub["chat_id"], sub.get("thread_id") or "", *WAKE_MODES)).fetchone()
+    except sqlite3.Error:
+        return None  # unreadable: deliver as before (a duplicate beats a lost notice)
+    if row is None:
+        return None
+    return int((row[0] if row[1] is None else row[1]) or 0)
+
+
+def tui_cover(conn: Any, sub: dict) -> Optional[Callable[[Any], bool]]:
+    """For a ``tui`` row: a predicate for the events its waking ``local`` sibling has already delivered a turn for
+    (:func:`covered` and at or below that row's acknowledged cursor), else None (deliver everything as before).
+
+    Silence must follow the wake's delivery, not the row's existence: silencing on existence acked the ``tui`` row
+    past an event the wake still owed, and a wake that then never landed lost the event (review of PR #1465)."""
+    acked = _local_acked(conn, sub)
+    if acked is None:
+        return None
+
+    def delivered(ev: Any) -> bool:
+        return covered(ev) and int(getattr(ev, "id", 0) or 0) <= acked
+    return delivered
+
+
+def tui_defer(conn: Any, sub: dict, now: Optional[float] = None) -> bool:
+    """True when this ``tui`` row should stay unclaimed this pass: its waking ``local`` sibling still owes a
+    covered event past both cursors, younger than :data:`DEFER_MAX_S`. The wake then carries its notice and
+    settles the row (:func:`settle_tui_sibling`); if the wake never lands, the row delivers it after the window or
+    once the ``local`` row is gone."""
+    import json
+    import time
+    from types import SimpleNamespace
+
+    acked = _local_acked(conn, sub)
+    if acked is None:
+        return False
+    try:
+        row = conn.execute("SELECT last_event_id, inflight_from FROM kanban_notify_subs WHERE task_id = ? "
+                           "AND platform = 'tui' AND chat_id = ? AND thread_id = ?",
+                           (sub["task_id"], sub["chat_id"], sub.get("thread_id") or "")).fetchone()
+        if row is None or row[1] is not None:
+            return False  # gone, or a claim is already in flight: the claim path owns it
+        since = (now if now is not None else time.time()) - DEFER_MAX_S
+        pending = conn.execute("SELECT kind, payload FROM task_events WHERE task_id = ? AND id > ? "
+                               "AND created_at > ?", (sub["task_id"], max(int(row[0] or 0), acked), since)).fetchall()
+    except sqlite3.Error:
+        return False
+    for kind, payload in pending:
+        try:
+            data = json.loads(payload) if payload else {}
+        except ValueError:
+            data = {}
+        if covered(SimpleNamespace(kind=kind, payload=data)):
+            return True
+    return False
 
 
 def tui_formatter(conn: Any, sub: dict, fmt: Callable) -> Callable:

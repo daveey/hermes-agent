@@ -94,12 +94,13 @@ def _cursors(tid):
         conn.close()
 
 
-def _wake_leg(runner):
+def _wake_leg(runner, fail_counts=None):
     async def tick():
         deliveries = await asyncio.to_thread(_notifier_collect, runner, kb, notifier_profile="default",
                                              gc_due=False, gc_retention_days=30)
         for d in deliveries:
-            await _KanbanNotification(runner, d, platform_cls=Platform, sub_fail_counts={}).deliver()
+            await _KanbanNotification(runner, d, platform_cls=Platform,
+                                      sub_fail_counts={} if fail_counts is None else fail_counts).deliver()
     asyncio.run(tick())
 
 
@@ -181,6 +182,8 @@ def test_wake_without_a_tui_sibling_keeps_its_text(board):
 
 
 def test_unloaded_sweeper_leaves_a_covered_event_to_the_wake_turn(board, tmp_path, monkeypatch):
+    from gateway import kanban_wake_sibling
+    monkeypatch.setattr(kanban_wake_sibling, "DEFER_MAX_S", 7200.0)  # the sweeper runs an hour on; the wake is due
     monkeypatch.setenv("HERMES_KANBAN_UNLOADED_WAKE", "0")
     db = SessionDB(tmp_path / "state.db")
     db.create_session(CHAT, "desktop")
@@ -196,9 +199,12 @@ def test_unloaded_sweeper_leaves_a_covered_event_to_the_wake_turn(board, tmp_pat
     assert ku.sweep_once(set(), now=time.time() + 3600, session_db=opener) == []
     assert [m for m in db.get_messages(CHAT) if m.get("display_kind") == "kanban_notice"] == []
     last, subs = _cursors(tid)
-    assert subs["tui"] == (last, None)
+    assert subs["tui"][0] < last and subs["tui"][1] is None  # left unclaimed for the wake, not acked past it
     _wake_leg(runner)
     assert len(adapter.turns) == 1 and NOTICE["completed"].format(tid=tid) in adapter.turns[0]
+    last, subs = _cursors(tid)
+    assert subs["tui"] == (last, None)  # the wake settled it
+    assert ku.sweep_once(set(), now=time.time() + 3600, session_db=opener) == []
 
 
 def test_archived_card_after_the_wake_leaves_no_second_notice_turn(board):
@@ -249,3 +255,62 @@ def test_a_stuck_tui_claim_rewound_after_the_wake_and_archive_starts_no_second_t
         conn.close()
     assert _notice_leg() == []
     assert len(adapter.turns) == 1
+
+
+# Review of PR #1465 at 67d5fb1cfc: silencing the tui row because a waking local row EXISTS lost the event when the
+# tui leg ran first and the wake never landed. These pass on the merge-base and must keep passing.
+
+class FailingAdapter(LocalAdapter):
+    async def handle_message(self, event):
+        raise RuntimeError("local FIFO refused the wake")
+
+
+def test_notice_first_then_a_wake_that_fails_until_dropped_still_delivers_the_notice(board):
+    from gateway.kanban_watchers_notifier import MAX_SEND_FAILURES
+
+    runner, _ = board
+    failing = FailingAdapter()
+    runner.adapters = {Platform.LOCAL: failing}
+    tid = _card()
+    _event(tid, "completed")
+    texts = _notice_leg()  # the tui leg first: the wake still owes the event, so nothing is acked here
+    counts: dict = {}
+    for _ in range(MAX_SEND_FAILURES + 1):
+        _wake_leg(runner, counts)
+    _last, subs = _cursors(tid)
+    assert "local" not in subs  # dropped after MAX_SEND_FAILURES
+    texts += _notice_leg()
+    assert len(texts) == 1 and NOTICE["completed"].format(tid=tid) in texts[0]
+
+
+def test_notice_first_with_no_local_adapter_delivers_the_notice_once_the_wait_ends(board, monkeypatch):
+    from gateway import kanban_wake_sibling
+
+    runner, _ = board
+    runner.adapters = {}
+    tid = _card()
+    _event(tid, "completed")
+    _wake_leg(runner)
+    assert _notice_leg() == []  # within the window: left to the wake
+    monkeypatch.setattr(kanban_wake_sibling, "DEFER_MAX_S", -1.0)  # the wake never landed in time
+    _wake_leg(runner)
+    texts = _notice_leg()
+    assert len(texts) == 1 and NOTICE["completed"].format(tid=tid) in texts[0]
+
+
+def test_unloaded_sweeper_delivers_a_covered_event_the_wake_never_delivered(board, tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_UNLOADED_WAKE", "0")
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session(CHAT, "desktop")
+    db.append_message(CHAT, "user", "start the cards")
+
+    @contextlib.contextmanager
+    def opener(chat_id):
+        yield (db, chat_id) if db.get_session(chat_id) else (None, None)
+
+    board[0].adapters = {}
+    tid = _card()
+    _event(tid, "completed")
+    ku.sweep_once(set(), now=time.time() + 3600, session_db=opener)  # an hour on, past DEFER_MAX_S
+    rows = [m for m in db.get_messages(CHAT) if m.get("display_kind") == "kanban_notice"]
+    assert len(rows) == 1 and NOTICE["completed"].format(tid=tid) in (rows[0].get("content") or "")
