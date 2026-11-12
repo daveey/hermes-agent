@@ -128,36 +128,61 @@ def _copy_delivery(conn: sqlite3.Connection, task_id: str, owner: dict) -> None:
         (task_id, task_id, owner["task_id"], hub_chat, owner["chat_session"]))
 
 
-def _replica_chats(conn: sqlite3.Connection, creator_task_id: str) -> list[dict]:
-    """``resolve_chats`` on this board's replica (``sync-shadow/<board>.db``, the whole board).
+class _ReplicaReader:
+    """One lazy guarded handle per repair pass, never cached ownership or misses.
 
-    A worker node runs another gateway's card from a copy in its live file: the copy carries no chat links, and its
-    creator chain lives only in the replica, so a card that worker files would resolve nothing here. Read-only;
-    [] when the board has no replica or it cannot be read.
+    Backfill must retry even terminal cards: a creator's human link can arrive late.
+    Reusing setup, rather than skipping candidates, bounds opens without hiding those arrivals.
+    The next pass always opens anew (including after a missing or replaced replica).
     """
-    from pathlib import Path
-    from hermes_cli import kanban_db_sync as sync
-    from hermes_cli.kanban_sync_client import shadow_path
-    key = sync._db_key(conn)
-    if not key or Path(key).parent.name in (sync.SHADOW_DIR, sync.LINKS_DIR):
-        return []
-    path = shadow_path(sync.board_slug_for_path(key))
-    try:
-        if not path.exists() or path.resolve() == Path(key).resolve():
-            return []
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+        self.replica = None
+        self.attempted = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if self.replica is not None:
+            self.replica.close()
+
+    def _open(self):
+        from pathlib import Path
+        from hermes_cli import kanban_db_sync as sync
+        from hermes_cli.kanban_sync_client import shadow_path
         from hermes_cli import kanban_lockguard
+
+        key = sync._db_key(self.conn)
+        if not key or Path(key).parent.name in (sync.SHADOW_DIR, sync.LINKS_DIR):
+            return
+        path = shadow_path(sync.board_slug_for_path(key))
+        if not path.exists() or path.resolve() == Path(key).resolve():
+            return
         replica = kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
-    except (OSError, sqlite3.Error):
-        return []
-    try:
-        replica.row_factory = sqlite3.Row
-        if not replica.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone():
+        try:
+            replica.row_factory = sqlite3.Row
+            if replica.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone():
+                self.replica = replica
+        finally:
+            if self.replica is None:
+                replica.close()
+
+    def resolve(self, creator_task_id: str) -> list[dict]:
+        try:
+            if not self.attempted:
+                self.attempted = True
+                self._open()
+            return resolve_chats(self.replica, creator_task_id) if self.replica is not None else []
+        except (OSError, sqlite3.Error):
             return []
-        return resolve_chats(replica, creator_task_id)
-    except sqlite3.Error:
-        return []
-    finally:
-        replica.close()
+
+
+def _replica_chats(conn: sqlite3.Connection, creator_task_id: str) -> list[dict]:
+    """Standalone creation uses the same reader, scoped to this single lookup."""
+    with _ReplicaReader(conn) as reader:
+        return reader.resolve(creator_task_id)
 
 
 def _owner_delivery(conn: sqlite3.Connection, task_id: str, owner: dict) -> None:
@@ -175,7 +200,8 @@ def _owner_delivery(conn: sqlite3.Connection, task_id: str, owner: dict) -> None
         (task_id, platform, chat_id, json.dumps({"reason": "create"}), task_id))
 
 
-def inherit_chats(conn: sqlite3.Connection, task_id: str, creator_task_id: str) -> None:
+def inherit_chats(conn: sqlite3.Connection, task_id: str, creator_task_id: str,
+                  *, replica_reader: _ReplicaReader | None = None) -> None:
     """Copy a creator's real chat links inside the card creation transaction."""
     from hermes_cli.kanban_chat_links import link_uid
     from hermes_cli.kanban_db import _append_event
@@ -183,7 +209,8 @@ def inherit_chats(conn: sqlite3.Connection, task_id: str, creator_task_id: str) 
         return
     owners, source = resolve_chats(conn, creator_task_id), None
     if not owners:
-        owners = _replica_chats(conn, creator_task_id)
+        owners = (replica_reader.resolve(creator_task_id) if replica_reader is not None
+                  else _replica_chats(conn, creator_task_id))
         source = "replica" if owners else None
     if not owners:
         if not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='creator_chats_unresolved'",
@@ -214,7 +241,7 @@ def backfill(conn: sqlite3.Connection) -> dict:
         "AND e.kind='created' WHERE NOT EXISTS (SELECT 1 FROM task_events done WHERE done.task_id=t.id "
         "AND done.kind='creator_chats_resolved')").fetchall()
     attempted, unresolved = [], []
-    with write_txn(conn):
+    with _ReplicaReader(conn) as replica_reader, write_txn(conn):
         for row in rows:
             if row["session_id"] and not (is_headless_session(row["session_id"])
                                           or is_placeholder_session(row["session_id"])):
@@ -222,7 +249,7 @@ def backfill(conn: sqlite3.Connection) -> dict:
             creator = json.loads(row["payload"] or "{}").get("creator_task_id")
             if not creator:
                 continue
-            inherit_chats(conn, row["id"], creator)
+            inherit_chats(conn, row["id"], creator, replica_reader=replica_reader)
             attempted.append(row["id"])
             if not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='creator_chats_resolved'",
                                 (row["id"],)).fetchone():
