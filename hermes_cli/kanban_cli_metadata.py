@@ -34,10 +34,13 @@ def parse_metadata_flag(raw: Optional[str]) -> tuple[Optional[dict], int]:
 def receipt_refusal(tid: str, exc: Exception) -> str:
     """The CLI line for a receipt admission/preservation refusal (nothing was written).
 
-    Re-raises any other ``ValueError`` so unrelated failures keep their old behavior.
+    A review-required refusal keeps its own message. Re-raises any other ``ValueError`` so unrelated failures keep their old behavior.
     """
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_review_required import ReviewRequiredError
 
+    if isinstance(exc, ReviewRequiredError):
+        return str(exc)  # already names the task and the review lane
     if isinstance(exc, kb.ArtifactPreservationError) or str(exc).startswith("completion_receipt"):
         return f"cannot complete {tid}: {exc}"
     raise exc

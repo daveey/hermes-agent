@@ -1220,7 +1220,6 @@ def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: 
 
 def _cmd_complete(args: argparse.Namespace) -> int:
     """Mark one or more tasks done. Supports a single id or a list."""
-    from hermes_cli.kanban_review_required import ReviewRequiredError
     ids, rc = _require_ids(args)
     if rc:
         return rc
@@ -1262,9 +1261,6 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             except _review_contract.IndependenceRefused as outside:  # --force does not override it [daveey]
                 fail_msg[tid] = f"cannot complete {tid}: {outside}"
                 return False
-            except ReviewRequiredError as review_err:
-                fail_msg[tid] = str(review_err)
-                return False
             except kb.LiveClaimError:
                 fail_msg[tid] = (f"cannot complete {tid}: a live worker is running it. Wait for the "
                                  f"worker, `hermes kanban reclaim {tid}` to release it, or re-run with "
@@ -1274,7 +1270,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 fail_msg[tid] = (f"cannot complete {tid}: {empty_err}. Pass --result/--summary "
                                  f"describing what was done (an empty completion is not evidence).")
                 return False
-            except (kb.ArtifactPreservationError, ValueError) as receipt_err:
+            except (kb.ArtifactPreservationError, ValueError) as receipt_err:  # incl. ReviewRequiredError
                 fail_msg[tid] = receipt_refusal(tid, receipt_err)  # nothing written; re-raises other errors
                 return False
             if not done:
