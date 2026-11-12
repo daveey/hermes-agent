@@ -9,22 +9,35 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import threading
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote_to_bytes, urlsplit
 
 
 _active: list[tuple[str, int, threading.Event]] = []
+# The target cannot be predicted before SQLite parses it: exclude every reservation.
+UNKNOWN = object()
 
 
 def database_key(path, *, uri=False):
-    value = os.fsdecode(path)
-    if uri and value.startswith("file:"):
-        parsed = urlsplit(value)
-        value = unquote(parsed.path)
-        if parse_qs(parsed.query).get("mode") == ["memory"]:
+    """Canonical file SQLite will open for *path*; ``None`` when nothing on disk, ``UNKNOWN``
+    when SQLite's own parsing could pick a file this prediction would miss."""
+    try:
+        value = os.fsdecode(path)
+        if uri and value.startswith("file:"):
+            parsed = urlsplit(value)
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            # SQLite decodes bytes and stops at an escaped NUL; a VFS may map names anywhere.
+            raw = unquote_to_bytes(parsed.path)
+            if (os.name == "nt" or b"\x00" in raw or "vfs" in query
+                    or parsed.netloc not in ("", "localhost")):
+                return UNKNOWN
+            value = os.fsdecode(raw)
+            if query.get("mode") == ["memory"]:
+                return None
+        if value in ("", ":memory:"):
             return None
-    if value in ("", ":memory:"):
-        return None
-    return str(Path(value).resolve())
+        return str(Path(value).resolve())
+    except (OSError, RuntimeError, ValueError):
+        return UNKNOWN
 
 
 def overlaps(left, right):

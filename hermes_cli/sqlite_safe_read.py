@@ -224,13 +224,17 @@ def connect_tracked(
                                uri=tracking_path is None and kwargs.get("uri", False))
     # An arbitrary opener may ignore path and run SQL before returning. Without
     # an explicit tracking_path, conservatively exclude every raw reservation.
-    with _tracking_access(wait_for_tracking, key=key,
-                          unknown=connect_fn is not None and tracking_path is None):
+    unknown = key is offline.UNKNOWN or (connect_fn is not None and tracking_path is None)
+    with _tracking_access(wait_for_tracking, key=key, unknown=unknown):
         conn = opener(str(path), **kwargs)
         try:
             resolved = _key(tracking_path) if tracking_path is not None else _canonical_db_path(conn)
             if resolved is None:
                 return conn  # in-memory / unnamed: nothing on disk to byte-probe
+            if resolved != key and offline.conflicts(resolved):
+                # SQLite (or a factory) opened a reserved file the prediction missed. Nothing
+                # has read it yet; refuse before any statement can.
+                raise _tracking_busy()
             if not isinstance(conn, _TrackingMixin):
                 # The opener substituted its own factory and discarded ours (test doubles
                 # simulating FTS5-less runtimes do this). Retag the instance's class so close()
@@ -311,24 +315,34 @@ def read_header_bytes_preopen(path: Path | str, *, length: int = 100, force: boo
     cannot be opened between deciding "nothing is live" and closing this descriptor."""
     from hermes_cli import sqlite_offline_reservations as offline
 
-    with _live_lock:
-        if offline.conflicts(_key(path), raw=True):
-            return None  # a restore may currently be replacing this file
-        if not force and _live_main_key(_key(path)) is not None:
-            logger.debug(
-                "refusing byte-level read of %s: a live connection exists in "
-                "this process and close() would cancel its POSIX locks",
-                path)
-            return None
-        try:
-            # Untracked read-only caches may still hold SQLite locks. On POSIX use a
-            # never-closed descriptor even when this registry is empty (or force=True).
-            if hasattr(os, "pread"):
-                return read_header_lock_safe(path, length=length)
-            with open(path, "rb") as handle:
-                return handle.read(length)
-        except OSError:
-            return None
+    recursive = getattr(_live_lock, "_is_owned", lambda: True)()
+    while True:
+        with _live_lock:
+            pending = offline.conflicts(_key(path), raw=True)
+            if not pending:
+                return _read_header_registered(path, length, force)
+            if recursive or offline.owns_reservation():
+                return None  # cannot wait for the other owner without pinning the registry
+        pending[0][2].wait()  # a restore may be replacing this file: read it afterwards
+
+
+def _read_header_registered(path, length, force):
+    """Body of :func:`read_header_bytes_preopen` (caller holds ``_live_lock``, no reservation)."""
+    if not force and _live_main_key(_key(path)) is not None:
+        logger.debug(
+            "refusing byte-level read of %s: a live connection exists in "
+            "this process and close() would cancel its POSIX locks",
+            path)
+        return None
+    try:
+        # Untracked read-only caches may still hold SQLite locks. On POSIX use a
+        # never-closed descriptor even when this registry is empty (or force=True).
+        if hasattr(os, "pread"):
+            return read_header_lock_safe(path, length=length)
+        with open(path, "rb") as handle:
+            return handle.read(length)
+    except OSError:
+        return None
 
 
 @contextlib.contextmanager

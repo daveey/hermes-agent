@@ -49,20 +49,20 @@ def test_same_thread_wait_refuses_and_nested_raw_cleanup(tmp_path):
         pass
 
 
-def test_waiting_open_and_header_refusal(tmp_path, monkeypatch):
+def test_waiting_open_and_header_probe_wait_for_reservation(tmp_path, monkeypatch):
     from hermes_cli import sqlite_offline_reservations as offline
 
     path = tmp_path / "board.db"
     seed = sqlite3.connect(path)
     seed.execute("CREATE TABLE example (value)")
     seed.close()
-    attempted = threading.Event()
+    attempted, probed = threading.Event(), threading.Event()
     original = offline.conflicts
 
     def observe(*args, **kwargs):
         pending = original(*args, **kwargs)
-        if pending and not kwargs.get("raw"):
-            attempted.set()
+        if pending:
+            (probed if kwargs.get("raw") else attempted).set()
         return pending
 
     monkeypatch.setattr(offline, "conflicts", observe)
@@ -76,8 +76,12 @@ def test_waiting_open_and_header_refusal(tmp_path, monkeypatch):
             pending = pool.submit(open_close)
             assert attempted.wait(5)
             assert not pending.done()
-            assert pool.submit(tracking.read_header_bytes_preopen, path).result(5) is None
-        pending.result(5)
+        pending.result(5)  # opened and closed again: the probe below races no live handle
+        with tracking.offline_file_access(path):
+            probing = pool.submit(tracking.read_header_bytes_preopen, path)
+            assert probed.wait(5)
+            assert not probing.done()
+        assert probing.result(5).startswith(b"SQLite")
     header = tracking.read_header_bytes_preopen(path)
     assert header is not None and header.startswith(b"SQLite")
 
