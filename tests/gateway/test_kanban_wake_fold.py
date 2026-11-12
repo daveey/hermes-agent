@@ -414,6 +414,25 @@ def test_refresh_claimed_leaves_unparsable_or_foreign_rows_alone(tmp_path, monke
     assert tui['text'].endswith('Live status: running.')
 
 
+@pytest.mark.parametrize('suffix', [' (edited)', '-more', '\tx'])
+def test_refresh_claimed_leaves_a_row_whose_last_card_tail_runs_on_mid_line_alone(tmp_path, monkeypatch, board, suffix):
+    """The stored text has the last card's tail, but that line continues past it: not the shape
+    ``_compose`` built, so the text is not guidance-split and rebuilt (t_01a1d02c1e9e0768)."""
+    tid = board('waited on')
+    _claim(tid)  # the premise no longer holds: a rebuild would relabel it
+    body = f'[kanban] Task {tid} is ready with no worker claiming it.\nTitle: x\nBoard: default'
+    card = {'task_id': tid, 'board': '', 'kinds': ['chat_wait_unclaimed'], 'text': body}
+    identity = json.dumps(['kanban-wake', 'x'])
+    for text in (body + suffix, body + suffix + '\n\n' + GUIDANCE):
+        payload = {'text': text, 'local_automation_v1': {'identity': identity, 'kanban_cards': [card]}}
+        kanban_wake_fold.refresh_claimed(payload)
+        assert payload['text'] == text
+    # Control: the same row without the run-on suffix is relabelled, so the guard is what holds it.
+    payload = {'text': body + '\n\n' + GUIDANCE, 'local_automation_v1': {'identity': identity, 'kanban_cards': [card]}}
+    kanban_wake_fold.refresh_claimed(payload)
+    assert payload['text'].startswith(f'[kanban] Task {tid} claimed by a worker (running).\n')
+
+
 def test_the_relabel_reads_the_notifiers_db_under_the_env_pin(tmp_path, monkeypatch, board):
     """A card on a non-default board relabels from the DB the notifier read it from: on a box that pins
     ``HERMES_KANBAN_DB`` that is the pinned file, never a per-slug DB the read would create."""
