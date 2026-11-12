@@ -35,6 +35,7 @@ class HistoryRefusalStep:
     outcome: str
     messages: Any = None
     conversation_history: Any = None
+    system_prompt: Any = None  # the prompt _compress_context returned (the retry sends it)
 
 
 def is_history_triggered(messages: Any, current_turn_user_idx: Any) -> bool:
@@ -52,7 +53,9 @@ def is_history_triggered(messages: Any, current_turn_user_idx: Any) -> bool:
 def _whole_history_window(compressor: Any) -> Iterator[None]:
     """Summarize as much of the head as the compressor allows: the trigger may sit in the first exchange
     or the recent tail that normal compaction keeps verbatim. The compressor still keeps its required
-    anchors, so a trigger there survives; the retry is then refused and the turn closes with the copy."""
+    anchors (latest user turn and reply, the lean tail floor) and the lean summary quotes earlier user
+    messages verbatim, so this only removes a trigger in older assistant/tool content. A trigger it keeps
+    makes the retry refused (or the summary refused as would-grow); the turn then closes with the copy."""
     saved = {}
     for name, value in (("protect_first_n", 0), ("protect_last_n", 0), ("tail_token_budget", 1)):
         if compressor is not None and hasattr(compressor, name):
@@ -74,18 +77,23 @@ def history_refusal_step(
     agent: Any, *, messages: Any, current_turn_user_idx: Any, turn_id: Any, system_message: Any,
     effective_task_id: Any,
 ) -> Optional[HistoryRefusalStep]:
-    """``None`` when the refusal is not history-triggered (keep the drop-and-notice path)."""
+    """``None`` when the refusal is not history-triggered (keep the drop-and-notice path).
+
+    ``system_message`` is the turn loop's caller prompt (``None`` on a normal turn), passed through to
+    ``_compress_context`` unchanged like the overflow/recovery callers: the full built prompt there is
+    appended to the rebuilt one as a context part and doubles it."""
+    if not is_history_triggered(messages, current_turn_user_idx):
+        # Checked first: a refusal after this turn's retry ran a tool round keeps the tool-round copy.
+        return None
     if getattr(agent, "_history_refusal_retry_turn", None) == turn_id and turn_id is not None:
         _log(agent, "refused")
         return HistoryRefusalStep("refused")
-    if not is_history_triggered(messages, current_turn_user_idx):
-        return None
     head = list(messages[:current_turn_user_idx])
     current = messages[current_turn_user_idx]
     try:
         with _whole_history_window(getattr(agent, "context_compressor", None)):
-            compressed, _prompt = agent._compress_context(
-                head, system_message or "", task_id=effective_task_id or "default", force=True,
+            compressed, prompt = agent._compress_context(
+                head, system_message, task_id=effective_task_id or "default", force=True,
                 trigger=_COMPACTION_TRIGGER, verbatim_tail=[current],
             )
     except Exception:
@@ -109,4 +117,4 @@ def history_refusal_step(
     agent._history_refusal_retry_turn = turn_id  # one compaction + retry per turn
     # "retried": the compacted request is resent; a refusal of it logs outcome=refused next.
     _log(agent, "retried")
-    return HistoryRefusalStep("retry", compressed, compressed[:idx])
+    return HistoryRefusalStep("retry", compressed, compressed[:idx], prompt)

@@ -118,6 +118,36 @@ def test_retry_refused_again_does_not_compact_twice(caplog):
     assert "outcome=refused" in caplog.text
 
 
+def test_caller_system_message_passes_through_and_returned_prompt_is_adopted():
+    """A normal turn's caller system_message is None. Handing the full built prompt to _compress_context
+    as the caller's message doubled the rebuilt prompt (review of PR #1300)."""
+    agent = _agent()
+    verdict = handle_content_policy_refusal(
+        agent, _refusal_response(), TurnRetryState(), thinking_spinner=None, messages=_messages(),
+        api_messages=_messages(), api_kwargs={}, active_system_prompt="FULL BUILT PROMPT",
+        conversation_history=_messages()[:2], api_call_count=1, effective_task_id="t", turn_id="turn-1",
+        api_request_id="r", api_start_time=0.0, retry_count=0, max_retries=3, current_turn_user_idx=2,
+    )
+    assert agent._compress_context.call_args.args[1] is None
+    assert verdict.active_system_prompt == "sys"
+
+
+def test_tool_round_refusal_after_the_retry_keeps_the_tool_round_copy():
+    agent = _agent()
+    first = _call(agent, _messages())
+    assert first.action == "break"
+    after_tools = first.messages + [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "type": "function",
+         "function": {"name": "shell", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "t1", "content": "ran"},
+    ]
+    second = _call(agent, after_tools, idx=len(first.messages) - 1, history=first.messages[:-1])
+    assert second.action == "return"
+    assert agent._compress_context.call_count == 1
+    assert "ask something else" in second.result["final_response"]
+    assert "didn't get past it" not in second.result["final_response"]
+
+
 def test_refusal_after_a_tool_round_keeps_the_drop_and_notice_path():
     messages = _messages() + [
         {"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "type": "function",

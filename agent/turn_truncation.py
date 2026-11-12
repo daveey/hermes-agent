@@ -803,13 +803,15 @@ def handle_content_policy_refusal(
     from agent.turn_refusal_history import HISTORY_REFUSAL_COPY, history_refusal_step
     _step = history_refusal_step(
         agent, messages=messages, current_turn_user_idx=current_turn_user_idx, turn_id=turn_id,
-        system_message=system_message if system_message is not None else active_system_prompt,
+        system_message=system_message,
         effective_task_id=effective_task_id,
     )
     if _step is not None and _step.outcome == "retry":
         agent._buffer_diagnostic_status(
             "⚠️ The safety filter refused this chat's earlier history — compacting it and retrying once...")
         _retry.restart_with_compressed_messages = True
+        if _step.system_prompt:
+            active_system_prompt = _step.system_prompt
         return RefusalVerdict("break", None, active_system_prompt, messages=_step.messages,
                               conversation_history=_step.conversation_history)
 
