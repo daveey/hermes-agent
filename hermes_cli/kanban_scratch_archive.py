@@ -535,7 +535,11 @@ def archive_workspace(workspace: Path, archive_dir: Path, *, task_id: str,
             final = archive_dir.with_name(f"{archive_dir.name}-{int(time.time())}")
         partial.rename(final)
         try:
-            _fsync_path(final.parent, directory=True)  # publication name durable before any detach
+            # Persist every ancestor entry, not just the published name. Existing
+            # directories may come from an interrupted prior attempt whose mkdir
+            # was never flushed, so existence cannot serve as a durability fence.
+            for parent in final.absolute().parents:
+                _fsync_path(parent, directory=True)
         except BaseException:
             shutil.rmtree(final, ignore_errors=True)
             raise

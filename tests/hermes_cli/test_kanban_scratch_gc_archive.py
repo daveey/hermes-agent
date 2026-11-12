@@ -751,6 +751,52 @@ def test_archive_fsyncs_all_artifacts_bottom_up_before_publication_and_detach(bo
     assert str(_archive(tid).parent) in [p for k, p in events[pub:det] if k == "fsync"]
 
 
+@pytest.mark.parametrize("existing", [False, True], ids=["absent_root", "retry_existing_chain"])
+def test_archive_flushes_ancestor_entries_before_return(tmp_path, monkeypatch, existing):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "evidence").write_text("unique")
+    dest = tmp_path / "archive" / "scratch" / "new-board" / "task"
+    if existing:
+        dest.parent.mkdir(parents=True)
+    flushed = []
+    real_flush = sa._fsync_path
+
+    def flush(path, *, directory):
+        real_flush(path, directory=directory)
+        if directory:
+            flushed.append(path)
+
+    monkeypatch.setattr(sa, "_fsync_path", flush)
+    result = sa.archive_workspace(source, dest, task_id="task", completed_at=OLD)
+    sa.verify_complete_archive(result)
+    assert all(parent in flushed for parent in dest.absolute().parents)
+
+
+@pytest.mark.parametrize("ancestor", [0, 1, 2])
+def test_ancestor_fsync_failure_preserves_workspace(board, monkeypatch, ancestor):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    tid, path = _plain_task(lambda p: None)
+    target = list(_archive(tid).parent.parents)[ancestor]
+    real_flush = sa._fsync_path
+    hits = []
+
+    def flush(current, *, directory):
+        if directory and current == target:
+            hits.append(current)
+            raise OSError(5, "ancestor EIO")
+        return real_flush(current, directory=directory)
+
+    monkeypatch.setattr(sa, "_fsync_path", flush)
+    assert _gc() == 0
+    assert hits
+    assert (path / "notes.txt").read_text() == "scratch"
+    assert not _archive(tid).exists()
+
+
 @pytest.mark.parametrize("target", ["file", "directory", "publication_parent"])
 def test_fsync_failure_fails_closed_without_publication(board, monkeypatch, target):
     from hermes_cli import kanban_scratch_archive as sa
