@@ -51,8 +51,8 @@ def canonical_github(url: str) -> Optional[str]:
 def git(path: str | Path, *args: str, timeout: float = 30, check: bool = True) -> subprocess.CompletedProcess:
     env = {**os.environ, **_BATCH_ENV}
     try:
-        return subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, timeout=timeout,
-                              check=check, env=env)
+        return subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=timeout, check=check, env=env)
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError(f"git {' '.join(args)} timed out after {timeout}s") from exc
 
@@ -76,7 +76,7 @@ def _cache_path() -> Path:
 def _cached_repo(path: str, full_name: str, lookup: Callable[[str], dict], now: float) -> dict:
     cache_file = _cache_path()
     try:
-        cache = json.loads(cache_file.read_text(encoding="utf-8"))
+        cache = json.loads(cache_file.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         cache = {}
     hit = cache.get(path) if isinstance(cache, dict) else None
@@ -101,10 +101,8 @@ class ProvenClone:
 
 
 def _live_checkout() -> Optional[Path]:
-    try:
-        return Path(__file__).resolve().parents[1]
-    except IndexError:
-        return None
+    from hermes_cli._startup_fast import project_root_str
+    return Path(project_root_str()).resolve()
 
 
 def prove_clone(key: str, path: str, *, expected_id: Optional[int] = None,
@@ -203,13 +201,13 @@ def attest(post: Callable[[str, dict], Any], clones: list[ProvenClone]) -> bool:
     repos = [{"id": c.repository_id, "full_name": c.full_name} for c in clones][:MAX_ATTESTED]
     try:
         post("/v2/machines/me/sources", {"version": 1, "repos": repos})
-    except Exception as exc:
+    except Exception as exc:  # health: allow BLE001 -- Board post boundary: any failure means "not attested"
         if getattr(exc, "status", None) == 404:
             _BOARD_LACKS_ROUTE = True
             _log.warning("workspace_source: the Board has no /v2/machines/me/sources route "
                          "(board_lacks_source_route); portability disabled on this host")
             return False
-        _log.info("workspace_source: attestation failed: %s", exc)
+        _log.warning("workspace_source: attestation failed: %s", exc, exc_info=True)
         return False
     return True
 
@@ -241,6 +239,6 @@ def attest_if_due(hub: Any, *, now: Optional[float] = None, cfg: Optional[Settin
     _ATTEST_STATE["next_at"] = clock + ATTEST_EVERY_S
     try:
         return attest_heartbeat(lambda _path, body: poster(body), cfg)
-    except Exception as exc:  # proof errors are per-clone; anything else must not break the sync round
-        _log.warning("workspace_source: attestation round failed: %s", exc)
+    except Exception as exc:  # health: allow BLE001 -- sync-round boundary; logged with traceback
+        _log.warning("workspace_source: attestation round failed: %s", exc, exc_info=True)
         return False

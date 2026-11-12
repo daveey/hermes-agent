@@ -97,7 +97,8 @@ def settings(config: Optional[Mapping[str, Any]] = None) -> Settings:
         try:
             from hermes_cli.config import load_config
             config = load_config() or {}
-        except Exception:  # a broken config never enables anything
+        except Exception:  # health: allow BLE001 -- a broken config never enables anything (fail closed)
+            _log.warning("workspace_source: config unreadable; treating as disabled", exc_info=True)
             config = {}
     raw = ((config.get("kanban") or {}).get("workspace_source") or {}) if isinstance(config, Mapping) else {}
     merged = {**DEFAULTS, **(raw if isinstance(raw, Mapping) else {})}
