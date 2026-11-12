@@ -340,6 +340,45 @@ def test_first_preflight_after_scripted_prelude_does_not_yield(home, tmp_path, m
     assert not agent._interrupt_requested
 
 
+@pytest.mark.parametrize("trigger", ["post_tool", "pre_api"])
+def test_replayed_prelude_does_not_reuse_previous_turn_call_count(home, tmp_path, monkeypatch, trigger):
+    agent = _make_agent(tmp_path)
+    session = {"agent": agent, "session_key": "session-key", "profile_home": str(home),
+               "history_lock": threading.RLock()}
+    monkeypatch.setattr(agent.context_compressor, "should_compress", lambda *a, **k: False)
+    first = _run_turn(agent, session, [_response()])
+    assert first["final_response"] == "done" and agent._api_call_count == 1
+
+    record_turn_start(home, "session-key", "run the quick job")
+    streaming = _StreamingSummary(cap_s=1.5)
+    seen = []
+    prelude_finished = False
+
+    def prelude():
+        nonlocal prelude_finished
+        yield "Opening", "quick_job", {}
+        prelude_finished = True
+
+    def summary(worker_agent, messages, system_message, **kwargs):
+        seen.append((kwargs["trigger"], agent._api_call_count, messages[-1]["role"],
+                     update_pause_cancel.in_flight(agent)))
+        return streaming(worker_agent, messages, system_message, **kwargs)
+
+    monkeypatch.setattr(cc, "compress_context", summary)
+    monkeypatch.setattr(agent.context_compressor, "should_compress", lambda *a, **k:
+                        not streaming.started.is_set() and (trigger == "post_tool" or prelude_finished))
+    monkeypatch.setattr("model_tools.handle_function_call", lambda *a, **k: "opening result")
+    _pause_once_summary_streams(home, streaming)
+    result = _run_turn(agent, session, [_response()], prelude=prelude())
+
+    assert seen == [(trigger, int(trigger == "pre_api"), "tool", {})]
+    assert streaming.outcome == "committed"
+    assert result["final_response"] == "done" and not result.get("failed")
+    assert not result.get("paused_for_update")
+    assert agent.client.chat.completions.create.call_count == 2
+    assert not agent._interrupt_requested
+
+
 def _release_pause_at_boundary(home, streaming, monkeypatch):
     original = up.boundary_pause_hook
 
@@ -366,7 +405,7 @@ def test_forced_overflow_preflight_yields_without_spending_attempt(home, tmp_pat
     session = {"agent": agent, "session_key": "session-key", "profile_home": str(home),
                "history_lock": threading.RLock()}
     streaming = _StreamingSummary()
-    summaries, attempts = [], []
+    summaries, attempts, yielded = [], [], []
 
     def summary(worker_agent, messages, system_message, **kwargs):
         if not summaries:
@@ -387,6 +426,7 @@ def test_forced_overflow_preflight_yields_without_spending_attempt(home, tmp_pat
         if streaming.started.is_set():
             attempts.append((before, result.compression_attempts))
             if result.action == "continue" and streaming.outcome == "cancelled":
+                yielded.append(True)
                 assert result.api_call_count == reserved_calls - 1
                 assert agent._api_call_count == result.api_call_count
                 assert result._last_preflight_pressure is None  # a declined pause must permit another pass
@@ -401,6 +441,7 @@ def test_forced_overflow_preflight_yields_without_spending_attempt(home, tmp_pat
     _pause_once_summary_streams(home, streaming)
     result = _run_turn(agent, session, [_response(_call("call_1")), _overflow_error(), _response()])
     assert summaries == ["committed", "cancelled"]
+    assert yielded == [True]  # refund/pressure assertions above must execute in both pause cases
     assert not result.get("failed") and not result.get("compression_exhausted")
     if decline_pause:
         assert result["final_response"] == "done"
