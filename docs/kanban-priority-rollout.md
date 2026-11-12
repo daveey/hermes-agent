@@ -64,7 +64,11 @@ grant or expiry. Implementation tests do not establish live operator authorizati
    Open exceptions reserve the top bands (at most 900); their old values are in
    the manifest. Ordinary positive values keep order/ties; nonpositive ordinary
    values are unchanged. Terminal rows are not rewritten. Snapshot pagination
-   requires one unchanged feed head. This is an observation, not a global lease.
+   retains the first feed head, then scans changes through a finite final observed
+   head. Heartbeats, events, runs and unrelated task fields may advance normally;
+   open-status transitions are replayed. Changes to task membership, openness,
+   ownership or priority refuse capture/verification and require a fresh attempt.
+   This observation is not a global lease; no all-origin dispatcher freeze is required.
 
 2. Secure the resulting original backup and attachment before doing anything that
    might clip values. Copy the **exact original bytes** to every other origin,
@@ -76,8 +80,10 @@ grant or expiry. Implementation tests do not establish live operator authorizati
      --backup /absolute/fresh-origin-backup.json
    ```
 
-   Each JSON receipt gives `attachment_id`, `manifest_sha256`, `writer`, and
-   `backup`. All origins must report the same digest. Keep all receipts and verify
+   Each JSON receipt gives `attachment_id`, `manifest_sha256`, `writer`,
+   `backup`, and `origins` (every required writer with its open-row count).
+   Use that map, not a hard-coded host list, to arrange operator sessions and
+   stage/apply on every listed origin. All origins must report the same digest. Keep all receipts and verify
    every original backup is secured **before any apply or cap-aware install**.
    Staging preserves bytes exactly; it never overwrites a backup. It changes no
    priority. If attachment storage fails, retain the original backup and retry
@@ -108,8 +114,8 @@ grant or expiry. Implementation tests do not establish live operator authorizati
      --writer ORIGIN --manifest /absolute/fresh-original.json --digest SHA256
    ```
 
-   It requires exact global open membership, ownership and target values at one
-   stable head; no local import or write occurs. Use `verify-restore` to compare
+   It requires exact global open membership, ownership and target values through
+   the final observed feed head; no local import or write occurs. Use `verify-restore` to compare
    original values after rollback. A local command receipt is not publication
    proof. Only after all origins match may the rollout
    owner install through the normal drain/update route. Verify no open stored

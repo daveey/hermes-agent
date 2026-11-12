@@ -31,7 +31,7 @@ def verify(hub, manifest: dict, *, undo: bool = False) -> dict:
 
 
 def _inventory(hub, board_id: str) -> list[dict]:
-    """Read raw Board pages at one feed head, without importing/clipping values."""
+    """Read raw pages and validate their finite feed interval without clipping."""
     rows = []
     after = ""
     head = None
@@ -41,7 +41,7 @@ def _inventory(hub, board_id: str) -> list[dict]:
             raise ValueError("invalid canonical snapshot page")
         if head is None:
             head = page["head"]
-        if page["head"] != head:
+        if page["head"] < head:
             raise ValueError("canonical inventory changed; capture a new manifest")
         batch = page.get("rows")
         if not isinstance(batch, list) or type(page.get("more")) is not bool:
@@ -63,8 +63,10 @@ def _inventory(hub, board_id: str) -> list[dict]:
     # A final read closes the final-page/return gap at an observed head. Apply
     # still has local CAS; this is not a distributed transaction or a lease.
     final = hub.snapshot_page(board_id, "tasks", limit=1)
-    if type(final.get("head")) is not int or final.get("head") != head:
+    if type(final.get("head")) is not int or final["head"] < page["head"]:
         raise ValueError("canonical inventory changed; capture a new manifest")
+    from hermes_cli.kanban_priority_feed import check_interval
+    check_interval(hub, board_id, rows, head, final["head"])
     return rows
 
 
@@ -111,5 +113,7 @@ def stage(conn, manifest: dict, *, path: Path, task_id: str, writer: str,
     attachment = kb.get_attachment(conn, attachment_id)
     if attachment is None or Path(attachment.stored_path).read_bytes() != data:
         raise ValueError("attached manifest readback mismatch; retain original backup")
+    from collections import Counter
+    origins = dict(sorted(Counter(row['origin'] for row in manifest['rows']).items()))
     return {"attachment_id": attachment_id, "manifest_sha256": digest,
-            "writer": writer, "backup": str(path)}
+            "writer": writer, "backup": str(path), "origins": origins}

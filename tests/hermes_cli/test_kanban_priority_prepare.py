@@ -47,6 +47,7 @@ def test_stage_requires_local_owner_and_preserves_original(conn, tmp_path):
     plan = migration.plan_global(rows, board_id=sync_helpers.BOARD, exceptions=[ids[2]])
     path = tmp_path / "original.json"
     result = prepare.stage(conn, plan, path=path, task_id=ids[0], writer=sync_helpers.ME)
+    assert result['origins'] == {sync_helpers.ME: 2, 'two': 1}
     original = path.read_bytes()
     assert result["manifest_sha256"] == hashlib.sha256(original).hexdigest()
     attachment = kb.get_attachment(conn, result["attachment_id"])
@@ -91,6 +92,11 @@ def test_capture_rejects_malformed_pages(patch):
 def test_capture_rechecks_final_head():
     from hermes_cli import kanban_priority_prepare as prepare
     class Changed(Pages):
+        def changes(self, board, since):
+            return {'changes': [{'seq': 5, 'table': 'tasks', 'uid': 'a',
+                                 'op': 'upsert', 'fields': {'priority': 12}}],
+                    'next': 5, 'more': False}
+
         def snapshot_page(self, *args, **kwargs):
             page = super().snapshot_page(*args, **kwargs)
             if kwargs.get('limit') == 1:
