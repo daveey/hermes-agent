@@ -142,8 +142,8 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[in
 def collect(disk_path: Optional[Path] = None) -> dict[str, Any]:
     """``{cpu_load1, cpus, mem_used_pct, disk_free_gb, disk_total_gb}`` plus the throughput counters
     (``machine_throughput_metrics``); a value that cannot be read is left out."""
-    out: dict[str, Any] = {"active_card_runs": active_card_runs()}
-    from hermes_cli import machine_drain_metrics, machine_throughput_metrics
+    from hermes_cli import machine_admission_metrics, machine_drain_metrics, machine_throughput_metrics
+    out: dict[str, Any] = machine_admission_metrics.collect(active_card_runs)
     out.update(machine_drain_metrics.collect())
     out.update(machine_throughput_metrics.cached_counters())
     try:
@@ -228,6 +228,12 @@ class Reporter:
         timing.note_cpu_sample(measured)
         if measured and all(k in measured for k in cpu.FIELDS):
             sample.update({k: measured[k] for k in cpu.FIELDS})
+        if "admission_version" in sample:
+            from hermes_cli import machine_admission_metrics as admission
+            current = admission.policy()
+            if not current or any(sample.get(key) != value for key, value in current.items()):
+                for key in admission.FIELDS:
+                    sample.pop(key, None)
         return sample
 
     def _spaced(self, now: float) -> bool:
