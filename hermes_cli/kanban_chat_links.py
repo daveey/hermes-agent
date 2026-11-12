@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from hermes_cli.kanban_replica_execution import run_evidence, select_terms as run_select
+from hermes_cli.kanban_replica_execution import read_runs, run_evidence
 from hermes_cli.kanban_run_machine import placement_select, run_machine
 
 _log = logging.getLogger(__name__)
@@ -282,7 +282,7 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
 TERMINAL_STATUSES = ("done", "archived")
 UNKNOWN = "unknown"
 # Rows last read from each replica, so an unreadable replica keeps its rows (stale) instead of dropping them.
-_last_good: dict[tuple[str, str, str], tuple[list[dict[str, Any]], Optional[float]]] = {}
+_last_good: dict[tuple[str, str, str], tuple[list[dict[str, Any]], Optional[float], dict[str, dict]]] = {}
 
 
 def _reset_for_tests() -> None:
@@ -303,9 +303,11 @@ def _stale_after_s() -> float:
     return max(HUB_STALE_AFTER_S, 3 * period)
 
 
-def _read_replica(path: Path, gateway: str, profile: str) -> tuple[list[dict[str, Any]], Optional[float]]:
+def _read_replica(path: Path, gateway: str,
+                  profile: str) -> tuple[list[dict[str, Any]], Optional[float], dict[str, dict]]:
     """Every unreleased link of this gateway+profile's chats in one replica, with its card row (or none when the
-    card row is missing), and the replica's last successful pull. Raises ``sqlite3.Error`` when unreadable.
+    card row is missing), the replica's last successful pull, and the current-run terms of the linked running cards
+    (``kanban_replica_execution.read_runs``). Raises ``sqlite3.Error`` when unreadable.
 
     ``chat_released`` is 1 when another link of the same card and chat (other kind) is released. [daveey] The owner
     writes a ``created`` link for a remote origin chat (``kanban_creator_chats``) that no gateway ever releases: the
@@ -326,12 +328,15 @@ def _read_replica(path: Path, gateway: str, profile: str) -> tuple[list[dict[str
         if rows is None:
             rows = _read_replica_links(conn, gateway, profile)
             _replica_rows[memo_key] = (content, rows)
+        # Never memoised: a pulled heartbeat is bookkeeping, so ``content`` does not move for it, while the run's
+        # newest liveness event is exactly what dates the card (review t_01a1d0f7c4cc4688).
+        runs = read_runs(conn, gateway, profile)
         try:
             row = conn.execute("SELECT pulled_at FROM kanban_sync_state LIMIT 1").fetchone()
             pulled = float(row[0]) if row and row[0] is not None else None
         except sqlite3.OperationalError:  # replica written before pulls were stamped
             pulled = None
-    return rows, pulled
+    return rows, pulled, runs
 
 
 # (replica path, gateway, profile) -> (content key, link rows) of the last ``_read_replica``.
@@ -342,7 +347,6 @@ def _read_replica_links(conn: sqlite3.Connection, gateway: str, profile: str) ->
     return [dict(r) for r in conn.execute(
         "SELECT l.task_id AS id, t.id AS task_row, t.title, t.status, t.assignee, t.created_at, t.started_at, "
         f"t.priority, t.block_kind, t.human_request, t.created_on, {placement_select(conn, 't')}, "
-        f"{run_select(conn, 't')}, "
         "l.chat_session, l.chat_profile, l.kind, "
         "EXISTS (SELECT 1 FROM task_chat_links r WHERE r.task_id = l.task_id AND r.chat_gateway = l.chat_gateway "
         "AND r.chat_profile IS l.chat_profile AND r.chat_session = l.chat_session AND r.released = 1) "
@@ -452,8 +456,8 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
     for board, path in replicas:
         memo_key = (str(path), gateway, profile)
         try:
-            rows, pulled = _read_replica(path, gateway, profile)
-            _last_good[memo_key] = (rows, pulled)
+            rows, pulled, runs = _read_replica(path, gateway, profile)
+            _last_good[memo_key] = (rows, pulled, runs)
             stale = pulled is None or now - pulled > stale_after
         except sqlite3.Error as exc:
             if unreadable_out is not None:
@@ -468,7 +472,7 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
                     if ids is None or c["session"] in ids:
                         out.setdefault((c["session"], c["key"]), c)
                 continue
-            rows, pulled = hit
+            rows, pulled, runs = hit
             stale = True
         if owners is None and rows:
             owners = _ledger_owners(stale_ok)
@@ -509,7 +513,8 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
             if machine := run_machine(r):
                 out[pair]["run_machine"] = machine
             # Executor-stamped liveness of the current run (kanban_replica_execution), never the pull clock.
-            if named and owner is not None and not unknown and (run := run_evidence(r)) is not None:
+            if named and owner is not None and not unknown and (run := run_evidence(
+                    {"status": status, **runs.get(tid, {})})) is not None:
                 out[pair]["_replica_run"] = run
     return list(out.values())
 

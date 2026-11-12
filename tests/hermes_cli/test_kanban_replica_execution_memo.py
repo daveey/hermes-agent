@@ -1,0 +1,127 @@
+"""A heartbeat pulled into a trigger-backed Board replica reaches the remote card's observation, although it never
+moves the replica's content key (review t_01a1d0f7c4cc4688, B1). [daveey]
+
+Heartbeat events and the ``last_heartbeat_at`` columns are bookkeeping for ``kanban_activity_revision``: they do not
+bump the shadow key, so the replica link-row memo and the counts fingerprint stay put (by design: heartbeats must not
+re-read every board). The run terms (current run uid + newest liveness event) are therefore read outside that memo,
+on every ``replica_cards`` call, with one bounded query over this gateway's linked running cards. Without that, a live
+remote card froze on its first memoised beat and expired to unknown 180 s later on a quiet board.
+"""
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from hermes_cli import kanban_activity_revision as rev
+from hermes_cli import kanban_chat_links as links
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_session_activity as ksa
+from hermes_cli import kanban_sync_client as ksc
+from tests.hermes_cli import kanban_sync_support as support
+
+ME, OWNER = "macbook", "hub"
+
+
+@pytest.fixture
+def shadow(tmp_path, monkeypatch):
+    from hermes_cli import profiles
+    home = support.kanban_home(tmp_path, monkeypatch)
+    (home / "config.yaml").write_text("kanban:\n  sync:\n    enabled: true\n    links_reader: replica\n")
+    local = kbc.connect(home / "kanban.db")
+    ksc.ensure_identity(local, "default", ME)
+    local.close()
+    path = home / "kanban" / sync.SHADOW_DIR / "default.db"
+    monkeypatch.setattr(ksc, "load_identity", lambda cfg=None: ksc.Identity("https://hub.test", "k", ME))
+    monkeypatch.setattr(ksc, "board_paths", lambda: [("default", home / "kanban.db")])
+    monkeypatch.setattr(ksc, "shadow_path", lambda slug: path)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: [
+        {"id": "t_hub", "board": "default", "gateway": OWNER, "profile": "work", "session": "s1", "released": False}])
+    ksa._reset_cache_for_tests()
+    links._reset_for_tests()
+    conn = kbc.connect(path)  # real writer init: the revision triggers are installed
+    now = time.time()
+    with kbc.write_txn(conn):
+        conn.execute("INSERT INTO tasks (id, title, status, created_at, created_on, current_run_id) "
+                     "VALUES ('t_hub', 'hub card', 'running', 1, ?, 7)", (OWNER,))
+        conn.execute("INSERT INTO task_runs (id, task_id, status, started_at, uid) "
+                     "VALUES (7, 't_hub', 'running', 1, 'run-uid-7')")
+        conn.execute("INSERT INTO task_events (task_id, run_id, kind, created_at, uid) "
+                     "VALUES ('t_hub', 7, 'heartbeat', ?, 'ev1')", (int(now - 170),))
+        conn.execute("INSERT INTO task_chat_links (uid, task_id, chat_gateway, chat_profile, chat_session, kind, "
+                     "released, created_at) VALUES ('u1', 't_hub', ?, 'default', 's1', 'shepherd', 0, 1)", (ME,))
+    sync.mark_pulled(conn, at=now)
+    try:
+        yield path, conn, now
+    finally:
+        conn.close()
+        ksa._reset_cache_for_tests()
+        links._reset_for_tests()
+
+
+def _beat(conn, uid: str, at: float, *, run_id: int = 7) -> None:
+    """What a pull applies for one executor heartbeat: the event plus the bookkeeping heartbeat columns only."""
+    with kbc.write_txn(conn):
+        conn.execute("INSERT INTO task_events (task_id, run_id, kind, created_at, uid) "
+                     "VALUES ('t_hub', ?, 'heartbeat', ?, ?)", (run_id, int(at), uid))
+        conn.execute("UPDATE tasks SET last_heartbeat_at = ? WHERE id = 't_hub'", (int(at),))
+        conn.execute("UPDATE task_runs SET last_heartbeat_at = ? WHERE id = ?", (int(at), run_id))
+    sync.mark_pulled(conn, at=at)
+
+
+def test_new_heartbeat_reaches_the_memoised_rows(shadow, monkeypatch):
+    path, conn, now = shadow
+    reads = []
+    real = links._read_replica_links
+    monkeypatch.setattr(links, "_read_replica_links", lambda *a: reads.append(1) or real(*a))
+    (first,) = links.replica_cards(["s1"], ME, replicas=[("default", path)], now=now)
+    assert first["_replica_run"] == {"run_id": "run-uid-7", "at": int(now - 170), "ref": "event:ev1"}
+    key = ksa._board_content_key(path, rev.SHADOW_TABLES)
+    _beat(conn, "ev2", now)
+    assert ksa._board_content_key(path, rev.SHADOW_TABLES) == key  # still bookkeeping: no board re-read
+    (second,) = links.replica_cards(["s1"], ME, replicas=[("default", path)], now=now)
+    assert second["_replica_run"]["ref"] == "event:ev2" and second["_replica_run"]["at"] == int(now)
+    assert len(reads) == 1  # the link rows stayed memoised; only the bounded run read ran again
+
+
+def test_run_rollover_on_a_quiet_board_never_borrows_the_old_run(shadow):
+    path, conn, now = shadow
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE task_runs SET status = 'released', ended_at = ? WHERE id = 7", (int(now - 5),))
+        conn.execute("INSERT INTO task_runs (id, task_id, status, started_at, uid) "
+                     "VALUES (8, 't_hub', 'running', ?, 'run-uid-8')", (int(now - 4),))
+        conn.execute("UPDATE tasks SET current_run_id = 8 WHERE id = 't_hub'")
+    _beat(conn, "ev-late-old", now, run_id=7)  # the previous attempt's late heartbeat arrives last
+    (card,) = links.replica_cards(["s1"], ME, replicas=[("default", path)], now=now)
+    assert "_replica_run" not in card  # the new run has no liveness event yet: explicit unknown, not run 7's beat
+    _beat(conn, "ev-new", now, run_id=8)
+    (card,) = links.replica_cards(["s1"], ME, replicas=[("default", path)], now=now)
+    assert card["_replica_run"] == {"run_id": "run-uid-8", "at": int(now), "ref": "event:ev-new"}
+
+
+def _counted_observation():
+    row = {"id": "s1", "_lineage_ids": ["s1"]}
+    ksa.annotate_kanban_activity([row])
+    (obs,) = row["execution_observations"]
+    return obs
+
+
+def test_sidebar_counts_pick_up_the_new_heartbeat_on_their_next_recompute(shadow, monkeypatch):
+    _path, conn, _now = shadow
+    # The shadow key will not move for the heartbeat, so only the counts' own age bound (3 s TTL, 30 s revalidation;
+    # unchanged by this fix) triggers their recompute; zero it instead of sleeping 30 s.
+    monkeypatch.setattr(ksa, "_CACHE_TTL_S", 0.0)
+    monkeypatch.setattr(ksa, "_COUNTS_MAX_AGE_S", 0.0)
+    first = _counted_observation()
+    assert first["state"] == "running" and first["source_revision"] == "event:ev1"
+    _beat(conn, "ev2", time.time())
+    second = _counted_observation()
+    assert second["state"] == "running" and second["source_revision"] == "event:ev2"
+    assert second["identity"]["run_id"] == "run-uid-7"
+    # The task list (``/api/session-kanban-tasks``) projects the same record from the same read.
+    from hermes_cli.kanban_execution_observations import add_cards
+    (listed,) = add_cards([{**c, "session_id": "s1"} for c in ksa.session_tasks(["s1"])])
+    assert listed["execution_observations"][0]["source_revision"] == "event:ev2"
+    assert listed["execution_observations"][0]["identity"] == second["identity"]

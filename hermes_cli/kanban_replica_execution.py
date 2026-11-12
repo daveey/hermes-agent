@@ -17,26 +17,40 @@ from hermes_cli.execution_observations import epoch, ident
 
 # Executor-written lifecycle events of an attempt; liveness only, never progress.
 LIVENESS_KINDS = ("heartbeat", "claimed", "spawned")
-_TERMS = ("run_uid", "run_beat")
+
+# Bound parameters, never interpolated: the statement text is a constant. Driven from this gateway's links
+# (``idx_task_chat_links_chat``) into ``tasks`` by primary key: a running-task-driven EXISTS re-scanned every link of
+# the gateway once per running card (77 ms on a real default-board replica vs 2.6 ms).
+_RUNS_SQL = (
+    "SELECT DISTINCT t.id AS id, "
+    "(SELECT r.uid FROM task_runs r WHERE r.id = t.current_run_id AND r.task_id = t.id "
+    " AND r.status = 'running' AND r.ended_at IS NULL) AS run_uid, "
+    "(SELECT json_array(e.created_at, e.uid) FROM task_events e WHERE e.run_id = t.current_run_id "
+    " AND e.task_id = t.id AND e.kind IN (?, ?, ?) ORDER BY e.created_at DESC, e.uid DESC LIMIT 1) AS run_beat "
+    "FROM task_chat_links l JOIN tasks t ON t.id = l.task_id "
+    "WHERE l.chat_gateway = ? AND l.chat_profile = ? AND l.released = 0 "
+    "AND t.status = 'running' AND t.created_on IS NOT NULL AND t.created_on != ?")
+assert _RUNS_SQL.count("?") == len(LIVENESS_KINDS) + 3
 
 
-def select_terms(conn: sqlite3.Connection, alias: str = "t") -> str:
-    """SELECT terms for the current run's identity and newest liveness event; NULL on boards lacking the columns.
+def read_runs(conn: sqlite3.Connection, gateway: str, profile: str) -> dict[str, dict]:
+    """``{task id: {'run_uid', 'run_beat'}}`` for the running replica cards linked to this gateway+profile's chats.
 
-    Correlated, evaluated only for ``running`` rows, through the ``task_runs`` primary key and the
-    ``task_events(run_id, id)`` index: bounded by the open running cards, not the link count."""
+    Read on EVERY replica read, outside the link-row memo: a pulled heartbeat event (and the heartbeat columns it
+    bumps) is bookkeeping for ``kanban_activity_revision``, so the replica's content key, and with it the memo and
+    the counts fingerprint, never move for it (review t_01a1d0f7c4cc4688). Bounded by this gateway's unreleased links
+    (``idx_task_chat_links_chat``, the ``tasks`` and ``task_runs`` primary keys, the ``task_events(run_id, id)``
+    index; ~4 ms including the schema probe for 154 links / 3 running cards on a real default-board replica).
+    Empty on a replica whose schema lacks the run columns."""
     tasks = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
     runs = {r[1] for r in conn.execute("PRAGMA table_info(task_runs)")}
     events = {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}
-    if not ({"current_run_id", "status"} <= tasks and {"id", "task_id", "uid", "status", "ended_at"} <= runs
+    if not ({"current_run_id", "status", "created_on"} <= tasks
+            and {"id", "task_id", "uid", "status", "ended_at"} <= runs
             and {"task_id", "run_id", "kind", "created_at", "uid"} <= events):
-        return ", ".join(f"NULL AS {name}" for name in _TERMS)
-    kinds = ",".join(f"'{k}'" for k in LIVENESS_KINDS)
-    return (f"CASE WHEN {alias}.status = 'running' THEN (SELECT r.uid FROM task_runs r WHERE r.id = {alias}.current_run_id "
-            f"AND r.task_id = {alias}.id AND r.status = 'running' AND r.ended_at IS NULL) END AS run_uid, "
-            f"CASE WHEN {alias}.status = 'running' THEN (SELECT json_array(e.created_at, e.uid) FROM task_events e "
-            f"WHERE e.run_id = {alias}.current_run_id AND e.task_id = {alias}.id AND e.kind IN ({kinds}) "
-            f"ORDER BY e.created_at DESC, e.uid DESC LIMIT 1) END AS run_beat")
+        return {}
+    return {str(r[0]): {"run_uid": r[1], "run_beat": r[2]}
+            for r in conn.execute(_RUNS_SQL, (*LIVENESS_KINDS, gateway, profile, gateway))}
 
 
 def run_evidence(row: dict) -> dict | None:
