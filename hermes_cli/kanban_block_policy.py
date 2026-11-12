@@ -211,7 +211,8 @@ _RELAY = re.compile(
     r"|\b(?:from|in|via|using)\s+(?:a|an|any|the)\s+hermes\s+(?:desktop\s+|cli\s+)?(?:chat|session)\b"
     # "from an owner Hermes chat" (hub t_01a1848506cae619), "from any owner chat", "from an owner Hermes Desktop or
     # CLI chat": an owner chat is an agent the ask makes David relay to. [daveey]
-    r"|\b(?:from|in|via|using)\s+(?:a|an|any|the)\s+owner\s+(?:hermes\s+)?(?:desktop\s+|cli\s+)?(?:or\s+cli\s+)?"
+    r"|\b(?:from|in|via|using)\s+(?:(?:a|an|any|the)\s+)?owner(?:'s)?\s+"
+    r"(?:hermes\s+)?(?:desktop\s+|cli\s+)?(?:or\s+cli\s+)?"
     r"(?:chat|session)\b",
     re.IGNORECASE)
 
