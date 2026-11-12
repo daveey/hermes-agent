@@ -19,7 +19,7 @@ board = fixtures.board
 
 
 @contextmanager
-def _hung_writer(conn, context, *, code=1, output='fixture worker_receipt_timeout'):
+def _hung_writer(conn, context, *, code=1, output='fixture worker_receipt_timeout', outer_pid=None):
     script = fixtures._CHILD.replace(
         "_record_worker_result(context, 1, 'fixture worker_receipt_timeout')",
         f'_record_worker_result(context, {code!r}, {output!r})').replace(
@@ -30,7 +30,7 @@ def _hung_writer(conn, context, *, code=1, output='fixture worker_receipt_timeou
         text=True, encoding='utf-8', env=build_subprocess_env(),
         cwd=str(Path(__file__).resolve().parents[2]))
     try:
-        kbd._set_worker_pid(conn, context['task_id'], proc.pid)
+        kbd._set_worker_pid(conn, context['task_id'], outer_pid or proc.pid)
         assert proc.stdin is not None and proc.stdout is not None
         proc.stdin.write('x')
         proc.stdin.flush()
@@ -74,25 +74,20 @@ def _assert_open(conn, context):
 @pytest.mark.parametrize('entry', ['ttl', 'max_runtime'])
 def test_failed_result_expiry_terminates_but_only_strict_finalizer_accounts(board, entry):
     conn, context = board
-    # An older binding remains live after the failed writer exits: killing the
-    # outer must not authorize TTL/max-runtime to close or charge the attempt.
-    historical = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
-                                  stdin=subprocess.PIPE, env=build_subprocess_env())
+    # An older binding is also hung: expiry terminates it too, but still must not
+    # close/account; only the strict finalizer does, once every witness is gone.
+    historical = _idle()
     try:
-        with kb.write_txn(conn):
-            kb._append_event(conn, context['task_id'], 'worker_bound',
-                             {'pid': historical.pid, 'started_at': kbd._process_fingerprint(historical.pid),
-                              'claim_lock': context['claim_lock']}, run_id=context['run_id'])
+        _bind(conn, context, historical)
         with _hung_writer(conn, context) as writer:
             _expire(conn, context, entry)
             _enforce(conn, entry)
             assert writer.poll() is not None, 'expired verified writer was left alive'
+            assert historical.poll() is not None, 'hung historical bound was left alive'
             _assert_open(conn, context)
-            assert kbd.detect_crashed_workers(conn, failed_results_only=True) == []
+            for _ in range(2):
+                _enforce(conn, entry)
             _assert_open(conn, context)
-            assert historical.stdin is not None
-            historical.stdin.close()
-            historical.wait(timeout=10)
             assert kbd.detect_crashed_workers(conn, failed_results_only=True) == [context['task_id']]
             for _ in range(2):
                 _enforce(conn, entry)
@@ -104,9 +99,73 @@ def test_failed_result_expiry_terminates_but_only_strict_finalizer_accounts(boar
             assert kinds.count('crashed') == 1
             assert 'timed_out' not in kinds and 'reclaimed' not in kinds
     finally:
-        if historical.poll() is None:
-            historical.kill()
-        historical.wait(timeout=10)
+        _reap(historical)
+
+
+@pytest.mark.platforms('posix')
+@pytest.mark.parametrize('entry', ['ttl', 'max_runtime'])
+@pytest.mark.parametrize('outer_dead', [False, True])
+def test_expiry_terminates_distinct_hung_outer_and_bound(board, entry, outer_dead):
+    conn, context = board
+    outer = _idle()
+    try:
+        kbd._set_worker_pid(conn, context['task_id'], outer.pid)
+        with _hung_writer(conn, context, outer_pid=outer.pid) as bound:
+            assert bound.pid != outer.pid
+            if outer_dead:  # real outer died; the hung bound must still be reaped
+                _reap(outer)
+            _expire(conn, context, entry)
+            _enforce(conn, entry)
+            assert outer.poll() is not None
+            assert bound.poll() is not None, 'hung bound process survived expiry'
+            _assert_open(conn, context)
+            assert kbd.detect_crashed_workers(conn, failed_results_only=True) == [context['task_id']]
+    finally:
+        _reap(outer)
+
+
+@pytest.mark.platforms('posix')
+@pytest.mark.parametrize('entry', ['ttl', 'max_runtime'])
+@pytest.mark.parametrize('bad', ['recycled', 'unknown', 'malformed'])
+def test_expiry_signals_nothing_when_any_historical_witness_unverified(board, entry, bad):
+    conn, context = board
+    stranger = _idle()
+    try:
+        birth = {'recycled': 'fixture-old-epoch|1', 'unknown': None, 'malformed': 'junk'}[bad]
+        with kb.write_txn(conn):
+            kb._append_event(conn, context['task_id'], 'worker_bound',
+                             {'pid': stranger.pid, 'started_at': birth,
+                              'claim_lock': context['claim_lock']}, run_id=context['run_id'])
+        with _hung_writer(conn, context) as writer:
+            _expire(conn, context, entry)
+            signals = []
+            _enforce(conn, entry, signal_fn=lambda pid, sig: signals.append((pid, sig)))
+            assert signals == []
+            _enforce(conn, entry)
+            assert writer.poll() is None and stranger.poll() is None
+            _assert_open(conn, context)
+    finally:
+        _reap(stranger)
+
+
+def _idle():
+    return subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
+                            stdin=subprocess.PIPE, env=build_subprocess_env())
+
+
+def _bind(conn, context, proc):
+    with kb.write_txn(conn):
+        kb._append_event(conn, context['task_id'], 'worker_bound',
+                         {'pid': proc.pid, 'started_at': kbd._process_fingerprint(proc.pid),
+                          'claim_lock': context['claim_lock']}, run_id=context['run_id'])
+
+
+def _reap(proc):
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait(timeout=10)
+    if proc.stdin is not None:
+        proc.stdin.close()
 
 
 @pytest.mark.platforms('posix')

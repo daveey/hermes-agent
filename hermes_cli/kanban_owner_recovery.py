@@ -255,23 +255,41 @@ def owner_reclaim_blocked(conn, task_id, *, crash_sweep=False, for_termination=F
     the shape that used to be unreclaimable forever, because ``bound_interpreter_gone`` was the
     only override and it needs the ``worker_bound`` event that run never wrote.
     """
-    from hermes_cli.kanban_failed_result import modern_result_recorded, valid_birth
+    from hermes_cli.kanban_failed_result import modern_result_recorded
     run = conn.execute('SELECT current_run_id, worker_pid, worker_started_at FROM tasks WHERE id=?',
                        (task_id,)).fetchone()
     if run is not None and modern_result_recorded(conn, task_id, run['current_run_id']):
-        # Expiry may still terminate the verified outer worker. It must never
-        # close/account here: even after signalling, all historical bindings
-        # remain the strict atomic finalizer's responsibility.
-        if (for_termination and run['worker_pid'] is not None and run['worker_pid'] > 0
-                and valid_birth(run['worker_started_at'])):
-            from hermes_cli.kanban_db_dispatch import _process_fingerprint
-            return _process_fingerprint(run['worker_pid']) != run['worker_started_at']
+        # Expiry may still terminate verified processes (outer and every bound witness).
+        # It must never close/account here: all historical bindings remain the strict
+        # atomic finalizer's responsibility.
+        if for_termination and run['worker_pid'] is not None and run['worker_pid'] > 0:
+            from hermes_cli.kanban_failed_result import termination_targets
+            return not termination_targets(conn, task_id)
         return True
     if not owner_reclaim_paused(conn, task_id):
         return False
     if crash_sweep and bound_interpreter_gone(conn, task_id):
         return False
     return not owner_attempt_provably_over(conn, task_id)
+
+
+def terminate_modern_bindings(conn, task_id, signal_fn=None) -> bool:
+    """Terminate every identity-verified live bound witness of a modern-result run, except the
+    outer (the caller's own termination step handles it). False when the plan is held or a
+    bound process survived; nothing is signalled unless every witness verifies first."""
+    from hermes_cli.kanban_db_dispatch import _terminate_reclaimed_worker
+    from hermes_cli.kanban_failed_result import modern_result_recorded, termination_targets
+    row = conn.execute("SELECT current_run_id, claim_lock FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None or not modern_result_recorded(conn, task_id, row["current_run_id"]):
+        return True
+    targets = termination_targets(conn, task_id)
+    if targets is None:
+        return False
+    for pid, birth, outer in targets:
+        if not outer and not _terminate_reclaimed_worker(
+                pid, row["claim_lock"], signal_fn=signal_fn, started_at=birth).get("terminated"):
+            return False
+    return True
 
 
 def owner_reclaim_blocked_after_kill(conn, task_id, *, signalled: bool) -> bool:

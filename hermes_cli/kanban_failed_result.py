@@ -51,6 +51,42 @@ def process_gone(pid, birth) -> bool:
     return False
 
 
+def termination_targets(conn, task_id):
+    """Plan expiry termination for a modern-result run, or ``None`` to hold.
+
+    Witnesses are the outer worker plus EVERY historical ``worker_bound`` incarnation of the
+    run. All must carry a valid birth and be either exited or the exact recorded process; one
+    recycled, unreadable or unverified witness holds the whole plan so nothing is signalled.
+    Returns the live exact-identity ``(pid, birth, is_outer)`` targets (may be empty).
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_dispatch as dispatch
+    row = conn.execute('SELECT current_run_id, claim_lock, worker_pid, worker_started_at '
+                       'FROM tasks WHERE id=?', (task_id,)).fetchone()
+    if row is None or not kb._claim_is_local(row['claim_lock'] or '', kb._host_prefix()):
+        return None
+    witnesses = [(row['worker_pid'], row['worker_started_at'], True)]
+    for event in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? "
+                              "AND kind='worker_bound'", (task_id, row['current_run_id'])):
+        try:
+            bound = json.loads(event['payload'])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(bound, dict) or bound.get('claim_lock') != row['claim_lock']:
+            return None
+        witnesses.append((bound.get('pid'), bound.get('started_at'), False))
+    targets = {}
+    for pid, birth, outer in witnesses:
+        if (not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or not valid_birth(birth)):
+            return None
+        if process_gone(pid, birth):
+            continue
+        if dispatch._process_fingerprint(pid) != birth:
+            return None
+        targets[(pid, birth)] = targets.get((pid, birth), False) or outer
+    return [(pid, birth, outer) for (pid, birth), outer in targets.items()]
+
+
 def recorded_process_witnesses(conn, context):
     """Whether this claim was launched with the modern two-process identity contract.
 

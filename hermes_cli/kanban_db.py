@@ -2310,7 +2310,7 @@ def release_stale_claims(
         "WHERE t.status = 'running' AND t.claim_expires IS NOT NULL "
         "  AND t.claim_expires < ?", (now,),
     ).fetchall()
-    from hermes_cli.kanban_owner_recovery import owner_reclaim_blocked, owner_reclaim_blocked_after_kill, reclaim_error
+    from hermes_cli.kanban_owner_recovery import owner_reclaim_blocked, owner_reclaim_blocked_after_kill, reclaim_error, terminate_modern_bindings
     for row in stale:
         if owner_reclaim_blocked(conn, row["id"], for_termination=True):
             continue
@@ -2328,9 +2328,9 @@ def release_stale_claims(
         started_at = _row_get(row, "worker_started_at")
         live = host_local and row["worker_pid"] and _worker_alive(row["worker_pid"], started_at) and not heartbeat_stale
         lease_lost = _sync.lease_lost(conn, row["id"], now, _resolve_claim_ttl_seconds() if live else None)  # [daveey] asks the Board
-        if _stale_claim_kept(conn, row, now, live=live and not lease_lost, host_local=host_local, started_at=started_at):
+        if (_stale_claim_kept(conn, row, now, live=live and not lease_lost, host_local=host_local, started_at=started_at)
+                or not terminate_modern_bindings(conn, row["id"], signal_fn)):
             continue
-
         termination = _terminate_reclaimed_worker(
             row["worker_pid"], row["claim_lock"], signal_fn=signal_fn, started_at=started_at,
         )
