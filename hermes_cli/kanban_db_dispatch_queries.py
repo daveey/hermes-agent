@@ -32,11 +32,13 @@ DISPATCH_ORDER = (
 
 def lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
     """Unclaimed rows of one lane in dispatch order (:data:`DISPATCH_ORDER`)."""
-    return conn.execute(
+    rows = conn.execute(
         "SELECT id, assignee FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         f"ORDER BY {DISPATCH_ORDER}"
     ).fetchall()
+    from hermes_cli.kanban_dispatch_priority import order_with_remote_waiters
+    return order_with_remote_waiters(conn, rows)
 
 
 def still_current_worker(conn: sqlite3.Connection, row, pid: int) -> bool:
