@@ -53,7 +53,12 @@ def test_cached_first_seen_still_ages_out(tmp_path):
     first = krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=now)
     assert len(first) == 1
     assert krn.release(first[0], ledger=ledger)
-    assert krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=now + krn.FRESH_S + 1) == []
+    # [daveey] Past FRESH_S an observed, undelivered state is one late notice; the cached first_seen still ages
+    # it out of the late window.
+    late = krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=now + krn.FRESH_S + 1)
+    assert len(late) == 1 and late[0]["text"].startswith("Late notices")
+    assert krn.release(late[0], ledger=ledger)
+    assert krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=now + krn.LATE_MAX_S + 1) == []
 
 
 def test_changed_snapshot_decodes_only_the_rows_whose_seq_moved(tmp_path, monkeypatch):

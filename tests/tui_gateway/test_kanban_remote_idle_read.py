@@ -290,7 +290,12 @@ def test_unchanged_replica_still_releases_reoffers_and_expires_claims(tmp_path):
     assert [c["ref"] for c in krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=NOW + 2)] == \
         [first[0]["ref"]]
     assert krn.release(first[0], ledger=ledger)
-    assert krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=NOW + krn.FRESH_S + 1) == []
+    # [daveey] Observed and never delivered: past FRESH_S it is one late notice, not a silent settle; the
+    # window still runs from the first observation, so past LATE_MAX_S it is gone.
+    late = krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=NOW + krn.FRESH_S + 1)
+    assert [c["ref"] for c in late[0]["children"]] == [first[0]["ref"]]
+    assert krn.release(late[0], ledger=ledger)
+    assert krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=NOW + krn.LATE_MAX_S + 1) == []
 
 
 def _rewrite(path, data):

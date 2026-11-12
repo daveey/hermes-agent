@@ -16,6 +16,9 @@ died first is re-offered, unless that key is already in the transcript. A refuse
 (``release``) so the owner of the chat re-claims it. Freshness is the later of the owner's terminal time
 and this host's durable first observation of that terminal state. The initial replica snapshot seeds old
 states silently (and frozen legacy keys never get a local window), so a fresh host never floods history.
+A state this host OBSERVED (``observations.first_seen`` set) that was never delivered inside ``FRESH_S`` (a busy
+chat, a down backend) is still delivered once as a late notice until ``LATE_MAX_S`` after its first observation;
+past that it is dropped with one WARNING, never silently.
 A legacy
 ``delivered=1`` row from before this (claimed before the write) inside ``FRESH_S`` whose notice is in no
 transcript of the chat is re-offered once.
@@ -38,6 +41,11 @@ from hermes_cli.kanban_withdrawal_notice import envelope as _withdrawal
 from tui_gateway.kanban_remote_notice_state import state as _notice_state
 
 FRESH_S = 6 * 3600.0
+# [daveey] How long, from this host's first observation, a state it OBSERVED (not one seeded by a source's first
+# snapshot) is still delivered once it is past ``FRESH_S``, as a late notice. Past it the notice is dropped with one
+# WARNING. 72 h spans a weekend with the Mac asleep after observing (hub card t_01a1c86d86cc1db7 was settled stale
+# silently 6 h after it was first seen, while its chat stayed busy).
+LATE_MAX_S = 72 * 3600.0
 # ``notices.delivered``: 0 = in flight (or an old silent record), DELIVERED = the notice is in the chat transcript,
 # SETTLED = recorded without a notice (stale, or a local placeholder reports it). Only a transcript write (``ack``)
 # or a keyed transcript row (``_claim_notice``) sets DELIVERED; a SETTLED row also gets a ``swept`` row with the
@@ -469,8 +477,9 @@ def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id,
 
     A fresh claim is in flight (delivered=0, this process's pid + start). It becomes delivered only in
     :func:`ack`, after the transcript write. A holder that is gone is re-offered unless the key is already
-    in the transcript. A state that is not fresh is recorded SETTLED (never DELIVERED) with a ``swept`` row
-    carrying ``settle_reason`` when ``swept_key`` is given.
+    in the transcript. A state that is not fresh is recorded SETTLED (never DELIVERED, ``settled`` =
+    ``settle_reason``) with a ``swept`` row carrying ``settle_reason`` when ``swept_key`` is given; that first
+    settle returns ``settled``.
 
     [daveey] The dead-holder check matches the claim's own key only. It used ``notice_in_transcript``'s legacy
     ``Kanban <task id>`` text match too, so ANY earlier notice of the same card (an earlier blocked state)
@@ -490,8 +499,10 @@ def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id,
                 (session, ref, state, now, 0 if fresh else SETTLED, pid if fresh else None,
                  start if fresh else None, notice_key, 0 if fresh else 1))
             if not fresh:
+                conn.execute("UPDATE notices SET settled=? WHERE session=? AND ref=? AND state=?",
+                             (settle_reason, session, ref, state))
                 _swept_row(conn, swept_key, settle_reason)
-        return "offer" if fresh else "skip"
+        return "offer" if fresh else "settled"
     if row["delivered"]:
         return "skip"
     holder = row["holder_pid"]
@@ -546,6 +557,26 @@ def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id,
     return "offer" if cur.rowcount == 1 else "skip"
 
 
+def _observed_first_seen(fresh_times, ident: tuple) -> Optional[float]:
+    from tui_gateway.kanban_remote_observations import first_seen_of
+    return first_seen_of(fresh_times, ident)
+
+
+def _late_verdict(now: float, first_seen: float) -> str:
+    """``late`` while an observed state is inside ``LATE_MAX_S`` of its first observation, else ``expired``."""
+    return "late" if now - first_seen <= LATE_MAX_S else "expired"
+
+
+def _log_dropped(task: dict, ref: str, state: str, session: str, first_seen: float, now: float) -> None:
+    """The one WARNING for an observed notice that is settled without ever reaching its chat."""
+    from datetime import UTC, datetime
+    minutes = int((now - first_seen) // 60)
+    logger.warning("remote kanban: dropped undelivered notice for card %s (%s %s) to chat %s: first seen %s, "
+                   "age %dh%02dm, past the %.0fh late window", task.get("id"), ref, state, session,
+                   datetime.fromtimestamp(first_seen, UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                   minutes // 60, minutes % 60, LATE_MAX_S / 3600)
+
+
 def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, ledger: Optional[Path] = None,
             now: Optional[float] = None, lineage: tuple[str, ...] = (),
             skip: Optional[Callable[[str], bool]] = None,
@@ -594,22 +625,33 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
                 state = _notice_state(task)
                 if (ref, state) in offered:
                     continue
-                at_fresh = fresh_times.get((card["gw"], card["key"], state), _fresh_at(task))
+                ident = (card["gw"], card["key"], state)
+                at_fresh = fresh_times.get(ident, _fresh_at(task))
                 fresh = at_fresh is not None and now - at_fresh <= FRESH_S
-                if not fresh and (card["gw"], card["key"], state) not in fresh_times:
+                if not fresh and ident not in fresh_times:
                     continue  # partial sync: don't permanently settle a not-yet-observed arrival
-                reason = "stale"
                 sid = card.get("sid") or session_key
                 claim_session = sid if per_link else session_key
+                key = _shared_key(card["gw"], card["key"], task, profile, sid)
+                # [daveey] A state this host observed while fresh and never delivered (a busy chat, a down backend)
+                # is still claimed past FRESH_S, as a late notice (its owner time is old, so ``_notice_item`` puts
+                # it in the late group). Only a seeded state (first snapshot) settles silently as ``stale``.
+                first_seen = _observed_first_seen(fresh_times, ident)
+                reason = "stale" if fresh or first_seen is None else _late_verdict(now, first_seen)
+                if reason == "late":
+                    fresh = True
+                elif reason == "expired" and transcript_has is not None and transcript_has(key, ""):
+                    reason = "transcript"  # already in the chat (another session id of it): nothing was lost
                 if fresh and skip is not None and conn.execute(
                         "SELECT 1 FROM notices WHERE session=? AND ref=? AND state=?",
                         (claim_session, ref, state)).fetchone() is None and skip(str(task["id"])):
                     fresh, reason = False, "placeholder"  # recorded silently: the placeholder's notice covers it
-                key = _shared_key(card["gw"], card["key"], task, profile, sid)
                 swept_key = (str(path), profile, sid, _notice_id(card["gw"], card["key"], task, profile, sid))
                 verdict = _claim_notice(conn, session=claim_session, ref=ref, state=state, now=now, fresh=fresh,
                                         notice_key=key, task_id=str(task["id"]), transcript_has=transcript_has,
                                         swept_key=swept_key, settle_reason=reason)
+                if verdict == "settled" and reason == "expired":
+                    _log_dropped(task, ref, state, claim_session, first_seen or 0.0, now)  # expired: observed
                 if verdict == "offer":
                     out.append(_notice_item(card, claim_session, me, profile, now))
                     offered.add((ref, state))
@@ -1138,16 +1180,35 @@ def _deliver_fresh_cards(cards, fresh_times, me, now, path, live, session_db, le
     for owner, key, task, links in cards:
         ref, state = f"{owner}/{key}", _notice_state(task)
         observed_at = fresh_times.get((owner, key, state), _fresh_at(task))
-        if observed_at is None or now - observed_at > FRESH_S:
+        first_seen = _observed_first_seen(fresh_times, (owner, key, state))
+        overdue = observed_at is None or now - observed_at > FRESH_S
+        if overdue and (first_seen is None or _late_verdict(now, first_seen) != "late"):
             counts["stale"] = counts.get("stale", 0) + 1
             continue
         for link in links:
+            if overdue and _late_link_settled(owner, key, task, link, ref, state, path, settled):
+                continue  # [daveey] one ledger read, then the memo: a settled late card never reopens state.db
             late = owner_time(task, now) is not None
             target = batches.target(owner, key, task, link, path) if late else waker
             results = [] if late else delivered
             _deliver_link(owner, key, task, link, me=me, ref=ref, state=state, path=path, live=live,
                           session_db=session_db, ledger=ledger, settled=settled,
                           delivered=results, swept=swept, waker=target, observed_at=observed_at, now=now)
+
+
+def _late_link_settled(owner, key, task, link, ref, state, path, settled) -> bool:
+    """An observed card past ``FRESH_S`` that this link already settled (delivered, stale or by a placeholder)
+    under its own session id. Checked before ``_deliver_link`` opens the chat's state.db, and remembered."""
+    profile, sid = link.get("profile"), link.get("session")
+    if not profile or not sid:
+        return False
+    memo_key = (str(path), profile, sid, _notice_id(owner, key, task, profile, sid))
+    if memo_key in _delivered:
+        return True
+    if settled((sid,), ref, state):
+        _remember_delivered(memo_key)
+        return True
+    return False
 
 
 def _sweep_snapshot(path, me: str) -> tuple:

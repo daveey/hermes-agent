@@ -101,7 +101,13 @@ def test_release_and_replica_rewrite_do_not_extend_arrival_window(tmp_path):
     with sqlite3.connect(replica) as conn:
         conn.execute("UPDATE replica SET seq=2")
     krn._reset_for_tests()
-    assert krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=now + krn.FRESH_S + 1) == []
+    # [daveey] Neither the release nor the rewrite moved first_seen: past FRESH_S it is one late notice, and past
+    # LATE_MAX_S of the first observation it is gone.
+    late = krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=now + krn.FRESH_S + 1)
+    assert len(late) == 1 and late[0]["text"].startswith("Late notices")
+    assert krn.release(late[0], ledger=ledger)
+    krn._reset_for_tests()
+    assert krn.collect(CHAT, "default", hub_db=replica, ledger=ledger, now=now + krn.LATE_MAX_S + 1) == []
 
 
 def test_late_legacy_and_superseded_rows_do_not_get_local_freshness(tmp_path):

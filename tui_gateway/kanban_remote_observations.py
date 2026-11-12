@@ -176,11 +176,34 @@ def _persist(source: str, cards: list[tuple], ledger, now: float) -> dict[tuple,
     return _fresh_map(states, {**(known or {}), **added})
 
 
-def _fresh_map(states: list[tuple], first_seen: dict) -> dict[tuple, float | None]:
-    fresh = {}
+class Observed(dict):
+    """``{(owner, key, state): freshness time}``, plus ``first_seen``: the same keys' local first observation, for
+    states this host OBSERVED (``observations.first_seen`` not NULL) only. A state seeded silently by a source's
+    first snapshot (old, legacy key, unknown owner time) is absent from ``first_seen``. [daveey]
+
+    ``collect`` and the sweep read it to keep an observed notice that aged past ``FRESH_S`` undelivered (a busy
+    chat, a down backend) as a late notice instead of settling it stale (hub card t_01a1c86d86cc1db7, MacBook
+    2026-11-12: first seen 04:23:33 PST, settled stale 6 h 0 m 2 s later, never in its chat)."""
+
+    first_seen: dict
+
+    def __init__(self, *args, first_seen: dict | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.first_seen = first_seen or {}
+
+
+def first_seen_of(fresh_times, ident: tuple) -> float | None:
+    """This host's first observation of ``ident`` = (owner, key, state); None for a seeded or unknown state."""
+    return getattr(fresh_times, "first_seen", {}).get(ident)
+
+
+def _fresh_map(states: list[tuple], first_seen: dict) -> Observed:
+    fresh = Observed()
     for owner, key, state, ref, at in states:
         first = first_seen[(ref, state)]
         fresh[(owner, key, state)] = max(at, first) if at is not None and first is not None else at
+        if first is not None:
+            fresh.first_seen[(owner, key, state)] = first
     return fresh
 
 
