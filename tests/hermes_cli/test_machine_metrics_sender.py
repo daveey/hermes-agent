@@ -149,9 +149,10 @@ def _toggling_world(state_at, alive_at=lambda t: True, *, loop_from=0.0):
     clock = FakeClock(0.0)
     sends: list[tuple[float, str]] = []
     state = [cpu.ON]
+    caller = ["sender"]  # which path is reporting (the loop's takeover while ON uses the sender's transport)
     reporter = mm.Reporter(lambda s: sends.append((clock.now, "loop")), collect_fn=lambda: {"cpus": 2},
                            clock=clock, cpu_limit_fn=_limit(state), cpu_take_fn=lambda _l: dict(SAMPLE))
-    sender = ms.MetricsSender(reporter, lambda s, p: sends.append((clock.now, "sender")), limit_fn=_limit(state),
+    sender = ms.MetricsSender(reporter, lambda s, p: sends.append((clock.now, caller[0])), limit_fn=_limit(state),
                               clock=clock, sched_fn=lambda: None)
     sender.alive = lambda: alive_at(clock.now)
     next_tick = P
@@ -162,7 +163,9 @@ def _toggling_world(state_at, alive_at=lambda t: True, *, loop_from=0.0):
             sender.tick_done_at = clock.now
             next_tick += P
         if clock.now >= loop_from:
+            caller[0] = "loop"
             sender.loop_report()
+            caller[0] = "sender"
         clock.now = round(clock.now + 0.5, 6)
     return sends
 
@@ -199,9 +202,11 @@ def test_the_first_anchor_skips_when_the_loop_reported_less_than_half_a_period_b
 def test_a_stalled_sender_hands_reporting_back_to_the_loop_with_a_warning(caplog):
     clock = FakeClock(0.0)
     sends = []
-    reporter = mm.Reporter(lambda s: sends.append(clock.now), collect_fn=lambda: {"cpus": 2}, clock=clock,
+    reporter = mm.Reporter(lambda s: sends.append(("hub", clock.now)), collect_fn=lambda: {"cpus": 2}, clock=clock,
                            cpu_limit_fn=lambda: (cpu.ON, 50.0))
-    sender = ms.MetricsSender(reporter, _nopost, limit_fn=lambda: (cpu.ON, 50.0), clock=clock)
+    # While ON the loop's takeover goes through the sender's bounded transport, never the kept-alive Hub.
+    sender = ms.MetricsSender(reporter, lambda s, p: sends.append(clock.now), limit_fn=lambda: (cpu.ON, 50.0),
+                              clock=clock, sched_fn=lambda: None)
     sender.alive = lambda: True
     sender.on = True  # mid-tick: ON is known, the tick's end not stamped yet
     assert sender.loop_report() is True and sends == [0.0]
@@ -404,7 +409,7 @@ class _SlowBoard(http.server.BaseHTTPRequestHandler):
             pass
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="schedstat is Linux-only")
+@pytest.mark.platforms("linux")  # schedstat is Linux-only
 def test_a_sample_without_a_cpu_triple_is_bounded_to_2_s_and_probed(caplog):
     """S-3: the sender never uses the 30 s kept-alive path, even for a report without a CPU triple."""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _SlowBoard)
@@ -464,7 +469,7 @@ def test_delegated_loop_report_is_a_component_free_not_sent_record(tmp_path, mon
     assert reps[1]["res"] == "sent" and {"collect_t0", "limit_t0", "send_t0"} <= set(reps[1])
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the sender runs on Linux hosts only")
+@pytest.mark.platforms("linux")  # the sender runs on Linux hosts only
 def test_a_long_blocked_round_still_yields_reports_from_the_sender(tmp_path, monkeypatch):
     """A round blocked for 30 periods (the hub's 30 s round at a 0.1 s scale) still yields >= 3 reports."""
     import hermes_constants

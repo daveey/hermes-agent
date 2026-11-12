@@ -68,11 +68,11 @@ class GatewayKanbanWatchersMixin:
                                   warn_after_seconds=_ks.DEFAULT_WARN_AFTER_SECONDS)
 
     async def _acquire_kanban_lease(self, lease) -> bool:
-        """Retry *lease* every ``lease.retry_seconds`` until held; False when the gateway stops first."""
+        """Retry *lease* every ``lease.retry_interval()`` until held; False when the gateway stops first."""
         while self._running:
             if lease.try_acquire():
                 return True
-            await self._sleep_between_ticks(lease.retry_seconds)
+            await self._sleep_between_ticks(lease.retry_interval())
         return False
 
     async def _sleep_between_ticks(self, interval: float) -> None:
