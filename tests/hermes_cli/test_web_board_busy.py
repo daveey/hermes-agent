@@ -71,7 +71,11 @@ def test_busy_memo_still_returns_stale_rows(client, monkeypatch, endpoint):
     monkeypatch.setattr(ksa, "_read_session_tasks", held)
     response = client.get(endpoint, params={"ids": "s-warm"})
     assert response.status_code == 200
-    assert response.json()["tasks"] == [{**rows[0], "stale": True}]
+    tasks = response.json()["tasks"]
+    # Legacy fields are unchanged; the optional observation of a replayed row is never current work.
+    assert [{k: v for k, v in t.items() if k != "execution_observations"} for t in tasks] == [
+        {**rows[0], "stale": True}]
+    assert {o["state"] for t in tasks for o in t.get("execution_observations", [])} <= {"unknown"}
 
 
 def test_non_busy_database_error_is_not_mislabeled(client, monkeypatch, endpoint):
