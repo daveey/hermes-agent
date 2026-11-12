@@ -810,6 +810,22 @@ def _ready_hold_reason(task, events, cfg, now=None) -> Optional[str]:
     return None
 
 
+def _impossible_runs_on(task, cfg) -> Optional[list[str]]:
+    """The card's runs_on when the Board registry is known and no enrolled machine carries every label (a typo or
+    alias such as ``hermes-hub``), else None. The registry comes from cfg ``registry`` (``{me, machines}``) or, when
+    absent, this process's cached registry read only (never a network fetch from a diagnostic)."""
+    from hermes_cli import kanban_runs_on_capabilities as roc
+    from hermes_cli import kanban_worker_node as wn
+    labels = wn._parse(_task_field(task, "runs_on"))
+    if not labels:
+        return None
+    reg = cfg["registry"] if "registry" in cfg else (wn._REGISTRY.get("value") if wn._REGISTRY.get("at") else None)
+    if not reg:
+        return None
+    me = str(reg.get("me") or "")
+    return labels if roc.impossible(labels, reg.get("machines") or {}, me) else None
+
+
 def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     """Assigned, unclaimed, ``ready`` for >= cfg["stranded_threshold_seconds"]
     (default 30 min). Deliberately age-based and identity-agnostic so it
@@ -860,17 +876,33 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
                          payload={"current_assignee": assignee}),
         _cli_hint("Check dispatcher status", "hermes kanban diagnostics"),
     ]
+    detail = (f"This task has been ready for {age_str} but nothing has claimed it. Common causes: "
+              f"assignee {assignee!r} is misspelled, the profile was deleted, or the external worker "
+              f"pool for this lane is down. Confirm the assignee is correct and that a worker is "
+              f"actually polling for it.")
+    title = f"Ready for {age_str} with no worker"
+    impossible = _impossible_runs_on(task, cfg)
+    held: dict = {}
+    if impossible:
+        # [daveey] self-heal agent-7489fcf5cd: a stored label no enrolled machine carries never leases; any
+        # worker may re-route it (kanban_creator_repin.stranded_refusal), so name that instead of a human edit.
+        tid = _task_field(task, "id") or "<task_id>"
+        held = {"held_reason": "impossible_runs_on", "runs_on": impossible}
+        title = f"Ready for {age_str}: runs_on {impossible} matches no enrolled machine"
+        detail = (f"No enrolled Board machine carries every label in runs_on={impossible} (labels_mismatch), so "
+                  f"this card can never be claimed. Any worker can re-route it: kanban_move(task_id='{tid}', "
+                  "runs_on=['machine:<registered-name>' or a real label], reason=...). This is agent work, not "
+                  "an ask for David.")
+        actions.insert(0, _cli_hint("Re-route to a real machine",
+                                    f"hermes kanban move {tid} --runs-on machine:<registered-name>", suggested=True))
     return [Diagnostic(
         kind="stranded_in_ready", severity=severity,
-        title=f"Ready for {age_str} with no worker",
-        detail=f"This task has been ready for {age_str} but nothing has claimed it. Common causes: "
-               f"assignee {assignee!r} is misspelled, the profile was deleted, or the external worker "
-               f"pool for this lane is down. Confirm the assignee is correct and that a worker is "
-               f"actually polling for it.",
+        title=title,
+        detail=detail,
         actions=actions,
         first_seen_at=last_ready_ts, last_seen_at=last_ready_ts, count=1,
         data={"ready_since": last_ready_ts, "age_seconds": int(age_seconds),
-              "assignee": assignee, "threshold_seconds": int(threshold_seconds)},
+              "assignee": assignee, "threshold_seconds": int(threshold_seconds), **held},
     )]
 
 

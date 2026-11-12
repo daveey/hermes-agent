@@ -461,7 +461,10 @@ KANBAN_MOVE_SCHEMA = _schema(
         "for dir/worktree cards. After it returns, end your turn with a one-line reply; do not call more tools. "
         "Exception: task_id = a worker-first card YOUR task created that no pool worker can run (its "
         "'No pool worker can run this card' notice) and runs_on = [\"machine:<origin>\"] repins that card to the "
-        "origin instead; your own run continues. Every other card is refused."
+        "origin instead; your own run continues. Second exception: task_id = a READY, unclaimed card of this "
+        "gateway whose runs_on no enrolled machine carries (stranded: e.g. ['hermes-hub']) may be re-routed by any "
+        "worker to labels a machine does carry (e.g. ['machine:hub']); the old labels are kept in a comment. "
+        "Every other card is refused."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),

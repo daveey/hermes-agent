@@ -382,7 +382,10 @@ def _enforce_worker_task_ownership(tid: str) -> None:
     if env_tid and tid != env_tid:
         raise _Reject(
             f"worker is scoped to task {env_tid}; refusing to mutate {tid}. Use kanban_comment "
-            f"to hand off information to other tasks, or kanban_create to spawn follow-up work.")
+            f"to hand off information to other tasks, or kanban_create to spawn follow-up work. "
+            f"If {tid} is a ready card stranded on runs_on labels no machine carries, re-route it yourself: "
+            f"kanban_move(task_id='{tid}', runs_on=[...], reason=...). A card another gateway created: "
+            "kanban_supervisor_request operator op. Never ask David to edit, complete or archive a card.")
 
 
 def _worker_guard(tool_name: str, args: dict) -> str:
