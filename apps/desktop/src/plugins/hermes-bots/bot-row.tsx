@@ -267,7 +267,11 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
         <div className="flex items-baseline justify-between gap-2">
           <div className="flex min-w-0 items-center gap-1.5">
             {/* The session row's own lead cell, so a bot's name sits on the
-                same left edge as every session name above it in the rail. */}
+                same left edge as every session name above it in the rail.
+                [daveey] No `session` prop, so an unread dot here stays emerald whatever the chat's stored
+                outcome: the canonical Bot Chat is hidden from session listings and the roster's
+                canonical_session summary carries no outcome. Painting the outcome tone here means adding
+                `outcome` to that summary (gateway/session_group_controls.py) and passing it through. */}
             <SidebarRowLead>
               <SessionStatusDot storedSessionId={canonicalSessionId} />
             </SidebarRowLead>

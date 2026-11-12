@@ -10,6 +10,7 @@ import type { SessionInfo } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import type * as ChatRuntime from '@/lib/chat-runtime'
 import { SESSION_ROW_AREAS, type SessionRowSlotProps } from '@/lib/session-row-slots'
+import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import type * as Time from '@/lib/time'
 import type * as ComposerStatusStore from '@/store/composer-status'
 import { $sidebarRowMeta } from '@/store/layout'
@@ -1173,6 +1174,28 @@ describe('SidebarSessionRow stored outcome', () => {
       expect(dot?.getAttribute('aria-label')).toBe(label)
       expect(dot?.className).toContain(colour)
       expect(dot?.className).not.toContain('ui-success')
+    })
+
+    // [daveey] Muted maps to the `blocked` stripe; session-outcome.test.ts pins that mapping, this pins the row
+    // actually paints it: a parked chat that comes back unread must not show the done emerald.
+    it('an unread muted chat paints the blocked stripe tone, never the done emerald', () => {
+      $unreadFinishedSessionIds.set(['s1'])
+
+      const { container } = renderRow(
+        makeSession({
+          message_count: 4,
+          muted: true,
+          outcome: { kind: 'muted' },
+          title: 'Parked'
+        } as Partial<SessionInfo> & { title: string })
+      )
+
+      const dot = dotOf(container)
+      expect(dot?.getAttribute('aria-label')).toBe('Unread — Muted')
+      expect(dot?.className).toContain(sessionStatusStripeColor('blocked'))
+      expect(dot?.className).not.toContain(sessionStatusStripeColor('done'))
+      expect(dot?.className).not.toContain('ui-success')
+      expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('blocked')
     })
 
     it('an unread done chat (or one with no outcome) keeps the emerald unread dot', () => {
