@@ -64,7 +64,8 @@ def _read_card(board: str, task_id: str):
     path = kanban_db_path(board=board)
     if not path.exists():
         return None
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
+    from hermes_cli import kanban_lockguard
+    conn = kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
     try:
         row = conn.execute("SELECT status, human_request FROM tasks WHERE id=?", (task_id,)).fetchone()
         if row is None:
