@@ -8,6 +8,11 @@ checks the merged rows against the caller's probe aggregate (``count``, ``total(
 ``total(octet_length(data))``). When they disagree (rows were deleted), one identity aggregate drops the vanished
 keys; anything else it cannot explain (a row rewritten at an older seq, a seq that went back, a replaced file)
 falls back to the full read. The result is always exactly the rows a full read returns, in ``(gw, key)`` order.
+
+Kept rows hold each row's text zlib-compressed (``pack``), never the decoded string: the gateway, the dashboard and
+every Desktop serve keep one view each, and ~56 MB of row text (UCS-4 once any row holds an emoji, so up to 4 bytes a
+character) was ~115 MB of every such process's heap on the mini (t_01a1cf67a93c05b6). Equal text compresses to equal
+bytes, so a kept row still compares equal exactly when its text is unchanged; ``text`` restores the text.
 """
 from __future__ import annotations
 
@@ -15,11 +20,19 @@ import json
 import os
 import sqlite3
 import threading
+import zlib
 from dataclasses import dataclass, field
 
 _COLUMNS = "gw, key, data, updated_at, {version}, seq, octet_length(data)"
-_FULL_SQL = f"SELECT json_group_array(json_array({_COLUMNS})) FROM replica WHERE coll = 'tasks'"
-_DELTA_SQL = _FULL_SQL + " AND seq > ?"
+# Rows are read in rowid pages (all inside the caller's one read transaction, so still one snapshot) of at most
+# ``_PAGE`` rows and about ``_PAGE_BYTES`` of row text at the replica's mean row size: one ``json_group_array`` over
+# every row was a 256 MB string (UCS-4) plus its decode, a ~400 MB peak per full read on the mini.
+_PAGE = 1000
+_PAGE_BYTES = 2 << 20
+_PAGE_SQL = (f"SELECT json_group_array(json_array({_COLUMNS})), max(rowid) FROM (SELECT rowid, * FROM replica"
+             " WHERE coll = 'tasks' AND rowid > ? {where} ORDER BY rowid LIMIT ?)")
+_FULL_SQL = _PAGE_SQL.format(version="{version}", where="")
+_DELTA_SQL = _PAGE_SQL.format(version="{version}", where="AND seq > ?")
 _IDENTITY_SQL = "SELECT json_group_array(json_array(gw, key, seq)) FROM replica WHERE coll = 'tasks'"
 
 
@@ -29,7 +42,7 @@ class Rows:
     path: str
     ident: tuple | None  # (st_dev, st_ino) of the file the rows came from
     version_column: str
-    by_key: dict[tuple, tuple]  # (gw, key) -> (gw, key, data, updated_at, version), as ``_read_remote_links`` reads
+    by_key: dict[tuple, tuple]  # (gw, key) -> (gw, key, packed data, updated_at, version); ``text`` unpacks data
     meta: dict[tuple, tuple]  # (gw, key) -> (seq, octet length of data)
     sums: tuple  # (count, total seq, total integer version, total octets): ``_REPLICA_PROBE``'s terms
     last_seq: int  # the highest seq these rows had (an upper bound once rows were deleted)
@@ -39,8 +52,24 @@ class Rows:
     removed: frozenset = field(default_factory=frozenset)
 
     def rows(self) -> list[tuple]:
+        """Every row as ``_read_remote_links`` reads it, ``(gw, key, data, updated_at, version)``, in key order."""
         by_key = self.by_key
-        return [by_key[k] for k in sorted(by_key, key=_sort_key)]
+        return [_unpacked(by_key[k]) for k in sorted(by_key, key=_sort_key)]
+
+
+def pack(data):
+    """``data`` as kept: text becomes zlib-compressed ``bytes`` (never GC-tracked); anything else stays as read.
+    A row read through ``json_array`` never holds ``bytes`` (JSON cannot hold a BLOB), so ``bytes`` is always packed."""
+    return zlib.compress(data.encode("utf-8", "surrogatepass"), 1) if isinstance(data, str) else data
+
+
+def text(data):
+    """The stored text of a kept row's ``data`` (anything not packed is returned as it was read)."""
+    return zlib.decompress(data).decode("utf-8", "surrogatepass") if isinstance(data, bytes) else data
+
+
+def _unpacked(row: tuple) -> tuple:
+    return (row[0], row[1], text(row[2]), *row[3:])
 
 
 _lock = threading.Lock()
@@ -68,6 +97,24 @@ def _decode(packed: str) -> list[tuple]:
     return [tuple(item) for item in json.loads(packed)]
 
 
+def page_rows(probe) -> int:
+    """Rows per page for a replica whose ``_REPLICA_PROBE`` is ``probe`` (count first, total octets last)."""
+    mean = float((probe[5] if probe else 0) or 0) / max(int((probe[0] if probe else 0) or 0), 1)
+    return max(50, min(_PAGE, int(_PAGE_BYTES // max(mean, 1.0))))
+
+
+def _paged(conn: sqlite3.Connection, sql: str, probe, args: tuple = ()):
+    """Every row ``sql`` (``_FULL_SQL``/``_DELTA_SQL``) selects, one page decoded at a time."""
+    size, after = page_rows(probe), -1 << 63
+    while True:
+        packed, last = conn.execute(sql, (after, *args, size)).fetchone()
+        rows = _decode(packed) if last is not None else []
+        yield from rows
+        if len(rows) < size:  # a short page is the last: no extra query to find the end
+            return
+        after = last
+
+
 def _sort_key(key: tuple) -> tuple:
     return str(key[0]), str(key[1])
 
@@ -86,12 +133,11 @@ def _matches(sums: tuple, probe) -> bool:
             and float(sums[2]) == float(probe[4] or 0) and float(sums[3]) == float(probe[5] or 0))
 
 
-def _full(conn: sqlite3.Connection, path: str, ident, version_column: str) -> Rows:
+def _full(conn: sqlite3.Connection, path: str, ident, version_column: str, probe) -> Rows:
     stats["full"] += 1
     by_key, meta, sums = {}, {}, (0, 0, 0, 0)
-    for gw, key, data, updated, version, seq, size in _decode(
-            conn.execute(_FULL_SQL.format(version=version_column)).fetchone()[0]):
-        row, m = (gw, key, data, updated, version), (seq or 0, size or 0)
+    for gw, key, data, updated, version, seq, size in _paged(conn, _FULL_SQL.format(version=version_column), probe):
+        row, m = (gw, key, pack(data), updated, version), (seq or 0, size or 0)
         by_key[(gw, key)], meta[(gw, key)] = row, m
         sums = _plus(sums, _terms(row, m))
     return Rows(path, ident, version_column, by_key, meta, sums, max((m[0] for m in meta.values()), default=0),
@@ -102,7 +148,7 @@ def _delta(conn: sqlite3.Connection, base: Rows, probe) -> Rows | None:
     """``base`` advanced to the snapshot ``probe`` describes, or None when only a full read can tell."""
     last = base.last_seq
     stats["delta"] += 1
-    fresh = _decode(conn.execute(_DELTA_SQL.format(version=base.version_column), (last,)).fetchone()[0])
+    fresh = list(_paged(conn, _DELTA_SQL.format(version=base.version_column), probe, (last,)))
     stats["delta_rows"] += len(fresh)
     by_key, meta, sums = dict(base.by_key), dict(base.meta), base.sums
     changed = set()
@@ -110,7 +156,7 @@ def _delta(conn: sqlite3.Connection, base: Rows, probe) -> Rows | None:
         k = (gw, key)
         if k in by_key:
             sums = _plus(sums, _terms(by_key[k], meta[k]), -1)
-        by_key[k], meta[k] = (gw, key, data, updated, version), (seq or 0, size or 0)
+        by_key[k], meta[k] = (gw, key, pack(data), updated, version), (seq or 0, size or 0)
         sums = _plus(sums, _terms(by_key[k], meta[k]))
         changed.add(k)
     removed: set = set()
@@ -138,14 +184,14 @@ def read(conn: sqlite3.Connection, path, version_column: str, probe, ident) -> R
     whose every task row carries a ``seq`` (``probe[0] == probe[1]``) and that has a ``version`` column."""
     tag = str(path)
     if ident is None:  # no file identity, so no base to trust
-        return _full(conn, tag, None, version_column)
+        return _full(conn, tag, None, version_column, probe)
     with _lock:
         base = _views.get(tag)
     view = None
     if base is not None and base.ident == ident:
         view = _delta(conn, base, probe)
     if view is None:
-        view = _full(conn, tag, ident, version_column)
+        view = _full(conn, tag, ident, version_column, probe)
     with _lock:
         if len(_views) >= 16 and tag not in _views:
             _views.pop(next(iter(_views)))

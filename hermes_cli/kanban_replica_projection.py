@@ -7,7 +7,13 @@
 aggregates built from them, and on a miss re-projects only the rows ``kanban_replica_rows`` reports changed. The
 clock-dependent inputs (hub staleness, each owner scope's freshness verdict) are the state's key: when one of them
 changes, the aggregates are rebuilt from the kept rows without decoding any. ``project`` answers exactly what
-``_project_replica`` does for the same rows; ``tests/hermes_cli/test_kanban_replica_projection.py`` pins that.
+``_project_replica`` does for the same rows; ``tests/hermes_cli/test_kanban_replica_incremental.py`` pins that.
+
+A kept row holds its whole decoded record only when it links a session of this origin (``sids``): only such a record
+can become a card, and a card reads the whole record (hash-bound owner evidence, receipts, run, wait fields). Every
+other row keeps ``SLIM_FIELDS``, all the release, fold and moved logic reads, and is decoded again from its packed
+text in the rare case a legacy alias folds a link of this origin into it. Keeping every record whole was ~150 MB of
+each gateway/dashboard/serve heap for ~13.5k replica cards of which 54 linked the mini (t_01a1cf67a93c05b6).
 """
 from __future__ import annotations
 
@@ -19,6 +25,9 @@ from hermes_cli.kanban_session_activity_records import _fold_legacy_aliases
 from hermes_cli.kanban_session_activity_release import record_attests_terminal
 
 LINK_RELS = ('shepherd', 'cross_task', 'create-task', 'adopt-task')
+# Every field a kept record without links to this origin is read for after ``_stage``: the unknown-status copy and
+# ``_fold_legacy_aliases`` (status, sessions, created_at, created_by), and the record's own identity.
+SLIM_FIELDS = ('id', 'status', 'profile', 'board', 'gateway', 'created_at', 'created_by', 'sessions')
 _REMOTE_FIELDS = ("title", "status", "block_kind", "human_request", "assignee", "created_at", "started_at", "priority")
 
 
@@ -85,6 +94,7 @@ class _Stage:
         'row',
         'seen',
         'sids',
+        'slim',
         't',
         'tkey',
         'unknown',
@@ -93,14 +103,15 @@ class _Stage:
 
 
 def _stage(row: tuple, me: str, origin_profile: str) -> _Stage:
+    from hermes_cli.kanban_replica_rows import text
     from hermes_cli.kanban_session_activity import LISTED_STATUSES, _decode_replica_task
 
     stats["projected"] += 1
     gw, record_key, data, updated, version = row
     st = _Stage()
-    st.row, st.error, st.order = row, None, (str(gw), str(record_key))
+    st.row, st.error, st.order, st.slim = row, None, (str(gw), str(record_key)), False
     try:
-        t, digest, evidence = _decode_replica_task(record_key, data)
+        t, digest, evidence = _decode_replica_task(record_key, text(data))
         parts = str(record_key).split('/')
         if len(parts) == 3:
             owner_profile, board, tid = parts
@@ -116,6 +127,10 @@ def _stage(row: tuple, me: str, origin_profile: str) -> _Stage:
         return st
     gw = str(gw)
     st.tkey = (gw, owner_profile, board, tid)
+    st.sids = linked_sessions(t, me, origin_profile)
+    if not st.sids:
+        st.slim = True
+        t = {f: t[f] for f in SLIM_FIELDS if f in t}
     st.t = t
     st.legacy = {'key': record_key, 'version': version, 'digest': digest} if owner_profile is None else None
     st.seen = (updated or 0) / 1000.0
@@ -129,9 +144,31 @@ def _stage(row: tuple, me: str, origin_profile: str) -> _Stage:
     created = t.get('created_at')
     st.published = (board, tid, created) if owner_profile is not None and created is not None else None
     st.owner3 = (gw, board, tid)
-    st.sids = linked_sessions(t, me, origin_profile)
     st.historical = st.cards = None
     return st
+
+
+def _record(st: _Stage) -> dict[str, Any]:
+    """The stage's whole decoded record: kept for a record linking this origin, else decoded again from its text."""
+    if not st.slim:
+        return st.t
+    from hermes_cli.kanban_replica_rows import text
+    from hermes_cli.kanban_session_activity import _decode_replica_task
+
+    stats["rehydrated"] += 1
+    return _decode_replica_task(st.row[1], text(st.row[2]))[0]
+
+
+def _whole(st: _Stage, base: dict[str, Any], t: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(record, t)`` with the whole record: ``base`` is what the state holds for the stage (its record or its
+    unknown-status copy) and ``t`` is ``base`` or a fold of it, which reads ``base`` with links added."""
+    record = _record(st)
+    if record is st.t:
+        return record, t
+    whole = record
+    if base is st.unknown:
+        whole = {**record, 'reported_status': record.get('status'), 'status': 'unknown', 'unfinished': True}
+    return record, {**whole, **{k: v for k, v in t.items() if k not in base or base[k] is not v}}
 
 
 @dataclass
@@ -161,7 +198,7 @@ class _State:
 
 _lock = threading.Lock()
 _states: dict[str, _State] = {}
-stats = {"projected": 0, "rebuilt": 0, "historical": 0, "considered": 0}
+stats = {"projected": 0, "rebuilt": 0, "historical": 0, "considered": 0, "rehydrated": 0}
 
 
 def _new_state(tag: str, key: tuple) -> _State:
@@ -352,9 +389,10 @@ def _emit(s: _State, me: str, origin_profile: str, last_ok, stale: bool, fresh: 
         sids = st.sids if tk not in changed else linked_sessions(t, me, origin_profile)
         if not sids:
             continue
+        record, t = _whole(st, s.tasks[tk], t)  # only a slim twin a legacy alias folded links into decodes here
         if st.historical is None:
             stats["historical"] += 1
-            st.historical = historical_fields(st.t, tk)
+            st.historical = historical_fields(record, tk)
         owner_seen = s.seen.get(gw) or None
         synced = min(owner_seen, last_ok) if (owner_seen and last_ok) else (owner_seen or last_ok)
         inputs = (t, sids, tk in s.released, synced, stale, me, origin_profile)
