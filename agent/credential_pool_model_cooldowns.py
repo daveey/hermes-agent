@@ -60,6 +60,15 @@ def merge_model_cooldowns(*maps: Any) -> dict[str, float]:
 
 
 class CredentialPoolModelCooldownMixin:
+    def clear_verified_model_cooldown(self, observed: PooledCredential, model: str) -> bool:
+        """CAS-clear the observed model bench (or Codex 429) after verified recovery.
+
+        The caller owns verification; this method does no network I/O. A changed token,
+        failure generation, disabled account, or auth/billing failure refuses the clear.
+        """
+        from agent.credential_pool_recovery import clear_verified_model_cooldown
+        return clear_verified_model_cooldown(self, observed, model)
+
     def token_is_blocked(self, token: str, *, model: Optional[str] = None) -> bool:
         """Whether a pool cooldown blocks *token* for *model*.
 
@@ -118,7 +127,9 @@ class CredentialPoolModelCooldownMixin:
             if scoped.id != entry.id and not (failed_key and scoped.runtime_api_key == failed_key):
                 continue
             cooldowns = merge_model_cooldowns(scoped.model_cooldowns, {model: until})
-            self._adopt(scoped, persist=False, model_cooldowns=cooldowns)
+            recorded = {**(scoped.model_cooldown_recorded_at or {}), model: time.time()}
+            self._adopt(scoped, persist=False, model_cooldowns=cooldowns,
+                        model_cooldown_recorded_at=recorded)
         self._persist()
 
     def limit_state(self, models: Iterable[str]) -> Optional[dict[str, Any]]:

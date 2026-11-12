@@ -3588,6 +3588,7 @@ def _set_reset_from_vendor_headers(context: dict[str, Any], headers: Any) -> Non
 
 def extract_api_error_context(error: Exception) -> dict[str, Any]:
     """Extract structured rate-limit details from provider errors."""
+    from agent.request_bucket_context import request_bucket_context
     context: dict[str, Any] = {}
     body = getattr(error, "body", None)
     payload = (body.get("error") if isinstance(body.get("error"), dict) else body) if isinstance(body, dict) else None
@@ -3596,8 +3597,7 @@ def extract_api_error_context(error: Exception) -> dict[str, Any]:
         if isinstance(reason, str) and reason.strip():
             context["reason"] = reason.strip()
         message = payload.get("message") or payload.get("error_description")
-        if not message and isinstance(payload.get("error"), str):
-            # xAI uses a top-level string ``error`` beside a structured ``code``.
+        if not message and isinstance(payload.get("error"), str):  # xAI top-level string beside structured code
             message = payload.get("error")
         if isinstance(message, str) and message.strip():
             context["message"] = message.strip()
@@ -3622,7 +3622,7 @@ def extract_api_error_context(error: Exception) -> dict[str, Any]:
         delay = reset_delay_from_message(context.get("message") or "")
         if delay is not None:
             context["reset_at"] = time.time() + delay
-    return context
+    return request_bucket_context(error, context, now=time.time())
 
 
 def _requeue_pending_steer(agent, steer_text: str) -> None:

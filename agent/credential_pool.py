@@ -231,6 +231,8 @@ class PooledCredential:
     # usable for its sibling models.  Keep that observation separate from the
     # credential-wide status used for auth and billing failures.
     model_cooldowns: Optional[dict[str, float]] = None
+    model_cooldown_recorded_at: Optional[dict[str, float]] = None
+    model_cooldown_cleared_at: Optional[dict[str, float]] = None
     extra: dict[str, Any] = None  # type: ignore[assignment]
 
     def __post_init__(self):
@@ -1091,18 +1093,13 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 return
             rows = auth_mod._entry_ids(written)
             self._persisted_token_pairs = auth_mod._token_pairs_by_id(written)
+            from agent.credential_pool_model_state import adopt_persisted_row
             for entry in self._entries:
                 row = rows.get(entry.id)
                 pair = self._persisted_token_pairs.get(entry.id, (None, None))
-                # Reference-only rows are intentionally secret-free on disk; never dehydrate
-                # their live in-memory credential while adopting a concurrent generation.
-                if row is None or not any(pair):
-                    continue
-                # Adopt only rows the store overrode with a peer's newer pair; re-hydrating an
-                # unchanged row would replace the live object (and pull peer cooldown state
-                # merged into the written row) on every ordinary flush.
-                if pair != (entry.access_token, entry.refresh_token):
-                    self._replace_entry(entry, PooledCredential.from_dict(self.provider, row))
+                updated = adopt_persisted_row(entry, row, pair)
+                if updated is not entry:
+                    self._replace_entry(entry, updated)
 
     def _adopt(self, entry: PooledCredential, *, persist: bool = True, **updates: Any) -> PooledCredential:
         """``replace(entry, **updates)``, swap it into the pool, optionally persist."""
@@ -2021,6 +2018,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         reset`` run from another process while this pool is live is honoured the
         same way (#89415): the in-memory cooldown would otherwise outlive it.
         """
+        from agent.credential_pool_model_state import resync_model_state
+        entry = resync_model_state(self, entry)
         if entry.last_status not in {STATUS_EXHAUSTED, STATUS_DEAD}:
             return entry
         if entry.auth_type == AUTH_TYPE_OAUTH and not entry.refresh_token:

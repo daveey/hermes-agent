@@ -34,10 +34,11 @@ def _merge_disk_cooldown_state(
 
         # Model cooldowns are independent observations: keep the latest reset per model so a
         # writer that just cooled one model cannot erase another process's cooldown for another.
-        from agent.credential_pool_model_cooldowns import merge_model_cooldowns
-        merged_cooldowns = merge_model_cooldowns(disk_entry.get("model_cooldowns"), entry.get("model_cooldowns"))
-        merged = {**entry, "model_cooldowns": merged_cooldowns} if merged_cooldowns else entry
+        from agent.credential_pool_model_state import merge_model_state
+        merged = {**entry, **merge_model_state(disk_entry, entry)}
         disk_status_fields = {f: disk_entry.get(f) for f in _POOL_STATUS_FIELDS}
+        # Model reset receipts remain monotonic even when a newer account failure wins.
+        disk_status_fields["status_cleared_at"] = merged.get("status_cleared_at")
 
         mem_ts = _parse_absolute_timestamp(entry.get("last_status_at")) or 0.0
         cleared_ts = _parse_absolute_timestamp(disk_entry.get("status_cleared_at")) or 0.0
