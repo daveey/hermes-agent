@@ -340,9 +340,13 @@ def local_words(place: dict[str, Any]) -> str:
         if (place.get("admission_class") not in ("capacity", "urgent") and pools["regular"] is not None
                 and pools["regular_cap"] is not None and pools["regular"] >= pools["regular_cap"]):
             census += f"; regular pool full ({pools['regular']}/{pools['regular_cap']}), a normal card waits for it"
-        return (f"{words}, {census}; class {place['admission_class']}. "
-                "Queued, not stuck: check class/placement and available capacity; priority slots are marked-only. "
-                "Do not run its work outside the dispatcher")
+        words = f"{words}, {census}; class {place['admission_class']}"
+        pool_advice = ("Queued, not stuck: check class/placement and available capacity; priority slots are "
+                       "marked-only. Do not run its work outside the dispatcher")
+        if not skip:
+            return f"{words}. {pool_advice}"
+        words = f"last dispatcher skip of this ready episode: {skips.words(skip)} ({words})"
+        return words + ". " + (pool_advice if skips.is_ordering(skip) else skips.advice(skip))
     if place.get("running") is not None and place.get("limit") is not None:
         words += f", {place['running']}/{place['limit']} running"
     elif place.get("limit") is not None and "running" in place:

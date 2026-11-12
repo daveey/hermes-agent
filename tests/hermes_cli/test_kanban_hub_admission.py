@@ -1528,3 +1528,45 @@ def test_capacity_report_wait_starts_at_latest_ready_event_not_creation(board):
                          (started - 600, tid))
     entry, = report.capacity_report(conn, now_s=now, days=7)["cards"]
     assert (entry["ready_wait_p50_before_s"], entry["ready_wait_p50_after_s"]) == (600, 600)
+
+
+_POOLS_FULL = {"regular": 7, "regular_cap": 7, "priority": 0, "priority_cap": 3}
+_SCORE = {"total": 1100, "effective_priority": 1000, "class_rank": 0, "descendants": 0, "age_buckets": 1,
+          "failures": 0, "weights": {"class": 500, "unblock": 25, "age": 100, "failure": 25}}
+
+
+def test_pool_note_keeps_non_ordering_dispatcher_skip():
+    """An opted-in hub's pool census must not swallow the recorded dispatcher skip (kanban-dd62aef001)."""
+    from hermes_cli import kanban_dispatch_skip as skips
+    from hermes_cli import kanban_queue_position as qp
+    skip = {"reason": "pinned_quota_wall", "detail": "claude-opus-5-5 (anthropic)"}
+    note = qp.describe({"lane": "local", "ahead": 0, "running": 7, "limit": 7, "skip": skip,
+                        "admission_class": "normal", "admission_pools": dict(_POOLS_FULL),
+                        "admission_score": dict(_SCORE)})
+    assert note.startswith("last dispatcher skip of this ready episode: " + skips.words(skip)), note
+    assert "regular 7/7, priority 0/3" in note, note
+    assert "score 1100 (priority 1000" in note, note
+    assert "regular pool full (7/7), a normal card waits for it" in note, note
+    assert "class normal" in note, note
+    assert note.endswith(skips.advice(skip)), note
+    assert "check class/placement" not in note, note
+
+
+def test_pool_note_ordering_skip_keeps_pool_advice():
+    """A slot-ordering skip still names itself, then the class/placement advice (never a bump)."""
+    from hermes_cli import kanban_dispatch_skip as skips
+    from hermes_cli import kanban_queue_position as qp
+    skip = {"reason": "claim_deferred", "detail": "capacity"}
+    note = qp.describe({"lane": "local", "ahead": 2, "skip": skip, "admission_class": "normal",
+                        "admission_pools": dict(_POOLS_FULL)})
+    assert note.startswith("last dispatcher skip of this ready episode: " + skips.words(skip)), note
+    assert "regular pool full (7/7)" in note and "class normal" in note, note
+    assert "check class/placement" in note and "bump" not in note, note
+
+
+def test_pool_note_without_skip_is_unchanged():
+    from hermes_cli import kanban_queue_position as qp
+    note = qp.describe({"lane": "local", "ahead": 0, "admission_class": "capacity",
+                        "admission_pools": dict(_POOLS_FULL)})
+    assert note.startswith("waiting for a local slot: ~0 ahead, regular 7/7, priority 0/3; class capacity. "), note
+    assert "last dispatcher skip" not in note and "pool full" not in note, note
