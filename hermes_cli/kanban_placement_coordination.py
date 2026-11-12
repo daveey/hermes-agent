@@ -93,6 +93,55 @@ _ACCESS = (
 )
 
 
+# hub-read's subcommands (hub ``~/.hermes/bin/hub-read``): ``ssh hermes-hub <sub>`` runs that restricted reader,
+# not a shell. A bare ``ssh``, ``ssh hermes-hub <anything else>`` and ``ssh <other host>`` keep pinning.
+HUB_READ_SUBCOMMANDS = ("cat", "tail", "head", "ls", "grep", "sqlite", "status", "journal", "units", "git", "help")
+_HUB_READ_SSH = re.compile(r"\bssh[ \t]+hermes-hub[ \t]+(?:" + "|".join(HUB_READ_SUBCOMMANDS) + r")(?![\w-])",
+                           re.IGNORECASE)
+# A Hermes state path (same roots as ``kanban_placement.HERMES_STATE_PATH``) up to the next space, quote or bracket.
+_STATE_PATH = re.compile(r"(?:~|/home/[^/\s]+)/\.hermes/([^\s`'\"<>()\[\]{},;|]*)")
+
+
+def hub_read_roots(cfg) -> tuple:
+    """``kanban.placement.hub_read_roots`` as segment tuples (paths relative to ``~/.hermes``); () when unset.
+
+    Fails closed: a malformed list, or an absolute, empty or ``.``/``..`` entry, clears nothing."""
+    roots = cfg.get("hub_read_roots") if isinstance(cfg, dict) else None
+    if not isinstance(roots, list):
+        return ()
+    out = []
+    for root in roots:
+        segs = tuple(root.strip().rstrip("/").split("/")) if isinstance(root, str) else ()
+        if segs and not root.strip().startswith("/") and all(s not in ("", ".", "..") for s in segs):
+            out.append(segs)
+    return tuple(out)
+
+
+def _under_roots(path: str, roots) -> bool:
+    segs = path.rstrip(".:!?").rstrip("/").split("/")
+    if any(s in ("", ".", "..") for s in segs):
+        return False
+    return any(tuple(segs[:len(r)]) == r for r in roots)
+
+
+def without_read_paths(text, cfg, *, target=None, requires=None):
+    """``text`` minus ``~/.hermes/<p>`` paths under :func:`hub_read_roots`, for a declared and attested ``hub:read``.
+
+    Only the path token goes, so a marker that merely names the file being read (``hermes-sync`` in
+    ``~/.hermes/logs/hermes-sync.log``, ``cron`` in ``~/.hermes/cron/...``) stops pinning, while every marker outside
+    it (a write verb such as ``restart the gateway`` or ``systemctl``) still pins. [daveey] t_01a1cf7175102c70"""
+    roots = hub_read_roots(cfg)
+    if not roots or "hub:read" not in set(requires or []):
+        return text
+    if not attested(destinations(cfg, target), access_requirements(requires)):
+        return text
+    return _strip_read_paths(text, roots)
+
+
+def _strip_read_paths(text, roots):
+    return _STATE_PATH.sub(lambda m: "" if _under_roots(m.group(1), roots) else m.group(0), text)
+
+
 def requirements(text):
     """Return required labels and an unsupported-action refusal, without changing text."""
     labels = set()
@@ -238,6 +287,9 @@ def access_text(text, cfg, *, target=None, requires=None):
     labels = access_requirements(declared)
     if not labels or not attested(destinations(cfg, target), labels):
         return text
+    if "hub:read" in declared:
+        # The restricted reader's own invocation, and reads under its roots (``kanban.placement.hub_read_roots``).
+        text = _strip_read_paths(_HUB_READ_SSH.sub("", text), hub_read_roots(cfg))
     for rx, needed in _ACCESS:
         if declared & needed:
             text = rx.sub("", text)

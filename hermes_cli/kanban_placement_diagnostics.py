@@ -48,10 +48,13 @@ def _home_hits(full: str, reqs: list, c):
     from hermes_cli.kanban_published_worktree import without_published_worktrees
 
     marker_full = coordination.access_text(coordination.marker_text(full), c.raw, requires=reqs)
+    # Other markers read the whole text minus only the hub-read-root paths a declared, attested hub:read clears
+    # (HERMES_STATE_PATH included: never marker_text's output, which drops ``token-broker`` from a path).
+    read_full = coordination.without_read_paths(full, c.raw, requires=reqs)
     extra = c.raw.get("extra_home_markers")
     exemptible = (p.HUB_CLI_COMMAND, r"\btoken-broker\b", r"\bssh\b", r"\bon the hub\b", r"\bthe hub's\b",
                   r"\bjournalctl\b", r"\bkanban\.db\b")
-    pats = [(rx, rx, marker_full if rx in exemptible else full)
+    pats = [(rx, rx, marker_full if rx in exemptible else read_full)
             for rx in p.HOME_GATEWAY_MARKERS if rx != p.HOST_WORKTREE_PATH]
     pats += [(rx, "operator", full) for rx in extra] if isinstance(extra, list) else []
     for rx, name, text in pats:
