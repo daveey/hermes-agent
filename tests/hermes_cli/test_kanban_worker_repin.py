@@ -29,6 +29,65 @@ gws = node_fixtures.gws
 svc = node_fixtures.svc
 
 
+@pytest.fixture(autouse=True)
+def pool_registry(monkeypatch):
+    from hermes_cli import kanban_worker_node as wn
+    monkeypatch.setattr(wn, "registry", lambda: {"machines": {
+        "worker-1": {"labels": ["pool:worker", "capability:hub-write"]}}})
+
+
+@pytest.mark.parametrize("status", ["ready", "scheduled", "todo"])
+@pytest.mark.parametrize("available", [False, True])
+def test_cli_started_pool_requires_live_complete_label_match(conn, monkeypatch, status, available):
+    from hermes_cli import kanban as kcli
+    from hermes_cli import kanban_worker_node as wn
+    tid = _acknowledged(conn, status=status, started_at=1, requires=json.dumps(["hub:write"]))
+    target = ["pool:worker", "capability:hub-write"]
+    machines = {
+        "plain": {"labels": ["pool:worker"]},
+        "held": {"labels": target, "hold": True},
+        "offline": {"labels": target, "state": "offline"},
+    }
+    if available:
+        machines["capable"] = {"labels": target}
+    monkeypatch.setattr(wn, "registry", lambda: {"machines": machines})
+    before = list(conn.iterdump())
+    calls = []
+
+    class Hub:
+        ident = NoCallHub.ident
+
+        def repin(self, board, **kw):
+            calls.append(kw)
+            return {"version": 5}
+
+    monkeypatch.setattr(ksc, "load_identity", lambda cfg=None: Hub.ident)
+    monkeypatch.setattr(ksc, "Hub", lambda *a, **kw: Hub())
+    monkeypatch.setattr(ksc, "pull", lambda *a, **kw: None)
+    out = json.loads(kcli.run_slash(f'move {tid} --pool --reason "queue" --json'))
+    if available:
+        assert out["ok"] and out["matches"] == ["capable"], out
+        assert calls == [{"task_id": tid, "expected_revision": 4, "runs_on": target}]
+        assert _moved(conn, tid)[-1]["matches"] == ["capable"]
+        text = kcli.run_slash(f'move {tid} --pool --reason "queue"')
+        assert "eligible: capable" in text
+    else:
+        assert not out["ok"] and out["reason_code"] == "no_machine", out
+        assert out["error"] == f"no active, unheld machine has every label in {target}"
+        assert calls == []
+        assert list(conn.iterdump()) == before  # row, reservation, outbox and every event unchanged
+
+
+def test_pool_registry_unavailable_refuses_without_write(conn, monkeypatch):
+    from hermes_cli import kanban_worker_node as wn
+    tid = _acknowledged(conn, started_at=1)
+    monkeypatch.setattr(wn, "registry", lambda: None)
+    before = list(conn.iterdump())
+    out = km.move_queued(conn, tid, runs_on=["pool:worker"], reason="queue", hub=NoCallHub())
+    assert out["reason_code"] == "registry_unavailable"
+    assert list(conn.iterdump()) == before
+
+
 class RepinHub(FakeHub):
     """FakeHub plus the Board's ``repinWorker`` (worker/src/worker_placement.ts): creator only, ready and unleased,
     exact revision, then clear policy + set the pin in one Board write."""
@@ -428,7 +487,7 @@ def test_cli_move_pool_repins_a_started_worker_first_card(gws, svc, monkeypatch)
     assert _local(origin.conn, tid) == (None, ["pool:worker"], "ready")
     [ev] = _moved(origin.conn, tid)
     assert ev["repinned"] is True and ev["runs_on"] == ["pool:worker"] and ev["previous_runs_on"] is None, ev
-    assert out["matches"] == [] == ev["matches"]  # the queue names no machine: whichever worker is free claims it
+    assert out["matches"] == ["worker-1"] == ev["matches"]
 
 
 @pytest.mark.parametrize("status", ["scheduled", "todo"])

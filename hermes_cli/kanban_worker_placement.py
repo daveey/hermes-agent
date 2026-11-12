@@ -55,7 +55,7 @@ QUEUED_WHY = ("portable: queued for any machine labelled {label} (kanban.placeme
               "with a free slot claims it through the Board lease")
 
 
-def queue_decision(args, cfg, gateway, pin, origin_intent, machine_ok=None):
+def queue_decision(args, cfg, gateway, pin, machine_ok=None):
     """``runs_on: [<pool label>, *coordination labels]`` for a portable card of a ``worker_queue`` gateway, or None.
 
     One queue instead of a machine pin: no worker is chosen at creation, so a held or full worker never strands the
@@ -66,7 +66,6 @@ def queue_decision(args, cfg, gateway, pin, origin_intent, machine_ok=None):
     from hermes_cli import kanban_placement as placement
     from hermes_cli import kanban_placement_coordination as coordination
 
-    del origin_intent  # kept for callers; it does not change execution routing
     label = placement._Cfg(cfg).queue_label(gateway)
     if not label or pin not in ("", "auto") or args.get("runs_on") is not None:
         return None
@@ -84,7 +83,7 @@ def creation_decision(args, cfg, gateway, pin, origin_intent, machine_ok=None, q
 
     if pin in ("local", "here", (gateway or "").lower()):
         return {"where": "local", "why": PINNED_LOCAL_WHY}
-    queued = queue_decision(args, cfg, gateway, pin, origin_intent, machine_ok) if queue else None
+    queued = queue_decision(args, cfg, gateway, pin, machine_ok) if queue else None
     if queued is not None:
         return queued
     pools = cfg.get("worker_pools")
@@ -208,7 +207,7 @@ def cli_runs_on(conn, args, body, workspace_kind, workspace_path, board, *, assi
         return None
     fields = _cli_fields(args, body, workspace_kind, workspace_path, board, assignee=assignee)
     fields.pop("runs_on", None)
-    result = queue_decision(fields, cfg, placement.reg.self_gateway(), "auto", None)
+    result = queue_decision(fields, cfg, placement.reg.self_gateway(), "auto")
     return (result or {}).get("runs_on")
 
 

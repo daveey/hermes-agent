@@ -573,7 +573,7 @@ def test_origin_bound_explicit_pins_still_win(hub, origin_ok, monkeypatch):
 
 def test_queue_decision_does_not_exclude_courier_creation():
     from hermes_cli import kanban_worker_placement as wp
-    out = wp.queue_decision({"title": "summarise CI"}, CFG, HUB, "auto", {"request_id": "r"}, lambda _label: True)
+    out = wp.creation_decision({"title": "summarise CI"}, CFG, HUB, "auto", {"request_id": "r"}, lambda _label: True)
     assert out is not None and out["runs_on"] == [POOL], out
 
 
