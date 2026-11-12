@@ -310,6 +310,10 @@ def fold_into(event, waiting, identity):
     old_cards = descriptor.get('kanban_cards') or _legacy_cards(str(waiting['payload'].get('text') or ''))
     if not descriptor.get('kanban_cards') and guidance and old_cards[0]['text'].endswith(guidance):
         old_cards[0]['text'] = old_cards[0]['text'][:-len(guidance)].rstrip()
+    if not guidance and descriptor.get('kanban_cards'):
+        # [daveey] A remote notice carries no guidance: keep the waiting batch's, or a local wake folded under
+        # it loses its "inspect the board, don't re-decompose" line (review t_01a1d03acceb95c1).
+        guidance = _guidance(str(waiting['payload'].get('text') or ''), old_cards) or ''
     # The stored cards stay as delivered; the live relabel is redone each time the batch is rebuilt.
     cards = _merge(old_cards, new_cards)
     event.text = _compose(cards, guidance)
