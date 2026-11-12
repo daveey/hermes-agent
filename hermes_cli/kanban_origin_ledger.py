@@ -431,6 +431,7 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
         # still raises if the authoritative store itself is broken.
         fresh = False
     result = []
+    infos: dict[str, tuple] = {}  # owner gateway -> (decoded gateway/info, or the error decoding it)
     try:
         with closing(_ro(path)) as conn:
             from hermes_cli.kanban_origin_legacy import aliases_for_projection
@@ -459,11 +460,21 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     # A successful origin pull does not prove the owner could
                     # read this board. Consume the collector's qualified scope
                     # inventory; missing/ambiguous inventory is not healthy.
-                    inventory = source.execute(
-                        "SELECT data FROM replica WHERE gw=? AND coll='gateway' AND key='info'",
-                        (owner['gateway'],)).fetchone()
+                    # [daveey] Decoded once per owner gateway per projection, not once per obligation: the info row
+                    # lists every scope the owner collects, and every hub card re-decoded it under ``_links_lock``.
+                    gw_info = infos.get(owner['gateway'])
+                    if gw_info is None:
+                        inventory = source.execute(
+                            "SELECT data FROM replica WHERE gw=? AND coll='gateway' AND key='info'",
+                            (owner['gateway'],)).fetchone()
+                        try:
+                            gw_info = infos[owner['gateway']] = (json.loads(inventory[0]) if inventory else {}, None)
+                        except (ValueError, TypeError) as exc:
+                            gw_info = infos[owner['gateway']] = (None, exc)
                     try:
-                        info = json.loads(inventory[0]) if inventory else {}
+                        if gw_info[1] is not None:
+                            raise gw_info[1]
+                        info = gw_info[0]
                         scopes = info.get('task_scopes')
                         if not isinstance(scopes, list):
                             scopes = []

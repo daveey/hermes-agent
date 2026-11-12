@@ -125,3 +125,40 @@ def test_fresh_origin_sync_does_not_make_unreadable_owner_scope_current(world, s
     row = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1001)[0]
     assert row['status'] == 'unknown'
     assert row['unfinished'] and row['stale']
+
+
+@pytest.mark.parametrize('info', [{'gateway': 'owner', 'task_scopes': [
+    {'profile': 'work', 'board': 'build', 'state': 'ok', 'observed_at': 1000}]}, '{bad'])
+def test_projection_decodes_each_owner_inventory_once(world, monkeypatch, info):
+    """[daveey] Every obligation to one owner reads that owner's ``gateway/info`` row: once per projection."""
+    from hermes_cli import kanban_origin
+
+    path, replica, binding = world
+    second = {**binding, 'binding_id': 'binding-0002', 'task_record_key': 'work/build/t_two',
+              'owner': {**binding['owner'], 'task_id': 't_two'}}
+    publish(replica, second)
+    accept((path, replica, second), request_id='request-0002')
+    publish(replica, binding)
+    accept(world)
+    tasks = [(b['task_record_key'], {**b['owner'], 'id': b['owner']['task_id'], 'status': 'running',
+                                     'origin_bindings': [b]}) for b in (binding, second)]
+    with sqlite3.connect(replica) as db:
+        db.execute('DELETE FROM replica')
+        db.executemany("INSERT INTO replica VALUES ('owner','tasks',?,3,?)", [(k, json.dumps(t)) for k, t in tasks])
+        db.execute('CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)')
+        db.execute("INSERT INTO meta VALUES ('last_ok','1000')")
+        db.execute("INSERT INTO replica VALUES ('owner','gateway','info',5,?)",
+                   (info if isinstance(info, str) else json.dumps(info),))
+    statements = []
+    real_ro = kanban_origin._ro
+
+    def traced(p, *args, **kwargs):
+        conn = real_ro(p, *args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(kanban_origin, '_ro', traced)
+    rows = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1001)
+    assert sorted(r['id'] for r in rows) == ['t_one', 't_two']
+    assert [r['stale'] for r in rows] == [isinstance(info, str)] * 2
+    assert sum("key='info'" in s for s in statements) == 1
