@@ -5,7 +5,10 @@ cannot take an idle pause. One refusal is ordinary (a busy gateway). The same ga
 update after update is a wall nothing retries through: on 2026-11-11 a pinned Ask Eve gateway
 answered ``unsupported`` to eleven hub updates in a row and the only trace was a log line per
 attempt. From the third consecutive deferral naming the same gateway, this files (or keeps) one
-card for an agent to clear it. [daveey]
+card for an agent to clear it, but only once that streak is ``MIN_STREAK_S`` old: the instant
+hub drainer retries a refused apply several times inside its retry window and then cools off
+10 min, so only a streak older than 15 min has outlived a cool-off and been refused again;
+three quick retries against a gateway busy with a chat turn are not a wall. [daveey]
 """
 from __future__ import annotations
 
@@ -23,6 +26,9 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 AUTHOR = "update-pause"
 THRESHOLD = 3
+#: A streak younger than this (seconds from its first to its latest deferral) files nothing,
+#: whatever its count: one instant-drainer retry burst plus its 10 min cool-off fits inside it.
+MIN_STREAK_S = 900
 #: While the owner card stays open, repeat the evidence as a comment every this many deferrals.
 REFRESH_EVERY = 12
 _RESULT = "__HERMES_UPDATE_PAUSE_DEFERRAL_TASK__="
@@ -54,6 +60,23 @@ def _write(units: dict) -> None:
     os.replace(tmp, path)
 
 
+def _now() -> datetime:
+    """Clock seam for tests."""
+    return datetime.now(UTC)
+
+
+def _streak_outlasts_floor(first_at, last: datetime) -> bool:
+    """True when the streak began at least ``MIN_STREAK_S`` before *last*. An unreadable
+    ``first_at`` counts as old enough: a corrupt record must not hide a real wall."""
+    try:
+        first = datetime.fromisoformat(str(first_at))
+        if first.tzinfo is None:
+            first = first.replace(tzinfo=UTC)
+        return (last - first).total_seconds() >= MIN_STREAK_S
+    except (TypeError, ValueError, OverflowError):
+        return True
+
+
 def note_pause_ok() -> None:
     """The pause went through (or had nothing to stop): no gateway is on a deferral streak."""
     try:
@@ -65,13 +88,15 @@ def note_pause_ok() -> None:
 def note_deferral(names, reason: str) -> list[str]:
     """Record that this update was deferred by the gateways *names*; the owner card ids filed.
 
-    Only CONSECUTIVE deferrals count: a gateway this deferral does not name starts over. Best
+    Only CONSECUTIVE deferrals count: a gateway this deferral does not name starts over, and a
+    streak younger than ``MIN_STREAK_S`` files nothing however many deferrals it holds. Best
     effort throughout: a streak that cannot be written or a card that cannot be filed never
     changes the update's own verdict."""
     names = [n for n in dict.fromkeys(names or ()) if isinstance(n, str) and n]
     filed: list[str] = []
     try:
-        before, now = _read(), datetime.now(UTC).isoformat(timespec="seconds")
+        before, clock = _read(), _now()
+        now = clock.isoformat(timespec="seconds")
         units = {}
         for name in names:
             prior = before.get(name)
@@ -83,7 +108,7 @@ def note_deferral(names, reason: str) -> list[str]:
         log.warning("Could not record the update pause deferral: %s", exc)
         return filed
     for name, entry in units.items():
-        if entry["count"] < THRESHOLD:
+        if entry["count"] < THRESHOLD or not _streak_outlasts_floor(entry["first_at"], clock):
             continue
         task_id = report(name, entry)
         owner = task_id or "NOT FILED (see agent.log)"

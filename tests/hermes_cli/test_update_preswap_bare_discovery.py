@@ -31,6 +31,7 @@ def bare_probes(tmp_path, monkeypatch):
     monkeypatch.setattr(update_receipt, "_gateway_code_root", lambda pid, home: tmp_path / "core")
     monkeypatch.setattr(scope, "update_scope_homes", lambda: {tmp_path.resolve()})
     monkeypatch.setattr(deferrals, "state_path", lambda: tmp_path / "streak.json")
+    monkeypatch.setattr(deferrals, "MIN_STREAK_S", 0)  # attribution under test, not the streak floor
     monkeypatch.setattr(deferrals, "report", Mock())
     # The sole mutation seam: discovery and scope classification remain real.
     stop = Mock()
