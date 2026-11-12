@@ -193,11 +193,10 @@ def test_the_authority_turn_plays_the_opening_and_skips_the_note_while_a_card_wa
 
 
 async def _settled(desktop, session_id):
-    """The opening turn's lease released: a delete is not refused as a write in flight."""
-    def idle():
-        with desktop.db._read_ctx() as conn:
-            return not desktop.db._guarded_ids(conn, [session_id])
-    await async_wait_until(idle, timeout=10)
+    """Wait for the opening drain, including admission settlement after lease release."""
+    task = desktop.authority.sessions[session_id].task
+    assert task is not None, "onboarding.start did not schedule its opening turn"
+    await asyncio.wait_for(asyncio.shield(task), timeout=30)
 
 
 @pytest.mark.asyncio
