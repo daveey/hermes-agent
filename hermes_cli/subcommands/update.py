@@ -108,6 +108,15 @@ def build_update_parser(subparsers, *, cmd_update: Callable) -> None:
         ),
     )
     update_parser.add_argument(
+        "--up-to", dest="up_to", default=None, metavar="SHA",
+        help=(
+            "Fast-forward main only as far as SHA (a full 40-hex commit on origin/main's "
+            "first-parent line, after HEAD) instead of the tip. Git source installs on branch "
+            "main only; skips the fork's upstream sync and push for this run. Refused with "
+            "--branch, --channel, --set-channel, --check or --plan."
+        ),
+    )
+    update_parser.add_argument(
         "--no-gateway-restart", action="store_true", default=False,
         help="Update code and dependencies but defer the fleet restart. Use for updates "
              "running inside a gateway cgroup, then restart gateways separately.",

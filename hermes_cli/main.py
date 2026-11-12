@@ -2120,11 +2120,15 @@ def _update_preflight_handled(args) -> bool:
     from hermes_cli.config import is_managed, managed_error
     from hermes_cli.update_channel import handle_metadata_args
     from hermes_cli.update_cmd_common import _record_stop
+    from hermes_cli.update_up_to import refuse, refuse_unsupported_invocation, requested
 
+    refuse_unsupported_invocation(args)  # --up-to with another target or a read-only mode: exit 1
     if handle_metadata_args(args, PROJECT_ROOT):
         sys.exit(0)
     if is_managed():
         managed_error("update Hermes Agent")
+        if up_to := requested(args):
+            refuse(up_to, "this install is package-managed", without_receipt="refused")
         if not any(getattr(args, flag, False) for flag in ("plan", "check", "list_venv_holders")):
             _record_stop("managed_install", without_receipt="refused")  # an update attempt: a metrics row only
         return True
@@ -2144,16 +2148,9 @@ def _update_preflight_handled(args) -> bool:
         return True
 
     if getattr(args, "list_venv_holders", False):
-        # Read-only twin of the Windows venv-holder refusal (#117246): same scan and classifiers,
-        # machine-readable, exit 3 when holders remain so automation can stop those PIDs and retry.
-        import json
-
-        from hermes_cli.update_cmd_windows import VENV_HOLDERS_EXIT, list_venv_holders
-
-        holders = list_venv_holders()
-        print(json.dumps(holders, indent=2))
-        if holders:
-            sys.exit(VENV_HOLDERS_EXIT)
+        # Read-only twin of the Windows venv-holder refusal (#117246): same scan and classifiers.
+        from hermes_cli.update_cmd_windows import print_venv_holders
+        print_venv_holders()
         return True
 
     # Image/package-managed admission gate (#91277 Phase 3): baked provenance marker first (fail-closed
@@ -2169,6 +2166,8 @@ def _update_preflight_handled(args) -> bool:
     if refusal is not None:
         print(refusal.message)
         record_refusal_receipt(refusal)
+        if up_to := requested(args):  # docker/nix/apt: not a git source install
+            refuse(up_to, "this install is not updated from a git checkout", without_receipt="refused")
         sys.exit(2)
 
     if getattr(args, "check", False):
