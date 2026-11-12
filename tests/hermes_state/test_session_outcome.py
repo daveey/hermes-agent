@@ -477,6 +477,46 @@ def test_failed_turn_with_no_live_work_is_turn_failed_not_judged(db):
     assert so.derive_outcome("chat", db=db)["reason"] == "turn_failed"
 
 
+def test_a_notice_triggered_failed_turn_with_no_finish_reason_is_turn_failed_not_judged(db):
+    # A kanban notice ran a turn that hit a provider 429: the closer typed its error row failed_turn with a NULL
+    # finish_reason. _lost_request skips it (the trigger was a notice), so only the tail row can name it.
+    so.register_outcome_judge(lambda sid, text, source=None: False)
+    say(db, "assistant", SUMMARY)
+    say(db, "user", "t_x done; PR1131 request_changes", display_kind=so._NOTICE_KIND)
+    failed_turn(db, "Couldn't process the notice: HTTP 429 rate limit. Retrying once at 21:59 PT.")
+    out = so.derive_outcome("chat", db=db)
+    assert (out["kind"], out["reason"]) == ("unresolved", "turn_failed")
+    assert "judged" not in out
+
+
+def test_an_untyped_legacy_failed_turn_boundary_tail_is_turn_failed(db):
+    from agent.turn_failure_copy import PARTIAL_FAILED_TURN_NOTICE
+    so.register_outcome_judge(lambda sid, text, source=None: True)
+    say(db, "user", "card moved", display_kind=so._NOTICE_KIND)
+    say(db, "assistant", PARTIAL_FAILED_TURN_NOTICE)  # persisted before the closers typed it
+    assert so.derive_outcome("chat", db=db)["reason"] == "turn_failed"
+
+
+def test_a_reply_quoting_the_failed_turn_notice_is_still_judged(db):
+    from agent.turn_failure_copy import FAILED_TURN_NOTICE
+    so.register_outcome_judge(lambda sid, text, source=None: True)
+    say(db, "user", "what does the error row say?")
+    say(db, "assistant", f"It says: {FAILED_TURN_NOTICE}")
+    assert so.derive_outcome("chat", db=db)["kind"] == "done"
+
+
+@pytest.mark.parametrize("typed", [True, False])
+def test_an_interrupted_automation_boundary_tail_is_not_turn_failed(db, typed):
+    from agent.turn_failure_copy import AUTOMATION_INTERRUPTED_NOTICE
+    so.register_outcome_judge(lambda sid, text, source=None: True)
+    say(db, "user", "a cron delivery", display_kind="cron_delivery")
+    if typed:
+        failed_turn(db, AUTOMATION_INTERRUPTED_NOTICE)
+    else:
+        say(db, "assistant", AUTOMATION_INTERRUPTED_NOTICE)
+    assert so.derive_outcome("chat", db=db)["kind"] == "done"
+
+
 def test_a_real_reply_after_the_failure_clears_it(db, board):
     add_card(board, "t_run", "chat", "scheduled")
     say(db, "user", "archive my receipts")
