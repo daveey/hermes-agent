@@ -126,6 +126,43 @@ def test_claim_persists_immutable_regular_receipt(board):
                               (task_id,)).fetchone()) == ("regular", "capacity")
 
 
+@pytest.mark.parametrize("kind,expected", [("capacity", 2), ("urgent", 3)])
+def test_concurrent_cross_board_claims_obey_origin_and_pool_caps(board, monkeypatch, kind, expected):
+    conn, home = board
+    configure(home, limit=None)
+    for index in range(7):
+        assert kb.claim_task(conn, task(conn, title=f"regular {index}"))
+    configure(home, cap=7)
+    with (home / "config.yaml").open("a") as config:
+        config.write("    priority_slots: 3\n")
+    advisory(home)
+    monkeypatch.setattr(cm, "sample", fake_sample(10))
+    candidates = []
+    for index in range(4):
+        folder = kb.boards_root() / f"pool-{index}"
+        folder.mkdir(parents=True)
+        (folder / "board.json").write_text("{}")
+        path = folder / "kanban.db"
+        with closing(kbc.connect(path)) as other:
+            tid = task(other)
+            kb.edit_task(other, tid, admission_class=kind, admission_frees="frees: worker slots")
+            candidates.append((path, tid))
+
+    def attempt(candidate):
+        path, tid = candidate
+        with closing(kbc.connect(path)) as other:
+            return kb.claim_task(other, tid)
+
+    for _ in range(4):
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(attempt, candidates))
+    detail = {"pools": {"regular": 0, "priority": 0}, "capacity_origins": {}}
+    assert mm.active_card_runs(detail=detail) == 7 + expected
+    assert detail["pools"] == {"regular": 7, "priority": expected}
+    if kind == "capacity":
+        assert list(detail["capacity_origins"].values()) == [2]
+
+
 def test_queue_note_reports_pools_and_marked_lane_order(board, monkeypatch):
     from hermes_cli import kanban_queue_position as qp
     conn, home = board

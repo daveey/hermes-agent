@@ -134,6 +134,38 @@ def rig(tmp_path, monkeypatch):
         r.close()
 
 
+@pytest.mark.parametrize("lane", LANES)
+@pytest.mark.parametrize("kind,regular,priority,pool", [("normal", 6, 3, "regular"), ("urgent", 7, 2, "priority")])
+def test_enabled_pools_exclude_only_own_echo_and_preserve_receipt(rig, lane, kind, regular, priority, pool):
+    import json
+
+    rig.fill(regular)
+    text = (rig.home / "config.yaml").read_text().replace(
+        "    cpu_busy_below_pct: 50\n", "    cpu_busy_below_pct: 50\n    priority_slots: 3\n")
+    (rig.home / "config.yaml").write_text(text)
+    for _ in range(priority):
+        marked = rig.card()
+        kb.edit_task(rig.conn, marked, admission_class="urgent")
+        rig.round()
+        assert kb.claim_task(rig.conn, marked)
+    candidate = rig.card(lane)
+    kb.edit_task(rig.conn, candidate, admission_class=kind)
+    rig.round()
+    seen = rig.echo_between_gate_and_txn()
+    assert claim(rig.conn, candidate, lane)
+    rows = rig.conn.execute("SELECT uid,admission_pool,admission_class,admission_origin FROM task_runs WHERE task_id=?", (candidate,)).fetchall()
+    assert len(rows) == 1
+    receipt = tuple(rows[0])
+    assert receipt[0] == seen["gate"].lease.run_uid
+    assert receipt[1:3] == (pool, kind)
+    evidence = json.loads(rig.conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='claimed' AND json_extract(payload,'$.hub_admission') IS NOT NULL", (candidate,)).fetchone()[0])["hub_admission"]
+    assert evidence["excluded_run_uid"] == receipt[0]
+    assert evidence["active_after"] == regular + priority
+    assert evidence["active_before"] == regular + priority + 1
+    rig.round()
+    assert tuple(rig.conn.execute("SELECT uid,admission_pool,admission_class,admission_origin FROM task_runs WHERE task_id=?", (candidate,)).fetchone()) == receipt
+
+
 def test_frozen_counter_shape_own_lockless_echo_counts_foreign_does_not(rig):
     """The counter semantics F5 measured, through the real function on a real board: own-holder lockless counts,
     foreign-holder lockless does not. The generic counter is deliberately unchanged by the fix."""
