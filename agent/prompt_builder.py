@@ -1011,9 +1011,8 @@ def _format_backend_probe(output: str) -> str:
 
 
 def _probe_remote_backend(env_type: str) -> str | None:
-    """Describe the active non-local backend via a live probe; None if it failed (cached, failures included).
-    None in a hosted scope: the probe builds and tears down a throwaway environment, and a hosted agent's
-    only environment is its own sandbox."""
+    """Describe the active non-local backend via a live probe; None if it failed (cached, failures included)
+    or in a hosted scope (the probe's throwaway environment; a hosted agent's only one is its own sandbox)."""
     from hermes_constants import hermes_home_key
     from tools.hosted_tool_policy import host_feature_enabled
     if not host_feature_enabled("backend_probe"):
