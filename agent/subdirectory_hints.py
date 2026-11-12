@@ -145,7 +145,10 @@ class SubdirectoryHintTracker:
         # AGENTS.md/CLAUDE.md injection at startup must not get the same files spliced into
         # tool results later — cron jobs relaying exact stdout leaked them to chat (#9441).
         self.enabled = enabled
-        self.working_dir = Path(working_dir or os.getcwd()).resolve()
+        if not working_dir:
+            from agent.runtime_cwd import process_cwd_or_fallback
+            working_dir = process_cwd_or_fallback()
+        self.working_dir = Path(working_dir).resolve()
         # $HOME is not a project (#76902): the packaged Desktop app with no default project
         # dir configured resolves its cwd (and TERMINAL_CWD) to home, and the containment
         # check is then vacuously true for the whole home subtree — every AGENTS.md /

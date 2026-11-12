@@ -1973,7 +1973,11 @@ def build_context_files_prompt(
 
     if safe_worker_enabled():
         return ""
-    cwd_path = Path(cwd if cwd is not None else os.getcwd()).resolve()
+    if cwd is None:
+        from agent.runtime_cwd import process_cwd_or_fallback  # a deleted process cwd must not kill the turn
+        cwd_path = Path(process_cwd_or_fallback()).resolve()
+    else:
+        cwd_path = Path(cwd).resolve()
     global_paths = global_context_file_paths(home_override)
     if _project_context_suppressed(cwd, cwd_path, allow_install_tree_fallback):
         logger.warning(

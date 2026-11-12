@@ -114,9 +114,35 @@ def process_cwd() -> str:
         return ""
 
 
+_deleted_cwd_warned = False
+
+
+def process_cwd_or_fallback() -> str:
+    """The process cwd, or — when it is gone (a Kanban workspace removed and recreated mid-run leaves
+    the worker in a deleted inode) — the first existing of: the scope's TERMINAL_CWD, the Kanban
+    workspace (HERMES_KANBAN_WORKSPACE), $HOME. Logs one warning per process. The turn path (system
+    prompt rebuild at compaction, context-file discovery) reads through this so a deleted cwd
+    degrades the prompt instead of killing the turn."""
+    global _deleted_cwd_warned
+    cwd = process_cwd()
+    if cwd:
+        return cwd
+    label, chosen = "HOME", os.path.expanduser("~")
+    for name, raw in (("TERMINAL_CWD", scope_terminal_cwd()),
+                      ("HERMES_KANBAN_WORKSPACE", os.environ.get("HERMES_KANBAN_WORKSPACE", ""))):
+        path = os.path.expanduser(raw.strip()) if raw and raw.strip() else ""
+        if path and os.path.isdir(path):
+            label, chosen = name, path
+            break
+    if not _deleted_cwd_warned:
+        _deleted_cwd_warned = True
+        logger.warning("process working directory was deleted (or is unreadable); using %s=%s instead", label, chosen)
+    return chosen
+
+
 def resolve_agent_cwd() -> Path:
-    """Configured cwd, else the launch dir (os.getcwd()'s OSError on a deleted cwd deliberately propagates)."""
-    return _resolve_configured_cwd(override_is_final=False) or Path(os.getcwd())
+    """Configured cwd, else the launch dir; a deleted launch dir falls back via ``process_cwd_or_fallback``."""
+    return _resolve_configured_cwd(override_is_final=False) or Path(process_cwd_or_fallback())
 
 
 def resolve_context_cwd(*, include_session_override: bool = True) -> Path | None:
