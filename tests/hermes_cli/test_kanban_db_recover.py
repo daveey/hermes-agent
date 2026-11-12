@@ -430,6 +430,44 @@ def test_stale_index_entries_of_deleted_rows_are_not_filled_back_in(home):
     assert after == before
 
 
+def test_garbage_scan_row_with_a_deleted_rowid_does_not_hide_its_stale_index_entry(home, monkeypatch):
+    """A damaged leaf can make a scan parse garbage cells and return rows with arbitrary rowids. One that
+    lands on a deleted row's rowid (still listed by a stale index entry) and fails NOT NULL is dropped by the
+    insert; it must not skip that rowid's stale lookup, so the backup fill can't resurrect the deleted row."""
+    path = home / "kanban.db"
+    _make_board(path)
+    shutil.copy2(path, path.with_name(path.name + ".corrupt.0123456789abcdef.bak"))
+    conn = sqlite3.connect(path)
+    deleted = [r[0] for r in conn.execute("SELECT id FROM task_events ORDER BY id DESC LIMIT 40")]
+    ncols = len(conn.execute("PRAGMA table_info(task_events)").fetchall())
+    conn.close()
+    _delete_behind_the_indexes(path, deleted)
+    before = _payloads(path)
+    lost = _damage_table(path, "task_events")
+    assert not set(lost) & set(deleted)
+    victim = deleted[0]
+    real_read, injected = rec._read_rows, []
+
+    def read_with_garbage(conn, sql, params=()):
+        rows, stopped = real_read(conn, sql, params)
+        if sql.startswith("SELECT rowid,") and "task_events" in sql and not params and "INDEXED BY" not in sql:
+            injected.append(sql)
+            rows = rows + [(victim, *([None] * ncols))]  # every column NULL: NOT NULL drops it on insert
+        return rows, stopped
+
+    monkeypatch.setattr(rec, "_read_rows", read_with_garbage)
+    result = rec.recover(path, file_card=False, reconcile_sync=False)
+
+    assert injected, "the scan paths were not intercepted"
+    assert result.status == "recovered", result.reason
+    events = result.tables["task_events"]
+    after = _payloads(path)
+    assert victim not in after, "a deleted row came back from the backup behind a garbage scan row"
+    assert after == before
+    assert events.stale_index_entries >= len(deleted)
+    assert events.recovered == len(before) - len(lost), "recovered counts rows that were never inserted"
+
+
 def test_writes_during_every_pass_install_nothing(home, monkeypatch):
     """A board written through all rebuild passes is left as is (status contended), never overwritten."""
     path = home / "kanban.db"

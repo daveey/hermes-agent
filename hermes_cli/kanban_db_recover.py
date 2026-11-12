@@ -308,20 +308,23 @@ def _table_indexes(conn: sqlite3.Connection, table: str) -> list[tuple[str, bool
 Listed = dict[str, tuple[list[str], dict[int, tuple]]]
 
 
-def _salvage_table(src: sqlite3.Connection, table: str, sql: Optional[str]
-                   ) -> tuple[dict[Any, tuple], list[str], int, Listed, set[int]]:
-    """Every readable row of ``table``: ``(rows by key, column names, failed read paths, listed)``.
-    The key is the rowid (or the whole row for WITHOUT ROWID tables). ``listed`` maps each index to
-    the rowids it still lists (with the index's key columns, for the report): a covering scan reads
-    only the index b-tree, so it names rows whose table page may be unreadable. The last element
-    holds listed rowids a point lookup found cleanly absent (no read error): stale index entries
-    of deleted rows, dropped from ``listed`` so they are never filled back in from a backup."""
+def _salvage_table(src: sqlite3.Connection, dst: sqlite3.Connection, table: str, sql: Optional[str]
+                   ) -> tuple[int, list[str], int, Listed, set[int]]:
+    """Copy every readable row of ``table`` into ``dst``: ``(rows inserted, column names, failed read
+    paths, listed, stale)``. ``listed`` maps each index to the rowids it still lists (with the index's
+    key columns, for the report): a covering scan reads only the index b-tree, so it names rows whose
+    table page may be unreadable. ``stale`` holds listed rowids a point lookup found cleanly absent (no
+    read error): stale index entries of deleted rows, dropped from ``listed`` so they are never filled
+    back in from a backup. The lookups cover every listed rowid ``dst`` lacks after the scans' insert,
+    not those the scans missed: a damaged leaf can make a scan return a garbage row with any rowid,
+    which the insert then drops (NOT NULL), and keying on scan output would let that hide a stale
+    entry and make the backup fill resurrect the deleted row."""
     try:
         columns = [str(r[1]) for r in src.execute(f"PRAGMA table_info({_q(table)})")]
     except sqlite3.DatabaseError:
         columns = []
     if not columns:
-        return {}, [], 1, {}, set()
+        return 0, [], 1, {}, set()
     cols = ", ".join(_q(c) for c in columns)
     rowid = not _is_without_rowid(sql)
     rows: dict[Any, tuple] = {}
@@ -342,6 +345,14 @@ def _salvage_table(src: sqlite3.Connection, table: str, sql: Optional[str]
                 rows.setdefault(row[0], row[1:])
             else:
                 rows.setdefault(row, row)
+    names = ", ".join(_q(c) for c in columns)
+    if rowid:
+        insert = f"INSERT OR IGNORE INTO {_q(table)} (rowid, {names}) VALUES ({', '.join('?' * (len(columns) + 1))})"
+        inserted = dst.executemany(insert, [(k, *v) for k, v in rows.items()]).rowcount
+    else:
+        insert = f"INSERT OR IGNORE INTO {_q(table)} ({names}) VALUES ({', '.join('?' * len(columns))})"
+        inserted = dst.executemany(insert, list(rows.values())).rowcount
+    inserted = max(inserted, 0)
     listed: Listed = {}
     stale: set[int] = set()
     if rowid:
@@ -351,18 +362,21 @@ def _salvage_table(src: sqlite3.Connection, table: str, sql: Optional[str]
             order = ", ".join(_q(c) for c in icols)
             got, _ = _read_rows(src, f"SELECT rowid, {order} FROM {_q(table)} INDEXED BY {_q(index)} ORDER BY {order}")
             listed[index] = (icols, {int(r[0]): tuple(r[1:]) for r in got if isinstance(r[0], int)})
-        # Point lookups for every listed row no scan produced: a scan that stops on a damaged page
-        # can also drop the row it was holding, while a lookup reaches any intact leaf directly.
-        for rid in sorted({rid for _cols, entries in listed.values() for rid in entries} - set(rows)):
+        # Point lookups for every listed row the insert did not produce: a scan that stops on a damaged
+        # page can drop the row it was holding, and a garbage scan row can take a listed rowid and then
+        # fail the insert, while a lookup reaches any intact leaf directly.
+        have = {r[0] for r in dst.execute(f"SELECT rowid FROM {_q(table)}")}
+        for rid in sorted({rid for _cols, entries in listed.values() for rid in entries} - have):
             got, stopped = _read_rows(src, f"{select} WHERE rowid = ?", (rid,))
             if not got and not stopped:
                 stale.add(rid)
-            for row in got:
-                rows.setdefault(row[0], row[1:])
+            found = [(rid, *row[1:]) for row in got if row[0] == rid][:1]
+            if found:
+                inserted += max(dst.executemany(insert, found).rowcount, 0)
         for _cols, entries in listed.values():
             for rid in stale:
                 entries.pop(rid, None)
-    return rows, columns, failed, listed, stale
+    return inserted, columns, failed, listed, stale
 
 
 def _healthy_fill_source(db_path: Path, exclude: set[Path]) -> Optional[Path]:
@@ -422,21 +436,12 @@ def _build(snapshot: Path, out: Path, fill: Optional[Path], result: RecoveryResu
             dst.execute(str(sql))
         listed_by_table: dict[str, Listed] = {}
         for name, sql in tables:
-            rows, columns, failed, listed, stale = _salvage_table(src, name, sql)
+            inserted, _columns, failed, listed, stale = _salvage_table(src, dst, name, sql)
             listed_by_table[name] = listed
             loss = result.tables.setdefault(name, TableLoss())
             loss.unreadable_paths = failed
             loss.stale_index_entries = len(stale)
-            if not columns:
-                continue
-            names = ", ".join(_q(c) for c in columns)
-            if _is_without_rowid(sql):
-                dst.executemany(f"INSERT OR IGNORE INTO {_q(name)} ({names}) VALUES ({', '.join('?' * len(columns))})",
-                                list(rows.values()))
-            else:
-                dst.executemany(f"INSERT OR IGNORE INTO {_q(name)} (rowid, {names}) "
-                                f"VALUES ({', '.join('?' * (len(columns) + 1))})", [(k, *v) for k, v in rows.items()])
-            loss.recovered = len(rows)
+            loss.recovered = inserted
         if fill is not None:
             _fill_from_backup(dst, fill, tables, listed_by_table, result)
         # Lost: rowids an index still lists that neither the salvage nor the fill produced.
