@@ -22,7 +22,7 @@ def _park(conn, task_id):
     from hermes_cli.kanban_core_update_requeue import latest_run_skipping_requeues
     # Latest run that executed: a core-update requeue is a pause, not a newer run, and an
     # unused Board grant ran nothing. [daveey]
-    latest = latest_run_skipping_requeues(conn, task_id, skip_unused_grants=True)
+    latest = latest_run_skipping_requeues(conn, task_id)
     row = conn.execute(
         "SELECT e.payload, e.created_at, r.*, t.assignee FROM task_events e "
         "JOIN task_runs r ON r.id=e.run_id JOIN tasks t ON t.id=e.task_id "
@@ -138,7 +138,7 @@ def released_after(conn, task_id, since, pr_urls):
     """A receipt older than any claim, or tied with publication, grants nothing."""
     from hermes_cli.kanban_core_update_requeue import latest_run_skipping_requeues
     from hermes_cli.kanban_wake_check import foreign_copy
-    run = latest_run_skipping_requeues(conn, task_id, skip_unused_grants=True)
+    run = latest_run_skipping_requeues(conn, task_id)
     if run is None:
         return False
     urls = {norm_pr(u) for u in pr_urls}

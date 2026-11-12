@@ -124,13 +124,10 @@ def _immediate_checkpoint_after(
     Same-second PR reporting and checkpointing is normal within one worker run.
     """
     from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_core_update_requeue import is_core_update_requeue
+    from hermes_cli.kanban_core_update_requeue import latest_ended_run_skipping_requeues
 
-    # A core-update requeue after the checkpoint is skipped, not a newer run. [daveey]
-    run = next((r for r in conn.execute(
-        "SELECT * FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL ORDER BY id DESC",
-        (task_id,),
-    ) if not is_core_update_requeue(conn, r)), None)
+    # A core-update requeue or an unused Board grant after the checkpoint is not a newer run. [daveey]
+    run = latest_ended_run_skipping_requeues(conn, task_id)
     if run is None or run["outcome"] != "continued":
         return False
     ended_at = kb._to_epoch(run["ended_at"])
@@ -335,7 +332,7 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
     from hermes_cli.kanban_core_update_requeue import latest_run_skipping_requeues, requeued_run_ids
 
     # A core-update requeue is a pause, not the consuming execution (kanban_core_update_requeue).
-    run = latest_run_skipping_requeues(conn, task_id, skip_unused_grants=True)
+    run = latest_run_skipping_requeues(conn, task_id)
     task = kb.get_task(conn, task_id)
     if run is not None and (task is None or run["profile"] != task.assignee):
         return False

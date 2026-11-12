@@ -1573,13 +1573,10 @@ def check_respawn_guard(
             _kbq.clear_quota_error(conn, task_id, stamp)
         return guard
     # Only the latest run gates admission; quota and infrastructure failures are neutral.
+    # A core-update requeue or an unused Board grant ran nothing and is not that run. [daveey]
+    from hermes_cli.kanban_core_update_requeue import latest_ended_run_skipping_requeues
     rl_cooldown = _kb._resolve_rate_limit_cooldown_seconds()
-    latest_run = conn.execute(
-        "SELECT outcome, ended_at, metadata FROM task_runs "
-        "WHERE task_id = ? AND ended_at IS NOT NULL "
-        "ORDER BY ended_at DESC LIMIT 1",
-        (task_id,),
-    ).fetchone()
+    latest_run = latest_ended_run_skipping_requeues(conn, task_id, by_ended_at=True)
     if latest_run is not None and latest_run["outcome"] == "spawn_failed":
         if rl_cooldown > 0 and _kb._json_dict(latest_run["metadata"]).get("infrastructure"):
             ended_at = _kb._to_epoch(latest_run["ended_at"])

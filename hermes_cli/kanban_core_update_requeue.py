@@ -52,15 +52,27 @@ def requeued_run_ids(conn: sqlite3.Connection, task_id: str) -> set[int]:
         if is_core_update_requeue(conn, run)}
 
 
-def latest_run_skipping_requeues(conn: sqlite3.Connection, task_id: str, *, skip_unused_grants: bool):
-    """Latest run, passing over core-update requeues (and, when asked, attested unused grants)."""
+def _skipped(conn: sqlite3.Connection, run) -> bool:
+    """A core-update requeue (a pause) or an attested unused Board grant (ran nothing). [daveey]"""
     from hermes_cli.kanban_unused_grant import is_unused_grant
 
-    for run in conn.execute("SELECT * FROM task_runs WHERE task_id = ? ORDER BY id DESC", (task_id,)):
-        if is_core_update_requeue(conn, run):
-            continue
-        if skip_unused_grants and is_unused_grant(conn, run):
-            continue
-        return run
-    return None
+    if run["outcome"] == "reclaimed":
+        return is_core_update_requeue(conn, run)
+    return run["outcome"] == "released" and is_unused_grant(conn, run)
+
+
+def latest_run_skipping_requeues(conn: sqlite3.Connection, task_id: str):
+    """Latest run, passing over core-update requeues and attested unused grants.
+
+    Any run that started, failed or lacks the unused-grant receipt still counts."""
+    rows = conn.execute("SELECT * FROM task_runs WHERE task_id = ? ORDER BY id DESC", (task_id,))
+    return next((run for run in rows if not _skipped(conn, run)), None)
+
+
+def latest_ended_run_skipping_requeues(conn: sqlite3.Connection, task_id: str, *, by_ended_at: bool = False):
+    """Latest ended run (by id, or by ``ended_at`` when asked), with the same skips."""
+    order = "ended_at DESC, id DESC" if by_ended_at else "id DESC"
+    rows = conn.execute(f"SELECT * FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL ORDER BY {order}",
+                        (task_id,))
+    return next((run for run in rows if not _skipped(conn, run)), None)
 

@@ -349,7 +349,7 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     # The park must be the card's latest run that executed. Passed over: a core-update
     # requeue (that pause is not the consuming claim; 2026-11-12: t_01a1ce8aff1f09c1 held
     # after an exact-head APPROVE) and a Board grant returned unused (it ran nothing). [daveey]
-    latest = latest_run_skipping_requeues(conn, task_id, skip_unused_grants=True)
+    latest = latest_run_skipping_requeues(conn, task_id)
     row = conn.execute(
         "SELECT e.payload, e.created_at, r.*, t.assignee "
         "FROM task_events e JOIN task_runs r ON r.id = e.run_id "

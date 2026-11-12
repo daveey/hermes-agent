@@ -12,7 +12,7 @@ def finished_review_hold(conn, task_id):
 
     from hermes_cli.kanban_core_update_requeue import latest_run_skipping_requeues
     # Same run the guard reads: not a core-update requeue, not an unused Board grant.
-    latest = latest_run_skipping_requeues(conn, task_id, skip_unused_grants=True)
+    latest = latest_run_skipping_requeues(conn, task_id)
     row = conn.execute(
         "SELECT e.payload, e.created_at, r.* FROM task_events e "
         "JOIN task_runs r ON r.id=e.run_id WHERE e.task_id=? "
