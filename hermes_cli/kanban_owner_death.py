@@ -14,7 +14,9 @@ spaced by ``check_respawn_guard``) when BOTH hold:
   (``logs/gateway-exit-diag.log``) records that pid's life as UNCLEAN, or the pid is dead/recycled.
 
 Crash-loop guard: a card that was also in flight at the owner's PREVIOUS unclean death is charged normally
-(``owner_death_repeat``), because a card whose own work kills the gateway has to stop.
+(``owner_death_repeat``), because a card whose own work kills the gateway has to stop. Exception: the
+worker host's root watchdog attests this exact owner died with its SIGKILLed systemd user manager
+(``kanban_host_manager_loss``); that waives one repeat per card, never more.
 """
 from __future__ import annotations
 
@@ -100,6 +102,26 @@ def _previous_death_seen(conn, task_id: str, owner_pid: int, deaths: list[int]) 
     return None
 
 
+def _host_manager_loss_waiver(conn, task_id: str, receipt: dict) -> Optional[str]:
+    """Root incident id when this repeat is a verified host user-manager SIGKILL and the card has not
+    already used its waiver (``MAX_WAIVERS`` in the scanned runs): a card that keeps killing its own
+    manager is charged again on the next repeat."""
+    from hermes_cli import kanban_host_manager_loss as hml
+    used = 0
+    for row in conn.execute(
+        "SELECT metadata FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT ?",
+        (task_id, _RUN_SCAN_LIMIT),
+    ):
+        try:
+            meta = json.loads(row[0]) if row[0] else {}
+        except (TypeError, ValueError):
+            meta = {}
+        used += isinstance(meta, dict) and bool(meta.get("host_manager_loss"))
+    if used >= hml.MAX_WAIVERS:
+        return None
+    return hml.manager_loss_incident(receipt)
+
+
 def note(dead, conn, task_id: Optional[str], run_id) -> None:
     """Rebook ``dead`` (``_DeadWorker``) lost to its owner's death as ``owner_restart_lost``. No-op for
     any other death; a crash-loop repeat stays a crash and is tagged so the systemic rule skips it."""
@@ -127,7 +149,10 @@ def note(dead, conn, task_id: Optional[str], run_id) -> None:
     payload["owner_death_pid"] = owner_pid
     payload["owner_exit"] = "unclean" if unclean else "pid_changed"
     repeat = _previous_death_seen(conn, task_id, owner_pid, deaths)
-    if repeat is not None:
+    waived = repeat is not None and _host_manager_loss_waiver(conn, task_id, receipt)
+    if waived:
+        payload["host_manager_loss"], payload["owner_death_repeat_waived"] = waived, repeat
+    elif repeat is not None:
         payload["owner_death_repeat"] = repeat
         dead.error_text = (
             f"{dead.error_text} (owner pid {owner_pid} died with this card in flight, as pid {repeat} did "
@@ -137,6 +162,8 @@ def note(dead, conn, task_id: Optional[str], run_id) -> None:
     dead.kind, dead.owner_restart, dead.event_kind = "owner_restart", True, "owner_restart_lost"
     payload.update(exit_kind="owner_restart", owner_restart=True, infrastructure=True)
     how = "an unclean exit" if unclean else "its pid changed since the claim"
+    if waived:
+        how += f"; root watchdog incident {waived} attests its user manager was SIGKILLed"
     dead.error_text = (
         f"pid {payload.get('pid')} lost its turn to the death of its profile owner (pid {owner_pid}, {how}) — "
         f"requeued without counting a failure; worker said: {original}")
