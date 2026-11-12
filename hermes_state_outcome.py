@@ -563,13 +563,42 @@ def _call_judge(judge: JudgeFn, sid: str, text: str, source: Optional[str]) -> O
         return judge(sid, text)
 
 
-def _judge_summary(sid: str, text: str, source: Optional[str]) -> Optional[bool]:
+@contextlib.contextmanager
+def _owner_scope(db: Any) -> Iterator[None]:
+    """[daveey] Bind the chat's owning profile (``<home>/state.db`` -> home override + ``owner_secret_scope``)
+    around the judge when multiplexing is on and the caller bound no secret scope. Notice writers, orphan reap,
+    completion notes and the web refresh run in sweeper threads or handlers with an empty context, so the
+    judge's provider read died with ``UnscopedSecretError`` at 0.0 s (t_01a1d0d08799272e). A caller that already
+    bound a scope (the post-turn refresh) keeps it; a single-profile process keeps process-env semantics."""
+    from agent.secret_scope import current_secret_scope, is_multiplex_active, reset_secret_scope, set_secret_scope
+
+    path = getattr(db, "db_path", None)
+    if path is None or not is_multiplex_active() or current_secret_scope() is not None:
+        yield
+        return
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from tui_gateway.launch_profile_policy import owner_secret_scope
+
+    home = Path(path).parent
+    home_token = set_hermes_home_override(str(home))  # home and secrets name the same owner
+    try:
+        scope_token = set_secret_scope(owner_secret_scope(home), profile_home=str(home))
+        try:
+            yield
+        finally:
+            reset_secret_scope(scope_token)
+    finally:
+        reset_hermes_home_override(home_token)
+
+
+def _judge_summary(sid: str, text: str, source: Optional[str], db: Any = None) -> Optional[bool]:
     """The registered judge's verdict, or None when there is none or it can't tell."""
     judge = _judge[0]
     if judge is None:
         return None
     try:
-        verdict = _call_judge(judge, sid, text, source)
+        with _owner_scope(db):
+            verdict = _call_judge(judge, sid, text, source)
     except Exception:
         logger.warning("session outcome judge failed for %s; using the heuristic", sid, exc_info=True)
         return None
@@ -716,7 +745,7 @@ def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
         if is_intentional_silence_response(text):
             return _outcome("done", now, summary="Scheduled run completed with nothing to report.", **named, **carry)
     msg_id = tail[0].get("id")
-    verdict = _judge_summary(sid, text, row.get("source"))
+    verdict = _judge_summary(sid, text, row.get("source"), db)
     if verdict is None:
         verdict = _prior_verdict(stored, msg_id)
     judged = {"judged": True, "judged_msg": msg_id} if verdict is not None and msg_id is not None else {}
