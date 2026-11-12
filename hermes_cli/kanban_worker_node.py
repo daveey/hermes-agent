@@ -417,6 +417,8 @@ def local_refusals(conn: sqlite3.Connection, status: str) -> dict[str, str]:
     if not reg:
         return out
     machines = reg["machines"]
+    from hermes_cli.kanban_hub_admission_pickup import refusals as unjudged
+    out.update(unjudged(conn, rows, own, machines))  # [daveey] never claim an unjudged hub-bound foreign copy
     for row in rows:
         reason = eligible(dict(row), own, machines)
         if reason is not None and reason != "held":
@@ -591,13 +593,21 @@ def pickup(conn: sqlite3.Connection, *, budget: Optional[int],
     replica = open_replica(conn)
     if replica is None:
         return []
+    from hermes_cli import kanban_hub_admission_pickup as admission
+    own = _own(conn)
     try:
-        picked, skips = _evaluate(conn, replica, _own(conn), mode=mode, limit=limit, profile_exists=profile_exists,
+        picked, skips = _evaluate(conn, replica, own, mode=mode, limit=limit, profile_exists=profile_exists,
                                   full_detail="pickup batch full this tick")
+        # [daveey] The hub judges a hub-bound foreign card before copying it (t_01a1cf65a941bf43).
+        picked, plans, held = admission.screen(conn, replica, own, picked)
+        skips.update(held)
         imported = import_cards(conn, replica, picked)
     finally:
         replica.close()
+    denied = admission.apply(conn, own, plans, imported)
     skips.update({tid: ("other", "import failed") for tid in picked if tid not in imported})
+    skips.update(denied)
+    imported = [tid for tid in imported if tid not in denied]
     _record_skips(conn, {tid: why for tid, why in skips.items() if tid not in imported})
     if imported:
         _log.info("kanban worker node: picked up %d card(s) from other gateways: %s", len(imported), imported)
