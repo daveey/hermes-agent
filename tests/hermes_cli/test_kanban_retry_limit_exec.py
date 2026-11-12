@@ -202,14 +202,27 @@ def test_scope_lost_between_submit_and_execute_is_rejected(board, monkeypatch):
     assert _max_retries(board["child"]) is None
 
 
-def test_requester_finished_before_execute_is_rejected(board, monkeypatch):
+def test_requester_finished_before_execute_still_applies(board, monkeypatch):
+    """Completing the requester does not cancel its filed request; only archiving does."""
     out = _tool(_req(board["child"]))
     with kbc.connect_closing() as conn:
         assert kb.complete_task(conn, board["requester"], result="x", summary="finished")
     _as_executor(monkeypatch)
     _drain()
     req = _request(out["request_id"])
-    assert req["status"] == "rejected" and "requester" in req["error"], req
+    assert req["status"] == "done" and req["error"] is None, req
+    assert _max_retries(board["child"]) == 5
+
+
+def test_requester_archived_before_execute_is_rejected(board, monkeypatch):
+    out = _tool(_req(board["child"]))
+    with kbc.connect_closing() as conn:
+        assert kb.complete_task(conn, board["requester"], result="x", summary="finished")
+        kb.archive_task(conn, board["requester"])
+    _as_executor(monkeypatch)
+    _drain()
+    req = _request(out["request_id"])
+    assert req["status"] == "rejected" and "archived" in req["error"], req
     assert _max_retries(board["child"]) is None
 
 

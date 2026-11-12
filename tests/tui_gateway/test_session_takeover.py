@@ -427,6 +427,38 @@ def test_take_over_refuses_a_live_writer_that_never_releases_at_the_live_cap(
     assert durable_writer.db.session_turn_lease_owner(KEY)["holder"] == holder
 
 
+def test_take_over_refuses_a_same_namespace_writer_it_may_not_signal_at_the_ack_deadline(
+        durable_writer, sleeper, rpc, monkeypatch):
+    """kill(pid, 0) answering EPERM (another user's process) does not prove the writer alive."""
+    import time
+    monkeypatch.setenv("HERMES_SESSION_TAKEOVER_ACK_TIMEOUT_S", "0.3")
+    monkeypatch.setenv("HERMES_SESSION_TAKEOVER_LIVE_WRITER_WAIT_S", "10")
+    proc = sleeper()
+    holder = _same_ns_holder(proc.pid)
+    durable_writer.hold(holder)
+    real_kill = os.kill
+    probed: list[int] = []
+
+    def kill(pid, sig):
+        if pid == proc.pid and sig == 0:
+            probed.append(pid)
+            raise PermissionError(1, "Operation not permitted")
+        return real_kill(pid, sig)
+
+    monkeypatch.setattr(os, "kill", kill)
+    started = time.monotonic()
+    resp = rpc()
+    elapsed = time.monotonic() - started
+    monkeypatch.setattr(os, "kill", real_kill)
+    assert probed  # the probe really ran and was refused
+    assert resp["error"]["code"] == 4090, resp
+    assert resp["error"]["data"] == {"reason": "SESSION_NOT_OWNED"}
+    assert 0.3 <= elapsed < 3  # the 0.3 s ACK deadline, not the 10 s live-writer cap
+    assert "alive" not in resp["error"]["message"]
+    assert resp["error"]["message"].endswith("No writer was forced out.")
+    assert durable_writer.db.session_turn_lease_owner(KEY)["holder"] == holder
+
+
 @pytest.mark.parametrize(("why", "label"), [("lease_takeover", "taken_over"), ("backend_exit", "shutdown"),
                                             ("session_close", "session_closed"), (None, "interrupted")])
 def test_interrupting_a_turn_names_why_in_the_pending_clarify_result(env, why, label):

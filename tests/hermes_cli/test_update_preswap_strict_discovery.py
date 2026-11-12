@@ -25,6 +25,7 @@ def probes(tmp_path, monkeypatch):
     from hermes_cli import dashboard_procs
     monkeypatch.setattr(dashboard_procs, "_hermes_home_for_pid", lambda pid: None)
     monkeypatch.setattr(deferrals, "state_path", lambda: tmp_path / "streak.json")
+    monkeypatch.setattr(deferrals, "MIN_STREAK_S", 0)  # attribution under test, not the streak floor
     report = Mock(return_value="fixture-repair")
     monkeypatch.setattr(deferrals, "report", report)
     stop = Mock()

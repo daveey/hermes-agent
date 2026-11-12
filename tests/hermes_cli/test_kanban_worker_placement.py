@@ -150,7 +150,7 @@ def test_hub_state_work_stays_local_only_when_admitted(title, admit, hub_judge):
 
 @pytest.mark.parametrize("title", [
     # ~/.hermes/skills is host state, not a checkout: curator ledger, usage counts, locks, live-patched skills.
-    "Run `journalctl --user` to inspect worker OOM kills",
+    "On this host run `journalctl --user` to inspect worker OOM kills",
     "Inspect this host's model routing registry and config.yaml",
     "Patch ~/.hermes/skills/devops/kanban-orchestrator/SKILL.md (live edit)",
     "Sum use_count from /home/ubuntu/.hermes/skills/.usage.json",
@@ -162,10 +162,10 @@ def test_hub_state_work_stays_local_only_when_admitted(title, admit, hub_judge):
     # askeve 12 trees with dirty files. Follow-up cards name the path in text, not a worktree workspace.
     "Continue in ~/code/babybear/.worktrees/t_50dec368 and push",
     "Finish /home/ubuntu/code/askeve/.worktrees/t_01a18c8d53dc31b2 and open a PR",
-    "Commit the dirty files in `~/code/askeve/.worktrees/t_01a18c8d53dc31b2`.",
+    "Commit this host's dirty files in `~/code/askeve/.worktrees/t_01a18c8d53dc31b2`.",
     "List the trees under /home/ubuntu/code/babybear/.worktrees",
     # hermes-hub commands act with this gateway's key and replica; a worker has neither.
-    "Run hermes-hub create-task hub --title x", "hermes-hub adopt-task t_1 --session s", "Run `hermes-hub sync`",
+    "Run hermes-hub create-task hub --title x", "hermes-hub adopt-task t_1 --session s", "On this host run `hermes-hub sync`",
     "Check hermes-hub requests for the stuck ask",
 ])
 def test_host_specific_state_and_identity_stay_local(title, hub_judge):

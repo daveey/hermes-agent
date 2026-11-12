@@ -172,6 +172,7 @@ describe('outcomeTooltip', () => {
     ['turn_failed', 'Unresolved: the last turn failed'],
     ['interrupted', 'Unresolved: the last turn was interrupted'],
     ['subagent_killed', 'Unresolved: a subagent was stopped before it finished'],
+    ['subagent_lost', 'Unresolved: a subagent went silent without finishing'],
     ['empty', 'Unresolved: no messages yet'],
     [undefined, 'Unresolved']
   ])('unresolved{%s} gives the reason in words', (reason, text) => {

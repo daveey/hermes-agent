@@ -379,6 +379,49 @@ def test_evicted_caller_copy_still_finishes(fleet):
     assert req["status"] == "done" and req["error"] == "requester_gone"
 
 
+def _complete_caller(f):
+    assert kb.complete_task(f.w, f.caller, summary="filed the comment", expected_run_id=f.run_id)
+    assert kb.get_task(f.w, f.caller).status == "done"
+
+
+def test_operator_comment_lands_after_requester_completes(fleet):
+    """A comment is naturally a worker's last act: completing the card must not void the filed request."""
+    f = fleet
+    out = _submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "handoff: PR #7 merged"})
+    _complete_caller(f)
+    _round(f)
+    comments = f.h.execute("SELECT body FROM task_comments WHERE task_id = ?", (f.target,)).fetchall()
+    assert [c[0] for c in comments] == ["handoff: PR #7 merged"]
+    req = ksr.get_request(f.w, out["request_id"])
+    assert req["status"] == "done" and req["error"] is None, (req["status"], req["error"], req["result"])
+    assert req["result"][0]["outcome"] == "applied"
+    kinds = [e.kind for e in kb.list_events(f.w, f.caller)]
+    assert "supervisor_request_done" in kinds
+    assert kb.get_task(f.w, f.caller).status == "done"  # the receipt neither wakes nor reopens the card
+    _round(f)  # a later round neither repeats the comment nor reopens the request
+    assert f.h.execute("SELECT COUNT(*) FROM task_comments WHERE task_id = ?", (f.target,)).fetchone()[0] == 1
+
+
+def test_late_forward_after_completion_is_proven_at_submit_time(fleet):
+    """The executor ran long after the caller's run ended: the home proves the run live when it was submitted."""
+    f = fleet
+    out = _submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "late"})
+    _complete_caller(f)
+    back = kox.SKEW_S * 5
+    with kb.write_txn(f.w):  # submit and completion happened well before this dispatcher tick
+        f.w.execute("UPDATE supervisor_requests SET created_at = created_at - ? WHERE id = ?",
+                    (back, out["request_id"]))
+        f.w.execute("UPDATE task_runs SET started_at = started_at - ?, ended_at = ended_at - ? WHERE id = ?",
+                    (back + 10, back - 5, f.run_id))
+    uid = f.w.execute("SELECT uid FROM task_runs WHERE id = ?", (f.run_id,)).fetchone()[0]
+    with kb.write_txn(f.rep):  # the Board already holds the run row; its start moves back with it
+        f.rep.execute("UPDATE task_runs SET started_at = started_at - ? WHERE uid = ?", (back + 10, uid))
+    _round(f)
+    req = ksr.get_request(f.w, out["request_id"])
+    assert req["status"] == "done", (req["error"], req["result"])
+    assert f.h.execute("SELECT COUNT(*) FROM task_comments WHERE task_id = ?", (f.target,)).fetchone()[0] == 1
+
+
 def test_home_offline_fails_after_deadline(fleet):
     f = fleet
     out = _submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "hi"})

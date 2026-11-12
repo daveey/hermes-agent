@@ -11,7 +11,8 @@ Rule (:func:`pinned_route`); every condition must hold, anything else keeps the 
    earlier ``model_reroute``, or the live episode), and that wall is still up; or the pin's provider is
    walled right now in ``provider_walls.json`` or the live pool is quota-walled for the pinned model
    (:func:`known_wall`), fresh card or not: its next run would only exit 75 into that wall to learn it
-   (kanban-dd62aef001; t_c21c170e, 11-12: a card woken from ``scheduled`` paid one wall run);
+   (kanban-dd62aef001; t_c21c170e, 11-12: a card woken from ``scheduled`` paid one wall run). When both
+   are up, the later reset counts: a short own wall never hides a longer known one;
 2. it resets ``kanban.pin_quota_reroute_min_hours`` (default 6) or more from now;
 3. the pin is not mandatory: neither ``tasks.model_pin_mandatory`` nor a ``require_model: true`` body line;
 4. the lane is ready, not review;
@@ -135,6 +136,17 @@ def known_wall(pinned: tuple[str, str], now: Optional[float] = None) -> Optional
     return {provider: float(max(resets))} if resets else None
 
 
+def _with_known_wall(own: dict[str, tuple[float, Any]], pinned: tuple[str, str],
+                     now: float) -> dict[str, tuple[float, Any]]:
+    """*own* with the pin's :func:`known_wall` folded in: the later reset wins, and the card's own episode id is
+    kept. A short own wall (a 2 h burst) never hides a longer wall the provider file or live pool knows."""
+    for name, until in (known_wall(pinned, now) or {}).items():
+        mine = own.get(name)
+        if mine is None or until > mine[0]:
+            own[name] = (until, mine[1] if mine else None)
+    return own
+
+
 def pinned_route(conn: Any, task: Any, *, lane: str, now: float, cfg: Optional[dict],
                  current: Optional[dict[str, float]] = None) -> Optional[tuple[str, str]]:
     """Same-class ``(model, provider)`` this pinned card's run may use instead of its walled pin, or None.
@@ -152,9 +164,7 @@ def pinned_route(conn: Any, task: Any, *, lane: str, now: float, cfg: Optional[d
     if lane == "review" or pinned is None or is_mandatory_pin(task):
         return None
     model, provider = pinned
-    own = own_walls(conn, task.id, now, current)
-    if provider not in own:
-        own.update({name: (until, None) for name, until in (known_wall(pinned, now) or {}).items()})
+    own = _with_known_wall(own_walls(conn, task.id, now, current), pinned, now)
     if provider not in own or own[provider][0] - now < min_wall_seconds(cfg):
         return None
     config = _assignee_config(getattr(task, "assignee", None)) or {}
@@ -196,9 +206,8 @@ def record(conn: Any, task: Any, origin: tuple[str, str], target: tuple[str, str
     for wall in (_outstanding(conn, task.id, state, now) if state else []):
         if origin[1] in _providers(wall):
             current[origin[1]] = max(current.get(origin[1], 0), wall["until"])
-    own = own_walls(conn, task.id, now, current)
-    if origin[1] not in own:  # moved by a wall the provider file / live pool knows (pinned_route rule 1)
-        own.update({name: (until, None) for name, until in (known_wall(origin, now) or {}).items()})
+    # The same walls pinned_route read: the card's own plus any the provider file / live pool knows (rule 1).
+    own = _with_known_wall(own_walls(conn, task.id, now, current), origin, now)
     resets_at, episode_id = own.get(origin[1], (None, None))
     payload = {"from_model": origin[0], "from_provider": origin[1], "to_model": target[0],
                "to_provider": target[1], "walled_provider": origin[1], "resets_at": resets_at,

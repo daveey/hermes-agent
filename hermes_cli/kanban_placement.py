@@ -417,7 +417,8 @@ def _local_marker(title: str, body: str, skills, cfg: _Cfg) -> Optional[str]:
     :data:`TITLE_ONLY_LOCAL_MARKERS`) scan the title only, unless the caller replaced the list.
     A product name (:data:`PRODUCT_NAME_MARKERS`) does not pin a card whose text names Linux
     and no Apple or device-bound work (same exception: not with a replaced list)."""
-    full = f"{title or ''}\n{body or ''}"
+    title, body = marker_work_text(title), marker_work_text(body)
+    full = f"{title}\n{body}"
     replaced = isinstance(cfg.raw.get("local_markers"), list)
     linux_only = (not replaced
                   and any(re.search(p, full, re.IGNORECASE) for p in LINUX_CONTEXT_MARKERS)
@@ -438,7 +439,8 @@ def _local_marker(title: str, body: str, skills, cfg: _Cfg) -> Optional[str]:
 
 def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
     """The first heavy-work hit, or None (also None when the card names the target's own host)."""
-    full = f"{title or ''}\n{body or ''}"
+    title, body = marker_work_text(title), marker_work_text(body)
+    full = f"{title}\n{body}"
     if any(re.search(p, full, re.IGNORECASE) for p in TARGET_HOST_MARKERS):
         return None
     for rx in cfg.heavy_markers():
@@ -537,6 +539,18 @@ def structural_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
     if any(str(r) not in c.carried_requires() for r in ordinary):
         return "uncarried requirement"
     return None
+
+
+_BACKTICKS = re.compile(r"(?<!`)(`+)(?!`)(.*?)(?<!`)\1(?!`)", re.DOTALL)
+
+
+def marker_work_text(text: Optional[str]) -> str:
+    """Scan work, not names: producers quote job/workflow/repo names in backticks.
+
+    Only complete matching delimiter runs are removed; incomplete quotes retain their markers.
+    Whitespace separates remaining words so removing a name cannot manufacture another marker.
+    """
+    return _BACKTICKS.sub(" ", without_evidence(without_placement_note(text or "")))
 
 
 def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:

@@ -416,6 +416,28 @@ def test_non_fresh_pin_on_a_known_wall_controls_never_move(board, monkeypatch, a
         assert _events(conn, tid, 'model_reroute') == [] and _comments(conn, tid) == []
 
 
+@pytest.mark.parametrize('own_hours, file_hours', [(2, 55), (55, 2)])
+def test_a_short_own_wall_never_hides_a_longer_known_wall(
+        board, monkeypatch, all_assignees_spawnable, own_hours, file_hours):
+    """Review nit on PR #1514: rule 1 read the provider file only when the card had no wall of its own on the
+    pin's provider, so a 2 h own wall hid a 55 h provider-file wall and the pin waited out the 2 h only to
+    spawn into the long wall. The later of the two now decides (and is the recorded reset); the card's own
+    episode id is kept so the one-comment-per-episode rule still holds."""
+    clock = _clock(monkeypatch)
+    _, cfg = _deep(monkeypatch)
+    with kbc.connect() as conn:
+        start = clock[0]
+        tid = _walled_card(conn, cfg, clock, hours=own_hours)
+        file_until = float(start + file_hours * 3600)
+        monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'openai-codex': file_until})
+        assert _tick(conn) == [PEER]
+        [event] = _events(conn, tid, 'model_reroute')
+        assert event['resets_at'] == float(start + max(own_hours, file_hours) * 3600)
+        live = episode(conn, tid)
+        assert live and live['episode_id'] and event['episode_id'] == live['episode_id']
+        assert len(_comments(conn, tid)) == 1
+
+
 # --- the review lane on a known wall (hub run 174730, 2026-11-12) ---------------------------------------
 
 GROK = ('grok-5', 'xai-oauth')
@@ -472,6 +494,32 @@ def test_review_unpinned_keeps_its_route_without_a_free_alternative(board, monke
     with kbc.connect() as conn:
         tid = _review_card(conn, body='must review on astra\nrequire_model: true' if case == 'marker' else None)
         assert tier.resolve_dispatch_tier(conn, kb.get_task(conn, tid), lane='review') == (*PIN, 'review_unpinned')
+
+
+GROK_MINI = ('grok-5-mini', 'xai-oauth')
+
+
+@pytest.mark.parametrize('case', ['later_free', 'none_free'])
+def test_review_unpinned_skips_an_alternative_walled_only_in_the_live_pool(board, monkeypatch, case):
+    """Mutant M4 (t_01a1d04d206e2c6e): ``_review_off_wall`` must check the live pool on each alternate, not
+    only provider_walls.json. The first alternate (grok-5) is walled only by the live pool, which walls per
+    model: the review moves to a later free reviewer (grok-5-mini, same provider, no wall) or, with none,
+    keeps its route; never into grok-5's wall."""
+    clock = _clock(monkeypatch)
+    config, _ = _deep(monkeypatch)
+    deep = config['model_routing']['routes']['deep']
+    deep.append(dict(deep[0], model=GROK[0], provider=GROK[1]))
+    if case == 'later_free':
+        deep.append(dict(deep[0], model=GROK_MINI[0], provider=GROK_MINI[1]))
+    until = float(clock[0] + 55 * 3600)
+    monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'openai-codex': until})  # the base, file only
+    monkeypatch.setattr(walls, 'live_quota_wall', lambda p, m: until if (m, p) == GROK else None)
+    with kbc.connect() as conn:
+        tid = _review_card(conn)
+        route = tier.resolve_dispatch_tier(conn, kb.get_task(conn, tid), lane='review')
+        assert route[:2] != GROK
+        assert route == ((*GROK_MINI, 'review_unpinned+wall:openai-codex') if case == 'later_free'
+                         else (*PIN, 'review_unpinned'))
 
 
 # --- the mandatory mark: create, set-model, tool, sync ---------------------------------------------

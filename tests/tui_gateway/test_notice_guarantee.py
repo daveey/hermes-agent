@@ -155,12 +155,106 @@ def test_failed_wakes_stop_after_max_attempts(db, monkeypatch):
     assert (state, attempts) == ("error", ng.MAX_ATTEMPTS)
 
 
-@pytest.mark.parametrize("verdict", ["refused", "busy", "missing"])
-def test_only_a_failed_wake_is_deferred(db, verdict):
+@pytest.mark.parametrize("verdict", ["refused", "missing"])
+def test_a_refused_or_missing_wake_is_final(db, verdict):
     row = _notice(db, "✔ Kanban t_aaa done — deploy card")
     _run(db, verdict=verdict)
     assert _closeout(db, row) == verdict
     assert _run(db, now=time.time() + 99999) == ([], [])
+
+
+def _busy_attempts(db, row):
+    return db._read_one("SELECT json_extract(display_metadata, '$.closeout.busy_attempts') FROM messages "
+                        "WHERE id = ?", (row,))[0]
+
+
+def test_a_busy_wake_is_deferred_and_offered_again_once_admission_reopens(db):
+    # Two hub chats (2026-11-12): their notices landed while a core update held turn admission for 30 min; the
+    # close-out wake returned "busy", the row was stamped final, and the chats stayed unresolved{notice_tail}.
+    now = time.time()
+    row = _notice(db, "✔ Kanban t_aaa done — deploy card")
+
+    out, calls = _run(db, verdict="busy", now=now)
+
+    assert calls == [(CHAT, row)] and [o["result"] for o in out] == ["dispatched"]
+    state, retry_at, attempts = _closeout_meta(db, row)
+    assert state == "deferred" and attempts == 1 and _busy_attempts(db, row) == 1
+    assert retry_at >= now + ng.BUSY_RETRY_S
+    stored = so.get_outcome(CHAT, db=db)
+    assert (stored["kind"], stored["reason"]) == ("unresolved", "notice_tail")
+    assert _run(db, now=now + ng.BUSY_RETRY_S - 60) == ([], [])  # not before retry_at
+
+    out, calls = _run(db, verdict="started", now=retry_at + 1)
+
+    assert calls == [(CHAT, row)] and _closeout_meta(db, row)[0] == "started"
+    assert _run(db, now=retry_at + 99999) == ([], [])  # started: never woken again
+
+
+def test_busy_wakes_back_off_and_stop_after_max_busy_attempts(db):
+    row = _notice(db, "✔ Kanban t_aaa done — deploy card")
+    now, wakes, delays = time.time(), 0, []
+    for _ in range(ng.MAX_BUSY_ATTEMPTS + 2):
+        _out, calls = _run(db, verdict="busy", now=now)
+        wakes += len(calls)
+        state, retry_at, _attempts = _closeout_meta(db, row)
+        if state == "deferred":
+            delays.append(round((retry_at - time.time()) / 60))
+            now = retry_at + 1
+        else:
+            now += 99999
+
+    assert wakes == ng.MAX_BUSY_ATTEMPTS
+    assert delays == sorted(delays) and delays[0] == 5 and delays[-1] == 60  # doubling, capped at an hour
+    assert (_closeout(db, row), _busy_attempts(db, row)) == ("busy", ng.MAX_BUSY_ATTEMPTS)
+
+
+def test_busy_wakes_do_not_spend_the_failed_wake_budget(db, monkeypatch):
+    monkeypatch.setattr(ng, "_retry_at", lambda sid, t: t + 60, raising=False)
+    row = _notice(db, "✔ Kanban t_aaa done — deploy card")
+    now = time.time()
+    for verdict in ["busy"] * 3 + ["error"]:
+        _run(db, verdict=verdict, now=now)
+        now = max(now, _closeout_meta(db, row)[1] or now) + 1
+
+    state, _retry, attempts = _closeout_meta(db, row)
+    assert (state, attempts, _busy_attempts(db, row)) == ("deferred", 4, 3)  # 1 of MAX_ATTEMPTS errors used
+
+
+def _stamp_legacy_busy(db, row):
+    # What the core before busy deferral wrote: busy after one wake, final, no busy_attempts.
+    db._write_rowcount("UPDATE messages SET display_metadata = json_set(display_metadata, '$.closeout', "
+                       "json('{\"state\": \"busy\", \"at\": 1, \"pid\": 1, \"attempts\": 1}')) WHERE id = ?",
+                       (row,))
+
+
+def test_a_row_stamped_busy_by_the_old_core_is_offered_again(db):
+    # The two hub chats of 2026-11-12 were stamped final busy before the fix landed; they resolve after it.
+    row = _notice(db, "✔ Kanban t_aaa done — deploy card")
+    _stamp_legacy_busy(db, row)
+
+    _out, calls = _run(db, verdict="started")
+
+    assert calls == [(CHAT, row)] and _closeout(db, row) == "started"
+    assert _run(db, now=time.time() + 99999) == ([], [])
+
+
+def test_a_legacy_busy_row_counts_its_old_busy_wake(db):
+    row = _notice(db, "✔ Kanban t_aaa done — deploy card")
+    _stamp_legacy_busy(db, row)
+
+    _run(db, verdict="busy")
+
+    state, retry_at, _attempts = _closeout_meta(db, row)
+    assert (state, _busy_attempts(db, row)) == ("deferred", 2)
+    assert retry_at >= time.time() + 2 * ng.BUSY_RETRY_S - 60
+
+
+def test_a_legacy_busy_row_past_the_lookback_is_left_alone(db):
+    row = _notice(db, "✔ Kanban t_aaa done — deploy card")
+    _stamp_legacy_busy(db, row)
+
+    assert _run(db, now=time.time() + ng.LOOKBACK_S + 3600) == ([], [])
+    assert _closeout(db, row) == "busy"
 
 
 def test_retry_at_follows_the_build_failures_quota_reset(monkeypatch):

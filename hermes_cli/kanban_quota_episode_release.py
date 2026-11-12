@@ -34,17 +34,35 @@ def _latest(conn, task_id):
     return kb._json_dict(row[0]) if row else None
 
 
+def _local_run(conn, task_id, payload):
+    """This replica's id for the run the release *payload* closed, or None.
+
+    The payload copies the released episode's ``run_id``/``episode_id``, and a stored ``quota_episode``
+    payload keeps the recording gateway's run ids while its event row's ``run_id`` is this replica's
+    (``kanban_quota_episode._wall_origin``). Read raw, a worker's id (2392) never covers the home's run
+    (173967): the hub's 15:14Z release of 4 cards left them held on every replica (t_01a1d052f773722d)."""
+    run = (payload or {}).get("run_id")
+    if type(run) is not int:
+        return None
+    row = conn.execute(
+        "SELECT run_id FROM task_events WHERE task_id=? AND kind='quota_episode' AND json_valid(payload) "
+        "AND json_extract(payload, '$.run_id') IS ? AND json_extract(payload, '$.episode_id') IS ? "
+        "ORDER BY id DESC LIMIT 1", (task_id, run, payload.get("episode_id"))).fetchone()
+    local = row[0] if row is not None else None
+    # No stored episode names it: a computed episode, whose run ids are already this replica's.
+    return local if type(local) is int else run
+
+
 def released_run(conn, task_id):
-    """Run id the latest release closed (runs up to it form no episode), or None."""
-    run = (_latest(conn, task_id) or {}).get("run_id")
-    return run if type(run) is int else None
+    """This replica's run id the latest release closed (runs up to it form no episode), or None."""
+    return _local_run(conn, task_id, _latest(conn, task_id))
 
 
 def covers_latest(conn, task_id) -> dict | None:
     """The latest release's payload while no run has ended after it, else None (queue notes, clocks)."""
     payload = _latest(conn, task_id)
-    run = (payload or {}).get("run_id")
-    if type(run) is not int:
+    run = _local_run(conn, task_id, payload)
+    if run is None:
         return None
     later = conn.execute("SELECT 1 FROM task_runs WHERE task_id=? AND id>? LIMIT 1", (task_id, run)).fetchone()
     return None if later else payload

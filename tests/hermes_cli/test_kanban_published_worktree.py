@@ -46,7 +46,7 @@ def reason(body, **extra):
 
 
 def test_clean_published_worktree_is_portable(published):
-    assert reason('Continue in `~/code/_wt/fix`.') is None
+    assert reason('Continue in ~/code/_wt/fix') is None
 
 
 @pytest.mark.parametrize('change', ['dirty', 'untracked', 'ahead', 'deleted', 'detached'])
@@ -62,7 +62,7 @@ def test_unreconstructible_worktree_stays_local(published, change):
         git(origin, 'update-ref', '-d', 'refs/heads/wt/fix')
     else:
         git(wt, 'checkout', '--detach')
-    assert reason('Continue in `~/code/_wt/fix`.') == 'home gateway marker'
+    assert reason('Continue in ~/code/_wt/fix') == 'home gateway marker'
 
 
 @pytest.mark.parametrize('suffix', [' and ~/code/_wt/missing', ' and ~/code/_wt/fix-other', ' and kanban.db'])

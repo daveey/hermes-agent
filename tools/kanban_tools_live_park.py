@@ -21,6 +21,10 @@ A card counts as live-claimed when it is ``running`` and one of these holds:
 
 Applies only to a caller that does not own the run (no ``HERMES_KANBAN_TASK``/``HERMES_KANBAN_RUN_ID`` for the
 card): a worker parking its own card is unaffected, and so is a ready, todo or blocked card.
+
+The CLI (``hermes kanban schedule|block <id>``) is a sibling entry path; it refuses through ``cli_refusal``, called
+from ``hermes_cli.kanban_cli_park._guarded_park`` (t_01a1d0622df6ea87). The check stays out of
+``kanban_db.schedule_task``/``block_task``, so internal parkers (owner-down, placement forwarding) are unchanged.
 """
 from __future__ import annotations
 
@@ -66,21 +70,40 @@ def live_claim(conn, task_id: str, now: Optional[float] = None) -> Optional[dict
     return {"holder": str(holder), "run_id": run_id, "via": "board_claim"}
 
 
+def _message(name: str, task_id: str, claim: dict, steer: str, stop: str) -> str:
+    """The refusal text both entry paths print: holder, run, nothing changed, how to steer or stop the worker."""
+    return (f"{name} refused: {task_id} is running under a live worker claim ({claim['holder']}, run "
+            f"{claim['run_id']}). Parking it from here would end that run underneath the worker, whose clean exit "
+            f"is then booked as a failure. Nothing changed. Steer the worker instead: {steer} reaches it at its next "
+            f"model call, and it parks its own card. {stop}")
+
+
 def refusal(conn, tool_name: str, task_id: str) -> Optional[str]:
     """A typed ``live_claim_park`` tool error when ``task_id`` holds a live claim, else None. Nothing changes."""
     claim = live_claim(conn, task_id)
     if claim is None:
         return None
     from tools.registry import tool_error
-    holder = claim["holder"]
     return tool_error(
-        f"{tool_name} refused: {task_id} is running under a live worker claim ({holder}, run {claim['run_id']}). "
-        "Parking it from here would end that run underneath the worker, whose clean exit is then booked as a "
-        f"failure. Nothing changed. Steer the worker instead: kanban_comment(task_id='{task_id}', body='<what to "
-        "do, e.g. park with kanban_schedule(awaiting=...) and end the run>') reaches it at its next model call, "
-        "and it parks its own card. To stop the run outright use kanban_archive.",
-        code=CODE, rejection="live_claim", task_id=task_id, holder=holder, run_id=claim["run_id"],
+        _message(tool_name, task_id, claim,
+                 f"kanban_comment(task_id='{task_id}', body='<what to do, e.g. park with "
+                 "kanban_schedule(awaiting=...) and end the run>')",
+                 "To stop the run outright use kanban_archive."),
+        code=CODE, rejection="live_claim", task_id=task_id, holder=claim["holder"], run_id=claim["run_id"],
         claim_via=claim["via"], handoff_complete=False)
+
+
+def cli_refusal(conn, op: str, task_id: str) -> Optional[str]:
+    """The same refusal for ``hermes kanban schedule|block <id>`` from a caller that does not own the run
+    (t_01a1d0622df6ea87): one stderr line for ``_bulk_apply``, else None. Nothing changes."""
+    claim = live_claim(conn, task_id)
+    if claim is None:
+        return None
+    return _message(
+        f"kanban {op}", task_id, claim,
+        f"hermes kanban comment {task_id} \"<what to do, e.g. park with kanban schedule and end the run>\"",
+        f"To stop the run outright use hermes kanban reclaim {task_id} or hermes kanban archive {task_id}. "
+        f"[{CODE}, via {claim['via']}]")
 
 
 def guard_refusal(board, args: dict, tool_name: str, task_id: str) -> Optional[str]:

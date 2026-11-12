@@ -73,7 +73,8 @@ elif "/check-runs?" in endpoint:
                                        "status": verdict[0], "conclusion": verdict[1],
                                        "app": {{"id": 15368}}}}] if verdict else []}}]))
 else:
-    print(json.dumps([{{"workflow_runs": runs}}]))
+    page = {{"workflow_runs": runs}}
+    print(json.dumps([page] if "--paginate" in args else page))  # a named page= is one page, not a list
 '''
 
 

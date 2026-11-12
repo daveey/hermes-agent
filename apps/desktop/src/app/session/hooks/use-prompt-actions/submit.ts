@@ -1223,7 +1223,10 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                     // may send it again. Every other failure keeps the send unconfirmed.
                     if (isDefiniteSubmitRefusal(error)) {
                       prepared.legacyAttempted = false
-                      await writePreparedSubmission(retryKey, prepared)
+                      // A failed save must not mask the refusal: the caller acts on the 4090.
+                      await writePreparedSubmission(retryKey, prepared).catch(storageError =>
+                        console.warn('[prepared-submission-reset]', storageError)
+                      )
                     }
 
                     throw error

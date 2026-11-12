@@ -257,7 +257,7 @@ def try_record(writer, *args, **kwargs):
         return False
 
 
-STAGES = frozenset({"pull", "reserve", "repin"})
+STAGES = frozenset({"pull", "reserve", "repin", "recover"})
 TIMING_KEYS = ("budget_ms", "elapsed_ms")
 TIMING_CAP_MS = 86_400_000
 

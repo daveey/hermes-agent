@@ -1,13 +1,18 @@
-"""The same gateway deferring ``hermes update`` three times in a row gets a repair owner.
+"""The same gateway deferring ``hermes update`` three times in a row, over a streak that has
+outlived a drain cool-off, gets a repair owner.
 
 hermes-hub, 2026-11-11: eleven updates in a row were deferred by a gateway that could never take
-the idle pause, and the only trace was one log line per attempt.
+the idle pause, and the only trace was one log line per attempt. hermes-hub, 2026-11-12: three
+instant-drainer retries in 41 s against a busy gateway filed a card; attempts alone are no wall.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -49,16 +54,41 @@ def _cards():
         return conn.execute("SELECT id, title, body, idempotency_key, status FROM tasks").fetchall()
 
 
-def test_third_consecutive_deferral_on_one_gateway_files_one_owner_card(tmp_path, monkeypatch, capsys):
-    """Two deferrals are ordinary; the third naming the same gateway files a repair card, later ones
-    keep that card, and a pause that goes through ends the streak."""
+T0 = datetime(2026, 11, 12, 15, 9, 37, tzinfo=UTC)
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Patched ``_now``: set ``clock.at = <seconds after T0>`` before each deferral. No sleeps."""
+    state = SimpleNamespace(at=0)
+    monkeypatch.setattr(deferrals, "_now", lambda: T0 + timedelta(seconds=state.at))
+    return state
+
+
+@pytest.fixture
+def reported(monkeypatch):
+    report = Mock(return_value="t_fixture_owner")
+    monkeypatch.setattr(deferrals, "report", report)
+    return report
+
+
+def _streak():
+    return json.loads(deferrals.state_path().read_text())["units"][UNIT]
+
+
+def test_third_consecutive_deferral_on_one_gateway_files_one_owner_card(tmp_path, monkeypatch, capsys, clock):
+    """Two deferrals are ordinary; the third naming the same gateway, once the streak has outlived
+    a drain cool-off, files a repair card, later ones keep that card, and a pause that goes through
+    ends the streak."""
     board = _board(tmp_path, monkeypatch)
     reason = f"{UNIT} does not support idle pause; restart that gateway on the installed code when idle"
 
     assert deferrals.note_deferral([UNIT], reason) == []
+    clock.at = 600
     assert deferrals.note_deferral([UNIT], reason) == []
     assert not board.exists() or _cards() == [], "a card was filed before the third deferral"
 
+    clock.at = deferrals.MIN_STREAK_S
     filed = deferrals.note_deferral([UNIT], reason)
     cards = _cards()
     assert len(cards) == 1 and filed == [cards[0][0]]
@@ -96,10 +126,81 @@ def test_a_finished_owner_does_not_swallow_a_streak_that_outlived_it(tmp_path, m
     assert second != first and len(_cards()) == 2
 
 
-def test_a_card_that_cannot_be_filed_never_changes_the_verdict(tmp_path, monkeypatch, capsys):
+def test_a_card_that_cannot_be_filed_never_changes_the_verdict(tmp_path, monkeypatch, capsys, clock):
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("x")
     monkeypatch.setenv("HERMES_KANBAN_DB", str(blocker / "board.db"))
-    for _ in range(3):
+    for at in (0, 600, deferrals.MIN_STREAK_S):
+        clock.at = at
         assert deferrals.note_deferral([UNIT], "does not support idle pause") == []
     assert "Repair owner: NOT FILED" in capsys.readouterr().out
+
+
+# --- The streak floor: attempts alone are not a wall (hermes-hub 2026-11-12) -----------------
+#
+# The instant hub drainer retried a refused apply with a doubling delay: deferrals 1..3 in 41 s
+# against a gateway busy with two review chats filed a repair card. Only a streak that outlives a
+# drain cool-off (``MIN_STREAK_S``) files one.
+
+BUSY = "hermes-gateway is busy or cannot acknowledge an idle pause; retry when idle"
+
+
+def test_three_retries_in_41_seconds_file_nothing(tmp_path, monkeypatch, capsys, clock, reported):
+    for at in (0, 13, 41):
+        clock.at = at
+        assert deferrals.note_deferral([UNIT], BUSY) == []
+    reported.assert_not_called()
+    assert "Repair owner" not in capsys.readouterr().out
+    streak = _streak()
+    assert streak["count"] == 3 and streak["first_at"] == T0.isoformat(timespec="seconds")
+
+
+def test_the_same_streak_files_once_it_outlives_the_floor(tmp_path, monkeypatch, capsys, clock, reported):
+    for at in (0, 13, 41, 120):
+        clock.at = at
+        deferrals.note_deferral([UNIT], BUSY)
+    reported.assert_not_called()
+    clock.at = deferrals.MIN_STREAK_S
+    assert deferrals.note_deferral([UNIT], BUSY) == ["t_fixture_owner"]
+    reported.assert_called_once()
+    unit, entry = reported.call_args.args
+    assert unit == UNIT and entry["count"] == 5 and entry["first_at"] == T0.isoformat(timespec="seconds")
+    assert f"{UNIT} has deferred 5 updates in a row" in capsys.readouterr().out
+
+
+def test_a_wall_over_hours_still_files_from_the_first_deferral_past_the_floor(tmp_path, monkeypatch, clock, reported):
+    """2026-11-11 shape: eleven refusals over hours. Bursts of instant retries each followed by a
+    10 min cool-off; the first deferral 15 min or more into the streak files, every later one keeps."""
+    times = [0, 10, 30, 70, 670, 680, 700, 740, 3600, 7200, 10800]
+    filed_at = []
+    for i, at in enumerate(times, 1):
+        clock.at = at
+        if deferrals.note_deferral([UNIT], "does not support idle pause"):
+            filed_at.append((i, at))
+    assert filed_at[0] == (9, 3600), "the first deferral past the floor did not file"
+    assert [c.args[1]["count"] for c in reported.call_args_list] == [i for i, _ in filed_at]
+    assert [i for i, _ in filed_at] == list(range(filed_at[0][0], 12))
+
+
+def test_a_pause_that_goes_through_restarts_the_floor(tmp_path, monkeypatch, clock, reported):
+    for at in (0, 10, 20):
+        clock.at = at
+        deferrals.note_deferral([UNIT], BUSY)
+    deferrals.note_pause_ok()
+    for at in (1000, 1010, 1020):  # past T0 + floor, but a fresh streak
+        clock.at = at
+        assert deferrals.note_deferral([UNIT], BUSY) == []
+    reported.assert_not_called()
+    assert _streak()["first_at"] == (T0 + timedelta(seconds=1000)).isoformat(timespec="seconds")
+    clock.at = 1000 + deferrals.MIN_STREAK_S
+    assert deferrals.note_deferral([UNIT], BUSY) == ["t_fixture_owner"]
+    assert reported.call_args.args[1]["count"] == 4
+
+
+def test_an_unreadable_first_at_fails_towards_filing(tmp_path, monkeypatch, clock, reported):
+    deferrals.state_path().parent.mkdir(parents=True, exist_ok=True)
+    deferrals.state_path().write_text(json.dumps({"units": {UNIT: {
+        "count": 4, "first_at": "not-a-time", "last_at": "not-a-time", "reason": BUSY}}}))
+    assert deferrals.note_deferral([UNIT], BUSY) == ["t_fixture_owner"]
+    unit, entry = reported.call_args.args
+    assert unit == UNIT and entry["count"] == 5 and entry["first_at"] == "not-a-time"

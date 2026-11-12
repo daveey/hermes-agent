@@ -476,6 +476,9 @@ _SPECS = [
     ], help="Mark one or more tasks done"),
     _cmd("edit", [
         _TASK_ID,
+        _arg("--requires", metavar="CAPABILITIES",
+             help="Orchestrator only: replace declared requirements with a comma-separated list; empty clears. "
+                  "Idle open cards only; workspace/skill needs remain. Cannot combine with other edit flags."),
         _arg("--title", help="Replace the task title"),
         _arg("--body", help="Replace the task body"),
         _arg("--priority", type=int, help="Replace priority (cap 1000; lowering requires --reason)"),

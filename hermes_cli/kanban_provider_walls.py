@@ -17,11 +17,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
 import sqlite3
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Optional
 
@@ -178,6 +180,51 @@ def profile_model() -> str:
         return ""
 
 
+# A pool read that keeps failing is logged as a WARNING at most once per provider per window (every
+# dispatcher tick reads it); the full traceback stays at DEBUG.
+READ_FAILURE_WARN_SECONDS = 15 * 60
+_READ_FAILURE_WARNED: dict[str, float] = {}
+
+
+def _read_failed(check: str, provider: str, model: Optional[str], exc: BaseException) -> None:
+    """Make a swallowed pool-read fault visible: each caller fails open or closed on it, silently. [daveey]"""
+    logger.debug("kanban walls: %s failed for %s/%s (%s)", check, provider, model, exc, exc_info=True)
+    now = time.monotonic()
+    last = _READ_FAILURE_WARNED.get(provider)
+    if last is not None and now - last < READ_FAILURE_WARN_SECONDS:
+        return
+    _READ_FAILURE_WARNED[provider] = now
+    logger.warning("kanban walls: cannot read the %s OAuth pool (%s in %s for %s: %s); its live quota "
+                   "evidence is ignored until it reads again", provider, type(exc).__name__, check, model, exc)
+
+
+@contextlib.contextmanager
+def _home_secret_scope() -> Iterator[None]:
+    """Bind this home's own secret scope for a pool read when none is bound and multiplexing is on.
+
+    A multiplexing gateway runs its dispatcher tick in an empty ``Context`` (no per-turn scope), where
+    ``get_secret`` fails closed, so ``load_pool`` raised ``UnscopedSecretError`` on every tick (mini BB
+    gateway, 2026-11-12). Callers judge the pool inside it too: availability checks may re-read a
+    credential. A routed turn's own scope is left alone. [daveey]"""
+    from agent.secret_scope import current_secret_scope, is_multiplex_active, reset_secret_scope, set_secret_scope
+    if not is_multiplex_active() or current_secret_scope() is not None:
+        yield
+        return
+    from hermes_constants import get_hermes_home
+    from tui_gateway.launch_profile_policy import owner_secret_scope
+    home = get_hermes_home()
+    token = set_secret_scope(owner_secret_scope(home), profile_home=str(home))
+    try:
+        yield
+    finally:
+        reset_secret_scope(token)
+
+
+def _oauth_pool(provider: str) -> Any:
+    from agent.credential_pool import load_pool
+    return load_pool(provider, allowed_auth_types={"oauth"})
+
+
 def live_quota_wall(provider: str, model: str) -> Optional[float]:
     """Reset time when ``provider``'s OAuth pool is quota-exhausted for ``model`` right now, else None.
 
@@ -188,11 +235,11 @@ def live_quota_wall(provider: str, model: str) -> Optional[float]:
     if not provider or provider == "auto" or not model or model.startswith("class:"):
         return None
     try:
-        from agent.credential_pool import load_pool
         from agent.model_routing_unavailable import quota_unavailable
-        unavailable = quota_unavailable(load_pool(provider, allowed_auth_types={"oauth"}), model)
-    except Exception as exc:  # never break dispatch over a pool read
-        logger.debug("kanban walls: live quota check failed for %s/%s (%s)", provider, model, exc, exc_info=True)
+        with _home_secret_scope():
+            unavailable = quota_unavailable(_oauth_pool(provider), model)
+    except Exception as exc:  # health: allow BLE001 -- never break dispatch over a pool read; warned
+        _read_failed("live quota check", provider, model, exc)
         return None
     return float(unavailable.resets_at) if unavailable is not None else None
 
@@ -206,11 +253,11 @@ def live_quota_room(provider: str, model: str) -> bool:
     if not provider or provider == "auto" or not model or model.startswith("class:"):
         return False
     try:
-        from agent.credential_pool import load_pool
         from agent.model_routing_unavailable import quota_room
-        return bool(quota_room(load_pool(provider, allowed_auth_types={"oauth"}), model))
-    except Exception as exc:  # never break dispatch over a pool read
-        logger.debug("kanban walls: live quota room check failed for %s/%s (%s)", provider, model, exc, exc_info=True)
+        with _home_secret_scope():
+            return bool(quota_room(_oauth_pool(provider), model))
+    except Exception as exc:  # health: allow BLE001 -- never break dispatch over a pool read; warned
+        _read_failed("live quota room check", provider, model, exc)
         return False
 
 
@@ -221,12 +268,12 @@ def live_pool_serving(provider: str, model: Optional[str] = None) -> bool:
     if not provider or provider == "auto":
         return False
     try:
-        from agent.credential_pool import load_pool
         from agent.model_routing_unavailable import quota_unavailable
-        pool = load_pool(provider, allowed_auth_types={"oauth"})
-        return quota_unavailable(pool, model) is None and bool(pool.has_available(model=model))
-    except Exception as exc:  # health: allow BLE001 -- a pool read fault keeps every hold
-        logger.debug("kanban walls: live serving check failed for %s/%s (%s)", provider, model, exc, exc_info=True)
+        with _home_secret_scope():
+            pool = _oauth_pool(provider)
+            return quota_unavailable(pool, model) is None and bool(pool.has_available(model=model))
+    except Exception as exc:  # health: allow BLE001 -- a pool read fault keeps every hold; warned
+        _read_failed("live serving check", provider, model, exc)
         return False
 
 

@@ -21,7 +21,8 @@ This module is the narrow contract between the two:
   ``kanban_link`` / ``kanban_unlink`` tool handlers, and records a correlated result.
   A crash after acceptance leaves the row ``accepted``; the lease expiring (or the
   executor pid being gone on this host) puts it back up for redelivery, and ops are
-  idempotent (an edge already present/absent counts as applied).
+  idempotent (an edge already present/absent counts as applied). A request no executor accepted
+  within ``DEADLINE_S`` (24 h) is rejected at accept as ``expired``, never run late.
 * **reconcile_notify** ops (``kanban_notify_reconcile_exec``) retire a wrong-local refused-send tui
   subscription. Their execution waits on the owner gateway's own receipt read (phase
   ``awaiting_owner``), which ``drain`` polls without spending delivery attempts.
@@ -46,7 +47,7 @@ import os
 import socket
 import sqlite3
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 _log = logging.getLogger(__name__)
 
@@ -54,6 +55,9 @@ MAX_OPS = 20
 MAX_ATTEMPTS = 5
 LEASE_SECONDS = 120
 EXECUTOR_FRESH_SECONDS = 300
+# A request no executor accepted within this long is rejected as expired at accept, not run late (the same
+# 24 h cap kanban_operator_call.DEADLINE_S puts on a forwarded call at its home gateway).
+DEADLINE_S = 24 * 3600
 OPS = ("link", "unlink", "reconcile_notify", "resume", "retry_limit", "archive")  # link: preview only (dry_run); a request carries unlink ops
 # reconcile_notify: retire a wrong-local refused-send tui subscription on owner-read receipts
 # (hermes_cli/kanban_notify_reconcile_exec.py). A request carries only those, or only edge ops.
@@ -236,10 +240,13 @@ def endpoint_scope(conn: sqlite3.Connection, requester: str, task_id: str) -> Op
 
 
 def requester_refusal(conn: sqlite3.Connection, requester: str) -> Optional[str]:
+    """Only a missing or archived requester voids its queued requests. A ``done`` requester's request still
+    runs: ``submit`` proved a live run, filing a comment is naturally a worker's last act, and each executor
+    re-checks the op's scope against the board as it is now."""
     row = conn.execute("SELECT status FROM tasks WHERE id = ?", (requester,)).fetchone()
     if row is None:
         return f"requester {requester} no longer exists"
-    if row[0] in ("archived", "done"):
+    if row[0] == "archived":
         return f"requester {requester} is {row[0]}"
     return None
 
@@ -494,14 +501,19 @@ def _apply_op(op: dict, board: Optional[str]) -> dict:
 
 
 def _accept_next(conn: sqlite3.Connection, executor: str, now: int,
-                 abandoned: list) -> Optional[dict]:
+                 abandoned: list, expired: list) -> Optional[dict]:
     from hermes_cli import kanban_db as kb
 
     with kb.write_txn(conn):
         for r in conn.execute(
-                "SELECT id, status, executor, lease_expires, result_json FROM supervisor_requests "
-                "WHERE status IN ('pending','accepted') ORDER BY id ASC").fetchall():
+                "SELECT id, status, executor, lease_expires, result_json, created_at, attempts "
+                "FROM supervisor_requests WHERE status IN ('pending','accepted') ORDER BY id ASC").fetchall():
             rid, status, holder, lease = int(r[0]), r[1], r[2], r[3]
+            # Never accepted (attempts 0: pending, or an _expire that crashed before its receipt) in time:
+            # rejected by the caller (_expire), never run late.
+            if int(r[6]) == 0 and now - int(r[5]) > DEADLINE_S:
+                expired.append((rid, holder))
+                continue
             if status == "accepted" and _awaiting_owner(r[4]):
                 continue  # waiting on another gateway: polled (kanban_notify_reconcile_exec.poll), no attempt spent
             if status == "accepted" and lease and int(lease) > now and not _executor_dead(holder):
@@ -672,7 +684,11 @@ def drain(conn: sqlite3.Connection, *, board: Optional[str] = None, role: str = 
     _rewake_late_parkers(conn)
     for _ in range(max(0, int(limit))):
         abandoned: list = []
-        req = _accept_next(conn, executor, now, abandoned)
+        expired: list = []
+        req = _accept_next(conn, executor, now, abandoned, expired)
+        for rid, holder in expired:
+            if _expire(conn, rid, holder, executor):
+                processed.append((rid, "rejected"))
         for rid, holder in abandoned:
             if _abandon(conn, rid, holder, executor):
                 processed.append((rid, "failed"))
@@ -709,6 +725,23 @@ def _abandon(conn: sqlite3.Connection, rid: int, holder: Optional[str], executor
             return False
     return _finish(conn, get_request(conn, rid), executor, "failed", results=[],
                    error=f"abandoned after {MAX_ATTEMPTS} deliveries whose executor never finished")
+
+
+def _expire(conn: sqlite3.Connection, rid: int, holder: Optional[str], executor: str) -> bool:
+    """Reject a request no executor accepted within ``DEADLINE_S`` without running any op. Takes it only from
+    the holder it was found with (compare-and-swap; attempts stays 0, so a crash here is expired again next
+    drain). The requester gets the usual rejection receipt."""
+    from hermes_cli import kanban_db as kb
+    with kb.write_txn(conn):
+        cur = conn.execute(
+            "UPDATE supervisor_requests SET status='accepted', executor=? WHERE id=? AND attempts=0 AND "
+            "status IN ('pending','accepted') AND COALESCE(executor,'')=?", (executor, rid, holder or ""))
+        if cur.rowcount != 1:
+            return False
+    req = cast(dict, get_request(conn, rid))  # the row the CAS above just took
+    detail = f"expired: pending > DEADLINE_S ({DEADLINE_S // 3600} h) with no executor accepting it"
+    results = [{**op, "outcome": "not_applied", "detail": "expired"} for op in req["ops"] or []]
+    return _finish(conn, req, executor, "rejected", results=results, error=detail)
 
 
 _skip_logged = False

@@ -12,7 +12,8 @@ appends the ordinary ``edited`` event. It is deliberately narrow:
   creating worker's own task. Not the creator chain, not siblings, not grandchildren.
 * **Never the requester's own card** (``self_scope``): a worker must not widen its own breaker.
 * **Bounded.** ``max_retries`` is an int 1..``MAX_RETRY_LIMIT``; bools are refused.
-* **Live cards only.** Archived or done targets, and a finished requester, are refused.
+* **Live cards only.** Archived or done targets are refused; so is an archived requester (a
+  requester that completed after filing still gets its request executed).
 
 Execution re-checks scope and the requester against the board as it is now. Each applied op
 appends a ``supervisor_retry_limit`` event carrying the request id, so a redelivered request

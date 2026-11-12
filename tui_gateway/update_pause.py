@@ -642,13 +642,19 @@ def successor_owes_continuation(home: Path | str, session_key: str) -> bool:
     gateway's kanban sweeper did so 21 s after a pause, the continuation re-asked a clarify form no Desktop
     window could see, and the user's next message cancelled it. The window is ``SUCCESSOR_YIELD_S`` from this
     process's start when it started after the pause, else ``SUCCESSOR_YIELD_UNKNOWN_S`` from the pause stamp.
-    Past it no successor came and any reader continues, as before."""
-    from tui_gateway.turn_marker import freshness_since, marker_writer_state, read_turn_marker
+    Past it no successor came and any reader continues, as before. Nothing is owed for a marker the startup
+    sweep leaves alone (``startup_resume._skip_reason``: stale, out of attempts, writer alive, opted out) or
+    when the sweep is off: no successor would continue it, and a fresh reader held a 2 h old pause for its
+    first ``SUCCESSOR_YIELD_S`` (review t_01a1cfcca83f9266)."""
+    from tui_gateway import server
+    from tui_gateway.startup_resume import _settings, _skip_reason
+    from tui_gateway.turn_marker import freshness_since, read_turn_marker
     marker = read_turn_marker(home, session_key)
-    if not marker or marker.get("reason") != PAUSE_REASON or not marker.get("auto_continue", True):
+    if not marker or marker.get("reason") != PAUSE_REASON:
         return False
-    if marker_writer_state(marker) == "alive":
-        return False  # its own backend still holds the pause (in-place watcher)
+    on_startup, fresh_s, max_attempts, _ = _settings(server._load_cfg())
+    if not on_startup or _skip_reason(marker, _now(), fresh_s, max_attempts) is not None:
+        return False
     paused, started = freshness_since(marker), _process_started_at()
     if started > paused:
         return 0 <= _now() - started < SUCCESSOR_YIELD_S

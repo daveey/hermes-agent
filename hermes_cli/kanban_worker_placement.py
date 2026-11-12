@@ -25,6 +25,15 @@ RESERVE_KEEPALIVE_S = 60.0
 _queued: dict[tuple[str, str], tuple[int, str | None, float]] = {}
 
 
+def _remember_queued(reply, key, revision, identity):
+    if reply.get("state") == "queued":
+        # Never adopt an arbitrary post-pull revision: it may be somebody else's edit.
+        version = reply.get("task_version", revision)
+        _queued[key] = (version, identity, time.monotonic() + RESERVE_KEEPALIVE_S)
+        if len(_queued) > 1024:
+            del _queued[next(iter(_queued))]
+
+
 def _local_identity(conn, task_id):
     from hermes_cli import kanban_repin_notice as repin
 
@@ -97,12 +106,14 @@ def creation_audit(args, cfg=None):
     """
     from hermes_cli import kanban_placement as placement
 
+    explicit = args.get("placement") not in (None, "", "auto") or args.get("runs_on") is not None
+    intent = "explicit" if explicit else "auto"
     try:
         cfg = placement.config() if cfg is None else cfg
-        return {"portable_reason": placement.portable_reason(args, cfg)}
+        return {"portable_reason": placement.portable_reason(args, cfg), "placement_intent": intent}
     except Exception:  # health: allow BLE001 -- an audit field never blocks a create
         logger.warning("portable_reason audit failed", exc_info=True)
-        return {"portable_reason": "audit failed"}
+        return {"portable_reason": "audit failed", "placement_intent": intent}
 
 
 def resolved_db_placement(fields):
@@ -269,12 +280,8 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
             or not all(isinstance(name, str) and name for name in candidates)):
         return 0
     cursor = (sync.sync_state(conn) or {}).get("worker_reserve_cursor") or ""
-    rows = conn.execute(
-        "SELECT id, sync_version FROM tasks WHERE placement_policy=? AND status='ready' "
-        "AND created_on=? AND claim_lock IS NULL AND lease_holder IS NULL AND sync_version IS NOT NULL "
-        "AND NOT EXISTS (SELECT 1 FROM kanban_sync_outbox o WHERE o.table_name='tasks' "
-        "AND o.row_uid=tasks.id AND o.state='pending') ORDER BY (id <= ?), id LIMIT ?",
-        (POLICY, gateway, cursor, MAX_RESERVES_PER_TICK)).fetchall()
+    from hermes_cli import kanban_placement_recovery as recovery
+    rows = recovery.select_rows(conn, board, gateway, cursor, MAX_RESERVES_PER_TICK)
     from hermes_cli import kanban_queue_reason as queue
 
     attempted = 0
@@ -286,7 +293,15 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
     now = time.monotonic()
     try:
         for row in rows:
-            last = row["id"]
+            if row["placement_policy"] is not None:
+                last = row["id"]
+            mode = recovery.available_mode(conn, dict(row), cfg, hub, board, gateway)
+            # Recovery changes placement policy: revalidate its current inputs. Ordinary
+            # renewals retain the pre-loop snapshot used by picked_up after an in-loop pull.
+            if mode and not recovery.unchanged_ready(conn, row):
+                continue
+            if row["placement_policy"] is None and mode is None:
+                continue
             key = (board, row["id"])
             held = _refused.get(key)
             if held and held[0] == row["sync_version"] and now < held[1]:
@@ -295,8 +310,8 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
             if len(_refused) > 1024:  # cards that left the query never come back to clear their entry
                 for stale in [k for k, (_, until) in _refused.items() if until <= now]:
                     del _refused[stale]
-            labels = requested_move(conn, row["id"])
-            stage = "reserve" if labels is None else "repin"  # provenance for a failure below
+            labels = None if mode else requested_move(conn, row["id"])
+            stage = "recover" if mode else ("reserve" if labels is None else "repin")
             held = _queued.get(key)
             identity = _local_identity(conn, row["id"]) if labels is None else None
             if labels is None and held and held[:2] == (row["sync_version"], identity) and now < held[2]:
@@ -317,14 +332,9 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                         logger.warning("repinned %s on the Board but could not record it locally", row["id"],
                                        exc_info=True)
                 else:
-                    reply = hub.reserve(board, task_id=row["id"], expected_revision=row["sync_version"],
-                                        candidates=candidates)
-                    if reply.get("state") == "queued":
-                        # Never adopt an arbitrary post-pull revision: it may be somebody else's edit.
-                        version = reply.get("task_version", row["sync_version"])
-                        _queued[key] = (version, identity, time.monotonic() + RESERVE_KEEPALIVE_S)
-                        if len(_queued) > 1024:
-                            del _queued[next(iter(_queued))]
+                    from hermes_cli.kanban_placement_recovery import request_assignment
+                    reply = request_assignment(hub, board, row, mode, candidates)
+                    _remember_queued(reply, key, row["sync_version"], identity)
                     queue.try_record(queue.record_reply, conn, row["id"], gateway, reply, candidates)
                 attempted += 1
             except OSError as exc:
@@ -334,6 +344,9 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
                 return attempted
             except client.HubError as exc:
                 timing = queue.call_timing(budget, started, time.monotonic())
+                if recovery.unavailable_endpoint(hub, board, gateway, exc, mode):
+                    logger.info("Board recovery endpoint unavailable; backing off for %ss", recovery.RECOVERY_RETRY_S)
+                    continue
                 fence = None
                 if rejection_code(exc) == "not_claimable":
                     # The Board already has it leased or not ready: our copy is behind. Back off at this revision.
@@ -479,11 +492,17 @@ def dispatch_tick(conn):
     """Retry placement before local capacity checks, without creating an extra daemon."""
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_sync_client as client
+    from hermes_cli import kanban_placement as placement
 
     if sync.board_mode(conn) != "primary":
         return
     state = sync.sync_state(conn) or {}
-    if not conn.execute("SELECT 1 FROM tasks WHERE placement_policy=? AND status='ready' LIMIT 1", (POLICY,)).fetchone():
+    cfg = placement.config()
+    pools = cfg.get("worker_pools")
+    if not isinstance(pools, dict) or not pools.get(state.get("gateway_id")):
+        return
+    if not conn.execute("SELECT 1 FROM tasks WHERE status='ready' AND created_on=? LIMIT 1",
+                        (state.get("gateway_id"),)).fetchone():
         return
     try:
         ident = client.load_identity()
@@ -498,7 +517,7 @@ def dispatch_tick(conn):
             queue.try_record(queue.record_pull_error, conn, ident.gateway, error=exc)
             return
         queue.clear_pull_streaks(ident.gateway)  # a feed-pull failure streak is no longer consecutive
-        reevaluate(conn, hub, state["board_id"], ident.gateway)
+        reevaluate(conn, hub, state["board_id"], ident.gateway, cfg=cfg)
     except (client.HubError, client.SyncUnavailable, client.Resync, OSError):
         # Offline origin cannot remove the queue fence or manufacture an assignment.
         return

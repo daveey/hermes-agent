@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from hermes_cli import kanban_db as kb
 from tests.hermes_cli.test_kanban_remote_archive import _running_on_worker, _tool
 from tests.hermes_cli.test_kanban_worker_node import WORKER
@@ -56,3 +58,62 @@ def test_an_expired_board_claim_does_not_hold_off_an_outside_park(gws, svc, kill
         "AND json_extract(payload, '$.holder') IS NOT NULL ORDER BY id DESC LIMIT 1", (tid,)).fetchone()[0])
     assert live_claim(hub.conn, tid, now=payload["expires"] / 1000 + 1) is None
     assert live_claim(hub.conn, tid)["holder"] == WORKER
+
+
+def _claim_event(conn, tid):
+    return conn.execute("SELECT id, payload FROM task_events WHERE task_id = ? AND run_id = ? AND kind = 'claimed' "
+                        "AND json_extract(payload, '$.holder') IS NOT NULL ORDER BY id DESC LIMIT 1",
+                        (tid, kb._current_run_id(conn, tid))).fetchone()
+
+
+def test_a_board_claim_naming_this_gateway_does_not_refuse(gws, svc, kills):
+    """``holder == own``: the Board ``claimed`` event names this gateway while ``claim_lock`` is NULL (e.g. a local
+    reclaim raced the feed). Our own claim with no live local worker protects no run, so the park is not refused."""
+    from hermes_cli import kanban_db_sync as sync
+    from tools.kanban_tools_live_park import live_claim
+    hub, worker = gws
+    tid = _running_on_worker(hub, worker, svc)
+    hub.enter()
+    _drop_lease_mirror(hub.conn, tid)
+    assert live_claim(hub.conn, tid)["via"] == "board_claim"  # the foreign claim is seen, so the gate is reached
+    own = str(sync._state(hub.conn)["gateway_id"])
+    event_id, payload = _claim_event(hub.conn, tid)
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE task_events SET payload = ? WHERE id = ?",
+                         (json.dumps({**json.loads(payload), "holder": own}), event_id))
+    assert kb.get_task(hub.conn, tid).status == "running"
+    assert live_claim(hub.conn, tid) is None
+
+
+@pytest.mark.parametrize("mode", ["off", "shadow"])
+def test_a_non_primary_board_does_not_consult_claim_events(gws, svc, kills, monkeypatch, mode):
+    """Only a primary board's feed carries authoritative ``claimed`` events; any other mode never refuses on them."""
+    from hermes_cli import kanban_db_sync as sync
+    from tools.kanban_tools_live_park import live_claim
+    hub, worker = gws
+    tid = _running_on_worker(hub, worker, svc)
+    hub.enter()
+    _drop_lease_mirror(hub.conn, tid)
+    assert live_claim(hub.conn, tid)["via"] == "board_claim"
+    monkeypatch.setattr(sync, "board_mode", lambda conn: mode)
+    assert live_claim(hub.conn, tid) is None
+
+
+def test_cli_creator_park_before_the_lease_mirror_arrives_is_refused(gws, svc, kills, capsys):
+    """The CLI path of the incident shape: ``hermes kanban schedule <id>`` on the creator's replica."""
+    import argparse
+
+    from hermes_cli import kanban as kcli
+    hub, worker = gws
+    tid = _running_on_worker(hub, worker, svc)
+    hub.enter()
+    _drop_lease_mirror(hub.conn, tid)
+    run_id = kb._current_run_id(hub.conn, tid)
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    kcli.build_parser(parser.add_subparsers(dest="command"))
+    rc = kcli.kanban_command(parser.parse_args(["kanban", "schedule", tid,
+                                                "SCHEDULED_UNTIL=2099-01-01T00:00:00Z soak", "--clock-only"]))
+    assert rc != 0
+    assert WORKER in capsys.readouterr().err
+    assert kb.get_task(hub.conn, tid).status == "running"
+    assert hub.conn.execute("SELECT ended_at FROM task_runs WHERE id = ?", (run_id,)).fetchone()[0] is None

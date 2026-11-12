@@ -400,14 +400,25 @@ def test_reserve_and_extend_default_to_one_short_try_and_accept_a_longer_timeout
     """[daveey] N3: callers holding the session-map lock keep the 50 ms default; lock-free callers (cron) may wait."""
     import time
 
-    child = _spawn_lock_holder(tmp_path, 1.5)
+    # Held until ``finish`` is set, not for a fixed time: a CPU-starved runner must not see the lock
+    # drop before the short tries run, nor have the short tries measured against a sub-second bound.
+    ctx = multiprocessing.get_context("spawn")
+    ready, finish = ctx.Event(), ctx.Event()
+    child = ctx.Process(target=_lock_child, args=(tmp_path, ready, finish))
+    child.start()
+    release = threading.Timer(0.3, finish.set)
     try:
+        assert ready.wait(20)
         for fn in (af.reserve, af.extend):
             started = time.monotonic()
             with pytest.raises(af.AdmissionBusy):
                 fn(tmp_path)
-            assert time.monotonic() - started < 0.5
-        af.reserve(tmp_path, timeout=10).close()
-        af.extend(tmp_path, timeout=10).close()
+            # One short try, not admission_lock's 10 s wait (the holder keeps the lock up to 20 s).
+            assert time.monotonic() - started < 5
+        release.start()  # the holder lets go while the longer-timeout caller waits
+        af.reserve(tmp_path, timeout=60).close()
+        af.extend(tmp_path, timeout=60).close()
     finally:
+        release.cancel()
+        finish.set()
         _reap(child)

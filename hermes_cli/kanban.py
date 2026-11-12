@@ -31,6 +31,8 @@ from hermes_cli import kanban_workflow
 from hermes_cli import kanban_contract_cli as _contract_cli
 from hermes_cli import kanban_foreign_card as _foreign_card
 from hermes_cli.kanban_cli_triage_lines import _decompose_ok_line, _retitled_suffix
+from hermes_cli.kanban_cli_flags import (parse_branch_flag as _parse_branch_flag,
+                                         parse_workspace_flag as _parse_workspace_flag)
 from hermes_cli.kanban_output import (
     _ATTACHMENT_FIELDS, _RUNS_RUN_FIELDS, _SHOW_RUN_FIELDS, _bulk_apply, _err,
     _fmt_counts, _fmt_task_line, _fmt_ts, _json_out, _obj_dict, _print_json,
@@ -73,39 +75,6 @@ def _run_state_kwargs(args: argparse.Namespace, cmd: str) -> tuple[Optional[dict
     if (st is None) != (sn is None):
         return None, _err(f"kanban {cmd}: pass both --state-type and --state-name, or omit both", 2)
     return ({} if st is None else {"state_type": st, "state_name": sn}), 0
-
-
-def _parse_workspace_flag(value: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """``--workspace`` -> ``(kind, path|None)``: ``scratch``, ``worktree``, ``worktree:<p>``, ``dir:<p>``.
-    Omitted -> ``(None, None)`` so ``create_task`` can tell "default" from an explicit scratch."""
-    if not value:
-        return (None, None)
-    v = value.strip()
-    if v in {"scratch", "worktree"}:
-        return (v, None)
-    for prefix, kind in (("dir:", "dir"), ("worktree:", "worktree")):
-        if not v.startswith(prefix):
-            continue
-        path = v[len(prefix):].strip()
-        if not path:
-            raise argparse.ArgumentTypeError(f"--workspace {prefix} requires a path after the colon")
-        return (kind, os.path.expanduser(path))
-    raise argparse.ArgumentTypeError(f"unknown --workspace value {value!r}: use scratch, worktree, "
-                                     "worktree:<path>, or dir:<path>")
-
-
-def _parse_branch_flag(value: Optional[str]) -> Optional[str]:
-    """Normalize an optional branch name from ``kanban create --branch``."""
-    if value is None:
-        return None
-    branch = value.strip()
-    if not branch:
-        raise argparse.ArgumentTypeError("--branch requires a non-empty name")
-    if branch.startswith("-"):
-        raise argparse.ArgumentTypeError("--branch must not start with '-'")
-    if any(ch.isspace() for ch in branch):
-        raise argparse.ArgumentTypeError("--branch must not contain whitespace")
-    return branch
 
 
 def _check_dispatcher_presence(hermes_home: Optional[Path] = None) -> tuple[bool, str]:
@@ -1321,11 +1290,10 @@ _OPERATOR_EDIT_FLAGS = ("max_retries", "goal_mode", "goal_max_turns", "max_runti
 
 
 def _cmd_edit(args: argparse.Namespace) -> int:
-    if getattr(args, "completion_contract", None) is not None:
-        return _contract_cli.cmd_edit_contract(args)
+    from hermes_cli.kanban_requires_edit import edit_preflight  # --requires / --completion-contract / --reason
+    if (rc := edit_preflight(args)) is not None:
+        return rc
     reason = getattr(args, "reason", None)
-    if reason is not None and getattr(args, "priority", None) is None and getattr(args, "priority_bump", None) is None:
-        return _err("kanban edit: --reason only applies to --completion-contract or --priority", 2)
     result = getattr(args, "result", None)
     raw_metadata = getattr(args, "metadata", None)
     summary = getattr(args, "summary", None)

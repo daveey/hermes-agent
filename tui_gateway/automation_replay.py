@@ -26,11 +26,14 @@ guarantee own that case). The boundary row an automation turn leaves says what f
 from __future__ import annotations
 
 import logging
+import math
 import re
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+from tui_gateway.update_pause import SUCCESSOR_YIELD_UNKNOWN_S
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +43,11 @@ REPLAY_METADATA_KEY = "automation_replay"
 REPLAY_MIN_DELAY_S = 60.0
 # The replay found a turn running: it looks again this much later, at most this many times, then gives up.
 BUSY_RECHECK_S = 60.0
-BUSY_RECHECKS_MAX = 10
+# [daveey] "busy" also means a dead writer's paused turn is left to its successor (``update_pause``), for up to
+# ``SUCCESSOR_YIELD_UNKNOWN_S`` from the pause stamp. The rechecks outlast that window by one interval, so a
+# replay that first fired just after the stamp is still pending when the window ends (10 x 60 s gave up at
+# 600 s of a 660 s window; review t_01a1cfcca83f9266).
+BUSY_RECHECKS_MAX = math.ceil((SUCCESSOR_YIELD_UNKNOWN_S + BUSY_RECHECK_S) / BUSY_RECHECK_S)
 # Tests switch this off (tests/tui_gateway/conftest.py) so no real timer outlives the test that armed it.
 ENABLED = True
 

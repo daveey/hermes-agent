@@ -81,11 +81,26 @@ def _cli_awaiting(args: argparse.Namespace, wake):
 def _guarded_park(conn, op: str, wake, refused: dict, park, awaiting=None, **plan):
     """Per-task op: refuse a park > 2 h out with no probe (``kanban_wake_check.guard_error``)
     or one nothing would produce (``kanban_awaiting``) before ``park`` runs; ``park`` itself writes
-    its reason comment only when it lands (``_commented``). [daveey]"""
+    its reason comment only when it lands (``_commented``).
+
+    First, a caller that does not own ``tid``'s run (``_worker_run_id_for`` is None) is refused on a card a
+    live worker owns (``kanban_tools_live_park.cli_refusal``, the agent tools' check): the park would end that
+    run underneath the worker (t_01a1d0622df6ea87). [daveey]"""
     from hermes_cli import kanban_awaiting as kaw
     from hermes_cli import kanban_wake_check as kwc
+    from hermes_cli.kanban import _worker_run_id_for
+    from tools.kanban_tools_live_park import cli_refusal
 
     def run(tid):
+        try:
+            outside = _worker_run_id_for(tid) is None
+        except ValueError as exc:   # a worker scoped to another card
+            refused[tid] = f"cannot {op} {tid}: {exc}"
+            return False
+        live = cli_refusal(conn, op, tid) if outside else None
+        if live:
+            refused[tid] = live
+            return False
         wake_at = kwc.planned_wake(conn, tid, op=op, **plan)
         err = kwc.guard_error(wake_at=wake_at, wake_check=wake[0], clock_only=wake[2])
         if err:

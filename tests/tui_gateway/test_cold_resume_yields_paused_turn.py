@@ -153,3 +153,87 @@ def test_process_start_is_this_process_birth():
     started = up._process_started_at()
     assert 0 < started <= time.time()
     assert wait_until(lambda: up._process_started_at() == started, timeout=1)  # stable across calls
+
+
+# ── only a pause the startup sweep takes is owed ─────────────────────────────────────────────────────────────
+
+def _set_marker(home, **fields) -> None:
+    path = home / "desktop" / "interrupted_turns.json"
+    entries = json.loads(path.read_text())
+    entries[KEY].update(fields)
+    path.write_text(json.dumps(entries))
+
+
+def _stale(home) -> None:
+    _age_pause(home, _recovery.CFG["desktop"]["auto_continue"]["freshness_minutes"] * 60 + 60)
+
+
+def _out_of_attempts(home) -> None:
+    _set_marker(home, attempts=2)  # desktop.auto_continue.max_attempts defaults to 2
+
+
+@pytest.mark.parametrize("skipped", [_stale, _out_of_attempts], ids=["stale", "out-of-attempts"])
+def test_a_pause_the_startup_sweep_skips_is_owed_to_no_one(recovery, home, monkeypatch, skipped):
+    """Review t_01a1cfcca83f9266: a 2 h old pause was owed to a reader started 10 s earlier, so each restart
+    delayed the chat's headless deliveries by ``SUCCESSOR_YIELD_S`` though no successor would ever take it."""
+    from tui_gateway import startup_resume as sr
+    skipped(home)
+    assert sr.pending_resumes(home, _recovery.CFG, log_skips=False) == []  # the sweep leaves it alone
+    monkeypatch.setattr(up, "_process_started_at", lambda: time.time() - 10)
+    assert not up.successor_owes_continuation(home, KEY)
+    assert _wake() != "busy"
+    assert _loaded()
+
+
+def test_a_pause_the_startup_sweep_takes_is_owed_to_a_fresh_reader(recovery, home, monkeypatch):
+    from tui_gateway import startup_resume as sr
+    _age_pause(home, 2 * 3600)
+    assert [r["session_key"] for r in sr.pending_resumes(home, _recovery.CFG, log_skips=False)] == [KEY]
+    monkeypatch.setattr(up, "_process_started_at", lambda: time.time() - 10)
+    assert up.successor_owes_continuation(home, KEY)
+    assert _wake() == "busy"
+    assert not recovery.done.wait(0.3) and recovery.calls == [] and not _loaded()
+
+
+# ── an automation replay outlasts the yield window ───────────────────────────────────────────────────────────
+
+def test_a_busy_replay_is_still_pending_when_the_yield_window_ends(recovery, home, monkeypatch):
+    """A replay that first fires just after a dead writer's pause stamp, in a process that did not restart and
+    with no successor coming, keeps rechecking past ``SUCCESSOR_YIELD_UNKNOWN_S`` and delivers then (10 x 60 s
+    gave up at 600 s of the 660 s window)."""
+    from tui_gateway import automation_replay as ar
+    stamp = time.time()
+    clock = [stamp - 30]  # the replay is scheduled 30 s before the pause stamp, so it first fires 30 s after
+    timers = []
+    monkeypatch.setattr(up, "_now", lambda: clock[0])
+    monkeypatch.setattr(ar, "ENABLED", True)
+    monkeypatch.setattr(ar, "_arm", lambda key, entry, delay, fire: timers.append((delay, fire, key)))
+    verdicts = []
+    real_wake = server._wake_session_turn
+    monkeypatch.setattr(server, "_wake_session_turn",
+                        lambda *a, **kw: (verdicts.append(real_wake(*a, **kw)), verdicts[-1])[1])
+    ar.reset()
+    try:
+        assert ar.schedule(KEY, text="a card finished", display_kind="kanban_notice", display_metadata={}, due=0,
+                           cause="lease", persisted=True, now=clock[0])
+        while timers and clock[0] - stamp < up.SUCCESSOR_YIELD_UNKNOWN_S:
+            delay, fire, key = timers.pop()
+            clock[0] += delay
+            if clock[0] - stamp >= up.SUCCESSOR_YIELD_UNKNOWN_S:
+                assert ar.pending(KEY), f"the replay gave up {clock[0] - stamp:.0f} s after the pause stamp"
+            fire(key)
+        assert clock[0] - stamp >= up.SUCCESSOR_YIELD_UNKNOWN_S, (
+            f"the replay gave up {clock[0] - stamp:.0f} s after the pause stamp; nothing more is scheduled")
+        assert set(verdicts) == {"busy"}  # the window's last fire resumed the chat; its paused turn went first
+        assert _loaded()
+        assert_continued(recovery)
+        assert ar.pending(KEY) and timers, "the replay gave up behind the paused turn's continuation"
+        _, session = server._find_live_session_by_key(KEY)
+        session["running"] = False  # the continuation finished
+        delay, fire, key = timers.pop()
+        clock[0] += delay
+        fire(key)
+        assert verdicts[-1] == "started" and not ar.pending(KEY)
+        assert len(recovery.calls) == 2 and "a card finished" in recovery.calls[1][0]
+    finally:
+        ar.reset()

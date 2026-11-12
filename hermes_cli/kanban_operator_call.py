@@ -378,7 +378,10 @@ def start(conn: sqlite3.Connection, req: dict, executor: str) -> str:
         return "rejected"
     payload = {"request_uid": uid, "board": board, "action": op["action"], "target_task_id": op.get("task_id"),
                "args": {k: v for k, v in op.items() if k not in ("op", "action", "task_id")},
-               "caller": caller, "requested_at": int(time.time()), "supervisor_request_id": req["id"],
+               # The call was made at submit (which proved the run live), not when this tick forwards it:
+               # the caller may have completed since.
+               "caller": caller, "requested_at": int(req["created_at"]),
+               "supervisor_request_id": req["id"],
                "home": verdict.get("home")}
     with kb.write_txn(conn):
         before = _outbox_rows(conn)
