@@ -137,6 +137,14 @@ def recover_auth_failure(agent, pool, *, status_code, has_retried_429, error_con
     warn_foreign_failing_key(pool, api_key_hint, credential_id)
     refreshed = pool.try_refresh_matching(**refresh_kwargs)
     if refreshed is None:
+        # A relay-minted row revoked by the hub's re-mint: re-pull and adopt the pushed token before
+        # rotating, since the same push revoked every sibling row too (t_01a1d064a8dc8bd6).
+        from agent.credential_relay_repull import recover_revoked_relay_row
+        repulled = recover_revoked_relay_row(
+            agent, pool, status_code=status_code, error_context=error_context,
+            api_key_hint=api_key_hint, credential_id=credential_id, episode=_episode)
+        if repulled is not None:
+            return repulled, has_retried_429
         # Refresh failed; rotate (the failed entry is already marked exhausted).
         if rotate_and_swap(401, "auth refresh failed"):
             return True, False
