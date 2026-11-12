@@ -847,7 +847,8 @@ class SessionDB(
         jittered application-level retry handles contention, not SQLite's busy handler;
         isolation_level=None: explicit BEGIN IMMEDIATE."""
         conn = _connect_tracked_db(
-            str(self.db_path), check_same_thread=False, timeout=1.0, isolation_level=None,
+            str(self.db_path), tracking_path=self.db_path,  # named: waits only on its own reservations
+            check_same_thread=False, timeout=1.0, isolation_level=None,
             factory=_corrupt_confirm.ScopedAuthorizerConnection,  # composes the corruption-scope recorder
         )
         try:

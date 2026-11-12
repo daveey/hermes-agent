@@ -248,3 +248,19 @@ def test_waiting_manual_registration_follows_reservation(tmp_path, monkeypatch):
         pending.result(3)
     assert tracking.has_live_connection(path)
     tracking.untrack_connection(path)
+
+
+def test_state_writer_open_ignores_unrelated_reservations(tmp_path):
+    """Reservations on other files can overlap without end; the state.db writer open (held
+    under SessionDB's startup and write locks) must not wait for a moment with none."""
+    from hermes_state import SessionDB
+
+    def open_close():
+        SessionDB(db_path=tmp_path / "state.db").close()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with tracking.offline_file_access(tmp_path / "unrelated.bin"):
+            pool.submit(open_close).result(10)
+            with pytest.raises(sqlite3.OperationalError) as caught:
+                tracking.connect_tracked(tmp_path / "x.db", connect_fn=sqlite3.connect)
+            assert caught.value.sqlite_errorcode == sqlite3.SQLITE_BUSY
