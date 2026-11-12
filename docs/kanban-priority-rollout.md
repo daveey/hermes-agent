@@ -55,7 +55,10 @@ fences. The coordinator checks lineage before reading configuration or starting
 SSH; remote staging checks it before reading stdin. SSH is transport for an
 already authorized operator, never a worker authorization mechanism.
 
-Create an explicit JSON mapping for **every origin in the captured manifest**:
+Create an explicit JSON mapping for **every origin in the captured manifest**.
+Entries for other enrolled origins that own no captured row are allowed; the
+coordinator reports them as `skipped` and never contacts them, so a map listing
+every enrolled gateway keeps working when one drains:
 
 ```json
 {
@@ -91,12 +94,33 @@ flag). `--allow-legacy-rollback` explicitly permits automatic guarded recovery
 of above-cap originals; omit it only if refusing that policy rollback is intended.
 Do not pass separate task, backup, manifest, attachment or digest flags to migrate.
 
-The coordinator captures one global raw manifest, secures its local original and
-attachment, sends the **exact UTF-8 bytes** over SSH stdin with `stage --manifest -`,
-and validates every origin's attachment, writer, inventory and identical SHA256
+Before a run, check the map against the live origins with the read-only
+`origins` operation (same operator fence, same map flags, no `--allow-legacy-rollback`):
+
+```sh
+hermes kanban --board default supervisor-requests --priority-operation origins \
+  --writer origin-a --host-map-file /absolute/operator-host-map.json
+```
+
+It captures the canonical inventory and prints
+`{"origins": {name: open-row count}, "missing": [...], "extra": [...], "errors": [...]}`.
+It exits 1 when an origin has no map entry or the writer is unmapped or owns no
+rows; `extra` entries alone pass. It writes no backup, attachment or priority,
+and does not use the backup paths, so they stay fresh for the real run. Hosts are
+still never inferred: fix a `missing` origin by adding its entry by hand.
+
+The coordinator captures one global raw manifest and checks host-map coverage on
+it **before writing anything**. A coverage mismatch (an origin missing from the
+map, or a local writer that is unmapped or owns no rows) exits 1 with `missing`,
+`extra` and `errors` in the report and consumes **no backup path and no
+attachment**: fix the map and rerun with the same paths. Only then does it stage
+that same captured manifest locally (backup plus attachment, so the staged digest
+is that of the checked capture), send the **exact UTF-8 bytes** over SSH stdin with
+`stage --manifest -` to every covered origin,
+and validate every origin's attachment, writer, inventory and identical SHA256
 receipt **before any apply**. Staging failure or digest mismatch writes no
 priorities, but local preparation and any completed staging consume their fresh
-backup paths even if host-map coverage validation or later staging fails. Retain
+backup paths if later staging fails. Retain
 those backups and choose new paths before retrying. It then applies each origin,
 publishes each normal outbox via the
 supported `kanban_sync_client.push` API (no snapshot pull), rejects pending or

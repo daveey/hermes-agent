@@ -6,6 +6,7 @@ import shlex
 import sqlite3
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -35,15 +36,21 @@ def rig(monkeypatch, tmp_path):
     data = '{ "note": "caf\u00e9", "rows": [] }\r\n'.encode('utf-8')
     digest = hashlib.sha256(data).hexdigest()
     events = []
+    rig_ns = SimpleNamespace(staged_origins=origins, manifest={
+        'board_id': 'board', 'rows': [{'id': f't-{o}', 'origin': o, 'old': 1, 'new': 2} for o in origins]})
     def receipt(o):
         return {'writer': o, 'manifest_sha256': digest, 'attachment_id': 1,
                 'origins': origins, 'backup': hosts[o]['backup']}
-    def prepare(_conn, _args):
+    def capture(_conn, _args):
+        events.append(('capture', _args.writer))
+        return rig_ns.manifest
+    def prepare(_conn, _args, *, manifest=None):
         events.append(('prepare', 'a'))
         assert _args.priority_operation == 'prepare'
         assert _args.task == 'task-a'
+        assert manifest is rig_ns.manifest  # stages the coverage-checked capture, no re-capture
         (tmp_path / 'a.json').write_bytes(data)
-        return receipt('a')
+        return {**receipt('a'), 'origins': dict(rig_ns.staged_origins)}
     def apply(_conn, attachment, dg, *, writer, undo, allow_legacy_rollback):
         assert attachment == 1 and dg == digest
         assert allow_legacy_rollback
@@ -81,12 +88,23 @@ def rig(monkeypatch, tmp_path):
         output = {'writer': origin, 'pending': 0, 'rejected': 0} if action == 'publish' else receipt(origin)
         return SimpleNamespace(returncode=0, stdout=json.dumps(output), stderr='')
     monkeypatch.setenv('RUNNER_TEST_SENTINEL', 'retained')
+    monkeypatch.setattr(cli, '_capture', capture)
     monkeypatch.setattr(cli, '_prepare_stage', prepare)
     monkeypatch.setattr(cli, '_publish', publish)
     monkeypatch.setattr(cli, '_verify', verify)
     monkeypatch.setattr(executor, 'apply_attached', apply)
     monkeypatch.setattr(runner.subprocess, 'run', transport)
-    return SimpleNamespace(args=args, hosts=hosts, data=data, events=events, transport=transport)
+    rig_ns.__dict__.update(args=args, hosts=hosts, data=data, events=events, transport=transport, tmp_path=tmp_path)
+    return rig_ns
+
+
+def _set_host_map(rig, hosts):
+    rig.args.host_map = json.dumps(hosts)
+
+
+def _consumed_nothing(rig):
+    assert not any(e[0] in ('prepare', 'stage', 'apply', 'restore', 'publish') for e in rig.events)
+    assert not any(Path(entry['backup']).exists() for entry in rig.hosts.values())
 
 
 def test_all_stages_before_apply_and_actual_command_wiring(rig, capsys):
@@ -96,7 +114,7 @@ def test_all_stages_before_apply_and_actual_command_wiring(rig, capsys):
     assert report['attempted'] == ['a', 'b', 'c']
     assert set(report['applied']) == {'a', 'b', 'c'}
     assert report['canonical'] == {'verified': 3}
-    assert rig.events == [('prepare', 'a'), ('stage', 'b'), ('stage', 'c'),
+    assert rig.events == [('capture', 'a'), ('prepare', 'a'), ('stage', 'b'), ('stage', 'c'),
                           ('apply', 'a'), ('apply', 'b'), ('apply', 'c'),
                           ('publish', 'a'), ('publish', 'b'), ('publish', 'c'), ('verify', 'a')]
 
@@ -217,8 +235,141 @@ def test_host_map_file_and_coverage(rig, tmp_path):
     del hosts['c']
     path.write_text(json.dumps(hosts), encoding='utf-8')
     code, report = runner.run(None, rig.args)
-    assert code != 0 and 'exactly cover' in report['errors'][0]
-    assert not report['applied']
+    assert code != 0 and report['errors'] == ['host map missing manifest origins: c']
+    assert report['missing'] == ['c'] and report['extra'] == []
+    assert not report['applied'] and not report['staged']
+
+
+@pytest.mark.parametrize('drop, add', [(['c'], []), (['b', 'c'], ['z'])])
+def test_coverage_mismatch_refuses_before_any_backup_or_attachment(rig, drop, add):
+    """Run 1 (op bdc414c0) staged the local backup and attachment, then refused on
+    coverage. Missing origins must refuse after the read-only capture only."""
+    hosts = {o: e for o, e in rig.hosts.items() if o not in drop}
+    for origin in add:
+        hosts[origin] = {**rig.hosts['a'], 'host': f'{origin}.example.com',
+                         'backup': str(rig.tmp_path / f'{origin}.json')}
+    _set_host_map(rig, hosts)
+    rig.manifest['rows'].append({'id': 't-a2', 'origin': 'a', 'old': 3, 'new': 4})
+    code, report = runner.run(None, rig.args)
+    assert code == 1
+    assert report['origins'] == {'a': 2, 'b': 1, 'c': 1}
+    assert report['missing'] == sorted(drop) and report['extra'] == add
+    assert report['staged'] == {} and report['attempted'] == []
+    assert rig.events == [('capture', 'a')]
+    _consumed_nothing(rig)
+
+
+def test_superset_map_skips_origins_without_rows(rig):
+    hosts = dict(rig.hosts, drained={**rig.hosts['b'], 'host': 'drained.example.com',
+                                     'backup': str(rig.tmp_path / 'drained.json')})
+    _set_host_map(rig, hosts)
+    code, report = runner.run(None, rig.args)
+    assert code == 0, report['errors']
+    assert report['skipped'] == ['drained'] and report['extra'] == ['drained']
+    assert report['missing'] == []
+    assert set(report['staged']) == set(report['applied']) == {'a', 'b', 'c'}
+    assert not any(origin == 'drained' for _action, origin in rig.events)
+    assert not Path(hosts['drained']['backup']).exists()
+
+
+def test_writer_without_rows_refuses_before_staging(rig):
+    hosts = dict(rig.hosts, w={**rig.hosts['a'], 'backup': str(rig.tmp_path / 'w.json')})
+    _set_host_map(rig, hosts)
+    rig.args.writer = 'w'
+    code, report = runner.run(None, rig.args)
+    assert code == 1 and report['extra'] == ['w']
+    assert any('local writer owns no manifest rows' in e for e in report['errors'])
+    assert rig.events == [('capture', 'w')]
+    _consumed_nothing(rig)
+
+
+def test_writer_missing_from_map_refuses_before_staging(rig):
+    _set_host_map(rig, {o: e for o, e in rig.hosts.items() if o != 'a'})
+    code, report = runner.run(None, rig.args)
+    assert code == 1 and report['missing'] == ['a']
+    assert 'local writer missing from host map' in report['errors']
+    _consumed_nothing(rig)
+
+
+def test_staged_origins_must_equal_checked_capture(rig):
+    rig.staged_origins = {'a': 1, 'b': 1}
+    code, report = runner.run(None, rig.args)
+    assert code == 1 and 'coverage-checked capture' in report['errors'][0]
+    assert not any(e[0] in ('stage', 'apply') for e in rig.events)
+
+
+def _origins_args(rig, *extra):
+    return cli_helpers.args('--priority-operation', 'origins', '--writer', 'a',
+                            '--host-map', rig.args.host_map, *extra)
+
+
+@pytest.mark.parametrize('drop, add, code', [([], [], 0), (['c'], [], 1), ([], ['z'], 0), (['b'], ['z'], 1)])
+def test_origins_check_is_read_only_and_reports_coverage(rig, capsys, drop, add, code):
+    hosts = {o: e for o, e in rig.hosts.items() if o not in drop}
+    for origin in add:
+        hosts[origin] = {**rig.hosts['a'], 'backup': str(rig.tmp_path / f'{origin}.json')}
+    _set_host_map(rig, hosts)
+    assert cli.run(None, _origins_args(rig)) == code
+    report = json.loads(capsys.readouterr().out)
+    assert report['origins'] == {'a': 1, 'b': 1, 'c': 1}
+    assert report['missing'] == drop and report['extra'] == add
+    assert bool(report['errors']) == bool(code)
+    assert rig.events == [('capture', 'a')]
+    _consumed_nothing(rig)
+
+
+@pytest.mark.parametrize('flag', [['--backup', '/x.json'], ['--task', 't'], ['--manifest', '-'],
+                                  ['--digest', 'd'], ['--attachment-id', '1'], ['--allow-legacy-rollback']])
+def test_origins_check_refuses_write_flags_before_capture(rig, flag):
+    assert cli.run(None, _origins_args(rig, *flag)) != 0
+    assert rig.events == []
+
+
+@pytest.mark.parametrize('delegated', [False, True])
+def test_origins_check_keeps_operator_fence(rig, monkeypatch, delegated):
+    from agent import delegation_context
+    monkeypatch.setattr(delegation_context, 'is_delegated_child_process_context', lambda: delegated)
+    if not delegated:
+        monkeypatch.setenv('HERMES_KANBAN_TASK', 'worker')
+    assert cli.run(None, _origins_args(rig)) != 0
+    with pytest.raises(PermissionError):
+        runner.check_host_map(None, _origins_args(rig))
+    assert rig.events == []
+
+
+@pytest.mark.parametrize('operation', ['origins', 'migrate'])
+def test_real_capture_path_writes_nothing_on_coverage_refusal(conn, monkeypatch, tmp_path, operation):
+    """Un-faked _capture/_prepare_stage: an uncovered origin refuses with no backup file,
+    no attachment and no priority change, for both the check and migrate itself."""
+    ids, _, _ = helpers.setup_plan(conn)
+    before = [tuple(r) for r in conn.execute('SELECT id, priority FROM tasks ORDER BY id')]
+    from hermes_cli.kanban_priority_migration import plan_global
+    inventory = [dict(r) for r in conn.execute('SELECT id,priority,created_on,status FROM tasks')]
+    inventory.append({'id': 'remote', 'priority': 5, 'created_on': 'worker-9', 'status': 'ready'})
+    calls = []
+    def capture(hub, *, board_id, exceptions):
+        calls.append((hub, board_id, exceptions))
+        return plan_global(inventory, board_id=board_id, exceptions=exceptions)
+    from hermes_cli import kanban_priority_prepare as prepare
+    from hermes_cli import kanban_sync_client as sync
+    monkeypatch.setattr(prepare, 'capture', capture)
+    monkeypatch.setattr(sync, 'load_identity', lambda: SimpleNamespace(gateway=sync_helpers.ME))
+    monkeypatch.setattr(sync, 'Hub', lambda identity: 'fake-hub')
+    def forbidden(*_a, **_kw):
+        pytest.fail('coverage refusal reached SSH')
+    monkeypatch.setattr(runner.subprocess, 'run', forbidden)
+    hosts = {sync_helpers.ME: {'host': 'me.example.com', 'argv': ['hermes'], 'task': ids[0],
+                               'backup': str(tmp_path / 'never.json')}}
+    args = cli_helpers.args('--priority-operation', operation, '--writer', sync_helpers.ME,
+                            '--host-map', json.dumps(hosts))
+    attachments_before = conn.execute('SELECT COUNT(*) FROM task_attachments').fetchone()[0]
+    code, report = (runner.check_host_map if operation == 'origins' else runner.run)(conn, args)
+    assert not (tmp_path / 'never.json').exists()  # run 1 consumed this path before refusing
+    assert conn.execute('SELECT COUNT(*) FROM task_attachments').fetchone()[0] == attachments_before
+    assert code == 1 and 'worker-9' in report['missing'] and sync_helpers.ME not in report['missing']
+    assert report['origins']['worker-9'] == 1 and report['origins'][sync_helpers.ME] >= 1
+    assert calls == [('fake-hub', sync_helpers.BOARD, [])]
+    assert [tuple(r) for r in conn.execute('SELECT id, priority FROM tasks ORDER BY id')] == before
 
 
 def test_publish_uses_supported_push_without_pull(conn, monkeypatch):
