@@ -125,6 +125,9 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, 
     # compose comment writes under one outer commit.
     with _kb.write_txn(conn, allow_nested=True):
         _kb._require_task(conn, task_id)
+        if relayed_human:  # the card holder's own checks, atomic with the write (one relay per user turn)
+            from hermes_cli.kanban_relayed_human import admit
+            admit(conn, task_id, relayed_human)
         cur = conn.execute(
             "INSERT INTO task_comments (task_id, author, body, created_at, origin_gateway) "
             "VALUES (?, ?, ?, ?, ?)", (task_id, author.strip(), body.strip(), now, origin),

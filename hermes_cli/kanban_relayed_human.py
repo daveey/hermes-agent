@@ -15,7 +15,14 @@ The origin (the chat writing the comment) verifies it:
   ``scheduled`` event): an answer cannot predate the question;
 * one relay per user message per card: the same user turn cannot mark two comments.
 
-A receiver of a cross-gateway relay stores the field as sent (``via='remote'``); its origin verified it.
+Only a row a person typed is a reply: a plain or ``steer`` user row, never a synthetic ``role='user'`` row (the
+card's own ``kanban_notice``, hidden scaffolding, process/delegation completions, internal notifications,
+compaction summaries, ``[System:`` notices or cross-session deliveries).
+
+The card's holder checks every relay before storing it (``admit``, inside ``add_comment``'s write transaction,
+so the one-relay rule is atomic), a cross-gateway one included: the card asked, the message is not older than
+the latest ask (``REMOTE_CLOCK_SKEW_SECONDS`` allowed for a remote clock), and no ``(session, message_id)`` is
+relayed to the card twice.
 """
 from __future__ import annotations
 
@@ -28,6 +35,12 @@ RELAY_FIELD = "relayed_human"
 SUSPECT_EVENT = "no_progress_relay_suspect"
 # A chat unblock this close to the escalation (and no relayed comment) is most likely an unmarked relay.
 SUSPECT_WINDOW_SECONDS = 15 * 60
+# A cross-gateway relay's ``at`` is the origin's clock; allow this much skew against the card's ask.
+REMOTE_CLOCK_SKEW_SECONDS = 120
+# Display kinds of a user row a person typed (NULL/'' = a plain prompt). Every other kind is synthetic.
+_TYPED_KINDS = ("steer",)
+# Untyped role='user' rows that are still not the user's words (gateway scaffolding, session-mentions courier).
+_SYNTHETIC_PREFIXES = ("[System:", "[Message from another Hermes session")
 
 
 class RelayRefused(ValueError):
@@ -49,13 +62,41 @@ def _latest_user_message(session_id: str, db_path: Optional[str] = None) -> Opti
     if not os.path.exists(db_path):
         return None
     uri = f"file:{db_path}?mode=ro"
+    kinds = ", ".join("?" for _ in _TYPED_KINDS)
+    not_synthetic = " ".join("AND instr(ltrim(COALESCE(content, '')), ?) <> 1" for _ in _SYNTHETIC_PREFIXES)
+    sql = ("SELECT id, timestamp FROM messages WHERE session_id = ? AND role = 'user' "
+           f"AND (COALESCE(display_kind, '') = '' OR display_kind IN ({kinds})) "
+           f"AND COALESCE(_compressed_summary, 0) = 0 {not_synthetic} ORDER BY id DESC LIMIT 1")
     try:
         with sqlite3.connect(uri, uri=True, timeout=5) as sdb:
-            row = sdb.execute("SELECT id, timestamp FROM messages WHERE session_id = ? AND role = 'user' "
-                              "ORDER BY id DESC LIMIT 1", (session_id,)).fetchone()
+            row = sdb.execute(sql, (session_id, *_TYPED_KINDS, *_SYNTHETIC_PREFIXES)).fetchone()
     except sqlite3.Error:
         return None
     return (int(row[0]), float(row[1])) if row else None
+
+
+def _already_relayed(conn: sqlite3.Connection, task_id: str, session: str, message_id: int) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'commented' "
+        "AND json_extract(payload, '$.relayed_human.session') = ? "
+        "AND json_extract(payload, '$.relayed_human.message_id') = ? LIMIT 1",
+        (task_id, session, int(message_id))).fetchone() is not None
+
+
+def admit(conn: sqlite3.Connection, task_id: str, relay: dict) -> None:
+    """The card holder's checks on any relay before it is stored (``add_comment`` calls this inside its write
+    transaction): the card asked, the message is not older than its latest ask, and this ``(session,
+    message_id)`` was not relayed to the card before. :class:`RelayRefused` otherwise."""
+    sid, message_id, at = str(relay["session"]), int(relay["message_id"]), int(relay["at"])
+    ask = _latest_ask(conn, task_id)
+    if ask is None:
+        raise RelayRefused(f"{task_id} never asked (no blocked or scheduled park): nothing to answer")
+    skew = REMOTE_CLOCK_SKEW_SECONDS if relay.get("via") == "remote" else 0
+    if at < ask - skew:
+        raise RelayRefused(f"the relayed user message (at {at}) predates {task_id}'s latest ask (at {ask}); "
+                           "relay only a reply given after the card asked")
+    if _already_relayed(conn, task_id, sid, message_id):
+        raise RelayRefused(f"user message {message_id} was already relayed to {task_id}; one relay per user turn")
 
 
 def verify(conn: sqlite3.Connection, task_id: str, *, session_id: Optional[str],
@@ -78,11 +119,7 @@ def verify(conn: sqlite3.Connection, task_id: str, *, session_id: Optional[str],
     if at <= ask:
         raise RelayRefused(f"the newest user message in session {sid} predates {task_id}'s latest ask; "
                            "relay only a reply given after the card asked")
-    used = conn.execute(
-        "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'commented' "
-        "AND json_extract(payload, '$.relayed_human.session') = ? "
-        "AND json_extract(payload, '$.relayed_human.message_id') = ? LIMIT 1", (task_id, sid, message_id)).fetchone()
-    if used:
+    if _already_relayed(conn, task_id, sid, message_id):
         raise RelayRefused(f"user message {message_id} was already relayed to {task_id}; one relay per user turn")
     return {"session": sid, "message_id": message_id, "at": int(at)}
 
@@ -102,7 +139,8 @@ def from_tool_args(conn: sqlite3.Connection, task_id: str, args: dict, session_i
 
 
 def from_remote(raw: Any) -> Optional[dict]:
-    """A cross-gateway relay's field as its origin verified it, normalized; ``None`` when absent/malformed."""
+    """A cross-gateway relay's field, normalized (shape only: ``admit`` checks it against the card when it is
+    stored); ``None`` when absent/malformed."""
     if not isinstance(raw, dict):
         return None
     sid = str(raw.get("session") or "").strip()[:200]

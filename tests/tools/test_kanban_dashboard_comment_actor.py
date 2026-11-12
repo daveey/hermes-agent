@@ -73,17 +73,51 @@ def test_courier_agent_comment_without_session_is_still_agent(client):
     assert p["writer_kind"] == "agent" and "writer_session" not in p
 
 
+def _asked_task() -> tuple[str, int]:
+    """A card whose latest ask (needs_input block) is at the returned time."""
+    tid = _ready_task()
+    conn = kbc.connect()
+    try:
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "blocked", {"kind": "needs_input", "reason": "which ring?"})
+        at = int(conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND kind = 'blocked'",
+                              (tid,)).fetchone()[0])
+    finally:
+        conn.close()
+    return tid, at
+
+
 def test_courier_relay_of_the_user_reply_is_stored_as_sent(client):
     """kanban-d1b921f32e: a cross_task relay of David's reply carries its origin-verified relayed_human;
     the receiver stores it (via='remote') beside writer_kind='agent'."""
-    tid = _ready_task()
+    tid, ask = _asked_task()
     r = client.post(f"/tasks/{tid}/comments", json={
         "body": "David says: the left ring", "author": "default", "writer_kind": "agent",
-        "writer_session": "hub-chat", "relayed_human": {"session": "hub-chat", "message_id": 42, "at": 1700}})
+        "writer_session": "hub-chat", "relayed_human": {"session": "hub-chat", "message_id": 42, "at": ask + 5}})
     assert r.status_code == 200, r.text
     p = _last_payload(tid)
     assert p["writer_kind"] == "agent"
-    assert p["relayed_human"] == {"session": "hub-chat", "message_id": 42, "at": 1700, "via": "remote"}
+    assert p["relayed_human"] == {"session": "hub-chat", "message_id": 42, "at": ask + 5, "via": "remote"}
+
+
+def test_receiver_refuses_a_replayed_or_pre_ask_relay(client):
+    """Review 5878485674 (2): the same (session, message_id) posted again, or a message older than the card's
+    latest ask, is refused (400) and stores nothing; so is a relay to a card that never asked."""
+    tid, ask = _asked_task()
+    relay = {"session": "hub-chat", "message_id": 7, "at": ask + 5}
+    sent = {"body": "David says: left", "author": "default", "writer_kind": "agent", "writer_session": "hub-chat"}
+    assert client.post(f"/tasks/{tid}/comments", json={**sent, "relayed_human": relay}).status_code == 200
+    for _ in range(2):
+        r = client.post(f"/tasks/{tid}/comments", json={**sent, "relayed_human": relay})
+        assert r.status_code == 400 and "already relayed" in r.text, r.text
+    r = client.post(f"/tasks/{tid}/comments", json={**sent, "relayed_human": {**relay, "message_id": 8,
+                                                                              "at": ask - 10000}})
+    assert r.status_code == 400 and "predates" in r.text, r.text
+    assert len(_comments(tid)) == 1
+    unasked = _ready_task()
+    r = client.post(f"/tasks/{unasked}/comments", json={**sent, "relayed_human": relay})
+    assert r.status_code == 400 and "never asked" in r.text, r.text
+    assert _comments(unasked) == []
 
 
 @pytest.mark.parametrize("extra", [

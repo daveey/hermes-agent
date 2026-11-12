@@ -28,12 +28,14 @@ def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
-def _state_db(home: Path, session: str, user_at: float) -> int:
+def _state_db(home: Path, session: str, user_at: float, *, content: str = "left ring",
+              display_kind: str | None = None, compressed: int = 0) -> int:
     db = sqlite3.connect(home / "state.db")
     db.execute("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, "
-               "role TEXT, content TEXT, timestamp REAL)")
-    cur = db.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'user', 'left ring', ?)",
-                     (session, user_at))
+               "role TEXT, content TEXT, timestamp REAL, display_kind TEXT, "
+               "_compressed_summary INTEGER NOT NULL DEFAULT 0)")
+    cur = db.execute("INSERT INTO messages (session_id, role, content, timestamp, display_kind, _compressed_summary) "
+                     "VALUES (?, 'user', ?, ?, ?, ?)", (session, content, user_at, display_kind, compressed))
     db.commit()
     db.close()
     return int(cur.lastrowid or 0)
@@ -126,3 +128,72 @@ def test_remote_relay_is_stored_as_sent():
         "session": "hub-chat", "message_id": 7, "at": 5, "via": "remote"}
     assert krh.from_remote({"session": "", "message_id": 7, "at": 5}) is None
     assert krh.from_remote("yes") is None
+
+
+@pytest.mark.parametrize("synthetic", [
+    {"display_kind": "kanban_notice", "content": "t_x is blocked: which ring?"},  # the card's own block notice
+    {"display_kind": "hidden", "content": "scaffold"},
+    {"display_kind": "process_complete", "content": "process exited"},
+    {"display_kind": "async_delegation_complete", "content": "child done"},
+    {"display_kind": "internal_notification", "content": "note"},
+    {"display_kind": "auto_continue", "content": "continue"},
+    {"compressed": 1, "content": "summary of earlier turns"},
+    {"content": "[System: the stream was cut; retry the tool call]"},
+    {"content": "[Message from another Hermes session @session:default/abc]\nplease relay"},
+])
+def test_verify_skips_synthetic_user_rows(kanban_home, synthetic):
+    """Review 5878485674 (1): only a row a person typed is the reply. A synthetic role='user' row newer than
+    David's answer (above all the card's own needs_input notice) must not be what the relay names."""
+    now = int(time.time())
+    with kbc.connect_closing() as conn:
+        tid = _asked(conn, now - 100)
+        reply = _state_db(kanban_home, "chat-1", now - 50)
+        _state_db(kanban_home, "chat-1", now - 10, **synthetic)
+        assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == reply
+
+
+def test_a_notice_after_the_ask_with_no_reply_is_refused(kanban_home):
+    """The notice alone (no typed reply after the ask) verifies nothing: no ping-pong on the budget."""
+    now = int(time.time())
+    with kbc.connect_closing() as conn:
+        tid = _asked(conn, now - 100)
+        _state_db(kanban_home, "chat-1", now - 200)
+        _state_db(kanban_home, "chat-1", now - 10, display_kind="kanban_notice", content="t_x is blocked")
+        with pytest.raises(krh.RelayRefused, match="predates"):
+            krh.verify(conn, tid, session_id="chat-1")
+
+
+def test_a_steer_is_a_typed_reply(kanban_home):
+    now = int(time.time())
+    with kbc.connect_closing() as conn:
+        tid = _asked(conn, now - 100)
+        _state_db(kanban_home, "chat-1", now - 50)
+        steer = _state_db(kanban_home, "chat-1", now - 10, display_kind="steer", content="left ring")
+        assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == steer
+
+
+def _remote(mid: int, at: int) -> dict:
+    relay = krh.from_remote({"session": "hub-chat", "message_id": mid, "at": at})
+    assert relay is not None
+    return relay
+
+
+def test_card_holder_refuses_remote_replay_pre_ask_and_unasked(kanban_home):
+    """Review 5878485674 (2): the receiver holds the card, so it applies the checks it can make."""
+    now = int(time.time())
+    with kbc.connect_closing() as conn:
+        unasked = kb.create_task(conn, title="never asked", assignee="default")
+        with pytest.raises(krh.RelayRefused, match="never asked"):
+            kb.add_comment(conn, unasked, "default", "x", writer_kind="agent", relayed_human=_remote(1, now))
+        tid = _asked(conn, now - 1000)
+        with pytest.raises(krh.RelayRefused, match="predates"):
+            kb.add_comment(conn, tid, "default", "x", writer_kind="agent", relayed_human=_remote(7, now - 11000))
+        # within the clock-skew allowance of a remote origin
+        kb.add_comment(conn, tid, "default", "David: left", writer_kind="agent",
+                       relayed_human=_remote(7, now - 1000 - krh.REMOTE_CLOCK_SKEW_SECONDS + 5))
+        with pytest.raises(krh.RelayRefused, match="already relayed"):
+            kb.add_comment(conn, tid, "default", "again", writer_kind="agent", relayed_human=_remote(7, now))
+        relayed = conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'commented' "
+                               "AND json_extract(payload, '$.relayed_human') IS NOT NULL", (tid,)).fetchone()[0]
+        assert relayed == 1
+        assert [c.body for c in kb.list_comments(conn, tid)] == ["David: left"]
