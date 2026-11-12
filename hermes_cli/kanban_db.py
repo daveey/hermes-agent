@@ -2452,6 +2452,10 @@ def _verify_created_cards(
     # Pull the set of cards linked as children of the completing task.
     # Cheap: one query, indexed on parent_id.
     linked_children: set[str] = set(child_ids(conn, completing_task_id))
+    # A Board-synced live file is partial: ask the Board replica for the rest (same trust rule). [daveey]
+    remote, remote_children = _replica_tasks([c for c in ordered if c not in found], completing_task_id)
+    found.update(remote)
+    linked_children |= remote_children
 
     verified: list[str] = []
     phantom: list[str] = []
@@ -2479,18 +2483,7 @@ def _scan_prose_for_phantom_ids(conn: sqlite3.Connection, text: str) -> list[str
     return unresolved_after_replica(missing)
 
 
-def unresolved_after_replica(missing: list[str]) -> list[str]:
-    """``missing`` (not on the local board) minus ids the hub replica knows; [] when the replica cannot say."""
-    if not missing:
-        return []
-    try:
-        from hermes_cli.kanban_session_activity import replica_task_resolution
-        found, authoritative = replica_task_resolution(missing)
-    except Exception:  # health: allow BLE001 -- advisory scan; an unusable replica means "unknown", never a flag
-        return []
-    if not authoritative:
-        return []
-    return [p for p in missing if p not in found]
+from hermes_cli.kanban_board_replica_refs import replica_tasks as _replica_tasks, unresolved_after_replica
 
 
 class HallucinatedCardsError(ValueError):
