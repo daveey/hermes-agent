@@ -550,6 +550,8 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
             continue
         reason = _skip_reason(conn, card, own, reg["machines"], mode=mode, review_enabled=review_enabled,
                               profile_exists=profile_exists)
+        if reason is None:
+            reason = _quota_held(replica, card)
         if reason is None and full:
             reason = ("budget_exhausted", full_detail)
         if reason is None:
@@ -557,6 +559,33 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
         elif reason[0] and card["id"] in mine:
             skips[card["id"]] = reason
     return picked, skips
+
+
+def _quota_held(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, Optional[str]]]:
+    """[daveey] ``("hold", detail)`` when the local dispatcher would hold ``card`` on its quota episode, judged
+    before the copy: the same read-only :func:`kanban_quota_episode.decision` ``check_respawn_guard`` returns for a
+    card with an episode, on the card's own runs/events in the replica (a copy carries exactly those) and this
+    machine's provider walls. Such a card would only be copied, held, evicted and copied again each tick, while
+    taking the pickup budget: worker-3 2026-11-12, 4 cards walled until 11-17/18 filled the batch and two
+    priority-0 cards pinned to it waited ``budget_exhausted`` (t_01a1cf9f2b838cbb). Not copied, it spends no
+    budget; an episode with a free alternate route (``decision`` -> None) is copied as before. Any failure copies
+    as before: the local guard still decides after the copy."""
+    from hermes_cli.kanban_quota_episode import decision, episode, hold_until
+    try:
+        if not episode(replica, card["id"]):
+            return None
+        from hermes_cli import kanban_db as kb
+        task = kb.get_task(replica, card["id"])
+        guard = decision(replica, task, lane=card["status"])[0] if task is not None else None
+        if guard is None:
+            return None
+        until = hold_until(replica, card["id"])
+    except Exception:  # health: allow BLE001 -- a hold prediction must never stop a pickup
+        _log.warning("kanban worker node: quota hold check for %s failed", card["id"], exc_info=True)
+        return None
+    from datetime import UTC, datetime
+    when = f" until {datetime.fromtimestamp(until, UTC):%Y-%m-%dT%H:%MZ}" if until else ""
+    return "hold", f"{guard}{when} (local dispatch would hold it)"
 
 
 def note_capped(conn: sqlite3.Connection, profile_exists: Optional[Callable[[str], bool]] = None) -> None:
