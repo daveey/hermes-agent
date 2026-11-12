@@ -170,17 +170,39 @@ def _pinned_here_since_ms(replica, task_id: str, own: str) -> Optional[int]:
     return None if row is None or row[0] is None else int(row[0]) * 1000
 
 
+# The origin's worker-first placement observation (``kanban_queue_reason.EVENT``); ``lifecycle.runs_on`` is the
+# card's ``runs_on`` (JSON text, or null) on the origin when the Board answered.
+_QUEUE_EVENT = "worker_queue_reason"
+
+
+def _seen_unpinned_here_ms(replica, task_id: str, own: str) -> Optional[int]:
+    """When the origin's newest worker-placement observation saw the card NOT pinned ``machine:<own>`` (ms), or None.
+
+    t_01a1cfdfb6f3f7ea (2026-11-12): a worker-first card's Board reservation pins it to a worker for seconds and
+    lapses (``runs_on`` null again), with no placement event. t_01a1cfa91548dad7 was reserved to worker-2 at
+    12:49:27Z, unpinned by 12:50:35Z and reserved again; worker-2 counted from ``ready_since`` (12:09Z) and filed
+    "waiting 40 min" at 12:50:44Z. A pin lasts at most since the last time it was seen absent."""
+    row = replica.execute(
+        "SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND kind = ? AND json_valid(payload) "
+        "AND NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(json_extract(task_events.payload, "
+        "'$.lifecycle.runs_on')) THEN json_extract(task_events.payload, '$.lifecycle.runs_on') ELSE '[]' END) "
+        "WHERE value = ?)", (task_id, _QUEUE_EVENT, f"machine:{own}")).fetchone()
+    return None if row is None or row[0] is None else int(row[0]) * 1000
+
+
 def stalled(conn, replica, own: str, *, now: Optional[float] = None) -> list[dict[str, Any]]:
     """Cards ready in ``replica``, pinned ``machine:<own>``, created elsewhere, unleased, not in the live file,
-    ready AND pinned here longer than :func:`stall_seconds`; oldest first. The clock starts at the later of
-    ``ready_since`` (else creation) and the newest placement event naming this machine."""
+    ready AND pinned here longer than :func:`stall_seconds`; oldest first. The clock starts at the latest of
+    ``ready_since`` (else creation), the newest placement event naming this machine and the newest worker-placement
+    observation of the card not pinned here (:func:`_seen_unpinned_here_ms`)."""
     from hermes_cli import kanban_worker_node as wn
     now_ms = _now_ms(now)
     limit_ms = stall_seconds() * 1000
     out = []
     for row in wn.pinned_rows(replica, own, now_ms=now_ms, statuses=("ready",)):
         since = row["ready_since"] if row["ready_since"] is not None else int(row["created_at"] or 0) * 1000
-        since = max(int(since), _pinned_here_since_ms(replica, row["id"], own) or 0)
+        since = max(int(since), _pinned_here_since_ms(replica, row["id"], own) or 0,
+                    _seen_unpinned_here_ms(replica, row["id"], own) or 0)
         if now_ms - int(since) <= limit_ms:
             continue
         if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (row["id"],)).fetchone():
@@ -489,12 +511,38 @@ def _refresh_targets(conn, task_id: str, members: list[dict[str, Any]], now_ms: 
             _log.info("pickup-stall refreshed card=%s added_targets=%d", task_id, len(added))
 
 
+def _open_coverage(conn, own: str) -> dict[str, str]:
+    """``{target card id: slug}`` for every card an OPEN host-wide repair about ``own`` (:data:`_HOST_GROUPS`) lists
+    in its body or the detector's target comments: a card whose host-wide cause changed (evidence missing, then
+    queue full) is not handed a second open host-wide repair. A card-specific refusal still gets its own card.
+
+    t_01a1cfdfb6f3f7ea (2026-11-12): worker-2 filed "Pickup evidence missing" for t_01a1cfa91548dad7 at 12:50:44Z;
+    pickup recorded budget_exhausted 0.3 s later, and the next tick filed "Pickup queue full" for the same card."""
+    prefix = f"{KEY_PREFIX}{own}:"
+    slugs = {spec[0] for spec in _HOST_GROUPS.values()}
+    out: dict[str, str] = {}
+    for row in conn.execute("SELECT id, body, idempotency_key FROM tasks WHERE idempotency_key >= ? "
+                            "AND idempotency_key < ? AND status NOT IN ('done', 'archived')",
+                            (prefix, prefix + "\U0010ffff")).fetchall():
+        slug = row["idempotency_key"][len(prefix):].split(":", 1)[0]
+        if slug not in slugs:
+            continue
+        text = (row["body"] or "") + "\n" + "\n".join(
+            r[0] for r in conn.execute("SELECT body FROM task_comments WHERE task_id = ? AND author = ?",
+                                       (row["id"], DETECTOR)))
+        for tid in re.findall(r"^- (\S+) \(", text, re.MULTILINE):
+            out.setdefault(tid, slug)
+    return out
+
+
 def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[float] = None) -> list[str]:
     """One repair per stalled card with a card-specific last reason; one per host per host-wide cause
-    (:data:`_HOST_GROUPS`), naming the oldest card. Returns the covering repair ids."""
+    (:data:`_HOST_GROUPS`), naming the oldest card. A card an open repair about this host already lists under
+    another key gets no second one (:func:`_open_coverage`). Returns the covering repair ids."""
     now_ms = _now_ms(now)
     ids: list[str] = []
     groups: dict[str, list[dict[str, Any]]] = {}
+    covered = _open_coverage(conn, own)
     for card in cards:
         # The sweep precedes pickup/note_capped. A first post-drain tick may
         # have old ready rows but no observation yet: missing evidence is not
@@ -510,6 +558,8 @@ def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[f
             continue
         group = _group(card)
         if group is not None:
+            if covered.get(card["id"], _HOST_GROUPS[group][0]) != _HOST_GROUPS[group][0]:
+                continue  # an open host-wide repair about this machine already lists it
             groups.setdefault(group, []).append(card)
             continue
         reason = (card["skip"] or {}).get("reason") or "none recorded"
