@@ -257,6 +257,33 @@ def test_roll_warms_the_successor_before_switching_and_never_stops_the_old_backe
     assert ro.is_superseded(9148)
 
 
+def test_roll_warms_every_board_on_disk_not_only_the_replayed_ones(home):
+    # Live 18:41Z: right after a switch Desktop's reconnect read the rarely-polled boards (bb, hermes, ...)
+    # cold. Board reads share 2 admission slots, so those cold first reads queued the warm board=default
+    # read for 18-22 s. Every board the successor lists must be warm before it takes traffic.
+    host = FakeHost(running={9148}, commits={9148: "a" * 40})
+    real_get = host.get
+
+    def get(port, path, timeout):
+        if path == "/api/plugins/kanban/boards" and port in host.running:
+            host.gets.append((port, path))
+            return 200, 0.01, {"boards": [{"slug": "default"}, {"slug": "bb"}, {"slug": "paint bot"},
+                                          {"slug": "old", "archived": 1}, {"slug": ""}, {"nope": 1}],
+                                "current": "default"}
+        return real_get(port, path, timeout)
+
+    ro.write_active(9148)
+    roller = make_roller(home, host)
+    roller.get = get
+    assert roller.roll("test") is True
+    warmed = [path for port, path in host.gets if port == 9149]
+    assert "/api/plugins/kanban/board?board=bb" in warmed
+    assert "/api/plugins/kanban/board?board=paint%20bot" in warmed
+    assert warmed.count("/api/plugins/kanban/board?board=default") == 2  # once per round, not duplicated
+    assert "/api/plugins/kanban/board?board=" not in warmed
+    assert "/api/plugins/kanban/board?board=old" not in warmed  # archived boards are not polled
+
+
 def test_roll_that_never_answers_keeps_the_old_backend_active(home):
     host = FakeHost(running={9148}, commits={9148: "a" * 40})
     host_get = host.get

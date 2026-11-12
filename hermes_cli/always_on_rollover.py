@@ -562,7 +562,9 @@ class Roller:
                 f" :{active_port or '-'}")
             self._abandon(port, active_port)
             return False
-        warm = self.warm(port, self.replay_paths(record.get("pid") if record else None))
+        paths = self.replay_paths(record.get("pid") if record else None)
+        paths += [p for p in self.board_paths(port) if p not in paths]
+        warm = self.warm(port, paths)
         body = self.health(port) if self.unit_active(port) else None  # it may have died while it warmed
         if body is None:
             log(f"roll: backend :{port} stopped answering while it warmed; keeping :{active_port or '-'}")
@@ -590,6 +592,26 @@ class Roller:
         return None
 
     # -- warming --
+    def board_paths(self, port: int) -> list[str]:
+        """GET /board for every unarchived board the successor lists. Desktop reads the rarely-polled boards
+        on reconnect, and board reads share 2 admission slots, so one cold board queues the warm ones behind
+        its first read (live 18:41Z: board=default waited 18-22 s). Best effort: no list, no extra paths."""
+        try:
+            status, _elapsed, body = self.get(port, "/api/plugins/kanban/boards", WARM_REQUEST_TIMEOUT_S)
+        except Exception:  # health: allow BLE001 -- warming is best effort: no list, no extra paths
+            return []
+        if status != 200 or not isinstance(body, dict) or not isinstance(body.get("boards"), list):
+            return []
+        out: list[str] = []
+        for board in body["boards"]:
+            slug = board.get("slug") if isinstance(board, dict) else None
+            if not isinstance(slug, str) or not slug or board.get("archived"):
+                continue
+            url = "/api/plugins/kanban/board?board=" + urllib.parse.quote(slug, safe="")
+            if url not in out:
+                out.append(url)
+        return out
+
     def replay_paths(self, old_pid: object) -> list[str]:
         """The default reads plus the allowlisted GETs (with their queries) the old backend served in the
         last two hours, from loop-watch's request_stats. Best effort: no log, no replays."""
