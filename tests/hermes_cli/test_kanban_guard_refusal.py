@@ -135,6 +135,44 @@ def test_old_refusal_outside_the_tail_stays_a_protocol_violation(kanban_home):
         assert "failure_finalized" in kinds
 
 
+@pytest.mark.parametrize("tail", [
+    # A plain kanban_show whose card body quotes the refusal text: the call succeeded (review 5879504029).
+    [("kanban_show", json.dumps({"task": {"body": f"refusal was: {json.loads(REFUSAL)['error']}"}}))],
+    # A refusal that does not START the error field is some other error quoting it.
+    [("kanban_comment", json.dumps({"error": f"comment rejected; body quoted {json.loads(REFUSAL)['error']}"}))],
+    # A refused read does not stop a worker from parking: no excuse for exiting without a terminal call.
+    [("kanban_show", REFUSAL), ("kanban_list", REFUSAL)],
+], ids=["quoted-in-success", "quoted-in-other-error", "refused-read-only"])
+def test_non_refusal_kanban_results_stay_a_protocol_violation(kanban_home, tail):
+    """Controls: only a terminal/lifecycle Kanban call whose result IS the guard refusal counts."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="default")
+        run_id = _clean_exit(conn, tid, 70104)
+        _session(kanban_home, conn, tid, run_id, tail)
+
+        kbd.detect_crashed_workers(conn)
+
+        run, kinds, _task = _booking(conn, tid)
+        meta = json.loads(run["metadata"])
+        assert meta.get("protocol_violation") is True and not meta.get("guard_refusal")
+        assert "failure_finalized" in kinds and "owner_restart_lost" not in kinds
+        assert kbd._protocol_violation_streak(conn, tid) == 1
+
+
+def test_refused_kanban_complete_counts_as_host_refusal(kanban_home):
+    """kanban_complete stays fail-closed during a skip, so its refusal is a host refusal too."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="default")
+        run_id = _clean_exit(conn, tid, 70105)
+        _session(kanban_home, conn, tid, run_id, [("read_file", '{"content": "x"}'), ("kanban_complete", REFUSAL)])
+
+        kbd.detect_crashed_workers(conn)
+
+        run, kinds, task = _booking(conn, tid)
+        assert json.loads(run["metadata"])["guard_refusal"] == {"refused_tools": ["kanban_complete"]}
+        assert task.status == "ready" and "failure_finalized" not in kinds
+
+
 def test_refusal_streak_is_bounded(kanban_home):
     """A guard that stays hung must not requeue a card uncounted forever: after ``STREAK_LIMIT`` such runs
     the next one is charged as a protocol violation again."""

@@ -13,6 +13,10 @@ call, the run is rebooked like a run lost to its owner's restart: requeued, no f
 (the ``owner_restart`` bookkeeping, which the Board's neutral release already knows), with
 ``guard_refusal`` in the run metadata and the refused tools in the error text. A run that never attempted a
 Kanban call, or whose refusals are older than its last few tool results, stays a protocol violation.
+Only a park/report/complete call counts (``TERMINAL_KANBAN_TOOLS``), and its result must BE the refusal,
+not quote it. Reusing the owner-restart bookkeeping is intended, side effects included: the next dispatch
+waits out the owner-restart cooldown, which outlasts the guard's 60 s suppression window, and diagnostics
+label the run an owner restart (``exit_kind`` / ``guard_refusal`` in its event and run metadata tell them apart).
 (``kanban_host_refusal`` is the unrelated startup/owner-storage proof.)
 """
 from __future__ import annotations
@@ -24,12 +28,16 @@ from contextlib import closing
 from pathlib import Path
 from typing import Optional
 
-from hermes_cli.plugins_dispatch import _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE as REFUSAL_MARKER
+from hermes_cli.plugins_dispatch import (
+    _HOOK_SKIP_EXEMPT_LIFECYCLE_TOOLS, _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE as REFUSAL_MARKER)
 
 logger = logging.getLogger(__name__)
 PAYLOAD_KEY = "guard_refusal"
 # The worker's last tool results that count as "how the run ended".
 TAIL_TOOL_RESULTS = 6
+# The calls a worker ends a run with. A refused read (kanban_show/kanban_list) does not stop a worker from
+# parking, so it is no excuse for a clean exit without a terminal call.
+TERMINAL_KANBAN_TOOLS = _HOOK_SKIP_EXEMPT_LIFECYCLE_TOOLS | {"kanban_complete"}
 # Consecutive uncounted guard-refusal runs before the next one is charged as a protocol violation again.
 STREAK_LIMIT = 3
 
@@ -50,9 +58,21 @@ def _prior_refusal_streak(conn: sqlite3.Connection, task_id: str, run_id) -> int
     return streak
 
 
+def _is_guard_refusal(content) -> bool:
+    """The tool result IS the skipped-guard refusal (``tool_error``'s ``{"error": "<marker>..."}``), not
+    merely a result quoting it (a ``kanban_show`` of a card whose body cites the marker)."""
+    try:
+        body = json.loads(content or "")
+    except (TypeError, ValueError):
+        return False
+    error = body.get("error") if isinstance(body, dict) else None
+    return isinstance(error, str) and error.startswith(REFUSAL_MARKER)
+
+
 def refused_kanban_calls(conn: Optional[sqlite3.Connection], task_id: str, run_id) -> list[str]:
-    """Kanban tools among *run_id*'s last ``TAIL_TOOL_RESULTS`` tool results that a skipped
-    ``pre_tool_call`` guard refused, oldest first; ``[]`` when none or the session can't be read."""
+    """Park/report/complete Kanban tools (``TERMINAL_KANBAN_TOOLS``) among *run_id*'s last
+    ``TAIL_TOOL_RESULTS`` tool results whose result is a skipped ``pre_tool_call`` guard's refusal,
+    oldest first; ``[]`` when none or the session can't be read."""
     if conn is None or not task_id or run_id is None:
         return []
     try:
@@ -67,14 +87,14 @@ def refused_kanban_calls(conn: Optional[sqlite3.Connection], task_id: str, run_i
     try:
         with closing(sqlite3.connect(Path(state_db).as_uri() + "?mode=ro", uri=True, timeout=2)) as state:
             rows = state.execute(
-                "SELECT tool_name, substr(content, 1, 2000) FROM messages "
+                "SELECT tool_name, content FROM messages "
                 "WHERE session_id=? AND role='tool' ORDER BY id DESC LIMIT ?",
                 (session_id, TAIL_TOOL_RESULTS)).fetchall()
     except (OSError, ValueError, sqlite3.Error):
         logger.debug("guard refusal: session %s unreadable", session_id, exc_info=True)
         return []
     return [str(name) for name, content in reversed(rows)
-            if str(name or "").startswith("kanban_") and REFUSAL_MARKER in (content or "")]
+            if name in TERMINAL_KANBAN_TOOLS and _is_guard_refusal(content)]
 
 
 def note(dead, conn: Optional[sqlite3.Connection], task_id: Optional[str], run_id) -> None:
