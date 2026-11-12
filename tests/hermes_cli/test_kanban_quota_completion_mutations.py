@@ -317,31 +317,27 @@ def test_recover_all_stalled_clears_nothing_within_deadline(serve, monkeypatch):
 # ---------------------------------------------------------------- DNS executor finalization
 
 @pytest.fixture
-def hang_dns(monkeypatch):
-    """Bounded DNS stub: blocks until released (or 3s) then fails; never touches the network.
+def hang_dns(monkeypatch, tmp_path):
+    """Hang the actual resolver child, then verify cancellation reaped it."""
+    from pathlib import Path
 
-    Teardown releases the stub and joins every thread it spawned (asyncio default-executor
-    and recover() workers) BEFORE monkeypatch restores getaddrinfo, so nothing escapes.
-    """
-    release = threading.Event()
     baseline = set(threading.enumerate())
+    marker = tmp_path / 'dns-pid'
+    monkeypatch.setattr(recovery, '_DNS_SCRIPT', (
+        "import os, time\n"
+        f"open({str(marker)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(3)\n"))
+    yield marker
+    # recover may return just before its worker finishes cancellation. Join those
+    # owned workers before restoring patches; never relax the caller bound.
+    for thread in set(threading.enumerate()) - baseline:
+        thread.join(1)
+        assert not thread.is_alive()
+    assert marker.exists(), 'resolver never started'
+    pid = int(marker.read_text())
+    assert not Path(f'/proc/{pid}').exists(), f'resolver {pid} not reaped'
 
-    def stub(*a, **k):
-        release.wait(3.0)
-        raise socket.gaierror(socket.EAI_AGAIN, 'stubbed DNS failure')
-    monkeypatch.setattr(socket, 'getaddrinfo', stub)
-    yield release
-    release.set()
-    leaked = [t for t in threading.enumerate() if t not in baseline and t is not threading.current_thread()]
-    for t in leaked:
-        t.join(5)
-    assert not [t for t in leaked if t.is_alive()], 'DNS worker thread leaked'
 
-
-@pytest.mark.xfail(strict=True, reason=(
-    'KNOWN PRODUCTION LEAK: asyncio.run() joins the default executor on exit, so a hung '
-    'getaddrinfo keeps completion_succeeds() alive past its absolute deadline. Remove this '
-    'xfail once production stops joining it (e.g. own loop + shutdown_default_executor skipped).'))
 def test_hung_dns_does_not_extend_completion_past_deadline(hang_dns):
     start = time.monotonic()
     assert recovery.completion_succeeds('anthropic', 'm', _entry('k'), start + 0.5) is False

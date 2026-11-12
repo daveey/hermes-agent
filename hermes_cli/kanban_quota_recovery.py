@@ -9,6 +9,61 @@ from contextvars import copy_context
 
 MAX_RESPONSE_BYTES = 1 << 20
 
+# libc DNS has no cancellation API. Keep it outside the interpreter/executor so
+# cancelling a probe can kill AND reap the resolver, including during loop shutdown.
+_DNS_SCRIPT = """
+import json, socket, sys
+args = json.load(sys.stdin)
+try:
+    result = socket.getaddrinfo(*args)
+except OSError:
+    sys.exit(1)
+json.dump(result, sys.stdout)
+"""
+
+
+async def _getaddrinfo(host, port, *, family=0, type=0, proto=0, flags=0):
+    import subprocess
+    import sys
+    import tempfile
+    from tools.environments.local import build_subprocess_env
+
+    if isinstance(host, bytes):
+        host = host.decode('ascii')
+    # A file avoids pipe backpressure and transport finalizers. Reaping below is
+    # synchronous after SIGKILL, so nested AnyIO cancellation cannot interrupt it.
+    with tempfile.TemporaryFile() as output:
+        process = subprocess.Popen(  # noqa: ASYNC220 -- synchronous spawn preserves kill/reap ownership on cancellation
+            [sys.executable, '-I', '-S', '-c', _DNS_SCRIPT],
+            stdin=subprocess.PIPE, stdout=output, stderr=subprocess.DEVNULL,
+            env=build_subprocess_env(base={}))
+        try:
+            process.stdin.write(json.dumps([host, port, family, type, proto, flags]).encode('utf-8'))
+            process.stdin.close()
+            while process.poll() is None:
+                await asyncio.sleep(0.01)
+            if process.returncode != 0:
+                raise OSError('DNS resolution failed')
+            output.seek(0)
+            rows = json.loads(output.read(MAX_RESPONSE_BYTES))
+            return [(af, kind, protocol, name, tuple(address))
+                    for af, kind, protocol, name, address in rows]
+        finally:
+            process.stdin.close()
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            process.wait(timeout=1)
+
+
+async def _run_attempt(provider, url, headers, body, deadline):
+    # Loop-local replacement: no global socket patch and no uncancellable DNS
+    # work in asyncio's default executor (which asyncio.run must join on exit).
+    asyncio.get_running_loop().getaddrinfo = _getaddrinfo
+    return await _attempt(provider, url, headers, body, deadline)
+
 
 def _client(timeout):
     import httpx
@@ -80,8 +135,8 @@ async def _attempt(provider, url, headers, body, deadline):
 def completion_succeeds(provider, model, observed, deadline):
     """One request, no SDK retry/refresh, and no response or credential diagnostics.
 
-    The absolute deadline is enforced by asyncio cancellation (closes the connection), so a
-    trickling or newline-less peer cannot keep a worker thread alive past it.
+    Cancellation closes HTTP sockets and kills/reaps the isolated DNS resolver;
+    asyncio.run retains normal executor shutdown with no DNS thread to join.
     """
     import httpx
     if deadline - time.monotonic() <= 0:
@@ -107,7 +162,7 @@ def completion_succeeds(provider, model, observed, deadline):
     else:
         return False
     try:
-        return asyncio.run(_attempt(provider, url, headers, body, deadline))
+        return asyncio.run(_run_attempt(provider, url, headers, body, deadline))
     except (httpx.HTTPError, OSError, ValueError, TimeoutError):
         return False
 
