@@ -321,9 +321,77 @@ def cmd_proxy(args) -> int:
 
 # ── a backend unit ───────────────────────────────────────────────────────────────────────────────────
 
+CUSTODY_DIR = "backends"
+CUSTODY_SCHEMA = 1
+
+
+def _proc_starttime(pid: int, proc: Path = Path("/proc")) -> Optional[str]:
+    """``linux:<field 22 of /proc/<pid>/stat>`` (start time in clock ticks since boot), else None. exec keeps
+    the pid and this value, so a record written just before ``execve`` names the serve that follows."""
+    with contextlib.suppress(OSError, ValueError, IndexError):
+        stat = (proc / str(int(pid)) / "stat").read_text(encoding="utf-8-sig", errors="replace")
+        return f"linux:{int(stat.rsplit(')', 1)[1].split()[19])}"
+    return None
+
+
+def custody_path(port: int, home: Optional[Path] = None) -> Path:
+    return aod.state_dir(home) / CUSTODY_DIR / f"{int(port)}.json"
+
+
+def write_backend_custody(*, port: int, nonce: str, hermes: str, home: Optional[Path] = None,
+                          pid: Optional[int] = None) -> dict:
+    """[daveey] Per-backend custody record ``desktop-ssh/always-on/backends/<port>.json`` (0600), written by
+    ``cmd_backend`` immediately before it execs the serve. A systemd-owned always-on backend has no Desktop
+    ``backend.lock.json`` (only a Desktop owned spawn writes one, and several backends share the always-on
+    slot during a roll, so one slot lock cannot name them all). This record is that backend's proof of
+    custody instead; ``verify_backend_custody`` checks it against the live process."""
+    pid = os.getpid() if pid is None else int(pid)
+    record = {"schemaVersion": CUSTODY_SCHEMA, "kind": "always-on-backend", "pid": pid,
+              "creationTime": _proc_starttime(pid) or "", "port": int(port), "unit": backend_unit(port),
+              "ownershipId": aod.OWNERSHIP_ID, "spawnNonce": nonce, "hermesHome": str(aod._root_hermes_home()),
+              "hermesPath": hermes, "writtenAt": time.time()}
+    path = custody_path(port, home)
+    aod._private_dir(path.parent)
+    aod._write_private(path, json.dumps(record))
+    return record
+
+
+def verify_backend_custody(pid: int, *, home: Optional[Path] = None, proc: Path = Path("/proc"),
+                           nonce: Optional[str] = None) -> Optional[dict]:
+    """The custody record of always-on backend *pid* when every fact agrees, else None: the pid runs in the
+    cgroup of ``hermes-always-on-backend@<port>.service``; ``backends/<port>.json`` names this pid and its
+    current kernel start time (so a recycled pid never matches); the record's nonce is the persisted
+    always-on nonce (``always-on/nonce``) and appears in the process argv as ``--ssh-owner-nonce``."""
+    port = backend_port_for_pid(pid, proc)
+    if port is None:
+        return None
+    try:
+        record = json.loads(custody_path(port, home).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or record.get("schemaVersion") != CUSTODY_SCHEMA:
+        return None
+    started = _proc_starttime(pid, proc)
+    if record.get("pid") != int(pid) or record.get("port") != port or not started \
+            or record.get("creationTime") != started or record.get("ownershipId") != aod.OWNERSHIP_ID:
+        return None
+    if nonce is None:
+        with contextlib.suppress(OSError):
+            nonce = (aod.state_dir(home) / "nonce").read_text(encoding="utf-8-sig").strip()
+    if not nonce or record.get("spawnNonce") != nonce:
+        return None
+    try:
+        argv = (proc / str(int(pid)) / "cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    if b"--ssh-owner-nonce" not in argv or argv.index(b"--ssh-owner-nonce") + 1 >= len(argv) \
+            or argv[argv.index(b"--ssh-owner-nonce") + 1] != nonce.encode():
+        return None
+    return record
+
 
 def cmd_backend(args) -> int:
-    """``hermes-always-on-backend@<port>``: stage the persisted token and exec the isolated SSH serve."""
+    """``hermes-always-on-backend@<port>``: stage the persisted token, record custody, exec the isolated SSH serve."""
     hermes = os.path.abspath(args.hermes)
     token, nonce = aod.ensure_credentials()
     token_path = aod.stage_token_file(token, nonce)
@@ -333,6 +401,7 @@ def cmd_backend(args) -> int:
     env[ENV_BACKEND] = str(int(args.port))
     env.pop("HERMES_DASHBOARD_SESSION_TOKEN", None)
     argv = aod.build_serve_argv(hermes, args.port, token_path, nonce)
+    write_backend_custody(port=args.port, nonce=nonce, hermes=hermes)
     log(f"backend :{args.port}: exec {' '.join(argv[:7])} ...")
     os.execve(hermes, argv, env)
     return 0  # unreachable
@@ -764,5 +833,5 @@ __all__ = [
     "BACKEND_PORTS", "ENV_BACKEND", "PROXY_UNIT", "Proxy", "Roller", "backend_port_for_pid", "bind_listener",
     "cmd_backend", "cmd_proxy", "cmd_roll", "install_units", "is_superseded", "pop_backend_port",
     "read_active", "render_units", "request_roll", "route_always_on_backends", "stop_all", "successor_pending",
-    "write_active",
+    "verify_backend_custody", "write_active", "write_backend_custody",
 ]

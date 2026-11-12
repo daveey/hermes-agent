@@ -455,6 +455,40 @@ def test_backend_unit_execs_the_isolated_serve_with_its_port(home, monkeypatch):
     ro.cmd_backend(argparse.Namespace(port=9149, hermes="/h/hermes"))
     assert captured["argv"][:7] == ["/h/hermes", "serve", "--isolated", "--host", "127.0.0.1", "--port", "9149"]
     assert captured["env"][ro.ENV_BACKEND] == "9149" and captured["env"][ao.ENV_FLAG] == "1"
+    record = json.loads(ro.custody_path(9149).read_text())  # written before the exec, same pid
+    assert record["pid"] == os.getpid() and record["port"] == 9149 and record["unit"] == ro.backend_unit(9149)
+    assert record["ownershipId"] == ao.OWNERSHIP_ID and record["creationTime"].startswith("linux:")
+    assert oct(ro.custody_path(9149).stat().st_mode & 0o777) == "0o600"
+
+
+def _fake_proc(root, pid, *, port, nonce, starttime=4242):
+    d = root / str(pid)
+    d.mkdir(parents=True)
+    (d / "cgroup").write_text(f"0::/user.slice/app.slice/hermes-always-on-backend@{port}.service\n")
+    fields = ["S"] + ["0"] * 18 + [str(starttime)] + ["0"] * 10
+    (d / "stat").write_text(f"{pid} (hermes serve) " + " ".join(fields) + "\n")
+    (d / "cmdline").write_bytes(b"\0".join([b"/h/hermes", b"serve", b"--ssh-owner-nonce", nonce.encode(), b""]))
+    return root
+
+
+def test_backend_custody_record_proves_the_live_backend_and_nothing_else(home, tmp_path):
+    # t_01a1cbfae450bef1: an always-on backend has no Desktop backend.lock.json (a systemd unit, and several
+    # backends share the always-on slot during a roll); its per-port custody record is the proof instead.
+    proc, nonce = _fake_proc(tmp_path / "proc", 777, port=9148, nonce="ab" * 8), "ab" * 8
+    ao._private_dir(ao.state_dir())
+    (ao.state_dir() / "nonce").write_text(nonce)
+    assert ro.verify_backend_custody(777, proc=proc) is None  # no record yet
+    ro.write_backend_custody(port=9148, nonce=nonce, hermes="/h/hermes", pid=777)
+    record = json.loads(ro.custody_path(9148).read_text())
+    record["creationTime"] = "linux:4242"  # the fake process's start time (written from the real /proc)
+    ro.custody_path(9148).write_text(json.dumps(record))
+    assert ro.verify_backend_custody(777, proc=proc)["port"] == 9148
+    # a recycled pid (other start time), another unit's port, another nonce: no custody
+    (proc / "777" / "stat").write_text("777 (x) " + " ".join(["S"] + ["0"] * 18 + ["9999"] + ["0"] * 10))
+    assert ro.verify_backend_custody(777, proc=proc) is None
+    _fake_proc(proc, 778, port=9149, nonce=nonce)
+    assert ro.verify_backend_custody(778, proc=proc) is None  # 9149's record names no such pid
+    assert ro.verify_backend_custody(777, proc=proc, nonce="cd" * 8) is None
 
 
 # ── the superseded watchdog (in the backend) ─────────────────────────────────────────────────────────
