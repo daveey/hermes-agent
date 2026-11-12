@@ -115,15 +115,15 @@ def _db_fields(fields):
     return args
 
 
-def _cli_fields(args, body, workspace_kind, workspace_path, board):
+def _cli_fields(args, body, workspace_kind, workspace_path, board, *, assignee):
     fields = {**vars(args), "body": body, "workspace_kind": workspace_kind,
-              "workspace_path": workspace_path, "board": board}
+              "workspace_path": workspace_path, "board": board, "assignee": assignee}
     if fields.get("initial_status") == "running":
         fields.pop("initial_status")  # argparse's ordinary create default, not a requested hold
     return fields
 
 
-def cli_policy(args, body, workspace_kind, workspace_path, board):
+def cli_policy(args, body, workspace_kind, workspace_path, board, *, assignee):
     """CLI creation uses the same enrollment boundary, without changing legacy routes."""
     from hermes_cli import kanban_placement as placement
 
@@ -131,14 +131,14 @@ def cli_policy(args, body, workspace_kind, workspace_path, board):
     if not cfg.get("worker_pools"):
         return None
     gateway = placement.reg.self_gateway()
-    result = creation_decision(_cli_fields(args, body, workspace_kind, workspace_path, board), cfg, gateway,
+    result = creation_decision(_cli_fields(args, body, workspace_kind, workspace_path, board, assignee=assignee), cfg, gateway,
                                "auto", None)
     return (result or {}).get("placement_policy")
 
 
-def cli_audit(args, body, workspace_kind, workspace_path, board):
+def cli_audit(args, body, workspace_kind, workspace_path, board, *, assignee):
     """:func:`creation_audit` over the same fields :func:`cli_policy` judged."""
-    return creation_audit(_cli_fields(args, body, workspace_kind, workspace_path, board))
+    return creation_audit(_cli_fields(args, body, workspace_kind, workspace_path, board, assignee=assignee))
 
 
 def validate_creation(policy, *, runs_on, workspace_kind, workspace_path, project, origin_intent, board):
