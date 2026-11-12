@@ -97,6 +97,22 @@ def compression_in_flight(agent: Any) -> Iterator[None]:
         finished(agent, COMPRESSION_CALL_ID)
 
 
+# The automatic compressions that run where a yield's unchanged transcript reaches the turn loop's next step
+# boundary: post-tool, and pre-API on a later iteration. Overflow recovery counts an unchanged transcript as
+# exhaustion, and the turn-start / idle / engine preflights fail closed on it (review 5878929471 on #1617).
+_YIELDABLE_TRIGGERS = frozenset({"post_tool", "pre_api"})
+
+
+def compression_can_yield(trigger: Any, messages: Any) -> bool:
+    """A compression may yield to the update pause only where the pause can land: a post-tool or pre-API
+    compression over a transcript that ends on a tool result (``_step_boundary_pause``'s own precondition; a
+    tool result inside the turn implies a model call ran)."""
+    if trigger not in _YIELDABLE_TRIGGERS or not isinstance(messages, list) or not messages:
+        return False
+    last = messages[-1]
+    return isinstance(last, dict) and last.get("role") == "tool"
+
+
 def compression_yield_requested(agent: Any) -> bool:
     """The update's cancel covered the running compression and is still the pending interrupt (no Stop since)."""
     record = _slots(agent).get(_CANCEL)

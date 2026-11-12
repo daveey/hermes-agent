@@ -98,13 +98,14 @@ def _call(call_id):
 class _StreamingSummary:
     """``compress_context`` whose summary keeps streaming (touching the fence) until cancelled or its cap."""
 
-    def __init__(self):
+    def __init__(self, cap_s: float = SUMMARY_CAP_S):
         self.started = threading.Event()
         self.outcome = None
+        self.cap_s = cap_s
 
     def __call__(self, agent, messages, system_message, *, commit_fence=None, **_kw):
         self.started.set()
-        deadline = time.monotonic() + SUMMARY_CAP_S
+        deadline = time.monotonic() + self.cap_s
         while time.monotonic() < deadline:
             if commit_fence is not None and commit_fence.is_cancelled:
                 self.outcome = "cancelled"
@@ -240,3 +241,61 @@ def test_a_user_stop_is_not_a_compression_yield():
     with update_pause_cancel.compression_in_flight(agent):
         assert update_pause_cancel.cancel(agent, "stamp") is None
         assert not update_pause_cancel.compression_yield_requested(agent)
+
+
+class _OverflowError(Exception):
+    """A provider 400 that proves the request is over the window (no reported limit)."""
+    status_code = 400
+    code = "context_length_exceeded"
+
+
+def _overflow_error():
+    return _OverflowError("This model's maximum context length is exceeded (context_length_exceeded)")
+
+
+def _pause_once_summary_streams(home, summary):
+    """The drainer's hold + pause, issued while the overflow recovery's summary streams."""
+    def _issue():
+        if summary.started.wait(5):
+            af.set_hold(home)
+            af.request_pause(home, expires_at=time.time() + 120)
+    threading.Thread(target=_issue, daemon=True).start()
+
+
+@pytest.mark.parametrize("responses", [
+    pytest.param(lambda: [_response(_call("call_1")), _overflow_error(), _response(), _response()],
+                 id="overflow-after-a-tool-round"),
+    pytest.param(lambda: [_overflow_error(), _response(), _response()], id="overflow-on-the-first-model-call"),
+])
+def test_an_overflow_recovery_compression_never_yields(home, tmp_path, monkeypatch, responses):
+    """Review 5878929471 on #1617: a yield is only safe where the pause can land (a tool-result boundary after a
+    model call). An overflow recovery treats the unchanged transcript as exhaustion (the turn failed with
+    ``compression_exhausted``, which auto-resets a gateway session) or re-sends the over-window request
+    unpaused. Overflow recovery therefore never registers with the watcher: its summary commits."""
+    record_turn_start(home, "session-key", "run the quick job")
+    agent = _make_agent(tmp_path)
+    session = {"agent": agent, "session_key": "session-key", "profile_home": str(home),
+               "history_lock": threading.RLock()}
+    summary = _StreamingSummary(cap_s=1.5)
+    monkeypatch.setattr(cc, "compress_context", summary)
+    monkeypatch.setattr(cc, "resolve_context_compression_timeouts", lambda *a, **k: (60.0, 600.0))
+    monkeypatch.setattr(agent.context_compressor, "should_compress", lambda *a, **k: False)
+    monkeypatch.setattr("model_tools.handle_function_call", lambda name, *a, **k: "quick result")
+    _pause_once_summary_streams(home, summary)
+
+    result = _run_turn(agent, session, responses())
+
+    assert summary.started.is_set()
+    assert summary.outcome == "committed"  # never cancelled by the update pause
+    assert not result.get("failed") and not result.get("compression_exhausted")
+    assert update_pause_cancel.in_flight(agent) == {}
+
+
+def test_only_a_tool_result_boundary_compression_can_yield():
+    tool_tail = [{"role": "user", "content": "go"}, {"role": "tool", "tool_call_id": "c", "content": "ok"}]
+    user_tail = [{"role": "user", "content": "go"}]
+    assert update_pause_cancel.compression_can_yield("post_tool", tool_tail)
+    assert update_pause_cancel.compression_can_yield("pre_api", tool_tail)
+    assert not update_pause_cancel.compression_can_yield("pre_api", user_tail)
+    for trigger in ("overflow", "turn_start_threshold", "engine_preflight", "idle", "gateway_hygiene", None):
+        assert not update_pause_cancel.compression_can_yield(trigger, tool_tail)
