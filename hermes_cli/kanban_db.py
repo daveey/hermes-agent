@@ -2312,7 +2312,7 @@ def release_stale_claims(
     ).fetchall()
     from hermes_cli.kanban_owner_recovery import owner_reclaim_blocked, owner_reclaim_blocked_after_kill, reclaim_error
     for row in stale:
-        if owner_reclaim_blocked(conn, row["id"]):
+        if owner_reclaim_blocked(conn, row["id"], for_termination=True):
             continue
         host_local = _claim_is_local(row["claim_lock"], host_prefix)
         hb = _to_epoch(row["last_heartbeat_at"])

@@ -244,7 +244,7 @@ def apply_attempt_note(conn, task_id, pid, dead) -> None:
     dead.error_text = f"{head} [{note}]{sep}{output}"
 
 
-def owner_reclaim_blocked(conn, task_id, *, crash_sweep=False) -> bool:
+def owner_reclaim_blocked(conn, task_id, *, crash_sweep=False, for_termination=False) -> bool:
     """True when a reclaim path must leave this task alone.
 
     The pause protects the effects of an attempt that may still be in flight, and stops
@@ -255,12 +255,17 @@ def owner_reclaim_blocked(conn, task_id, *, crash_sweep=False) -> bool:
     the shape that used to be unreclaimable forever, because ``bound_interpreter_gone`` was the
     only override and it needs the ``worker_bound`` event that run never wrote.
     """
-    from hermes_cli.kanban_failed_result import modern_result_recorded
-    run = conn.execute('SELECT current_run_id FROM tasks WHERE id=?', (task_id,)).fetchone()
+    from hermes_cli.kanban_failed_result import modern_result_recorded, valid_birth
+    run = conn.execute('SELECT current_run_id, worker_pid, worker_started_at FROM tasks WHERE id=?',
+                       (task_id,)).fetchone()
     if run is not None and modern_result_recorded(conn, task_id, run['current_run_id']):
-        # Only the strict failed-result finalizer may close a marked attempt.
-        # TTL/heartbeat paths must not bypass its two-process death proof merely
-        # because the owner admission has already become terminal.
+        # Expiry may still terminate the verified outer worker. It must never
+        # close/account here: even after signalling, all historical bindings
+        # remain the strict atomic finalizer's responsibility.
+        if (for_termination and run['worker_pid'] is not None and run['worker_pid'] > 0
+                and valid_birth(run['worker_started_at'])):
+            from hermes_cli.kanban_db_dispatch import _process_fingerprint
+            return _process_fingerprint(run['worker_pid']) != run['worker_started_at']
         return True
     if not owner_reclaim_paused(conn, task_id):
         return False

@@ -757,7 +757,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
     ).fetchall()
     from hermes_cli.kanban_owner_recovery import owner_reclaim_blocked, owner_reclaim_blocked_after_kill
     for row in rows:
-        if owner_reclaim_blocked(conn, row["id"]):
+        if owner_reclaim_blocked(conn, row["id"], for_termination=True):
             continue
         lock = row["claim_lock"] or ""
         if not _kb._claim_is_local(lock, host_prefix):
