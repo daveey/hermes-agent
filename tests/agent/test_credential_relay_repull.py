@@ -162,3 +162,47 @@ def test_only_revoked_401s_on_relay_rows_take_the_re_pull_path():
     assert is_revoked_401(401, REVOKED)
     assert not is_revoked_401(401, {"message": "invalid x-api-key"})
     assert not is_revoked_401(403, REVOKED)
+
+
+
+@pytest.fixture
+def user_home(tmp_path, monkeypatch):
+    from agent import credential_relay_repull as rr
+
+    user = tmp_path / "user"
+    (user / ".hermes").mkdir(parents=True)
+    monkeypatch.setattr(rr, "_settings", dict)
+    monkeypatch.setattr(rr.Path, "home", classmethod(lambda cls: user))
+    monkeypatch.setenv("HERMES_HOME", str(user / ".hermes"))
+    return rr, user
+
+
+@pytest.mark.platforms("macos")
+def test_a_mac_kickstarts_its_launchd_pull_job(user_home):
+    """The 15:30Z burst hit the MacBook and the mini too: they pull through launchd, not the worker script."""
+    rr, user = user_home
+    assert rr.pull_command() is None  # no pull job on this host: the old re-read/rotate path decides
+    agents = user / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    (agents / f"{rr.MAC_PULL_JOB}.plist").write_text("<plist/>")
+    assert rr.pull_command() == ["launchctl", "kickstart", f"gui/{rr.os.getuid()}/{rr.MAC_PULL_JOB}"]  # windows-footgun: ok -- macOS-only test
+
+
+@pytest.mark.platforms("linux")
+def test_a_worker_node_runs_its_pull_script_for_the_default_home_only(user_home, monkeypatch):
+    rr, user = user_home
+    agents = user / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    (agents / f"{rr.MAC_PULL_JOB}.plist").write_text("<plist/>")
+    assert rr.pull_command() is None  # a stray plist off macOS is not a pull job
+    script = user / "bin" / "worker-oauth-pull"
+    script.parent.mkdir()
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    assert rr.pull_command() == [str(script)]
+
+    (user / ".bb-hermes").mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(user / ".bb-hermes"))
+    assert rr.pull_command() is None  # that script writes ~/.hermes only
+    monkeypatch.setattr(rr, "_settings", lambda: {"pull_command": "hub-oauth-pull --home ~/.bb-hermes"})
+    assert rr.pull_command() == ["hub-oauth-pull", "--home", "~/.bb-hermes"]

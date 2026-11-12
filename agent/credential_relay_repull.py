@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -69,23 +70,33 @@ def is_revoked_401(status_code: Optional[int], error_context: Optional[dict]) ->
     return "revoked" in text
 
 
-def pull_command() -> Optional[list[str]]:
-    """The host's relay pull: ``oauth_relay.pull_command``, else the worker's ``~/bin/worker-oauth-pull``.
+MAC_PULL_JOB = "com.daveey.hub-oauth-pull"
 
-    That script writes the default home's ``auth.json`` only, so it is used only for that home.
+
+def pull_command() -> Optional[list[str]]:
+    """The host's relay pull: ``oauth_relay.pull_command``, else the host's own pull job.
+
+    A worker node runs ``~/bin/worker-oauth-pull``; a Mac (MacBook, mini) runs the launchd job
+    ``com.daveey.hub-oauth-pull`` every 120 s, so it is kickstarted, which keeps the job's own
+    provider/skip environment. Both write the default home's ``auth.json`` only, so they are used
+    only for that home; any other home (the mini's ``~/.bb-hermes``) needs ``pull_command``.
     """
     configured = str(_settings().get("pull_command") or "").strip()
     if configured:
         return shlex.split(configured)
     from hermes_constants import get_hermes_home
-    home = Path.home()  # health: allow HX001 -- the worker pull script and its target live in the user's home
-    script = home / "bin" / "worker-oauth-pull"
+    home = Path.home()  # health: allow HX001 -- the host pull jobs and their target live in the user's home
     try:
         default_home = Path(get_hermes_home()).resolve() == (home / ".hermes").resolve()
     except OSError:
         return None
-    if default_home and script.is_file() and os.access(script, os.X_OK):
+    if not default_home:
+        return None
+    script = home / "bin" / "worker-oauth-pull"
+    if script.is_file() and os.access(script, os.X_OK):
         return [str(script)]
+    if sys.platform == "darwin" and (home / "Library" / "LaunchAgents" / f"{MAC_PULL_JOB}.plist").is_file():
+        return ["launchctl", "kickstart", f"gui/{os.getuid()}/{MAC_PULL_JOB}"]  # windows-footgun: ok -- darwin-gated
     return None
 
 
