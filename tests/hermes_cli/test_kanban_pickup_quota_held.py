@@ -83,8 +83,29 @@ def test_quota_held_cards_do_not_starve_a_pinned_card(gws, imports):
     assert all(_status(worker.conn, tid) is None for tid in walled)
     # A walled card pinned here says why it waits, not budget_exhausted.
     skip = kps.latest(worker.conn, walled[0])
-    assert skip is not None and skip["reason"] == "hold"
+    assert skip is not None and skip["reason"] == "quota_hold"
     assert skip["detail"].startswith("subscription_quota_reset until ")
+
+
+def test_a_quota_held_pinned_card_files_no_repair_until_its_deadline_passes(gws):
+    """Review 5874270282: recorded as the machine-wide ``hold``, a walled pinned card filed "Pickup held on <host>
+    ... do not lift it" after 600 s while the machine was not held. Its own wall is expected until its deadline."""
+    from tests.hermes_cli.test_kanban_pickup_stall import _age, _repairs
+    hub, worker = gws
+    tid = _walled(hub, title="walled, pinned", priority=10, runs_on=PIN)
+    worker.round()
+    worker.tick(max_spawn=1)
+    assert _status(worker.conn, tid) is None
+    _age(worker, tid, 3600)
+    t0 = time.time()
+    assert kps.sweep(worker.conn, now=t0) == []
+    assert kps.sweep(worker.conn, now=t0 + WALL_S + kps.stall_seconds() - 120) == []
+    assert not _repairs(worker.conn)
+    # The wall outlived its deadline and the card is still not here: a card-specific repair, never the host hold.
+    kps.sweep(worker.conn, now=t0 + WALL_S + kps.stall_seconds() + 120)
+    [repair] = _repairs(worker.conn)
+    assert tid in repair["title"] and "quota_hold" in repair["title"]
+    assert "held on" not in repair["title"].lower()
 
 
 def test_an_episode_whose_wall_has_passed_is_copied(gws, imports, monkeypatch):

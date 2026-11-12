@@ -562,7 +562,7 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
 
 
 def _quota_held(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, Optional[str]]]:
-    """[daveey] ``("hold", detail)`` when the local dispatcher would hold ``card`` on its quota episode, judged
+    """[daveey] ``("quota_hold", detail)`` when the local dispatcher would hold ``card`` on its quota episode, judged
     before the copy: the same read-only :func:`kanban_quota_episode.decision` ``check_respawn_guard`` returns for a
     card with an episode, on the card's own runs/events in the replica (a copy carries exactly those) and this
     machine's provider walls. Such a card would only be copied, held, evicted and copied again each tick, while
@@ -584,8 +584,9 @@ def _quota_held(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tupl
         _log.warning("kanban worker node: quota hold check for %s failed", card["id"], exc_info=True)
         return None
     from datetime import UTC, datetime
-    when = f" until {datetime.fromtimestamp(until, UTC):%Y-%m-%dT%H:%MZ}" if until else ""
-    return "hold", f"{guard}{when} (local dispatch would hold it)"
+    when = f" until {datetime.fromtimestamp(until, UTC):%Y-%m-%dT%H:%M:%SZ}" if until else ""
+    # Not "hold": that groups with a registry hold of the whole machine (kanban_pickup_stall._HOST_GROUPS).
+    return "quota_hold", f"{guard}{when} (local dispatch would hold it)"
 
 
 def note_capped(conn: sqlite3.Connection, profile_exists: Optional[Callable[[str], bool]] = None) -> None:

@@ -20,7 +20,8 @@ read back: pickup kept no record of why a pass skipped a candidate.
   entry, replica path). Host-wide causes share
   ONE card per host naming the oldest card: ``budget_exhausted`` (the queue is simply full), ``hold`` and an
   unreadable machine registry. A ``hold`` that states ``release by HH:MMZ`` (or is the core rollout's own,
-  :func:`expected_hold`) files nothing until that release plus the stall threshold has passed. Missing evidence gets
+  :func:`expected_hold`) files nothing until that release plus the stall threshold has passed; nor does a card's own
+  ``quota_hold`` (local dispatch would hold it on its quota wall) before its stated deadline. Missing evidence gets
   one additional stall interval of durable grace, then one
   host alert (not a fabricated refusal); a failed pickup must not silence the detector forever.
   ``budget_exhausted`` is recorded only for a card a slot would have started, so a
@@ -38,7 +39,7 @@ _log = logging.getLogger(__name__)
 
 TABLE = "kanban_pickup_skips"
 REASONS = ("budget_exhausted", "profile_ineligible", "capability_missing", "parents_incomplete", "hold", "other",
-           "evidence_missing")
+           "evidence_missing", "quota_hold")
 DEFAULT_STALL_SECONDS = 600
 REFRESH_SECONDS = 60
 RETENTION_SECONDS = 7 * 86400
@@ -448,6 +449,21 @@ def _hold_expected(own: str, now_ms: int) -> bool:
     return True
 
 
+_QUOTA_UNTIL = re.compile(r" until (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)Z")
+
+
+def _quota_hold_expected(skip: Mapping[str, Any], now_ms: int) -> bool:
+    """A ``quota_hold`` skip (the card's own quota wall: local dispatch would hold a copy) whose stated deadline plus
+    the stall threshold is still ahead: the wait is expected, file nothing. Past it, or with no readable deadline,
+    the card alerts on its own like any card-specific reason, never as the machine-wide registry ``hold``."""
+    found = _QUOTA_UNTIL.search(str(skip.get("detail") or "")) if skip.get("reason") == "quota_hold" else None
+    if found is None:
+        return False
+    from datetime import UTC, datetime
+    until = datetime.strptime(found.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=UTC).timestamp()
+    return now_ms < (until + stall_seconds()) * 1000
+
+
 def _group(card: Mapping[str, Any]) -> Optional[str]:
     skip = card["skip"] or {}
     if skip.get("reason") == "other" and skip.get("detail") == "machine registry unavailable":
@@ -489,6 +505,8 @@ def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[f
             continue
         if (card["skip"]["reason"] == "evidence_missing"
                 and now_ms - card["skip"]["first_at"] < stall_seconds() * 1000):
+            continue
+        if _quota_hold_expected(card["skip"], now_ms):
             continue
         group = _group(card)
         if group is not None:
