@@ -4,7 +4,6 @@ from __future__ import annotations
 if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 
 import os
-import shutil
 import subprocess
 import sys
 import textwrap
@@ -78,37 +77,42 @@ def test_install_matches_top_level_names_and_does_not_stack(monkeypatch):
     ids=["unset-skips", "unlisted-skips", "listed-fails"],
 )
 def test_collection_through_conftest(tmp_path, env_value, expect_error):
-    """End to end: a module-level importorskip under tests/ collects as skip or error via conftest."""
-    probe_dir = _REPO_ROOT / "tests" / f"_required_extras_probe_{os.getpid()}_{tmp_path.name}"
-    probe_dir.mkdir()
-    try:
-        probe = probe_dir / "test_probe.py"
-        probe.write_text(
-            textwrap.dedent(
-                f"""
-                import pytest
-                mod = pytest.importorskip("{_MISSING}", reason="optional extra not installed")
-                def test_never():
-                    pass
-                """
-            ),
-            encoding="utf-8",
-        )
-        env = {k: v for k, v in os.environ.items() if k != required_extras.ENV_VAR}
-        if env_value is not None:
-            env[required_extras.ENV_VAR] = env_value
-        result = subprocess.run(
-            [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", str(probe)],
-            cwd=_REPO_ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=300,
-            check=False,
-        )
-    finally:
-        shutil.rmtree(probe_dir, ignore_errors=True)
+    """End to end: a module-level importorskip collects as skip or error once tests/conftest.py loads.
+
+    The probe lives in tmp_path and the real conftest loads as a plugin (``-p tests.conftest``).
+    Writing it into the repo's tests/ tree raced the tests that scan that tree in sibling processes
+    (tests/test_no_shadowed_test_definitions.py raised FileNotFoundError when the probe vanished
+    between its glob and its read).
+    """
+    probe = tmp_path / "test_probe.py"
+    probe.write_text(
+        textwrap.dedent(
+            f"""
+            import pytest
+            mod = pytest.importorskip("{_MISSING}", reason="optional extra not installed")
+            def test_never():
+                pass
+            """
+        ),
+        encoding="utf-8",
+    )
+    env = {k: v for k, v in os.environ.items() if k != required_extras.ENV_VAR}
+    if env_value is not None:
+        env[required_extras.ENV_VAR] = env_value
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
+            "--rootdir", str(_REPO_ROOT), "-c", str(_REPO_ROOT / "pyproject.toml"),
+            "-p", "tests.conftest", str(probe),
+        ],
+        cwd=_REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=300,
+        check=False,
+    )
     output = result.stdout + result.stderr
     if expect_error:
         assert result.returncode != 0, output
