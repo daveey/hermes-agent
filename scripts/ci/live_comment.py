@@ -464,7 +464,7 @@ def _parse_status_file(status_file: Path) -> list[dict]:
 
 
 def fetch_all_review_statuses(
-    token: str, repo: str, run_id: str,
+    token: str, repo: str, run_id: str, *, strict: bool = False,
 ) -> list[dict]:
     """Fetch and merge all review-status artifacts from the run.
 
@@ -475,7 +475,8 @@ def fetch_all_review_statuses(
     status-producing job.
 
     Returns the merged list of ``{source, results: [...]}`` objects.
-    Artifacts that don't exist yet or fail to parse are silently skipped.
+    In strict snapshot mode, collection errors refuse publication instead of
+    erasing prior review sections. Artifacts not uploaded yet remain absent.
     """
     all_statuses: list[dict] = []
     temp_base = Path(tempfile.gettempdir()) / "review-status-artifacts"
@@ -483,6 +484,8 @@ def fetch_all_review_statuses(
     try:
         artifacts = _list_artifacts(token, repo, run_id)
     except Exception:
+        if strict:
+            raise
         return all_statuses
 
     rs_artifacts = [
@@ -501,8 +504,16 @@ def fetch_all_review_statuses(
     for artifact in rs_artifacts:
         status_file = _download_artifact(token, repo, artifact, run_dl_dir)
         if status_file is None:
+            if strict:
+                raise RuntimeError("review-status artifact download failed")
             continue
-        statuses = _parse_status_file(status_file)
+        if strict:
+            content = status_file.read_text().strip().removeprefix("review_status=")
+            statuses = json.loads(content)
+            if not isinstance(statuses, list) or not all(isinstance(s, dict) for s in statuses):
+                raise ValueError("invalid review-status artifact")
+        else:
+            statuses = _parse_status_file(status_file)
         all_statuses.extend(statuses)
 
     # A re-run can leave several non-expired artifacts with the same name,

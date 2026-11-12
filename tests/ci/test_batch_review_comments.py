@@ -149,6 +149,38 @@ def test_main_requires_env(monkeypatch):
     assert b.main() == 1
 
 
+@pytest.mark.parametrize("conclusion", ["cancelled", "timed_out", "action_required", "neutral", "skipped"])
+def test_incomplete_run_never_overwrites_comment(monkeypatch, conclusion):
+    prs = [_pr(1, "a")]
+    run = _run(1, "a", "t") | {"status": "completed", "conclusion": conclusion}
+    f = Fake(monkeypatch, prs, {"a": [run]}, fresh=_fresh(prs))
+    assert b.run_batch("t", REPO, NOW) == 0
+    assert f.posted == {}
+
+
+def test_final_snapshot_preserves_ship_footer_contract(monkeypatch):
+    prs = [_pr(1, "a")]
+    run = _run(1, "a", "t") | {"status": "completed", "conclusion": "success"}
+    f = Fake(monkeypatch, prs, {"a": [run]}, fresh=_fresh(prs))
+    assert b.run_batch("t", REPO, NOW) == 0
+    assert "ran on [a]" in f.posted["1"]
+
+
+def test_artifact_listing_error_is_not_clean_snapshot(monkeypatch):
+    def fail(*args):
+        raise OSError("artifact API unavailable")
+    monkeypatch.setattr(b.lc, "_list_artifacts", fail)
+    with pytest.raises(OSError):
+        b.lc.fetch_all_review_statuses("t", REPO, "1", strict=True)
+
+
+def test_artifact_download_error_is_not_clean_snapshot(monkeypatch):
+    monkeypatch.setattr(b.lc, "_list_artifacts", lambda *args: [{"name": "review-status-test"}])
+    monkeypatch.setattr(b.lc, "_download_artifact", lambda *args: None)
+    with pytest.raises(RuntimeError):
+        b.lc.fetch_all_review_statuses("t", REPO, "1", strict=True)
+
+
 def test_workflow_shape():
     yaml = pytest.importorskip("hermes_yaml")
     doc = yaml.safe_load((Path(__file__).resolve().parents[2] / ".github/workflows/ci-review-comment.yml").read_text())

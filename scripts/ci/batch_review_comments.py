@@ -76,14 +76,15 @@ def select_ci_run(runs: list[dict], head_sha: str) -> dict | None:
     return best
 
 
-def snapshot_commit_info(pr: dict, run: dict, repo: str, now: datetime) -> str:
+def snapshot_commit_info(pr: dict, run: dict, repo: str, now: datetime, *, completed: bool = False) -> str:
     sha = run["head_sha"]
     url = f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{repo}/pull/{pr['number']}/commits/{sha}"
     msg = ((run.get("head_commit") or {}).get("message") or "").split("\n")[0][:60]
     tail = f" — {msg}" if msg else ""
     stamp = now.strftime("%Y-%m-%d %H:%M UTC")
+    phase = "ran on" if completed else "running on"
     return (
-        f"<sub>snapshot of [{sha[:7]}]({url}){tail} · taken {stamp}; "
+        f"<sub>snapshot of CI; {phase} [{sha[:7]}]({url}){tail} · taken {stamp}; "
         f"refreshed hourly, not live</sub>"
     )
 
@@ -93,7 +94,7 @@ def build_snapshot(token: str, repo: str, pr: dict, run: dict, now: datetime) ->
     jobs, runs_completed = lc.collect_run_jobs(token, repo, str(run["id"]), watch)
     completed, pending, job_urls = lc.classify_jobs(jobs)
     by_check, check_urls = lc.split_failed_steps(jobs, completed, job_urls)
-    statuses = lc.fetch_all_review_statuses(token, repo, str(run["id"]))
+    statuses = lc.fetch_all_review_statuses(token, repo, str(run["id"]), strict=True)
     return lc.build_comment_body(
         lc._import_assembler(),
         by_check,
@@ -101,7 +102,7 @@ def build_snapshot(token: str, repo: str, pr: dict, run: dict, now: datetime) ->
         run.get("html_url", ""),
         check_urls,
         json.dumps(statuses) if statuses else "",
-        snapshot_commit_info(pr, run, repo, now),
+        snapshot_commit_info(pr, run, repo, now, completed=runs_completed),
         waiting=not runs_completed,
     )
 
@@ -119,6 +120,8 @@ def process_pr(token: str, repo: str, pr: dict, now: datetime) -> str:
     run = select_ci_run(runs, sha)
     if run is None:
         return "skipped:no CI run on head"
+    if run.get("status") == "completed" and run.get("conclusion") not in {"success", "failure"}:
+        return "skipped:CI cancelled or incomplete"
     body = build_snapshot(token, repo, pr, run, now)
 
     # Head race: re-read the PR right before writing.
