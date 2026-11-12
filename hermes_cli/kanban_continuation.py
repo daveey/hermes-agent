@@ -118,6 +118,8 @@ def continue_task(
         return {"ok": False, "error": f"resume_after_seconds must be between 0 and {MAX_RESUME_AFTER_SECONDS}"}
     limit = max_continuations if max_continuations is not None else max_consecutive_continuations()
     now = int(time.time())
+    from hermes_cli import kanban_park_pin as kpp
+    pin = kpp.plan(conn, task_id, checkpoint)  # git reads stay outside the write txn
     with kb.write_txn(conn):
         row = conn.execute(
             "SELECT status, current_run_id FROM tasks WHERE id = ?", (task_id,),
@@ -186,6 +188,7 @@ def continue_task(
         )
         if cur.rowcount != 1:
             return {"ok": False, "error": "task changed state concurrently"}
+        kpp.apply(conn, task_id, pin)  # unpushed state keeps a pooled card on this worker
         from hermes_cli.kanban_blocker_metadata import blocker_metadata, FIELDS
         meta = blocker_metadata(conn, task_id, reason=checkpoint, metadata=metadata,
                                 blocker_id=blocker_id, blocker_provider=blocker_provider,

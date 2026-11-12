@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from hermes_cli import kanban_db_sync as _sync, kanban_priority
+from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_priority
 from hermes_cli.kanban_db_values import _first_line, _opt_int, _json_or_null
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
 from hermes_cli import kanban_placement_forward as _placement_fwd  # stdlib-only at import: no cycle
@@ -2950,14 +2950,14 @@ def block_task(
     from hermes_cli.kanban_goal_recovery import record_block
     from hermes_cli.kanban_reason_comment import reason_comment
     human_request = validate_block_request(human_request, kind)
+    pin = _park_pin.plan(conn, task_id, reason)  # git reads stay outside the write txn
     with write_txn(conn), reason_comment(conn, task_id, comment) as noted:
         if not record_block(conn, task_id, goal_rejection, reason, expected_run_id, kind, human_request):
             return False
-        cur_row = conn.execute(
-            "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,),
-        ).fetchone()
+        cur_row = conn.execute("SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if cur_row is None:
             return False
+        _park_pin.apply(conn, task_id, pin)  # unpushed state keeps a pooled card on this worker (same run only)
         from hermes_cli.kanban_dependency_validation import validate_dependency_block
         validate_dependency_block(conn, task_id, kind)
         from hermes_cli import kanban_assignment_routing as assignment_routing

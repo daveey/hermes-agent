@@ -147,7 +147,8 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
         raise MoveRefused(exc.code, str(exc)) from exc
     from hermes_cli import kanban_move_pool as kmp
     host = kmp.check(labels, pool, me=me, running=exclude_me, previous=wn._parse(row["runs_on"]),
-                     workspace_path=row["workspace_path"], host_reason=host_reason, force=force, refused=MoveRefused)
+                     workspace_path=row["workspace_path"], host_reason=host_reason, force=force, refused=MoveRefused,
+                     task_id=task_id)
     from hermes_cli import kanban_runs_on_capabilities as roc
     try:
         requires = json.loads(row["requires"]) if row["requires"] else []
