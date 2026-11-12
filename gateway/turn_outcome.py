@@ -47,6 +47,15 @@ def concluding_turn_identity(runner, event=None, session_key: Optional[str] = No
         return frozenset()
 
 
+def finish_gateway_turn_outcome(runner, session_entry, event, session_key, outcome_token, env_tokens) -> None:
+    """Refresh in the concluding run's scope, then restore both scopes even on failure."""
+    try:
+        refresh_gateway_turn_outcome(runner, session_entry, event, session_key)
+    finally:
+        run_outcome.reset(outcome_token)
+        runner._clear_session_env(env_tokens)
+
+
 def _refresh(sid: str, db, concluding_turn: frozenset) -> None:
     try:
         from hermes_state_outcome import refresh_outcome

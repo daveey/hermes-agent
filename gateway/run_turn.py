@@ -40,7 +40,7 @@ from gateway.session_transcript import TranscriptReadError
 from gateway.run_turn_bubble_cleanup import register_bubble_cleanup, settle_turn_senders
 from gateway.turn_context import TurnContext
 from gateway.turn_lease import DEFAULT_LEASE_WAIT, TurnLeaseTimeoutError
-from gateway.turn_outcome import refresh_gateway_turn_outcome
+from gateway.turn_outcome import finish_gateway_turn_outcome, run_outcome
 from hermes_constants import get_hermes_home_override
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -224,7 +224,6 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             return prepared
         history, message_text = prepared.history, prepared.message_text
 
-        from gateway.turn_outcome import run_outcome
         outcome_token = run_outcome.set({"session_id": session_entry.session_id})
         try:
             hook_ctx = {
@@ -343,11 +342,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         except Exception as e:
             return await self._hmwa_agent_error_reply(e, event, source, session_entry, session_key, prepared)
         finally:  # [daveey] store the chat's outcome (off the reply path), then restore the session context
-            try:
-                refresh_gateway_turn_outcome(self, session_entry, event, session_key)
-            finally:
-                run_outcome.reset(outcome_token)
-                self._clear_session_env(_session_env_tokens)
+            finish_gateway_turn_outcome(self, session_entry, event, session_key, outcome_token, _session_env_tokens)
 
     def _profile_scope_for_source(self, source: SessionSource):
         """``_profile_runtime_scope`` for ``source``'s profile when a secret scope is required.

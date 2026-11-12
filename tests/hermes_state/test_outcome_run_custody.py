@@ -111,7 +111,7 @@ async def test_displaced_handler_uses_worker_receipt_not_successor_slot(db, monk
         assert receipts, runner._hmwa_agent_error_reply.call_args
         assert gw.concluding_turn_identity(runner, event, "key") == {"lease:turn-A", "gateway:token-A"}
         threads.append(real_refresh(*a))
-    monkeypatch.setattr("gateway.run_turn.refresh_gateway_turn_outcome", refresh)
+    monkeypatch.setattr(gw, "refresh_gateway_turn_outcome", refresh)
     previous = gw.run_outcome.get()
     await GatewayTurnMixin._handle_message_with_agent(runner, event, source, "key", 1)
     assert gw.run_outcome.get() is previous
