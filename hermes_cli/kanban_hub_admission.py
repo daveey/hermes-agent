@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 
@@ -28,7 +29,15 @@ class Verdict:
 
 def _skill():
     from hermes_cli.config import get_hermes_home
-    path = get_hermes_home() / "skills/devops/hub-admission-test/SKILL.md"
+    from agent.skill_utils import get_external_skills_dirs
+    # Only profile-owned/configured roots: never let a repository's project skill
+    # replace the admission policy that decides where that repository's work runs.
+    roots = [get_hermes_home() / "skills", *get_external_skills_dirs()]
+    paths = [root / relative for root in roots for relative in (
+        "devops/hub-admission-test/SKILL.md", "hub-admission-test/SKILL.md")]
+    path = next((path for path in paths if path.is_file()), None)
+    if path is None:
+        raise FileNotFoundError("hub-admission-test skill is not installed")
     text = path.read_text(encoding="utf-8")
     body = text.split("---", 2)[-1].strip() if text.startswith("---\n") else text
     return body, hashlib.sha256(text.encode()).hexdigest()
@@ -84,14 +93,16 @@ def admit(card_fields, *, hub_reason=None) -> Verdict:
                                         hub_reason, sha], ensure_ascii=False).encode()).hexdigest()
         cached = _cache(key)
         if cached is not None:
-            return cached
+            payload = {k: getattr(cached, k) for k in ("admit", "need", "evidence", "why")}
+            return replace(_parse(json.dumps(payload), card_fields, hub_reason, sha), cached=True)
         route = {}
-        response = aux.call_llm(
-            task="hub_admission", provider=PROVIDER, model=MODEL, timeout=TIMEOUT,
-            max_tokens=1024, temperature=0, route_info=route,
-            messages=[{"role": "system", "content": body}, {"role": "user", "content": json.dumps({
-                "title": card_fields.get("title") or "", "body": card_fields.get("body") or "",
-                "hub_reason": hub_reason})}])
+        with aux.aux_stream_deadline(time.monotonic() + TIMEOUT):
+            response = aux.call_llm(
+                task="hub_admission", provider=PROVIDER, model=MODEL, timeout=TIMEOUT,
+                max_tokens=1024, temperature=0, route_info=route,
+                messages=[{"role": "system", "content": body}, {"role": "user", "content": json.dumps({
+                    "title": card_fields.get("title") or "", "body": card_fields.get("body") or "",
+                    "hub_reason": hub_reason})}])
         if (route.get("provider"), route.get("model"), route.get("billing_group")) != (
                 PROVIDER, MODEL, "subscription"):
             return Verdict(skill_sha=sha)
