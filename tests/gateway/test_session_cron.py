@@ -251,3 +251,65 @@ async def test_draining_owner_answers_an_external_firers_cron_observation_over_t
     finally:
         await firer.close()
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_forwarded_cancel_during_owner_restart_stays_a_restart_cut_after_the_drain_ends(
+        tmp_path, monkeypatch, caplog):
+    """cron-7c04faf754 round 2: the fire was handed to a restart-safe worker, so this owner's
+    process holds no scheduler interrupted mark for it. The stop forwarded while the owner drains
+    for its restart must keep meaning "this owner's shutdown" after ``_stop_persist_exit_state``
+    resets ``_draining`` and before the run thread reads its latch: one WARNING ``stopped by gateway
+    shutdown``, no ``failed:`` ERROR, and the restart-cut flag the firer books as an interruption."""
+    from contextlib import nullcontext
+    import json
+    import logging
+    from cron import scheduler
+    from cron.cancellation import CronShutdownInterrupted, cancel_is_shutdown, cancel_reason
+    from cron.restart_cut import RESTART_CUT_FLAG
+    from gateway import run, session_cron
+    from gateway.session_authority import LiveSession, SessionAuthority
+    from gateway.session_contract import SessionActor, SessionRef
+    from hermes_state import SessionDB
+    from hermes_state_runtime import admit_session_input, begin_runtime_epoch, claim_session_input
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    db = SessionDB(tmp_path / 'state.db')
+    db.create_session('s', source='cron')
+    runner = SimpleNamespace(_draining=False, _interrupting_remaining_work=False)
+    authority = SessionAuthority(runner, profile_id='p', instance_id='test', db=db,
+                                 epoch=begin_runtime_epoch(db, instance_id='test'))
+    authority.sessions['s'] = LiveSession(SimpleNamespace(platform=None, user_id='cron-owner'), 'route')
+    actor = SessionActor('cron-owner', 'p', frozenset({'session:create', 'session:submit', 'session:control'}), 'ticker')
+    monkeypatch.setattr(run, '_profile_runtime_scope', lambda home: nullcontext())
+    loop = asyncio.get_running_loop()
+    seen = {}
+
+    def run_job(job, *, extra_prompt, execution_id, cancel_event):
+        runner._draining = True  # the owner's core-update restart drain begins mid-run
+        asyncio.run_coroutine_threadsafe(session_cron.operation(authority, 'cancel', params, actor), loop).result(10)
+        runner._draining = False  # _stop_persist_exit_state, before the run's next poll
+        seen['reason'] = reason = cancel_reason(cancel_event)
+        seen['shutdown'] = cancel_is_shutdown(cancel_event)
+        error = CronShutdownInterrupted if seen['shutdown'] else RuntimeError
+        exc = error(f"Cron job 'job' was stopped: {reason}")
+        if not scheduler._log_shutdown_stop('job', str(exc), exc):
+            scheduler.logger.error("Job '%s' failed: %s", 'job', str(exc))
+        return (False, 'doc', '', str(exc))
+    monkeypatch.setattr(scheduler, 'run_job', run_job)
+    caplog.set_level(logging.DEBUG, logger='cron.scheduler')
+
+    with db:
+        admit_session_input(db, epoch=authority.epoch, principal_id='cron-owner', session_id='s',
+                            request_id='cron:job:fire', payload={'text': ''})
+        row = claim_session_input(db, epoch=authority.epoch, session_id='s')
+        params = {'session_id': 's', 'admission_id': row['admission_id']}
+        policy = SimpleNamespace(request_json=json.dumps({
+            'extra_prompt': None, 'request_id': 'cron:job:fire', 'cron_job': {'id': 'job'}}))
+        with pytest.raises(RuntimeError):
+            await session_cron.execute(authority, SessionRef('p', 's'), row, policy)
+    assert seen['shutdown'] is True, seen['reason']
+    records = [(r.levelno, r.getMessage()) for r in caplog.records if r.name == 'cron.scheduler']
+    assert [lvl for lvl, _ in records] == [logging.WARNING], records
+    assert 'stopped by gateway shutdown' in records[0][1]
+    assert authority.pending_results[row['admission_id']]['result']['cron_job_flags'].get(RESTART_CUT_FLAG) is True

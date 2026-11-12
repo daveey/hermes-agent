@@ -814,7 +814,7 @@ class TestOwnerStopWhileDraining:
     run as a restart cut. An operator Stop during the drain and a takeover without a drain keep their
     wording."""
 
-    def _run(self, monkeypatch, caplog, *, draining, operator_cancel=False):
+    def _run(self, monkeypatch, caplog, *, draining, operator_cancel=False, drain_ends_before_poll=False):
         import asyncio
         import json
         import logging
@@ -836,6 +836,9 @@ class TestOwnerStopWhileDraining:
             if operator_cancel:
                 request_cancel(job["execution_id"])
             stop_authority_work(holder["authority"])
+            if drain_ends_before_poll:
+                # _stop_persist_exit_state resets the drain flag before the run's next 5 s poll.
+                holder["authority"].runner._draining = False
             assert cancel_event is not None and cancel_event.is_set()
             captured["reason"] = reason = cancel_reason(cancel_event)
             captured["shutdown"] = cancel_is_shutdown(cancel_event)
@@ -882,6 +885,20 @@ class TestOwnerStopWhileDraining:
         got = self._run(monkeypatch, caplog, draining=True)
         assert "shutdown" in got["reason"].lower(), got["reason"]
         assert got["shutdown"] is True
+        assert [(lvl, tb) for lvl, _msg, tb in got["records"]] == [(logging.WARNING, False)]
+        assert "stopped by gateway shutdown" in got["records"][0][1]
+        assert not any("failed:" in msg for _lvl, msg, _tb in got["records"])
+        assert got["flags"].get(RESTART_CUT_FLAG) is True
+
+    def test_drain_stop_read_after_drain_flag_reset_is_still_a_shutdown(self, monkeypatch, caplog):
+        """Live hub 2026-11-12: the stop landed while draining, but the run read its latch only after
+        ``_stop_persist_exit_state`` reset ``_draining``; the shutdown fact is latched at stop time."""
+        import logging
+
+        from cron.restart_cut import RESTART_CUT_FLAG
+
+        got = self._run(monkeypatch, caplog, draining=True, drain_ends_before_poll=True)
+        assert got["shutdown"] is True, got["reason"]
         assert [(lvl, tb) for lvl, _msg, tb in got["records"]] == [(logging.WARNING, False)]
         assert "stopped by gateway shutdown" in got["records"][0][1]
         assert not any("failed:" in msg for _lvl, msg, _tb in got["records"])
