@@ -177,12 +177,12 @@ def card(row, *, gateway=None, profile=None, now=None):
     return project(raw, now=now, source_class="sidebar")
 
 
-def _merge(row, observations):
+def _merge(row, observations, *, keep_empty=False):
     previous = row.get("execution_observations")
     previous = previous if isinstance(previous, list) else []
     kept = [value for value in previous if not isinstance(value, dict)
             or value.get("source") not in {"kanban.card", "kanban.counts"}]
-    if kept or observations:
+    if kept or observations or keep_empty:
         row["execution_observations"] = [*kept, *observations]
     else:
         row.pop("execution_observations", None)
@@ -228,14 +228,18 @@ def failed_card(row, *, gateway=None, profile=None, now=None):
     source = row.get("_execution_source")
     source = source if isinstance(source, dict) else {}
     scope = row.get("_execution_scope")
-    if isinstance(scope, dict):  # the reader's board-root owner scope, never the active profile (C9)
+    # A board-scoped row owns its profile, None (unrooted board: unevidenced) included; it never falls back
+    # to the reader's active profile, so list and counts identities agree (C9).
+    owned = isinstance(scope, dict) or bool(source)
+    if isinstance(scope, dict):
         source = {**scope, **{k: v for k, v in source.items() if v is not None}}
     if row.get("remote"):
         source = {"gateway": row.get("gateway"), "profile": row.get("owner_profile", row.get("profile")),
                   "board": row.get("board")}
     else:
         source = {**source, "gateway": source.get("gateway") or gateway,
-                  "profile": source.get("profile") or profile, "board": source.get("board") or row.get("board")}
+                  "profile": source.get("profile") if owned else profile,
+                  "board": source.get("board") or row.get("board")}
     value = unknown_raw(row, source)
     return _project(value, now=time.time() if now is None else now, source_class="sidebar")
 
@@ -303,4 +307,6 @@ def count_snapshot(row, keys, *, now=None, evidence=None):
     if row.get("kanban_unknown"):
         observations.extend(_carry_history(row.get("execution_observations"), now))
         observations.append(project({"version": 1, "source": "kanban.counts", "state": "unknown"}, now=now))
-    _merge(row, observations)
+    # Open work with no card record (a pending chat close-out is an obligation, not a card execution) still
+    # gets the array: its presence tells consumers this is a current producer, not a legacy one (F8).
+    _merge(row, observations, keep_empty=bool(row.get("kanban_active")))

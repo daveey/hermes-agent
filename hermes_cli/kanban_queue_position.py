@@ -356,6 +356,7 @@ def _work_observations(conn, task, board):
     row = {**asdict(task), "board": board or "default"}
     try:
         gateway, profile = card_scope(conn_path(conn))
+        row["_execution_scope"] = {"gateway": gateway, "profile": profile, "board": row["board"]}
         with transaction(conn) as read_at:
             from hermes_cli.kanban_session_activity import _require_local_execution_authority
             _require_local_execution_authority(conn)
