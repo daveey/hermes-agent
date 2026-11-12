@@ -28,11 +28,17 @@ def settle_unbooked_fire(job, exc, fire_owner, execution_id):
 
     - CronFireNotAdmitted on a scheduled fire: the gateway was not ready (an update's restart gap)
       and nothing was submitted. The slot goes back on the schedule, the streak and last verdict
-      stay, and the ledger row records the non-admission. Manual fires still fail loudly.
+      stay, and the ledger row records the non-admission. A manual fire the gateway refused while
+      draining is deferred to the next gateway's first tick the same way (cron/restart_cut.py);
+      one refused for any other not-ready state still fails loudly.
     - CronExecutionUnknown: the owner may have accepted it, so the job pauses for reconciliation.
     Every other error returns False and takes the failed-run path."""
     import logging
     log = logging.getLogger('cron.scheduler')
+    if isinstance(exc, CronFireNotAdmitted) and not job.get('_scheduled_instant') and exc.state == 'draining':
+        from cron.restart_cut import defer_unadmitted
+        defer_unadmitted(job, execution_id, str(exc), fire_owner or None)
+        return True
     if isinstance(exc, CronFireNotAdmitted) and job.get('_scheduled_instant'):
         from cron.executions import finish_execution
         from cron.jobs import release_unadmitted_fire
@@ -183,7 +189,22 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
             if recovering:
                 raise
             if owner is not None or isinstance(exc, GatewayRPCError):
+                from cron.restart_cut import not_ready_refusal
+                refused = not_ready_refusal(exc)
+                if refused:
+                    # Durable before the absence check: if that check is lost too, journal
+                    # recovery still knows the owner refused this fire as not ready.
+                    record['submit_refused'] = refused
+                    save()
                 state = await call('recover', params)
+                if state['status'] == 'missing' and refused:
+                    # [daveey] Refused while draining for a restart and proven never admitted:
+                    # nothing ran, so the fire is deferred to the next gateway, not failed.
+                    journal.unlink(missing_ok=True)
+                    attempted = False
+                    raise CronFireNotAdmitted(
+                        f'Not admitted: the gateway is draining ({refused}); the fire is deferred',
+                        'draining', refused) from exc
                 if state['status'] == 'missing':
                     error = f'{type(exc).__name__}: {exc}'
                     result = [False, f'# Cron Job: {job["id"]} (FAILED)\n\n{error}\n', '', error]
@@ -237,6 +258,8 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
                 observe(lambda op, data: operation(authority, op, data)), loop).result()
         return asyncio.run(remote())
     except Exception as exc:
+        if isinstance(exc, CronFireNotAdmitted):
+            raise
         if attempted:
             raise CronExecutionUnknown(f'Cron execution unverified; reconcile {journal}: {exc}') from exc
         from hermes_cli.gateway_client import GatewayUnavailableError
@@ -306,6 +329,13 @@ def reconcile_pending(*, allow_connect=True):
                 if current is None:
                     journal.unlink(missing_ok=True)
                     continue
+                from cron.restart_cut import NOT_READY_REFUSALS, defer_unadmitted
+                if record.get('submit_refused') in NOT_READY_REFUSALS:
+                    # [daveey] Refused while the owner drained for a restart: nothing ran, so the
+                    # fire is deferred to this (the next) gateway instead of failed.
+                    defer_unadmitted(current, params['request_id'], record['submit_refused'], None,
+                                     recovered=True)
+                    continue
                 error = 'Cron admission missing: the owner never admitted this fire'
                 state = {'status': 'terminal', 'job': current, 'job_flags': {'_fire_error': True},
                          'result': [False, f'# Cron Job: {params["job_id"]} (FAILED)\n\n{error}\n', '', error]}
@@ -317,6 +347,11 @@ def reconcile_pending(*, allow_connect=True):
             success, output, answer, error = state['result']
             job = dict(state['job'], **(state.get('job_flags') or {}))
             job['execution_id'] = params['request_id']
+            from cron.restart_cut import RESTART_CUT_FLAG, settle_restart_cut
+            if not success and job.pop(RESTART_CUT_FLAG, False):
+                # [daveey] The owner's restart cut this run: an interruption rerun once, not a failure.
+                settle_restart_cut(job, params['request_id'], error, None, recovered=True)
+                continue
             # The same result verdicts as the ordinary tail: an agent-declared [CRON_FAILURE] and a
             # blank answer are failures, whichever process books them.
             success, error, declared = _apply_agent_failure_marker(job, success, error, answer)

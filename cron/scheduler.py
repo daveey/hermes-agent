@@ -3627,9 +3627,9 @@ def _run_one_job_body(
             return True
         success, output, final_response, error = outcome
 
-        if _fire_claim_ownership_lost():
-            _teardown_deferred()
-            _record_fire_ownership_lost(job, fire_owner, execution_id)
+        from cron.restart_cut import settle_cut_or_lost
+        if settle_cut_or_lost(job, success, error, execution_id, fire_owner, execution_token,
+                              _teardown_deferred, _fire_claim_ownership_lost):
             return True
 
         success, error, agent_declared = _apply_agent_failure_marker(job, success, error, final_response)
