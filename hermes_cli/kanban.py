@@ -458,8 +458,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
     except kanban_origin.OriginError as exc:
         return _err(f"kanban: {exc.code}: {exc}", 2)
     origin_binding = None
-    # [daveey] Hub admission runs before any connection/write lock: the judge is a model call.
-    from hermes_cli.kanban_hub_admission_placement import cli_preflight
+    # [daveey] Hub admission (a model call) runs before any connection/write lock.
+    from hermes_cli.kanban_hub_admission_placement import cli_preflight, with_admission as _with_admission
     assignee = (args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
                 or _cli_default_assignee(args))
     plan, refused_rc = cli_preflight(args, body, ws_kind, ws_path, getattr(args, "board", None)
@@ -494,7 +494,6 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_worker_node import MachinePinRefused, check_machine_pins
         from hermes_cli.kanban_ask_resolved import AskFilingRefused, check_create_filing, create_context
         from hermes_cli.kanban_worker_placement import cli_audit, cli_runs_on
-        from hermes_cli.kanban_hub_admission_placement import with_admission as _with_admission
         try:
             # [daveey] A blocked ask's resolved_check runs once first, as the sweep will run it for this assignee
             # and workspace: already met or broken refuses the create. A key hit returns the card: no probe.
@@ -766,8 +765,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         from hermes_cli import kanban_queue_reason as kqr
         queue_reason = kqr.latest(conn, args.task_id)
         # Same ``queue`` as kanban_show and the REST read (kanban-7d720d4ab8): a ready card says where it waits. [daveey]
-        from hermes_cli import kanban_queue_position as kqp
-        from hermes_cli import kanban_hub_admission_placement as _hub_admission_show
+        from hermes_cli import kanban_queue_position as kqp, kanban_hub_admission_placement as _hub_admission_show
         details = kqp.detail_fields(conn, task, getattr(args, "board", None))
         queue = details.get("queue")
         if not want_json:
