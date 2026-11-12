@@ -92,6 +92,24 @@ def test_unlearned_negative_device_defers_to_python(abi, monkeypatch):
     assert native(42) == (-8, 123)
 
 
+@pytest.mark.parametrize("nodev_py", [-1, (1 << 64) - 1])
+@pytest.mark.parametrize("unsigned", [False, True])
+def test_nodev_never_teaches_real_device_conversion(abi, nodev_py, unsigned):
+    # CPython 3.14 keeps NODEV (-1, e.g. AF_UNIX sockets) signed even where it
+    # converts other negative dev_t to uint64: NODEV must not poison learning.
+    abi.dev = abi.stat_dev = 7
+    native, _descriptors = darwin.build()
+    abi.dev, abi.stat_dev = -1, nodev_py
+    assert native(42) == (nodev_py, 123)
+    abi.dev = -7
+    abi.stat_dev = ((1 << 64) - 7) if unsigned else -7
+    assert native(42) == (abi.stat_dev, 123)
+    abi.stat_dev = 12345  # both conversions learned: no further Python handoff
+    assert native(42) == ((((1 << 64) - 7) if unsigned else -7), 123)
+    abi.dev = -1
+    assert native(42) == (nodev_py, 123)
+
+
 def test_runtime_fstat_failure_before_learning_reports_closed(abi, monkeypatch):
     abi.dev = abi.stat_dev = 7
     native, _descriptors = darwin.build()

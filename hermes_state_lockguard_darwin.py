@@ -31,11 +31,14 @@ def build():
 
     mask = (1 << 64) - 1
     # CPython builds differ in how a negative int32 dev_t becomes st_dev
-    # (signed vs uint64). None = not yet proven on this interpreter.
-    unsigned_dev = [None]
+    # (signed vs uint64), and 3.14 keeps NODEV (-1, e.g. AF_UNIX sockets)
+    # signed even when it converts other devices to uint64. So NODEV and
+    # ordinary negative devices are learned separately: [ordinary, nodev].
+    # None = not yet proven on this interpreter.
+    unsigned_dev = [None, None]
 
-    def learn(fd, dev, ino):
-        # Until a negative device has been observed, ask Python itself (one
+    def learn(fd, dev, ino, kind):
+        # Until a device of this kind has been observed, ask Python itself (one
         # GIL-releasing fstat) and learn its conversion only from a consistent
         # answer. Python's own st_dev is always the authoritative identity.
         try:
@@ -43,7 +46,7 @@ def build():
         except OSError:
             return None
         if st.st_ino == ino and st.st_dev in (dev, dev & mask):
-            unsigned_dev[0] = st.st_dev != dev
+            unsigned_dev[kind] = st.st_dev != dev
         return st.st_dev, st.st_ino
 
     def raw(fd):
@@ -61,9 +64,10 @@ def build():
         dev, ino = got
         if dev >= 0:
             return dev, ino
-        if unsigned_dev[0] is None:
-            return learn(fd, dev, ino)
-        return (dev & mask if unsigned_dev[0] else dev), ino
+        kind = 1 if dev == -1 else 0
+        if unsigned_dev[kind] is None:
+            return learn(fd, dev, ino, kind)
+        return (dev & mask if unsigned_dev[kind] else dev), ino
 
     def descriptors():
         buf = ctypes.create_string_buffer(MAX_FDS * 8)
