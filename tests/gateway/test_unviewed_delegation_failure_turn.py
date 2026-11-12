@@ -264,7 +264,7 @@ async def test_unattended_wakes_stop_at_the_limit_until_the_user_returns(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_failure_in_a_chat_its_viewer_closed_stays_a_note(tmp_path, monkeypatch):
+async def test_failure_in_a_chat_its_viewer_closed_stays_a_note(tmp_path, monkeypatch, caplog):
     """Exit or /new ends the session's background work and refuses new dispatches: a wake there would
     run its re-dispatched child inside the wake turn of a chat nobody will reopen. A viewer attaching
     lifts the refusal, and the next failure wakes again."""
@@ -276,9 +276,13 @@ async def test_failure_in_a_chat_its_viewer_closed_stays_a_note(tmp_path, monkey
         seen = _turns(runner, authority, target, "deleg_closed")
         await _fail(runner, authority, ref, route, target, "deleg_closed0")
         assert seen == [] and len(_notes(authority, target, "deleg_closed0")) == 1
+        warnings = [r.getMessage() for r in caplog.records if "not woken" in r.getMessage()]
+        assert len(warnings) == 1 and "its chat was closed" in warnings[0]
+        caplog.clear()
         delegation.allow_for_session(token)
         await _fail(runner, authority, ref, route, target, "deleg_closed1")
         assert len(seen) == 1 and "deleg_closed1" in seen[0][0]
+        assert not any("not woken" in r.getMessage() for r in caplog.records)
     finally:
         authority.db.close()
 

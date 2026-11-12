@@ -7,6 +7,9 @@ asked. ``interrupt_all(..., by_shutdown=True)`` now stamps why the unit stopped 
 stamped stop counts as a failure the parent must act on (re-dispatch or tell the user).
 """
 import threading
+from types import SimpleNamespace
+
+import pytest
 
 from tests.tools.test_async_delegation import _drain_for
 from tools import async_delegation as ad
@@ -63,6 +66,38 @@ def test_shutdown_stop_of_a_single_unit_is_stamped_and_wakes_the_parent():
     assert evt.get("interrupted_by") == "gateway shutdown (restart)", evt
     assert delegation_wakes_parent(evt)
     assert "not by you or the user" in (format_process_notification(evt) or "")
+
+
+@pytest.mark.parametrize("statuses", [("completed",), ("failed",), ("completed", "failed")])
+def test_shutdown_stamp_without_stopped_children_has_no_stop_guidance(statuses):
+    evt = {"type": "async_delegation", "is_batch": True, "delegation_id": "deleg_done",
+           "interrupted_by": "gateway shutdown (restart)", "goals": ["work"] * len(statuses),
+           "results": [{"task_index": i, "status": status, "summary": "result"}
+                       for i, status in enumerate(statuses)]}
+    text = format_process_notification(evt) or ""
+    assert "deleg_done" in text
+    assert "stopped by" not in text
+    assert delegation_wakes_parent(evt) is ("failed" in statuses)
+
+
+@pytest.mark.parametrize("extra,warns", [
+    ({}, True),
+    ({"type": "completion"}, False),
+    ({"task_failure_notice": True}, False),
+    ({"role": "cron_run"}, False),
+])
+def test_requested_stop_warning_only_for_final_delegations(caplog, extra, warns):
+    from gateway.config import Platform
+    from gateway.run_notifications import _watch_notification_metadata
+
+    evt = {"type": "async_delegation", "delegation_id": "deleg_warning", "status": "interrupted",
+           "parent_session_id": "parent-warning", **extra}
+    metadata = _watch_notification_metadata(evt, SimpleNamespace(platform=Platform.LOCAL))
+    assert not metadata.get("completion_wakes_parent")
+    warnings = [record.getMessage() for record in caplog.records if "not woken" in record.getMessage()]
+    assert bool(warnings) is warns, warnings
+    if warns:
+        assert "parent-warning" in warnings[0] and "interrupted" in warnings[0]
 
 
 def test_requested_stop_stays_asleep():
