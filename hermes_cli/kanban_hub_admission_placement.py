@@ -447,7 +447,7 @@ def _refusal(args, verdict, audit, cfg, *, on_hub, machine_hub, pin, labels):
     out = {"where": "refuse", "why": verdict.why, "hub_admission": audit, "pin": "hub"}
     if on_hub and not machine_hub and not is_hub(pin, cfg):
         out["remedy"] = hub_stay_remedy(structural_reason({**args, "runs_on": None}, cfg), labels,
-                                        assignee=args.get("assignee"), pool_profiles=_Cfg(cfg).assignees())
+                                        assignee=args.get("assignee") or "default", pool_profiles=_Cfg(cfg).assignees())
     return out
 
 
@@ -501,20 +501,20 @@ def hub_stay_remedy(structural, labels, *, assignee=None, pool_profiles=()):
     tailnet work as ``mac-ops`` and, told only "assignee not allowlisted", kept the hub-only profile
     (sweep slug profile-not-in-pool, t_01a1d09e42e2c4fd). [daveey]
     """
-    if labels is not None:
-        first = "drop runs_on (or name labels a pool worker carries) so the card joins the worker pool"
-    elif structural == ASSIGNEE_KEEP:
+    if structural == ASSIGNEE_KEEP:
         pool = sorted(pool_profiles) or ["default"]
         pick = "default" if "default" in pool else pool[0]
         first = (f"assignee {assignee!r} is a profile no pool worker runs (pool profiles: {', '.join(pool)}); "
-                 f"re-create it with assignee={pick!r}, no placement, and runs_on=['capability:<label>'] for the "
-                 "access the work needs (capability:tailnet-exec for commands on a Mac, capability:hub-write "
-                 "for hub-admin changes, capability:hub-read for hub logs and DBs)")
+                 f"re-create it with assignee={pick!r} and no placement; add access constraints only if the work needs it "
+                 "(runs_on=['capability:tailnet-exec'] for commands on a Mac, requires=['hub:write'] "
+                 "for hub-admin changes, runs_on=['capability:hub-read'] for hub logs and DBs)")
     elif structural:
         first = (f"remove what keeps it on this host ({structural}) and omit placement so the card joins the "
                  "worker pool")
     else:
         first = "omit placement (or pass placement='auto') so the card joins the worker pool"
+    if labels is not None:
+        first = "drop runs_on (or name labels a pool worker carries); " + first
     return (f"On the hub, placement='local' is a hub slot and needs an admit. Instead: {first}; or pass "
             "hub_reason quoting what only the hub can do; or, for a question to David, create it with "
             "initial_status='blocked' and a human_request (it takes no slot and is never judged).")

@@ -204,6 +204,36 @@ def test_origin_and_courier_denies_never_queue(gate, monkeypatch):
     assert hap.pool_route({"title": "x"}, QUEUE_CFG, "hub", audit, ["hub:write"])["runs_on"][0] == "pool:worker"
 
 
+@pytest.mark.parametrize("assignee", [None, ""])
+def test_omitted_assignee_remedy_names_default(gate, assignee):
+    fields = {"title": "Portable work", "placement": "local"}
+    if assignee is not None:
+        fields["assignee"] = assignee
+    result = placement.decide(fields, self_gw="hub", cfg={"assignees": ["bb-tuner"]})
+    assert result["where"] == "refuse"
+    assert "assignee 'default'" in result["remedy"]
+    assert "assignee='bb-tuner'" in result["remedy"]
+
+
+def test_explicit_labels_remedy_also_names_non_pool_assignee(gate):
+    result = placement.decide(
+        {"title": "Portable work", "placement": "local", "assignee": "mac-ops", "runs_on": []},
+        self_gw="hub", cfg={"assignees": ["default"]},
+    )
+    assert result["where"] == "refuse"
+    assert "drop runs_on" in result["remedy"]
+    assert "assignee 'mac-ops'" in result["remedy"]
+    assert "assignee='default'" in result["remedy"]
+
+
+def test_assignee_remedy_access_is_optional_and_uses_hub_contract():
+    from hermes_cli import kanban_hub_admission_placement as hap
+    text = hap.hub_stay_remedy(hap.ASSIGNEE_KEEP, None, assignee="mac-ops", pool_profiles={"default"})
+    assert "only if the work needs it" in text
+    assert "requires=['hub:write']" in text
+    assert "capability:hub-write" not in text
+
+
 def test_assignee_keep_remedy_tracks_structural_reason():
     """The remedy keys on structural_reason's exact text; a reworded reason must not silently drop it."""
     from hermes_cli import kanban_hub_admission_placement as hap
