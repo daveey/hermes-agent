@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from agent.context_engine import automatic_compaction_status_message
+from agent.update_pause_cancel import compression_yield_requested
 from agent.conversation_compression import (
     PRE_API_COMPRESSION_STATUS_TEMPLATE, _reset_read_dedup_caches, compression_blocked_transiently,
     compression_skipped_due_to_lock, context_compression_timed_out, conversation_history_after_compression,
@@ -149,6 +150,13 @@ def run_preflight_compression(
             v.messages, system_message, approx_tokens=request_pressure_tokens,
             task_id=effective_task_id, trigger="pre_api",
         )
+        if v.messages is _pre_api_input and compression_yield_requested(agent):
+            # A discarded summary did not spend recovery budget. Re-enter the loop
+            # so the boundary hook can pause (or decline if the hold was released).
+            v.compression_attempts -= 1
+            v._last_preflight_pressure = None
+            v.api_call_count = _refund_api_call(agent, v.api_call_count)
+            return _done("continue")
         if context_compression_timed_out(agent):
             # Progress-aware timeout: never reached the provider — refund the
             # call/budget and stop; an overflow retry would only re-compress.
@@ -316,7 +324,10 @@ def compress_after_tool_results(
         messages, active_system_prompt = agent._compress_context(
             messages, system_message, approx_tokens=_real_tokens, task_id=effective_task_id, trigger="post_tool",
         )
-        if messages is _post_tool_input and compression_skipped_due_to_lock(agent):
+        if messages is _post_tool_input and compression_yield_requested(agent):
+            # The summary was discarded for a pause, not a failed compression.
+            compression_attempts -= 1
+        elif messages is _post_tool_input and compression_skipped_due_to_lock(agent):
             # Lock-skip no-op is a temporary defer, not evidence about compressibility:
             # refund so a lock-loser loop doesn't burn the budget toward exhausted.
             # #69870 lock-skip / #97488 transient-block: this pass no-oped for a TEMPORARY reason (another

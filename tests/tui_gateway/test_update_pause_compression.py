@@ -291,11 +291,121 @@ def test_an_overflow_recovery_compression_never_yields(home, tmp_path, monkeypat
     assert update_pause_cancel.in_flight(agent) == {}
 
 
+@pytest.mark.parametrize("trigger", ["post_tool", "pre_api"])
+def test_scripted_tool_tail_before_any_api_call_cannot_yield(tmp_path, monkeypatch, trigger):
+    agent = _make_agent(tmp_path)
+    agent._api_call_count = 0
+    observed = []
+
+    def summary(_agent, messages, system_message, **kwargs):
+        observed.append(update_pause_cancel.in_flight(agent))
+        return messages, system_message
+
+    monkeypatch.setattr(cc, "compress_context", summary)
+    agent._compress_context(
+        [{"role": "tool", "tool_call_id": "prelude", "content": "opening"}],
+        "system", trigger=trigger,
+    )
+    assert observed == [{}]
+
+
+def _release_pause_at_boundary(home, streaming, monkeypatch):
+    original = up.boundary_pause_hook
+
+    def factory(*args):
+        hook = original(*args)
+
+        def released(**kwargs):
+            if streaming.outcome == "cancelled":
+                af.clear_pause_request(home)
+                af.clear_hold(home)
+            return hook(**kwargs)
+
+        return released
+
+    monkeypatch.setattr(up, "boundary_pause_hook", factory)
+
+
+@pytest.mark.parametrize("decline_pause", [False, True])
+def test_forced_overflow_preflight_yields_without_spending_attempt(home, tmp_path, monkeypatch, decline_pause):
+    import agent.turn_preflight as preflight
+
+    record_turn_start(home, "session-key", "run the quick job")
+    agent = _make_agent(tmp_path)
+    session = {"agent": agent, "session_key": "session-key", "profile_home": str(home),
+               "history_lock": threading.RLock()}
+    streaming = _StreamingSummary()
+    summaries, attempts = [], []
+
+    def summary(worker_agent, messages, system_message, **kwargs):
+        if not summaries:
+            assert kwargs["trigger"] == "overflow"
+            summaries.append("committed")
+            return [dict(m, content="short") if m.get("role") == "tool" else m for m in messages], system_message
+        assert kwargs["trigger"] == "pre_api"
+        result = streaming(worker_agent, messages, system_message, **kwargs)
+        summaries.append(streaming.outcome)
+        return result
+
+    original = preflight.run_preflight_compression
+
+    def capture(*args, **kwargs):
+        before = args[1].compression_attempts
+        result = original(*args, **kwargs)
+        if streaming.started.is_set():
+            attempts.append((before, result.compression_attempts))
+        return result
+
+    monkeypatch.setattr("agent.turn_preflight_gate.run_preflight_compression", capture)
+    monkeypatch.setattr(cc, "compress_context", summary)
+    monkeypatch.setattr(agent.context_compressor, "should_compress", lambda *a, **k: summaries == ["committed"])
+    monkeypatch.setattr("model_tools.handle_function_call", lambda *a, **k: "large result " * 10000)
+    if decline_pause:
+        _release_pause_at_boundary(home, streaming, monkeypatch)
+    _pause_once_summary_streams(home, streaming)
+    result = _run_turn(agent, session, [_response(_call("call_1")), _overflow_error(), _response()])
+    assert summaries == ["committed", "cancelled"]
+    assert not result.get("failed") and not result.get("compression_exhausted")
+    if decline_pause:
+        assert result["final_response"] == "done"
+        assert attempts and all(before == after for before, after in attempts)
+    else:
+        assert result["paused_for_update"] == up.PAUSE_REASON
+
+
+def test_declined_post_tool_pause_refunds_attempt(home, tmp_path, monkeypatch):
+    import agent.turn_preflight as preflight
+
+    record_turn_start(home, "session-key", "run the quick job")
+    agent = _make_agent(tmp_path)
+    session = {"agent": agent, "session_key": "session-key", "profile_home": str(home),
+               "history_lock": threading.RLock()}
+    streaming = _StreamingSummary()
+    attempts = []
+    original = preflight.compress_after_tool_results
+
+    def capture(*args, **kwargs):
+        result = original(*args, **kwargs)
+        attempts.append((kwargs["compression_attempts"], result.compression_attempts))
+        return result
+
+    monkeypatch.setattr("agent.turn_tool_round.compress_after_tool_results", capture)
+    monkeypatch.setattr(cc, "compress_context", streaming)
+    monkeypatch.setattr(agent.context_compressor, "should_compress", lambda *a, **k: not streaming.started.is_set())
+    monkeypatch.setattr("model_tools.handle_function_call", lambda *a, **k: "quick result")
+    _release_pause_at_boundary(home, streaming, monkeypatch)
+    _pause_once_summary_streams(home, streaming)
+    result = _run_turn(agent, session, [_response(_call("call_1")), _response()])
+    assert streaming.outcome == "cancelled"
+    assert result["final_response"] == "done" and not result.get("failed")
+    assert attempts == [(0, 0)]
+
+
 def test_only_a_tool_result_boundary_compression_can_yield():
     tool_tail = [{"role": "user", "content": "go"}, {"role": "tool", "tool_call_id": "c", "content": "ok"}]
     user_tail = [{"role": "user", "content": "go"}]
-    assert update_pause_cancel.compression_can_yield("post_tool", tool_tail)
-    assert update_pause_cancel.compression_can_yield("pre_api", tool_tail)
-    assert not update_pause_cancel.compression_can_yield("pre_api", user_tail)
+    assert update_pause_cancel.compression_can_yield("post_tool", tool_tail, api_call_count=1)
+    assert update_pause_cancel.compression_can_yield("pre_api", tool_tail, api_call_count=1)
+    assert not update_pause_cancel.compression_can_yield("pre_api", user_tail, api_call_count=1)
     for trigger in ("overflow", "turn_start_threshold", "engine_preflight", "idle", "gateway_hygiene", None):
-        assert not update_pause_cancel.compression_can_yield(trigger, tool_tail)
+        assert not update_pause_cancel.compression_can_yield(trigger, tool_tail, api_call_count=1)

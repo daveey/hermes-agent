@@ -188,7 +188,9 @@ def _run_under_progress_timeout(
         )
 
     from agent import update_pause_cancel
-    if not update_pause_cancel.compression_can_yield(trigger, messages):
+    if not update_pause_cancel.compression_can_yield(
+        trigger, messages, api_call_count=getattr(agent, "_api_call_count", 0),
+    ):
         return _wait()
     # A core-update pause's cancel covers this wait like a running tool call (t_01a1d0aa52ee1404), only where
     # the yield's unchanged transcript reaches a step boundary the pause lands on.
