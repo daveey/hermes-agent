@@ -160,6 +160,7 @@ def settle_tui_sibling(board: Optional[str], sub: dict, upto: int) -> bool:
     from types import SimpleNamespace
 
     from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli.kanban_failure_notice import provisional_failure
     from tui_gateway.session_notifications import _KANBAN_EVENT_FORMATTERS
     if not _waking_local(sub):
         return False
@@ -180,7 +181,10 @@ def settle_tui_sibling(board: Optional[str], sub: dict, upto: int) -> bool:
                 data = json.loads(payload) if payload else {}
             except ValueError:
                 data = {}
-            if kind in _KANBAN_EVENT_FORMATTERS and not covered(SimpleNamespace(kind=kind, payload=data)):
+            ev = SimpleNamespace(kind=kind, payload=data)
+            if provisional_failure(ev):
+                continue  # the tui row shows nothing for it; its failure_finalized carries the notice
+            if kind in _KANBAN_EVENT_FORMATTERS and not covered(ev):
                 return False  # the tui row still owes a notice the wake did not carry
         if held is None:
             cur = conn.execute(f"UPDATE kanban_notify_subs SET last_event_id = ? WHERE {key} "

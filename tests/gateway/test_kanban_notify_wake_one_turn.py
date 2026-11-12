@@ -314,3 +314,35 @@ def test_unloaded_sweeper_delivers_a_covered_event_the_wake_never_delivered(boar
     ku.sweep_once(set(), now=time.time() + 3600, session_db=opener)  # an hour on, past DEFER_MAX_S
     rows = [m for m in db.get_messages(CHAT) if m.get("display_kind") == "kanban_notice"]
     assert len(rows) == 1 and NOTICE["completed"].format(tid=tid) in (rows[0].get("content") or "")
+
+
+def test_archived_card_after_a_local_failure_wake_leaves_no_second_notice_turn(board):
+    """Review of PR #1465 at 196018f8a7: a local failure appends a provisional canonical ``crashed`` event in the same
+    transaction as ``failure_finalized``. The tui row shows nothing for the provisional event, so it must not stop the
+    wake from settling the tui row; otherwise archiving the card after the wake delivers failure_finalized again."""
+    from hermes_cli.kanban_db_archive import archive_task
+
+    runner, adapter = board
+    tid = _card()
+    conn = kbc.connect()
+    try:
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "crashed", {"error": "worker exited 1", "failure_notice": "canonical"})
+            kb._append_event(conn, tid, "failure_finalized", {"error": "worker exited 1", "failures": 1,
+                                                             "trigger_outcome": "crashed", "tripped": False,
+                                                             "run_uid": "local:1", "final_status": "ready"})
+    finally:
+        conn.close()
+    _wake_leg(runner)
+    assert len(adapter.turns) == 1
+    last, subs = _cursors(tid)
+    assert subs["tui"] == (last, None)  # the wake settled the tui row past the provisional event
+    conn = kbc.connect()
+    try:
+        archive_task(conn, tid)
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM kanban_notify_subs WHERE task_id = ? AND platform = 'local'", (tid,))
+    finally:
+        conn.close()
+    assert _notice_leg() == []
+    assert len(adapter.turns) == 1
