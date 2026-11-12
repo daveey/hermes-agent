@@ -51,8 +51,8 @@ def comment_route(task_id: str, owner: Optional[str]) -> str:
     ``hub-admin`` route, attributed ``<worker>/<card>``, and reads it back. Before it was named here, workers that
     hit this refusal filed relay cards that queued on the hub only to post one comment (t_01a1ce48ffc89823).
     Only a comment: completion, status, links and archive stay with the owner."""
-    import shutil
-    if (owner or "").strip().lower() not in HUB_OWNERS or not shutil.which(HUB_COMMENT):
+    from hermes_platform.resolver import locate_command
+    if (owner or "").strip().lower() not in HUB_OWNERS or not locate_command(HUB_COMMENT).command:
         return ""
     return (f" To add a comment only (no other write), run `{HUB_COMMENT} {task_id} --text '...'` (or "
             "`--file <path>`) from your card's terminal: it posts on the hub attributed to your card and prints "
