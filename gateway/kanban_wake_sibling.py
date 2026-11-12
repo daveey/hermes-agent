@@ -27,10 +27,18 @@ WAKE_MODES = ("notify+wake", "wake")
 DEFER_MAX_S = 600.0
 
 
+def _chats(sub: dict) -> tuple:
+    """This row's chat and the other ids of its compression lineage (``sibling_chats``, stamped by the caller that
+    knows the lineage): a ``local`` row on the lineage root is the same chat as a ``tui`` row on its tip."""
+    chats = tuple(dict.fromkeys(str(c) for c in (sub["chat_id"], *(sub.get("sibling_chats") or ())) if c))
+    return chats or (str(sub["chat_id"]),)
+
+
 def _sibling(conn: Any, sub: dict, platform: str, modes: Optional[tuple] = None) -> bool:
-    sql = ("SELECT 1 FROM kanban_notify_subs WHERE task_id = ? AND platform = ? AND chat_id = ? "
-           "AND thread_id = ?")
-    args: list = [sub["task_id"], platform, sub["chat_id"], sub.get("thread_id") or ""]
+    chats = _chats(sub)
+    sql = ("SELECT 1 FROM kanban_notify_subs WHERE task_id = ? AND platform = ? "
+           f"AND chat_id IN ({','.join('?' * len(chats))}) AND thread_id = ?")
+    args: list = [sub["task_id"], platform, *chats, sub.get("thread_id") or ""]
     if modes:
         sql += f" AND delivery_mode IN ({','.join('?' * len(modes))})"
         args.extend(modes)
@@ -47,36 +55,60 @@ def covered(ev: Any) -> bool:
     return getattr(ev, "kind", "") in _WAKE_KINDS and not provisional_failure(ev)
 
 
-def _local_acked(conn: Any, sub: dict) -> Optional[int]:
-    """The event id up to which the waking ``local`` sibling of this ``tui`` row has delivered (its cursor, or the
-    start of its in-flight claim), or None when there is no such row (or it is unreadable)."""
+def local_since(conn: Any, row: Any) -> int:
+    """The last event of the card written before this ``local`` row existed: the row never delivers it or anything
+    earlier (it starts caught up). ``created_event_id`` (stamped at insert, ``trg_notify_sub_created_event``); a
+    row from before that column is dated by ``created_at``, an event in its own second counting as after it.
+
+    A cursor that is past an event only because the row was created later is not a delivery: t_01a1ce412fbf6e7f's
+    local row was created at 04:39:43 with its cursor at 240205, past the completion 239624, and silencing the
+    ``tui`` row on that cursor would have lost the completion. [daveey]"""
+    created = row["created_event_id"] if "created_event_id" in row.keys() else None
+    if created is not None:
+        return int(created)
+    try:
+        found = conn.execute("SELECT MAX(id) FROM task_events WHERE task_id = ? AND created_at < ?",
+                             (row["task_id"], int(row["created_at"] or 0))).fetchone()
+    except sqlite3.Error:
+        return 2 ** 62  # undatable: it covers nothing (a duplicate beats a lost notice)
+    return int((found[0] if found else 0) or 0)
+
+
+def _local_acked(conn: Any, sub: dict) -> Optional[tuple]:
+    """``(since, acked)`` for the waking ``local`` sibling of this ``tui`` row: it has delivered the events in
+    ``(since, acked]`` (``acked`` = its cursor, or the start of its in-flight claim; :func:`local_since`), or None
+    when there is no such row (or it is unreadable)."""
     if (sub.get("platform") or "").lower() != "tui":
         return None
+    chats = _chats(sub)
     try:
         row = conn.execute(
-            "SELECT last_event_id, inflight_from FROM kanban_notify_subs WHERE task_id = ? AND platform = 'local' "
-            f"AND chat_id = ? AND thread_id = ? AND delivery_mode IN ({','.join('?' * len(WAKE_MODES))}) "
-            "ORDER BY last_event_id LIMIT 1",
-            (sub["task_id"], sub["chat_id"], sub.get("thread_id") or "", *WAKE_MODES)).fetchone()
-    except sqlite3.Error:
+            "SELECT * FROM kanban_notify_subs WHERE task_id = ? AND platform = 'local' "
+            f"AND chat_id IN ({','.join('?' * len(chats))}) AND thread_id = ? "
+            f"AND delivery_mode IN ({','.join('?' * len(WAKE_MODES))}) ORDER BY last_event_id LIMIT 1",
+            (sub["task_id"], *chats, sub.get("thread_id") or "", *WAKE_MODES)).fetchone()
+        if row is None:
+            return None
+        return local_since(conn, row), int((row["last_event_id"] if row["inflight_from"] is None
+                                            else row["inflight_from"]) or 0)
+    except (sqlite3.Error, IndexError, KeyError):
         return None  # unreadable: deliver as before (a duplicate beats a lost notice)
-    if row is None:
-        return None
-    return int((row[0] if row[1] is None else row[1]) or 0)
 
 
 def tui_cover(conn: Any, sub: dict) -> Optional[Callable[[Any], bool]]:
     """For a ``tui`` row: a predicate for the events its waking ``local`` sibling has already delivered a turn for
-    (:func:`covered` and at or below that row's acknowledged cursor), else None (deliver everything as before).
+    (:func:`covered`, written after that row existed and at or below its acknowledged cursor), else None (deliver
+    everything as before).
 
     Silence must follow the wake's delivery, not the row's existence: silencing on existence acked the ``tui`` row
     past an event the wake still owed, and a wake that then never landed lost the event (review of PR #1465)."""
-    acked = _local_acked(conn, sub)
-    if acked is None:
+    found = _local_acked(conn, sub)
+    if found is None:
         return None
+    since, acked = found
 
     def delivered(ev: Any) -> bool:
-        return covered(ev) and int(getattr(ev, "id", 0) or 0) <= acked
+        return covered(ev) and since < int(getattr(ev, "id", 0) or 0) <= acked
     return delivered
 
 
@@ -109,9 +141,10 @@ def wake_owes_after(conn: Any, sub: dict, floor: int, now: Optional[float] = Non
     import time
     from types import SimpleNamespace
 
-    acked = _local_acked(conn, sub)
-    if acked is None:
+    found = _local_acked(conn, sub)
+    if found is None:
         return False
+    acked = found[1]
     # While a core-update drain hold is on, the wake leg rewinds every batch and delivers it once the hold lifts,
     # so the window runs from the lift: a hold past DEFER_MAX_S let the tui row show its notice turn and the wake
     # start a second one after the hold (review of PR #1465 at 9268465a67), and a window that only stopped while
@@ -227,7 +260,8 @@ def settle_tui_sibling(board: Optional[str], sub: dict, upto: int, carried: froz
       so a rewind hands back only what the wake did not carry; the holder's own ack is unchanged.
 
     An event the ``tui`` row would show but the wake does not wake on settles only when its id is in ``carried``
-    (the wake turn showed its line, :func:`carried_ids`); any other such event keeps the row where it is.
+    (the wake turn showed its line, :func:`carried_ids`); any other such event keeps the row where it is. So does
+    any event written before this ``local`` row existed (:func:`local_since`): the wake never carried it.
     """
     import contextlib
     import json
@@ -249,6 +283,9 @@ def settle_tui_sibling(board: Optional[str], sub: dict, upto: int, carried: froz
         stop = upto if held is None else min(upto, last)
         if start >= stop:
             return False
+        mine = conn.execute("SELECT * FROM kanban_notify_subs WHERE task_id = ? AND platform = 'local' AND chat_id = ? "
+                            "AND thread_id = ?", ident).fetchone()
+        since = local_since(conn, mine) if mine is not None else 0
         for ev_id, kind, payload in conn.execute("SELECT id, kind, payload FROM task_events WHERE task_id = ? "
                                                  "AND id > ? AND id <= ?", (ident[0], start, stop)):
             try:
@@ -258,7 +295,8 @@ def settle_tui_sibling(board: Optional[str], sub: dict, upto: int, carried: froz
             ev = SimpleNamespace(kind=kind, payload=data)
             if provisional_failure(ev):
                 continue  # the tui row shows nothing for it; its failure_finalized carries the notice
-            if kind in _KANBAN_EVENT_FORMATTERS and not covered(ev) and int(ev_id) not in carried:
+            owed = int(ev_id) <= since or (not covered(ev) and int(ev_id) not in carried)
+            if kind in _KANBAN_EVENT_FORMATTERS and owed:
                 return False  # the tui row still owes a notice the wake did not carry
         if held is None:
             cur = conn.execute(f"UPDATE kanban_notify_subs SET last_event_id = ? WHERE {key} "

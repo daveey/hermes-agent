@@ -754,6 +754,9 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
     except Exception:
         return []
     texts: list = []
+    chats: tuple = (session_key,)
+    with contextlib.suppress(Exception):  # the chat's compaction parents: its local rows may sit on the root
+        chats = (session_key, *_session_lineage(session_key))
     with contextlib.closing(conn):
         try:
             subs = _kbn.list_notify_subs(conn, platform="tui", chat_id=session_key)
@@ -766,6 +769,7 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
         for sub in subs:
             if (sub.get("platform") or "").lower() != "tui" or sub.get("chat_id") != session_key:
                 continue
+            sub = {**sub, "sibling_chats": chats}
             sub_ident = dict(task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
                              thread_id=sub.get("thread_id") or "")
             from gateway.kanban_wake_sibling import tui_defer
@@ -801,6 +805,7 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
                     text = DiagnosticText(text) if diagnostic_event(ev) else _KanbanText(text)
                     from hermes_cli.kanban_failure_notice import event_key
                     text._kb_keys = (event_key(slug, ev),)  # type: ignore[attr-defined]
+                    text._kb_event = ev  # type: ignore[attr-defined]  # _kb_settle_held re-checks custody [daveey]
                     texts.append(text)
                     sub_texts.append(text)
                     if claim is not None:
@@ -856,6 +861,8 @@ def _collect_kanban_notifications(session: dict, claims: list | None = None) -> 
         unique.setdefault(resolved, slug)
     seen = session.setdefault("_kb_board_seen", {})
     stray, unreclaimed = _kb_stray_delegate_keys(session, session_key), []
+    if _kb_gateway_owns(session):  # its collector admits these rows to the chat's FIFO in one tick (kanban_leg_custody)
+        return _collect_remote_kanban_notifications(session_key, claims)
     texts = [t for slug in unique.values() for t in _kb_poll_board(
         _kb, slug, session_key, claims, seen, stray=stray, unreclaimed=unreclaimed)]
     if stray and not unreclaimed:
@@ -1240,6 +1247,19 @@ def _notif_collect_kanban(session: dict) -> tuple:
     return texts, claims
 
 
+def _kb_gateway_owns(session: dict) -> bool:
+    from tui_gateway.kanban_leg_custody import gateway_owns
+    return gateway_owns(session, _canonical_ledger_refusal)
+
+
+def _kb_settle_held(session: dict) -> None:  # a buffered claim the chat's wake delivered meanwhile [daveey]
+    from tui_gateway.kanban_leg_custody import settle_held
+    lineage: tuple = ()
+    with contextlib.suppress(Exception):
+        lineage = _session_lineage(str(session.get("session_key") or ""))
+    settle_held(session, lineage, _notif_log_failure)
+
+
 def _notif_poll_kanban_scoped(sid: str, session: dict, prepared=None) -> None:
     """One kanban poll: emit new texts, buffer them, and run the buffered batch as a turn if idle. Events are
     cursor-claimed, so they wait in the buffer instead of dropping the agent turn; a turn the admission gate
@@ -1262,6 +1282,10 @@ def _notif_poll_kanban_scoped(sid: str, session: dict, prepared=None) -> None:
         session.setdefault("_kanban_pending", []).extend(texts)
     if claims and prepared is None:  # prepared collections already transferred custody
         session.setdefault("_kanban_claims", []).extend(claims)
+    _kb_settle_held(session)
+    if session.get("_kanban_pending") and _kb_gateway_owns(session):  # hand back now, not after a refused turn
+        _kb_rewind_refused(session, list(session.get("_kanban_pending") or []), not_owned=True)
+        return
     if not session.get("_kanban_pending") or not _notif_claim_turn(session):
         return
     with session["history_lock"]:

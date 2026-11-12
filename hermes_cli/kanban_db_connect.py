@@ -1112,6 +1112,9 @@ _NOTIFY_SUB_COLUMNS = (
     # Epoch seconds of the earliest outstanding claim: a LIVE holder's claim older than NOTIFY_CLAIM_STALE_S no
     # longer blocks other consumers (t_01a199de3003e911). NULL = none, or written before this column. [daveey]
     ("inflight_at", "inflight_at INTEGER"),
+    # The card's last event when the row was inserted (its starting cursor; trg_notify_sub_created_event): a row
+    # never delivers an event written before it existed. NULL = inserted before this column. [daveey]
+    ("created_event_id", "created_event_id INTEGER"),
 )
 
 _TASK_RUN_COLUMNS = (
@@ -1232,6 +1235,16 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             pass  # a read-only (delegated-child) opener: the next writer stamps; inheritance has a fallback
 
     _rebuild_drifted_tables(conn)
+    _ensure_notify_sub_triggers(conn)
+
+
+def _ensure_notify_sub_triggers(conn: sqlite3.Connection) -> None:
+    """Stamp ``created_event_id`` on every new notify row (after any rebuild, which drops a table's triggers): the
+    sibling-leg rules read it to tell an event written before the row existed from one it delivered. [daveey]"""
+    if _table_exists(conn, "kanban_notify_subs"):
+        conn.execute("CREATE TRIGGER IF NOT EXISTS trg_notify_sub_created_event AFTER INSERT ON kanban_notify_subs "
+                     "WHEN NEW.created_event_id IS NULL BEGIN UPDATE kanban_notify_subs SET created_event_id = "
+                     "NEW.last_event_id WHERE rowid = NEW.rowid; END")
 
 
 def _backfill_legacy_inflight_runs(conn: sqlite3.Connection) -> None:
@@ -1339,6 +1352,7 @@ _REBUILD_SPECS = {
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
         " last_ping_event_id INTEGER NOT NULL DEFAULT 0,"
         " inflight_from INTEGER, inflight_pid INTEGER, inflight_start INTEGER, inflight_at INTEGER,"
+        " created_event_id INTEGER,"
         " PRIMARY KEY (task_id, platform, chat_id, thread_id))",
         ("CREATE INDEX idx_notify_task ON kanban_notify_subs(task_id)",),
     ),
