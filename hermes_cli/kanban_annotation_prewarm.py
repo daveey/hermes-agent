@@ -17,6 +17,13 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
+_boot_thread: list[Optional[threading.Thread]] = [None]
+
+
+def boot_thread() -> Optional[threading.Thread]:
+    """The boot prewarm thread this process started, if any (``boot_warmup_gate`` waits on it)."""
+    return _boot_thread[0]
+
 
 def prewarm_annotation() -> bool:
     """Build this process's annotation snapshot (and the remote-links projection under it). Never raises."""
@@ -45,4 +52,5 @@ def start_annotation_prewarm() -> Optional[threading.Thread]:
 
     thread = spawn_context_thread(_boot_prewarm, name="kanban-annotation-prewarm")
     thread.start()
+    _boot_thread[0] = thread
     return thread

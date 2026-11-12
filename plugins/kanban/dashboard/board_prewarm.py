@@ -16,6 +16,13 @@ from hermes_cli import kanban_db
 
 log = logging.getLogger(__name__)
 
+_boot_thread: list[Optional[threading.Thread]] = [None]
+
+
+def boot_thread() -> Optional[threading.Thread]:
+    """The boot prewarm thread this process started, if any (``hermes_cli.boot_warmup_gate`` waits on it)."""
+    return _boot_thread[0]
+
 
 def _warm_names(api):
     yield kanban_db.get_current_board()
@@ -61,4 +68,5 @@ def start_board_prewarm(api) -> Optional[threading.Thread]:
         return None
     thread = spawn_context_thread(lambda: prewarm_boards(api), name="kanban-board-prewarm")
     thread.start()
+    _boot_thread[0] = thread
     return thread
