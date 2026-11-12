@@ -1308,7 +1308,6 @@ class _CrashSweep:
     # Worker-exit observer payloads, fired only after every reclaim/accounting
     # txn has committed.
     exited_hook_payloads: list[dict] = field(default_factory=list)
-    auto_blocked: list[str] = field(default_factory=list)
 
 
 def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None,
@@ -1367,17 +1366,9 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None,
             _owner_death.note(dead, conn, row["id"], row["current_run_id"])  # owner died under it [daveey]
             dead.run_id = row["current_run_id"]
             dead.event_payload["retry_status"] = _kb._retry_status_for_run(conn, row["id"])
-            from hermes_cli import kanban_neutral_release
-            if kanban_neutral_release.queue(conn, row, dead):
+            from hermes_cli.kanban_failure_release import route_dead_worker
+            if route_dead_worker(conn, row, dead, sweep, pid):
                 continue
-            from hermes_cli.kanban_failure_release import deferred_crash
-            if deferred_crash(conn, dead):
-                sweep.crashed.append(row["id"])
-                sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead))
-                continue
-            if not (dead.rate_limited or dead.owner_restart
-                    or dead.owner_unavailable or (dead.host_reboot and not dead.reboot_culprit)):
-                dead.event_payload["failure_notice"] = "canonical"
             from hermes_cli.kanban_run_finalizer import close_dead_run
             closed = close_dead_run(conn, row, dead)
             if closed is None:

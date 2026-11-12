@@ -24,6 +24,25 @@ def deferred_crash(conn: sqlite3.Connection, dead) -> bool:
     )
 
 
+def route_dead_worker(conn: sqlite3.Connection, row, dead, sweep, pid: int) -> bool:
+    """Route a classified dead worker before local closure; True when the Board owns it.
+
+    Neutral releases wait for the feed; charged primary crashes join the sweep's
+    accounting without a local mirror edit. Otherwise mark the canonical notice.
+    """
+    from hermes_cli import kanban_neutral_release
+    if kanban_neutral_release.queue(conn, row, dead):
+        return True
+    if deferred_crash(conn, dead):
+        sweep.crashed.append(row["id"])
+        sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead))
+        return True
+    if not (dead.rate_limited or dead.owner_restart
+            or dead.owner_unavailable or (dead.host_reboot and not dead.reboot_culprit)):
+        dead.event_payload["failure_notice"] = "canonical"
+    return False
+
+
 def queued(conn: sqlite3.Connection, run_id: int | None) -> bool:
     """Skip repeated observations/side effects while the authoritative feed lags."""
     if sync.board_mode(conn) != "primary":
