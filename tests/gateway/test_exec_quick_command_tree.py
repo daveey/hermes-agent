@@ -31,6 +31,14 @@ def _pid(path: Path):
 
 @pytest.mark.platforms("posix")
 @pytest.mark.asyncio
+@pytest.mark.parametrize(('command', 'output'), [('printf hello', 'hello'), ('printf error >&2', 'error'), ('true', None)])
+async def test_exec_command_success(command, output):
+    reply = await GatewayInboundHooksMixin()._hm_run_exec_quick_command('probe', command)
+    assert reply == (output or run_inbound_hooks.t('gateway.quick_command.no_output'))
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.asyncio
 async def test_timed_out_exec_command_kills_its_background_child(tmp_path, monkeypatch):
     monkeypatch.setattr(run_inbound_hooks, '_EXEC_QUICK_COMMAND_TIMEOUT', 2)
     reply = await GatewayInboundHooksMixin()._hm_run_exec_quick_command('probe', _TREE, cwd=str(tmp_path))
