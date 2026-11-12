@@ -20,6 +20,7 @@ import logging
 import time
 from typing import Any, Optional
 
+from hermes_cli import kanban_last_checkpoint as last_checkpoint
 from hermes_cli import kanban_parent_unclaimed as pu
 
 _log = logging.getLogger(__name__)
@@ -88,27 +89,28 @@ def notice_text(payload: Any) -> str:
     tid = str(payload.get("parent") or "<card>")[:64]
     title = str(payload.get("parent_title") or "").strip()[:120]
     named = f"{tid} ({title})" if title else tid
+    checkpoint = last_checkpoint.sentence(payload)  # before the advice (kanban-3debc730ab) [daveey]
     if payload.get("core_update_hold"):
         return (f"{named}, which this chat waits on, has been ready {payload.get('ready_minutes', '?')} min "
                 "with no worker: claims are held for a pending Hermes update "
-                f"(hold started {payload.get('core_update_started') or 'at an unknown time'}). "
-                "The hold lasts until the update applies or the drain's hard max.")
+                f"(hold started {payload.get('core_update_started') or 'at an unknown time'}). " + checkpoint
+                + "The hold lasts until the update applies or the drain's hard max.")
     if payload.get("missing_shared_board"):
         return (f"{named}, which this chat waits on, has been ready {payload.get('ready_minutes', '?')} min "
                 f"with no worker because it isn't on the shared Board (claim_deferred: not_found). "
                 f"Last sync rejection: {payload.get('sync_reject_reason') or 'no sync rejection recorded'}. "
-                "Repair the Board sync rejection before retrying dispatch.")
+                + checkpoint + "Repair the Board sync rejection before retrying dispatch.")
     if payload.get("respawn_guard"):
         return (f"{named}, which this chat waits on, has been ready {payload.get('ready_minutes', '?')} min "
-                f"with no worker: last recorded respawn guard is {payload['respawn_guard']}. "
-                "Check the current dispatcher verdict and resolve that guard; priority changes do not clear it.")
+                f"with no worker: last recorded respawn guard is {payload['respawn_guard']}. " + checkpoint
+                + "Check the current dispatcher verdict and resolve that guard; priority changes do not clear it.")
     hold = ""
     if payload.get("hold_reason") and payload.get("hold_until"):
         stamp = time.strftime("%H:%M:%SZ", time.gmtime(int(payload["hold_until"])))
         hold = f"; dispatcher hold {payload['hold_reason']} until {stamp}"
     return (f"{named}, which this chat waits on, has been ready {payload.get('ready_minutes', '?')} min with no "
             f"worker ({payload.get('queue') or 'queue place unknown'}{hold}){pu._observation(payload)}. "
-            + pu._options(tid, payload.get("priority_evidence"), payload) + ".")
+            + checkpoint + pu._options(tid, payload.get("priority_evidence"), payload) + ".")
 
 
 def _floor_kinds() -> str:

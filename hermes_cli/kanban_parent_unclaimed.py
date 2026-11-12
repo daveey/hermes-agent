@@ -17,6 +17,8 @@ import logging
 import time
 from typing import Any, Optional
 
+from hermes_cli import kanban_last_checkpoint as last_checkpoint
+
 _log = logging.getLogger(__name__)
 
 NOTICE_KIND = "dependency_parent_unclaimed"
@@ -98,7 +100,7 @@ def notice_text(payload: Any) -> str:
               if payload.get("respawn_guard") else _options(parent, payload.get("priority_evidence"), payload))
     return (f"Waiting {payload.get('wait_minutes', '?')} min on parent {named}, which has been ready "
             f"{payload.get('ready_minutes', '?')} min with no worker ({payload.get('queue') or 'queue place unknown'})"
-            + _observation(payload) + ". " + advice + ".")
+            + _observation(payload) + ". " + last_checkpoint.sentence(payload) + advice + ".")
 
 
 def ready_hint(conn, task, *, now: Optional[float] = None) -> Optional[str]:
@@ -112,10 +114,11 @@ def ready_hint(conn, task, *, now: Optional[float] = None) -> Optional[str]:
     from hermes_cli.kanban_priority import lane_evidence
     from hermes_cli import kanban_queue_position as kqp
     place = _place(conn, task.id)
+    checkpoint = last_checkpoint.sentence(last_checkpoint.fields(conn, task.id))  # kanban-3debc730ab [daveey]
     if place.get("lane") == "respawn_guard":
-        return f"Ready {_minutes(waited)} min, unclaimed; {kqp.describe(place)}."
+        return f"Ready {_minutes(waited)} min, unclaimed; {kqp.describe(place)}. {checkpoint}".rstrip()
     from hermes_cli.kanban_dispatch_skip import notice_fields
-    return (f"Ready {_minutes(waited)} min, unclaimed; {_queue_words(place)}. "
+    return (f"Ready {_minutes(waited)} min, unclaimed; {_queue_words(place)}. " + checkpoint
             + _options(task.id, lane_evidence(conn, task.id), notice_fields(place, waited)) + ".")
 
 
@@ -189,6 +192,7 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
                 "admission": ({"reason": "core_update_hold", "status": "held"} if (extra or {}).get("core_update_hold")
                               else {"reason": None, "status": "unknown"})}
     guard = place.get("reason") if place.get("lane") == "respawn_guard" else None
+    checkpoint = last_checkpoint.fields(conn, waiting_on)  # what the card already did (kanban-3debc730ab) [daveey]
     with kb.write_txn(conn):
         if _already_posted(conn, task_id, waiting_on, wait_key, kind):
             return False
@@ -200,7 +204,8 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
         kb._append_event(conn, task_id, kind, {
             "parent": waiting_on, "parent_title": parent_title, "wait_event_id": wait_key,
             "wait_minutes": _minutes(waited_seconds), "ready_minutes": _minutes(ready_seconds),
-            "queue": kqp.describe(place) if guard else _queue_words(place), **observed, **(extra or {}),
+            "queue": kqp.describe(place) if guard else _queue_words(place), **observed, **checkpoint,
+            **(extra or {}),
             "respawn_guard": guard,
             "priority_evidence": lane_evidence(conn, waiting_on),
             **({} if guard else notice_fields(place, ready_seconds)),
