@@ -276,6 +276,8 @@ def row_turn_author(policy, row):
 
 async def execute_admission(authority, ref, row):
     busy_turn_started(row['admission_id'])
+    from hermes_cli.kanban_stale_ask import refresh_payload
+    refresh_payload(row['payload'])  # [daveey] a queued block notice re-reads its card before it is shown
     from gateway.session_completion_notes import note_if_unviewed
     noted = await note_if_unviewed(authority, ref, row)  # #134889 LC-7: no viewer, no turn
     if noted is not None:
