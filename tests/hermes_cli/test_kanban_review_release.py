@@ -72,6 +72,31 @@ def test_new_promotion_does_not_rearm_old_receipt(board, monkeypatch):
     assert not release.released(board, task, {PR})
 
 
+@pytest.mark.parametrize("field,value", [("reviewed_sha", "b" * 40), ("reviewed_pr", OLD)])
+def test_same_result_contradiction_revokes_receipt(board, field, value):
+    import json
+    from hermes_cli import kanban_review_release as release
+    task, reviews = helpers.parked(board)
+    helpers.finish_reviews(board, reviews)
+    assert release.released(board, task, {PR})
+    row = board.execute("SELECT id,metadata FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1", (reviews[0],)).fetchone()
+    metadata = json.loads(row["metadata"])
+    metadata[field] = value
+    board.execute("UPDATE task_runs SET metadata=? WHERE id=?", (json.dumps(metadata), row["id"]))
+    board.commit()
+    assert not release.released(board, task, {PR})
+
+
+def test_lifecycle_retraction_revokes_receipt(board):
+    from hermes_cli import kanban_review_release as release
+    task, reviews = helpers.parked(board)
+    helpers.finish_reviews(board, reviews)
+    assert release.released(board, task, {PR})
+    kb._append_event(board, task, "descendant_invalidated", {})
+    board.commit()
+    assert not release.released(board, task, {PR})
+
+
 def test_remote_review_change_during_precompute_drops_stamp(board, monkeypatch):
     from hermes_cli import kanban_review_release as release
     task, reviews = helpers.parked(board)

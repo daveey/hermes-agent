@@ -1174,6 +1174,7 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     # probes match the gateway, not a free-text author. Back-filled from ``hub:gw:<x>`` / ``<x>/t_...``.
     from hermes_cli.kanban_comment_origin import ensure_origin_column
     ensure_origin_column(conn)
+    _add_column_if_missing(conn, "task_events", "origin_gateway", "origin_gateway TEXT")
 
     # task_events.run_id back-fills as NULL for historical events (they predate
     # runs and can't be attributed).

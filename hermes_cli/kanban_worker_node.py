@@ -466,7 +466,7 @@ def _changes_for(replica: sqlite3.Connection, tid: str, card: sqlite3.Row) -> li
                 continue
             version = int(row["sync_version"] or 0) if "sync_version" in row.keys() else 0
             # A comment's sender is machine-local (never a wire field): carry the replica's as the change's writer.
-            sender = (row["origin_gateway"] or "") if table == "task_comments" and "origin_gateway" in row.keys() else ""
+            sender = (row["origin_gateway"] or "") if table in ("task_comments", "task_events") and "origin_gateway" in row.keys() else ""
             out.append(sync.RemoteChange(0, table, row["uid"], "upsert", ksc._row_fields(replica, table, row),
                                          version, "", sender))
     # Its parent edges too: once the copy is here the feed applies its later links (own_partition), so a copy

@@ -87,7 +87,7 @@ LOCAL_COLUMNS: dict[str, frozenset[str]] = {
     "task_links": frozenset(),
     # ``origin_gateway``: the sending gateway as this gateway saw it (relay sender); peers keep their own.
     "task_comments": frozenset({"origin_gateway"}),
-    "task_events": frozenset(),
+    "task_events": frozenset({"origin_gateway"}),
     # ``sync_version``: the Board version of the row this gateway last applied or had acknowledged (the fence that
     # keeps an older copy of a run from the feed off a newer local row).
     "task_runs": frozenset({"claim_lock", "claim_expires", "worker_pid", "worker_started_at", "last_heartbeat_at",
@@ -1346,6 +1346,8 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
         return False
     from hermes_cli.kanban_sync_omissions import without_held
     cols = _local_fields(conn, table, without_held(conn, table, ch.uid, ch.fields), task_id)
+    if table == "task_events" and "origin_gateway" in table_columns(conn, table):
+        cols["origin_gateway"] = ch.origin_gateway or None
     if table == "task_links":
         return conn.execute("INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
                             (cols["parent_id"], cols["child_id"])).rowcount == 1

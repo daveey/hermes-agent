@@ -109,8 +109,16 @@ def released(conn, task_id, pr_urls):
     parents = kb.parent_ids(conn, task_id)
     if kb.unsatisfied_parents(conn, task_id) or owner_faulted_since(conn, task_id, parked):
         return False
-    for event in conn.execute("SELECT payload, created_at FROM task_events WHERE task_id=? "
+    for event in conn.execute("SELECT * FROM task_events WHERE task_id=? "
                               "AND kind='promoted' ORDER BY id DESC LIMIT 1", (task_id,)):
+        origin = event["origin_gateway"] if "origin_gateway" in event.keys() else None
+        if origin or foreign_copy(conn, task_id):
+            home = conn.execute("SELECT created_on FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
+            if not origin or origin != home:
+                return False
+        if conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND id>? "
+                        "AND kind='descendant_invalidated' LIMIT 1", (task_id, event["id"])).fetchone():
+            return False
         stamp = kb._json_dict(event["payload"]).get("review_release")
         if not isinstance(stamp, dict):
             continue
@@ -149,6 +157,13 @@ def released(conn, task_id, pr_urls):
                                   (proof["parent"],)).fetchone()
             if latest is not None and not review._checkpoint_matches_run(proof.get("result"), latest):
                 break
+            if latest is not None:
+                current = kb._json_dict(latest["metadata"])
+                # Absent replica evidence is allowed; explicit changed review
+                # identity is not. Verdict changes can still authorize repair.
+                identity_keys = ("reviewed_sha", "head", "exact_head", "pr", "reviewed_pr")
+                if any(k in current and current[k] != data.get(k) for k in identity_keys):
+                    break
             explicit = review._named_prs(data, urls)
             if explicit is not None and set(named) != explicit:
                 break

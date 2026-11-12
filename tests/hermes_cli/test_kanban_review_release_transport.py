@@ -17,7 +17,7 @@ PR = "https://github.com/example/repo/pull/9003"
 OLD = PR + "9"
 
 
-@pytest.mark.parametrize("missing", ["parent", "github"])
+@pytest.mark.parametrize("missing", ["parent", "github", "foreign_origin"])
 def test_home_review_receipt_crosses_feed_and_pickup(gws, clock, monkeypatch, missing):
     hub, worker = gws
     hub.enter()
@@ -57,6 +57,16 @@ def test_home_review_receipt_crosses_feed_and_pickup(gws, clock, monkeypatch, mi
         assert worker.conn.execute("SELECT 1 FROM task_runs WHERE task_id=?", (parent,)).fetchone() is None
         from hermes_cli import kanban_dependency_review as review
         monkeypatch.setattr(review, "_completed_review_run", lambda *a: None)
+    if missing == "foreign_origin":
+        from hermes_cli import kanban_db_sync as sync
+        from hermes_cli import kanban_sync_client as client
+        from hermes_cli import kanban_review_release as release
+        event = worker.conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind='promoted' ORDER BY id DESC LIMIT 1", (task,)).fetchone()
+        forged = sync.RemoteChange(0, "task_events", event["uid"], "upsert",
+                                   client._row_fields(worker.conn, "task_events", event), 0, "", "foreign")
+        sync._upsert_row(worker.conn, forged, "worker", sync.ApplyResult(cursor=0))
+        assert not release.released(worker.conn, task, {PR, OLD})
+        return
     assert dispatch.check_respawn_guard(worker.conn, task) is None
     assert kb.claim_task(worker.conn, task)
     assert dispatch.check_respawn_guard(worker.conn, task) == "active_pr"
