@@ -4,8 +4,9 @@ Split out of tools/kanban_tools.py to keep that facade under its size cap; behav
 """
 from __future__ import annotations
 
-import re
 from typing import Any, Optional
+
+from hermes_cli import kanban_wake_check_secret
 
 
 def _check(cond: Any, message: str, rejection: Optional[str] = None) -> None:
@@ -79,34 +80,14 @@ def _wake_check_args(args: dict) -> tuple[Optional[str], Optional[int], bool]:
     return cmd, every, clock_only  # verbatim: the stored probe is the command that runs
 
 
-WAKE_CHECK_SECRET = "wake_check_secret"
+WAKE_CHECK_SECRET = kanban_wake_check_secret.WAKE_CHECK_SECRET
 
 
 def _wake_check_secret_error(cmd: str) -> Optional[str]:
     """Refusal text when the display redactor would change ``cmd``, else None. [daveey]
 
-    A wake_check is executable: storing its redacted form changes what runs (``idempotency_key='review...26b2'``
-    could never match, t_01a1cf477dece56b), and storing it unredacted keeps the secret on the board. So a probe
-    redaction would alter is refused, never stored altered. The message names only the redacted assignment."""
-    from tools.kanban_tools import _redact  # lazy: kanban_tools imports this module
-
-    redacted = _redact(cmd)
-    if redacted == cmd:
-        return None
-    import difflib
-
-    raw, red = cmd.split(), redacted.split()
-    names = []
-    for op, a1, _a2, b1, b2 in difflib.SequenceMatcher(a=raw, b=red, autojunk=False).get_opcodes():
-        if op == "equal":
-            continue
-        m = re.match(r"^['\"]?([A-Za-z0-9_.\-]+)\s*=", red[b1]) if b1 < b2 else None
-        names.append(f"`{m.group(1)}=`" if m else f"the value after `{raw[a1 - 1]}`" if a1 else "its first word")
-    return (f"{WAKE_CHECK_SECRET}: this wake_check contains a secret or credential-shaped value at "
-            f"{', '.join(names[:3])}. Probes run exactly as stored and the board never stores a "
-            "secret, so it was not stored, run or masked. Never inline a secret in a probe: read it from env "
-            "(`$OPENAI_API_KEY`, set in the probe host's environment) or a file (`curl -H @$HOME/.hub-auth ...`, "
-            "`sh ~/bin/check.sh` that fetches it via token-broker), then park again.")
+    Shared with ``hermes kanban block/schedule --wake-check`` (``hermes_cli/kanban_wake_check_secret``)."""
+    return kanban_wake_check_secret.secret_error(cmd)
 
 
 def _wake_check_echo(wake: tuple) -> dict:

@@ -11,6 +11,7 @@ from typing import Optional
 
 from hermes_cli import kanban_db as kb
 from hermes_cli.kanban_output import _err
+from hermes_cli.kanban_wake_check_secret import secret_error
 
 
 def _commented(reason: Optional[str], author, prefix: str, op):
@@ -48,6 +49,9 @@ def _cli_wake_check(args: argparse.Namespace):
 
     cmd = kwc.normalize_cmd(getattr(args, "wake_check", None))
     every = kwc.normalize_every(getattr(args, "check_every", None)) if cmd else None
+    secret = secret_error(cmd) if cmd else None
+    if secret:  # before the dry run executes it; the tool path refuses the same probe the same way
+        raise ValueError(secret)
     err = kwc.dry_run_error(cmd, blocker_id=getattr(args, "blocker_id", None) or None)
     if err:
         raise ValueError(err)
