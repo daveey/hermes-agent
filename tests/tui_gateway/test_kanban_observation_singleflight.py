@@ -212,6 +212,19 @@ def test_same_signature_refresh_does_not_repeat_persistence(tmp_path, monkeypatc
     assert obs.observe(replica, ledger, NOW) == expected
 
 
+def test_missing_sequence_signature_never_reuses_an_old_memo(tmp_path):
+    replica, ledger, cards = _world(tmp_path)
+    with sqlite3.connect(replica) as conn:
+        conn.execute("ALTER TABLE replica DROP COLUMN seq")
+    before = obs.observe(replica, ledger, NOW)
+    moved = _card("t_bulk_0", CHAT, status="blocked", at=NOW + 2)
+    with sqlite3.connect(replica) as conn:
+        conn.execute("UPDATE replica SET data=? WHERE key=?", (json.dumps(moved["task"]), cards[0]["key"]))
+    after = obs.observe(replica, ledger, NOW + 3)
+    assert after != before
+    assert any(state.startswith("blocked@") for _, _, state in after)
+
+
 def test_unknown_after_fingerprint_forces_a_fresh_snapshot(tmp_path, monkeypatch):
     from tui_gateway import kanban_replica_observer as observer
 
