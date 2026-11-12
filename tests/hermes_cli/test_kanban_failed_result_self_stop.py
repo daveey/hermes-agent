@@ -7,11 +7,12 @@ lines/h on worker-4). A queued stop job cancels the manager's auto-restart. No
 live service mutation: ``systemctl`` and ``/proc/self/cgroup`` are fixtures.
 """
 import json
-import shutil
+import types
 from pathlib import Path
 
 import pytest
 
+from hermes_platform import resolver
 from hermes_cli import kanban_failed_result_observer as observer
 
 UNIT = 'hermes-failed-result-174699-3952684799857.service'
@@ -23,10 +24,18 @@ def _import_failure(_):
     raise ModuleNotFoundError("No module named 'ruamel'")
 
 
+def _systemctl_at(monkeypatch, path):
+    """The observer resolves systemctl through the managed resolver, never a bare which."""
+    def locate(name, *args, **kwargs):
+        found = path if name == 'systemctl' else None
+        return types.SimpleNamespace(command=(found,) if found else ())
+    monkeypatch.setattr(resolver, 'locate_command', locate)
+
+
 @pytest.fixture
 def systemctl(monkeypatch):
     calls = []
-    monkeypatch.setattr(shutil, 'which', lambda name: '/usr/bin/systemctl' if name == 'systemctl' else None)
+    _systemctl_at(monkeypatch, '/usr/bin/systemctl')
     def run(command, **kwargs):
         calls.append(command)
         return observer.subprocess.CompletedProcess(command, 0)
@@ -83,7 +92,7 @@ def test_stop_failure_never_masks_retire_exit(systemctl, monkeypatch):
 
 
 def test_missing_systemctl_or_cgroup_is_a_no_op(systemctl, monkeypatch):
-    monkeypatch.setattr(shutil, 'which', lambda name: None)
+    _systemctl_at(monkeypatch, None)
     _cgroup(monkeypatch, f'/user.slice/user-1000.slice/user@1000.service/app.slice/{UNIT}')
     assert observer.main(['observer', json.dumps(CONTEXT)]) == observer.STARTUP_FAILURE_EXIT
     real = Path.read_text
@@ -92,6 +101,6 @@ def test_missing_systemctl_or_cgroup_is_a_no_op(systemctl, monkeypatch):
             raise FileNotFoundError(self)
         return real(self, *args, **kwargs)
     monkeypatch.setattr(Path, 'read_text', no_proc)
-    monkeypatch.setattr(shutil, 'which', lambda name: '/usr/bin/systemctl')
+    _systemctl_at(monkeypatch, '/usr/bin/systemctl')
     assert observer.main(['observer', json.dumps(CONTEXT)]) == observer.STARTUP_FAILURE_EXIT
     assert systemctl == []

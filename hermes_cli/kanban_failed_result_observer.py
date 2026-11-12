@@ -9,7 +9,6 @@ import contextlib
 import json
 import os
 import select
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -238,11 +237,12 @@ def _stop_own_unit(context):
         cgroup = Path('/proc/self/cgroup').read_text(encoding='utf-8')
         if not any(line.rsplit('/', 1)[-1] == unit for line in cgroup.splitlines()):
             return
-        systemctl = shutil.which('systemctl')
+        from hermes_platform.resolver import locate_command
+        systemctl = locate_command('systemctl').command
         if systemctl:
-            subprocess.run([systemctl, '--user', '--no-block', 'stop', unit], stdin=subprocess.DEVNULL,
+            subprocess.run([*systemctl, '--user', '--no-block', 'stop', unit], stdin=subprocess.DEVNULL,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
-    except (AttributeError, OSError, ValueError, subprocess.SubprocessError):
+    except (AttributeError, ImportError, OSError, ValueError, subprocess.SubprocessError):
         pass
 
 
