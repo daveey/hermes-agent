@@ -31,6 +31,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._fixtures.runner_probe import add_runner_imports
+
 
 @pytest.fixture(autouse=True)
 def isolated_probe_environment(monkeypatch):
@@ -49,6 +51,7 @@ def _probe_root(tmp_path):
     shutil.copy2(real / "run_tests_parallel_rss.py", scripts)
     shutil.copy2(real / "run_tests_launch.py", scripts)
     shutil.copy2(real / "run_tests_fork_child.py", scripts)
+    add_runner_imports(root)
     # The runner shares the platforms() spec resolver with the CI lane selector.
     shutil.copy2(real / "ci" / "list_os_marked_tests.py", scripts / "ci")
     return root

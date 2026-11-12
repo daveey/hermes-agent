@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._fixtures.runner_probe import add_runner_imports
+
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 MB = 1024 * 1024
 
@@ -101,6 +103,7 @@ def _probe_root(tmp_path: Path) -> Path:
     shutil.copy2(_SCRIPTS / "run_tests_host_slots.py", root / "scripts")
     shutil.copy2(_SCRIPTS / "run_tests_launch.py", root / "scripts")
     shutil.copy2(_SCRIPTS / "run_tests_fork_child.py", root / "scripts")
+    add_runner_imports(root)
     shutil.copy2(_SCRIPTS / "ci" / "list_os_marked_tests.py", root / "scripts" / "ci")
     return root
 
