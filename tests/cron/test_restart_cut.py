@@ -77,6 +77,8 @@ def test_direct_run_cut_by_owner_restart_reruns_once_without_a_failure(home, mon
     assert row["status"] == "failed" and "gateway restart" in row["error"]
     assert row["delivery_outcome"] == "suppressed"
     assert delivered == [] and scheduler.drain_delivery_queue({}, None) == 0, "no failure notice"
+    # Typed, so consumers (the coach) need not match the prose detail.
+    assert jobs.get_job(job["id"])["last_failure"]["kind"] == "lifecycle_interrupt"
     _assert_rerun_once(job["id"], execution_id, natural_next=natural_next)
 
 
@@ -112,6 +114,7 @@ def test_an_ordinary_failure_still_counts(home, monkeypatch):
     assert scheduler.run_one_job(claimed) is True
     saved = jobs.get_job(job["id"])
     assert saved["failure_streak"] == 1 and saved.get("restart_rerun") is None
+    assert "kind" not in saved["last_failure"], "an ordinary failure is not a lifecycle interrupt"
     assert not _due(job["id"])
 
 

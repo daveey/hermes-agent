@@ -2442,6 +2442,8 @@ def release_unadmitted_fire(
 
 # Failure kinds that never reached the agent: a later gate tick may clear a streak made only of them.
 _PRE_AGENT_ERROR_KINDS = ("fire", "gate")
+# ``last_failure.kind`` of a run its owner gateway's shutdown/restart stopped (shutdown_interrupted).
+LIFECYCLE_INTERRUPT_KIND = "lifecycle_interrupt"
 
 
 def _record_run_outcome(
@@ -2481,8 +2483,10 @@ def _record_run_outcome(
         job["failure_streak"] = 0
         job.pop("last_error_kind", None)
     elif shutdown_interrupted:
-        # Preserve diagnostic evidence without blaming the job for its owner's shutdown.
-        job["last_failure"] = {"at": now, "detail": error or (status or "run failed")}
+        # Preserve diagnostic evidence without blaming the job for its owner's shutdown. The typed
+        # ``kind`` lets consumers tell this apart without matching the prose detail.
+        job["last_failure"] = {"at": now, "detail": error or (status or "run failed"),
+                               "kind": LIFECYCLE_INTERRUPT_KIND}
     elif not cancelled:
         prior = job.get("last_error_kind") if int(job.get("failure_streak") or 0) else None
         if not (fire_error or gate_error) or prior not in (None, *_PRE_AGENT_ERROR_KINDS):

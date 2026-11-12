@@ -81,12 +81,14 @@ class TestMarkRunningJobsInterrupted:
             saved = jobs.load_jobs()[0]
             assert saved["last_status"] == "error"
             assert saved["last_failure"]["detail"] == reason
+            assert saved["last_failure"]["kind"] == "lifecycle_interrupt"
             assert saved["failure_streak"] == streak
             assert saved.get("last_error_kind") == kind
             assert jobs.mark_job_run(job["id"], False, "real agent failure")
             saved = jobs.load_jobs()[0]
             assert saved["failure_streak"] == streak + 1
             assert saved["last_error_kind"] == "agent"
+            assert "kind" not in saved["last_failure"], "a real failure replaces the typed interrupt"
 
     def test_no_op_when_nothing_running(self):
         import cron.scheduler as sched
