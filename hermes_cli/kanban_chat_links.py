@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from hermes_cli.kanban_replica_execution import run_evidence, select_terms as run_select
 from hermes_cli.kanban_run_machine import placement_select, run_machine
 
 _log = logging.getLogger(__name__)
@@ -341,6 +342,7 @@ def _read_replica_links(conn: sqlite3.Connection, gateway: str, profile: str) ->
     return [dict(r) for r in conn.execute(
         "SELECT l.task_id AS id, t.id AS task_row, t.title, t.status, t.assignee, t.created_at, t.started_at, "
         f"t.priority, t.block_kind, t.human_request, t.created_on, {placement_select(conn, 't')}, "
+        f"{run_select(conn, 't')}, "
         "l.chat_session, l.chat_profile, l.kind, "
         "EXISTS (SELECT 1 FROM task_chat_links r WHERE r.task_id = l.task_id AND r.chat_gateway = l.chat_gateway "
         "AND r.chat_profile IS l.chat_profile AND r.chat_session = l.chat_session AND r.released = 1) "
@@ -383,17 +385,18 @@ _owners_memo: tuple[list[dict[str, Any]], dict[tuple[str, str], list[tuple[str, 
 
 
 def _owner_of(known: list[tuple[str, str, str, bool]], owner: Optional[str],
-              session: str) -> tuple[Optional[str], str]:
+              session: str) -> tuple[Optional[str], str, bool]:
     """The ONE (owner gateway, owner profile) for a replica card: the profile this chat's own unreleased ledger row
-    names, else the only one any unreleased row names, else ``default`` (never several rows for one card)."""
+    names, else the only one any unreleased row names, else ``default`` (never several rows for one card). The third
+    value says whether a ledger row named that profile; the ``default`` fallback is a label, not owner evidence."""
     if owner is not None:
         known = [k for k in known if k[0] == owner]
     for pick in ([k for k in known if k[2] == session and not k[3]], [k for k in known if not k[3]]):
         pairs = sorted({(k[0], k[1]) for k in pick})
         if len(pairs) == 1:
-            return pairs[0]
+            return (*pairs[0], True)
     gateways = sorted({k[0] for k in known})
-    return (owner if owner is not None else gateways[0] if len(gateways) == 1 else None), "default"
+    return (owner if owner is not None else gateways[0] if len(gateways) == 1 else None), "default", False
 
 
 def _ledger_fallback(board: str, gateway: str, profile: str, statuses: tuple[str, ...], *,
@@ -482,7 +485,8 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
             if status in TERMINAL_STATUSES and r.get("chat_released"):
                 continue
             tid = str(r["id"])
-            owner, owner_profile = _owner_of((owners or {}).get((board, tid), []), r["created_on"], r["chat_session"])
+            owner, owner_profile, named = _owner_of((owners or {}).get((board, tid), []), r["created_on"],
+                                                    r["chat_session"])
             if missing and owner == gateway:  # the ledger places the missing row on this gateway: a local card
                 continue
             key = f"{owner or '?'}/{owner_profile}/{board}/{tid}"
@@ -504,6 +508,9 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
             }
             if machine := run_machine(r):
                 out[pair]["run_machine"] = machine
+            # Executor-stamped liveness of the current run (kanban_replica_execution), never the pull clock.
+            if named and owner is not None and not unknown and (run := run_evidence(r)) is not None:
+                out[pair]["_replica_run"] = run
     return list(out.values())
 
 
