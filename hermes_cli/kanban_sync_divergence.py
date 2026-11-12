@@ -88,10 +88,12 @@ def _stale_lifecycle(live: sqlite3.Connection, shadow: sqlite3.Connection, row: 
     """True when the live status is older than the replica's, not a local edit the service missed.
 
     ``running`` names an open run: when that run has already ended (in either copy), no local write can have
-    produced the live ``running``; the live row missed the end of its own run. A live non-terminal status over a
-    replica ``done``/``archived`` card on the same run is the same gap. Pushing it would reopen the card for every
-    reader, because the owner's HLC is newer than the worker's end (hub t_01a1ceaeb6ba593c, 2026-11-12). A live
-    ``claim_lock`` is a local worker holding the card right now, so that copy is never stale. [daveey]"""
+    produced the live ``running``; the live row missed the end of its own run. This holds even under a live
+    ``claim_lock``, since a held claim names an open run. A live non-terminal status over a replica
+    ``done``/``archived`` card on the same run is the same gap. Pushing it would reopen the card for every reader,
+    because the owner's HLC is newer than the worker's end (hub t_01a1ceaeb6ba593c, 2026-11-12). That second case
+    alone is guarded by a live ``claim_lock``: a local worker holding the card right now makes it no stale
+    copy. [daveey]"""
     if not run_uid:
         return False
     if row["status"] == "running" and (_run_ended(live, run_uid) or _run_ended(shadow, run_uid)):
@@ -121,33 +123,96 @@ def _adopt_replica(live: sqlite3.Connection, shadow: sqlite3.Connection, tid: st
 # A run outcome that parks the card -> (its landing status, the event the park writes).
 _PARKS = {"blocked": ("blocked", "blocked"), "review_requested": ("review", "review_requested"),
           "scheduled": ("scheduled", "scheduled")}
+# Every park event lands its own status (all ``blocked`` writers land ``blocked``; a dependency or loop writes
+# ``dependency_wait`` / ``block_loop_detected``), so a later park event, e.g. the wake invariant's
+# scheduled -> blocked, moves the card into that park.
+_PARK_EVENTS = {kind: status for status, kind in _PARKS.values()}
 # Moves that take a card out of a park after its run ended; any later event naming a ``status`` counts too.
-_LEFT_PARK = ("unblocked", "promoted", "promoted_manual", "reopened", "continuation_woken", "condition_met",
-              "changes_requested", "dependency_wait", "block_loop_detected", "completed", "archived")
+_LEFT_PARK = frozenset({
+    "unblocked", "promoted", "promoted_manual", "reopened", "continuation_woken", "condition_met",
+    "changes_requested", "dependency_wait", "block_loop_detected", "completed", "archived",
+    "agent_block_escalated", "ask_rechecked", "supervisor_escalated"})  # the triage sweeps
+_WARNED_CAP = 4096  # bound on the once-gate's warned (task, run) set
+_warned_once: set[tuple[str, int]] = set()
+_KEEP = object()  # a column the heal leaves as it is
 
 
-def _parked_status(live: sqlite3.Connection, tid: str, run: sqlite3.Row) -> str | None:
-    """The park the ended run left the card in, or None when it is unknown or the card has left it since.
+def _event_order(event: dict) -> tuple[int, int, int]:
+    """Origin order of an event: its second, then its uid's UUIDv7 millisecond, then the local id.
+
+    The local id is arrival order: the Board can deliver an ``unblocked`` before the ``blocked`` it follows, and
+    both carry the same second. Every synced event's uid is a UUIDv7 minted at its insert on its own gateway, so
+    its 48-bit millisecond orders the two. A row with no uid (sync off, or written while the triggers were down)
+    falls back to arrival order."""
+    ms = 0
+    uid = event.get("uid")
+    if isinstance(uid, str) and len(uid) >= 13:
+        try:
+            ms = int(uid[:8] + uid[9:13], 16)
+        except ValueError:
+            ms = 0
+    return int(event["created_at"] or 0), ms, int(event["id"])
+
+
+def _payload(event: dict) -> dict:
+    """The event's payload, or {} when it is absent or not a JSON object (a malformed row is skipped, not fatal)."""
+    try:
+        value = json.loads(event["payload"]) if event["payload"] else {}
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _lifecycle(event: dict) -> bool:
+    return event["kind"] in _PARK_EVENTS or event["kind"] in _LEFT_PARK or "status" in _payload(event)
+
+
+def _parked_status(live: sqlite3.Connection, tid: str, run: sqlite3.Row) -> tuple[str, dict] | None:
+    """The park the card sits in after its ended run, with that park's event payload; None when the card left it.
 
     A ``blocked`` outcome is not proof of ``blocked``: a dependency block lands ``todo`` and a loop ``triage``, so the
-    park's own event (written in the run's end transaction, at or after the run's start) must name it, and no later
-    event may have moved the card on (an unblock, a wake, a review reopen)."""
-    park = _PARKS.get(run["outcome"] or "")
-    if park is None:
+    park's own event (written in the run's end transaction, at or after the run's start) must name it. The card's
+    last lifecycle move since then decides: that park event, or a later park event (the wake invariant turns a
+    wakeless human ``scheduled`` wait into ``blocked``), lands its park; anything else (an unblock, a wake, a review
+    reopen, a triage sweep) means the card left it. Events are ordered by origin time (``_event_order``)."""
+    if (run["outcome"] or "") not in _PARKS:
         return None
-    status, kind = park
-    end = live.execute("SELECT id, created_at FROM task_events WHERE task_id = ? AND kind = ? "
-                       "AND (run_id = ? OR created_at >= ?) ORDER BY created_at DESC, id DESC LIMIT 1",
-                       (tid, kind, run["run_id"], run["started_at"])).fetchone()
+    cols = {r[1] for r in live.execute("PRAGMA table_info(task_events)")}
+    uid = "uid" if "uid" in cols else "NULL AS uid"
+    kinds = sorted(_PARK_EVENTS.keys() | _LEFT_PARK)
+    events = [e for e in (dict(r) for r in live.execute(
+        f"SELECT id, {uid}, kind, payload, created_at, run_id FROM task_events WHERE task_id = ? "
+        f"AND (kind IN ({','.join('?' * len(kinds))}) OR payload LIKE '%\"status\"%')", (tid, *kinds)))
+        if _lifecycle(e)]
+    end = max((e for e in events if e["kind"] == _PARKS[run["outcome"]][1]
+               and (e["run_id"] == run["run_id"] or int(e["created_at"] or 0) >= int(run["started_at"] or 0))),
+              key=_event_order, default=None)
     if end is None:
         return None
-    marks = ",".join("?" * len(_LEFT_PARK))
-    left = live.execute(
-        f"SELECT 1 FROM task_events WHERE task_id = ? AND id != ? "
-        f"AND (created_at > ? OR (created_at = ? AND id > ?)) "
-        f"AND (kind IN ({marks}) OR json_extract(payload, '$.status') IS NOT NULL) LIMIT 1",
-        (tid, end["id"], end["created_at"], end["created_at"], end["id"], *_LEFT_PARK)).fetchone()
-    return None if left else status
+    last = max(events, key=_event_order)  # ``end`` itself when nothing moved the card since
+    status = _PARK_EVENTS.get(last["kind"])
+    return (status, _payload(last)) if status else None
+
+
+def _park_fields(status: str, payload: dict) -> dict:
+    """Columns a restored park takes from its own event, over whatever the stale copy carried.
+
+    ``blocked``: the block's ``kind`` and ``human_request`` (``block_task`` writes both in the same transaction as
+    the event; a copy sent before the block carries the pre-park NULLs, and a blocked card with no ask is escalated
+    to triage by the agent-block sweep). ``scheduled``: ``schedule_task`` clears ``human_request``. The wake itself
+    (``task_wake_checks`` rows, the event's ``wake_at``) is not a ``tasks`` column, so no stale task copy changes it.
+    ``review`` carries no park field."""
+    if status == "scheduled":
+        return {"human_request": None}
+    if status != "blocked":
+        return {}
+    fields = {}
+    if isinstance(payload.get("kind"), str):
+        fields["block_kind"] = payload["kind"]
+    if "human_request" in payload:
+        ask = payload["human_request"]
+        fields["human_request"] = json.dumps(ask) if ask else None
+    return fields
 
 
 def heal_running_over_ended_run(live: sqlite3.Connection) -> dict[str, str]:
@@ -162,9 +227,8 @@ def heal_running_over_ended_run(live: sqlite3.Connection) -> dict[str, str]:
     ``review_requested``, ``scheduled``) puts it back in that park when the park's own event is the card's last
     lifecycle move (``_parked_status``), so a heal never re-dispatches a card that was waiting. Any other end is a
     reclaim: ``todo``, which the promoter turns into ``ready`` once the card's parents are done. The write goes
-    through the capture triggers, so the Board's copy is corrected by the same round's push. [daveey]"""
-    from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_db_connect import write_txn
+    through the capture triggers, so the Board's copy is corrected by the same round's push. Each card heals in its
+    own transaction, and a card whose heal raises is logged and skipped, never the round. [daveey]"""
     rows = live.execute(
         "SELECT t.id, r.id AS run_id, r.outcome, r.started_at, r.ended_at FROM tasks t "
         "JOIN task_runs r ON r.id = t.current_run_id "
@@ -172,30 +236,56 @@ def heal_running_over_ended_run(live: sqlite3.Connection) -> dict[str, str]:
         "AND r.ended_at IS NOT NULL").fetchall()
     healed: dict[str, str] = {}
     for row in rows:
-        tid, changed = row["id"], 0
-        with write_txn(live):
-            # ``run_id`` is the event column (synced as ``run_uid``); the payload key is the pre-column record.
-            if live.execute("SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'status_healed' "
-                            "AND (run_id = ? OR json_extract(payload, '$.run_id') = ?)",
-                            (tid, row["run_id"], row["run_id"])).fetchone():
+        try:
+            status = _heal_one(live, row)
+        except (sqlite3.Error, ValueError, TypeError) as exc:  # one bad card never stops the others' heal
+            _log.warning("kanban sync: heal of %s over its ended run %s failed, skipped: %s",
+                         row["id"], row["run_id"], exc)
+            continue
+        if status is not None:
+            healed[row["id"]] = status
+            _log.warning("kanban sync: %s read running over its ended run %s (%s); moved to %s",
+                         row["id"], row["run_id"], row["outcome"], status)
+    return healed
+
+
+def _heal_one(live: sqlite3.Connection, row: sqlite3.Row) -> str | None:
+    """Heal one card in its own transaction; returns its new status, or None when it was left as it is."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import write_txn
+    tid = row["id"]
+    with write_txn(live):
+        # ``run_id`` is the event column (synced as ``run_uid``); the payload key is the pre-column record. A
+        # malformed payload reads as no key (``json_extract`` raises on one; CASE evaluates it only when valid).
+        if live.execute("SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'status_healed' AND (run_id = ? "
+                        "OR CASE WHEN json_valid(payload) THEN json_extract(payload, '$.run_id') END = ?)",
+                        (tid, row["run_id"], row["run_id"])).fetchone():
+            key = (tid, int(row["run_id"]))
+            if key not in _warned_once:  # once per (task, run) per process: it stays outvoted every round
+                if len(_warned_once) >= _WARNED_CAP:
+                    _warned_once.clear()
+                _warned_once.add(key)
                 _log.warning("kanban sync: %s still reads running over its ended run %s after one heal; the Board "
                              "kept a newer write, not healing it again", tid, row["run_id"])
-                continue
-            event = live.execute("SELECT run_id FROM task_events WHERE task_id = ? AND kind = 'completed' "
-                                 "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
-            done = row["outcome"] == "completed" and event is not None and event["run_id"] == row["run_id"]
-            status = "done" if done else _parked_status(live, tid, row) or "todo"
-            changed = live.execute(
-                "UPDATE tasks SET status = ?, current_run_id = NULL, "
-                "completed_at = CASE WHEN ? THEN COALESCE(completed_at, ?) ELSE NULL END, "
-                "block_kind = CASE WHEN ? THEN NULL ELSE block_kind END "
-                "WHERE id = ? AND status = 'running' AND claim_lock IS NULL AND lease_holder IS NULL "
-                "AND current_run_id = ?", (status, done, row["ended_at"], done, tid, row["run_id"])).rowcount
-            if changed:
-                kb._append_event(live, tid, "status_healed", {"from": "running", "to": status,
-                                                              "outcome": row["outcome"]}, run_id=row["run_id"])
-        if changed:
-            healed[tid] = status
-            _log.warning("kanban sync: %s read running over its ended run %s (%s); moved to %s",
-                         tid, row["run_id"], row["outcome"], status)
-    return healed
+            return None
+        event = live.execute("SELECT run_id FROM task_events WHERE task_id = ? AND kind = 'completed' "
+                             "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
+        done = row["outcome"] == "completed" and event is not None and event["run_id"] == row["run_id"]
+        park = None if done else _parked_status(live, tid, row)
+        status = "done" if done else park[0] if park else "todo"
+        extra = _park_fields(*park) if park else {}
+        # A park's own columns (``_park_fields``); a completion clears ``block_kind``; a reclaim keeps the rest.
+        extra.setdefault("block_kind", None if done else _KEEP)
+        sets = "".join(f", {col} = ?" for col, v in extra.items() if v is not _KEEP)
+        values = [v for v in extra.values() if v is not _KEEP]
+        changed = live.execute(
+            "UPDATE tasks SET status = ?, current_run_id = NULL, "
+            f"completed_at = CASE WHEN ? THEN COALESCE(completed_at, ?) ELSE NULL END{sets} "
+            "WHERE id = ? AND status = 'running' AND claim_lock IS NULL AND lease_holder IS NULL "
+            "AND current_run_id = ?",
+            (status, done, row["ended_at"], *values, tid, row["run_id"])).rowcount
+        if not changed:
+            return None
+        kb._append_event(live, tid, "status_healed", {"from": "running", "to": status,
+                                                      "outcome": row["outcome"]}, run_id=row["run_id"])
+    return status

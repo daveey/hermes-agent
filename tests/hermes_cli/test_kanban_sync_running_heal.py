@@ -4,7 +4,9 @@ Hub 2026-11-12: t_01a1ceaeb6ba593c (completed) and t_01a1ceb44e35f780 (blocked -
 itself (v21 / v11), so the replica and the live file agreed and no divergence repair could see them."""
 from __future__ import annotations
 
+import json
 import logging
+import sqlite3
 import time
 
 import pytest
@@ -23,12 +25,13 @@ _END_EVENT = {"completed": "completed", "blocked": "blocked", "review_requested"
               "scheduled": "scheduled"}
 
 
-def _regressed(live, kanban_home, svc, *, status, outcome, completed_at, end_event=True, after=None):
+def _regressed(live, kanban_home, svc, *, status, outcome, completed_at, end_event=True, after=None,
+               end_payload=None, stale=None):
     tid, run_uid = base._running_card(live, kanban_home, svc)
     if end_event and outcome in _END_EVENT:
         run_id = live.execute("SELECT id FROM task_runs WHERE uid = ?", (run_uid,)).fetchone()[0]
         with kbc.write_txn(live):
-            kb._append_event(live, tid, _END_EVENT[outcome], {"summary": "run end"}, run_id=run_id)
+            kb._append_event(live, tid, _END_EVENT[outcome], end_payload or {"summary": "run end"}, run_id=run_id)
             for kind, payload in after or ():
                 kb._append_event(live, tid, kind, payload)
     base._worker_ends(svc, tid, run_uid, status=status, outcome=outcome, completed_at=completed_at)
@@ -36,8 +39,22 @@ def _regressed(live, kanban_home, svc, *, status, outcome, completed_at, end_eve
     # The stale copy the hub sent at 08:27:50, as the Board stored it.
     svc.hub(OTHER).ops(BOARD, [{"client_op_id": "stale-copy", "op": "upsert", "table": "tasks", "uid": tid,
                                 "hlc": base._hlc(3_000, OTHER),
-                                "fields": {"status": "running", "completed_at": None, "current_run_uid": run_uid}}])
+                                "fields": {"status": "running", "completed_at": None, "current_run_uid": run_uid,
+                                           **(stale or {})}}])
     return tid
+
+
+def _as_feed(live, sql, params=()):
+    """Rewrite event rows as a feed apply would (no capture)."""
+    with kbc.write_txn(live):
+        live.execute("UPDATE kanban_sync_state SET applying = 1")
+        live.execute(sql, params)
+        live.execute("UPDATE kanban_sync_state SET applying = 0")
+
+
+def _uid_at(ms: int) -> str:
+    h = f"{ms:012x}"
+    return f"{h[:8]}-{h[8:12]}-7000-8000-000000000000"
 
 
 def _clock_after_the_stale_write(live):
@@ -101,6 +118,107 @@ def test_a_park_the_card_has_since_left_falls_back_to_todo(live, kanban_home, sv
     assert live.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == "todo"
 
 
+@pytest.mark.parametrize("outcome,sweep", [
+    ("blocked", "agent_block_escalated"),   # kanban_block_policy: blocked -> triage
+    ("blocked", "ask_rechecked"),           # standing-ask recheck: blocked -> triage
+    ("review_requested", "supervisor_escalated"),  # review -> triage
+])
+def test_a_sweep_that_moved_the_card_out_of_its_park_is_not_undone(live, kanban_home, svc, outcome, sweep):
+    tid = _regressed(live, kanban_home, svc, status="triage", outcome=outcome, completed_at=None,
+                     after=[(sweep, {"reason": "sweep"})])
+    _heal_through_rounds(live, kanban_home, svc)
+    assert live.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == "todo"
+
+
+def test_a_scheduled_park_the_wake_invariant_moved_to_blocked_lands_blocked(live, kanban_home, svc):
+    """``kanban_continuation._enforce_wake_invariant`` turns a wakeless human wait into ``blocked``."""
+    tid = _regressed(live, kanban_home, svc, status="blocked", outcome="scheduled", completed_at=None,
+                     after=[("blocked", {"reason": "human wait", "kind": "needs_input",
+                                         "source_status": "scheduled"})])
+    _heal_through_rounds(live, kanban_home, svc)
+    assert live.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == "blocked"
+
+
+@pytest.mark.parametrize("unblock_later_ms,expected", [(5, "todo"), (-5, "blocked")])
+def test_same_second_events_are_ordered_by_their_origin_clock_not_arrival(live, kanban_home, svc,
+                                                                           unblock_later_ms, expected):
+    """The Board may deliver an ``unblocked`` before the ``blocked`` it follows: same second, lower local id."""
+    tid = _regressed(live, kanban_home, svc, status="todo", outcome="blocked", completed_at=None,
+                     after=[("unblocked", None)])
+    end_id, unblock_id = (live.execute("SELECT id FROM task_events WHERE task_id = ? AND kind = ?",
+                                       (tid, k)).fetchone()[0] for k in ("blocked", "unblocked"))
+    second = int(time.time()) + 60  # after every other event of the card
+    ms = second * 1000 + 500
+    # Arrival order: the unblock first (lower id), the park after it (higher id).
+    _as_feed(live, "UPDATE task_events SET id = ?, created_at = ?, uid = ? WHERE id = ?",
+             (unblock_id + 1000, second, _uid_at(ms), end_id))
+    _as_feed(live, "UPDATE task_events SET created_at = ?, uid = ? WHERE id = ?",
+             (second, _uid_at(ms + unblock_later_ms), unblock_id))
+    _heal_through_rounds(live, kanban_home, svc)
+    assert live.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == expected
+
+
+def test_a_malformed_event_payload_skips_that_row_not_the_heal(live, kanban_home, svc):
+    tid = _regressed(live, kanban_home, svc, status="blocked", outcome="blocked", completed_at=None)
+    _as_feed(live, "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'commented', ?, ?)",
+             (tid, "{not json", int(time.time())))
+    _clock_after_the_stale_write(live)
+    result = base._round(kanban_home, svc)
+    assert result.error is None
+    assert live.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == "blocked"
+
+
+def _local_running_over_ended_run(live) -> str:
+    tid = kb.create_task(live, title="local card", assignee="worker")
+    with kbc.write_txn(live):
+        live.execute("UPDATE kanban_sync_state SET applying = 1")
+        run_id = live.execute("INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at) "
+                              "VALUES (?, 'worker', 'done', 'completed', ?, ?)",
+                              (tid, int(time.time()) - 5, int(time.time()))).lastrowid
+        live.execute("UPDATE tasks SET status = 'running', current_run_id = ? WHERE id = ?", (run_id, tid))
+        live.execute("UPDATE kanban_sync_state SET applying = 0")
+    return tid
+
+
+def test_a_card_whose_heal_raises_is_skipped_and_the_rest_heal(live, monkeypatch):
+    from hermes_cli import kanban_sync_divergence as div
+    first, second = _local_running_over_ended_run(live), _local_running_over_ended_run(live)
+    real = div._parked_status
+
+    def flaky(conn, tid, run):  # an outcome-``completed`` run with no ``completed`` event asks for the park
+        if tid == first:
+            raise sqlite3.OperationalError("malformed JSON")
+        return real(conn, tid, run)
+
+    monkeypatch.setattr(div, "_parked_status", flaky)
+    assert heal_running_over_ended_run(live) == {second: "todo"}
+    status = {t: live.execute("SELECT status FROM tasks WHERE id = ?", (t,)).fetchone()[0] for t in (first, second)}
+    assert status == {first: "running", second: "todo"}
+
+
+def test_a_restored_block_takes_its_kind_and_ask_from_the_park_event(live, kanban_home, svc):
+    """The stale copy can carry the pre-park ``block_kind``/``human_request`` too (both ``NULL``)."""
+    ask = {"action": "Reply A or B. Unblock = build it; archive = drop it.", "why_human": "a toss-up",
+           "interaction": "reply", "scope": "this card", "evidence": "two designs"}
+    tid = _regressed(live, kanban_home, svc, status="blocked", outcome="blocked", completed_at=None,
+                     end_payload={"reason": "pick", "kind": "needs_input", "human_request": ask},
+                     stale={"block_kind": None, "human_request": None})
+    _heal_through_rounds(live, kanban_home, svc)
+    row = live.execute("SELECT status, block_kind, human_request FROM tasks WHERE id = ?", (tid,)).fetchone()
+    assert (row["status"], row["block_kind"]) == ("blocked", "needs_input")
+    assert json.loads(row["human_request"]) == ask
+    assert base._service_task(svc, tid)["block_kind"] == "needs_input"
+
+
+def test_a_restored_schedule_drops_a_stale_ask(live, kanban_home, svc):
+    """``schedule_task`` clears ``human_request``; a stale copy's ask must not ride back with the park."""
+    tid = _regressed(live, kanban_home, svc, status="scheduled", outcome="scheduled", completed_at=None,
+                     stale={"human_request": json.dumps({"action": "old ask"})})
+    _heal_through_rounds(live, kanban_home, svc)
+    row = live.execute("SELECT status, human_request FROM tasks WHERE id = ?", (tid,)).fetchone()
+    assert (row["status"], row["human_request"]) == ("scheduled", None)
+
+
 def test_the_heal_event_names_its_run_so_the_board_gets_the_run_uid(live, kanban_home, svc):
     tid = _regressed(live, kanban_home, svc, status="done", outcome="completed", completed_at=1794472039)
     _heal_through_rounds(live, kanban_home, svc)
@@ -123,7 +241,7 @@ def test_a_heal_the_board_outvotes_is_reported_once_not_looped(live, kanban_home
         for _ in range(3):  # the stale write's clock is ahead of ours: every heal loses the field merge
             base._round(kanban_home, svc)
     assert _healed_events(live, tid) == 1
-    assert any("after one heal" in r.getMessage() and tid in r.getMessage() for r in caplog.records)
+    assert sum("after one heal" in r.getMessage() and tid in r.getMessage() for r in caplog.records) == 1
 
 
 def test_a_running_card_with_its_run_open_is_left_alone(live, kanban_home, svc):
