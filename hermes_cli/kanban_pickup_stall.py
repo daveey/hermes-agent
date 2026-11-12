@@ -11,8 +11,12 @@ read back: pickup kept no record of why a pass skipped a candidate.
   :data:`MAX_ROWS`. ``kanban_show`` of the card on this host returns the latest as ``pickup_skip``.
 * Detector (:func:`sweep`, every non-dry dispatcher tick before the spawn cap): a card ``ready`` in this host's full
   replica, pinned ``machine:<this host>``, created elsewhere, with no live lease and not imported here, whose
-  ``ready_since`` is older than ``kanban.sync.pickup_stall_seconds`` (default 600) gets ONE agent repair card on this
-  host (an open one, or one closed less than :data:`REPLACE_AFTER_SECONDS` ago, is reused). Host-wide causes share
+  ``ready_since`` is older than ``kanban.sync.pickup_stall_seconds`` (default 600) gets ONE agent repair card filed
+  by this host (an open one, or one closed less than :data:`REPLACE_AFTER_SECONDS` ago, is reused). The repair is
+  never pinned here (:func:`alarm_placement`): this host is the one taking no Board work, so the repair is pinned
+  to another active, unheld machine that can run it now, or the hub operator lane, and an open unclaimed repair
+  whose pin is stranded is re-pinned. Its body carries this host's machine-local evidence (pickup skips, registry
+  entry, replica path). Host-wide causes share
   ONE card per host naming the oldest card: ``budget_exhausted`` (the queue is simply full), ``hold`` and an
   unreadable machine registry. Missing evidence gets one additional stall interval of durable grace, then one
   host alert (not a fabricated refusal); a failed pickup must not silence the detector forever.
@@ -179,27 +183,146 @@ def _minutes(since_ms: int, now_ms: int) -> int:
     return max(0, (now_ms - since_ms) // 60000)
 
 
-_TAIL = ("\n\nOn this host: `kanban_show <card>` returns its `pickup_skip`; the replica is "
-         "`~/.hermes/kanban/sync-shadow/<board>.db`; the Board row via "
-         "`Hub(load_identity()).row_evidence(<board>, 'tasks', <card>)`. Check `kanban.sync.pickup`, the machine "
-         "registry entry (labels, hold, pickup), profiles, capabilities and dispatcher capacity, fix the cause "
-         "(or re-place the card on a machine that can run it), and verify the card is imported and claimed. Do not "
-         "claim a cause the recorded evidence does not show, and never lift a registry hold you did not set. This "
-         "is agent-owned repair, not a human decision.")
+def _tail(conn, own: str) -> str:
+    """The repair runs on another machine (:func:`alarm_placement`), so name where ``own``'s machine-local
+    evidence lives instead of saying "on this host"."""
+    from hermes_cli import kanban_worker_node as wn
+    try:
+        replica = str(wn._replica_path(conn))
+    except Exception:  # health: allow BLE001 -- a path in prose must never stop the alarm
+        replica = "~/.hermes/kanban/sync-shadow/<board>.db"
+    return (f"\n\nThis repair runs on another machine. The pickup skips quoted above are machine-local to {own} "
+            f"(table `{TABLE}` in its live board file, not synced); read more there with `tailnet_exec` or ssh: "
+            f"`kanban_show <card>` on {own} returns its `pickup_skip`, and {own}'s replica is `{replica}`. The "
+            "Board row from any machine: `Hub(load_identity()).row_evidence(<board>, 'tasks', <card>)`. Check "
+            "`kanban.sync.pickup`, the machine registry entry (labels, hold, pickup), profiles, capabilities and "
+            "dispatcher capacity, fix the cause (or re-place the card on a machine that can run it), and verify the "
+            "card is imported and claimed. Do not claim a cause the recorded evidence does not show, and never lift "
+            "or shorten a registry hold you did not set. This is agent-owned repair, not a human decision.")
+
+
+# --- where the alarm runs ------------------------------------------------------------------------------------
+# t_01a1ce5f6ddc72f6 (2026-11-12): every alarm was pinned ``machine:<own>``, the machine that takes no Board work
+# (held, or no spawn slot), so it sat ready until the condition cleared by itself and nobody re-placed the cards.
+OPERATOR_LANE = "hub"
+FRESH_SECONDS = 300
+_REQUIRES = ("terminal", "file", "kanban")
+HUB_ACCESS = "capability:hub-write"
+
+
+def _free_slots(entry: Mapping[str, Any]) -> Optional[int]:
+    cap, active = entry.get("max_card_runs"), (entry.get("metrics") or {}).get("active_card_runs")
+    if isinstance(cap, bool) or not isinstance(cap, int) or isinstance(active, bool) \
+            or not isinstance(active, (int, float)):
+        return None
+    return cap - int(active)
+
+
+def _can_host(name: str, entry: Optional[Mapping[str, Any]], own: str, need: set[str]) -> bool:
+    """Another active, unheld machine that copies cards, carries ``need`` and reaches the hub (it is the operator
+    lane, or attests ``capability:hub-write``): re-placing or handing off another gateway's card goes through it."""
+    from hermes_cli import kanban_worker_node as wn
+    if name == own or not entry or entry.get("state", "active") != "active" or entry.get("hold") \
+            or not wn.advertises_pickup(entry):
+        return False
+    labels = wn.effective_labels(entry, name)
+    return need <= labels and (name == OPERATOR_LANE or HUB_ACCESS in labels)
+
+
+def _ready_now(entry: Mapping[str, Any], now_ms: int) -> bool:
+    """Not draining, seen recently and (when the registry says) a free card slot."""
+    if (entry.get("metrics") or {}).get("drain_active"):
+        return False
+    seen = entry.get("last_seen")
+    if isinstance(seen, (int, float)) and not isinstance(seen, bool) and now_ms - seen > FRESH_SECONDS * 1000:
+        return False
+    free = _free_slots(entry)
+    return free is None or free > 0
+
+
+def alarm_placement(own: str, machines: Optional[Mapping[str, Mapping[str, Any]]], *, assignee: str,
+                    requires: tuple[str, ...] = _REQUIRES, now_ms: Optional[int] = None,
+                    ) -> tuple[Optional[list[str]], str]:
+    """``(runs_on, why)`` for an alarm about machine ``own``; never ``machine:<own>``. ``machines`` is the registry
+    (None: unreadable). In order: the eligible-now host (:func:`_can_host` and :func:`_ready_now`) with the most
+    free slots; the hub operator lane; any other host; any other machine that copies cards, even held (the hub
+    first: it runs the alarm when that hold ends, not ``own``'s). With no other such machine enrolled, None
+    (default placement): the registry offers nowhere else."""
+    from hermes_cli import kanban_worker_node as wn
+    now_ms = _now_ms() if now_ms is None else now_ms
+    need = {f"capability:{r}" for r in requires} | {f"profile:{assignee}"}
+    if machines is None:
+        if own != OPERATOR_LANE:
+            return [f"machine:{OPERATOR_LANE}"], f"the machine registry is unreadable from {own}: hub operator lane"
+        # The hub carries no capability:hub-write, so this label set never lands back on it.
+        return sorted(need | {HUB_ACCESS}), "the registry is unreadable from the hub: any worker with hub access"
+    hosts = {n: e for n, e in machines.items() if _can_host(n, e, own, need)}
+    now = sorted(n for n, e in hosts.items() if _ready_now(e, now_ms))
+    if now:
+        best = min(now, key=lambda n: (-(_free_slots(hosts[n]) or 0), n))
+        free = _free_slots(hosts[best])
+        return [f"machine:{best}"], (f"{best} is active, unheld, not draining"
+                                     + (f" and has {free} free card slot(s)" if free is not None else ""))
+    if OPERATOR_LANE in hosts:
+        return [f"machine:{OPERATOR_LANE}"], "no other machine is eligible now: hub operator lane"
+    if hosts:
+        best = min(hosts, key=lambda n: (-(_free_slots(hosts[n]) or 0), n))
+        return [f"machine:{best}"], f"no other machine is eligible now; {best} is unheld and will free up first"
+    held = sorted((n != OPERATOR_LANE, n) for n, e in machines.items() if n != own and e
+                  and e.get("state", "active") == "active" and wn.advertises_pickup(e))
+    if held:
+        name = held[0][1]
+        return [f"machine:{name}"], f"every other machine is held or lacks access; {name} takes it when free"
+    return None, f"no other machine copies cards: default placement (the registry offers nowhere but {own})"
+
+
+def _stranded(runs_on: Any, own: str, machines: Optional[Mapping[str, Mapping[str, Any]]], need: set[str]) -> bool:
+    """An open alarm's pin cannot run it: it names ``own``, or (registry readable) a machine that cannot host."""
+    from hermes_cli import kanban_worker_node as wn
+    pins = [lab.split(":", 1)[1] for lab in wn._parse(runs_on) or [] if lab.startswith("machine:")]
+    if own in pins:
+        return True
+    return machines is not None and any(not _can_host(p, machines.get(p), own, need) for p in pins)
+
+
+def _replace_stranded(conn, task_id: str, own: str, machines, runs_on: list[str], why: str) -> None:
+    """Re-pin an open, unclaimed alarm whose pin is stranded (legacy ``machine:<own>`` cards included)."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_worker_node as wn
+    from hermes_cli.kanban_db_comment_ids import add_comment
+    with kb.write_txn(conn):
+        row = conn.execute("SELECT status, claim_lock, runs_on, assignee FROM tasks WHERE id = ?",
+                           (task_id,)).fetchone()
+        if row is None or row["status"] in ("running", "done", "archived") or row["claim_lock"] is not None:
+            return
+        need = {f"capability:{r}" for r in _REQUIRES} | {f"profile:{row['assignee']}"}
+        if not _stranded(row["runs_on"], own, machines, need) or wn._parse(row["runs_on"]) == runs_on:
+            return
+        wn.set_runs_on(conn, task_id, runs_on)
+        add_comment(conn, task_id, DETECTOR, f"Re-placed from runs_on {row['runs_on']} to {runs_on}: {why}. "
+                                             f"An alarm about {own} must not wait on {own}.")
+    _log.info("pickup-stall re-placed card=%s runs_on=%s", task_id, runs_on)
 
 
 def _create(conn, *, key: str, title: str, body: str, tenant: Optional[str], own: str, now_ms: int,
             priority: int = 0) -> str:
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_worker_node as wn
     from hermes_cli.kanban_triage_sweep import _supervisor_profile
+    reg = wn.registry()
+    machines = None if reg is None else (reg.get("machines") or {})
+    assignee = _supervisor_profile()
+    runs_on, why = alarm_placement(own, machines, assignee=assignee, now_ms=now_ms)
     existing = _covering_repair(conn, key, now_ms)
     if existing:
+        _replace_stranded(conn, existing, own, machines, runs_on, why)
         return existing
     # A repair closed long ago is replaced, so the key carries the creation time (create_task returns any
     # non-archived task with an equal key, done ones included).
-    return kb.create_task(conn, title=title, body=body + _TAIL, assignee=_supervisor_profile(), created_by=DETECTOR,
-                          workspace_kind="scratch", tenant=tenant, requires=["terminal", "file", "kanban"],
-                          idempotency_key=f"{key}{_now_ms()}", runs_on=[f"machine:{own}"], priority=priority)
+    return kb.create_task(conn, title=title, body=body + f"\n\nPlaced with runs_on {runs_on}: {why}."
+                          + _tail(conn, own), assignee=assignee, created_by=DETECTOR, workspace_kind="scratch",
+                          tenant=tenant, requires=list(_REQUIRES), idempotency_key=f"{key}{_now_ms()}",
+                          runs_on=runs_on, priority=priority)
 
 
 # Host-wide causes: one card per host, never one per pinned card. ``hold`` is an operator's deliberate state.
@@ -209,16 +332,29 @@ _HOST_GROUPS = {
                          "This is not a recorded pickup refusal: inspect pickup exceptions/timeouts and the "
                          "dispatcher logs before attributing a cause."),
     "budget_exhausted": (QUEUE_FULL, "Pickup queue full on {own}",
-                         "the last pickup skip of each is budget_exhausted (no spawn slot on this host). Decide "
+                         "the last pickup skip of each is budget_exhausted (no spawn slot on {own}). Decide "
                          "whether the queue drains on its own (running cards near done) or work must move to a "
                          "machine with slots."),
     "hold": ("hold", "Pickup held on {own}",
-             "this machine is on hold in the machine registry, so it takes no Board work. An operator set that on "
+             "{own} is on hold in the machine registry, so it takes no Board work. An operator set that on "
              "purpose: do not lift it; re-place cards that cannot wait for the hold to end."),
     "registry": ("registry", "Pickup blind on {own}: machine registry unavailable",
-                 "the machine registry could not be read, so pickup copies nothing. Restore registry access "
+                 "{own} could not read the machine registry, so its pickup copies nothing. Restore registry access "
                  "(Board identity, network) and confirm the next pass imports the cards."),
 }
+
+
+def _registry_line(own: str) -> str:
+    """``own``'s registry entry as the detector read it (hold, who and when, card slots): evidence for a repair
+    that runs elsewhere."""
+    from hermes_cli import kanban_worker_node as wn
+    entry = ((wn.registry() or {}).get("machines") or {}).get(own)
+    if not entry:
+        return f"Registry entry for {own}: unreadable from {own} at {_stamp(_now_ms())}."
+    keys = ("state", "hold", "hold_reason", "hold_by", "hold_at", "hold_owner", "pickup", "max_card_runs")
+    fields = ", ".join(f"{k}={entry.get(k)!r}" for k in keys if k in entry)
+    active = (entry.get("metrics") or {}).get("active_card_runs")
+    return f"Registry entry for {own} at {_stamp(_now_ms())}: {fields}, active_card_runs={active!r}."
 
 
 def _group(card: Mapping[str, Any]) -> Optional[str]:
@@ -240,8 +376,8 @@ def _refresh_targets(conn, task_id: str, members: list[dict[str, Any]], now_ms: 
             c.body for c in kb.list_comments(conn, task_id) if c.author == DETECTOR)
         added = [c for c in members if f"- {c['id']} (" not in seen]
         if added:
-            lines = "\n".join(f"- {c['id']} ({c['title']}), ready {_minutes(c['since_ms'], now_ms)} min"
-                              for c in added)
+            lines = "\n".join(f"- {c['id']} ({c['title']}), ready {_minutes(c['since_ms'], now_ms)} min, "
+                              f"last skip {describe(c.get('skip'))}" for c in added)
             add_comment(conn, task_id, DETECTOR, "Additional targets for this pickup cause:\n\n" + lines)
             _log.info("pickup-stall refreshed card=%s added_targets=%d", task_id, len(added))
 
@@ -273,21 +409,22 @@ def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[f
             conn, key=f"{KEY_PREFIX}{own}:{card['id']}:", tenant=card["tenant"], own=own, now_ms=now_ms,
             title=f"Pickup stalled: {card['id']} pinned to machine:{own}, ready {waited} min, not imported ({reason})",
             body=(f"Card {card['id']} ({card['title']}) has been ready on the Board, pinned to machine:{own}, "
-                  f"for {waited} min (threshold {stall_seconds()} s) and this host has not imported or claimed "
-                  f"it.\n\nLast recorded pickup skip: {describe(card['skip'])}.")))
+                  f"for {waited} min (threshold {stall_seconds()} s) and {own} has not imported or claimed "
+                  f"it.\n\nLast pickup skip recorded on {own}: {describe(card['skip'])}.")))
     for group, members in groups.items():
         slug, title, why = _HOST_GROUPS[group]
         oldest = members[0]
-        listed = "\n".join(f"- {c['id']} ({c['title']}), ready {_minutes(c['since_ms'], now_ms)} min"
-                           for c in members[:20])
+        listed = "\n".join(f"- {c['id']} ({c['title']}), ready {_minutes(c['since_ms'], now_ms)} min, "
+                           f"last skip {describe(c['skip'])}" for c in members[:20])
         # Below ordinary work: a host-wide repair must not take the slot the cards it reports on are waiting for.
         ids.append(_create(
             conn, key=f"{KEY_PREFIX}{own}:{slug}:", tenant=oldest["tenant"], own=own, now_ms=now_ms, priority=-1,
             title=(title.format(own=own) + f": oldest {oldest['id']} waiting "
                    f"{_minutes(oldest['since_ms'], now_ms)} min ({len(members)} pinned card(s))"),
-            body=(f"{len(members)} card(s) pinned to machine:{own} have waited past {stall_seconds()} s, and {why}"
-                  f"\n\nOldest: {oldest['id']} ({oldest['title']}), last skip {describe(oldest['skip'])}."
-                  f"\n\n{listed}")))
+            body=(f"{len(members)} card(s) pinned to machine:{own} have waited past {stall_seconds()} s, and "
+                  f"{why.format(own=own)}\n\nOldest: {oldest['id']} ({oldest['title']}), last skip "
+                  f"{describe(oldest['skip'])}.\n\n{_registry_line(own)}\n\nPickup skips recorded on {own}:\n\n"
+                  f"{listed}")))
         _refresh_targets(conn, ids[-1], members, now_ms)
     return ids
 
