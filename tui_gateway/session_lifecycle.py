@@ -697,6 +697,8 @@ def _teardown_popped_session(session: dict | None, *, end_reason: str = "tui_clo
     """Finish a close after the caller has atomically detached the session."""
     if session is None:
         return False
+    from tui_gateway.detached_turn_cleanup import cancel
+    cancel(session)
     run_thread = session.get("_run_thread")
     if end_reason != "tui_shutdown" and run_thread is not None and run_thread is not threading.current_thread():
         try:
@@ -1006,6 +1008,8 @@ def _rebind_live_transport(sid: str, session: dict, transport: Transport) -> Non
                 _schedule_ws_orphan_reap(sid)
         return
     _attach_session_transport(session, transport)
+    from tui_gateway.detached_turn_cleanup import cancel
+    cancel(session)
     # Every transport that showed this session (pop-outs resume the same sid); on disconnect the last
     # viewer becomes the transport instead of the drop sentinel.
     session.setdefault("viewers", {})[transport] = time.time()

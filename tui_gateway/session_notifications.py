@@ -237,6 +237,8 @@ def _notif_release_turn(session: dict) -> None:
     with session["history_lock"]:
         if settle(session):
             session["running"] = False
+    from tui_gateway.detached_turn_cleanup import settled
+    settled(session)
 
 
 def _notif_claim_turn(session: dict) -> bool:

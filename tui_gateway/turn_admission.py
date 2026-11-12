@@ -173,6 +173,8 @@ def settle_prompt_state(session, st):
         if not st.error_retained:
             server._clear_inflight_turn(session)
         server._release_hosted_room_turn_slot(session)
+    from tui_gateway.detached_turn_cleanup import settled
+    settled(session)
 
 
 def start_build_work(session, target, *, delay=None):

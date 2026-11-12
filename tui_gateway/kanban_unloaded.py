@@ -23,8 +23,9 @@ A chat another live backend holds reaching the sweeper means that backend's poll
 holder ("poller miss"). Claimed events always end as a turn or a row: any error after the claim falls back to the row,
 and a failed row rewinds the claim. The claim is durable (holder pid + start) until that row or the started
 turn is acked; a sweeper that dies in between is rewound by ``recover_orphaned_notify_claims`` on the next
-pass, the same guarantee as the live poller. Once woken, the chat is live in that process, so later notices go through its live
-poller like any open chat's. Residual: if submit raises after the turn thread already started, the row is written too.
+pass, the same guarantee as the live poller. A headless wake stays live only for the detached-turn grace
+(default 60 s) after settlement, so nearby notices reuse its poller; after cleanup later notices return here.
+Protected background work keeps its poller but releases the idle writer lease. Residual: if submit raises after the turn thread already started, the row is written too.
 A chat mid-turn refuses the row (``SessionTurnLeaseLostError``): that is "busy, try later", so the claim is rewound
 with one INFO line and the next pass retries; a notice still stalled after ``OVERDUE_S`` logs one WARNING per card
 and chat with the reason (kanban-e5babca565).
