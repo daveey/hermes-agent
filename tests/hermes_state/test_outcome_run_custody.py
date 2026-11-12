@@ -143,7 +143,7 @@ async def test_abandoned_worker_captures_own_live_lease(db, monkeypatch, cancell
         if cancelled:
             raise asyncio.CancelledError
         return set(), {pending}
-    monkeypatch.setattr("gateway.run_turn.asyncio.wait", poll)
+    monkeypatch.setattr("gateway.run_turn_wait.asyncio.wait", poll)
     runner = SimpleNamespace(_session_db=db, _run_agent_timeout_result=lambda *a: {"failed": True},
                              _session_state=lambda *a: pytest.fail("successor slot read"))
     token = gw.run_outcome.set({"session_id": "chat"})

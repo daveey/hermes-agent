@@ -114,7 +114,7 @@ async def test_turn_poll_loop_ignores_host_sleep(clock, monkeypatch):
         agent_timeout=TIMEOUT_S, agent_warning=900.0, task_id="t", process_baseline=None,
         worker_done=threading.Event(), timeout_fired=threading.Event(),
         cleanup_lock=threading.Lock(), is_current=lambda: True)
-    worker.executor_task = object()
+    worker.executor_task = asyncio.get_running_loop().create_future()
 
     result = await runner._run_agent_await_turn_worker(worker, turn_ctx, asyncio.Event(), None)
 
