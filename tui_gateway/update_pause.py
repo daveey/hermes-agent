@@ -630,6 +630,21 @@ def successor_owes_continuation(home: Path | str, session_key: str) -> bool:
     return 0 <= _now() - freshness_since(marker) < SUCCESSOR_YIELD_S
 
 
+def paused_turn_homes(launch_home: Path | str, profiles) -> list[Path]:
+    """[daveey] Homes whose turn marker ``successor_owes_continuation`` reads for a headless wake: the launch home,
+    then each named profile's. A read-only lookup: ``server._profile_home`` would register every profile as served
+    by this process (multi-profile hosting), and raises for an entry under profiles/ that is no valid profile id,
+    which failed every wake (review t_01a1ceb9846fd38e). Such an entry holds no chat's marker and is skipped."""
+    from hermes_cli import profiles as profiles_mod
+    homes = [Path(launch_home)]
+    for name in filter(None, profiles):  # None = the launch home
+        try:
+            homes.append(Path(profiles_mod.get_profile_dir(name)))
+        except ValueError:
+            continue
+    return homes
+
+
 def continuation_due(session: dict) -> bool:
     """[daveey] True while a paused turn's window is over and its continuation has not started: an automatic
     turn claiming the idle session now would run first and delay the paused turn by its whole run (a kanban
