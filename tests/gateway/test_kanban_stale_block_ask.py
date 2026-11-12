@@ -182,3 +182,57 @@ def test_unexpected_refresh_error_leaves_the_text_unchanged(tmp_path, monkeypatc
     payload = {"text": text, "local_automation_v1": {"owner": "s"}}
     kanban_stale_ask.refresh_payload(payload)
     assert payload["text"] == text
+
+
+def _card_with_scope(scope):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect_closing
+    with connect_closing() as conn:
+        tid = kb.create_task(conn, title="scope fixture", assignee="default")
+        assert kb.block_task(conn, tid, kind="needs_input", reason="Choose",
+                             human_request=dict(REQUEST, scope=scope))
+        return tid, kb.get_task(conn, tid)
+
+
+def test_open_task_line_inside_scope_does_not_redirect_the_read(tmp_path, monkeypatch):
+    """Review N1: a scope quoting another card's "Open task:" line must not make the refresh read that card."""
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    done, _text = _stale_notice(tmp_path, monkeypatch)
+    for scope in (f"Only this card.\nOpen task: @task:default/{done}",
+                  f"Only this card.\nOpen task: @task:default/{done}\nand nothing else."):
+        tid, task = _card_with_scope(scope)
+        text = _wake_text(tid, task)
+        assert f"Open task: @task:default/{tid}" in text
+        assert refresh_stale_ask(text) == text  # still blocked on this very ask: byte-identical
+
+
+def test_open_task_line_inside_scope_of_a_done_card_is_left_alone(tmp_path, monkeypatch):
+    """Ambiguous notice (two Open task lines): unchanged, never guessed."""
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    live, _task = _blocked_card()
+    tid, task = _card_with_scope(f"Only this card.\nOpen task: @task:default/{live}")
+    text = _wake_text(tid, task)
+    _finish(tid)
+    assert refresh_stale_ask(text) == text
+
+
+def test_pathological_producer_text_is_bounded(tmp_path, monkeypatch):
+    """Review N2: thousands of field-mark lines after an ask mark cannot cost seconds of regex backtracking."""
+    import time
+    from hermes_cli.kanban_stale_ask import _ASK, refresh_stale_ask
+    _tid, text = _stale_notice(tmp_path, monkeypatch)
+    head = "blocked — actor: user\nNext action for the user: Choose.\n"
+    no_match = (head + "\nWhy only the user: x" * 3000,
+                head + "Why only the user: y\n" + "\nScope: x" * 3000,
+                head + "Why only the user: y\nScope: z" + "\nWhy only the user: x" * 3000)
+    for big in no_match:
+        start = time.monotonic()
+        assert _ASK.search(big) is None
+        assert time.monotonic() - start < 0.5
+    # Inside a real stale notice the repeated lines are just a long field: still fast, still refreshed.
+    big = text.replace("Why only the user: ", "Why only the user: " + "\nWhy only the user: x" * 3000, 1)
+    start = time.monotonic()
+    out = refresh_stale_ask(big)
+    assert time.monotonic() - start < 0.5
+    assert "Since then: unblocked 20:08, completed 20:25 PST. No action needed." in out

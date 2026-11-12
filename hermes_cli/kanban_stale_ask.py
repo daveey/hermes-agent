@@ -24,13 +24,24 @@ TERMINAL_HINT = ("\nUse the owner Desktop session's user-terminal flow; opening 
 # Every free-text field is a tempered token: it may span lines (a human_request field can) but never
 # another notice's actor line or ask mark, so a stray "Next action for the user:" in prose or a second
 # joined notice cannot pull the text between them into one match. The ask mark must also sit at the
-# start of the line right under block_notice()'s own "blocked — actor:" line.
-_FIELD = r"(?:(?!Next action for the user: |\nblocked — actor: ).)*?"
+# start of the line right under block_notice()'s own "blocked — actor:" line. Each field also stops at
+# the next field's own line mark, so a field can end in one place only: the match is linear (no
+# backtracking across thousands of repeated "\nWhy only the user:" lines) and a field that quotes the
+# next mark makes the notice ambiguous, which leaves it unchanged.
+_STOPS = r"Next action for the user: |\nblocked — actor: "
+
+
+def _field(*marks: str) -> str:
+    return r"(?:(?!" + "|".join([_STOPS, *(re.escape(m) for m in marks)]) + r").)*"
+
+
 _ASK = re.compile(
-    r"(?P<head>blocked — actor: [^\n]*\n)Next action for the user: (?P<action>" + _FIELD + r")\n"
-    r"Why only the user: " + _FIELD + r"\n"
-    r"(?P<rest>Scope: " + _FIELD + r"\nOpen task: @task:(?P<board>[^/@\s]+)(?:@(?P<gw>[^/\s]+))?/(?P<tid>[A-Za-z0-9_-]+))"
-    r"(?P<hint>" + re.escape(TERMINAL_HINT) + r")?",
+    r"(?P<head>blocked — actor: [^\n]*\n)Next action for the user: (?P<action>" + _field("\nWhy only the user: ") + r")\n"
+    r"Why only the user: " + _field("\nScope: ") + r"\n"
+    r"(?P<rest>Scope: " + _field("\nOpen task: ") + r"\nOpen task: @task:(?P<board>[^/@\s]+)(?:@(?P<gw>[^/\s]+))?/(?P<tid>[A-Za-z0-9_-]+))"
+    r"(?P<hint>" + re.escape(TERMINAL_HINT) + r")?"
+    # A second "Open task:" line before the notice ends means a field quoted one: ambiguous, leave it.
+    r"(?!(?:(?!\n\n|blocked — actor: ).)*\nOpen task: )",
     re.DOTALL)
 logger = logging.getLogger(__name__)
 _PT = "America/Los_Angeles"
