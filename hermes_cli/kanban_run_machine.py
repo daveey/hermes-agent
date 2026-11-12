@@ -47,8 +47,8 @@ def run_machine(row: dict[str, Any], now: Optional[float] = None) -> Optional[st
     machines = [x[len("machine:"):] for x in labels or [] if x.startswith("machine:")]
     if len(machines) == 1:
         return machines[0] or None
-    if row.get("placement_policy") == "worker-first-v1":
-        return POOL
+    if row.get("placement_policy") == "worker-first-v1" or "pool:worker" in (labels or []):
+        return POOL  # [daveey] the worker queue (kanban_placement.POOL_LABEL): any worker with a free slot
     if labels is not None:
         return None
     return str(row.get("created_on") or "") or None

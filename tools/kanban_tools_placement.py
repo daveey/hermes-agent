@@ -22,7 +22,8 @@ def _origin_enrollment(args, origin, marker, **effective):
     from hermes_cli.kanban_worker_placement import creation_decision
     cfg, gateway = kp.config(), kp.reg.self_gateway()
     return creation_decision({**args, **effective}, cfg, gateway,
-                             kp.canonical_pin(args.get("placement") or "auto", gateway, cfg), None)
+                             kp.canonical_pin(args.get("placement") or "auto", gateway, cfg), None,
+                             queue=False)  # [daveey] origin-bound: the worker queue is not applied here
 
 
 def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:

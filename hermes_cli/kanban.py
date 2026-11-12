@@ -492,7 +492,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_ask_resolved import AskFilingRefused, check_create_filing, create_context
         assignee = (args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
                     or _cli_default_assignee(args))
-        from hermes_cli.kanban_worker_placement import cli_audit, cli_policy
+        from hermes_cli.kanban_worker_placement import cli_audit, cli_policy, cli_runs_on
         try:
             # [daveey] A blocked ask's resolved_check runs once first, as the sweep will run it for this assignee
             # and workspace: already met or broken refuses the create. A key hit returns the card: no probe.
@@ -523,7 +523,10 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 human_request=getattr(args, "human_request", None),
                 creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                                  if in_worker else None),
-                validate_workspace=True, validate_skills=True, runs_on=getattr(args, "runs_on", None),
+                validate_workspace=True, validate_skills=True,
+                # [daveey] No --runs-on: a portable card queues for the worker pool (kanban.placement.worker_queue).
+                runs_on=(getattr(args, "runs_on", None) if getattr(args, "runs_on", None) is not None
+                         else cli_runs_on(conn, args, body, ws_kind, ws_path, board, assignee=assignee)),
                 placement_policy=cli_policy(args, body, ws_kind, ws_path, board, assignee=assignee),
                 placement_checked=True, board=board,
                 placement_audit=cli_audit(args, body, ws_kind, ws_path, board, assignee=assignee),
@@ -889,7 +892,13 @@ def _cmd_move(args: argparse.Namespace) -> int:
     """[daveey] ``hermes kanban move``: the card's own worker (HERMES_KANBAN_TASK + run id) moves its running card;
     otherwise a queued card is relabelled, or with --reclaim a card running here is stopped first."""
     from hermes_cli import kanban_move as km
-    labels = [x.strip() for x in str(args.runs_on).split(",") if x.strip()]
+    from hermes_cli.kanban_placement import POOL_LABEL
+    pool = bool(getattr(args, "pool", False))
+    if pool == bool(args.runs_on):
+        print("kanban move: pass exactly one of --pool or --runs-on [invalid_runs_on]", file=sys.stderr)
+        return 1
+    labels = [POOL_LABEL] if pool else [x.strip() for x in str(args.runs_on).split(",") if x.strip()]
+    host = {"host_reason": getattr(args, "host_reason", None)}
     own_run = os.environ.get("HERMES_KANBAN_TASK") == args.task_id and os.environ.get("HERMES_KANBAN_RUN_ID")
     with kbc.connect_closing() as conn:
         status = (conn.execute("SELECT status FROM tasks WHERE id = ?", (args.task_id,)).fetchone() or {"status": None})
@@ -898,16 +907,17 @@ def _cmd_move(args: argparse.Namespace) -> int:
                    "error": "--checkpoint is required when a worker moves its own running card"}
         elif own_run:
             res = km.move_task(conn, args.task_id, runs_on=labels, reason=args.reason, checkpoint=args.checkpoint,
-                               expected_run_id=int(os.environ["HERMES_KANBAN_RUN_ID"]), force=args.force)
+                               expected_run_id=int(os.environ["HERMES_KANBAN_RUN_ID"]), force=args.force, **host)
         elif status["status"] == "running":
             if not args.reclaim:
                 res = {"ok": False, "reason_code": "running",
                        "error": f"{args.task_id} is running: its worker moves it (kanban_move), or pass --reclaim"}
             else:
-                res = km.move_reclaim(conn, args.task_id, runs_on=labels, reason=args.reason, force=args.force)
+                res = km.move_reclaim(conn, args.task_id, runs_on=labels, reason=args.reason, force=args.force,
+                                      **host)
         else:
             res = km.move_queued(conn, args.task_id, runs_on=labels, reason=args.reason,
-                                 checkpoint=args.checkpoint or "", force=args.force)
+                                 checkpoint=args.checkpoint or "", force=args.force, **host)
     if getattr(args, "json", False):
         print(json.dumps(res))
     elif res.get("ok"):

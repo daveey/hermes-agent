@@ -199,6 +199,34 @@ DEFAULT_CARRIED_REQUIRES = ("terminal", "file", "git", "kanban")
 _help_cache: dict = {}
 
 
+# The registry label every worker node carries (added at its enroll readiness gate, removed on drain). A card with
+# ``runs_on: [POOL_LABEL]`` waits in one queue: any worker with a free slot claims it through the Board lease.
+POOL_LABEL = "pool:worker"
+_LABEL = re.compile(r"[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9:._-]*")
+
+
+def is_pool_label(value) -> bool:
+    """``value`` names a class of machines (``pool:worker``), not one machine (``machine:<x>``) or a bare name."""
+    return (isinstance(value, str) and len(value) <= 64 and bool(_LABEL.fullmatch(value))
+            and not value.startswith("machine:"))
+
+
+def route_labels(dest: str) -> list[str]:
+    """``runs_on`` for a ``heavy_route``/``worker_queue`` value: a label as is, a machine name as ``machine:<x>``."""
+    return [dest] if is_pool_label(dest) else [f"machine:{dest}"]
+
+
+def label_machines(label: str, machines: Optional[dict] = None) -> list[str]:
+    """Active, unheld registry machines that carry ``label`` and pick up other gateways' cards (sorted)."""
+    from hermes_cli import kanban_worker_node as wn
+    if machines is None:
+        machines = (wn.registry() or {}).get("machines") or {}
+    return sorted(name for name, entry in machines.items()
+                  if isinstance(entry, dict) and entry.get("state", "active") == "active" and not entry.get("hold")
+                  and ("pickup" not in entry or wn.advertises_pickup(entry))
+                  and label in (entry.get("labels") or []))
+
+
 class _Cfg:
     def __init__(self, raw: dict):
         self.raw = raw if isinstance(raw, dict) else {}
@@ -248,6 +276,14 @@ class _Cfg:
             return None
         tgt = route.get(self_gw)
         return tgt if isinstance(tgt, str) and tgt and tgt != self_gw else None
+
+    def queue_label(self, self_gw: Optional[str]) -> Optional[str]:
+        """``kanban.placement.worker_queue[<this gateway>]``: the pool label portable cards queue for, or None."""
+        queue = self.raw.get("worker_queue")
+        if not self_gw or not isinstance(queue, dict):
+            return None
+        label = queue.get(self_gw)
+        return label if is_pool_label(label) else None
 
     def heavy_markers(self) -> list[re.Pattern]:
         base = self.raw.get("heavy_markers")
@@ -458,7 +494,7 @@ def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
     heavy = _heavy_marker(title, body, c)
     if not heavy or not (machine_ok or _machine_picks_up)(worker):
         return None
-    return {"where": "local", "runs_on": [f"machine:{worker}"],
+    return {"where": "local", "runs_on": route_labels(worker),
             "why": f"heavy work ({heavy}): runs on {worker} through the Board lease"}
 
 
@@ -466,8 +502,11 @@ def _machine_picks_up(name: str) -> bool:
     """``name`` is an active machine in the Board registry that is not held (draining) and has not turned
     pickup off. The Board registry does not publish ``pickup`` today (10-28: every entry lacked it, the hub
     and worker-1 included, though both claim ``runs_on`` cards), so a missing field counts as on:
-    ``heavy_route`` naming the worker is the operator saying it picks up."""
+    ``heavy_route`` naming the worker is the operator saying it picks up. A pool label (:func:`is_pool_label`) is
+    live when some such machine carries it."""
     from hermes_cli import kanban_worker_node as wn
+    if is_pool_label(name):
+        return bool(label_machines(name))
     entry = ((wn.registry() or {}).get("machines") or {}).get(name)
     if not entry or entry.get("state", "active") != "active" or entry.get("hold"):
         return False
@@ -714,7 +753,7 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
         self_gw = reg.self_gateway() if self_gw is None else self_gw
         pin = canonical_pin(args.get("placement") or "auto", self_gw, c.raw)
         from hermes_cli.kanban_worker_placement import creation_decision
-        enrollment = creation_decision(args, c.raw, self_gw, pin, origin_intent)
+        enrollment = creation_decision(args, c.raw, self_gw, pin, origin_intent, machine_ok=machine_ok)
         if enrollment is not None:
             return enrollment
         explicit = pin not in ("", "auto")
@@ -795,7 +834,7 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
             worker = c.heavy_target(self_gw)
             heavy = _heavy_marker(args.get("title") or "", args.get("body") or "", c) if worker else None
             if heavy and (machine_ok or _machine_picks_up)(worker):
-                return {"where": "local", "runs_on": [f"machine:{worker}"],
+                return {"where": "local", "runs_on": route_labels(worker),
                         "why": f"heavy work ({heavy}): runs on {worker} through the Board lease"}
         if has_parents:
             # Liveness is checked when the card is forwarded, not now: its parents may run for hours.

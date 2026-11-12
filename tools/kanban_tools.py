@@ -1245,11 +1245,11 @@ def _handle_move(args: dict, **kw) -> str:
         "steps so the run on the other machine can resume"))
     reason = _require_text(args, "reason", "reason is required — say what this machine lacks")
     runs_on = args.get("runs_on")
-    _check(isinstance(runs_on, list) and runs_on, "runs_on must be a non-empty list of labels, e.g. ['machine:worker-1']")
+    _check(isinstance(runs_on, list) and runs_on, "runs_on must be a non-empty list of labels, e.g. ['pool:worker']")
     from hermes_cli.kanban_move import move_task
     with _board(args.get("board")) as (kb, conn):
-        res = move_task(conn, tid, runs_on=runs_on, reason=reason, checkpoint=checkpoint,
-                        expected_run_id=_worker_run_id(tid), force=bool(args.get("force")))
+        res = move_task(conn, tid, runs_on=runs_on, reason=reason, checkpoint=checkpoint, expected_run_id=_worker_run_id(tid),
+                        force=bool(args.get("force")), host_reason=args.get("host_reason"))
         _check(res.get("ok"), f"could not move {tid}: {res.get('error')}")
         note = (f"Moved: the card is re-queued for {res['runs_on']} (eligible now: {', '.join(res['matches'])}); "
                 "this run is over. End your turn with a one-line reply; do not call more tools.")

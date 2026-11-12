@@ -466,10 +466,15 @@ KANBAN_MOVE_SCHEMA = _schema(
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "runs_on": {"type": "array", "items": {"type": "string"}, "description": (
-            "Labels the next machine must have, e.g. [\"machine:worker-1\"], [\"macos\"], [\"linux\"]. "
-            "machine:<name> pins one registered machine that picks up this board (else refused)."
+            "Labels the next machine must have, e.g. [\"pool:worker\"] (any worker with a free slot: the default "
+            "for portable work), [\"macos\"], [\"linux\"]. machine:<name> pins one registered machine that picks "
+            "up this board (else refused); pinning one pool worker also needs host_reason."
         )},
         "reason": _prop("string", "Why the card must move (what this machine lacks). Logged on the card."),
+        "host_reason": _prop("string", (
+            "Required for runs_on naming one pool worker (machine:worker-N): the card works on that host, or "
+            "holds unpushed state there. Capacity is never a host reason: use [\"pool:worker\"]."
+        )),
         "checkpoint": _prop("string", (
             "Everything the next run needs to resume on the other machine: what is done (commits, branches, "
             "pushed work, with ids), what is NOT portable (local files, processes) and the exact next steps. "

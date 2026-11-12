@@ -42,12 +42,40 @@ def _notice_from_stored(conn, task_id, gateway, pool):
     repin.maybe_notify(conn, task_id, gateway, queue.latest(conn, task_id), pool)
 
 
-def creation_decision(args, cfg, gateway, pin, origin_intent):
-    """Resolve explicit local pins and pool enrollment before legacy routing."""
+QUEUED_WHY = ("portable: queued for any machine labelled {label} (kanban.placement.worker_queue); the first one "
+              "with a free slot claims it through the Board lease")
+
+
+def queue_decision(args, cfg, gateway, pin, origin_intent, machine_ok=None):
+    """``runs_on: [<pool label>, *coordination labels]`` for a portable card of a ``worker_queue`` gateway, or None.
+
+    One queue instead of a machine pin: no worker is chosen at creation, so a held or full worker never strands the
+    card while another has free slots. None (legacy routing applies) for a pin, an explicit ``runs_on``, courier
+    creation, non-portable work, or when no active, unheld machine carries the label. [daveey]
+    """
+    from hermes_cli import kanban_placement as placement
+    from hermes_cli import kanban_placement_coordination as coordination
+
+    label = placement._Cfg(cfg).queue_label(gateway)
+    if not label or pin not in ("", "auto") or args.get("runs_on") is not None or origin_intent is not None:
+        return None
+    if placement.portable_reason(args, cfg):
+        return None
+    extra = coordination.required_labels(args)
+    if extra is None or not (machine_ok or placement._machine_picks_up)(label):
+        return None
+    return {"where": "local", "runs_on": [label, *sorted(extra - {label})], "why": QUEUED_WHY.format(label=label)}
+
+
+def creation_decision(args, cfg, gateway, pin, origin_intent, machine_ok=None, queue=True):
+    """Resolve explicit local pins, the worker queue and pool enrollment before legacy routing."""
     from hermes_cli.kanban_placement import PINNED_LOCAL_WHY, portable_reason
 
     if pin in ("local", "here", (gateway or "").lower()):
         return {"where": "local", "why": PINNED_LOCAL_WHY}
+    queued = queue_decision(args, cfg, gateway, pin, origin_intent, machine_ok) if queue else None
+    if queued is not None:
+        return queued
     pools = cfg.get("worker_pools")
     if pin not in ("", "auto") or not isinstance(pools, dict) or gateway not in pools:
         return None
@@ -134,6 +162,24 @@ def cli_policy(args, body, workspace_kind, workspace_path, board, *, assignee):
     result = creation_decision(_cli_fields(args, body, workspace_kind, workspace_path, board, assignee=assignee), cfg, gateway,
                                "auto", None)
     return (result or {}).get("placement_policy")
+
+
+def cli_runs_on(conn, args, body, workspace_kind, workspace_path, board, *, assignee):
+    """``runs_on`` the worker queue gives a CLI-created card (``kanban.placement.worker_queue``), or None.
+
+    Only on a Board primary (``runs_on`` is a Board placement field) and only without an explicit ``--runs-on``."""
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_placement as placement
+
+    if getattr(args, "runs_on", None) is not None or sync.board_mode(conn) != "primary":
+        return None
+    cfg = placement.config()
+    if not cfg.get("worker_queue"):
+        return None
+    fields = _cli_fields(args, body, workspace_kind, workspace_path, board, assignee=assignee)
+    fields.pop("runs_on", None)
+    result = queue_decision(fields, cfg, placement.reg.self_gateway(), "auto", None)
+    return (result or {}).get("runs_on")
 
 
 def cli_audit(args, body, workspace_kind, workspace_path, board, *, assignee):

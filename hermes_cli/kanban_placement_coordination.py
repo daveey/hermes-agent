@@ -105,10 +105,14 @@ def destinations(cfg, target=None):
         return [target]
     from hermes_cli import kanban_capability_registry as reg
     pools = cfg.get("worker_pools")
-    names = pools.get(reg.self_gateway()) if isinstance(pools, dict) else None
+    gateway = reg.self_gateway()
+    names = pools.get(gateway) if isinstance(pools, dict) else None
     if (not isinstance(names, list) or not names or len(names) > 64
             or not all(isinstance(n, str) and n.strip() for n in names)):
-        return []
+        # The worker queue: every machine carrying this gateway's pool label is a possible destination.
+        from hermes_cli import kanban_placement as placement
+        label = placement._Cfg(cfg).queue_label(gateway)
+        return placement.label_machines(label) if label else []
     return names
 
 
@@ -196,13 +200,20 @@ def claim_refusal(card, me):
                  requires=requires)
 
 
-def legacy_refusal(args):
-    """Legacy automatic pins have no policy fence; do not apply coordination exemptions."""
+def required_labels(args):
+    """Coordination labels a card's text, skills and declared access need; None for an unsupported action."""
     from hermes_cli.kanban_placement import without_evidence, without_placement_note
     text = f"{args.get('title') or ''}\n{without_evidence(without_placement_note(args.get('body') or ''))}"
     required, refusal = requirements(text)
-    return bool(refusal or required or skill_requirements(args.get("skills"))
-                or access_requirements(args.get("requires")))
+    if refusal:
+        return None
+    return required | skill_requirements(args.get("skills")) | access_requirements(args.get("requires"))
+
+
+def legacy_refusal(args):
+    """Legacy automatic pins have no policy fence; do not apply coordination exemptions."""
+    labels = required_labels(args)
+    return labels is None or bool(labels)
 
 
 def skill_requirements(skills):

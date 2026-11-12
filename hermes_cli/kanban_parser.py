@@ -363,8 +363,14 @@ _SPECS = [
     _cmd("reclaim", [_TASK_ID, _RECLAIM_REASON], help="Release an active worker claim on a running task"),
     _cmd("move", [
         _TASK_ID,
-        _arg("--runs-on", dest="runs_on", required=True,
-             help="Comma-separated labels the next machine must have, e.g. machine:worker-1 or macos"),
+        _arg("--runs-on", dest="runs_on", default=None,
+             help="Comma-separated labels the next machine must have, e.g. pool:worker or macos"),
+        _arg("--pool", action="store_true",
+             help="Queue the card for any worker (= --runs-on pool:worker): the first worker with a free slot "
+                  "claims it"),
+        _arg("--host-reason", dest="host_reason", default=None,
+             help="Required to pin one pool worker (machine:worker-N): the card works on that host, or holds "
+                  "unpushed state there"),
         _arg("--reason", required=True, help="Why the card must move (logged as a `moved` event)"),
         _arg("--checkpoint", default=None,
              help="Resume notes (required when a card's own worker moves its running card)"),
