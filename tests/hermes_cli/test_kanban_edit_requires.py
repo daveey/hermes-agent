@@ -85,7 +85,11 @@ def test_requires_edit_force_is_not_an_escape(kanban_home):
 def test_requires_edit_retains_skill_requirements(kanban_home, monkeypatch):
     from hermes_cli import kanban_capabilities as capabilities
     tid = helpers._new(requires=["host_repo"])
-    monkeypatch.setattr(capabilities, "skill_requirements", lambda skills, profile: ["host_repo"])
+    with kbc.connect() as conn:
+        conn.execute("UPDATE tasks SET skills=? WHERE id=?", (json.dumps(["repo-skill"]), tid))
+        conn.commit()
+    monkeypatch.setattr(capabilities, "skill_requirements",
+                        lambda skills, profile: ["host_repo"] if "repo-skill" in skills else [])
     assert helpers._main(["edit", tid, "--requires", "terminal"]) == 0
     with kbc.connect() as conn:
         assert kb.get_task(conn, tid).requires == ["terminal", "host_repo"]
@@ -102,3 +106,14 @@ def test_requires_edit_rejects_ready_card_with_custodian(kanban_home, field):
         conn.commit()
     assert helpers._main(["edit", tid, "--requires", "terminal"]) == 2
     assert helpers._edited_events(tid) == []
+
+
+def test_requires_edit_accepts_legacy_null_requirements(kanban_home):
+    tid = helpers._new(requires=["host_repo"])
+    with kbc.connect() as conn:
+        conn.execute("UPDATE tasks SET requires=NULL WHERE id=?", (tid,))
+        conn.commit()
+    assert helpers._main(["edit", tid, "--requires", "terminal"]) == 0
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, tid).requires == ["terminal"]
+

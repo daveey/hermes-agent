@@ -80,3 +80,50 @@ def test_current_requirement_shape_rejected_independently(setup, value):
     row = dict(db.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
     row['requires'] = json.dumps(value)
     assert not recovery.current_portable(db, row, {})
+
+
+@pytest.mark.parametrize("policy", [None, wp.POLICY])
+def test_stale_policy_without_pending_move_can_recover(setup, monkeypatch, policy):
+    db, _ = setup
+    tid = fixtures.make(db, runs_on='["machine:worker-1"]')
+    row = dict(db.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
+    row["placement_policy"] = policy
+    monkeypatch.setattr(node, "registry", lambda **kw: {"machines": {"worker-1": {"hold": True}}})
+    monkeypatch.setattr(wp, "requested_move", lambda *a: None if policy else ["machine:worker-2"])
+    assert recovery.recovery_mode(db, row, {}) == "stale_pin"
+
+
+def test_prior_policy_without_move_event_does_not_reenroll(setup):
+    db, hub = setup
+    tid = fixtures.make(db)
+    db.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='created'",
+               (json.dumps({"placement_policy": wp.POLICY}), tid))
+    db.commit()
+    assert wp.reevaluate(db, hub, "default", "hub") == 0
+    assert not hub.calls
+
+
+@pytest.mark.parametrize("source", ["current", "created"])
+def test_project_constraint_survives_reconstruction(setup, source):
+    db, _ = setup
+    tid = fixtures.make(db)
+    row = dict(db.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
+    if source == "current":
+        row["project_id"] = "project-custody"
+    else:
+        db.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='created'",
+                   (json.dumps({"project_id": "project-custody"}), tid))
+        db.commit()
+    assert not recovery.current_portable(db, row, {})
+
+
+@pytest.mark.parametrize("key", ["requires", "skills"])
+def test_bad_member_rejected_before_downstream_classifier(setup, monkeypatch, key):
+    from hermes_cli import kanban_placement as placement
+    db, _ = setup
+    tid = fixtures.make(db)
+    row = dict(db.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
+    row[key] = "[1]"
+    monkeypatch.setattr(placement, "portable_reason", lambda *a: None)
+    assert not recovery.current_portable(db, row, {})
+
