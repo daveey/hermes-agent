@@ -62,7 +62,7 @@ _TOOLS = {
 # Explicit task contracts, not authority inferred from prose. These declarations
 # describe existing restricted access; they never install credentials or grant writes.
 ACCESS_LABELS = {"ssh:mbp": "capability:ssh-mbp", "ssh:mini": "capability:ssh-mini",
-                 "hub:read": "capability:hub-read"}
+                 "hub:read": "capability:hub-read", "hub:write": "capability:hub-write"}
 _ACCESS = (
     (re.compile(r"\bssh\b", re.IGNORECASE), {"ssh:mbp", "ssh:mini"}),
     (re.compile(r"\bon the hub\b|\bthe hub's\b|\bjournalctl\b|\bkanban\.db\b", re.IGNORECASE),

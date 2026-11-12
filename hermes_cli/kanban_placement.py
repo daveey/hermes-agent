@@ -473,8 +473,36 @@ def without_evidence(body: str) -> str:
     return _EVIDENCE.sub("", body or "")
 
 
+def structural_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
+    """Non-textual restrictions that admission cannot override."""
+    c = _Cfg(config() if cfg is None else cfg)
+    if args.get("needs"):
+        return "gateway-scoped need"
+    if (args.get("workspace_kind") or "scratch") != "scratch":
+        return "host workspace"
+    board = args.get("board")
+    if board and board != "default":
+        return "non-default board"
+    if (args.get("assignee") or "default") not in c.assignees():
+        return "assignee not allowlisted"
+    # Explicit tool defaults are equivalent to omission, as on the CLI path.
+    # A blocked initial status still needs origin-side human-request handling.
+    if any(args.get(k) not in (None, "", [], False)
+           for k in UNCARRIED_OPTIONS if not (k == "initial_status" and args.get(k) == "running")):
+        return "uncarried option"
+    reqs = args.get("requires") or []
+    reqs = [reqs] if isinstance(reqs, str) else list(reqs)
+    from hermes_cli import kanban_placement_coordination as coordination
+    ordinary = [r for r in reqs if r not in coordination.ACCESS_LABELS]
+    if any(reg.is_gateway_need(r) for r in ordinary):
+        return "gateway-scoped requirement"
+    if any(str(r) not in c.carried_requires() for r in ordinary):
+        return "uncarried requirement"
+    return None
+
+
 def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
-    """Why a card cannot leave its origin; None means structurally portable, not admitted.
+    """Legacy portability scan; hub text matches request admission, not permission to stay.
 
     Keep the conservative legacy routeless-heavy boundary, excluding only its heavy-marker
     requirement. Worker profile/tool/skill attestations and capacity are Board admission checks.
@@ -673,7 +701,7 @@ def canonical_pin(pin, self_gw: Optional[str] = None, cfg: Optional[dict] = None
             hit = {str(k).strip().lower(): str(v).strip().lower() for k, v in aliases.items()}.get(p)
             if hit:
                 return hit
-        known = {str(self_gw or "").strip().lower()}
+        known = {"hub", str(self_gw or "").strip().lower()}
         route = raw.get("route")
         if isinstance(route, dict):
             known |= {str(k).strip().lower() for k in route} | {str(v).strip().lower() for v in route.values()}
@@ -726,6 +754,8 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
         known = sg.strip().lower() if isinstance(sg, str) else ""
         out = _decide(args, origin_intent=origin_intent, now=now, cfg=cfg, self_gw=sg, live=live,
                       locate=locate, carries=carries, machine_ok=machine_ok, info=info)
+        from hermes_cli.kanban_hub_admission_placement import apply
+        out = apply(args, out, sg, config() if cfg is None else cfg)
         pin = explicit_foreign_pin(args, sg, cfg)
         if pin and origin_intent is None and out.get("where") == "local" and not out.get("defer"):
             return {"where": "refuse", "why": out.get("why", ""), "pin": pin}

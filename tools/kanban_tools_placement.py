@@ -95,6 +95,10 @@ def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_p
     elsewhere without the pin also gets a ``note`` naming that target (the card is still created here).
     """
     why = decision.get("why") or ""
+    if decision.get("hub_admission"):
+        # Admission already resolved the execution target; advisory re-deciding
+        # would make another model call and could discard the effective contract.
+        return dict(decision)
     if decision.get("placement_policy"):
         return {"where": "local", "placement_policy": decision["placement_policy"], "why": why}
     if decision.get("defer"):
