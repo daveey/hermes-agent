@@ -143,6 +143,16 @@ def test_native_manual_ready_receipts(kind):
     assert rows[0]["ready_to_claim_s"] == 2
 
 
+@pytest.mark.parametrize("swept", [False, True])
+def test_import_invalidates_historical_ready_and_sweep_starts_new_interval(swept):
+    events = [event(1, "promoted", 100), event(2, "imported", 200, parked=True)]
+    if swept:
+        events.append(event(3, "triage_swept", 5000, assignee="default"))
+    events.append(event(4, "claimed", 5002, 1, lock="h"))
+    rows = attempts(events, board="one", task_id="t", now=5010)
+    assert rows[0]["ready_to_claim_s"] == (2 if swept else None)
+
+
 def test_idle_is_capped_by_deduplicated_pool_backlog():
     result = idle_coverage([interval(eligible_backlog=1, admissible_slots=5)] * 2)
     assert result["unexplained_idle_slot_seconds"] == 10

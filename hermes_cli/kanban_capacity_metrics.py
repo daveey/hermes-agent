@@ -29,7 +29,7 @@ def _payload(event):
 
 def _ready(event, payload):
     # Creation is not readiness. Only explicit ready transitions qualify.
-    if event.get("kind") in {"promoted", "promoted_manual", "unblocked"}:
+    if event.get("kind") in {"promoted", "promoted_manual", "unblocked", "triage_swept"}:
         return payload.get("status", "ready") == "ready"
     if event.get("kind") in {"released", "reclaimed", "owner_unavailable", "crashed", "rate_limited",
                               "timed_out", "stale", "reconciled", "owner_restart_lost",
@@ -87,7 +87,7 @@ def attempts(events, *, board, task_id, now):
                                process_pid=payload["pid"])
         elif kind in {"dependency_wait", "blocked", "scheduled", "completed", "archived", "changes_requested",
                       "status", "auto_blocked", "gave_up", "block_loop_detected", "agent_block_escalated",
-                      "supervisor_escalated", "continuation_exhausted", "unblocked"}:
+                      "supervisor_escalated", "continuation_exhausted", "unblocked", "imported"}:
             ready, current = None, None
     if ready is not None:
         rows.append(_attempt(board, task_id, ready))
