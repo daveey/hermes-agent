@@ -25,6 +25,8 @@ def matches(row: dict, expected: str) -> bool:
         return expected == row.get("id")
     if expected.count("/") == 1:
         return expected == "/".join(parts[-2:])
+    if expected.count("/") == 2 and len(parts) == 4:
+        return expected == "/".join((parts[0], *parts[-2:]))
     if len(parts) == 2:
         from hermes_cli.kanban_origin import gateway_names
         key = f"{gateway_names()[0]}/{key}"

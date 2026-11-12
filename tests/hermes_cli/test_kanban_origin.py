@@ -72,7 +72,7 @@ def test_tool_create_binds_origin_without_rewriting_the_creator(hub_gateway, mon
     assert _hub_subs(tid) == ["macbook/default/20261022_204322_aaaaaa"]
     assert res["origin_binding"]["readback"] == "pending"
     assert res["origin_binding"]["verify_visible"] == (
-        f"hermes kanban chat-tasks 20261022_204322_aaaaaa --expect hub/default/{tid}")
+        f"hermes -p default kanban chat-tasks 20261022_204322_aaaaaa --expect hub/default/{tid}")
     assert res["origin_binding"]["verify_on_origin"] == f"hermes-hub links 20261022_204322_aaaaaa --expect hub/default/{tid}"
     # idempotent: a retried create returns the same card and does not duplicate the binding
     again = json.loads(kt._handle_create({"title": "P0", "assignee": "default", "idempotency_key": "k-p0"}))

@@ -95,6 +95,26 @@ def test_lineage_error_is_not_absence(monkeypatch, capsys):
     assert "session store unavailable" in captured.err
 
 
+@pytest.mark.parametrize("expected,code", [("remote/work/t1", 0), ("remote/research/work/t1", 0),
+                                           ("wrong/work/t1", 4), ("remote/other/t1", 4),
+                                           ("remote/wrong/work/t1", 4)])
+def test_real_profile_qualified_projection(monkeypatch, lineage, expected, code):
+    from hermes_cli.kanban_replica_projection import card_rows
+    projected = card_rows(("remote", "research", "work", "t1"), {"status": "ready"},
+                          sids=["chat"], closed=False, synced=1, stale=False, me="local",
+                          origin_profile="default", legacy_record=False, historical={})
+    monkeypatch.setattr(activity, "session_tasks", lambda *a, **kw: [row for _, row in projected])
+    assert run("chat", "--expect", expected) == code
+
+
+def test_named_origin_profile_in_command(monkeypatch):
+    from hermes_cli import kanban_origin, kanban_db_notify
+    monkeypatch.setattr(kanban_db_notify, "add_notify_sub", lambda *a, **kw: None)
+    monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("hub", set()))
+    receipt = kanban_origin.bind(None, "t1", kanban_origin.Origin("mac", "research", "chat"))
+    assert receipt["verify_visible"] == "hermes -p research kanban chat-tasks chat --expect hub/default/t1"
+
+
 def test_tool_guidance_names_projection():
     from tools.kanban_tools_schemas import KANBAN_CREATE_SCHEMA
     text = json.dumps(KANBAN_CREATE_SCHEMA)
