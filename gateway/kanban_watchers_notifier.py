@@ -922,8 +922,8 @@ class _KanbanNotification:
         # Pings, artifact uploads (media policy) and the wake text (display.language) all read the
         # SUBSCRIBER profile's config; the notifier thread itself runs in the launch profile's scope.
         async with self._owner_scope():
-            from gateway.session_notifier_drain import held
-            if self.wake_agent and held():
+            from gateway.session_notifier_drain import held_noted
+            if self.wake_agent and held_noted():
                 # Decide once before any delivery. Refusing a later chunk on a new
                 # hold would rewind and replay earlier accepted chunks. An admitted
                 # batch settles; the next tick waits with its cursor retained.

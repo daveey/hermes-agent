@@ -10,9 +10,10 @@ The waking ``local`` row owns the turn for every event it wakes on, and the wake
 ``tui`` row would have shown (:func:`notice_lines`). The ``tui`` consumers stay silent only for events that row has
 already delivered (:func:`tui_cover`); while it still owes a covered event they leave the ``tui`` row unclaimed
 (:func:`tui_defer`), so a wake that never lands (the row dropped after repeated failures, no LOCAL adapter, past
-:data:`DEFER_MAX_S`, a window that does not run while a core-drain hold keeps the wake waiting) still leaves the
-``tui`` notice owed and delivered: a duplicate beats a lost notice. Kinds the wake leg does not wake on (``status``,
-quota and re-pin notices) stay with the ``tui`` row. A ``notify``-only ``local`` row covers nothing.
+:data:`DEFER_MAX_S`, a window counted from the later of the event and the lift of a core-drain hold that kept the
+wake waiting) still leaves the ``tui`` notice owed and delivered: a duplicate beats a lost notice. Kinds the wake leg
+does not wake on (``status``, quota and re-pin notices) stay with the ``tui`` row. A ``notify``-only ``local`` row
+covers nothing.
 """
 
 from __future__ import annotations
@@ -97,8 +98,9 @@ def tui_defer(conn: Any, sub: dict, now: Optional[float] = None) -> bool:
 
 def wake_owes_after(conn: Any, sub: dict, floor: int, now: Optional[float] = None) -> bool:
     """True when this ``tui`` row's waking ``local`` sibling still owes a covered event past ``floor`` (and past
-    its own cursor), younger than :data:`DEFER_MAX_S`, or of any age while the core-drain hold that keeps the wake
-    leg waiting is on (:func:`_drain_held`).
+    its own cursor), younger than :data:`DEFER_MAX_S`. The window runs from the later of the event and the lift of
+    the core-drain hold that keeps the wake leg waiting (:func:`_drain_held`): any age counts while the hold is on
+    or was seen on less than :data:`DEFER_MAX_S` ago.
 
     The legacy poller also asks this right after its claim, with ``floor`` = the claim's start: a covered event
     appended between :func:`tui_defer` and the claim would otherwise ride both the ``tui`` batch and the wake turn
@@ -111,9 +113,11 @@ def wake_owes_after(conn: Any, sub: dict, floor: int, now: Optional[float] = Non
     if acked is None:
         return False
     # While a core-update drain hold is on, the wake leg rewinds every batch and delivers it once the hold lifts,
-    # so the window does not run: a hold past DEFER_MAX_S let the tui row show its notice turn and the wake start
-    # a second one after the hold (review of PR #1465 at 9268465a67). [daveey]
-    since = float("-inf") if _drain_held() else (now if now is not None else time.time()) - DEFER_MAX_S
+    # so the window runs from the lift: a hold past DEFER_MAX_S let the tui row show its notice turn and the wake
+    # start a second one after the hold (review of PR #1465 at 9268465a67), and a window that only stopped while
+    # held let the first tui tick after the lift do the same (review of PR #1652 at 76133d4520). [daveey]
+    now = now if now is not None else time.time()
+    since = float("-inf") if _drain_held() or _lifted_within(now) else now - DEFER_MAX_S
     try:
         pending = conn.execute("SELECT kind, payload FROM task_events WHERE task_id = ? AND id > ? "
                                "AND created_at > ?", (sub["task_id"], max(int(floor), acked), since)).fetchall()
@@ -134,9 +138,17 @@ def _drain_held() -> bool:
     as not held (deliver as before: a duplicate beats a lost notice)."""
     from gateway import session_notifier_drain
     try:
-        return bool(session_notifier_drain.held())
+        return bool(session_notifier_drain.held_noted())
     except OSError:
         return False
+
+
+def _lifted_within(now: float) -> bool:
+    """A notifier leg saw the core-drain hold on less than :data:`DEFER_MAX_S` before ``now``
+    (:func:`gateway.session_notifier_drain.last_held_at`). A stamp from the future (clock step) does not count."""
+    from gateway import session_notifier_drain
+    seen = session_notifier_drain.last_held_at()
+    return seen is not None and 0 <= now - seen < DEFER_MAX_S
 
 
 def tui_formatter(conn: Any, sub: dict, fmt: Callable) -> Callable:
