@@ -351,11 +351,11 @@ def detail_fields(conn, task, board=None):
 def _work_observations(conn, task, board):
     """Optional card evidence for a detail read: any adapter failure is an explicit unknown, never a failed read."""
     from dataclasses import asdict
-    from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, add_cards, failed_card, local_scope
+    from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, add_cards, card_scope, conn_path, failed_card
     from hermes_cli.kanban_execution_source import assemble, transaction
     row = {**asdict(task), "board": board or "default"}
     try:
-        gateway, profile = local_scope()
+        gateway, profile = card_scope(conn_path(conn))
         with transaction(conn) as read_at:
             from hermes_cli.kanban_session_activity import _require_local_execution_authority
             _require_local_execution_authority(conn)

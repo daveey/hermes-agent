@@ -64,6 +64,43 @@ def local_scope():
     return _gateway_name(), profile
 
 
+def board_owner_profile(path):
+    """Owner profile of a board DB by its root, the hub ``collect_qualified_tasks`` rule; never the reader's.
+
+    ``kanban_home()`` is shared across profiles, so the active profile would give one card different
+    identities in different consumers. ``<root>/...`` is ``default``; ``<root>/profiles/<P>/...`` is ``P``.
+    A board outside the root is not evidenced (None, so the identity stays unqualified). Never raises.
+    """
+    try:
+        from pathlib import Path
+
+        from hermes_constants import get_default_hermes_root
+
+        rel = Path(path).resolve().relative_to(get_default_hermes_root().resolve()).parts
+    except ADAPTER_ERRORS:
+        _log.debug("board owner profile unavailable for %r", path, exc_info=True)
+        return None
+    if rel and rel[0] == "profiles":
+        return rel[1] if len(rel) > 2 and rel[1] and not rel[1].startswith(".") else None
+    return "default"
+
+
+def card_scope(path):
+    """``(gateway, owner profile)`` for cards read from the board DB at ``path``."""
+    return local_scope()[0], board_owner_profile(path)
+
+
+def conn_path(conn):
+    """File path of a connection's main database, or None (in-memory/unreadable)."""
+    try:
+        for _seq, name, file in conn.execute("PRAGMA database_list"):
+            if name == "main":
+                return file or None
+    except ADAPTER_ERRORS:
+        _log.debug("database path unavailable", exc_info=True)
+    return None
+
+
 def _request(value):
     if isinstance(value, str):
         try:

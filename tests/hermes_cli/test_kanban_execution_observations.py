@@ -16,6 +16,7 @@ kanban_root = activity_fixtures.kanban_root
 @pytest.fixture
 def board(kanban_root, monkeypatch):
     monkeypatch.setattr(observations, "local_scope", lambda: ("fixture-gateway", "default"))
+    monkeypatch.setenv("HERMES_HOME", str(kanban_root))  # the board is under the root: owner profile default
     path = kanban_root / "kanban.db"
     activity_fixtures._make_full_board(path, [("card", "Work", "running", "agent", "session", 100, 200, 7)])
     with sqlite3.connect(path) as conn:

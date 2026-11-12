@@ -30,6 +30,7 @@ GATEWAY, PROFILE = "fixture-gateway", "default"
 @pytest.fixture
 def board(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))  # the board is under the root: owner profile default
     monkeypatch.setenv("HERMES_HUB_STATE", str(tmp_path / "hub-state"))
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.setattr(kanban_origin, "gateway_names", lambda: (GATEWAY, {GATEWAY, "away"}))

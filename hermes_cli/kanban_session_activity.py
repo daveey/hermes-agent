@@ -1310,8 +1310,8 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                 reads["blocked_pairs"] = _pairs_sink
                 reads["pairs"] = reads["active_pairs"] | reads["blocked_pairs"]
                 from hermes_cli.kanban_execution_source import assemble, safe_raw, unknown_raw
-                from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, local_scope
-                gateway, profile = local_scope()
+                from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, card_scope
+                gateway, profile = card_scope(path)
                 try:
                     _require_local_execution_authority(conn)
                     sources = assemble(conn, {tid for _, tid in reads["pairs"]}, board=_board_slug(path),
@@ -1569,8 +1569,8 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
         except sqlite3.Error:  # board predates notify subscriptions
             pass
         from hermes_cli.kanban_execution_source import assemble
-        from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, local_scope
-        gateway, profile = local_scope()
+        from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, card_scope
+        gateway, profile = card_scope(path)
         try:
             _require_local_execution_authority(conn)
             sources = assemble(conn, found, board=_board_slug(path), gateway=gateway, profile=profile,
