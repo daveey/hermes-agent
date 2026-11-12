@@ -22,6 +22,12 @@ unloaded sweeper's loop therefore looks, in every profile store, for chats whose
   dies with its backend and its own failure gives up, so before this a close-out refused by a quota window that a
   restart (or a still-broken store) outlived was never offered again (two hub chats, 2026-11-10). A deferred row
   is durable: any backend's pass picks it up. [daveey]
+- a wake that found the chat ``"busy"`` (no live turn, yet admission refused it: a core update's admission hold or
+  drain, a paused turn owed to its restarting backend, an exiting backend's fence) is deferred the same way,
+  ``BUSY_RETRY_S`` doubling up to ``BUSY_RETRY_MAX_S``, at most ``MAX_BUSY_ATTEMPTS`` busy wakes per row (counted in
+  ``busy_attempts``, apart from the failed-wake budget); the last one stamps ``busy``. Before this ``busy`` was
+  final: a notice that landed while a hub core update held admission for 30 min stayed ``unresolved{notice_tail}``
+  after the hold lifted (two hub chats, 2026-11-12). [daveey]
 
 Ownership follows the unloaded sweeper's: a chat another live backend holds is that backend's (its own pass
 handles it); a chat with a live turn is skipped. The close-out prompt row is itself a notice, stamped as claimed,
@@ -56,6 +62,10 @@ WAKES_PER_HOUR = 2
 # no sooner than the failure's quota/route reset (or the automation replay's floor) plus this slack.
 MAX_ATTEMPTS = 3
 DEFER_SLACK_S = 600.0
+# A busy wake is offered again after BUSY_RETRY_S, doubling to BUSY_RETRY_MAX_S: ~4.6 h of busy wakes per row.
+BUSY_RETRY_S = 300.0
+BUSY_RETRY_MAX_S = 3600.0
+MAX_BUSY_ATTEMPTS = 8
 LOOKBACK_S = 3 * 86400.0
 MAX_PARALLEL_WAKES = 2
 CLOSEOUT_TEXT = (
@@ -123,9 +133,9 @@ def _deferred_due(meta: dict, now: float) -> bool:
     return isinstance(retry_at, (int, float)) and not isinstance(retry_at, bool) and retry_at <= now
 
 
-def _attempts(meta: Any) -> int:
+def _attempts(meta: Any, field: str = "attempts") -> int:
     closeout = meta.get("closeout") if isinstance(meta, dict) else None
-    n = closeout.get("attempts") if isinstance(closeout, dict) else None
+    n = closeout.get(field) if isinstance(closeout, dict) else None
     return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 0
 
 
@@ -135,8 +145,10 @@ def started_last_hour(db: Any, sid: str, now: float) -> int:
 
 
 def _claim(db: Any, cand: dict, now: float) -> bool:
+    busy = _attempts(cand["meta"], "busy_attempts")
     meta = {**cand["meta"], "closeout": {"state": "claimed", "at": now, "pid": os.getpid(),
-                                         "attempts": _attempts(cand["meta"]) + 1}}
+                                         "attempts": _attempts(cand["meta"]) + 1,
+                                         **({"busy_attempts": busy} if busy else {})}}
     return db._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
                               (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"])) == 1
 
@@ -265,9 +277,9 @@ def _retry_at(sid: str, now: float) -> float:
 
 
 def _closeout_job(session_db, wake, sid: str, msg_id: int, attempts: int = 1,
-                  retry_at: Optional[Callable[[str, float], float]] = None) -> str:
+                  retry_at: Optional[Callable[[str, float], float]] = None, busy_attempts: int = 0) -> str:
     """Worker: the wake, then the verdict on the claimed row; a wake that did not start refreshes the outcome.
-    A failed wake (``"error"``) with attempts left is stamped ``deferred`` for a later pass (module doc)."""
+    A failed (``"error"``) or busy wake with attempts left is stamped ``deferred`` for a later pass (module doc)."""
     try:
         try:
             verdict = str(wake(sid, msg_id) or "error")
@@ -275,7 +287,14 @@ def _closeout_job(session_db, wake, sid: str, msg_id: int, attempts: int = 1,
             logger.warning("notice close-out wake of %s failed", sid, exc_info=True)
             verdict = "error"
         extra: dict = {}
-        if verdict == "error" and attempts < MAX_ATTEMPTS:
+        if verdict == "busy":
+            busy_attempts += 1
+            extra = {"busy_attempts": busy_attempts}
+            if busy_attempts < MAX_BUSY_ATTEMPTS:
+                delay = min(BUSY_RETRY_S * 2 ** (busy_attempts - 1), BUSY_RETRY_MAX_S)
+                extra["retry_at"] = time.time() + delay
+                verdict = "deferred"
+        elif verdict == "error" and attempts - busy_attempts < MAX_ATTEMPTS:
             now = time.time()
             try:
                 extra = {"retry_at": float((retry_at or _retry_at)(sid, now)), "attempts": attempts}
@@ -350,7 +369,8 @@ def _handle(db, cand: dict, now: float, *, holders, session_db, wake, spawn, see
         return "skipped:claimed"
     try:
         attempts = _attempts(cand["meta"]) + 1
-        spawn(lambda: _closeout_job(session_db, wake, sid, cand["msg_id"], attempts=attempts))
+        busy = _attempts(cand["meta"], "busy_attempts")
+        spawn(lambda: _closeout_job(session_db, wake, sid, cand["msg_id"], attempts=attempts, busy_attempts=busy))
     except Exception:
         _wake_slots.release()
         _stamp(db, cand["msg_id"], "error")
