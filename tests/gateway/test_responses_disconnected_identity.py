@@ -93,9 +93,11 @@ async def test_delete_retires_a_disconnected_stream_identity_but_not_a_running_o
     calls, release, hold = [], asyncio.Event(), asyncio.Event()
     store = api._current_response_store()
     store._max_size = 1
-    release.set()
     async with TestClient(TestServer(_app(api, owner, calls, release, hold))) as client:
         done = await _disconnect_mid_stream(client, store, 'gone-done')
+        # Complete only after the server observed the disconnect. Releasing before
+        # opening the stream races normal completion against the client's close.
+        release.set()
         await _await_terminal(owner, 1)
         busy = await _disconnect_mid_stream(client, store, 'held')
         # The client deletes the response it walked away from: its identity goes everywhere.
