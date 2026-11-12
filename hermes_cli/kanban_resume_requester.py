@@ -163,7 +163,9 @@ def ensure_recovery_cards(conn: sqlite3.Connection) -> list[str]:
             from hermes_cli.kanban_goal_recovery import current_park, recovery_assignee
             task = kb.get_task(conn, target)
             goal = current_park(conn, target)
-            assignee = recovery_assignee(task) if goal else row['assignee'] or 'default'
+            from hermes_cli.kanban_gate_only import create_assignee
+            # A gate-only target (bb-repair-native) files its recovery under its queue, never the gate's profile.
+            assignee = recovery_assignee(task) if goal else create_assignee(row['assignee'] or 'default')
             if not assignee:
                 continue
             rec = kb.create_task(

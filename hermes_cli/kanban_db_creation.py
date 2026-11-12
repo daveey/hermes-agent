@@ -100,7 +100,9 @@ def validate_create_assignment(conn, assignee, *, runs_on, requires, workspace_k
     from hermes_cli.kanban_pin_provider import require_remote_pin_provider, resolve_pin_provider
     from hermes_cli.kanban_runs_on_capabilities import check_create, runs_elsewhere
     from hermes_cli.kanban_skill_check import check_task_skills
+    from hermes_cli.kanban_gate_only import refuse_create
 
+    refuse_create(assignee)  # kanban.gate_only_assignees: only the gate assigns them, by reassignment [daveey]
     remote = runs_elsewhere(conn, runs_on)
     check_task_skills(skills, assignee, enabled=validate_skills and not remote)
     required = validate_assignment(assignee, requires=requires, workspace_kind=workspace_kind,
