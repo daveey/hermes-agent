@@ -160,11 +160,11 @@ def test_verify_skips_synthetic_user_rows(kanban_home, synthetic):
         assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == reply
 
 
-def _loop_state(home: Path, session: str, *, awaiting: bool, fired_at: float) -> None:
+def _loop_state(home: Path, session: str, *, awaiting: bool, fired_at: float, prompt: str = "/recap") -> None:
     db = sqlite3.connect(home / "state.db")
     db.execute("CREATE TABLE IF NOT EXISTS state_meta (key TEXT PRIMARY KEY, value TEXT)")
     db.execute("INSERT OR REPLACE INTO state_meta (key, value) VALUES (?, ?)", (f"loop:{session}", json.dumps(
-        {"prompt": "/recap", "status": "active", "awaiting_response": awaiting, "last_fired_at": fired_at})))
+        {"prompt": prompt, "status": "active", "awaiting_response": awaiting, "last_fired_at": fired_at})))
     db.commit()
     db.close()
 
@@ -183,25 +183,49 @@ def test_a_running_slash_loop_ticks_prompt_is_not_a_reply(kanban_home):
         assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == tick
 
 
-def _string_constants(path: str) -> dict:
-    import ast
-    tree = ast.parse((Path(__file__).resolve().parents[2] / path).read_text())
-    return {t.id: n.value.value for n in tree.body if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant)
-            for t in n.targets if isinstance(t, ast.Name) and isinstance(n.value.value, str)}
+@pytest.mark.parametrize("prompt", ["/recap", "check the ring card"])
+def test_a_reply_after_an_interrupted_loop_tick_is_the_reply(kanban_home, prompt):
+    """Review 5879164478 (2): an interrupted or errored tick is never completed, so ``awaiting_response`` stays
+    set into the person's next turn. Only the tick's own (first) row is skipped; the person's later row is the
+    reply, for a slash loop and a wakeup-framed loop alike."""
+    now = int(time.time())
+    with kbc.connect_closing() as conn:
+        tid = _asked(conn, now - 100)
+        _loop_state(kanban_home, "chat-1", awaiting=True, fired_at=now - 40, prompt=prompt)
+        tick = ("Run the recap skill now" if prompt.startswith("/")
+                else "[/loop wakeup #2, every 5m]\nRecurring task: check the ring card")
+        _state_db(kanban_home, "chat-1", now - 40, content=tick)
+        reply = _state_db(kanban_home, "chat-1", now - 10, content="left ring")
+        assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == reply
+
+
+def test_an_untyped_row_of_a_wakeup_framed_loop_is_never_skipped_as_the_tick(kanban_home):
+    """The tick-row rule covers slash loops only: a wakeup-framed tick is caught by its frame, so the person's
+    reply right after the fire is never mistaken for the tick."""
+    now = int(time.time())
+    with kbc.connect_closing() as conn:
+        tid = _asked(conn, now - 100)
+        _loop_state(kanban_home, "chat-1", awaiting=True, fired_at=now - 10, prompt="check the ring card")
+        reply = _state_db(kanban_home, "chat-1", now - 9, content="left ring")
+        assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == reply
 
 
 def test_every_registered_synthetic_opening_is_excluded():
     """The exclusion follows the producers' registries (review 5878871802), so a nudge added there is covered."""
     from agent.conversation_compression_scaffolding import _SYNTHETIC_USER_PREFIXES
     from agent.pre_final_gate import HELD_NOTICE, held_nudge
+    from gateway.run import _AUTO_CONTINUE_FALLBACK_PREFIX, _AUTO_CONTINUE_NOTE_PREFIX
+    from hermes_cli import loops
+    from hermes_cli.heartbeat import HEARTBEAT_PROMPT_TEMPLATE
+    from tui_gateway.session_history import _AUTO_CONTINUE_NOTE_PREFIX as TUI_AUTO_CONTINUE_NOTE_PREFIX
     prefixes = krh._synthetic_prefixes()
     openings = [*_SYNTHETIC_USER_PREFIXES, held_nudge("Finish it.", shown=False)]
-    openings += [v for k, v in _string_constants("gateway/run.py").items() if k.startswith("_AUTO_CONTINUE")]
-    openings += [_string_constants("tui_gateway/session_history.py")["_AUTO_CONTINUE_NOTE_PREFIX"]]
-    from hermes_cli import loops
+    openings += [_AUTO_CONTINUE_NOTE_PREFIX, _AUTO_CONTINUE_FALLBACK_PREFIX, TUI_AUTO_CONTINUE_NOTE_PREFIX]
     openings += [loops.WAKEUP_PROMPT_TEMPLATE.format(tick=1, cadence="", prompt="p", until="u"),
-                 loops.WAKEUP_PROMPT_WITH_UNTIL_TEMPLATE.format(tick=1, cadence="", prompt="p", until="u")]
-    assert len(openings) >= 10 and HELD_NOTICE in prefixes
+                 loops.WAKEUP_PROMPT_WITH_UNTIL_TEMPLATE.format(tick=1, cadence="", prompt="p", until="u"),
+                 # Review 5879164478 (3): the TUI /heartbeat tick submits this frame untyped.
+                 HEARTBEAT_PROMPT_TEMPLATE.format(interval="5m", prompt="check the ring card")]
+    assert len(openings) >= 11 and HELD_NOTICE in prefixes
     assert [o for o in openings if not o.lstrip().startswith(prefixes)] == []
 
 

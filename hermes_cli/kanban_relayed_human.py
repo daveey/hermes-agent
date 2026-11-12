@@ -19,8 +19,8 @@ Only a row a person typed is a reply: a plain or ``steer`` user row, never a syn
 card's own ``kanban_notice``, hidden scaffolding, process/delegation completions, internal notifications,
 compaction summaries, ``[System:`` notices or cross-session deliveries). Untyped synthetic rows are recognized
 by their producers' registered openings (runtime scaffolding, the pre-final gate's held-draft notice, auto-continue
-notes, the ``/loop`` wakeup frame) and a running ``/loop`` tick's row; a Kanban notice is always typed
-``kanban_notice``, the no-store fallback included.
+notes, the ``/loop`` wakeup and ``/heartbeat`` frames) and an in-flight slash ``/loop`` tick's first row; a Kanban
+notice is always typed ``kanban_notice``, the no-store fallback included.
 
 The card's holder checks every relay before storing it (``admit``, inside ``add_comment``'s write transaction,
 so the one-relay rule is atomic), a cross-gateway one included: the card asked, the message is not older than
@@ -61,21 +61,30 @@ def _latest_ask(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
 def _synthetic_prefixes() -> tuple[str, ...]:
     """Openings of untyped synthetic user rows, taken from their producers' registries so a nudge registered
     there is excluded here too: compaction/runtime scaffolding (task-list snapshot, background-process notices,
-    ``[System:`` nudges), the pre-final gate's held-draft notice and the ``/loop`` wakeup frame."""
+    ``[System:`` nudges), the pre-final gate's held-draft notice, the ``/loop`` wakeup frame and the
+    ``/heartbeat`` tick frame (the TUI submits both untyped)."""
     from agent.conversation_compression_scaffolding import _SYNTHETIC_USER_PREFIXES
     from agent.pre_final_gate import HELD_NOTICE
+    from hermes_cli.heartbeat import HEARTBEAT_PROMPT_TEMPLATE
     from hermes_cli.loops import WAKEUP_PROMPT_TEMPLATE, WAKEUP_PROMPT_WITH_UNTIL_TEMPLATE
-    loop_frames = {t.split("{", 1)[0] for t in (WAKEUP_PROMPT_TEMPLATE, WAKEUP_PROMPT_WITH_UNTIL_TEMPLATE)}
-    return (*_SYNTHETIC_USER_PREFIXES, HELD_NOTICE, *sorted(loop_frames), *_EXTRA_SYNTHETIC_PREFIXES)
+    frames = {t.split("{", 1)[0] for t in (WAKEUP_PROMPT_TEMPLATE, WAKEUP_PROMPT_WITH_UNTIL_TEMPLATE,
+                                           HEARTBEAT_PROMPT_TEMPLATE)}
+    return (*_SYNTHETIC_USER_PREFIXES, HELD_NOTICE, *sorted(frames), *_EXTRA_SYNTHETIC_PREFIXES)
 
 
-def _loop_tick_since(sdb: sqlite3.Connection, session_id: str) -> Optional[float]:
-    """When this session's ``/loop`` tick fired, while that tick's turn still runs (``awaiting_response``): the
-    tick's row (a slash command's prompt, stored untyped) is the loop's, not a reply. ``None`` otherwise."""
+def _slash_loop_tick_since(sdb: sqlite3.Connection, session_id: str) -> Optional[float]:
+    """When this session's slash-command ``/loop`` tick (``/loop 10m /recap``) fired, while that tick is in flight
+    (``awaiting_response``): it submits the command's prompt as an untyped row, which is the loop's, not a reply.
+    A wakeup-framed loop's row is caught by its frame instead. ``None`` otherwise.
+
+    ``awaiting_response`` outlives an interrupted or errored tick (it is never completed), so only the FIRST
+    untyped row at/after the fire is the tick's; every later one is the person's."""
     try:
         row = sdb.execute("SELECT value FROM state_meta WHERE key = ?", (f"loop:{session_id}",)).fetchone()
         state = json.loads(row[0]) if row and row[0] else None
         if not isinstance(state, dict) or not state.get("awaiting_response"):
+            return None
+        if not str(state.get("prompt") or "").lstrip().startswith("/"):
             return None
         return float(state.get("last_fired_at") or 0) or None
     except (sqlite3.Error, TypeError, ValueError):
@@ -98,12 +107,17 @@ def _latest_user_message(session_id: str, db_path: Optional[str] = None) -> Opti
     prefixes = _synthetic_prefixes()
     try:
         with sqlite3.connect(uri, uri=True, timeout=5) as sdb:
-            loop_since = _loop_tick_since(sdb, session_id)
-            for message_id, at, content, kind in sdb.execute(sql, (session_id, *_TYPED_KINDS)):
+            tick_row = None
+            if (loop_since := _slash_loop_tick_since(sdb, session_id)) is not None:
+                tick_row = sdb.execute(  # the oldest untyped row at/after the fire: the tick's own prompt
+                    "SELECT id FROM messages WHERE session_id = ? AND role = 'user' "
+                    "AND COALESCE(display_kind, '') = '' AND timestamp >= ? ORDER BY id ASC LIMIT 1",
+                    (session_id, loop_since - 1)).fetchone()
+            for message_id, at, content, _kind in sdb.execute(sql, (session_id, *_TYPED_KINDS)):
                 if str(content or "").lstrip().startswith(prefixes):
                     continue
-                if loop_since is not None and not kind and float(at) >= loop_since - 1:
-                    continue  # the running /loop tick's own prompt row
+                if tick_row is not None and int(message_id) == int(tick_row[0]):
+                    continue
                 return int(message_id), float(at)
     except sqlite3.Error:
         return None
