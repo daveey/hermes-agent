@@ -42,8 +42,7 @@ REGISTRY_TTL_S = 60
 REGISTRY_RETRY_S = 5
 # Copy at most this many cards per tick when the dispatcher has no cap.
 DEFAULT_PICKUP_BATCH = 4
-# History copied with a card: enough for the worker's context, without the whole event log.
-EVENT_TAIL = 200
+# Import runs before events so portable run UIDs resolve to the copied runs.
 _CHILD_TABLES = ("task_runs", "task_comments", "task_attachments", "task_events")
 
 _REGISTRY: dict[str, Any] = {"at": None, "value": None, "retry": False}
@@ -404,8 +403,12 @@ def _changes_for(replica: sqlite3.Connection, tid: str, card: sqlite3.Row) -> li
             fields[column] = card[column]
     out = [sync.RemoteChange(0, "tasks", tid, "upsert", fields, int(card["sync_version"] or 0), "", "")]
     for table in _CHILD_TABLES:
-        order = f"id DESC LIMIT {EVENT_TAIL}" if table == "task_events" else "id"
-        for row in replica.execute(f"SELECT * FROM {table} WHERE task_id = ? ORDER BY {order}", (tid,)).fetchall():
+        # Events are policy evidence, not a display tail: queue diagnostics can
+        # bury an authenticated continuation (or its invalidation) arbitrarily
+        # far back. Carry the whole history, in source insertion order, just as
+        # runs/comments travel in full. Descending import also reverses local
+        # event ids and changes consumers that read the latest event by id.
+        for row in replica.execute(f"SELECT * FROM {table} WHERE task_id = ? ORDER BY id", (tid,)):
             if row["uid"] is None:
                 continue
             version = int(row["sync_version"] or 0) if "sync_version" in row.keys() else 0
