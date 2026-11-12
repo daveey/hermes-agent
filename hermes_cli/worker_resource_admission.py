@@ -6,20 +6,39 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 
 from hermes_cli import worker_compute_capacity as capacity
+
+# Short hysteresis writers should not cause prelease/final-gate churn. Keep the
+# wait bounded; final admission also checks its whole-lock budget after sampling.
+PRESSURE_LOCK_TIMEOUT = 0.25
+
+
+def _lock_pressure(lock):
+    import fcntl
+    deadline = time.monotonic() + PRESSURE_LOCK_TIMEOUT
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(0.01, remaining))
 
 
 def _pressure(directory: Path) -> bool:
     """Serialize hysteresis updates, including pre-lease callers across boards.
 
     The observation is taken inside the lock, never replayed from a reporter.
-    Corrupt state or a busy lock refuses rather than erasing a held brake.
+    Corrupt state or a lock still busy after a bounded wait refuses rather than
+    erasing a held brake.
     """
-    import fcntl
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / 'pressure.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _lock_pressure(lock)
         path = directory / 'pressure.json'
         try:
             state = json.loads(path.read_text(encoding='utf-8'))

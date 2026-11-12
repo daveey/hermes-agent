@@ -159,6 +159,60 @@ def test_worker_only_final_deadline_and_budget(worker_rig, monkeypatch, expired,
     assert reason == ('worker_resources_unknown' if expired or slow else None)
 
 
+def test_pressure_waits_for_short_writer_and_keeps_hysteresis(worker_rig, monkeypatch):
+    import fcntl
+    import threading
+    from hermes_cli.worker_resource_admission import refusal
+    rig, _ = worker_rig
+    directory = rig.home / 'worker-resources'
+    directory.mkdir(exist_ok=True)
+    (directory / 'pressure.json').write_text(json.dumps({'held': True}))
+    monkeypatch.setattr('os.getloadavg', lambda: (20, 0, 0))
+    observed = threading.Event()
+    real_flock = fcntl.flock
+    def flock(fd, flags):
+        try:
+            return real_flock(fd, flags)
+        except BlockingIOError:
+            observed.set()
+            raise
+    monkeypatch.setattr(fcntl, 'flock', flock)
+    with (directory / 'pressure.lock').open('a') as lock:
+        real_flock(lock, fcntl.LOCK_EX)
+        result = []
+        thread = threading.Thread(target=lambda: result.append(refusal()))
+        thread.start()
+        try:
+            assert observed.wait(2)
+        finally:
+            real_flock(lock, fcntl.LOCK_UN)
+            thread.join(2)
+    assert not thread.is_alive()
+    assert result == ['worker_load_pressure']
+    assert json.loads((directory / 'pressure.json').read_text())['held'] is True
+
+
+def test_pressure_contention_timeout_preserves_state(worker_rig, monkeypatch):
+    import fcntl
+    import time
+    from hermes_cli import worker_resource_admission as resources
+    rig, _ = worker_rig
+    directory = rig.home / 'worker-resources'
+    directory.mkdir(exist_ok=True)
+    path = directory / 'pressure.json'
+    original = json.dumps({'held': True})
+    path.write_text(original)
+    monkeypatch.setattr(resources, 'PRESSURE_LOCK_TIMEOUT', 0.05)
+    with (directory / 'pressure.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        start = time.monotonic()
+        assert resources.refusal() == 'worker_resources_unknown'
+        assert 0.04 <= time.monotonic() - start < 1
+    assert path.read_text() == original
+    monkeypatch.setattr('os.getloadavg', lambda: (16, 0, 0))
+    assert resources.refusal() is None
+
+
 def test_policy_enabled_after_lock_selection_refuses(worker_rig, monkeypatch):
     from hermes_cli import machine_cpu_metrics as cpu
     rig, _ = worker_rig

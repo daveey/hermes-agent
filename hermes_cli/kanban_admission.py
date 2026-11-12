@@ -349,13 +349,17 @@ def claim_transaction(conn, *, task_id=None, gate=None):
                 # installation's updater fence and avoid taking one lock twice.
                 roots = [installation]
                 worker = capacity.worker_enabled()
-                if worker:
+                from hermes_cli import worker_board_retirement as retirement
+                pending_retirement = retirement.pending(conn)
+                if worker or pending_retirement is not None:
                     account = capacity.policy_root().resolve()
                     if account != installation:
                         roots.insert(0, account)
                 fences = [stack.enter_context(admission_lock(home, timeout=0)) for home in roots]
                 held = any(is_held(root) for root in fences)
                 waiting = not held and any(turns_waiting(root) for root in fences)
+                if not held and not waiting and pending_retirement is not None:
+                    retirement.discard(pending_retirement)
                 if not held and not waiting and worker:
                     from hermes_cli.worker_account_boards import register
                     register(conn)

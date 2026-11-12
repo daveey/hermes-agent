@@ -23,6 +23,11 @@ def register(conn) -> None:
     if not raw:
         raise ValueError('worker admission requires a file-backed board')
     path = Path(raw).resolve(strict=True)
+    from hermes_cli.worker_board_retirement import record_paths, discard
+    # A fresh admission invalidates any interrupted pre-rename idle proof.
+    # The caller retains the account fence through the subsequent claim.
+    _, intent = record_paths(path)
+    discard(intent)
     directory = capacity.policy_root() / 'worker-resources' / 'boards'
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / (hashlib.sha256(str(path).encode()).hexdigest() + '.json')
@@ -84,15 +89,20 @@ def removing(path: Path):
         except (AdmissionBusy, sqlite3.Error) as exc:
             raise ValueError(f'board busy or unreadable; retry removal: {exc}') from exc
         # Claims cannot pass their final gate until after removal and retirement.
+        from hermes_cli import worker_board_retirement as retirement
+        _, intent = retirement.record_paths(path)
+        if verify:
+            retirement.prepare(path)
         succeeded = False
         try:
             yield
             succeeded = True
         finally:
-            # Rename can succeed before a later tombstone write fails. The
-            # fenced idle proof also permits retirement in that partial state.
+            # Keep the durable proof if record retirement is interrupted after
+            # rename. A later explicit recovery must take the account fence.
             if succeeded or (verify and not path.exists()):
-                record.unlink(missing_ok=True)
+                retirement.discard(record)
+            retirement.discard(intent)
 
 
 def paths() -> list[Path]:
