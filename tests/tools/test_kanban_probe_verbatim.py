@@ -83,6 +83,7 @@ def test_schedule_stores_idempotency_key_probe_byte_identical(worker_env):
     "OPENAI_API_KEY=sk-proj-" + "Ab3dE" * 8,
     "api_key='sk-" + "Zq9" * 12 + "'",
     "AWS_SECRET_ACCESS_KEY=" + "wJalrXUtnFEMI/K7MDENG/bPxRfiCY" + "EXAMPLEKEY",
+    "PRIMARY_KEY=" + "Zm9vYmFyYmF6cXV4" * 5 + "K3Rlc3Q=",  # Azure shared-access key: not an identifier name
 ])
 def test_block_with_inline_secret_is_refused_not_masked(worker_env, secret_assignment):
     probe = f"{secret_assignment} curl -sf https://api.example.com/ready"
