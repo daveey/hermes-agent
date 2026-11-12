@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-MAX_OBSERVERS = 4  # board files with a retained observer connection
+MAX_OBSERVERS = 16  # board files with a retained observer (GET /boards observes every live board)
 MAX_ENTRIES = 8  # materialized row sets (board x query params)
 OBSERVER_IDLE_S = 600.0  # an observer unused this long is closed (archived/removed boards)
 

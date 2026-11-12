@@ -1548,7 +1548,8 @@ def list_boards(include_archived: bool = Query(False)):
     """Every board on disk with task counts and the active slug."""
     boards = kanban_db.list_boards(include_archived=include_archived)
     current = kanban_db.get_current_board()
-    proj_map = _projects_by_id()
+    # The switcher polls this: open the projects db only when a listed board is project-scoped.
+    proj_map = _projects_by_id() if any(b.get("project_id") for b in boards) else {}
     for b in boards:
         b["is_current"] = (b["slug"] == current)
         b["counts"] = _board_counts(b["slug"])
