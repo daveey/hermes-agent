@@ -181,16 +181,30 @@ def hold_until(conn, task_id, now=None):
     return max(s['until'] for s in outstanding) if outstanding else None
 
 
+def _strong_class(base):
+    """True for an unpinned strong-tier class route (``retry_after_*``/``pattern:*``/``review`` on
+    ``class:<x>``/``auto``): the worker would allocate any route of that class, so a wall on one provider
+    leaves the class's other providers open to it. [daveey]"""
+    from agent.model_routing import is_class_selector
+    model, provider, reason = base
+    return (isinstance(model, str) and is_class_selector(model) and str(provider or 'auto').strip().lower() == 'auto'
+            and (reason == 'review' or str(reason).startswith(('retry_after_', 'pattern:'))))
+
+
 def alternate_route(conn, task, walls, base, now):
-    """Non-allocating probe using the worker's billing/capability eligibility."""
+    """Non-allocating probe using the worker's billing/capability eligibility.
+
+    A strong-tier class route (``_strong_class``) also requires the route's provider to serve on this
+    gateway's live pool: the strong tier is chosen for its strength, so it moves only to proven room."""
     from agent.model_routing import eligible_routes, validate_policy, ModelRoutingError
     from agent.model_routing_agent import class_requirements
     from hermes_cli.config import is_provider_enabled
     from hermes_cli.kanban_model_assignment import _assignee_config
-    from hermes_cli.kanban_provider_walls import active_walls
+    from hermes_cli.kanban_provider_walls import active_walls, live_pool_serving
     model, _provider, reason = base
-    if (task.model_override or task.provider_override or reason not in {'default', 'off', 'profile_out_of_scope'}
-            or not walls):
+    strong = _strong_class(base)
+    if (task.model_override or task.provider_override
+            or (reason not in {'default', 'off', 'profile_out_of_scope'} and not strong) or not walls):
         return None
     config = _assignee_config(task.assignee) or {}
     policy = config.get('model_routing') or {}
@@ -215,6 +229,8 @@ def alternate_route(conn, task, walls, base, now):
     providers = config.get('providers') or {}
     routes = eligible_routes(policy, level, class_requirements(config), eligible=lambda r: (
         r['provider'] not in walled and is_provider_enabled(providers.get(r['provider'], {}))))
+    if strong:
+        routes = [r for r in routes if live_pool_serving(r['provider'], r['model'])]
     return (routes[0]['model'], routes[0]['provider']) if routes else None
 
 
@@ -319,8 +335,10 @@ def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
     except Exception:
         logger.warning('kanban quota: route resolve failed for %s; holding', task.id, exc_info=True)
         return held, None
-    if lane == 'review' or base[2] in ('review_unpinned', 'review_override', 'review_override_refused') or unknown:
-        # An unrecorded wall may be any provider: no route can be proven to avoid it.
+    if (lane == 'review' and not _strong_class(base)) or base[2] in (
+            'review_unpinned', 'review_override', 'review_override_refused') or unknown:
+        # An unrecorded wall may be any provider: no route can be proven to avoid it. A legacy unpinned
+        # review on a class route (reason ``review``) chose no reviewer, so another route of its class may take it.
         return held, None
     try:
         if base[2] == 'pinned':
