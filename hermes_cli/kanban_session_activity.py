@@ -39,6 +39,7 @@ from hermes_cli.kanban_session_activity_attention import run_checks as _run_done
 from hermes_cli.kanban_session_activity_card_details import _add_card_details
 from hermes_cli.kanban_watch import not_watch_sql as _not_watch
 from hermes_cli.kanban_links_refresh import ScopeRefresher
+from hermes_cli import kanban_links_narrow as _links_narrow
 import contextlib
 import json
 import logging
@@ -1006,15 +1007,25 @@ def _links_lookup(scope: tuple, stale_ok: bool) -> tuple:
         _refresh_links_in_background(scope)
         return hit
     fingerprint = _links_fingerprint()
-    if hit is not None and hit[2] == fingerprint and time.monotonic() < hit[0]:
+    if hit is not None and _links_fresh(hit, fingerprint):
         return hit
     with _links_lock:
         hit = _links_cache.get(scope)
-        if hit is not None and hit[2] == fingerprint and time.monotonic() < hit[0]:
+        if hit is not None and _links_fresh(hit, fingerprint):
             return hit
         if stale_ok and hit is not None:
             return hit
-        return _store_links(scope, fingerprint)
+        return _publish_links(scope, fingerprint)
+
+
+def _links_fresh(hit: tuple, fingerprint: tuple) -> bool:
+    """Within its max age, and read under ``fingerprint`` except for boards it never read (``kanban_links_narrow``)."""
+    return time.monotonic() < hit[0] and (hit[2] == fingerprint or _links_narrow.matches(hit, fingerprint))
+
+
+def _publish_links(scope: tuple, fingerprint: tuple) -> tuple:
+    projector = _project_remote_links  # the one ``_store_links`` runs: a replaced projection declares no reads
+    return _links_narrow.remember(_store_links(scope, fingerprint), projector, _board_db_paths(), _board_slug)
 
 
 def _store_links(scope: tuple, fingerprint: tuple) -> tuple:
@@ -1050,8 +1061,8 @@ def _refresh_links_scope(scope: tuple) -> None:
             return
         fingerprint = _links_fingerprint()
         hit = _links_cache.get(scope)
-        if hit is None or hit[2] != fingerprint or time.monotonic() >= hit[0]:
-            _store_links(scope, fingerprint)
+        if hit is None or not _links_fresh(hit, fingerprint):
+            _publish_links(scope, fingerprint)
 
 
 _links_refresher = ScopeRefresher(lambda scope: _refresh_links_scope(scope), _LINKS_SCOPE_CAP)
@@ -1129,6 +1140,10 @@ def _project_remote_links() -> list[dict[str, Any]]:
     finally:
         for conn in tip_conn:
             _close_quietly(conn)
+
+
+# Local boards are read only for this origin's own rows, each at its row's board (kanban_links_narrow). [daveey]
+setattr(_project_remote_links, _links_narrow.DECLARES_BOARD_READS, True)
 
 
 def _legacy_remote_links() -> list[dict[str, Any]]:
@@ -1677,7 +1692,7 @@ def attention_task_counts(now: float | None = None) -> dict[str, int]:
     pairs: set[tuple[str, str]] = set()
     for path in paths:
         try:
-            recent = _read_recent_done(path, since)
+            recent = _recent_done.memoized(path, since, _read_recent_done, _revalidate.board_memo_key, scope)  # [daveey]
         except sqlite3.Error as exc:
             _log.debug("kanban attention read failed for %s: %s", path, exc)
             continue
@@ -1923,12 +1938,14 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
     _last_annotation.clear()
     _frozen_parts.clear()
     _bounded.reset()
+    _recent_done.reset()
     _annotation_copy.reset()
     with _pairs_lock:
         _board_memo.clear()
     _busy.reset()
     with _links_lock:
         _links_cache.clear()
+        _links_narrow.reset()
     with _cache_lock:
         _cache = None
         _count_scopes.reset_locked()

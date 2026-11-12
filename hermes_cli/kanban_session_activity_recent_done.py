@@ -5,6 +5,7 @@ Split from ``kanban_session_activity`` (its file cap); ``_read_recent_done`` the
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -42,3 +43,44 @@ def read_recent_done(path: Path, since: float, counted_sub_clause: Callable[[sql
         card.pop("chat_id", None)
         out.append((sid, {**card, "board": board, "board_path": str(path)}))
     return out
+
+
+# [daveey] Per (origin scope, board): (memo key, since, rows) of its last read. The attention pass re-read every
+# board whenever any board's revision moved; a board whose key (``kanban_session_activity_revalidate.board_memo_key``:
+# content revision, or stat plus the reader's data_version) is unchanged holds the same done cards, and a later
+# cut-off only drops rows. Unknown or busy keys equal nothing, so they always read (t_01a1cee98aaa8db1).
+_memo: dict[tuple, tuple[Any, float, list[tuple[str, dict[str, Any]]]]] = {}
+_memo_lock = threading.Lock()
+MEMO_MAX = 256
+
+
+def memoized(path: Path, since: float, read: Callable[[Path, float], list[tuple[str, dict[str, Any]]]],
+             memo_key: Callable[[Path], Any], scope: tuple = ()) -> list[tuple[str, dict[str, Any]]]:
+    """``read(path, since)``, served from this scope's last read of the board while its ``memo_key`` is unchanged and
+    ``since`` is no earlier than that read's. Returns fresh card dicts (callers and checks may hold them)."""
+    slot = (scope, str(path))
+    key = memo_key(path)  # before the read: a commit during it moves the key for the next call
+    with _memo_lock:
+        hit = _memo.get(slot)
+    if hit is not None and hit[0] == key and since >= hit[1]:
+        kept: list[tuple[str, dict[str, Any]]] = []
+        for sid, card in hit[2]:
+            at = card.get("completed_at")
+            if not isinstance(at, (int, float)) or isinstance(at, bool):
+                break  # a row without a comparable cut-off: read again
+            if at >= since:
+                kept.append((sid, dict(card)))
+        else:
+            return kept
+    rows = read(path, since)
+    with _memo_lock:
+        _memo.pop(slot, None)
+        _memo[slot] = (key, since, [(sid, dict(card)) for sid, card in rows])
+        while len(_memo) > MEMO_MAX:
+            del _memo[next(iter(_memo))]
+    return rows
+
+
+def reset() -> None:
+    with _memo_lock:
+        _memo.clear()

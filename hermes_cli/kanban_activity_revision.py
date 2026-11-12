@@ -10,7 +10,10 @@ Each writer (``kanban_db_connect`` init) installs ``kanban_activity_revision``: 
 every insert, delete, or update of a read column of the tables the annotation reads. Triggers run inside the writer's
 own transaction, so a committed task write is visible in the counter to the next reader (read-your-writes). Updates
 that only touch bookkeeping columns (``BOOKKEEPING_COLUMNS``: claim/lease/heartbeat/sync clocks, notifier in-flight
-marks) do not bump it; no activity reader selects those columns.
+marks) do not bump it; no activity reader selects those columns. Neither do inserts of ``UNREAD_EVENT_KINDS``
+events (heartbeats), whose only reader (the card-details strip) is never cached on this key. A writer of an older
+version reinstalls its unconditional insert trigger on init (``ensure_revision`` repairs any SQL mismatch, bumping):
+heartbeats then bump again, a superset, and readers of either version only check the trigger names.
 
 Readers (``content_key``) only trust the counter when every table they read that exists in the file carries all three
 of its triggers; otherwise (older writer, dropped trigger, rebuilt file) they fall back to the file's stat plus a
@@ -50,6 +53,12 @@ BOOKKEEPING_COLUMNS: dict[str, frozenset[str]] = {
     "kanban_notify_subs": frozenset({"inflight_from", "inflight_pid", "inflight_start", "inflight_at",
                                      "last_ping_event_id"}),
 }
+# [daveey] Event kinds no keyed reader reads: a heartbeat is a liveness signal (``heartbeat_worker``: ~18 of the hub
+# board's ~39 bumps a minute) that only the card-details strip shows, and that read is never cached on this key
+# (``_add_card_details`` runs on every ``session_tasks`` call). Their inserts do not bump the counter, so a heartbeat
+# no longer re-reads every board's counts, the links projection and the attention pass (t_01a1cee98aaa8db1). Every
+# other kind, and any update or delete of an event row, still bumps.
+UNREAD_EVENT_KINDS = ("heartbeat",)
 _BUMP = f"UPDATE {REVISION_TABLE} SET revision = revision + 1 WHERE id = 1;"
 
 
@@ -75,7 +84,10 @@ def wanted_triggers(conn: sqlite3.Connection, tables: Iterable[str]) -> dict[str
             continue  # table absent: nothing to read, nothing to watch
         for op in ("INSERT", "DELETE"):
             name = f"{PREFIX}{table}_{op.lower()}"
-            out[name] = f"CREATE TRIGGER {name} AFTER {op} ON {_quote(table)} BEGIN {_BUMP} END"
+            when = ""
+            if op == "INSERT" and table == "task_events" and "kind" in columns:
+                when = " WHEN COALESCE(NEW.kind, '') NOT IN ({})".format(", ".join(f"'{k}'" for k in UNREAD_EVENT_KINDS))
+            out[name] = f"CREATE TRIGGER {name} AFTER {op} ON {_quote(table)}{when} BEGIN {_BUMP} END"
         read = [c for c in columns if c not in BOOKKEEPING_COLUMNS.get(table, frozenset())]
         changed = " OR ".join(f"OLD.{_quote(c)} IS NOT NEW.{_quote(c)}" for c in read)
         name = f"{PREFIX}{table}_update"
