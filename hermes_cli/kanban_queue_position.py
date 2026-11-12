@@ -198,7 +198,7 @@ def _position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Op
         elsewhere = None
     place = {"lane": "local", "ahead": _ahead(conn, task), "running": running, "limit": limit, "approximate": True,
              "board": khc.board_of(conn) or board, "observed_at": int(time.time()),
-             **queue_fields(limit, getattr(task, "admission_class", "normal"))}
+             **queue_fields(limit, getattr(task, "admission_class", "normal"), conn, task.id)}
     if elsewhere:  # only when other boards' cards rank ahead: the single-board payload keeps its shape
         place["ahead_other_boards"] = elsewhere
     from hermes_cli import kanban_dispatch_skip as skips
@@ -333,6 +333,10 @@ def local_words(place: dict[str, Any]) -> str:
         census = ", ".join(f"{name} {pools[name] if pools[name] is not None else '?'}/"
                            f"{pools[name + '_cap'] if pools[name + '_cap'] is not None else '?'}"
                            for name in ("regular", "priority"))
+        scored = place.get("admission_score")
+        if scored:
+            from hermes_cli.kanban_admission_score import summary
+            census += "; " + summary(scored)
         return (f"{words}, {census}; class {place['admission_class']}. "
                 "Queued, not stuck: check class/placement and available capacity; priority slots are marked-only. "
                 "Do not run its work outside the dispatcher")

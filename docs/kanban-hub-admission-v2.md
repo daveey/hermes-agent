@@ -27,11 +27,15 @@ Core now reports the policy and both pool counts from one root configuration
 snapshot and one census, rechecks configuration after CPU sampling, and removes
 the entire new tuple on an old Board's atomic 400 compatibility retry.
 
-Still pending: queue notes, complete Board adversarial coverage and delivery,
-composed courier receiver compatibility, full malformed-config/receipt tests, sync replay
-coverage, guard mutations, scoring, reporting and live activation. Do not enable
-this incomplete implementation. `priority_slots` is currently opt-in (absent = 0)
-until the full Board-compatible rollout is ready; the enabled-hub target is 3.
+Phase 2 is implemented on the same branch: `hermes_cli/kanban_admission_score.py`
+(`rank`), score-ordered lanes on opted-in hubs (marked-first partition kept), the
+queue-note score summary, `hermes kanban queue [--explain ID] [--json]` and the
+capacity effect report `hermes kanban queue --report [--days N]`.
+
+Still pending: delivery (exact-head review, CI, Board deploy before core
+activation), read-only old/new replay over real boards, natural hub install and
+live activation. Do not enable before the Board side is deployed. `priority_slots`
+is opt-in (absent = 0); the enabled-hub target is 3.
 
 ## Policy and rollout
 
@@ -148,21 +152,32 @@ its maximum contribution is 1500 after ten hours. Ties use readiness timestamp,
 then task ID. Scoring is read-only and never rewrites stored priorities.
 
 Score selects order only; it cannot bypass placement, either pool cap, CPU,
-memory, origin cap or update holds. Workers keep plain dispatch order.
+memory, origin cap or update holds. Workers keep plain dispatch order. On the
+opted-in hub, lanes are ranked by score and then stably partitioned marked-first,
+so the class weight orders within a group and never undoes the pool partition.
+An unreadable replica or invalid weights falls back to priority order (logged).
+`rank(conn, rows, *, now_ms=None, weights=None)` is the shared contract for the
+foreign-pickup stage: one call is one read-only snapshot over the full replica
+(local rows and a local child's edge set override it), nothing is cached.
 
-`queue_note` and `hermes kanban queue --explain ID` show component values, position,
-placement, current class, applicable refusal and `regular N/7, priority M/3`.
+`queue_note` appends `score T (priority P + class C + unblock U + age A - failures F)`
+on an opted-in hub. `hermes kanban queue --explain ID` prints the lane position,
+`score T = priority P + class W*r + unblock W*d + age W*a - failures W*f`, the
+pools line `regular N/7, priority M/3` and the cards ahead; off the hub it says the
+score is not used (plain priority). `hermes kanban queue --json` lists both lanes.
 Ready-wait notices recommend class/placement corrections, never priority bidding.
 
 ## Effect reporting
 
-A weekly hub report lists capacity claims with their stated frees metric,
-claim-time and post-completion observations, ready-wait p50 and worker free slots.
-Unknown/missing/incomparable data is explicitly unknown, not a success or failure.
-Before implementation of automatic class loss, encode and test a deterministic
-repeated-no-effect policy using comparable observations; retain auditable origin,
-measurement window and evidence. Do not demote creators merely because unrelated
-queue load rose. Reporting must run on the hub, not a sleeping Mac.
+`hermes kanban queue --report [--days 7] [--json]` (run on the hub) lists capacity
+cards completed in the window with their `frees:` claim and claim-time origin, and
+the local ready-wait p50 (claim start minus that ready interval's start) of other
+cards claimed in the 24 h before and after completion. With fewer than 3 claims on
+either side the effect is `unknown`, never a success or failure; `moved` means
+after <= 0.9 * before, otherwise `no_effect`. An origin with at least 2 measured
+no-effect cards and none moved is flagged `revoke_recommended`; the report only
+recommends, an operator acts (`hermes kanban edit <id> --class normal`). Worker
+free slots are not yet part of the report.
 
 ## Acceptance
 

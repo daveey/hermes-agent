@@ -11,6 +11,7 @@ import pytest
 
 from hermes_cli import admission_fence as af
 from hermes_cli import kanban_admission as ka
+from hermes_cli import kanban_admission_score as score
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
@@ -987,3 +988,347 @@ def test_claim_inside_the_hold_budget_still_admits(board, monkeypatch):
     monkeypatch.setattr(cm, "sample", fake_sample(10.0, check=lambda: time.sleep(0.1)))  # health: allow HX013 -- a short stand-in sample
     t = task(conn)
     assert kb.claim_task(conn, t) is not None
+
+
+# --- Phase 2: deterministic admission score over the full replica ---------------------------------------
+
+def ready(conn, title, priority=0, created_at=None, admission_class="normal", failures=0):
+    tid = task(conn, title=title)
+    fields = {"priority": priority}
+    if admission_class != "normal":
+        fields["admission_class"] = admission_class
+        if admission_class == "capacity":
+            fields["admission_frees"] = "frees: worker slots"
+    kb.edit_task(conn, tid, **fields)
+    with kb.write_txn(conn):
+        if created_at is not None:
+            conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (created_at, tid))
+            conn.execute("UPDATE task_events SET created_at=? WHERE task_id=?", (created_at, tid))
+        conn.execute("UPDATE tasks SET consecutive_failures=? WHERE id=?", (failures, tid))
+    return tid
+
+
+def rows(conn, *ids):
+    marks = ",".join("?" for _ in ids)
+    return conn.execute(f"SELECT id, assignee, admission_class FROM tasks WHERE id IN ({marks})", ids).fetchall()
+
+
+def order(conn, now_s, *ids, weights=None):
+    return [row["id"] for row, _ in score.rank(conn, rows(conn, *ids), now_ms=now_s * 1000, weights=weights)]
+
+
+def test_breakdown_sums_every_component_with_default_weights(board):
+    conn, _home = board
+    now = 1_800_000_000
+    tid = ready(conn, "parent", priority=300, created_at=now - 35 * 60, admission_class="capacity", failures=1)
+    for index in range(3):
+        child = task(conn, title=f"child {index}")
+        kb.link_tasks(conn, tid, child)
+    (row, parts), = score.rank(conn, rows(conn, tid), now_ms=now * 1000)
+    assert row["id"] == tid
+    assert (parts.effective_priority, parts.class_rank, parts.descendants, parts.age_buckets, parts.failures) == \
+        (300, 1, 3, 3, 1)
+    assert parts.total == 300 + 500 + 25 * 3 + 25 * 3 - 100
+
+
+def test_capacity_card_outranks_higher_priority_normal_card(board):
+    conn, _home = board
+    now = 1_800_000_000
+    normal = ready(conn, "normal", priority=400, created_at=now)
+    capacity = ready(conn, "capacity", priority=0, created_at=now, admission_class="capacity")
+    assert order(conn, now, normal, capacity) == [capacity, normal]
+
+
+def test_descendants_raise_score_and_are_capped(board):
+    conn, _home = board
+    now = 1_800_000_000
+    plain = ready(conn, "plain", priority=100, created_at=now - 1)
+    parent = ready(conn, "parent", priority=60, created_at=now)
+    for index in range(25):
+        kb.link_tasks(conn, parent, task(conn, title=f"child {index}"))
+    assert order(conn, now, plain, parent) == [parent, plain]
+    (_row, parts), = score.rank(conn, rows(conn, parent), now_ms=now * 1000)
+    assert parts.descendants == 20
+
+
+def test_aging_lifts_starved_card_within_bound(board):
+    conn, _home = board
+    now = 1_800_000_000
+    starved = ready(conn, "starved", priority=0, created_at=now - 10 * 3600)
+    fresh = ready(conn, "fresh", priority=1000, created_at=now)
+    (_row, parts), = score.rank(conn, rows(conn, starved), now_ms=now * 1000)
+    assert parts.age_buckets == 60
+    # 60 buckets * 25 = 1500 > the 1000 priority cap: ten hours lift any card past fresh capped priority.
+    assert order(conn, now, fresh, starved) == [starved, fresh]
+    # The bound: aging never exceeds 60 buckets, so an older card gains nothing more.
+    older = ready(conn, "older", priority=0, created_at=now - 100 * 3600)
+    (_row, parts), = score.rank(conn, rows(conn, older), now_ms=now * 1000)
+    assert parts.age_buckets == 60
+
+
+def test_age_counts_current_ready_interval_not_card_age(board):
+    conn, _home = board
+    now = 1_800_000_000
+    tid = ready(conn, "requeued", created_at=now - 10 * 3600)
+    with kb.write_txn(conn):
+        kb._append_event(conn, tid, "promoted", {})
+        conn.execute("UPDATE task_events SET created_at=? WHERE task_id=? AND kind='promoted'", (now - 25 * 60, tid))
+    (_row, parts), = score.rank(conn, rows(conn, tid), now_ms=now * 1000)
+    assert parts.age_buckets == 2
+    assert parts.ready_since == now - 25 * 60
+
+
+def test_consecutive_failures_lower_the_score(board):
+    conn, _home = board
+    now = 1_800_000_000
+    failing = ready(conn, "failing", priority=150, created_at=now - 1, failures=2)
+    steady = ready(conn, "steady", priority=0, created_at=now)
+    assert order(conn, now, failing, steady) == [steady, failing]
+    (_row, parts), = score.rank(conn, rows(conn, failing), now_ms=now * 1000)
+    assert (parts.failures, parts.total) == (2, 150 - 200)
+
+
+def test_equal_scores_break_on_ready_start_then_id(board):
+    conn, _home = board
+    now = 1_800_000_000
+    later = ready(conn, "later", created_at=now - 60)
+    earlier = ready(conn, "earlier", created_at=now - 120)
+    assert order(conn, now, later, earlier) == [earlier, later]
+    twin_a, twin_b = ready(conn, "a", created_at=now - 60), ready(conn, "b", created_at=now - 60)
+    assert order(conn, now, twin_b, twin_a) == sorted([twin_a, twin_b])
+
+
+def test_configured_weights_are_validated_and_applied(board):
+    conn, home = board
+    now = 1_800_000_000
+    normal = ready(conn, "normal", priority=400, created_at=now)
+    capacity = ready(conn, "capacity", created_at=now, admission_class="capacity")
+    configure(home, limit=None)
+    with (home / "config.yaml").open("a") as config:
+        config.write("  admission:\n    weights:\n      class: 100\n")
+    assert score.configured_weights() == {**score.DEFAULT_WEIGHTS, "class": 100}
+    assert [row["id"] for row, _ in score.rank(conn, rows(conn, normal, capacity), now_ms=now * 1000)] == \
+        [normal, capacity]
+
+
+@pytest.mark.parametrize("weights,reason", [
+    ([], "admission weights must be a mapping"),
+    ({"bump": 1}, "unknown admission weight(s): bump"),
+    ({"age": -1}, "admission weight age must be a nonnegative number"),
+    ({"age": True}, "admission weight age must be a nonnegative number"),
+    ({"age": "25"}, "admission weight age must be a nonnegative number"),
+    ({"age": float("inf")}, "admission weight age must be a nonnegative number"),
+    ({"age": float("nan")}, "admission weight age must be a nonnegative number"),
+])
+def test_invalid_weights_refuse_with_their_own_reason(weights, reason):
+    with pytest.raises(ValueError) as error:
+        score.validate_weights(weights)
+    assert str(error.value) == reason
+
+
+@pytest.fixture
+def replica(board, tmp_path, monkeypatch):
+    from hermes_cli import kanban_worker_node as wn
+    path = tmp_path / "replica.db"
+    remote = kbc.connect(path)
+    monkeypatch.setattr(sync, "board_mode", lambda conn: "primary")
+    monkeypatch.setattr(wn, "open_replica", lambda conn: kbc.connect(path))
+    try:
+        yield remote
+    finally:
+        remote.close()
+
+
+def _copy_task(remote, conn, tid):
+    row = conn.execute("SELECT id, title, assignee, priority, status, created_at FROM tasks WHERE id=?",
+                       (tid,)).fetchone()
+    with kb.write_txn(remote):
+        remote.execute("INSERT INTO tasks (id, title, assignee, priority, status, created_at) VALUES (?,?,?,?,?,?)",
+                       tuple(row))
+
+
+def test_replica_descendants_count_and_local_unlink_or_completion_wins(board, replica):
+    conn, _home = board
+    now = 1_800_000_000
+    parent = ready(conn, "imported parent", priority=0, created_at=now)
+    local_work = ready(conn, "local", priority=100, created_at=now)
+    _copy_task(replica, conn, parent)
+    waiter = kb.create_task(replica, title="remote waiter", assignee="default", priority=900, parents=[parent])
+    assert order(conn, now, local_work, parent) == [parent, local_work]
+    (_row, parts), = score.rank(conn, rows(conn, parent), now_ms=now * 1000)
+    assert (parts.effective_priority, parts.descendants) == (900, 1)
+    # A local edge set for the child overrides the replica edges: after a local unlink the waiter donates nothing.
+    _copy_task(conn, replica, waiter)
+    assert order(conn, now, local_work, parent) == [local_work, parent]
+    # Re-linked locally, then completed locally: a done child is no longer an open descendant.
+    kb.link_tasks(conn, parent, waiter)
+    assert order(conn, now, local_work, parent) == [parent, local_work]
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (waiter,))
+    assert order(conn, now, local_work, parent) == [local_work, parent]
+    assert conn.execute("SELECT priority FROM tasks WHERE id=?", (parent,)).fetchone()[0] == 0
+
+
+def _enable(home):
+    configure(home, cap=7)
+    with (home / "config.yaml").open("a") as config:
+        config.write("    priority_slots: 3\n")
+
+
+def test_opted_in_hub_lane_order_uses_score_and_keeps_marked_first(board):
+    from hermes_cli import kanban_admission_pools as pools
+    conn, home = board
+    now = int(time.time())
+    starved = ready(conn, "starved", priority=0, created_at=now - 11 * 3600)
+    fresh = ready(conn, "fresh", priority=1000, created_at=now)
+    marked = ready(conn, "marked", priority=0, created_at=now, admission_class="capacity")
+    _enable(home)
+    assert [r["id"] for r in pools.lane_rows(conn, "ready")] == [marked, starved, fresh]
+
+
+@pytest.mark.parametrize("enabled,slots", [(False, 3), (True, 0)])
+def test_worker_lane_order_keeps_plain_priority(board, enabled, slots):
+    from hermes_cli import kanban_admission_pools as pools
+    conn, home = board
+    now = int(time.time())
+    starved = ready(conn, "starved", priority=0, created_at=now - 11 * 3600)
+    fresh = ready(conn, "fresh", priority=1000, created_at=now)
+    configure(home, cap=7, limit=50 if enabled else None)
+    with (home / "config.yaml").open("a") as config:
+        config.write(("" if enabled else "  admission:\n") + f"    priority_slots: {slots}\n")
+    assert [r["id"] for r in pools.lane_rows(conn, "ready")] == [fresh, starved]
+
+
+def _explain_board(conn, home, monkeypatch):
+    now = int(time.time())
+    configure(home, limit=None)
+    assert kb.claim_task(conn, task(conn, title="regular running"))
+    _enable(home)
+    advisory(home)
+    monkeypatch.setattr(cm, "sample", fake_sample(10))
+    fresh = ready(conn, "fresh", priority=900, created_at=now)
+    starved = ready(conn, "starved", priority=0, created_at=now - 11 * 3600)
+    marked = ready(conn, "marked", priority=0, created_at=now - 25 * 60, admission_class="capacity")
+    return fresh, starved, marked
+
+
+def test_queue_note_carries_score_breakdown_on_opted_in_hub(board, monkeypatch):
+    from hermes_cli import kanban_queue_position as qp
+    conn, home = board
+    fresh, _starved, marked = _explain_board(conn, home, monkeypatch)
+    monkeypatch.setattr(qp, "_running_and_limit", lambda *a: (1, 7))
+    place = qp.read(conn, kb.get_task(conn, fresh))
+    assert place["ahead"] == 2
+    assert place["admission_score"]["effective_priority"] == 900
+    note = qp.describe(place)
+    assert "score 900 (priority 900 + class 0 + unblock 0 + age 0 - failures 0)" in note
+    assert "bump" not in note
+    assert qp.read(conn, kb.get_task(conn, marked))["admission_score"]["class_rank"] == 1
+
+
+def test_queue_explain_prints_breakdown_position_and_pools(board, monkeypatch):
+    from hermes_cli import kanban as kc
+    conn, home = board
+    fresh, starved, marked = _explain_board(conn, home, monkeypatch)
+    text = kc.run_slash(f"queue --explain {starved}")
+    assert f"{starved}: ready lane position 2/3" in text
+    assert "score 1500 = priority 0 + class 500*0 + unblock 25*0 + age 25*60 - failures 100*0" in text
+    assert "pools: regular 1/7, priority 0/3" in text
+    assert f"ahead: {marked}" in text
+    listing = json.loads(kc.run_slash("queue --json"))
+    assert [row["id"] for row in listing["ready"]] == [marked, starved, fresh]
+    assert listing["ready"][0]["score"]["class_rank"] == 1
+    assert listing["scored"] is True
+
+
+def test_queue_explain_on_worker_reports_plain_priority(board):
+    from hermes_cli import kanban as kc
+    conn, home = board
+    configure(home, limit=None)
+    tid = ready(conn, "worker card", priority=5)
+    text = kc.run_slash(f"queue --explain {tid}")
+    assert "hub admission score not enabled here: plain priority order" in text
+    assert f"{tid}: ready lane position 1/1" in text
+    assert json.loads(kc.run_slash("queue --json"))["scored"] is False
+
+
+def test_queue_explain_unknown_or_unqueued_card(board):
+    from hermes_cli import kanban as kc
+    conn, home = board
+    configure(home, limit=None)
+    blocked = task(conn)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (blocked,))
+    assert "not in a ready or review lane (status blocked)" in kc.run_slash(f"queue --explain {blocked}")
+    assert "no such task: t_missing" in kc.run_slash("queue --explain t_missing")
+
+
+def _claimed_run(conn, title, *, ready_at, started_at, admission_class="normal", origin=None, completed_at=None):
+    tid = ready(conn, title, created_at=ready_at, admission_class=admission_class)
+    with kb.write_txn(conn):
+        conn.execute("INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, outcome, "
+                     "admission_pool, admission_class, admission_origin) VALUES (?, 'default', 'done', ?, ?, "
+                     "'completed', ?, ?, ?)",
+                     (tid, started_at, completed_at, "priority" if admission_class != "normal" else "regular",
+                      admission_class, origin))
+        if completed_at is not None:
+            conn.execute("UPDATE tasks SET status='done', completed_at=? WHERE id=?", (completed_at, tid))
+    return tid
+
+
+def _waits(conn, around, before_wait, after_wait, n=3):
+    for index in range(n):
+        start = around - 3600 - index * 60
+        _claimed_run(conn, f"before {index}", ready_at=start - before_wait, started_at=start)
+        start = around + 3600 + index * 60
+        _claimed_run(conn, f"after {index}", ready_at=start - after_wait, started_at=start)
+
+
+def test_capacity_report_measures_ready_wait_p50_around_completion(board):
+    from hermes_cli import kanban_admission_report as report
+    conn, _home = board
+    now = 1_800_000_000
+    done_at = now - 2 * 86400
+    moved = _claimed_run(conn, "add worker", ready_at=done_at - 7200, started_at=done_at - 3600,
+                         admission_class="capacity", origin="chat:a", completed_at=done_at)
+    _waits(conn, done_at, before_wait=3000, after_wait=600)
+    data = report.capacity_report(conn, now_s=now, days=7)
+    entry, = data["cards"]
+    assert entry["id"] == moved
+    assert entry["frees"] == "frees: worker slots"
+    assert entry["origin"] == "chat:a"
+    assert (entry["ready_wait_p50_before_s"], entry["ready_wait_p50_after_s"]) == (3000, 600)
+    assert entry["effect"] == "moved"
+
+
+def test_capacity_report_flags_repeat_no_effect_origin_and_unknown_is_not_failure(board):
+    from hermes_cli import kanban_admission_report as report
+    conn, _home = board
+    now = 1_800_000_000
+    for index, day in enumerate((2, 4)):
+        done_at = now - day * 86400
+        _claimed_run(conn, f"no effect {index}", ready_at=done_at - 7200, started_at=done_at - 3600,
+                     admission_class="capacity", origin="chat:b", completed_at=done_at)
+        _waits(conn, done_at, before_wait=600, after_wait=600)
+    sparse_at = now - 6 * 86400
+    _claimed_run(conn, "unmeasured", ready_at=sparse_at - 7200, started_at=sparse_at - 3600,
+                 admission_class="capacity", origin="chat:c", completed_at=sparse_at)
+    data = report.capacity_report(conn, now_s=now, days=7)
+    effects = {card["origin"]: card["effect"] for card in data["cards"]}
+    assert sorted(card["effect"] for card in data["cards"] if card["origin"] == "chat:b") == ["no_effect"] * 2
+    assert effects["chat:c"] == "unknown"
+    assert data["origins"]["chat:b"] == {"moved": 0, "no_effect": 2, "unknown": 0, "revoke_recommended": True}
+    assert data["origins"]["chat:c"]["revoke_recommended"] is False
+    text = report.render(data)
+    assert "chat:b: 0 moved, 2 no effect, 0 unknown -> remove capacity class from new cards" in text
+
+
+def test_capacity_report_cli_window_excludes_old_cards(board):
+    from hermes_cli import kanban as kc
+    conn, home = board
+    configure(home, limit=None)
+    old = int(time.time()) - 30 * 86400
+    _claimed_run(conn, "old capacity", ready_at=old - 60, started_at=old, admission_class="capacity",
+                 origin="chat:a", completed_at=old + 60)
+    assert json.loads(kc.run_slash("queue --report --days 7 --json"))["cards"] == []
+    assert len(json.loads(kc.run_slash("queue --report --days 60 --json"))["cards"]) == 1

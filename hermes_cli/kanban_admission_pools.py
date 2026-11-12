@@ -1,4 +1,9 @@
 """Deterministic selection for separate regular and marked-only hub pools."""
+import logging
+import sqlite3
+
+_LOG = logging.getLogger(__name__)
+MARKED = ("capacity", "urgent")
 
 
 def select_pool(admission_class, *, regular, priority, regular_cap, priority_cap):
@@ -38,8 +43,8 @@ def board_pools(conn, *, own=None, excluded=(), origins=None):
     return counts
 
 
-def root_settings():
-    """Opt-in root policy; absent priority_slots leaves the existing scalar gate intact."""
+def admission_policy() -> dict:
+    """Root ``kanban.admission`` mapping (``{}`` when absent); malformed nesting raises ValueError."""
     from pathlib import Path
     from hermes_constants import get_default_hermes_root
     from hermes_cli.config_backend import read_config_doc_readonly
@@ -47,7 +52,7 @@ def root_settings():
     try:
         doc = read_config_doc_readonly(Path(get_default_hermes_root()) / "config.yaml")
     except FileNotFoundError:
-        return 0, 85
+        return {}
     policy = {} if doc is None else doc
     for key in ("kanban", "admission"):
         if not isinstance(policy, dict):
@@ -55,6 +60,12 @@ def root_settings():
         policy = policy.get(key, {})
     if not isinstance(policy, dict):
         raise ValueError("admission configuration must be mappings")
+    return policy
+
+
+def root_settings():
+    """Opt-in root policy; absent priority_slots leaves the existing scalar gate intact."""
+    policy = admission_policy()
     slots = policy.get("priority_slots", 0)
     ceiling = policy.get("priority_cpu_busy_below_pct", 85)
     if type(slots) is not int or slots < 0:
@@ -64,13 +75,30 @@ def root_settings():
     return slots, ceiling
 
 
+def score_enabled() -> bool:
+    """Hub admission ordering (marked-first + score) applies only on an opted-in hub; workers keep priority."""
+    from hermes_cli import machine_cpu_metrics as cpu
+
+    return cpu.root_limit()[0] == cpu.ON and root_settings()[0] > 0
+
+
 def lane_rows(conn, status):
     """Offer marked candidates before normal rows only on an opted-in hub."""
-    from hermes_cli import machine_cpu_metrics as cpu
     from hermes_cli.kanban_db_dispatch_queries import lane_rows as query
 
-    marked_first = cpu.root_limit()[0] == cpu.ON and root_settings()[0] > 0
-    return query(conn, status, marked_first=marked_first)
+    marked_first = score_enabled()
+    rows = query(conn, status, marked_first=marked_first)
+    if not marked_first:
+        return rows
+    from hermes_cli import kanban_admission_score as score
+
+    try:
+        ranked = [row for row, _parts in score.rank(conn, rows)]
+    except (sqlite3.Error, OSError, ValueError):
+        _LOG.warning("admission score unavailable; using priority order", exc_info=True)
+        return rows
+    ranked.sort(key=lambda row: row["admission_class"] not in MARKED)
+    return ranked
 
 
 def dispatch_remaining(regular_cap):
@@ -102,7 +130,7 @@ def host_remaining(regular_cap, running_count, board):
     return remaining
 
 
-def queue_fields(regular_cap, admission_class):
+def queue_fields(regular_cap, admission_class, conn=None, task_id=None):
     """Advisory whole-host census; unknown counts are never rendered as free slots."""
     from hermes_cli import machine_cpu_metrics as cpu, machine_metrics
 
@@ -114,8 +142,14 @@ def queue_fields(regular_cap, admission_class):
     detail = {"pools": {"regular": 0, "priority": 0}}
     active = machine_metrics.active_card_runs(detail=detail)
     counts = detail["pools"] if active is not None else {"regular": None, "priority": None}
-    return {"admission_class": admission_class,
-            "admission_pools": {**counts, "regular_cap": regular_cap, "priority_cap": slots}}
+    fields = {"admission_class": admission_class,
+              "admission_pools": {**counts, "regular_cap": regular_cap, "priority_cap": slots}}
+    if conn is not None and task_id is not None:
+        from hermes_cli import kanban_admission_score as score
+
+        rows = conn.execute("SELECT id FROM tasks WHERE id=?", (task_id,)).fetchall()
+        fields["admission_score"] = score.rank(conn, rows)[0][1].as_dict() if rows else None
+    return fields
 
 
 def advisory_limit(conn, task_id, regular_limit):
