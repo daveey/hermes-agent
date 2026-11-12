@@ -112,11 +112,10 @@ def _recover_from_revoked(agent):
     return recovered
 
 
-def _worker_exit_code(agent):
-    """The turn the worker surfaces once recovery found nothing, and the exit code it books."""
+def _worker_result(agent):
+    """The turn result the worker surfaces once recovery found nothing."""
     from agent.error_classifier import classify_api_error
     from agent.turn_recovery import nonretryable_client_error_result
-    from hermes_cli.turn_exit import turn_exit_code
     from tests.agent.test_failed_turn_chat_copy import _Agent
 
     stub = _Agent()
@@ -128,7 +127,23 @@ def _worker_exit_code(agent):
         conversation_history=None, api_call_count=1, approx_tokens=10, provider="anthropic",
         base_url="https://api.anthropic.com", model=MODEL)
     assert result["failure_reason"] == "auth"
-    return turn_exit_code(result, kanban_worker=True)
+    return result
+
+
+def _worker_exit_code(agent):
+    """The exit code the worker books for that turn."""
+    from hermes_cli.turn_exit import turn_exit_code
+    return turn_exit_code(_worker_result(agent), kanban_worker=True)
+
+
+def _receipt_deadline(result, monkeypatch):
+    """The quota reset the dispatcher would read from this attempt's exit-75 receipt
+    (gateway/session_kanban._record_worker_result writes last_output + quota_fields)."""
+    from hermes_cli import kanban_quota_receipt as kqr
+    receipt = {"exit_code": kb.KANBAN_RATE_LIMIT_EXIT_CODE, "last_output": result.get("final_response") or "",
+               **kqr.quota_fields(result)}
+    monkeypatch.setattr(kqr, "_owned_receipt", lambda *_a: (receipt, time.time()))
+    return kqr.receipt_deadline(None, "t", 1)
 
 
 def _dispatch_worker_death(code):
@@ -190,3 +205,20 @@ def test_every_account_revoked_after_a_reread_stays_terminal(home):
 
     task, gave_up = _dispatch_worker_death(code)
     assert gave_up is not None and task.status != "ready"
+
+
+def test_revoked_requeue_carries_no_quota_reset_of_the_benched_siblings(home, monkeypatch):
+    """The exit-75 requeue of a revoked 401 is a wait, not a quota wall. Its receipt must not carry a
+    sibling's weekly reset (the 429-benched rows here hold one 5 days out), or the dispatcher's quota
+    episode holds the card for days: t_01a1cf4afccc9f5f was held to 11-17 13:00Z after the 11:34Z
+    burst although the provider served again within 4 minutes."""
+    _write_pool(home, [_pushed("acct-A", "sk-ant...oked", 0), _quota_benched("acct-C", "***", 1),
+                       _quota_benched("acct-D", "***", 2)])
+    agent = _agent_on("acct-A")
+    assert _recover_from_revoked(agent) is False
+
+    result = _worker_result(agent)
+    from hermes_cli.turn_exit import turn_exit_code
+    assert turn_exit_code(result, kanban_worker=True) == kb.KANBAN_RATE_LIMIT_EXIT_CODE
+    assert "failure_resets_at" not in result
+    assert _receipt_deadline(result, monkeypatch) is None
