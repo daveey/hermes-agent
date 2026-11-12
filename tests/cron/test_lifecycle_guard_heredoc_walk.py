@@ -241,7 +241,12 @@ def test_trusted_owner_masks_the_data_body(command):
     from tools.shell_heredoc import strip_inert_heredoc_bodies
 
     masked = strip_inert_heredoc_bodies(command, nested=True)
-    assert "\nx\n" not in masked and masked.count("\n") == command.count("\n"), masked
+    if "${XOPTS:-}" in command:
+        # This old positive case was unsound: unknown options can inject a remote
+        # program. Retain the case with its fail-closed expectation (real shell below).
+        assert masked == command
+    else:
+        assert "\nx\n" not in masked and masked.count("\n") == command.count("\n"), masked
 
 
 @pytest.mark.parametrize("command", [
@@ -365,6 +370,208 @@ def test_subshell_and_substitution_parens_still_execute(tmp_path, template):
     big.write_text("echo hi\n" * 220000, encoding="utf-8")
     unsafe, refusal = scan_gateway_lifecycle(template.format(big=big), cwd=str(tmp_path))
     assert unsafe is True and "scan cap" in refusal
+
+
+# --- binding provenance: textual assignments are not necessarily shell state --------------------
+
+@pytest.mark.parametrize("decoy", [
+    "if false; then CMD='bash -s'; fi",
+    "# CMD='bash -s'",
+    "CMD='bash -s' true",
+    "echo CMD='bash -s'",
+])
+def test_untrusted_variable_assignment_does_not_hide_executed_body(tmp_path, decoy):
+    import os
+    import subprocess
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    marker = tmp_path / "marker"
+    hermes = tmp_path / "hermes"
+    hermes.write_text('#!/bin/sh\nprintf called > "$MARKER"\n')
+    hermes.chmod(0o755)
+    command = (
+        "transform() { sed s/python3/bash/ | bash; }\nCMD=transform\n" + decoy + "\n"
+        "$CMD <<'R'\npython3 - <<'PY'\n"
+        "bash -c 'hermes gateway \"restart\"'\nPY\nR\n"
+    )
+    result = subprocess.run(["bash"], input=command, text=True, encoding="utf-8", capture_output=True, check=False,
+                            env={**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin",
+                                 "MARKER": str(marker)}, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text() == "called"
+    assert guard(command, cwd=str(tmp_path)) is True
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
+
+
+@pytest.mark.parametrize("mutation", [
+    "set -- ev al\n\"$1$2\" 'CMD=transform'",
+    "set -- pri ntf -v CMD transform\n\"$1$2\" \"$3\" \"$4\" \"$5\"",
+])
+def test_synthesized_mutator_cannot_change_a_trusted_shell_binding(tmp_path, mutation):
+    import os
+    import subprocess
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    marker = tmp_path / "marker"
+    hermes = tmp_path / "hermes"
+    hermes.write_text('#!/bin/sh\nprintf called > "$MARKER"\n')
+    hermes.chmod(0o755)
+    transform = tmp_path / "transform"
+    transform.write_text('#!/bin/sh\nsed s/python3/bash/ | bash\n')
+    transform.chmod(0o755)
+    command = ("CMD=bash\n" + mutation + "\n$CMD <<'R'\npython3 - <<'PY'\n"
+               "bash -c 'hermes gateway \"restart\"'\nPY\nR\n")
+    result = subprocess.run(["bash"], input=command, text=True, encoding="utf-8", capture_output=True, check=False,
+                            env={**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin",
+                                 "MARKER": str(marker)}, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text() == "called"
+    assert guard(command, cwd=str(tmp_path)) is True
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
+
+
+def test_ssh_binding_with_unknown_expansions_can_change_remote_program(tmp_path):
+    import os
+    import subprocess
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    marker = tmp_path / "marker"
+    hermes = tmp_path / "hermes"
+    hermes.write_text('#!/bin/sh\nprintf called > "$MARKER"\n')
+    hermes.chmod(0o755)
+    ssh = tmp_path / "ssh"
+    # SSH's documented joining of remote arguments, without any network access.
+    ssh.write_text('#!/bin/sh\nshift 3\nexec sh -c "$*"\n')
+    ssh.chmod(0o755)
+    command = ('SSH="timeout 60 ssh -o A=b ${XOPTS:-} u@$IP"\n'
+               '$SSH "T=$T bash -s" <<\'R\'\npython3 - <<\'PY\'\n'
+               'bash -c \'hermes gateway "restart"\'\nPY\nR\n')
+    result = subprocess.run(["bash"], input=command, text=True, encoding="utf-8", capture_output=True, check=False,
+                            env={**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin",
+                                 "MARKER": str(marker), "IP": "h", "T": "x",
+                                 "XOPTS": "otherhost sed s/python3/bash/ | bash #"}, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text() == "called"
+    assert guard(command, cwd=str(tmp_path)) is True
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
+
+
+@pytest.mark.parametrize("prefix", [
+    "if false; then\nCMD='bash -s'\nfi\n",
+    "# CMD='bash -s'\n",
+    "CMD='bash -s' true\n",
+    "echo CMD='bash -s'\n",
+    "f() {\nCMD='bash -s'\n}\n",
+    "true && (\nCMD='bash -s'\n)\n",
+    "echo '\nCMD=bash\n'\n",
+    "false &&\nCMD=bash\n",
+    "CMD=bash\nCMD=bash\n",
+    "CMD=bash\nprintf -v CMD transform\n",
+    "CMD=bash\ne'val' 'CMD=transform'; :\n",
+    "CMD=bash\nread CMD\n",
+    "CMD=bash\nunknown_command\n",
+    "CMD=bash\nset -- ev al\n\"$1$2\" 'CMD=transform'\n",
+    "CMD=bash\nset -- printf -v CMD transform\n\"$@\"\n",
+    "CMD='$OTHER'\n",
+    "CMD=bash\nPATH=/untrusted\n",
+    "CMD= bash\n",
+    "CMD= 'bash -s'\n",
+])
+def test_variable_binding_requires_unique_standalone_top_level_assignment(prefix):
+    from tools.shell_heredoc import _variable_value
+
+    assert _variable_value(prefix, "CMD", len(prefix)) is None
+
+
+@pytest.mark.parametrize("prefix", ["CMD='bash -s'\n", 'CMD="bash -s"\n'])
+def test_variable_binding_accepts_unique_standalone_assignment(prefix):
+    from tools.shell_heredoc import _variable_value
+
+    assert _variable_value(prefix, "CMD", len(prefix)) == "bash -s"
+
+
+# --- stdin scripts may be consumed by earlier commands before the shell parses them -------------
+
+@pytest.mark.parametrize("unit", [
+    "", "# comment", "MESSAGE='hello world'", 'echo "$MESSAGE"',
+    'echo before; q "$1"', ": ready", "set -u",
+])
+def test_nonreading_units_use_a_generic_positive_grammar(unit):
+    from tools.shell_heredoc import _nonreading_shell_unit
+
+    assert _nonreading_shell_unit(unit, {"q"}) is True
+
+
+@pytest.mark.parametrize("unit", [
+    "arbitrary_cli comment", "PATH=/untrusted", "set -- eval", "printf -v PATH /untrusted",
+    "printf '%n' PATH", 'echo "${X:=changed}"', 'echo "$((X=1))"',
+    "echo safe </dev/stdin", r"e\cho safe",
+    'echo "$(cat /arbitrary/file)"', "cat /dev/stdin", "q | bash",
+    "HB=$(command -v hermes || ls ~/.local/bin/hermes 2>/dev/null || echo ~/.hermes/hermes-agent/venv/bin/hermes)",
+    'env -u X timeout 60 "$HB" kanban comment x "$(cat /tmp/wc_$T.txt)" 2>&1 | tail -3 | cut -c1-200',
+])
+def test_cli_and_file_substitutions_are_not_proven_nonreading(unit):
+    from tools.shell_heredoc import _nonreading_shell_unit
+
+    # An executable discovered on PATH may read stdin; a file can be a symlink to it.
+    assert _nonreading_shell_unit(unit, set()) is False
+
+
+@pytest.mark.parametrize("prefix", [
+    "sed 's/^python3 - /bash -s /' | bash",
+    "while IFS= read -r line; do eval \"$line\"; done",
+    "hash -p /bin/bash python3",
+])
+def test_nested_stdin_hijack_walk_only_body_stays_visible(tmp_path, prefix):
+    import os
+    import subprocess
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    marker = tmp_path / "marker"
+    hermes = tmp_path / "hermes"
+    hermes.write_text('#!/bin/sh\nprintf called > "$MARKER"\n')
+    hermes.chmod(0o755)
+    command = ("bash -s <<'R'\n" + prefix + "\npython3 - <<'PY'\n"
+               "bash -c 'hermes gateway \"restart\"'\nPY\nR\n")
+    result = subprocess.run(["bash"], input=command, text=True, encoding="utf-8", capture_output=True, check=False,
+                            env={**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin",
+                                 "MARKER": str(marker)}, timeout=10)
+    assert marker.read_text() == "called", result.stderr
+    assert guard(command, cwd=str(tmp_path)) is True
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
+
+
+@pytest.mark.parametrize("opener", [
+    "ssh ${XOPTS:-} h 'bash -s' <<'R'",
+    "bash -s <<R",
+])
+def test_nested_masking_requires_literal_owner_and_quoted_outer_body(opener):
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    command = opener + "\npython3 - <<'PY'\nx\nPY\nR\n"
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
+
+
+@pytest.mark.parametrize("prefix", [
+    "unknown_command; ",
+    "unknown_command <<'A'\ndata\nA\n",
+])
+def test_nested_masking_stops_after_untrusted_same_line_or_heredoc_owner(prefix):
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    command = "bash -s <<'R'\n" + prefix + "python3 - <<'PY'\nx\nPY\nR\n"
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
+
+
+def test_nested_function_second_body_is_not_assumed_nonreading():
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    command = ("bash -s <<'R'\nf() { python3 - <<'ONE'\nfirst\nONE\n"
+               "python3 - <<'TWO'\nsecond\nTWO\n}\nR\n")
+    masked = strip_inert_heredoc_bodies(command, nested=True)
+    assert "\nfirst\n" not in masked
+    assert "\nsecond\n" in masked
+    assert masked.count("\n") == command.count("\n")
 
 
 # --- the refused scripts, verbatim ---------------------------------------------------------------

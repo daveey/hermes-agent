@@ -70,7 +70,7 @@ _CONSUMER_SHADOW_RE = re.compile(
     r"(?:^|[\s;&|(){{}}])(?:(?:function\s+)?{names}\s*\(\s*\)|function\s+{names}\s+\{{"
     r"|alias\s+{names}=)".format(
         names=r"(?:python[\d.]*|osascript|cat|timeout|nice|ionice|nohup|setsid|stdbuf|env|command"
-              r"|exec|eatmydata|sudo|doas|ssh|bash|sh|dash|zsh|ksh)"),
+              r"|exec|eatmydata|sudo|doas|ssh|bash|sh|dash|zsh|ksh|echo|printf|set|tail|cut|ls)"),
     re.IGNORECASE)
 
 
@@ -170,18 +170,49 @@ def _ssh_runs_stdin_shell(words: list[str]) -> bool:
         return False
 
 
-def _variable_value(command: str, name: str, before: int) -> str | None:
-    """Value of the last plain ``NAME=value`` assignment in ``command[:before]``, or None."""
-    pattern = re.compile(r"(?:^|[\s;&|])" + re.escape(name)
-                         + r"""=("(?:[^"\\]|\\.)*"|'[^']*'|[^\s;&|'"]*)(?=[\s;&|]|$)""")
-    matches = list(pattern.finditer(command, 0, before))
-    if not matches or "$(" in matches[-1].group(1) or "`" in matches[-1].group(1):
+def _literal_assignment(unit: str) -> tuple[str, str] | None:
+    """Recognize one literal scalar assignment, never shell state or expansions.
+
+    Even quoted expansion markers are rejected: callers split the value as a command,
+    not as a second shell program. No attempt is made to evaluate shell syntax.
+    """
+    match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", unit)
+    if (not match or match[2][:1].isspace()
+            or any(char in match[2] for char in "$`\\\n;|&<>(){}~*?[]")):
+        return None
+    name = match[1]
+    if name in {"PATH", "IFS", "ENV", "CDPATH", "GLOBIGNORE", "SHELLOPTS", "PS4"} or name.startswith("BASH"):
         return None
     try:
-        words = shlex.split(matches[-1].group(1))
+        words = shlex.split(match[2])
     except ValueError:
         return None
-    return words[0] if len(words) == 1 else None
+    return (name, words[0]) if len(words) == 1 else None
+
+
+def _variable_value(command: str, name: str, before: int) -> str | None:
+    """Resolve one literal binding in a wholly declarative prefix.
+
+    A mutator blacklist is insufficient: positional parameters, quoted names and
+    arbitrary functions can synthesize eval/printf/read. Unknown commands invalidate
+    provenance, even before the assignment. Ambiguous scopes and writes fail closed.
+    """
+    found: list[str] = []
+    cursor = 0
+    while cursor < before:
+        end, specs, unknown, _post, _owner = _scan_heredoc_command_unit(command, cursor)
+        if end > before or specs or unknown:
+            return None
+        unit = command[cursor:end].strip()
+        cursor = end + 1
+        if not unit or unit.startswith("#"):
+            continue
+        assignment = _literal_assignment(unit)
+        if assignment is None:
+            return None
+        if assignment[0] == name:
+            found.append(assignment[1])
+    return found[0] if len(found) == 1 else None
 
 
 def _owner_feeds_shell(command: str, command_start: int, owner_start: int, specs: list) -> bool:
@@ -214,6 +245,10 @@ def _owner_feeds_shell(command: str, command_start: int, owner_start: int, specs
         if not value:
             return False
         words[first:first + 1] = value.split()
+    # Unknown expansions can inject SSH options, a host, or remote shell syntax.
+    # Resolving the first word is not proof of the remaining argument values.
+    if any("$" in word or "`" in word for word in words):
+        return False
     return _is_stdin_shell(words) or _ssh_runs_stdin_shell(words)
 
 
@@ -399,6 +434,91 @@ def _owner_runs_inert_consumer(
 _OUTPUT_EXECUTOR_RE = re.compile(r"\||\$\(|`|<\(|>\(|\beval\b|\bsource\b|(?:^|[\s;&(])\.\s")
 
 
+def _nonreading_shell_unit(unit: str, functions: set[str]) -> bool:
+    """Positive grammar for units that cannot consume or reinterpret the stdin script.
+
+    External programs and file-backed substitutions are not trusted by name: even an
+    ordinary pathname can resolve to a script reader or a symlink to /dev/stdin.
+    Only literal assignments, nonmutating builtins and already-verified functions
+    qualify. Substitutions, arithmetic/indirect expansions, redirects and pipelines
+    remain visible. printf is excluded because %n and -v can mutate shell state.
+    """
+    unit = unit.strip()
+    if not unit or unit.startswith("#"):
+        return True
+    if _literal_assignment(unit) is not None:
+        return True
+    if any(mark in unit for mark in ("`", "<", ">", "\\", "\n")):
+        return False
+    # Simple scalar/positional expansions are arguments, never a command name.
+    simple_arguments = re.sub(r"\$(?:[A-Za-z_]\w*|[0-9]+)", "ARG", unit)
+    if "$" in simple_arguments:
+        return False
+    for segment in unit.split(";"):
+        try:
+            tokens = shlex.split(segment, comments=True)
+        except ValueError:
+            return False
+        if not tokens:
+            continue
+        if any(char in _mask_simple_quotes(segment) for char in "|&(){}"):
+            return False
+        if tokens[0] in {"echo", ":"} | functions:
+            continue
+        if tokens == ["set", "-u"]:
+            continue
+        return False
+    return True
+
+
+class _StdinScriptState:
+    """Track whether earlier units leave a nested shell's source stream untouched."""
+
+    def __init__(self) -> None:
+        self.intact = True
+        self.functions: set[str] = set()
+        self.pending_function: str | None = None
+
+    def observe_unit(self, unit: str) -> None:
+        unit = unit.strip()
+        if self.pending_function and unit == "}":
+            self.functions.add(self.pending_function)
+            self.pending_function = None
+        else:
+            safe = _nonreading_shell_unit(unit, self.functions)
+            self.intact = self.intact and safe and self.pending_function is None
+
+    def before_heredoc(self, command: str, start: int, owner: int) -> bool:
+        if self.pending_function:
+            self.intact = False
+        if owner > start:
+            safe = _nonreading_shell_unit(command[start:owner].rstrip(";&| "), self.functions)
+            self.intact = self.intact and safe
+        return self.intact
+
+    def begin_function(self, command: str, start: int, end: int) -> bool:
+        header = _FUNCTION_HEADER_RE.match(command, start, end)
+        if header is None:
+            return False
+        name = re.search(r"(?:function\s+)?([A-Za-z_][\w.:-]*)", header.group())
+        if name is None:
+            return False
+        self.pending_function = name.group(1)
+        return True
+
+
+def _heredoc_bodies(command: str, start: int, specs: list) -> list[tuple[int, int, int]] | None:
+    """Locate all bodies in opener order, failing closed on any missing terminator."""
+    bodies = []
+    for delimiter, strip_tabs, _quoted in specs:
+        closed = _find_heredoc_close(command, start, delimiter, strip_tabs)
+        if closed is None:
+            return None
+        bodies.append((start, *closed))
+        start = closed[1]
+    return bodies
+
+
 def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: int = 0) -> str:
     """Mask heredoc bodies that are provably inert data (see module docstring).
 
@@ -409,12 +529,15 @@ def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: in
     # Runs on every terminal call: skip the state machine when no '<<' exists; stop past the last.
     if "<<" not in command:
         return command
-    if _CONSUMER_SHADOW_RE.search(command):
+    if (_CONSUMER_SHADOW_RE.search(command)
+            or re.search(r"(?:^|[\s;&|])hash\s", command)):
         return command
     last_opener_index = command.rfind("<<")
     replacements: list[tuple[int, int, str, str]] = []
     function_masks = 0
     command_start = 0
+    stdin = _StdinScriptState()
+
     while command_start <= last_opener_index:
         (
             command_end,
@@ -426,25 +549,30 @@ def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: in
         if unknown_operator:
             return command
         if not specs:
+            if _depth:
+                stdin.observe_unit(command[command_start:command_end])
             if command_end >= len(command):
                 break
             command_start = command_end + 1
             continue
         if command_end >= len(command):
             return command  # opener with no body line: unterminated — leave visible
-        body_cursor = command_end + 1
-        bodies: list[tuple[int, int, int]] = []
-        for delimiter, strip_tabs, _quoted in specs:
-            closed = _find_heredoc_close(command, body_cursor, delimiter, strip_tabs)
-            if closed is None:
-                return command  # unterminated
-            bodies.append((body_cursor, *closed))
-            body_cursor = closed[1]
+        bodies = _heredoc_bodies(command, command_end + 1, specs)
+        if bodies is None:
+            return command  # unterminated
+        body_cursor = bodies[-1][2]
         quoted = [spec_quoted for _delimiter, _strip_tabs, spec_quoted in specs]
         consumer = None
         if all(quoted) and not post_heredoc_list_operator:
             consumer = _owner_runs_inert_consumer(command, command_start, command_end, owner_start)
+        if _depth and not stdin.before_heredoc(command, command_start, owner_start):
+            # Once a previous command could steal stdin, no later source lines can
+            # be interpreted as the shell's untouched program.
+            return _apply_replacements(command, replacements)
         if consumer:
+            if _depth and consumer == "function":
+                if not stdin.begin_function(command, command_start, command_end):
+                    return command
             function_masks += consumer == "function"
             replacements += [(start, end, "\n" * command.count("\n", start, end), consumer)
                              for start, _terminator, end in bodies]
@@ -458,6 +586,8 @@ def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: in
                 masked = strip_inert_heredoc_bodies(inner, nested=True, _depth=_depth + 1)
                 if masked != inner:
                     replacements.append((start, terminator, masked, "nested"))
+        if _depth and not consumer:
+            stdin.intact = False
         command_start = body_cursor
     result = _apply_replacements(command, replacements)
     if function_masks and not nested and _OUTPUT_EXECUTOR_RE.search(_mask_simple_quotes(result)):
