@@ -15,7 +15,10 @@ class SubscriptionQuotaUnavailable(ModelRoutingError):
 
 
 def _quota_scan(pool, model):
-    """``(room, waits)`` for *model*: room when a live OAuth entry can serve it now, else its quota resets."""
+    """``(room, waits)`` for *model*: room when a live OAuth entry can serve it now, else its quota resets.
+
+    Every live OAuth entry must carry quota evidence: one on an auth/refresh/billing bench without its
+    own model cooldown means "not proven a quota wall" (no waits), though it is not room either."""
     from agent.credential_pool import STATUS_DEAD, _exhausted_until
     from agent.credential_pool_model_cooldowns import MODEL_ENTITLEMENT_BENCH_SECONDS, model_cooldown_until
     import time
@@ -24,19 +27,24 @@ def _quota_scan(pool, model):
         return False, []
     now = time.time()
     entries = [entry for entry in pool.entries() if entry.auth_type == "oauth" and entry.last_status != STATUS_DEAD]
-    waits = []
+    waits, unproven = [], False
     for entry in entries:
         account = _exhausted_until(entry, sole_credential=len(entries) <= 1)
-        if account and account > now and entry.last_error_code != 429:
-            continue  # an auth/refresh/billing bench is not evidence of quota
         model_reset = model_cooldown_until(entry, model)
         if model_reset and model_reset - now >= MODEL_ENTITLEMENT_BENCH_SECONDS / 2:
             continue  # entitlement benches do not reopen on a quota reset
+        if account and account > now and entry.last_error_code != 429:
+            # An auth/refresh/billing bench is not evidence of quota: unless this account
+            # also has its own cooldown for the model, the pool is not proven exhausted.
+            if not model_reset:
+                unproven = True
+                continue
+            account = None
         reset = max(account or 0, model_reset or 0)
         if reset <= now:
             return True, []  # not an exhausted pool
         waits.append(reset)
-    return False, waits
+    return False, [] if unproven else waits
 
 
 def quota_unavailable(pool, model):

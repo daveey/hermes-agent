@@ -209,6 +209,22 @@ def live_quota_room(provider: str, model: str) -> bool:
         return False
 
 
+def live_pool_serving(provider: str, model: Optional[str] = None) -> bool:
+    """True when ``provider``'s OAuth pool can serve ``model`` right now (``None``: any model, judged
+    conservatively): no quota wall and an entry out of cooldown. Any read fault is False."""
+    provider = _norm(provider)
+    if not provider or provider == "auto":
+        return False
+    try:
+        from agent.credential_pool import load_pool
+        from agent.model_routing_unavailable import quota_unavailable
+        pool = load_pool(provider, allowed_auth_types={"oauth"})
+        return quota_unavailable(pool, model) is None and bool(pool.has_available(model=model))
+    except Exception as exc:  # health: allow BLE001 -- a pool read fault keeps every hold
+        logger.debug("kanban walls: live serving check failed for %s/%s (%s)", provider, model, exc, exc_info=True)
+        return False
+
+
 def rate_limit_storm(conn: sqlite3.Connection, *, now: Optional[float] = None, prefix: Optional[str] = None) -> int:
     """``rate_limited`` runs in the last hour claimed by this host (claim ``prefix``, default this host's).
 

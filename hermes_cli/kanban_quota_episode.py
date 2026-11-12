@@ -74,6 +74,22 @@ def _providers(state):
     return [state['provider']] if state.get('provider') else []
 
 
+def _disproved(wall, now):
+    """True for a hinted wall the live OAuth pool now contradicts: every provider it names serves its
+    model (any model for a class route) and no provider-wide wall stands. A transient auth bench once
+    made ``quota_unavailable`` report a days-long false wall; the stored deadline must not outlive it."""
+    from agent.model_routing import is_class_selector
+    from hermes_cli import kanban_provider_walls as pw
+    names = _providers(wall)
+    if not wall.get('hinted') or not names:
+        return False
+    model = wall.get('model')
+    if not isinstance(model, str) or not model or is_class_selector(model) or len(names) > 1:
+        model = None
+    known = pw.active_walls(now=now)
+    return all(known.get(name) is None and pw.live_pool_serving(name, model) for name in names)
+
+
 def _outstanding(conn, task_id, state, now):
     """Every wall of this episode still before its deadline (earlier providers included)."""
     from hermes_cli import kanban_db as kb
@@ -84,7 +100,7 @@ def _outstanding(conn, task_id, state, now):
         prior = kb._json_dict(row[0])
         if isinstance(prior.get('until'), (int, float)) and prior['until'] > now:
             out.append(prior)
-    return out
+    return [wall for wall in out if not _disproved(wall, now)]
 
 
 def _base_route(task, base):
