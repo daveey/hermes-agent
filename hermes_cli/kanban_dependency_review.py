@@ -379,7 +379,8 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     urls -= {norm_pr(u) for u in discharged}
     if not urls:
         return False
-    reviewed = set().union(*(_reviewed_prs(conn, p, parked_at, row["id"], captured_set) for p in parents))
+    repairs = {p: _reviewed_prs(conn, p, parked_at, row["id"], captured_set) for p in parents}
+    reviewed = set().union(*repairs.values())
     if urls.issubset(reviewed):
         return True
     # Without repair evidence, every awaited parent must approve a checkpointed PR. One approval
@@ -389,10 +390,13 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     # A parent that is here only because its history could not be proven finished before the
     # park (legacy checkpoint, reopened or replica-unverified) must approve every holding PR on
     # its own: its pre-park approval of another PR is not evidence for this one.
+    # Mixed split reviews (one named parent requests changes on its PR, a sibling approves
+    # the other) also resume: each named parent left exact-head evidence for a checkpointed
+    # PR and together they cover every holding PR. Still no merge approval, one continuation.
     approvals = {p: _approval_prs(conn, p, parked_at, row["id"], captured_set) for p in parents}
-    if not all(approvals.values()):
+    if not all(approvals[p] or repairs[p] for p in parents):
         return False
     named = evidence.get("awaited") if isinstance(evidence.get("awaited"), list) else ()
     if not all(urls.issubset(a) for p, a in approvals.items() if p not in named):
         return False
-    return urls.issubset(set().union(*approvals.values()))
+    return urls.issubset(reviewed.union(*approvals.values()))
