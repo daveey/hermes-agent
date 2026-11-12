@@ -34,9 +34,9 @@ def per_request_response(result):
     """A fresh ``Response`` for this request from a possibly shared encoded result.
 
     A coalesced read or cache hands one result to several waiting requests.
-    Starlette sends ``response.raw_headers`` itself as the start message's header
-    list and middleware (CORS) appends to that list in place, and FastAPI sets
-    ``response.background``, so one ``JSONResponse`` object must not be sent twice.
+    FastAPI sets ``response.background`` on a returned Response, so one shared
+    ``JSONResponse`` object would carry one request's background tasks into
+    another; each request gets its own object instead.
     The shared part is the rendered body; the per-request ``Response`` built here
     is a constant-time wrapper with the same status, content-type and
     content-length headers. Anything else (a raw payload that took the fallback,

@@ -302,16 +302,24 @@ async def test_profiles_sessions_body_matches_parent_path(routed):
 
 
 @pytest.mark.asyncio
-async def test_coalesced_requests_each_get_full_body_and_own_headers(routed):
+async def test_coalesced_requests_each_get_full_body_and_own_headers(routed, monkeypatch):
     """Two requests joined on one read share the rendered body, not one Response object.
 
-    CORS middleware appends to the start message's header list, which Starlette takes
-    straight from ``response.raw_headers``: a shared Response would send the second
-    caller a doubled ``vary``.
+    FastAPI sets ``response.background`` on a returned Response, so one shared
+    object would carry the first request's background tasks into the joined one.
     """
     import httpx
+    from starlette.responses import Response
     from tests.waiting import async_wait_until
 
+    sent = []
+    real_call = Response.__call__
+
+    async def recording_call(self, scope, receive, send):
+        sent.append(self)
+        return await real_call(self, scope, receive, send)
+
+    monkeypatch.setattr(Response, "__call__", recording_call)
     routed["block"] = True
     routed["release"].clear()
     headers = {"Origin": "http://desktop.test"}
@@ -327,6 +335,7 @@ async def test_coalesced_requests_each_get_full_body_and_own_headers(routed):
         # A later, separate read after the joined pair still answers normally.
         third = await client.get("/api/profiles/sessions", params={"limit": 200}, headers=headers)
     assert routed["reads"] == 2, "the two concurrent requests did not join one read"
+    assert len(sent) == 3 and len({id(r) for r in sent}) == 3, "joined requests sent one shared Response object"
     bodies = {r.content for r in [*responses, third]}
     assert len(bodies) == 1
     assert len(responses[0].json()["sessions"]) >= 200
