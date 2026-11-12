@@ -17,7 +17,11 @@ instead of an LLM worker (:func:`forward_argv`); it costs seconds, not a worker:
 
 Any failure before the target accepted the card (target not live for :data:`MAX_NOT_LIVE` attempts,
 refused, an exception) cancels the deferral (``placement_deferred_cancelled``) and ``exec``s the
-normal worker command, so the card still runs, here. Never a silent stall.
+normal worker command, so the card still runs, here. Never a silent stall. That includes a request the
+target rejected after it was queued (a hub ``rejected``/``expired``/``failed`` state): it is never parked
+on. The forward names the local card in ``distinct_from`` (the target sees it through the replica and
+would refuse its own copy as an overlap); a ``create_overlap`` naming only this card is re-forwarded
+once, under a new request id; an overlap with another card blocks this one for a decision.
 """
 from __future__ import annotations
 
@@ -465,6 +469,9 @@ class Forwarder:
         self.create = kp.create_remote
         self.await_id = kp.await_task_id
         self.remote_task_id = kp.remote_task_id
+        self.remote_state = kp.remote_state
+        self.rejection = kp.remote_rejection
+        self.carries_options = lambda: kp.hub_carries_options(self.hub_cli)
         self.check = lambda gw, tid: kwait.check_remote(gw, "task", tid, until=UNTIL)
 
     # Each step returns a short action word; "fallback" means: exec the normal worker.
@@ -487,7 +494,7 @@ class Forwarder:
             return self._await(task, target, st["request_id"])
         return self._forward(task, target, st)
 
-    def _forward(self, task, target: str, st: dict) -> str:
+    def _forward(self, task, target: str, st: dict, *, reforward_of: Optional[str] = None) -> str:
         dead = self.live(target)
         if dead:
             if int(st.get("not_live") or 0) + 1 >= MAX_NOT_LIVE:
@@ -495,20 +502,45 @@ class Forwarder:
             self._event(NOT_LIVE, {"why": dead})
             return self._park_clock(f"{target} is not live yet ({dead}); retrying the forward")
         args = remote_args(self.conn, task, self_gw=self.self_gw)
-        placed = self.create(args, target=target, origin_session=st.get("origin_session"),
-                             origin_profile=st.get("origin_profile") or "default", self_gw=self.self_gw,
-                             cfg=self.cfg, hub_cli=self.hub_cli,
-                             # This is transport identity, not a caller's receiver-side creation key.
-                             transport_key=f"placement-forward:{self.self_gw}:{task.id}")
+        distinct = self.carries_options()
+        if distinct:
+            # The target's overlap guard sees this local card through the replica and would refuse its own copy
+            # as a duplicate of it (create_overlap naming only this card), so name it as distinct up front.
+            args.update(distinct_from=[task.id], distinct_reason=(
+                f"placement copy of {self.self_gw} card {task.id}: that card is this card's deferred-placement "
+                f"placeholder and completes when this one is done, not separate work"))
+        # This is transport identity, not a caller's receiver-side creation key. A re-forward after a
+        # rejection needs a new one: the request id is derived from it, and the old id is terminal.
+        key = f"placement-forward:{self.self_gw}:{task.id}" + (":distinct" if reforward_of else "")
+        placed = self._create(args, target, st, key)
+        if distinct and not placed.get("ok") and "create_option_unknown" in str(placed.get("error") or "") \
+                and "distinct_" in str(placed.get("error") or ""):
+            # A client that predates distinct_from: send the plain card (as before this option existed).
+            args.pop("distinct_from", None)
+            args.pop("distinct_reason", None)
+            placed = self._create(args, target, st, key)
         if not placed.get("ok"):
             return self._cancel(f"{target} refused the card: {placed.get('error')}")
         rid = placed["request_id"]
-        self._event(FORWARDED, {"request_id": rid, "queued_only": bool(placed.get("queued_only"))})
+        payload = {"request_id": rid, "queued_only": bool(placed.get("queued_only"))}
+        if reforward_of:
+            payload.update(reforwarded=True, reforward_of=reforward_of)
+        self._event(FORWARDED, payload)
         return self._await(task, target, rid)
 
+    def _create(self, args: dict, target: str, st: dict, key: str) -> dict:
+        return self.create(args, target=target, origin_session=st.get("origin_session"),
+                           origin_profile=st.get("origin_profile") or "default", self_gw=self.self_gw,
+                           cfg=self.cfg, hub_cli=self.hub_cli, transport_key=key)
+
     def _await(self, task, target: str, rid: str) -> str:
+        from hermes_cli.kanban_placement import FAILED_STATES
+        if self.remote_state(rid) in FAILED_STATES:
+            return self._rejected(task, target, rid)
         tid, _status = self.await_id(rid, hub_cli=self.hub_cli, budget=AWAIT_BUDGET)
         if not tid:
+            if self.remote_state(rid) in FAILED_STATES:  # refused during the wait (seconds, usually)
+                return self._rejected(task, target, rid)
             return self._park_clock(f"request {rid} is queued for {target}; waiting for {target} to make the card")
         self._event(FORWARDED, {"request_id": rid, "remote_task_id": tid})
         from hermes_cli import kanban_db as kb
@@ -516,6 +548,37 @@ class Forwarder:
                        f"Forwarded to {target} as {tid} (kanban.placement: its parents finished and nothing "
                        f"here needs this machine). This card completes when {tid} is done.")
         return self._park_remote(target, tid)
+
+    def _rejected(self, task, target: str, rid: str) -> str:
+        """The target refused request ``rid`` for good (a terminal state other than done): it will never make
+        the card, so never park on it. A ``create_overlap`` naming only this card (the target saw the local
+        placeholder through the replica) is re-forwarded once with ``distinct_from``; a real overlap blocks for a
+        decision; anything else cancels the deferral and runs the card here."""
+        from hermes_cli import kanban_db as kb
+        why = self.rejection(rid) or {}
+        st = state(self.conn, self.task_id) or {}
+        code = why.get("code") or why.get("state") or "rejected"
+        text = (why.get("error") or "").strip()[:400]
+        ids = [str(m.get("id")) for m in why.get("matches") or []]
+        if code == "create_overlap" and ids:
+            others = [i for i in ids if i != task.id]
+            self_only = not others and int(why.get("total_matches") or len(ids)) <= len(ids)
+            if self_only and not st.get("reforwarded") and self.carries_options():
+                print(f"placement forward: {target} refused {rid} as an overlap with this card itself; "
+                      "re-forwarding with distinct_from", flush=True)
+                return self._forward(task, target, st, reforward_of=rid)
+            if not self_only:
+                named = ", ".join(others) or f"{why.get('total_matches')} (not all named in the refusal)"
+                ok = kb.block_task(
+                    self.conn, self.task_id, kind="needs_input", expected_run_id=self.run_id,
+                    reason=(f"{target} refused to make this card (create_overlap): it already has open card(s) "
+                            f"{named} that look like this work. {text} "
+                            "1) If that card covers it, archive this one. 2) If this is separate work, unblock "
+                            "this card: it then runs here."))
+                if ok:
+                    self._event(CANCELLED, {"why": f"{target} rejected {rid}: create_overlap with {others}"})
+                return "blocked" if ok else "block-refused"
+        return self._cancel(f"{target} rejected request {rid} ({code}): {text}"[:600])
 
     def _settle(self, task, target: str, rtid: str) -> str:
         from hermes_cli import kanban_db as kb

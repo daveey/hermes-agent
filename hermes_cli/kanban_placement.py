@@ -955,6 +955,47 @@ def remote_state(rid: str) -> Optional[str]:
     return row[0] if row else None
 
 
+# hermes-hub's terminal request states other than ``done``: the target will never make the card. [daveey]
+FAILED_STATES = ("rejected", "expired", "failed")
+
+
+def remote_rejection(rid: str) -> dict:
+    """Why a request in a :data:`FAILED_STATES` state failed: ``{state, code, matches, total_matches, error}``.
+
+    The target's refusal is its ``hermes kanban create --json`` output, which hermes-hub stores as text in the
+    result's ``stdout`` (and ``error``), so the JSON line is parsed out of it. ``{}`` while the request is not
+    failed. Never raises."""
+    row = _sent_row(rid)
+    if not row or row[0] not in FAILED_STATES:
+        return {}
+    out: dict = {"state": row[0], "code": None, "matches": [], "total_matches": 0, "error": ""}
+    try:
+        res = json.loads(row[1] or "{}")
+    except ValueError:
+        res = {}
+    if not isinstance(res, dict):
+        return out
+    out["error"] = str(res.get("error") or res.get("stdout") or "")[:600]
+    out["code"] = res.get("code") if isinstance(res.get("code"), str) else None
+    for text in (res.get("stdout"), res.get("error")):
+        for line in str(text or "").splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                parsed = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict) and isinstance(parsed.get("code"), str):
+                matches = [m for m in parsed.get("matches") or [] if isinstance(m, dict)]
+                total = parsed.get("total_matches")
+                out.update(code=parsed["code"], matches=matches,
+                           total_matches=total if type(total) is int else len(matches),
+                           error=str(parsed.get("note") or out["error"])[:600])
+                return out
+    return out
+
+
 _OUTPUT_ID = re.compile(r'"id"\s*:\s*"(t_[A-Za-z0-9_]+)"')
 
 
@@ -1042,6 +1083,6 @@ def await_task_id(rid: str, *, hub_cli: str, budget: float, clock: Callable[[], 
         tid = remote_task_id(rid)
         if tid:
             return tid, remote_status(rid)
-        if clock() >= deadline:
+        if clock() >= deadline or remote_state(rid) in FAILED_STATES:  # rejected: it will never come
             return None, None
         sleep(1.0)
