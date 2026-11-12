@@ -341,7 +341,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         except Exception as e:
             return await self._hmwa_agent_error_reply(e, event, source, session_entry, session_key, prepared)
         finally:  # [daveey] store the chat's outcome (off the reply path), then restore the session context
-            refresh_gateway_turn_outcome(self, session_entry)
+            refresh_gateway_turn_outcome(self, session_entry, event, session_key)
             self._clear_session_env(_session_env_tokens)
 
     def _profile_scope_for_source(self, source: SessionSource):

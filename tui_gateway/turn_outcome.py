@@ -17,32 +17,44 @@ def _turn_sid(session: dict, agent=None) -> str:
     return str(getattr(agent, "session_id", "") or session.get("session_key") or "")
 
 
-def capture_concluding_turn(session: dict, agent=None) -> frozenset:
-    """The concluding turn's own live-turn evidence (marker, turn lease), taken now. A refresh that runs later
-    (a timer) passes it back so a turn started in between stays a live turn. Failure discounts nothing."""
-    sid = _turn_sid(session, agent)
-    if not sid:
-        return frozenset()
+def own_turn_marker(session: dict, marker_key: str) -> Optional[dict]:
+    """The marker this turn just recorded, read back right after ``record_turn_start`` (before any other turn of
+    the chat can overwrite the key). Its identity is what the turn-end refresh may discount, nothing later."""
+    if not marker_key:
+        return None
     try:
-        from hermes_state_outcome import capture_turn_identity
         from tui_gateway import server  # split helpers only work rebound onto server globals (bind_module)
+        from tui_gateway.turn_marker import read_turn_marker
 
-        with server._session_profile_runtime_scope(session), server._session_db(session) as db:
-            return capture_turn_identity(sid, db=db) if db is not None else frozenset()
-    except Exception:  # health: allow BLE001 -- best-effort; an unreadable store discounts nothing
-        logger.warning("turn identity capture failed for %s", sid, exc_info=True)
+        return read_turn_marker(server._session_home(session), marker_key)
+    except Exception:  # health: allow BLE001 -- unreadable = not named, so the marker reads live (fail safe)
+        logger.debug("own turn marker read failed for %s", marker_key, exc_info=True)
+        return None
+
+
+def concluding_turn_identity(agent=None, marker: Optional[dict] = None) -> frozenset:
+    """The concluding TUI turn's OWN evidence: the marker it recorded (``own_turn_marker``) and its agent's
+    turn-lease holder. Never a snapshot of what the chat holds now: a turn admitted after ``settle_prompt_state``,
+    or a concurrent turn's marker or routing token, stays a live turn. Nothing named = nothing discounted."""
+    try:
+        from hermes_state_outcome import turn_identity
+
+        holder = getattr(agent, "_last_session_turn_lease_holder", None)
+        return turn_identity(marker=marker if isinstance(marker, dict) else None,
+                             lease_holder=holder if isinstance(holder, str) else None)
+    except Exception:  # health: allow BLE001 -- best-effort; nothing named discounts nothing
+        logger.warning("turn identity capture failed", exc_info=True)
         return frozenset()
 
 
 def refresh_turn_outcome(session: dict, agent=None, concluding_turn: Optional[frozenset] = None) -> None:
     """Refresh the outcome of the row this turn wrote (the agent's compression tip, else the session key).
-    ``concluding_turn``: evidence captured when the turn concluded (``capture_concluding_turn``); omitted = the
-    turn is concluding right now and its evidence is captured here, in the same store scope."""
+    ``concluding_turn``: the turn's own evidence (``concluding_turn_identity``); omitted = nothing discounted."""
     sid = _turn_sid(session, agent)
     if not sid:
         return
     try:
-        from hermes_state_outcome import capture_turn_identity, refresh_outcome
+        from hermes_state_outcome import refresh_outcome
         from tui_gateway import server  # split helpers only work rebound onto server globals (bind_module)
 
         # The turn has already released its secret scope (the home override alone
@@ -50,8 +62,6 @@ def refresh_turn_outcome(session: dict, agent=None, concluding_turn: Optional[fr
         # context threads: bind the owning session's full runtime scope again.
         with server._session_profile_runtime_scope(session), server._session_db(session) as db:
             if db is not None:
-                if concluding_turn is None:
-                    concluding_turn = capture_turn_identity(sid, db=db)
-                refresh_outcome(sid, "turn_end", db=db, concluding_turn=concluding_turn)
+                refresh_outcome(sid, "turn_end", db=db, concluding_turn=concluding_turn or frozenset())
     except Exception:  # health: allow BLE001 -- the turn already concluded; a failed refresh is logged
         logger.warning("turn-end outcome refresh failed for %s", sid, exc_info=True)

@@ -564,6 +564,9 @@ def admit_durable_turn_lease(
         agent, db, session_id, holder, expires_at=_committed_lease_expiry(db, session_id, holder, authority_floor),
     )
     agent._active_session_turn_lease_holder = holder
+    # [daveey] Kept after release (the active attr is cleared even when a busy store defers the release): the
+    # turn-end outcome refresh discounts only this turn's own lease (hermes_state_outcome.turn_identity).
+    agent._last_session_turn_lease_holder = holder
     agent._active_session_turn_lease_ttl_seconds = LEASE_TTL_SECONDS
     try:
         # Read the row only now: the previous holder may have created or deleted it while this

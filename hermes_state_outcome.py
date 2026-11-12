@@ -246,8 +246,8 @@ def _live_turn(db: Any, sid: str, concluding: frozenset[str] = frozenset()) -> b
 
     Managed workers and CLI turns need no TUI marker or gateway routing entry. Their shared
     turn-facade lease is the cross-process evidence; an idle attached session is not a turn.
-    ``concluding`` [daveey]: tokens of the turn that is concluding (``capture_turn_identity``); evidence
-    carrying one of them is that turn's own, not a live turn."""
+    ``concluding`` [daveey]: tokens of the turn that is concluding (``turn_identity``); evidence carrying
+    one of them is that turn's own, not a live turn."""
     return any(token not in concluding for token in _live_turn_tokens(db, sid))
 
 
@@ -258,10 +258,10 @@ def _live_turn_tokens(db: Any, sid: str) -> Iterator[str]:
     home = Path(db.db_path).parent
     marker = read_turn_marker(home, sid)
     if marker and marker_writer_state(marker) == "alive":
-        yield f"marker:{marker.get('writer_pid')}:{marker.get('started_at')}"
+        yield marker_identity(marker)
     owner = _guarded("durable turn", sid, lambda: _durable_turn_owner(db, sid), None)
     if owner is not None:
-        yield f"lease:{owner['holder']}:{owner.get('acquired_at')}"
+        yield f"lease:{owner['holder']}"
     yield from _guarded("gateway turn", sid, lambda: list(_gateway_turn_tokens(db, sid)), [])
 
 
@@ -299,7 +299,7 @@ def _gateway_turn_tokens(db: Any, sid: str) -> Iterator[str]:
         scope = str(routing_scope or "")
         gateway_home = Path(scope).parent if scope else Path(db.db_path).parent
         if _gateway_running(gateway_home):
-            yield f"gateway:{scope}:{entry.get('active_turn_token')}:{entry.get('active_turn_started_at')}"
+            yield f"gateway:{entry.get('active_turn_token')}"
 
 
 def _gateway_turn_live(db: Any, sid: str) -> bool:
@@ -849,20 +849,34 @@ def derive_outcome(sid: str, *, db: Any = None, ignore_live_turn: bool = False,
         return _derive(handle, _tip(handle, sid), ignore_live_turn=ignore_live_turn, pending_reply=pending_reply)
 
 
-def capture_turn_identity(sid: str, *, db: Any = None) -> frozenset[str]:
-    """[daveey] The live-turn evidence ``sid`` holds right now, as opaque tokens (TUI marker pid+start, turn-lease
-    holder+acquisition, gateway routing token+start). A turn's conclusion captures this BEFORE it schedules its
-    ``turn_end`` refresh and hands it to ``refresh_outcome(concluding_turn=...)``: the refresh then discounts
-    exactly that turn's not-yet-released evidence, while a turn that started afterwards (different token) is
-    still a live turn. Callers treat a failed capture as nothing to discount."""
-    with _db_scope(db) as handle:
-        return frozenset(_live_turn_tokens(handle, _tip(handle, sid)))
+def marker_identity(marker: Optional[dict]) -> str:
+    """[daveey] Identity of one TUI turn marker (writer pid + its own ``started_at``); a newer turn's marker under
+    the same key has a different one."""
+    marker = marker or {}
+    return f"marker:{marker.get('writer_pid')}:{marker.get('started_at')}"
+
+
+def turn_identity(*, marker: Optional[dict] = None, lease_holder: Optional[str] = None,
+                  gateway_token: Optional[str] = None) -> frozenset[str]:
+    """[daveey] The concluding turn's OWN live-turn evidence, built only from handles that turn holds: the TUI
+    marker it recorded (read back right after it was written), its turn-lease holder (unique per turn) and its
+    gateway ``active_turn_token`` (a uuid per turn). Never a snapshot of what the chat holds at conclusion: that
+    would also take a newer or concurrent turn's evidence (PR1131 review t_01a1d0ca50bdd065). Passed to
+    ``refresh_outcome(concluding_turn=...)``; any evidence not named here is a live turn."""
+    tokens = set()
+    if marker:
+        tokens.add(marker_identity(marker))
+    if lease_holder:
+        tokens.add(f"lease:{lease_holder}")
+    if gateway_token:
+        tokens.add(f"gateway:{gateway_token}")
+    return frozenset(tokens)
 
 
 def refresh_outcome(sid: str, trigger: str, *, db: Any = None,
                     concluding_turn: Optional[Iterable[str]] = None) -> dict[str, Any]:
     """Derive, write when it changed, and return the outcome now stored. ``concluding_turn``: the
-    ``capture_turn_identity`` of the turn whose conclusion is refreshing (``turn_end``): only that turn's own
+    ``turn_identity`` of the turn whose conclusion is refreshing (``turn_end``): only that turn's own
     evidence is not a live turn; any other live turn derives ``running``."""
     if trigger not in TRIGGERS:
         raise ValueError(f"unknown outcome trigger {trigger!r}")

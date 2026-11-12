@@ -52,6 +52,14 @@ def _session(agent=None, **extra):
 def home(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_hermes_home", tmp_path)
     monkeypatch.setattr(server, "_load_cfg", lambda: CFG)
+    # [daveey] A turn's end refresh derives the chat's outcome past its own marker and reads the chat's cards.
+    # With Thread inlined process-wide (turn_env, schedule_env) the remote-links worker loop
+    # (kanban_links_refresh._run) would run forever on the test thread (CI: 600 s file timeout): keep the card
+    # sources local and empty.
+    from hermes_cli import kanban_session_activity as ksa
+    monkeypatch.setattr(ksa, "_board_db_paths", list)
+    monkeypatch.setattr(ksa, "_remote_cards", lambda *a, **k: [])
+    ksa._reset_cache_for_tests()
     return tmp_path
 
 

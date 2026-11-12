@@ -666,6 +666,9 @@ class _TurnRun:
     error_detail: str = ""
     prompt_text: str = ""
     marker_key: str = ""
+    # [daveey] The marker this turn recorded, read back at once: its identity is the only marker evidence the
+    # turn-end outcome refresh may discount (tui_gateway/turn_outcome.concluding_turn_identity).
+    own_marker: Any = None
     display_kind: Any = None
     receipt_attempted: bool = False
     # [daveey] An automation turn (kanban_notice, process_complete): its display metadata and the one replay plan
@@ -1410,6 +1413,8 @@ def _run_admitted_prompt(
             receipt_committed=terminal_callback is None)
         st.marker_key = _record_turn_marker(session, text, auto_continue=auto_continue and terminal_callback is None,
             notification_category=(display_metadata or {}).get("notification_category"))
+        from tui_gateway.turn_outcome import own_turn_marker
+        st.own_marker = own_turn_marker(session, st.marker_key)
         st.display_kind = display_kind
         st.display_metadata = display_metadata
         from tui_gateway import automation_replay  # [daveey] a failed automation turn's copy and its one replay
@@ -1450,7 +1455,9 @@ def _run_admitted_prompt(
                 _emit("message.complete", sid, payload)
                 if paused_for_update:
                     update_pause.start_in_place_watcher(sid, session, st.marker_key)
-            _schedule_refused_turn_retry(sid, session, st.marker_key)
+            from tui_gateway.turn_outcome import concluding_turn_identity
+            _schedule_refused_turn_retry(sid, session, st.marker_key,
+                                         concluding_turn_identity(st.agent, st.own_marker))
             if status == "complete":
                 # [daveey] This turn's context carried any failed delivery already in the transcript.
                 automation_replay.cancel_carried(st.marker_key, str(session.get("session_key") or ""))
@@ -1512,8 +1519,9 @@ def _run_admitted_prompt(
                 _emit_settled_session_info(sid, session, st.agent)
             finally:
                 try:
-                    from tui_gateway.turn_outcome import refresh_turn_outcome  # [daveey] every conclusion,
-                    refresh_turn_outcome(session, st.agent)  # before the profile scope resets
+                    from tui_gateway.turn_outcome import (  # [daveey] every conclusion, before the profile
+                        concluding_turn_identity, refresh_turn_outcome)  # scope resets; only its own evidence
+                    refresh_turn_outcome(session, st.agent, concluding_turn_identity(st.agent, st.own_marker))
                     _post_turn_housekeeping(sid, session, st)
                 finally:
                     _rearm_carried_pause_watcher(sid, session, st)

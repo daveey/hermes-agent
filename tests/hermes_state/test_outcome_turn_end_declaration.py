@@ -12,7 +12,7 @@ import pytest
 
 import hermes_state_outcome as so
 from hermes_state import SessionDB
-from tui_gateway.turn_marker import clear_turn_marker, record_turn_start
+from tui_gateway.turn_marker import clear_turn_marker, read_turn_marker, record_turn_start
 
 WAIT = {"kind": "waiting", "on": [{"kind": "card", "id": "t_suite", "label": "Fleet scheduling regression suite"}]}
 # A reply the heuristic (no judge) reads as a closing summary: without the declaration it derives done.
@@ -60,7 +60,7 @@ def test_the_turns_own_turn_end_refresh_ignores_its_unreleased_turn(db):
     home = db.db_path.parent
     record_turn_start(home, "chat", "is the suite built?")  # the lease/token the concluding turn still holds
     try:
-        own = so.capture_turn_identity("chat", db=db)  # what the turn captures when it concludes
+        own = so.turn_identity(marker=read_turn_marker(home, "chat"))  # the marker the turn recorded
         assert own
         out = so.refresh_outcome("chat", "turn_end", db=db, concluding_turn=own)
     finally:
@@ -96,13 +96,16 @@ def test_a_newer_user_row_still_supersedes_a_carried_declaration(db):
 
 def test_both_turn_end_callers_pass_the_concluding_turn_never_a_blanket_bypass(monkeypatch):
     """Entry paths: the gateway (messaging/local Desktop runtime) and the TUI turn-end refresh."""
+    from types import SimpleNamespace
+
     calls = []
     monkeypatch.setattr(so, "refresh_outcome", lambda sid, trigger, **kw: calls.append((sid, trigger, kw)) or {})
-    monkeypatch.setattr(so, "capture_turn_identity", lambda sid, db=None: frozenset({"lease:h:1"}))
     from gateway import turn_outcome as gw
 
-    gw._refresh("chat", object(), gw._capture("chat", object()))
-    assert calls[-1][1] == "turn_end" and calls[-1][2].get("concluding_turn") == frozenset({"lease:h:1"})
+    agent = SimpleNamespace(_last_session_turn_lease_holder="h")
+    runner = SimpleNamespace(_session_state=lambda key: SimpleNamespace(turn=SimpleNamespace(agent=agent)))
+    gw._refresh("chat", object(), gw.concluding_turn_identity(runner, None, "key"))
+    assert calls[-1][1] == "turn_end" and calls[-1][2].get("concluding_turn") == frozenset({"lease:h"})
     assert "ignore_live_turn" not in calls[-1][2]
 
     import contextlib
@@ -111,8 +114,8 @@ def test_both_turn_end_callers_pass_the_concluding_turn_never_a_blanket_bypass(m
 
     monkeypatch.setattr(server, "_session_profile_runtime_scope", lambda s: contextlib.nullcontext(), raising=False)
     monkeypatch.setattr(server, "_session_db", lambda s: contextlib.nullcontext(object()), raising=False)
-    tui.refresh_turn_outcome({"session_key": "chat"})
-    assert calls[-1][1] == "turn_end" and calls[-1][2].get("concluding_turn") == frozenset({"lease:h:1"})
+    tui.refresh_turn_outcome({"session_key": "chat"}, agent, tui.concluding_turn_identity(agent))
+    assert calls[-1][1] == "turn_end" and calls[-1][2].get("concluding_turn") == frozenset({"lease:h"})
     assert "ignore_live_turn" not in calls[-1][2]
-    tui.refresh_turn_outcome({"session_key": "chat"}, None, frozenset({"marker:1:2"}))  # a timer's earlier capture
-    assert calls[-1][2].get("concluding_turn") == frozenset({"marker:1:2"})
+    tui.refresh_turn_outcome({"session_key": "chat"})  # nothing named: nothing discounted
+    assert calls[-1][2].get("concluding_turn") == frozenset()

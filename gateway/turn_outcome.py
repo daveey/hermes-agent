@@ -15,16 +15,32 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-def _capture(sid: str, db) -> frozenset:
-    """The concluding turn's own live-turn evidence (routing token, turn lease, marker), taken now, before the
-    refresh is scheduled. The refresh runs later on an unawaited thread: a newer turn may have started by then,
-    and only this turn's evidence may be discounted. Nothing captured = nothing discounted."""
+def _turn_agent(runner, session_key: Optional[str]):
+    """The agent that ran this turn (``turn.agent`` stays set until the session's next turn is claimed)."""
+    if not session_key:
+        return None
     try:
-        from hermes_state_outcome import capture_turn_identity
+        return getattr(runner._session_state(session_key).turn, "agent", None)
+    except Exception:  # health: allow BLE001 -- no agent = its lease is not named, so it reads live (fail safe)
+        logger.debug("gateway turn agent lookup failed for %s", session_key, exc_info=True)
+        return None
 
-        return capture_turn_identity(sid, db=db)
-    except Exception:  # health: allow BLE001 -- best-effort; an unreadable store discounts nothing
-        logger.warning("gateway turn identity capture failed for %s", sid, exc_info=True)
+
+def concluding_turn_identity(runner, event=None, session_key: Optional[str] = None) -> frozenset:
+    """The concluding gateway turn's OWN evidence: its routing ``active_turn_token`` (the event owns it until
+    ``_clear_durable_active_turn``) and its agent's turn-lease holder. Never a snapshot of the chat's live
+    evidence: a concurrent Desktop turn's marker, or a turn that starts before the unawaited refresh runs, stays
+    a live turn. Nothing named = nothing discounted."""
+    try:
+        from hermes_state_outcome import turn_identity
+
+        agent = _turn_agent(runner, session_key)
+        holder = getattr(agent, "_last_session_turn_lease_holder", None)
+        token = getattr(event, "_gateway_active_turn_token", None)
+        return turn_identity(lease_holder=holder if isinstance(holder, str) else None,
+                             gateway_token=token if isinstance(token, str) else None)
+    except Exception:  # health: allow BLE001 -- best-effort; nothing named discounts nothing
+        logger.warning("gateway turn identity capture failed for %s", session_key, exc_info=True)
         return frozenset()
 
 
@@ -37,8 +53,10 @@ def _refresh(sid: str, db, concluding_turn: frozenset) -> None:
         logger.warning("gateway turn-end outcome refresh failed for %s", sid, exc_info=True)
 
 
-def refresh_gateway_turn_outcome(runner, session_entry) -> Optional[threading.Thread]:
-    """Start the refresh off the reply path; the started thread (None when there is nothing to refresh)."""
+def refresh_gateway_turn_outcome(runner, session_entry, event=None,
+                                 session_key: Optional[str] = None) -> Optional[threading.Thread]:
+    """Start the refresh off the reply path; the started thread (None when there is nothing to refresh).
+    The concluding turn's identity is taken here, before the thread is scheduled."""
     sid = str(getattr(session_entry, "session_id", "") or "")
     store = getattr(runner, "_session_db", None)
     db = getattr(store, "_db", store)
@@ -47,8 +65,8 @@ def refresh_gateway_turn_outcome(runner, session_entry) -> Optional[threading.Th
     try:
         from agent.memory_provider import spawn_context_thread
 
-        thread = spawn_context_thread(
-            _refresh, name="gateway-turn-outcome", args=(sid, db, _capture(sid, db)))
+        concluding = concluding_turn_identity(runner, event, session_key)
+        thread = spawn_context_thread(_refresh, name="gateway-turn-outcome", args=(sid, db, concluding))
         thread.start()
         return thread
     except Exception:  # health: allow BLE001 -- a thread that can't start skips one refresh; logged
