@@ -1137,6 +1137,11 @@ def nonretryable_client_error_result(
         # exhausted request repair). Preserve that terminal verdict for auto-continue.
         "failure_retryable": False,
     })
+    if classified.reason == FailoverReason.auth:
+        from agent.credential_pool_pushed import auth_wall_is_transient
+        if auth_wall_is_transient(getattr(agent, "_credential_pool", None)):
+            # A sibling account is only quota-benched or was re-minted: the card waits, not parks.
+            result["auth_pool_transient"] = True
     if _keep_partial:
         result["partial"] = True
     _stamp_limit_reset(result, agent, api_error, classified)

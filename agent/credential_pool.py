@@ -1168,11 +1168,10 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         # Carry the classifier's verdict so the cooldown is sized by what
         # actually failed (a billing 403 must not get the sole-credential
         # transient cooldown); absent a classification, clear a stale one.
-        updated_extra = dict(entry.extra)
-        if failure_reason:
-            updated_extra["failure_reason"] = failure_reason
-        else:
-            updated_extra.pop("failure_reason", None)
+        updated_extra = {k: v for k, v in entry.extra.items() if k != "failure_reason"}
+        updated_extra.update({"failure_reason": failure_reason} if failure_reason else {})
+        # The generation this failure was seen on: a later token for the row is not under the bench. [daveey]
+        updated_extra["bench_token_fp"] = fingerprint_secret_value(entry.access_token) if entry.access_token else None
         return self._adopt(
             entry,
             persist=persist,
