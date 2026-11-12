@@ -33,7 +33,16 @@ export interface RowExecution {
   outstanding: number
 }
 
-type Stamped = Pick<SessionInfo, 'execution_observations' | 'id' | 'connection_id' | 'profile'>
+type Stamped = Pick<SessionInfo, 'execution_observations' | 'id' | 'connection_id' | 'profile'> &
+  Partial<Pick<SessionInfo, 'kanban_active' | 'kanban_parked'>>
+
+/** A producer that sent card counts but no `execution_observations` at all is an older backend (mixed
+ * version): its legacy live (unparked) cards still discover work, but as explicit unknown, never as
+ * certain running. Parked cards keep their legacy wait and blocked cards their legacy ask. */
+const legacyCardsWithoutObservations = (row: Partial<Stamped> | undefined): number =>
+  row && !Array.isArray(row.execution_observations)
+    ? Math.max(0, (row.kanban_active ?? 0) - Math.max(0, row.kanban_parked ?? 0))
+    : 0
 
 function ownerSource(owner: ReturnType<typeof knownOwnerForSession>) {
   if (isSessionOwnerRoute(owner)) {return gatewayRouteState(owner.connectionId, owner.profile).key}
@@ -50,7 +59,7 @@ export function rowExecution(row: Partial<Stamped> | undefined, nowSeconds: numb
 
   const roster = row?.id ? rosterRowEvidence($liveWorkRoster.get(), source, lineageAliases(row.id, $sessions.get())) : { records: [], missing: 0 }
   const list = [...(Array.isArray(row?.execution_observations) ? row.execution_observations : []), ...roster.records]
-  let missing = roster.missing
+  let missing = roster.missing + legacyCardsWithoutObservations(row)
 
   if (row?.id) {
     const aliases = lineageAliases(row.id, $sessions.get())

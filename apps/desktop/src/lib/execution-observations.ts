@@ -423,7 +423,8 @@ function lastKnown(out: ExecutionObservation): ExecutionObservation {
 const waitKind = (out: ExecutionObservation): unknown => get(get(out, 'wait'), 'kind')
 
 function project(value: unknown, now: number, sourceClass: ObservationSourceClass, expectedIdentity?: unknown): ExecutionObservation {
-  if (expectedIdentity !== undefined) {
+  // null and undefined both mean "no fence", as Python's `expected_identity is not None` does.
+  if (expectedIdentity !== undefined && expectedIdentity !== null) {
     const expected = executionIdentityKey(expectedIdentity)
 
     if (expected === null || expected !== executionIdentityKey(get(value, 'identity'))) {

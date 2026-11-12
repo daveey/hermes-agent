@@ -157,6 +157,16 @@ describe('sidebar execution wiring', () => {
     expect(withRowActivity('idle', row({}, AT - 181))).toBe('background')
   })
 
+  it('makes legacy live card counts from an older producer (no observations array) explicit unknown', () => {
+    const legacy = row({ kanban_active: 2, kanban_blocked: 1, kanban_parked: 1 }, AT)
+
+    expect(rowExecution(legacy)).toMatchObject({ live: 0, unknown: 1 })
+    expect(withRowActivity('idle', legacy)).toBe('background')
+    expect(rowExecution(row({ kanban_active: 1, kanban_parked: 1 }, AT))).toBeNull()  // legacy wait stays a wait
+    // A current producer sends the array; its own records decide, the legacy count adds no unknown.
+    expect(rowExecution(row({ execution_observations: [], kanban_active: 1 }, AT))).toBeNull()
+  })
+
   it('keeps the existing 180 s kanban boundary independent of observations', () => {
     const fresh = [
       obs({

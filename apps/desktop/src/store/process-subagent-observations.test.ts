@@ -98,6 +98,18 @@ describe('process/subagent source to sidebar consumers', () => {
     expect(rowExecution(row, 1001)).toMatchObject({ live: 1, unknown: 0 })
   })
 
+  it('a failed roster read keeps the outstanding human request of its cached record', () => {
+    vi.useFakeTimers(); vi.setSystemTime(1001000)
+    $sessions.set([row])
+    const source = gatewayRouteState(null, 'work').key
+    const ask = { action: 'Approve', why_human: 'owner', interaction: 'approval', scope: 'fixture', evidence: 'fixture' }
+    setLiveWorkRosterSource(source, [{ session_id: 'owner', background: 1, subagents: 0,
+      execution_observations: [{ ...records[0], human_request: ask }] }], 1001000, ['owner'])
+    expect(rowExecution(row, 1001)).toMatchObject({ live: 1, unknown: 0, outstanding: 1 })
+    failLiveWorkRosterSource(source, ['owner'])
+    expect(rowExecution(row, 1001)).toMatchObject({ live: 0, unknown: 1, outstanding: 1 })
+  })
+
   it('preserves roster arrays and exposes missing source beside fresh running on initial mixed version', () => {
     vi.useFakeTimers(); vi.setSystemTime(1001000)
     setLiveWorkRosterSource('ambient', [{ session_id: 'owner', background: 1, subagents: 1, execution_observations: [records[0]] }])

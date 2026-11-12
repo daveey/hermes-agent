@@ -152,6 +152,8 @@ export function noteEventFed(eventFedAt: Map<string, number>, aliases: readonly 
 export const rosterSourceHasWork = (roster: LiveWorkRoster, source: string) =>
   Object.values(roster[source]?.sessions ?? {}).some(c => c.subagents > 0 || c.background > 0)
 
+const isRecord = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
+
 /** Roster counts discover work, never establish liveness. Missing per-kind records stay unknown
  * beside other fresh records. `source` is the row's owner route, not its unqualified session id. */
 export function rosterRowEvidence(roster: LiveWorkRoster, source: string, aliases: readonly string[]) {
@@ -162,7 +164,21 @@ export function rosterRowEvidence(roster: LiveWorkRoster, source: string, aliase
     const counts = roster[source]?.sessions[alias]
 
     if (roster[source]?.failed) {
-      if (counts || roster[source].covers.has(alias)) {missing += Math.max(1, (counts?.background ?? 0) + (counts?.subagents ?? 0))}
+      // A failed read revokes current state, never outstanding asks: keep each cached record as an
+      // explicit unknown under its own identity, with its human requests and original clocks.
+      const cached = (counts?.execution_observations ?? []).filter(isRecord).map(record => ({
+        ...record,
+        state: 'unknown',
+        last_known_state: record.state,
+        unknown_reason: 'source_unavailable'
+      }))
+
+      records.push(...cached)
+
+      if (counts || roster[source].covers.has(alias)) {
+        const live = (counts?.background ?? 0) + (counts?.subagents ?? 0)
+        missing += Math.max(cached.length > 0 ? 0 : 1, live - cached.length)
+      }
 
       continue
     }

@@ -677,7 +677,7 @@ describe('SidebarSessionRow kanban counts', () => {
 
   it('shows open and blocked counts right after the age', () => {
     const { container } = renderRow(
-      makeSession({ kanban_active: 3, kanban_blocked: 1, title: 'Waiting' } as Partial<SessionInfo> & {
+      makeSession({ execution_observations: [], kanban_active: 3, kanban_blocked: 1, title: 'Waiting' } as Partial<SessionInfo> & {
         title: string
       }),
       { card: true }
@@ -691,6 +691,14 @@ describe('SidebarSessionRow kanban counts', () => {
     const time = container.querySelector('time')!
     // The counts follow the age in document order.
     expect(time.compareDocumentPosition(counts) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('labels live cards from an older producer without observations as unknown, not certain work', () => {
+    renderRow(makeSession({ kanban_active: 3, kanban_blocked: 1, title: 'Legacy' } as Partial<SessionInfo> & { title: string }))
+
+    const label = screen.getByTestId('session-row-kanban-counts').getAttribute('aria-label') ?? ''
+    expect(label).toContain('3 work items have unknown current status')
+    expect(label).toContain('3 open, 1 blocked')
   })
 
   it('shows blocked-only work and hides the zero side', () => {
