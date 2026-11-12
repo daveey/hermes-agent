@@ -83,8 +83,34 @@ function logFreshnessFlips(previous: Record<string, boolean>, next: Record<strin
   }
 }
 
+/** [daveey] Owner keys (`connection\0profile`, profile `*` = every profile there) whose live list was fresh at least
+ *  once this launch. Never cleared: once an owner has answered, its live rows and the hub-sync replica are newer than
+ *  the launch-time boot snapshot, so that snapshot's copies of its chats must not come back when it goes stale. */
+export const $answeredSessionOwners = atom<ReadonlySet<string>>(new Set())
+
+function noteAnsweredOwners(next: Record<string, boolean>): void {
+  const answered = $answeredSessionOwners.get()
+  const fresh = Object.keys(next).filter(key => next[key] === true && !answered.has(key))
+
+  if (fresh.length) {
+    $answeredSessionOwners.set(new Set([...answered, ...fresh]))
+  }
+}
+
+/** True once `connection`/`profile` (or every profile on `connection`) answered a live list this launch. */
+export function sessionOwnerAnswered(
+  connection: null | string | undefined,
+  profile?: null | string,
+  answered: ReadonlySet<string> = $answeredSessionOwners.get()
+): boolean {
+  const conn = connection ?? undefined
+
+  return answered.has(ownerKey(conn, profile ?? undefined)) || answered.has(ownerKey(conn, '*'))
+}
+
 function publishFreshness(next: Record<string, boolean>, reason: string): void {
   const previous = $sessionListFreshness.get()
+  noteAnsweredOwners(next)
 
   if (
     Object.keys(previous).length !== Object.keys(next).length ||
@@ -457,6 +483,7 @@ export function hideOfflineSession(row: SessionInfo): void {
 export function _resetOfflineSessionsForTests(): void {
   archivedWhileOffline.clear()
   listStaleOwners.clear()
+  $answeredSessionOwners.set(new Set())
   $sessionListFreshness.set({})
   $offlineSessions.set([])
 }

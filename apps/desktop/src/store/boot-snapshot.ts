@@ -23,10 +23,12 @@ import type { SessionInfo } from '@/hermes'
 import { $connectionsRegistry } from './connection-registry-state'
 import { connectionForHubGateway, hubReplicaConnectionId } from './hub-sync'
 import {
+  $answeredSessionOwners,
   $offlineSessions,
   offlineIdentity,
   type OfflineReplicaRecord,
-  offlineSessionsFromReplica
+  offlineSessionsFromReplica,
+  sessionOwnerAnswered
 } from './offline-sessions'
 import { $projectTree } from './project-tree'
 
@@ -72,17 +74,26 @@ export const $bootSessions = computed([$bootSnapshot, $connectionsRegistry], (bo
   )
 })
 
-/** The sidebar's fallback inputs: the hub-sync plugin's rows, then boot rows it does not have (plugin rows win). */
-export const $sidebarFallbackSessions = computed([$offlineSessions, $bootSessions], (offline, boot): SessionInfo[] => {
-  if (!boot.length) {
-    return offline
+/** The sidebar's fallback inputs: the hub-sync plugin's rows, then boot rows it does not have (plugin rows win).
+ *  [daveey] A boot row is a cold-start stand-in only: it is frozen at launch, so once its owner has answered a live
+ *  list it is dropped for good. Kept, it resurrected chats archived after launch every time that owner went stale
+ *  (the replica drops archived rows, so the boot copy was the only one left to fill the gap). */
+export const $sidebarFallbackSessions = computed(
+  [$offlineSessions, $bootSessions, $answeredSessionOwners],
+  (offline, boot, answered): SessionInfo[] => {
+    if (!boot.length) {
+      return offline
+    }
+
+    const have = new Set(offline.map(offlineIdentity))
+
+    const extra = boot.filter(
+      row => !have.has(offlineIdentity(row)) && !sessionOwnerAnswered(row.connection_id, row.profile, answered)
+    )
+
+    return extra.length ? [...offline, ...extra] : offline
   }
-
-  const have = new Set(offline.map(offlineIdentity))
-  const extra = boot.filter(row => !have.has(offlineIdentity(row)))
-
-  return extra.length ? [...offline, ...extra] : offline
-})
+)
 
 /** Read and apply the snapshot. Main window only; a no-op without the bridge or on any failure. */
 export function applyBootSnapshot(

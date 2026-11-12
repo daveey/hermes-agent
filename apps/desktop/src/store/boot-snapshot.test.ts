@@ -18,6 +18,7 @@ import {
   $offlineSessions,
   _resetOfflineSessionsForTests,
   mergeOfflineFallback,
+  recordSessionGatewayUnavailable,
   recordSessionListResult
 } from './offline-sessions'
 import { $projectTree } from './project-tree'
@@ -168,6 +169,47 @@ describe('boot rows in the sidebar fallback', () => {
     recordSessionListResult([], live, undefined, 'default')
 
     expect(mergeOfflineFallback(live, $sidebarFallbackSessions.get()).map(row => row.id)).toEqual(['s_new'])
+  })
+
+  // [daveey] An archived hub chat kept coming back: the launch-time snapshot still listed it, the replica (which drops
+  // archived rows) did not, and every time the hub went stale (its backend busy with a turn or a notice) the frozen
+  // boot copy filled the gap until the next good hub list.
+  it("drops another gateway's boot rows once that gateway answered a live list, even when it goes stale again", () => {
+    $connectionsRegistry.set(registry())
+    rememberHubGatewayName('mac-mini', 'mini')
+    $connectionsRegistry.set(registry())
+    applyBootSnapshot(() => snapshot(), NOW_S * 1000)
+
+    const fallbackIds = (live: SessionInfo[]) =>
+      mergeOfflineFallback(live, $sidebarFallbackSessions.get()).map(row => row.id)
+
+    // Cold start, before the mini answers: its boot row is the sidebar's copy.
+    expect(fallbackIds([])).toContain('s_mini')
+
+    // The mini's live list answers without s_mini (archived after launch); the replica has dropped it too.
+    const live = [{ connection_id: 'mac-mini', id: 's_other', profile: 'default', title: 'Live' } as SessionInfo]
+    recordSessionListResult([], live, 'mac-mini', 'all')
+    $offlineSessions.set([])
+    expect(fallbackIds(live)).not.toContain('s_mini')
+
+    // The mini goes stale (a failed list while it is busy): the frozen boot copy must not come back.
+    recordSessionListResult(live, [], 'mac-mini', 'all', [], true)
+    expect(fallbackIds(live)).not.toContain('s_mini')
+
+    // ... or the reachability probe calls it unavailable (the desktop.log `gateway-unavailable` flips).
+    recordSessionGatewayUnavailable('mac-mini')
+    expect(fallbackIds(live)).not.toContain('s_mini')
+  })
+
+  it("keeps another gateway's boot rows while that gateway has never answered this launch", () => {
+    $connectionsRegistry.set(registry())
+    rememberHubGatewayName('mac-mini', 'mini')
+    $connectionsRegistry.set(registry())
+    applyBootSnapshot(() => snapshot(), NOW_S * 1000)
+
+    recordSessionListResult([], [], 'mac-mini', 'all', [], true)
+
+    expect(mergeOfflineFallback([], $sidebarFallbackSessions.get()).map(row => row.id)).toContain('s_mini')
   })
 })
 
