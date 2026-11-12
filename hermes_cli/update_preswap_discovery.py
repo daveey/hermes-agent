@@ -61,10 +61,41 @@ def systemd_units() -> list[dict]:
     return units
 
 
+def _bare_supervisor_evidence(pid: int, argv: list | None) -> tuple[bool | None, str]:
+    """True = proven bare, False = unmanaged supervisor, None = unreadable evidence.
+
+    Only the managed Hermes units inventoried above can be safely disarmed here.
+    Refuse every other service cgroup (including nested children), even Restart=no:
+    a PID disappearing does not establish custody of its supervisor. The user@ UID
+    manager is infrastructure, not a supervisor of a terminal/session scope.
+    Best-effort fleet helpers intentionally retain their separate default semantics.
+    """
+    import psutil
+    from hermes_cli import update_cmd_posix_pause as pause
+    from hermes_cli.gateway import argv_declares_external_supervisor
+
+    if argv_declares_external_supervisor(argv):
+        return False, "supervised by --external-supervisor"
+    cgroup = pause._pid_cgroup(pid)
+    if not cgroup or not cgroup.startswith("/"):
+        return None, "its supervisor cgroup could not be read"
+    parts = cgroup.strip("/").split("/")
+    for part in parts:
+        manager = part.startswith("user@") and part.endswith(".service") and part[5:-8].isdecimal()
+        if part.endswith(".service") and (not manager or part == parts[-1]):
+            return False, f"unmanaged supervisor systemd unit {part}"
+    try:
+        env = psutil.Process(pid).environ()
+    except (psutil.Error, OSError) as exc:
+        return None, f"its supervisor environment could not be read ({type(exc).__name__})"
+    if env.get("HERMES_S6_SUPERVISED_CHILD"):
+        return False, "supervised by s6"
+    return True, ""
+
+
 def bare_gateways(service_pids: set[int]) -> tuple[list[dict], list[str]]:
     """Only proven foreign ownership/code excludes a candidate from the strict pause."""
     from gateway.status import get_process_start_time
-    from hermes_cli import update_cmd_posix_pause as pause
     from hermes_cli.gateway import _capture_gateway_argv, find_gateway_pids
     from hermes_cli.update_fleet_scope import (
         announce_skipped_runtime, gateway_foreign_code_root, gateway_pid_home, home_in_update_scope,
@@ -83,10 +114,11 @@ def bare_gateways(service_pids: set[int]) -> tuple[list[dict], list[str]]:
         if pinned is not None:
             announce_skipped_runtime("gateway process", f"PID {pid}", home, code_root=pinned)
             continue
-        marker, argv = pause._supervisor_markers(pid), _capture_gateway_argv(pid)
-        if marker or not argv or not home:
-            why = f"supervised by {marker}" if marker else "its command line could not be read" if not argv \
-                else "its Hermes home could not be proved"
+        argv = _capture_gateway_argv(pid)
+        is_bare, why = _bare_supervisor_evidence(pid, argv)
+        if is_bare is not True or not argv or not home:
+            why = why or ("its command line could not be read" if not argv
+                          else "its Hermes home could not be proved")
             notices.append(f"  ↷ gateway PID {pid} keeps running until after the update ({why})")
             continue
         bare.append({"pid": pid, "argv": list(argv), "home": str(home), "ct": get_process_start_time(pid)})

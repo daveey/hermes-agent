@@ -118,6 +118,72 @@ def test_unit_gateway_never_enters_bare_stop_set(bare_probes, tmp_path, monkeypa
 
 
 @pytest.mark.platforms("linux")
+def test_s6_session_scope_is_not_bare(bare_probes, tmp_path, monkeypatch):
+    import psutil
+
+    monkeypatch.setattr(dashboard_procs, "_hermes_home_for_pid", lambda pid: str(tmp_path))
+    monkeypatch.setattr(psutil, "Process", lambda pid: Mock(environ=lambda: {"HERMES_S6_SUPERVISED_CHILD": "1"}))
+    verdict = pause._pause(pause._empty_token())
+    assert verdict and "s6" in verdict and "checkout was not changed" in verdict
+    bare_probes.assert_not_called()
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("probe", ["failed", "nonzero", "empty", "restart-no"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_custom_service_never_becomes_bare(bare_probes, tmp_path, monkeypatch, probe, nested):
+    import subprocess
+
+    monkeypatch.setattr(dashboard_procs, "_hermes_home_for_pid", lambda pid: str(tmp_path))
+    cgroup = "/fixture/custom-bot.service" + ("/child" if nested else "")
+    monkeypatch.setattr(pause, "_pid_cgroup", lambda pid="self": cgroup)
+
+    def systemctl(cmd, **kwargs):
+        if probe == "failed":
+            raise OSError("systemctl unavailable")
+        if probe == "nonzero":
+            return subprocess.CompletedProcess(cmd, 1, "", "denied")
+        value = "" if probe == "empty" else str(PID) if "--property=MainPID" in cmd else "no"
+        return subprocess.CompletedProcess(cmd, 0, value, "")
+
+    monkeypatch.setattr(fleet, "_systemctl", systemctl)
+    token = pause._empty_token()
+    verdict = pause._pause(token)
+    assert verdict and "custom-bot.service" in verdict and "checkout was not changed" in verdict
+    assert token["unmapped"] == []
+    bare_probes.assert_not_called()
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("evidence", ["cgroup", "environment", "process"])
+def test_unknown_supervisor_evidence_refuses(bare_probes, tmp_path, monkeypatch, evidence):
+    import psutil
+
+    monkeypatch.setattr(dashboard_procs, "_hermes_home_for_pid", lambda pid: str(tmp_path))
+    if evidence == "cgroup":
+        monkeypatch.setattr(pause, "_pid_cgroup", lambda pid="self": None)
+    else:
+        def unreadable(*args):
+            raise psutil.AccessDenied(PID)
+        monkeypatch.setattr(psutil, "Process", unreadable if evidence == "process" else
+                            lambda pid: Mock(environ=unreadable))
+    verdict = pause._pause(pause._empty_token())
+    assert verdict and "supervisor" in verdict and "checkout was not changed" in verdict
+    bare_probes.assert_not_called()
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("cgroup", ["/", "/fixture/session.scope", "/user.slice/user@1000.service/app.slice/terminal.scope"])
+def test_readable_unsupervised_scope_is_bare(bare_probes, tmp_path, monkeypatch, cgroup):
+    monkeypatch.setattr(dashboard_procs, "_hermes_home_for_pid", lambda pid: str(tmp_path))
+    monkeypatch.setattr(pause, "_pid_cgroup", lambda pid="self": cgroup)
+    token = pause._empty_token()
+    assert pause._pause(token) is None
+    assert token["unmapped_pids"] == [PID]
+    bare_probes.assert_called_once()
+
+
+@pytest.mark.platforms("linux")
 def test_default_bare_discovery_keeps_best_effort_exclusion(bare_probes, monkeypatch):
     monkeypatch.delenv(pause.STOP_BUSY_ENV)
     assert pause._pause(pause._empty_token()) is None
