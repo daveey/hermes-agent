@@ -6,6 +6,7 @@ hashes remain suppressed; a foreign ref never borrows a local session's proof.
 from __future__ import annotations
 
 from contextlib import closing
+import json
 import re
 import sqlite3
 import time
@@ -131,3 +132,54 @@ def machine_sessions(gateway: Any, sessions: Iterable[Any], *, local_gateway=Non
 
 def is_machine_session(gateway: Any, session: Any, *, local_gateway=None, profile=None) -> bool:
     return bool(machine_sessions(gateway, (session,), local_gateway=local_gateway, profile=profile))
+
+
+def _ancestors(conn, task_ids: Iterable[str], max_depth: int) -> list[str]:
+    """The cards and their creator/dependency ancestors (bounded, cycle-safe)."""
+    seen: dict[str, None] = {}
+    frontier = [t for t in dict.fromkeys(task_ids) if t]
+    for _depth in range(max_depth):
+        frontier = [t for t in frontier if t not in seen]
+        if not frontier:
+            break
+        seen.update(dict.fromkeys(frontier))
+        q = ",".join("?" * len(frontier))
+        following = [r[0] for r in conn.execute(f"SELECT parent_id FROM task_links WHERE child_id IN ({q})", frontier)]
+        for (payload,) in conn.execute(
+                f"SELECT payload FROM task_events WHERE task_id IN ({q}) AND kind='created'", frontier):
+            try:
+                creator = (json.loads(payload or "{}") or {}).get("creator_task_id")
+            except (TypeError, ValueError, AttributeError):
+                creator = None
+            if creator:
+                following.append(str(creator))
+        frontier = following
+    return list(seen)
+
+
+def proven_foreign_chats(conn, task_ids: Iterable[str], *, local_gateway=None, max_depth: int = 16) -> frozenset[str]:
+    """``gateway/profile/session`` refs of other gateways' ``local-<sha256>`` chats this board proves own a card.
+
+    ``machine_sessions`` cannot read a foreign gateway's state.db, so it suppresses every foreign hash (a
+    Desktop chat and a worker receipt share the shape). This lifts that only for an exact qualified ref with an
+    unreleased ``created`` chat link on one of ``task_ids`` or an ancestor (creator edge or dependency parent).
+    Only the chat's own gateway can tell a Desktop chat from a worker receipt, and it says so in that row: its
+    reconcile writes an origin card's ``created`` link only for an interactive chat (``_ledger_links``) and
+    releases every link to its own machine sessions, owner-written ones included (``_owner_written_releases``).
+    The row is synced, so worker replicas see it. A courier binding (``origin_creation_intents``) or a
+    ``reason: origin`` hub sub proves nothing alone: ``hermes-hub create-task``/``adopt-task`` default the origin
+    to the caller's ``$HERMES_SESSION_ID`` (a worker's own hash inside a Kanban worker), and neither row is ever
+    released. Observer links, released links, an unqualified id or a missing profile prove nothing; this
+    gateway's own sessions keep their state.db verdict; no network read. [daveey]"""
+    if local_gateway is None:
+        from hermes_cli.kanban_origin import gateway_names
+        local_gateway = gateway_names()[0]
+    if not local_gateway or not conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone():
+        return frozenset()
+    ids = _ancestors(conn, task_ids, max_depth)
+    q = ",".join("?" * len(ids))
+    refs = conn.execute(
+        f"SELECT chat_gateway, chat_profile, chat_session FROM task_chat_links WHERE task_id IN ({q}) "
+        "AND kind='created' AND released=0", ids).fetchall() if ids else []
+    return frozenset(f"{gw}/{prof}/{sid}" for gw, prof, sid in refs
+                     if gw and prof and gw != local_gateway and _HEADLESS_SESSION.fullmatch(str(sid or "")))

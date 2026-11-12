@@ -48,7 +48,7 @@ _SUB_KEY_WHERE = "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_
 
 # Compatibility exports: provenance is shared by link reconciliation and notice delivery.
 from hermes_cli.kanban_session_provenance import (
-    is_headless_session, is_machine_session, machine_sessions, _source_cache,
+    is_headless_session, is_machine_session, machine_sessions, proven_foreign_chats, _source_cache,
 )
 
 
@@ -112,7 +112,9 @@ def add_notify_sub(
     ``MAX(task_events.id)``) so the notifier never replays history at boot.
     """
     from hermes_cli.kanban_placement import is_placeholder_session
-    if platform in ("hub", "tui") and (is_placeholder_session(chat_id) or is_headless_session(chat_id)):
+    if platform in ("hub", "tui") and (is_placeholder_session(chat_id) or (
+            is_headless_session(chat_id)
+            and not (platform == "hub" and chat_id in proven_foreign_chats(conn, (task_id,))))):
         return
     valid_mode = delivery_mode if delivery_mode in _NOTIFY_DELIVERY_MODES else None
     # api_server is stateless: the adapter has no send(), the wake self-post IS
@@ -1042,7 +1044,9 @@ def _inherit_notify_subs(
 
 def _machine_sub_chats(conn: sqlite3.Connection, parent_ids: tuple) -> list[str]:
     """``platform\\x1fchat_id`` of the parents' ``tui``/``hub`` subs whose chat is a machine session
-    (``is_machine_session``: a worker/cron/one-shot/subagent transcript), which a child must not inherit. [daveey]"""
+    (``is_machine_session``: a worker/cron/one-shot/subagent transcript), which a child must not inherit. Another
+    gateway's ``local-<sha256>`` chat with an unreleased ``created`` link on a parent or its ancestors
+    (``proven_foreign_chats``) is no machine. [daveey]"""
     from hermes_cli.kanban_origin import OriginError, gateway_names, parse_origin
     rows = conn.execute(
         f"SELECT DISTINCT platform, chat_id FROM kanban_notify_subs WHERE task_id IN ({','.join('?' * len(parent_ids))})"
@@ -1060,8 +1064,13 @@ def _machine_sub_chats(conn: sqlite3.Connection, parent_ids: tuple) -> list[str]
                 gateway = ""
         by_gateway.setdefault(gateway, {})[chat_id] = f"{platform}\x1f{chat_id}"
     out = []
+    proven: Optional[frozenset[str]] = None
     for gateway, chats in by_gateway.items():
         hits = machine_sessions(gateway, chats, local_gateway=me)
+        if hits and gateway != me:
+            if proven is None:
+                proven = proven_foreign_chats(conn, parent_ids, local_gateway=me)
+            hits = {c for c in hits if c not in proven}
         out.extend(chats[c] for c in hits)
     return out
 
