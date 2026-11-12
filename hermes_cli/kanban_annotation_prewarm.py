@@ -18,11 +18,18 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 _boot_thread: list[Optional[threading.Thread]] = [None]
+# Which step the boot thread is in, so the bind gate's budget-spent line names the slow one.
+_boot_phase: list[str] = ["session annotation"]
 
 
 def boot_thread() -> Optional[threading.Thread]:
     """The boot prewarm thread this process started, if any (``boot_warmup_gate`` waits on it)."""
     return _boot_thread[0]
+
+
+def boot_phase() -> str:
+    """The step the boot thread is in: ``session annotation``, then ``project tree``."""
+    return _boot_phase[0]
 
 
 def prewarm_annotation() -> bool:
@@ -38,9 +45,11 @@ def prewarm_annotation() -> bool:
 
 def _boot_prewarm() -> None:
     """The annotation first (every session read waits on it), then the project tree, which reads that annotation."""
+    _boot_phase[0] = "session annotation"
     prewarm_annotation()
     from hermes_cli.projects_tree_prewarm import prewarm_project_tree
 
+    _boot_phase[0] = "project tree"
     prewarm_project_tree()
 
 

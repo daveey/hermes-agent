@@ -74,6 +74,75 @@ def test_hold_gives_up_at_the_budget_and_never_raises(monkeypatch):
     assert gate.hold_bind_for_prewarm(budget_s=0.2) is None
 
 
+def test_budget_ends_at_the_bind_deadline_after_process_start():
+    # Hub boot-to-bind measured 11.4-18.4 s: a fixed 6 s on top of a slow boot overruns Desktop's 20 s attach window.
+    assert gate.warmup_budget_s(None) == gate.ALWAYS_ON_WARMUP_BUDGET_S == 6.0
+    assert gate.warmup_budget_s(5.0) == 6.0
+    assert gate.warmup_budget_s(13.0) == gate.ALWAYS_ON_BIND_DEADLINE_S - 13.0
+    assert gate.warmup_budget_s(18.4) == 0.0
+
+
+def test_process_age_is_none_when_unknown_or_implausible(monkeypatch):
+    import psutil
+
+    age = gate.process_age_s()
+    assert age is None or 0 <= age <= 300
+    monkeypatch.setattr(psutil.Process, "create_time", lambda self: time.time() - 3600)
+    assert gate.process_age_s() is None
+    monkeypatch.setattr(psutil.Process, "create_time", lambda self: 1 / 0)
+    assert gate.process_age_s() is None
+
+
+def test_hold_on_a_slow_boot_binds_by_the_deadline(monkeypatch):
+    monkeypatch.setenv(ENV_FLAG, "1")
+    release = threading.Event()
+    thread = _gated_thread(release, threading.Event())
+    monkeypatch.setattr(gate, "boot_prewarm_threads", lambda: [thread])
+    monkeypatch.setattr(gate, "process_age_s", lambda: 16.8, raising=False)  # 0.2 s before the 17 s deadline
+    try:
+        started = time.monotonic()
+        result = gate.hold_bind_for_prewarm()
+        assert result is not None
+        elapsed, running = result
+        assert running == 1 and elapsed < 1.5 and time.monotonic() - started < 1.5  # not the full 6 s
+    finally:
+        release.set()
+
+
+def test_budget_spent_line_names_the_prewarms_still_running(monkeypatch, caplog):
+    monkeypatch.setenv(ENV_FLAG, "1")
+    monkeypatch.setattr(kanban_annotation_prewarm, "_boot_phase", ["project tree"], raising=False)
+    release = threading.Event()
+    board = threading.Thread(target=release.wait, args=(10,), daemon=True, name="kanban-board-prewarm")
+    annotation = threading.Thread(target=release.wait, args=(10,), daemon=True, name="kanban-annotation-prewarm")
+    finished = threading.Thread(target=lambda: None, name="kanban-board-prewarm")
+    for thread in (board, annotation, finished):
+        thread.start()
+    finished.join(5)
+    monkeypatch.setattr(gate, "boot_prewarm_threads", lambda: [finished, board, annotation])
+    try:
+        with caplog.at_level("INFO", logger=gate.log.name):
+            result = gate.hold_bind_for_prewarm(budget_s=0.1)
+        assert result is not None and result[1] == 2
+    finally:
+        release.set()
+    line = next(r.getMessage() for r in caplog.records if "boot prewarm budget spent" in r.getMessage())
+    assert "2 still running: board, project tree); binding" in line, line
+
+
+def test_annotation_boot_thread_reports_its_current_step(monkeypatch):
+    from hermes_cli import projects_tree_prewarm
+
+    seen = []
+    monkeypatch.setattr(kanban_annotation_prewarm, "_boot_phase", ["project tree"])
+    monkeypatch.setattr(kanban_annotation_prewarm, "prewarm_annotation",
+                        lambda: seen.append(kanban_annotation_prewarm.boot_phase()))
+    monkeypatch.setattr(projects_tree_prewarm, "prewarm_project_tree",
+                        lambda: seen.append(kanban_annotation_prewarm.boot_phase()))
+    kanban_annotation_prewarm._boot_prewarm()
+    assert seen == ["session annotation", "project tree"]
+
+
 def test_boot_prewarm_threads_are_the_ones_the_prewarms_started(monkeypatch):
     first, second = threading.Thread(target=lambda: None), threading.Thread(target=lambda: None)
     monkeypatch.setattr(kanban_annotation_prewarm, "_boot_thread", [first])
@@ -110,6 +179,8 @@ def _serve_startup(monkeypatch, *, always_on: bool) -> tuple[bool, list]:
     thread = _gated_thread(release, done)
     threading.Timer(0.3, release.set).start()
     monkeypatch.setattr(gate, "boot_prewarm_threads", lambda: [thread])
+    # A fresh boot (the test process itself is older than the bind deadline).
+    monkeypatch.setattr(gate, "process_age_s", lambda: 1.0, raising=False)
     joined, real_join = [], gate.join_within
     monkeypatch.setattr(gate, "join_within", lambda threads, budget_s: joined.append(list(threads)) or
                         real_join(threads, budget_s))
