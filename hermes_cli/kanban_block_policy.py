@@ -122,7 +122,7 @@ _RECOMMENDATION_BOUNDARY = re.compile(
     r"certs?|certificates?|hub|mini|router|bridge|hue|lights?|locks?|unlock\w*|alarm\w*|speakers?|eo1|"
     r"doors?|garage|cameras?|thermostat\w*|monitor|nursery|"
     r"archiv\w*\s+(?:the|a|an|this|that|these|those|all|old|our|my|every|it)\b|"
-    r"post(?:ed|ing|s)?\s+(?:on|to|the|a|it|this|publicly)\b|repl(?:y|ies|ied)|submit\w*|"
+    r"post(?:ed|ing|s)?\s+(?:on|to|the|a|it|this|publicly)\b|submit\w*|"
     r"share\w*\s+(?:with|the|it|this|that|a|an|my|our|publicly)\b|"
     r"dms?|recruit\w*|partner\w*|"
     # permissions and credentials
@@ -131,7 +131,7 @@ _RECOMMENDATION_BOUNDARY = re.compile(
     # safety, privacy, consent
     r"consent|privacy|private|safety|health|medical|"
     # destructive or hard to reverse
-    r"delet\w*|remov\w*|wip\w*|drop\w*|purg\w*|eras\w*|destroy\w*|truncat\w*|overwrit\w*|reset\w*|"
+    r"delet\w*|remov\w*|wip\w*|purg\w*|eras\w*|destroy\w*|truncat\w*|overwrit\w*|reset\w*|"
     r"force[- ]?push\w*|irreversibl\w*|destructive|permanent\w*|unrecoverabl\w*|hard[- ]to[- ]reverse|"
     r"bypass\w*|without\s+(?:ci|review|tests?|checks?|approval)|skip\w*\s+(?:ci|review|tests?|checks?)|"
     r"(?:failing|failed|red|broken)\s+(?:required\s+)?(?:ci|checks?|builds?)|"
@@ -175,8 +175,8 @@ def recommended_choice_warning(human_request) -> dict:
     text = " ".join(str(human_request.get(key) or "")
                     for key in ("action", "scope", "why_human", "evidence"))
     text += " " + " ".join(str(choice.get(key) or "") for choice in choices for key in ("label", "value"))
-    # The documented ask template ("Reply A or B in this chat ... archive = drop it.") is not a boundary.
-    text = _ASK_TEMPLATE.sub(" ", text)
+    # Nothing is stripped before the veto: every boundary word in any field is seen. The ask template's
+    # own verbs ("reply", "drop") are simply not veto terms (review t_01a1cebce8757c5a). [daveey]
     if _RECOMMENDATION_BOUNDARY.search(text) or _RECOMMENDATION_NAMED_PERSON.search(text):
         return {}
     return {"warning": RECOMMENDATION_WARNING}
@@ -194,11 +194,6 @@ RECOMMENDATION_WARNING = (
     "no permission. Otherwise: this block stands and this run still ends, so do not apply the option "
     "now; comment your recommended pick and how to reverse it so David can just unblock, and next time "
     "apply the recommended option and comment the pick instead of blocking.")
-_ASK_TEMPLATE = re.compile(
-    r"\breply\s+(?:with\s+)?(?:[a-z0-9]|one|your)\b[^.;]{0,40}?\bin\s+this\s+chat\b|\barchiv\w*\s*=\s*[^.;]*",
-    re.IGNORECASE)
-
-
 ASK_LINT_CODE = "user_ask_incomplete"
 _UNBLOCK = re.compile(r"\bun-?block", re.IGNORECASE)
 _ARCHIVE = re.compile(r"\barchiv", re.IGNORECASE)

@@ -197,18 +197,65 @@ def test_recommendation_nudge_still_fires_for_in_gate_code_decisions(action):
 
 
 # The kanban_block schema's own ask template must not veto an in-gate ask (review t_01a1cea8ae43e248:
-# "reply" and "drop" vetoed 17/17), while a boundary outside the template still does. [daveey]
+# "reply" and "drop" vetoed 17/17), but nothing is stripped before the veto, so any boundary word in
+# the ask, the template's unblock/archive clauses included, still vetoes (t_01a1cebce8757c5a). [daveey]
 @pytest.mark.parametrize("action,warns", [
     ("Pick the retry backoff for the poller. Reply A or B in this chat. Unblock = build the pick; "
      "archive = drop it.", True),
-    ("Choose fixture timing. Reply with A in this chat. Unblock = proceed; archive = delete the branch.", True),
+    ("Choose fixture timing. Reply with A in this chat. Unblock = proceed; archive = close the card.", True),
+    ("Choose fixture timing. Reply with A in this chat. Unblock = proceed; archive = delete the branch.", False),
     ("Pick the retry backoff. Reply A or B in this chat. Unblock = drop the users table; archive = skip.", False),
     ("Reply to the recruiter about the PR in this chat. Unblock = proceed; archive = skip.", False),
+    ("Pick the retry backoff. Reply A, B or C in this chat. Unblock = build the pick; archive = drop it.", True),
+    # Review t_01a1cebce8757c5a: a boundary between the choice token and "in this chat", or after an
+    # archive clause's comma, is not template and must still veto. [daveey]
+    ("Reply A to Bob's PR test in this chat.", False),
+    ("Reply A to spend $40 on the test runner in this chat.", False),
+    ("Reply y to deploy the PR to prod in this chat.", False),
+    ("Pick the PR fix. Archive = keep it, unblock = deploy to prod.", False),
+    ("Pick the PR fix. Unblock = build; archive = cancel the $40 subscription.", False),
 ])
 def test_recommendation_nudge_ignores_the_canonical_ask_template(action, warns):
     from hermes_cli.kanban_block_policy import recommended_choice_warning
     request = {"interaction": "reply", "action": action, "scope": "this card",
                "choices": [{"label": "A (recommended)", "value": "a"}, {"label": "B", "value": "b"}]}
+    assert bool(recommended_choice_warning(request)) is warns
+
+
+# Fixture: review t_01a1cebce8757c5a's probe (reviewer_template_strip_probe_t_01a1cebce8757c5a.py). Its
+# criterion: a wrong warning must be harmless and no boundary word is removed before the veto. A note
+# on a David-only ask the coarse veto cannot name (e.g. a bare person's name) is tolerated, so the
+# Bob probes are not pinned here. [daveey]
+_PROBE_TEMPLATE = "Reply A or B in this chat. Unblock = build the pick; archive = drop it."
+_PROBE_CASES = {
+    "a_code_template": ("Pick the test timeout for tests/foo.py. " + _PROBE_TEMPLATE, "reply", None, True),
+    "a_code_plain": ("Pick the test timeout for tests/foo.py.", "reply", None, True),
+    "b_spend": ("Raise the GPU spend cap for the test to $200. " + _PROBE_TEMPLATE, "reply", None, False),
+    "c_perm": ("Grant the bot admin permission for the PR. " + _PROBE_TEMPLATE, "reply", None, False),
+    "c_consent": ("Consent to recording test fixtures from the nursery camera. " + _PROBE_TEMPLATE,
+                  "reply", None, False),
+    "d_physical": ("Press the button on the hub for the test", "physical", None, False),
+    "e_norec": ("Pick the test timeout. " + _PROBE_TEMPLATE, "reply", ("A", "B"), False),
+    "replyA_spend": ("Reply A to spend $40 on the test runner in this chat.", "reply",
+                     ("A: test fix (recommended)", "B"), False),
+    "replyY_deploy": ("Reply y to deploy the PR to prod in this chat.", "reply",
+                      ("y: PR fix (recommended)", "n"), False),
+    "archive_then_unblock_comma": ("Pick the PR fix. Archive = keep it, unblock = deploy to prod.", "reply",
+                                   ("A: PR fix (recommended)", "B"), False),
+    "archive_cost": ("Pick the PR fix. Unblock = build; archive = cancel the $40 subscription.", "reply",
+                     ("A: PR fix (recommended)", "B"), False),
+    "unblock_boundary": ("Pick the PR test. Reply A or B in this chat. Unblock = deploy the pick; "
+                         "archive = drop it.", "reply", None, False),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_PROBE_CASES))
+def test_recommendation_nudge_reviewer_template_probe(name):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    action, interaction, labels, warns = _PROBE_CASES[name]
+    labels = labels or ("Option A: raise test timeout to 30s (recommended)", "Option B: keep 10s")
+    request = {"action": action, "scope": "Card t_x scope", "why_human": "toss-up", "evidence": "see comment",
+               "interaction": interaction, "choices": [{"label": l, "value": f"v{i}"} for i, l in enumerate(labels)]}
     assert bool(recommended_choice_warning(request)) is warns
 
 
