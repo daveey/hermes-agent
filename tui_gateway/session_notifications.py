@@ -521,6 +521,11 @@ def _session_owns_pending_process_notification(session: dict) -> bool:
         # After Stop no notification turn can start until the user's next prompt (``_notif_claim_turn``), so a
         # pending notice is no reason to keep the session: the user's prompt resumes it like any other.
         return False
+    if session.get("_notif_held"):
+        # [daveey] A notice whose turn admission refused (update hold, a paused turn's continuation due) waits in
+        # this session's held list: off the queue, out of the in-flight hold, so awaits_notification cannot see
+        # it. Reaping now parks it unowned and drops it 10 min later (hub chat 20261111_005201_05663e).
+        return True
     from tools.process_registry import process_registry
     from tools.process_registry_awaiting import awaits_notification
     return awaits_notification(process_registry, _session_process_owners(session))
