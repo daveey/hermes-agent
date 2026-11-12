@@ -529,6 +529,7 @@ def pool_route(args, cfg, gateway, audit, requires, *, queue=True, machine_ok=No
     """
     from hermes_cli import kanban_placement as kp
     from hermes_cli import kanban_placement_coordination as coordination
+    from hermes_cli.kanban_mandatory_pin import worker_first_refusal
     from hermes_cli.kanban_worker_placement import POLICY, QUEUED_WHY, WAITING
 
     label = kp._Cfg(cfg).queue_label(gateway) if queue else None
@@ -536,6 +537,9 @@ def pool_route(args, cfg, gateway, audit, requires, *, queue=True, machine_ok=No
     if label and extra is not None and (machine_ok or kp._machine_picks_up)(label):
         out = {"where": "local", "runs_on": [label, *sorted(extra - {label})],
                "why": QUEUED_WHY.format(label=label), "hub_admission": audit}
+    elif why := worker_first_refusal(args):
+        # No attested queue: a denied mandatory pin is refused, as it was while the pin counted as uncarried.
+        return {"where": "refuse", "why": f"hub admission denied, and {why}", "hub_admission": audit}
     else:
         out = {"where": "local", "placement_policy": POLICY, "why": WAITING, "hub_admission": audit}
     if requires is not None:

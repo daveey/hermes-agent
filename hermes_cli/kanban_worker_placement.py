@@ -97,6 +97,9 @@ def creation_decision(args, cfg, gateway, pin, origin_intent, machine_ok=None, q
     reason = portable_reason(args, cfg)
     if reason:
         return None  # Non-portable work still follows the origin's legacy route.
+    from hermes_cli.kanban_mandatory_pin import worker_first_refusal
+    if worker_first_refusal(args):
+        return None  # the worker-first lease cannot demand the pin attestation: home, as before
     return {"where": "local", "placement_policy": POLICY, "why": WAITING}
 
 

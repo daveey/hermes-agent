@@ -220,3 +220,82 @@ def test_a_refused_mandatory_pin_is_never_cleared_to_the_profile_default(tmp_pat
 def test_the_courier_still_cannot_carry_a_mandatory_pin():
     used = kp._uncarried({**REVIEW, **PIN}, kp._Cfg({}), True)
     assert used == ["pin_mandatory"]
+
+
+# --- review 5878972889: no route around the label ---------------------------------------------------------------
+# The worker-first pool's Board lease checks only profile/requires/skill labels, and a move rewrites runs_on, so
+# either could hand an old core (no refusal(), no CAS) a mandatory pin. Each test here fails on ebc69953d4.
+
+def test_a_mandatory_pin_never_enrolls_worker_first(monkeypatch):
+    from hermes_cli import kanban_worker_placement as wp
+    monkeypatch.setattr(kp, "portable_reason", lambda args, cfg=None: None)  # an attested, portable pool
+    cfg = {"worker_pools": {HUB: [WORKER]}}
+    assert wp.creation_decision({**REVIEW, **PIN}, cfg, HUB, "auto", None, queue=False) is None
+    plain = wp.creation_decision({**REVIEW, "model": "claude-opus-5-5"}, cfg, HUB, "auto", None, queue=False)
+    assert plain["placement_policy"] == wp.POLICY  # a plain pin still enrolls
+
+
+def test_a_denied_mandatory_pin_with_no_queue_is_refused_not_sent_worker_first():
+    from hermes_cli import kanban_hub_admission_placement as hp
+    out = hp.pool_route({**REVIEW, **PIN}, {}, HUB, {"admit": False}, None, queue=False)
+    assert out["where"] == "refuse" and mp.WORKER_FIRST_REASON in out["why"], out
+    assert hp.pool_route(REVIEW, {}, HUB, {"admit": False}, None, queue=False)["placement_policy"] == "worker-first-v1"
+
+
+def test_recovery_never_promotes_a_home_mandatory_pin(tmp_path, monkeypatch):
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_placement_recovery as rec
+    monkeypatch.setattr(kp, "portable_reason", lambda args, cfg=None: None)
+    monkeypatch.setattr(kp, "config", dict)
+    conn = kbc.connect(tmp_path / "kanban.db")
+    pinned = kb.create_task(conn, title="review", assignee="default", model_override="claude-opus-5-5",
+                            provider_override="anthropic", pin_mandatory=True)
+    plain = kb.create_task(conn, title="review", assignee="default", model_override="claude-opus-5-5",
+                           provider_override="anthropic")
+    row = lambda tid: dict(conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone())
+    assert rec.current_portable(conn, row(plain), {}) is True
+    assert rec.current_portable(conn, row(pinned), {}) is False
+    conn.close()
+
+
+def test_a_hub_pickup_re_place_keeps_the_label(monkeypatch):
+    from hermes_cli import kanban_hub_admission_pickup as hap
+    monkeypatch.setattr(kp, "structural_reason", lambda args, cfg=None: None)
+    monkeypatch.setattr(kp, "portable_reason", lambda args, cfg=None: None)
+    monkeypatch.setattr(kp, "_machine_picks_up", lambda label: True)
+    card = {"title": "review", "body": "", "assignee": "default", "workspace_kind": "scratch", "requires": "[]",
+            "skills": None, "model_override": "claude-opus-5-5", "provider_override": "anthropic",
+            "model_pin_mandatory": 1}
+    assert sorted(hap._target(hap._fields(card, BOARD), HUB, CFG, {})) == sorted([POOL, mp.LABEL])
+    plain = {**card, "model_pin_mandatory": None}
+    assert hap._target(hap._fields(plain, BOARD), HUB, CFG, {}) == [POOL]
+
+
+def _machines(*, attest):
+    worker = {**MACHINES[WORKER], "labels": ["linux", POOL] + ([mp.LABEL] if attest else [])}
+    return {**MACHINES, WORKER: worker}
+
+
+@pytest.mark.parametrize("target", [[POOL], [f"machine:{WORKER}"]])
+def test_a_move_keeps_the_label_and_needs_an_attested_target(gws, target):
+    from hermes_cli import kanban_move as km
+    hub, _ = gws
+    hub.enter()
+    tid = kb.create_task(hub.conn, title="review", assignee="default", model_override="claude-opus-5-5",
+                         provider_override="anthropic", pin_mandatory=True)
+    kw: dict = {"reason": "r", "me": HUB, "host_reason": "the review runs on that host"}
+    res = km.move_queued(hub.conn, tid, runs_on=target, machines=_machines(attest=False), **kw)
+    assert res["reason_code"] == "no_machine" and mp.LABEL in res["error"], res
+    res = km.move_queued(hub.conn, tid, runs_on=target, machines=_machines(attest=True), **kw)
+    assert res["ok"] and _runs_on(hub.conn, tid) == sorted([*target, mp.LABEL]), res
+    plain = kb.create_task(hub.conn, title="plain", assignee="default", model_override="claude-opus-5-5",
+                           provider_override="anthropic")
+    res = km.move_queued(hub.conn, plain, runs_on=target, machines=_machines(attest=False), **kw)
+    assert res["ok"] and _runs_on(hub.conn, plain) == target, res
+
+
+def test_carry_leaves_a_pin_to_this_machine_alone():
+    card = {"model_override": "claude-opus-5-5", "model_pin_mandatory": 1}
+    assert mp.carry([f"machine:{HUB}"], card, me=HUB) == [f"machine:{HUB}"]  # this core refuses what it can't serve
+    assert mp.carry([f"machine:{WORKER}"], card, me=HUB) == [mp.LABEL, f"machine:{WORKER}"]
+    assert mp.carry([POOL], {"model_override": "x"}, me=HUB) == [POOL]

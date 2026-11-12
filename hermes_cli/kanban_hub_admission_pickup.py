@@ -78,7 +78,10 @@ def _fields(card: Mapping[str, Any], board: str) -> dict:
         return value if isinstance(value, list) else None
     return {"title": card["title"] or "", "body": without_placement_note(card["body"] or ""),
             "assignee": card["assignee"], "workspace_kind": card["workspace_kind"] or "scratch",
-            "requires": _list(card["requires"]), "skills": _list(card["skills"]), "board": board}
+            "requires": _list(card["requires"]), "skills": _list(card["skills"]), "board": board,
+            # A mandatory pin's attestation label rides the re-placed queue labels (kanban_mandatory_pin).
+            **{k: card[k] for k in ("model_override", "provider_override", "model_pin_mandatory")
+               if k in card.keys()}}
 
 
 def _target(fields: dict, own: str, cfg: dict, audit: dict) -> Optional[list[str]]:

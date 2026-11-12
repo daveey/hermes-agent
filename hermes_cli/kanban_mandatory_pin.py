@@ -13,10 +13,16 @@ What the pool route needs instead, and where it lives:
   ``pool:worker``). The creator checks it on every eligible pool member (:func:`requirements` through
   ``kanban_placement_diagnostics.portability``), the destination checks it on itself
   (``kanban_placement_coordination.claim_refusal``). A pool without it, or an unknown registry, keeps
-  the card home (:data:`REASON`): mixed versions fail closed;
+  the card home (:data:`REASON`): mixed versions fail closed. The card leaves home only through the worker
+  queue, whose ``runs_on`` carries the label into the Board lease; it never enrolls worker-first
+  (:func:`worker_first_refusal`), and a move keeps the label (:func:`carry`);
 * the claiming machine refuses a mandatory pin it cannot run exactly (:func:`refusal`): the card stays on
   the Board for a machine that can. There is never a fallback to another model, and a stored mandatory
   pin is never cleared (``kanban_model_assignment.route_model_mismatch``).
+
+"Mandatory" here is the ``tasks.model_pin_mandatory`` column. A ``require_model: true`` body line
+(``kanban_provider_walls.requires_model``) only exempts a pin from the quota reroute; it is not placed, gated or
+protected here, as before this module.
 
 A pin that is not mandatory keeps every substitution it had (quota reroute, registry clear).
 """
@@ -29,6 +35,7 @@ _log = logging.getLogger(__name__)
 
 LABEL = "capability:mandatory-model-pin"
 REASON = "mandatory model pin unattested"
+WORKER_FIRST_REASON = "a mandatory model pin leaves home only through the worker queue"
 _logged: set[tuple[str, str]] = set()
 
 
@@ -51,6 +58,29 @@ def pin_of(item: Mapping[str, Any]) -> Optional[tuple[str, str]]:
 def requirements(item: Mapping[str, Any]) -> set[str]:
     """The attestation labels a destination must carry to take ``item`` (create args or a card row)."""
     return {LABEL} if pin_of(item) else set()
+
+
+def worker_first_refusal(item: Mapping[str, Any]) -> Optional[str]:
+    """Why ``item`` (create args or a card row) may not enroll worker-first, or None.
+
+    Only the worker queue carries a mandatory pin: there :data:`LABEL` sits in ``runs_on``, and the Board leases
+    the card only to a machine carrying every label. The worker-first pool's Board lease checks just profile,
+    ``requires`` and skill labels, and the create-time attestation sees only members eligible now, so a held or
+    stale old-core member could be assigned the card later (review 5878972889 on #1622)."""
+    return WORKER_FIRST_REASON if pin_of(item) else None
+
+
+def carry(labels: list[str], item: Mapping[str, Any], *, me: str = "") -> list[str]:
+    """``labels`` (a new ``runs_on``) with :data:`LABEL` added when ``item`` has a mandatory pin, so a move keeps
+    the attestation (``[pool:worker]`` alone would let an old core lease it). Unchanged when every ``machine:``
+    label names ``me``: this machine runs this core, which refuses a pin it cannot serve."""
+    need = requirements(item)
+    if not need or need <= set(labels):
+        return list(labels)
+    machines = [label[8:] for label in labels if label.startswith("machine:")]
+    if machines and me and all(name == me for name in machines):
+        return list(labels)
+    return sorted(set(labels) | need)
 
 
 def refusal(card: Mapping[str, Any], *, me: str = "") -> Optional[str]:

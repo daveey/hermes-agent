@@ -129,7 +129,8 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
     ship_custody = kms.refusal(reason, host_reason)
     if ship_custody:
         raise MoveRefused(kms.SHIP_CUSTODY_REFUSED, ship_custody)
-    row = conn.execute("SELECT status, workspace_kind, workspace_path, runs_on, assignee, requires, skills FROM tasks "
+    row = conn.execute("SELECT status, workspace_kind, workspace_path, runs_on, assignee, requires, skills, "
+                       "model_override, provider_override, model_pin_mandatory FROM tasks "
                        "WHERE id = ?", (task_id,)).fetchone()
     if row is None:
         raise MoveRefused("not_found", f"task {task_id} not found")
@@ -138,6 +139,10 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
     if sync.board_mode(conn) != "primary":
         raise MoveRefused("not_synced", "runs_on needs a board that syncs to the Board service (kanban.sync)")
     me = me or str(sync._state(conn)["gateway_id"])
+    from hermes_cli.kanban_mandatory_pin import carry
+    # A mandatory pin keeps its attestation label through every move (agent, operator, pickup-stall alarm):
+    # [pool:worker] alone would let an old core lease it; machine:<x> needs x to attest it. [daveey]
+    labels = carry(labels, dict(row), me=me)
     if machines is None:
         reg = wn.registry()
         if reg is None:

@@ -332,6 +332,27 @@ def test_the_alarms_run_may_not_move_an_unlisted_card_or_back_onto_the_stalled_m
     assert place._pin(hub.conn, unlisted) == place._pin(hub.conn, a) == [f"machine:{M}"]
 
 
+def test_the_alarms_pool_move_keeps_a_mandatory_pins_label(held, monkeypatch):
+    # Review 5878972889 on #1622: the alarm may only ask for exactly [pool:worker]; the move must still carry
+    # capability:mandatory-model-pin, or an old-core pool worker leases a pin it would run on another model.
+    from hermes_cli import kanban_mandatory_pin as mp
+    hub, _worker_gw, _alarm, (a, _b), _unlisted = held
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET model_override = 'claude-opus-5-5', provider_override = 'anthropic', "
+                         "model_pin_mandatory = 1 WHERE id = ?", (a,))
+    pooled = {**support.MACHINES[X], "labels": [*support.MACHINES[X]["labels"], POOL]}
+    monkeypatch.setitem(support.MACHINES, X, pooled)
+    hub.enter()
+    out = _move(a, [POOL])  # worker-2 is on the pool but does not attest the mandatory-pin refusal
+    assert out.get("ok") is not True and mp.LABEL in out["error"], out
+    assert place._pin(hub.conn, a) == [f"machine:{M}"]
+    monkeypatch.setitem(support.MACHINES, X, {**pooled, "labels": [*pooled["labels"], mp.LABEL]})
+    hub.enter()
+    out = _move(a, [POOL])
+    assert out.get("ok") is True, out
+    assert place._pin(hub.conn, a) == sorted([POOL, mp.LABEL])
+
+
 def test_the_hold_alarm_text_names_the_supported_command():
     assert "kanban_move command below" in kps._HOST_GROUPS["hold"][2]
     text = rp.howto(M)
