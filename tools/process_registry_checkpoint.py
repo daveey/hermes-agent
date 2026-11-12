@@ -376,6 +376,9 @@ class ProcessCheckpointMixin:
             # A TUI backend reports the eventual exit (status unknown) to the owning chat; a gateway keeps the
             # exited session for its recovered watcher to deliver. [daveey]
             session._report_lost_exit = owner == OWNER_TUI
+            # File-backed host jobs collect a real exit, just like re-attached sandbox jobs.
+            # Route it to the Desktop waker even when the owning chat is not loaded.
+            session._completion_via_readopt_sink = owner == OWNER_TUI
             session._lost_exit_via_watcher = owner != OWNER_TUI and session.watcher_interval > 0
             if session.output_log:
                 self._track_started(session, self._log_reader_loop, f"proc-log-reader-{session.id}")
