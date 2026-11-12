@@ -26,7 +26,6 @@ import logging
 import secrets
 import time
 import uuid
-import webbrowser
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 from urllib.parse import urlencode, urlparse
@@ -189,8 +188,9 @@ def login(provider: str, cfg: OAuthPKCEConfig, *, open_browser: bool = True) -> 
     print(f"Waiting for callback on {redirect_uri} (timeout {int(cfg.timeout_seconds)}s, Ctrl+C to cancel)...")
     _print_loopback_ssh_hint(redirect_uri)
     if open_browser and _can_open_graphical_browser():
+        from hermes_cli import top_level_env  # late: the clean opener, not an in-process webbrowser.open
         try:
-            webbrowser.open(authorize_url)
+            top_level_env.open_url_for_person(authorize_url)
         except Exception:
             print("Could not open the browser automatically; use the URL above.")
     try:

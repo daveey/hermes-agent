@@ -11,7 +11,6 @@ path is a 404 and never reaches the exchange.
 from __future__ import annotations
 
 import secrets
-import webbrowser
 from typing import Any, Dict
 from urllib.parse import urlencode
 
@@ -78,8 +77,9 @@ def _openrouter_loopback_code(auth_url_params: dict[str, str], *, open_browser: 
 
     print(f"Open this URL to authorize Hermes with OpenRouter:\n  {auth_url}\n\nDocs: {OPENROUTER_OAUTH_DOCS_URL}")
     if open_browser and _can_open_graphical_browser():
+        from hermes_cli import top_level_env  # late: the clean opener, not an in-process webbrowser.open
         try:
-            opened = webbrowser.open(auth_url)
+            opened = top_level_env.open_url_for_person_checked(auth_url)
         except Exception:
             opened = False
         print("Browser opened for OpenRouter authorization." if opened

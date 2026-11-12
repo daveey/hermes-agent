@@ -773,7 +773,6 @@ def _generate_pkce() -> tuple:
 
 def run_hermes_oauth_login_pure() -> Optional[dict[str, Any]]:
     """Run Hermes-native OAuth PKCE flow and return credential state."""
-    import webbrowser
     from urllib.parse import urlencode
     verifier, challenge = _generate_pkce()
     oauth_state = secrets.token_urlsafe(32)
@@ -796,7 +795,8 @@ def run_hermes_oauth_login_pure() -> Optional[dict[str, Any]]:
         _can_open_gui = lambda: True
     if _can_open_gui():
         with contextlib.suppress(Exception):
-            webbrowser.open(auth_url)
+            from hermes_cli import top_level_env  # late: the clean opener
+            top_level_env.open_url_for_person(auth_url)
             print("  (Browser opened automatically)")
     print("\nAfter authorizing, you'll see a code. Paste it below.\n")
     try:

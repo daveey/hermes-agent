@@ -1028,7 +1028,7 @@ def test_openrouter_loopback_callback_binds_nonce_path_and_rejects_forged_redire
         return True
 
     monkeypatch.setattr(orm, "_can_open_graphical_browser", lambda: True)
-    monkeypatch.setattr(orm.webbrowser, "open", _browser)
+    monkeypatch.setattr("hermes_cli.top_level_env.open_url_for_person_checked", _browser)
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         try:

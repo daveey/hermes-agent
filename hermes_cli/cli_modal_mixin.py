@@ -12,7 +12,6 @@ import queue
 import sys
 import threading
 import time as _time
-import webbrowser
 
 from agent.i18n import t
 from hermes_cli.callbacks import prompt_for_secret
@@ -775,7 +774,8 @@ class CLIModalMixin:
     def _connection_open_url(self) -> None:
         state = self._connection_state
         if state and state.get("phase") == "url" and state["target"].get("connect_url"):
-            webbrowser.open(state["target"]["connect_url"])
+            from hermes_cli import top_level_env  # late: the clean opener
+            top_level_env.open_url_for_person(state["target"]["connect_url"])
 
     def _connection_cancel(self) -> None:
         self._connection_answer(approve=False)

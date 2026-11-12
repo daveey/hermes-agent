@@ -11,10 +11,10 @@ Known limits (each records the legacy ``human``, never a false ``agent`` for a p
   a marker set only on such a process is invisible; a readable marked ancestor still counts;
 - an agent-started local proxy/relay presents its own (possibly clean) ancestry.
 A GUI launched from an agent terminal inherits its markers and records ``agent``. Hermes's
-own dashboard/webapp auto-open drops them (``top_level_env.open_url_for_person``); other
-in-process ``webbrowser.open`` callers (OAuth/device-flow sign-ins) can still cold-start a
-marked browser. macOS denies the global socket inventory, so each bare comment scans
-same-user processes there.
+own browser launchers, including OAuth/device-flow sign-ins, drop them through the
+``top_level_env.open_url_for_person`` helpers. External launchers can still propagate
+markers. macOS denies the global socket inventory, so each bare comment scans same-user
+processes there.
 Resolved peers use the CLI ancestry policy: unreadable ordinary ancestors fail closed to
 ``agent``, while root supervisors and access-denied same-uid ``systemd --user`` managers
 with permitted capabilities beyond the reader's are skipped. This preserves clean Linux

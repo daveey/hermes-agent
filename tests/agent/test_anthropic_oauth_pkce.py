@@ -51,11 +51,11 @@ def _patch_oauth_flow(
             capture_auth_url["url"] = url
         return True
 
-    monkeypatch.setattr("webbrowser.open", fake_open)
-    # The flow now gates webbrowser.open() behind a graphical-browser check so
+    monkeypatch.setattr("hermes_cli.top_level_env.open_url_for_person", fake_open)
+    # The flow now gates the person-browser opener behind a graphical-browser check so
     # it never launches a console browser (w3m/lynx) inside the terminal. Tests
     # run headless, so force the GUI path to True — the URL capture relies on
-    # webbrowser.open() being invoked.
+    # the opener being invoked.
     monkeypatch.setattr(
         "hermes_cli.auth._can_open_graphical_browser", lambda: True
     )

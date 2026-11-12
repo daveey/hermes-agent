@@ -827,7 +827,7 @@ class TestNonInteractiveFailFastAtCallbackBoundary:
 
         monkeypatch.setattr(mod, "_is_interactive", lambda: False)
         monkeypatch.setattr(
-            "webbrowser.open", MagicMock(side_effect=AssertionError("must not open browser"))
+            "hermes_cli.top_level_env.open_url_for_person_checked", MagicMock(side_effect=AssertionError("must not open browser"))
         )
 
         with pytest.raises(OAuthNonInteractiveError, match="browser authorization"):

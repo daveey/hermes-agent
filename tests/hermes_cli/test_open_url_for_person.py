@@ -23,7 +23,7 @@ REAL_CHECKED = top_level_env.open_url_for_person_checked
 
 def test_unchecked_opener_spawns_the_clean_child(monkeypatch):
     spawned = []
-    monkeypatch.setattr(top_level_env, "_spawn_clean_url_opener", spawned.append)
+    monkeypatch.setattr(top_level_env, "_spawn_clean_url_opener", lambda url, new=0: spawned.append(url))
     REAL_OPEN("http://127.0.0.1:9119")
     assert spawned == ["http://127.0.0.1:9119"]
 
@@ -75,10 +75,10 @@ class _Proc:
 
 
 @pytest.mark.parametrize("spawn, expected", [
-    (lambda url: _Proc(0), True),
-    (lambda url: _Proc(1), False),
-    (lambda url: _Proc(__import__("subprocess").TimeoutExpired("opener", 15)), True),
-    (lambda url: (_ for _ in ()).throw(OSError("no interpreter")), False),
+    (lambda url, new=0: _Proc(0), True),
+    (lambda url, new=0: _Proc(1), False),
+    (lambda url, new=0: _Proc(__import__("subprocess").TimeoutExpired("opener", 15)), True),
+    (lambda url, new=0: (_ for _ in ()).throw(OSError("no interpreter")), False),
 ])
 def test_checked_opener_reports_the_childs_outcome(monkeypatch, spawn, expected):
     monkeypatch.setattr(top_level_env, "_spawn_clean_url_opener", spawn)

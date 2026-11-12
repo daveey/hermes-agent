@@ -238,8 +238,8 @@ class CLIBillingMixin:
         except Exception:
             pass  # guard unavailable → plain best-effort open
         try:
-            import webbrowser
-            return bool(webbrowser.open(url))
+            from hermes_cli import top_level_env  # late: the clean opener, not an in-process webbrowser.open
+            return bool(top_level_env.open_url_for_person_checked(url))
         except Exception:
             return False
 

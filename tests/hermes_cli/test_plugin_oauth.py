@@ -133,7 +133,7 @@ def idp(monkeypatch, tmp_path):
         threading.Thread(target=lambda: urlopen(url, timeout=10, context=trust).close(), daemon=True).start()
         return True
 
-    monkeypatch.setattr(pkce.webbrowser, "open", browser)
+    monkeypatch.setattr("hermes_cli.top_level_env.open_url_for_person", browser)
     monkeypatch.setattr("hermes_cli.auth_device_flow._can_open_graphical_browser", lambda: True)
     yield server
     server.stop()

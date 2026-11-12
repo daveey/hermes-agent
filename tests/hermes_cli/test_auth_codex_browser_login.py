@@ -99,7 +99,7 @@ def test_browser_flag_runs_loopback_pkce_and_stores_loopback_source(tmp_path, mo
     def _browser(url):  # the "browser": follow the authorize redirect back to the loopback listener
         threading.Thread(target=lambda: urllib.request.urlopen(url, timeout=5).read(), daemon=True).start()
         return True
-    monkeypatch.setattr(browser_mod.webbrowser, "open", _browser)
+    monkeypatch.setattr("hermes_cli.top_level_env.open_url_for_person_checked", _browser)
 
     auth_add_command(_args(browser=True, no_browser=False))
 

@@ -227,8 +227,7 @@ class TestWhoWaits:
         assert "/api/anonymous/challenge/status" not in [p for _, p in nas.calls]
 
     def test_a_background_caller_never_prints_or_opens_a_browser(self, monkeypatch, capsys):
-        import webbrowser
-        monkeypatch.setattr(webbrowser, "open", lambda _url: pytest.fail("opened a browser in the background"))
+        monkeypatch.setattr("hermes_cli.top_level_env.open_url_for_person_checked", lambda _url: pytest.fail("opened a browser in the background"))
         challenge = anon_challenge.BrowserChallenge(f"{PORTAL}/challenge?code=t", True, 600, 2, "A quick check.")
         with anon_challenge.background_caller():
             anon_challenge.present(challenge)
@@ -255,11 +254,10 @@ class TestWhoWaits:
     def test_an_inherited_desktop_flag_is_not_the_desktop_surface(self, nas, monkeypatch, capsys):
         """A ``hermes`` run in the desktop's terminal pane inherits HERMES_DESKTOP but not the spawn
         credential: it reports ``cli`` to the service and prints the link where its user is."""
-        import webbrowser
         monkeypatch.setenv("HERMES_DESKTOP", "1")
         monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
         monkeypatch.setenv("SSH_TTY", "/dev/pts/0")
-        monkeypatch.setattr(webbrowser, "open", lambda _url: False)
+        monkeypatch.setattr("hermes_cli.top_level_env.open_url_for_person_checked", lambda _url: False)
         _connectors_token()
         assert nas.token_requests[-1]["body"]["client"]["surface"] == "cli"
         anon_challenge.present(anon_challenge.BrowserChallenge(f"{PORTAL}/challenge?code=t", True, 600, 2, "m"))
@@ -411,12 +409,11 @@ class TestPresenting:
         assert opened == [challenge]
 
     def test_a_terminal_opens_one_tab_per_ticket_however_many_attempts_resume_it(self, monkeypatch, capsys):
-        import webbrowser
         from hermes_cli import auth_device_flow
         opened = []
         monkeypatch.setattr(auth_device_flow, "_is_remote_session", lambda: False)
         monkeypatch.setattr(auth_device_flow, "_can_open_graphical_browser", lambda: True)
-        monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url) or True)
+        monkeypatch.setattr("hermes_cli.top_level_env.open_url_for_person_checked", lambda url: opened.append(url) or True)
         challenge = anon_challenge.BrowserChallenge(f"{PORTAL}/challenge?code=once", True, 600, 2, "m")
         anon_challenge.present(challenge)
         anon_challenge.present(challenge)
@@ -424,9 +421,8 @@ class TestPresenting:
         assert capsys.readouterr().err.count(challenge.url) == 2     # the link is always shown
 
     def test_a_terminal_prints_the_link_and_skips_the_browser_over_ssh(self, monkeypatch, capsys):
-        import webbrowser
         monkeypatch.setenv("SSH_TTY", "/dev/pts/0")
-        monkeypatch.setattr(webbrowser, "open", lambda _url: pytest.fail("opened a browser over SSH"))
+        monkeypatch.setattr("hermes_cli.top_level_env.open_url_for_person_checked", lambda _url: pytest.fail("opened a browser over SSH"))
         challenge = anon_challenge.BrowserChallenge(f"{PORTAL}/challenge?code=t", True, 600, 2, "A quick check.")
         anon_challenge.present(challenge)
         err = capsys.readouterr().err

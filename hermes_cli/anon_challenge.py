@@ -345,10 +345,10 @@ def _present_in_terminal(challenge: BrowserChallenge) -> None:
     already_open = challenge.url in _opened_urls
     if (not already_open and client_surface() != "gateway"
             and not _is_remote_session() and _can_open_graphical_browser()):
-        import webbrowser
+        from hermes_cli import top_level_env  # late: the clean opener, not an in-process webbrowser.open
         try:
-            opened = bool(webbrowser.open(challenge.url))
-        except (webbrowser.Error, OSError) as exc:
+            opened = bool(top_level_env.open_url_for_person_checked(challenge.url))
+        except OSError as exc:
             logger.debug("could not open the challenge in a browser: %s", exc)
         if opened:
             _opened_urls.add(challenge.url)

@@ -45,7 +45,7 @@ def _browser_hits(url: str) -> bool:
 def test_pkce_handler_add_status_refresh_logout_against_fake_idp(idp, monkeypatch, tmp_path, request):
     from agent.credential_pool import load_pool
 
-    monkeypatch.setattr(pkce.webbrowser, "open", _browser_hits)
+    monkeypatch.setattr("hermes_cli.top_level_env.open_url_for_person", _browser_hits)
     monkeypatch.setattr("hermes_cli.auth_device_flow._can_open_graphical_browser", lambda: True)
     cfg = _config(idp)
     handler, refresh = pkce.pkce_auth_handler(cfg), pkce.pkce_refresh_credential(cfg)
@@ -111,7 +111,7 @@ def test_spent_refresh_token_is_grant_dead_and_marks_the_pool_row_dead(idp, monk
     """RFC 6749 invalid_grant on refresh is terminal. The pool must DEAD the row, not EXHAUST it."""
     from agent.credential_pool import STATUS_DEAD, load_pool
 
-    monkeypatch.setattr(pkce.webbrowser, "open", _browser_hits)
+    monkeypatch.setattr("hermes_cli.top_level_env.open_url_for_person", _browser_hits)
     monkeypatch.setattr("hermes_cli.auth_device_flow._can_open_graphical_browser", lambda: True)
     cfg = _config(idp)
     handler, refresh = pkce.pkce_auth_handler(cfg), pkce.pkce_refresh_credential(cfg)
@@ -143,7 +143,7 @@ def test_alias_login_stores_the_row_under_the_canonical_profile_name(idp, monkey
     from agent.credential_pool import load_pool
 
     alias = "example-pkce-alias"
-    monkeypatch.setattr(pkce.webbrowser, "open", _browser_hits)
+    monkeypatch.setattr("hermes_cli.top_level_env.open_url_for_person", _browser_hits)
     monkeypatch.setattr("hermes_cli.auth_device_flow._can_open_graphical_browser", lambda: True)
     cfg = _config(idp)
     handler = pkce.pkce_auth_handler(cfg)

@@ -57,14 +57,17 @@ def clean_launch_env(base: Optional[MutableMapping[str, str]] = None) -> dict[st
     return drop_agent_attribution(env)
 
 
-def url_opener_command(url: str) -> list[str]:
-    """argv that opens ``url`` with the stdlib browser registry in a fresh interpreter (exit 0 = opened)."""
+def url_opener_command(url: str, new: int = 0) -> list[str]:
+    """argv that opens ``url`` with the stdlib browser registry in a fresh interpreter (exit 0 = opened).
+
+    ``new`` is ``webbrowser.open``'s window hint (0 same window, 1 new window, 2 new tab)."""
     import sys
     return [sys.executable, "-I", "-c",
-            "import sys, webbrowser; sys.exit(0 if webbrowser.open(sys.argv[1]) else 1)", url]
+            "import sys, webbrowser; sys.exit(0 if webbrowser.open(sys.argv[1], new=int(sys.argv[2])) else 1)",
+            url, str(int(new))]
 
 
-def open_url_for_person(url: str) -> None:
+def open_url_for_person(url: str, new: int = 0) -> None:
     """Open ``url`` in the person's browser without handing it the agent markers. [daveey]
 
     main() advertises ``HERMES_AGENT``/``AI_AGENT`` in ``os.environ`` for every command, so an
@@ -73,16 +76,16 @@ def open_url_for_person(url: str) -> None:
     ancestry (``kanban_http_comment_writer``): notes a person typed in that browser would be
     recorded as an agent's. The opener runs in a child with :func:`clean_launch_env` instead of
     mutating this (multi-threaded) process's environment."""
-    _spawn_clean_url_opener(url)
+    _spawn_clean_url_opener(url, new)
 
 
-def open_url_for_person_checked(url: str, timeout: float = 15.0) -> bool:
+def open_url_for_person_checked(url: str, timeout: float = 15.0, new: int = 0) -> bool:
     """:func:`open_url_for_person` for callers that report whether a browser opened.
 
     True when the child's ``webbrowser.open`` succeeded, or is still running at ``timeout``
     (a browser being launched); False on its failure or a spawn error."""
     try:
-        proc = _spawn_clean_url_opener(url)
+        proc = _spawn_clean_url_opener(url, new)
     except OSError:
         return False
     try:
@@ -91,8 +94,8 @@ def open_url_for_person_checked(url: str, timeout: float = 15.0) -> bool:
         return True
 
 
-def _spawn_clean_url_opener(url: str) -> subprocess.Popen:
-    return subprocess.Popen(url_opener_command(url), env=clean_launch_env(), stdin=subprocess.DEVNULL,
+def _spawn_clean_url_opener(url: str, new: int = 0) -> subprocess.Popen:
+    return subprocess.Popen(url_opener_command(url, new), env=clean_launch_env(), stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # no console flash
 

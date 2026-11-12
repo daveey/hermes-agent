@@ -19,7 +19,6 @@ from __future__ import annotations
 import hmac
 import logging
 import secrets
-import webbrowser
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode
 
@@ -133,8 +132,9 @@ def _codex_browser_login(
     print(f"Open this URL to authorize Hermes:\n  {auth_url}\n")
     _print_loopback_ssh_hint(redirect_uri)
     if open_browser and _can_open_graphical_browser():
+        from hermes_cli import top_level_env  # late: the clean opener, not an in-process webbrowser.open
         try:
-            opened = webbrowser.open(auth_url)
+            opened = top_level_env.open_url_for_person_checked(auth_url)
         except Exception:
             opened = False
         print("Browser opened for OpenAI authorization." if opened

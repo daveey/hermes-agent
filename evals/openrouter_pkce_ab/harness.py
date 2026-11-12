@@ -2,8 +2,8 @@
 """Local A/B harness for `hermes auth add openrouter --type oauth` against a FAKE OpenRouter.
 
 Runs the REAL entry point (``hermes_cli.auth_commands.auth_add_command``) with a temp HERMES_HOME.
-Only the network authority is replaced: ``webbrowser.open`` is swapped for a scripted "browser"
-that follows the auth URL's ``callback_url`` the way openrouter.ai would (redirecting the loopback
+Only the network authority is replaced: ``top_level_env.open_url_for_person_checked`` is swapped for a
+scripted "browser" that follows the auth URL's ``callback_url`` the way openrouter.ai would (redirecting the loopback
 listener with ``?code=``), and ``OPENROUTER_AUTH_KEYS_URL`` points at a local fake code-exchange
 server that enforces OpenRouter's documented contract (S256 verifier check, single-use code, 403).
 
@@ -84,7 +84,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def scripted_browser(fake: FakeOpenRouter, *, tamper_path=False, pre_consume=False):
-    """Return a ``webbrowser.open`` stand-in that behaves like openrouter.ai/auth after user consent."""
+    """Return a person-browser opener stand-in that behaves like openrouter.ai/auth after user consent."""
     def _open(url):
         q = parse_qs(urlparse(url).query)
         callback = q["callback_url"][0]
@@ -128,9 +128,10 @@ def run(scenario: str, fake: FakeOpenRouter, home: str) -> dict:
     try:  # BEFORE (origin/main) has no auth_openrouter sibling; the flow itself must then fail.
         import hermes_cli.auth_openrouter as orm
         import hermes_cli.auth_device_flow as dfl
+        import hermes_cli.top_level_env as tle
         orm.OPENROUTER_AUTH_KEYS_URL = fake.url
         dfl._can_open_graphical_browser = lambda: True
-        orm.webbrowser.open = browser
+        tle.open_url_for_person_checked = browser  # the clean person-browser opener auth_openrouter calls
     except ImportError:
         pass
     args = SimpleNamespace(provider="openrouter", auth_type="oauth", label="pkce-test", api_key=None,

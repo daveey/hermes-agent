@@ -464,8 +464,8 @@ def login_device_flow(
         _safe(lambda: on_user_code(code))
     if open_browser:
         with contextlib.suppress(Exception):
-            import webbrowser
-            webbrowser.open(code.verification_uri_complete or code.verification_uri, new=2)
+            from hermes_cli import top_level_env  # late: the clean opener
+            top_level_env.open_url_for_person(code.verification_uri_complete or code.verification_uri, new=2)
     first_token = poll_for_token(code, client_id=client_id)
     token = _validated_dashboard_token([_DeviceTokenCandidate(source="poll", token=first_token)])
     store_photon_token(token)

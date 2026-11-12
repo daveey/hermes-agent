@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import sys
-import webbrowser
 
 from hermes_cli.colors import Colors, color
 from hermes_cli.config import load_config
@@ -92,7 +91,8 @@ def _cmd_open(args) -> int:
     """Open the Portal subscription page in the default browser."""
     print(f"Opening {SUBSCRIPTION_URL}")
     try:
-        opened = webbrowser.open(SUBSCRIPTION_URL)
+        from hermes_cli import top_level_env  # late: the clean opener
+        opened = top_level_env.open_url_for_person_checked(SUBSCRIPTION_URL)
     except Exception:
         opened = False
     if opened:

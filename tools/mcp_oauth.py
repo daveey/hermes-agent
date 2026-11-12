@@ -24,7 +24,6 @@ import stat
 import sys
 import threading
 import time
-import webbrowser
 from functools import partialmethod
 
 # Cross-process advisory file locking for the refresh fence. Mirrors
@@ -789,7 +788,8 @@ def _announce_authorization_url(
     else:
         opened = False
         with contextlib.suppress(Exception):
-            opened = webbrowser.open(authorization_url)
+            from hermes_cli import top_level_env  # late: the clean opener
+            opened = top_level_env.open_url_for_person_checked(authorization_url)
         note = "Browser opened automatically." if opened else "Could not open browser — please open the URL manually."
     print(f"  ({note})\n", file=sys.stderr)
 

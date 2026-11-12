@@ -126,8 +126,7 @@ def test_free_prints_catalog_and_deep_links_with_plan(cli, monkeypatch, capsys):
 
 
 def test_open_url_in_browser_refuses_remote_session(cli, monkeypatch):
-    # (4): a remote/SSH session must NOT auto-open — webbrowser.open is never called.
-    import webbrowser
+    # (4): a remote/SSH session must NOT auto-open — the opener is never called.
 
     from hermes_cli import auth
     from hermes_cli import auth_device_flow
@@ -135,10 +134,10 @@ def test_open_url_in_browser_refuses_remote_session(cli, monkeypatch):
     monkeypatch.setattr(auth, "_is_remote_session", lambda: True, raising=False)
     monkeypatch.setattr(auth_device_flow, "_is_remote_session", lambda: True, raising=False)
     called = {"n": 0}
-    monkeypatch.setattr(webbrowser, "open", lambda url: called.update(n=called["n"] + 1) or True)
+    monkeypatch.setattr("hermes_cli.top_level_env.open_url_for_person_checked", lambda url: called.update(n=called["n"] + 1) or True)
 
     assert cli._open_url_in_browser("https://x.example") is False
-    assert called["n"] == 0  # guard short-circuits before webbrowser.open
+    assert called["n"] == 0  # guard short-circuits before the opener
 
 
 

@@ -306,8 +306,9 @@ def _print_device_code_instructions(
     print(f"  2. If prompted, enter code: {user_code}")
     if not open_browser:
         return
+    from hermes_cli import top_level_env  # late: the clean opener, not an in-process webbrowser.open
     try:
-        opened = webbrowser.open(verification_url)
+        opened = top_level_env.open_url_for_person_checked(verification_url)
     except Exception:
         if not swallow_open_errors:
             raise
