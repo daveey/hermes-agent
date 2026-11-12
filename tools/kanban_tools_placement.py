@@ -168,6 +168,15 @@ def _pin_drain_note(conn, task_id: str):
         return None
 
 
+def _pinned_note(conn, task_id: str, machine: str, runs_on: list[str]) -> str:
+    """The kanban_create note for a card pinned to another machine's lease, naming a drain that holds it. [daveey]"""
+    note = (f"Created here as {task_id}; it runs on {machine} via the board lease "
+            f"(runs_on={runs_on}). The pin was honoured: do not re-create it.")
+    if drain := _pin_drain_note(conn, task_id):  # the target can't claim it yet (t_01a1cca8ed755919)
+        note += " " + drain
+    return note
+
+
 def _runs_where(runs_on, pinned_machine, marker_placement) -> str:
     """Where a card created on this board runs, for the kanban_create result. Never raises."""
     if marker_placement and marker_placement.get("placement_policy"):

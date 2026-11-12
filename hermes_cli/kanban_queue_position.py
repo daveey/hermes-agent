@@ -190,7 +190,7 @@ def headline(place: dict[str, Any]) -> str:
         until = place.get("drain_until_ms")
         bound = (f"announced bound {_stamp_ms(until)}, not guaranteed" if until else "end time unknown")
         return (f"waiting for {machines} (runs_on {runs_on}), which is DRAINING for a core update (Board registry "
-                f"metrics; {bound}): its dispatcher imports and claims no cards until the drain ends")
+                f"metrics; {bound}): its dispatcher claims no new cards until the drain ends")
     words = f"waiting for {machines} (runs_on {runs_on}); this machine cannot lease it"
     if place.get("draining"):
         words += f" ({', '.join(place['draining'])} draining for a core update)"
