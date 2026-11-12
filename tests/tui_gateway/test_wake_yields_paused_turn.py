@@ -107,18 +107,14 @@ def test_a_non_conforming_profile_dir_does_not_fail_the_wake(recovery, profiles_
     assert recovery.done.wait(5) and recovery.calls[0][0] == "a card finished"
 
 
-def test_a_fresh_pause_in_a_profile_home_is_left_to_its_successor(recovery, profiles_root):
+def test_a_fresh_pause_in_a_profile_home_is_left_to_its_successor(recovery, profiles_root, monkeypatch):
+    monkeypatch.setattr("tui_gateway.turn_marker.marker_writer_state", lambda marker: "dead")  # no real pid probe
     _profile(profiles_root.root, "Not A Profile!")
     work = _profile(profiles_root.root, "work")
     old = time.time() - up.SUCCESSOR_YIELD_S - 1
     _edit_marker(recovery.home, started_at=old, paused_at=old)  # the launch home owes nothing
     record_turn_start(work, KEY, "finish the request")
     mark_turn_paused(work, KEY, up.PAUSE_REASON)
-    path = work / "desktop" / "interrupted_turns.json"
-    entries = json.loads(path.read_text())
-    entries[KEY]["writer_pid"] = 2 ** 22 - 3
-    entries[KEY].pop("writer_start_time", None)
-    path.write_text(json.dumps(entries))
     verdict = server._wake_session_turn(KEY, "a card finished", display_kind="kanban_notice",
                                         label="kanban-sweep-wake")
     assert verdict == "busy"
