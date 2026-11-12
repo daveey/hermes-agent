@@ -292,6 +292,18 @@ def test_board_answer_without_a_label_set_is_a_failure(hub):
     assert req["status"] == "failed" and "carries no label set" in req["error"], req
 
 
+def test_worker_with_a_full_skill_inventory_is_published_not_capped(hub):
+    """Live workers carry ~230 labels (213 skill:*). The cap must track the Board's (512), or every publish to a
+    worker is falsely refused too_many_labels."""
+    f = hub
+    f.reg.labels["worker-3"] |= {f"skill:s{i}" for i in range(226)}
+    out = _submit(f, _op())
+    _round(f)
+    req = ksr.get_request(f.w, out["request_id"])
+    assert req["status"] == "done" and req["result"][0]["outcome"] == "applied", req
+    assert "capability:hub-read" in f.reg.labels["worker-3"] and len(f.reg.labels["worker-3"]) == 231
+
+
 def test_delta_past_the_board_label_cap_is_refused_without_a_write(hub):
     f = hub
     f.reg.labels["worker-3"] |= {f"skill:s{i}" for i in range(kol.BOARD_MAX_LABELS - 4)}
