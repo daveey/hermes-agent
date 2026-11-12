@@ -96,14 +96,19 @@ DESKTOP_SURFACE_MARKER = r"\bdesktop (app|backend|backends|renderer|window|chat|
 # A chat or window the card itself opens or drives in the live app ("a throwaway Desktop chat runs the CLI"):
 # that is work on the machine with the app, wherever in the card it is said.
 LIVE_DESKTOP_MARKER = (r"\b(throwaway|scratch|disposable|hidden|fixture|fresh|new|real|live) "
-                       r"desktop (chat|chats|session|sessions|window)\b")
+                       r"(hermes )?desktop (chat|chats|session|sessions|window)\b")
+# The same need said with a verb: "Open a Desktop chat and send one prompt", "Focus the existing Desktop
+# window". The verb and the surface sit in one sentence, at most a few words apart.
+DESKTOP_ACTION_MARKER = (r"\b(open|opens|opening|start|starts|launch|launches|focus|focuses|click|clicks|"
+                         r"type|types|quit|quits|relaunch|reopen|restart)\b[^.;:,()\n]{0,40}?"
+                         r"\bdesktop (app|chat|chats|window|sidebar)\b")
 # Phrases that mean the work needs this machine (a Mac the user works on). Case-insensitive.
 DEFAULT_LOCAL_MARKERS = (
     r"\bchrome\b", r"\bcdp\b", r"\bkeychain\b", r"\bcodesign", r"\bnotari[sz]", r"\btcc\b",
     r"\bosascript\b", r"\bapple ?script\b", r"\bapple (photos|notes|reminders|contacts|calendar|music)\b",
     r"\bphotos\.app\b", r"\bimessage\b", r"\bfind ?my\b", r"\bremindctl\b", r"\bshortcuts? app\b",
     r"\blaunchd\b", r"\blaunchctl\b", r"launchagents", r"~/library/", r"\bhermes\.app\b",
-    HERMES_DESKTOP_MARKER, DESKTOP_SURFACE_MARKER, LIVE_DESKTOP_MARKER,
+    HERMES_DESKTOP_MARKER, DESKTOP_SURFACE_MARKER, LIVE_DESKTOP_MARKER, DESKTOP_ACTION_MARKER,
     r"\bdesktop\s+dom\b",
     r"\bmacbook\b", MACOS_MARKER, r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b",
     BABYBEAR_MARKER, r"\bxcode\b", r"\bsimulator\b", r"\bwhatsapp\b", r"\bscreen ?shot",

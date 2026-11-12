@@ -27,6 +27,8 @@ _SYMPTOM_BODIES = [
     "Its completion notice is delivered to the owning session (Desktop chat or Kanban run) exactly once.",
     "Rows created as source=cli show in the Desktop sidebar. Create them as source=tool.",
     "The desktop app for b2bcf494ad was copied from a peer in 205 s while admission was held.",
+    "The worker was cut off mid-turn. The Desktop chat showed no notice afterwards.",
+    "The fix must start from the session row; Desktop chats are otherwise unchanged.",
 ]
 
 
@@ -59,6 +61,10 @@ def test_desktop_surface_in_the_title_still_pins(title):
     "Open a fresh Desktop window and read the status bar.",
     "Start a new Desktop session and send one prompt.",
     "Needs a Desktop DOM readback of the composer",
+    "Open a Desktop chat and send one prompt.",
+    "Focus the existing Desktop window and read the status bar.",
+    "Open a fresh Hermes Desktop chat and send one prompt.",
+    "Quit and relaunch the Desktop app, then read the version.",
 ])
 def test_a_chat_or_window_the_card_drives_in_the_live_app_still_pins(body):
     d = decide({"title": "Prove the notice text", "body": body})
@@ -79,5 +85,9 @@ def test_create_tool_sends_a_card_that_describes_desktop_chats_to_the_hub(mac):
     out = json.loads(kt._handle_create({"title": _TITLE, "body": _BODY}))
     assert out.get("placed", {}).get("gateway") == "hub" and "placement" not in out, out
     assert helpers._local_count() == 0
+    for title, body in (("Prove the notice text", "Open a Desktop chat and send one prompt."),
+                        ("Read the block actor line", "A throwaway Desktop chat runs the CLI block.")):
+        live = json.loads(kt._handle_create({"title": title, "body": body}))
+        assert live["placement"]["where"] == "local" and "desktop chat" in live["placement"]["why"], live
     pinned = json.loads(kt._handle_create({"title": "Desktop app: composer loses focus", "body": "Push the fix."}))
     assert pinned["placement"] == {"where": "local", "why": "local marker: mentions 'desktop app'"}, pinned
