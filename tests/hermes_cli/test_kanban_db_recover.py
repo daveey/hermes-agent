@@ -95,7 +95,13 @@ def _leaf_rowids(data: bytes, page_size: int, page: int) -> list[int]:
 
 
 def _damage_table(path: Path, table: str) -> list[int]:
-    """Overwrite the cell area of a middle leaf page of ``table``; return the rowids it held."""
+    """Overwrite a middle leaf page of ``table`` whole, header included; return the rowids it held.
+
+    The page type byte becomes 0xff, which SQLite rejects on every access (SQLITE_CORRUPT). Keeping a
+    valid leaf header over a garbage cell area is not deterministic: its cell pointers mask to the
+    page's last byte, so the cell parse runs into whatever memory follows the page buffer and some
+    reads return rows with random rowids (0, 16265, ...) instead of an error. One that equals a deleted
+    row's rowid hid that row's stale index entry and made the backup fill resurrect it (CI flake)."""
     conn = sqlite3.connect(path)
     root = conn.execute("SELECT rootpage FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()[0]
     conn.close()
@@ -107,8 +113,8 @@ def _damage_table(path: Path, table: str) -> list[int]:
     rowids = _leaf_rowids(data, page_size, page)
     off = (page - 1) * page_size
     with open(path, "r+b") as fh:
-        fh.seek(off + 8)
-        fh.write(b"\xff" * (page_size - 8))
+        fh.seek(off)
+        fh.write(b"\xff" * page_size)
     return rowids
 
 
