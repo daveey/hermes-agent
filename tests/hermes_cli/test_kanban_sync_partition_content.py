@@ -303,8 +303,14 @@ def test_same_content_file_rewrite_or_replacement_rearms(pair, side, replace):
     from pathlib import Path
     conn = getattr(pair, side)
     assert conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
-    _warm(pair)
     path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    if not replace:
+        # Filesystems can coalesce ctime updates within one timestamp tick.
+        # Give the real rewrite an observably different mtime before caching;
+        # no sleeps, fake stat values, or weakened main-file fence are needed.
+        import os
+        os.utime(path, ns=(path.stat().st_atime_ns, 1_000_000_000))
+    _warm(pair)
     before = path.stat()
     if replace:
         # The retained handle still sees the old inode: pathname fencing must
@@ -320,7 +326,7 @@ def test_same_content_file_rewrite_or_replacement_rearms(pair, side, replace):
             handle.write(data)
             handle.flush()
         assert path.stat().st_ino == before.st_ino
-        assert path.stat().st_ctime_ns != before.st_ctime_ns
+        assert path.stat().st_mtime_ns != before.st_mtime_ns
     assert not pair.prepare().skip
 
 
@@ -337,6 +343,47 @@ def test_replica_rebuild_with_retained_handles_runs_partition_scans(
         result = window._round(kanban_home, svc)
         assert result.error is None and not result.repair_deferred
         assert all(count == 1 for count in calls.values())
+
+
+@pytest.mark.parametrize("inputs", [(None, None, "primary", "local"),
+                                   (None, None, "shadow", "local", "{}")])
+def test_short_or_disagreeing_inputs_cannot_publish(pair, inputs):
+    decision = content.prepare(pair.live, pair.replica, path=pair.path, inputs=inputs)
+    assert decision.stamp is None and not decision.skip
+    content.commit(decision, pair.live, pair.replica, inputs=inputs)
+    assert not content._done
+
+
+def test_prepare_installs_missing_replica_revision_before_snapshot(pair):
+    with kbc.write_txn(pair.replica):
+        pair.replica.execute("DROP TABLE kanban_repair_revision")
+    decision = pair.prepare()
+    assert decision.stamp is not None and not decision.skip
+    pair.commit(decision)
+    assert pair.prepare().skip
+
+
+def test_unknown_decision_cannot_publish_after_state_recovers(pair):
+    decision = content.prepare(pair.live, pair.replica, path=pair.path, inputs=None)
+    pair.commit(decision)
+    assert not content._done
+
+
+def test_skipped_decision_cannot_republish_after_reset(pair):
+    _warm(pair)
+    decision = pair.prepare()
+    assert decision.skip
+    content.reset()
+    pair.commit(decision)
+    assert not content._done
+
+
+def test_memory_store_is_not_a_file_fenced_snapshot(pair):
+    import sqlite3
+    from contextlib import closing
+    with closing(sqlite3.connect(":memory:")) as memory:
+        pair.live.backup(memory)
+        assert content._snapshot(memory) is None
 
 
 def test_unknown_inputs_and_snapshot_error_evict(pair, monkeypatch):
