@@ -31,6 +31,16 @@ def pool_label() -> str:
     return POOL_LABEL
 
 
+def cli_labels(args: Any) -> tuple[Optional[list[str]], dict[str, Any], str]:
+    """``hermes kanban move`` target: (labels, {host_reason}, \"\") from exactly one of ``--pool`` / ``--runs-on``,
+    else (None, {}, error)."""
+    pool, runs_on = bool(getattr(args, "pool", False)), getattr(args, "runs_on", None)
+    if pool == bool(runs_on):
+        return None, {}, "kanban move: pass exactly one of --pool or --runs-on [invalid_runs_on]"
+    labels = [pool_label()] if pool else [x.strip() for x in str(runs_on).split(",") if x.strip()]
+    return labels, {"host_reason": getattr(args, "host_reason", None)}, ""
+
+
 def pool_pins(labels: list[str], machines: Mapping[str, Mapping[str, Any]]) -> list[str]:
     """Machines named by ``machine:<x>`` labels that are pool workers (carry the pool label)."""
     label = pool_label()

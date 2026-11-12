@@ -165,13 +165,15 @@ def cli_policy(args, body, workspace_kind, workspace_path, board, *, assignee):
 
 
 def cli_runs_on(conn, args, body, workspace_kind, workspace_path, board, *, assignee):
-    """``runs_on`` the worker queue gives a CLI-created card (``kanban.placement.worker_queue``), or None.
-
-    Only on a Board primary (``runs_on`` is a Board placement field) and only without an explicit ``--runs-on``."""
+    """``runs_on`` for a CLI-created card: an explicit ``--runs-on`` as given, else what the worker queue
+    (``kanban.placement.worker_queue``) gives it, or None. The queue applies only on a Board primary
+    (``runs_on`` is a Board placement field)."""
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_placement as placement
 
-    if getattr(args, "runs_on", None) is not None or sync.board_mode(conn) != "primary":
+    if getattr(args, "runs_on", None) is not None:
+        return args.runs_on
+    if sync.board_mode(conn) != "primary":
         return None
     cfg = placement.config()
     if not cfg.get("worker_queue"):
