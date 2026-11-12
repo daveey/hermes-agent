@@ -257,6 +257,51 @@ def test_a_legacy_busy_row_past_the_lookback_is_left_alone(db):
     assert _closeout(db, row) == "busy"
 
 
+def test_two_backends_passes_over_one_legacy_busy_row_wake_it_once(db):
+    # Every backend runs this pass every 30 s over the same profile store, and once the fix ships each of them
+    # re-offers a legacy busy row. Backend B's whole pass runs between backend A's candidate read and its claim
+    # (A's holders lookup is the last step before _claim), so A holds a stale raw_meta: the claim's compare-and-swap
+    # must let only B wake the row, stamped as busy wake 2 (busy_attempts carried over from the old busy wake).
+    row = _notice(db, "✔ Kanban t_aaa done — deploy card")
+    _stamp_legacy_busy(db, row)
+    other = SessionDB(db.db_path)  # backend B: its own connection to the same store
+    wakes, at_wake = [], []
+
+    def backend(store, name, holders):
+        def wake(sid, msg_id):
+            wakes.append((name, sid, msg_id))
+            at_wake.append(tuple(store._read_one(
+                "SELECT json_extract(display_metadata, '$.closeout.state'), "
+                "json_extract(display_metadata, '$.closeout.busy_attempts') FROM messages WHERE id = ?", (msg_id,))))
+            return "started"
+
+        @contextlib.contextmanager
+        def opener(chat_id):
+            yield store, store.get_compression_tip(chat_id) or chat_id
+
+        return ng.guarantee_pass(stores=lambda: iter([store]), holders=holders, session_db=opener, wake=wake,
+                                 spawn=lambda job: job())
+
+    b_out = []
+
+    def a_holders():
+        if not b_out:
+            b_out.append(backend(other, "B", list))
+        return []
+
+    try:
+        a_out = backend(db, "A", a_holders)
+        late = backend(other, "B", list)
+    finally:
+        other.close()
+
+    assert [o["result"] for o in b_out[0]] == ["dispatched"]
+    assert [o["result"] for o in a_out] == ["skipped:claimed"]
+    assert wakes == [("B", CHAT, row)] and at_wake == [("claimed", 1)]
+    assert (_closeout(db, row), _busy_attempts(db, row)) == ("started", 1)
+    assert late == []  # and no later pass offers it again
+
+
 def test_retry_at_follows_the_build_failures_quota_reset(monkeypatch):
     from tui_gateway import automation_replay, server
     now = 1_000_000.0
