@@ -56,7 +56,7 @@ def _launch_authority(runner: Any, profile: Optional[str]) -> Any:
     answer with the launch authority for every profile. A sub stamped with another served profile is
     left to the legacy backend instead of being matched against the wrong session store."""
     registry = getattr(runner, "session_authorities", None)
-    authority = registry.launch() if registry is not None else getattr(runner, "session_authority", None)
+    authority = registry.launch if registry is not None else getattr(runner, "session_authority", None)
     if authority is None or not profile:
         return authority
     name = None

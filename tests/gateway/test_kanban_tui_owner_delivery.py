@@ -344,3 +344,34 @@ async def test_stale_live_claim_is_released_logged_and_then_delivered(env, monke
     assert any("was never delivered" in r.getMessage() and "without an ack" in r.getMessage()
                for r in caplog.records)
     assert [x["chat"] for x in admitted] == [CHAT_B] and _row(tid, CHAT_B)[0] == _max_event(tid)
+
+
+def _registry(runner, authority, tmp_path):
+    """A real SessionAuthorities map whose launch slot holds ``authority`` (``launch`` is a property)."""
+    from gateway.session_authorities import SessionAuthorities
+    authority.profile_id = str(tmp_path / "home")
+    registry = SessionAuthorities(authority.profile_id)
+    registry.add(authority.profile_id, authority)
+    runner.session_authorities = registry
+    return registry
+
+
+def test_launch_authority_reads_the_registry_launch_property(env, tmp_path):
+    from gateway.kanban_tui_owner import _launch_authority
+    runner, authority, _admitted, _ = env
+    _registry(runner, authority, tmp_path)
+    assert _launch_authority(runner, "default") is authority
+    assert _launch_authority(runner, None) is authority
+    assert _launch_authority(runner, "work") is None
+
+
+@pytest.mark.asyncio
+async def test_registry_backed_gateway_claims_and_delivers_owned_tui_row(env, tmp_path):
+    runner, authority, admitted, _ = env
+    _registry(runner, authority, tmp_path)
+    authority.sessions[CHAT_B] = _Live(CHAT_B)
+    authority.db.work(CHAT_B)
+    tid = _task("registry", CHAT_B)
+    _complete(tid)
+    await _tick(runner)
+    assert [a["chat"] for a in admitted] == [CHAT_B] and _row(tid, CHAT_B)[0] == _max_event(tid)
