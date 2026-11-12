@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_replica_lag as lag  # pushed rows the replica holds only after its next pull
 from hermes_cli import kanban_sync_timing as sync_timing  # off unless kanban.sync.diagnostics.timing_until arms it
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
 from hermes_cli.kanban_sync_hub_routes import HubRoutesMixin
@@ -690,6 +691,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                     from hermes_cli.kanban_sync_omissions import acknowledge
                     sent = next(op.get('fields', {}) for op in wire if op['client_op_id'] == op_id)
                     acknowledge(conn, op_id, res.get("row"), sent=sent)
+                    lag.acked(shadow_path(board), lag.acked_task_ids([row]))  # the replica has it after its next pull
                     conn.execute("DELETE FROM kanban_sync_outbox WHERE op_id = ?", (op_id,))
                     if row["table_name"] == "tasks" and row["op"] != "release" and res.get("version"):
                         conn.execute("UPDATE tasks SET sync_version = MAX(COALESCE(sync_version, 0), ?) WHERE id = ?",
@@ -924,6 +926,7 @@ def _pulled_replica(slug: str, hub: Hub, gateway: str):
     with ExitStack() as stack:
         replica = stack.enter_context(connection(path, lambda: open_shadow(slug, gateway)))
         rebuilt = False
+        generation = lag.pull_started(path)  # done only below: a failed pull leaves this gateway's pushes lagging
         try:
             pulled = pull(replica, hub, slug, observers=False)
         except Resync:
@@ -934,6 +937,7 @@ def _pulled_replica(slug: str, hub: Hub, gateway: str):
             replica = stack.enter_context(connection(path, lambda: open_shadow(slug, gateway)))
             rebuilt = True
             pulled = resync(replica, hub, slug, observers=False)
+        lag.pull_done(path, generation)
         try:  # readers derive the replica's staleness from this (kanban_chat_links); a failed stamp only ages it
             sync.mark_pulled(replica)
         except sqlite3.Error as exc:
