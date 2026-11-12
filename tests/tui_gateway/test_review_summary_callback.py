@@ -11,6 +11,7 @@ transcript line.
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,6 +21,30 @@ import pytest
 # "MagicMock/<name>/<id>", so the store landed in the cwd (the repo checkout). The real one
 # follows the test's isolated HERMES_HOME.
 from hermes_constants import get_process_hermes_home as _real_get_process_hermes_home
+from tests.waiting import DEFAULT_TIMEOUT
+
+
+def _stop_notification_pollers() -> None:
+    """Stop and join the notification poller ``_init_session`` started.
+
+    Clearing ``_sessions`` does not stop it: the daemon keeps polling the kanban board, the
+    delegation store and state.db, lazily importing as it goes, through interpreter shutdown and
+    the conftest's rmtree of the test home. In CI the file passed in under a second and then the
+    process never exited (600 s file timeout). ``PollerStop.set`` wakes its queue wait, so the
+    join returns as soon as the loop body finishes its current pass.
+    """
+    from tui_gateway import session_notifications
+
+    pollers = [(stop, t) for stop, t in list(session_notifications._notification_pollers) if t.is_alive()]
+    for stop, _thread in pollers:
+        stop.set()
+    deadline = time.monotonic() + DEFAULT_TIMEOUT
+    for _stop, thread in pollers:
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
+    alive = [t.name for _stop, t in pollers if t.is_alive()]
+    session_notifications._notification_pollers[:] = [
+        (stop, t) for stop, t in session_notifications._notification_pollers if t.is_alive()]
+    assert not alive, f"notification pollers still running at teardown: {alive}"
 
 
 @pytest.fixture()
@@ -43,6 +68,7 @@ def server():
         mod = importlib.import_module("tui_gateway.server")
 
     yield mod
+    _stop_notification_pollers()
     # Reset module-level session state without re-importing. importlib.reload
     # would re-register the module's atexit hooks (ThreadPoolExecutor
     # shutdown, _shutdown_sessions); the duplicates race the stderr
