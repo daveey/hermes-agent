@@ -7,8 +7,9 @@ name: CI
 #
 # Sub-workflows are triggered via ``workflow_call`` and keep their own job
 # definitions, matrices, and concurrency settings. They no longer have
-# ``push:`` / ``pull_request:`` triggers of their own, except hermes-state-macos:
-# it keeps standalone main validation, masked out of this workflow on main pushes.
+# ``push:`` / ``pull_request:`` triggers of their own, except hermes-state-macos
+# and native-memory-macos: each keeps standalone main validation (its own
+# ``push:`` trigger), masked out of this workflow on main pushes.
 #
 # SECURITY: this workflow runs PR-controlled actions, workflows, and code.
 # Do not add ``secrets: inherit`` or GitHub App credentials here. Trusted
