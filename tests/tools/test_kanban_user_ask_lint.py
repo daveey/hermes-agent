@@ -72,10 +72,42 @@ def test_recommended_decision_warning_is_nonfatal(worker_env, action, scope, int
 
 @pytest.mark.parametrize("hr", [None, [], {}, {"interaction": "reply"},
     {"interaction": "reply", "choices": "recommended"},
+    {"interaction": "reply", "choices": ({"label": "A (recommended)"},)},
     {"interaction": "reply", "choices": [None, {"label": "ordinary"}]}])
 def test_recommendation_warning_ignores_missing_or_malformed_choices(hr):
     from hermes_cli.kanban_block_policy import recommended_choice_warning
     assert recommended_choice_warning(hr) == {}
+
+
+@pytest.mark.parametrize("field,text", [
+    ("why_human", "This exceeds the approved budget"),
+    ("evidence", "The option requires permission"),
+    ("label", "Grant admin access (recommended)"),
+    ("value", "privacy-consent"),
+])
+def test_recommendation_boundary_in_explanations_and_choices(field, text):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    request = {"interaction": "reply", "action": "Choose A or B", "scope": "code fixtures",
+               "choices": [{"label": "A (recommended)", "value": "a"}]}
+    if field in {"label", "value"}:
+        request["choices"][0][field] = text
+    else:
+        request[field] = text
+    assert recommended_choice_warning(request) == {}
+
+
+@pytest.mark.parametrize("label,warns", [
+    ("A (not recommended)", False), ("A [Recommended]", True),
+    ("A (RECOMMENDED)", True), ("A is not recommended", False),
+])
+def test_recommendation_requires_explicit_positive_marker(label, warns):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    result = recommended_choice_warning({"interaction": "reply", "choices": [{"label": label}]})
+    assert bool(result) is warns
+    if warns:
+        assert "reversible" in result["warning"]
+        assert "existing review and landing gates" in result["warning"]
+        assert "this run still ends" in result["warning"]
 
 
 def test_worker_guidance_applies_recommendation_with_boundaries():

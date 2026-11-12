@@ -113,17 +113,24 @@ def recommended_choice_warning(human_request) -> dict:
         return {}
     if human_request.get("interaction") not in {"reply", "approval"}:
         return {}
-    text = " ".join(str(human_request.get(key) or "") for key in ("action", "scope"))
+    choices = human_request.get("choices")
+    if not isinstance(choices, list):
+        return {}
+    choices = [choice for choice in choices if isinstance(choice, dict)]
+    # Explicit positive UI markers only; 'not recommended' is not a recommendation.
+    if not any(re.search(r"\(recommended\)|\[recommended\]", str(choice.get("label") or ""), re.IGNORECASE)
+               for choice in choices):
+        return {}
+    text = " ".join(str(human_request.get(key) or "")
+                    for key in ("action", "scope", "why_human", "evidence"))
+    text += " " + " ".join(str(choice.get(key) or "") for choice in choices for key in ("label", "value"))
     if _RECOMMENDATION_BOUNDARY.search(text):
         return {}
-    choices = human_request.get("choices")
-    if not isinstance(choices, list) or not any(
-        isinstance(choice, dict) and re.search(r"\brecommended\b", str(choice.get("label") or ""), re.IGNORECASE)
-        for choice in choices
-    ):
-        return {}
     return {"warning": "this looks like a decision you can apply yourself under David's standing rule; "
-            "apply the recommended option and comment the pick, unless it is a toss-up. "
+            "apply the recommended option and comment the pick and reversal only if it is in scope, "
+            "reversible, and within existing review and landing gates. Do not apply it for spend beyond "
+            "standing limits, permissions, credentials, other people, safety or privacy consent, "
+            "hard-to-reverse effects, or a toss-up. "
             "This warning does not undo the block or grant permission; this run still ends."}
 
 
