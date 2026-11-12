@@ -1341,7 +1341,8 @@ def _push_completion_event(record: dict[str, Any], result: dict[str, Any], statu
         "status": status, **payload, "dispatched_at": dispatched_at, "completed_at": completed_at,
         **({} if is_batch else {"exit_reason": result.get("exit_reason")}),
         **{k: record[k] for k in _ROUTING_KEYS if record.get(k)},
-        **{k: result[k] for k in _STALL_META_KEYS if k in result}}
+        **{k: result[k] for k in _STALL_META_KEYS if k in result},
+        **({"interrupted_by": record["_interrupted_by"]} if record.get("_interrupted_by") else {})}
     try:
         _persist_completion(evt, result)
     except Exception as exc:
@@ -1587,12 +1588,17 @@ def _interrupt_records(targets: list[dict[str, Any]], caller: str, reason: str, 
     return count
 
 
-def interrupt_all(reason: str = "shutdown") -> int:
+def interrupt_all(reason: str = "shutdown", *, by_shutdown: bool = False) -> int:
     """Signal every running async delegation to stop (``/stop``, shutdown). Returns how
     many. The child still emits a completion event (status='interrupted') via the
-    normal finalize path."""
+    normal finalize path. ``by_shutdown`` (the gateway's shutdown sweep) stamps *reason* on each
+    unit's result as ``interrupted_by``: nobody asked for that stop, so its parent wakes to
+    re-dispatch or report (``delegation_wakes_parent``) instead of sleeping on a note."""
     with _records_lock:
         targets = [r for r in _records.values() if r.get("status") in _ACTIVE_STATES]
+        if by_shutdown:
+            for r in targets:
+                r["_interrupted_by"] = reason
     return _interrupt_records(targets, "interrupt_all", reason, "Interrupted %d async delegation(s) (%s)")
 
 

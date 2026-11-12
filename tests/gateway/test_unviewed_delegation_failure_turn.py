@@ -169,6 +169,37 @@ async def test_unit_the_stall_monitor_stopped_wakes_the_parent(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stop,turn", [({"interrupted_by": "gateway shutdown (restart)"}, True), ({}, False)],
+                         ids=["gateway-shutdown", "user-stop"])
+async def test_unit_a_gateway_shutdown_stopped_wakes_the_parent(tmp_path, monkeypatch, caplog, stop, turn):
+    """A core update restarted the gateway mid-delegation: its child reports ``interrupted`` as a user stop
+    does, and the parent slept on a note until the user asked. The persisted (replayed after the restart)
+    result carries the shutdown as its stop reason, which makes it a failure the parent must act on. A
+    parent left asleep on unfinished work is logged."""
+    import json
+    import logging
+    caplog.set_level(logging.WARNING)
+    runner, authority, ref, _actor = await _local(tmp_path, monkeypatch)
+    try:
+        route, target = authority.sessions[ref.session_id].route, _target(runner, authority, ref)
+        evt = json.loads(json.dumps(dict(_batch(route, "deleg_restart", "interrupted"), parent_session_id=target,
+                                         **stop)))
+        assert await runner._deliver_async_delegation_group([evt]) is True
+        seen = _turns(runner, authority, target, "deleg_restart")
+        await authority._drain(ref)
+        assert len(seen) == int(turn)
+        assert len(_notes(authority, target, "deleg_restart")) == int(not turn)
+        if turn:
+            assert "stopped by gateway shutdown (restart), not by you or the user" in seen[0][0]
+        not_woken = [r.getMessage() for r in caplog.records if "not woken" in r.getMessage()]
+        assert bool(not_woken) is (not turn), not_woken
+        if not turn:
+            assert "deleg_restart" in not_woken[0] and "interrupted" in not_woken[0]
+    finally:
+        authority.db.close()
+
+
+@pytest.mark.asyncio
 async def test_failed_manual_cron_run_stays_a_note(tmp_path, monkeypatch):
     """``cronjob(action='run')`` reports through the same event with ``role=cron_run``. Its outcome is
     finished text, as a scheduled run's is: a turn over it would only spend a model call."""
@@ -205,10 +236,12 @@ async def _fail(runner, authority, ref, route, target, name):
 
 
 @pytest.mark.asyncio
-async def test_unattended_wakes_stop_at_the_limit_until_the_user_returns(tmp_path, monkeypatch):
+async def test_unattended_wakes_stop_at_the_limit_until_the_user_returns(tmp_path, monkeypatch, caplog):
     """A woken parent that re-dispatches into the same failure (billing, a usage limit) would wake
     itself without end. After ``UNATTENDED_WAKE_LIMIT`` wakes in a row nobody watched, the next failure
     is a note; the user's own message starts the count again."""
+    import logging
+    caplog.set_level(logging.WARNING)
     from gateway.session_completion_notes import UNATTENDED_WAKE_LIMIT
     runner, authority, ref, _actor = await _local(tmp_path, monkeypatch)
     try:
@@ -220,6 +253,8 @@ async def test_unattended_wakes_stop_at_the_limit_until_the_user_returns(tmp_pat
         assert len(woken) == UNATTENDED_WAKE_LIMIT, "the loop is bounded"
         assert all(f"deleg_loop{i}" in woken[i] for i in range(UNATTENDED_WAKE_LIMIT))
         assert len(_notes(authority, target, "deleg_loop")) == 2, "later failures are kept as notes"
+        assert sum("not woken" in r.getMessage() and "unattended wakes" in r.getMessage()
+                   for r in caplog.records) == 2, "each parent left asleep is logged"
         _human(authority, ref, "back", "what happened?")
         await authority._drain(ref)
         await _fail(runner, authority, ref, route, target, "deleg_loop_after")

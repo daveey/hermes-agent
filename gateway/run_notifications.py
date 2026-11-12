@@ -178,9 +178,14 @@ def _watch_notification_metadata(evt: dict, source) -> dict[str, Any]:
         # A local completion persists as the async-result card the in-process TUI wrote, and a tick
         # carries its CLI receipt; messaging rows stay internal_notification, as on main.
         metadata.update(_local_completion_card(evt))
-        from tools.process_registry_notifications import delegation_wakes_parent
+        from tools.process_registry_notifications import delegation_unfinished_statuses, delegation_wakes_parent
         if delegation_wakes_parent(evt):
             metadata["completion_wakes_parent"] = True
+        elif evt.get("role") != "cron_run" and (unfinished := delegation_unfinished_statuses(evt)):
+            # A stop someone asked for: with no viewer attached it becomes a note and nothing runs. Say so,
+            # so a parent left asleep on unfinished work is visible in the log, not only to the user.
+            logger.warning("Async delegation %s: parent %s not woken: %s (a requested stop; a note if unviewed)",
+                           evt.get("delegation_id"), parent_session_id or session_key or "?", ",".join(unfinished))
     proven_session_id = str(evt.get("proven_session_id") or "").strip()
     if proven_session_id:
         metadata["gateway_proven_session_id"] = proven_session_id

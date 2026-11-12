@@ -56,7 +56,12 @@ def _wakes_unviewed_parent(authority, session_id, live, descriptor):
     if not descriptor.get('wakes_parent'):
         return False
     from tools.async_delegation import refused_for_session
-    if refused_for_session((authority.profile_id, session_id)) or live.unattended_wakes >= UNATTENDED_WAKE_LIMIT:
+    closed = refused_for_session((authority.profile_id, session_id))
+    if closed or live.unattended_wakes >= UNATTENDED_WAKE_LIMIT:
+        import logging
+        logging.getLogger(__name__).warning(
+            'parent %s not woken: failed delegation result kept as a note (%s)', session_id,
+            'its chat was closed' if closed else f'{UNATTENDED_WAKE_LIMIT} unattended wakes in a row')
         return False
     live.unattended_wakes += 1
     return True
