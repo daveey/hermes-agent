@@ -173,6 +173,22 @@ def test_refused_kanban_complete_counts_as_host_refusal(kanban_home):
         assert task.status == "ready" and "failure_finalized" not in kinds
 
 
+def test_refusal_with_appended_budget_notice_still_counts(kanban_home):
+    """Near the end of a run the tool executor appends a budget notice to the latest tool result before it
+    is persisted; a park call refused as the budget runs out is still the refusal."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="default")
+        run_id = _clean_exit(conn, tid, 70106)
+        notice = "\n\n[BUDGET WARNING: iteration 89/90. Wrap up and park the card now.]"
+        _session(kanban_home, conn, tid, run_id, [("kanban_continue", REFUSAL + notice)])
+
+        kbd.detect_crashed_workers(conn)
+
+        run, kinds, task = _booking(conn, tid)
+        assert json.loads(run["metadata"])["guard_refusal"] == {"refused_tools": ["kanban_continue"]}
+        assert task.status == "ready" and "failure_finalized" not in kinds
+
+
 def test_refusal_streak_is_bounded(kanban_home):
     """A guard that stays hung must not requeue a card uncounted forever: after ``STREAK_LIMIT`` such runs
     the next one is charged as a protocol violation again."""

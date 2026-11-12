@@ -60,10 +60,14 @@ def _prior_refusal_streak(conn: sqlite3.Connection, task_id: str, run_id) -> int
 
 def _is_guard_refusal(content) -> bool:
     """The tool result IS the skipped-guard refusal (``tool_error``'s ``{"error": "<marker>..."}``), not
-    merely a result quoting it (a ``kanban_show`` of a card whose body cites the marker)."""
+    merely a result quoting it (a ``kanban_show`` of a card whose body cites the marker). Only the leading
+    JSON value is read: near the end of a run the tool executor appends a budget notice to the latest tool
+    result before it is persisted, and a park call refused as the budget runs out must still count."""
+    if not isinstance(content, str):
+        return False
     try:
-        body = json.loads(content or "")
-    except (TypeError, ValueError):
+        body, _end = json.JSONDecoder().raw_decode(content.lstrip())
+    except ValueError:
         return False
     error = body.get("error") if isinstance(body, dict) else None
     return isinstance(error, str) and error.startswith(REFUSAL_MARKER)
@@ -85,7 +89,8 @@ def refused_kanban_calls(conn: Optional[sqlite3.Connection], task_id: str, run_i
         return []
     state_db, session_id = row[0], row[1]
     try:
-        with closing(sqlite3.connect(Path(state_db).as_uri() + "?mode=ro", uri=True, timeout=2)) as state:
+        uri = Path(state_db).as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=2)) as state:  # noqa: kanban-lockguard (state.db)
             rows = state.execute(
                 "SELECT tool_name, content FROM messages "
                 "WHERE session_id=? AND role='tool' ORDER BY id DESC LIMIT ?",
