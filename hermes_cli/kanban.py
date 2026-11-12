@@ -479,8 +479,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 max_runtime_seconds=max_runtime, skills=getattr(args, "skills", None) or None,
                 max_retries=max_retries, model_override=getattr(args, "model_override", None),
                 provider_override=getattr(args, "provider_override", None), pin_mandatory=bool(getattr(args, "pin_mandatory", False)),
-                goal_mode=bool(getattr(args, "goal_mode", False)),
-                review_required=bool(getattr(args, "review_required", False)),
+                goal_mode=bool(getattr(args, "goal_mode", False)), review_required=bool(getattr(args, "review_required", False)),
                 goal_max_turns=getattr(args, "goal_max_turns", None),
                 reasoning_effort=getattr(args, "reasoning_effort", None),
                 completion_contract=getattr(args, "completion_contract", None),
@@ -1311,10 +1310,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     if priority is not None:
         priority = bounded(priority)
     operator = {name: getattr(args, name, None) for name in _OPERATOR_EDIT_FLAGS}
-    if operator["goal_mode"] is not None:
-        operator["goal_mode"] = operator["goal_mode"] == "on"
-    if operator["review_required"] is not None:
-        operator["review_required"] = operator["review_required"] == "on"
+    operator.update({k: operator[k] == "on" for k in ("goal_mode", "review_required") if operator[k] is not None})
     has_operator = any(value is not None for value in operator.values())
     has_admission = any(value is not None for value in admission.values())
     if has_operator and has_admission:
