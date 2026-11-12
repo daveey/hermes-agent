@@ -196,7 +196,14 @@ async def run_gateway_chat(args, emitter=None):
         # [daveey] A core update restarting the owner parks a finite turn and continues it on the next owner:
         # the one-shot wait redials it (``GatewayChatView._redial``). Each dial is closed on exit. A submit the
         # draining owner refused is taken to the next owner within the same wait (``_submit_finite``).
-        view.reconnect = lambda: connections.enter_async_context(connect_gateway())
+        redial = await connections.enter_async_context(contextlib.AsyncExitStack())
+
+        async def reconnect():
+            # A refused resume must not retain its socket until the whole run exits.
+            await redial.aclose()
+            return await redial.enter_async_context(connect_gateway())
+
+        view.reconnect = reconnect
         view.update_wait = wait
         if (getattr(args, "resume", None) or title or latest) and not quiet:
             from agent.context_compressor import MODEL_ONLY_DISPLAY_METADATA_KEY
@@ -211,14 +218,14 @@ async def run_gateway_chat(args, emitter=None):
 
 async def _attach_through_update(connections, wait, args, oneshot, oneshot_prompt):
     """[daveey] A finite run's connection and session, retried while the owner refuses them only because a
-    core update is swapping it (``UpdateWait``); every retry dials afresh. Each refusal admitted nothing:
-    ensure answered before any socket, and a draining owner's ``session.create``/``session.resume`` refusal
-    creates nothing, so the next attempt asks the next owner the same question."""
+    core update is swapping it (``UpdateWait``); every retry dials afresh. A create can commit before its
+    resume hits retirement: keep its request identity so the next owner reuses that session."""
+    request_id = uuid.uuid4().hex
     while True:
         attempt = contextlib.AsyncExitStack()
         try:
             client = await wait.dial(lambda: attempt.enter_async_context(connect_gateway()))
-            snapshot = await _open_session(client, args, oneshot, oneshot_prompt)
+            snapshot = await _open_session(client, args, oneshot, oneshot_prompt, request_id=request_id)
         except GatewayClientError as exc:
             await attempt.aclose()
             await wait.retry(exc)  # raises exc unless it is a restart refusal inside the window
@@ -230,7 +237,7 @@ async def _attach_through_update(connections, wait, args, oneshot, oneshot_promp
         return client, snapshot
 
 
-async def _open_session(client, args, oneshot, oneshot_prompt):
+async def _open_session(client, args, oneshot, oneshot_prompt, *, request_id=None):
     """The session this run attaches to: resumed (``-c``/``--resume``) or created."""
     description = await client.rpc("runtime.describe")
     title = continue_title(args)
@@ -282,7 +289,7 @@ async def _open_session(client, args, oneshot, oneshot_prompt):
         missing = sorted(set(policy) - set(parameters))
         if missing:
             raise GatewayClientError("Gateway does not support creation options: " + ", ".join(missing))
-        snapshot = await client.rpc("session.create", request_id=uuid.uuid4().hex, source=source, **policy)
+        snapshot = await client.rpc("session.create", request_id=request_id or uuid.uuid4().hex, source=source, **policy)
         if (warning := (snapshot.get("info") or {}).get("config_warning")) and not isinstance(oneshot_prompt, str):
             print(f"Warning: {warning}", file=sys.stderr)
     return snapshot

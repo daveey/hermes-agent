@@ -4,8 +4,8 @@ the restarted owner instead of failing.
 During an update's swap the owner admits nothing new: ``ensure_gateway_runtime`` answers ``draining``
 (``update_paused`` while the update fence is up, ``restart_wait`` inside a restart's after-turn wait) or
 ``starting``, and an attached owner that is draining refuses ``session.create`` / ``prompt.submit`` with
-``runtime_draining`` (``runtime_retired`` once its authority retired). Each of these refusals means nothing
-was admitted, so asking the next owner again is safe. A finite run used to exit 1 on the first one
+``runtime_draining`` (``runtime_retired`` once its authority retired). No turn was admitted; session creation
+can already have committed, so callers preserve request identities when retrying. A finite run used to exit 1 on the first one
 (``Error: Gateway draining: update_paused``) and lose its prompt; selfheal probes and scripts that run
 ``hermes -z`` on a timer hit it on every hub apply. ``UpdateWait`` retries them for at most
 ``ADMISSION_WAIT_S`` from the first refusal (the same 10 minutes a running one-shot waits for its restarted
@@ -66,8 +66,8 @@ class UpdateWait:
         if self.deadline is None:
             self.deadline = loop.time() + ADMISSION_WAIT_S
             if self.announce:
-                print(f"Gateway is restarting for an update ({exc}); waiting up to {ADMISSION_WAIT_S / 60:.0f} "
-                      "min for the restarted gateway to take this prompt.", file=sys.stderr, flush=True)
+                print(f"Gateway is not admitting new turns yet (restarting or draining; {exc}); "
+                      f"waiting up to {ADMISSION_WAIT_S / 60:.0f} min to take this prompt.", file=sys.stderr, flush=True)
         elif loop.time() >= self.deadline:
             logger.debug("gateway admission wait gave up: %s", exc)
             raise exc

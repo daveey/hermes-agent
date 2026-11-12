@@ -269,9 +269,10 @@ class GatewayChatView:
         a view without a dialer or wait, raises as before."""
         from hermes_cli.gateway_client import GatewayRPCError
         wait = self.update_wait
+        input_id = uuid.uuid4().hex
         while True:
             try:
-                return await self.submit(query)
+                return await self.submit(query, input_id=input_id)
             except GatewayRPCError as exc:
                 if wait is None or self.reconnect is None:
                     raise
@@ -434,11 +435,11 @@ class GatewayChatView:
     def _settled(self, admission, payload):
         self.prompts.pop(payload["prompt_id"], None)
 
-    async def submit(self, text):
+    async def submit(self, text, *, input_id=None):
         self.mutations.retire(self.session_id)
         sid, gaps = self.session_id, self.gaps
         receipt = await self.client.rpc("prompt.submit", session_id=self.session_id,
-                                        input_id=uuid.uuid4().hex, text=text,
+                                        input_id=input_id or uuid.uuid4().hex, text=text,
                                         **({"finite": True} if self.finite else {}),
                                         **({"unattended": True} if self.finite and self.unattended else {}))
         if (receipt or {}).get("voice_stopped") is True:

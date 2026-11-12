@@ -16,7 +16,7 @@ from hermes_cli import gateway_chat, gateway_update_wait
 from hermes_cli.gateway_client import GatewayClientError, GatewayRPCError, GatewayUnavailableError
 
 UPDATE_PAUSED = ("Gateway draining: update_paused", "draining", "update_paused")
-NOTICE = "waiting up to 10 min for the restarted gateway to take this prompt"
+NOTICE = "waiting up to 10 min"
 
 
 def _paused():
@@ -29,9 +29,12 @@ class Owner:
     def __init__(self, refuse=None, session="s"):
         self.events, self.calls, self.refuse, self.session = asyncio.Queue(), [], dict(refuse or {}), session
         self.closed = False
+        self.params = []
+        self.closed_at_dial = []
 
     async def rpc(self, method, **params):
         self.calls.append(method)
+        self.params.append((method, params))
         if method in self.refuse:
             raise self.refuse[method]
         if method == "runtime.describe":
@@ -59,8 +62,11 @@ def dials(monkeypatch, tmp_path):
 
     @asynccontextmanager
     async def connect():
-        made.append(None)
+        for owner in made:
+            if isinstance(owner, Owner):
+                owner.closed_at_dial.append(owner.closed)
         nxt = script.pop(0)
+        made.append(nxt)
         if isinstance(nxt, BaseException):
             raise nxt
         try:
@@ -68,7 +74,15 @@ def dials(monkeypatch, tmp_path):
         finally:
             nxt.closed = True
 
-    monkeypatch.setattr(gateway_chat, "connect_gateway", connect)
+    # Retain generators: GC must not stand in for explicit connection cleanup.
+    contexts = []
+
+    def retained_connect():
+        context = connect()
+        contexts.append(context)
+        return context
+
+    monkeypatch.setattr(gateway_chat, "connect_gateway", retained_connect)
     return script, made
 
 
@@ -121,7 +135,8 @@ async def test_a_draining_owner_refusing_the_session_is_left_for_the_next_one(di
     draining, restarted = Owner(refuse={"session.create": GatewayRPCError(reason)}), Owner()
     script += [draining, restarted]
     assert await _z() == 0
-    assert len(made) == 2 and draining.closed and "prompt.submit" not in draining.calls  # closed before the next dial
+    assert draining.closed_at_dial == [True]
+    assert len(made) == 2 and draining.closed and "prompt.submit" not in draining.calls
     assert restarted.calls[:3] == ["runtime.describe", "session.create", "prompt.submit"]
     assert "pong" in capsys.readouterr().out
 
@@ -139,6 +154,7 @@ async def test_a_refused_submit_goes_to_the_restarted_owner_on_the_same_session(
     assert len(made) == 4 and draining.calls.count("session.create") == 1
     assert restarted.calls == ["session.resume"]
     assert later.calls[:2] == ["session.resume", "prompt.submit"]
+    assert restarted.closed_at_dial == [True]
     out, err = capsys.readouterr()
     assert "pong" in out and err.count(NOTICE) == 1
 
@@ -167,3 +183,43 @@ async def test_stream_json_waits_without_a_stderr_notice(monkeypatch, capsys):
     assert wait.waiting and wait.retries == 1 and capsys.readouterr().err == ""
     with pytest.raises(GatewayClientError, match="session_replay_gap"):
         await wait.retry(GatewayClientError("session_replay_gap"))
+
+
+@pytest.mark.asyncio
+async def test_create_retry_reuses_request_id_but_a_new_run_does_not(dials):
+    script, _ = dials
+    retired = Owner(refuse={"session.create": GatewayRPCError("runtime_retired")})
+    restarted, another_run = Owner(), Owner()
+    script += [retired, restarted, another_run]
+    assert await _z() == 0
+    assert await _z() == 0
+    ids = [next(params["request_id"] for method, params in owner.params if method == "session.create")
+           for owner in (retired, restarted, another_run)]
+    assert ids[0] == ids[1]
+    assert ids[1] != ids[2]
+
+
+@pytest.mark.asyncio
+async def test_submit_retry_reuses_input_id_but_a_new_run_does_not(dials):
+    script, _ = dials
+    retired = Owner(refuse={"prompt.submit": GatewayRPCError("runtime_retired")})
+    restarted, another_run = Owner(), Owner()
+    script += [retired, restarted, another_run]
+    assert await _z() == 0
+    assert await _z() == 0
+    ids = [next(params["input_id"] for method, params in owner.params if method == "prompt.submit")
+           for owner in (retired, restarted, another_run)]
+    assert ids[0] == ids[1]
+    assert ids[1] != ids[2]
+
+
+@pytest.mark.asyncio
+async def test_admission_notice_does_not_claim_an_update(monkeypatch, capsys):
+    monkeypatch.setattr(gateway_update_wait, "ADMISSION_RETRY_S", 0)
+    wait = gateway_update_wait.UpdateWait()
+    await wait.retry(GatewayRPCError("runtime_draining"))
+    await wait.retry(GatewayRPCError("runtime_draining"))
+    notice = capsys.readouterr().err
+    assert notice.count(NOTICE) == 1
+    assert "not admitting new turns yet" in notice
+    assert "restarting for an update" not in notice
