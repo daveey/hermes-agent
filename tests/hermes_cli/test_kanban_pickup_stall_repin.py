@@ -177,6 +177,46 @@ def test_the_new_machine_must_be_eligible_now(board, change):
     assert board.why(machines=_machines(**{X: change})) is not None
 
 
+# t_01a1d0214f3e63e8 (2026-11-12): every eligible machine was a pool worker, and a move to ``machine:<pool worker>``
+# needs a host_reason no alarm path can pass (kanban_move_pool), so the alarm could re-place nothing. The pool queue
+# is the alarm's way off M whenever another pool worker is eligible now.
+POOL = "pool:worker"
+
+
+def _pooled(**over):
+    return _machines(**{X: {"labels": [*_worker(X)["labels"], POOL]}}, **over)
+
+
+def test_the_pool_queue_is_a_valid_target_when_another_pool_worker_is_eligible(board):
+    assert board.why(runs_on=[POOL], machines=_pooled()) is None
+
+
+@pytest.mark.parametrize("machines", [
+    lambda: _machines(),                                               # no machine carries the pool label
+    lambda: _pooled(worker_2={"hold": True}),                          # the only other pool worker is held
+    lambda: _pooled(worker_2={"metrics": {"active_card_runs": 10}}),  # ... or has no free slot
+    lambda: _pooled(worker_2={"last_seen": NOW - 301_000}),           # ... or was not seen recently
+    lambda: _machines(worker_1={"hold": False, "labels": [*_worker(M)["labels"], POOL]}),  # only M is pooled
+    lambda: None,                                                      # the registry is unreadable
+])
+def test_the_pool_queue_is_refused_when_no_other_pool_worker_is_eligible_now(board, machines):
+    why = rp.refusal(board.conn, board.target, board.alarm, [POOL], machines=machines(), now_ms=NOW)
+    assert why is not None and (POOL in why or "unreadable" in why), why
+
+
+@pytest.mark.parametrize("runs_on", [[POOL, "linux"], [POOL, f"machine:{X}"], ["pool:gpu"]])
+def test_the_pool_queue_is_exactly_the_pool_label(board, runs_on):
+    assert board.why(runs_on=runs_on, machines=_pooled(worker_2={
+        "labels": [*_worker(X)["labels"], POOL, "pool:gpu"]})) is not None
+
+
+def test_the_pool_queue_still_needs_the_cards_capabilities(board):
+    board.set(board.target, requires=json.dumps(["gpu"]))
+    assert "capability:gpu" in board.why(runs_on=[POOL], machines=_pooled())
+    assert board.why(runs_on=[POOL], machines=_pooled(
+        worker_2={"labels": [*_worker(X)["labels"], POOL, "capability:gpu"]})) is None
+
+
 def test_the_new_machine_needs_the_cards_required_capabilities(board):
     board.set(board.target, requires=json.dumps(["gpu"]))
     assert "capability:gpu" in board.why()
@@ -267,6 +307,22 @@ def test_the_alarms_run_re_places_each_listed_card_and_keeps_running(held):
     assert support.MACHINES[M]["hold"] is True  # the hold is the operator's: never lifted or shortened
 
 
+def test_the_alarms_run_re_places_a_listed_card_onto_the_pool_queue(held, monkeypatch):
+    hub, _worker_gw, alarm, (a, b), _unlisted = held
+    body = kb.get_task(hub.conn, alarm).body
+    assert f'runs_on=["{POOL}"]' in body  # the alarm recommends the pool queue first
+    out = _move(a, [POOL])  # worker-2 carries no pool label yet: nowhere on the pool can take it now
+    assert out.get("ok") is not True and POOL in out["error"], out
+    monkeypatch.setitem(support.MACHINES, X, {**support.MACHINES[X],
+                                              "labels": [*support.MACHINES[X]["labels"], POOL]})
+    hub.enter()  # re-read the registry
+    for tid in (a, b):
+        out = _move(tid, [POOL])
+        assert out.get("ok") is True, out
+        assert place._pin(hub.conn, tid) == [POOL]
+    assert kb.get_task(hub.conn, alarm).status == "running"
+
+
 def test_the_alarms_run_may_not_move_an_unlisted_card_or_back_onto_the_stalled_machine(held):
     hub, _worker_gw, _alarm, (a, _b), unlisted = held
     out = _move(unlisted, [f"machine:{X}"])
@@ -313,6 +369,12 @@ def test_an_alarm_caller_gets_the_same_scope_on_an_operator_call_move(fleet, mon
         f.h.execute("UPDATE tasks SET runs_on = ? WHERE id = ?", (json.dumps([f"machine:{M}"]), other))
     f.board()
     assert ask([f"machine:{X}"], target=other).get("code") == "pickup_stall_scope"
+    # The pool queue: granted while another pool worker is eligible now, refused when none is.
+    assert ask([POOL]).get("code") == "pickup_stall_scope"
+    monkeypatch.setattr(rp, "_registry_machines", lambda: _pooled())
+    assert ask([POOL])["verdict"] == "supervisor"
+    monkeypatch.setattr(rp, "_registry_machines", lambda: _pooled(worker_2={"hold": True}))
+    assert ask([POOL]).get("code") == "pickup_stall_scope"
     # A caller that is no alarm keeps the plain operator-call rules.
     with kb.write_txn(f.w):
         f.w.execute("UPDATE tasks SET created_by = 'default' WHERE id = ?", (f.caller,))

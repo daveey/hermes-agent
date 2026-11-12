@@ -7,7 +7,8 @@ task or its ``repin-owner`` supervisor, and the stalled cards were created by ot
 re-placed them by hand.
 
 The grant (:func:`refusal`) is the alarm's own run moving one target with ``kanban_move(task_id=<target>,
-runs_on=["machine:<X>"], reason=...)``. Every condition must hold, each read on the board the move would write:
+runs_on=["pool:worker"], reason=...)`` (or ``["machine:<X>"]``). Every condition must hold, each read on the board the
+move would write:
 
 * the caller is an open alarm the detector filed: ``created_by`` the detector, ``created_on`` M, idempotency key
   ``pickup-stall:<M>:...`` (M is read from the key, never from the arguments);
@@ -16,7 +17,10 @@ runs_on=["machine:<X>"], reason=...)``. Every condition must hold, each read on 
 * the target is still ready and unclaimed, with no current run, and still pinned ``machine:<M>`` (only off M);
 * ``runs_on`` is exactly ``["machine:<X>"]``, X is not M, and X is eligible now by the alarm placement rules
   (active, unheld, copies cards, carries the target's ``capability:<requires>`` and ``profile:<assignee>``, not
-  draining, seen recently, a free card slot).
+  draining, seen recently, a free card slot); or exactly the pool queue ``[POOL_LABEL]``
+  (:data:`hermes_cli.kanban_placement.POOL_LABEL`) while some pool machine other than M is eligible now by the same
+  rules (t_01a1d0214f3e63e8: ``machine:<pool worker>`` needs a ``host_reason`` (:mod:`hermes_cli.kanban_move_pool`)
+  that no alarm path passes, so with every eligible machine a pool worker the alarm could re-place nothing).
 
 The move itself is the ordinary queued move (``kanban_move.move_queued``) with its own guards. Nothing here reads
 or writes a registry hold, so a hold is never lifted or shortened. A target another gateway created is moved through
@@ -35,14 +39,17 @@ CLOSED = ("done", "archived")
 
 def howto(own: str) -> str:
     """The supported re-place command, as alarm prose (``_tail`` and the hold text name it)."""
+    pool = pool_label()
     return (f"To re-place a listed card off {own}, call the kanban_move TOOL from this alarm's run (not the shell: "
             f"`hermes kanban move` is fenced in worker shells): kanban_move(task_id=\"<listed card>\", "
-            "runs_on=[\"machine:<X>\"], reason=\"...\"), where X is another machine eligible now (active, unheld, "
-            "free slot, the card's profile and capabilities). When the card was created on another gateway, "
-            "kanban_move answers foreign_card: send the same move as kanban_supervisor_request(ops=[{\"op\": "
-            "\"operator\", \"action\": \"move\", \"task_id\": \"<listed card>\", \"runs_on\": [\"machine:<X>\"], "
-            f"\"reason\": \"...\"}}]). Only the cards this alarm lists, only while they are ready and pinned to {own}, "
-            f"and never back to {own}.")
+            f"runs_on=[\"{pool}\"], reason=\"...\") queues it for any pool worker other than {own} with a free "
+            "slot (granted while one is eligible now). Never pin one pool worker: that needs a host_reason, and "
+            "capacity is none. Only when no pool worker is eligible, use runs_on=[\"machine:<X>\"] for another "
+            "machine eligible now that is not a pool worker (active, unheld, free slot, the card's profile and "
+            "capabilities). When the card was created on another gateway, kanban_move answers foreign_card: send "
+            "the same move as kanban_supervisor_request(ops=[{\"op\": \"operator\", \"action\": \"move\", "
+            f"\"task_id\": \"<listed card>\", \"runs_on\": [\"{pool}\"], \"reason\": \"...\"}}]). Only the cards "
+            f"this alarm lists, only while they are ready and pinned to {own}, and never back to {own}.")
 
 
 def _cols(row: Any) -> set:
@@ -126,12 +133,40 @@ def scope_refusal(conn: sqlite3.Connection, alarm: Any, target: Any, runs_on: An
         labels = list(wn.normalize_runs_on(runs_on) or [])
     except ValueError as exc:
         return str(exc)
+    if labels == [pool_label()]:
+        return pool_refusal(own, machines, _need(target), now_ms)
     if len(labels) != 1 or not labels[0].startswith("machine:"):
-        return "runs_on must be exactly one machine:<X> label"
+        return f"runs_on must be exactly [\"{pool_label()}\"] or exactly one machine:<X> label"
     name = labels[0].split(":", 1)[1]
     if name == own:
         return f"the card must leave {own}"
     return eligible_now(name, own, machines, _need(target), now_ms)
+
+
+def pool_label() -> str:
+    from hermes_cli.kanban_placement import POOL_LABEL
+    return POOL_LABEL
+
+
+def pool_refusal(own: str, machines: Optional[Mapping[str, Mapping[str, Any]]], need: set,
+                 now_ms: int) -> Optional[str]:
+    """None when a pool machine other than ``own`` may take the card now (:func:`eligible_now`), else why not.
+
+    The pool queue is how an alarm re-places a card onto a pool worker: ``machine:<pool worker>`` needs a
+    ``host_reason`` (:mod:`hermes_cli.kanban_move_pool`), which capacity never is, so no alarm path passes one."""
+    label = pool_label()
+    if machines is None:
+        return "the machine registry is unreadable"
+    pooled = sorted(n for n, e in machines.items() if n != own and label in ((e or {}).get("labels") or []))
+    whys = []
+    for name in pooled:
+        why = eligible_now(name, own, machines, need, now_ms)
+        if why is None:
+            return None
+        whys.append(why)
+    return (f"no {label} machine other than {own} is eligible now"
+            + (f": {'; '.join(whys)}" if whys else " (none carries the label)")
+            + "; a machine outside the pool that is eligible now takes runs_on=[\"machine:<X>\"]")
 
 
 def _registry_machines() -> Optional[Mapping[str, Mapping[str, Any]]]:

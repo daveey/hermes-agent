@@ -336,7 +336,7 @@ def preflight_op(conn: sqlite3.Connection, requester: str, op: dict) -> dict:
         return refuse("running", f"{target} is running; only its own run may move it (kanban_move)")
     if alarm_scope is not None:
         return refuse("pickup_stall_scope", f"a pickup-stall alarm moves only a card it lists, off the stalled "
-                                            f"machine, to one eligible now: {alarm_scope}")
+                                            f"machine, to the pool or one machine eligible now: {alarm_scope}")
     if op["action"] == "unblock":
         if status != "blocked":
             return refuse("not_blocked", f"{target} is {status}, not blocked")

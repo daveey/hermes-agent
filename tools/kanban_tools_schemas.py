@@ -465,7 +465,8 @@ KANBAN_MOVE_SCHEMA = _schema(
         "gateway whose runs_on no enrolled machine carries (stranded: e.g. ['hermes-hub']) may be re-routed by any "
         "worker to labels a machine does carry (e.g. ['machine:hub']); the old labels are kept in a comment. "
         "Third: a pickup-stall alarm's run may move a ready card its alarm lists off the stalled machine to "
-        "runs_on = [\"machine:<X>\"] for one other machine eligible now. "
+        "runs_on = [\"pool:worker\"] while another pool worker is eligible now (or [\"machine:<X>\"] for one other "
+        "eligible machine outside the pool). "
         "Every other card is refused."
     ),
     {
