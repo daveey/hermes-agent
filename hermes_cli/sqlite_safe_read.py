@@ -68,7 +68,7 @@ def _canonical_db_path(conn: sqlite3.Connection) -> Optional[str]:
 def track_connection(path: Path | str) -> None:
     """Record that this process holds a connection to *path* (prefer :func:`connect_tracked`; this
     is for callers managing their own connection objects, and for tests)."""
-    with _live_lock:
+    with _tracking_access(True, key=_key(path)):
         _track_key(_key(path))
 
 
@@ -178,16 +178,33 @@ def _tracking_factory(factory: type) -> type:
     return cached
 
 
+def _tracking_busy():
+    exc = sqlite3.OperationalError("database is locked: SQLite tracking registry is busy")
+    exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    return exc
+
+
 @contextlib.contextmanager
-def _tracking_access(blocking):
-    if not _live_lock.acquire(blocking=blocking):
-        exc = sqlite3.OperationalError("database is locked: SQLite tracking registry is busy")
-        exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
-        raise exc
-    try:
-        yield
-    finally:
-        _live_lock.release()
+def _tracking_access(blocking, *, key=None, unknown=False):
+    from hermes_cli import sqlite_offline_reservations as offline
+
+    # An Event wait cannot release an outer recursive acquisition. Refuse
+    # rather than pinning an owner that needs the registry to finish its body.
+    recursive = getattr(_live_lock, "_is_owned", lambda: True)()
+    while True:
+        if not _live_lock.acquire(blocking=blocking):
+            raise _tracking_busy()
+        try:
+            pending = offline.conflicts(key, unknown=unknown)
+            if not pending:
+                yield
+                return
+            must_refuse = not blocking or recursive or offline.owns_reservation()
+        finally:
+            _live_lock.release()
+        if must_refuse:
+            raise _tracking_busy()
+        pending[0][2].wait()
 
 
 def connect_tracked(
@@ -201,7 +218,14 @@ def connect_tracked(
     opener = connect_fn if connect_fn is not None else sqlite3.connect
     kwargs["factory"] = _tracking_factory(kwargs.get("factory", sqlite3.Connection))
 
-    with _tracking_access(wait_for_tracking):
+    from hermes_cli import sqlite_offline_reservations as offline
+
+    key = offline.database_key(tracking_path if tracking_path is not None else path,
+                               uri=tracking_path is None and kwargs.get("uri", False))
+    # An arbitrary opener may ignore path and run SQL before returning. Without
+    # an explicit tracking_path, conservatively exclude every raw reservation.
+    with _tracking_access(wait_for_tracking, key=key,
+                          unknown=connect_fn is not None and tracking_path is None):
         conn = opener(str(path), **kwargs)
         try:
             resolved = _key(tracking_path) if tracking_path is not None else _canonical_db_path(conn)
@@ -285,7 +309,11 @@ def read_header_bytes_preopen(path: Path | str, *, length: int = 100, force: boo
     sanctioned byte-level read of a database file, for first-open validation (real SQLite? zeroed?
     overwritten?). Check and open/read/close run together under ``_live_lock`` so a connection
     cannot be opened between deciding "nothing is live" and closing this descriptor."""
+    from hermes_cli import sqlite_offline_reservations as offline
+
     with _live_lock:
+        if offline.conflicts(_key(path), raw=True):
+            return None  # a restore may currently be replacing this file
         if not force and _live_main_key(_key(path)) is not None:
             logger.debug(
                 "refusing byte-level read of %s: a live connection exists in "
@@ -305,19 +333,35 @@ def read_header_bytes_preopen(path: Path | str, *, length: int = 100, force: boo
 
 @contextlib.contextmanager
 def offline_file_access(path: Path | str, *, what: str = "read"):
-    """Hold the connection-lifecycle lock across a raw read of a database file: checking
-    :func:`has_live_connection` and *then* doing raw I/O is a check/use race (a connection opened
-    in between loses its POSIX locks to the raw ``close()``). Held only for the raw I/O."""
-    with _live_lock:
-        main = _live_main_key(_key(path))
-        if main is not None:
-            subject = "it" if main == _key(path) else f"its main database {main}"
-            raise LiveConnectionError(
-                f"Refusing to {what} {path}: a connection to {subject} is still open "
-                "in this process, and raw file access would cancel that "
-                "connection's POSIX advisory locks. Close all database "
-                "handles (stop the gateway/dashboard) and retry.")
+    """Reserve the file against new tracked opens, without locking unrelated I/O.
+
+    Check and reservation publication share the open/registration mutex. Real
+    close/untrack remains atomic under that mutex, but never waits for raw I/O.
+    """
+    from hermes_cli import sqlite_offline_reservations as offline
+
+    key = _key(path)
+    recursive = getattr(_live_lock, "_is_owned", lambda: True)()
+    finished = threading.Event()
+    try:
+        while True:
+            with _live_lock:
+                main = _live_main_key(key)
+                if main is not None:
+                    raise LiveConnectionError(
+                        f"Refusing to {what} {path}: a connection to {main} is still open "
+                        "in this process, and raw file access would cancel its POSIX locks.")
+                pending = offline.conflicts(key, raw=True)
+                if not pending:
+                    offline.reserve(key, finished)
+                    break
+                if recursive or offline.owns_reservation():
+                    raise LiveConnectionError("nested offline file access would wait on another owner")
+            pending[0][2].wait()
         yield
+    finally:
+        # Completion cannot depend on a waiter releasing a recursive registry lock.
+        finished.set()
 
 
 # ---------------------------------------------------------------------------------------------
