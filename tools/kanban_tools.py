@@ -1623,6 +1623,11 @@ def _handle_create(args: dict, **kw) -> str:
                 return _placement_refused(_pin, "an origin-bound card is created on this gateway")
         marker_placement = _origin_enrollment(args, origin, marker_placement, assignee=assignee,
                                                skills=skills, project_id=project_id)
+        if origin_intent is not None:  # a routed create landing on the hub: judged before its txn [daveey]
+            from hermes_cli.kanban_hub_admission_placement import courier_plan
+            marker_placement = courier_plan(conn, {**args, "title": title, "assignee": assignee,
+                                                   "skills": skills, "project_id": project_id},
+                                            runs_on) or marker_placement
         _admission_refused(marker_placement)  # raises the typed refusal for a denied hub pin
         try:
             new_tid = kb.create_task(

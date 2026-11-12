@@ -150,15 +150,18 @@ def test_capability_owner_routed_to_the_hub(env, monkeypatch, hub_judge, admit):
 
 @pytest.mark.parametrize("admit", [True, False])
 def test_capability_owner_held_by_the_hub_itself(env, hub_judge, admit):
-    hub_judge.admit_next = admit
+    """The relay-time verdict (stored on the route entry) decides; the probe makes no model call."""
     need = routing_support.NEED
+    stored = {"admit": admit, "need": "hub_live_process" if admit else None,
+              "evidence": "do the scoped action" if admit else "", "why": "relay-time verdict"}
     with kbc.connect_closing() as db:
         tid = routing_support.running(db)
         task = kb.get_task(db, tid)
         rid = kcr.request_id(tid, need)
-        kcr._local_owner(db, task, {"request_id": rid, "generation": 1}, need=need, rid=rid,
-                         self_gw="hub", from_gw="worker-1", reason="do the scoped action")
+        kcr._local_owner(db, task, {"request_id": rid, "generation": 1, "hub_admission": stored},
+                         need=need, rid=rid, self_gw="hub", from_gw="worker-1", reason="do the scoped action")
         owner = next(t for t in kb.list_tasks(db) if t.id != tid)
+    assert hub_judge.calls == []
     if admit:
         assert owner.placement_policy is None
     else:

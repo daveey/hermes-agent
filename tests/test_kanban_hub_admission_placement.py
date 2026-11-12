@@ -24,15 +24,74 @@ def decide(fields, gateway="hub"):
                             live=lambda _: None, carries=True)
 
 
-@pytest.mark.parametrize("pin", ["auto", "local"])
 @pytest.mark.parametrize("title,admitted", [("Chrome", True), ("Read ~/.hermes/logs on the hub", False)])
-def test_hub_auto_candidate(gate, title, admitted, pin):
-    result = decide({"title": title, "placement": pin})
+def test_hub_auto_candidate(gate, title, admitted):
+    result = decide({"title": title, "placement": "auto"})
     assert result["hub_admission"]["admit"] is admitted
     assert result.get("placement_policy") == (None if admitted else "worker-first-v1")
     if not admitted:
         assert "hub:write" in result["requires"]
     assert len(gate) == 1
+
+
+@pytest.mark.parametrize("pin", ["local", "here", " Local "])
+@pytest.mark.parametrize("title,where", [("Chrome", "local"), ("Read ~/.hermes/logs on the hub", "refuse")])
+def test_hub_stay_here_pin_is_explicit(gate, pin, title, where):
+    """Spec owner 11-12: placement='local'/'here' on the hub is an explicit pin; a deny refuses."""
+    result = decide({"title": title, "placement": pin})
+    assert result["where"] == where
+    assert "placement_policy" not in result
+    assert len(gate) == 1
+
+
+@pytest.mark.parametrize("labels", [[], ["linux"], "linux"])
+@pytest.mark.parametrize("title,where", [("Chrome", "local"), ("Read logs", "refuse")])
+def test_hub_only_lease_labels_are_judged(gate, monkeypatch, labels, title, where):
+    """runs_on=[] and labels no other machine satisfies are hub pins on the hub."""
+    from hermes_cli import kanban_worker_node as wn
+    monkeypatch.setattr(wn, "registry", lambda: {"machines": {"hub": {"labels": ["linux"]},
+                                                                "worker-1": {"labels": ["gpu"]}}})
+    assert decide({"title": title, "runs_on": labels})["where"] == where
+    assert len(gate) == 1
+
+
+def test_lease_labels_a_worker_satisfies_make_no_call(gate, monkeypatch):
+    from hermes_cli import kanban_worker_node as wn
+    monkeypatch.setattr(wn, "registry", lambda: {"machines": {"hub": {"labels": ["linux"]},
+                                                                "worker-1": {"labels": ["linux"]}}})
+    decide({"title": "Read logs", "runs_on": ["linux"]})
+    assert gate == []
+
+
+@pytest.mark.parametrize("runs_on", ["machine:hub", [" machine:hub"], "machine:hub,linux",
+                                     ["linux", "machine:hub "]])
+@pytest.mark.parametrize("gateway", ["hub", "mac"])
+def test_machine_hub_shapes_are_judged(gate, runs_on, gateway):
+    """Review t_01a1ceabf1ca19c8: string and padded runs_on shapes named machine:hub with zero calls."""
+    result = decide({"title": "Read logs", "runs_on": runs_on}, gateway)
+    assert result["where"] == "refuse"
+    assert len(gate) == 1
+
+
+@pytest.mark.parametrize("fields", [{"workspace_kind": "dir"}, {"board": "other"},
+                                     {"requires": ["host_repo"]}, {"needs": ["ssh:somewhere"]},
+                                     {"assignee": "other"}])
+@pytest.mark.parametrize("title,where", [("Chrome", "local"), ("Read ~/.hermes/logs on the hub", "refuse")])
+def test_structural_keep_local_is_judged(gate, fields, title, where):
+    """Spec owner 11-12: a structural keep-local on the hub is not exempt; it cannot go to the
+    pool, so a deny refuses the create."""
+    result = decide({"title": title, **fields})
+    assert result["where"] == where
+    assert "placement_policy" not in result
+    assert len(gate) == 1
+
+
+@pytest.mark.parametrize("fields", [{"workspace_kind": "dir"}, {"board": "other"}])
+def test_structural_refusal_zero_calls(gate, fields):
+    """A structural refusal (a foreign hub pin that cannot carry the card) makes no model call."""
+    result = decide({"title": "Chrome", "placement": "hub", **fields}, "mac")
+    assert result["where"] == "refuse"
+    assert gate == []
 
 
 @pytest.mark.parametrize("pin", ["hub", "hermes-hub"])
@@ -42,16 +101,9 @@ def test_explicit_foreign_hub(gate, pin, title, where):
     assert len(gate) == 1
 
 
-@pytest.mark.parametrize("fields", [{"workspace_kind": "dir"}, {"board": "other"},
-                                     {"requires": ["host_repo"]}, {"needs": ["ssh:somewhere"]},
-                                     {"assignee": "other"}])
-def test_structural_zero_calls(gate, fields):
-    decide({"title": "Read ~/.hermes/logs on the hub", **fields})
-    assert gate == []
-
-
 @pytest.mark.parametrize("fields,gateway", [({"placement": "local"}, "mac"),
-    ({"runs_on": ["machine:worker-1"]}, "hub"), ({"title": "code"}, "mac")])
+    ({"runs_on": ["machine:worker-1"]}, "hub"), ({"title": "code"}, "mac"),
+    ({"title": "Read ~/.hermes/logs on the hub", "placement": "local"}, "mac")])
 def test_nonhub_zero_calls(gate, fields, gateway):
     decide(fields, gateway)
     assert gate == []
@@ -102,7 +154,7 @@ def test_denied_without_pool_refuses(gate):
 
 def test_tool_keeps_verdict_and_effective_contract(gate):
     from tools.kanban_tools_placement import _local_placement
-    fields = {"title": "Read logs", "placement": "local"}
+    fields = {"title": "Read ~/.hermes/logs on the hub", "placement": "auto"}
     decision = decide(fields)
     result = _local_placement(placement, fields, decision, machine_ok=None, note_local_pin=True)
     assert result == decision

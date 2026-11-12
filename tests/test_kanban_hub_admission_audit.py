@@ -69,7 +69,9 @@ def test_origin_bound_creation_does_not_skip_gate(monkeypatch, admit):
     result = tools._origin_enrollment({"title": "Chrome", "placement": "local"}, object(), None)
     assert result["hub_admission"]["admit"] is admit
     assert len(calls) == 1
-    assert result.get("placement_policy") == (None if admit else "worker-first-v1")
+    # placement='local' on the hub is an explicit stay-here pin: a deny refuses (spec owner 11-12)
+    assert result.get("where") == ("local" if admit else "refuse")
+    assert result.get("placement_policy") is None
 
 
 @pytest.mark.parametrize("admit", [True, False])

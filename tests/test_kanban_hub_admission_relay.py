@@ -1,0 +1,134 @@
+"""A relayed capability owner bound for the hub is judged at relay time, never in the probe. [daveey]
+
+Review t_01a1ceabf1ca19c8: the judge (30 s deadline) ran inside ``hermes kanban wait-check
+capability-owner``, which has its own 30 s timeout, and an unavailable verdict became a permanent
+route decision (a relay failure, or a pool owner). Now the relaying node judges the owner card when it
+parks the waiting card; the hub's probe applies the stored verdict with zero model calls, and a
+missing/unavailable verdict fails the route retryably (the next route of the need is a fresh relay).
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from hermes_cli import kanban_capability_routing as kcr
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_hub_admission as judge
+from hermes_cli import kanban_worker_node as wn
+from tests.hermes_cli.kanban_sync_fake_board import FakeService
+from tests.hermes_cli.test_kanban_capability_relay import Gw
+
+HUB, WORKER = "hub", "worker-1"
+NEED = "browser:signed-in"
+QUOTE = "the hub's signed-in Chrome profile"
+REASON = f"Renew the Board dashboard session in {QUOTE}; read back the cookie expiry."
+
+
+@pytest.fixture
+def pair(tmp_path, monkeypatch):
+    svc = FakeService(lease_runs=True)
+    monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: None)
+    sync.consume_dispatcher_wake()
+    hub = Gw(tmp_path, HUB, svc, monkeypatch, pickup=False, hub_replica=True)
+    worker = Gw(tmp_path, WORKER, svc, monkeypatch, pickup="explicit", hub_replica=False)
+    hub.holds(NEED)
+    worker.holds("sudo:nopasswd")
+    monkeypatch.setattr(kcr, "hub_runner", lambda argv: (_ for _ in ()).throw(AssertionError(argv)))
+    calls = []
+    verdict = {"value": judge.Verdict(admit=True, need="hub_chrome", evidence=QUOTE, why="needs Chrome")}
+
+    def fake(fields, *, hub_reason=None):
+        calls.append(fields)
+        return verdict["value"]
+
+    monkeypatch.setattr(judge, "admit", fake)
+    yield hub, worker, calls, verdict
+    for g in (hub, worker):
+        g.conn.close()
+        if g.hub is not None:
+            g.hub.close()
+    sync.set_lease_client(None)
+    wn.set_registry_fetch(None)
+
+
+def _relay(hub, worker):
+    hub.enter()
+    tid = kb.create_task(hub.conn, title="Board dashboard session check", assignee="default",
+                         runs_on=[f"machine:{WORKER}"])
+    hub.round()
+    worker.round()
+    worker.tick()
+    run_id = kb.get_task(worker.conn, tid).current_run_id
+    worker.enter()
+    res = kcr.route(worker.conn, tid, [NEED], reason=REASON, expected_run_id=run_id)
+    worker.round()
+    worker.tick()
+    worker.round()
+    hub.round()
+    hub.enter()
+    return tid, res, kcr.request_id(tid, NEED)
+
+
+def _owner(hub, rid):
+    return hub.conn.execute("SELECT id, runs_on, placement_policy, requires FROM tasks "
+                            "WHERE idempotency_key = ?", (rid,)).fetchone()
+
+
+@pytest.mark.parametrize("admit", [True, False])
+def test_relay_time_verdict_applies_in_the_probe_with_no_model_call(pair, admit):
+    hub, worker, calls, verdict = pair
+    if not admit:
+        verdict["value"] = judge.Verdict(admit=False, why="hub-admin covers it")
+    tid, res, rid = _relay(hub, worker)
+    assert len(calls) == 1  # judged once, by the relaying node
+    assert res["routes"][0]["hub_admission"]["admit"] is admit
+    rc, msg = kcr.wait_check(rid)
+    assert rc == 1, msg
+    assert len(calls) == 1  # the wait-check probe made no model call
+    owner = _owner(hub, rid)
+    if admit:
+        assert json.loads(owner["runs_on"]) == [f"machine:{HUB}"] and owner["placement_policy"] is None
+    else:
+        assert owner["placement_policy"] == "worker-first-v1"
+        assert json.loads(owner["requires"]) == ["hub:write"]
+    kinds = [e.payload for e in kb.list_events(hub.conn, tid) if e.kind == "hub_admission"]
+    assert kinds and all(p["admit"] is admit for p in kinds)
+
+
+def test_unavailable_verdict_fails_retryably_and_never_makes_a_route(pair):
+    hub, worker, calls, verdict = pair
+    verdict["value"] = judge.Verdict()  # "admission unavailable"
+    tid, _res, rid = _relay(hub, worker)
+    rc, msg = kcr.wait_check(rid)
+    assert rc == 0 and "hub_admission_unavailable" in msg
+    assert len(calls) == 1  # nothing was judged inside the probe
+    assert _owner(hub, rid) is None  # no hub owner and no pool owner
+    # Routing the need again is a fresh relay generation, not the failed route's permanent answer.
+    assert kcr._route_generations(hub.conn, tid, [NEED]) == {NEED: 2}
+
+
+def test_owner_verdict_inside_an_open_transaction_is_recorded(pair):
+    """Review suggestion: an in-transaction deny made no model call but recorded no event either."""
+    from hermes_cli.kanban_hub_admission_placement import gate_owner
+    hub, _worker, calls, _verdict = pair
+    hub.enter()
+    tid = kb.create_task(hub.conn, title="waiting card", assignee="default")
+    with kb.write_txn(hub.conn):
+        audit = gate_owner(hub.conn, tid, "Capability owner", "body", need=NEED)
+    assert audit["admit"] is False and audit["why"] == "admission unavailable"
+    assert calls == []
+    assert [e.payload["why"] for e in kb.list_events(hub.conn, tid) if e.kind == "hub_admission"] == [
+        "admission unavailable"]
+
+
+def test_stored_admit_whose_quote_left_the_text_is_not_used():
+    from hermes_cli.kanban_hub_admission_placement import stored_owner_verdict
+    entry = {"hub_admission": {"admit": True, "need": "hub_chrome", "evidence": QUOTE, "why": "x"}}
+    assert stored_owner_verdict(entry, "title", f"body with {QUOTE}")["admit"] is True
+    assert stored_owner_verdict(entry, "title", "body without it") is None
+    assert stored_owner_verdict({}, "t", "b") is None
+    assert stored_owner_verdict({"hub_admission": {"admit": False, "why": "admission unavailable"}}, "t", "b") is None
+    assert stored_owner_verdict({"hub_admission": {"admit": False, "why": "pool can"}}, "t", "b")["admit"] is False

@@ -116,6 +116,48 @@ def test_tool_runs_on_machine_hub_keeps_explicit_intent(synced, on_gateway, monk
             assert result.get("hub_admission", {}).get("admit") is False
 
 
+@pytest.mark.parametrize("runs_on", ["machine:hub", [" machine:hub"], "machine:hub,linux"])
+def test_tool_runs_on_shapes_naming_hub_are_judged(synced, on_gateway, monkeypatch, runs_on):
+    """Review t_01a1ceabf1ca19c8: string and padded shapes made a machine:hub card with zero calls.
+
+    The real tool normalizer runs (explicit_runs_on is not patched)."""
+    from hermes_cli import kanban_sync_runstate as runstate
+    from hermes_cli import kanban_worker_node as wn
+    judge = on_gateway("hub")
+    judge.admit_next = False
+    monkeypatch.setattr(runstate, "stranded_create", lambda *a, **kw: "")
+    monkeypatch.setattr(wn, "check_machine_pins", lambda *a, **kw: None)
+    result = json.loads(kt._handle_create({"title": "Rotate the Board admin key", "requires": [],
+                                           "runs_on": runs_on}))
+    assert len(judge.calls) == 1, result
+    assert not result.get("ok"), result
+    with kbc.connect() as conn:
+        assert kb.list_tasks(conn) == []
+
+
+@pytest.mark.parametrize("admit", [True, False])
+def test_tool_courier_create_landing_on_hub_is_judged(on_gateway, admit):
+    """A routed create (macbook→hub auto route) is judged on the hub before its txn; a deny
+    re-enrolls it in the pool with requires hub:write (spec owner 11-12)."""
+    judge = on_gateway("hub")
+    judge.admit_next = admit
+    intent = {"request_id": f"request-hub-{admit}",
+              "owner": {"gateway": "hub", "profile": "default", "board": "default"},
+              "origin": {"gateway": "macbook", "profile": "default", "session": "s_mac"}}
+    result = json.loads(kt._handle_create({"title": MARKED, "requires": [], "assignee": "default"},
+                                          origin_intent=intent))
+    assert len(judge.calls) == 1, result
+    assert result.get("task_id"), result
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, result["task_id"])
+    assert task is not None
+    if admit:
+        assert task.placement_policy is None
+    else:
+        assert task.placement_policy == "worker-first-v1" and "hub:write" in (task.requires or [])
+    assert [e["admit"] for e in _events(result["task_id"])] == [admit]
+
+
 @pytest.mark.parametrize("admit", [True, False])
 def test_tool_placement_hub_from_another_gateway(on_gateway, monkeypatch, admit):
     import functools

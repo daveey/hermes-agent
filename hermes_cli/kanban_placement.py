@@ -947,6 +947,9 @@ def remote_body(args: dict, *, self_gw: str, target: str, carried: bool = False)
     """The body sent to ``target``. ``carried`` (the client passes options as fields) drops the
     body-text fallback for skills and the runtime budget."""
     body = (args.get("body") or "").rstrip()
+    if str(args.get("hub_reason") or "").strip():
+        # The receiving hub re-judges a routed card (courier_plan); the reason must reach its judge. [daveey]
+        body = f"{body}\n\nHub reason (hub admission): {str(args['hub_reason']).strip()}".strip()
     extra = []
     skills = [] if carried else args.get("skills") or []
     if skills:

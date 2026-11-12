@@ -12,6 +12,72 @@ def is_hub(name, cfg):
     return canonical_pin(name, "hub", cfg) in ("hub", "hermes-hub")
 
 
+def hub_only(labels, cfg):
+    """True when only the hub can claim a card with these lease labels (``[]`` = any machine counts).
+
+    An unreadable registry counts as hub-only: the judge is consulted rather than skipped.
+    """
+    from hermes_cli import kanban_worker_node as wn
+    if not labels:
+        return True
+    if any(v.startswith("machine:") and not is_hub(v[8:], cfg) for v in labels):
+        return False  # the named non-hub machine claims it
+    try:
+        machines = (wn.registry() or {}).get("machines") or {}
+    except Exception:  # health: allow BLE001 -- an unknown registry is judged, never waved through
+        return True
+    if not machines:
+        return True
+    return not any(set(labels) <= wn.effective_labels(entry, name) for name, entry in machines.items()
+                   if not is_hub(name, cfg) and (entry or {}).get("state", "active") == "active")
+
+
+def _verdict(fields, hub_reason=None):
+    try:
+        return judge.admit(fields, hub_reason=hub_reason)
+    except Exception:  # health: allow BLE001 -- a failed judge is a deny
+        return judge.Verdict()
+
+
+def courier_plan(conn, args, runs_on, *, cfg=None, gateway=None):
+    """A courier create landing on the hub: ``None`` (not hub-bound) or the admission placement.
+
+    Runs in the receiving ``kanban_create`` before its write transaction, before the card can be
+    claimed. Admitted: ``{"hub_admission": audit}`` (stays here). Denied: worker-first enrollment
+    with ``requires`` + ``hub:write``; ``where="refuse"`` when it cannot go to the pool.
+    """
+    from hermes_cli import kanban_placement as kp
+    from hermes_cli.kanban_worker_placement import POLICY, WAITING
+    cfg = kp.config() if cfg is None else cfg
+    gateway = kp.reg.self_gateway() if gateway is None else gateway
+    if not is_hub(gateway, cfg):
+        return None
+    machines = [v[8:] for v in runs_on or [] if v.startswith("machine:")]
+    if runs_on is not None and not any(is_hub(m, cfg) for m in machines) and not hub_only(runs_on, cfg):
+        return None  # the lease labels let a worker claim it: not a hub slot
+    if args.get("placement_policy"):
+        return None
+    # validate_creation's own fences: a worker-first card cannot carry a host workspace, board or project.
+    pinned = (runs_on is not None or (args.get("workspace_kind") or "scratch") != "scratch"
+              or args.get("workspace_path") or args.get("project_id")
+              or args.get("board") not in (None, "", "default"))
+    if conn is not None and conn.in_transaction:
+        verdict = judge.Verdict()  # never a model call under the SQLite write lock
+    else:
+        # The origin's routing note names *its* host needs (Chrome profile, Keychain): never hub evidence.
+        verdict = _verdict({**args, "body": kp.without_placement_note(args.get("body") or "")},
+                           args.get("hub_reason"))
+    audit = {**asdict(verdict), "entry": "courier"}
+    if verdict.admit:
+        return {"hub_admission": audit}
+    if pinned or gateway not in (cfg.get("worker_pools") or {}):
+        return {"where": "refuse", "why": verdict.why, "hub_admission": audit, "pin": "hub"}
+    requires = args.get("requires") or []
+    requires = [requires] if isinstance(requires, str) else list(requires)
+    return {"where": "local", "placement_policy": POLICY, "why": WAITING, "hub_admission": audit,
+            "requires": list(dict.fromkeys([*requires, "hub:write"]))}
+
+
 def gate_move(conn, task_id, runs_on, *, cfg=None):
     """``None`` when a move does not target the hub or the judge admits it, else a refusal dict.
 
@@ -20,18 +86,24 @@ def gate_move(conn, task_id, runs_on, *, cfg=None):
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_placement as kp
+    from hermes_cli import kanban_worker_node as wn
 
-    raw = [runs_on] if isinstance(runs_on, str) else list(runs_on or [])
     cfg = kp.config() if cfg is None else cfg
-    labels = [str(v).strip() for v in raw if isinstance(v, str)]
+    try:
+        labels = wn.normalize_runs_on(runs_on) or []
+    except ValueError:  # malformed labels: still judge any hub machine named in them (fail closed)
+        raw = [runs_on] if isinstance(runs_on, str) else list(runs_on or [])
+        labels = [p.strip() for v in raw if isinstance(v, str) for p in v.split(",")]
     if not any(v.lower().startswith("machine:") and is_hub(v[8:], cfg) for v in labels):
         return None
     row = conn.execute("SELECT title, body FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None:
         return None  # the mover's own check reports an unknown card
-    if conn.in_transaction:
+    if conn.in_transaction:  # never a model call under the SQLite write lock; still recorded
+        audit = {**asdict(judge.Verdict()), "entry": "move", "runs_on": labels}
+        kb._append_event(conn, task_id, "hub_admission", audit)
         return {"ok": False, "reason_code": "hub_admission_unavailable",
-                "error": "hub admission cannot run inside an open transaction"}
+                "error": "hub admission cannot run inside an open transaction", "hub_admission": audit}
     try:
         verdict = judge.admit({"title": row["title"], "body": row["body"]})
     except Exception:  # health: allow BLE001 -- a failed judge is a deny
@@ -109,21 +181,44 @@ def cli_preflight(args, body, workspace_kind, workspace_path, board, *, assignee
     return plan, 2
 
 
-def gate_owner(conn, waiting_task_id, title, body, *, need):
-    """Judge a capability owner card bound for the hub; records the verdict on the waiting card.
+def owner_verdict(title, body, *, need):
+    """Judge a capability owner card's text at relay time (never inside a wait-check probe)."""
+    return {**asdict(_verdict({"title": title, "body": body})), "entry": "capability_owner",
+            "capability": need}
 
-    Returns the audit dict (``admit`` says whether the owner may run on the hub).
+
+def stored_owner_verdict(entry, title, body):
+    """The relay-time verdict for the owner card being sent now, or None when it cannot be used.
+
+    An admit counts only while its evidence still occurs verbatim in the text being sent.
+    """
+    audit = (entry or {}).get("hub_admission")
+    if not isinstance(audit, dict) or not isinstance(audit.get("admit"), bool):
+        return None
+    if audit.get("why") == judge.Verdict().why:
+        return None  # the judge was unavailable at relay time: retry, never a permanent answer
+    if audit["admit"] and not (audit.get("evidence") and (audit["evidence"] in title or audit["evidence"] in body)):
+        return None
+    return audit
+
+
+def gate_owner(conn, waiting_task_id, title, body, *, need, audit=None):
+    """Judge (or take ``audit`` judged at relay time) a hub-bound owner card; record the verdict.
+
+    Returns the audit dict (``admit`` says whether the owner may run on the hub). Inside an open
+    transaction no model call is made (deny), but the verdict is still recorded in that transaction.
     """
     from hermes_cli import kanban_db as kb
-    if conn.in_transaction:  # never a model call under the SQLite write lock
-        return {**asdict(judge.Verdict()), "entry": "capability_owner", "capability": need}
-    try:
-        verdict = judge.admit({"title": title, "body": body})
-    except Exception:  # health: allow BLE001 -- a failed judge is a deny
-        verdict = judge.Verdict()
-    audit = {**asdict(verdict), "entry": "capability_owner", "capability": need}
-    with kb.write_txn(conn):
+    if audit is None:
+        if conn.in_transaction:  # never a model call under the SQLite write lock
+            audit = {**asdict(judge.Verdict()), "entry": "capability_owner", "capability": need}
+        else:
+            audit = owner_verdict(title, body, need=need)
+    if conn.in_transaction:
         kb._append_event(conn, waiting_task_id, "hub_admission", audit)
+    else:
+        with kb.write_txn(conn):
+            kb._append_event(conn, waiting_task_id, "hub_admission", audit)
     return audit
 
 
@@ -156,32 +251,44 @@ def apply(args, decision, gateway, cfg, *, origin_intent=None):
 
     Returned requires are effective persistence inputs, not just creation-time checks.
     A worker policy cannot coexist with runs_on, so hub access travels in requires.
-    Courier applies (``origin_intent``: another gateway's routed create landing here) keep
-    today's behaviour: the origin decided the route, and worker-first cannot carry a courier.
+    Courier applies (``origin_intent``: another gateway's routed create landing here) are
+    judged by :func:`courier_plan` on the receiving hub, before its create transaction.
     """
+    from hermes_cli import kanban_worker_node as wn
     from hermes_cli.kanban_placement import structural_reason
     from hermes_cli.kanban_worker_placement import POLICY, WAITING
 
     if origin_intent is not None:
-        return decision
-    if decision.get("where") == "refuse" or structural_reason({**args, "runs_on": None}, cfg):
-        return decision
-    labels = args.get("runs_on")
-    machines = [v[8:] for v in labels or [] if isinstance(v, str) and v.startswith("machine:")]
+        return decision  # judged where it lands, outside the courier's txn: see courier_plan
+    if decision.get("where") == "refuse":
+        return decision  # structural refusals make no model call
+    try:
+        # The exact labels the create persists: a comma string or padded label is still machine:hub.
+        labels = wn.normalize_runs_on(args.get("runs_on"))
+    except ValueError:
+        return decision  # the create itself rejects invalid labels before any write
+    machines = [v[8:] for v in labels or [] if v.startswith("machine:")]
     machine_hub = any(is_hub(v, cfg) for v in machines)
     destination = decision.get("defer") or decision.get("where")
-    local_hub = destination == "local" and is_hub(gateway, cfg)
-    pin = args.get("placement") or "auto"
-    explicit = machine_hub or is_hub(pin, cfg)
+    on_hub = is_hub(gateway, cfg)
+    local_hub = destination == "local" and on_hub
+    pin = str(args.get("placement") or "auto").strip()
+    # On the hub, "stay here" is an explicit hub pin: a deny refuses instead of moving the card.
+    explicit = machine_hub or is_hub(pin, cfg) or (local_hub and pin.lower() in ("local", "here"))
     if not machine_hub:
-        # Any explicit runs_on (even [] = any machine) is executed by the Board lease, not this slot.
-        if labels is not None or decision.get("runs_on") or decision.get("placement_policy"):
+        if labels is not None:
+            # Lease labels: judged only when created here and nothing but the hub can claim them.
+            if not (on_hub and hub_only(labels, cfg)):
+                return decision
+            explicit = True
+        elif decision.get("runs_on") or decision.get("placement_policy"):
+            return decision  # already enrolled or pinned away from the hub
+        # A foreign gateway's automatic route to the hub is judged when it lands (courier_plan);
+        # at the origin only explicit hub pins are, so non-hub origins make zero model calls.
+        elif not local_hub and not (explicit and is_hub(destination, cfg)):
             return decision
-        # A foreign gateway's automatic route to the hub is the origin's routing decision (it lands
-        # as a courier apply, unchanged); only explicit hub pins are judged at the origin, so
-        # non-hub origins make zero model calls unless the caller names the hub.
-        if not local_hub and not (explicit and is_hub(destination, cfg)):
-            return decision
+    if structural_reason({**args, "runs_on": None}, cfg):
+        explicit = True  # a host workspace, other board or uncarried option cannot go to the pool
     if args.get("force_hub"):
         if os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("HERMES_KANBAN_WORKER_TASK"):
             return {"where": "refuse", "why": "force_hub is unavailable to dispatcher workers"}

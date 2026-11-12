@@ -190,14 +190,19 @@ def cli_audit(args, body, workspace_kind, workspace_path, board, *, assignee):
 
 
 def validate_creation(policy, *, runs_on, workspace_kind, workspace_path, project, origin_intent, board):
-    """Reject contradictory enrollment rather than quietly erasing a caller pin."""
+    """Reject contradictory enrollment rather than quietly erasing a caller pin.
+
+    A courier create may carry the policy: only the receiving hub's admission judge sets it
+    (``courier_plan``), re-enrolling a denied routed card in the worker pool. [daveey]
+    """
+    del origin_intent
     if policy is None:
         return
     if policy != POLICY:
         raise ValueError("unknown placement policy")
     if (runs_on is not None or workspace_kind not in (None, "scratch") or workspace_path
-            or project or origin_intent is not None or board not in (None, "default")):
-        raise ValueError("worker-first policy cannot override manual, courier or host placement")
+            or project or board not in (None, "default")):
+        raise ValueError("worker-first policy cannot override manual or host placement")
 
 
 def execution_refusal(conn, row):

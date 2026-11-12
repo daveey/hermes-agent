@@ -45,8 +45,14 @@ def test_effective_creation_audit_preserves_enrollment(kanban_home, tmp_path, mo
     if case == "local-pin":
         args["placement"] = "local"
     result = json.loads(kt._handle_create(args))
+    if case in {"inherited-project", "implicit-assignee", "local-pin"}:
+        # Spec owner 11-12: a structural keep-local or an explicit stay-here pin on the hub is
+        # judged, and (unable to go to the pool) a deny refuses the create with the verdict.
+        assert not result.get("ok") and result.get("hub_admission", {}).get("admit") is False, result
+        assert len(calls) == 1
+        return
     assert result.get("ok"), result
-    assert len(calls) == (1 if case == "local-pin" else 0)
+    assert calls == []
     with kbc.connect() as conn:
         task = kb.get_task(conn, result["task_id"])
         event = next(e for e in kb.list_events(conn, task.id) if e.kind == "created")
