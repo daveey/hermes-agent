@@ -45,10 +45,75 @@ jobs:
     # Include cold environment provisioning and reduced-priority shared-host work.
     timeout-minutes: 90
     steps:
+      # This dedicated runner executes one job at a time. Recreate only at the
+      # first step, before checkout registers post actions or starts test workers.
+      # Start cleanup also recovers leftovers from cancelled/failed previous jobs.
+      - name: Recreate dedicated CI checkout
+        working-directory: ${{ runner.temp }}
+        shell: /usr/bin/python3 {0}
+        run: |
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+
+          ROOT = Path('/Users/daveey/ci-runner-hermes-state')
+
+          def prepare():
+              work = ROOT / '_work'
+              expected = {
+                  'GITHUB_ACTIONS': 'true',
+                  'RUNNER_OS': 'macOS',
+                  'GITHUB_REPOSITORY': 'softmax-universe/daveey-hermes',
+                  'GITHUB_WORKSPACE': str(work / 'daveey-hermes/daveey-hermes'),
+                  'RUNNER_TEMP': str(work / '_temp'),
+              }
+              if any(os.environ.get(key) != value for key, value in expected.items()):
+                  raise RuntimeError('Refusing cleanup outside dedicated CI workspace')
+              if Path.cwd() != work / '_temp' or not shutil.rmtree.avoids_symlink_attacks:
+                  raise RuntimeError('Cleanup needs runner temp cwd and fd-safe rmtree')
+              targets = (work / 'daveey-hermes/daveey-hermes', work / 'hermes')
+              # Validate ALL targets before removing any. Never follow an aliased
+              # ancestor onto a user checkout, another runner or an external disk.
+              for target in targets:
+                  for path in (target, *target.parents):
+                      if path.is_symlink():
+                          raise RuntimeError(f'Refusing symlink: {path}')
+                  if target.exists() and (not target.is_dir() or
+                                          target.stat().st_dev != ROOT.stat().st_dev):
+                      raise RuntimeError(f'Refusing non-directory or foreign device: {target}')
+                  if target.exists():
+                      if target.is_mount():
+                          raise RuntimeError(f'Refusing root mount: {target}')
+                      for directory, dirs, _ in os.walk(target, followlinks=False):
+                          for name in dirs:
+                              child = Path(directory) / name
+                              if not child.is_symlink() and (child.is_mount() or
+                                      child.stat().st_dev != ROOT.stat().st_dev):
+                                  raise RuntimeError(f'Refusing nested mount: {child}')
+                      # Runner serialization is the boundary; lsof additionally
+                      # refuses survivors from a failed/cancelled previous job.
+                      probe = subprocess.run(
+                          ['/usr/sbin/lsof', '-nP', '+D', str(target)],
+                          capture_output=True, text=True, encoding='utf-8', timeout=120,
+                          check=False,
+                      )
+                      if probe.returncode != 1 or probe.stdout or probe.stderr:
+                          raise RuntimeError(f'Checkout busy or lsof uncertain: {target}')
+              for target in targets:
+                  if target.exists():
+                      shutil.rmtree(target)
+              # Keep the workspace available even if checkout itself fails.
+              targets[0].mkdir(parents=True, exist_ok=True)
+              print('Fresh CI checkout; obsolete hermes namespace absent')
+
+          prepare()
+
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit || github.sha }}
+          fetch-depth: 1
 
       - name: Run tests/hermes_state
         shell: bash
@@ -64,3 +129,12 @@ jobs:
           OPENROUTER_API_KEY: ''
           OPENAI_API_KEY: ''
           NOUS_API_KEY: ''
+
+      - name: Measure retained checkout (2 GiB ceiling)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          usage_kib=$(du -sk "$GITHUB_WORKSPACE" | cut -f1)
+          printf 'Retained checkout: %s KiB; ceiling: 2097152 KiB (2 GiB)\n' "$usage_kib"
+          test "$usage_kib" -le 2097152

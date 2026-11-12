@@ -162,7 +162,7 @@ def test_reusable_job_also_rejects_fork_prs(fork):
 def test_suite_launch_receipt_and_failure_propagation(tmp_path, code):
     """Execute shell wiring; receipt taskpolicy's launch boundary, not native macOS execution."""
     job = workflow('hermes-state-macos.yml')['jobs']['hermes-state-macos']
-    step = next(step for step in job['steps'] if 'run' in step)
+    step = next(step for step in job['steps'] if step.get('name') == 'Run tests/hermes_state')
     workflow_steps.required(step, context())
     receipt = tmp_path / 'receipt.json'
     shim = '''taskpolicy() {
