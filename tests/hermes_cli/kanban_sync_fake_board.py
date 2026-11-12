@@ -114,6 +114,51 @@ class FakeService:
         b = self.board(bid)
         b["floor"] = b["seq"]
 
+    # transitions.ts NEUTRAL_RELEASES: release outcome -> (run outcome, event kind); never charged.
+    NEUTRAL = {"rate_limited": ("rate_limited", "rate_limited"), "owner_restart": ("reclaimed", "owner_restart_lost"),
+               "owner_unavailable": ("owner_unavailable", "owner_unavailable"), "owner_down": ("owner_down", "owner_down"),
+               "reboot_bystander": ("host_reboot", "host_reboot")}
+
+    def release_op(self, b: dict, op: dict, gw: str) -> dict:
+        """As transitions.ts releaseTask: only the lease holder's run is released; the Board ends that run, emits
+        its one outcome event (carrying the holder's ``diagnostic``) and books a charged outcome exactly once."""
+        task, run = op["task"], op["run_uid"]
+        lease = b["leases"].get(task)
+        if not lease or lease["holder"] != gw or lease["run_uid"] != run:
+            return {"status": "rejected", "reason": "lease_lost"}
+        outcome, op_id = op.get("outcome", "released"), op["client_op_id"]
+        clock = f"{9_999_999_999_999:013d}-0002-board"
+        error = str(op.get("error") or outcome)[:500]
+        card = b["rows"]["tasks"][task]
+        b["leases"].pop(task, None)
+        ended, kind = self.NEUTRAL.get(outcome, ("crashed" if outcome == "terminal_provider" else outcome,) * 2)
+        canonical = outcome in ("crashed", "timed_out", "terminal_provider")
+        diag = dict(op.get("diagnostic") or {}) if canonical else {}
+        self._put(b, "task_runs", run, {"status": ended, "outcome": ended, "ended_at": int(time.time()),
+                                        "error": None if outcome == "released" else error,
+                                        "metadata": json.dumps(diag) if diag else None}, "server", op_id, clock)
+        payload = {**diag, **({"failure_notice": "canonical"} if canonical else {}), "error": error, "retry_status": "ready"}
+        self._put(b, "task_events", f"ev-{op_id}-{kind}", {"task_id": task, "run_uid": run, "kind": kind,
+                                                            "payload": json.dumps(payload), "created_at": int(time.time())},
+                  "server", op_id, clock)
+        fields: dict = {"status": "ready", "current_run_uid": None, "lease_holder": None, "lease_expires": None}
+        if canonical:
+            failures = int(card.get("consecutive_failures") or 0) + 1
+            limit = card.get("max_retries") or op.get("failure_limit") or 2
+            tripped = bool(op.get("force_trip")) or outcome == "terminal_provider" or failures >= int(limit)
+            fields.update(consecutive_failures=failures, last_failure_error=error,
+                          **({"status": "triage"} if tripped else {}))
+            final = {**(op.get("extra") or {}), "run_uid": run, "failures": failures, "effective_limit": int(limit),
+                     "error": error, "trigger_outcome": outcome, "tripped": tripped}
+            for event in (["gave_up"] if tripped else []) + ["failure_finalized"]:
+                self._put(b, "task_events", f"ev-{op_id}-{event}", {"task_id": task, "run_uid": run, "kind": event,
+                                                                     "payload": json.dumps(final),
+                                                                     "created_at": int(time.time())},
+                          "server", op_id, clock)
+        clocks = {**card.get("field_hlc", {}), **dict.fromkeys(fields, clock)}
+        row = self._put(b, "tasks", task, {**fields, "field_hlc": clocks}, "server", op_id, clock)
+        return {"status": "applied", "row": row}
+
 
 class FakeHub:
     """Duck-typed :class:`ksc.Hub` for one gateway."""
@@ -136,7 +181,9 @@ class FakeHub:
             if prior is not None:
                 results.append({**prior, "dup": True})
                 continue
-            res = {"client_op_id": op["client_op_id"], **self.svc.row_op(b, op, self.gateway)}
+            res = {"client_op_id": op["client_op_id"],
+                   **(self.svc.release_op(b, op, self.gateway) if op.get("op") == "release"
+                      else self.svc.row_op(b, op, self.gateway))}
             row = res.get("row")
             res["version"] = row.get("version") if row else None
             b["applied"][op["client_op_id"]] = res

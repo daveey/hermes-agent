@@ -44,7 +44,8 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list, *, allow_nes
         if dead.protocol_violation:
             from hermes_cli.kanban_failure_release import queue
             if queue(conn, tid, dead.run_id, outcome="crashed", error=error_text,
-                     protocol_violation=True, failure_limit=_d._PROTOCOL_VIOLATION_FAILURE_LIMIT):
+                     protocol_violation=True, failure_limit=_d._PROTOCOL_VIOLATION_FAILURE_LIMIT,
+                     diagnostic=dict(dead.event_payload)):
                 continue  # Board computes the streak from authoritative closed runs.
             streak = _d._protocol_violation_streak(conn, tid)
             trow = conn.execute("SELECT max_retries FROM tasks WHERE id = ?", (tid,)).fetchone()
@@ -66,7 +67,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list, *, allow_nes
             # ``force_trip``: the decision (incl. per-task ``max_retries``) was
             # already made against the violation streak above.
             tripped = _d._record_task_failure(
-                conn, tid, run_id=dead.run_id,
+                conn, tid, run_id=dead.run_id, diagnostic=dict(dead.event_payload),
                 error=error_text,
                 outcome="crashed",
                 failure_limit=violation_limit,
@@ -87,7 +88,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list, *, allow_nes
             flag = "unknown_skill" if dead.unknown_skill else "stdlib_shadow" if dead.stdlib_shadow else \
                 "reboot_culprit" if dead.reboot_culprit else "terminal_provider"
             tripped = _d._record_task_failure(
-                conn, tid, run_id=dead.run_id,
+                conn, tid, run_id=dead.run_id, diagnostic=dict(dead.event_payload),
                 error=error_text,
                 outcome="crashed",
                 force_trip=True,
@@ -113,7 +114,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list, *, allow_nes
                 # No fix card could be opened: trips at 1, held for an operator.
                 extra["sticky"] = True
             tripped = _d._record_task_failure(
-                conn, tid, run_id=dead.run_id,
+                conn, tid, run_id=dead.run_id, diagnostic=dict(dead.event_payload),
                 error=error_text,
                 outcome="crashed",
                 failure_limit=1 if is_systemic else None,

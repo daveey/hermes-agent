@@ -53,7 +53,7 @@ def test_local_protocol_has_one_final_notice_without_early_charge(live, monkeypa
 def test_systemic_link_failure_emits_one_give_up_per_run(live, monkeypatch):
     from hermes_cli import kanban_systemic_crash as systemic
     tids = [_local_crash(live, monkeypatch)[0] for _ in range(3)]
-    monkeypatch.setattr(systemic, "attach", lambda *a: False)
+    monkeypatch.setattr(systemic, "attach", lambda *a, **k: False)
     assert sorted(dispatch.detect_crashed_workers(live)) == sorted(tids)
     for tid in tids:
         rows = list(live.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='gave_up'", (tid,)))
@@ -145,7 +145,7 @@ def test_local_failure_receipt_rolls_back_with_counter_and_event(live):
     tid, rid = transport._running(live)
     sync.set_mode(live, "off")
     with pytest.raises(RuntimeError, match="rollback"), kb.write_txn(live):
-        dispatch._record_task_failure(live, tid, "exit", outcome="crashed", run_id=rid)
+        dispatch._record_task_failure(live, tid, "exit", outcome="crashed", run_id=rid, allow_nested=True)
         raise RuntimeError("rollback")
     assert kb.get_task(live, tid).consecutive_failures == 0
     dispatch._record_task_failure(live, tid, "exit", outcome="crashed", run_id=rid)

@@ -15,7 +15,7 @@ def _record_task_failure(
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
     infrastructure: bool = False, block_kind: str = "transient", run_id: int | None = None,
-    allow_nested: bool = False,
+    allow_nested: bool = False, diagnostic: Optional[dict] = None,
 ) -> bool:
     """Record a non-success outcome and maybe trip the circuit breaker; every
     non-success path funnels through here so ``consecutive_failures`` stays
@@ -47,10 +47,13 @@ def _record_task_failure(
         ).fetchone()
         if row is None:
             return False
+        # ``diagnostic`` (the classifier's event payload) is the local outcome event's
+        # evidence; on a Board-primary card it rides the release to that event.
         from hermes_cli.kanban_failure_release import queue
         if queue(conn, task_id, run_id if run_id is not None else row["current_run_id"],
                  outcome=outcome, error=error, failure_limit=failure_limit, force_trip=force_trip,
-                 infrastructure=infrastructure, block_kind=block_kind, extra=event_payload_extra or {}):
+                 infrastructure=infrastructure, block_kind=block_kind, extra=event_payload_extra or {},
+                 **({"diagnostic": diagnostic} if diagnostic else {})):
             return False  # Only the authoritative feed can report a completed breaker transition.
         from hermes_cli import kanban_local_failure as local_failure
         run_id = run_id if run_id is not None else row["current_run_id"]
