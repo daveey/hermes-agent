@@ -362,6 +362,8 @@ def mid_tool_cancel_step(session: dict, marker_key: str, agent: Any, state: dict
     if not pause_requested(session):
         state.clear()  # a later request starts its own grace (and may cancel again)
         return None
+    from tui_gateway.update_pause_approval import withdraw_for_update
+    withdraw_for_update(session, marker_key, agent)
     if state.get("cancelled"):
         return None  # one cancel per request: the turn pauses at the next boundary
     now = _mono()
