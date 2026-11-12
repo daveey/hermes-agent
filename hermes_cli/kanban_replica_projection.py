@@ -26,7 +26,8 @@ from hermes_cli.kanban_session_activity_release import record_attests_terminal
 
 LINK_RELS = ('shepherd', 'cross_task', 'create-task', 'adopt-task')
 # Every field a kept record without links to this origin is read for after ``_stage``: the unknown-status copy and
-# ``_fold_legacy_aliases`` (status, sessions, created_at, created_by), and the record's own identity.
+# ``_fold_legacy_aliases`` (status, sessions, created_at, created_by), and the record's own identity. Release
+# evidence (``record_attests_terminal``) is computed in ``_stage`` from the whole record before it is slimmed.
 SLIM_FIELDS = ('id', 'status', 'profile', 'board', 'gateway', 'created_at', 'created_by', 'sessions')
 _REMOTE_FIELDS = ("title", "status", "block_kind", "human_request", "assignee", "created_at", "started_at", "priority")
 
@@ -128,17 +129,19 @@ def _stage(row: tuple, me: str, origin_profile: str) -> _Stage:
     gw = str(gw)
     st.tkey = (gw, owner_profile, board, tid)
     st.sids = linked_sessions(t, me, origin_profile)
+    # [daveey] Release evidence reads the whole record (``record_attests_terminal`` reads origin_bindings and
+    # more), so it is computed before the record is slimmed.
+    st.attest = ((gw, owner_profile, board) if record_attests_terminal(t, gw, owner_profile, board, evidence)
+                 else None)
+    # [daveey] Verified completion (``kanban_origin_ledger._verified_terminal``): only such a record expires a
+    # retained link it no longer carries (``_legacy_remote_links``).
+    st.verified = st.attest is not None and evidence.get('verified') is True
     if not st.sids:
         st.slim = True
         t = {f: t[f] for f in SLIM_FIELDS if f in t}
     st.t = t
     st.legacy = {'key': record_key, 'version': version, 'digest': digest} if owner_profile is None else None
     st.seen = (updated or 0) / 1000.0
-    st.attest = ((gw, owner_profile, board) if record_attests_terminal(t, gw, owner_profile, board, evidence)
-                 else None)
-    # [daveey] Verified completion (``kanban_origin_ledger._verified_terminal``): only such a record expires a
-    # retained link it no longer carries (``_legacy_remote_links``).
-    st.verified = st.attest is not None and evidence.get('verified') is True
     st.unknown = ({**t, 'reported_status': t.get('status'), 'status': 'unknown', 'unfinished': True}
                   if owner_profile is None or t.get('status') not in LISTED_STATUSES else None)
     created = t.get('created_at')

@@ -33,6 +33,11 @@ _PAGE_SQL = (f"SELECT json_group_array(json_array({_COLUMNS})), max(rowid) FROM 
              " WHERE coll = 'tasks' AND rowid > ? {where} ORDER BY rowid LIMIT ?)")
 _FULL_SQL = _PAGE_SQL.format(version="{version}", where="")
 _DELTA_SQL = _PAGE_SQL.format(version="{version}", where="AND seq > ?")
+# A delta is usually a few rows: read them in one query planned on the seq index (the rowid-paged form scans
+# ``replica_coll`` and filters seq row by row, ~22 ms vs ~3 ms on a 14k-row hub). Only a delta bigger than a page
+# (a resync rewrote many rows) is paged.
+_DELTA_SIZE_SQL = "SELECT count(*), total(octet_length(data)) FROM replica WHERE coll = 'tasks' AND seq > ?"
+_DELTA_ONE_SQL = f"SELECT json_group_array(json_array({_COLUMNS})) FROM replica WHERE coll = 'tasks' AND seq > ?"
 _IDENTITY_SQL = "SELECT json_group_array(json_array(gw, key, seq)) FROM replica WHERE coll = 'tasks'"
 
 
@@ -148,7 +153,11 @@ def _delta(conn: sqlite3.Connection, base: Rows, probe) -> Rows | None:
     """``base`` advanced to the snapshot ``probe`` describes, or None when only a full read can tell."""
     last = base.last_seq
     stats["delta"] += 1
-    fresh = list(_paged(conn, _DELTA_SQL.format(version=base.version_column), probe, (last,)))
+    count, octets = conn.execute(_DELTA_SIZE_SQL, (last,)).fetchone()
+    if count <= _PAGE and octets <= _PAGE_BYTES:
+        fresh = _decode(conn.execute(_DELTA_ONE_SQL.format(version=base.version_column), (last,)).fetchone()[0])
+    else:
+        fresh = list(_paged(conn, _DELTA_SQL.format(version=base.version_column), probe, (last,)))
     stats["delta_rows"] += len(fresh)
     by_key, meta, sums = dict(base.by_key), dict(base.meta), base.sums
     changed = set()
