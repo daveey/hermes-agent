@@ -90,6 +90,12 @@ def _validate_batch_ops(operations, default_name, tool_error):
     def fail(i, msg):
         return None, tool_error(f"operations[{i}]{msg}", success=False)
     names = []
+    # Models name the skill on one op and drop it on its sibling (a patch plus the reference
+    # file it links). When every named op targets ONE skill the nameless op can only mean that
+    # skill, so it inherits it; with several targets the guess would be a write to the wrong skill.
+    named = sorted({op["name"] for op in operations
+                    if isinstance(op, dict) and isinstance(op.get("name"), str) and op["name"]})
+    sole_name = named[0] if len(named) == 1 else None
     for i, op in enumerate(operations):
         if not isinstance(op, dict) or not op.get("action"):
             return fail(i, " needs an 'action'.")
@@ -97,9 +103,14 @@ def _validate_batch_ops(operations, default_name, tool_error):
         if act not in _BATCH_OP_ACTIONS:
             return fail(i, f": unknown action '{act}'. Batchable: "
                            f"{', '.join(sorted(_BATCH_OP_ACTIONS))}; delete must be sole.")
-        nm = op.get("name") or default_name
+        nm = op.get("name") or default_name or sole_name
         if not nm:
-            return fail(i, " needs a 'name' (the skill it targets).")
+            if named:
+                return fail(i, " needs a 'name' (the skill it targets): the other ops in this call "
+                               f"target several skills ({', '.join(named)}), so it cannot be inferred. "
+                               "Resend the same call with 'name' set on every op.")
+            return fail(i, " needs a 'name' (the skill it targets). Resend the same call with "
+                           "'name' set on every op.")
         # Reject a misfiled op here, before any sibling is applied: a runtime failure on
         # op[1] would first apply op[0] and then roll the whole batch back.
         if (shape_err := _op_shape_error(act, op)) is not None:
@@ -246,7 +257,10 @@ def _skill_manage_batch(operations, default_name: str | None = None, task_id: st
         def _staging(wa):
             acts = ", ".join(op["action"] for op in operations)
             gist = f"batch({len(operations)} ops: {acts}) on {', '.join(sorted(set(names)))}"
-            return {"action": "batch", "operations": operations}, gist
+            # Stage the RESOLVED target on every op: the approver's per-op diff reads op['name'],
+            # and a nameless (inherited) op would otherwise preview against no skill at all.
+            staged_ops = [{**op, "name": names[i]} for i, op in enumerate(operations)]
+            return {"action": "batch", "operations": staged_ops}, gist
         staged = _smt._run_write_gate(_staging)
         if staged is not None:
             return staged
@@ -297,6 +311,8 @@ def _skill_manage_batch(operations, default_name: str | None = None, task_id: st
                     return json.dumps(fail, ensure_ascii=False)
                 entry = {"name": names[i], "action": op["action"],
                          "file_path": op.get("file_path"), "success": True}
+                if not op.get("name") and not default_name:
+                    entry["name_inherited"] = True  # say which skill a nameless op landed in
                 # Advisory payloads (linter findings, org-sharing note) ride on the op result; the
                 # compact success row otherwise hides them and the model never sees a finding.
                 entry.update({k: parsed[k] for k in _ADVISORY_KEYS if parsed.get(k) is not None})
