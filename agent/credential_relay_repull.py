@@ -108,7 +108,11 @@ def _wait_budget() -> float:
 
 
 def _run_pull(cmd: list[str]) -> None:
-    """Run the pull once; a peer process already pulling (lock held) is left to finish on its own."""
+    """Run the pull once; leave a peer holding the lock to finish on its own.
+
+    The command must bootstrap its own Python dependencies, not borrow the agent's
+    PYTHONPATH/PYTHONHOME. All other relay settings remain inherited.
+    """
     from hermes_constants import get_hermes_home
     lock_path = Path(get_hermes_home()) / "state" / "oauth-relay-repull.lock"
     log = _ra().logger
@@ -124,8 +128,14 @@ def _run_pull(cmd: list[str]) -> None:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     return
+            # The relay owns its interpreter (workers use /usr/bin/python3 for boto3).
+            # PM's backend PYTHONPATH mixes its cryptography with distro OpenSSL and
+            # fails at GEN_EMAIL. Preserve relay/AWS/home settings, not Python imports.
+            env = os.environ.copy()
+            env.pop("PYTHONPATH", None)
+            env.pop("PYTHONHOME", None)
             proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                  timeout=_PULL_TIMEOUT_S, stdin=subprocess.DEVNULL, check=False)
+                                  timeout=_PULL_TIMEOUT_S, stdin=subprocess.DEVNULL, check=False, env=env)
             if proc.returncode != 0:
                 log.warning("OAuth relay re-pull %s exited %s: %s", cmd[0], proc.returncode,
                             (proc.stderr or proc.stdout or "").strip()[-300:])
