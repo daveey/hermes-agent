@@ -132,10 +132,11 @@ jobs:
         # lanes are forced off unless this is a release run or a manual dispatch
         # (whose empty diff already turns every lane on): never on a pull request
         # or a push to main, whatever the diff or labels say. The macOS state and
-        # native memory lanes are off on a main push (hermes-state-macos.yml and
-        # native-memory-macos.yml each run main from their own push trigger, so a
-        # main push never runs a suite twice on the one mini runner) and on for
-        # a dispatch or a release.
+        # native memory lanes are off on a main push (hermes-state-macos.yml runs
+        # main from its own path-filtered push trigger and 4-hourly schedule, and
+        # native-memory-macos.yml from its own push trigger, so a main push never
+        # runs a suite twice on the one mini runner) and on for a dispatch or a
+        # release.
         id: gate-lanes
         env:
           RELEASE: ${{ inputs.release }}
@@ -314,8 +315,8 @@ jobs:
     # dependency manifests (and every dispatch / release). A fork PR never runs
     # on the mini: the job skips, and macos-state-required below then fails the
     # selected lane, so a fork change to that surface cannot merge on a skip.
-    # Main pushes skip here (detect turns the lane off); the workflow's own push
-    # trigger runs main.
+    # Main pushes skip here (detect turns the lane off); the workflow's own
+    # path-filtered push trigger and 4-hourly schedule run main.
     if: needs.detect.outputs.hermes_state == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     uses: ./.github/workflows/hermes-state-macos.yml
     with:
