@@ -71,3 +71,33 @@ def _merge_disk_cooldown_state(
         return {**merged, **disk_status_fields}
     except Exception:  # pragma: no cover - best-effort merge
         return entry
+
+
+def _token_identity(token: Any) -> Optional[str]:
+    """Codex JWT identity: ``chatgpt_account_id`` (+ ``sub``) first, else email; None if undecodable."""
+    from hermes_cli.auth_constants import _decode_jwt_claims
+    claims = _decode_jwt_claims(token)
+    if not claims:
+        return None
+    auth = claims.get("https://api.openai.com/auth")
+    account = auth.get("chatgpt_account_id") if isinstance(auth, dict) else None
+    if isinstance(account, str) and account.strip():
+        sub = claims.get("sub")
+        sub = sub.strip() if isinstance(sub, str) else ""
+        return f"acct:{account.strip()}/{sub}"
+    email = claims.get("email")
+    if isinstance(email, str) and email.strip():
+        return f"email:{email.strip()}".lower()
+    return None
+
+
+def _credential_token_pair(row: Any) -> tuple[Any, Any]:
+    if not isinstance(row, dict):
+        return (None, None)
+    return row.get("access_token"), row.get("refresh_token")
+
+
+def _codex_identity_changed(old_token: Any, new_token: Any) -> bool:
+    """True only when both tokens carry a decodable identity and the identities differ."""
+    old, new = _token_identity(old_token), _token_identity(new_token)
+    return bool(old and new and old != new)

@@ -15,6 +15,14 @@ def bench(pool, model=A):
     return pool.entries()[0]
 
 
+def test_healthy_selection_does_not_read_model_state(pool, monkeypatch):
+    from hermes_cli import auth
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("healthy selection must not read model state")
+    monkeypatch.setattr(auth, "read_credential_pool", unexpected_read)
+    assert pool.select(model=A) is not None
+
+
 def test_verified_recovery_clears_only_observed_model(pool):
     from agent.credential_pool import load_pool
     from hermes_cli.auth import read_credential_pool

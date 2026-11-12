@@ -41,6 +41,8 @@ def merge_model_state(*rows: dict[str, Any]) -> dict[str, Any]:
 
 def resync_model_state(pool, entry):
     """Read resets even when the credential has no account-wide failure status."""
+    if not entry.model_cooldowns:
+        return entry
     from hermes_cli.auth import read_credential_pool
     try:
         row = next((r for r in read_credential_pool(pool.provider) if r.get("id") == entry.id), None)

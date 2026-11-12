@@ -34,7 +34,8 @@ from hermes_constants import OPENROUTER_BASE_URL, hermes_home_key, secure_parent
 from agent.credential_persistence import sanitize_borrowed_credential_payload
 from utils import atomic_json_write, env_float, file_cache_version, is_truthy_value
 # Re-exported: callers and auth_codex/auth_oauth_grants read these via hermes_cli.auth.
-from hermes_cli.auth_pool_merge import _POOL_STATUS_FIELDS, _merge_disk_cooldown_state
+from hermes_cli.auth_pool_merge import (
+    _POOL_STATUS_FIELDS, _credential_token_pair, _codex_identity_changed, _merge_disk_cooldown_state)
 from hermes_cli.auth_zai_kimi import (
     KIMI_CODE_BASE_URL, ZAI_ENDPOINTS, _normalize_lmstudio_runtime_base_url, _resolve_kimi_base_url,
     _resolve_zai_base_url, detect_zai_endpoint)
@@ -970,12 +971,6 @@ _POOL_TOKEN_GENERATION_FIELDS = (
 )
 
 
-def _credential_token_pair(row: Any) -> tuple[Any, Any]:
-    if not isinstance(row, dict):
-        return (None, None)
-    return row.get("access_token"), row.get("refresh_token")
-
-
 def _token_pairs_by_id(rows: Iterable[Any]) -> dict[str, tuple[Any, Any]]:
     """Token-generation base per row id, INCLUDING ``(None, None)`` for token-less rows.
 
@@ -993,12 +988,7 @@ def _merge_pool_row_generation(
     base_pair: Optional[tuple[Any, Any]] = None,
     status_cleared: bool = False,
 ) -> dict[str, Any]:
-    """Keep a newer on-disk token generation authoritative during stale writes.
-
-    Only a terminal auth verdict (``last_status == dead``) is scoped to the token pair
-    it was observed on; account-wide cooldowns (402 billing, 429 throttle) from the
-    stale writer still apply to the rotated pair and go through the ordinary recency
-    merge in ``_merge_disk_cooldown_state``."""
+    """Keep disk token generations and cross-account status authoritative during stale writes."""
     from agent.credential_pool import STATUS_DEAD
 
     merge_disk = None if status_cleared else disk_entry
@@ -1018,8 +1008,17 @@ def _merge_pool_row_generation(
                 merged.pop(field, None)
 
     _take_from_disk(_POOL_TOKEN_GENERATION_FIELDS)
-    if not status_cleared and entry.get("last_status") == STATUS_DEAD:
+    # Both pairs decode to DIFFERENT accounts: the disk row was re-pointed at another
+    # identity, so the writer's cooldown/quarantine describes an account that no longer
+    # owns this row. Same-account refreshes keep real exhaustion (ordinary merge below).
+    cross_account = provider_id == 'openai-codex' and _codex_identity_changed(
+        base_pair[0] or entry.get("access_token"), disk_pair[0])
+    if cross_account or (not status_cleared and entry.get("last_status") == STATUS_DEAD):
         _take_from_disk((*_POOL_STATUS_FIELDS, "failure_reason"))
+    if cross_account:
+        _take_from_disk(('model_cooldowns', 'model_cooldown_recorded_at', 'model_cooldown_cleared_at',
+                         'cooldown_until', 'bench_status_at', 'bench_token_fp'))
+        return merged
     return _merge_disk_cooldown_state(merged, merge_disk, provider_id)
 
 

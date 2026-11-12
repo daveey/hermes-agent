@@ -7,8 +7,8 @@ accounts had weekly headroom. The only way out was hand SQL on the ``quota_episo
 ``live_verdict`` reads every pooled OAuth account's live usage windows (``agent.account_usage``, the
 ``/api/oauth/usage`` read for anthropic, read-only for Codex). Two callers:
 
-- ``contradicted``: a start-time ``SubscriptionQuotaUnavailable`` the live read contradicts is booked as an
-  unconfirmed retry (no reset, so no quota episode and no provider wall).
+- ``contradicted``: a start-time ``SubscriptionQuotaUnavailable`` is checked by the bounded live
+  completion recovery helper, not usage alone. Managed workers retry construction once after a clear.
 - ``hermes kanban quota-release <id> --probe`` (``kanban_quota_episode_release``): the operator release
   refuses, with an audited ``quota_release_refused`` event, unless every walled provider shows headroom.
 """
@@ -94,12 +94,13 @@ def verdicts(walls, model, verdict=None):
     return {provider: verdict(provider, model)._asdict() for provider in names}
 
 
-def contradicted(exc, *, verdict=live_verdict):
-    """A start-time typed quota refusal the live usage read contradicts becomes an unconfirmed retry.
+def contradicted(exc, *, verdict=None):
+    """Start-time quota recovery; usage-only injection is retained for read-only verdict callers.
 
-    The worker books the returned exception instead of *exc* (``gateway.session_kanban``): exit 75 with
-    no reset, so no quota episode or provider wall rests on a pool view the provider itself disputes.
-    Any other exception, or a probe that confirms or cannot read the wall, returns *exc* unchanged."""
+    Default recovery requires a successful completion and a persisted compare-and-swap clear.
+    A managed startup already attempted recovery before its single retry; never probe it twice.
+    Operator ``live_verdict`` remains read-only and separate from this mutation path.
+    """
     from agent.model_routing_unavailable import (
         QuotaContradicted, SubscriptionAuthUnavailable, SubscriptionQuotaUnavailable)
     wall, seen = exc, set()
@@ -108,6 +109,12 @@ def contradicted(exc, *, verdict=live_verdict):
         wall = wall.__cause__ or wall.__context__
     if wall is None or isinstance(wall, SubscriptionAuthUnavailable) or not isinstance(wall, SubscriptionQuotaUnavailable):
         return exc
+    if getattr(exc, '_kanban_quota_probe_attempted', False):
+        return exc
+    if verdict is None:
+        from hermes_cli.kanban_quota_recovery import recover_exception
+        return (QuotaContradicted(wall.provider, wall.model, 'live completion verified; stale bench cleared')
+                if recover_exception(exc) else exc)
     try:
         found = verdict(wall.provider, wall.model)
     except Exception:  # health: allow BLE001 -- a failed probe keeps the typed refusal (fail closed) [daveey]
