@@ -29,7 +29,8 @@ from tests.hermes_cli.kanban_sync_fake_board import FakeService
 from tests.hermes_cli.test_kanban_worker_node import HUB, MACHINES, Gateway, _tool_create
 
 MAC = "macbook"
-BODY = "Inspect the Desktop backend's ~/.hermes/state.db and ~/.hermes/logs/gateway.log on the MacBook."
+# An operate instruction: a body that only names "the Desktop backend" no longer pins (PR 1222). [daveey]
+BODY = "Restart the Desktop backend, then inspect ~/.hermes/state.db and ~/.hermes/logs/gateway.log on the MacBook."
 
 
 @pytest.fixture
