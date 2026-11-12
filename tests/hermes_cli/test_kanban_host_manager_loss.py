@@ -180,3 +180,87 @@ def test_a_repeat_without_root_evidence_is_still_charged(owner_board, monkeypatc
             kbd.detect_crashed_workers(conn)
         assert _task(conn, tid).consecutive_failures == 1
         assert _last_payload(conn, tid, "crashed")["owner_death_repeat"] == DEAD_OWNER
+
+
+def _run_metadata(conn, tid):
+    return [json.loads(r[0]) if r[0] else {} for r in conn.execute(
+        "SELECT metadata FROM task_runs WHERE task_id=? AND ended_at IS NOT NULL ORDER BY id", (tid,))]
+
+
+def test_a_first_owner_death_never_spends_the_waiver(owner_board, monkeypatch, tmp_path):
+    """Root evidence at a NON-repeat death is not consulted: the run is requeued as an ordinary owner
+    death and its metadata carries no ``host_manager_loss``, so the card keeps its one waiver."""
+    monkeypatch.setenv("HERMES_KANBAN_OWNER_RESTART_COOLDOWN_SECONDS", "0")
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="card", assignee="default")
+        _ledger(owner_board, DEAD_OWNER)
+        _attested(monkeypatch, tmp_path, DEAD_OWNER)
+        _claim(conn, tid, 87001, owner_board, owner_pid=DEAD_OWNER, birth=BIRTH)
+        _reaped(monkeypatch, [87001])
+        assert kbd.detect_crashed_workers(conn) == [] and _task(conn, tid).consecutive_failures == 0
+        lost = _last_payload(conn, tid, "owner_restart_lost")
+        assert lost["owner_death_pid"] == DEAD_OWNER and "host_manager_loss" not in lost
+        assert "owner_death_repeat_waived" not in lost
+        metadata = _run_metadata(conn, tid)
+        assert len(metadata) == 1 and "host_manager_loss" not in metadata[0]
+
+
+def test_a_huge_receipt_number_fails_closed(tmp_path):
+    """``float(10**400)`` raises OverflowError: an absurd JSON int is no match, not an exception."""
+    for n, loss in enumerate([dict(observed_monotonic=10 ** 400), dict(exit_monotonic=-(10 ** 400))]):
+        assert _check(_root(tmp_path / f"loss{n}", _incident(loss=loss))) is None
+    huge_owner = _incident()
+    huge_owner["manager_loss"]["owner"]["birth"] = 10 ** 400
+    assert _check(_root(tmp_path / "owner", huge_owner)) is None
+    assert _check(_root(tmp_path / "receipt", _incident()), {"pid": DEAD_OWNER, "birth": 10 ** 400}) is None
+
+
+def test_a_repeat_whose_receipt_breaks_the_parser_is_charged_without_breaking_the_sweep(
+        owner_board, monkeypatch, tmp_path):
+    """Any error reading the root evidence fails closed: the repeat is charged as before and the
+    dead-worker sweep carries on (2026-11-12 review of PR #1231: OverflowError escaped ``note()``)."""
+    monkeypatch.setenv("HERMES_KANBAN_OWNER_RESTART_COOLDOWN_SECONDS", "0")
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="card", assignee="default")
+        for n, owner in enumerate([DEAD_OWNER, 50001]):
+            _ledger(owner_board, owner)
+            root = _root(tmp_path / str(owner), _incident(owner_pid=owner, loss=dict(observed_monotonic=10 ** 400)))
+            monkeypatch.setattr(hml, "manager_loss_incident", functools.partial(
+                _ORIGINAL, root=root, uid=os.getuid(), boot_id=BOOT, host=HOST, now=NOW, check_ancestors=False))
+            _claim(conn, tid, 86001 + n, owner_board, owner_pid=owner, birth=BIRTH)
+            _reaped(monkeypatch, [86001 + n])
+            kbd.detect_crashed_workers(conn)
+        assert _task(conn, tid).consecutive_failures == 1
+        charged = _last_payload(conn, tid, "crashed")
+        assert charged["owner_death_repeat"] == DEAD_OWNER and "host_manager_loss" not in charged
+
+
+@pytest.mark.parametrize("error", [OverflowError, RuntimeError, KeyError])
+def test_the_waiver_fails_closed_on_any_reader_error(owner_board, monkeypatch, error):
+    from hermes_cli import kanban_owner_death as od
+
+    def boom(receipt):
+        raise error("bad receipt")
+
+    monkeypatch.setattr(hml, "manager_loss_incident", boom)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="card", assignee="default")
+        assert od._host_manager_loss_waiver(conn, tid, {"pid": DEAD_OWNER, "birth": BIRTH}) is None
+
+
+def test_non_linux_hosts_never_waive(tmp_path, monkeypatch):
+    """Off Linux there is no root watchdog: even a receipt naming this boot exactly returns ``None``."""
+    boot_file = "/proc/sys/kernel/random/boot_id"
+    if not os.path.exists(boot_file):
+        pytest.skip("needs a Linux boot_id for the positive control")
+    with open(boot_file, encoding="utf-8") as fh:
+        boot = fh.read().strip()
+    record = _incident(loss=dict(boot_id=boot))
+    root = _root(tmp_path, record)
+    kw = dict(root=root, uid=os.getuid(), host=HOST, now=NOW, check_ancestors=False)
+    receipt = {"pid": DEAD_OWNER, "birth": BIRTH}
+    monkeypatch.setattr(hml.sys, "platform", "linux")
+    assert hml.manager_loss_incident(receipt, **kw) == record["incident_id"]  # positive control
+    for platform in ("darwin", "win32"):
+        monkeypatch.setattr(hml.sys, "platform", platform)
+        assert hml.manager_loss_incident(receipt, **kw) is None

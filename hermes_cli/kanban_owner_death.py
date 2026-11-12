@@ -21,6 +21,7 @@ worker host's root watchdog attests this exact owner died with its SIGKILLed sys
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Optional
@@ -119,7 +120,12 @@ def _host_manager_loss_waiver(conn, task_id: str, receipt: dict) -> Optional[str
         used += isinstance(meta, dict) and bool(meta.get("host_manager_loss"))
     if used >= hml.MAX_WAIVERS:
         return None
-    return hml.manager_loss_incident(receipt)
+    try:
+        return hml.manager_loss_incident(receipt)
+    except Exception:  # any reader error is no evidence: charge the repeat, keep the sweep alive
+        logging.getLogger(__name__).warning(
+            "host manager-loss receipt unreadable for %s; charging the owner-death repeat", task_id, exc_info=True)
+        return None
 
 
 def note(dead, conn, task_id: Optional[str], run_id) -> None:

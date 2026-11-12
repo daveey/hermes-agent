@@ -19,6 +19,7 @@ naming this owner exactly returns ``None`` (charged as before).
 from __future__ import annotations
 
 import json
+import math
 import os
 import socket
 import stat
@@ -37,7 +38,14 @@ MANAGER_UNIT = "user@1000.service"
 
 
 def _number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    """A real finite number: an int too large for a float (``float(10**400)`` raises OverflowError)
+    or an inf/nan is no evidence."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
 
 
 def _trusted_node(path: Path, *, uid: int, directory: bool) -> bool:
