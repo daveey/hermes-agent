@@ -173,3 +173,26 @@ def test_legacy_registry_missing_child_id_and_invalid_clocks_are_unknown():
         obs = subagent({"child_session_id": "child", "parent_session_id": "parent", "activity_at": clock,
                         "live": True}, gateway="edge", profile="default", now=1005)
         assert obs["state"] == "unknown" and obs["observed_at"] is None
+
+
+@pytest.mark.parametrize("endpoint", ["/api/profiles/sessions", "/api/profiles/sessions/sidebar"])
+def test_profile_lists_http_entry_paths(stored, monkeypatch, endpoint):
+    from fastapi.testclient import TestClient
+    from hermes_cli import profiles as profile_config
+    from hermes_cli.web_routers import profiles
+    from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN, app
+
+    (stored.home / "config.yaml").write_text("{}\n")
+    stored.db.append_message("parent", role="user", content="hello")
+    monkeypatch.setattr(profile_config, "_get_default_hermes_home", lambda: stored.home)
+    monkeypatch.setattr(profile_config, "_get_profiles_root", lambda: stored.home / "profiles")
+    monkeypatch.setattr(profiles, "_SIDEBAR_CACHE_TTL_SECONDS", 0.0)
+    with TestClient(app) as client:
+        client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
+        response = client.get(endpoint, params={"profile": "default", "recents_profile": "default"})
+        assert response.status_code == 200, response.text
+        data = response.json()
+        rows = data["recents"]["sessions"] if endpoint.endswith("sidebar") else data["sessions"]
+        parent = next(row for row in rows if row["id"] == "parent")
+        (obs,) = _observations([parent])
+        assert obs["state"] == "running" and obs["identity"]["work_id"] == "child"

@@ -45,6 +45,7 @@ describe('process/subagent source to sidebar consumers', () => {
       env: { ...process.env, PYTHONPATH: resolve(process.cwd(), '../..') },
     }))
     const stamped = sample.row as SessionInfo
+
     expect(stamped.execution_observations).toEqual([sample.registry])
     vi.useFakeTimers(); vi.setSystemTime(sample.now * 1000)
     $sessions.set([stamped])
