@@ -78,7 +78,8 @@ def test_successor_owes_continuation_reads_the_durable_pause(recovery, fields, o
 
 
 def test_a_pause_whose_writer_lives_is_not_owed_by_a_successor(recovery, monkeypatch):
-    monkeypatch.setattr("tui_gateway.turn_marker.marker_writer_state", lambda marker: "alive")
+    for where in ("tui_gateway.turn_marker", "tui_gateway.startup_resume"):  # the sweep's own check reads it
+        monkeypatch.setattr(f"{where}.marker_writer_state", lambda marker: "alive")
     assert up.successor_owes_continuation(recovery.home, KEY) is False
 
 
@@ -115,7 +116,8 @@ def test_a_non_conforming_profile_dir_does_not_fail_the_wake(recovery, profiles_
 
 
 def test_a_fresh_pause_in_a_profile_home_is_left_to_its_successor(recovery, profiles_root, monkeypatch):
-    monkeypatch.setattr("tui_gateway.turn_marker.marker_writer_state", lambda marker: "dead")  # no real pid probe
+    for where in ("tui_gateway.turn_marker", "tui_gateway.startup_resume"):  # no real pid probe
+        monkeypatch.setattr(f"{where}.marker_writer_state", lambda marker: "dead")
     _profile(profiles_root.root, "Not A Profile!")
     work = _profile(profiles_root.root, "work")
     old = time.time() - up.SUCCESSOR_YIELD_UNKNOWN_S - 1
