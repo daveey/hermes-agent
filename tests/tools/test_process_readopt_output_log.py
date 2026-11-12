@@ -100,7 +100,9 @@ def test_interpreter_restart_dispatches_one_completion_turn(
     from tools.process_registry_notifications import format_process_notification
 
     gate = tmp_path / "release"
-    command = f'while [ ! -f {shlex.quote(str(gate))} ]; do sleep 0.02; done; printf "restart-proof\\n"; exit 7'
+    command = (f'n=0; while [ ! -f {shlex.quote(str(gate))} ]; do '
+               'n=$((n+1)); [ "$n" -lt 1500 ] || exit 124; sleep 0.02; done; '
+               'printf "restart-proof\\n"; exit 7')
     producer = subprocess.run(
         [sys.executable, "-c", _SPAWNER, str(checkpoint), str(tmp_path), command, TUI_KEY],
         cwd=str(Path(__file__).resolve().parents[2]), env=build_subprocess_env(),

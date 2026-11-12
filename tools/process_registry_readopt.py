@@ -277,9 +277,15 @@ _keeper_lock = threading.Lock()
 _keeper_thread: Optional[threading.Thread] = None
 
 
+def _checkpoint_keeper_tick(registry) -> None:
+    """Reassert our entries and revisit jobs whose previous writer outlived startup."""
+    registry.reassert_checkpoint()
+    recover_tui_orphaned_processes(registry)
+
+
 def start_checkpoint_keeper(registry=None, interval: float = CHECKPOINT_KEEPER_SECONDS) -> bool:
-    """Desktop backend: every *interval* s, put back any live entry another writer dropped from
-    processes.json (``reassert_checkpoint``). Idempotent; one file read per tick. [daveey]"""
+    """Desktop backend: reassert live entries and recover late orphans every *interval* s.
+    Idempotent; recovery retains the live-writer and Desktop-owner fences. [daveey]"""
     global _keeper_thread
     if registry is None:
         from tools.process_registry import process_registry as registry
@@ -288,7 +294,7 @@ def start_checkpoint_keeper(registry=None, interval: float = CHECKPOINT_KEEPER_S
         while True:
             time.sleep(interval)
             try:
-                registry.reassert_checkpoint()
+                _checkpoint_keeper_tick(registry)
             except Exception:
                 logger.debug("checkpoint keeper tick failed", exc_info=True)
 
