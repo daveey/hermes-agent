@@ -215,7 +215,8 @@ def _fetch_exited(pid: int) -> bool:
 def _state(pid: int) -> str:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8-sig")
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+        # Reaping before open gives ENOENT; after open, the stat read gives ESRCH.
         return "Z"
     return stat[stat.rfind(")") + 2:][:1]
 
