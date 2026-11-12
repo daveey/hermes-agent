@@ -47,6 +47,7 @@ from hermes_cli.kanban_ops import (
 )
 from hermes_cli.kanban_parser import build_parser
 from hermes_cli.kanban_sync_cli import cmd_sync as _cmd_sync
+from hermes_cli.kanban_operator_resume import cmd as _cmd_resume
 from hermes_cli.kanban_archive_scope import (  # moved here from this module; re-exported for callers
     _capability_owner_waiting_card, _creator_task_id, _is_stranded_runs_on_copy,
     _worker_may_archive_capability_owner, _worker_may_archive_own,
@@ -1575,11 +1576,6 @@ def _cmd_reopen_review(args: argparse.Namespace) -> int:
 
         return _bulk_apply(ids, op, lambda tid: f"Reopened {tid}{suffix}",
                            lambda tid: f"cannot reopen {tid} (not in review?)")
-
-
-def _cmd_resume(args: argparse.Namespace) -> int:
-    from hermes_cli.kanban_operator_resume import cmd
-    return cmd(args)
 
 
 def _cmd_promote(args: argparse.Namespace) -> int:

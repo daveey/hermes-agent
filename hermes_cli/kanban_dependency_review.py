@@ -94,8 +94,10 @@ def _completed_review_run(conn, parent_id, parked_at, owner_run_id):
         # A checkpointed move can leave the parent's run on another gateway.
         # Use the refreshed Board result, never a move-supplied verdict or a
         # source database's integer run ID as a local identity.
-        from hermes_cli.kanban_move_parent_evidence import result
+        from hermes_cli.kanban_move_parent_evidence import owner_faulted_since, result
         owner = conn.execute("SELECT task_id FROM task_runs WHERE id = ?", (owner_run_id,)).fetchone()
+        if owner and owner_faulted_since(conn, owner[0], parked_at):
+            return None  # Neither foreign source may release a crashed/reclaimed owner.
         mirrored = result(conn, owner[0], parent_id) if owner else None
         if (mirrored and mirrored.get("parent_status") == "done" and mirrored.get("was_claimed")
                 and mirrored.get("outcome") == "completed"

@@ -117,6 +117,22 @@ def _checkpointed_move_after(conn, task_id, ended):
     return moved is not None and moved >= ended
 
 
+def owner_faulted_since(conn, task_id, since) -> bool:
+    """True when the owner crashed, was reclaimed or timed out at/after ``since``.
+
+    A park authorizes one continuation of an orderly owner only; a fault after it
+    re-arms the hold whichever foreign source (this mirror or the Board replica)
+    supplies the parent's result.
+    """
+    from hermes_cli import kanban_db as kb
+
+    faults = conn.execute(
+        "SELECT created_at FROM task_events WHERE task_id = ? "
+        "AND kind IN ('crashed', 'reclaimed', 'timed_out')", (task_id,),
+    )
+    return any((kb._to_epoch(e[0]) or 0) >= since for e in faults)
+
+
 def result(conn, task_id, parent_id):
     """Read only for an orderly parked owner: after a checkpointed queued move, or
     when the owner's own authenticated review park names this parent."""
@@ -137,11 +153,7 @@ def result(conn, task_id, parent_id):
         evidence = _parked_review_checkpoint(conn, task_id, run)
         if evidence is None or parent_id not in evidence["parents"]:
             return None
-    faults = conn.execute(
-        "SELECT created_at FROM task_events WHERE task_id = ? "
-        "AND kind IN ('crashed', 'reclaimed', 'timed_out')", (task_id,),
-    )
-    if any((kb._to_epoch(e[0]) or 0) >= ended for e in faults):
+    if owner_faulted_since(conn, task_id, ended):
         return None
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (_TABLE,)).fetchone():
         return None
