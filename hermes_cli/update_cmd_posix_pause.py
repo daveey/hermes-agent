@@ -302,6 +302,9 @@ def _respawning_service(pid: int) -> str | None:
 
 def _discover_bare(service_pids: set[int]) -> tuple[list[dict], list[str]]:
     """``(bare gateways, notices)``: this install's ``gateway run`` processes outside any unit."""
+    if _stop_busy_opted_in():
+        from hermes_cli.update_preswap_discovery import bare_gateways
+        return bare_gateways(service_pids)
     from gateway.status import get_process_start_time
     from hermes_cli.gateway import _capture_gateway_argv, _get_service_pids, find_gateway_pids
     from hermes_cli.update_cmd_fleet import _scoped_manual_gateway_pids

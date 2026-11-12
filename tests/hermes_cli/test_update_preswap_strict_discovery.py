@@ -36,7 +36,7 @@ def probes(tmp_path, monkeypatch):
     ("listing", "systemd user gateway inventory"),
     ("missing", "systemd user gateway inventory"),
     ("pid_nonzero", UNIT), ("pid_invalid", UNIT), ("pid_empty", UNIT),
-    ("ownership", UNIT), ("cgroup_timeout", UNIT),
+    ("ownership", UNIT), ("implicit_default", UNIT), ("cgroup_timeout", UNIT),
 ])
 def test_unknown_systemd_discovery_refuses_and_third_attempt_reports(probes, monkeypatch, failure, identity):
     stop, report = probes
@@ -55,12 +55,12 @@ def test_unknown_systemd_discovery_refuses_and_third_attempt_reports(probes, mon
         if "--property=Environment" in cmd:
             if failure == "cgroup_timeout":
                 return subprocess.CompletedProcess(cmd, 0, "HERMES_HOME=/fixture/home", "")
-            return subprocess.CompletedProcess(cmd, 1, "", "denied")
+            return subprocess.CompletedProcess(cmd, 0 if failure == "implicit_default" else 1, "", "denied")
         if "--property=ControlGroup" in cmd:
             raise subprocess.TimeoutExpired(cmd, 1)
         pytest.fail(f"unexpected probe: {cmd}")
 
-    monkeypatch.setattr(scope, "home_in_update_scope", lambda home: True)
+    monkeypatch.setattr(scope, "home_in_update_scope", lambda home: failure != "implicit_default")
     monkeypatch.setattr(scope, "gateway_foreign_code_root", lambda pid, home: None)
     monkeypatch.setattr(fleet, "_systemctl", systemctl)
     for attempt in range(3):

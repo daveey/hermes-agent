@@ -1,7 +1,7 @@
-"""Fail-closed systemd inventory only for the Linux opted-in pre-swap stop.
+"""Fail-closed gateway inventory only for the Linux opted-in pre-swap stop.
 
 Fleet restart's best-effort helpers deliberately conflate unknown and excluded. That
-contract must not authorize a checkout move; leave those shared helpers unchanged.
+contract must not authorize a checkout move; preserve those helpers' default behavior.
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def systemd_units() -> list[dict]:
                 if state not in ("inactive", "failed"):
                     raise pause.PauseRefused(f"{name} has no MainPID but is not proven inactive ({state!r})", [name])
                 continue
-            home = systemd_unit_hermes_home(cmd, name)
+            home = systemd_unit_hermes_home(cmd, name, allow_default=False)
             if home is None:
                 raise pause.PauseRefused(f"{name} ownership could not be read", [name])
             if not home_in_update_scope(home):
@@ -59,3 +59,35 @@ def systemd_units() -> list[dict]:
                 units.append({"kind": "systemd", "scope": scope, "unit": name, "pid": pid,
                               "cgroup": pause._unit_cgroup(cmd, name), "home": home})
     return units
+
+
+def bare_gateways(service_pids: set[int]) -> tuple[list[dict], list[str]]:
+    """Only proven foreign ownership/code excludes a candidate from the strict pause."""
+    from gateway.status import get_process_start_time
+    from hermes_cli import update_cmd_posix_pause as pause
+    from hermes_cli.gateway import _capture_gateway_argv, find_gateway_pids
+    from hermes_cli.update_fleet_scope import (
+        announce_skipped_runtime, gateway_foreign_code_root, gateway_pid_home, home_in_update_scope,
+    )
+
+    bare, notices = [], []
+    # The best-effort service PID lookup can hide an unclassified runtime. Only
+    # units already accepted by this transaction have established custody.
+    for pid in find_gateway_pids(exclude_pids=set(service_pids), all_profiles=True):
+        pid = int(pid)
+        home = gateway_pid_home(pid)
+        if home and not home_in_update_scope(home):
+            announce_skipped_runtime("gateway process", f"PID {pid}", home)
+            continue
+        pinned = gateway_foreign_code_root(pid, home)
+        if pinned is not None:
+            announce_skipped_runtime("gateway process", f"PID {pid}", home, code_root=pinned)
+            continue
+        marker, argv = pause._supervisor_markers(pid), _capture_gateway_argv(pid)
+        if marker or not argv or not home:
+            why = f"supervised by {marker}" if marker else "its command line could not be read" if not argv \
+                else "its Hermes home could not be proved"
+            notices.append(f"  ↷ gateway PID {pid} keeps running until after the update ({why})")
+            continue
+        bare.append({"pid": pid, "argv": list(argv), "home": str(home), "ct": get_process_start_time(pid)})
+    return bare, notices
