@@ -321,6 +321,37 @@ def test_materialize_timeout_is_host_scope(world):
     assert (err.code, err.scope) == ("materialize_timeout", "host")
 
 
+@pytest.mark.parametrize("replica_revision", [None, 1])
+def test_materialize_timeout_uses_grant_revision_then_defers_next_claim(world, replica_revision):
+    from hermes_cli import kanban_source_dispatch as ksd
+    from hermes_cli import kanban_db_sync as sync
+    conn, cfg = use_home(world, "worker-2")
+    claimed = _claimed(conn)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET workspace_source=? WHERE id=?", (
+            json.dumps(manifest(world, manifest_revision=replica_revision)) if replica_revision else None, claimed.id))
+    original = ksr.resolve_source_workspace
+
+    def timed(conn_, task_, snapshot, **kw):
+        ticks = iter([0.0] + [1000.0] * 50)
+        return original(conn_, task_, snapshot, cfg=cfg, clock=lambda: next(ticks), **kw)
+    world.monkeypatch.setattr(ksr, "resolve_source_workspace", timed)
+    snapshot = kws.SourceSnapshot(json.dumps(manifest(world, manifest_revision=7)), kws.Custody("hub", "published", 7))
+    kws.stash_grant_snapshot(claimed.id, snapshot)
+    err = refusal(lambda: ksd.resolve(conn, claimed, board=None, kbw=None))
+    assert err.code == "materialize_timeout"
+    assert ksd.refused(conn, claimed, err, SimpleNamespace(auto_blocked=[]))
+    assert kws.skipped(conn, claimed.id, 7) == "materialize_timeout"
+    assert kws.skipped(conn, claimed.id, replica_revision) is None
+    # Once the feed catches up to the grant revision, claim_gate must defer before any new lease/run.
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET workspace_source=? WHERE id=?", (json.dumps(manifest(world, manifest_revision=7)), claimed.id))
+    runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+    assert sync.claim_gate(conn, claimed.id, 900).deferred
+    assert sync.pop_claim_deferral(claimed.id) == "workspace_source_refused_here:materialize_timeout"
+    assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == runs
+
+
 def test_non_holder_with_retained_custody_refused(world):
     conn, cfg = use_home(world, "worker-2")
     err = refusal(lambda: resolve(world, conn, cfg, snap(world, state="retained")))

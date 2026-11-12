@@ -1232,6 +1232,8 @@ def apply_remote_changes(
         result.revision_after = _repair_revision(conn)
     if observers:
         _after_commit(conn, result, board)
+        from hermes_cli.kanban_source_refusal_block import drain
+        drain(conn)
     return result
 
 

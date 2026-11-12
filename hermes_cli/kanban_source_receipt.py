@@ -1,9 +1,10 @@
-"""Spike R1 (t_01a1d0bdfa1955d5): the source receipt rides the outbox op that moves a card out of ``running``.
+"""PR-1 source receipt carrier: the receipt rides the status-leaving outbox op.
 
-The receipt is computed before the ending's write transaction (the preflight; here a stub carrier, ``staged``)
-and parked in the local, never-synced ``kanban_source_receipt_pending`` row. The tasks UPDATE capture trigger
-(``kanban_db_sync._update_trigger``) reads it into the same outbox op as the status change, only when that UPDATE
-leaves ``running`` for the run the row names.
+``staged`` carries a precomputed receipt across voluntary ending helpers. The
+one-statement wrapper parks it in the local, never-synced pending table just
+for the status UPDATE; the capture trigger binds it to OLD.current_run_id.
+Cleanup is unconditional, including a CAS miss or exception. PR-2 supplies the
+git preflight/publish producer; PR-1 deliberately leaves the protocol disabled.
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ from typing import Any, Callable, Optional
 TABLE = "kanban_source_receipt_pending"
 DDL = (f"CREATE TABLE IF NOT EXISTS {TABLE} (task_id TEXT PRIMARY KEY, run_id INTEGER NOT NULL, "
        "receipt TEXT NOT NULL CHECK (json_valid(receipt)))")
-# Stub preflight carrier: (task_id, run_id) -> receipt computed before the write transaction.
+# Preflight handoff carrier: (task_id, run_id) -> receipt computed before the write transaction (producer in PR-2).
 _STAGED: contextvars.ContextVar[dict] = contextvars.ContextVar("kanban_source_receipt_staged", default={})
 
 

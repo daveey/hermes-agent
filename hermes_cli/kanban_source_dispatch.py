@@ -32,7 +32,16 @@ def resolve(conn: sqlite3.Connection, claimed: Any, *, board: Optional[str], kbw
     if snapshot is not None and snapshot.has_source:
         from hermes_cli.kanban_source_resolver import resolve_source_workspace
         ttl = (claimed.claim_expires - time.time()) if getattr(claimed, "claim_expires", None) else None
-        source = resolve_source_workspace(conn, claimed, snapshot, me=_me(conn) or "", ttl_s=ttl)
+        try:
+            source = resolve_source_workspace(conn, claimed, snapshot, me=_me(conn) or "", ttl_s=ttl)
+        except WorkspaceSourceRefusal as exc:
+            # The replica may lag or have no manifest. Bind refusal identity to this grant, not that replica.
+            try:
+                revision = snapshot.manifest().manifest_revision
+            except ws.ManifestInvalid:
+                revision = snapshot.custody.manifest_revision if snapshot.custody else None
+            exc.evidence["manifest_revision"] = revision
+            raise
         _materialized_event(conn, claimed, snapshot, source)
         return Path(source.path), source.branch, source
     if claimed.workspace_kind == "worktree":
@@ -52,14 +61,9 @@ def _materialized_event(conn: sqlite3.Connection, claimed: Any, snapshot: Any, s
                          source.event_payload(holder=holder, run_uid=row[0] if row else None), run_id=run_id)
 
 
-def _revision(exc: WorkspaceSourceRefusal, conn: sqlite3.Connection, task_id: str) -> Optional[int]:
-    if isinstance(exc.evidence.get("manifest_revision"), int):
-        return exc.evidence["manifest_revision"]
-    try:
-        row = conn.execute("SELECT workspace_source FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        return ws.parse_manifest(row[0]).manifest_revision if row and row[0] else None
-    except (sqlite3.OperationalError, ws.ManifestInvalid):
-        return None
+def _revision(exc: WorkspaceSourceRefusal) -> Optional[int]:
+    value = exc.evidence.get("manifest_revision")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def refused(conn: sqlite3.Connection, claimed: Any, exc: BaseException, result: Any) -> bool:
@@ -71,26 +75,27 @@ def refused(conn: sqlite3.Connection, claimed: Any, exc: BaseException, result: 
     if not isinstance(exc, WorkspaceSourceRefusal):
         return False
     from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_failure_accounting import _record_task_failure
+    from hermes_cli import kanban_failure_release as release
+    from hermes_cli import kanban_db_sync as sync
     import socket
-    revision = _revision(exc, conn, claimed.id)
+    revision = _revision(exc)
     payload = {"code": exc.code, "scope": exc.scope, "hostname": socket.gethostname(), "manifest_revision": revision,
                "detail": exc.detail[:300]}
-    _record_task_failure(conn, claimed.id, f"workspace_source: {exc}", outcome="spawn_failed", release_claim=True,
-                         end_run=True, infrastructure=True, event_payload_extra={"workspace_source_refused": payload})
     with kb.write_txn(conn):
+        primary = release.queue(conn, claimed.id, claimed.current_run_id, outcome="released",
+                                unused_grant=True, error=f"workspace_source: {exc}")
         kb._append_event(conn, claimed.id, "workspace_source_refused", payload)
         if exc.scope == "host":
             ws.remember_skip(conn, claimed.id, revision, exc.code)
-    if exc.scope == "card":
-        evidence = "; ".join(f"{k}={v}" for k, v in exc.evidence.items()) or exc.detail or exc.code
-        kb.block_task(conn, claimed.id, kind="needs_input", reason=(
-            f"workspace_source {exc.code}: {exc.detail}. 1) Check the task branch on the remote and the custody "
-            "holder's worktree. 2) Re-publish the source from its holder, then unblock this card."),
-            human_request={"action": f"Restore the task branch ({exc.code}) and unblock this card. Unblock = retry "
-                                     "materializing; archive = drop the card.",
-                           "why_human": "the source moved or vanished outside a lease; only a person can decide "
-                                        "which copy is right",
-                           "interaction": "reply", "scope": f"card {claimed.id}", "evidence": evidence[:500]})
-        result.auto_blocked.append(claimed.id)
+        elif primary:
+            from hermes_cli.kanban_source_refusal_block import defer
+            defer(conn, claimed, exc)
+    if not primary:
+        from hermes_cli.kanban_failure_accounting import _record_task_failure
+        _record_task_failure(conn, claimed.id, f"workspace_source: {exc}", outcome="released", release_claim=True,
+                             end_run=True, infrastructure=True)
+    if exc.scope == "card" and sync.board_mode(conn) != "primary":
+        from hermes_cli.kanban_source_refusal_block import block
+        if block(conn, claimed.id, exc):
+            result.auto_blocked.append(claimed.id)
     return True

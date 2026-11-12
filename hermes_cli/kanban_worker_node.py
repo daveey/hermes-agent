@@ -529,6 +529,10 @@ def _unimported_pinned(conn: sqlite3.Connection, replica: sqlite3.Connection, ow
         return set()
 
 
+from hermes_cli.kanban_workspace_source import pickup_batch
+
+
+@pickup_batch()
 def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *, mode: str, limit: Any,
               profile_exists: Optional[Callable[[str], bool]], full_detail: str,
               held: Optional[dict[str, tuple]] = None,

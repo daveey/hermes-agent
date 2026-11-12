@@ -364,8 +364,37 @@ def _calls_wrapper(key: str) -> bool:
     rel, name = key.split("::")
     tree = ast.parse((REPO / rel).read_text(encoding="utf-8"))
     fn = next(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
-    return any(isinstance(n, ast.Call) and (getattr(n.func, "attr", None) or getattr(n.func, "id", None))
-               == "with_source_receipt" for n in ast.walk(fn))
+    parents = {child: parent for parent in ast.walk(fn) for child in ast.iter_child_nodes(parent)}
+    def sql_text(node, before):
+        if isinstance(node, ast.Name):
+            prior = [(n.lineno, n.value) for n in ast.walk(fn) if isinstance(n, ast.Assign) and n.lineno < before
+                     and any(isinstance(t, ast.Name) and t.id == node.id for t in n.targets)]
+            line, value = max(prior, key=lambda pair: pair[0], default=(0, None))
+            return sql_text(value, line) if value is not None else None
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "replace":
+            return sql_text(node.func.value, before)
+        return _text(node)
+    updates = []
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call) or getattr(node.func, "attr", None) != "execute" or not node.args:
+            continue
+        arg = node.args[0]
+        sql = sql_text(arg, node.lineno)
+        if sql and _leaves_running(sql):
+            updates.append(node)
+    for update in updates:
+        current, wrapped = update, False
+        while current in parents:
+            parent = parents[current]
+            if (isinstance(parent, ast.Call) and len(parent.args) >= 3 and parent.args[2] is current
+                    and isinstance(current, ast.Lambda) and
+                    (getattr(parent.func, "attr", None) or getattr(parent.func, "id", None)) == "with_source_receipt"):
+                wrapped = True
+                break
+            current = parent
+        if not wrapped:
+            return False
+    return bool(updates)
 
 
 def test_status_leaving_sites_enumerated():
@@ -379,6 +408,25 @@ def test_status_leaving_sites_enumerated():
     assert not sorted(known - set(sites)), f"stale entries: {sorted(known - set(sites))}"
     unwrapped = sorted(k for k in WRAPPED if not _calls_wrapper(k))
     assert not unwrapped, f"voluntary endings without with_source_receipt: {unwrapped}"
+
+
+@pytest.mark.parametrize("body", [
+    'with_source_receipt(conn, tid, lambda: conn.execute("SELECT 1"))\n    conn.execute(sql)',
+    'with_source_receipt(conn, tid, lambda: conn.execute(sql))\n    conn.execute(sql)',
+    'with_source_receipt(conn, tid, lambda: conn.execute("SELECT 1"))\n    def nested():\n        conn.execute(sql)',
+])
+def test_guard_rejects_unrelated_wrapper(tmp_path, monkeypatch, body):
+    import sys
+    monkeypatch.setattr(sys.modules[__name__], "REPO", tmp_path)
+    path = tmp_path / "ending.py"
+    path.write_text('def ending(conn, tid):\n    sql = "UPDATE tasks SET status=\'done\' WHERE id=?"\n    ' + body + '\n')
+    assert not _calls_wrapper("ending.py::ending")
+
+
+def test_receipt_documents_pr1_carrier_not_spike_stub():
+    from hermes_cli import kanban_source_receipt as sr
+    assert "Spike R1" not in sr.__doc__ and "stub carrier" not in sr.__doc__
+    assert "PR-2" in sr.__doc__ and "PR-1" in sr.__doc__
 
 
 def test_guard_reads_format_and_fstring_sql():

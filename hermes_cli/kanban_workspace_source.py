@@ -9,6 +9,8 @@ manifest card to this core, so the routing below only ever sees snapshots with n
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import logging
 import re
@@ -95,8 +97,8 @@ def settings(config: Optional[Mapping[str, Any]] = None) -> Settings:
     treated false) until :data:`SOURCE_PROTOCOL_COMPLETE`."""
     if config is None:
         try:
-            from hermes_cli.config import load_config
-            config = load_config() or {}
+            from hermes_cli.config import load_config_readonly
+            config = load_config_readonly() or {}
         except Exception:  # health: allow BLE001 -- a broken config never enables anything (fail closed)
             _log.warning("workspace_source: config unreadable; treating as disabled", exc_info=True)
             config = {}
@@ -308,12 +310,32 @@ def skipped(conn: sqlite3.Connection, task_id: str, manifest_revision: Optional[
 
 # --- pickup skip (v3 §6) -------------------------------------------------------------------------------------------
 
+_PICKUP_BATCH: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("source_pickup_batch", default=None)
+
+
+@contextlib.contextmanager
+def pickup_batch():
+    """One scan's lazy config/proof snapshot; discarded on exit, never used by the post-grant resolver."""
+    token = _PICKUP_BATCH.set({})
+    try:
+        yield
+    finally:
+        _PICKUP_BATCH.reset(token)
+
+
 def pickup_skip(conn: sqlite3.Connection, card: Any, own: str, *, cfg: Optional[Settings] = None,
                 proven_ids: Optional[set[int]] = None) -> Optional[str]:
     """Early skip for a card with custody or a manifest held by another host: it needs a valid replica manifest,
     custody ``published``/``unchanged`` and a locally proven clone for the repository. Only when enabled; the Board
     lease stays the single-writer authority (this never admits anything)."""
-    cfg = cfg or settings()
+    batch = _PICKUP_BATCH.get()
+    if cfg is None:
+        if batch is not None:
+            if "cfg" not in batch:
+                batch["cfg"] = settings()
+            cfg = batch["cfg"]
+        else:
+            cfg = settings()
     snap = replica_snapshot(card)
     if not cfg.enabled or snap is None or not snap.has_source:
         return None
@@ -329,7 +351,14 @@ def pickup_skip(conn: sqlite3.Connection, card: Any, own: str, *, cfg: Optional[
         return f"workspace_source: refused here ({code}) at revision {manifest.manifest_revision}"
     if proven_ids is None:
         from hermes_cli.kanban_source_clones import proven_repo_ids
-        proven_ids = proven_repo_ids(cfg)
+        key = tuple(sorted(cfg.clones.items()))
+        if batch is not None:
+            proofs = batch.setdefault("proofs", {})
+            if key not in proofs:
+                proofs[key] = proven_repo_ids(cfg)
+            proven_ids = proofs[key]
+        else:
+            proven_ids = proven_repo_ids(cfg)
     if manifest.repository_id not in proven_ids:
         return f"workspace_source: no proven clone of {manifest.full_name}"
     return None
