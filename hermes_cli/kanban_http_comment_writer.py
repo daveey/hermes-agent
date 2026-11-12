@@ -15,6 +15,10 @@ own dashboard/webapp auto-open drops them (``top_level_env.open_url_for_person``
 in-process ``webbrowser.open`` callers (OAuth/device-flow sign-ins) can still cold-start a
 marked browser. macOS denies the global socket inventory, so each bare comment scans
 same-user processes there.
+Resolved peers use the CLI ancestry policy: unreadable ordinary ancestors fail closed to
+``agent``, while root supervisors and access-denied same-uid ``systemd --user`` managers
+with permitted capabilities beyond the reader's are skipped. This preserves clean Linux
+GUI/user-unit ancestry without ignoring markers on readable descendants or managers.
 """
 from __future__ import annotations
 

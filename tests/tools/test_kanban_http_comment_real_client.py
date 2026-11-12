@@ -94,6 +94,23 @@ def test_agent_curl_with_token_records_agent(served):
     assert actor._last_payload(tid)["writer_kind"] == "agent"
 
 
+def test_clean_curl_with_token_records_human(served):
+    from hermes_cli import kanban_comment_writer as ancestry
+
+    # A clean child cannot undo an agent-marked (or unreadable) pytest ancestor.
+    # On clean CI this control makes the adjacent curl marker load-bearing.
+    try:
+        marker = ancestry.agent_ancestor()
+    except ancestry.Inconclusive as exc:
+        pytest.skip(f"pytest ancestry is inconclusive: {exc}")
+    if marker:
+        pytest.skip(f"pytest ancestry is agent-marked: {marker}")
+    tid = actor._ready_task()
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+    assert _curl(served, tid, token=TOKEN, env=env) == "200"
+    assert actor._last_payload(tid)["writer_kind"] == "human"
+
+
 def test_curl_without_token_is_refused_and_stores_nothing(served):
     tid = actor._ready_task()
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HERMES_AGENT": "1"}
