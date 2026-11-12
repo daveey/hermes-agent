@@ -40,7 +40,7 @@ def test_service_uses_canonical_install_root_and_reads_readiness(board, tmp_path
     root = tmp_path / 'canonical-install'
     root.mkdir()
     monkeypatch.setattr(_startup_fast, 'project_root_str', lambda: str(root))
-    monkeypatch.setattr(service.shutil, 'which', lambda name: '/usr/bin/systemd-run')
+    monkeypatch.setattr(service, 'locate_command', lambda name: SimpleNamespace(command=('/usr/bin/systemd-run',)))
     calls = []
 
     def submit(command, **kwargs):

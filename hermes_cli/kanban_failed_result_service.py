@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+from hermes_platform.resolver import locate_command
 
 
 def arm_service(context, *, startup_seconds=5.0):
@@ -21,7 +22,7 @@ def arm_service(context, *, startup_seconds=5.0):
     from tools.process_registry import systemd_user_bus_env
     from hermes_cli._startup_fast import project_root_str
 
-    binary = shutil.which('systemd-run')
+    binary = locate_command('systemd-run').command
     if not binary:
         raise RuntimeError('failed-result observer needs systemd-run')
     directory = Path(tempfile.mkdtemp(prefix='failed-result-', dir=Path(context['db']).parent))
@@ -30,7 +31,7 @@ def arm_service(context, *, startup_seconds=5.0):
     unit = f'hermes-failed-result-{os.getpid()}-{time.monotonic_ns()}.service'
     context['observer_unit'] = unit
     env = build_subprocess_env(extra=systemd_user_bus_env())
-    command = [binary, '--user', '--quiet', '--collect', f'--unit={unit}',
+    command = [*binary, '--user', '--quiet', '--collect', f'--unit={unit}',
                '--property=Type=exec', '--property=Slice=app.slice',
                '--property=Restart=on-failure', '--property=RestartSec=500ms',
                '--property=RestartForceExitStatus=SIGTERM SIGHUP SIGINT SIGPIPE',

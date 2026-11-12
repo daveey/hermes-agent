@@ -3,6 +3,7 @@ import contextlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -86,7 +87,7 @@ def test_failed_arm_keeps_result_and_records_diagnostic(board, monkeypatch):
 @pytest.mark.parametrize('ack', ['correct', 'wrong', 'none', 'refused'])
 def test_service_custody_requires_exact_readiness_ack(board, monkeypatch, ack):
     _, context = board
-    monkeypatch.setattr(service.shutil, 'which', lambda name: '/usr/bin/systemd-run')
+    monkeypatch.setattr(service, 'locate_command', lambda name: SimpleNamespace(command=('/usr/bin/systemd-run',)))
     times = iter([0, 0, 2])
     monkeypatch.setattr(service.time, 'monotonic', lambda: next(times))
     monkeypatch.setattr(service.time, 'sleep', lambda _: None)
@@ -111,6 +112,6 @@ def test_service_custody_requires_exact_readiness_ack(board, monkeypatch, ack):
 
 def test_missing_manager_is_not_reported_as_custody(board, monkeypatch):
     _, context = board
-    monkeypatch.setattr(service.shutil, 'which', lambda name: None)
+    monkeypatch.setattr(service, 'locate_command', lambda name: SimpleNamespace(command=()))
     with pytest.raises(RuntimeError, match='needs systemd-run'):
         service.arm_service(context)
