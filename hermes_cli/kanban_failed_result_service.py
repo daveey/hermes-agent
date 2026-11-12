@@ -19,6 +19,7 @@ def arm_service(context, *, startup_seconds=5.0):
     """
     from tools.environments.local import build_subprocess_env
     from tools.process_registry import systemd_user_bus_env
+    from hermes_cli._startup_fast import project_root_str
 
     binary = shutil.which('systemd-run')
     if not binary:
@@ -34,7 +35,7 @@ def arm_service(context, *, startup_seconds=5.0):
                '--property=Restart=on-failure', '--property=RestartSec=500ms',
                '--property=RestartForceExitStatus=SIGTERM SIGHUP SIGINT SIGPIPE',
                '--property=StartLimitIntervalSec=0',
-               f'--working-directory={Path(__file__).resolve().parents[1]}']
+               f'--working-directory={project_root_str()}']
     # A manager-created service does not inherit its submitter's environment.
     # Keep profile/path resolution, without forwarding secrets or worker pins.
     for key in ('PATH', 'PYTHONPATH', 'HERMES_HOME', 'HERMES_KANBAN_HOME', 'HERMES_KANBAN_BOARD',
@@ -55,7 +56,7 @@ def arm_service(context, *, startup_seconds=5.0):
     deadline = time.monotonic() + startup_seconds
     while time.monotonic() < deadline:
         try:
-            if ready.read_text(encoding='utf-8') == unit:
+            if ready.read_text(encoding='utf-8-sig') == unit:
                 return unit
         except FileNotFoundError:
             pass

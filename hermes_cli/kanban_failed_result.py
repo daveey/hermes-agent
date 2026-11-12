@@ -7,7 +7,6 @@ proof to close a run. This module does not itself change lifecycle state.
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -27,16 +26,16 @@ def process_gone(pid, birth) -> bool:
     An exact-identity Linux zombie is exited; permission failures stay unknown.
     """
     from hermes_cli import kanban_db_dispatch as dispatch
+    import psutil
 
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
     if not valid_birth(birth):
         return False
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except (PermissionError, OSError):
+        if not psutil.pid_exists(pid):
+            return True
+    except (psutil.Error, OSError):
         return False
     # A matching Linux zombie has exited even if its wedged parent has not
     # reaped it. Read identity on both sides of the state observation; an

@@ -31,6 +31,7 @@ def arm(context):
     from tools.environments.local import build_subprocess_env
     from tools.process_registry import restart_safe_gateway_child_argv, systemd_user_bus_env
     from hermes_cli.kanban_db_dispatch import _process_fingerprint
+    from hermes_cli._startup_fast import project_root_str
 
     context = {key: context[key] for key in ('db', 'task_id', 'run_id', 'claim_lock', 'board') if key in context}
     context.update(writer_pid=os.getpid(), writer_birth=_process_fingerprint(os.getpid()))
@@ -45,9 +46,10 @@ def arm(context):
         raise RuntimeError('independent failed-result observer scope unavailable')
     proc = subprocess.Popen(
         launch.argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        # detached-spawn: ok — independent reconciler must outlive the failed writer to close its run
         start_new_session=True, close_fds=True,
         env=build_subprocess_env(extra=systemd_user_bus_env()),
-        cwd=str(Path(__file__).resolve().parents[1]),
+        cwd=project_root_str(),
     )
     assert proc.stdout is not None
     deadline = time.monotonic() + START_SECONDS

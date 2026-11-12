@@ -138,13 +138,13 @@ def test_board_only_proof_accepts_real_dead_child(board):
 @pytest.mark.parametrize('state', ['live', 'recycled', 'unreadable', 'denied', 'gone'])
 def test_process_proof_fails_closed(monkeypatch, state):
     from hermes_cli import kanban_failed_result as reconcile
-    def probe(pid, signal):
-        assert (pid, signal) == (123, 0)
-        if state == 'gone':
-            raise ProcessLookupError()
+    import psutil
+    def probe(pid):
+        assert pid == 123
         if state == 'denied':
             raise PermissionError()
-    monkeypatch.setattr(reconcile.os, 'kill', probe)
+        return state != 'gone'
+    monkeypatch.setattr(psutil, 'pid_exists', probe)
     monkeypatch.setattr(reconcile.Path, 'read_text', lambda *args, **kwargs: '123 (fixture) S')
     monkeypatch.setattr(kbd, '_process_fingerprint',
                         lambda pid: {'live': 'epoch|1', 'recycled': 'epoch|2'}.get(state))
@@ -154,9 +154,10 @@ def test_process_proof_fails_closed(monkeypatch, state):
 @pytest.mark.parametrize('birth', [None, '', 'UNVERIFIED', 12])
 def test_missing_birth_never_proves_death(monkeypatch, birth):
     from hermes_cli import kanban_failed_result as reconcile
+    import psutil
     def unexpected(*args):
         pytest.fail('invalid binding must not query OS')
-    monkeypatch.setattr(reconcile.os, 'kill', unexpected)
+    monkeypatch.setattr(psutil, 'pid_exists', unexpected)
     assert not reconcile.process_gone(123, birth)
 
 
@@ -343,9 +344,10 @@ def test_modern_receipt_invalid_binding_still_vetoes_reclaim(board, monkeypatch,
                                   'epoch| 1', 'epoch|1@-2', 'epoch|1|2'])
 def test_malformed_birth_never_queries_process(monkeypatch, birth):
     from hermes_cli import kanban_failed_result as reconcile
+    import psutil
     def unexpected(*args):
         pytest.fail('malformed birth must fail before querying process')
-    monkeypatch.setattr(reconcile.os, 'kill', unexpected)
+    monkeypatch.setattr(psutil, 'pid_exists', unexpected)
     assert not reconcile.process_gone(123, birth)
 
 
