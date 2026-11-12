@@ -258,6 +258,38 @@ def effective_stop_drain_timeout(runner: object) -> float:
     return resolve_launchd_capped_drain(drain, getattr(runner, "_launchd_exit_timeout_s", None))
 
 
+def checkpoint_cron_grace_spent(runner: object) -> bool:
+    """Do not restore the cron floor after an instant checkpoint spent its grace.
+
+    The stop-entry snapshot already required a live intent and only cuttable work.
+    Re-read the intent to preserve withdrawal, ordinary updates and Mac policy;
+    this narrows an accepted stop, never authorizes a checkpoint or tree mutation.
+    """
+    import json
+
+    if getattr(runner, "_stop_kanban_leash_s", None) is None:
+        return False
+    path = getattr(runner, "_restart_update_intent", None)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig")) if path is not None else None
+        return (isinstance(data, dict) and data.get("kind") == "unfenced"
+                and data.get("checkpoint") is True and data.get("cron_cut") is True)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def stop_cron_drain_budget(runner: object, timeout: float, cron_timeout: float, elapsed: float, *, api: int) -> float:
+    """The real stop-phase budget, including its already-spent checkpoint grace."""
+    from gateway.shutdown_watchdog import resolve_shutdown_watchdog_delay
+
+    if not api and checkpoint_cron_grace_spent(runner):
+        return timeout
+    # Under launchd the real leash is its exit timeout. ``timeout`` is already
+    # launchd-capped: use the same leash as the watchdog, including dump margin.
+    leash = effective_stop_watchdog_delay(runner, resolve_shutdown_watchdog_delay(timeout))
+    return resolve_cron_drain_budget(timeout, cron_timeout, watchdog_delay=leash, elapsed=elapsed)
+
+
 def effective_stop_watchdog_delay(runner: object, watchdog_delay: float) -> float:
     """Thread-watchdog leash for the stop in progress on ``runner``.
 
