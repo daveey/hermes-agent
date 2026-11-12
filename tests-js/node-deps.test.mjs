@@ -346,8 +346,12 @@ function background(source, env, ...args) {
   child.stdout.on('data', data => { output += data })
   child.stderr.on('data', data => { output += data })
   const exit = new Promise(done => child.on('exit', (code, signal) => done({ code, signal, output })))
+  // The job's stdin may already be closed (the job is gone) when a line is written.
+  child.stdin.on('error', () => {})
   return {
     exit,
+    // A line on the job's stdin, which the run passes on to pnpm.
+    input: text => child.stdin.write(text),
     kill: () => process.kill(-child.pid, 'SIGKILL'),
     // As Ctrl-Z and `fg` do: the whole job.
     stop: () => process.kill(-child.pid, 'SIGSTOP'),
@@ -549,9 +553,13 @@ test.skipIf(process.platform === 'win32').each([[false, false], [true, false], [
   const dir = dirname(source)
   mkdirSync(join(dir, 'owner'))
   // A's pnpm: stopped (with all of A) in the middle of its work, which goes on into the tree once resumed.
+  // It waits for a line on its stdin (the job's, which the run and relay pass on), in the shell itself:
+  // a polling loop forks `sleep`, and a stop that lands between that fork and the child's exec leaves
+  // the shell in its uninterruptible vfork wait (state D, never T) behind the stopped child, so the job
+  // is stopped but the shell never shows it. A read on a pipe just restarts after the stop.
   writeFileSync(join(dir, 'owner/pnpm'), ['#!/bin/sh', 'if [ "$1" = install ]; then',
     `  echo $$ > '${dir}/owner.started'`,
-    `  while [ ! -f '${dir}/owner.release' ]; do sleep 0.05; done`,
+    '  read -r _ || :',
     `  echo third > node_modules/.written-by-the-stopped-pnpm; touch '${dir}/relay.release'; '${pnpmCommand()}' "$@"; exit $?`,
     'fi', `exec '${pnpmCommand()}' "$@"`, ''].join('\n'))
   chmodSync(join(dir, 'owner/pnpm'), 0o755)
@@ -619,7 +627,7 @@ test.skipIf(process.platform === 'win32').each([[false, false], [true, false], [
     Object.assign(lockTiming, timing)
   }
   const built = readFileSync(join(webOnly(source), 'built'), 'utf8')
-  writeFileSync(join(dir, 'owner.release'), '')
+  owner.input('\n')
   owner.resume()
   const { code, output } = await owner.exit
   // Long enough for the stopped pnpm to have finished, had it survived.
@@ -637,7 +645,7 @@ test.skipIf(process.platform === 'win32').each([[false, false], [true, false], [
   } finally {
     Object.assign(lockTiming, timing)
     // No failed assertion can strand the gated installer or a stopped job.
-    writeFileSync(join(dir, 'owner.release'), '')
+    owner.input('\n')
     writeFileSync(join(dir, 'relay.release'), '')
     try { owner.kill() } catch (error) { expect(error.code).toBe('ESRCH') }
     const watcherPid = join(dir, 'watcher.pid')
