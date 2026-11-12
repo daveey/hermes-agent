@@ -101,7 +101,10 @@ def _completed_review_run(conn, parent_id, parked_at, owner_run_id):
                 and mirrored.get("outcome") == "completed"
                 and (kb._to_epoch(mirrored.get("ended_at")) or 0) >= parked_at):
             return mirrored
-        return None
+        # A parent created and run on another gateway: its run lives only in the
+        # Board replica. Same claimed-completion-after-park rule, Board data only.
+        from hermes_cli.kanban_dependency_history import replica_review_run
+        return replica_review_run(conn, parent_id, parked_at)
     if (not row["was_claimed"] or row["outcome"] != "completed"
             or row["id"] == owner_run_id
             or (kb._to_epoch(row["ended_at"]) or 0) < parked_at):

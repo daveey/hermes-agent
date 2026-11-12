@@ -127,9 +127,13 @@ def test_prepare_scopes_only_latest_active_checkpoint(moved_parent, case):
 
 
 @pytest.mark.parametrize("case", ["valid", "not_done", "not_claimed", "not_completed", "before_park", "missing_owner", "missing_evidence"])
-def test_completed_review_requires_foreign_completion(moved_parent, case):
+def test_completed_review_requires_foreign_completion(moved_parent, monkeypatch, case):
+    from hermes_cli import kanban_dependency_history
     from hermes_cli.kanban_dependency_review import _completed_review_run
 
+    # Isolate the mirror's own rules: the worker's real, fresh replica would otherwise
+    # supply the untampered parent run (test_kanban_dependency_review_replica_parent).
+    monkeypatch.setattr(kanban_dependency_history, "replica_review_run", lambda *a: None)
     _, worker, task, parent = moved_parent
     owner = kanban_unused_grant.latest_started_run(worker.conn, task)
     assert owner is not None
