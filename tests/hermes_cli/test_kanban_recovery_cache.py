@@ -65,3 +65,33 @@ def test_scan_cursor_is_board_scoped_and_bounded(conn):
 def test_empty_scan_does_not_allocate_cursor(conn):
     assert recovery.select_rows(conn, "b", "hub", "", 1) == []
     assert recovery._scan_cursor == {}
+
+
+@pytest.mark.parametrize("dimension", ["database", "gateway"])
+def test_scan_cursor_does_not_cross_storage_owner(conn, monkeypatch, dimension):
+    from hermes_cli import kanban_db_connect as connect
+    ids = sorted(fixtures.make(conn) for _ in range(2))
+    monkeypatch.setattr(connect, "_main_db_file", lambda db: "one.db")
+    assert [r["id"] for r in recovery.select_rows(conn, "b", "hub", "", 1)] == ids[:1]
+    gateway = "hub"
+    if dimension == "database":
+        # Same contents from a different physical database must start its own cursor.
+        monkeypatch.setattr(connect, "_main_db_file", lambda db: "two.db")
+    else:
+        gateway = "other"
+        conn.execute("UPDATE tasks SET created_on=?", (gateway,))
+        conn.execute("DELETE FROM kanban_sync_outbox")
+        conn.commit()
+    assert [r["id"] for r in recovery.select_rows(conn, "b", gateway, "", 1)] == ids[:1]
+
+
+@pytest.mark.parametrize("state", ["pending", "rejected"])
+def test_scan_excludes_unacknowledged_writes_before_spending_slot(conn, state):
+    tid = fixtures.make(conn)
+    conn.execute("UPDATE tasks SET title='pending edit' WHERE id=?", (tid,))
+    conn.execute("UPDATE kanban_sync_outbox SET state=? WHERE table_name='tasks' AND row_uid=?", (state, tid))
+    conn.commit()
+    assert conn.execute("SELECT 1 FROM kanban_sync_outbox WHERE row_uid=? AND state=?", (tid, state)).fetchone()
+    assert recovery.select_rows(conn, "b", "hub", "", 1) == []
+
+
