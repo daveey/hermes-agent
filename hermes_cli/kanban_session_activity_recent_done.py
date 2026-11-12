@@ -59,7 +59,14 @@ def memoized(path: Path, since: float, read: Callable[[Path, float], list[tuple[
     """``read(path, since)``, served from this scope's last read of the board while its ``memo_key`` is unchanged and
     ``since`` is no earlier than that read's. Returns fresh card dicts (callers and checks may hold them)."""
     slot = (scope, str(path))
-    key = memo_key(path)  # before the read: a commit during it moves the key for the next call
+    try:
+        key = memo_key(path)  # before the read: a commit during it moves the key for the next call
+    except sqlite3.Error:
+        # No key vouches for a memo row (unopenable/vanished board): read as before, never cache, and let the
+        # read decide whether this board counts.
+        with _memo_lock:
+            _memo.pop(slot, None)
+        return read(path, since)
     with _memo_lock:
         hit = _memo.get(slot)
     if hit is not None and hit[0] == key and since >= hit[1]:

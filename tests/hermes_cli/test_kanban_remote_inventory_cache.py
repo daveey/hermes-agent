@@ -54,11 +54,22 @@ def test_unchanged_stores_share_one_projection(projection):
     assert calls['n'] == 1
 
 
+def _write_ledger(board):
+    """Commit to the origin ledger, a store every projection reads. (The stub row is remote, so the local board is
+    one this projection never read: kanban_links_narrow keeps the projection across that board's commits.)"""
+    with sqlite3.connect(board.parent / 'kanban/origin-ledger.db') as db:
+        db.execute('CREATE TABLE IF NOT EXISTS bump (n INTEGER)')
+        db.execute('INSERT INTO bump VALUES (1)')
+
+
 def test_a_store_change_reprojects(projection):
     calls, board = projection
     activity._remote_links()
-    with sqlite3.connect(board) as db:
+    with sqlite3.connect(board) as db:  # a board no row of this projection reads
         db.execute("INSERT INTO tasks VALUES ('t_two', 'ready')")
+    activity._remote_links()
+    assert calls['n'] == 1
+    _write_ledger(board)
     activity._remote_links()
     assert calls['n'] == 2
 
@@ -79,8 +90,7 @@ def test_stale_ok_readers_never_wait_for_a_rebuild(projection):
     first = activity._remote_links(stale_ok=True)
     gate = threading.Event()
     calls['gate'] = gate  # the next projection is held open
-    with sqlite3.connect(board) as db:
-        db.execute("INSERT INTO tasks VALUES ('t_two', 'ready')")
+    _write_ledger(board)
     try:
         for _ in range(5):  # one rebuild running and held; every read still returns at once
             started = _time.monotonic()

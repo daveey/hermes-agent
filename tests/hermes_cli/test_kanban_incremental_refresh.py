@@ -221,3 +221,40 @@ def test_recent_done_memo_drops_rows_past_a_later_cutoff(boards):
     assert len(calls) == 2
     rd.memoized(path, now - 300, read, lambda p: ("revision", 2))  # a moved key: read
     assert len(calls) == 3
+
+
+def test_recent_done_memo_key_failure_reads_without_caching(boards):
+    """A board whose memo key can't be taken (unopenable, vanished) is still read, and never cached."""
+    import sqlite3
+
+    from hermes_cli import kanban_session_activity_recent_done as rd
+
+    calls: list = []
+
+    def read(path, since):
+        calls.append(since)
+        return [("s", {"id": "x", "completed_at": since + 1})]
+
+    def broken(_path):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    path = boards[0][0]
+    assert [c["id"] for _, c in rd.memoized(path, 1.0, read, broken)] == ["x"]
+    assert [c["id"] for _, c in rd.memoized(path, 1.0, read, broken)] == ["x"]
+    assert len(calls) == 2
+
+
+def test_links_narrow_counts_a_shared_slug_as_read_on_every_board():
+    entry = (0.0, ("scope",), (("p1", 1), ("p2", 1), ("p3", 1)), [],
+             [{"gateway": "g", "profile": "d", "origin_gateway": "g", "origin_profile": "d", "board": "default"}])
+    narrow.reset()
+
+    def project():
+        return None
+
+    setattr(project, narrow.DECLARES_BOARD_READS, True)
+    slugs = {"p1": "default", "p2": "default", "p3": "other"}
+    narrow.remember(entry, project, ["p1", "p2", "p3"], lambda p: slugs[p])
+    assert narrow.matches(entry, (("p1", 1), ("p2", 1), ("p3", 2)))  # only the unread board moved
+    assert not narrow.matches(entry, (("p1", 1), ("p2", 2), ("p3", 1)))  # the second "default" board moved
+    narrow.reset()

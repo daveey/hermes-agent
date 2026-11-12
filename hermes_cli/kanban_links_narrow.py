@@ -32,7 +32,9 @@ def remember(entry: tuple, project: Callable, board_paths: Iterable[Any], slug_o
         _read.pop(entry[1], None)
     if not getattr(project, DECLARES_BOARD_READS, False):
         return entry
-    paths = {slug_of(p): str(p) for p in board_paths}
+    paths: dict[str, set[str]] = {}
+    for p in board_paths:  # a slug two boards share (boards/default vs kanban.db) counts as read on both
+        paths.setdefault(slug_of(p), set()).add(str(p))
     read: set[str] = set()
     for row in entry[4]:
         try:
@@ -41,10 +43,10 @@ def remember(entry: tuple, project: Callable, board_paths: Iterable[Any], slug_o
         except (KeyError, TypeError):
             return entry  # unknown shape: exact fingerprint only
         if local and board in paths:
-            read.add(paths[board])
+            read.update(paths[board])
     with _lock:
         _read.pop(entry[1], None)
-        _read[entry[1]] = (entry, frozenset(read), frozenset(paths.values()))
+        _read[entry[1]] = (entry, frozenset(read), frozenset(p for ps in paths.values() for p in ps))
         while len(_read) > 64:
             del _read[next(iter(_read))]
     return entry
