@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -201,6 +202,29 @@ def _roster(rt):
     return {e["session_id"]: e for e in rt.call("subagent.roster")["sessions"]}
 
 
+def test_real_rpc_and_persisted_annotation_use_identical_child_records(runtime, monkeypatch):
+    from hermes_cli import subagent_session_activity as activity
+    from tui_gateway import server
+
+    now = time.time()
+    record = _child(runtime, activity=now - 3, started=now - 600)
+    record["agent"]._parent_session_id = "parent-a"
+    db = server._get_db()
+    assert db is not None
+    db.create_session("child-session", source="subagent", parent_session_id="parent-a")
+    db.touch_session_activity("child-session", now - 3)
+    monkeypatch.setattr(activity, "_profile_paths", lambda: [("default", Path(db.db_path))])
+    monkeypatch.setattr(activity, "local_scope", lambda: ("gw-1", "default"))
+    monkeypatch.setattr(activity.time, "time", lambda: now)
+    activity._reset_cache_for_tests()
+    try:
+        persisted = activity.annotate_subagent_activity([{"id": "parent-a"}])[0]["execution_observations"]
+        assert persisted == _subagents(runtime)["c1"]["execution_observations"]
+        assert persisted == _roster(runtime)["parent-a"]["execution_observations"]
+    finally:
+        activity._reset_cache_for_tests()
+
+
 @pytest.mark.parametrize("path", ["list", "roster"])
 def test_running_child_is_dated_by_its_own_activity_clock_on_both_paths(runtime, path):
     now = time.time()
@@ -212,10 +236,10 @@ def test_running_child_is_dated_by_its_own_activity_clock_on_both_paths(runtime,
         row = _roster(runtime)["parent-a"]
         assert row["subagents"] == 1 and row["background"] == 0
     (obs,) = row["execution_observations"]
-    assert obs["state"] == "running" and obs["freshness"] == "current" and obs["source"] == "subagent.registry"
-    assert obs["identity"]["kind"] == "subagent" and obs["identity"]["work_id"] == "c1"
+    assert obs["state"] == "running" and obs["freshness"] == "current" and obs["source"] == "subagent.activity"
+    assert obs["identity"]["kind"] == "subagent" and obs["identity"]["work_id"] == "child-session"
     assert obs["identity"]["session"] == "parent-a" and obs["identity"]["gateway"] == "gw-1"
-    assert obs["identity"]["generation"].startswith("delegation=d1:start=")
+    assert obs["identity"]["generation"] == "session=child-session"
     assert obs["observed_at"] == now - 3 and obs["last_activity"] == now - 3 and obs["valid_until"] == now - 3 + 180
     assert obs["last_progress"] is None
 
@@ -249,7 +273,7 @@ def test_child_missing_delegation_or_owner_or_not_running_is_unknown(runtime):
     _child(runtime, "noowner", owner=None, activity=now - 1)
     _child(runtime, "done", status="completed", activity=now - 1)
     rows = _subagents(runtime)
-    assert rows["nodeleg"]["execution_observations"][0]["state"] == "unknown"
+    assert rows["nodeleg"]["execution_observations"][0]["state"] == "running"  # delegation id is not child identity
     assert rows["noowner"]["execution_observations"][0]["state"] == "unknown"
     assert rows["done"]["execution_observations"][0]["unknown_reason"] == "subagent_not_running"
 
@@ -258,9 +282,10 @@ def test_reused_child_id_never_aliases_the_previous_generation(runtime):
     now = time.time()
     _child(runtime, activity=now - 2, started=now - 100, delegation="d-old")
     old = _subagents(runtime)["c1"]["execution_observations"][0]["identity"]
-    _child(runtime, activity=now - 1, started=now - 50, delegation="d-new")
+    record = _child(runtime, activity=now - 1, started=now - 50, delegation="d-new")
+    record["agent"].session_id = "new-child-session"
     new = _subagents(runtime)["c1"]["execution_observations"][0]["identity"]
-    assert old["work_id"] == new["work_id"] and old["generation"] != new["generation"]
+    assert old["work_id"] != new["work_id"] and old["generation"] != new["generation"]
 
 
 def test_one_broken_child_beside_a_fresh_child_stays_unknown_without_hiding_it(runtime):

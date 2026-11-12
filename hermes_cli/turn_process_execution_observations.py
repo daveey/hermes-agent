@@ -17,8 +17,9 @@ _log = logging.getLogger(__name__)
 
 TURN_SOURCE = "turn.lease"
 PROCESS_SOURCES = frozenset({"process.registry", "process.checkpoint"})
-SUBAGENT_SOURCE = "subagent.registry"
-SUBAGENT_SOURCES = frozenset({SUBAGENT_SOURCE})
+SUBAGENT_SOURCE = "subagent.activity"
+# Replace old producer records during mixed-version rollout, never treat their ids as child ids.
+SUBAGENT_SOURCES = frozenset({SUBAGENT_SOURCE, "subagent.registry"})
 OWNED_SOURCES = frozenset({TURN_SOURCE}) | PROCESS_SOURCES | SUBAGENT_SOURCES
 
 
@@ -118,24 +119,32 @@ def activity_clock(record):
     return value if _finite(value) else None
 
 
-def subagent(record, *, gateway, profile, now):
-    """Delegate registry record: ``subagent_id, delegation_id, started_at, status, owner_agent_session_id``
-    (+ the live ``agent``). Identity is the subagent id qualified by delegation and spawn time; the
-    owner is the durable conversation that commissioned it.
+def registry_subagent(record, *, gateway, profile, now):
+    """Adapt registry records without inventing child ids for legacy/half-built agents."""
+    agent = record.get("agent")
+    parent = getattr(agent, "_parent_session_id", None)
+    parent = parent if ident(parent) else record.get("owner_agent_session_id")
+    return subagent({"child_session_id": getattr(agent, "session_id", None),
+                     "parent_session_id": parent, "activity_at": activity_clock(record),
+                     "started_at": record.get("started_at"), "live": record.get("status") == "running"},
+                    gateway=gateway, profile=profile, now=now)
 
-    A running child is dated by its OWN activity clock (``last_activity_ts``: finite, not future, not before
-    spawn); a wedged child's clock stops and the observation expires with no fetch. Without a usable clock the
-    spawn time dates it and it expires. Request time never dates it. Activity, ``tool_count`` and ``last_tool``
-    are never progress.
+
+def subagent(evidence, *, gateway, profile, now):
+    """Pure canonical child projection shared by registry and persisted producers.
+
+    Spawn times differ between adapters: they are fallback clocks, never identity. Equal child
+    activity clocks yield identical records. Registry/delegation ids cannot enter canonical refs.
+    Activity is not progress; missing child identity is unknown, never a fabricated PID/id.
     """
-    work_id, delegation = record.get("subagent_id"), record.get("delegation_id")
-    owner, started = record.get("owner_agent_session_id"), record.get("started_at")
-    generation = f"delegation={delegation}:start={started}" if ident(delegation) and _finite(started) else None
+    work_id, owner = evidence.get("child_session_id"), evidence.get("parent_session_id")
+    started, activity = evidence.get("started_at"), evidence.get("activity_at")
+    generation = f"session={work_id}" if ident(work_id) else None
     reference = f"{SUBAGENT_SOURCE}/{work_id}"
-    activity = activity_clock(record)
-    if not (activity is not None and _finite(started) and started <= activity <= now):
+    if not (_finite(activity) and activity <= now):
         activity = None
-    observed = activity if activity is not None else (started if _finite(started) else None)
+    activity = float(activity) if activity is not None else None
+    observed = activity if activity is not None else (float(started) if _finite(started) else None)
     raw = {"version": 1, "identity": _identity("subagent", work_id, gateway, profile,
                                                owner if ident(owner) else None, generation),
            "owner": _owner(gateway, profile, owner if ident(owner) else None), "state": "running",
@@ -144,10 +153,10 @@ def subagent(record, *, gateway, profile, now):
            "valid_until": observed + SOURCE_TTLS["sidebar"] if observed is not None else None,
            "last_activity": activity, "last_progress": None, "last_progress_kind": None,
            "last_progress_ref": None, "wait": None}
-    if record.get("status") != "running":
+    if evidence.get("live") is not True:
         raw.update(state="unknown", unknown_reason="subagent_not_running")
-    elif not (ident(owner) and ident(delegation)):
-        raw.update(state="unknown", unknown_reason="missing_subagent_owner_or_delegation")
+    elif not (ident(owner) and ident(work_id)):
+        raw.update(state="unknown", unknown_reason="missing_subagent_child_or_parent")
     return project(raw, now=now, source_class="sidebar")
 
 

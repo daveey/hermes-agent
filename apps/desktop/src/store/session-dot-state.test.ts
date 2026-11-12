@@ -187,8 +187,8 @@ describe('hasLiveTurn', () => {
 describe('$delegatingSessionIds', () => {
   const subagent = (status: SubagentProgress['status']): SubagentProgress => ({
     executionObservations: status === 'running' ? [{
-      version: 1, identity: { gateway: 'edge', profile: 'default', session: 'owner', kind: 'subagent', work_id: 'sub-1', generation: 'delegation=batch:start=1000' },
-      owner: { gateway: 'edge', profile: 'default', session: 'owner' }, state: 'running', source: 'subagent.registry',
+      version: 1, identity: { gateway: 'edge', profile: 'default', session: 'owner', kind: 'subagent', work_id: 'sub-1', generation: 'session=sub-1' },
+      owner: { gateway: 'edge', profile: 'default', session: 'owner' }, state: 'running', source: 'subagent.activity',
       source_revision: 'sub-1@1000', observed_at: Date.now() / 1000, valid_until: Date.now() / 1000 + 180, evidence_refs: ['sub-1']
     }] : [],
     id: 'sub-1',

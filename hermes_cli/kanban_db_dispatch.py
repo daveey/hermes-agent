@@ -105,7 +105,6 @@ DEFAULT_GUARD_HOLD_CAP_LONG_SECONDS = 6 * 3600
 _GUARD_HOLD_SHORT_CAP_REASONS = frozenset({"blocker_auth"})
 _GUARD_HOLD_EXEMPT_REASONS = frozenset({"shared_blocker", "model_provider_mismatch", "model_pin_not_in_routing_registry", "subscription_quota_reset"})
 
-
 def _env_seconds(name: str, default: int) -> int:
     try:
         return max(0, int(os.environ.get(name, "") or default))
@@ -155,16 +154,12 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
 @dataclass
 class DispatchResult:
     """Outcome of a single ``dispatch`` pass.
-
     ``kanban.default_assignee`` applied this tick before spawning (#27145). Surfaces the auto-assignment to
     telemetry / CLI / dashboard so the operator can see when the dispatcher is acting on the fallback rule
-    ``kanban.max_in_progress_per_profile`` (#21582). Each entry is ``(task_id, assignee,
-    current_running_count)``. NOT an operator-actionable failure — the task will be picked up on a
-    subsequent tick when the assignee has capacity. Separate bucket so telemetry / dashboards can show "this
-    profile is busy" vs
-    the board's dispatch lock (issue #35240). A losing dispatcher does no DB writes this tick — the lock
-    holder is making progress on the same board. This is the steady-state signal that a single-writer guard
-    is
+    ``kanban.max_in_progress_per_profile`` (#21582): ``(task_id, assignee, current_running_count)``.
+    NOT an operator-actionable failure — the task will be picked up on a subsequent tick when the assignee
+    has capacity. Separate bucket so telemetry / dashboards can show "this profile is busy" vs the board's
+    dispatch lock (issue #35240). A losing dispatcher does no DB writes this tick; the holder is progressing.
     """
 
     scheduling_admitted: bool = False

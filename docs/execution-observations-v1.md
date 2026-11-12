@@ -1,5 +1,33 @@
 # Execution observations v1 (capacity adapter)
 
+## Canonical child activity
+
+`turn_process_execution_observations.subagent` is the pure normalizer for
+`{child_session_id, parent_session_id, activity_at, started_at, live}`. Both registry
+RPCs and `subagent_session_activity.annotate_subagent_activity(rows)` produce source
+`subagent.activity`: gateway/profile/parent session, `work_id=<child session id>`,
+`generation=session=<child session id>`. Registry ids, delegation ids, PIDs and spawn
+timestamps never identify this execution. The registry adapter reads the child's
+actual `session_id` and original `_parent_session_id`; legacy records without an
+actual child id remain unknown. Equal activity clocks normalize to identical records,
+including source revision and evidence refs, irrespective of reservation/spawn time.
+
+The persisted reader runs on the existing session-list, profile stamps/bootstrap and
+project-tree annotation cadence, never inside `subagent.list`. It uses URI `mode=ro`,
+one batched SELECT per profile state.db per three-second cache (including failures),
+and discovers unended children started within six hours. Stale activity expires after
+180 seconds without a fetch; activity is never substantive progress. Finished rows
+are absent after cache refresh. Read failures produce unknown, not an empty inventory.
+The old `subagent.registry` source remains in replacement sets for mixed versions.
+
+Managed-worker children are owner-reserved in the owner's profile state.db by
+`gateway.session_worker_child.reserve_child_execution`. `ChildSessionStore` then
+persists `session.activity` via `worker.persist`; the local worker need not open a
+state.db. Observe these rows at the owner gateway, not the worker host. Persist-disabled
+children, inaccessible owner stores and children outside the discovery window are
+not complete inventory coverage; absence never proves zero children or completion.
+No new timer, store, migration, writer or lifecycle policy is introduced.
+
 Optional `execution_observations[]` is additive advisory evidence. Existing outcomes,
 completion/origin release receipts, admission and structured human requests remain
 authoritative and unchanged. Missing optional fields never erase outstanding work.

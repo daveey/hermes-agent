@@ -18,8 +18,9 @@ import { $subagentsBySession, reconcileSubagentSnapshot, upsertSubagent } from '
 // Real source adapters, not a second table of expected observations. No production reads or clocks.
 const records = JSON.parse(execFileSync('python3', ['-c', `
 import json
-from hermes_cli.turn_process_execution_observations import process, subagent
+from hermes_cli.turn_process_execution_observations import process, registry_subagent as subagent
 class Child:
+    session_id = "child-a"
     def get_activity_summary(self): return {"last_activity_ts": 1000}
 p=process({"id":"proc-a", "pid":71, "host_start_time":81, "observed_at":1000, "source":"process.registry"}, gateway="edge", profile="work", session="owner", now=1001)
 s=subagent({"subagent_id":"child-a", "delegation_id":"batch-a", "owner_agent_session_id":"owner", "started_at":900, "status":"running", "agent":Child()}, gateway="edge", profile="work", now=1001)
@@ -38,6 +39,22 @@ afterEach(() => {
 })
 
 describe('process/subagent source to sidebar consumers', () => {
+  it('merges the actual SQLite and registry child producers as one sidebar execution', () => {
+    const sample = JSON.parse(execFileSync('python3', ['tests/fixtures/subagent_profile_parity.py'], {
+      cwd: resolve(process.cwd(), '../..'), encoding: 'utf8',
+      env: { ...process.env, PYTHONPATH: resolve(process.cwd(), '../..') },
+    }))
+    const stamped = sample.row as SessionInfo
+    expect(stamped.execution_observations).toEqual([sample.registry])
+    vi.useFakeTimers(); vi.setSystemTime(sample.now * 1000)
+    $sessions.set([stamped])
+    setLiveWorkRosterSource(gatewayRouteState(null, 'work').key,
+      [{ session_id: 'owner', subagents: 1, background: 0, execution_observations: [sample.registry] }],
+      sample.now * 1000, ['owner'])
+    expect(rowExecution(stamped, sample.now)).toMatchObject({ live: 1, unknown: 0 })
+    expect(rowExecution(stamped, 1181)).toMatchObject({ live: 0, unknown: 1 })
+  })
+
   it('counts one non-launch-profile process once across real row, RPC and roster producers', () => {
     const sample = JSON.parse(execFileSync('python3', ['tests/fixtures/process_profile_parity.py'], {
       cwd: resolve(process.cwd(), '../..'), encoding: 'utf8',

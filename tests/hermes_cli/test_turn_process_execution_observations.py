@@ -317,11 +317,12 @@ def test_in_process_sandbox_registry_entry_is_unknown_in_the_sidebar_but_still_c
 
 def _child_record(**extra):
     return {"subagent_id": "c1", "delegation_id": "d1", "started_at": 1000.0, "status": "running",
-            "owner_agent_session_id": "owner", "agent": None, **extra}
+            "owner_agent_session_id": "owner", "agent": _Agent({}), **extra}
 
 
 class _Agent:
     def __init__(self, summary):
+        self.session_id = "child-session"
         self.summary = summary
 
     def get_activity_summary(self):
@@ -331,13 +332,13 @@ class _Agent:
 
 
 def test_subagent_adapter_dates_a_running_child_by_its_activity_clock_never_by_request_time():
-    from hermes_cli.turn_process_execution_observations import subagent
+    from hermes_cli.turn_process_execution_observations import registry_subagent as subagent
 
     live = _child_record(agent=_Agent({"last_activity_ts": 1900.0}))
     obs = subagent(live, gateway="gw-1", profile="default", now=1950.0)
     assert obs["state"] == "running" and obs["observed_at"] == 1900.0 and obs["last_activity"] == 1900.0
-    assert obs["identity"] == {"kind": "subagent", "work_id": "c1", "gateway": "gw-1", "profile": "default",
-                               "session": "owner", "generation": "delegation=d1:start=1000.0"}
+    assert obs["identity"] == {"kind": "subagent", "work_id": "child-session", "gateway": "gw-1", "profile": "default",
+                               "session": "owner", "generation": "session=child-session"}
     assert obs["last_progress"] is None
     # The clock froze (wedged child): it expires on its own while the request clock keeps moving.
     wedged = subagent(live, gateway="gw-1", profile="default", now=1900.0 + 180)
@@ -345,11 +346,11 @@ def test_subagent_adapter_dates_a_running_child_by_its_activity_clock_never_by_r
     assert wedged["last_known_state"] == "running" and wedged["observed_at"] == 1900.0
 
 
-@pytest.mark.parametrize("agent", [None, _Agent(RuntimeError("x")), _Agent({}), _Agent({"last_activity_ts": "9"}),
-                                   _Agent({"last_activity_ts": float("nan")}), _Agent({"last_activity_ts": 500.0}),
+@pytest.mark.parametrize("agent", [_Agent(RuntimeError("x")), _Agent({}), _Agent({"last_activity_ts": "9"}),
+                                   _Agent({"last_activity_ts": float("nan")}),
                                    _Agent({"last_activity_ts": 5000.0})])
 def test_subagent_adapter_falls_back_to_spawn_time_for_a_missing_or_invalid_clock(agent):
-    from hermes_cli.turn_process_execution_observations import subagent
+    from hermes_cli.turn_process_execution_observations import registry_subagent as subagent
 
     fresh = subagent(_child_record(agent=agent), gateway="gw-1", profile="default", now=1010.0)
     assert fresh["state"] == "running" and fresh["observed_at"] == 1000.0 and fresh["last_activity"] is None
@@ -357,11 +358,12 @@ def test_subagent_adapter_falls_back_to_spawn_time_for_a_missing_or_invalid_cloc
     assert old["state"] == "unknown" and old["unknown_reason"] == "source_expired"
 
 
-@pytest.mark.parametrize("change", [{"delegation_id": None}, {"owner_agent_session_id": ""}, {"started_at": None},
-                                    {"status": "completed"}, {"subagent_id": ""}])
+@pytest.mark.parametrize("change", [{"agent": None}, {"owner_agent_session_id": ""},
+                                    {"status": "completed"}])
 def test_subagent_adapter_unknown_without_exact_identity_owner_or_running_status(change):
-    from hermes_cli.turn_process_execution_observations import subagent
+    from hermes_cli.turn_process_execution_observations import registry_subagent as subagent
 
-    obs = subagent(_child_record(agent=_Agent({"last_activity_ts": 1990.0}), **change),
-                   gateway="gw-1", profile="default", now=2000.0)
+    record = _child_record(agent=_Agent({"last_activity_ts": 1990.0}))
+    record.update(change)
+    obs = subagent(record, gateway="gw-1", profile="default", now=2000.0)
     assert obs["state"] == "unknown"

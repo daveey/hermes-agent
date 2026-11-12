@@ -53,7 +53,7 @@ def _visible_subagent_records(session_id, transport, owner):
 def _subagent_observation(record, profile):
     """One v1 observation for a registry record (own activity clock, else spawn time); None on adapter failure."""
     from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, local_scope
-    from hermes_cli.turn_process_execution_observations import subagent
+    from hermes_cli.turn_process_execution_observations import registry_subagent as subagent
 
     try:
         gateway, local_profile = local_scope()
