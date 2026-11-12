@@ -22,6 +22,15 @@ New scripts/ci/flaky_artifact.py owns strict schema, exporter CLI and ZIP decodi
 ## Code review follow-up
 Independent cumulative review deleg_7e2f726c approved with a medium card-flood concern. Consumer now rejects more than 200 aggregate flaky entries across a run before any card side effects (wire schema remains capped at 10000 per slice). Synthetic tests cover exactly 200 and 201 across slices. Explicit earlier, later or malformed job attempts fail closed; cancelled runs and incomplete reports remain FAILED/unprocessed as required, rather than the recovered WIP's terminal SKIPPED behavior. Protocol input is validated before API URL construction and all list pages are size bounded.
 
+## Exit policy amendment (t_01a1ced0875af6be, 2026-11-12)
+
+Natural polls showed the conservative cost above was not bounded in practice: the cron exited 1 on every poll for hours. Of 15 unavailable attempts in one receipt, 13 were cancelled 'CI' runs that a newer push to the same branch had superseded (concurrency cancel; each has a newer run of the same workflow and branch), and 2 were "Re-run failed jobs" attempts whose test jobs were carried over from attempt 1 (new job ids stamped run_attempt 2, attempt 1's timestamps, artifacts named for attempt 1). Amended rules:
+
+1. A cancelled run with test jobs is not_applicable when a newer run (any status) of the same workflow_id and head_branch exists (one read of the workflow's run list for that branch); otherwise, or when that read fails, it stays unavailable.
+2. A carried-over test job (it started before the attempt's run_started_at and an earlier attempt has a job with the same name, started_at and completed_at) is supplied by that earlier attempt's artifact and job id, validated against that attempt. A job that really reran still needs its own attempt's artifact.
+3. missing on a run completed less than the grace window ago (default 15 min, --grace-minutes) logs RETRY, stays unprocessed and is not FAILED.
+4. Unreadable data logs WAITING until it was unavailable in two consecutive polls and completed at least the grace window ago; only then FAILED, which is what exits 1. state.unavailable keeps only attempts still listed and unprocessed (capped at 1000). Card filing failures, runs_unavailable and poll_budget stay FAILED at once.
+
 ## Source reading list
 /home/ubuntu/code/_wt/flaky-artifact-metadata/scripts/ci/flaky_kanban.py
 /home/ubuntu/code/_wt/flaky-artifact-metadata/scripts/run_tests_parallel.py (_write_flaky_report, _report_flaky, main)

@@ -142,7 +142,7 @@ def test_unavailable_data_is_a_fixed_failed_code_and_leaves_the_run_unprocessed(
     gh.simple(tests=(A,))
     _BREAKS[how](gh)
     log, board, state = _poll()
-    assert log == [f"FAILED run=5/1 code={code}", "POLL complete=0 empty=0 unavailable=1 not_applicable=0"]
+    assert log == [f"WAITING run=5/1 code={code} polls=1", "POLL complete=0 empty=0 unavailable=1 not_applicable=0"]
     assert state["runs"] == [] and not board.cards
     assert SECRET not in "\n".join(log)
 
@@ -152,7 +152,7 @@ def test_unavailable_run_is_retried_next_poll_and_then_filed_once(gh):
     good = gh.zips[100]
     gh.zips[100] = fa.ArtifactError("download_unavailable")
     log, board, state = _poll()
-    assert log[0] == "FAILED run=5/1 code=download_unavailable" and state["runs"] == []
+    assert log[0] == "WAITING run=5/1 code=download_unavailable polls=1" and state["runs"] == []
     gh.zips[100] = good
     log, board, state = _poll(board, state)
     assert log[0].startswith("opened") and state["runs"] == ["5/1"]
@@ -163,7 +163,7 @@ def test_all_artifacts_are_validated_before_any_card_side_effect(gh):
     _two_slices(gh)
     gh.zips[101] = make_zip(meta(slice_no=2, slices=2, complete=False))
     log, board, state = _poll()
-    assert log[0] == "FAILED run=5/1 code=incomplete" and not board.cards and state["cards"] == {}
+    assert log[0] == "WAITING run=5/1 code=incomplete polls=1" and not board.cards and state["cards"] == {}
     assert gh.downloads == [100, 101]                  # slice 1 was read and valid, yet nothing was filed
 
 
@@ -188,7 +188,7 @@ def test_incomplete_or_unrecognised_jobs_never_mean_no_flakes(gh, jobs, code):
     gh.simple()
     gh.jobs[(5, 1)] = jobs
     log, _board, state = _poll()
-    assert log == [f"FAILED run=5/1 code={code}", "POLL complete=0 empty=0 unavailable=1 not_applicable=0"]
+    assert log == [f"WAITING run=5/1 code={code} polls=1", "POLL complete=0 empty=0 unavailable=1 not_applicable=0"]
     assert state["runs"] == [] and gh.downloads == []
 
 
@@ -210,7 +210,7 @@ def test_listing_failures_leave_that_run_retryable_and_other_runs_proceed(gh):
     gh.simple(run_id=6, tests=(B,), art_id=200)
     gh.fail["runs/5/artifacts"] = urllib.error.URLError(SECRET)
     log, board, state = _poll()
-    assert log[0] == "FAILED run=5/1 code=artifacts_unavailable"
+    assert log[0] == "WAITING run=5/1 code=artifacts_unavailable polls=1"
     assert log[1].startswith("opened") and log[-1] == "POLL complete=1 empty=0 unavailable=1 not_applicable=0"
     assert state["runs"] == ["6/1"] and SECRET not in "\n".join(log)
     gh.fail.clear()
@@ -223,7 +223,7 @@ def test_jobs_listing_failure_is_jobs_unavailable(gh):
     gh.simple()
     gh.fail["/attempts/1/jobs"] = TimeoutError(SECRET)
     log, _, state = _poll()
-    assert log[0] == "FAILED run=5/1 code=jobs_unavailable" and state["runs"] == [] and SECRET not in str(log)
+    assert log[0] == "WAITING run=5/1 code=jobs_unavailable polls=1" and state["runs"] == [] and SECRET not in str(log)
 
 
 def test_completed_runs_listing_failure_changes_no_state(gh):
@@ -233,15 +233,18 @@ def test_completed_runs_listing_failure_changes_no_state(gh):
     assert log == ["FAILED runs_unavailable"] and state["runs"] == [] and not board.cards and gh.downloads == []
 
 
-def test_main_exits_one_on_a_failed_unavailable_line(gh, tmp_path, monkeypatch, capsys):
+def test_main_exits_one_once_an_unavailable_run_persists(gh, tmp_path, monkeypatch, capsys):
     gh.simple()
     gh.artifacts[5] = []
     monkeypatch.setenv("GH_TOKEN", "tok")
     monkeypatch.setattr(fk, "CliBoard", lambda *a, **k: FakeBoard())
     monkeypatch.setattr(fk, "HubRelay", lambda *a, **k: None)
-    rc = fk.main(["--from-github", "--repo", "o/r", "--state", str(tmp_path / "s.json")])
+    argv = ["--from-github", "--repo", "o/r", "--state", str(tmp_path / "s.json")]
+    assert fk.main(argv) == 0
     out = capsys.readouterr().out
-    assert rc == 1 and "FAILED run=5/1 code=missing" in out and "POLL complete=0" in out
+    assert "WAITING run=5/1 code=missing polls=1" in out and "FAILED" not in out and "POLL complete=0" in out
+    assert fk.main(argv) == 1
+    assert "FAILED run=5/1 code=missing polls=2" in capsys.readouterr().out
     assert fk.load_state(tmp_path / "s.json")["runs"] == []
 
 
@@ -269,7 +272,7 @@ def test_page_overflow_is_rejected(gh, monkeypatch):
     monkeypatch.setattr(fap, "MAX_PAGES", 2)
     gh.artifacts[5] = [artifact(3000 + i, name=f"other-{i}") for i in range(250)] + [artifact(100)]
     log, _, state = _poll()
-    assert log[0] == "FAILED run=5/1 code=artifacts_unavailable" and state["runs"] == []
+    assert log[0] == "WAITING run=5/1 code=artifacts_unavailable polls=1" and state["runs"] == []
 
 
 def test_rerun_attempt_does_not_mix_in_earlier_attempt_artifacts(gh):
@@ -278,7 +281,7 @@ def test_rerun_attempt_does_not_mix_in_earlier_attempt_artifacts(gh):
     gh.artifacts[5] = [artifact(100, attempt=1)]
     gh.zips[100] = make_zip(meta(attempt=1, tests=(A,)))
     log, board, state = _poll()
-    assert log[0] == "FAILED run=5/2 code=missing" and not board.cards
+    assert log[0] == "WAITING run=5/2 code=missing polls=1" and not board.cards
     gh.artifacts[5].append(artifact(110, attempt=2))
     gh.zips[110] = make_zip(meta(attempt=2, tests=(B,)))
     log, board, state = _poll(board, state)
@@ -335,7 +338,7 @@ def test_explicit_other_or_malformed_job_attempt_is_unavailable(gh, own):
     gh.run(5, attempt=2)
     gh.jobs[(5, 2)] = [{**job(19), "run_attempt": own}]
     log, board, state = _poll()
-    assert log[0] == "FAILED run=5/2 code=jobs_unavailable"
+    assert log[0] == "WAITING run=5/2 code=jobs_unavailable polls=1"
     assert not state["runs"] and not board.cards and not gh.downloads
 
 
@@ -345,7 +348,7 @@ def test_cancelled_test_run_never_means_no_flakes(gh, jobs):
     gh.run()["conclusion"] = "cancelled"
     gh.jobs[(5, 1)] = jobs
     log, board, state = _poll()
-    assert log[0] == "FAILED run=5/1 code=jobs_unavailable"
+    assert log[0] == "WAITING run=5/1 code=jobs_unavailable polls=1"
     assert not state["runs"] and not board.cards
 
 
@@ -358,5 +361,5 @@ def test_run_flake_limit_is_aggregate_and_precedes_all_side_effects(gh, total):
     if total == 200:
         assert len(board.cards) == total and state["runs"] == ["5/1"]
     else:
-        assert log[0] == "FAILED run=5/1 code=invalid"
+        assert log[0] == "WAITING run=5/1 code=invalid polls=1"
         assert not board.cards and not state["runs"]
