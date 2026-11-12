@@ -6,6 +6,9 @@ A completed review then authorizes one continuation of those same PRs: a repair
 when it records changes or an absent/unrecognised verdict with an exact
 ``reviewed_sha``/``head``/``exact_head``, or a landing
 continuation when it records an exact-head approval. The next claim consumes it.
+A review parent linked after the park by someone else (an orchestrator's
+``kanban_link``) counts as awaited only as an exact-current-head re-review of a
+captured PR (:mod:`kanban_dependency_review_relink`).
 A later comment that repeats a captured PR does not re-arm the hold; a new PR,
 a review naming a different PR, or a crash/reclaim does.
 """
@@ -361,8 +364,9 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     if not isinstance(evidence, dict) or not _checkpoint_matches_run(evidence, row):
         return False
     parents = kb.parent_ids(conn, task_id)
-    if (not parents or sorted(parents) != evidence.get("parents")
-            or kb.unsatisfied_parents(conn, task_id)):
+    checkpointed = evidence.get("parents")
+    if (not parents or not isinstance(checkpointed, list) or kb.unsatisfied_parents(conn, task_id)
+            or [p for p in parents if p in checkpointed] != checkpointed):
         return False
     captured = evidence.get("prs")
     if not isinstance(captured, list) or not all(isinstance(u, str) for u in captured):
@@ -374,6 +378,13 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     parked_at = kb._to_epoch(row["created_at"])
     if parked_at is None:
         return False
+    # A parent the checkpoint never saw counts as awaited only as an exact-current-head
+    # re-review of a captured PR, linked after the park (an orchestrator's kanban_link).
+    late = {p for p in parents if p not in checkpointed}
+    if late:
+        from hermes_cli.kanban_dependency_review_relink import late_review_parents
+        if not late_review_parents(conn, task_id, late, parked_at, row["id"], captured_set):
+            return False
     parents = _awaited_parents(conn, parents, evidence, parked_at)
     if not parents:
         return False
@@ -397,7 +408,8 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     approvals = {p: _approval_prs(conn, p, parked_at, row["id"], captured_set) for p in parents}
     if not all(approvals[p] or repairs[p] for p in parents):
         return False
-    named = evidence.get("awaited") if isinstance(evidence.get("awaited"), list) else ()
+    named_awaited = evidence.get("awaited")
+    named = [*(named_awaited if isinstance(named_awaited, list) else ()), *late]
     if not all(urls.issubset(a) for p, a in approvals.items() if p not in named):
         return False
     return urls.issubset(reviewed.union(*approvals.values()))

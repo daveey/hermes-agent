@@ -140,8 +140,12 @@ def _pr_state_offline(monkeypatch):
         return
     prs.clear_cache()
     monkeypatch.setattr(prs, "_gh_pr_state", lambda url: None)
+    from hermes_cli import kanban_dependency_review_relink as relink
+    relink.clear_cache()
+    monkeypatch.setattr(relink, "_gh_pr_head", lambda url: None)
     yield
     prs.clear_cache()
+    relink.clear_cache()
 
 
 @pytest.fixture(autouse=True)
