@@ -6,6 +6,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_session_activity as activity
+from hermes_cli.kanban_sync_divergence import _landing
 
 
 @pytest.fixture
@@ -50,6 +51,9 @@ def test_routes_real_mismatch_to_durable_supervisor(board, kind):
     audit = payload(conn, tid)
     assert audit['requested_kind'] == kind
     assert audit['rekind_reason'] == ('profile_capability_mismatch' if kind == 'capability' else None)
+    assert audit['status'] == 'todo'  # where routing left it, not 'blocked': the sync heal restores this status
+    event = dict(conn.execute('SELECT kind, payload FROM task_events WHERE task_id=? AND kind="blocked"', (tid,)).fetchone())
+    assert _landing(event) is None  # not a park: a heal over this run lands todo, behind the supervisor
     supervisor = kb.get_task(conn, audit['supervisor_task_id'])
     assert supervisor.assignee == 'supervisor'
     assert supervisor.status == 'ready'

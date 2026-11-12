@@ -197,7 +197,8 @@ def _parked_status(live: sqlite3.Connection, tid: str, run: sqlite3.Row) -> tupl
     must name it. The card's last lifecycle move since then decides: that park event, or a later park event (the
     wake invariant turns a wakeless human ``scheduled`` wait into ``blocked``), lands where it recorded
     (``_landing``); anything else (an unblock, a wake, a review reopen, a triage sweep) means the card left it.
-    Events are ordered by origin time (``_event_order``)."""
+    A ``block_loop_detected`` end is not a park either: the heal reclaims it to ``todo`` like any loop sweep, and
+    the loop detector re-parks it if the run loops again. Events are ordered by origin time (``_event_order``)."""
     if (run["outcome"] or "") not in _PARKS:
         return None
     cols = {r[1] for r in live.execute("PRAGMA table_info(task_events)")}

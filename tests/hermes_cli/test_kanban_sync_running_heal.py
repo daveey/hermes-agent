@@ -179,6 +179,15 @@ def test_an_exhausted_budget_block_lands_triage_not_blocked(live, kanban_home, s
     assert _status(live, tid) == "triage"
 
 
+def test_an_assignment_routed_block_lands_todo_behind_its_supervisor(live, kanban_home, svc):
+    """``assignment_routing.route`` moves the card to ``todo`` behind a supervisor; ``blocked`` would strand it."""
+    tid = _regressed(live, kanban_home, svc, status="todo", outcome="blocked", completed_at=None,
+                     end_payload={"kind": "assignment", "reason": "r", "source_status": "ready", "status": "todo",
+                                  "supervisor_task_id": "t_sup", "supervisor_profile": "supervisor"})
+    _heal_through_rounds(live, kanban_home, svc)
+    assert _status(live, tid) == "todo"
+
+
 def test_a_metadata_only_block_event_is_not_a_move(live, kanban_home, svc):
     """``kanban_human_request_migration.classify`` re-files the ask on a ``triage`` card with a ``blocked`` event."""
     tid = _regressed(live, kanban_home, svc, status="triage", outcome="blocked", completed_at=None,
