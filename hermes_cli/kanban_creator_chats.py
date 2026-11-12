@@ -130,8 +130,10 @@ def resolve_chats(conn: sqlite3.Connection, creator_task_id: str) -> list[dict]:
 def _copy_delivery(conn: sqlite3.Connection, task_id: str, owner: dict) -> None:
     """Retain every delivery column, never the source card's notification cursor.
 
-    A picked-up or synced copy of the owner card carries its links but never its subs (they do not sync): with
-    nothing to copy, the link alone still owns the child, as on the replica path. [daveey]"""
+    A picked-up or synced copy of another gateway's owner card (``created_on`` set and not this gateway) carries
+    its links but never its subs (they do not sync): with nothing to copy, the link alone still owns the child, as
+    on the replica path. This gateway's own card is authoritative: a chat that removed its sub there stays
+    unsubscribed, so its children get no sub either. [daveey]"""
     hub_chat = f"{owner['chat_gateway']}/{owner['chat_profile'] or 'default'}/{owner['chat_session']}"
     match = "((platform='hub' AND chat_id=?) OR (platform='tui' AND chat_id=?))"
     conn.execute(
@@ -143,9 +145,19 @@ def _copy_delivery(conn: sqlite3.Connection, task_id: str, owner: dict) -> None:
         "(SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?) "
         "FROM kanban_notify_subs WHERE task_id=? AND " + match,
         (task_id, task_id, owner["task_id"], hub_chat, owner["chat_session"]))
-    if not conn.execute(f"SELECT 1 FROM kanban_notify_subs WHERE task_id=? AND {match}",
-                        (task_id, hub_chat, owner["chat_session"])).fetchone():
+    if _foreign_copy(conn, owner["task_id"]) and not conn.execute(
+            f"SELECT 1 FROM kanban_notify_subs WHERE task_id=? AND {match}",
+            (task_id, hub_chat, owner["chat_session"])).fetchone():
         _owner_delivery(conn, task_id, owner)
+
+
+def _foreign_copy(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True for a local copy of another gateway's card (its subs live on that gateway, not here). [daveey]"""
+    from hermes_cli.kanban_origin import gateway_names
+    if not any(c[1] == "created_on" for c in conn.execute("PRAGMA table_info(tasks)")):
+        return False
+    row = conn.execute("SELECT created_on FROM tasks WHERE id=?", (task_id,)).fetchone()
+    return bool(row and row[0] and row[0] != gateway_names()[0])
 
 
 class _ReplicaReader:

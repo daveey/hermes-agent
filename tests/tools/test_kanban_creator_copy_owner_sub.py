@@ -25,9 +25,13 @@ def home(tmp_path, monkeypatch):
     return home
 
 
-def _copy_with_link(conn, gateway, profile):
-    """A creator card whose link rows are in this file but whose subs are not (a picked-up or synced copy)."""
+def _copy_with_link(conn, gateway, profile, created_on="away"):
+    """A creator card whose link rows are in this file but whose subs are not (a picked-up or synced copy of
+    another gateway's card when ``created_on`` names that gateway)."""
     creator = kb.create_task(conn, title="picked-up creator", assignee="default")
+    if not any(c[1] == "created_on" for c in conn.execute("PRAGMA table_info(tasks)")):
+        conn.execute("ALTER TABLE tasks ADD COLUMN created_on TEXT")
+    conn.execute("UPDATE tasks SET created_on=? WHERE id=?", (created_on, creator))
     conn.execute("INSERT INTO task_chat_links (uid, task_id, chat_gateway, chat_profile, chat_session, kind, "
                  "released, created_at) VALUES (?, ?, ?, ?, ?, 'created', 0, 1)",
                  (links.link_uid(creator, gateway, profile, CHAT, "created"), creator, gateway, profile, CHAT))
@@ -75,3 +79,20 @@ def test_owner_sub_in_this_file_is_still_copied_once(home, monkeypatch, capsys):
         subs = notify.list_notify_subs(conn, child)
         assert [(s["platform"], s["chat_id"], s["delivery_mode"], s["delivery_metadata"]) for s in subs] == [
             ("hub", f"away/research/{CHAT}", "notify+wake", {"reason": "origin", "keep": 1})]
+
+
+@pytest.mark.parametrize("created_on", [None, "here"])
+@pytest.mark.parametrize("gateway,profile", [("away", "research"), ("here", None)])
+def test_own_card_whose_chat_unsubscribed_gives_its_child_no_sub(home, monkeypatch, capsys, created_on,
+                                                                 gateway, profile):
+    """This gateway's own owner card is authoritative: a chat that removed its sub there is not re-subscribed on
+    the card's new worker children, although its unreleased ``created`` link still names it. [daveey]"""
+    with kbc.connect_closing() as conn:
+        creator = _copy_with_link(conn, gateway, profile, created_on=created_on)
+        assert _subs(conn, creator) == []
+    monkeypatch.setenv("HERMES_KANBAN_TASK", creator)
+    monkeypatch.setenv("HERMES_SESSION_ID", WORKER)
+    monkeypatch.setenv("HERMES_SESSION_KEY", WORKER)
+    child = create("tool", monkeypatch, capsys)
+    with kbc.connect_closing() as conn:
+        assert _subs(conn, child) == []
