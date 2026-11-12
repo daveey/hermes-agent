@@ -87,9 +87,19 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
             if existing["intent_json"] != immutable:
                 raise OriginError("origin_creation_conflict", "request ID reused with a different creation intent")
             return existing["task_id"]
-        # The receipt request ID, not legacy best-effort idempotency, owns this
-        # creation. Never adopt an unrelated existing task by its legacy key.
-        options["idempotency_key"] = None
+        # The receipt request ID, not legacy best-effort idempotency, owns this creation: never adopt an
+        # unrelated existing task by the creator's key. The key is still stored on the new card, so a guard or
+        # probe that looks the card up by it matches (it used to be dropped to NULL). [daveey] A live card that
+        # already holds it is a typed refusal naming that card, never a duplicate and never an adoption; an
+        # exact retry is answered by the request ID above. Checked inside this write txn, so no race.
+        key = options.get("idempotency_key")
+        if key:
+            held = conn.execute(
+                "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' "
+                "ORDER BY created_at DESC LIMIT 1", (key,)).fetchone()
+            if held:
+                raise OriginError("origin_idempotency_conflict",
+                                  f"idempotency_key {key!r} already names card {held['id']} on this board")
         task_id = kb.create_task(conn, **options, placement_checked=True)  # courier retains owner placement
         marker = {"binding_id": "binding-" + secrets.token_hex(16), "version": 1,
                   "owner": {**intent["owner"], "task_id": task_id}, "origin": intent["origin"],
