@@ -165,6 +165,7 @@ COMPLETE_REJECTION_CLASSES = frozenset({
     "not_running",    # card waits (scheduled/todo/ready) with no run: archive it or re-park it as a watch [daveey]
     "foreign_card",   # card exists here only as a Board replica copy; its owner gateway must write it [daveey]
     "review_contract",  # ship review card completed without metadata ship can read [daveey]
+    "review_independence",  # ship review verdict recorded outside the card's dispatched worker run [daveey]
     "pr_acceptance",  # completion contract's PR CI acceptance refused (pr_acceptance event ok=false)
     "parents",        # unsatisfied parent dependencies
     "not_owner",      # delegate child / other task / unbound run id
@@ -899,10 +900,9 @@ def _handle_complete(args: dict, **kw) -> str:
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
-        from hermes_cli import kanban_review_contract as _krc  # [daveey] a review ship cannot read: fix it now
-        unreadable = _krc.refusal(getattr(task, "body", None), metadata)
-        if unreadable:
-            raise _Reject(unreadable, _krc.REJECTION)
+        from hermes_cli import kanban_review_contract as _krc  # [daveey] a review ship would refuse: refuse it now
+        if refused := _krc.completion_refusal(getattr(task, "body", None), metadata, _worker_run_id(tid)):
+            raise _Reject(*refused)
         goal_verification = _goal_gate("kanban_complete", task, tid, (summary or result or "").strip(), conn=conn)
         try:
             run_id = _worker_run_id(tid)

@@ -19,6 +19,13 @@ This module catches that gap at completion time, while the reviewer can still fi
   that only discusses the contract) are not review results and are left alone.
 
 Ship itself is unchanged: it accepts no aliases and infers no sha.
+
+``independence_refusal`` closes the other half (defect agent-9eea612942): ship also accepts only a review completed
+by a dispatched reviewer run with its own session. A landing chat that completed the review card itself (with a
+subagent's verdict, from the CLI, or from the dashboard) left a record ship refuses hours later at land time
+("its latest run did not complete; no completed review record"). Such a completion is now refused when it is
+recorded: on a core-pull card, a verdict-bearing review result from a caller that is not the card's own dispatched
+worker run. No override: ship refuses the record regardless, so an override would only bring the defect back.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ from typing import Any, Optional
 from hermes_cli.kanban_db_dispatch_pr_policy import BUILTIN_GITHUB_REPO_ALIASES
 
 REJECTION = "review_contract"
+INDEPENDENCE_REJECTION = "review_independence"
 VERDICTS = ("approve", "request_changes")
 CORE_REPOS = frozenset(r.lower() for pair in BUILTIN_GITHUB_REPO_ALIASES.items() for r in pair)
 _SHA40 = re.compile(r"[0-9a-f]{40}")
@@ -115,3 +123,46 @@ def refusal(body: Optional[str], metadata: Any) -> Optional[str]:
             + "; ".join(found) + ". Nothing changed: retry kanban_complete with the same summary and metadata "
             "that also carries {\"verdict\": \"approve\" | \"request_changes\", \"reviewed_sha\": \"<40-hex head>\", "
             "\"reviewed_pr\": \"https://github.com/<owner>/<repo>/pull/<n>\"}.")
+
+
+def independence_refusal(body: Optional[str], metadata: Any, worker_run_id: Optional[int]) -> Optional[str]:
+    """The refusal text for a ship review verdict recorded outside the card's own dispatched worker run, else None.
+
+    ``worker_run_id`` is the caller's dispatcher run id for this card (None for a chat, an orchestrator, the CLI or
+    the dashboard). A ship review card is one whose body names a core-fork pull (``states_contract`` implies it).
+    Landing handoffs (``published_pr``), completions with no verdict key and other cards are left alone.
+    """
+    if worker_run_id is not None:
+        return None
+    if not is_review_result(metadata) or not any(key in metadata for key in _VERDICT_KEYS):
+        return None
+    pull = core_pull(body)
+    if pull is None:
+        return None
+    return (f"this is a ship review card for {pull}; `hermes-core-wt ship` accepts only a review completed by a "
+            "dispatched reviewer run with its own session, so a completion recorded from this chat or the CLI would "
+            "be refused at land time ('no completed review record'). Leave the card for a worker to claim, or post "
+            "your findings as a kanban_comment. Nothing changed.")
+
+
+class IndependenceRefused(ValueError):
+    """``independence_refusal`` raised for the CLI and dashboard completion paths (a ValueError they surface)."""
+
+
+def completion_refusal(body: Optional[str], metadata: Any, worker_run_id: Optional[int]) -> Optional[tuple[str, str]]:
+    """``(message, rejection class)`` for the kanban_complete tool, else None. Independence is checked first: a
+    verdict recorded outside the card's worker run is worthless to ship whatever its shape, so fixing the shape from
+    the same caller must not be the advice."""
+    if outside := independence_refusal(body, metadata, worker_run_id):
+        return f"kanban_complete refused: {outside}", INDEPENDENCE_REJECTION
+    if unreadable := refusal(body, metadata):
+        return unreadable, REJECTION
+    return None
+
+
+def refuse_outside(conn, task_id: str, metadata: Any, worker_run_id: Optional[int]) -> None:
+    """Raise IndependenceRefused when ``independence_refusal`` refuses this completion of ``task_id``."""
+    from hermes_cli import kanban_db as kb
+    msg = independence_refusal(getattr(kb.get_task(conn, task_id), "body", None), metadata, worker_run_id)
+    if msg:
+        raise IndependenceRefused(f"{INDEPENDENCE_REJECTION}: {msg}")

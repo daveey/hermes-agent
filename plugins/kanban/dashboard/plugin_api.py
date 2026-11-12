@@ -32,6 +32,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from hermes_cli import kanban_db
+from hermes_cli import kanban_review_contract as _review_contract  # a dashboard "done" is never a worker run
 from hermes_cli import kanban_workflow
 from hermes_cli.web_read_coalescing import coalesced_read
 from hermes_cli import kanban_db_connect as kbc
@@ -689,8 +690,8 @@ def _drag_to(conn, task_id: str, s: str) -> bool:
 # payload) -> ok. ``review`` uses request_review (never a block, so it can't trip unblock-loop
 # detection) and ``done`` pass ``force=True``: a dashboard action is a human override of a live worker claim.
 _STATUS_HANDLERS: dict[str, Any] = {
-    "done": lambda conn, tid, p: kanban_db.complete_task(
-        conn, tid, result=p.result, summary=p.summary, metadata=p.metadata, force=True),
+    "done": lambda conn, tid, p: _review_contract.refuse_outside(conn, tid, p.metadata, None) or (  # [daveey]
+        kanban_db.complete_task(conn, tid, result=p.result, summary=p.summary, metadata=p.metadata, force=True)),
     "blocked": lambda conn, tid, p: kanban_db.block_task(
         conn, tid, kind=p.block_kind, human_request=p.human_request,
         reason=p.block_reason, wake_check=p.wake_check,

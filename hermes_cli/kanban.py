@@ -30,6 +30,7 @@ from hermes_cli import kanban_swarm as ks
 from hermes_cli import kanban_workflow
 from hermes_cli import kanban_contract_cli as _contract_cli
 from hermes_cli import kanban_foreign_card as _foreign_card
+from hermes_cli import kanban_review_contract as _review_contract
 from hermes_cli.kanban_cli_triage_lines import _decompose_ok_line, _retitled_suffix
 from hermes_cli.kanban_cli_flags import (parse_branch_flag as _parse_branch_flag,
                                          parse_workspace_flag as _parse_workspace_flag)
@@ -1244,10 +1245,14 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 fail_msg[tid] = f"cannot complete {tid}: {_foreign_card.REJECTION}: {foreign}"
                 return False
             try:
+                _review_contract.refuse_outside(conn, tid, metadata, _worker_run_id_for(tid))  # ship would refuse
                 done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
                                         goal_verification=verified[0] if verified else None,
                                         expected_run_id=_worker_run_id_for(tid),
                                         force=bool(getattr(args, "force", False)))
+            except _review_contract.IndependenceRefused as outside:  # --force does not override it [daveey]
+                fail_msg[tid] = f"cannot complete {tid}: {outside}"
+                return False
             except kb.LiveClaimError:
                 fail_msg[tid] = (f"cannot complete {tid}: a live worker is running it. Wait for the "
                                  f"worker, `hermes kanban reclaim {tid}` to release it, or re-run with "

@@ -289,3 +289,131 @@ def test_tool_leaves_cards_without_contract_alone(board, monkeypatch):
     out = _complete({"review_verdict": "approve", "reviewed_head": "abc"})
     assert not out.get("error"), out
     assert _status(board, tid) == "done"
+
+
+# --- independence: a ship review verdict recorded outside the card's dispatched worker run (agent-9eea612942) ---
+# Chat 20261111_090650_1247e7 completed review card t_01a1cce808ae7ea0 (PR #1133) itself with a subagent's verdict:
+# run 29959 started and ended in the same second, no worker session. Ship refused it hours later ("its latest run
+# did not complete; no completed review record"). The completion is now refused when it is recorded.
+
+@pytest.mark.parametrize("body", [SHIP_BODY, MISNAMED_BODY, HEAD_BODY, PR_KEY_BODY],
+                         ids=["ship", "misnamed", "head", "pr_key"])
+@pytest.mark.parametrize("md", [GOOD, {**GOOD, "verdict": "request_changes"}, dict(PR_KEY_MD),
+                                {"review_verdict": "approve", "reviewed_sha": SHA}, {"approved": True}],
+                         ids=["approve", "request_changes", "pr_key", "review_verdict", "approved"])
+def test_independence_refuses_outside_verdict_on_ship_review(body, md):
+    msg = krc.independence_refusal(body, md, None) or ""
+    assert msg.startswith(f"this is a ship review card for {krc.core_pull(body)}; `hermes-core-wt ship` accepts only")
+    assert "no completed review record" in msg and "kanban_comment" in msg
+    assert krc.independence_refusal(body, md, 7) is None  # the card's own dispatched worker run
+
+
+@pytest.mark.parametrize("body,md", [
+    (SHIP_BODY, {"published_pr": PR, "verdict": "approve", "reviewed_sha": SHA, "reviewed_pr": PR}),  # landing
+    (SHIP_BODY, {"reviewed_sha": SHA, "reviewed_pr": PR, "landed_sha": SHA}),  # no verdict key
+    (PR_KEY_BODY, LANDING_MDS[0]),
+    (SHIP_BODY, {"changed_files": ["a.py"]}), (SHIP_BODY, {}), (SHIP_BODY, None),
+    ("Fix the sidebar scroll.", dict(GOOD)),  # not a ship review card
+    (PR_KEY_BODY.replace(PR_KEY_PULL, "https://github.com/daveey/babybear/pull/3730"), dict(PR_KEY_MD)),
+    (None, dict(GOOD)),
+], ids=["landing", "no_verdict", "pr_key_landing", "no_review_key", "empty", "none", "not_ship", "babybear", "no_body"])
+def test_independence_leaves_non_reviews_alone(body, md):
+    assert krc.independence_refusal(body, md, None) is None
+
+
+def _outside_card(kb, body):
+    """A ready card nobody claimed: the shape t_01a1cce808ae7ea0 had when the chat completed it."""
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect() as conn:
+        return kb.create_task(conn, title="Independent exact-head review PR1349", body=body, assignee="test-worker")
+
+
+def _runs(kb, tid):
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect() as conn:
+        return conn.execute("SELECT COUNT(*) FROM task_runs WHERE task_id = ?", (tid,)).fetchone()[0]
+
+
+@pytest.mark.parametrize("body", [SHIP_BODY, PR_KEY_BODY], ids=["contract", "core_pull"])
+def test_tool_refuses_outside_approval_on_ship_review(board, body):
+    from tools import kanban_tools as kt
+    tid = _outside_card(board, body)
+    md = {**PR_KEY_MD, "reviewed_pr": PR_KEY_PULL} if body is PR_KEY_BODY else dict(GOOD)
+    out = json.loads(kt._handle_complete({"task_id": tid, "summary": "APPROVE (subagent verdict)", "metadata": md}))
+    assert out.get("error") and out["rejection"] == "review_independence", out
+    assert out["rejection"] in kt.COMPLETE_REJECTION_CLASSES
+    assert "accepts only a review completed by a dispatched reviewer run" in out["error"]
+    assert _status(board, tid) == "ready" and _runs(board, tid) == 0  # nothing changed
+
+
+def test_tool_outside_independence_precedes_shape_refusal(board):
+    from tools import kanban_tools as kt
+    tid = _outside_card(board, MISNAMED_BODY)
+    md = {"review_verdict": "approve", "reviewed_sha": SHA, "reviewed_pr": PR}  # also unreadable by ship
+    out = json.loads(kt._handle_complete({"task_id": tid, "summary": "APPROVE", "metadata": md}))
+    assert out["rejection"] == "review_independence", out
+
+
+def test_tool_dispatched_worker_completes_same_card(board, monkeypatch):
+    tid = _claim(board, monkeypatch, SHIP_BODY)
+    out = _complete(dict(GOOD))
+    assert not out.get("error"), out
+    assert _status(board, tid) == "done"
+
+
+@pytest.mark.parametrize("body,md", [
+    ("Fix the sidebar scroll. Done when its tests pass.", dict(GOOD)),  # not a ship review card
+    (PR_KEY_BODY, dict(LANDING_MDS[0])),  # a verdictless landing handoff on a core-pull card
+    (SHIP_BODY, {"changed_files": ["a.py"]}),  # no review key at all
+], ids=["not_ship", "verdictless_landing", "no_review_key"])
+def test_tool_outside_non_review_completions_still_complete(board, body, md):
+    from tools import kanban_tools as kt
+    tid = _outside_card(board, body)
+    out = json.loads(kt._handle_complete({"task_id": tid, "summary": "Closed from the chat", "metadata": md}))
+    assert not out.get("error"), out
+    assert _status(board, tid) == "done"
+
+
+def _cli_complete(tid, md, force=False):
+    import argparse
+    from hermes_cli import kanban as cli
+    return cli._cmd_complete(argparse.Namespace(task_ids=[tid], summary="APPROVE (subagent verdict)", result=None,
+                                                metadata=json.dumps(md), force=force))
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_cli_refuses_outside_approval_on_ship_review(board, capsys, force):
+    tid = _outside_card(board, SHIP_BODY)
+    assert _cli_complete(tid, dict(GOOD), force=force) != 0
+    assert "review_independence" in capsys.readouterr().err
+    assert _status(board, tid) == "ready" and _runs(board, tid) == 0
+
+
+def test_cli_outside_non_review_completion_still_completes(board):
+    tid = _outside_card(board, PR_KEY_BODY)
+    assert _cli_complete(tid, dict(LANDING_MDS[0])) == 0
+    assert _status(board, tid) == "done"
+
+
+def test_cli_from_the_cards_dispatched_worker_completes(board, monkeypatch):
+    tid = _claim(board, monkeypatch, SHIP_BODY)  # HERMES_KANBAN_TASK + HERMES_KANBAN_RUN_ID name this card's run
+    assert _cli_complete(tid, dict(GOOD)) == 0
+    assert _status(board, tid) == "done"
+
+
+def test_dashboard_done_refuses_outside_approval_on_ship_review(board):
+    from types import SimpleNamespace
+    from hermes_cli import kanban_db_connect as kbc
+    from plugins.kanban.dashboard import plugin_api
+    done = plugin_api._STATUS_HANDLERS["done"]
+    tid = _outside_card(board, SHIP_BODY)
+    with kbc.connect() as conn:
+        with pytest.raises(ValueError, match="review_independence"):
+            done(conn, tid, SimpleNamespace(result=None, summary="APPROVE", metadata=dict(GOOD)))
+        assert kb_status(board, conn, tid) == "ready"
+        assert done(conn, tid, SimpleNamespace(result="closed", summary="closed", metadata={"note": "x"}))
+        assert kb_status(board, conn, tid) == "done"
+
+
+def kb_status(kb, conn, tid):
+    return kb.get_task(conn, tid).status
