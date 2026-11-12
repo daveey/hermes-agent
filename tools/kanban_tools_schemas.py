@@ -806,9 +806,11 @@ KANBAN_CREATE_SCHEMA = _schema(
         "distinct_reason": _prop("string", "Why this card is separate work from the distinct_from cards."),
         "hub_reason": _prop("string", (
                 "Only for a card that needs the hub itself: what only the hub has (its signed-in "
-                "Chrome, the Board admin key, instance-role SSM, a Desktop-session interaction, an "
+                "Chrome, a Desktop-session interaction, an "
                 "existing hub worktree with unpushed commits, a hermes-hub command acting with the "
-                "hub's key, or live gateway state hub-admin cannot reach). A Sonnet admission judge "
+                "hub's key, or live gateway state hub-admin cannot reach). Board admin key and "
+                "instance-role SSM steps are not hub needs: run them with hub-admin on a "
+                "capability:hub-write worker. A Sonnet admission judge "
                 "reads it with the card; without admission a hub card goes to the worker pool (pool "
                 "workers have hub ssh + hub-admin) and an explicit hub pin is refused.")),
         "force_hub": _prop("boolean", (

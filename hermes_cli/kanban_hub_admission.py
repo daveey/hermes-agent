@@ -16,8 +16,9 @@ _log = logging.getLogger(__name__)
 MODEL = "claude-sonnet-5-5"
 PROVIDER = "anthropic"
 TIMEOUT = 30
-NEEDS = frozenset({"hub_chrome", "board_admin_key", "instance_role_ssm", "user_terminal",
-                   "hub_worktree", "gateway_key_cli", "hub_live_process"})
+# The hub-admission-test rubric's allowlist. Board admin key and instance-role SSM are not on it: hub-admin from
+# a capability:hub-write worker reaches both, so a verdict naming either is invalid (deny).
+NEEDS = frozenset({"hub_chrome", "user_terminal", "hub_worktree", "gateway_key_cli", "hub_live_process"})
 
 
 @dataclass(frozen=True)

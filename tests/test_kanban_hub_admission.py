@@ -56,6 +56,21 @@ def test_invalid_verdict_denied(judge, change):
     assert result.why == "invalid admission verdict"
 
 
+@pytest.mark.parametrize("need,quote", [
+    ("board_admin_key", "Rotate the Board admin key"),
+    ("instance_role_ssm", "Read the parameter over instance-role SSM"),
+])
+def test_retired_hub_write_needs_are_not_admitted(judge, need, quote):
+    """Board admin key and instance-role SSM are hub-write work (hub-admin from a capability:hub-write worker),
+    so the rubric no longer offers them: a judge reply naming one, with a real quote, is not a valid admission."""
+    gate, _, reply, _ = judge
+    result = {"admit": True, "need": need, "evidence": quote, "why": "needs the hub"}
+    assert gate.validated(dict(result), {"title": quote, "body": ""}, None, "sha") is None
+    reply.update(result)
+    verdict = gate.admit({"title": quote, "body": ""})
+    assert verdict.admit is False and verdict.why == "invalid admission verdict"
+
+
 def test_cache_and_skill_revision(judge):
     gate, calls, _, skill = judge
     fields = {"title": "Use signed-in Chrome"}
