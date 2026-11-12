@@ -293,3 +293,34 @@ def test_move_to_self_refuses_only_on_a_found_clean_tree(hub, tmp_path):
     _commit(ws / "repo", "b.txt")
     res = km.move_queued(hub.conn, tid, **move)
     assert res["ok"] and _moved(hub.conn, tid)[-1]["unpushed_state"].startswith("unpushed commits in "), res
+
+
+# --- direct create_task producers (swarm, triage sweep, alert cards) -------------------------------------------
+
+def test_direct_create_task_queues_a_portable_card_like_the_front_doors(hub, monkeypatch):
+    """11-12 11:10Z: with ``worker_queue`` set, the old ``db_policy`` judged the queue decision but kept only its
+    (absent) ``placement_policy``, so a direct ``kb.create_task`` card was neither queued nor pool-enrolled: it ran on
+    the hub."""
+    monkeypatch.setattr(kp, "config", lambda: {**CFG, "worker_pools": {HUB: ["worker-1", "worker-2"]}})
+    _registry(held=("worker-1",))
+    tid = kb.create_task(hub.conn, title="summarise the failing CI jobs", assignee="default", requires=[])
+    assert _runs_on(hub.conn, tid) == [POOL]
+    assert kb.get_task(hub.conn, tid).placement_policy is None  # queued, not also enrolled
+    # Host work stays local and unqueued; an explicit pin and a checked front-door decision are kept as given.
+    tid = kb.create_task(hub.conn, title="restart the gateway service on the hub", assignee="default", requires=[])
+    assert _runs_on(hub.conn, tid) is None and kb.get_task(hub.conn, tid).placement_policy is None
+    tid = kb.create_task(hub.conn, title="pinned", assignee="default", requires=[], runs_on=["machine:worker-2"])
+    assert _runs_on(hub.conn, tid) == ["machine:worker-2"]
+    tid = kb.create_task(hub.conn, title="summarise CI", assignee="default", requires=[], placement_checked=True)
+    assert _runs_on(hub.conn, tid) is None
+
+
+def test_direct_create_task_keeps_pool_enrollment_when_it_cannot_queue(hub, monkeypatch):
+    monkeypatch.setattr(kp, "config", lambda: {**CFG, "worker_pools": {HUB: ["worker-1", "worker-2"]}})
+    _registry(held=("worker-1", "worker-2"))  # no unheld machine carries the label
+    tid = kb.create_task(hub.conn, title="summarise the failing CI jobs", assignee="default", requires=[])
+    assert _runs_on(hub.conn, tid) is None and kb.get_task(hub.conn, tid).placement_policy == "worker-first-v1"
+    _registry()
+    sync.set_mode(hub.conn, "off")  # runs_on is a Board placement field: off a primary, enroll instead
+    tid = kb.create_task(hub.conn, title="summarise the failing CI jobs", assignee="default", requires=[])
+    assert _runs_on(hub.conn, tid) is None and kb.get_task(hub.conn, tid).placement_policy == "worker-first-v1"

@@ -106,28 +106,40 @@ def creation_audit(args, cfg=None):
 
 
 def resolved_db_placement(fields):
-    """Validate the effective workspace after project inheritance, enrolling only unchecked producers."""
-    policy = fields["placement_policy"]
+    """``(policy, audit, runs_on)``: validate the effective workspace after project inheritance, placing only
+    unchecked producers (worker queue, else pool enrollment) exactly as the front doors do."""
+    policy, runs_on = fields["placement_policy"], fields["runs_on"]
     if policy is None and not fields["placement_checked"]:
-        policy = db_policy(fields)
-    validate_creation(policy, runs_on=fields["runs_on"], workspace_kind=fields["workspace_kind"],
+        policy, queued = db_placement(fields)
+        runs_on = queued if queued is not None else runs_on
+    validate_creation(policy, runs_on=runs_on, workspace_kind=fields["workspace_kind"],
                       workspace_path=fields["workspace_path"], project=fields["project_id"],
                       origin_intent=None, board=fields["board"])
     audit = fields["placement_audit"]
     if audit is None:
         audit = creation_audit(_db_fields(fields))
-    return policy, audit
+    return policy, audit, runs_on
 
 
-def db_policy(fields):
-    """Enroll direct producers at insertion; front doors may preserve an already checked decision."""
+def db_placement(fields):
+    """``(placement_policy, runs_on)`` for a direct ``create_task`` producer (swarm, triage sweep, alerts, ...).
+
+    Same outcome as the front doors: a portable card of a ``worker_queue`` gateway queues for the pool label on a
+    Board primary (``runs_on`` is a Board placement field); elsewhere, or with no live labelled machine, it keeps
+    worker-pool enrollment. Judging the queue but keeping only ``placement_policy`` (11-12) dropped both. [daveey]
+    """
+    from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_placement as placement
 
     cfg = placement.config()
-    if not cfg.get("worker_pools"):
-        return None
-    result = creation_decision(_db_fields(fields), cfg, placement.reg.self_gateway(), "auto", None)
-    return (result or {}).get("placement_policy")
+    if not cfg.get("worker_pools") and not cfg.get("worker_queue"):
+        return None, None
+    queue = bool(cfg.get("worker_queue")) and sync.board_mode(fields["conn"]) == "primary"
+    result = creation_decision(_db_fields(fields), cfg, placement.reg.self_gateway(), "auto", None,
+                               queue=queue) or {}
+    if result.get("runs_on") is not None:
+        return None, list(result["runs_on"])
+    return result.get("placement_policy"), None
 
 
 def _db_fields(fields):

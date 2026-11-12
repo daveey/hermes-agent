@@ -1308,7 +1308,7 @@ def create_task(
     project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
         conn, project_id, project_source_task_id, workspace_kind, workspace_path
     )
-    placement_policy, placement_audit = resolved_db_placement(locals())
+    placement_policy, placement_audit, runs_on = resolved_db_placement(locals())
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
 
