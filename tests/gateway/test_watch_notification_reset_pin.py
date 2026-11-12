@@ -232,8 +232,9 @@ async def test_permanently_refused_completion_converges_to_dropped_across_restar
         for _process in range(3):
             # Each process starts from the durable ledger alone: a fresh queue, replayed rows.
             monkeypatch.setattr(process_registry, 'completion_queue', queue.Queue())
-            delegation._offered.clear()
-            delegation.restore_undelivered_completions(process_registry.completion_queue)
+            # A restart loses ALL process-local custody, including the offer lease.
+            delegation._reset_for_tests()
+            assert delegation.restore_undelivered_completions(process_registry.completion_queue) == 1
             await _run_async_watcher(runner, monkeypatch, clock, ticks=150)
             row = delegation.get_durable_delegation('refused-1')
             if row['delivery_state'] != 'pending':
@@ -286,8 +287,9 @@ async def test_foreign_pinned_completion_spends_nothing_across_restarts(monkeypa
         clock = install_module_clock(monkeypatch, run_notifications)
         for _process in range(3):
             monkeypatch.setattr(process_registry, 'completion_queue', queue.Queue())
-            delegation._offered.clear()
-            delegation.restore_undelivered_completions(process_registry.completion_queue)
+            # A restart loses ALL process-local custody, including the offer lease.
+            delegation._reset_for_tests()
+            assert delegation.restore_undelivered_completions(process_registry.completion_queue) == 1
             await _run_async_watcher(runner, monkeypatch, clock, ticks=150)
         row = delegation.get_durable_delegation('foreign-1')
         assert (row['delivery_state'], row['delivery_attempts']) == ('pending', 0)

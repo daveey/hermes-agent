@@ -98,8 +98,24 @@ def test_startup_replay_requires_a_live_consumer(notification_env, monkeypatch, 
     row = ad.get_durable_delegation(event["delegation_id"])
     assert (row["delivery_state"], row["delivery_attempts"]) == (("delivered", 1) if owns else ("pending", 0))
     if not owns:
-        # Refusal hands the offer back; the sweep's re-offer stays gated until a client attaches.
+        # Handback preserves the offer lease, then replays with the ownership gate intact.
         _orphan_owner(home)
         offered = queue.Queue()
-        assert ad.sweep_orphaned_completions(offered) == 1
-        assert offered.get_nowait()["startup_replay"] is True
+        now = time.time()
+        assert ad.sweep_orphaned_completions(offered, now=now) == 0
+        assert ad.sweep_orphaned_completions(offered, now=now + ad._CLAIM_LEASE_S + 1) == 1
+        replay = offered.get_nowait()
+        assert replay["startup_replay"] is True
+        server._notif_handle_ready(
+            "ui1", session, [replay], set(), process_registry, format_process_notification, None)
+        assert submit.call_count == 0
+        assert ad.get_durable_delegation(event["delegation_id"])["delivery_attempts"] == 0
+        # Once a real peer attaches, this same replay can be claimed exactly once.
+        session["transport"] = WSTransport(None, _loop)
+        server._notif_handle_ready(
+            "ui1", session, [replay], set(), process_registry, format_process_notification, None)
+        server._notif_handle_ready(
+            "ui1", session, [replay], set(), process_registry, format_process_notification, None)
+        assert submit.call_count == 1
+        row = ad.get_durable_delegation(event["delegation_id"])
+        assert (row["delivery_state"], row["delivery_attempts"]) == ("delivered", 1)
