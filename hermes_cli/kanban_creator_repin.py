@@ -63,9 +63,15 @@ def creator_repin(conn: sqlite3.Connection, task_id: str, env_task: str, *, runs
                              f"runs_on no enrolled machine carries, and {task_id} is none of these ({refusal}; "
                              f"{stranded})"}
     if not repin.applies(conn, task_id):
+        # The creator is the likeliest worker to find its own stranded child: the reroute open to every
+        # worker is open to it too.
+        stranded = stranded_refusal(conn, task_id)
+        if stranded is None:
+            return stranded_reroute(conn, task_id, env_task, runs_on=runs_on, reason=reason, hub=hub)
         return {"ok": False, "reason_code": "not_repinnable",
                 "error": f"{task_id} is not an unstarted worker-first card (running, done, archived or no "
-                         "placement policy); only the explicit origin repin is allowed here"}
+                         f"placement policy) nor a ready card stranded on impossible runs_on ({stranded}); "
+                         "only the explicit origin repin or a stranded reroute is allowed here"}
     return km.move_queued(conn, task_id, runs_on=runs_on, reason=reason, hub=hub)
 
 

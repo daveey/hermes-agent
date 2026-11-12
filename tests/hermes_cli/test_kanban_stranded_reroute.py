@@ -111,6 +111,68 @@ def test_a_claimed_card_is_not_rerouted(hub):
     assert _runs_on(hub.conn, tid) == ["hermes-hub"]
 
 
+@pytest.mark.parametrize("status", ["blocked", "todo", "scheduled", "triage"])
+def test_a_card_that_is_not_ready_is_not_rerouted(hub, status):
+    """``move_queued`` alone would move a blocked/todo/scheduled card: the ready-only guard is the fence."""
+    tid = _legacy_card(hub, ["hermes-hub"])
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, tid))
+    res = kcr.creator_repin(hub.conn, tid, OTHER_WORKER_TASK, runs_on=["machine:hub"], reason=REASON)
+    assert not res.get("ok") and res["reason_code"] == "not_creator_task", res
+    assert "not a ready, unclaimed card" in res["error"], res
+    assert _runs_on(hub.conn, tid) == ["hermes-hub"]
+
+
+@pytest.mark.parametrize("col,val,why", [
+    ("lease_holder", "worker-1", "not a ready, unclaimed card"),
+    ("current_run_id", 999, "not a ready, unclaimed card"),
+    ("created_on", "worker-1", "ask its home"),
+])
+def test_a_held_or_foreign_card_is_not_rerouted(hub, col, val, why):
+    tid = _legacy_card(hub, ["hermes-hub"])
+    with kb.write_txn(hub.conn):
+        hub.conn.execute(f"UPDATE tasks SET {col} = ? WHERE id = ?", (val, tid))
+    res = kcr.creator_repin(hub.conn, tid, OTHER_WORKER_TASK, runs_on=["machine:hub"], reason=REASON)
+    assert not res.get("ok") and res["reason_code"] == "not_creator_task", res
+    assert why in res["error"], res
+    assert _runs_on(hub.conn, tid) == ["hermes-hub"]
+
+
+def test_a_non_primary_board_is_not_rerouted(hub, monkeypatch):
+    tid = _legacy_card(hub, ["hermes-hub"])
+    monkeypatch.setattr(sync, "board_mode", lambda conn: "mirror")
+    res = kcr.creator_repin(hub.conn, tid, OTHER_WORKER_TASK, runs_on=["machine:hub"], reason=REASON)
+    assert not res.get("ok") and res["reason_code"] == "not_creator_task", res
+    assert "not a Board primary" in res["error"], res
+    assert _runs_on(hub.conn, tid) == ["hermes-hub"]
+
+
+def _created_child(hub, labels):
+    hub.enter()
+    creator = kb.create_task(hub.conn, title="creator", assignee="default")
+    tid = kb.create_task(hub.conn, title="child", assignee="default", creator_task_id=creator)
+    with kb.write_txn(hub.conn):
+        wn.set_runs_on(hub.conn, tid, labels)
+    hub.round()
+    return creator, tid
+
+
+def test_the_creator_reroutes_its_own_stranded_card(hub):
+    creator, tid = _created_child(hub, ["hermes-hub"])
+    res = kcr.creator_repin(hub.conn, tid, creator, runs_on=["machine:hub"], reason=REASON)
+    assert res.get("ok"), res
+    assert _runs_on(hub.conn, tid) == ["machine:hub"]
+    assert any(creator in c.body and "['hermes-hub']" in c.body for c in kb.list_comments(hub.conn, tid))
+
+
+def test_the_creator_still_cannot_move_a_satisfiable_ordinary_card(hub):
+    creator, tid = _created_child(hub, ["linux"])
+    res = kcr.creator_repin(hub.conn, tid, creator, runs_on=["machine:hub"], reason=REASON)
+    assert not res.get("ok") and res["reason_code"] == "not_repinnable", res
+    assert "deliberate placement" in res["error"], res
+    assert _runs_on(hub.conn, tid) == ["linux"]
+
+
 # --- diagnostic -----------------------------------------------------------------------------------------------
 
 def _ready_row(labels, age=6 * 3600, now=1_800_000_000):
