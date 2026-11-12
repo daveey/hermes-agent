@@ -220,9 +220,12 @@ def _lift_misplaced_entry_name(raw_args: Any) -> Optional[tuple[str, Any]]:
                 or canonical in BRIDGE_TOOL_NAMES):
             return None
         return inner, rest.get("arguments")
-    # Beside params: only a registered tool with a known schema that declares no `name`.
+    # Beside params: only a registered tool with a known schema that declares no `name`,
+    # and every other key must be one of THAT tool's params. Otherwise `name` may be an
+    # argument of some other tool Y (e.g. skill_view(name=X, file_path=...)) whose value
+    # happens to be a tool name, and lifting would reroute Y's call to X.
     declared = _declared_parameter_names(canonical)
-    if declared is None or "name" in declared:
+    if declared is None or "name" in declared or not set(rest) <= declared:
         return None
     return inner, rest
 

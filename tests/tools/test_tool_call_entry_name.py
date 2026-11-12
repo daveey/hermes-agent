@@ -80,6 +80,21 @@ def test_name_beside_params_is_kept_when_the_tool_declares_name():
 
 
 @pytest.mark.parametrize("args", [
+    # A nameless call to another tool Y, e.g. skill_view(name=X, file_path=...), whose own
+    # `name` argument happens to equal a registered tool X: rerouting it to X would run a
+    # tool the model never chose. Every other key must be one of X's declared params.
+    {"name": "fake_action_request", "file_path": "references/api.md"},
+    {"name": "fake_action_request", "request": {}, "file_path": "references/api.md"},
+])
+def test_name_beside_params_foreign_to_that_tool_is_not_rerouted(args):
+    entries, err = normalize_tool_call_entries({"calls": [{"arguments": args}]})
+    assert entries == []
+    assert "calls[0] requires a 'name'" in err
+    _, _, err = resolve_underlying_call({"calls": [{"arguments": args}]})
+    assert err and "calls[0] requires a 'name'" in err
+
+
+@pytest.mark.parametrize("args", [
     {"name": "not_a_registered_tool", "content": "x"},  # beside params, unknown tool
     {"name": "fake_no_props", "content": "x"},  # beside params, schema declares nothing
     {"name": "not_a_registered_tool", "arguments": {}},  # nested envelope, unknown tool
