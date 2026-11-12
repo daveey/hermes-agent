@@ -16,7 +16,9 @@ WAKE_CHECK_SECRET = "wake_check_secret"
 
 def secret_error(cmd: str) -> Optional[str]:
     """Refusal text when ``redact_sensitive_text(cmd, force=True)`` would change ``cmd``, else None.
-    The message names only the redacted assignment, never the value."""
+    The message names the redacted assignment without its ``=`` (the output redactor read ``NAME=`.`` as an
+    assignment and masked the rest of the sentence), never the value. ``force=True`` is the check itself: a host
+    with redaction off (``security.redact_secrets: false``) refuses the same probes."""
     from agent.redact import redact_sensitive_text
 
     redacted = redact_sensitive_text(str(cmd), force=True)
@@ -28,7 +30,7 @@ def secret_error(cmd: str) -> Optional[str]:
         if op == "equal":
             continue
         m = re.match(r"^['\"]?([A-Za-z0-9_.\-]+)\s*=", red[b1]) if b1 < b2 else None
-        names.append(f"`{m.group(1)}=`" if m else f"the value after `{raw[a1 - 1]}`" if a1 else "its first word")
+        names.append(f"`{m.group(1)}`" if m else f"the value after `{raw[a1 - 1]}`" if a1 else "its first word")
     return (f"{WAKE_CHECK_SECRET}: this wake_check contains a secret or credential-shaped value at "
             f"{', '.join(names[:3])}. Probes run exactly as stored and the board never stores a "
             "secret, so it was not stored, run or masked. Never inline a secret in a probe: read it from env "

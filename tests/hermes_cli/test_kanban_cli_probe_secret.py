@@ -74,7 +74,7 @@ def test_cli_park_with_inline_secret_is_refused_and_stores_nothing(kanban_home, 
     rc = _run(verb[0], tid, *verb[1:], "--wake-check", SECRET_PROBE)
     out = capsys.readouterr()
     assert rc == 2
-    assert "wake_check_secret" in out.err and "OPENAI_API_KEY=" in out.err
+    assert "wake_check_secret" in out.err and "`OPENAI_API_KEY`" in out.err
     assert SECRET not in out.err + out.out  # the refusal never echoes the secret
     cmd, events, comments, status = _stored(tid)
     assert cmd is None and status == "running"
