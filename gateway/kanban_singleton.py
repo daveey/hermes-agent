@@ -125,12 +125,23 @@ def _environ_home(pid: int) -> Optional[str]:
 def holder_info(lock_path: Path) -> Optional[dict]:
     """``{pid, hermes_home, root, since}`` for the process holding *lock_path*, or None when free/unknown.
 
-    The pid comes from ``/proc/locks`` when readable (authoritative), else from the holder sidecar
-    while that pid is alive. ``since`` is the wall time the holder took the lock (sidecar), or None.
+    The pid is verified against the sidecar candidate's Linux fdinfo, then discovered
+    through ``/proc/locks``; elsewhere a live sidecar pid is used. ``since`` is the
+    wall time the holder took the lock (sidecar), or None.
     """
     lock_path = Path(lock_path)
     side = _read_json(_sidecar(lock_path, "holder.json")) or {}
-    pid = _lock_holder_pid(lock_path)
+    # The global /proc/locks table can omit a held lock during unrelated churn.
+    # A sidecar is only a candidate: verify its exact PID/device/inode in fdinfo.
+    pid = None
+    side_pid = side.get("pid")
+    if isinstance(side_pid, int) and side_pid > 0:
+        from gateway.kanban_dispatcher_health import _owns_lock
+        with contextlib.suppress(OSError):
+            if _owns_lock(lock_path, side_pid):
+                pid = side_pid
+    if pid is None:
+        pid = _lock_holder_pid(lock_path)
     if pid is None:
         side_pid = side.get("pid")
         # With /proc/locks readable a free lock means no holder; elsewhere trust a live sidecar pid.
