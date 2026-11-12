@@ -37,7 +37,7 @@ def _detail(error: Any) -> str:
     return RESTART_CUT_REASON if not error or error == RESTART_CUT_REASON else f"{RESTART_CUT_REASON} ({error})"
 
 
-def _reschedule(job_id: str, execution_id: str) -> bool:
+def _reschedule(job_id: str, execution_id: str, *, deferred: bool = False) -> bool:
     from cron.executions import get_execution
     from cron.restart_rerun import reschedule_interrupted
 
@@ -45,7 +45,7 @@ def _reschedule(job_id: str, execution_id: str) -> bool:
     if record is None or record.get("job_id") != job_id:
         return False
     try:
-        return reschedule_interrupted(record, restart_cut=True)
+        return reschedule_interrupted(record, restart_cut=True, deferred=deferred)
     except Exception:  # health: allow BLE001 -- the attempt is already booked; a missed rerun is logged
         logger.warning("cron: rescheduling %s after its restart cut failed", job_id, exc_info=True)
         return False
@@ -147,7 +147,7 @@ def defer_unadmitted(job: dict[str, Any], execution_id: str, detail: str, fire_o
         _retire_journal(job_id, execution_id)
     else:
         scheduler.finish_execution(execution_id, success=False, error=note, delivery_outcome="suppressed")
-    rearmed = _reschedule(job_id, execution_id)
+    rearmed = _reschedule(job_id, execution_id, deferred=True)
     if not recovered and fire_owner:  # a gone firer's claim names a dead process: the next claim reclaims it
         _release_own_claim(job_id, fire_owner, note)
     logger.warning("Cron %s %s: %s", job_id, "deferred" if rearmed else "not re-armed", note)

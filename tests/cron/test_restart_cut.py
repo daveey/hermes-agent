@@ -332,3 +332,82 @@ def test_draining_refusal_whose_absence_check_was_lost_is_deferred_by_recovery(h
     assert saved.get("last_status") is None and int(saved.get("failure_streak") or 0) == 0
     assert not scheduler_authority.journal_path(job["id"], fire).exists()
     _assert_rerun_once(job["id"], fire, natural_next=natural_next)
+
+
+def _defer_while_draining(job_id, monkeypatch, owner_ops):
+    from hermes_state_runtime import RuntimeStoreError
+
+    def refuse(_params):
+        raise RuntimeStoreError("runtime_draining")
+
+    owner_ops["submit"] = refuse
+    owner_ops["recover"] = lambda params: {"status": "missing"}
+    claimed = jobs.claim_job_for_fire(job_id, return_job=True) or \
+        jobs.claim_job_for_fire(job_id, force=True, return_job=True)
+    assert isinstance(claimed, dict)
+    scheduler.run_one_job(claimed)
+    assert "deferred" in executions.get_execution(claimed["execution_id"])["error"]
+    assert _due(job_id)
+
+
+def _cut_next_attempt(job_id, monkeypatch):
+    def run_job(job, **_kwargs):
+        job["_restart_cut"] = True
+        return (False, "", "", "interrupted")
+
+    monkeypatch.setattr(scheduler, "run_job", run_job)
+    attempt = jobs.claim_job_for_fire(job_id, return_job=True)
+    assert isinstance(attempt, dict)
+    assert scheduler.run_one_job(attempt) is True
+    return attempt["execution_id"]
+
+
+def test_first_run_after_a_deferral_cut_by_a_restart_is_still_rerun(home, monkeypatch, owner_ops):
+    """Hub live proof (b5b0e485e75e): a run-now deferred while draining, then its real attempt on the
+    new gateway cut by the next update, was logged "itself a restart rerun" and never rerun. A
+    deferral re-arms a fire that never ran, so it spends no rerun."""
+    job = jobs.create_job(prompt="probe", schedule=FAR_FUTURE, name="probe", deliver="local")
+    natural_next = job["next_run_at"]
+    _defer_while_draining(job["id"], monkeypatch, owner_ops)
+
+    cut = _cut_next_attempt(job["id"], monkeypatch)
+
+    saved = jobs.get_job(job["id"])
+    assert int(saved.get("failure_streak") or 0) == 0
+    assert executions.get_execution(cut)["delivery_outcome"] == "suppressed"
+    _assert_rerun_once(job["id"], cut, natural_next=natural_next)
+
+
+def test_rerun_after_a_deferral_cut_again_is_not_rerun(home, monkeypatch, owner_ops):
+    """The deferral spends no rerun, but the one rerun still holds: deferral -> cut -> rerun -> cut
+    waits for the schedule."""
+    job = jobs.create_job(prompt="probe", schedule=FAR_FUTURE, name="probe", deliver="local")
+    _defer_while_draining(job["id"], monkeypatch, owner_ops)
+    first_cut = _cut_next_attempt(job["id"], monkeypatch)
+    assert _due(job["id"])
+    _cut_next_attempt(job["id"], monkeypatch)
+    saved = jobs.get_job(job["id"])
+    assert saved["restart_rerun"]["execution_id"] == first_cut
+    assert not _due(job["id"]), "a rerun cut again waits for its schedule"
+
+
+def test_deferring_a_pending_rerun_keeps_it_a_rerun(home, monkeypatch, owner_ops):
+    """A rerun refused while draining is deferred, but stays the rerun: cut again, it is not rerun."""
+    job = jobs.create_job(prompt="probe", schedule=FAR_FUTURE, name="probe", deliver="local")
+
+    def run_job(job, **_kwargs):
+        job["_restart_cut"] = True
+        return (False, "", "", "interrupted")
+
+    real_run_job = scheduler.run_job
+    monkeypatch.setattr(scheduler, "run_job", run_job)
+    first = jobs.claim_job_for_fire(job["id"], force=True, return_job=True)
+    assert scheduler.run_one_job(first) is True
+    rerun_at = jobs.get_job(job["id"])["restart_rerun"]["at"]
+    monkeypatch.setattr(scheduler, "run_job", real_run_job)  # the rerun goes to the draining owner
+    _defer_while_draining(job["id"], monkeypatch, owner_ops)
+    marker = jobs.get_job(job["id"])["restart_rerun"]
+    assert marker["at"] == rerun_at and not marker.get("deferred")
+
+    _cut_next_attempt(job["id"], monkeypatch)
+    assert not _due(job["id"]), "the deferred rerun, cut again, waits for its schedule"
