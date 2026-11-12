@@ -22,7 +22,7 @@ import pytest
 
 from hermes_cli import update_cmd_posix_pause as pause
 
-pytestmark = pytest.mark.platforms("posix")
+pytestmark = pytest.mark.platforms("linux")
 
 BOUND = 4.0  # the scaled-down stand-in for the 30 s pre-swap bound
 SLACK = 1.5  # scheduling slack on a loaded CI box
@@ -384,21 +384,6 @@ def test_idle_only_still_prints_and_continues_on_unmanageable(monkeypatch, capsy
     monkeypatch.setattr(pause, "_left_running", lambda u, j: (u, j, ["  ↷ x keeps running"]))
     assert pause._pause(pause._empty_token()) is None  # nothing left to stop: unchanged behaviour
     assert "x keeps running" in capsys.readouterr().out
-
-
-def test_macos_ignores_the_opt_in_and_stays_idle_only(monkeypatch, capsys):
-    monkeypatch.setenv(pause.STOP_BUSY_ENV, "1")
-    monkeypatch.setattr(pause, "_is_linux", lambda: False)
-    assert not pause._stop_busy_opted_in()
-    monkeypatch.setattr(pause, "_stop_busy_gateways", lambda *a: pytest.fail("busy stop on macOS"))
-    asked = []
-    monkeypatch.setattr(pause, "_ask_to_drain", lambda e: asked.append(e) or False)
-    from hermes_cli import update_pause_record as record
-    monkeypatch.setattr(record, "mark_stop_sent", lambda *a: None)
-    monkeypatch.setattr(record, "mark_stop_refused", lambda *a: None)
-    with pytest.raises(pause.PauseRefused):
-        pause._stop_gateways({}, [{"pid": 4242, "kind": "launchd", "label": "ai.hermes.gateway", "home": "/h"}])
-    assert asked  # the idle-only verb, which a busy gateway answers with a deferral
 
 
 def test_recovery_is_announced_as_its_own_phase(monkeypatch, capsys):

@@ -311,7 +311,7 @@ def _busy_gateway_at_commit_point(tmp_path, monkeypatch, *, active_work=7):
     return order, runner, root, head(), _fake_clock(monkeypatch)
 
 
-@pytest.mark.platforms("posix")
+@pytest.mark.platforms("linux")
 def test_opted_in_update_stops_a_busy_gateway_within_the_bound_before_any_tree_move(tmp_path, monkeypatch):
     from hermes_cli import update_cmd_commit as commit
     order, runner, root, start_head, now = _busy_gateway_at_commit_point(tmp_path, monkeypatch)
@@ -344,7 +344,7 @@ def test_without_the_opt_in_a_busy_gateway_defers_and_nothing_is_stopped(tmp_pat
     assert now[0] == 0.0
 
 
-@pytest.mark.platforms("posix")
+@pytest.mark.platforms("linux")
 def test_opted_in_update_stops_a_gateway_that_predates_the_pause_verbs_at_once(monkeypatch):
     """hermes-hub's pinned askeve gateways: no idle verb, so the default path refuses them forever."""
     from gateway import control_socket
@@ -368,7 +368,7 @@ def test_opted_in_update_stops_a_gateway_that_predates_the_pause_verbs_at_once(m
     assert now[0] == 0.0  # a supervised gateway that cannot drain is not waited for
 
 
-@pytest.mark.platforms("posix")
+@pytest.mark.platforms("linux")
 def test_opted_in_stop_that_fails_still_refuses_the_move(tmp_path, monkeypatch):
     from hermes_cli import update_cmd_commit as commit
     order, _runner, root, _head, _now = _busy_gateway_at_commit_point(tmp_path, monkeypatch)
@@ -379,6 +379,28 @@ def test_opted_in_stop_that_fails_still_refuses_the_move(tmp_path, monkeypatch):
 
     assert "systemctl stop failed" in refused and "the checkout was not changed" in refused
     assert order == ["drain", "resume"]  # rolled back under the fence, never armed
+
+
+@pytest.mark.parametrize("native", [
+    pytest.param(False, marks=pytest.mark.platforms("posix")),
+    pytest.param(True, marks=pytest.mark.platforms("macos")),
+])
+def test_macos_ignores_the_opt_in_and_stays_idle_only(monkeypatch, native):
+    # The native case exercises the real platform predicate on macOS CI; the
+    # simulated case keeps the refusal contract exercised on Linux as well.
+    if not native:
+        monkeypatch.setattr(pause, "_is_linux", lambda: False)
+    monkeypatch.setenv(pause.STOP_BUSY_ENV, "1")
+    assert not pause._stop_busy_opted_in()
+    monkeypatch.setattr(pause, "_stop_busy_gateways", lambda *a: pytest.fail("busy stop on macOS"))
+    asked = []
+    monkeypatch.setattr(pause, "_ask_to_drain", lambda e: asked.append(e) or False)
+    monkeypatch.setattr(record, "mark_stop_sent", lambda *a: None)
+    monkeypatch.setattr(record, "mark_stop_refused", lambda *a: None)
+    entry = {"pid": 4242, "kind": "launchd", "label": "ai.hermes.gateway", "home": "/h"}
+    with pytest.raises(pause.PauseRefused):
+        pause._stop_gateways({}, [entry])
+    assert asked == [entry]
 
 
 def test_the_opt_in_is_not_inherited_by_a_replayed_gateway():
