@@ -109,8 +109,12 @@ def _clock(ts: int, base_day) -> tuple[str, str]:
     return f"{day}{when:%H:%M}", when.strftime("%Z")
 
 
-def since_line(status: str, events, anchor: int) -> Optional[str]:
-    """The replacement line, or ``None`` while the card still waits on the same block."""
+def since_line(status: str, events, anchor: int, current=None) -> Optional[str]:
+    """The replacement line, or ``None`` while the card still waits on the same block.
+
+    ``current`` is the card's live ``tasks.human_request``. Only a live ask counts as "a newer one"
+    (review F10): an old blocked event is no proof one exists, e.g. after unblock then gave_up.
+    Callers drop the case where ``current`` renders to this very ask before calling."""
     from zoneinfo import ZoneInfo
     later = [ev for ev in events[anchor + 1:] if ev[1] in _LABELS and not ev[3].get("metadata_only")]
     if status in {"blocked", "triage"} and not later:
@@ -125,8 +129,7 @@ def since_line(status: str, events, anchor: int) -> Optional[str]:
     if not later or _LAST_STATUS.get(later[-1][1]) != status:
         text = f"{text}; now {status}" if text else f"now {status}"
     if status in {"blocked", "triage"}:
-        newest = next((ev for ev in reversed(events) if ev[1] in _BLOCK_KINDS), None)
-        if newest is not None and isinstance(newest[3].get("human_request"), dict):
+        if isinstance(current, dict) and current:
             return f"Since then: {text}. This ask was replaced by a newer one; answer that, not this."
         return f"Since then: {text}. This ask no longer applies; the card is blocked on something else."
     return f"Since then: {text}. No action needed."
@@ -180,7 +183,7 @@ def _stale_line(text: str, pos: int, link_end: int, board: str, tid: str, card, 
         if rendered is not None and len(rendered) == link_end - pos and text.startswith(rendered, pos):
             return None  # the card's live ask is this very ask (review F8): it stands
     anchor = _anchor(events, owner)
-    return since_line(status, events, anchor) if anchor is not None else None
+    return since_line(status, events, anchor, current) if anchor is not None else None
 
 
 def _ask_marks(text: str):
@@ -200,7 +203,12 @@ def refresh_stale_ask(text):
 
     Asks are resolved in text order. An ask inside an earlier owned ask's span is a quotation in that
     ask's fields and is never touched (review F7). The first ask no card verifiably owns ends the scan:
-    its fields could run anywhere, so nothing after it is trusted."""
+    its fields could run anywhere, so nothing after it is trusted.
+
+    Limits, by intent: only quotes inside an owned ask's span are protected; a stale ask quoted
+    elsewhere (e.g. in another notice's Reason) is refreshed, which stays truthful (review O1). A
+    remote or unreadable link anywhere in the scanned links leaves the whole text unchanged, even an
+    earlier stale ask: fail closed (review O2)."""
     if not isinstance(text, str) or ASK_MARK not in text:
         return text
     cache = {}

@@ -380,6 +380,26 @@ def test_reblock_with_the_same_ask_into_triage_keeps_the_ask(tmp_path, monkeypat
     assert refresh_stale_ask(text) == text
 
 
+def test_gave_up_into_triage_without_a_new_ask_says_it_no_longer_applies(tmp_path, monkeypatch):
+    """Review F10: blocked, unblocked, then the worker gives up into triage with no ask. No newer ask
+    exists, so the line must not send the reader to one."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect_closing
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    tid, task = _blocked_card()
+    text = _wake_text(tid, task)
+    with connect_closing() as conn:
+        assert kb.unblock_task(conn, tid)
+        conn.execute("UPDATE tasks SET status='triage', human_request=NULL WHERE id=?", (tid,))
+        kb._append_event(conn, tid, "gave_up", {})
+        conn.commit()
+    out = refresh_stale_ask(text)
+    assert "Next action for the user" not in out
+    assert "replaced by a newer one" not in out
+    assert "This ask no longer applies" in out and "now triage" in out
+
+
 def test_many_ask_marks_on_one_long_line_are_fast(tmp_path, monkeypatch):
     """Review F9: tens of thousands of ask marks on one long line must not cost seconds."""
     import time
