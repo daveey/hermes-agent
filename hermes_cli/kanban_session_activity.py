@@ -666,7 +666,8 @@ _REPLICA_PROBE = ("SELECT count(*), count(seq), max(seq), total(seq), total(vers
 def _read_remote_links(path: Path, now: float | None = None, *,
                        qualified_out: set | None = None,
                        owners_out: set | None = None,
-                       moved_out: dict | None = None) -> list[dict[str, Any]]:
+                       moved_out: dict | None = None,
+                       closed_out: set | None = None) -> list[dict[str, Any]]:
     """Replica cards linked to a session on this gateway, one row per (session, card).
 
     Open and unproven cards come back ``unfinished``; cards their owner attests closed
@@ -711,6 +712,8 @@ def _read_remote_links(path: Path, now: float | None = None, *,
                     owners_out.update(memo[5])
                 if moved_out is not None:
                     moved_out.update(memo[9])
+                if closed_out is not None:
+                    closed_out.update(memo[10])
                 return list(memo[3])  # cards are read-only, as in ``_links_cache``
         if key is not None:  # [daveey] a miss reads and re-projects only the rows whose seq moved
             view = _replica_rows.read(conn, path, version_column, probe, ident)
@@ -724,24 +727,28 @@ def _read_remote_links(path: Path, now: float | None = None, *,
         conn.close()
     if key is None:
         return _project_replica(path, now, me, rows, info_rows, last_ok, offline,
-                                qualified_out=qualified_out, owners_out=owners_out, moved_out=moved_out)
+                                qualified_out=qualified_out, owners_out=owners_out, moved_out=moved_out,
+                                closed_out=closed_out)
     qualified: set = set()
     owners: set = set()
     moved: dict = {}
+    closed: set = set()
     seen_at: dict[str, float] = {}
     cards = _replica_projection.project(view, now, me, info_rows, last_ok, offline, fresh=key[3],
                                         qualified_out=qualified, owners_out=owners, seen_out=seen_at,
-                                        moved_out=moved)
+                                        moved_out=moved, closed_out=closed)
     # Heartbeat cut-offs are the live verdicts in ``key``, hub staleness the ``stale`` check; a clock step back rereads.
     _remote_read_memo = (key, now, None, list(cards),
                          frozenset(qualified), frozenset(owners), stale, _replica_synced(seen_at, last_ok),
-                         dict(seen_at), dict(moved))
+                         dict(seen_at), dict(moved), frozenset(closed))
     if qualified_out is not None:
         qualified_out.update(qualified)
     if owners_out is not None:
         owners_out.update(owners)
     if moved_out is not None:
         moved_out.update(moved)
+    if closed_out is not None:
+        closed_out.update(closed)
     return cards
 
 
@@ -758,7 +765,7 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
                      offline: float | None, *, qualified_out: set | None = None, owners_out: set | None = None,
                      horizon_out: list[float] | None = None,
                      seen_out: dict[str, float] | None = None,
-                     moved_out: dict | None = None) -> list[dict[str, Any]]:
+                     moved_out: dict | None = None, closed_out: set | None = None) -> list[dict[str, Any]]:
     """``_read_remote_links`` of rows already read. ``horizon_out`` collects every wall time after ``now`` at which
     the same rows could project differently (hub-sync staleness, scope-heartbeat freshness)."""
     stale = offline is not None or last_ok is None or now - last_ok > HUB_STALE_AFTER_S
@@ -800,6 +807,8 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
             raw[key] = t
             if _owner_attests_terminal(t, str(gw), owner_profile, board, heartbeats, now, stale, evidence):
                 released.add(key)
+                if closed_out is not None and evidence.get('verified') is True:
+                    closed_out.add(key)
             elif owner_profile is None or t.get('status') not in LISTED_STATUSES:
                 # Legacy links carry no authoritative release receipt. Preserve
                 # terminal/unknown reports even on cold start; only owner-attested
@@ -1162,9 +1171,9 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
         if path is None:
             raise FileNotFoundError("no hub.db")
         qualified: set[tuple[str, str, str]] = set()
-        owners: set[tuple[str, str, str]] = set()
+        closed: set[tuple[str, str | None, str, str]] = set()
         moved: dict[str, Any] = {}
-        cards = _read_remote_links(path, qualified_out=qualified, owners_out=owners, moved_out=moved)
+        cards = _read_remote_links(path, qualified_out=qualified, closed_out=closed, moved_out=moved)
     except Exception as exc:  # a broken replica must never break the sidebar
         if previous is None:
             if path is not None:
@@ -1188,8 +1197,10 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
                  # Successful reads migrate graph-inferred cache entries only.
                  # Receipt-backed obligations remain in the separate ledger.
                  and c.get("via") != "descendant"
-                 # Fresh replica + owner row present but this session's link gone: expire the ghost.
-                 and (c.get("gateway"), c.get("board"), c.get("id")) not in owners
+                 # Fresh replica: the owner row (exact profile) dropped this session's link and verifies the
+                 # completion: expire the ghost. An open or unverified row keeps it: a reprovisioned owner
+                 # republishes its cards with ``sessions: []`` (hub, 2026-11-11). [daveey]
+                 and (c.get("gateway"), c.get("profile"), c.get("board"), c.get("id")) not in closed
                  and not (c.get("ownership_state") == "unknown"
                           and (c["session"], c.get("gateway"), c.get("board"), c.get("id")) in qualified_now)
                  # Fresh replica: the named owner publishes the scope without it, another gateway owns the card.

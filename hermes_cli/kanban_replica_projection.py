@@ -88,6 +88,7 @@ class _Stage:
         't',
         'tkey',
         'unknown',
+        'verified',
     )
 
 
@@ -120,6 +121,9 @@ def _stage(row: tuple, me: str, origin_profile: str) -> _Stage:
     st.seen = (updated or 0) / 1000.0
     st.attest = ((gw, owner_profile, board) if record_attests_terminal(t, gw, owner_profile, board, evidence)
                  else None)
+    # [daveey] Verified completion (``kanban_origin_ledger._verified_terminal``): only such a record expires a
+    # retained link it no longer carries (``_legacy_remote_links``).
+    st.verified = st.attest is not None and evidence.get('verified') is True
     st.unknown = ({**t, 'reported_status': t.get('status'), 'status': 'unknown', 'unfinished': True}
                   if owner_profile is None or t.get('status') not in LISTED_STATUSES else None)
     created = t.get('created_at')
@@ -152,6 +156,7 @@ class _State:
     legacy_keys: set
     linked: set
     order: dict  # tkey -> its (gw, key) in ``stages``
+    closed: set  # released tkeys whose owner verified the completion
 
 
 _lock = threading.Lock()
@@ -160,7 +165,7 @@ stats = {"projected": 0, "rebuilt": 0, "historical": 0, "considered": 0}
 
 
 def _new_state(tag: str, key: tuple) -> _State:
-    return _State(tag, None, key, {}, {}, {}, {}, set(), {}, {}, set(), {}, {}, {}, {}, {}, set(), set(), {})
+    return _State(tag, None, key, {}, {}, {}, {}, set(), {}, {}, set(), {}, {}, {}, {}, {}, set(), set(), {}, set())
 
 
 def _apply(s: _State, rk: tuple, st: _Stage) -> None:
@@ -183,6 +188,8 @@ def _apply(s: _State, rk: tuple, st: _Stage) -> None:
         s.seen[gw] = max(s.seen.get(gw, 0.0), st.seen)
     if st.attest is not None and not stale and st.attest in fresh:
         s.released.add(tk)
+        if st.verified:
+            s.closed.add(tk)
         s.tasks[tk] = st.t
     else:
         s.tasks[tk] = st.unknown if st.unknown is not None else st.t
@@ -204,6 +211,7 @@ def _unapply(s: _State, rk: tuple) -> None:
     for d in (s.raw, s.order, s.tasks, s.legacy):
         d.pop(tk, None)
     s.released.discard(tk)
+    s.closed.discard(tk)
     s.legacy_keys.discard(tk)
     s.linked.discard(tk)
     if st.legacy is None:
@@ -276,7 +284,8 @@ def _rekeyed(old: _State, key: tuple) -> _State:
 
 def project(view, now: float, me: str, info_rows: list, last_ok: float | None, offline: float | None, *,
             fresh: frozenset, qualified_out: set | None = None, owners_out: set | None = None,
-            seen_out: dict | None = None, moved_out: dict | None = None) -> list[dict[str, Any]]:
+            seen_out: dict | None = None, moved_out: dict | None = None,
+            closed_out: set | None = None) -> list[dict[str, Any]]:
     """``_project_replica(path, now, me, view.rows(), info_rows, last_ok, offline, ...)``, incrementally.
     ``fresh`` is ``fresh_scopes`` of ``info_rows``' heartbeats at ``now``: all the projection reads of them."""
     from hermes_cli.profiles import get_active_profile_name
@@ -299,7 +308,7 @@ def project(view, now: float, me: str, info_rows: list, last_ok: float | None, o
         while len(_states) > 16:
             _states.pop(next(iter(_states)))
         return _emit(s, me, origin_profile, last_ok, stale, fresh, qualified_out=qualified_out,
-                     owners_out=owners_out, seen_out=seen_out, moved_out=moved_out)
+                     owners_out=owners_out, seen_out=seen_out, moved_out=moved_out, closed_out=closed_out)
 
 
 def _hub_stale_after() -> float:
@@ -308,7 +317,7 @@ def _hub_stale_after() -> float:
 
 
 def _emit(s: _State, me: str, origin_profile: str, last_ok, stale: bool, fresh: frozenset, *, qualified_out,
-          owners_out, seen_out, moved_out) -> list[dict[str, Any]]:
+          owners_out, seen_out, moved_out, closed_out=None) -> list[dict[str, Any]]:
     if s.errors:
         raise s.errors[min(s.errors, key=lambda rk: s.errors[rk].order)].error
     _settle_seen(s)
@@ -316,6 +325,8 @@ def _emit(s: _State, me: str, origin_profile: str, last_ok, stale: bool, fresh: 
         seen_out.update(s.seen)
     if owners_out is not None and not stale:
         owners_out.update(s.owners)
+    if closed_out is not None:  # ``s.closed`` is empty on a stale replica (``_apply``)
+        closed_out.update(s.closed)
     if moved_out is not None and not stale:
         moved_out.update({'published': dict(s.published_out), 'live_scopes': fresh})
     # Fold only the legacy records and every qualified record sharing their (gw, board, id): exactly the inputs

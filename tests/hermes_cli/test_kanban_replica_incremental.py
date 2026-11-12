@@ -56,18 +56,20 @@ class World:
 
     def both(self):
         """(live, explicit, live outs, explicit outs) at one instant; the explicit read is the full path."""
-        outs = [(set(), set(), {}), (set(), set(), {})]
+        outs = [(set(), set(), {}, set()), (set(), set(), {}, set())]
         live = activity._read_remote_links(self.path, qualified_out=outs[0][0], owners_out=outs[0][1],
-                                           moved_out=outs[0][2])
+                                           moved_out=outs[0][2], closed_out=outs[0][3])
         full = activity._read_remote_links(self.path, now=self.clock['now'], qualified_out=outs[1][0],
-                                           owners_out=outs[1][1], moved_out=outs[1][2])
+                                           owners_out=outs[1][1], moved_out=outs[1][2], closed_out=outs[1][3])
         return live, full, outs[0], outs[1]
 
-    def same(self):
+    def same(self, closed=None):
         replica_rows.stats.update(dict.fromkeys(replica_rows.stats, 0))
         projection.stats.update(dict.fromkeys(projection.stats, 0))
         live, full, live_outs, full_outs = self.both()
         assert live == full and live_outs == full_outs
+        if closed is not None:  # released records whose owner verified the completion (ghost expiry)
+            assert live_outs[3] == closed
         return live
 
 
@@ -117,13 +119,22 @@ def test_steps_through_inserts_updates_deletes_and_scope_changes_equal_the_full_
 
     w.put('work/build/t_16', json.dumps(observed(card('t_16', status='done'))))  # owner attests it closed
     w.tick(1015.0)
-    rows = w.same()
+    rows = w.same(closed=set())  # closed, but its completion is not verified
     assert {r['id']: r['released'] for r in rows}['t_16'] is True and projection.stats['projected'] == 1
+    verified = observed(card('t_17', status='done', sessions=[]))
+    verified['origin_observation']['verified'] = True  # not hashed: the observation covers the payload only
+    w.put('work/build/t_17', json.dumps(verified))
+    w.tick(1016.0)
+    w.same(closed={('owner', 'work', 'build', 't_17')})
+    w.same(closed={('owner', 'work', 'build', 't_17')})  # unchanged rows: the memo answers, closed included
+    w.put('work/build/t_17', json.dumps(card('t_17', status='ready', sessions=[])))  # reopened
+    w.tick(1017.0)
+    w.same(closed=set())
 
     _scopes(w.path, [], seq=w.seq + 1)  # the owner scope goes away: the release no longer holds
     w.seq += 1
     w.tick(1020.0)
-    rows = w.same()
+    rows = w.same(closed=set())
     assert {r['id']: r['released'] for r in rows}['t_16'] is False
     assert (projection.stats['projected'], projection.stats['rebuilt'], projection.stats['historical']) == (0, 1, 0)
     assert replica_rows.stats['delta_rows'] == 0

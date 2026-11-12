@@ -179,14 +179,28 @@ def test_unchanged_inventory_is_written_once(replica):
 
 
 def test_dropped_link_on_fresh_replica_expires_ghost(replica, monkeypatch):
+    """Only an owner row (exact profile) that verifies the completion expires the retained link."""
     _, _, card = replica
-    card.update(gateway='owner', board='work', id='t_one')
+    card.update(gateway='owner', profile='work', board='build', id='t_one')
     activity._legacy_remote_links()
-    def read(path, owners_out=None, **kw):
-        owners_out.add(('owner', 'work', 't_one'))
+    def read(path, *, closed_out, **kw):
+        closed_out.add(('owner', 'work', 'build', 't_one'))
         return []
     monkeypatch.setattr(activity, '_read_remote_links', read)
     assert activity._legacy_remote_links() == []
+
+
+@pytest.mark.parametrize('closed', [set(), {('owner', None, 'build', 't_one')}, {('owner', 'other', 'build', 't_one')}])
+def test_dropped_link_without_verified_closure_keeps_stale_ghost(replica, monkeypatch, closed):
+    """An open/unverified owner row (or another profile's closed one) without this session's link keeps it."""
+    _, _, card = replica
+    card.update(gateway='owner', profile='work', board='build', id='t_one')
+    activity._legacy_remote_links()
+    def read(path, *, closed_out, **kw):
+        closed_out.update(closed)
+        return []
+    monkeypatch.setattr(activity, '_read_remote_links', read)
+    assert [(c['stale'], c['unfinished']) for c in activity._legacy_remote_links()] == [(True, True)]
 
 
 def test_missing_owner_keeps_stale_ghost(replica, monkeypatch):
