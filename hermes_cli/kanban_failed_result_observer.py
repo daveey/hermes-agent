@@ -20,6 +20,9 @@ POLL_SECONDS = 0.5
 START_SECONDS = 5.0
 # Bound retries for the short relocation fence, never the dispatcher tick lock.
 OPEN_SECONDS = 2.0
+# EX_CONFIG: deterministic startup failure; the service never restarts on it.
+STARTUP_FAILURE_EXIT = 78
+CONTEXT_KEYS = ('db', 'task_id', 'run_id', 'claim_lock')
 
 
 def arm(context):
@@ -199,9 +202,27 @@ def observe(context):
             time.sleep(POLL_SECONDS)
 
 
-if __name__ == '__main__':
-    context = json.loads(sys.argv[1])
-    observe(context)
+def main(argv):
+    """Run one observation; returns the process exit status.
+
+    [daveey] An import failure (``No module named 'ruamel'`` from a wrong
+    interpreter or a broken checkout) is deterministic: restarting replays it
+    forever. Exit ``STARTUP_FAILURE_EXIT``, which the service lists in
+    ``RestartPreventExitStatus``, so the manager retires the unit instead.
+    A missing or malformed context argument is equally deterministic.
+    """
+    try:
+        context = json.loads(argv[1])
+        if not isinstance(context, dict) or not context.get('db') or any(key not in context for key in CONTEXT_KEYS):
+            raise ValueError(f'context lacks {CONTEXT_KEYS}')
+    except (IndexError, TypeError, ValueError) as exc:
+        print(f'failed-result observer has no usable context, retiring: {exc!r}', file=sys.stderr)
+        return STARTUP_FAILURE_EXIT
+    try:
+        observe(context)
+    except ImportError as exc:
+        print(f'failed-result observer cannot import its code, retiring: {exc!r}', file=sys.stderr)
+        return STARTUP_FAILURE_EXIT
     # Only a successful terminal observation releases the readiness artifact.
     # Unexpected errors retain it and exit nonzero for manager restart.
     if context.get('ready_path'):
@@ -211,3 +232,8 @@ if __name__ == '__main__':
             ready.parent.rmdir()
         except FileNotFoundError:
             pass
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))

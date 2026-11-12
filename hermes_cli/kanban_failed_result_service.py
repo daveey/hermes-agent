@@ -12,6 +12,10 @@ from pathlib import Path
 from hermes_platform.resolver import locate_command
 
 OBSERVER_MODULE = 'hermes_cli.kanban_failed_result_observer'
+# Finite restart budget: at most this many starts per interval, then the unit fails
+# and ``--collect`` removes it. Committed results stay queued for crash recovery.
+START_LIMIT_BURST = 10
+START_LIMIT_INTERVAL_SECONDS = 300
 
 
 def observer_argv_env(env, context):
@@ -38,6 +42,7 @@ def arm_service(context, *, startup_seconds=5.0):
     from tools.environments.local import build_subprocess_env
     from tools.process_registry import systemd_user_bus_env
     from hermes_cli._startup_fast import project_root_str
+    from hermes_cli.kanban_failed_result_observer import STARTUP_FAILURE_EXIT
 
     binary = locate_command('systemd-run').command
     if not binary:
@@ -52,7 +57,13 @@ def arm_service(context, *, startup_seconds=5.0):
                '--property=Type=exec', '--property=Slice=app.slice',
                '--property=Restart=on-failure', '--property=RestartSec=500ms',
                '--property=RestartForceExitStatus=SIGTERM SIGHUP SIGINT SIGPIPE',
-               '--property=StartLimitIntervalSec=0',
+               # [daveey] A deterministic startup failure must retire the unit, not
+               # loop forever (~1.7k journal lines / 5 min). The observer exits
+               # STARTUP_FAILURE_EXIT on import/context errors; anything else that
+               # crashes it repeatedly still stops at the start limit.
+               f'--property=RestartPreventExitStatus={STARTUP_FAILURE_EXIT}',
+               f'--property=StartLimitIntervalSec={START_LIMIT_INTERVAL_SECONDS}s',
+               f'--property=StartLimitBurst={START_LIMIT_BURST}',
                f'--working-directory={project_root_str()}']
     # A manager-created service does not inherit its submitter's environment.
     # Keep profile/path resolution, without forwarding secrets or worker pins.
