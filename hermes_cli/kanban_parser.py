@@ -544,6 +544,10 @@ _SPECS = [
         _TASK_IDS,
         _reason("Optional reason/note — recorded as a comment before reopening. Quote multi-word reasons."),
     ], help="Send one or more review tasks back for changes (review -> ready/todo)"),
+    _cmd("resume", [
+        _TASK_ID,
+        _arg("--reason", required=True, help="Why this owner should continue its PR (recorded as an event + comment)"),
+    ], help="Operator-only: let a READY card held by the active_pr respawn guard run once more"),
     _cmd("promote", [
         _TASK_ID,
         _arg("reason", nargs="*", help="Audit-trail reason (recorded on the task_events row)"),

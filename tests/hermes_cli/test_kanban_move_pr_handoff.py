@@ -111,17 +111,23 @@ def test_operator_cli_preserves_checkpoint(gws, monkeypatch):
 
 
 
-@pytest.mark.parametrize("review,checkpoint,allowed", [
-    (False, "Resume existing PR", True),
-    (True, "Resume existing PR", True),
-    (False, "", False),
-    ("invalid", "Resume existing PR", False),
+@pytest.mark.parametrize("review,checkpoint,allowed,owned", [
+    (False, "Resume existing PR", True, True),
+    (True, "Resume existing PR", True, True),
+    # No move checkpoint: the owner's authenticated review park alone scopes the
+    # foreign-parent mirror on the importing worker (t_01a1cda0a1585230). [daveey]
+    (False, "", True, True),
+    (True, "", True, True),
+    ("invalid", "Resume existing PR", False, True),
+    ("invalid", "", False, True),
+    # Neither a move checkpoint nor an authenticated park: nothing to read, stays held.
+    (False, "", False, False),
 ])
-def test_operator_move_after_dependency_park(gws, monkeypatch, review, checkpoint, allowed):
+def test_operator_move_after_dependency_park(gws, monkeypatch, review, checkpoint, allowed, owned):
     hub, worker = gws
     hub.enter()
     monkeypatch.setattr(prs, "pr_state", lambda _: "OPEN")
-    task, _, clock = helpers.park(hub.conn, monkeypatch, finish=False)
+    task, _, clock = helpers.park(hub.conn, monkeypatch, finish=False, owned=owned)
     clock[0] += 1
     parent = kb.parent_ids(hub.conn, task)[0]
     assert kb.claim_task(hub.conn, parent)

@@ -272,7 +272,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair", "recover",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
-    "request-review", "request-changes", "reopen-review", "reopen",
+    "request-review", "request-changes", "reopen-review", "reopen", "resume",
     "gc", "origin-bind", "origin-create", "origin-adopt", "sync", "supervisor-requests",
 })
 
@@ -1577,6 +1577,11 @@ def _cmd_reopen_review(args: argparse.Namespace) -> int:
                            lambda tid: f"cannot reopen {tid} (not in review?)")
 
 
+def _cmd_resume(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_operator_resume import cmd
+    return cmd(args)
+
+
 def _cmd_promote(args: argparse.Namespace) -> int:
     reason = _joined_words(args.reason)
     author = _profile_author()
@@ -1882,7 +1887,7 @@ _HANDLERS = {
     "complete": _cmd_complete, "edit": _cmd_edit, "reopen": _cmd_reopen, "block": _cmd_block,
     "schedule": _cmd_schedule, "unblock": _cmd_unblock,
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
-    "reopen-review": _cmd_reopen_review, "promote": _cmd_promote,
+    "reopen-review": _cmd_reopen_review, "promote": _cmd_promote, "resume": _cmd_resume,
     "archive": _cmd_archive, "tail": _cmd_tail, "dispatch": _cmd_dispatch,
     "daemon": _cmd_daemon, "watch": _cmd_watch, "stats": _cmd_stats,
     "log": _cmd_log, "runs": _cmd_runs, "heartbeat": _cmd_heartbeat,
