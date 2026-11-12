@@ -1149,7 +1149,10 @@ def _handle_block(args: dict, **kw) -> str:
                 "so this was recorded as needs_input (sticky until a human unblocks) "
                 "instead of parking in todo where the dispatcher would respawn it."
             )
-        return _ok_landed(kb, conn, tid, "blocked", **extra)
+        from hermes_cli.kanban_block_policy import recommended_choice_warning
+
+        return _ok_landed(kb, conn, tid, "blocked", **extra,
+                          **recommended_choice_warning(args.get("human_request")))
 
 
 @_kanban_handler("kanban_schedule")

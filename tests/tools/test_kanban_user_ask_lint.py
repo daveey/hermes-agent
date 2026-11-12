@@ -46,6 +46,45 @@ def _task(tid):
         conn.close()
 
 
+@pytest.mark.parametrize("action,scope,interaction,choices,warns", [
+    ("Choose fixture timing", "code fixtures", "reply", True, True),
+    ("Approve a spend cap of $50", "code fixtures", "reply", True, False),
+    ("Grant permission", "code fixtures", "approval", True, False),
+    ("Give consent", "code fixtures", "reply", True, False),
+    ("Choose fixture timing", "code fixtures", "physical", True, False),
+    ("Choose fixture timing", "code fixtures", "reply", False, False),
+    ("Choose fixture timing", "privacy consent", "reply", True, False),
+    ("Ask the reviewer", "code fixtures", "reply", True, False),
+    ("Delete the data", "code fixtures", "reply", True, False),
+])
+def test_recommended_decision_warning_is_nonfatal(worker_env, action, scope, interaction, choices, warns):
+    from tools import kanban_tools as kt
+    request = {**CLEAR, "action": action + ". Unblock = proceed; archive = skip.",
+               "scope": scope, "interaction": interaction,
+               "choices": [{"label": "Postmerge (recommended)" if choices else "Postmerge", "value": "post"},
+                           {"label": "Premerge", "value": "pre"}]}
+    result = json.loads(kt._handle_block({"reason": "Fixture timing", "kind": "needs_input",
+                                       "human_request": request}))
+    assert result.get("ok") is True, result
+    assert _task(worker_env).status == "blocked"
+    assert ("apply the recommended option" in result.get("warning", "")) is warns
+
+
+@pytest.mark.parametrize("hr", [None, [], {}, {"interaction": "reply"},
+    {"interaction": "reply", "choices": "recommended"},
+    {"interaction": "reply", "choices": [None, {"label": "ordinary"}]}])
+def test_recommendation_warning_ignores_missing_or_malformed_choices(hr):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    assert recommended_choice_warning(hr) == {}
+
+
+def test_worker_guidance_applies_recommendation_with_boundaries():
+    from agent.prompt_builder import KANBAN_GUIDANCE
+    for phrase in ("Comment the pick and how to reverse it", "permissions or credentials",
+                   "safety or privacy consent", "hard-to-reverse", "toss-up"):
+        assert phrase in KANBAN_GUIDANCE
+
+
 def test_block_with_vague_ask_is_refused(worker_env):
     from tools import kanban_tools as kt
     d = json.loads(kt._handle_block({"reason": "Waiting on the design pick", "kind": "needs_input",

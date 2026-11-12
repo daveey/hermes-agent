@@ -98,6 +98,35 @@ def _assignment_routes(task) -> bool:
         return False
 
 
+# Conservative advisory only: these are human boundaries, not an authorization classifier.
+_RECOMMENDATION_BOUNDARY = re.compile(
+    r"\b(?:spend\w*|cost\w*|budget\w*|pay\w*|purchas\w*|money|dollars?|"
+    r"permission\w*|credential\w*|password\w*|tokens?|secrets?|access|"
+    r"consent|privacy|safety|delet\w*|irreversible|destructive|"
+    r"person|people|Rose|colleague\w*|reviewer\w*|customer\w*|vendor\w*|"
+    r"physical|press|plug|unplug|touch|sign[ -]?in)\b|[$€£]", re.IGNORECASE)
+
+
+def recommended_choice_warning(human_request) -> dict:
+    """Non-fatal nudge for a recommended decision; never applies it or changes admission."""
+    if not isinstance(human_request, dict):
+        return {}
+    if human_request.get("interaction") not in {"reply", "approval"}:
+        return {}
+    text = " ".join(str(human_request.get(key) or "") for key in ("action", "scope"))
+    if _RECOMMENDATION_BOUNDARY.search(text):
+        return {}
+    choices = human_request.get("choices")
+    if not isinstance(choices, list) or not any(
+        isinstance(choice, dict) and re.search(r"\brecommended\b", str(choice.get("label") or ""), re.IGNORECASE)
+        for choice in choices
+    ):
+        return {}
+    return {"warning": "this looks like a decision you can apply yourself under David's standing rule; "
+            "apply the recommended option and comment the pick, unless it is a toss-up. "
+            "This warning does not undo the block or grant permission; this run still ends."}
+
+
 ASK_LINT_CODE = "user_ask_incomplete"
 _UNBLOCK = re.compile(r"\bun-?block", re.IGNORECASE)
 _ARCHIVE = re.compile(r"\barchiv", re.IGNORECASE)
