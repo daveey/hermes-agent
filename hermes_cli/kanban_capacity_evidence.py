@@ -71,7 +71,7 @@ def _task_reasons(result, tid, reference):
         reasons.append(_reason("provider_limit", "rate_limited", reference, "post_claim"))
     # Only explicit provider quota clocks; generic cooldowns are not provider limits.
     held = result.clock_held.get(tid)
-    if held and held[0] in {"subscription_quota_reset", "rate_limit_cooldown"}:
+    if held and held[0] in {"subscription_quota_reset", "rate_limit_cooldown", "pinned_quota_wall"}:
         reasons.append(_reason("provider_limit", held[0], reference))
     for task, native in result.respawn_guarded:
         if task == tid and native in {"subscription_quota_reset", "rate_limit_cooldown"}:
@@ -175,6 +175,9 @@ def observe_dispatch(conn, result, *, board, dry_run=False, update_drain=False):
                dry_run=dry_run, update_drain=update_drain)
     except Exception:  # health: allow BLE001 -- optional evidence cannot control admission
         _log.warning("capacity observation unavailable", exc_info=True)
+    # One durable reason per passed-over card and ready episode (kanban-dd62aef001); never raises. [daveey]
+    from hermes_cli.kanban_dispatch_skip import record_tick
+    record_tick(conn, result, dry_run=dry_run)
 
 
 def _unknown(reason, **fields):

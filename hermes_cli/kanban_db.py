@@ -2222,7 +2222,7 @@ def goal_run_status(
             return "superseded"
     if task.status in {"ready", "todo"}:
         event = conn.execute(
-            "SELECT kind FROM task_events WHERE task_id = ? "
+            "SELECT kind FROM task_events WHERE task_id = ? AND kind != 'dispatch_skipped' "
             "ORDER BY id DESC LIMIT 1", (task_id,),
         ).fetchone()
         if event and event["kind"] == "changes_requested":

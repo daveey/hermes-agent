@@ -783,7 +783,7 @@ def _ready_hold_reason(task, events, cfg) -> Optional[str]:
     Capacity checks can precede pickup/guard evaluation, leaving old guard history on a
     replica-only card. A same-second clear must outrank the guard it retired.
     """
-    evs = list(events or [])
+    evs = [ev for ev in (events or []) if _event_kind(ev) != "dispatch_skipped"]  # skip records end no guard
     latest = max(evs, key=lambda ev: (_event_ts(ev), _task_field(ev, "id", 0) or 0)) if evs else None
     if latest is not None and _event_kind(latest) == "respawn_guarded":
         return "respawn_guarded"

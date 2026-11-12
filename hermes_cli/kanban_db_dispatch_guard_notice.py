@@ -32,7 +32,7 @@ def _current_guard_hold(
     comment_filter = (
         "NOT (kind = 'commented' AND json_extract(payload, '$.author') = 'kanban-dispatcher')"
         if include_replies else "kind != 'commented'"
-    )
+    ) + " AND kind != 'dispatch_skipped'"  # a skip record neither starts nor ends a guard hold
     events = sorted(
         (stamp, row[0], row[1], row[2])
         for row in conn.execute(

@@ -57,12 +57,15 @@ def _queue_words(place: dict[str, Any]) -> str:
         from hermes_cli import kanban_queue_position as kqp
         return kqp.headline(place) if place["lane"] == "machine" else str(kqp.describe(place))
     from hermes_cli.kanban_queue_position import ahead_words
+    from hermes_cli import kanban_dispatch_skip as skips
     ahead = place.get("ahead")
     words = ahead_words(place, "{n} card(s) ahead of it") if ahead is not None else "queue place unknown"
     if place.get("running") is not None and place.get("limit") is not None:
         words += f", {place['running']}/{place['limit']} worker slots busy"
     elif place.get("limit") is not None and "running" in place:
         words += f", running count unknown (cap {place['limit']})"
+    if place.get("skip"):  # the recorded reason comes first: a bare queue place read as an ordering wait [daveey]
+        words = f"{skips.words(place['skip'])}; {words}"
     return words
 
 
@@ -77,9 +80,12 @@ def _observation(payload: dict[str, Any]) -> str:
     return f" [board {payload.get('board') or 'unknown'}, observed {stamp}, admission reason {reason}]"
 
 
-def _options(parent_id: str, evidence: Optional[dict[str, Any]] = None) -> str:
+def _options(parent_id: str, evidence: Optional[dict[str, Any]] = None,
+             payload: Optional[dict[str, Any]] = None) -> str:
+    """Capacity advice, or the recorded skip's (or the unrecorded skip's) advice without priority changes."""
+    from hermes_cli.kanban_dispatch_skip import notice_advice
     from hermes_cli.kanban_priority import advice
-    return f"{NO_FIX}: " + advice(parent_id, evidence)
+    return f"{NO_FIX}: " + (notice_advice(payload or {}) or advice(parent_id, evidence))
 
 
 def notice_text(payload: Any) -> str:
@@ -89,7 +95,7 @@ def notice_text(payload: Any) -> str:
     title = str(payload.get("parent_title") or "").strip()[:120]
     named = f"{parent} ({title})" if title else parent
     advice = ("Check the current dispatcher verdict and resolve the recorded guard; priority changes do not clear it"
-              if payload.get("respawn_guard") else _options(parent, payload.get("priority_evidence")))
+              if payload.get("respawn_guard") else _options(parent, payload.get("priority_evidence"), payload))
     return (f"Waiting {payload.get('wait_minutes', '?')} min on parent {named}, which has been ready "
             f"{payload.get('ready_minutes', '?')} min with no worker ({payload.get('queue') or 'queue place unknown'})"
             + _observation(payload) + ". " + advice + ".")
@@ -108,8 +114,9 @@ def ready_hint(conn, task, *, now: Optional[float] = None) -> Optional[str]:
     place = _place(conn, task.id)
     if place.get("lane") == "respawn_guard":
         return f"Ready {_minutes(waited)} min, unclaimed; {kqp.describe(place)}."
+    from hermes_cli.kanban_dispatch_skip import notice_fields
     return (f"Ready {_minutes(waited)} min, unclaimed; {_queue_words(place)}. "
-            + _options(task.id, lane_evidence(conn, task.id)) + ".")
+            + _options(task.id, lane_evidence(conn, task.id), notice_fields(place, waited)) + ".")
 
 
 _CANDIDATES = (
@@ -181,6 +188,7 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
         still = conn.execute("SELECT status, claim_lock FROM tasks WHERE id = ?", (waiting_on,)).fetchone()
         if still is None or still["status"] != "ready" or still["claim_lock"]:
             return False
+        from hermes_cli.kanban_dispatch_skip import notice_fields
         from hermes_cli.kanban_priority import lane_evidence
         kb._append_event(conn, task_id, kind, {
             "parent": waiting_on, "parent_title": parent_title, "wait_event_id": wait_key,
@@ -188,5 +196,6 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
             "queue": kqp.describe(place) if guard else _queue_words(place), **observed, **(extra or {}),
             "respawn_guard": guard,
             "priority_evidence": lane_evidence(conn, waiting_on),
+            **({} if guard else notice_fields(place, ready_seconds)),
         })
     return True

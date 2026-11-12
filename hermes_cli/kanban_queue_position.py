@@ -137,7 +137,7 @@ def recorded_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     from hermes_cli.kanban_diagnostics import _READY_WAIT_FLOOR_KINDS
 
     kinds = {*_READY_WAIT_FLOOR_KINDS, "respawn_guarded", "continued", "scheduled", "reassigned", "reopened",
-             "hold_released"}
+             "hold_released", "dispatch_skipped"}  # a later dispatcher skip is the newer verdict
     slots = ",".join("?" for _ in kinds)
     row = conn.execute(
         f"SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ({slots}) "
@@ -184,6 +184,10 @@ def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Opt
              "board": khc.board_of(conn) or board, "observed_at": int(time.time())}
     if elsewhere:  # only when other boards' cards rank ahead: the single-board payload keeps its shape
         place["ahead_other_boards"] = elsewhere
+    from hermes_cli import kanban_dispatch_skip as skips
+    skip = skips.latest(conn, task.id)
+    if skip:  # why the last tick passed it over (kanban-dd62aef001): no longer a bare slot wait [daveey]
+        place["skip"] = skip
     return place
 
 
@@ -264,6 +268,13 @@ def describe(place: Optional[dict[str, Any]]) -> Optional[str]:
         return headline(place) + ". " + _NOT_STUCK
     if lane == "worker_pool":
         return f"waiting for a pool worker ({place.get('reason') or 'no reason recorded'}). " + _NOT_STUCK
+    return local_words(place)
+
+
+def local_words(place: dict[str, Any]) -> str:
+    """``describe`` for the ``local`` lane: the recorded dispatcher skip first, when there is one."""
+    from hermes_cli import kanban_dispatch_skip as skips
+    skip = place.get("skip")
     ahead = place.get("ahead")
     words = (ahead_words(place, "waiting for a local slot: ~{n} ahead") if ahead is not None
              else "waiting for a local slot")
@@ -271,7 +282,10 @@ def describe(place: Optional[dict[str, Any]]) -> Optional[str]:
         words += f", {place['running']}/{place['limit']} running"
     elif place.get("limit") is not None and "running" in place:
         words += f", running count unknown (cap {place['limit']})"
-    return words + ". " + _NOT_STUCK
+    if not skip:
+        return words + ". " + _NOT_STUCK
+    words = f"last dispatcher skip of this ready episode: {skips.words(skip)} ({words})"
+    return words + ". " + (_NOT_STUCK if skips.is_ordering(skip) else skips.advice(skip))
 
 
 def read(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Optional[dict[str, Any]]:

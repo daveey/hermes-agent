@@ -15,7 +15,7 @@ def note_nonspawnable(conn: sqlite3.Connection, task_id: str, assignee: str, *, 
     from hermes_cli import kanban_db as kb
     with kb.write_txn(conn):
         last = conn.execute(
-            "SELECT kind, payload FROM task_events WHERE task_id = ? "
+            "SELECT kind, payload FROM task_events WHERE task_id = ? AND kind != 'dispatch_skipped' "
             "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id,)).fetchone()
         if (last is None or last["kind"] != "skipped_nonspawnable"
                 or last["payload"] != kb._json_or_null({"assignee": assignee})):
@@ -61,7 +61,7 @@ def note_unplaceable(conn: sqlite3.Connection, task_id: str) -> None:
     payload = {"runs_on": place["runs_on"], "missing": place["missing"], "machines": place["machines"]}
     with kb.write_txn(conn):
         last = conn.execute(
-            "SELECT kind, payload FROM task_events WHERE task_id = ? "
+            "SELECT kind, payload FROM task_events WHERE task_id = ? AND kind != 'dispatch_skipped' "
             "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id,)).fetchone()
         if last is None or last["kind"] != "skipped_unplaceable" or last["payload"] != kb._json_or_null(payload):
             kb._append_event(conn, task_id, "skipped_unplaceable", payload)

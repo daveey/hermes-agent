@@ -137,7 +137,10 @@ def test_live_pool_exhaustion_counts_as_wall_without_a_crash(board, monkeypatch)
                             provider_override=CODEX)
     seen = _dispatch(conn)
     assert seen[tid][:2] == (OPUS, "anthropic")
-    assert seen[pinned][:2] == ("gpt-6-astra", CODEX)  # exact pins keep their tuple
+    # Exact pins keep their tuple: never rewritten, and a fresh one on a live wall is held (kanban_dispatch_skip).
+    assert pinned not in seen
+    assert [r[0] for r in conn.execute("SELECT kind FROM task_events WHERE task_id = ? AND kind = 'dispatch_skipped'",
+                                       (pinned,))] == ["dispatch_skipped"]
 
 
 def test_every_fallback_exhausted_leaves_task_on_its_route(board, monkeypatch):

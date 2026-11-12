@@ -207,8 +207,8 @@ class DispatchResult:
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
     capsule_refused: list[tuple[str, str]] = field(default_factory=list)  # (task_id, code): kanban_capsule_admission [daveey]
-    remote_archived: list[str] = field(default_factory=list)
-    """Task ids archived on a stop request from another gateway (``kanban_remote_stop``)."""
+    pinned_quota_held: list = field(default_factory=list)  # (task_id, model, provider, reset): kanban_dispatch_skip
+    remote_archived: list[str] = field(default_factory=list)  # archived on another gateway's stop (kanban_remote_stop)
     auto_blocked: list[str] = field(default_factory=list)
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
     agent_block_escalated: list[str] = field(default_factory=list)
@@ -1933,7 +1933,7 @@ def _dispatch_lane_task(
     task_id = row["id"]
     from hermes_cli.kanban_db_dispatch_admission import lane_admission_refused  # nonspawnable, capsule [daveey]
     if lane_admission_refused(conn, task_id, assignee, result, profile_exists=_profile_exists_fn(),
-                              spawn_fn=spawn_fn, dry_run=dry_run):
+                              spawn_fn=spawn_fn, dry_run=dry_run, lane=lane):
         return False
     # Per-profile cap: one profile's local model / API quota / browser pool
     # must not be overwhelmed by a fan-out even with global headroom.
