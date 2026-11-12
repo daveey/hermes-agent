@@ -18,7 +18,9 @@ read back: pickup kept no record of why a pass skipped a candidate.
   whose pin is stranded is re-pinned. Its body carries this host's machine-local evidence (pickup skips, registry
   entry, replica path). Host-wide causes share
   ONE card per host naming the oldest card: ``budget_exhausted`` (the queue is simply full), ``hold`` and an
-  unreadable machine registry. Missing evidence gets one additional stall interval of durable grace, then one
+  unreadable machine registry. A ``hold`` that states ``release by HH:MMZ`` (or is the core rollout's own,
+  :func:`expected_hold`) files nothing until that release plus the stall threshold has passed. Missing evidence gets
+  one additional stall interval of durable grace, then one
   host alert (not a fabricated refusal); a failed pickup must not silence the detector forever.
   ``budget_exhausted`` is recorded only for a card a slot would have started, so a
   refusal is never hidden behind a full queue. No Inbox post, no human ask.
@@ -26,6 +28,8 @@ read back: pickup kept no record of why a pass skipped a candidate.
 from __future__ import annotations
 
 import logging
+import math
+import re
 import time
 from typing import Any, Mapping, Optional
 
@@ -357,6 +361,63 @@ def _registry_line(own: str) -> str:
     return f"Registry entry for {own} at {_stamp(_now_ms())}: {fields}, active_card_runs={active!r}."
 
 
+# --- expected holds ------------------------------------------------------------------------------------------
+# t_01a1cedb2faf7341 (2026-11-12): hub-worker-core-rollout holds ONE worker at a time to drain it for a core update
+# (owner ``rollout:worker-core-rollout@<host>``, reason ``...; release by HH:MMZ``, released within 90 min), and each
+# rollout filed a "Pickup held on worker-N" repair (t_01a1cec7cd7fe7ce) whose answer is always "expected". Same rule
+# as state's worker-claim-watch: a hold that states its release, or is the rollout's own, is expected until that
+# release plus the stall threshold; past it, the hold outlived its word and alerts as before.
+ROLLOUT_OWNER_PREFIX = "rollout:worker-core-rollout@"
+ROLLOUT_MAX_SECONDS = 90 * 60  # the rollout's hard cap: its hold's implied release when the reason states none
+_RELEASE_RE = re.compile(r"release(?:d)?\s+(?:by|at)\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*Z", re.IGNORECASE)
+
+
+def _release_s(reason: Optional[str], held_at: float) -> Optional[float]:
+    """First UTC ``release by HH:MM[:SS]Z`` instant at/after the hold start (None: no valid stated release)."""
+    m = _RELEASE_RE.search(reason or "")
+    if not m:
+        return None
+    h, mi, sec = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+    if h > 23 or mi > 59 or sec > 59:
+        return None
+    t = held_at - (held_at % 86400) + h * 3600 + mi * 60 + sec
+    return t if t >= held_at else t + 86400
+
+
+def expected_hold(entry: Optional[Mapping[str, Any]], *, now_ms: int, stall_s: int) -> Optional[float]:
+    """The release instant (epoch s) of ``entry``'s hold while it is still expected, else None (alert as usual).
+
+    Expected: a hold with a known start (``hold_at``, Board epoch ms) whose reason states ``release by HH:MMZ``,
+    or whose owner is the core rollout (implied release: start + :data:`ROLLOUT_MAX_SECONDS`), until that release
+    plus ``stall_s``. An unknown start, no release and no rollout owner, or a passed window fail toward alerting."""
+    if not isinstance(entry, Mapping) or entry.get("hold") is not True:
+        return None
+    at = entry.get("hold_at")
+    if isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at) or at <= 0:
+        return None
+    held_at = at / 1000.0 if at > 1e11 else float(at)
+    reason = entry.get("hold_reason") if isinstance(entry.get("hold_reason"), str) else None
+    release = _release_s(reason, held_at)
+    if release is None and str(entry.get("hold_owner") or "").startswith(ROLLOUT_OWNER_PREFIX):
+        release = held_at + ROLLOUT_MAX_SECONDS
+    if release is None or now_ms > (release + stall_s) * 1000:
+        return None
+    return release
+
+
+def _hold_expected(own: str, now_ms: int) -> bool:
+    """``own``'s registry hold is inside its stated window (:func:`expected_hold`): file no hold repair now."""
+    from hermes_cli import kanban_worker_node as wn
+    entry = ((wn.registry() or {}).get("machines") or {}).get(own)
+    release = expected_hold(entry, now_ms=now_ms, stall_s=stall_seconds())
+    if release is None:
+        return False
+    _log.debug("pickup-stall: %s hold by %s is expected until %s + %ss; no repair", own,
+               (entry or {}).get("hold_owner") or (entry or {}).get("hold_by"), _stamp(int(release * 1000)),
+               stall_seconds())
+    return True
+
+
 def _group(card: Mapping[str, Any]) -> Optional[str]:
     skip = card["skip"] or {}
     if skip.get("reason") == "other" and skip.get("detail") == "machine registry unavailable":
@@ -413,6 +474,8 @@ def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[f
                   f"it.\n\nLast pickup skip recorded on {own}: {describe(card['skip'])}.")))
     for group, members in groups.items():
         slug, title, why = _HOST_GROUPS[group]
+        if group == "hold" and _hold_expected(own, now_ms):
+            continue
         oldest = members[0]
         listed = "\n".join(f"- {c['id']} ({c['title']}), ready {_minutes(c['since_ms'], now_ms)} min, "
                            f"last skip {describe(c['skip'])}" for c in members[:20])
