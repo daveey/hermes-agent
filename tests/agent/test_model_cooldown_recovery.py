@@ -189,7 +189,7 @@ def test_sanitized_borrowed_row_recovers_by_fingerprint_without_persisting_secre
 
 
 @pytest.mark.parametrize("source", ["env:ANTHROPIC_TOKEN", "claude_code"])
-@pytest.mark.parametrize("change", ["fingerprint", "source", "disabled"])
+@pytest.mark.parametrize("change", ["fingerprint", "source", "secret_source", "base_url", "auth_type", "disabled"])
 def test_sanitized_borrowed_row_refuses_changed_identity(pool, source, change):
     from agent.credential_pool_disabled import set_credential_disabled
     from hermes_cli import auth
@@ -203,9 +203,62 @@ def test_sanitized_borrowed_row_refuses_changed_identity(pool, source, change):
             row = store["credential_pool"]["anthropic"][0]
             if change == "fingerprint":
                 row["secret_fingerprint"] = "sha256:0000000000000000"
-            else:
+            elif change == "source":
                 row["source"] = "env:OTHER" if source == "claude_code" else "claude_code"
+            else:
+                row[change] = {"secret_source": "peer-secret-location",
+                               "base_url": "https://peer.example.com/v1", "auth_type": "api_key"}[change]
             auth._save_auth_store(store)
     before = auth.read_credential_pool("anthropic")
     assert not borrowed.clear_verified_model_cooldown(observed, A)
     assert auth.read_credential_pool("anthropic") == before
+
+
+@pytest.mark.parametrize("source", ["manual", "hermes_pkce"])
+def test_owned_row_without_secret_cannot_recover_by_borrowed_fingerprint(pool, source):
+    from agent.credential_pool import CredentialPool, PooledCredential
+    from agent.credential_persistence import fingerprint_secret_value, is_borrowed_credential_source
+    from hermes_cli import auth
+
+    observed = bench(pool)
+    observed.source = source
+    row = observed.to_dict()
+    # A damaged owned row may retain a fingerprint, but is not a borrowed reference.
+    row.pop("access_token", None)
+    row.pop("refresh_token", None)
+    row["secret_fingerprint"] = fingerprint_secret_value(observed.runtime_api_key)
+    auth.write_credential_pool("anthropic", [row])
+    current = PooledCredential.from_dict("anthropic", auth.read_credential_pool("anthropic")[0])
+    assert not current.runtime_api_key
+    assert not is_borrowed_credential_source(current.source, "anthropic")
+    assert current.source == observed.source
+    assert current.extra["secret_fingerprint"] == fingerprint_secret_value(observed.runtime_api_key)
+    owned = CredentialPool("anthropic", [observed])
+    before = auth._load_auth_store()
+    assert not owned.clear_verified_model_cooldown(observed, A)
+    assert auth._load_auth_store() == before
+    assert A in (owned.entries()[0].model_cooldowns or {})
+
+
+def test_recovery_refuses_disabled_observation_when_current_label_is_enabled(pool):
+    from agent.credential_pool import PooledCredential
+    from agent.credential_pool_disabled import disabled_keys, matches
+    from hermes_cli import auth
+
+    observed = bench(pool)
+    with auth._auth_store_lock():
+        store = auth._load_auth_store()
+        # Label drift is not a CAS identity change. A label-only disable record
+        # matches the verified snapshot but not the renamed persisted row.
+        store["credential_pool"]["anthropic"][0]["label"] = "renamed-seat"
+        store["disabled_credentials"] = {"anthropic": [{"label": observed.label}]}
+        auth._save_auth_store(store)
+    before = auth._load_auth_store()
+    current = PooledCredential.from_dict("anthropic", before["credential_pool"]["anthropic"][0])
+    keys = disabled_keys("anthropic")
+    assert not matches(current, keys)
+    assert matches(observed, keys)
+    assert current.runtime_api_key == observed.runtime_api_key
+    assert not pool.clear_verified_model_cooldown(observed, A)
+    assert auth._load_auth_store() == before
+    assert A in pool.entries()[0].model_cooldowns
