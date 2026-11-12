@@ -204,6 +204,9 @@ def _discover_systemd() -> list[dict]:
         return []
     with suppress(Exception):
         _ensure_user_systemd_env()
+    if _stop_busy_opted_in():
+        from hermes_cli.update_preswap_discovery import systemd_units
+        return systemd_units()
     units: list[dict] = []
     seen_pids: set[int] = set()
     for scope, scope_cmd, listing in _systemd_gateway_unit_listings():
@@ -622,19 +625,19 @@ def _systemctl_async(unit: dict, args: list[str], deadline: float, *, must: bool
     from hermes_cli.update_cmd_fleet import _systemctl
     cmd = _manage_cmd(unit["scope"])
     if cmd is None:
-        raise PauseRefused(f"no privilege to stop system unit {unit['unit']}")
+        raise PauseRefused(f"no privilege to stop system unit {unit['unit']}", [unit["unit"]])
     if (left := _left(deadline)) <= 0:  # no floor: an expired deadline issues nothing
         if must:
-            raise PauseRefused(f"the pre-swap deadline passed before systemctl {args[0]} {unit['unit']}")
+            raise PauseRefused(f"the pre-swap deadline passed before systemctl {args[0]} {unit['unit']}", [unit["unit"]])
         return
     try:
         result = _systemctl(cmd + [*args, unit["unit"]], timeout=min(10.0, left))
     except (OSError, subprocess.SubprocessError) as exc:
         if must:
-            raise PauseRefused(f"systemctl {args[0]} {unit['unit']} did not complete: {exc}") from exc
+            raise PauseRefused(f"systemctl {args[0]} {unit['unit']} did not complete: {exc}", [unit["unit"]]) from exc
         return
     if must and result.returncode != 0:
-        raise PauseRefused(f"systemctl {args[0]} {unit['unit']} failed: {(result.stderr or '').strip()}")
+        raise PauseRefused(f"systemctl {args[0]} {unit['unit']} failed: {(result.stderr or '').strip()}", [unit["unit"]])
 
 
 def _begin_launchd_bootout(job: dict) -> subprocess.Popen:
@@ -648,7 +651,7 @@ def _stop_at_once(entry: dict, deadline: float, procs: dict, *, drained: bool = 
     background), a bare process gets marker + SIGTERM. ``_stopped`` verifies the outcome."""
     from hermes_cli.update_cmd_windows import _write_update_planned_stop_marker
     if _left(deadline) <= 0:
-        raise PauseRefused(f"the pre-swap deadline passed before stopping {_names([entry])}")
+        raise PauseRefused(f"the pre-swap deadline passed before stopping {_names([entry])}", [_names([entry])])
     kind = entry.get("kind")
     if kind == "systemd":
         _systemctl_async(entry, ["stop", "--no-block"], deadline, must=True)
@@ -709,10 +712,10 @@ def _stop_busy_gateways(token: dict, entries: list[dict], deadline: float) -> No
     waiting: list[dict] = []   # drain accepted: expected to exit on its own
     settling: list[dict] = []  # a stop is under way: must be verified
     try:
-        for entry in entries:
+        for index, entry in enumerate(entries):
             if _left(deadline) <= 0:
                 raise PauseRefused(f"the pre-swap deadline passed before {_names([entry])} was asked to stop; "
-                                   "the checkout was not changed")
+                                   "the checkout was not changed", [_names([e]) for e in entries[index:]])
             pause_record.mark_stop_sent(token, entry["pid"])  # before the request: see _ask_to_drain
             if _ask_busy_to_drain(entry, min(2.0, _left(drain_end))):
                 waiting.append(entry)
@@ -748,7 +751,8 @@ def _stop_busy_gateways(token: dict, entries: list[dict], deadline: float) -> No
                         forced.add(entry["pid"])
                         _force(entry, deadline, procs)
             time.sleep(min(_POLL_S, max(0.0, _left(deadline))))
-        raise PauseRefused(f"{_names(settling)} did not stop within {total:.0f}s; the checkout was not changed")
+        raise PauseRefused(f"{_names(settling)} did not stop within {total:.0f}s; the checkout was not changed",
+                           [_names([e]) for e in settling])
     finally:
         for proc in procs.values():
             if proc.poll() is None:
@@ -925,16 +929,22 @@ def _pause(token: dict) -> str | None:
             units, jobs, notices = _left_running(units, jobs)
             bare, more = _discover_bare({u["pid"] for u in units} | {j["pid"] for j in jobs})
     except Exception as exc:  # health: allow BLE001 -- a discovery that cannot finish stops nothing
+        if opted_in:
+            _deferral_streak(exc if isinstance(exc, PauseRefused) else
+                             PauseRefused(str(exc), ["gateway inventory"]))
         return f"could not list running gateways ({exc}); the checkout was not changed"
     finally:
         _DISCOVERY_DEADLINE = None
     if opted_in:
         # A listing that ran out of time or lost a probe is unfinished, never an empty (or smaller) set.
         if timed_out or _left(deadline) <= 0:
+            _deferral_streak(PauseRefused("deadline passed while listing gateways", ["gateway inventory"]))
             return "the pre-swap deadline passed while listing gateways; the checkout was not changed"
         if notices or more:
             # The caller asked for this host to converge: a gateway the update cannot stop is a refusal.
             why = "; ".join(line.strip().lstrip("↷ ").strip() for line in notices + more)
+            _deferral_streak(PauseRefused(why, [line.strip().lstrip("↷ ").split(" keeps running", 1)[0]
+                                              for line in notices + more]))
             return f"gateways that cannot be stopped for the update ({why}); the checkout was not changed"
     for line in notices + more:
         print(line)
