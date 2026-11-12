@@ -1027,6 +1027,8 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
                         _REPAIRED_AT[key] = _repair_clock()
             if mode == "primary":
                 heal_clobbered_completions(live)
+                from hermes_cli.kanban_sync_divergence import heal_running_over_ended_run
+                heal_running_over_ended_run(live)
         result.push = push(live, hub, slug, gateway, primary=mode == "primary")
         from hermes_cli.kanban_sync_attachments import transfer_pending
         transfer_pending(live, hub, slug)
