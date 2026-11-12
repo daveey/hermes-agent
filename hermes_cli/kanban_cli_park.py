@@ -107,5 +107,5 @@ def _parked_msg(conn, verb: str, suffix: str):
 
     def msg(tid):
         owner = kaw.escalated_owner(conn, tid)
-        return kaw.escalation_message(tid, owner) if owner else f"{verb} {tid}{suffix}"
+        return kaw.escalation_message(tid, owner, kaw.escalated_fired(conn, tid)) if owner else f"{verb} {tid}{suffix}"
     return msg

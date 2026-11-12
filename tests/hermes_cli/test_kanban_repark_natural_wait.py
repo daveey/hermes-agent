@@ -141,6 +141,47 @@ def test_the_park_after_six_fires_escalates_naming_the_fire_count(kanban_home, m
         assert esc and (esc[-1].payload or {})["awaiting"]["fired_reparks"] == 6
 
 
+def test_the_fire_cap_escalation_tells_the_worker_the_fire_count(kanban_home, monkeypatch) -> None:
+    """The worker reads ``next``, not the owner body: it must not say "same premise 3 times". [daveey]"""
+    with kbc.connect_closing() as conn:
+        tid = _mac_card(conn)
+        _fire_cycles(monkeypatch, conn, tid, kaw.PROBE_FIRE_REPARK_LIMIT)
+        _claim(monkeypatch, conn, tid)
+        out = _tool("schedule", _mac_park(6))
+        assert out.get("code") == kaw.ESCALATED_EVENT, out
+        assert "probe fired 6 times" in out["next"] and "re-parked each time" in out["next"], out["next"]
+        assert "same premise" not in out["next"]
+        assert out["owner_task_id"] in out["next"]
+        # The plain re-park escalation keeps its wording.
+        assert "same premise 3 times" in kaw.escalation_message("t_0123456789abcdef", "t_fedcba9876543210")
+
+
+def _pacing_continues(monkeypatch, conn, tid, n: int) -> None:
+    """``n`` short pacing continues (inferred clock, no premise) between a fire and the next park."""
+    for _ in range(n):
+        _claim(monkeypatch, conn, tid)
+        out = _tool("continue", {"checkpoint": "pacing: probe fired but HID idle again 40s; re-check shortly",
+                                 "resume_after_seconds": 60})
+        assert out.get("status") == "scheduled", out
+        _deadline_wakes(conn, tid)
+
+
+def test_pacing_continues_between_fires_do_not_hide_the_fire_cap(kanban_home, monkeypatch) -> None:
+    """Premise-less rows must not use up the scan window, or 3 continues per cycle would leave the cap
+    (6 fires) out of reach and a broken probe would cycle forever. [daveey]"""
+    with kbc.connect_closing() as conn:
+        tid = _mac_card(conn)
+        for i in range(kaw.PROBE_FIRE_REPARK_LIMIT):
+            _claim(monkeypatch, conn, tid)
+            assert _tool("schedule", _mac_park(i)).get("status") == "scheduled", i
+            _probe_fires(conn, tid)
+            _pacing_continues(monkeypatch, conn, tid, 3)
+        _claim(monkeypatch, conn, tid)
+        out = _tool("schedule", _mac_park(6))
+        assert out.get("status") == "todo" and out.get("code") == kaw.ESCALATED_EVENT, out
+        assert "probe fired 6 times" in out["next"]
+
+
 def test_another_probes_fire_resets_the_fire_count(kanban_home, monkeypatch) -> None:
     with kbc.connect_closing() as conn:
         tid = _mac_card(conn)

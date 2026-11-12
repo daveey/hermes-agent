@@ -87,4 +87,4 @@ def _escalated(kb, conn, tid: str) -> Optional[str]:
     if owner is None:
         return None
     return _ok_landed(kb, conn, tid, "todo", code="repark_escalated", owner_task_id=owner,
-                      next=kaw.escalation_message(tid, owner))
+                      next=kaw.escalation_message(tid, owner, kaw.escalated_fired(conn, tid)))

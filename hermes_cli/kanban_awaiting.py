@@ -71,8 +71,10 @@ REPARK_LIMIT = 2
 # Fires of one opaque probe, each followed by a re-park on it, before the next park escalates: a probe
 # that keeps firing while the worker's own check disagrees is broken, not a natural window.
 PROBE_FIRE_REPARK_LIMIT = 6
-# Event rows scanned for those cycles: 2 per cycle plus slack for pacing continues.
+# Premise-bearing rows (fires, parks with a wait) scanned for those cycles: 2 per cycle plus slack.
+# Premise-less rows (pacing continues, legacy parks) do not count against it, only against the raw cap.
 PROBE_FIRE_WINDOW = 4 * PROBE_FIRE_REPARK_LIMIT
+PROBE_FIRE_SCAN_MAX = 10 * PROBE_FIRE_WINDOW
 ESCALATION_PREFIX = "repark-escalation:"
 ESCALATED_EVENT = "repark_escalated"
 _TASK_ID = re.compile(r"\bt_[0-9a-f]{8,16}\b")
@@ -707,17 +709,23 @@ def probe_fire_reparks(conn: sqlite3.Connection, task_id: str, premise: str, pro
     another premise, another probe's fire or any other card progress (``kanban_no_progress``).
 
     ``prior_same_premise`` ends its run at each such fire (a natural window that closed again), so a probe
-    that is looser than the worker's own check would otherwise cycle forever, one worker run per fire. [daveey]"""
+    that is looser than the worker's own check would otherwise cycle forever, one worker run per fire.
+
+    Premise-less rows (inferred-clock pacing continues, legacy parks) are skipped without using up
+    ``PROBE_FIRE_WINDOW``: counting them let a few pacing continues per cycle push the 6th fire out of
+    the window, so the cap silently never tripped. Only ``PROBE_FIRE_SCAN_MAX`` bounds the raw read.
+    A human comment does not reset the count, unlike ``kanban_no_progress``: a note is not a probe fix,
+    and only event kinds in ``CARD_PROGRESS_EVENTS`` are read here. [daveey]"""
     if not probe:
         return 0
     from hermes_cli.kanban_no_progress import CARD_PROGRESS_EVENTS
     from hermes_cli.kanban_wake_check import CONDITION_MET_EVENT
     other = tuple(k for k in CARD_PROGRESS_EVENTS if k != CONDITION_MET_EVENT)
     kinds = ("scheduled", "continued", ESCALATED_EVENT, CONDITION_MET_EVENT, *other)
-    fires = 0
+    fires = seen = 0
     for kind, payload in conn.execute(
             f"SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ({','.join('?' * len(kinds))}) "
-            f"ORDER BY id DESC LIMIT {PROBE_FIRE_WINDOW}", (task_id, *kinds)):
+            f"ORDER BY id DESC LIMIT {PROBE_FIRE_SCAN_MAX}", (task_id, *kinds)):
         if kind in other or kind == ESCALATED_EVENT:
             break
         try:
@@ -730,11 +738,14 @@ def probe_fire_reparks(conn: sqlite3.Connection, task_id: str, premise: str, pro
             if not (data.get("wake_check") and _probe_key(data["wake_check"]) == probe):
                 break
             fires += 1
-            continue
-        got = data.get("awaiting") or {}
-        if not isinstance(got, dict) or got.get("premise") is None:
-            continue  # a continuation with no wait, or a legacy park
-        if got["premise"] != premise and got.get("probe") != probe:
+        else:
+            got = data.get("awaiting") or {}
+            if not isinstance(got, dict) or got.get("premise") is None:
+                continue  # a continuation with no wait, or a legacy park: not in the window
+            if got["premise"] != premise and got.get("probe") != probe:
+                break
+        seen += 1
+        if seen >= PROBE_FIRE_WINDOW:
             break
     return fires
 
@@ -891,8 +902,24 @@ def escalated_owner(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
         return None
 
 
-def escalation_message(task_id: str, owner: Optional[str]) -> str:
-    return (f"{ESCALATED_EVENT}: {task_id} parked on the same premise {REPARK_LIMIT + 1} times with no new "
-            f"evidence, so it was not parked again. It now waits on owner card {owner}, which must remove "
-            "the cause (with no capable supervisor configured it lands in triage for the orchestrator). "
-            "End your turn.")
+def escalated_fired(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
+    """``fired_reparks`` of this card's latest event when it is a fire-cap escalation, else None."""
+    row = conn.execute("SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                       (task_id,)).fetchone()
+    if not row or row[0] != ESCALATED_EVENT:
+        return None
+    try:
+        got = (json.loads(row[1] or "{}").get("awaiting") or {}).get("fired_reparks")
+    except (ValueError, AttributeError):
+        return None
+    return got if isinstance(got, int) and not isinstance(got, bool) and got > 0 else None
+
+
+def escalation_message(task_id: str, owner: Optional[str], fired: Optional[int] = None) -> str:
+    """What the parking worker is told; ``fired`` (``escalated_fired``) selects the fire-cap wording."""
+    what = (f"its wake probe fired {fired} times and it re-parked each time (fix the probe or the worker's "
+            "check)" if fired else
+            f"parked on the same premise {REPARK_LIMIT + 1} times with no new evidence")
+    return (f"{ESCALATED_EVENT}: {task_id} {what}, so it was not parked again. It now waits on owner card "
+            f"{owner}, which must remove the cause (with no capable supervisor configured it lands in triage "
+            "for the orchestrator). End your turn.")
