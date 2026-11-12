@@ -305,8 +305,8 @@ def _gateway_running(home: Path) -> bool:
     return get_running_pid(home / "gateway.pid", cleanup_stale=False) is not None
 
 
-def _card_items(ids: list[str]) -> tuple[list[dict], list[dict], bool]:
-    """(decision items, waits, read failed) from the cards these chats created or shepherd: a card parked on a
+def _card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
+    """(decision items, waits) from the cards these chats created or shepherd: a card parked on a
     validated ``human_request`` is a decision, every other open card is a wait."""
     from hermes_cli.kanban_human_request import needs_human
     from hermes_cli.kanban_session_activity import LISTED_STATUSES, session_tasks
@@ -332,7 +332,7 @@ def _card_items(ids: list[str]) -> tuple[list[dict], list[dict], bool]:
         if isinstance(eta, (int, float)) and not isinstance(eta, bool):
             item["eta"] = float(eta)
         waits.append(item)
-    return decisions, waits, False
+    return decisions, waits
 
 
 def _cron_items(ids: list[str]) -> list[dict]:
@@ -554,8 +554,10 @@ def _outcome(kind: str, now: float, **fields: Any) -> dict[str, Any]:
 def _live_work(db: Any, sid: str, ids: list[str]) -> tuple[list[dict], list[dict], bool]:
     """(open decision items, named waits, card read failed). A recurring cron is not live work: it never
     ends, so a chat that owns one would wait forever (see ``_derive``, which names it on the outcome instead)."""
-    card_decisions, card_waits, card_read_failed = _guarded(
-        "kanban cards", sid, lambda: _card_items(ids), ([], [], True))
+    _FAILED = object()  # per-invocation sentinel: an unread board is unknown, not empty
+    cards = _guarded("kanban cards", sid, lambda: _card_items(ids), _FAILED)
+    card_read_failed = cards is _FAILED
+    card_decisions, card_waits = ([], []) if card_read_failed else cards
     prov_decisions, prov_waits = _provider_items(sid)
     waits = (card_waits + _guarded("processes", sid, lambda: _process_items(sid, ids), [])
              + _guarded("subagents", sid, lambda: _subagent_items(db, ids), [])
