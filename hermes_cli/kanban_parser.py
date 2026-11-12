@@ -14,6 +14,9 @@ import json
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_notify as kbn
+# The `resume` handler rides kanban.py's existing kanban_parser import, so kanban.py (at its
+# FILE_LINES cap) gains no line for it. [daveey]
+from hermes_cli.kanban_operator_resume import cmd as cmd_resume
 
 
 def _arg(*flags: str, **kw):

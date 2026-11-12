@@ -45,9 +45,8 @@ from hermes_cli.kanban_cli_park import (
 from hermes_cli.kanban_ops import (
     _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_recover, _cmd_repair, _cmd_tail, _cmd_watch,
 )
-from hermes_cli.kanban_parser import build_parser
+from hermes_cli.kanban_parser import build_parser, cmd_resume as _cmd_resume
 from hermes_cli.kanban_sync_cli import cmd_sync as _cmd_sync
-from hermes_cli.kanban_operator_resume import cmd as _cmd_resume
 from hermes_cli.kanban_archive_scope import (  # moved here from this module; re-exported for callers
     _capability_owner_waiting_card, _creator_task_id, _is_stranded_runs_on_copy,
     _worker_may_archive_capability_owner, _worker_may_archive_own,
