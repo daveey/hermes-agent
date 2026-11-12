@@ -225,6 +225,18 @@ def test_missing_sequence_signature_never_reuses_an_old_memo(tmp_path):
     assert any(state.startswith("blocked@") for _, _, state in after)
 
 
+def test_unknown_fingerprints_never_reuse_a_shared_snapshot(tmp_path, monkeypatch):
+    from tui_gateway import kanban_replica_observer as observer
+
+    replica, ledger, cards = _world(tmp_path)
+    monkeypatch.setattr(observer, "fingerprint", lambda path: None)
+    before = obs.observe(replica, ledger, NOW)
+    _move(replica, cards[0], "blocked", NOW + 1)
+    after = obs.observe(replica, ledger, NOW + 2)
+    assert after != before
+    assert any(state.startswith("blocked@") for _, _, state in after)
+
+
 def test_unknown_after_fingerprint_forces_a_fresh_snapshot(tmp_path, monkeypatch):
     from tui_gateway import kanban_replica_observer as observer
 
