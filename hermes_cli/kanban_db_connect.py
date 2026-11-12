@@ -969,6 +969,8 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
                 _migrate_add_optional_columns(conn)
                 from hermes_cli.kanban_wake_episode import ensure_schema
                 ensure_schema(conn)
+                from hermes_cli import kanban_source_receipt
+                kanban_source_receipt.ensure_schema(conn)  # before the capture triggers that read it
                 _kb._sync.install_or_remove(conn, resolved)
                 _ensure_activity_revision(conn, resolved)
                 _INITIALIZED_PATHS.add(resolved)

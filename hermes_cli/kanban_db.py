@@ -2511,6 +2511,8 @@ def complete_task(
     from hermes_cli.kanban_metadata_files import discard_on_error
     staged: list[Path] = []
     with discard_on_error(staged), write_txn(conn):
+        from hermes_cli.kanban_source_receipt import stage_pending
+        stage_pending(conn, task_id)  # plan v4 §2.1: first statement of the ending txn
         require_review(conn, task_id, expected_run_id, placement_settled=placement_settled)
         if not _parents_satisfied(conn, task_id):
             return False
@@ -2867,6 +2869,8 @@ def block_task(
     human_request = validate_block_request(human_request, kind)
     pin = _park_pin.plan(conn, task_id, reason)  # git reads stay outside the write txn
     with write_txn(conn), reason_comment(conn, task_id, comment) as noted:
+        from hermes_cli.kanban_source_receipt import stage_pending
+        stage_pending(conn, task_id)  # plan v4 §2.1: first statement of the ending txn
         if not record_block(conn, task_id, goal_rejection, reason, expected_run_id, kind, human_request):
             return False
         cur_row = conn.execute("SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,)).fetchone()

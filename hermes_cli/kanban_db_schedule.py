@@ -38,6 +38,8 @@ def schedule_task(
     from hermes_cli import kanban_park_pin as kpp
     pin = kpp.plan(conn, task_id, reason)  # git reads stay outside the write txn
     with _kb.write_txn(conn), reason_comment(conn, task_id, comment) as noted:
+        from hermes_cli.kanban_source_receipt import stage_pending
+        stage_pending(conn, task_id)  # plan v4 §2.1: first statement of the ending txn
         if _kb._awaiting_human_answer(conn, task_id):
             return False
         from hermes_cli.kanban_timed_park import scheduled_payload

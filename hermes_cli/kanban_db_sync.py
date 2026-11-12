@@ -574,9 +574,15 @@ def _update_trigger(table: str, columns: list[str]) -> str:
         f"SELECT '{_wire_name(table, c)}' AS k, {_wire_value(table, c, 'NEW')} AS v WHERE OLD.{c} IS NOT NEW.{c}"
         for c in columns
     )
+    if table == "tasks":  # the virtual receipt rides the status-leaving op (kanban_source_receipt)
+        from hermes_cli.kanban_source_receipt import trigger_pair
+        pairs += f" UNION ALL {trigger_pair()}"
     fields = f"(SELECT json_group_object(k, json(v)) FROM ({pairs}))"
     base = "NEW.sync_version" if table == "tasks" else "NULL"
     body = _outbox_insert(table, "upsert", _row_uid_sql(table, "NEW"), fields, base)
+    if table == "tasks":  # plan v4 §2.1: the trigger body deletes the pending row it used
+        body += (" DELETE FROM kanban_source_receipt_pending WHERE task_id = NEW.id AND run_id = OLD.current_run_id "
+                 "AND OLD.status = 'running' AND NEW.status IS NOT 'running';")
     return (f"CREATE TRIGGER kanban_sync_{table}_upd AFTER UPDATE ON {table} "
             f"WHEN {_NOT_APPLYING} AND ({changed}) BEGIN {body} END")
 
