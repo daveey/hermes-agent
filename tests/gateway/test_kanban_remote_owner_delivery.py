@@ -40,7 +40,7 @@ from tui_gateway import kanban_remote_notices as krn
 from tui_gateway import kanban_unloaded as ku
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
-from tests.gateway.test_kanban_wake_fold import GUIDANCE, _local_chat, _wake
+from tests.gateway.test_kanban_wake_fold import GUIDANCE, _automation, _claim, _drain, _local_chat, _wake
 
 CHAT = "20261026_235722_bef6c6"
 GW_HOLDER = f"pid={os.getpid()}:turn={CHAT}:x:platform=local"
@@ -726,5 +726,64 @@ async def test_a_remote_notice_folding_last_keeps_the_local_wakes_guidance(tmp_p
         text = row["payload"]["text"]
         assert f"[kanban] Task {a} completed." in text and "card t_remote_r1 " in text
         assert text.count(GUIDANCE) == 1 and text.endswith(GUIDANCE)
+    finally:
+        authority.db.close()
+
+
+async def _admit_remote(authority, adapter, source, item):
+    md = kro._metadata(item)
+    assert await session_automation.admit_route_wake(authority.runner, adapter, source,
+                                                     md["kanban_cards"][0]["text"], "kanban-wake", md)
+
+
+@pytest.mark.asyncio
+async def test_a_local_wake_folding_into_a_remote_only_batch_keeps_its_own_guidance(tmp_path, monkeypatch, board):
+    """Review t_01a1d0636f0b4b88 (P1): a remote-only batch carries no guidance. A local wake folding into it
+    brings its own, which the waiting batch's recovery must not overwrite with the batch's empty tail; a
+    remote notice folding after that recovers it, so it appears once, at the end."""
+    authority, adapter, source, queued, _human = await _local_chat(tmp_path, monkeypatch)
+    try:
+        await _admit_remote(authority, adapter, source, _remote_item("t_remote_r1", 1001))
+        await _admit_remote(authority, adapter, source, _remote_item("t_remote_r2", 1002))
+        [row] = _automation(queued())
+        text = row["payload"]["text"]
+        assert GUIDANCE not in text and text == text.rstrip()
+        await _admit_remote(authority, adapter, source, _remote_item("t_remote_r3", 1003))
+        a = board("local A")
+        await _wake(adapter, source, a, "completed")
+        [row] = _automation(queued())
+        assert row["payload"]["text"].count(GUIDANCE) == 1 and row["payload"]["text"].endswith(GUIDANCE)
+        await _admit_remote(authority, adapter, source, _remote_item("t_remote_r4", 1004))
+        [row] = _automation(queued())
+        text = row["payload"]["text"]
+        assert f"[kanban] Task {a} completed." in text and "card t_remote_r4 " in text
+        assert text.count(GUIDANCE) == 1 and text.endswith(GUIDANCE)
+    finally:
+        authority.db.close()
+
+
+@pytest.mark.asyncio
+async def test_a_relabelled_local_wake_last_in_a_remote_batch_keeps_guidance_through_a_later_remote(
+        tmp_path, monkeypatch, board):
+    """Review t_01a1d0636f0b4b88 (P2): a stale local wait (its card claimed before delivery) folds into a
+    remote-only batch and is relabelled as the last card. It keeps its guidance, and a remote notice folding
+    after it recovers that guidance past the Note line: once, at the end, also after the claim-time drain."""
+    authority, adapter, source, queued, _human = await _local_chat(tmp_path, monkeypatch)
+    try:
+        await _admit_remote(authority, adapter, source, _remote_item("t_remote_r0", 1000))
+        a = board("waited on")
+        _claim(a)
+        await _wake(adapter, source, a, "chat_wait_unclaimed")
+        [row] = _automation(queued())
+        text = row["payload"]["text"]
+        assert "Note: an earlier wake for this card said" in text
+        assert text.count(GUIDANCE) == 1 and text.endswith(GUIDANCE)
+        await _admit_remote(authority, adapter, source, _remote_item("t_remote_r1", 1001))
+        [row] = _automation(queued())
+        text = row["payload"]["text"]
+        assert f"[kanban] Task {a} claimed by a worker (running)." in text
+        assert text.count(GUIDANCE) == 1 and text.endswith(GUIDANCE)
+        drained = await _drain(authority, row, monkeypatch)
+        assert drained.count(GUIDANCE) == 1 and drained.endswith(GUIDANCE)
     finally:
         authority.db.close()
