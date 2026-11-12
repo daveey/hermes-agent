@@ -39,6 +39,9 @@ _HOST_NAMES = frozenset({
     "HERMES_PYTHON_SRC_ROOT", "HERMES_DATA_DIR_SUFFIX", "HERMES_HOME_MODE", "HERMES_MANAGED",
     "HERMES_CONTAINER", "HERMES_SKIP_CHMOD", "HERMES_GATEWAY_LOCK_DIR", "HERMES_DISABLE_LAZY_INSTALLS",
     "HERMES_KANBAN_HOME", "HERMES_KANBAN_BUSY_TIMEOUT_MS",
+    # The board's rate-limit cooldown: the worker's failed-result observer reaps a 429 run and books
+    # its quota episode with it, so it must match the dispatcher's (else it books the default).
+    "HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS",
     # The administrator-managed scope directory (an IT bootstrap override, never in any profile's
     # ``.env``): without it a cold-started gateway loses the managed overlay stored elsewhere.
     "HERMES_MANAGED_DIR",

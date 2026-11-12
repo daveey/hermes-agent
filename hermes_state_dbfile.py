@@ -145,6 +145,10 @@ def inodes_with_other_descriptors(identities: set[tuple[int, int]]) -> Optional[
         probe_fds.update(_RETIRED_HEADER_PROBE_FDS)  # retired probes hold no locks either
     finally:
         _HEADER_PROBE_LOCK.release()
+    # The lock-safe readers' cached O_RDONLY pread fds (hermes_cli.sqlite_safe_read) hold no locks
+    # either: counting them would pin every probe of a file that path also read a header through.
+    from hermes_cli.sqlite_safe_read import lock_safe_fds
+    probe_fds.update(lock_safe_fds())
     descriptors = own_descriptors()
     if descriptors is None:
         return None

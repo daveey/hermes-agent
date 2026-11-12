@@ -22,6 +22,9 @@ OWNER_ONLY_WRITERS = {
     # The store implementations themselves (their own forwarding calls take a caller's dict).
     "agent/runtime_session_store.py",
     "hermes_state_sessions.py",
+    # Gateway delegate-row adoption (``_adopt_delegate_row``): the gateway runner owns its SessionDB and
+    # writes the owner-reserved ``_chat_adopted`` lineage marker; no managed worker runs session recovery.
+    "gateway/session_recovery.py",
 }
 
 

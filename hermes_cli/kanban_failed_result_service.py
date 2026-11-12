@@ -55,9 +55,11 @@ def arm_service(context, *, startup_seconds=5.0):
                '--property=StartLimitIntervalSec=0',
                f'--working-directory={project_root_str()}']
     # A manager-created service does not inherit its submitter's environment.
-    # Keep profile/path resolution, without forwarding secrets or worker pins.
+    # Keep profile/path resolution, without forwarding secrets or worker pins. The rate-limit
+    # cooldown is policy the reaper applies when it records a quota episode for this run: without it
+    # the observer books the default backoff although its dispatcher runs another one.
     for key in ('PATH', 'PYTHONPATH', 'HERMES_HOME', 'HERMES_KANBAN_HOME', 'HERMES_KANBAN_BOARD',
-                'HOME', 'LANG', 'TZ', 'TMPDIR'):
+                'HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS', 'HOME', 'LANG', 'TZ', 'TMPDIR'):
         if key in env:
             command.append(f'--setenv={key}={env[key]}')
     command += ['--', *argv]

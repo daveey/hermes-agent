@@ -57,6 +57,21 @@ def _concrete(path: str) -> str:
     return _PARAM.sub(lambda m: f"e2e-{m.group(1)}", path)
 
 
+# ``/api/peer/`` is gated by a peer pass, not the session token (hermes_cli/dashboard_auth/peer_pass.py):
+# with no provider taking passes (this sandbox) its contract is a 404 ``peer_access_unavailable`` for
+# every caller, which serves nothing either.
+_PEER_PREFIX = "/api/peer/"
+
+
+def _peer_route_refusal(path: str, r) -> bool:
+    if not path.startswith(_PEER_PREFIX) or r.status_code != 404:
+        return False
+    try:
+        return r.json().get("error") == "peer_access_unavailable"
+    except ValueError:
+        return False
+
+
 @pytest.fixture(scope="module")
 def dash(tmp_path_factory: pytest.TempPathFactory):
     sb = H.make_sandbox(tmp_path_factory.mktemp("dash-auth"))
@@ -106,7 +121,7 @@ def test_every_api_route_refuses_missing_and_wrong_token(dash: H.Dashboard, inve
         for label, headers, query in _bad_credentials(dash, path):
             r = dash.http.request(method, url, headers=headers, params=query,
                                   json={} if method != "GET" else None)
-            if r.status_code != 401:
+            if r.status_code != 401 and not _peer_route_refusal(path, r):
                 leaks.append(f"{method} {path} ({label}) -> {r.status_code} {r.text[:120]!r}")
     assert not leaks, f"{len(leaks)} gated route(s) served a caller without the session token:\n  " + "\n  ".join(leaks[:40])
     assert dash.proc.poll() is None, "dashboard died during the unauthenticated sweep"

@@ -888,7 +888,9 @@ class SessionSchemaMixin:
             healed = cursor.execute(
                 f"UPDATE sessions SET model_config = json_remove(model_config, '$._delegate_from') WHERE {polluted}"
             ).rowcount
-        except sqlite3.OperationalError as exc:
+        except sqlite3.DatabaseError as exc:
+            # OperationalError (locked/missing column) or a damaged sessions b-tree: the open-time scan
+            # must not turn page damage into an open failure; the first write confirms and latches it.
             logger.debug("reset-row delegate-marker heal skipped: %s", exc)
             return
         self._index_healed_rows_for_trigram(cursor, ids)

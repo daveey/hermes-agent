@@ -780,7 +780,7 @@ class TestOwnerSideShutdownCancel:
         cancel.set()  # the firer's forwarded cron.cancel landed before the run checked it
         authority._cron_cancellations = {"adm": cancel}
         row = {"admission_id": "adm", "request_id": "req", "principal_id": "cron-owner",
-               "payload": {"text": ""}}
+               "owner_epoch": 1, "generation": 1, "payload": {"text": ""}}
         policy = SimpleNamespace(request_json=json.dumps({
             "cron_job": {"id": job_id, "prompt": "x"}, "extra_prompt": None, "request_id": "req"}))
         try:
