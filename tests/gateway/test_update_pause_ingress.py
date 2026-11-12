@@ -198,7 +198,9 @@ async def test_native_admission_without_pause_is_unaffected_and_delivers_once(mo
     ({'text': 'x', 'finite': True, 'unattended': True}, 'local', True),
     ({'native_text_v1': {}, 'finite': True}, 'telegram', False),
     ({'api_turn_v1': {}}, 'local', False),
-    ({'local_automation_v1': {}}, 'local', False),
+    ({'local_automation_v1': {}}, 'local', False),  # malformed descriptor: fails closed
+    ({'local_automation_v1': {'identity': '["kanban-wake","route","x"]'}}, 'local', True),
+    ({'local_automation_v1': {'identity': '["async_delegation","d","x"]'}}, 'local', False),
 ])
 def test_only_native_or_local_chat_admissions_are_pause_eligible(payload, platform, expected):
     from types import SimpleNamespace

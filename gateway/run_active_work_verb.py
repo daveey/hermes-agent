@@ -4,6 +4,11 @@
 async delegations, so a CLI asking "may I stop this gateway?" could not see a background subagent
 that ``stop()`` interrupts (``tools.async_delegation.interrupt_all``). The verb answers from the
 running process instead: the same units the drain report publishes plus every live delegation.
+
+``active_work`` units carry ``update_pausable`` on every unit, not only chat: true only for a chat
+turn whose agent runs under the gateway's core-update pause hook
+(``session_update_pause_hook.update_pausable``), i.e. a pause request parks it at a step boundary with a
+durable checkpoint. Every other unit (api, managed, cron, delegation) only finishes or is cut.
 """
 
 from __future__ import annotations
@@ -64,6 +69,9 @@ def active_work_verb(runner, loop) -> Callable[[], dict[str, Any]]:
                 units = list(runner._describe_active_work()) + _delegation_units(time.time())
                 if scoped:
                     units = _profile_units(runner, profile, units)
+                # Only a chat turn under the update-pause hook parks; every other unit says so explicitly.
+                units = [{**unit, "update_pausable": unit.get("update_pausable") is True} for unit in units]
+                if scoped:
                     box.append({"active_agents": len(units), "active_work": units, "profile": profile,
                                 "parked_work": [u for u in runner._describe_parked_work()
                                                 if u.get("profile") == profile]})

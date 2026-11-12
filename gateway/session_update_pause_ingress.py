@@ -4,8 +4,9 @@ from dataclasses import replace
 
 
 def supported(authority, row, event, live, *, is_api):
-    """Only a claimed native messaging or local chat turn can be checkpointed. API and
-    producer-admitted automation have other result contracts and keep counting as active work.
+    """Only a claimed native messaging or local chat turn can be checkpointed, including a local
+    route's producer wake (below). API and noted-completion admissions have other result contracts
+    and keep counting as active work.
     Native notices retain their presentation traits on resume, but must pass current ingress
     authorization again; a formerly internal wake is never a license to bypass Stop or policy.
 
@@ -16,10 +17,21 @@ def supported(authority, row, event, live, *, is_api):
     """
     payload = row['payload']
     local = getattr(getattr(live.source, 'platform', None), 'value', None) == 'local'
-    if is_api or (payload.get('finite') is True and not local):
+    if is_api or (payload.get('finite') is True and not local) or 'api_turn_v1' in payload:
         return False
-    if any(key in payload for key in ('api_turn_v1', 'local_automation_v1')):
-        return False
+    if 'local_automation_v1' in payload:
+        # [daveey] A producer wake on a local route (Kanban notice, /loop tick, plugin injection,
+        # heartbeat) runs as a turn and resumes like a local chat turn: the claim re-checks its route
+        # (``check_local_automation``) and ``resume_event`` keeps its mute/heartbeat traits only.
+        # Unparkable, a notice turn held a restart-safe drain for its whole claim lease (David-MBP
+        # 2026-11-12 06:03/07:16 PST). Not a noted completion: at an unviewed resume
+        # ``note_if_unviewed`` would write it as a note instead of continuing. Not a detached
+        # route's wake: its resume is not covered here.
+        descriptor = payload['local_automation_v1']
+        if not (isinstance(descriptor, dict) and isinstance(descriptor.get('identity'), str)):
+            return False  # malformed: the claim refuses it anyway, never park it
+        from gateway.session_completion_notes import noted_completion
+        return local and not noted_completion(row)
     return 'native_text_v1' in payload or local
 
 
