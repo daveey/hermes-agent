@@ -464,6 +464,8 @@ KANBAN_MOVE_SCHEMA = _schema(
         "origin instead; your own run continues. Second exception: task_id = a READY, unclaimed card of this "
         "gateway whose runs_on no enrolled machine carries (stranded: e.g. ['hermes-hub']) may be re-routed by any "
         "worker to labels a machine does carry (e.g. ['machine:hub']); the old labels are kept in a comment. "
+        "Third: a pickup-stall alarm's run may move a ready card its alarm lists off the stalled machine to "
+        "runs_on = [\"machine:<X>\"] for one other machine eligible now. "
         "Every other card is refused."
     ),
     {

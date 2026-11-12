@@ -210,6 +210,7 @@ def _minutes(since_ms: int, now_ms: int) -> int:
 def _tail(conn, own: str) -> str:
     """The repair runs on another machine (:func:`alarm_placement`), so name where ``own``'s machine-local
     evidence lives instead of saying "on this host"."""
+    from hermes_cli import kanban_pickup_stall_repin as repin
     from hermes_cli import kanban_worker_node as wn
     try:
         replica = str(wn._replica_path(conn))
@@ -221,8 +222,9 @@ def _tail(conn, own: str) -> str:
             "Board row from any machine: `Hub(load_identity()).row_evidence(<board>, 'tasks', <card>)`. Check "
             "`kanban.sync.pickup`, the machine registry entry (labels, hold, pickup), profiles, capabilities and "
             "dispatcher capacity, fix the cause (or re-place the card on a machine that can run it), and verify the "
-            "card is imported and claimed. Do not claim a cause the recorded evidence does not show, and never lift "
-            "or shorten a registry hold you did not set. This is agent-owned repair, not a human decision.")
+            "card is imported and claimed. " + repin.howto(own) + " Do not claim a cause the recorded evidence "
+            "does not show, and never lift or shorten a registry hold you did not set. This is agent-owned repair, "
+            "not a human decision.")
 
 
 # --- where the alarm runs ------------------------------------------------------------------------------------
@@ -242,15 +244,22 @@ def _free_slots(entry: Mapping[str, Any]) -> Optional[int]:
     return cap - int(active)
 
 
-def _can_host(name: str, entry: Optional[Mapping[str, Any]], own: str, need: set[str]) -> bool:
-    """Another active, unheld machine that copies cards, carries ``need`` and reaches the hub (it is the operator
-    lane, or attests ``capability:hub-write``): re-placing or handing off another gateway's card goes through it."""
+def _takes_work(name: str, entry: Optional[Mapping[str, Any]], own: str, need: set[str]) -> bool:
+    """Another active, unheld machine that copies cards and carries ``need`` (also the rule for where an alarm's
+    run may re-place a stalled card: :mod:`hermes_cli.kanban_pickup_stall_repin`)."""
     from hermes_cli import kanban_worker_node as wn
     if name == own or not entry or entry.get("state", "active") != "active" or entry.get("hold") \
             or not wn.advertises_pickup(entry):
         return False
-    labels = wn.effective_labels(entry, name)
-    return need <= labels and (name == OPERATOR_LANE or HUB_ACCESS in labels)
+    return need <= wn.effective_labels(entry, name)
+
+
+def _can_host(name: str, entry: Optional[Mapping[str, Any]], own: str, need: set[str]) -> bool:
+    """:func:`_takes_work`, and reaches the hub (it is the operator lane, or attests ``capability:hub-write``):
+    re-placing or handing off another gateway's card goes through it."""
+    from hermes_cli import kanban_worker_node as wn
+    return _takes_work(name, entry, own, need) and (name == OPERATOR_LANE
+                                                    or HUB_ACCESS in wn.effective_labels(entry, name))
 
 
 def _ready_now(entry: Mapping[str, Any], now_ms: int) -> bool:
@@ -358,10 +367,11 @@ _HOST_GROUPS = {
     "budget_exhausted": (QUEUE_FULL, "Pickup queue full on {own}",
                          "the last pickup skip of each is budget_exhausted (no spawn slot on {own}). Decide "
                          "whether the queue drains on its own (running cards near done) or work must move to a "
-                         "machine with slots."),
+                         "machine with slots (the kanban_move command below)."),
     "hold": ("hold", "Pickup held on {own}",
              "{own} is on hold in the machine registry, so it takes no Board work. An operator set that on "
-             "purpose: do not lift it; re-place cards that cannot wait for the hold to end."),
+             "purpose: do not lift it; re-place cards that cannot wait for the hold to end with the kanban_move "
+             "command below."),
     "registry": ("registry", "Pickup blind on {own}: machine registry unavailable",
                  "{own} could not read the machine registry, so its pickup copies nothing. Restore registry access "
                  "(Board identity, network) and confirm the next pass imports the cards."),

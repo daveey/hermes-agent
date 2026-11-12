@@ -56,12 +56,17 @@ def creator_repin(conn: sqlite3.Connection, task_id: str, env_task: str, *, runs
             stranded = stranded_refusal(conn, task_id)
             if stranded is None:
                 return stranded_reroute(conn, task_id, env_task, runs_on=runs_on, reason=reason, hub=hub)
+            from hermes_cli import kanban_pickup_stall_repin as stall
+            stalled = stall.refusal(conn, task_id, env_task, runs_on)
+            if stalled is None:
+                return stall.move(conn, task_id, env_task, runs_on=runs_on, reason=reason, hub=hub)
             return {"ok": False, "reason_code": "not_creator_task",
                     "error": f"worker is scoped to task {env_task}; it may move another card only to repin a "
                              f"worker-first card its own task created (or, as its generated repin-owner "
-                             f"supervisor, its one listed orphaned card), or to re-route a ready card whose "
-                             f"runs_on no enrolled machine carries, and {task_id} is none of these ({refusal}; "
-                             f"{stranded})"}
+                             f"supervisor, its one listed orphaned card; or, as a pickup-stall alarm, a card it "
+                             f"lists off the stalled machine), or to re-route a ready card whose runs_on no "
+                             f"enrolled machine carries, and {task_id} is none of these ({refusal}; {stranded}; "
+                             f"pickup-stall alarm: {stalled})"}
     if not repin.applies(conn, task_id):
         # The creator is the likeliest worker to find its own stranded child: the reroute open to every
         # worker is open to it too.

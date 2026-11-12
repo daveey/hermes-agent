@@ -307,6 +307,8 @@ def preflight_op(conn: sqlite3.Connection, requester: str, op: dict) -> dict:
         human = None
         if op["action"] == "unblock" and rep is not None:
             human = rep.execute("SELECT human_request, block_kind FROM tasks WHERE id = ?", (target,)).fetchone()
+        from hermes_cli import kanban_pickup_stall_repin as stall
+        alarm_scope = stall.operator_refusal(conn, rep, requester, op)  # None unless an alarm asks
     if not home:
         return refuse("no_home", f"{target} has no created_on; no gateway owns it")
     if home == _own_gateway(conn):
@@ -315,6 +317,9 @@ def preflight_op(conn: sqlite3.Connection, requester: str, op: dict) -> dict:
         return refuse("terminal", f"{target} is {status}")
     if op["action"] == "move" and status == "running":
         return refuse("running", f"{target} is running; only its own run may move it (kanban_move)")
+    if alarm_scope is not None:
+        return refuse("pickup_stall_scope", f"a pickup-stall alarm moves only a card it lists, off the stalled "
+                                            f"machine, to one eligible now: {alarm_scope}")
     if op["action"] == "unblock":
         if status != "blocked":
             return refuse("not_blocked", f"{target} is {status}, not blocked")
