@@ -9,8 +9,9 @@ t_01a1cf4778d6d1b1, t_01a1cf4799e84072). Any worker posts that comment itself: t
 
 :func:`verdict` is the hub admission judge's deterministic first rule: such a card is denied with that route and no
 model call, so the refusal the creating worker reads says what to do instead. A card that also names one of the
-admission allowlist's contexts (hub Chrome, Board admin key, instance-role SSM, user terminal, a hub worktree) is left
-to the judge.
+admission allowlist's contexts (hub Chrome, Board admin key, instance-role SSM, user terminal, a hub worktree, the hub
+gateway's own key for ``hermes-hub`` (gateway_key_cli), in-process hub state (hub_live_process)) is left to the judge,
+and so is a card that names no explicit target card (``on t_<id>``, a ``## t_<id>`` heading, ``task_id=t_<id>``).
 """
 from __future__ import annotations
 
@@ -21,13 +22,22 @@ from typing import Optional
 _VERB = re.compile(r"^\W*(?:post|relay|leave|add|write|deliver|forward|copy)\b", re.IGNORECASE)
 _PAYLOAD = re.compile(r"\b(?:comments?|notes?|evidence|results?|receipts?|corrections?)\b", re.IGNORECASE)
 _COMMENT = re.compile(r"\b(?:comments?|kanban_comment|hub-comment)\b", re.IGNORECASE)
-_CARD = re.compile(r"\bt_[0-9a-f]{16}\b")
+# The comment has an explicit target card: "on|onto|to [the] [hub-owned] [task|card] t_<id>" (markdown and a
+# board/ prefix allowed), a "## t_<id>" section heading, `hub-comment t_<id>` or `task_id=t_<id>`.
+_TARGET = re.compile(r"\b(?:on|onto|to)\s+(?:the\s+)?(?:hub-owned\s+)?(?:(?:task|card)\s+)?[*`]*(?:[\w-]+/)?"
+                     r"t_[0-9a-f]{16}\b|^\s*#+\s*[*`]*t_[0-9a-f]{16}\b|hub-comment\s+t_[0-9a-f]{16}\b|"
+                     r"task_id\s*=\s*['\"]?t_[0-9a-f]{16}\b", re.IGNORECASE | re.MULTILINE)
 # What makes it a relay rather than code that happens to touch comments.
 _RELAY = re.compile(r"verbatim|hub-owned|foreign_card|board_pinned|read_only_transport|replica|only the hub|"
                     r"owner-only|created on (?:the )?hub", re.IGNORECASE)
 # The hub-admission-test allowlist's contexts: any mention goes to the judge instead.
 _HUB_CONTEXT = re.compile(r"chrome|cloudflare access|admin key|instance[- ]role|\bssm\b|run_in_user_terminal|"
-                          r"user terminal|_wt/|\.worktrees/|unpushed", re.IGNORECASE)
+                          r"user terminal|_wt/|\.worktrees/|unpushed|"
+                          # gateway_key_cli: `hermes-hub <subcommand>` with the hub gateway's own key.
+                          r"gateway_key_cli|hermes-hub\b|(?:gateway|hub)(?:'s|s)? (?:own )?key|"
+                          r"hub-admin (?:cannot|can't|can not|is insufficient)|"
+                          # hub_live_process: in-process hub gateway/serve state.
+                          r"hub_live_process|in-process|live process", re.IGNORECASE)
 
 WHY = ("comment relay: a card that only posts a comment on another card never needs the hub. Post it from your "
        "own card: kanban_supervisor_request(ops=[{'op': 'operator', 'action': 'comment', 'task_id': <card>, "
@@ -40,7 +50,7 @@ def is_relay(title: str, body: str, hub_reason: Optional[str] = None) -> bool:
     """True when the card's only work is posting comment text onto other named cards."""
     title, body, reason = title or "", body or "", hub_reason or ""
     text = f"{title}\n{body}"
-    return bool(_VERB.search(title) and _PAYLOAD.search(title) and _COMMENT.search(text) and _CARD.search(text)
+    return bool(_VERB.search(title) and _PAYLOAD.search(title) and _COMMENT.search(text) and _TARGET.search(text)
                 and _RELAY.search(f"{text}\n{reason}") and not _HUB_CONTEXT.search(f"{text}\n{reason}"))
 
 

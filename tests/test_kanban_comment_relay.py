@@ -74,6 +74,17 @@ def test_comment_relay_is_denied_without_a_model_call(judge, title, body):
     ("Post the billing note on t_01a1cdfe0d81e0f0",
      "Read it in the hub's signed-in Chrome first, then post the comment verbatim on the hub-owned card."),
     ("Fix kanban_comment foreign_card refusal text", "The replica refuses comments on t_01a1cdfe0d81e0f0."),
+    # Allowlist gateway_key_cli: the hub gateway's own key for a hermes-hub subcommand, then a comment.
+    ("Write repair results onto t_01a1cf4778d6d1b1",
+     "Run `hermes-hub replica repair` with the hub gateway's own key (only the hub holds it), then kanban_comment "
+     "the receipt on t_01a1cf4778d6d1b1."),
+    # Allowlist hub_live_process: in-process hub gateway state, then a comment.
+    ("Post live dispatcher evidence on t_01a1cf4778d6d1b1",
+     "Dump the in-process dispatcher queue of the hub gateway (only the hub has it) and post it as a comment "
+     "verbatim on t_01a1cf4778d6d1b1."),
+    # No explicit target card for the comment: not a relay.
+    ("Add replica notes to sync docs",
+     "Document how the replica handles comments; see t_01a1cf4778d6d1b1 for background."),
 ])
 def test_other_cards_still_go_to_the_judge(judge, title, body):
     gate, calls = judge
