@@ -76,6 +76,69 @@ def test_subscribe_warns_when_binding_a_different_chat(home, monkeypatch, capsys
     assert MINE in text
 
 
+_ROUTING_KEY = f"agent:main:local:dm:{MINE}"
+# caller -> (subprocess env, the chat id the warning must suggest; None = never warned)
+_CALLERS = {
+    "routing": ({"HERMES_SESSION_KEY": _ROUTING_KEY}, MINE),
+    "bare": ({"HERMES_SESSION_KEY": MINE}, MINE),
+    "preferred": ({"HERMES_SESSION_KEY": _ROUTING_KEY, "HERMES_SESSION_ID": OTHER}, OTHER),
+    "preferred_bare": ({"HERMES_SESSION_KEY": MINE, "HERMES_SESSION_ID": OTHER}, OTHER),
+    "stale_id": ({"HERMES_SESSION_KEY": _ROUTING_KEY, "HERMES_SESSION_ID": "stale-unstored"}, MINE),
+    "worker": ({"HERMES_SESSION_KEY": _ROUTING_KEY, "HERMES_KANBAN_TASK": "t_worker"}, None),
+    "unknown": ({"HERMES_SESSION_KEY": "agent:main:local:dm:missing"}, None),
+}
+
+
+@pytest.mark.parametrize("target", [MINE, OTHER])
+@pytest.mark.parametrize("caller", sorted(_CALLERS))
+def test_subscribe_resolves_caller_before_warning(home, monkeypatch, capsys, target, caller):
+    env, resolved = _CALLERS[caller]
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    rc, _ = _subscribe(target)
+    out = capsys.readouterr()
+    assert rc == 0
+    if resolved and target != resolved:
+        assert "WARNING: binding a different chat" in out.err
+        assert f"re-run with --chat-id {resolved} and" in out.err
+    else:
+        assert "WARNING" not in out.err
+    assert "agent:main:local:dm:" not in out.err
+    assert "stale-unstored" not in out.err
+
+
+def test_subscribe_routing_key_same_compression_lineage(home, monkeypatch, capsys):
+    from hermes_state import SessionDB
+    with SessionDB(db_path=home / "state.db") as db:
+        db.publish_compression_child(parent_session_id=MINE, child_session_id="compressed",
+                                     source="desktop", messages=[{"role": "user", "content": "summary"}],
+                                     require_compression_lease=False)
+    monkeypatch.setenv("HERMES_SESSION_KEY", f"agent:main:local:dm:{MINE}")
+    rc, _ = _subscribe("compressed")
+    assert rc == 0
+    assert "WARNING" not in capsys.readouterr().err
+
+
+def test_unknown_target_keeps_id_diagnostic_without_lineage_warning(home, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_SESSION_ID", MINE)
+    rc, _ = _subscribe("missing")
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "not a chat in this profile's state.db" in out.out
+    assert "WARNING" not in out.err
+
+
+def test_real_routing_shaped_id_is_not_replaced_by_suffix(home, monkeypatch, capsys):
+    from hermes_state import SessionDB
+    key = f"agent:main:local:dm:{MINE}"
+    with SessionDB(db_path=home / "state.db") as db:
+        db.create_session(session_id=key, source="desktop")
+    monkeypatch.setenv("HERMES_SESSION_KEY", key)
+    rc, _ = _subscribe(MINE)
+    assert rc == 0
+    assert f"re-run with --chat-id {key} and" in capsys.readouterr().err
+
+
 def test_subscribe_from_a_plain_shell_does_not_warn(home, capsys):
     rc, _ = _subscribe(OTHER)
     out = capsys.readouterr()

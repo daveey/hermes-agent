@@ -37,21 +37,34 @@ def _title_and_tip(session_id: str) -> tuple[Optional[str], Optional[str], bool]
         db.close()
 
 
+def _caller_chat() -> tuple[str, Optional[str]]:
+    """Resolve subprocess identity to a real state.db chat, never suggest an unchecked routing key."""
+    session_id = (os.environ.get("HERMES_SESSION_ID") or "").strip()
+    key = (os.environ.get("HERMES_SESSION_KEY") or "").strip()
+    for candidate in (session_id, key, key.rsplit(":", 1)[-1]):
+        if candidate:
+            _title, tip, found = _title_and_tip(candidate)
+            if found:
+                return candidate, tip
+    return "", None
+
+
 def print_tui_target(task_id: str, chat_id: str) -> None:
     """Print the bound chat's title; warn on stderr when it is not the calling agent's own chat.
 
-    The subprocess env names the calling chat: ``HERMES_SESSION_KEY`` (what the tui poller listens on) or
-    ``HERMES_SESSION_ID``. Two ids of one compacted lineage (same compression tip) are the same chat. A plain shell
-    (neither set) and a Kanban worker are never warned."""
+    ``HERMES_SESSION_ID`` names the state.db chat; ``HERMES_SESSION_KEY`` may instead be a
+    Desktop routing key ending in that id. Here both only identify the caller: this manual
+    subscribe routes by ``--chat-id``, not by either env spelling.
+    Two ids of one compacted lineage (same compression tip) are the same chat. A plain shell,
+    an unresolved caller, and a Kanban worker are never warned."""
     title, tip, found = _title_and_tip(chat_id)
     label = title or "untitled"
     print(f"  chat {chat_id}: {label}" if found else
           f"  chat {chat_id} is not a chat in this profile's state.db (check the id)")
-    mine = (os.environ.get("HERMES_SESSION_KEY") or os.environ.get("HERMES_SESSION_ID") or "").strip()
-    if os.environ.get("HERMES_KANBAN_TASK") or not mine or mine == chat_id:
+    if os.environ.get("HERMES_KANBAN_TASK") or not found:
         return
-    _mine_title, mine_tip, mine_found = _title_and_tip(mine)
-    if found and mine_found and tip == mine_tip:
+    mine, mine_tip = _caller_chat()
+    if not mine or tip == mine_tip:
         return
     print(f"WARNING: binding a different chat ({label}): this command runs from chat {mine}, but --chat-id is "
           f"{chat_id}. To link the card to this chat, re-run with --chat-id {mine} and "
