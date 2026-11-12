@@ -499,12 +499,11 @@ def _reporter_case(h: Harness, monkeypatch, send):
         h.clock.advance_ms(5)
         return {"cpus": 4}
 
-    def sample(*args, **kwargs):
-        h.clock.advance_ms(2)  # only snapshot B work, never the observation window
+    def take(_limit):
+        h.clock.advance_ms(2)  # only the hand-off from the sampler thread, never an observation window
         return {"cpu_busy_pct": 41.0, "cpu_busy_window_ms": 1005, "cpu_busy_sample_end_ms": 1_800_000_001_000}
     return mm.Reporter(send, collect_fn=collect, clock=lambda: h.clock.ns / 1e9,
-                       cpu_limit_fn=lambda: (cpu.ON, 50.0),
-                       cpu_begin_fn=lambda **kw: (h.clock.ns / 1e9, None), cpu_finish_fn=sample)
+                       cpu_limit_fn=lambda: (cpu.ON, 50.0), cpu_take_fn=take)
 
 
 @pytest.mark.parametrize("failure,outcome,status", [
@@ -526,18 +525,16 @@ def test_report_record_spans_collect_sample_and_the_whole_send(tmp_path, monkeyp
             raise failure
         return {}
     reporter = _reporter_case(h, monkeypatch, send)
-    assert h.diag.report(reporter.report_due) is False  # begin has limit span but sends nothing
-    assert h.diag.report(reporter.report_due) is False  # not due has no component span
+    assert h.diag.report(reporter.report_due) is (failure is None)  # the sampler measured already: one call
     h.clock.advance_ms(1000)
-    assert h.diag.report(reporter.report_due) is (failure is None)
     assert h.diag.report(reporter.report_due) is False  # not due: a quiet report is recorded too
     h.until[0] = None
     h.diag.boundary()
     reps = [r for r in h.records() if r["ev"] == "rep"]
-    assert len(reps) == 4
-    begin, early, rep, quiet = reps
-    assert begin['res'] == 'not_sent' and 'limit_t0' in begin and 'send_t0' not in begin
-    assert early['res'] == 'not_sent' and not any(f'{span}_t0' in early for span in timing.SPANS)
+    assert len(reps) == 2
+    rep, quiet = reps
+    assert 'limit_t0' in rep
+    assert not any(f'{span}_t0' in quiet for span in timing.SPANS)
     assert rep["res"] == ("sent" if failure is None else "not_sent")
     assert rep["collect_t1"] - rep["collect_t0"] == 5 * MS
     assert rep["cpu_t1"] - rep["cpu_t0"] == 2 * MS
@@ -554,8 +551,6 @@ def test_reporter_outside_a_report_scope_is_unchanged(tmp_path, monkeypatch):
     h = Harness(tmp_path)
     h.arm()
     reporter = _reporter_case(h, monkeypatch, lambda s: {})
-    assert reporter.report_due() is False
-    h.clock.advance_ms(1000)
     assert reporter.report_due() is True  # no report() scope: spans are no-ops
     h.until[0] = None
     h.diag.boundary()

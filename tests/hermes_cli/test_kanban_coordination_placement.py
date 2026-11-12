@@ -193,6 +193,35 @@ def test_explicit_execution_is_fail_closed(fleet, text):
     assert coord.requirements(text)[1] == coord.ACTION_REASON
 
 
+@pytest.mark.parametrize("text", [
+    "fails with current core and passes with hermes-hub's older core",
+    "compare via hermes-hub\u2019s journal output",
+    "use hermes-hub's checkout as the base",
+    "Run hermes-hub's\nexisting fixtures",
+    "verified with cross_task's comment path",
+])
+def test_possessive_prose_is_not_an_invocation(fleet, text):
+    from hermes_cli import kanban_placement_coordination as coord
+    cfg, entry, _ = fleet
+    entry["labels"] = []
+    assert coord.requirements(text) == (set(), None)
+    assert reason(text, cfg) is None
+
+
+@pytest.mark.parametrize("text", [
+    "`hermes-hub unknown-cmd`", "run hermes-hub", "run hermes-hub' frobnicate",
+    "run hermes-hub's-tool", "use cross_task", "with hermes-hub'sync",
+])
+def test_possessive_exemption_keeps_invocations_fail_closed(fleet, text):
+    from hermes_cli import kanban_placement_coordination as coord
+    assert coord.requirements(text)[1] == coord.ACTION_REASON
+
+
+def test_possessive_exemption_keeps_status_read():
+    from hermes_cli import kanban_placement_coordination as coord
+    assert coord.requirements("hermes-hub status") == ({"capability:coordination-read"}, None)
+
+
 @pytest.mark.parametrize("text", ["hermes-hub status", "hermes-hub pull", "cross_task read", "cross_task list"])
 def test_each_read_needs_fresh_attestation(fleet, text):
     cfg, entry, _ = fleet

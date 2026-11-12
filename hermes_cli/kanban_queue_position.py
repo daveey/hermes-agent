@@ -171,7 +171,27 @@ def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Opt
     if placed is not None:
         return placed
     running, limit = _running_and_limit(conn, board)
-    return {"lane": "local", "ahead": _ahead(conn, task), "running": running, "limit": limit, "approximate": True}
+    from hermes_cli import kanban_board_share as share
+    try:
+        elsewhere = share.ahead_elsewhere(conn, task.id)
+    except Exception:  # health: allow BLE001 -- other boards are advisory; an unreadable count is unknown
+        _log.debug("kanban queue position: other boards unavailable", exc_info=True)
+        elsewhere = None
+    place = {"lane": "local", "ahead": _ahead(conn, task), "running": running, "limit": limit, "approximate": True}
+    if elsewhere:  # only when other boards' cards rank ahead: the single-board payload keeps its shape
+        place["ahead_other_boards"] = elsewhere
+    return place
+
+
+def ahead_words(place: dict[str, Any], template: str) -> str:
+    """``template`` (with ``{n}``) filled with the total ahead, naming cards on other boards that share the host
+    slots: without them a card read "0 ahead" while other boards' cards took every freed slot (2026-11-12)."""
+    ahead = int(place.get("ahead") or 0)
+    other = place.get("ahead_other_boards") or 0
+    if not other:
+        return template.format(n=ahead)
+    from hermes_cli.kanban_board_share import OTHER_BOARDS
+    return template.format(n=ahead + other) + f" ({other} on {OTHER_BOARDS})"
 
 
 _NOT_STUCK = ("queued, not stuck: check placement and available capacity first; re-place if suitable. "
@@ -241,7 +261,8 @@ def describe(place: Optional[dict[str, Any]]) -> Optional[str]:
     if lane == "worker_pool":
         return f"waiting for a pool worker ({place.get('reason') or 'no reason recorded'}). " + _NOT_STUCK
     ahead = place.get("ahead")
-    words = f"waiting for a local slot: ~{ahead} ahead" if ahead is not None else "waiting for a local slot"
+    words = (ahead_words(place, "waiting for a local slot: ~{n} ahead") if ahead is not None
+             else "waiting for a local slot")
     if place.get("running") is not None and place.get("limit") is not None:
         words += f", {place['running']}/{place['limit']} running"
     return words + ". " + _NOT_STUCK
@@ -261,7 +282,21 @@ def fields(place: Optional[dict[str, Any]]) -> dict[str, Any]:
     return {"queue": place, "queue_note": describe(place)} if place else {}
 
 
+def detail_fields(conn, task, board=None):
+    """Additive card-read fields for every state; legacy queue shape is unchanged."""
+    from hermes_cli import kanban_capacity_evidence as evidence
+    out = fields(read(conn, task, board))
+    try:
+        capacity = evidence.read(conn, task, board=board)
+    except Exception:  # health: allow BLE001 -- diagnostics cannot fail a card read
+        capacity = evidence._unknown("observation_unavailable")
+    observation = capacity.get("execution_observation")
+    out.update(capacity_evidence=capacity, execution_observations=[observation] if observation else [])
+    out["capacity_note"] = evidence.describe(capacity)
+    return out
+
+
 def print_field(place: Optional[dict[str, Any]], queue_reason: Any, field) -> None:
     """The text ``queue:`` line, unless the worker-pool ``queue_reason`` line already took it."""
     if place and not queue_reason:
-        field("queue", describe(place))
+        field("queue", fields(place)["queue_note"])

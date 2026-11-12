@@ -152,6 +152,10 @@ def _supervisor(task):
             from hermes_cli.config_backend import config_exists
             if not config_exists(Path(resolve_profile_env(name)) / 'config.yaml'):
                 continue
+            # A profile no pool worker or local dispatcher can run strands the card it is handed (t_f6d930b7).
+            from hermes_cli.kanban_profile_runnable import runnable
+            if not runnable(name):
+                continue
             required = validate_assignment(name, requires=[*(task.requires or []), 'kanban'],
                                            workspace_kind=task.workspace_kind,
                                            workspace_path=task.workspace_path, skills=task.skills)

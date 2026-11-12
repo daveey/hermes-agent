@@ -56,8 +56,9 @@ def _queue_words(place: dict[str, Any]) -> str:
         # hold on that machine from the chat (t_01a1cca8ed755919). [daveey]
         from hermes_cli import kanban_queue_position as kqp
         return kqp.headline(place) if place["lane"] == "machine" else str(kqp.describe(place))
+    from hermes_cli.kanban_queue_position import ahead_words
     ahead = place.get("ahead")
-    words = f"{ahead} card(s) ahead of it" if ahead is not None else "queue place unknown"
+    words = ahead_words(place, "{n} card(s) ahead of it") if ahead is not None else "queue place unknown"
     if place.get("running") is not None and place.get("limit") is not None:
         words += f", {place['running']}/{place['limit']} worker slots busy"
     return words

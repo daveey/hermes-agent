@@ -1147,6 +1147,11 @@ class ToolRegistry:
             return tool_error(refusal)
         entry = self.get_entry(name, scope=scope)
         if not entry:
+            # [daveey] A miss while this home's plugins reload is not authoritative: wait, read again.
+            from tools.registry_reload import wait_for_reload
+            if wait_for_reload(scope):
+                entry = self.get_entry(name, scope=scope)
+        if not entry:
             return tool_error(f"Unknown tool: {name}")
         from tools.arg_validation import check_tool_args, flag_unknown_args
         refusal, unknown, valid = check_tool_args(entry, args)

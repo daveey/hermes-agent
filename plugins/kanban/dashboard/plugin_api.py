@@ -402,9 +402,7 @@ def get_task(
         if task is not None:
             out = _task_detail(conn, task, run_state_type, run_state_name)
             from hermes_cli import kanban_queue_position as kqp
-            queue = kqp.position(conn, task, board)  # [daveey] a long wait reads as queued, not stuck
-            if queue is not None:
-                out["queue"] = queue
+            out.update(kqp.detail_fields(conn, task, board))
             return {**out, "source": "live", "wait_observation": owner_proof(conn, task)}
         live_file = kbc._main_db_file(conn)
     # [daveey] A synced board's live file holds only this gateway's own cards; a card another gateway created

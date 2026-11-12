@@ -47,11 +47,88 @@ The commands below are an operator handoff, not a worker-executable runbook.
 Digest binding and membership/value CAS provide freshness; there is no time-based
 grant or expiry. Implementation tests do not establish live operator authorization.
 
-1. Coordinate a quiet migration window across all origins. Before installing any
-   cap-aware imports, prepare from the raw canonical Board snapshot (no local
-   cap-aware pull). Use a locally owned existing task for `LOCAL_TASK`; do not
-   create extra open tasks after capture. `ORIGIN` is the enrolled primary gateway
-   name. The board flag is before the subcommand.
+### One-command operator coordinator
+
+Run this only from a genuine operator context, with this command surface installed
+on every origin. The local and remote CLIs retain the worker/delegated-lineage
+fences. The coordinator checks lineage before reading configuration or starting
+SSH; remote staging checks it before reading stdin. SSH is transport for an
+already authorized operator, never a worker authorization mechanism.
+
+Create an explicit JSON mapping for **every origin in the captured manifest**:
+
+```json
+{
+  "origin-a": {
+    "host": "operator@origin-a.example.com",
+    "argv": ["hermes", "kanban", "--board", "default", "supervisor-requests"],
+    "task": "EXISTING_LOCAL_TASK_A",
+    "backup": "/absolute/fresh-origin-a.json"
+  },
+  "origin-b": {
+    "host": "operator@origin-b.example.com",
+    "argv": ["/absolute/hermes", "kanban", "--board", "default", "supervisor-requests"],
+    "task": "EXISTING_LOCAL_TASK_B",
+    "backup": "/absolute/fresh-origin-b.json"
+  }
+}
+```
+
+`argv` is the complete remote command prefix, including board and
+`supervisor-requests`; arguments are individually shell-quoted for SSH. Hosts are
+never inferred or hardcoded. The local writer also needs an entry, but executes
+in-process rather than via SSH. Backup paths must be fresh absolute paths, and
+attachment tasks must already belong to their corresponding writers.
+
+```sh
+hermes kanban --board default supervisor-requests --priority-operation migrate \
+  --writer origin-a --host-map-file /absolute/operator-host-map.json \
+  --exception EXCEPTION_LOW --exception EXCEPTION_HIGH --allow-legacy-rollback
+```
+
+Alternatively pass the JSON directly with `--host-map '{...}'` (exactly one map
+flag). `--allow-legacy-rollback` explicitly permits automatic guarded recovery
+of above-cap originals; omit it only if refusing that policy rollback is intended.
+Do not pass separate task, backup, manifest, attachment or digest flags to migrate.
+
+The coordinator captures one global raw manifest, secures its local original and
+attachment, sends the **exact UTF-8 bytes** over SSH stdin with `stage --manifest -`,
+and validates every origin's attachment, writer, inventory and identical SHA256
+receipt **before any apply**. Staging failure or digest mismatch writes no
+priorities, but local preparation and any completed staging consume their fresh
+backup paths even if host-map coverage validation or later staging fails. Retain
+those backups and choose new paths before retrying. It then applies each origin,
+publishes each normal outbox via the
+supported `kanban_sync_client.push` API (no snapshot pull), rejects pending or
+rejected publication, and runs the canonical read-only verifier. Success requires
+canonical verification, not merely local apply receipts.
+
+A later apply refusal, SSH timeout, invalid response, or **any exception from the
+in-process local writer** (for example `sqlite3.OperationalError: database is
+locked` under live dispatch) stops further applies and
+attempts guarded restore on **every attempted origin**, including the uncertain
+origin, in reverse order. A restore that raises on one origin is recorded and the
+remaining origins are still restored. The JSON report separates `attempted` origins from
+acknowledged, validated `applied` receipts and retains restore errors; the command
+exits nonzero even if recovery succeeds. The same CAS makes restore a no-op if
+apply never committed. Once all attempted origins have successful restore
+receipts it also publishes and attempts canonical `verify-restore`. Restore
+refusal never causes a forced write: residual uncertain outcomes require manual
+inspection of the origin's attachment, receipts and current state before resuming.
+Do not treat an absent apply receipt as proof of no write. Publication or canonical
+verification failure also exits nonzero, retaining receipts/backups for operator
+recovery, but does **not** trigger automatic rollback; automatic guarded restore
+is limited to apply failures.
+Save stdout as the durable operation report. No credentials or lineage are cleared.
+
+### Individual operator operations
+
+1. Before installing any cap-aware imports, prepare from the raw canonical Board
+   snapshot (no local cap-aware pull). No global quiet window or dispatcher freeze
+   is required: bounded capture observation and transactional apply/restore guards
+   determine safe progress under churn. Use a locally owned existing task for
+   `LOCAL_TASK`. `ORIGIN` is the enrolled primary gateway name. The board flag is
+   before the subcommand.
 
    ```sh
    hermes kanban --board default supervisor-requests --priority-operation prepare \

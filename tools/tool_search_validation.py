@@ -8,6 +8,7 @@ import logging
 import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from tools.connectors.gateway.names import is_connector_name
 from tools.registry import tool_error
 from tools.tool_search_catalog import BRIDGE_TOOL_NAMES, _registry_entry
 
@@ -172,6 +173,87 @@ def canonical_bridge_tool_name(name: str) -> str:
     return name
 
 
+def _declared_parameter_names(name: str) -> Optional[set[str]]:
+    """Top-level parameter names of a registered tool's served schema; None when unknown."""
+    try:
+        from tools.registry import registry as _registry
+        served = _registry.get_definitions({name}, quiet=True)
+        schema = served[0] if served else _registry.get_schema(name)
+    except Exception:  # a registry bug must not block the call; it keeps the "requires a 'name'" error
+        logger.debug("schema lookup failed for %s", name, exc_info=True)
+        return None
+    if not isinstance(schema, dict):
+        return None
+    fn = schema.get("function") if schema.get("type") == "function" else schema
+    params = fn.get("parameters") if isinstance(fn, dict) else None
+    props = params.get("properties") if isinstance(params, dict) else None
+    return set(props) if isinstance(props, dict) else None
+
+
+def _lift_misplaced_entry_name(raw_args: Any) -> Optional[tuple[str, Any]]:
+    """[daveey] Recover a ``calls[]`` entry whose tool name was put INSIDE ``arguments``.
+
+    Models emit two such shapes (Opus/Sonnet, 2026-11 coach sessions):
+    the whole envelope nested one level down, ``{"arguments": {"name": X, "arguments": {...}}}``,
+    and the name written beside the tool's own params, ``{"arguments": {"request": ..., "name": X}}``.
+    Both used to fail as "requires a 'name'" and cost a turn. Lift only what is unambiguous:
+    the name must be a registered tool (or a ``connectors__`` name for the nested envelope),
+    and beside other params it must name a locally registered tool whose schema declares no
+    ``name`` parameter (otherwise ``name`` is a real argument and the entry stays an error).
+    Returns ``(name, arguments)`` or None.
+    """
+    if isinstance(raw_args, str):
+        try:
+            raw_args = json.loads(raw_args)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(raw_args, dict):
+        return None
+    inner = raw_args.get("name")
+    if not isinstance(inner, str):
+        return None
+    inner = inner.strip()
+    canonical = canonical_bridge_tool_name(inner)
+    rest = {key: value for key, value in raw_args.items() if key != "name"}
+    if set(rest) <= {"arguments"}:
+        if not (_registry_entry(canonical) is not None or is_connector_name(canonical)
+                or canonical in BRIDGE_TOOL_NAMES):
+            return None
+        return inner, rest.get("arguments")
+    # Beside params: only a registered tool with a known schema that declares no `name`,
+    # and every other key must be one of THAT tool's params. Otherwise `name` may be an
+    # argument of some other tool Y (e.g. skill_view(name=X, file_path=...)) whose value
+    # happens to be a tool name, and lifting would reroute Y's call to X.
+    declared = _declared_parameter_names(canonical)
+    if declared is None or "name" in declared or not set(rest) <= declared:
+        return None
+    return inner, rest
+
+
+def _missing_name_error(position: int, raw: dict[str, Any], raw_calls: list[Any]) -> str:
+    """[daveey] A nameless entry: say what arrived and the one correction that works.
+
+    The bare "requires a 'name'" sent models back with the same mistake: the usual cause is a
+    batch whose later entry was meant to reuse the earlier entry's tool, and such a batch of local
+    tools is refused next anyway, so the correction names both rules at once."""
+    args = raw.get("arguments")
+    keys = sorted(args) if isinstance(args, dict) else sorted(k for k in raw if k != "name")
+    carried = f" (it carries {', '.join(map(str, keys[:8]))}{', ...' if len(keys) > 8 else ''})" if keys else ""
+    named = list(dict.fromkeys(
+        str(c.get("name")).strip() for c in raw_calls
+        if isinstance(c, dict) and str(c.get("name") or "").strip()))
+    message = (f"tool_call calls[{position}] requires a 'name': the entry has no top-level \"name\" "
+               f"beside \"arguments\"{carried}. Every entry is {{\"name\": <exact tool name>, "
+               "\"arguments\": {...}}; a name is never inherited from another entry")
+    if named:
+        message += f" (this batch also names {', '.join(repr(n) for n in named)})"
+    message += "."
+    if len(raw_calls) > 1 and any(not is_connector_name(n) for n in named):
+        message += (" Only connectors__ tools may share one tool_call: send each local tool call "
+                    "as its own tool_call.")
+    return message + " Nothing in this batch was invoked."
+
+
 def normalize_tool_call_entries(args: dict[str, Any]) -> tuple[list[dict[str, Any]], Optional[str]]:
     """Normalize ``tool_call`` arguments into a ``calls[]`` list of entries.
 
@@ -204,12 +286,15 @@ def normalize_tool_call_entries(args: dict[str, Any]) -> tuple[list[dict[str, An
         if not isinstance(raw, dict):
             return [], f"tool_call calls[{position}] must be an object with 'name' and 'arguments'"
         name = str(raw.get("name") or "").strip()
+        raw_args = raw.get("arguments")
         if not name:
-            return [], f"tool_call calls[{position}] requires a 'name'"
+            lifted = _lift_misplaced_entry_name(raw_args)
+            if lifted is None:
+                return [], _missing_name_error(position, raw, raw_calls)
+            name, raw_args = lifted
         name = canonical_bridge_tool_name(name)
         if name in BRIDGE_TOOL_NAMES:
             return [], f"tool_call cannot invoke '{name}' (it is itself a bridge tool)"
-        raw_args = raw.get("arguments")
         if raw_args is None or (isinstance(raw_args, str) and not raw_args.strip()):
             # "" / whitespace is how some OpenAI-compatible gateways spell "no arguments" for a
             # parameterless tool (#83937); the loop already treats an empty outer arguments string

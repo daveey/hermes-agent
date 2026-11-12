@@ -7,10 +7,10 @@ since worker-first-v1 (docs/worker-first-v1.md): the Board's worker-pool admissi
 local run. Cards without ``placement_policy`` are still placed without it.
 
 Hub overflow: on a host whose installation-root config sets ``kanban.admission.cpu_busy_below_pct`` the reporter
-also measures CPU busy across two nonblocking snapshots about 1 s apart and attaches
-the complete triple ``cpu_busy_pct``/``cpu_busy_window_ms``/``cpu_busy_sample_end_ms``. ``collect()`` itself never
-samples CPU busy. A CPU-bearing report has a hard 2 s total transport budget and is never replayed: a failed round
-drops its sample and the next round measures again.
+also attaches the complete triple ``cpu_busy_pct``/``cpu_busy_window_ms``/``cpu_busy_sample_end_ms`` measured by the
+sync loop's advisory sampler thread (``machine_cpu_sampler``: a ~1 s window every 5 s, off the loop thread).
+``collect()`` itself never samples CPU busy. A CPU-bearing report has a hard 2 s total transport budget and is never
+replayed: each sample is reported at most once, and a failed round drops it.
 """
 from __future__ import annotations
 
@@ -185,23 +185,13 @@ class Reporter:
     def __init__(self, send: Callable[[dict], Any], *, collect_fn: Optional[Callable[[], dict]] = None,
                  clock: Callable[[], float] = time.monotonic,
                  cpu_limit_fn: Optional[Callable[[], tuple]] = None,
-                 cpu_begin_fn: Optional[Callable[..., tuple]] = None,
-                 cpu_finish_fn: Optional[Callable[..., Optional[dict]]] = None) -> None:
+                 cpu_take_fn: Optional[Callable[[Any], Optional[dict]]] = None) -> None:
         self.send, self.collect_fn, self.clock = send, collect_fn, clock
-        # Injection follows the nonblocking begin(**clock) / finish(A, **clock) contract.
-        # The former blocking cpu_sample_fn seam is deliberately retired.
         self.cpu_limit_fn = cpu_limit_fn
-        self.cpu_begin_fn, self.cpu_finish_fn = cpu_begin_fn, cpu_finish_fn
-        self.cpu_sample_drops = 0
+        # The sync loop sets this to its AdvisorySampler.take (machine_cpu_sampler): the CPU triple is measured on
+        # the sampler's own thread, never on the loop, so a slow round cannot void it. None reports no CPU triple.
+        self.cpu_take_fn = cpu_take_fn
         self.next_at = 0.0
-        self._pending = None
-
-    def pending_wake_in(self) -> Optional[float]:
-        """Only a pending measurement adds a wake; the normal poll deadline is unchanged."""
-        if self._pending is None:
-            return None
-        from hermes_cli import machine_cpu_metrics as cpu
-        return max(0.0, self._pending[0] + cpu.WINDOW_S - self.clock())
 
     def _sample(self, sample: dict, measured: Optional[dict]) -> dict:
         from hermes_cli import kanban_sync_timing as timing
@@ -209,49 +199,25 @@ class Reporter:
         timing.note_cpu_sample(measured)
         if measured and all(k in measured for k in cpu.FIELDS):
             sample.update({k: measured[k] for k in cpu.FIELDS})
-            try:
-                with timing.span("adv"):
-                    record_hub_cpu_sample(measured)
-            except OSError as exc:
-                _log.debug("hub CPU advisory sample not recorded: %s", exc)
         return sample
 
     def report_due(self) -> bool:
-        from hermes_cli import machine_cpu_metrics as cpu
         now = self.clock()
-        pending = self._pending
-        if pending is not None:
-            if now < pending[0] + cpu.WINDOW_S:
-                return False
-            # Consume before any fallible finish work: no stale A survives an exception.
-            self._pending = None
-        elif now < self.next_at:
+        if now < self.next_at:
             return False
-        else:
-            self.next_at = now + REPORT_EVERY_S
+        self.next_at = now + REPORT_EVERY_S
         try:
             from hermes_cli import kanban_sync_timing as timing
+            from hermes_cli import machine_cpu_metrics as cpu
             from hermes_cli.machine_drain_metrics import send_compatible
+            with timing.span("collect"):
+                sample = dict((self.collect_fn or collect)())
             with timing.span("limit"):
                 state, limit = (self.cpu_limit_fn or cpu.root_limit)()
             measured = None
-            if pending is None and state == cpu.ON:
-                first = (self.cpu_begin_fn or cpu.begin)(clock=self.clock)
-                self._pending = (first[0], limit, first)
-                if self.clock() < first[0] + cpu.WINDOW_S:
-                    return False
-                # A slow snapshot read can itself exhaust the window. Finish in this call,
-                # rather than hand the loop a due pending A and force a zero-length wait.
-                return self.report_due()
-            with timing.span("collect"):
-                sample = dict((self.collect_fn or collect)())
-            if pending is not None:
-                with timing.span("cpu"):
-                    if state == cpu.ON and limit == pending[1]:
-                        measured = (self.cpu_finish_fn or cpu.finish)(pending[2], clock=self.clock)
-                if measured is None:
-                    self.cpu_sample_drops += 1
-                    _log.info("machine metrics admission quality: cpu_sample_drops=%d", self.cpu_sample_drops)
+            if state == cpu.ON and self.cpu_take_fn is not None:
+                with timing.span("cpu"):  # nonblocking: the sampler's newest unreported sample
+                    measured = self.cpu_take_fn(limit)
             sample = self._sample(sample, measured)
             with timing.span("send"):  # preserve the transport's existing hard 2 s budget
                 send_compatible(self.send, sample)

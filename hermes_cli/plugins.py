@@ -413,7 +413,10 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
             # deadline worker that cannot re-acquire the sweep's RLock; the flag is already set for the
             # whole sweep, so return where the locked re-entry used to. Every other caller still waits.
             return
-        with self._discovery_lock, _plugin_home_scope(self.home_path):
+        from tools.registry_reload import reload_barrier
+        # [daveey] The barrier spans unload through re-registration: a tool call on another thread waits
+        # instead of reading this home's registry with its plugin tools and guard hooks missing.
+        with self._discovery_lock, _plugin_home_scope(self.home_path), reload_barrier(force):
             if self._discovered and not force:
                 return
             # ``on_plugin_loaded`` reports the plugins this sweep loads that the process did not have before

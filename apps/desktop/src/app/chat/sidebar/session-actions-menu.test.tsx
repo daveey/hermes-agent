@@ -43,6 +43,7 @@ vi.mock('@/i18n', () => ({
         delete: 'Delete',
         done: 'Done',
         loading: 'Loading…',
+        retry: 'Retry',
         save: 'Save'
       },
       errors: { genericFailure: 'Something went wrong' },
@@ -91,6 +92,7 @@ vi.mock('@/store/gateway', () => ({ activeGateway: vi.fn(() => null) }))
 vi.mock('@/store/notifications', () => ({ notify: vi.fn(), notifyError: vi.fn() }))
 vi.mock('@/store/projects', () => ({
   $projectTree: atom<unknown[]>([]),
+  applyRenamedSessionTitle: vi.fn(),
   moveSessionToProject: vi.fn(),
   moveToProjectTargets: vi.fn(() => []),
   projectIdForCwd: vi.fn(() => null),
@@ -105,6 +107,7 @@ vi.mock('@/store/session', () => ({
   $selectedStoredSessionId: atom<null | string>(null),
   $sessions: atom<unknown[]>([]),
   $unreadFinishedSessionIds: atom<string[]>([]),
+  applySessionTitle: vi.fn(),
   markSessionRead: vi.fn(),
   sessionMatchesStoredId: vi.fn((row: { id: string }, id: string) => row.id === id),
   sessionPinId: vi.fn((s: { id: string }) => s.id),
@@ -211,6 +214,59 @@ describe('SessionActionsMenu', () => {
     await waitFor(() => {
       expect(renameSession).toHaveBeenCalledWith('s1', 'Prep Butler', 'personal')
     })
+  })
+
+  it('a stalled-owner rename keeps the dialog and offers a Retry of the same id, title and owner', async () => {
+    const { renameSession } = await import('@/hermes')
+    const { notifyError } = await import('@/store/notifications')
+    const stalled = new Error('503: owner_unavailable: control_timeout: the gateway that owns this profile did not answer in time; nothing was changed, retry')
+    vi.mocked(renameSession).mockReset()
+    vi.mocked(notifyError).mockClear()
+    vi.mocked(renameSession).mockRejectedValueOnce(stalled).mockResolvedValueOnce({ ok: true, title: 'Prep Butler' })
+
+    render(
+      <SessionActionsMenu profile="personal" sessionId="s1" title="My session">
+        <button aria-label="Session actions" type="button">
+          ⋮
+        </button>
+      </SessionActionsMenu>
+    )
+
+    const trigger = screen.getByRole('button', { name: 'Session actions' })
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' })
+    fireEvent.pointerUp(trigger, { button: 0, pointerType: 'mouse' })
+    fireEvent.click(trigger)
+    fireEvent.click(await screen.findByRole('menuitem', { name: /rename/i }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: 'Prep Butler' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: /save/i }))
+
+    await waitFor(() => expect(notifyError).toHaveBeenCalledOnce())
+    const [error, , options] = vi.mocked(notifyError).mock.calls[0]
+    expect(error).toBe(stalled)
+    expect(options?.action?.label).toBe('Retry')
+    // Nothing was applied: the dialog is still open with the typed title.
+    expect(screen.getByRole('dialog')).toBeTruthy()
+
+    options!.action!.onClick()
+    await waitFor(() => expect(renameSession).toHaveBeenCalledTimes(2))
+    expect(vi.mocked(renameSession).mock.calls).toEqual([['s1', 'Prep Butler', 'personal'], ['s1', 'Prep Butler', 'personal']])
+    expect(vi.mocked(notifyError).mock.calls.slice(1)).toEqual([])
+  })
+
+  it('a definitive rename refusal shows no Retry', async () => {
+    const { renameSession } = await import('@/hermes')
+    const { notifyError } = await import('@/store/notifications')
+    vi.mocked(renameSession).mockReset()
+    vi.mocked(notifyError).mockClear()
+    vi.mocked(renameSession).mockRejectedValueOnce(new Error('409: revision_conflict'))
+
+    render(<RenameSessionDialog currentTitle="Old" onOpenChange={() => {}} open profile="personal" sessionId="s1" />)
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: 'New' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: /save/i }))
+    await waitFor(() => expect(notifyError).toHaveBeenCalledOnce())
+    expect(vi.mocked(notifyError).mock.calls[0][2]?.action).toBeUndefined()
   })
 
   it('confirms before deleting — cancel keeps the session, confirm deletes it', async () => {

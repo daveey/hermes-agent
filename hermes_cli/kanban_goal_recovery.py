@@ -16,9 +16,10 @@ class GoalRejection:
 
 def park(conn, task, reason, *, expected_run_id):
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_workspace_publication import involuntary_park
     if not task or expected_run_id is None:
         return False
-    return kb.block_task(conn, task.id, kind='transient', reason=reason,
+    return involuntary_park(task.id, kb.block_task, conn, task.id, kind='transient', reason=reason,
                          expected_run_id=expected_run_id,
                          goal_rejection=GoalRejection(digest(subject(task, reason))))
 

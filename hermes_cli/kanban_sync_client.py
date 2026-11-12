@@ -1501,40 +1501,45 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
     next_links = 0.0
     from hermes_cli.machine_metrics import Reporter
     metrics = Reporter(hub.report_metrics)
-    while keep_running():
-        boards = board_paths()
-        for slug, _path in boards:
-            if slug not in watchers or not watchers[slug].is_alive():
-                watcher = FeedWatcher(ident, slug, wake, keep_running, on_change=work.changed,
-                                      on_state=work.feed_state)
-                watchers[slug] = threading.Thread(target=watcher.run, daemon=True, name=f"kanban-feed-{slug}")
-                watchers[slug].start()
-        selected = sync_timing.select(work.select, boards, time.monotonic(), outbox_pending)
-        selected += [b for b in deferred_repairs_due(boards, _repair_clock()) if b not in selected]
-        results = sync_all_once(hub, boards=selected)
-        ahead = [r for r in results if (r.error or "").startswith("SchemaAhead")]
-        if ahead:
-            _log.error("kanban sync: a newer core migrated this host's board; giving up the sync role")
-            runstate.record_down("gave up the sync role: " + "; ".join(f"board {r.board}: {r.error}" for r in ahead))
-            return
-        runstate.clear()  # a completed round: the loop runs
-        for r in results:
-            work.finished(r.board, not r.error)
-            if r.push and (r.push.sent or r.push.rejected):
-                _log.info("kanban sync: %s %s pulled=%d pushed=%d rejected=%d", r.board, r.mode, r.pulled,
-                          r.push.sent, r.push.rejected)
-        if time.monotonic() >= next_links:
-            reconcile_links(boards, ident.gateway, skip_unchanged=True)
-            next_links = time.monotonic() + LINKS_EVERY_S
-        sync_timing.report(metrics.report_due)
-        remaining = max(0.0, work.deadline - time.monotonic())
-        deferred_due = next_deferred_repair(boards)
-        if deferred_due is not None:
-            remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
-        pending_wake = metrics.pending_wake_in()
-        if pending_wake is not None:
-            remaining = min(remaining, pending_wake)
-        sync_timing.wait(wait_for_work, wake, [p for _s, p in boards], remaining, keep_running)
+    # Hub CPU advisory: measured on its own thread, so a slow sync round can neither void nor delay it. [daveey]
+    from hermes_cli.machine_cpu_sampler import AdvisorySampler
+    sampler = AdvisorySampler()
+    metrics.cpu_take_fn = sampler.take
+    sampler.start()
+    try:
+        while keep_running():
+            boards = board_paths()
+            for slug, _path in boards:
+                if slug not in watchers or not watchers[slug].is_alive():
+                    watcher = FeedWatcher(ident, slug, wake, keep_running, on_change=work.changed,
+                                          on_state=work.feed_state)
+                    watchers[slug] = threading.Thread(target=watcher.run, daemon=True, name=f"kanban-feed-{slug}")
+                    watchers[slug].start()
+            selected = sync_timing.select(work.select, boards, time.monotonic(), outbox_pending)
+            selected += [b for b in deferred_repairs_due(boards, _repair_clock()) if b not in selected]
+            results = sync_all_once(hub, boards=selected)
+            ahead = [r for r in results if (r.error or "").startswith("SchemaAhead")]
+            if ahead:
+                _log.error("kanban sync: a newer core migrated this host's board; giving up the sync role")
+                runstate.record_down("gave up the sync role: " + "; ".join(f"board {r.board}: {r.error}" for r in ahead))
+                return
+            runstate.clear()  # a completed round: the loop runs
+            for r in results:
+                work.finished(r.board, not r.error)
+                if r.push and (r.push.sent or r.push.rejected):
+                    _log.info("kanban sync: %s %s pulled=%d pushed=%d rejected=%d", r.board, r.mode, r.pulled,
+                              r.push.sent, r.push.rejected)
+            if time.monotonic() >= next_links:
+                reconcile_links(boards, ident.gateway, skip_unchanged=True)
+                next_links = time.monotonic() + LINKS_EVERY_S
+            sync_timing.report(metrics.report_due)
+            remaining = max(0.0, work.deadline - time.monotonic())
+            deferred_due = next_deferred_repair(boards)
+            if deferred_due is not None:
+                remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
+            sync_timing.wait(wait_for_work, wake, [p for _s, p in boards], remaining, keep_running)
+    finally:
+        sampler.close()
     runstate.record_down("stopped (gateway stopping, or the host sync lease went to another gateway)")
 
 

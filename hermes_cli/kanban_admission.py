@@ -32,7 +32,7 @@ def _defer(task_id, reason):
 def hub_cpu_advisory(task_id=None):
     """Lock-free pre-check before a Board lease (review ruling 5). Returns a refusal reason or None.
 
-    Off unless the root limit is set. Uses the metrics reporter's latest complete sample: missing, stale (>15 s),
+    Off unless the root limit is set. Uses the advisory sampler's latest complete sample: missing, stale (>15 s),
     future or malformed reads as unknown and defers; a fresh value at or above the limit defers. Advisory only."""
     from hermes_cli import machine_cpu_metrics as cpu
     from hermes_cli import machine_metrics

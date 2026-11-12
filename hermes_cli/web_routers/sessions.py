@@ -1120,13 +1120,14 @@ async def _on_live_owner(request: Request, profile: Optional[str], offline: Call
     from fastapi.responses import JSONResponse, Response
     from gateway.runtime_ownership import OwnershipConflict
     from hermes_cli.gateway_client import _session_ticket
-    from hermes_cli.gateway_runtime import discover_gateway_endpoint, gateway_profile_home
+    from hermes_cli.gateway_runtime import gateway_profile_home
+    from hermes_cli.session_owner_discovery import discover_session_owner, owner_unavailable_detail
     from hermes_constants import get_hermes_home
     from hermes_state import _default_db_path
     import httpx
 
     home = Path(_cron_profile_home(profile)[1]) if profile else Path(_default_db_path()).parent
-    discovery = await asyncio.to_thread(discover_gateway_endpoint, home, timeout=1.5)
+    discovery = await discover_session_owner(home)
     endpoint = discovery.endpoint
     if endpoint is None:
         try:
@@ -1134,8 +1135,7 @@ async def _on_live_owner(request: Request, profile: Optional[str], offline: Call
         except HTTPException as exc:
             if discovery.state == "absent" or not isinstance(exc.__cause__, OwnershipConflict):
                 raise
-            reason = discovery.reason_code or discovery.state
-            raise HTTPException(status_code=503, detail=f"owner_unavailable: {reason}: {exc.detail}") from exc
+            raise HTTPException(status_code=503, detail=owner_unavailable_detail(discovery, exc.detail)) from exc
     if not getattr(endpoint, "control_home", True):
         # A standalone profile gateway answered on its own socket: mint there, never on the launch home's.
         endpoint = replace(endpoint, control_home=str(home.expanduser().resolve()))

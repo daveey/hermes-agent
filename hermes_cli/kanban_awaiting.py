@@ -653,26 +653,40 @@ def probe_premise(wake_check: Optional[str], *, op: str = "schedule", wake_in: O
     as one premise whatever the reason says. None for card/CI probes and short pacing continues."""
     if _short_continue(op, wake_in) or not opaque_probe(wake_check):
         return None
-    basis = "probe|" + " ".join(str(wake_check).split())
-    return hashlib.sha256(basis.encode()).hexdigest()[:16]
+    return _probe_key(wake_check)
+
+
+def _probe_key(cmd: Any) -> str:
+    return hashlib.sha256(("probe|" + " ".join(str(cmd).split())).encode()).hexdigest()[:16]
 
 
 def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str, *,
                        probe: Optional[str] = None) -> int:
     """Trailing parks of this card on ``premise`` (or on the same opaque ``probe``), newest first,
     stopping at the first other premise or at the last escalation (the supervisor acted since).
-    A deploy park behind a healthy core update window (``kanban_deploy_window``) is not counted."""
+    A deploy park behind a healthy core update window (``kanban_deploy_window``) is not counted.
+
+    A ``condition_met`` wake by this same probe also ends the run: the probe is live and its condition
+    really held (two confirming exit-0 runs), so a park after it waits on a natural window that closed
+    again (an idle Mac whose user came back), which is new evidence, not a stuck premise. Escalating it
+    froze t_f6d930b7 behind owner cards nothing could run and dropped the working idle trigger. [daveey]"""
     from hermes_cli.kanban_deploy_window import is_healthy
+    from hermes_cli.kanban_wake_check import CONDITION_MET_EVENT
     count = 0
     for kind, payload in conn.execute(
-            "SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ('scheduled','continued',?) "
-            "ORDER BY id DESC LIMIT 20", (task_id, ESCALATED_EVENT)):
+            "SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ('scheduled','continued',?,?) "
+            "ORDER BY id DESC LIMIT 20", (task_id, ESCALATED_EVENT, CONDITION_MET_EVENT)):
         if kind == ESCALATED_EVENT:
             break
         try:
-            got = json.loads(payload or "{}").get("awaiting") or {}
+            data = json.loads(payload or "{}")
+            got = data.get("awaiting") or {}
         except (ValueError, AttributeError):
-            got = {}
+            data, got = {}, {}
+        if kind == CONDITION_MET_EVENT:
+            if probe and isinstance(data, dict) and data.get("wake_check") and _probe_key(data["wake_check"]) == probe:
+                break
+            continue
         if not isinstance(got, dict) or got.get("premise") is None:
             continue  # a continuation with no wait, or a legacy park
         if got["premise"] != premise and not (probe and got.get("probe") == probe):
@@ -688,7 +702,8 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
     """``resolve`` plus re-park escalation: the record to store on the parking event.
 
     Raises ``RepeatedPark`` on the third park in a row on one premise. Card waits (their producer
-    is accountable) and inferred clock waits (pacing continues, operator drags) never escalate,
+    is accountable), inferred clock waits (pacing continues, operator drags) and re-parks after the
+    same probe fired (``prior_same_premise``: a natural window that closed again) never escalate,
     nor does a deploy wait behind a healthy core update window (``kanban_deploy_window``), whose
     evidence lands on the record as ``deploy_window`` for the caller's wake floor."""
     from hermes_cli import kanban_deploy_window as kdw

@@ -22,6 +22,7 @@ from tools.registry import (
     CHECK_FN_CACHE_BYPASS, check_fn_cache_epoch, check_fn_cache_scope, check_fn_verdict_window, discover_builtin_tools,
     registry, tool_error)
 from tools.registry import _MAX_TOOL_ERROR_CHARS as _TOOL_ERROR_MAX_LEN
+from tools.registry_reload import reload_epoch, settle_reload_since, wait_for_reload
 from toolsets import resolve_toolset, validate_toolset
 from tools.arg_coercion import coerce_tool_args
 from tools.todo_tool import TODO_LEGACY_ALIASES, TODO_SCHEMA
@@ -1024,7 +1025,14 @@ def _handle_function_call(
     # Tool Search bridge: tool_search / tool_describe are catalog reads handled
     # inline; tool_call is unwrapped so every downstream hook (pre/post, edit
     # approval, guardrails) sees the real tool name, never the bridge.
+    # [daveey] A plugin reload unloads every plugin tool and guard hook before re-registering them:
+    # wait it out before resolving, and resolve again when a pass overlapped a bridge read or refusal
+    # (nothing was invoked yet, so nothing runs twice). See tools/registry_reload.py.
+    wait_for_reload()
+    epoch = reload_epoch()
     bridged = _dispatch_bridge_tool(function_name, function_args, enabled_toolsets, disabled_toolsets, ids)
+    if bridged is not None and bridged[1] is None and settle_reload_since(epoch):
+        bridged = _dispatch_bridge_tool(function_name, function_args, enabled_toolsets, disabled_toolsets, ids)
     if bridged is not None:
         result, underlying = bridged
         if underlying is None:

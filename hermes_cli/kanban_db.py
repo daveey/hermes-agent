@@ -18,6 +18,7 @@ import contextlib
 import json
 
 from hermes_cli.kanban_published_worktree import publication_scope
+from hermes_cli.kanban_workspace_publication import publication_guard
 import os
 import re
 import secrets
@@ -1857,38 +1858,7 @@ def _append_event(
     append_event(conn, task_id, kind, payload, run_id=run_id)
 
 
-def _end_run(
-    conn: sqlite3.Connection, task_id: str, *, outcome: str, summary: Optional[str] = None,
-    error: Optional[str] = None, metadata: Optional[dict] = None, status: Optional[str] = None,
-) -> Optional[int]:
-    """Close the active run (``status`` defaults to ``outcome``) and clear
-    ``current_run_id``; None when no run was active (never-claimed task).
-
-    ``worker_pid`` / ``worker_started_at`` / ``claim_lock`` stay on the closed
-    row: they are the only evidence left of the OS process once the task row
-    is wiped, and :func:`kanban_db_dispatch.reap_terminal_workers` needs them
-    to end a worker that survived its own terminal transition."""
-    now = int(time.time())
-    run_id = _current_run_id(conn, task_id)
-    if run_id is None:
-        return None
-    conn.execute(
-        """
-        UPDATE task_runs
-           SET status        = ?,
-               outcome       = ?,
-               summary       = ?,
-               error         = ?,
-               metadata      = ?,
-               ended_at      = ?,
-               claim_expires = NULL
-         WHERE id = ?
-           AND ended_at IS NULL
-        """,
-        (status or outcome, outcome, summary, error, _json_or_null(metadata), now, run_id),
-    )
-    conn.execute("UPDATE tasks SET current_run_id = NULL WHERE id = ?", (task_id,))
-    return run_id
+from hermes_cli.kanban_db_run import _end_run
 
 
 def _task_status(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
@@ -2943,6 +2913,7 @@ def _refuse_untimed_probe(kind: Optional[str], wake_check: Optional[str], clock_
         "would run it. Use kind='time' to wait on it; for a human ask, put it in human_request.resolved_check.")
 
 
+@publication_guard
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
@@ -3154,6 +3125,7 @@ def redact_review_value(value: Any) -> Any:
     return value
 
 
+@publication_guard
 def request_review(
     conn: sqlite3.Connection, task_id: str, *, summary: Optional[str] = None,
     metadata: Optional[dict] = None, reviewer: Optional[str] = None,

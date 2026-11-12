@@ -373,6 +373,24 @@ def test_render_failure_releases_claims_and_isolates_chats(arrival, monkeypatch)
     assert len(retry) == 1 and len(retry[0]["children"]) == 2
 
 
+def test_absurd_owner_time_in_one_chat_never_holds_another_chats_group(arrival):
+    """``datetime.fromtimestamp(-1e30)`` raises OverflowError while rendering one chat's late group; that chat's
+    claims are released and the other chat's group is still delivered in the same flush."""
+    from tests.tui_gateway.test_kanban_remote_notices import OTHER
+
+    replica, ledger, now, insert, db, opener = arrival
+    insert(2, "done", 8 * 3600)
+    db.create_session(OTHER, "desktop")
+    _put(replica, [_card("t_late_absurd", OTHER, status="done", at=-1e30)])
+
+    got = krn.sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener,
+                                   ledger=ledger, now=now)
+
+    assert [g["session_id"] for g in got] == [CHAT]
+    assert _delivered_by_session(ledger) == {(CHAT, 1)}  # OTHER's claim released, not left in flight
+    assert len(db.get_messages(CHAT)) == 1 and db.get_messages(OTHER) == []
+
+
 def test_wake_failure_never_unclaims_a_persisted_chat(arrival):
     replica, ledger, now, _insert, db, opener = arrival
     other = _two_chats(arrival)

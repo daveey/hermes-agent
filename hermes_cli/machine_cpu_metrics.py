@@ -8,9 +8,10 @@ included in user/nice and are never added again; ``steal`` counts as busy (time 
 error, malformed line, counter decrease (reboot/reset), non-positive total, or an elapsed window outside
 [1000, 2000] ms yields ``None`` (unknown), which every caller treats as "refuse", never as idle.
 
-There is no daemon or background sampler. Two callers sample on demand:
-- the metrics reporter, only on a host whose installation-root config sets
-  ``kanban.admission.cpu_busy_below_pct`` (the Board uses the reported triple for hub overflow), and
+Two callers sample:
+- the sync loop's advisory sampler thread (``machine_cpu_sampler``), every 5 s and only while the
+  installation-root config sets ``kanban.admission.cpu_busy_below_pct``; it feeds the lock-free advisory file and
+  the metrics report (the Board uses the reported triple for hub overflow), and
 - the final claim gate in ``kanban_admission.claim_transaction``, with an independent full sample taken while
   ``admission.lock`` is held.
 
@@ -62,37 +63,6 @@ def busy_pct(before: Optional[tuple[int, int]], after: Optional[tuple[int, int]]
 
 def _read_proc_stat() -> str:
     return Path("/proc/stat").read_text(encoding="ascii")
-
-
-def begin(*, read: Callable[[], str] = _read_proc_stat,
-          clock: Callable[[], float] = time.monotonic, linux: Optional[bool] = None) -> tuple:
-    """Capture A without waiting. Keep its monotonic start even when the read is unknown."""
-    t0 = clock()
-    if linux is None:
-        linux = sys.platform.startswith("linux")
-    try:
-        first = parse_proc_stat(read()) if linux else None
-    except (OSError, UnicodeError, ValueError):
-        first = None
-    return t0, first
-
-
-def finish(first: tuple, *, read: Callable[[], str] = _read_proc_stat,
-           clock: Callable[[], float] = time.monotonic,
-           wall: Callable[[], float] = time.time) -> Optional[dict[str, Any]]:
-    """Capture B without waiting; validate exactly the synchronous sampler's window and arithmetic."""
-    try:
-        second = parse_proc_stat(read())
-        window_ms = (clock() - first[0]) * 1000.0
-        end_ms = int(wall() * 1000)
-    except (OSError, UnicodeError, ValueError):
-        return None
-    if not math.isfinite(window_ms) or not MIN_WINDOW_MS <= round(window_ms, 6) <= MAX_WINDOW_MS:
-        return None
-    pct = busy_pct(first[1], second)
-    if pct is None:
-        return None
-    return {"cpu_busy_pct": pct, "cpu_busy_window_ms": round(window_ms), "cpu_busy_sample_end_ms": end_ms}
 
 
 def sample(window_s: float = WINDOW_S, *, read: Callable[[], str] = _read_proc_stat,

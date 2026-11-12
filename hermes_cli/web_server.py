@@ -1351,6 +1351,13 @@ def _publish_host_rendezvous(host: str, port: int) -> None:
 
     desktop_child = is_desktop_owned_backend()
     role = hr.ROLE_DESKTOP_SERVE if desktop_child else hr.ROLE_SERVE
+    # Whatever the role lock says below: a second Desktop-owned backend (the always-on SSH backend
+    # beside a pool child) publishes no role record, and plugin activation must still reach its
+    # chats (t_01a1ce929e118cf2). Discovery only; the attach ladder never reads these entries.
+    from gateway import host_backends
+
+    host_backends.publish(role, host=host, port=port, profiles=hr.served_profiles(),
+                          token=_SESSION_TOKEN)
 
     outcome, error = hr.claim_host_lock(role)
     if outcome is hr.HostLockOutcome.COULD_NOT_OPEN:

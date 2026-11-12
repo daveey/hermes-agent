@@ -17,6 +17,7 @@ import {
   fetchStoredTranscriptAcrossBackends,
   getAllSessionMessages,
   getLatestSessionMessages,
+  pinSessionWriteOwner,
   setSessionArchived
 } from '@/hermes'
 import { useI18n } from '@/i18n'
@@ -167,10 +168,12 @@ import {
 } from '../session-context-drift'
 import { singleFlightSessionResume } from '../use-prompt-actions/single-flight-resume'
 
+import { commitArchive } from './archive-commit'
 import { archiveOwnerRow } from './archive-owner'
 import { archivePreflight, softHideArchivedRow } from './archive-soft-hide'
 import { branchThroughRowId } from './branch-boundary'
 import { branchCreateKey } from './branch-create-key'
+import { closeStoredSessionTile } from './close-stored-tile'
 import type { SessionCreateOverrides } from './create-overrides'
 import { markSessionCreatedThisRun, sessionCreatedThisRun } from './created-this-run'
 import { graftEarlySegmentDeltas, mergeSegmentSnapshotIntoLiveRow } from './current-segment'
@@ -3358,17 +3361,12 @@ export function useSessionActions({
           clearSessionControl(closingRuntimeId)
         }
 
-        // A tiled copy of this session must not outlive it: collapse the pane
-        // and evict its mirrored runtime state so nothing submits to (or renders)
-        // a deleted session.
-        const tiledRuntimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
-        closeSessionTile(storedSessionId)
-
-        if (tiledRuntimeId) {
-          runtimeIdByStoredSessionIdRef.current.delete(storedSessionId)
-          sessionStateByRuntimeIdRef.current.delete(tiledRuntimeId)
-          dropSessionState(tiledRuntimeId)
-        }
+        // A tiled copy of this session must not outlive it.
+        const tiledRuntimeId = closeStoredSessionTile(
+          storedSessionId,
+          runtimeIdByStoredSessionIdRef,
+          sessionStateByRuntimeIdRef
+        )
 
         // Live per-session stores (the same four the stop paths clear) key on
         // the gateway event's session_id, i.e. the runtime id. When the deleted
@@ -3479,43 +3477,37 @@ export function useSessionActions({
         return
       }
 
-      try {
-        // Route to the row's OWN gateway (mirrors deleteSession's removedOwner):
-        // an All-Gateways row archived via the active connection 404s there.
-        const archiveOwner: SessionOwnerScope = archived?.connection_id
-          ? { connectionId: archived.connection_id, profile: archived.profile || 'default' }
-          : profile
+      // Route to the row's OWN gateway (mirrors deleteSession's removedOwner): an
+      // All-Gateways row archived via the active connection 404s there. Pinned once,
+      // so a Retry goes to the same owner with the same retained identity.
+      const archiveOwner = pinSessionWriteOwner(
+        archived?.connection_id ? { connectionId: archived.connection_id, profile: archived.profile || 'default' } : profile
+      )
 
-        await setSessionArchived(storedSessionId, true, archiveOwner)
-        // Archived rows never reach the sidebar, so their persisted unread can
-        // only rot. Dropped after the RPC so a failed archive keeps it.
-        forgetSessionUnread(archivedIds, profile)
-        // An archived session is hidden from the sidebar; its tile must go too.
-        const tiledRuntimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
-        closeSessionTile(storedSessionId)
-
-        if (tiledRuntimeId) {
-          runtimeIdByStoredSessionIdRef.current.delete(storedSessionId)
-          sessionStateByRuntimeIdRef.current.delete(tiledRuntimeId)
-          dropSessionState(tiledRuntimeId)
+      await commitArchive({
+        copy,
+        hidden,
+        owner: archiveOwner,
+        rehide: () => softHideArchivedRow(storedSessionId, archived, findListedSession(storedSessionId) ?? listed),
+        retryLabel: t.common.retry,
+        storedSessionId,
+        onArchived: () => {
+          // Archived rows never reach the sidebar, so their persisted unread can
+          // only rot. Dropped after the RPC so a failed archive keeps it.
+          forgetSessionUnread(archivedIds, profile)
+          // An archived session is hidden from the sidebar; its tile must go too.
+          closeStoredSessionTile(storedSessionId, runtimeIdByStoredSessionIdRef, sessionStateByRuntimeIdRef)
+          notify({ durationMs: 2_000, kind: 'success', message: copy.archived })
         }
-
-        notify({ durationMs: 2_000, kind: 'success', message: copy.archived })
-      } catch (err) {
-        hidden.restore()
-        notifyError(err, copy.archiveFailed)
-
-        return
-      }
-
-      hidden.end()
+      })
     },
     [
       copy,
       runtimeIdByStoredSessionIdRef,
       selectedStoredSessionIdRef,
       sessionStateByRuntimeIdRef,
-      startFreshSessionDraft
+      startFreshSessionDraft,
+      t.common.retry
     ]
   )
 

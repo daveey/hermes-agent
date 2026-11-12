@@ -245,7 +245,10 @@ def serve_backend_records() -> list:
     (``serve``) first, then the Desktop child (``desktop-serve``). Both can run at once (a supervised
     dashboard plus Desktop), and Desktop chats live in the child, so an activation must reach each
     (t_01a19a63867979de). A stale (dead pid) record is skipped by ``read_record``; one whose token no
-    longer matches is skipped here. Never raises for one bad record."""
+    longer matches is skipped here. Then every per-process entry (``gateway.host_backends``) not
+    already listed: a second Desktop-owned backend holds no role record (t_01a1ce929e118cf2).
+    Never raises for one bad record."""
+    from gateway import host_backends as hb
     from gateway import host_rendezvous as hr
     records, seen = [], set()
     for role in (hr.ROLE_SERVE, hr.ROLE_DESKTOP_SERVE):
@@ -256,6 +259,15 @@ def serve_backend_records() -> list:
             logger.debug("serve backend record %s unreadable", role, exc_info=True)
             continue
         if usable and (record.pid, record.port) not in seen:
+            seen.add((record.pid, record.port))
+            records.append(record)
+    try:
+        entries = hb.read_entries()
+    except Exception:
+        logger.debug("serve backend entries unreadable", exc_info=True)
+        entries = []
+    for record in entries:
+        if record.port and (record.pid, record.port) not in seen and hb.token_is_consistent(record):
             seen.add((record.pid, record.port))
             records.append(record)
     return records
@@ -290,9 +302,10 @@ def notify_serve_backend_record(record, name: str, home: Path) -> dict[str, Any]
     try:
         import json
         import urllib.request
+        from gateway import host_backends as hb
         from gateway import host_rendezvous as hr
         from hermes_cli.url_utils import format_url_host
-        token = hr.read_token(record.role)
+        token = hb.token_for(record)
         request = urllib.request.Request(
             f"http://{format_url_host(hr.dial_host(record))}:{record.port}"
             "/api/dashboard/agent-plugins/activate",

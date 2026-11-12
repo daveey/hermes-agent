@@ -1934,41 +1934,7 @@ def count_running_tasks(conn: sqlite3.Connection) -> int:
         return 0
 
 
-def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
-    """Total ``running`` tasks across every board EXCEPT ``board``.
-
-    Caps bound the HOST, but each board's tick only sees its own DB; without
-    this a derived cap of N gets multiplied by the number of active boards.
-    Boards are matched by resolved DB path, so ``HERMES_KANBAN_DB`` (pins every
-    board to one file) yields 0. Fails open per board.
-    """
-    try:
-        current_path = str(_kb.kanban_db_path(board=board).expanduser().resolve())
-    except Exception:
-        current_path = None
-    try:
-        boards = _kb.list_boards(include_archived=False)
-    except Exception:
-        return 0
-    total = 0
-    for meta in boards:
-        slug = meta.get("slug") or _kb.DEFAULT_BOARD
-        try:
-            path = _kb.kanban_db_path(board=slug).expanduser()
-            resolved = str(path.resolve())
-            if current_path is not None and resolved == current_path:
-                continue
-            if not path.exists():
-                continue
-            other = _kbc.connect(board=slug)
-            try:
-                total += count_running_tasks(other)
-            finally:
-                with contextlib.suppress(Exception):
-                    other.close()
-        except Exception:
-            continue
-    return total
+from hermes_cli.kanban_board_share import count_running_tasks_other_boards  # moved; test seam stays here [daveey]
 
 
 def _memory_pressure_level(sample: Optional[Mapping[str, Any]] = None) -> str:
@@ -2005,6 +1971,8 @@ def dispatch_once(
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
     dispatcher_id: Optional[str] = None,
+    observation_update_drain: bool = False,
+    spawn_quota: Optional[int] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -2015,7 +1983,7 @@ def dispatch_once(
     resolved DB path so unrelated boards tick in parallel.
     """
     def _locked_tick() -> DispatchResult:
-        return _dispatch_once_locked(
+        result = _dispatch_once_locked(
             conn,
             spawn_fn=spawn_fn,
             ttl_seconds=ttl_seconds,
@@ -2028,7 +1996,12 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
+            spawn_quota=spawn_quota,
         )
+        from hermes_cli.kanban_capacity_evidence import observe_dispatch
+        observe_dispatch(conn, result, board=board, dry_run=dry_run,
+                         update_drain=observation_update_drain)
+        return result
 
     from hermes_cli.kanban_dispatch_owner import run_owned_tick
     return run_owned_tick(conn, _locked_tick, dispatcher_id, board, dry_run)
@@ -2258,6 +2231,7 @@ def _tick_spawn_budget(
     max_spawn: Optional[int],
     max_in_progress: Optional[int],
     board: Optional[str],
+    spawn_quota: Optional[int] = None,
 ) -> tuple[bool, Optional[int]]:
     """``(may_spawn, spawn_budget)`` for this tick; ``budget None`` = uncapped.
 
@@ -2290,6 +2264,12 @@ def _tick_spawn_budget(
         remaining = max_in_progress - total_running
         if spawn_budget is None or spawn_budget > remaining:
             spawn_budget = remaining
+    if spawn_quota is not None:  # this board's share of the host slots, ranked across boards (kanban_board_share)
+        if spawn_quota <= 0:
+            from hermes_cli.kanban_board_share import OTHER_BOARDS
+            result.at_capacity = f"board_share=0 (free slots go to higher-ranked cards on {OTHER_BOARDS})"
+            return False, None
+        spawn_budget = spawn_quota if spawn_budget is None else min(spawn_budget, spawn_quota)
 
     # Memory-pressure guard: a static cap can't see the host's actual state.
     # critical -> spawn nothing this tick; elevated -> at most one new worker.
@@ -2390,6 +2370,7 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    spawn_quota: Optional[int] = None,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
     todo -> ready, then atomically claim each spawnable ready/review row and
@@ -2423,7 +2404,7 @@ def _dispatch_once_locked(
     if result.core_update_drain_hold is not None:  # every caller (CLI, dashboard, gateway) claims nothing
         return result
     may_spawn, spawn_budget = _tick_spawn_budget(conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress,
-                                                 board=board)
+                                                 board=board, spawn_quota=spawn_quota)
     if not may_spawn:
         return _kb._sync.worker_pickup_capped(conn, result, dry_run, _profile_exists_fn)  # record why cards wait
 
@@ -2565,21 +2546,7 @@ def _absolute_hermes_path(path: str) -> str:
     return expanded if os.path.isabs(expanded) else os.path.abspath(expanded)
 
 
-def _looks_like_path(value: str) -> bool:
-    """Return true when a command override is an explicit path, not a name."""
-    expanded = os.path.expanduser(value)
-    return (
-        expanded.startswith("~")
-        or os.path.isabs(expanded)
-        or bool(os.path.dirname(expanded))
-        or "\\" in expanded
-        or bool(re.match(r"^[A-Za-z]:", expanded))
-    )
-
-
-def _is_windows_batch_shim(path: str) -> bool:
-    """Return true for Windows shell/batch shims that should not be argv[0]."""
-    return path.lower().endswith((".cmd", ".bat"))
+from hermes_cli.kanban_dispatch_paths import _looks_like_path, _is_windows_batch_shim
 
 
 def _path_search_names(command: str) -> list[str]:

@@ -207,12 +207,14 @@ class _KanbanDispatcher:
         self.disabled_corrupt_boards.pop(slug, None)
         return True
 
-    def tick_once_for_board(self, slug: str, *, suppress_spawn: bool = False) -> Optional[object]:
+    def tick_once_for_board(self, slug: str, *, suppress_spawn: bool = False,
+                            spawn_quota: Optional[int] = None) -> Optional[object]:
         """Run one dispatch_once for a specific board.
 
         The per-board DB is opened explicitly so boards never share a
         connection or claim across each other. ``suppress_spawn`` (core-update
         drain hold) runs reclaim, wake probes and promotion but claims nothing.
+        ``spawn_quota`` caps this board's spawns at its cross-board share of the host slots (tick_once).
         """
         conn = None
         fingerprint = self.board_db_fingerprint(slug)
@@ -220,8 +222,11 @@ class _KanbanDispatcher:
             return None
         kwargs = {k: v for k, v in asdict(self.settings).items() if k != "interval"}
         kwargs["max_in_progress"] = self.live_max_in_progress()
+        if spawn_quota is not None:
+            kwargs["spawn_quota"] = spawn_quota
         if suppress_spawn:
             kwargs["max_spawn"] = 0  # budget gate refuses every claim; bookkeeping phases still run
+            kwargs["observation_update_drain"] = True  # diagnostic only, never an admission input
         try:
             # No explicit init_db(): connect() runs the migration once per
             # process (see the matching note in the notifier collector).
@@ -283,7 +288,8 @@ class _KanbanDispatcher:
         tick order. A fixed order (``default`` first, then alphabetical) let a
         standing backlog on ``default`` take every slot freed after a core-update
         drain hold or a worker exit, so ready cards on other boards waited behind
-        it indefinitely. Rotating the start gives each board first pick in turn.
+        it indefinitely. Rotating the start gives each board first pick in turn
+        when slots are plentiful; under contention ``tick_once`` ranks cards across boards instead.
         """
         slugs = list(self._board_slugs())
         if len(slugs) < 2:
@@ -293,10 +299,19 @@ class _KanbanDispatcher:
         return slugs[start:] + slugs[:start]
 
     def tick_once(self, *, suppress_spawn: bool = False) -> list[tuple[str, Optional[object]]]:
-        """Run one dispatch_once per board. Returns (slug, result) pairs."""
+        """Run one dispatch_once per board. Returns (slug, result) pairs.
+
+        When free host slots are fewer than the ready cards on all boards, each board gets a spawn quota from one
+        cross-board ranking (``hermes_cli.kanban_board_share``: priority order plus a starvation guard). [daveey]
+        """
         self.successful_scopes = []
         if not suppress_spawn:
-            return [(slug, self.tick_once_for_board(slug)) for slug in self._fair_board_order()]
+            order = self._fair_board_order()
+            from hermes_cli import kanban_board_share as share
+            quotas = share.shares(order, self.live_max_in_progress())
+            if quotas is not None:
+                return share.run(order, quotas, self.tick_once_for_board)
+            return [(slug, self.tick_once_for_board(slug)) for slug in order]
         return [(slug, self.tick_once_for_board(slug, suppress_spawn=True)) for slug in self._board_slugs()]
 
     @staticmethod

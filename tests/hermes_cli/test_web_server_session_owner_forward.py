@@ -131,7 +131,12 @@ async def test_an_owner_discovery_cannot_identify_is_not_owner_less(tmp_path, mo
             operation='sidebar', payload={'pinned': True})
     assert exc.value.status_code == 503
     assert exc.value.detail.startswith(f'owner_unavailable: {reason_code or state}: ')
-    assert 'Drain and stop the gateway' in exc.value.detail
+    if reason_code == 'control_timeout':
+        # A live owner that only missed its identify deadlines: retry, never drain or stop it.
+        assert 'Drain and stop the gateway' not in exc.value.detail
+        assert exc.value.detail.endswith('retry')
+    else:
+        assert 'Drain and stop the gateway' in exc.value.detail
 
 
 @pytest.mark.asyncio

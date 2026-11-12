@@ -36,6 +36,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -405,6 +406,7 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
                 _kbn.remove_notify_sub(conn, **ident)
         if not claimed:
             return None  # a live poller or another sweeper got there first
+        claimed = _undelivered(db, tip, slug, claimed)
     if skip is not None:
         logger.info("kanban notice for %s/%s not delivered to chat %s: %s", slug, ident["task_id"], tip, skip)
         return None
@@ -446,6 +448,21 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
                 tip, slug, ident["task_id"], len(texts), verdict)
     return {"board": slug, "task_id": ident["task_id"], "chat_id": ident["chat_id"], "session_id": tip,
             "texts": texts, "woken": verdict == "started", "wake_result": verdict, "held_by": held_by}
+
+
+def _undelivered(db, tip, slug, claimed: list) -> list:
+    """``claimed`` minus the events whose ``"<board>:<event id>"`` key a notice row in ``tip``'s lineage already
+    holds (a live poller wrote it, then died before its ack). The writer refuses a range that only partly overlaps
+    the lineage (KanbanNoticeOverlapError), so without this every pass rewound and retried it, and nothing was
+    delivered until the chat was opened (t_01a1ce5a5b6f9bb3). A failed read keeps the whole range: the writer's
+    atomic recheck still guards it, and a race after this read still raises, rewinds and retries next pass. [daveey]"""
+    try:
+        done = db.kanban_notice_keys_delivered(tip, [f"{slug}:{int(e.id)}" for e in claimed])
+    except (sqlite3.Error, OSError):
+        logger.warning("kanban unloaded sweep: delivered-key read for %s failed; offering the whole range", tip,
+                       exc_info=True)
+        return claimed
+    return [e for e in claimed if f"{slug}:{int(e.id)}" not in done]
 
 
 def _route_notice(holders, ident, tip, slug, task, texts, now, grace_s) -> tuple[Optional[str], Optional[str]]:

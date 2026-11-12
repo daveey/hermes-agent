@@ -129,7 +129,8 @@ class SweepBatches:
         for (profile, tip), entries in pending.items():
             try:
                 delivered.append(self._flush_one(profile, tip, entries))
-            except (sqlite3.Error, OSError, ValueError, KeyError, TypeError, RuntimeError):
+            # OverflowError: datetime.fromtimestamp of an absurd owner time (-1e30) in group(); collect catches it too.
+            except (sqlite3.Error, OSError, ValueError, KeyError, TypeError, RuntimeError, OverflowError):
                 logger.warning("late remote notices for %s not delivered; claims released for the next pass",
                                tip, exc_info=True)
                 release_undelivered([entry[0] for entry in entries], self.ledger)
