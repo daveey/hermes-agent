@@ -70,6 +70,45 @@ def describe(verdict):
     return f"hub admission: denied ({(verdict.get('why') or '')[:160]})"
 
 
+def _event_verdict(events):
+    verdicts = [e.payload for e in events if e.kind == "hub_admission" and isinstance(e.payload, dict)]
+    return verdicts[-1] if verdicts else None
+
+
+def show_json(events):
+    """``hermes kanban show --json`` fields: the newest verdict, when the card has one."""
+    verdict = _event_verdict(events)
+    return {"hub_admission": verdict} if verdict else {}
+
+
+def print_show_field(events, field):
+    """``hermes kanban show``: a ``hub:`` line saying why this card is (or is not) on the hub."""
+    verdict = _event_verdict(events)
+    if verdict:
+        field("hub", describe(verdict))
+
+
+def cli_preflight(args, body, workspace_kind, workspace_path, board, *, assignee):
+    """``hermes kanban create`` admission before any connection: ``(plan, exit code or None)``.
+
+    A refusal is printed here (``--json``: ``code hub_admission_denied``) and returns exit code 2.
+    """
+    import sys
+    from hermes_cli.kanban_output import _print_json
+    plan = cli_plan(args, body, workspace_kind, workspace_path, board, assignee=assignee)
+    if plan.get("where") != "refuse":
+        return plan, None
+    verdict = plan.get("hub_admission") or {}
+    if getattr(args, "json", False):
+        _print_json({"ok": False, "created": False, "code": "hub_admission_denied",
+                     "error": plan.get("why", ""), "hub_admission": plan.get("hub_admission")})
+    else:
+        print(f"kanban: hub_admission_denied: {plan.get('why', '')} (no card was created; "
+              f"need={verdict.get('need')!r}). Drop the hub pin, or give --hub-reason "
+              "quoting what only the hub can do.", file=sys.stderr)
+    return plan, 2
+
+
 def gate_owner(conn, waiting_task_id, title, body, *, need):
     """Judge a capability owner card bound for the hub; records the verdict on the waiting card.
 

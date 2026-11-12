@@ -40,7 +40,7 @@ def _skill():
     path = next((path for path in paths if path.is_file()), None)
     if path is None:
         raise FileNotFoundError("hub-admission-test skill is not installed")
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8-sig")
     body = text.split("---", 2)[-1].strip() if text.startswith("---\n") else text
     return body, hashlib.sha256(text.encode()).hexdigest()
 

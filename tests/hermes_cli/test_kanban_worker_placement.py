@@ -2,7 +2,9 @@
 import pytest
 
 from hermes_cli import kanban_placement as placement
-from tests.hermes_cli.hub_judge_support import hub_judge
+from tests.hermes_cli import hub_judge_support
+
+hub_judge = hub_judge_support.hub_judge
 
 
 @pytest.mark.parametrize("title", ["Summarize a public paper", "Run the full test suite"])

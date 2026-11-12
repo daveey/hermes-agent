@@ -25,7 +25,10 @@ from hermes_cli.kanban_capabilities import check_tool_create, declaration_requir
 from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc
 from tools.kanban_tools_placement import (_local_placement, _machine_placement, _marker_placement_fields, _persisted_session_id,
                                           _create_session_id, _placement_origin, _placement_refused, _runs_where,
-                                          _effective_board_args, _origin_enrollment, _pinned_note)
+                                          _effective_board_args, _origin_enrollment, _pinned_note,
+                                          _admission_refused, _effective_requires, _with_admission)
+# SSRF-checked capped download lives in a sibling; tests monkeypatch it on this module.
+from tools.kanban_tools_attach_url import _download_url_with_cap
 from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_park_args import (_blocker_id_arg, _clear_blocker_arg, _blocker_scope_args, _park_guard,
                                           _wake_check_args, _wake_check_echo, _escalated)
@@ -1400,47 +1403,6 @@ def _handle_attach(args: dict, **kw) -> str:
     return _store_attachment(args.get("board"), tid, filename, data, args.get("content_type"))
 
 
-_MAX_ATTACH_URL_REDIRECTS = 5
-
-
-def _download_url_with_cap(url: str, max_bytes: int) -> tuple[bytes, Optional[str]]:
-    """Fetch ``url`` over http(s) capped at ``max_bytes`` -> ``(data, content_type)``.
-    Every hop is SSRF-checked (redirects followed manually) so a model-controlled URL, or a
-    public host 302ing, cannot reach loopback/private/cloud-metadata ranges. ``ValueError``
-    for bad scheme, blocked target, too many redirects, or a body over the cap (checked
-    while streaming, so nothing oversize is buffered)."""
-    from urllib.parse import urljoin, urlparse
-    import httpx
-    from tools.url_safety import is_safe_url
-    current_url = url
-    for _ in range(_MAX_ATTACH_URL_REDIRECTS + 1):
-        scheme = (urlparse(current_url).scheme or "").lower()
-        if scheme not in ("http", "https"):
-            raise ValueError(f"unsupported URL scheme {scheme!r}; only http/https are allowed")
-        if not is_safe_url(current_url):
-            raise ValueError(
-                f"URL blocked by SSRF protection (private/internal address): {current_url}")
-        chunks: list[bytes] = []
-        total = 0
-        with httpx.stream("GET", current_url, headers={"User-Agent": "hermes-kanban/attach"},
-                          timeout=30, follow_redirects=False) as resp:
-            if resp.is_redirect:
-                location = resp.headers.get("location")
-                if not location:
-                    raise ValueError(f"redirect without Location header from {current_url}")
-                current_url = urljoin(current_url, location)
-                continue
-            resp.raise_for_status()
-            content_type = (resp.headers.get("content-type") or "").split(";")[0].strip() or None
-            for chunk in resp.iter_bytes(1024 * 1024):
-                total += len(chunk)
-                if total > max_bytes:
-                    raise ValueError(f"attachment exceeds {max_bytes // (1024 * 1024)} MB limit")
-                chunks.append(chunk)
-        return b"".join(chunks), content_type
-    raise ValueError(f"too many redirects fetching {url}")
-
-
 @_kanban_handler("kanban_attach_url")
 def _handle_attach_url(args: dict, **kw) -> str:
     """Attach a file fetched server-side from an http(s) URL (shared size cap)."""
@@ -1661,9 +1623,7 @@ def _handle_create(args: dict, **kw) -> str:
                 return _placement_refused(_pin, "an origin-bound card is created on this gateway")
         marker_placement = _origin_enrollment(args, origin, marker_placement, assignee=assignee,
                                                skills=skills, project_id=project_id)
-        if marker_placement and marker_placement.get("where") == "refuse":
-            return _placement_refused(marker_placement.get("pin", "hub"), marker_placement.get("why", ""),
-                                      hub_admission=marker_placement.get("hub_admission"))
+        _admission_refused(marker_placement)  # raises the typed refusal for a denied hub pin
         try:
             new_tid = kb.create_task(
                 conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
@@ -1678,7 +1638,7 @@ def _handle_create(args: dict, **kw) -> str:
                 creator_task_id=self_tid,
                 idempotency_key=args.get("idempotency_key"),
                 max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
-                requires=(marker_placement or {}).get("requires", args.get("requires")),
+                requires=_effective_requires(marker_placement, args),
                 runs_on=runs_on, max_retries=max_retries,
                 placement_policy=(marker_placement or {}).get("placement_policy"),
                 placement_checked=True,  # this front door already checked pins, origins and portability
@@ -1728,9 +1688,7 @@ def _handle_create(args: dict, **kw) -> str:
             # and a caller that archives and re-creates it makes a duplicate. [daveey]
             extra["runs_on"] = runs_on
             if pinned_machine:
-                extra["placement"] = {**_machine_placement(pinned_machine, runs_on),
-                                      **({"hub_admission": marker_placement["hub_admission"]}
-                                         if marker_placement and marker_placement.get("hub_admission") else {})}
+                extra["placement"] = _with_admission(_machine_placement(pinned_machine, runs_on), marker_placement)
                 extra["note"] = _pinned_note(conn, new_tid, pinned_machine, runs_on)  # + drain wait [daveey]
         # Every result says where the card runs (a caller that can't tell re-creates it or never learns it is stranded)
         extra.update(runs_where=_runs_where(runs_on, pinned_machine, marker_placement),  # + contract advisory [daveey]

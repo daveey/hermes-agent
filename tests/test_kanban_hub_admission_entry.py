@@ -17,10 +17,11 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_placement as placement
 from tests.hermes_cli import test_kanban_capability_routing as routing_support
 from tests.hermes_cli import test_kanban_worker_policy_db as fixtures
-from tests.hermes_cli.hub_judge_support import hub_judge
+from tests.hermes_cli import hub_judge_support
 
 conn = fixtures.conn
 env = routing_support.env
+hub_judge = hub_judge_support.hub_judge
 MARKED = "Read ~/.hermes/logs/agent.log on the hub"
 
 

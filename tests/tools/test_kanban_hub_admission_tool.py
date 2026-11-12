@@ -12,10 +12,11 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_placement as placement
 from tests.hermes_cli import test_kanban_portable_reason_audit as audit_support
-from tests.hermes_cli.hub_judge_support import hub_judge
+from tests.hermes_cli import hub_judge_support
 from tools import kanban_tools as kt
 
 kanban_home = audit_support.kanban_home
+hub_judge = hub_judge_support.hub_judge
 MARKED = "Read ~/.hermes/logs/agent.log on the hub"
 
 

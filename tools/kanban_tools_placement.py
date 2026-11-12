@@ -91,6 +91,28 @@ def _placement_refused(pin: str, why: str, *, hub_admission=None) -> str:
         **({"hub_admission": hub_admission} if hub_admission else {}))
 
 
+def _admission_refused(marker_placement) -> None:
+    """[daveey] Raise the refusal for a denied hub admission found after origin enrollment.
+
+    ``_Reject`` carries the finished payload to ``_kanban_handler`` (no branch in ``_handle_create``)."""
+    if not marker_placement or marker_placement.get("where") != "refuse":
+        return
+    from tools.kanban_tools import _Reject
+    raise _Reject("", payload=_placement_refused(marker_placement.get("pin", "hub"), marker_placement.get("why", ""),
+                                                 hub_admission=marker_placement.get("hub_admission")))
+
+
+def _effective_requires(marker_placement, args: dict):
+    """[daveey] Requirements to persist: a denied hub card carries ``hub:write`` from the planner."""
+    return (marker_placement or {}).get("requires", args.get("requires"))
+
+
+def _with_admission(placement: dict, marker_placement) -> dict:
+    """[daveey] A machine-pin create reply keeps the hub admission verdict that let it through."""
+    verdict = (marker_placement or {}).get("hub_admission")
+    return {**placement, "hub_admission": verdict} if verdict else placement
+
+
 def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_pin: bool) -> dict:
     """``placement`` for a card ``kp.decide`` kept on this gateway; every local decision says why. [daveey]
 

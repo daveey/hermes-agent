@@ -416,16 +416,11 @@ def _print_overlap_refusal(args: argparse.Namespace, refused: str) -> int:
 @publication_scope
 def _cmd_create(args: argparse.Namespace) -> int:
     from agent.delegation_context import is_dispatcher_owned_worker_context
+    from hermes_cli.kanban_cli_body import read_body
 
-    body = args.body
-    body_file = getattr(args, "body_file", None)
-    if body is not None and body_file is not None:
-        return _err("kanban: --body and --body-file are mutually exclusive", 2)
-    if body_file is not None:
-        try:
-            body = sys.stdin.read() if body_file == "-" else Path(body_file).read_text(encoding="utf-8-sig")
-        except OSError as exc:
-            return _err(f"kanban: --body-file: {exc}", 2)
+    body, body_error = read_body(args)
+    if body_error:
+        return _err(body_error, 2)
 
     try:
         ws_kind, ws_path = _parse_workspace_flag(args.workspace)
@@ -464,19 +459,13 @@ def _cmd_create(args: argparse.Namespace) -> int:
         return _err(f"kanban: {exc.code}: {exc}", 2)
     origin_binding = None
     # [daveey] Hub admission runs before any connection/write lock: the judge is a model call.
-    from hermes_cli.kanban_hub_admission_placement import cli_plan
-    plan = cli_plan(args, body, ws_kind, ws_path, getattr(args, "board", None) or kb.get_current_board(),
-                    assignee=(args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
-                              or _cli_default_assignee(args)))
-    if plan.get("where") == "refuse":
-        if getattr(args, "json", False):
-            _print_json({"ok": False, "created": False, "code": "hub_admission_denied",
-                         "error": plan.get("why", ""), "hub_admission": plan.get("hub_admission")})
-            return 2
-        verdict = plan.get("hub_admission") or {}
-        return _err(f"kanban: hub_admission_denied: {plan.get('why', '')} (no card was created; "
-                    f"need={verdict.get('need')!r}). Drop the hub pin, or give --hub-reason "
-                    "quoting what only the hub can do.", 2)
+    from hermes_cli.kanban_hub_admission_placement import cli_preflight
+    assignee = (args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
+                or _cli_default_assignee(args))
+    plan, refused_rc = cli_preflight(args, body, ws_kind, ws_path, getattr(args, "board", None)
+                                     or kb.get_current_board(), assignee=assignee)
+    if refused_rc is not None:
+        return refused_rc
     with kbc.connect_closing() as conn:
         # An --idempotency-key hit returns an existing card: never re-stamp/re-subscribe it.
         idem_hit = bool(idem_key) and conn.execute(
@@ -504,8 +493,6 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_capabilities import RequiresDeclarationMissing, declaration_required
         from hermes_cli.kanban_worker_node import MachinePinRefused, check_machine_pins
         from hermes_cli.kanban_ask_resolved import AskFilingRefused, check_create_filing, create_context
-        assignee = (args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
-                    or _cli_default_assignee(args))
         from hermes_cli.kanban_worker_placement import cli_audit, cli_runs_on
         from hermes_cli.kanban_hub_admission_placement import with_admission as _with_admission
         try:
@@ -780,6 +767,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         queue_reason = kqr.latest(conn, args.task_id)
         # Same ``queue`` as kanban_show and the REST read (kanban-7d720d4ab8): a ready card says where it waits. [daveey]
         from hermes_cli import kanban_queue_position as kqp
+        from hermes_cli import kanban_hub_admission_placement as _hub_admission_show
         details = kqp.detail_fields(conn, task, getattr(args, "board", None))
         queue = details.get("queue")
         if not want_json:
@@ -794,8 +782,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
             "wake_check": wake_check,
             "queue_reason": queue_reason,
             **details,
-            **({"hub_admission": [e.payload for e in events if e.kind == "hub_admission"][-1]}
-               if any(e.kind == "hub_admission" for e in events) else {}),
+            **_hub_admission_show.show_json(events),
         })
         return 0
 
@@ -820,10 +807,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         field("model", f"{task.model_override}{_prov}")
     _print_max_retries(task)
     field("created", f"{_fmt_ts(task.created_at)} by {task.created_by or '-'}")
-    _verdicts = [e.payload for e in events if e.kind == "hub_admission" and isinstance(e.payload, dict)]
-    if _verdicts:  # [daveey] why this card is (or is not) on the hub
-        from hermes_cli.kanban_hub_admission_placement import describe as _describe_admission
-        field("hub", _describe_admission(_verdicts[-1]))
+    _hub_admission_show.print_show_field(events, field)  # [daveey] why this card is (or is not) on the hub
 
     # Diagnostics up top so CLI users see distress signals before scrolling.
     from hermes_cli import kanban_diagnostics as kd

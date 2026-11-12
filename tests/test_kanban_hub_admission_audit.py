@@ -7,7 +7,9 @@ import pytest
 from hermes_cli import kanban_db_creation as creation
 from hermes_cli.kanban_hub_admission import Verdict
 from tools import kanban_tools_placement as tools
-from tests.hermes_cli.test_kanban_placement import mac
+from tests.hermes_cli import test_kanban_placement as placement_support
+
+mac = placement_support.mac
 
 
 @pytest.fixture
