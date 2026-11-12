@@ -203,7 +203,11 @@ def _ledger(path: Optional[Path] = None) -> sqlite3.Connection:
     for name, decl in (("holder_pid", "INTEGER"), ("holder_start", "INTEGER"), ("notice_key", "TEXT"),
                        ("legacy_seen", "INTEGER NOT NULL DEFAULT 0"), ("settled", "TEXT")):
         if name not in cols:
-            conn.execute(f"ALTER TABLE notices ADD COLUMN {name} {decl}")
+            try:
+                conn.execute(f"ALTER TABLE notices ADD COLUMN {name} {decl}")
+            except sqlite3.OperationalError as exc:  # [daveey] a concurrent opener added it first
+                if "duplicate column name" not in str(exc):
+                    raise
     return conn
 
 
@@ -719,7 +723,7 @@ def _record_swept(keys: list[tuple], ledger: Optional[Path], *, reason: str) -> 
 
 def _reset_for_tests() -> None:
     """Forget this process's memos, as a restarted backend would (the ledger file stays)."""
-    from tui_gateway.kanban_remote_observations import _decoded, _decoded_files, _memo
+    from tui_gateway.kanban_remote_observations import _decoded, _decoded_files, _generation, _known, _memo
     from tui_gateway.kanban_replica_observer import reset as reset_observers
     from tui_gateway.remote_sweep_projection import reset as reset_projection
 
@@ -730,6 +734,8 @@ def _reset_for_tests() -> None:
     _sweep_memo = None
     reset_observers()
     _memo.clear()
+    _known.clear()
+    _generation.clear()
     _decoded.clear()
     _decoded_files.clear()
     _index_memo = None
