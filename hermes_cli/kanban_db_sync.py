@@ -1374,6 +1374,9 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
     if table == "task_chat_links":
         from hermes_cli.kanban_restore_chat_subs import restore_link_sub
         restore_link_sub(conn, cols, own)  # a restored card's hub delivery (kanban_notify_subs does not sync)
+    if table == "task_events" and cols.get("kind") == "origin_intent_recorded":
+        from hermes_cli.kanban_origin_intent_carry import restore_from_event
+        restore_from_event(conn, cols, own)  # a restored courier card's origin intent (a machine-local table)
     return True
 
 

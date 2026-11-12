@@ -36,6 +36,15 @@ def _subscribe_origin(conn, task_id: str, origin: dict) -> None:
         (task_id, chat_id, origin["profile"], int(time.time()), task_id))
 
 
+def _insert_intent(conn, row: tuple) -> None:
+    """Store the intent row and its synced copy in one transaction. The row is machine-local and its binding id is a
+    random secret, so only the copy lets an owner restored from the Board rebuild it (``kanban_origin_intent_carry``)."""
+    from hermes_cli.kanban_origin_intent_carry import record
+    conn.execute("INSERT INTO origin_creation_intents VALUES (?,?,?,?,?)", row)
+    request_id, intent_json, task_id, binding_json, child_request_id = row
+    record(conn, task_id, request_id, intent_json, binding_json, child_request_id)
+
+
 def create_with_origin(conn, intent: dict, options: dict) -> str:
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_origin_ledger import validate_binding
@@ -104,8 +113,8 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
         marker = {"binding_id": "binding-" + secrets.token_hex(16), "version": 1,
                   "owner": {**intent["owner"], "task_id": task_id}, "origin": intent["origin"],
                   "task_record_key": f"{intent['owner']['profile']}/{intent['owner']['board']}/{task_id}"}
-        conn.execute("INSERT INTO origin_creation_intents VALUES (?,?,?,?,?)",
-                     (intent["request_id"], immutable, task_id, _json(marker), "origin-bind-" + secrets.token_hex(16)))
+        _insert_intent(conn, (intent["request_id"], immutable, task_id, _json(marker),
+                              "origin-bind-" + secrets.token_hex(16)))
         _subscribe_origin(conn, task_id, intent["origin"])
         return task_id
 
@@ -164,7 +173,7 @@ def adopt_with_origin(conn, intent: dict, *, board: str) -> str:
             if previous.get("owner") == owner and previous.get("origin") == intent["origin"]:
                 raise OriginError("origin_already_bound", "retry existing origin request " + row["request_id"])
         marker["binding_id"] = "binding-" + secrets.token_hex(16)
-        conn.execute("INSERT INTO origin_creation_intents VALUES (?,?,?,?,?)",
-                     (intent["request_id"], immutable, task_id, _json(marker), "origin-bind-" + secrets.token_hex(16)))
+        _insert_intent(conn, (intent["request_id"], immutable, task_id, _json(marker),
+                              "origin-bind-" + secrets.token_hex(16)))
         _subscribe_origin(conn, task_id, intent["origin"])
         return task_id

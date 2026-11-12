@@ -43,7 +43,9 @@ def test_adopt_done_task_without_creating_or_changing_owner_state(board):
     assert "publication_version" not in marker
     assert dict(conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()) == before
     assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
-    assert conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == events
+    # The only new event is the synced copy of the intent row (kanban_origin_intent_carry): no lifecycle event.
+    assert [r[0] for r in conn.execute("SELECT kind FROM task_events ORDER BY id")][events:] == [
+        "origin_intent_recorded"]
     assert creation.adopt_with_origin(conn, intent(tid), board="default") == tid
     assert dict(conn.execute("SELECT * FROM origin_creation_intents").fetchone()) == dict(row)
 
