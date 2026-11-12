@@ -40,7 +40,7 @@ from tools.process_registry_output_log import ProcessOutputLogMixin, open_output
 from tools.process_registry_survivable import ProcessForegroundHoldMixin, enabled as survivable_enabled
 from tools.process_registry_ownership import ProcessOwnershipMixin
 from tools.process_registry_termination import ProcessTerminationMixin
-from tools.process_registry_obligations import ProcessObligationMixin, owed_still
+from tools.process_registry_obligations import ProcessObligationMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
 from tools.process_registry_env_log import env_poller_loop, log_delta_command
 from tools.process_registry_wsl import _is_wsl_launcher_command
@@ -2153,7 +2153,7 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
             self._log_lifecycle_kill(session, source)
             # A reader can persist a plain exit during the SIGKILL wait; rewrite the receipt.
             if not self._move_to_finished(session):
-                save_completed_result(session, owed_still(session.id))
+                self._rewrite_killed_receipt(session, consume_output)
             self._write_checkpoint()
             return {
                 "status": "killed", "session_id": session.id, "completion_reason": session.completion_reason,

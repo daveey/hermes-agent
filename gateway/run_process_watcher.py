@@ -145,8 +145,7 @@ class GatewayProcessWatcherMixin:
                 )
         if settled_by is not None:
             # In the owning profile's scope (bound by _run_process_watcher): its receipt holds the obligation.
-            from tools.process_registry_obligations import settle_quietly
-            await asyncio.to_thread(settle_quietly, session_id, settled_by)
+            await asyncio.to_thread(process_registry.settle_completion, session_id, settled_by)
         logger.debug("Process watcher ended%s: %s", " (silent)" if silent else "", session_id)
 
     # Former name of the poll loop (fork tests and callers).

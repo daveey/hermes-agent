@@ -42,8 +42,17 @@ def _result_paths():
             continue  # Another producer pruned it.
     retained.sort(key=lambda item: (item[0], item[1].name), reverse=True)
     for _, path in retained[MAX_RETAINED_RESULTS:]:
-        path.unlink(missing_ok=True)
+        if not _owed(path):  # an owed notice keeps its receipt until settled or aged out [daveey]
+            path.unlink(missing_ok=True)
     return [path for _, path in retained[:MAX_RETAINED_RESULTS]]
+
+
+def _owed(path) -> bool:
+    try:
+        record = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(record, dict) and isinstance(record.get("delivery_obligation"), dict)
 
 
 def save_completed_result(session, obligation: dict | None = None) -> None:

@@ -97,8 +97,13 @@ def owes_gateway_delivery(session) -> bool:
 
 
 def obligation_for(session, *, owed_since: Optional[float] = None) -> dict:
-    return {**{f: getattr(session, f) for f in _ROUTE_FIELDS}, "owed_since": owed_since or time.time(),
-            "recoveries": 0, **_writer()}
+    from agent.redact import redact_sensitive_text
+    owed = {f: getattr(session, f) for f in _ROUTE_FIELDS}
+    # The route fields are the checkpoint's own (persisted there verbatim); the subagent's free-text
+    # handoff note is not, so it gets the receipt command's redaction before it reaches disk.
+    if owed.get("handoff_note"):
+        owed["handoff_note"] = redact_sensitive_text(str(owed["handoff_note"]), force=True)
+    return {**owed, "owed_since": owed_since or time.time(), "recoveries": 0, **_writer()}
 
 
 def settle(session_id: str, how: str) -> bool:
@@ -162,6 +167,20 @@ class ProcessObligationMixin:
             self._completion_consumed.add(session_id)
             settle_quietly(session_id, "consumed via wait/log")
 
+    def settle_completion(self, session_id: str, how: str) -> bool:
+        """The watcher's acknowledgement, under ``self._lock`` like every other receipt rewrite, so a
+        concurrent kill-path rewrite cannot read the obligation before it and write it back after."""
+        with self._lock:
+            return settle_quietly(session_id, how)
+
+    def _rewrite_killed_receipt(self, session, consume_output: bool) -> None:
+        """A kill that lost the finish race rewrites the reader's receipt as killed. An explicit kill
+        (``consume_output``) hands the output to its caller, so it settles the obligation; any other kill
+        keeps the one the receipt carries (never re-creates it). Read and write under ``self._lock``."""
+        from tools import process_registry as registry_module  # its save name (tests patch it there)
+        with self._lock:
+            registry_module.save_completed_result(session, None if consume_output else owed_still(session.id))
+
     def _recover_owed_completions_locked(self, owner: Optional[str]) -> int:
         """Under the checkpoint file lock: re-arm a watcher for each owed receipt of this profile."""
         from tools.process_registry_readopt import OWNER_GATEWAY, owner_accepts
@@ -190,7 +209,13 @@ class ProcessObligationMixin:
                 continue
             if owed.get("writer_pid") != os.getpid() and self._writer_alive(owed):
                 continue  # a live gateway still has this watcher
-            age, tries = now - float(owed.get("owed_since") or 0), int(owed.get("recoveries") or 0)
+            try:
+                age, tries = now - float(owed.get("owed_since") or 0), int(owed.get("recoveries") or 0)
+                session = self._owed_session(record, owed)
+            except (KeyError, TypeError, ValueError):
+                # One malformed receipt must not stop the owed receipts after it from being re-armed.
+                logger.warning("Skipping the unreadable owed completion %s", sid, exc_info=True)
+                continue
             if age > OBLIGATION_MAX_AGE_SECONDS or tries >= OBLIGATION_MAX_RECOVERIES:
                 record.pop(OBLIGATION_KEY, None)
                 with suppress(OSError):
@@ -206,7 +231,6 @@ class ProcessObligationMixin:
             except OSError:
                 logger.warning("Could not claim the owed completion of %s", sid, exc_info=True)
                 continue
-            session = self._owed_session(record, owed)
             with self._lock:
                 self._finished[sid] = session
             self.pending_watchers.append(self._recovered_watcher(session))

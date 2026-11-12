@@ -182,6 +182,63 @@ async def test_wait_or_log_consumption_suppresses_the_notice_across_restart(rig,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("consume_output", [True, False])
+async def test_kill_that_races_the_reader_exit_settles_only_an_explicit_kill(rig, consume_output):
+    """The reader records a plain exit (owed receipt) during the kill's signal wait; the kill then rewrites
+    the receipt as killed. An explicit kill handed the output to its caller, so nothing is owed across a
+    restart; a bulk cleanup kill (consume_output=False) keeps the notice owed."""
+    h = await rig["setup"]()
+    registry, session = _job(h)
+
+    def reader_exits_mid_signal(sess, sid, consume):
+        _settle_exit(registry, sess, 0)
+        assert OBLIGATION_KEY in _receipt(h)
+    registry._signal_kill = reader_exits_mid_signal
+    result = registry.kill_process(session.id, consume_output=consume_output)
+    assert result["status"] == "killed" and _receipt(h)["completion_reason"] == "killed"
+    assert (OBLIGATION_KEY in _receipt(h)) is (not consume_output)
+    registry = h["restart"]()
+    assert len(await _run_watchers(h, registry)) == (0 if consume_output else 1)
+    assert len(_completion_admissions(h)) == (0 if consume_output else 1)
+
+
+def test_owed_receipts_survive_retention_and_a_malformed_one_skips_alone(tmp_path, monkeypatch):
+    """Count pruning keeps owed receipts; a broken owed receipt does not stop recovery of the rest;
+    a subagent's handoff note is redacted before it reaches the receipt."""
+    import os
+    from tools import process_registry_results as results
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(results, "MAX_RETAINED_RESULTS", 2)
+    registry = ProcessRegistry()
+    secret = "sk-proj-" + "A1b2C3d4" * 6
+    for n, sid in enumerate(("proc_eeeeeeeeeeee", "proc_ffffffffffff")):
+        session = ProcessSession(id=sid, command="true", task_id="t", session_key="agent:main:local:dm:x",
+                                 started_at=STARTED + n, notify_on_complete=True, watcher_platform="local",
+                                 watcher_chat_id="x", watcher_interval=5, handoff_note=f"key {secret}")
+        with registry._lock:
+            registry._running[sid] = session
+        registry._finish_exited(session, 0)
+    directory = tmp_path / "logs" / "process-results"
+    owed = json.loads((directory / "proc_eeeeeeeeeeee.json").read_text())
+    assert secret not in json.dumps(owed) and "key " in owed[OBLIGATION_KEY]["handoff_note"]
+    for n in range(3):  # newer ordinary receipts push both owed ones past the count cap
+        (directory / f"proc_00000000000{n}.json").write_text(json.dumps({"id": f"proc_00000000000{n}"}))
+    broken = json.loads((directory / "proc_eeeeeeeeeeee.json").read_text())
+    del broken["exit_code"]
+    (directory / "proc_eeeeeeeeeeee.json").write_text(json.dumps(broken))
+    import time
+    old = time.time() - 3600
+    for sid in ("proc_eeeeeeeeeeee", "proc_ffffffffffff"):  # older than the 3 ordinary ones, inside retention
+        os.utime(directory / f"{sid}.json", (old, old))
+    results._result_paths()
+    assert (directory / "proc_eeeeeeeeeeee.json").exists() and (directory / "proc_ffffffffffff.json").exists()
+    assert len(list(directory.glob("proc_0*"))) == 2, "ordinary receipts past the cap are still pruned"
+    gateway = ProcessRegistry()
+    gateway.recover_from_checkpoint(owner="gateway")
+    assert [w["session_id"] for w in gateway.pending_watchers] == ["proc_ffffffffffff"]
+
+
+@pytest.mark.asyncio
 async def test_no_notify_and_other_profile_jobs_do_not_wake(rig):
     h = await rig["setup"]()
     registry, quiet = _job(h, "proc_aaaaaaaaaaaa", notify=False)
