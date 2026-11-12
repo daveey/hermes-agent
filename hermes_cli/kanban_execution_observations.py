@@ -155,12 +155,35 @@ def add_cards(rows, *, now=None):
         gateway = profile = None
     for row in rows:
         try:
-            _merge(row, [card(row, gateway=gateway, profile=profile, now=now)])
+            if row.get("_execution_error"):
+                raise RuntimeError("execution source unavailable")
+            observation = card(row, gateway=gateway, profile=profile, now=now)
         except ADAPTER_ERRORS:
             _log.debug("execution observation unavailable for card %s", row.get("id"), exc_info=True)
+            observation = failed_card(row, gateway=gateway, profile=profile, now=now)
+        _merge(row, [observation])
         row.pop("_execution_event", None)
         row.pop("_execution_source", None)
+        row.pop("_execution_error", None)
     return rows
+
+
+def _project(value, *, now, **kw):
+    out = project(value, now=now, **kw)
+    if value.get("unknown_reason") == "adapter_error":
+        out.update(state="unknown", unknown_reason="adapter_error")
+    return out
+
+
+def failed_card(row, *, gateway=None, profile=None, now=None):
+    """Explicit unknown for a card whose adapter failed: never absent, never a state, keeps its own ask."""
+    from hermes_cli.kanban_execution_source import unknown_raw
+    source = row.get("_execution_source")
+    source = source if isinstance(source, dict) else {}
+    value = unknown_raw(row, {**source, "gateway": source.get("gateway") or gateway,
+                              "profile": source.get("profile") or profile,
+                              "board": source.get("board") or row.get("board")})
+    return _project(value, now=time.time() if now is None else now, source_class="sidebar")
 
 
 _HISTORY = ("human_request", "retained_human_requests", "delivery_receipt", "historical_delivery_receipts")
@@ -220,7 +243,7 @@ def count_snapshot(row, keys, *, now=None, evidence=None):
         else:
             rows.append({"id": parts[-1]})
     now = time.time() if now is None else now
-    observations = [project(value["_raw"], now=now) if "_raw" in value else card(value, now=now) for value in rows]
+    observations = [_project(value["_raw"], now=now) if "_raw" in value else card(value, now=now) for value in rows]
     if row.get("kanban_unknown"):
         observations.extend(_carry_history(row.get("execution_observations"), now))
         observations.append(project({"version": 1, "source": "kanban.counts", "state": "unknown"}, now=now))

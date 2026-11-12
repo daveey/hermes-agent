@@ -1372,12 +1372,19 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                 reads["blocked"] = _counts_on(conn, BLOCKED_STATUSES)
                 reads["blocked_pairs"] = _pairs_sink
                 reads["pairs"] = reads["active_pairs"] | reads["blocked_pairs"]
-                from hermes_cli.kanban_execution_source import assemble, raw
-                from hermes_cli.kanban_execution_observations import local_scope
+                from hermes_cli.kanban_execution_source import assemble, safe_raw, unknown_raw
+                from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, local_scope
                 gateway, profile = local_scope()
-                sources = assemble(conn, {tid for _, tid in reads["pairs"]}, board=_board_slug(path),
-                                   gateway=gateway, profile=profile, observed_at=read_at)
-                reads["execution"] = {tid: raw(source["task"], source) for tid, source in sources.items()}
+                try:
+                    sources = assemble(conn, {tid for _, tid in reads["pairs"]}, board=_board_slug(path),
+                                       gateway=gateway, profile=profile, observed_at=read_at)
+                    reads["execution"] = {tid: safe_raw(source["task"], source) for tid, source in sources.items()}
+                except ADAPTER_ERRORS:
+                    # Optional evidence only: legacy counts and asks stay; each card is an explicit unknown.
+                    _log.debug("kanban execution source failed for %s", path, exc_info=True)
+                    reads["execution"] = {tid: unknown_raw({"id": tid}, gateway=gateway, profile=profile,
+                                                           board=_board_slug(path))
+                                          for _, tid in reads["pairs"]}
             finally:
                 _pairs_sink = outer
             if parked:
@@ -1613,12 +1620,18 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
         except sqlite3.Error:  # board predates notify subscriptions
             pass
         from hermes_cli.kanban_execution_source import assemble
-        from hermes_cli.kanban_execution_observations import local_scope
+        from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, local_scope
         gateway, profile = local_scope()
-        sources = assemble(conn, found, board=_board_slug(path), gateway=gateway, profile=profile,
-                           observed_at=read_at)
-        for tid, source in sources.items():
-            found[tid]["_execution_source"] = source
+        try:
+            sources = assemble(conn, found, board=_board_slug(path), gateway=gateway, profile=profile,
+                               observed_at=read_at)
+            for tid, source in sources.items():
+                found[tid]["_execution_source"] = source
+        except ADAPTER_ERRORS:
+            # Optional evidence: the task list and asks stay; each card becomes an explicit unknown.
+            _log.debug("kanban execution source failed for %s", path, exc_info=True)
+            for info in found.values():
+                info["_execution_error"] = True
         _add_card_details(conn, found)
         try:
             for tid, info in _local_wait_info(conn, found).items():

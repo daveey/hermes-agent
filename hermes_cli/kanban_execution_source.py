@@ -7,6 +7,7 @@ No commands, arbitrary event payloads, or event prose enter public observations.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -14,6 +15,7 @@ from contextlib import contextmanager
 from hermes_cli.execution_observations import epoch, human_request_valid, same_json
 
 MAX_HISTORY = 128
+_log = logging.getLogger(__name__)
 MAX_PAYLOAD = 32768
 _TASK_FIELDS = ('id', 'status', 'assignee', 'session_id', 'current_run_id', 'block_kind', 'human_request', 'created_on')
 # Only landing rules traced to the corresponding writers. Ambiguous transitions
@@ -152,7 +154,9 @@ def _event_id(event, synced):
     if not synced:
         return event['id']
     meta = event['_payload'].get('_recovery_history_v1')
-    return meta.get('identity') if isinstance(meta, dict) else event.get('uid')
+    value = meta.get('identity') if isinstance(meta, dict) else event.get('uid')
+    # Only a non-empty string is provable (and hashable); anything else is an unprovable identity.
+    return value if isinstance(value, str) and value else None
 
 
 def _tip(events, runs, synced):
@@ -245,6 +249,40 @@ def _wait(result, row, source, event):
                        for p in parents]
             wait.update(kind='dependency', predicate='all named parents in done|archived', targets=targets)
     result['wait'] = wait if wait.get('predicate') else None
+
+
+def unknown_raw(row, source=None, *, gateway=None, profile=None, board=None):
+    """Explicit unknown card observation for an adapter failure; grants no state, clock or authority.
+
+    Keeps the qualified identity (no run/generation) and the row's own human ask with probe fields
+    stripped, so an optional adapter failing never erases an outstanding request.
+    """
+    source = source if isinstance(source, dict) else {}
+    gateway = source.get('gateway', gateway)
+    profile = source.get('profile', profile)
+    board = source.get('board', board)
+    board = board if board is not None else row.get('board')
+    identity = {'gateway': gateway, 'profile': profile, 'board': board, 'kind': 'card', 'work_id': row.get('id')}
+    result = {'version': 1, 'identity': identity, 'owner': {'gateway': gateway, 'profile': profile},
+              'state': 'unknown', 'source': 'kanban.card', 'observed_at': None, 'valid_until': None,
+              'source_revision': None, 'evidence_refs': [], 'last_progress': None, 'wait': None,
+              'last_activity': None, 'last_activity_kind': None, 'unknown_reason': 'adapter_error'}
+    request = row.get('human_request')
+    request = _payload(request) if isinstance(request, str) else request
+    if isinstance(request, dict):
+        result['human_request'] = {k: v for k, v in request.items() if k not in ('resolved_check', 'resolved_check_every')}
+    return result
+
+
+def safe_raw(row, source):
+    """:func:`raw`, but one card's adapter failure degrades to :func:`unknown_raw`, not its whole read."""
+    from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS
+    try:
+        return raw(row, source)
+    except ADAPTER_ERRORS:
+        _log.debug('execution source unavailable for card %s', row.get('id'), exc_info=True)
+        task = source.get('task') if isinstance(source, dict) else None
+        return unknown_raw({**row, **task} if isinstance(task, dict) else row, source)
 
 
 def raw(row, source):

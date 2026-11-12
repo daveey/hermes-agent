@@ -342,17 +342,31 @@ def detail_fields(conn, task, board=None):
     except Exception:  # health: allow BLE001 -- diagnostics cannot fail a card read
         capacity = evidence._unknown("observation_unavailable")
     observation = capacity.get("execution_observation")
-    from dataclasses import asdict
-    from hermes_cli.kanban_execution_observations import add_cards
-    from hermes_cli.kanban_execution_source import assemble, transaction
-    from hermes_cli.kanban_execution_observations import local_scope
-    gateway, profile = local_scope()
-    with transaction(conn) as read_at:
-        sources = assemble(conn, [task.id], board=board or "default", gateway=gateway, profile=profile, observed_at=read_at)
-    work = add_cards([{**asdict(task), "board": board or "default", "_execution_source": sources.get(task.id)}])[0]["execution_observations"]
-    out.update(capacity_evidence=capacity, execution_observations=([observation] if observation else []) + work)
+    out.update(capacity_evidence=capacity,
+               execution_observations=([observation] if observation else []) + _work_observations(conn, task, board))
     out["capacity_note"] = evidence.describe(capacity)
     return out
+
+
+def _work_observations(conn, task, board):
+    """Optional card evidence for a detail read: any adapter failure is an explicit unknown, never a failed read."""
+    from dataclasses import asdict
+    from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, add_cards, failed_card, local_scope
+    from hermes_cli.kanban_execution_source import assemble, transaction
+    row = {**asdict(task), "board": board or "default"}
+    try:
+        gateway, profile = local_scope()
+        with transaction(conn) as read_at:
+            sources = assemble(conn, [task.id], board=board or "default", gateway=gateway, profile=profile,
+                               observed_at=read_at)
+        row["_execution_source"] = sources.get(task.id)
+        return add_cards([row])[0].get("execution_observations", [])
+    except ADAPTER_ERRORS:
+        _log.debug("kanban queue position: execution observation unavailable for %s", task.id, exc_info=True)
+        try:
+            return [failed_card(row)]
+        except ADAPTER_ERRORS:
+            return []
 
 
 def print_field(place: Optional[dict[str, Any]], queue_reason: Any, field) -> None:
