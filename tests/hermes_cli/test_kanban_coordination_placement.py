@@ -453,7 +453,7 @@ def test_unattested_access_leaves_cards_home_as_before(fleet, board_maps_access)
 
 
 # --- PR #1330 review: the Board cannot place declared access yet (worker_placement.ts supportedRequirement) ----
-@pytest.mark.parametrize("requires", [["ssh:mini"], ["ssh:mbp"], ["hub:read"], ["terminal", "hub:read"]])
+@pytest.mark.parametrize("requires", [["ssh:mini"], ["ssh:mbp"]])
 def test_declared_access_stays_home_until_the_board_maps_it(fleet, monkeypatch, requires):
     """Every eligible member attests every label, yet the Board would leave an enrolled card queued
     (``task_requirement_unsupported``): keep it home-only, where it at least runs."""
@@ -474,18 +474,25 @@ def test_declared_access_stays_home_until_the_board_maps_it(fleet, monkeypatch, 
     assert coord.stranded(card, cfg, coord.REASON) == ["worker"]
 
 
-def test_declared_hub_write_is_board_placeable(fleet):
-    """hub:write is the one declared access the Board maps (``capability:hub-write``): it is not refused, and a
-    held member still does not decide attestation for it."""
+@pytest.mark.parametrize("requires", [["hub:read"], ["hub:write"], ["terminal", "file", "hub:read", "hub:write"]])
+def test_declared_hub_access_is_board_placeable(fleet, requires):
+    """Use the real supported-access set, not the broader hypothetical Board fixture."""
     from hermes_cli import kanban_placement_coordination as coord
     cfg, entry, machines = fleet
-    cfg["carried_requires"] = ["terminal"]
+    cfg["carried_requires"] = ["terminal", "file"]
     cfg["worker_pools"]["hub"] = ["held", "worker"]
     machines["held"] = {**entry, "labels": [], "hold": True}
-    assert coord.board_refusal(["hub:write"]) is None
-    assert coord.board_refusal(["hub:write", "hub:read"]) == coord.BOARD_REASON
-    entry["labels"] = [v for v in entry["labels"] if v != "capability:hub-write"]
-    assert coord.attested(["held", "worker"], {"capability:hub-write"}) is False
-    entry["labels"].append("capability:hub-write")
-    assert coord.attested(["held", "worker"], {"capability:hub-write"}) is True
-    assert reason("read the log", cfg, ["hub:write"]) is None
+    assert coord.board_refusal(requires) is None
+    labels = coord.access_requirements(requires)
+    assert labels == {"capability:" + r.replace(":", "-") for r in requires if r.startswith("hub:")}
+    entry["labels"] += list(labels)
+    assert reason("read the log", cfg, requires) is None
+    card = {"placement_policy": "worker-first-v1", "title": "Read the log", "body": "read the log",
+            "requires": json.dumps(requires)}
+    assert coord.claim_refusal(card, "worker") is None
+    for label in labels:
+        entry["labels"] = [v for v in entry["labels"] if v != label]
+        assert coord.attested(["held", "worker"], labels) is False
+        assert coord.claim_refusal(card, "worker") == coord.REASON
+        entry["labels"].append(label)
+    assert coord.attested(["held", "worker"], labels) is True
