@@ -13,6 +13,7 @@ def clear_verified_model_cooldown(pool, observed, model: str) -> bool:
     """
     from agent import credential_pool as cp
     from agent.credential_pool_disabled import disabled_keys, matches
+    from agent.credential_persistence import fingerprint_secret_value, is_borrowed_credential_source
     from hermes_cli import auth
 
     if not model or observed.provider != pool.provider:
@@ -31,10 +32,23 @@ def clear_verified_model_cooldown(pool, observed, model: str) -> bool:
                 if row is None:
                     return False
                 current = cp.PooledCredential.from_dict(pool.provider, row)
-                if (not observed.runtime_api_key or current.runtime_api_key != observed.runtime_api_key
-                        or (current.access_token, current.refresh_token, current.base_url, current.auth_type)
-                        != (observed.access_token, observed.refresh_token, observed.base_url, observed.auth_type)
-                        or matches(current, disabled_keys(pool.provider))):
+                observed_secret = observed.runtime_api_key
+                disabled = disabled_keys(pool.provider)
+                if not observed_secret or matches(current, disabled) or matches(observed, disabled):
+                    return False
+                hydrate = False
+                if current.runtime_api_key:
+                    same_secret = current.runtime_api_key == observed_secret and (
+                        current.access_token, current.refresh_token) == (observed.access_token, observed.refresh_token)
+                else:
+                    # Sanitized borrowed row: the store keeps no token, only source + fingerprint.
+                    stored_fp = current.extra.get("secret_fingerprint")
+                    same_secret = (is_borrowed_credential_source(current.source, pool.provider)
+                                   and bool(stored_fp) and stored_fp == fingerprint_secret_value(observed_secret)
+                                   and current.source == observed.source
+                                   and current.extra.get("secret_source") == observed.extra.get("secret_source"))
+                    hydrate = same_secret
+                if not same_secret or (current.base_url, current.auth_type) != (observed.base_url, observed.auth_type):
                     return False
                 status_fields = ("last_status", "last_status_at", "last_error_code", "last_error_reason",
                                  "last_error_message", "last_error_reset_at", "status_cleared_at")
@@ -67,9 +81,13 @@ def clear_verified_model_cooldown(pool, observed, model: str) -> bool:
                 auth._save_auth_store(store, target_path=target)
                 adopted = cp.PooledCredential.from_dict(pool.provider, row)
                 live = pool._find(lambda e: e.id == observed.id)
+                persisted_pair = (adopted.access_token, adopted.refresh_token)
                 if live is not None:
+                    if hydrate:  # runtime secret stays in memory only; the saved row stays sanitized
+                        adopted.access_token, adopted.refresh_token = observed.access_token, observed.refresh_token
+                        adopted.agent_key = observed.agent_key
                     pool._replace_entry(live, adopted)
-                pool._persisted_token_pairs[observed.id] = (adopted.access_token, adopted.refresh_token)
+                pool._persisted_token_pairs[observed.id] = persisted_pair
                 return True
         except Exception:
             # Failure to lock/read/write is not evidence of recovery.

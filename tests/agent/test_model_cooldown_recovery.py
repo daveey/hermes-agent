@@ -156,3 +156,56 @@ def test_new_account_failure_does_not_erase_model_reset_receipt():
     stale = {"id": "seat", "model_cooldowns": {A: time.time() + 3600},
              "model_cooldown_recorded_at": {A: 150.0}}
     assert not _merge_disk_cooldown_state(stale, merged, "anthropic")["model_cooldowns"]
+
+
+def _borrowed_pool(source, token="sk-ant-oat-live-secret"):
+    from agent.credential_pool import CredentialPool, PooledCredential
+    from hermes_cli import auth
+
+    now = time.time()
+    row = {"id": "borrowed", "label": source, "auth_type": "oauth", "priority": 0, "source": source,
+           "access_token": token, "refresh_token": "rt-live-secret",
+           "model_cooldowns": {A: now + 3600}, "model_cooldown_recorded_at": {A: now}}
+    auth.write_credential_pool("anthropic", [row])
+    stored = auth.read_credential_pool("anthropic")[0]
+    assert "access_token" not in stored and stored["secret_fingerprint"]  # sanitized on disk
+    live = PooledCredential.from_dict("anthropic", row)
+    return CredentialPool("anthropic", [live]), live
+
+
+@pytest.mark.parametrize("source", ["env:ANTHROPIC_TOKEN", "claude_code"])
+def test_sanitized_borrowed_row_recovers_by_fingerprint_without_persisting_secret(pool, source):
+    from hermes_cli import auth
+
+    borrowed, observed = _borrowed_pool(source)
+    assert borrowed.clear_verified_model_cooldown(observed, A)
+    stored = auth.read_credential_pool("anthropic")[0]
+    assert A not in stored["model_cooldowns"]
+    assert "access_token" not in stored and "refresh_token" not in stored
+    assert "live-secret" not in str(auth._load_auth_store())
+    kept = borrowed.entries()[0]  # hydrated secret stays in memory
+    assert kept.runtime_api_key == "sk-ant-oat-live-secret" and kept.refresh_token == "rt-live-secret"
+    assert A not in (kept.model_cooldowns or {})
+
+
+@pytest.mark.parametrize("source", ["env:ANTHROPIC_TOKEN", "claude_code"])
+@pytest.mark.parametrize("change", ["fingerprint", "source", "disabled"])
+def test_sanitized_borrowed_row_refuses_changed_identity(pool, source, change):
+    from agent.credential_pool_disabled import set_credential_disabled
+    from hermes_cli import auth
+
+    borrowed, observed = _borrowed_pool(source)
+    if change == "disabled":
+        set_credential_disabled("anthropic", observed, True)
+    else:
+        with auth._auth_store_lock():
+            store = auth._load_auth_store()
+            row = store["credential_pool"]["anthropic"][0]
+            if change == "fingerprint":
+                row["secret_fingerprint"] = "sha256:0000000000000000"
+            else:
+                row["source"] = "env:OTHER" if source == "claude_code" else "claude_code"
+            auth._save_auth_store(store)
+    before = auth.read_credential_pool("anthropic")
+    assert not borrowed.clear_verified_model_cooldown(observed, A)
+    assert auth.read_credential_pool("anthropic") == before

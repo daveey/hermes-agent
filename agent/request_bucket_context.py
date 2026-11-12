@@ -1,6 +1,8 @@
 """Keep a request-bucket reset separate from subscription usage windows."""
 from __future__ import annotations
 
+import math
+
 from agent.credential_pool_timestamps import _parse_absolute_timestamp
 from agent.retry_utils import parse_retry_after_seconds
 
@@ -23,10 +25,16 @@ def request_bucket_context(error, context, *, now):
         'anthropic-ratelimit-requests-remaining', 'x-ratelimit-remaining-requests'))
     if not exhausted:
         return context
-    seconds = parse_retry_after_seconds(headers)
+    # Validate before the shared parser clamps NaN / -Infinity to zero.
+    raw_retry = headers.get('retry-after')
+    try:
+        finite_retry = math.isfinite(float(raw_retry))
+    except (TypeError, ValueError):
+        finite_retry = True  # HTTP-date or malformed: let the shared parser decide.
+    seconds = parse_retry_after_seconds(headers) if finite_retry else None
     if seconds is None:
         reset = _parse_absolute_timestamp(headers.get('anthropic-ratelimit-requests-reset'))
         seconds = reset - now if reset is not None else None
-    if seconds is None or seconds < 0:
+    if seconds is None or not math.isfinite(seconds) or seconds < 0:
         return context
     return {**context, 'reset_at': now + seconds}

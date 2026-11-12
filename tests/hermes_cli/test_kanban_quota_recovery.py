@@ -1,5 +1,9 @@
 """Completion proof, deadline custody, and startup retry for quota recovery."""
+import subprocess
+import sys
+import textwrap
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -9,6 +13,8 @@ import pytest
 from tests.agent import test_model_cooldown_recovery as pool_helpers
 
 api_pool = pool_helpers.pool
+MESSAGE = {'type': 'message', 'role': 'assistant', 'content': [{'type': 'text', 'text': 'O'}],
+           'stop_reason': 'max_tokens'}
 
 
 @pytest.fixture
@@ -34,8 +40,8 @@ def test_completion_uses_claude_code_wire(monkeypatch):
     def handle(request):
         import json
         seen.append((request, json.loads(request.content)))
-        return httpx.Response(200, json={'content': []})
-    monkeypatch.setattr(recovery, '_client', lambda timeout: httpx.Client(transport=httpx.MockTransport(handle)))
+        return httpx.Response(200, json=MESSAGE)
+    monkeypatch.setattr(recovery, '_client', lambda timeout: httpx.AsyncClient(transport=httpx.MockTransport(handle)))
     assert recovery.completion_succeeds('anthropic', 'model', _entry(), recovery.time.monotonic() + 5)
     request, body = seen[0]
     assert request.url == 'https://api.anthropic.com/v1/messages'
@@ -57,7 +63,7 @@ def test_codex_requires_completed(monkeypatch, data, ok):
     from hermes_cli import kanban_quota_recovery as recovery
     def handle(request):
         return httpx.Response(200, text=data)
-    monkeypatch.setattr(recovery, '_client', lambda timeout: httpx.Client(transport=httpx.MockTransport(handle)))
+    monkeypatch.setattr(recovery, '_client', lambda timeout: httpx.AsyncClient(transport=httpx.MockTransport(handle)))
     assert recovery.completion_succeeds('openai-codex', 'model', _entry(), recovery.time.monotonic() + 5) is ok
 
 
@@ -130,7 +136,7 @@ def test_rejected_completion_never_retries(monkeypatch, status):
     def handle(request):
         calls.append(request)
         return httpx.Response(status)
-    monkeypatch.setattr(recovery, '_client', lambda timeout: httpx.Client(transport=httpx.MockTransport(handle)))
+    monkeypatch.setattr(recovery, '_client', lambda timeout: httpx.AsyncClient(transport=httpx.MockTransport(handle)))
     assert not recovery.completion_succeeds('anthropic', 'model', _entry(), recovery.time.monotonic() + 5)
     assert len(calls) == 1
 
@@ -248,3 +254,67 @@ def test_three_recoveries_record_accounts_and_owner_files_one_card(pool, monkeyp
     finally:
         conn.close()
 
+
+
+@pytest.mark.parametrize('content', [
+    b'', b'{"type":"message","role":"assistant","content":[', b'not json', b'[]',
+    b'{"type":"error","error":{"type":"overloaded_error"}}',
+    b'{"type":"message","role":"assistant","content":[],"stop_reason":null}',
+    b'{"content":[]}',
+])
+def test_anthropic_200_requires_valid_completed_body(monkeypatch, content):
+    from hermes_cli import kanban_quota_recovery as recovery
+    monkeypatch.setattr(recovery, '_client', lambda timeout: httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=content))))
+    assert not recovery.completion_succeeds('anthropic', 'model', _entry(), recovery.time.monotonic() + 5)
+
+
+@pytest.mark.parametrize('provider', ['anthropic', 'openai-codex'])
+def test_response_bytes_are_bounded(monkeypatch, provider):
+    from hermes_cli import kanban_quota_recovery as recovery
+    monkeypatch.setattr(recovery, 'MAX_RESPONSE_BYTES', 1000, raising=False)
+    big = (b'{"type":"message","role":"assistant","stop_reason":"end_turn","content":[],"x":"' + b'a' * 2000 + b'"}'
+           if provider == 'anthropic' else b'data: ' + b'a' * 2000)
+    monkeypatch.setattr(recovery, '_client', lambda timeout: httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=big))))
+    assert not recovery.completion_succeeds(provider, 'model', _entry(), recovery.time.monotonic() + 5)
+
+
+_SERVER = textwrap.dedent(r'''
+    import socket, sys, time
+    mode = sys.argv[1]
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(1)
+    print(s.getsockname()[1], flush=True)
+    c, _ = s.accept()
+    c.recv(65536)
+    head = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n"
+    if mode == "anthropic":
+        head = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100000\r\n\r\n"
+    c.sendall(head)
+    try:
+        while True:
+            c.sendall(b" ")  # trickle: never a newline, never a complete body
+            time.sleep(0.05)
+    except OSError:
+        print("PEER_CLOSED", flush=True)
+''')
+
+
+@pytest.mark.parametrize('provider', ['anthropic', 'openai-codex'])
+def test_trickling_stream_is_cancelled_at_deadline_and_peer_sees_close(monkeypatch, provider):
+    from hermes_cli import kanban_quota_recovery as recovery
+    proc = subprocess.Popen([sys.executable, '-c', _SERVER, provider], stdout=subprocess.PIPE, text=True)
+    try:
+        port = int(proc.stdout.readline())
+        monkeypatch.setattr(recovery, '_client', lambda timeout: httpx.AsyncClient(timeout=30))
+        real = httpx.AsyncClient.stream
+        monkeypatch.setattr(httpx.AsyncClient, 'stream',
+                            lambda self, method, url, **kw: real(self, method, f'http://127.0.0.1:{port}/', **kw))
+        start = time.monotonic()
+        assert not recovery.completion_succeeds(provider, 'model', _entry(), start + 1.0)
+        assert time.monotonic() - start < 2.5
+        assert proc.stdout.readline().strip() == 'PEER_CLOSED'
+        assert proc.wait(5) == 0
+    finally:
+        proc.kill()
+        proc.wait()

@@ -1,22 +1,90 @@
 """Bounded completion proof for stale model quota benches; only the caller mutates state."""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from contextvars import copy_context
 
+MAX_RESPONSE_BYTES = 1 << 20
+
 
 def _client(timeout):
     import httpx
-    return httpx.Client(timeout=timeout, follow_redirects=False)
+    return httpx.AsyncClient(timeout=timeout, follow_redirects=False)
+
+
+def _valid_message(raw):
+    """A completed Anthropic message: not error-shaped, not truncated, not headers-only."""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return False
+    return (isinstance(data, dict) and data.get('type') == 'message' and data.get('role') == 'assistant'
+            and isinstance(data.get('content'), list) and bool(data.get('stop_reason')))
+
+
+async def _read_anthropic(response):
+    chunks, size = [], 0
+    async for chunk in response.aiter_bytes():
+        size += len(chunk)
+        if size > MAX_RESPONSE_BYTES:
+            return False
+        chunks.append(chunk)
+    return _valid_message(b''.join(chunks))
+
+
+async def _read_codex(response):
+    buffer, size = b'', 0
+    async for chunk in response.aiter_bytes():
+        size += len(chunk)
+        buffer += chunk
+        # Bound total bytes and any single unterminated line.
+        if size > MAX_RESPONSE_BYTES or len(buffer) > MAX_RESPONSE_BYTES:
+            return False
+        *lines, buffer = buffer.split(b'\n')
+        for raw in lines:
+            line = raw.decode('utf-8', 'replace').rstrip('\r')
+            if not line.startswith('data:'):
+                continue
+            try:
+                event = json.loads(line[5:].strip())
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get('type') in ('response.failed', 'response.incomplete', 'error'):
+                return False
+            if event.get('type') == 'response.completed':
+                final = event.get('response')
+                return isinstance(final, dict) and final.get('status') == 'completed'
+    return False
+
+
+async def _attempt(provider, url, headers, body, deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return False
+
+    async def run():
+        async with _client(remaining) as client, client.stream('POST', url, headers=headers, json=body) as response:
+            if response.status_code != 200:
+                return False
+            return await (_read_anthropic if provider == 'anthropic' else _read_codex)(response)
+
+    # Cancellation unwinds the async-with blocks, which closes the transport/socket.
+    return bool(await asyncio.wait_for(run(), remaining)) and time.monotonic() < deadline
 
 
 def completion_succeeds(provider, model, observed, deadline):
-    """One request, no SDK retry/refresh, and no response or credential diagnostics."""
+    """One request, no SDK retry/refresh, and no response or credential diagnostics.
+
+    The absolute deadline is enforced by asyncio cancellation (closes the connection), so a
+    trickling or newline-less peer cannot keep a worker thread alive past it.
+    """
     import httpx
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
+    if deadline - time.monotonic() <= 0:
         return False
     headers = {'Authorization': f'Bearer {observed.runtime_api_key}'}
     if provider == 'anthropic':
@@ -39,30 +107,9 @@ def completion_succeeds(provider, model, observed, deadline):
     else:
         return False
     try:
-        with _client(remaining) as client, client.stream('POST', url, headers=headers, json=body) as response:
-            if response.status_code != 200:
-                return False
-            if provider == 'anthropic':
-                return time.monotonic() < deadline
-            for line in response.iter_lines():
-                if time.monotonic() >= deadline:
-                    return False
-                if not line.startswith('data:'):
-                    continue
-                try:
-                    event = json.loads(line[5:].strip())
-                except ValueError:
-                    continue
-                if not isinstance(event, dict):
-                    continue
-                if event.get('type') in ('response.failed', 'response.incomplete', 'error'):
-                    return False
-                if event.get('type') == 'response.completed':
-                    final = event.get('response')
-                    return isinstance(final, dict) and final.get('status') == 'completed'
-    except (httpx.HTTPError, OSError, ValueError):
+        return asyncio.run(_attempt(provider, url, headers, body, deadline))
+    except (httpx.HTTPError, OSError, ValueError, TimeoutError):
         return False
-    return False
 
 
 def _eligible(entry, provider, model, now, disabled):
