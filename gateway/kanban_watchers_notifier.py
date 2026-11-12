@@ -710,15 +710,19 @@ class _KanbanNotification:
             synth += "\n" + t("gateway.kanban.wake.handoff", summary=self.wake_handoff)
         if self.wake_review_detail:
             synth += "\n" + t("gateway.kanban.wake.review_detail", reason=self.wake_review_detail)
+        lines = []
         if self.d.get("tui_notice"):
             # The chat's tui row stays silent for these events (kanban_wake_sibling): this turn shows its notice.
             from gateway.kanban_wake_sibling import notice_lines
             if lines := notice_lines(sub, task, self.d["events"], self.board_slug, self.d.get("tui_floor")):
                 synth += "\n" + "\n".join(lines)
         self.synth = synth + "\n\n" + t("gateway.kanban.wake.guidance")
-        # What a later wake for the same chat folds from while this one still waits (kanban_wake_fold).
+        # What a later wake for the same chat folds from while this one still waits (kanban_wake_fold). The
+        # notices survive a fold that replaces this card: the tui row was settled past them.
         self.wake_card = {"task_id": sub["task_id"], "board": self.board_slug or "",
                           "kinds": [k for k in _WAKE_KINDS if k in self.wake_kinds], "text": synth}
+        if lines:
+            self.wake_card["notices"] = list(lines)
 
     def _log_woke(self) -> None:
         logger.info("kanban notifier: woke agent for %s on %s/%s profile=%s events=%s",

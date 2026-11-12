@@ -26,7 +26,7 @@ from hermes_state_runtime import RuntimeStoreError, list_session_admissions
 logger = logging.getLogger(__name__)
 
 PRODUCER = 'kanban-wake'
-_CARD_KEYS = frozenset({'task_id', 'board', 'kinds', 'text'})
+_CARD_KEYS = frozenset({'task_id', 'board', 'kinds', 'text', 'notices'})
 _MAX_CARDS = 200
 _MAX_CARD_TEXT = 32000
 
@@ -64,7 +64,9 @@ def card_metadata(metadata):
                 or len(card['text']) > _MAX_CARD_TEXT
                 or not all(isinstance(card.get(key, ''), str) for key in ('task_id', 'board'))
                 or not isinstance(card.get('kinds', []), list)
-                or not all(isinstance(kind, str) for kind in card.get('kinds', []))):
+                or not all(isinstance(kind, str) for kind in card.get('kinds', []))
+                or not isinstance(card.get('notices', []), list)
+                or not all(isinstance(line, str) for line in card.get('notices', []))):
             raise RuntimeStoreError('invalid_params')
     return {'kanban_cards': [dict(card) for card in cards]}
 
@@ -113,14 +115,42 @@ def _legacy_cards(text):
 
 
 def _merge(old_cards, new_cards):
-    """Cards in first-seen order; a later event for the same card replaces the earlier one."""
+    """Cards in first-seen order; a later event for the same card replaces the earlier one, keeping the
+    earlier card's notice lines (:func:`_keep_notices`)."""
     merged, order = {}, []
     for index, card in enumerate([*old_cards, *new_cards]):
         key = card.get('task_id') or f'#opaque-{index}'
         if key not in merged:
             order.append(key)
-        merged[key] = dict(card)
+            merged[key] = dict(card)
+        else:
+            merged[key] = _keep_notices(merged[key], card)
     return [merged[key] for key in order]
+
+
+def _keep_notices(old, new):
+    """``new`` (a later wake for the same card) with ``old``'s ``notices`` it does not show yet, ahead of its own.
+
+    A card's ``notices`` are Kanban notice lines its wake turn carries for the chat's ``tui`` row, which was settled
+    past them when the wake was admitted (``kanban_wake_sibling.settle_tui_sibling``). Replacing the card dropped
+    them for good: a ``status → ready`` line carried by a queued wake vanished when the completion's wake folded
+    into it (review of PR #1465 at b0fdf842f2). The earlier premise text itself still collapses to the latest."""
+    card = dict(new)
+    have = [str(line) for line in card.get('notices') or []]
+    text = str(card.get('text') or '')
+    missing = [line for line in old.get('notices') or [] if line not in have and line not in text]
+    while missing and len(text) + sum(len(line) + 1 for line in missing) > _MAX_CARD_TEXT:
+        missing.pop(0)  # card_metadata refuses an oversized card; the oldest notice goes first
+    if not missing:
+        return card
+    block = '\n'.join(missing)
+    at = text.find(have[0]) if have else -1
+    if at > 0 and text[at - 1] == '\n':
+        text = text[:at] + block + '\n' + text[at:]
+    else:
+        text = text.rstrip() + '\n' + block
+    card['text'], card['notices'] = text, [*missing, *have]
+    return card
 
 
 def _live_task(card):

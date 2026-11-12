@@ -411,6 +411,12 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
                 _kbn.remove_notify_sub(conn, **ident)
         if not claimed:
             return None  # a live poller or another sweeper got there first
+        from gateway.kanban_wake_sibling import wake_owes_after
+        if skip is None and wake_owes_after(conn, sub, old, now):
+            # A covered event landed between tui_defer and this claim: hand it back to the wake. [daveey]
+            with contextlib.suppress(Exception):
+                _kbn.rewind_notify_cursor(conn, claimed_cursor=new, old_cursor=old, **ident)
+            return None
         claimed = _undelivered(db, tip, slug, claimed)
     if skip is not None:
         logger.info("kanban notice for %s/%s not delivered to chat %s: %s", slug, ident["task_id"], tip, skip)

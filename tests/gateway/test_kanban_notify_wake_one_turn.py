@@ -440,3 +440,94 @@ def test_a_covered_event_landing_between_the_defer_check_and_the_claim_goes_only
     last, subs = _cursors(tid)
     assert subs["tui"] == (last, None)
     assert _notice_leg() == [] and len(adapter.turns) == 1
+
+
+def _wake_cards(runner):
+    """One wake-leg pass that captures each wake's text and folding card instead of turning it."""
+    out = []
+
+    async def tick():
+        deliveries = await asyncio.to_thread(_notifier_collect, runner, kb, notifier_profile="default",
+                                             gc_due=False, gc_retention_days=30)
+        for d in deliveries:
+            n = _KanbanNotification(runner, d, platform_cls=Platform, sub_fail_counts={})
+            await n.deliver()
+            out.append((n.synth, n.wake_card))
+    asyncio.run(tick())
+    return out
+
+
+def test_a_queued_wake_folded_into_a_later_wake_for_the_card_keeps_the_notice_lines_it_carried(board):
+    """Review of PR #1465 at b0fdf842f2 (probe P1): wake A carries an uncovered ``→ ready`` line and the tui row is
+    settled past it at admission; if A is still queued when B (the completion) folds into it, ``_merge`` replaced
+    A's card with B's and the line was gone for good."""
+    import json
+    from types import SimpleNamespace
+
+    from gateway.kanban_wake_fold import card_metadata, fold_into
+    runner, _adapter = board
+    tid = _card()
+    _status(tid)
+    _event(tid, "blocked")
+    [(text_a, card_a)] = _wake_cards(runner)
+    assert "→ ready" in text_a and "→ ready" in "\n".join(card_a["notices"])
+    last, subs = _cursors(tid)
+    assert subs["tui"] == (last, None)  # settled at admission
+    _event(tid, "completed")
+    [(text_b, card_b)] = _wake_cards(runner)
+    assert "→ ready" not in text_b
+    waiting = {"request_id": json.dumps(["kanban-wake", "a"]),
+               "payload": {"text": text_a, "local_automation_v1": {"kanban_cards": [card_a]}}}
+    event = SimpleNamespace(text=text_b, metadata={"kanban_cards": [card_b]})
+    fold_into(event, waiting, json.dumps(["kanban-wake", "b"]))
+    assert "→ ready" in event.text and NOTICE["completed"].format(tid=tid) in event.text
+    assert event.text.index("→ ready") < event.text.index(NOTICE["completed"].format(tid=tid))
+    [blocked] = [line for line in card_a["notices"] if "→ ready" not in line]
+    assert blocked in event.text  # the covered blocked notice A carried survives too
+    assert card_metadata(event.metadata)["kanban_cards"][0]["notices"]  # what a third wake folds from
+    _archive_and_drop_local(tid)
+    assert _notice_leg() == []  # the tui row owes nothing: the folded turn is the one place it shows
+
+
+def test_unloaded_sweeper_hands_back_a_claim_that_raced_a_covered_event(board, tmp_path, monkeypatch):
+    """Nit on PR #1465 at b0fdf842f2 (probe P2): the sweeper's tui_defer and claim are separate statements too."""
+    from gateway import kanban_wake_sibling
+    monkeypatch.setattr(kanban_wake_sibling, "DEFER_MAX_S", 7200.0)
+    monkeypatch.setenv("HERMES_KANBAN_UNLOADED_WAKE", "0")
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session(CHAT, "desktop")
+    db.append_message(CHAT, "user", "start the cards")
+
+    @contextlib.contextmanager
+    def opener(chat_id):
+        yield (db, chat_id) if db.get_session(chat_id) else (None, None)
+
+    runner, adapter = board
+    tid = _card()
+    _event(tid, "completed")
+    monkeypatch.setattr(kanban_wake_sibling, "tui_defer", lambda *a, **k: False)  # the completion lands after it
+    assert ku.sweep_once(set(), now=time.time() + 3600, session_db=opener) == []
+    assert [m for m in db.get_messages(CHAT) if m.get("display_kind") == "kanban_notice"] == []
+    last, subs = _cursors(tid)
+    assert subs["tui"][0] < last and subs["tui"][1] is None  # handed back, not acked or held
+    _wake_leg(runner)
+    assert len(adapter.turns) == 1 and NOTICE["completed"].format(tid=tid) in adapter.turns[0]
+    assert _cursors(tid)[1]["tui"] == (last, None)
+
+
+@pytest.mark.parametrize("carrier_first", [True, False], ids=["notices-in-earlier-wake", "notices-in-later-wake"])
+def test_two_wakes_for_one_card_fold_in_either_order_keeping_every_notice_once(carrier_first):
+    from gateway.kanban_wake_fold import _merge
+    head = "[kanban] Task t_x {}.\nTitle: x"
+    plain = {"task_id": "t_x", "board": "b", "kinds": ["blocked"], "text": head.format("blocked") + "\n⏸ blocked"}
+    carrier = {"task_id": "t_x", "board": "b", "kinds": ["completed"], "notices": ["🔄 t_x → ready", "✔ t_x done"],
+               "text": head.format("completed") + "\n🔄 t_x → ready\n✔ t_x done"}
+    plain = {**plain, "notices": ["⏸ blocked"]}
+    first, second = (carrier, plain) if carrier_first else (plain, carrier)
+    [card] = _merge([first], [second])
+    assert card["text"].startswith(second["text"].split("\n")[0])  # the latest premise heads the card
+    for line in ("🔄 t_x → ready", "✔ t_x done", "⏸ blocked"):
+        assert card["text"].count(line) == 1, card["text"]
+    assert sorted(card["notices"]) == sorted(["🔄 t_x → ready", "✔ t_x done", "⏸ blocked"])
+    [again] = _merge([card], [dict(second)])  # a third wake re-folding the same card adds nothing twice
+    assert again["text"] == card["text"]
