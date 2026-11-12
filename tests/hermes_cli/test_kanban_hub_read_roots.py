@@ -111,7 +111,6 @@ def test_malformed_roots_clear_nothing(attested, roots):
     "chmod -R 777 ~/.hermes/logs/''..",
     'chmod -R 777 ~/.hermes/logs/""..',
     "chmod -R 777 $(echo ~/.hermes/logs/)..",
-    "chmod -R 777 `echo ~/.hermes/logs/`..",
     'chmod -R 777 "$(echo ~/.hermes/logs/)"..',
     'chmod -R 777 $(echo "~/.hermes/logs/")..',
     "chmod -R 777 ~/.hermes/logs/' '/../../.env",
@@ -120,10 +119,26 @@ def test_malformed_roots_clear_nothing(attested, roots):
     "chmod -R 777 $(echo ~/.hermes/logs/x)/../../state.db",
     "chmod -R 777 ~/.hermes/logs/x(..)",
     "chmod -R 777 /home/../.hermes/logs/x",
+    # Root paths are judged before marker_work_text drops backtick spans (review 5878536845): a backtick span
+    # glued to the path hides its ``..`` (both resolve to ~/.hermes/.env).
+    "chmod -R 777 ~/.hermes/logs/`x`/../.env",
+    "chmod -R 777 ~/.hermes/logs/`echo ..`/.env",
 ])
 def test_controls_still_pin(attested, body):
     cfg, _, _ = attested
     assert reason(body, cfg) == "home gateway marker"
+
+
+@pytest.mark.parametrize("body", [
+    # A whole backtick span is a name to marker_work_text (main fdd26189801), so main already ignores these with or
+    # without hub:read; the declaration must not change the answer either way.
+    "chmod -R 777 `echo ~/.hermes/logs/`..",
+    "chmod -R 777 `~/.hermes/state/x`",
+    "read `~/.hermes/logs/x.log` then chmod -R 777 ~/.hermes/state/x",
+])
+def test_backtick_spans_follow_main_with_or_without_hub_read(attested, body):
+    cfg, _, _ = attested
+    assert reason(body, cfg) == reason(body, cfg, requires=())
 
 
 def test_claim_refusal_unchanged(attested):

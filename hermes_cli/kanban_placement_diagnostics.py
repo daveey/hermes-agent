@@ -34,23 +34,31 @@ def portability(args: dict, cfg=None, *, local_markers: bool = True,
     from hermes_cli import kanban_mandatory_pin as mandatory
     if (pin := mandatory.requirements(args)) and not coordination.attested(coordination.destinations(c.raw), pin):
         return mandatory.REASON, None  # an old-core pool member would not refuse a pin it cannot serve
-    if home_markers and (hit := next(_home_hits(full, reqs, c), None)):
+    if home_markers and (hit := next(_home_hits(args, full, reqs, c), None)):
         return "home gateway marker", f"mentions {hit[1].group(0)!r}"
     return None, None
 
 
-def _home_hits(full: str, reqs: list, c):
+def _home_hits(args: dict, full: str, reqs: list, c):
     """Every home-gateway-marker hit of ``full`` in scan order, as ``(pattern, match)``; an operator
     ``extra_home_markers`` hit has pattern ``"operator"``. The worktree-path probe runs last, and only when that
     path is named: it avoids filesystem/network probes when a cheap marker already pins the card."""
     from hermes_cli import kanban_placement as p
     from hermes_cli import kanban_placement_coordination as coordination
+    from hermes_cli.kanban_carried_evidence import without_carried_inputs
     from hermes_cli.kanban_published_worktree import without_published_worktrees
 
-    marker_full = coordination.access_text(coordination.marker_text(full), c.raw, requires=reqs)
     # Other markers read the whole text minus only the hub-read-root paths a declared, attested hub:read clears
-    # (HERMES_STATE_PATH included: never marker_text's output, which drops ``token-broker`` from a path).
-    read_full = coordination.without_read_paths(full, c.raw, requires=reqs)
+    # (HERMES_STATE_PATH included: never marker_text's output, which drops ``token-broker`` from a path). Those
+    # paths are judged before marker_work_text drops backtick spans, so a backtick glued to a path
+    # (``logs/`x`/../.env``) still ends or extends its shell word (review 5878536845); then the same steps as
+    # ``full`` follow, so an undeclared card's text is ``full`` exactly.
+    def read_work(text):
+        raw = p.without_evidence(p.without_placement_note(text or ""))
+        return p._BACKTICKS.sub(" ", coordination.without_read_paths(raw, c.raw, requires=reqs))
+
+    read_full = without_carried_inputs(f"{read_work(args.get('title'))}\n{read_work(args.get('body'))}", c.raw)
+    marker_full = coordination.access_text(coordination.marker_text(read_full), c.raw, requires=reqs)
     extra = c.raw.get("extra_home_markers")
     exemptible = (p.HUB_CLI_COMMAND, r"\btoken-broker\b", r"\bssh\b", r"\bon the hub\b", r"\bthe hub's\b",
                   r"\bjournalctl\b", r"\bkanban\.db\b")
@@ -79,7 +87,7 @@ def home_marker_hits(args: dict, cfg=None) -> list:
     reqs = args.get("requires") or []
     reqs = [reqs] if isinstance(reqs, str) else list(reqs)
     title, body = p.marker_work_text(args.get("title")), p.marker_work_text(args.get("body"))
-    return list(_home_hits(without_carried_inputs(f"{title}\n{body}", c.raw), reqs, c))
+    return list(_home_hits(args, without_carried_inputs(f"{title}\n{body}", c.raw), reqs, c))
 
 
 def local_why(args: dict, cfg=None, *, fallback="no placement route for this gateway") -> str:
