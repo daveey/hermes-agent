@@ -10,24 +10,17 @@ from hermes_cli import kanban_priority_migration as migration
     ("exception_duplicates", "duplicate exception"), ("board", "board identity"),
 ])
 def test_global_plan_rejects_ambiguous_inventory(case, reason):
-    rows = [{"id": "a", "priority": 10000, "created_on": "one", "status": "ready"}]
-    exceptions = []
-    board = "board"
-    if case == "missing":
-        exceptions = ["missing"]
-    elif case == "duplicates":
-        rows *= 2
-    elif case == "origin":
-        rows[0]["created_on"] = None
-    elif case == "priority":
-        rows[0]["priority"] = True
-    elif case == "ranks":
-        rows = [{"id": str(i), "priority": i + 1, "created_on": "one", "status": "ready"}
-                for i in range(901)]
-    elif case == "exception_duplicates":
-        exceptions = ["a", "a"]
-    elif case == "board":
-        board = ""
+    row = {"id": "a", "priority": 10000, "created_on": "one", "status": "ready"}
+    cases = {
+        "missing": ([row], ["missing"], "board"),
+        "duplicates": ([row, row], [], "board"),
+        "origin": ([dict(row, created_on=None)], [], "board"),
+        "priority": ([dict(row, priority=True)], [], "board"),
+        "ranks": ([dict(row, id=str(i), priority=i + 1) for i in range(901)], [], "board"),
+        "exception_duplicates": ([row], ["a", "a"], "board"),
+        "board": ([row], [], ""),
+    }
+    rows, exceptions, board = cases[case]
     with pytest.raises(ValueError, match=reason):
         migration.plan_global(rows, board_id=board, exceptions=exceptions)
 

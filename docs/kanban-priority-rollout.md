@@ -32,39 +32,88 @@ human-go incidents remained in place after transitive inheritance was added.
 - Inheritance, parent-first tie-breaking and age ordering remain intact. Two cards
   at 1000 can still have work ahead; priority never creates capacity.
 
-## One-shot migration and rollback
+## One-shot mixed-origin migration and rollback
 
-Run on the origin writer, **not a worker replica**. Do not move its live checkout
-or restart a busy gateway by hand. Use the normal reviewed core-update route.
+The supported executor is the **non-worker operator** `supervisor-requests`
+CLI. A dispatched worker or delegated descendant cannot execute it, including
+through a shell subprocess. Do not clear lineage, proxy it through SSH, or invoke
+Python/SQL directly to evade this boundary. An actual operator must execute the
+commands in their own operator session. No automatic worker grant is introduced.
 
-1. Before installing cap-aware import code, coordinate the snapshot/application
-   window with the origin operator. Capture all open priorities through
-   `kanban_priority_migration.plan(conn)` from the reviewed worktree. Save with
-   `save_manifest(Path(absolute_path), manifest)`; it uses exclusive creation and
-   fsync. Attach this JSON to the owner task **before** applying it.
-2. `apply(conn, Path(absolute_path))` normalizes distinct positive ranks to 1..900,
-   preserving ordering and ties and leaving nonpositive values unchanged. The
-   highest two requested cards therefore remain in the highest two distinct bands.
-   Reserve 901..1000 for deliberate subsequent escalation. Terminal rows are not
-   rewritten. The operation refuses a different board/gateway, shadow mode,
-   foreign-owned open rows, new open cards or any changed recorded priority.
-   On refusal capture and attach a **new** manifest; never overwrite the original.
-3. Publish the origin deltas through normal Board sync and read back exact target
-   values. Install on the hub using normal drain/update coordination. Ensure old
-   clients which can write priorities are upgraded; imported legacy values are
-   bounded locally, but this does not remotely rewrite a legacy sender's database.
-4. Verify no open stored priority exceeds 1000. With a genuinely free slot and
-   other eligible effective priorities below 1000, bump one authorized ready card
-   to 1000 and verify `queue.ahead == 0`, then observe its claim. Do not manufacture
-   capacity, disturb running work or claim this fixture is live proof.
-5. Rollback: `apply(conn, manifest_path, undo=True)` restores prior values only
-   when all recorded current values still match. Restoring above-cap legacy values
-   additionally requires `allow_legacy_rollback=True`: this is an explicit rollback
-   of the priority policy and must be coordinated with deployment, not normal
-   editing. No lifecycle state, lease, parent edge or run is reverted.
-   Both apply and undo refuse atomically if any recorded card has become terminal
-   or disappeared. Undo allows newly created cards, leaving them untouched; apply
-   requires exact open membership. Movement among open statuses is safe.
+1. Coordinate a quiet migration window across all origins. Before installing any
+   cap-aware imports, prepare from the raw canonical Board snapshot (no local
+   cap-aware pull). Use a locally owned existing task for `LOCAL_TASK`; do not
+   create extra open tasks after capture. `ORIGIN` is the enrolled primary gateway
+   name. The board flag is before the subcommand.
+
+   ```sh
+   hermes kanban --board default supervisor-requests --priority-operation prepare \
+     --writer ORIGIN --task LOCAL_TASK --backup /absolute/fresh-original.json \
+     --exception t_01a1ca6310b2af43 --exception t_01a19400313cfbda
+   ```
+
+   The requested exceptions are explicitly ordered low to high. Each must resolve
+   canonically, including terminal state: missing is an error, not assumed done.
+   Open exceptions reserve the top bands (at most 900); their old values are in
+   the manifest. Ordinary positive values keep order/ties; nonpositive ordinary
+   values are unchanged. Terminal rows are not rewritten. Snapshot pagination
+   requires one unchanged feed head. This is an observation, not a global lease.
+
+2. Secure the resulting original backup and attachment before doing anything that
+   might clip values. Copy the **exact original bytes** to every other origin,
+   then stage them on each primary writer using a fresh backup path:
+
+   ```sh
+   hermes kanban --board default supervisor-requests --priority-operation stage \
+     --writer ORIGIN --task LOCAL_TASK --manifest /absolute/copied-original.json \
+     --backup /absolute/fresh-origin-backup.json
+   ```
+
+   Each JSON receipt gives `attachment_id`, `manifest_sha256`, `writer`, and
+   `backup`. All origins must report the same digest. Keep all receipts and verify
+   every original backup is secured **before any apply or cap-aware install**.
+   Staging preserves bytes exactly; it never overwrites a backup. It changes no
+   priority. If attachment storage fails, retain the original backup and retry
+   staging at a new path.
+
+3. On each origin, apply its local attachment and exact digest:
+
+   ```sh
+   hermes kanban --board default supervisor-requests --priority-operation apply \
+     --writer ORIGIN --attachment-id LOCAL_ATTACHMENT_ID --digest SHA256
+   ```
+
+   This uses the normal writer transaction, events and sync outbox. It refuses
+   shadow/different writers, foreign attachment owners, changed manifest bytes,
+   invalid ranks, unknown origins, and changed owned open membership/ownership or
+   priority values. All rows already at their targets are an idempotent no-op;
+   mixed old/new states refuse. Movement among open statuses is safe.
+   Each origin is atomic, **not all origins together**. If any origin refuses,
+   stop the rollout: do not clip/import/install and do not rewrite the manifest.
+   Retain all originals and receipts. Either guarded-restore applied origins or
+   deliberately capture and attach a new global plan from the new state.
+
+4. Let normal Board sync publish the outbox, inspect rejection/pending counts,
+   and read back canonical priorities against every manifest row. A local command
+   receipt is not publication proof. Only after all origins match may the rollout
+   owner install through the normal drain/update route. Verify no open stored
+   priority exceeds 1000; reserve 901..1000 for deliberate escalation. Verify a
+   genuinely eligible ready card's queue/claim under real capacity separately.
+
+5. Guarded rollback uses the same local attachment/digest:
+
+   ```sh
+   hermes kanban --board default supervisor-requests --priority-operation restore \
+     --writer ORIGIN --attachment-id LOCAL_ATTACHMENT_ID --digest SHA256 \
+     --allow-legacy-rollback
+   ```
+
+   The explicit flag acknowledges policy rollback when restoring above-cap old
+   values; coordinate cap-aware import/deployment policy first or imports may
+   immediately clip restored values. Restore requires exact owned membership and
+   target-value CAS, just like apply (new cards also cause refusal). It never
+   reverts lifecycle state, lease, parents or runs. Publish and read back restore
+   through normal sync too.
 
 Legacy terminal priorities remain historical until reopened. The shared descendant
 invalidation path bounds the reopened root and every invalidated descendant in the

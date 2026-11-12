@@ -48,7 +48,8 @@ def capture(hub, *, board_id: str, exceptions: list[str]) -> dict:
     return validate(plan_global(rows, board_id=board_id, exceptions=exceptions))
 
 
-def stage(conn, manifest: dict, *, path: Path, task_id: str, writer: str) -> dict:
+def stage(conn, manifest: dict, *, path: Path, task_id: str, writer: str,
+          original_bytes: bytes | None = None) -> dict:
     """Save a fresh immutable backup and attach identical bytes on the local owner."""
     from hermes_cli.kanban_db_sync import sync_state
     from hermes_cli.kanban_supervisor_requests import _non_worker_refusal
@@ -65,7 +66,16 @@ def stage(conn, manifest: dict, *, path: Path, task_id: str, writer: str) -> dic
     owner = conn.execute("SELECT created_on FROM tasks WHERE id=?", (task_id,)).fetchone()
     if owner is None or owner[0] != writer:
         raise ValueError("attachment owner must belong to this writer")
-    save_manifest(path, manifest)
+    if original_bytes is None:
+        save_manifest(path, manifest)
+    else:
+        import json
+        if validate(json.loads(original_bytes)) != manifest:
+            raise ValueError("original manifest bytes do not match plan")
+        with path.open("xb") as stream:
+            stream.write(original_bytes)
+            stream.flush()
+            os.fsync(stream.fileno())
     # Preserve the backup even if attachment storage subsequently fails. The
     # existing attachment writer owns its transaction; staging changes no priority.
     # Apply revalidates writer, attachment and complete owned inventory atomically.

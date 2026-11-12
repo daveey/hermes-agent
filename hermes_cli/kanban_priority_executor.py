@@ -27,6 +27,9 @@ def apply_attached(conn, attachment_id: int, digest: str, *, writer: str,
         attachment = kb.get_attachment(conn, attachment_id)
         if attachment is None:
             raise ValueError("attached manifest required")
+        owner = conn.execute("SELECT created_on FROM tasks WHERE id=?", (attachment.task_id,)).fetchone()
+        if owner is None or owner[0] != writer:
+            raise ValueError("attachment owner must belong to this writer")
         data = Path(attachment.stored_path).read_bytes()
         if hashlib.sha256(data).hexdigest() != digest:
             raise ValueError("manifest digest mismatch")

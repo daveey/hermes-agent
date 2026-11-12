@@ -700,7 +700,14 @@ def cli_command(args) -> int:
     from this (non-worker) process."""
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli.kanban_output import _err
+    if getattr(args, "priority_operation", None):
+        refusal = _non_worker_refusal()
+        if refusal:
+            return _err(refusal)
     with kbc.connect_closing() as conn:
+        if getattr(args, "priority_operation", None):
+            from hermes_cli.kanban_priority_cli import run
+            return run(conn, args)
         processed = None
         if args.drain:
             try:

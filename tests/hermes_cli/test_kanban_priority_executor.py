@@ -43,40 +43,48 @@ def test_executor_writes_only_origin_rows_and_captures_normal_outbox(conn):
 
 @pytest.mark.parametrize("case, reason", [
     ("missing", "attached manifest required"), ("digest", "digest mismatch"),
+    ("foreign_attachment", "attachment owner"),
     ("writer", "different writer"), ("shadow", "primary writer"),
     ("board", "different board"), ("priority", "priorities changed"),
     ("ownership", "ownership or membership changed"),
     ("terminal", "ownership or membership changed"),
     ("new", "ownership or membership changed"),
 ])
-def test_executor_refuses_whole_origin_atomically(conn, case, reason):
+@pytest.mark.parametrize("undo", [False, True])
+def test_executor_refuses_whole_origin_atomically(conn, case, reason, undo):
     from hermes_cli import kanban_priority_executor as executor
     ids, attachment, digest = setup_plan(conn)
+    if undo:
+        executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME)
     writer = sync_helpers.ME
+    sql_mutations = {
+        "shadow": ("UPDATE kanban_sync_state SET mode='shadow'", ()),
+        "board": ("UPDATE kanban_sync_state SET board_id='another'", ()),
+        "priority": ("UPDATE tasks SET priority=777 WHERE id=?", (ids[2],)),
+        "ownership": ("UPDATE tasks SET created_on='two' WHERE id=?", (ids[2],)),
+        "terminal": ("UPDATE tasks SET status='done' WHERE id=?", (ids[2],)),
+    }
+    if case in sql_mutations:
+        conn.execute(*sql_mutations[case])
     if case == "missing":
         attachment = -1
-    elif case == "digest":
+    if case == "foreign_attachment":
+        from pathlib import Path
+        stored = kb.get_attachment(conn, attachment)
+        assert stored is not None
+        attachment = kb.store_attachment_bytes(conn, ids[1], "foreign.json", Path(stored.stored_path).read_bytes())
+    if case == "digest":
         digest = "0" * 64
-    elif case == "writer":
+    if case == "writer":
         writer = "two"
-    elif case == "shadow":
-        conn.execute("UPDATE kanban_sync_state SET mode='shadow'")
-    elif case == "board":
-        conn.execute("UPDATE kanban_sync_state SET board_id='another'")
-    elif case == "priority":
-        conn.execute("UPDATE tasks SET priority=777 WHERE id=?", (ids[2],))
-    elif case == "ownership":
-        conn.execute("UPDATE tasks SET created_on='two' WHERE id=?", (ids[2],))
-    elif case == "terminal":
-        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (ids[2],))
-    elif case == "new":
+    if case == "new":
         extra = helpers.legacy(conn, [10000])[0]
         conn.execute("UPDATE tasks SET created_on=? WHERE id=?", (writer, extra))
     conn.commit()
     before = helpers.priorities(conn, ids)
     outbox_before = [tuple(r) for r in conn.execute("SELECT * FROM kanban_sync_outbox")]
     with pytest.raises(ValueError, match=reason):
-        executor.apply_attached(conn, attachment, digest, writer=writer)
+        executor.apply_attached(conn, attachment, digest, writer=writer, undo=undo, allow_legacy_rollback=True)
     assert helpers.priorities(conn, ids) == before
     assert [tuple(r) for r in conn.execute("SELECT * FROM kanban_sync_outbox")] == outbox_before
 
@@ -89,22 +97,17 @@ def test_attached_manifest_is_validated_not_trusted(conn, mutation):
     stored = kb.get_attachment(conn, attachment)
     assert stored is not None
     manifest = json.loads(Path(stored.stored_path).read_bytes())
-    if mutation == "rank":
-        manifest["rows"][0]["new"] = 123
-    elif mutation == "version":
-        manifest["version"] = 1
-    elif mutation == "boolean":
-        manifest["rows"][0]["old"] = True
-    elif mutation == "duplicate":
-        manifest["rows"].append(manifest["rows"][0])
-    elif mutation == "exception":
-        manifest["exceptions"] = [{"id": "unknown", "status": "running", "origin": "two", "old": 1}]
-    elif mutation == "origin":
-        manifest["rows"][0]["origin"] = None
-    elif mutation == "ceiling":
-        manifest["ceiling"] = 999
-    else:
-        manifest["arbitrary"] = "ignored?"
+    mutations = {
+        "rank": lambda: manifest["rows"][0].update(new=123),
+        "version": lambda: manifest.update(version=1),
+        "boolean": lambda: manifest["rows"][0].update(old=True),
+        "duplicate": lambda: manifest["rows"].append(manifest["rows"][0]),
+        "exception": lambda: manifest.update(exceptions=[{"id": "unknown", "status": "running", "origin": "two", "old": 1}]),
+        "origin": lambda: manifest["rows"][0].update(origin=None),
+        "ceiling": lambda: manifest.update(ceiling=999),
+        "extra": lambda: manifest.update(arbitrary="ignored?"),
+    }
+    mutations[mutation]()
     data = json.dumps(manifest).encode()
     attachment = kb.store_attachment_bytes(conn, ids[0], "invalid.json", data, content_type="application/json")
     before = helpers.priorities(conn, ids)
@@ -163,7 +166,11 @@ def test_two_origins_share_ranks_and_publish_only_their_own_rows(conn, tmp_path)
         other.execute("UPDATE kanban_sync_state SET gateway_id='two'")
         other.commit()
         assert executor.apply_attached(conn, attachment, digest, writer=sync_helpers.ME)["changed"] == 2
-        assert executor.apply_attached(other, attachment, digest, writer="two")["changed"] == 1
+        from pathlib import Path
+        stored = kb.get_attachment(conn, attachment)
+        assert stored is not None
+        other_attachment = kb.store_attachment_bytes(other, ids[1], "origin-two.json", Path(stored.stored_path).read_bytes())
+        assert executor.apply_attached(other, other_attachment, digest, writer="two")["changed"] == 1
         assert helpers.priorities(other, ids) == [10000, 450, 50000]
         for db, origin, own in [(conn, sync_helpers.ME, {ids[0], ids[2]}), (other, "two", {ids[1]})]:
             task_ops = {r[0] for r in db.execute("SELECT row_uid FROM kanban_sync_outbox WHERE table_name='tasks'")}
