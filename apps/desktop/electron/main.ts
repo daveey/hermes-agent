@@ -475,13 +475,13 @@ import { migrateActiveProfileIfMissing as migrateActiveProfileIfMissingPure } fr
 import { prepareProfileRenameLifecycle, profileRenameFromRequest } from './profile-rename-routing'
 import {
   applyRemoteProfileSessionOutcomes,
-  assembleSidebarSessionSlices,
-  buildSidebarSessionSliceParams,
   composeUnifiedSessionResponse,
+  fanOutSidebarSessionSlices,
   fetchAllProfilesAggregatePerProfile,
   fetchAllProfilesSessionsPerProfile,
   fetchPrimaryProfileSessions,
   fetchRemoteProfileSessions,
+  fetchSidebarSessionsBatchedOrSliced,
   findRemoteOwnerProfileForSession,
   hasPinnedRegistrySessionSource,
   isAllProfilesAggregateRequest,
@@ -15566,10 +15566,8 @@ async function interceptSessionRequestForRemote(request, registryConnectionId = 
 
   // Batched sidebar slices. With no remote profiles the local batched endpoint
   // (one DB open per profile) serves it directly — take the fast path. When
-  // remotes exist, fan the three slices back out to the per-slice
-  // /api/profiles/sessions path (which already merges remote rows correctly) and
-  // reassemble; local profiles fall back to three primary reads there, but
-  // remote correctness is preserved.
+  // remotes exist, a concrete local profile still reads the primary's batched
+  // route once; otherwise fan the slices out to /api/profiles/sessions.
   if (method === 'GET' && pathname === '/api/profiles/sessions/sidebar') {
     const remoteProfiles = configuredRemoteProfileNames()
 
@@ -15587,16 +15585,15 @@ async function interceptSessionRequestForRemote(request, registryConnectionId = 
       return undefined
     }
 
-    const { recents: recentsSp, cron: cronSp, messaging: messagingSp } = buildSidebarSessionSliceParams(searchParams)
     const ownerTag = primaryRowsOwnerTag(registryConnectionId, readDesktopConnectionsRegistry().primary)
 
-    const [recents, cron, messaging] = await Promise.all([
-      fetchProfilesSessionSlice(recentsSp, remoteProfiles, registrySources, ownerTag, registryConnectionId),
-      fetchProfilesSessionSlice(cronSp, remoteProfiles, registrySources, ownerTag, registryConnectionId),
-      fetchProfilesSessionSlice(messagingSp, remoteProfiles, registrySources, ownerTag, registryConnectionId)
-    ])
+    const readSlice = sp => fetchProfilesSessionSlice(sp, remoteProfiles, registrySources, ownerTag, registryConnectionId)
+    const fanOut = () => fanOutSidebarSessionSlices(searchParams, readSlice)
 
-    return assembleSidebarSessionSlices(recents, cron, messaging)
+    // [daveey] A concrete local profile: one batched primary read, the slices only on its failure.
+    return fetchSidebarSessionsBatchedOrSliced(searchParams, {
+      fanOut, fetchJsonForProfile, hasRemoteOverride: profileHasRemoteOverride, ownerTag
+    })
   }
 
   // Per-session read/mutation. Owner is in ?profile= (reads) or request.profile

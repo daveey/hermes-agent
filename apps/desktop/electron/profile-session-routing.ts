@@ -326,6 +326,89 @@ export async function fetchPrimaryProfileSessions(
   }
 }
 
+/** The concrete profile whose whole sidebar the primary's batched route can
+ *  serve in one read [daveey], or null when the sidebar must fan out per
+ *  slice: `all` merges remote/registry rows, an override reads its remote.
+ *  Same scope read as buildSidebarSessionSliceParams. */
+export function batchedPrimarySidebarProfile(
+  searchParams: URLSearchParams,
+  hasRemoteOverride: (profile: string) => unknown
+): string | null {
+  const profile = (searchParams.get('recents_profile') || 'all').trim() || 'all'
+
+  return profile !== 'all' && !hasRemoteOverride(profile) ? profile : null
+}
+
+/** Stamp `ownerTag` on every unowned row of a batched sidebar response (the
+ *  three slices), as fetchPrimaryProfileSessions does for one slice. Copy,
+ *  never mutate; a null tag returns the response as is. */
+export function tagSidebarSlicesOwner(data: unknown, ownerTag: string | null | undefined): unknown {
+  if (!ownerTag || !data || typeof data !== 'object') {
+    return data
+  }
+
+  const response = data as Record<string, unknown>
+  const tagged: Record<string, unknown> = { ...response }
+
+  for (const key of ['recents', 'cron', 'messaging']) {
+    const slice = response[key]
+
+    if (slice && typeof slice === 'object' && Array.isArray((slice as { sessions?: unknown }).sessions)) {
+      tagged[key] = {
+        ...slice,
+        sessions: rowsOf(slice).map(row =>
+          row && typeof row === 'object' && !String((row as Record<string, unknown>).connection_id ?? '').trim()
+            ? { ...row, connection_id: ownerTag }
+            : row
+        )
+      }
+    }
+  }
+
+  return tagged
+}
+
+/** The per-slice sidebar path: the three slice reads from one workspace
+ *  scope, reassembled into the batched response shape. */
+export async function fanOutSidebarSessionSlices(
+  searchParams: URLSearchParams,
+  readSlice: (sliceParams: URLSearchParams) => Promise<unknown>
+) {
+  const { recents, cron, messaging } = buildSidebarSessionSliceParams(searchParams)
+  const [recentsData, cronData, messagingData] = await Promise.all([recents, cron, messaging].map(readSlice))
+
+  return assembleSidebarSessionSlices(recentsData, cronData, messagingData)
+}
+
+/** Serve the sidebar while remotes or registry gateways exist [daveey]. A
+ *  concrete profile with no remote override lives wholly on the primary, so
+ *  one batched `/sidebar` read replaces the three per-slice reads. Any failure
+ *  of that read (an older primary 404s the route, timeout, transport) runs
+ *  `fanOut`, the per-slice path, for this request only. */
+export async function fetchSidebarSessionsBatchedOrSliced(
+  searchParams: URLSearchParams,
+  deps: {
+    fanOut: () => Promise<unknown>
+    fetchJsonForProfile: FetchJsonForProfile
+    hasRemoteOverride: (profile: string) => unknown
+    ownerTag: string | null
+  }
+): Promise<unknown> {
+  if (batchedPrimarySidebarProfile(searchParams, deps.hasRemoteOverride) !== null) {
+    let data: unknown
+
+    try {
+      data = await deps.fetchJsonForProfile(null, `/api/profiles/sessions/sidebar?${searchParams}`)
+    } catch {
+      return deps.fanOut()
+    }
+
+    return tagSidebarSlicesOwner(data, deps.ownerTag)
+  }
+
+  return deps.fanOut()
+}
+
 /** Reassemble the batched sidebar response from its three per-slice reads,
  *  keeping each slice's `errors` so a failed scan is never read as an
  *  authoritative empty slice. */
