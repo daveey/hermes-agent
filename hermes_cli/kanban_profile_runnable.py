@@ -31,6 +31,32 @@ def runnable(name: str) -> bool:
     except Exception:  # health: allow BLE001 -- an unreadable rule set must not invent a runnable pool
         logger.warning("kanban: placement check for profile %s failed", name, exc_info=True)
         return False
+    return _attested(name, members)
+
+
+def runnable_for(name: str, task: object) -> bool:
+    """Whether an existing card can run once assigned to ``name``. Its placement is fixed at creation: an
+    enrolled ``worker-first-v1`` card runs only on a pool worker attesting ``profile:<name>``, whatever the
+    assignee allowlist says (the decomposer once moved two enrolled owners to ``mac-ops``, which no pool
+    worker carries); any other card stays on this gateway, which has every local profile."""
+    from hermes_cli.kanban_worker_placement import POLICY
+
+    if getattr(task, "placement_policy", None) != POLICY:
+        return True
+    from hermes_cli import kanban_placement as placement
+
+    try:
+        pools = placement.config().get("worker_pools")
+        members = pools.get(placement.reg.self_gateway()) if isinstance(pools, dict) else None
+    except Exception:  # health: allow BLE001 -- no pool config: judge against every registered machine
+        logger.warning("kanban: pool config unreadable for profile %s", name, exc_info=True)
+        members = None
+    return _attested(name, members if isinstance(members, list) and members else None)
+
+
+def _attested(name: str, members: list | None) -> bool:
+    """An active, unheld, picking-up machine among ``members`` (None = every registered one) attests
+    ``profile:<name>``; an unreadable registry counts as none."""
     from hermes_cli import kanban_worker_node as wn
 
     try:
@@ -42,7 +68,7 @@ def runnable(name: str) -> bool:
     if not isinstance(machines, dict):
         return False
     label = f"profile:{name}"
-    for member in members:
+    for member in machines if members is None else members:
         entry = machines.get(member)
         if (isinstance(entry, dict) and entry.get("state", "active") == "active" and not entry.get("hold")
                 and wn.advertises_pickup(entry) and label in (entry.get("labels") or [])):
