@@ -57,6 +57,8 @@ STALE_PENDING_S = 6 * 3600  # a run queued this long never got runners: it no lo
 # Set on the gate's own pushes; the pre-push guard lets exactly those through.
 GATE_ENV = "HERMES_UPSTREAM_SYNC_GATE"
 UPSTREAM_REF = "refs/remotes/upstream/main"
+# Renamed/transferred repos (lowercase configured slug -> GitHub's name): origin URLs still name the old slug.
+CANONICAL_SLUGS = {"daveey/hermes": "softmax-universe/daveey-hermes"}
 
 LANDED, REFUSED, NOT_YET = 0, 1, 2
 # The check daveey/hermes main's branch protection requires on a PR head (ci.yaml's aggregate job),
@@ -122,11 +124,16 @@ def gh_cli(*args, reason="upstream sync gate: read fork CI evidence") -> subproc
 
 
 def github_pages(endpoint):
-    """Every page of a GitHub API GET: the logged-in gh, else the broker's ``user/github`` scope."""
-    proc = gh_cli("api", "--paginate", "--slurp", endpoint)
+    """Every page of a GitHub API GET: the logged-in gh, else the broker's ``user/github`` scope.
+
+    An endpoint that names its ``page=`` reads that one page only: ``--paginate`` would walk the whole
+    history, one request of the shared token per page."""
+    paged = re.search(r"[?&]page=\d+(?:&|$)", endpoint)
+    proc = gh_cli("api", endpoint) if paged else gh_cli("api", "--paginate", "--slurp", endpoint)
     if proc.returncode:
         raise GateError(f"GitHub API read failed: {(proc.stderr or proc.stdout).strip()[-300:]}")
-    return json.loads(proc.stdout)
+    data = json.loads(proc.stdout)
+    return [data] if paged else data
 
 
 @dataclass
@@ -152,25 +159,85 @@ def _jobs_green(gh_repo, run_id, request) -> bool:
                for name in REQUIRED_JOBS)
 
 
-def candidates(gh_repo, request) -> dict[str, Candidate]:
-    """Each staged candidate's newest verdict, keyed by head sha."""
-    pages = request(f"repos/{gh_repo}/actions/workflows/{WORKFLOW_FILE}/runs?event=push&per_page=50")
-    runs = sorted((r for page in pages for r in page["workflow_runs"]), key=lambda r: (r.get("run_number", 0), r["id"]))
+class VerdictCache:
+    """Jobs verdicts of completed run attempts and canonical repo slugs, kept on disk between gate calls.
+
+    A completed run attempt's jobs never change (a re-run is a new ``run_attempt``), so its verdict is read
+    from GitHub once. Unreadable or unwritable: the gate just reads GitHub again.
+    """
+
+    def __init__(self, path: Path | None):
+        self.path, self.data = path, {}
+        try:
+            self.data = json.loads(path.read_text(encoding="utf-8-sig")) if path and path.exists() else {}
+        except (OSError, ValueError):
+            self.data = {}
+        if not isinstance(self.data, dict):
+            self.data = {}
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def put(self, key, value) -> None:
+        self.data[key] = value
+        if self.path is None:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(self.data, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError:
+            pass  # a cache that cannot be written only costs requests
+
+
+def default_cache_path() -> Path:
+    home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+    return Path(home) / "cache" / "upstream-sync-gate.json"
+
+
+def _run_verdict(gh_repo, run, request, cache) -> bool:
+    key = f"jobs:{gh_repo.lower()}:{run['id']}:{run.get('run_attempt', 1)}"
+    cached = cache.get(key) if cache is not None else None
+    if isinstance(cached, bool):
+        return cached
+    green = bool(_jobs_green(gh_repo, run["id"], request))
+    if cache is not None:
+        cache.put(key, green)
+    return green
+
+
+def candidates(gh_repo, request, *, wanted=None, cache=None) -> dict[str, Candidate]:
+    """Each staged candidate's newest verdict, keyed by head sha.
+
+    Only a head's newest verdict-bearing run counts, so jobs are read for that run alone, and only when
+    ``wanted(head, updated_at)`` says the gate can act on that head (None: every head). Re-reading jobs for
+    every green run in the list cost ~100-200 requests of the shared user token per call. A completed-success
+    run that is not wanted is reported ``unread``: no landing, staging or backoff decision reads that status.
+    """
+    pages = request(f"repos/{gh_repo}/actions/workflows/{WORKFLOW_FILE}/runs?event=push&per_page=50&page=1")
+    runs = sorted((r for page in pages for r in page["workflow_runs"]), key=lambda r: (r.get("run_number", 0), r["id"]),
+                  reverse=True)
     found: dict[str, Candidate] = {}
-    for run in runs:  # oldest first: a later run on the same head replaces the earlier verdict
+    for run in runs:  # newest first: a head's first verdict-bearing run is its verdict
         head = run["head_sha"]
+        if head in found:
+            continue
         if run["head_branch"] != BRANCH_PREFIX + head or run["path"] != WORKFLOW_PATH or run["event"] != "push":
             continue  # evidence counts only from the candidate's own branch and this workflow
+        updated = _ts(run.get("updated_at") or run.get("created_at"))
         if run["status"] != "completed":
             status = "pending"
         elif run["conclusion"] == "success":
-            status = "green" if _jobs_green(gh_repo, run["id"], request) else "red"
+            if wanted is not None and not wanted(head, updated):
+                status = "unread"
+            else:
+                status = "green" if _run_verdict(gh_repo, run, request, cache) else "red"
         elif run["conclusion"] in ("cancelled", "skipped", "stale"):
             continue  # never reached a verdict: neither evidence nor a failure
         else:
             status = "red"
-        found[head] = Candidate(head, status, run["html_url"], _ts(run.get("updated_at") or run.get("created_at")),
-                                run["id"])
+        found[head] = Candidate(head, status, run["html_url"], updated, run["id"])
     return found
 
 
@@ -376,24 +443,34 @@ def _close_superseded(repo, gh_repo, request, gh, protected=()) -> None:
         print(f"  superseded sync PRs: cleanup failed: {exc!r}")
 
 
-def advance(repo: Path, head: str | None, *, gh_repo: str, request=github_pages, gh=gh_cli, now=None) -> int:
+def advance(repo: Path, head: str | None, *, gh_repo: str, request=github_pages, gh=gh_cli, now=None,
+            cache: VerdictCache | None = None) -> int:
     """Land green candidates, then report ``head``'s state or stage it (module doc, exit codes).
 
     Every call then closes open sync PRs whose parents main already holds, including any this call's landing
     made redundant."""
     protected = set()
-    verdict = _advance(repo, head, gh_repo=gh_repo, request=request, gh=gh, now=now, protected=protected)
+    verdict = _advance(repo, head, gh_repo=gh_repo, request=request, gh=gh, now=now, protected=protected,
+                       cache=cache)
     _close_superseded(repo, gh_repo, request, gh, protected)
     return verdict
 
 
-def _advance(repo: Path, head: str | None, *, gh_repo: str, request, gh, now, protected) -> int:
+def _advance(repo: Path, head: str | None, *, gh_repo: str, request, gh, now, protected, cache=None) -> int:
     now = time.time() if now is None else now
     try:
         if head is not None:
             head = git(repo, "rev-parse", "--verify", f"{head}^{{commit}}")
-        found = candidates(gh_repo, request)
-        landed_other = _land_other_greens(repo, found, head, _fetch_main(repo), gh_repo=gh_repo, request=request,
+        main = _fetch_main(repo)
+
+        def wanted(sha, updated_at):
+            """A green run's jobs matter only for a head this call may land, or back off on (recent)."""
+            if sha == head or now - updated_at < RED_BACKOFF_S:
+                return True
+            return not (_is_ancestor(repo, sha, main) or _parents_on_main(repo, sha, main))
+
+        found = candidates(gh_repo, request, wanted=wanted, cache=cache)
+        landed_other = _land_other_greens(repo, found, head, main, gh_repo=gh_repo, request=request,
                                          gh=gh, protected=protected)
         if head is None:
             return LANDED if landed_other else NOT_YET
@@ -465,6 +542,30 @@ def origin_slug(repo) -> str:
     return match[1]
 
 
+def canonical_slug(slug: str, request=github_pages, cache: VerdictCache | None = None) -> str:
+    """GitHub's current name for ``slug``. A renamed or transferred repo answers every old-name REST call with
+    a 301 first, which doubles each request on the shared token, so the gate resolves the name once.
+    Unreadable: the configured slug (GitHub still redirects it)."""
+    known = CANONICAL_SLUGS.get(slug.lower())
+    if known:
+        return known
+    key = f"slug:{slug.lower()}"
+    cached = cache.get(key) if cache is not None else None
+    if isinstance(cached, str) and cached:
+        return cached
+    try:
+        pages = request(f"repos/{slug}")
+        name = next((p.get("full_name") for p in pages if isinstance(p, dict) and p.get("full_name")), None)
+    except (GateError, OSError, subprocess.SubprocessError, ValueError, TypeError) as exc:
+        print(f"  could not resolve GitHub's name for {slug} ({exc}); using it as configured")
+        return slug
+    if not isinstance(name, str) or not re.fullmatch(r"[^/\s]+/[^/\s]+", name):
+        return slug
+    if cache is not None:
+        cache.put(key, name)
+    return name
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
@@ -478,7 +579,8 @@ def main(argv=None) -> int:
     except GateError as exc:
         print(f"REFUSED: {exc}")
         return REFUSED
-    return advance(args.repo, args.head, gh_repo=slug)
+    cache = VerdictCache(default_cache_path())
+    return advance(args.repo, args.head, gh_repo=canonical_slug(slug, cache=cache), cache=cache)
 
 
 if __name__ == "__main__":
