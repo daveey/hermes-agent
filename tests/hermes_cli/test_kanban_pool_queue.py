@@ -307,6 +307,48 @@ def test_park_keeps_a_pushed_card_on_the_pool_and_pins_only_unpushed_state(w2, t
     assert [k for k, _ in _placement_events(conn, tid)] == ["pool_pinned", "pool_unpinned"]
 
 
+def test_park_keeps_work_pushed_by_url_on_the_pool_even_after_the_remote_branch_moved(w2, tmp_path, monkeypatch):
+    """11-12: t_01a1d0a1eaa00371 pushed its fix with ``git push https://...git HEAD:wt/...`` (a URL, so origin/*
+    stayed at the old tip) and a server-side update-branch then moved the branch past it. The park called that
+    "unpushed commits", pinned the card to machine:worker-2, and it sat ready while worker-2 was on a Board hold."""
+    from tools import kanban_tools as kt
+    conn = w2.conn
+    tid = kb.create_task(conn, title="pool card pushed by url", assignee="default", runs_on=[POOL])
+    tree = _pushed_clone(tmp_path, tmp_path / "code" / "_wt" / "url-push")
+    remote = str(tmp_path / "url-push-remote.git")
+    _git(tree, "fetch", "-q", "origin")  # origin/wt/x tracks the pushed tip
+    _commit(tree, "b.txt")
+    _git(tree, "push", "-q", remote, "HEAD:refs/heads/wt/x")  # by URL: origin/wt/x stays behind HEAD
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", "-q", "-b", "wt/x", remote, str(other))
+    _commit(other, "merge-from-base.txt")  # GitHub's update-branch: the remote branch moves past HEAD
+    _git(other, "push", "-q", "origin", "HEAD:refs/heads/wt/x")
+
+    _run(w2, monkeypatch, tid)
+    out = json.loads(kt._handle_block({"kind": "time", "clock_only": True, "reason": (
+        f"SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on review; fix pushed from {tree}")}))
+    assert out.get("ok"), out
+    assert _runs_on(conn, tid) == [POOL] and _placement_events(conn, tid) == []
+
+    # A commit no remote branch holds still pins, even with a stale tracking ref around.
+    _run(w2, monkeypatch, tid)
+    _commit(tree, "c.txt")
+    out = json.loads(kt._handle_block({"kind": "time", "clock_only": True, "reason": (
+        f"SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on review; c.txt only in {tree}")}))
+    assert out.get("ok"), out
+    assert _runs_on(conn, tid) == ["machine:worker-2"]
+    assert _placement_events(conn, tid)[-1][1]["unpushed_state"] == f"unpushed commits in {tree.resolve()}"
+
+
+def test_a_head_that_is_a_remote_branch_tip_counts_as_pushed(tmp_path):
+    from hermes_cli import kanban_move_pool as kmp
+    tree = _pushed_clone(tmp_path, tmp_path / "tip")
+    _commit(tree, "b.txt")
+    assert kmp.tree_state([str(tree)]) == f"unpushed commits in {tree}"
+    _git(tree, "push", "-q", str(tmp_path / "tip-remote.git"), "HEAD:refs/heads/wt/new")  # new branch, by URL
+    assert kmp.tree_state([str(tree)]) is None
+
+
 def test_park_pins_a_dirty_tree_found_by_its_owner_marker(w2, tmp_path, monkeypatch):
     from tools import kanban_tools as kt
     conn = w2.conn
