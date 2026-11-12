@@ -458,7 +458,8 @@ def restore_undelivered_completions(target_queue) -> int:
         return _replay_pending(conn, rows, target_queue, now, startup=True)
 
 
-def unclaimed_pending_completions(*, min_age_s: float, now: Optional[float] = None) -> list[dict[str, Any]]:
+def unclaimed_pending_completions(*, min_age_s: float, now: Optional[float] = None,
+                                  recover: bool = True) -> list[dict[str, Any]]:
     """[daveey] This home's terminal completions still pending delivery, not under a live claim, and at least
     ``min_age_s`` past completion: ``[{"delegation_id", "event"}]``, oldest first. Expired rows are dropped first
     (as the replay does). For the unloaded-parent waker (``tui_gateway.delegation_unloaded``), which claims each
@@ -470,7 +471,8 @@ def unclaimed_pending_completions(*, min_age_s: float, now: Optional[float] = No
     from tools.async_delegation_idle import ledger_quiet
     if ledger_quiet(_db_path()):
         return []
-    recover_abandoned_delegations()  # an owner that died while no poller ran here: classify it first
+    if recover:  # an owner that died while no poller ran here: classify it first (the caller throttles this)
+        recover_abandoned_delegations()
     now = time.time() if now is None else now
     with _DB_LOCK, _transaction() as conn:
         _expire_pending_completions(conn, now)

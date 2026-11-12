@@ -53,8 +53,10 @@ WAKES_PER_HOUR = 6
 MAX_PARALLEL_WAKES = 2
 RETRY_S = 120.0
 RETRY_MAX_S = 1800.0
+RECOVER_EVERY_S = 300.0  # dead-owner classification per ledger; the pass itself ticks every 30 s
 
 _lock = threading.Lock()
+_recovered_at: dict[str, float] = {}  # ledger home -> last recover_abandoned_delegations run (this process)
 _wake_times: dict[str, list[float]] = {}  # chat -> started wakes (this process)
 _retry: dict[str, tuple[float, float]] = {}  # delegation id -> (not before, last delay)
 _wake_slots = threading.BoundedSemaphore(MAX_PARALLEL_WAKES)
@@ -65,6 +67,7 @@ def _reset_for_tests() -> None:
     with _lock:
         _wake_times.clear()
         _retry.clear()
+        _recovered_at.clear()
     _wake_slots = threading.BoundedSemaphore(MAX_PARALLEL_WAKES)
 
 
@@ -211,8 +214,13 @@ def sweep_once(*, now: Optional[float] = None, grace_s: float = GRACE_S,
     out: list[dict] = []
     for home in homes():
         with _home_scope(home):
+            with _lock:
+                key = str(home or "")
+                recover = now - _recovered_at.get(key, float("-inf")) >= RECOVER_EVERY_S
+                if recover:
+                    _recovered_at[key] = now
             try:
-                rows = ad.unclaimed_pending_completions(min_age_s=grace_s, now=now)
+                rows = ad.unclaimed_pending_completions(min_age_s=grace_s, now=now, recover=recover)
             except Exception:
                 logger.debug("%s: ledger of %s unreadable", LABEL, home or "launch home", exc_info=True)
                 continue

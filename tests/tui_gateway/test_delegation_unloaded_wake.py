@@ -205,6 +205,20 @@ def test_an_archived_or_moved_parent_is_never_woken(home, mark, verdict):
     assert row["delivery_attempts"] == 0  # unclaimed: an unarchived/reopened chat's poller can still take it
 
 
+def test_dead_owner_recovery_runs_at_most_every_recover_every_s(home, monkeypatch):
+    _completion()
+    calls = []
+    real = ad.unclaimed_pending_completions
+    monkeypatch.setattr(ad, "unclaimed_pending_completions",
+                        lambda **kw: calls.append(kw["recover"]) or real(**kw))
+    t0 = time.time()
+
+    for dt in (0.0, 30.0, du.RECOVER_EVERY_S - 1, du.RECOVER_EVERY_S + 1):
+        _sweep(home, _Waker("busy"), now=t0 + dt)
+
+    assert calls == [True, False, False, True]
+
+
 def test_a_lapsed_claim_at_ack_is_logged_as_a_warning(home, monkeypatch, caplog):
     _completion()
     monkeypatch.setattr(ad, "complete_completion_delivery", lambda did, claim: False)
