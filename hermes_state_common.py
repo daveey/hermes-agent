@@ -948,6 +948,11 @@ CREATE INDEX IF NOT EXISTS idx_sessions_tool_names
 -- a small candidate set before compression-chain and preview hydration.
 CREATE INDEX IF NOT EXISTS idx_sessions_effective_activity
     ON sessions(COALESCE(last_activity_at, started_at) DESC, started_at DESC);
+-- Pinned back-fill of every sidebar slice (``SELECT id FROM sessions WHERE pinned = 1``):
+-- a handful of pins must not cost a full sessions scan per slice. ``pinned`` leads so the
+-- planner SEARCHes (pinned=?) rather than SCANs; on ``(id)`` alone it walks the partial index.
+CREATE INDEX IF NOT EXISTS idx_sessions_pinned
+    ON sessions(pinned, id) WHERE pinned = 1;
 -- CLI/TUI listings match gateway rows stored as source='local' by created_source,
 -- before LIMIT. created_source is reconciled onto legacy DBs, so this index lives
 -- here rather than in SCHEMA_SQL. A source-only index would walk every local row
