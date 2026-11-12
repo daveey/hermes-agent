@@ -328,11 +328,21 @@ async def execute(authority, ref, row, policy):
             # The forwarded ``cron.cancel`` carries no reason, so the operator's marker is read here
             # first: a stopped agent run reports "cancelled on request", not a lost fire claim. When
             # the firer is this process and its shutdown interrupted the fire, the forwarded cancel
-            # reports that shutdown, not lost ownership (cron-7c04faf754).
+            # reports that shutdown, not lost ownership (cron-7c04faf754). So does a stop while this
+            # owner drains for a restart with no operator marker: ``stop_authority_work`` latches the
+            # run's cancel without a reason and without the scheduler's interrupted mark.
             job_id = job['id']
+            from cron.cancellation import cancel_requested
+
+            def _stopped_by_own_shutdown():
+                if fire_interrupted_by_shutdown(job_id):
+                    return True
+                runner = getattr(authority, 'runner', None)
+                return bool(getattr(runner, '_draining', False)) and not cancel_requested(execution_id)
+
             stop = _CombinedCancelEvent(
                 CancelRequest(execution_id),
-                ShutdownAwareCancel(cancel, lambda: fire_interrupted_by_shutdown(job_id)))
+                ShutdownAwareCancel(cancel, _stopped_by_own_shutdown))
             try:
                 result = await asyncio.to_thread(_run_identified, run_job, job, execution_id,
                                                  extra_prompt=data['extra_prompt'], cancel_event=stop)
