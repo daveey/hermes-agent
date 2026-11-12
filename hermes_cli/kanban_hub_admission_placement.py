@@ -28,13 +28,17 @@ def apply(args, decision, gateway, cfg):
     machine_hub = any(is_hub(v, cfg) for v in machines)
     destination = decision.get("defer") or decision.get("where")
     local_hub = destination == "local" and is_hub(gateway, cfg)
-    if not machine_hub:
-        if machines or decision.get("runs_on") or decision.get("placement_policy"):
-            return decision
-        if not local_hub and not is_hub(destination, cfg):
-            return decision
     pin = args.get("placement") or "auto"
     explicit = machine_hub or is_hub(pin, cfg)
+    if not machine_hub:
+        # Any explicit runs_on (even [] = any machine) is executed by the Board lease, not this slot.
+        if labels is not None or decision.get("runs_on") or decision.get("placement_policy"):
+            return decision
+        # A foreign gateway's automatic route to the hub is judged by the hub's own
+        # ingress (it lands there as a hub-local create); only explicit pins are judged here,
+        # so non-hub origins make zero model calls unless the caller names the hub.
+        if not local_hub and not (explicit and is_hub(destination, cfg)):
+            return decision
     if args.get("force_hub"):
         if os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("HERMES_KANBAN_WORKER_TASK"):
             return {"where": "refuse", "why": "force_hub is unavailable to dispatcher workers"}
@@ -57,5 +61,11 @@ def apply(args, decision, gateway, cfg):
                 "hub_admission": audit}
     requires = args.get("requires") or []
     requires = [requires] if isinstance(requires, str) else list(requires)
+    # Board contract (hermes-hub #90): requires hub:write -> capability:hub-write at reservation and
+    # claim. runs_on stays owned by the worker-first reservation, so the label travels in requires,
+    # and only for cards whose text hit a hub-state marker (they may still need hub-admin).
+    from hermes_cli.kanban_placement import portable_reason
+    if portable_reason(args, cfg):
+        requires = list(dict.fromkeys([*requires, "hub:write"]))
     return {"where": "local", "placement_policy": POLICY, "why": WAITING,
-            "requires": list(dict.fromkeys([*requires, "hub:write"])), "hub_admission": audit}
+            "requires": requires, "hub_admission": audit}
