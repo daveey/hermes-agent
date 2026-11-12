@@ -376,10 +376,9 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     reviewed = set().union(*(_reviewed_prs(conn, p, parked_at, row["id"], captured_set) for p in parents))
     if urls.issubset(reviewed):
         return True
-    # Without repair evidence, every awaited parent must approve. One approval does not cover a
-    # sibling that never reviewed, and a named unrelated PR does not cover
-    # the checkpoint set.
-    return all(
-        urls.issubset(_approval_prs(conn, p, parked_at, row["id"], captured_set))
-        for p in parents
-    )
+    # Without repair evidence, every awaited parent must approve a checkpointed PR and together
+    # they must approve every holding PR. One approval does not cover a sibling that never
+    # reviewed, and a named unrelated PR approves nothing. A split review (one card per PR of
+    # a multi-repo change, each naming its own reviewed_pr) is covered by the union.
+    approvals = [_approval_prs(conn, p, parked_at, row["id"], captured_set) for p in parents]
+    return all(approvals) and urls.issubset(set().union(*approvals))
