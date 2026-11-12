@@ -244,3 +244,12 @@ def test_card_metadata_rejects_malformed_cards():
         with pytest.raises(RuntimeStoreError):
             kanban_wake_fold.card_metadata({'kanban_cards': bad})
     assert 'kanban_cards' in session_automation._AUTOMATION_METADATA
+
+
+def test_every_wake_kind_has_a_status_label():
+    """``chat_wait_unclaimed`` joined the wake kinds with no label, so every such wake told the chat
+    "Task <id> gateway.kanban.wake.chat_wait_unclaimed." (state.db message 873383, 2026-11-11)."""
+    from agent.i18n import t
+    from gateway.kanban_watchers_notifier import _WAKE_KINDS
+    missing = [kind for kind in _WAKE_KINDS if t(f'gateway.kanban.wake.{kind}') == f'gateway.kanban.wake.{kind}']
+    assert not missing
