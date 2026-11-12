@@ -711,7 +711,7 @@ def test_human_decision_card_still_outranks_the_reply(db, board):
     assert so.refresh_outcome("chat", "turn_end", db=db)["kind"] == "decision"
 
 
-@pytest.mark.parametrize("precedence", ["declared", "provider", "silent_cron"])
+@pytest.mark.parametrize("precedence", ["declared", "declared_waiting", "provider", "silent_cron"])
 def test_busy_card_read_preserves_authority_but_not_silent_completion(db, monkeypatch, precedence):
     from hermes_cli.kanban_generation import BoardLifecycleBusy
 
@@ -719,6 +719,8 @@ def test_busy_card_read_preserves_authority_but_not_silent_completion(db, monkey
     declared = None
     if precedence == "declared":
         declared = so.declare_outcome("chat", {"kind": "done", "summary": SUMMARY}, db=db)
+    elif precedence == "declared_waiting":
+        declared = so.declare_outcome("chat", {"kind": "waiting", "on": [{"kind": "card", "id": "t_x"}]}, db=db)
     elif precedence == "provider":
         so.register_outcome_provider("approval", lambda sid: {
             "decision_items": [{"id": "approval", "question": "Deploy?"}]})
@@ -732,7 +734,12 @@ def test_busy_card_read_preserves_authority_but_not_silent_completion(db, monkey
     monkeypatch.setattr(ksa, "session_tasks", busy)
     out = so.refresh_outcome("chat", "manual", db=db)
     if precedence == "declared":
-        assert out == declared
+        # A declared done cannot outrank an unread card any more than a counted open one.
+        assert out["kind"] != "done"
+        assert (out["kind"], out["reason"]) == ("unresolved", "card_read_failed")
+        assert out["declared"]["kind"] == "done"
+    elif precedence == "declared_waiting":
+        assert out["kind"] == "waiting" and out["on"] == (declared or {})["on"]
     elif precedence == "provider":
         assert out["kind"] == "decision" and out["items"][0]["id"] == "approval"
     else:

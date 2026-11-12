@@ -607,14 +607,16 @@ def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
         return _outcome("waiting", now, on=waits, **carry)
     crons = _guarded("cron", sid, lambda: _cron_items(_lineage_ids(db, sid)), [])
     named = {"crons": crons} if crons else {}
-    if holds and declared.get("kind") in ("done", "waiting"):
-        return {**{k: v for k, v in declared.items() if k != "crons"},
-                **(named if declared.get("kind") == "done" else {})}
+    if holds and declared and declared.get("kind") == "waiting":
+        return {k: v for k, v in declared.items() if k != "crons"}
     if card_read_failed:
-        # Unknown card state is not evidence of completion, regardless of the reply.
+        # Unknown card state is not evidence of completion, regardless of the reply or a declared
+        # done: a counted open card outranks a declared done (``waits`` above), so an unread one must too.
         if stored and stored.get("kind") in ("waiting", "decision"):
             return stored
         return _outcome("unresolved", now, reason="card_read_failed", **carry)
+    if holds and declared and declared.get("kind") == "done":
+        return {**{k: v for k, v in declared.items() if k != "crons"}, **named}
     if not tail:
         return _outcome("unresolved", now, reason="empty", **carry)
     reason = _tail_reason(tail)
