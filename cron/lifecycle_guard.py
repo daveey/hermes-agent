@@ -1235,7 +1235,7 @@ def _contains_unsafe_gateway_action(
     # oversized data file mentioned there otherwise fails closed as a "script".
     from tools.shell_heredoc import strip_inert_heredoc_bodies
 
-    walk_command = strip_inert_heredoc_bodies(command)
+    walk_command = strip_inert_heredoc_bodies(command, nested=True)
 
     for payload in _iter_shell_command_payloads(walk_command):
         # An `sh -c` payload is text of the same file (or command) it appears in.

@@ -163,10 +163,85 @@ def test_data_consumer_heredoc_mention_is_not_refused(tmp_path, shape, body_kind
 
     db = _big_sqlite(tmp_path / "big.db")
     command = _CONSUMER_SHAPES[shape].format(body=_bodies(db)[body_kind])
-    masked = strip_inert_heredoc_bodies(command)
+    masked = strip_inert_heredoc_bodies(command, nested=True)  # the executed-path walk's view
     assert str(db) not in masked, masked  # the consumer body is masked, wherever it sits
     assert masked.count("\n") == command.count("\n")
+    # Text scanners still see a NESTED body (its outer body could rewrite it); others are masked.
+    assert (str(db) in strip_inert_heredoc_bodies(command)) == shape.startswith("nested")
     assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)
+
+
+# Shapes where a shell really runs the "consumer" body (or rewrites it first): main refuses each,
+# and so must the peeled/nested masking (review of PR #1671 @004c14deb336, plus the function
+# output and stdin-hijack variants of the same class).
+_SHELL_RUNS_BODY = {
+    "exec-a": "exec -a python3 bash <<'R'\nhermes gateway restart\nR",
+    "env-S-attached-single": "env -S'bash -s' python3 <<'R'\nhermes gateway restart\nR",
+    "env-S-attached-double": "env -S\"bash -s\" python3 <<'R'\nhermes gateway restart\nR",
+    "env-split-string=": "env --split-string='bash -s' python3 <<'R'\nhermes gateway restart\nR",
+    "sudo-D": "sudo -D python3 bash <<'R'\nhermes gateway restart\nR",
+    "sudo-R": "sudo -R python3 bash <<'R'\nhermes gateway restart\nR",
+    "sudo-chdir": "sudo --chdir=/ python3 - <<'R'\nhermes gateway restart\nR",
+    "outer-tab-strip": "bash <<-'R'\n\tpython3 - <<'PY'\n\tprint(1)\n\tPY\n"
+                       "\thermes gateway restart\nPY\nR",
+    "outer-transform": "sed 's/python3 - /bash -s /' <<'R' | bash\npython3 - <<'PY'\n"
+                       "hermes gateway restart\nPY\nR",
+    "outer-unknown-var": "$CMD <<'R'\npython3 - <<'PY'\nhermes gateway restart\nPY\nR",
+    "outer-stdin-hijack": "bash -s <<'R'\nsed 's/^python3 - /bash -s /' | bash\npython3 - <<'PY'\n"
+                          "hermes gateway restart\nPY\nR",
+    "outer-ssh-remote-pipe": "ssh h 'sed s/python3/bash/ | bash' <<'R'\npython3 - <<'PY'\n"
+                             "hermes gateway restart\nPY\nR",
+    "fn-cat-piped": "f() { cat <<'PY'\nhermes gateway restart\nPY\n}\nf | bash",
+    "fn-python-piped": "f() { python3 - <<'PY'\nprint('hermes gateway restart')\nPY\n}\nf | bash",
+    "fn-python-eval": "f() { python3 - <<'PY'\nprint('hermes gateway restart')\nPY\n}\neval \"$(f)\"",
+    "ssh-shadow": "ssh() { sed s/python3/bash/ | bash; }\nssh h 'bash -s' <<'R'\npython3 - <<'PY'\n"
+                  "hermes gateway restart\nPY\nR",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_SHELL_RUNS_BODY))
+def test_bodies_a_shell_runs_stay_refused(tmp_path, shape):
+    from cron.lifecycle_guard import scan_gateway_lifecycle
+
+    assert scan_gateway_lifecycle(_SHELL_RUNS_BODY[shape], cwd=str(tmp_path)) == (True, None)
+
+
+@pytest.mark.parametrize("command", [
+    # wrappers outside the stdin-passing allowlist, or with options it does not know
+    "exec -a python3 bash <<'R'\npython3 - <<'PY'\nx\nPY\nR",
+    "env -S'bash -s' python3 - <<'PY'\nx\nPY",
+    "sudo -D / python3 - <<'PY'\nx\nPY",
+    # nested only under a single, tab-preserving body that a stdin shell reads verbatim
+    "bash <<-'R'\npython3 - <<'PY'\nx\nPY\nR",
+    "sed s/a/b/ <<'R' | bash\npython3 - <<'PY'\nx\nPY\nR",
+    "bash -c 'sed s/a/b/ | bash' <<'R'\npython3 - <<'PY'\nx\nPY\nR",
+    "bash script.sh <<'R'\npython3 - <<'PY'\nx\nPY\nR",
+    "ssh h 'cat | bash' <<'R'\npython3 - <<'PY'\nx\nPY\nR",
+    "ssh h 'bash -s | bash' <<'R'\npython3 - <<'PY'\nx\nPY\nR",
+    "SSH=\"$(pick)\"\n$SSH h 'bash -s' <<'R'\npython3 - <<'PY'\nx\nPY\nR",
+    # a shadowed outer shell/ssh, and `cat` (its output is its body) inside a function
+    "ssh() { cat; }\nssh h 'bash -s' <<'R'\npython3 - <<'PY'\nx\nPY\nR",
+    "f() { cat <<'PY'\nx\nPY\n}\nf",
+])
+def test_untrusted_owner_masks_nothing(command):
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    assert strip_inert_heredoc_bodies(command, nested=True) == command
+
+
+@pytest.mark.parametrize("command", [
+    "timeout --signal=KILL -k 5 20 nice -n 5 stdbuf -oL env -i A=1 python3 - x <<'PY'\nx\nPY",
+    "sudo -u root -E python3 - <<'PY'\nx\nPY",
+    "bash -eu -o pipefail -s a b <<'R'\npython3 - <<'PY'\nx\nPY\nR",
+    "ssh -o BatchMode=yes -p 22 -tt h 'T=1 bash -s' <<'R'\npython3 - <<'PY'\nx\nPY\nR",
+    "SSH=\"timeout 60 ssh -o A=b ${XOPTS:-} u@$IP\"\n$SSH \"T=$T bash -s\" <<'R' 2>&1 | grep x\n"
+    "python3 - <<'PY'\nx\nPY\nR",
+])
+def test_trusted_owner_masks_the_data_body(command):
+    from tools.shell_heredoc import strip_inert_heredoc_bodies
+
+    masked = strip_inert_heredoc_bodies(command, nested=True)
+    assert "\nx\n" not in masked and masked.count("\n") == command.count("\n"), masked
 
 
 @pytest.mark.parametrize("command", [
