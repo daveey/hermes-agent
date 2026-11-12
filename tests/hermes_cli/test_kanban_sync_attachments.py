@@ -186,7 +186,9 @@ def test_duplicate_names_and_foreign_shadow_are_readable(stores):
 
 
 @pytest.mark.parametrize("bad_receipt", [None, {}, {"blob_key": "sha256:" + "0" * 64},
-                                        {"blob_key": "key", "sha256": "wrong", "size": 5}])
+                                        {"blob_key": "key", "sha256": "wrong", "size": 5},
+                                        {"blob_key": "sha256:" + "0" * 64,
+                                         "sha256": hashlib.sha256(b"proof").hexdigest(), "size": 5}])
 def test_unverified_upload_receipt_keeps_local_custody(stores, monkeypatch, bad_receipt):
     _, worker, _, conn, _, tid, round_at = stores
     aid = kb.store_attachment_bytes(conn, tid, "receipt", b"proof")
