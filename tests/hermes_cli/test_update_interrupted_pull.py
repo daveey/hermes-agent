@@ -18,10 +18,13 @@ import pytest
 
 from hermes_cli import _early_recovery as er
 from hermes_cli import update_cmd
+from hermes_cli.update_custody import GIT_NO_DETACH
 
 
 def _git(root: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True,
+    # A fixture commit of 100+ loose objects makes git >= 2.54 fork a detached geometric repack that
+    # packs and deletes those loose files while the next `git clone` of the repo is still copying them.
+    return subprocess.run(["git", *GIT_NO_DETACH, "-C", str(root), *args], check=True, capture_output=True,
                           text=True, encoding="utf-8").stdout.strip()
 
 
@@ -211,7 +214,7 @@ def test_restore_never_touches_user_work_when_git_wrote_nothing(checkout, capsys
     # following the printed advice leaves a merge in progress, and edits git never wrote are theirs.
     stale = f"pid=0\npre={_git(root, 'rev-parse', 'HEAD')}\ntarget={b}\nstash=\n"
     marker.write_text(stale, encoding="utf-8", newline="")
-    merge = subprocess.run(["git", "-C", str(root), "merge", "origin/main"],
+    merge = subprocess.run(["git", *GIT_NO_DETACH, "-C", str(root), "merge", "origin/main"],
                            capture_output=True, text=True, encoding="utf-8", check=False)
     assert (root / ".git" / "MERGE_HEAD").exists(), merge.stdout + merge.stderr
     (root / "utils.py").write_text("OLD = 1  # resolved by hand\n", encoding="utf-8", newline="")
