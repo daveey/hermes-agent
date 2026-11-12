@@ -1,0 +1,191 @@
+"""One-shot, store-only update checkpoints. Status stays started for old binaries.
+
+A receipt proves a persisted completed-tool boundary, not process quiescence. The
+owner must stop its in-process executor before publishing parked accounting. No
+worker execution may be live or uncertain. Resuming consumes proof BEFORE running.
+"""
+import hashlib
+import json
+
+from hermes_state_runtime import (
+    RuntimeStoreError, _admission, _canonical_chain, _epoch, _json, _row, _session, _text,
+)
+
+CHECKPOINT_PREFIX = 'gateway.update_checkpoint.v1.'
+MAX_SUFFIX_ROWS = 129  # one assistant plus at most 128 results
+MAX_SUFFIX_BYTES = 4 * 1024 * 1024
+MAX_RECEIPT_BYTES = 8192
+
+
+def _refuse(detail):
+    raise RuntimeStoreError('invalid_checkpoint', field='update_checkpoint', detail=detail)
+
+
+def _binding(conn, row, physical_session_id, transcript_mark):
+    """Recomputed on the transaction connection; nothing trusts a caller's history."""
+    if row['status'] != 'started' or type(row['generation']) is not int:
+        _refuse('admission is not started')
+    logical = row['target_session_id']
+    session = _session(conn, logical)
+    if session['runtime_generation'] != row['generation']:
+        _refuse('generation changed')
+    from hermes_state_local_lineage import local_physical_target
+    target = local_physical_target(conn, logical)
+    chain = _canonical_chain(conn, target)
+    if physical_session_id != chain[-1]:
+        _refuse('physical tip changed')
+    physical = _session(conn, physical_session_id)
+    if physical['runtime_generation'] > row['generation']:
+        _refuse('physical generation is ahead')
+    if physical['ended_at'] is not None or session['archived'] or physical['archived']:
+        _refuse('session is closed')
+    from hermes_state_runtime_workers import worker_states
+    if worker_states(conn, logical):
+        _refuse('worker execution is live or uncertain')
+    if conn.execute("SELECT 1 FROM session_admissions WHERE target_session_id=? AND status='terminal' "
+                    "AND outcome='steering' AND owner_epoch=? AND generation=? LIMIT 1",
+                    (logical, row['owner_epoch'], row['generation'])).fetchone():
+        _refuse('steering transfer exists')
+    if conn.execute("SELECT 1 FROM session_admissions WHERE target_session_id=? "
+                    "AND status IN ('started','unknown') AND admission_id!=? LIMIT 1",
+                    (logical, row['admission_id'])).fetchone():
+        _refuse('competing execution exists')
+    if type(transcript_mark) is not int or transcript_mark < 0:
+        _refuse('invalid transcript mark')
+    # Probe metadata first: a huge message cannot force an unbounded Python read.
+    columns = [r[1] for r in conn.execute('PRAGMA table_info(messages)')]
+    sizes = '+'.join(f'COALESCE(length(CAST("{c}" AS BLOB)),0)' for c in columns)
+    tail = conn.execute(f'SELECT id,role,({sizes}) AS size FROM messages WHERE session_id=? '
+                        'ORDER BY id DESC LIMIT ?', (physical_session_id, MAX_SUFFIX_ROWS + 1)).fetchall()
+    suffix = []
+    for item in tail:
+        suffix.append(item)
+        if item['role'] != 'tool':
+            break
+    if (len(suffix) < 2 or len(suffix) > MAX_SUFFIX_ROWS or suffix[-1]['role'] != 'assistant'
+            or any(r['role'] != 'tool' for r in suffix[:-1])):
+        _refuse('not a completed tool suffix')
+    if suffix[-1]['id'] <= transcript_mark:
+        _refuse('boundary predates claim')
+    if sum(r['size'] for r in suffix) > MAX_SUFFIX_BYTES:
+        _refuse('tool suffix too large')
+    messages = [dict(r) for r in conn.execute('SELECT * FROM messages WHERE session_id=? AND id>=? ORDER BY id',
+                                              (physical_session_id, suffix[-1]['id']))]
+    if any(m['active'] != 1 for m in messages):
+        _refuse('tool suffix is inactive')
+    try:
+        calls = json.loads(messages[0]['tool_calls'])
+        ids = [c['id'] for c in calls]
+        results = [r['tool_call_id'] for r in messages[1:]]
+        if (not isinstance(calls, list) or not ids or any(not isinstance(i, str) or not i for i in ids)
+                or len(ids) != len(set(ids)) or len(results) != len(set(results)) or set(ids) != set(results)):
+            _refuse('tool calls and results differ')
+    except (TypeError, KeyError, ValueError) as exc:
+        if isinstance(exc, RuntimeStoreError):
+            raise
+        _refuse('malformed tool calls')
+    fingerprint = [{k: {'blob': v.hex()} if isinstance(v, bytes) else v for k, v in m.items()}
+                   for m in messages]
+    return dict(version=1, admission_id=row['admission_id'], owner_epoch=row['owner_epoch'],
+                generation=row['generation'], session_id=logical, physical_session_id=physical_session_id,
+                lineage_json=row['lineage_json'], physical_chain=chain, payload_digest=row['payload_digest'],
+                physical_generation=physical['runtime_generation'],
+                transcript_mark=transcript_mark, max_message_id=suffix[0]['id'],
+                suffix_start_id=suffix[-1]['id'],
+                suffix_digest=hashlib.sha256(_json({'messages': fingerprint}).encode('utf-8')).hexdigest())
+
+
+def _valid_checkpoint(conn, row):
+    saved = conn.execute('SELECT value FROM state_meta WHERE key=?',
+                         (CHECKPOINT_PREFIX + row['admission_id'],)).fetchone()
+    if saved is None or not isinstance(saved[0], str) or len(saved[0]) > MAX_RECEIPT_BYTES:
+        return None
+    try:
+        receipt = json.loads(saved[0])
+        if not isinstance(receipt, dict):
+            return None
+        actual = _binding(conn, row, receipt['physical_session_id'], receipt['transcript_mark'])
+        # JSON equality alone accepts bool as int. Canonical bytes also bind types.
+        return actual if _json(actual) == _json(receipt) else None
+    except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+        return None
+
+
+def delete_session_checkpoint(conn, admission_id):
+    """Same-transaction cleanup; never deletes unrelated state_meta receipts."""
+    conn.execute('DELETE FROM state_meta WHERE key=?', (CHECKPOINT_PREFIX + admission_id,))
+
+
+def checkpoint_session_input(db, *, epoch, admission_id, generation, physical_session_id, transcript_mark):
+    """Park an exact started generation at a fresh complete persisted tool suffix.
+
+    transcript_mark is the claim's global messages.id high-water mark. The receipt
+    is bounded and immutable: retries must prove the exact same boundary.
+    """
+    _text(admission_id)
+    _text(physical_session_id)
+    def write(conn):
+        _epoch(conn, epoch)
+        row = _admission(conn, admission_id)
+        if row['owner_epoch'] != epoch or type(generation) is not int or row['generation'] != generation:
+            raise RuntimeStoreError('stale_generation')
+        receipt = _binding(conn, row, physical_session_id, transcript_mark)
+        encoded = _json(receipt)
+        if len(encoded.encode('utf-8')) > MAX_RECEIPT_BYTES:
+            _refuse('receipt too large')
+        old = conn.execute('SELECT value FROM state_meta WHERE key=?', (CHECKPOINT_PREFIX + admission_id,)).fetchone()
+        if old is not None and old[0] != encoded:
+            _refuse('checkpoint already differs')
+        conn.execute('INSERT OR IGNORE INTO state_meta(key,value) VALUES(?,?)',
+                     (CHECKPOINT_PREFIX + admission_id, encoded))
+        return receipt
+    return db._execute_write(write)
+
+
+def get_session_checkpoint(db, *, session_id):
+    """Valid proof for the exact logical FIFO, else None; never repairs receipts."""
+    with db._read_ctx() as conn:
+        rows = conn.execute("SELECT * FROM session_admissions WHERE target_session_id=? AND status='started'",
+                            (session_id,)).fetchall()
+        return _valid_checkpoint(conn, rows[0]) if len(rows) == 1 else None
+
+
+def resume_session_checkpoint(db, *, epoch, admission_id, _guard=None):
+    """Atomically fence the old attempt, advance generation and consume its proof.
+
+    Returns the original admission row with update_resume=receipt. Caller continues
+    persisted history, never resubmits payload. _guard is the owner's admission gate.
+    """
+    def write(conn):
+        _epoch(conn, epoch)
+        if _guard is not None:
+            _guard(conn)
+        row = _admission(conn, admission_id)
+        receipt = _valid_checkpoint(conn, row)
+        if receipt is None:
+            _refuse('missing or invalid checkpoint')
+        generation = row['generation'] + 1
+        targets = {row['target_session_id'], receipt['physical_session_id']}
+        for target in targets:
+            conn.execute('UPDATE sessions SET runtime_generation=? WHERE id=?', (generation, target))
+        conn.execute('UPDATE session_admissions SET owner_epoch=?,generation=? WHERE admission_id=?',
+                     (epoch, generation, admission_id))
+        delete_session_checkpoint(conn, admission_id)
+        result = _row(_admission(conn, admission_id))
+        result['update_resume'] = receipt
+        result['transcript_mark'] = conn.execute('SELECT COALESCE(MAX(id),0) FROM messages').fetchone()[0]
+        return result
+    return db._execute_write(write)
+
+
+def recover_checkpointed_inputs(conn, epoch):
+    """Old started attempts without exact proof become unknown; return their count."""
+    changed = 0
+    for row in conn.execute("SELECT * FROM session_admissions WHERE status='started' AND owner_epoch!=?",
+                            (epoch,)).fetchall():
+        if _valid_checkpoint(conn, row) is not None:
+            continue
+        delete_session_checkpoint(conn, row['admission_id'])
+        conn.execute("UPDATE session_admissions SET status='unknown' WHERE admission_id=?", (row['admission_id'],))
+        changed += 1
+    return changed

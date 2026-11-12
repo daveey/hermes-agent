@@ -287,6 +287,8 @@ def settle_session_input(db, *, epoch: int, admission_id: str, generation: int, 
                 or session['runtime_generation'] != generation):
             raise RuntimeStoreError('stale_generation')
         _retire_admission_workers(conn, row, epoch)
+        from hermes_state_update_pause import delete_session_checkpoint
+        delete_session_checkpoint(conn, admission_id)
         if _terminal_write is not None:
             _terminal_write(conn, row)
         if result is not None:
@@ -501,16 +503,21 @@ def retarget_local_automation(db, *, epoch: int, session_id: str, principal_id: 
 
 
 def recover_session_inputs(db, *, epoch: int) -> int:
-    """Never replay started work. Live worker adoption is a separate explicit operation."""
+    """Unproven started work becomes unknown; exact update checkpoints stay fenced.
+
+    Live worker adoption remains a separate explicit operation.
+    """
     def write(conn):
         _epoch(conn, epoch)
+        from hermes_state_update_pause import recover_checkpointed_inputs
+        changed = recover_checkpointed_inputs(conn, epoch)
         from hermes_state_runtime_workers import retire_stale_children
         retire_stale_children(conn, epoch)
         conn.execute("UPDATE worker_executions SET status='unknown' WHERE status IN ('registered','running') AND owner_epoch!=?", (epoch,))
         # A steer handed to a lost claim may or may not have reached its agent: never replayed.
         conn.execute("UPDATE session_admissions SET outcome='interrupted' WHERE status='terminal' AND outcome=? "
                      "AND owner_epoch!=?", (STEERING, epoch))
-        return conn.execute("UPDATE session_admissions SET status='unknown' WHERE status='started' AND owner_epoch!=?", (epoch,)).rowcount
+        return changed
     return db._execute_write(write)
 
 

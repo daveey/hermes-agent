@@ -145,6 +145,9 @@ class SessionAuthority:
         self.events = {}
         self.native_waiters = set()
         self.pending_results = {}
+        self.update_parked = {}  # logical session -> durable unfinished update receipt
+        self.update_claims = {}  # logical session -> (admission id, its checkpoint/resume generations)
+        self.update_stops = set()  # admission identities, never a queued successor's generation
         # Replies of recovered no-waiter turns, sent only once their terminal outcome commits.
         self.pending_deliveries = {}
         # Stops accepted for a running generation whose agent does not exist yet
@@ -935,6 +938,9 @@ class SessionAuthority:
 
     async def interrupt(self, actor, ref, generation):
         self.authorize(actor, ref, 'session:control')
+        from gateway.session_update_pause import interrupt_update
+        if await interrupt_update(self, ref, generation):
+            return self._handle(ref)
         handle = self._handle(ref)
         if handle.execution_generation != generation:
             raise RuntimeStoreError('stale_generation')
@@ -1085,7 +1091,13 @@ class SessionAuthority:
             pending = list_session_admissions(self.db, session_id=ref.session_id)
             if any(row['status'] == 'unknown' for row in pending):
                 raise RuntimeStoreError('unknown_execution')
-            first = next((row for row in pending if row['status'] == 'queued'), None)
+            from gateway.session_update_pause import checkpoint_head, update_held, UPDATE_PAUSED
+            checkpoint = checkpoint_head(self, ref)
+            if checkpoint is not None and update_held(self):
+                return UPDATE_PAUSED, None
+            first = (get_session_admission(self.db, admission_id=checkpoint['admission_id']) if checkpoint
+                     else next((row for row in pending if row['status'] == 'queued'), None))
+            expected_status = 'started' if checkpoint else 'queued'
             from gateway.config import Platform
             if live.source.platform == Platform.LOCAL:
                 # A reasoning command or a model pick made while the previous turn ran lands here, at the
@@ -1107,7 +1119,7 @@ class SessionAuthority:
                     # Cancellation may advance the FIFO while the source owner is awaited;
                     # the successor must earn its own reauthorization, not inherit this one.
                     current = get_session_admission(self.db, admission_id=first['admission_id'])
-                    if current is None or current['status'] != 'queued':
+                    if current is None or current['status'] != expected_status:
                         return False, first
                 if 'local_automation_v1' in first['payload']:
                     from gateway.session_automation import check_local_automation
@@ -1134,7 +1146,7 @@ class SessionAuthority:
                 # Cancellation may advance FIFO while the connector is awaited.
                 # Never let the successor inherit this row's fresh verdict.
                 current = get_session_admission(self.db, admission_id=first['admission_id'])
-                if current is None or current['status'] != 'queued':
+                if current is None or current['status'] != expected_status:
                     return False, first
             if first is not None and live.source.platform == Platform.API_SERVER:
                 from gateway.session_api import reopen_api_session
@@ -1158,6 +1170,9 @@ class SessionAuthority:
             live.rescan = False  # a _schedule from here on may not be visible to this claim's read
             # The row these checks validated, never whichever is first when the write runs: a
             # cancellation commits from a worker thread and can advance the FIFO at any point.
+            if checkpoint is not None:
+                from gateway.session_update_pause import resume_checkpoint
+                return await resume_checkpoint(self, ref, live, first), first
             row = await tracked_write(self, partial(claim_session_input, self.db, epoch=self.epoch,
                                                     session_id=ref.session_id, _guard=self._admission_gate(),
                                                     head=first['admission_id'] if first is not None else None),
@@ -1170,6 +1185,8 @@ class SessionAuthority:
         """The claim's execution stamp, in the same tracked task as its commit: no observer (or
         retirement's join) ever sees a committed claim that no execution stamp names."""
         if row:  # None or False (the head changed under the write) claimed nothing
+            from gateway.session_update_pause import claim_started
+            claim_started(self, ref.session_id, row)
             with live.event_stream.lock:
                 live.event_stream.execution = {
                     'authority_epoch': self.epoch, 'execution_generation': row['generation'],
@@ -1227,9 +1244,22 @@ class SessionAuthority:
                 if refusing is not None:
                     await self._refuse_head(ref, *refusing)
                     refusing = None
+                # Remember the attempted FIFO identity, including a started checkpoint. A
+                # refusal must never select a queued follower behind unfinished work.
+                attempted = next(iter(list_session_admissions(self.db, session_id=ref.session_id)), None)
                 try:
                     row, first = await self._claim_next(ref, live)
                 except RuntimeStoreError as exc:
+                    if (attempted is not None and attempted['status'] == 'started'
+                            and exc.reason in {'admission_conflict', 'permission_denied', 'not_found',
+                                               'invalid_checkpoint'}):
+                        from gateway.session_update_pause import refuse_checkpoint
+                        fenced = await refuse_checkpoint(self, ref, live, attempted)
+                        if fenced is not False:
+                            self._pause(ref, 'unknown_execution' if fenced else exc.reason)
+                            return None
+                        # It changed while preflight awaited: retry, never refuse its successor.
+                        continue
                     if exc.reason == 'unknown_execution':
                         # An automation turn nobody is waiting on settles interrupted (GW-10); only a
                         # person's lost turn keeps the FIFO paused for them to resolve.
@@ -1269,6 +1299,13 @@ class SessionAuthority:
                 await asyncio.sleep(backoff)
                 continue
             backoff = 0.0
+            if row == 'update_paused':
+                # Durable unfinished work, no active execution stamp. Keep the original waiters;
+                # shutdown leaves the receipt for the next owner rather than terminalizing it.
+                if self.runner._draining or self.retiring or self.sessions.get(ref.session_id) is not live:
+                    return None
+                await asyncio.sleep(_CLAIM_RETRY_MIN_S)
+                continue
             if row != 'classic_busy':
                 return row, first
             if self._drain_stopping(ref, live):
@@ -1285,6 +1322,11 @@ class SessionAuthority:
         from gateway.session_open import settled
         try:
             try:
+                from gateway.session_update_pause import stopped
+                if row.get('update_resume') and stopped(self, row):
+                    self.pending_results[row['admission_id']] = {
+                        'result': {'interrupted': True, 'final_response': ''}, 'usage': {}}
+                    return '', 'interrupted'
                 if review is not None and not review.request_done.is_set():
                     # A cold /refine's review shares the session id, as the resident agent's does:
                     # cancel it before the turn (its bounded wait runs off-loop). Inside the try: a
@@ -1365,7 +1407,10 @@ class SessionAuthority:
                 raise
             from gateway.session_runtime_workers import track_mutation
             from gateway.session_settlement_recovery import settle_and_deliver
-            delivery = track_mutation(self, settle_and_deliver(self, live, ref, row, response, outcome))
+            from gateway.session_update_pause import paused_result, park_or_interrupt
+            operation = (park_or_interrupt(self, live, ref, row) if paused_result(self, row)
+                         else settle_and_deliver(self, live, ref, row, response, outcome))
+            delivery = track_mutation(self, operation)
             try:
                 advance = await asyncio.shield(delivery)
             except asyncio.CancelledError:

@@ -840,7 +840,10 @@ def finalize_turn(
             # A different gate may have published an interim after the silent hold. Do not
             # overwrite that durable row; the runtime boundary is a distinct final answer.
             append_message(messages, {"role": "assistant", "content": final_response})
-        _close_transcript_tail(agent, messages, final_response, interrupted, _recovered_from_stream)
+        # An update pause is a resumable tool boundary, not a terminal Stop. Keep
+        # its completed tool suffix intact for the durable checkpoint validator.
+        stopped = interrupted and _turn_exit_reason != "paused_for_update(core_update_pause)"
+        _close_transcript_tail(agent, messages, final_response, stopped, _recovered_from_stream)
         if not interrupted and not failed and not vetoed:
             _micro_compact_after_turn(agent, messages, final_response, logger, effective_task_id)
         agent._persist_session(messages, conversation_history)

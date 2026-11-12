@@ -1957,6 +1957,7 @@ def _close_durable_failed_turn(agent, result: Any) -> None:
             return
         if (
             result.get("compression_exhausted") or result.get("compression_deferred")
+            or result.get("paused_for_update") == "core_update_pause"
             or result.get("failure_reason") in ("context_overflow", "content_policy_blocked")
         ):
             return

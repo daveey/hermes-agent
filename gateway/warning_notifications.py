@@ -33,8 +33,12 @@ def is_diagnostic_notice(notice) -> bool:
 def diagnostic_metadata(event) -> dict:
     """``{"notification_category": "diagnostic"}`` for a trusted diagnostic-only wake, else ``{}``.
 
-    Only internal wakes may classify a turn; human content never does.
+    Only internal wakes may classify a turn; human content never does. A checkpoint-resumed wake is
+    demoted to non-internal, so ``resume_event`` re-stamps the verified fact privately; no wire or
+    adapter field can set it.
     """
+    if getattr(event, "_trusted_diagnostic_wake", None) is True:
+        return {"notification_category": "diagnostic"}
     if getattr(event, "internal", False) and (getattr(event, "metadata", None) or {}).get(
             "notification_category") == "diagnostic":
         return {"notification_category": "diagnostic"}

@@ -304,6 +304,13 @@ async def execute_admission(authority, ref, row):
         if 'local_automation_v1' in row['payload']:
             from gateway.session_automation import restore_local_automation
             event = restore_local_automation(authority, ref, row)
+    from gateway.session_update_pause_ingress import pause_scope, resume_event
+    event = resume_event(row, event)  # a checkpoint resume continues with the shared pause note only
+    if row.get('update_resume'):
+        # The receipt's physical transcript, not a fresh daily/idle session chosen
+        # by get_or_create_session. Strict lookup refuses a route moved since claim.
+        event.metadata.update(gateway_session_key=live.route, gateway_session_strict=True,
+                              gateway_session_id=row['update_resume']['physical_session_id'])
     # The claim's admission gate ran inside its commit, so no drain had begun when this row was
     # claimed: it is in-flight work the restart drain waits for, not new work its gate refuses.
     # Without this a drain that flips between the claim and the turn settles it 'completed' unrun.
@@ -337,6 +344,7 @@ async def execute_admission(authority, ref, row):
     # This drain, not the handler's unwind, releases the turn's crash marker (see below).
     event._turn_marker_handoff = True
     handed = False
+    paused = False
     try:
         async with _admission_scope(authority, home, row, event, captured):
             if is_api:
@@ -352,9 +360,14 @@ async def execute_admission(authority, ref, row):
             # [daveey] A following session's selection is committed before its in-process build,
             # from the one profile read that build resolves (the managed path commits in _bootstrap).
             from gateway.session_local_profile import turn_selection
-            with turn_selection(authority, ref, local_policy, row['generation']):
+            with turn_selection(authority, ref, local_policy, row['generation']), \
+                    pause_scope(authority, row, event, live, is_api=is_api):
                 response = await authority.runner._handle_message(event)
             result = captured.get('terminal_result', captured.get('result'))
+            from gateway.session_update_pause_ingress import retain_pause
+            paused = retain_pause(authority, row, result, captured, native=native)
+            if paused:
+                return None
             if result is None:
                 # No TurnRunner result means the handler answered without executing the turn.
                 # A turn that never ran because it failed (agent initialization raised, history
@@ -364,7 +377,9 @@ async def execute_admission(authority, ref, row):
                 # a finite (``chat -q`` / ``-z``) prompt, whose exit code is the only verdict a
                 # script reads, unless the prompt was a command and the reply is its answer.
                 result = {'final_response': response or '', 'messages': []}
-                if is_api or (row['payload'].get('finite') is True and not event.get_command()):
+                # A checkpoint is unfinished work, never a notice-only input. A strict
+                # resolver miss or a newly refusing gate cannot complete it without execution.
+                if row.get('update_resume') or is_api or (row['payload'].get('finite') is True and not event.get_command()):
                     result = {'final_response': '', 'messages': [], 'failed': True, 'completed': False,
                               'error': response or 'The admitted turn failed.'}
             # The drain commits this under the stream lock so no viewer reads `terminal`
@@ -388,7 +403,7 @@ async def execute_admission(authority, ref, row):
             await _hand_over_turn_marker(authority, row['admission_id'], event)
             return response
     finally:
-        if not native:
+        if not native and not paused:
             # No adapter task awaits this turn to run its post-delivery callbacks: the drain runs them
             # once the turn settled and its reply went out (``fire_post_delivery``).
             _take_post_delivery(authority, row['admission_id'], event.source, route)

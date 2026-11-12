@@ -168,9 +168,10 @@ from gateway.run_turn_prepare import GatewayTurnPrepareMixin
 from gateway.run_background import GatewayBackgroundMixin
 from gateway.run_turn_hygiene import GatewayTurnHygieneMixin
 from gateway.run_turn_persistence import GatewayTurnPersistenceMixin
+from gateway.run_turn_session_info import GatewayTurnSessionInfoMixin
 
 
-class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, GatewayTurnPersistenceMixin):
+class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, GatewayTurnPersistenceMixin, GatewayTurnSessionInfoMixin):
     """Agent-turn execution for GatewayRunner (see module docstring)."""
 
 
@@ -290,6 +291,17 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
                 self._hmwa_discard_stale_result(source, _quick_key, run_generation)
                 return None
 
+            from gateway.session_update_pause_hook import is_paused
+            if is_paused(agent_result):
+                # The agent already persisted its complete tool boundary. The authority
+                # needs the exact nonterminal result after this handler fully unwinds;
+                # no terminal shaping, hooks, transcript append or delivery is owed yet.
+                from gateway.session_results import execution_result
+                captured = execution_result.get()
+                if captured is not None:
+                    captured['result'] = agent_result
+                return None
+
             response, _intentional_silence, agent_messages = await self._hmwa_shape_agent_response(
                 agent_result, source, history, session_entry, session_key,
                 _quick_key, run_generation, _run_start_session_id, _platform_name, _msg_start_time,
@@ -395,49 +407,6 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             return nullcontext()
         from gateway.run import _profile_runtime_scope
         return _profile_runtime_scope(self._resolve_profile_home_for_source(source), {})
-
-    def _reset_notice_session_info(self, source: SessionSource) -> str:
-        """Session-info block for the auto-reset notice, resolved inside the profile serving ``source``.
-
-        Call via ``asyncio.to_thread``: resolution can block (credential refresh, context-length
-        probes), and the scope is entered here so contextvars behave in the worker thread."""
-        with self._profile_scope_for_source(source):
-            return self._format_session_info(source)
-
-    def _format_session_info(self, source: Optional[SessionSource] = None) -> str:
-        """Model / provider / context-length / endpoint block so users can spot bad context detection.
-        With ``source``, the chat's ``channel_overrides`` route is reported (what its turn runs)."""
-        from gateway.run import _resolve_gateway_model_context
-        from gateway.session_info_route import channel_override_route
-        model, route, force_provider = channel_override_route(getattr(self, "config", None), source)
-        resolved = _resolve_gateway_model_context(model=model, route=route)
-        if force_provider:
-            resolved = dataclasses.replace(resolved, provider=force_provider)
-        context_length = resolved.context_length
-        ctx_source = {
-            "config": "config",
-            "default": "fallback, not a detected limit — set model.context_length in config to override",
-        }.get(resolved.context_source, "detected")
-        ctx_display = (
-            f"{context_length / 1_000_000:.1f}M" if context_length >= 1_000_000
-            else f"{context_length // 1_000}K" if context_length >= 1_000 else str(context_length)
-        )
-        lines = [
-            t("gateway.session.info_model", model=resolved.model),
-            t("gateway.session.info_provider", provider=resolved.provider or "openrouter"),
-            t("gateway.session.info_context", tokens=ctx_display, source=ctx_source),
-        ]
-        if (resolved.provider or "") == "moa":
-            # The preset name hides who pays: the aggregator runs every tool-loop step (#112359).
-            from hermes_cli.config import load_config
-            from hermes_cli.moa_config import normalize_moa_config
-            agg = normalize_moa_config(load_config().get("moa"))["presets"].get(resolved.model, {}).get("aggregator") or {}
-            if agg:
-                lines.append(t("gateway.session.info_acting_model", provider=agg.get("provider"), model=agg.get("model")))
-        base_url = resolved.base_url
-        if base_url and base_url_hostname(base_url) in ("localhost", "127.0.0.1", "0.0.0.0"):
-            lines.append(t("gateway.session.info_endpoint", url=base_url))
-        return "\n".join(lines)
 
     def _resolve_enabled_toolsets_for_source(
         self, user_config: dict, source: SessionSource, platform_key: str,
@@ -1547,6 +1516,11 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         Keyed by session_key (not source.chat_id) to match the adapter's storage keys."""
         from gateway.run import _build_media_placeholder, _dequeue_pending_event, _is_control_interrupt_message
         from gateway.session_ingress import executing_admission
+        from gateway.session_update_pause_hook import is_paused
+        # A parked admission has not completed. Do not consume pending adapter
+        # events (including internal wakes) or launch a recursive turn under hold.
+        if is_paused(result):
+            return None, None
         pending_event = None
         pending = None
         if result and adapter and session_key:

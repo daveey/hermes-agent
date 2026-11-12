@@ -161,6 +161,14 @@ class GatewayRestartWaitMixin:
             units.extend({"kind": kind, "pid": os.getpid()} for _ in range(count))
         return units
 
+    def _describe_parked_work(self) -> list:
+        """Sessions parked on an update checkpoint: unfinished and resumed after the update, never
+        counted by ``_active_work_count`` and never listed in ``_describe_active_work``."""
+        from gateway.session_runtime_workers import parked_work_units
+        with suppress(Exception):
+            return parked_work_units(self)
+        return []
+
     def _core_update_intent_path(self) -> Optional[Path]:
         """``<HERMES_HOME>/core-update/intent`` when it exists now, else None. A restart requested
         while it exists is that update's drain request."""

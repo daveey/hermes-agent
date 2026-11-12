@@ -1,0 +1,87 @@
+"""Production binding of the update-pause scope for canonical in-process admissions."""
+from contextlib import contextmanager, nullcontext
+from dataclasses import replace
+
+
+def supported(authority, row, event, live, *, is_api):
+    """Only a claimed native messaging or local chat turn can be checkpointed. API, finite and
+    producer-admitted automation have other result contracts and keep counting as active work.
+    Native notices retain their presentation traits on resume, but must pass current ingress
+    authorization again; a formerly internal wake is never a license to bypass Stop or policy.
+    """
+    payload = row['payload']
+    if is_api or payload.get('finite') is True:
+        return False
+    if any(key in payload for key in ('api_turn_v1', 'local_automation_v1')):
+        return False
+    return 'native_text_v1' in payload or live.source.platform.value == 'local'
+
+
+@contextmanager
+def pause_scope(authority, row, event, live, *, is_api):
+    from gateway.session_tui_ops import _profile_home
+    from gateway.session_update_pause_hook import bind_scope
+    from gateway.session_display import display_turn_scope
+    # Presentation is trusted independently of ingress policy. Never mark a resumed
+    # event internal merely to render a notice: that would bypass authorization.
+    display = (display_turn_scope(event.message_id, {'kind': 'auto_continue'})
+               if row.get('update_resume') else nullcontext())
+    from gateway.session_cli_turn import cli_turn_scope
+    # Resume the admitted options, not the original model-facing user message.
+    committed = {key: value for key, value in row['payload'].get('cli_turn_v1', {}).items()
+                 if key != 'api_text'}
+    cli = cli_turn_scope(event.message_id, committed) if row.get('update_resume') else nullcontext()
+    with display, cli, bind_scope(_profile_home(authority), eligible=supported(authority, row, event, live, is_api=is_api),
+                             resuming=bool(row.get('update_resume')), message_id=event.message_id):
+        yield
+
+
+def retain_pause(authority, row, result, captured, *, native):
+    """Keep nonterminal state until the fully unwound handler can be checkpointed."""
+    from gateway.session_update_pause_hook import is_paused
+    if not is_paused(result):
+        return False
+    if native:
+        authority.native_waiters.add(row['admission_id'])
+    authority.pending_results[row['admission_id']] = {
+        'result': result, 'usage': captured.get('usage', {})}
+    return True
+
+
+def resume_event(row, event):
+    """The next model action after a checkpoint: trusted shared pause note, same route/provenance,
+    and none of the original message's attachments, platform id or control authority."""
+    if not row.get('update_resume'):
+        return event
+    from tui_gateway.update_pause import pause_note
+    from gateway.warning_notifications import diagnostic_metadata, diagnostic_wake_muted
+    heartbeat = getattr(event, '_heartbeat_session_id', None)
+    # Trusted traits are read from the verified original before it is demoted: dataclasses.replace
+    # drops private non-field state, and internal=False alone would unmute a diagnostic wake.
+    muted = diagnostic_wake_muted(event) if (event.internal or heartbeat) else None
+    # Trusted automation = gateway-stamped internal wake or heartbeat poll, never human content.
+    automation = bool(event.internal or heartbeat)
+    # Read before demotion: run_turn derives the turn mute from this persisted category, and only an
+    # internal event may carry it, so the verified fact is stamped privately instead of keeping internal.
+    diagnostic = bool(diagnostic_metadata(event))
+    resumed = replace(event, text=pause_note(event.text if isinstance(event.text, str) else ''),
+                   # Admission-bound, never the platform id or None: display scope matches on this id,
+                   # so a None-id follow-up on the same task must not inherit auto_continue.
+                   message_id=f"update-resume:{row['admission_id']}",
+                   # '' (not None) wins _reply_anchor_for_event: the synthetic id is no platform message.
+                   ledger_message_id=None, reply_anchor_override='',
+                   platform_update_id=None, media_urls=[], media_types=[], media_text_inlined=[],
+                   media_filenames=[], reply_to_message_id=None, reply_to_text=None,
+                   reply_to_author_id=None, reply_to_author_name=None, reply_to_is_own_message=False,
+                   prompt_response=None, auto_skill=None, channel_context=None, internal=False,
+                   allow_gateway_control=False, metadata={}, edit_revision=None,
+                   # Unaddressed machinery keeps its bare-silence contract under the auto_continue
+                   # display kind; a human event keeps whatever reply_expected the adapter knew.
+                   **({'reply_expected': False} if automation else {}))
+    if diagnostic:
+        resumed._trusted_diagnostic_wake = True
+    if heartbeat:
+        resumed._heartbeat_session_id = heartbeat  # the owner/lineage check still applies
+    if muted is not None:
+        resumed._notification_reply_muted = muted
+    return resumed

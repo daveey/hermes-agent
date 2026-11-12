@@ -675,14 +675,31 @@ async def recover_profile_native_sessions(runner, authority):
     """Bind one authority's queued native rows to the adapters connected now."""
     from gateway.session_authorities import owner_scope
     with owner_scope(authority):
-        pending = {row['target_session_id'] for row in authority.db._read_all(
-            "SELECT DISTINCT target_session_id FROM session_admissions WHERE status IN ('queued','unknown')")}
+        from hermes_state_update_pause import get_session_checkpoint
+        rows = authority.db._read_all(
+            "SELECT DISTINCT target_session_id,status FROM session_admissions "
+            "WHERE status IN ('queued','unknown','started')")
+        # Old executions recover unknown; only a validated update receipt makes a
+        # still-started admission safe to wake (never replay an ordinary live turn).
+        checkpoints = {row['target_session_id'] for row in rows if row['status'] == 'started'
+                       and get_session_checkpoint(authority.db, session_id=row['target_session_id']) is not None}
+        pending = {row['target_session_id'] for row in rows if row['status'] != 'started'} | checkpoints
         bindings = [(owner, entry.origin, runner._adapter_for_source(entry.origin))
                     for entry in runner.session_store.list_sessions() if entry.origin is not None
                     for owner in [authority.logical_owner(entry.session_id)] if owner in pending]
         outcome = await authority.recover_native_sessions(bindings)
         from gateway.session_detached import recover_detached_sessions
         outcome.update(dict.fromkeys(recover_detached_sessions(authority, pending - set(outcome)), 'detached'))
+        # Detached queued recovery deliberately ignores started/unknown rows. A
+        # checkpoint with no queued follower needs its own validated boot wake.
+        from gateway.session_route_recovery import restore_routed_session
+        for sid in sorted(checkpoints - set(outcome)):
+            if sid in authority.sessions:
+                continue
+            ref = restore_routed_session(authority, sid)
+            if ref is not None and authority.sessions[sid].detached:
+                authority._schedule(ref)
+                outcome[sid] = 'detached'
     for sid, verdict in outcome.items():
         logger.info('Native session startup recovery %s (%s): %s', sid, authority.profile_id, verdict)
     return outcome

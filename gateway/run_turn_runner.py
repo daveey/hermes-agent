@@ -83,6 +83,19 @@ def _finite_viewer_turn() -> bool:
     return finite_turn_required() is True
 
 
+def paused_update_result(result) -> bool:
+    from gateway.session_update_pause_hook import is_paused
+    return is_paused(result)
+
+
+def project_paused_result(result, common: dict) -> dict | None:
+    """A core-update pause is a NONTERMINAL checkpoint: pass the flag through with an empty reply (no
+    empty-response error, no media tags) so the authority can branch before terminal settlement."""
+    if not paused_update_result(result):
+        return None
+    return {"final_response": "", "paused_for_update": True, **common}
+
+
 def _persisted_turn(agent, agent_history, result, compressions) -> dict | None:
     """``message.complete.persisted_turn`` for this turn, the receipt the TUI gateway's own turns
     publish: clients bind the streamed reply to its stored row instead of comparing words. The
@@ -954,6 +967,12 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         # (restart, crash, SIGTERM). Session-level resume_pending (drain-timeout shutdown) uses
         # stronger reason-aware wording that subsumes this case. Both gate on the age of
         # ``history[-1]`` (not agent_history, which stripped tool-row timestamps); no stamp = fresh.
+        from gateway.session_update_pause_hook import current_scope
+        pause = current_scope(ctx.inbound_message_id)
+        if pause is not None and pause.resuming:
+            # This durable suffix is complete, not an interrupted NEW-message tail.
+            self._prepend_pending_note("_pending_skills_reload_notes")
+            return persist_override, ctx.persist_user_timestamp
         window = _auto_continue_freshness_window()
         interruption_is_fresh = _is_fresh_gateway_interruption(_last_transcript_timestamp(ctx.history), window_secs=window)
         entry = None
@@ -1078,7 +1097,10 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 agent._silence_marker_needs_reply = not silence_allowed(
                     ctx.persist_user_display_kind, ctx.reply_expected)
                 try:
-                    result = agent.run_conversation(api_message, **kwargs)
+                    from gateway.session_update_pause_hook import installed as update_pause_installed
+                    # Only a bound, eligible native admission can park; the cached agent's prior hook returns.
+                    with update_pause_installed(agent, message_id=ctx.inbound_message_id):
+                        result = agent.run_conversation(api_message, **kwargs)
                 finally:
                     agent._silence_marker_needs_reply = False
             if captured is not None:
@@ -1104,6 +1126,9 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
 
     def _finish_stream_consumer(self, result, agent_history, stream_consumer):
         ctx = self._ctx
+        if paused_update_result(result):
+            ctx.result_holder[0] = result  # nonterminal checkpoint: no stream seal/final delivery
+            return
         # Canonicalize a model-emitted computer-use screenshot path at the common result boundary so
         # the streaming finalizer and the non-streaming delivery path see the same response.
         if isinstance(result, dict) and isinstance(result.get("final_response"), str):
@@ -1497,6 +1522,9 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 **({"billing_block": result["billing_block"]} if isinstance(result.get("billing_block"), dict) else {}),
                 **({"warning": result["warning"]} if isinstance(result.get("warning"), str) and result["warning"] else {}),
             }
+        projected = project_paused_result(result, common)
+        if projected is not None:
+            return projected
         if not final_response:
             final_response = _normalize_empty_agent_response(result, final_response or "", history_len=len(agent_history))
             final_response = _sanitize_gateway_final_response(ctx.source.platform, final_response)

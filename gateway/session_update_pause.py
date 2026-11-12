@@ -1,0 +1,233 @@
+"""Durable update checkpoints are unfinished FIFO heads, never terminal results.
+
+The drain owns the entire handler unwind before entering this module. Parking and
+Stop serialize with claims, but no stream lock spans a write or an await.
+"""
+import asyncio
+import logging
+from functools import partial
+
+from gateway.session_update_pause_hook import fence_root, is_paused
+from hermes_state_update_pause import checkpoint_session_input, get_session_checkpoint
+
+UPDATE_PAUSED = 'update_paused'
+
+
+def paused_result(authority, row):
+    return is_paused((authority.pending_results.get(row['admission_id']) or {}).get('result'))
+
+
+def update_held(authority):
+    from gateway.session_tui_ops import _profile_home
+    from hermes_cli.admission_fence import is_held
+    return is_held(fence_root(_profile_home(authority)) / 'core-update')
+
+
+def checkpoint_head(authority, ref):
+    # A cached receipt is only a scheduling hint. Consumption always recomputes
+    # the proof transactionally; parked polls must not hash a multi-MB tool tail.
+    cached = authority.update_parked.get(ref.session_id)
+    if cached is not None:
+        # Cheap row/key probe (no transcript hash): an external settle must not leave a
+        # terminal head parked behind a hold, starving the queued follower.
+        from hermes_state_update_pause import CHECKPOINT_PREFIX
+        from hermes_state_runtime import RuntimeStoreError
+        with authority.db._read_ctx() as conn:
+            live = conn.execute('SELECT a.status, (SELECT 1 FROM state_meta WHERE key=?) FROM '
+                'session_admissions a WHERE a.admission_id=?',
+                (CHECKPOINT_PREFIX + cached['admission_id'], cached['admission_id'])).fetchone()
+        if live is not None and live[0] == 'started':
+            if live[1]:
+                return cached
+            # Still the started head but its proof vanished: unknown state, fail closed.
+            raise RuntimeStoreError('invalid_checkpoint')
+        authority.update_parked.pop(ref.session_id, None)
+    receipt = get_session_checkpoint(authority.db, session_id=ref.session_id)
+    if receipt is not None:
+        authority.update_parked[ref.session_id] = receipt
+    else:
+        from hermes_state_update_pause import CHECKPOINT_PREFIX
+        from hermes_state_runtime import RuntimeStoreError
+        with authority.db._read_ctx() as conn:
+            invalid = conn.execute("SELECT 1 FROM session_admissions a JOIN state_meta m "
+                "ON m.key=? || a.admission_id WHERE a.target_session_id=? AND a.status='started'",
+                (CHECKPOINT_PREFIX, ref.session_id)).fetchone()
+        if invalid:
+            raise RuntimeStoreError('invalid_checkpoint')
+    return receipt
+
+
+async def refuse_checkpoint(authority, ref, live, row):
+    """Fence only the rejected started identity. Invalid proof cannot authorize settlement
+    or replay; the existing Discard control resolves the unknown head explicitly."""
+    from gateway.session_runtime_workers import tracked_write, persist_work_count
+    from hermes_state_runtime import _epoch, _admission
+    from hermes_state_update_pause import CHECKPOINT_PREFIX, delete_session_checkpoint
+
+    def write(conn):
+        _epoch(conn, authority.epoch)
+        current = _admission(conn, row['admission_id'])
+        if (current['status'], current['owner_epoch'], current['generation']) != (
+                'started', row['owner_epoch'], row['generation']):
+            return False
+        if not conn.execute('SELECT 1 FROM state_meta WHERE key=?',
+                            (CHECKPOINT_PREFIX + row['admission_id'],)).fetchone():
+            return None  # ordinary running work, not this checkpoint protocol
+        conn.execute("UPDATE session_admissions SET status='unknown' WHERE admission_id=?",
+                     (row['admission_id'],))
+        delete_session_checkpoint(conn, row['admission_id'])
+        conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?',
+                     (ref.session_id,))
+        return True
+
+    async with live.claim_gate, live.mutation_lock:
+        changed = await tracked_write(authority, partial(authority.db._execute_write, write))
+        if changed:
+            authority.update_parked.pop(ref.session_id, None)
+            authority._publish_pending(ref)
+            persist_work_count(authority)
+        return changed
+
+
+async def resume_checkpoint(authority, ref, live, first):
+    """Recheck the hold at the consume transaction, after asynchronous route authorization."""
+    from gateway.session_runtime_workers import tracked_write
+    from hermes_state_runtime import RuntimeStoreError
+    from hermes_state_update_pause import resume_session_checkpoint
+    gate = authority._admission_gate()
+    def guard(conn):
+        gate(conn)
+        if update_held(authority):
+            raise RuntimeStoreError('update_pause_held')
+    def resumed(row):
+        authority.update_parked.pop(ref.session_id, None)
+        authority._stamp_claim(ref, live, row)
+        from gateway.session_runtime_workers import persist_work_count
+        persist_work_count(authority)
+        return row
+
+    try:
+        row = await tracked_write(authority, partial(resume_session_checkpoint, authority.db,
+            epoch=authority.epoch, admission_id=first['admission_id'], _guard=guard),
+            then=resumed)
+    except RuntimeStoreError as exc:
+        if exc.reason != 'update_pause_held':
+            raise
+        return UPDATE_PAUSED
+    return row
+
+
+async def park_or_interrupt(authority, live, ref, row):
+    """Tracked by the caller before it yields; retain the waiter and media on success."""
+    from gateway.session_runtime_workers import tracked_write, persist_work_count
+    async with live.claim_gate, live.mutation_lock:
+        remember_claim(authority, ref.session_id, row)
+        if stopped(authority, row):
+            return await settle_interrupted(authority, live, ref, row)
+        try:
+            receipt = await tracked_write(authority, partial(checkpoint_session_input, authority.db,
+                epoch=authority.epoch, admission_id=row['admission_id'], generation=row['generation'],
+                physical_session_id=authority.physical_target(ref), transcript_mark=row['transcript_mark']))
+        except Exception:
+            logging.getLogger(__name__).exception('Update checkpoint failed for %s', row['admission_id'])
+            return await settle_interrupted(authority, live, ref, row)
+        if stopped(authority, row):
+            return await settle_interrupted(authority, live, ref, row)
+        authority.pending_results.pop(row['admission_id'], None)
+        authority.update_parked[ref.session_id] = receipt
+        with live.event_stream.lock:
+            live.event_stream.execution = {}
+            authority.adopted.pop(ref.session_id, None)
+        logging.getLogger(__name__).info('Parked gateway turn for update: session=%s admission=%s generation=%s',
+                                         ref.session_id, row['admission_id'], row['generation'])
+        authority._publish_pending(ref)
+        persist_work_count(authority)
+        return True
+
+
+def stopped(authority, row):
+    return (row['admission_id'] in authority.update_stops
+            or authority.pending_stops.get(row['target_session_id']) == row['generation']
+            or authority.delivered_stops.get(row['target_session_id']) == row['generation'])
+
+
+def claim_started(authority, sid, row):
+    if row.get('update_resume'):
+        remember_claim(authority, sid, row)
+    else:
+        previous = authority.update_claims.pop(sid, None)
+        if previous is not None:
+            authority.update_stops.discard(previous[0])
+
+
+def remember_claim(authority, sid, row):
+    admission_id, generations = authority.update_claims.get(sid, (row['admission_id'], set()))
+    if admission_id != row['admission_id']:
+        authority.update_stops.discard(admission_id)
+        generations = set()
+    generations.add(row['generation'])
+    if row.get('update_resume'):
+        generations.add(row['update_resume']['generation'])
+    authority.update_claims[sid] = (row['admission_id'], generations)
+
+
+async def interrupt_update(authority, ref, generation):
+    """Latch before waiting on a commit. Old-generation Stop maps ONLY to its resumed admission."""
+    from hermes_state_runtime import get_session_admission
+    from gateway.session_runtime_workers import track_mutation
+    sid = ref.session_id
+    live = authority.sessions[sid]
+    admission_id, generations = authority.update_claims.get(sid, (None, set()))
+    receipt = (authority.update_parked.get(sid)
+               or get_session_checkpoint(authority.db, session_id=sid))
+    execution = live.event_stream.execution
+    if admission_id is None and receipt is not None:
+        admission_id, generations = receipt['admission_id'], {receipt['generation']}
+    if admission_id is None and execution.get('admission_id'):
+        candidate = get_session_admission(authority.db, admission_id=execution['admission_id'])
+        if candidate is not None and paused_result(authority, candidate):
+            admission_id, generations = candidate['admission_id'], {candidate['generation']}
+    if admission_id is None or generation not in generations:
+        return False
+    row = get_session_admission(authority.db, admission_id=admission_id)
+    if row is None or row['status'] != 'started':
+        return False
+    # A fresh successor must never inherit a checkpoint generation's Stop.
+    if execution and execution.get('admission_id') != admission_id:
+        return False
+    authority.update_stops.add(admission_id)
+    if authority.executing.get(sid) == row['generation']:
+        authority.pending_stops[sid] = row['generation']
+        with live.event_stream.lock:
+            adopted_generation, agent = authority.adopted.get(sid, (None, None))
+        if adopted_generation == row['generation'] and agent is not None:
+            from agent.interrupt_compat import request_hard_interrupt
+            request_hard_interrupt(agent)
+        return True
+
+    async def finish():
+        async with live.claim_gate, live.mutation_lock:
+            current = get_session_admission(authority.db, admission_id=admission_id)
+            if current is not None and current['status'] == 'started':
+                if authority.executing.get(sid) == current['generation']:
+                    authority.pending_stops[sid] = current['generation']
+                else:
+                    await settle_interrupted(authority, live, ref, current)
+    await asyncio.shield(track_mutation(authority, finish()))
+    return True
+
+
+async def settle_interrupted(authority, live, ref, row):
+    from gateway.session_settlement_recovery import settle_and_deliver
+    if row['owner_epoch'] != authority.epoch:
+        # Stop can arrive before recovery schedules the parked head. Adopt its exact
+        # proof once, solely to settle it: never run the original input again.
+        from gateway.session_runtime_workers import tracked_write
+        from hermes_state_update_pause import resume_session_checkpoint
+        row = await tracked_write(authority, partial(resume_session_checkpoint, authority.db,
+            epoch=authority.epoch, admission_id=row['admission_id']))
+    authority.update_parked.pop(ref.session_id, None)
+    authority.pending_deliveries.pop(row['admission_id'], None)
+    authority.pending_results[row['admission_id']] = {
+        'result': {'interrupted': True, 'final_response': ''}, 'usage': {}}
+    return await settle_and_deliver(authority, live, ref, row, '', 'interrupted')

@@ -64,9 +64,12 @@ def active_work_verb(runner, loop) -> Callable[[], dict[str, Any]]:
                 units = list(runner._describe_active_work()) + _delegation_units(time.time())
                 if scoped:
                     units = _profile_units(runner, profile, units)
-                    box.append({"active_agents": len(units), "active_work": units, "profile": profile})
+                    box.append({"active_agents": len(units), "active_work": units, "profile": profile,
+                                "parked_work": [u for u in runner._describe_parked_work()
+                                                if u.get("profile") == profile]})
                 else:
-                    box.append({"active_agents": runner._active_work_count(), "active_work": units})
+                    box.append({"active_agents": runner._active_work_count(), "active_work": units,
+                                "parked_work": runner._describe_parked_work()})
             finally:
                 done.set()
 

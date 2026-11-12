@@ -1101,7 +1101,7 @@ def _coerce_session_store(session_store: Any) -> dict[str, str]:
 
 def _prepare_runtime_status_update(
     *, gateway_state: Any = _UNSET, exit_reason: Any = _UNSET, restart_requested: Any = _UNSET,
-    active_agents: Any = _UNSET, active_work: Any = _UNSET, platform: Any = _UNSET, platform_state: Any = _UNSET,
+    active_agents: Any = _UNSET, active_work: Any = _UNSET, parked_work: Any = _UNSET, platform: Any = _UNSET, platform_state: Any = _UNSET,
     error_code: Any = _UNSET, error_message: Any = _UNSET, needs_attention: Any = _UNSET,
     retrying_since: Any = _UNSET, served_profiles: Any = _UNSET, session_store: Any = _UNSET,
     parked_profiles: Any = _UNSET, multiplex_standalone_reason: Any = _UNSET,
@@ -1141,6 +1141,7 @@ def _prepare_runtime_status_update(
             ("restart_requested", restart_requested, bool),
             ("active_agents", active_agents, parse_active_agents),
             ("active_work", active_work, lambda v: list(v) if v else None),
+            ("parked_work", parked_work, lambda v: list(v) if v else None),
             ("served_profiles", served_profiles, lambda v: list(v or [])),
             # Profiles the multiplexer could not serve, name -> reason; clients fail fast on them.
             ("parked_profiles", parked_profiles, lambda v: {str(k): str(r) for k, r in dict(v or {}).items()}),
@@ -1905,33 +1906,7 @@ def write_planned_stop_marker(target_pid: int) -> bool:
     })
 
 
-_PLANNED_STOP_MUTEX_WAIT_S = 2.0
-
-
-def _update_pause_on_disk() -> bool:
-    """A Windows update pause of this checkout is on disk (its record or a recovery's claim), or the
-    record directory cannot be listed. Only then does a consume need the pause lock and a checkpoint,
-    and only then can accepted-stop evidence beside a request still be owed: with none, every pause
-    was settled by recovery or the updater (or never made: every non-Windows host)."""
-    from hermes_cli import update_pause_record
-    record = update_pause_record.record_path()
-    try:
-        with os.scandir(record.parent) as entries:
-            return any(e.name == record.name or (e.name.startswith(record.name + ".") and e.name.endswith(".claim"))
-                       for e in entries)
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-
-
-def _checkpoint_planned_stop(path: Path, record: dict[str, Any]) -> None:
-    """``on_consume``, decided after the request was read: an update writes its record before its
-    request, so a pause that appeared since the consumer first looked is checkpointed too."""
-    from hermes_cli import update_pause_record
-    if _update_pause_on_disk():
-        with update_pause_record._mutex(_PLANNED_STOP_MUTEX_WAIT_S):
-            update_pause_record.mark_stop_consumed(path, record)
+from gateway.status_planned_stop_pause import _PLANNED_STOP_MUTEX_WAIT_S, _checkpoint_planned_stop, _update_pause_on_disk
 
 
 def consume_planned_stop_marker_for_self() -> bool:

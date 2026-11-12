@@ -23,6 +23,18 @@ def uncounted_runtime_work(runner):
             + sum(len(mutation_tasks(authority)) + len(side_agents(authority)) for authority in authorities))
 
 
+def parked_work_units(runner):
+    """One entry per session parked on a durable update checkpoint, across served authorities.
+
+    Parked work is unfinished but NOT executing: it is never in ``active_work`` or any count that
+    blocks a drain. It reads the same ``update_parked`` map the update pause's claim gate writes.
+    """
+    return [{'kind': 'update_parked', 'session': sid, 'admission_id': receipt.get('admission_id'),
+             'profile': getattr(authority, 'profile_id', None)}
+            for authority in all_authorities(runner)
+            for sid, receipt in sorted(dict(getattr(authority, 'update_parked', {})).items())]
+
+
 def kanban_managed_count(runner):
     """Confirmed Kanban workers only; unknown/pre-bootstrap claims and mutations stay awaitable.
 
