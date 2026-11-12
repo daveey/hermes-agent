@@ -65,7 +65,8 @@ def resume(conn, task_id: str, *, reason: str, actor: str) -> dict:
     tip = _tip(conn, task_id)
     # The guard may consult GitHub: evaluate it before the write lock, then fence on the event tip.
     guard = check_respawn_guard(conn, task_id)
-    if guard != "active_pr":
+    from hermes_cli.kanban_observed_pr_hold import observed
+    if guard != "active_pr" and not (guard is None and observed(conn, task_id)):
         raise ResumeRefused(f"resume requires an active_pr hold (guard: {guard or 'none'})")
     with write_txn(conn):
         task = kb.get_task(conn, task_id)

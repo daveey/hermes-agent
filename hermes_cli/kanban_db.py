@@ -1910,19 +1910,11 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
 
 
 def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) -> int:
-    """Promote dependency waits and recoverable failure stops;
-    returns the count. Opens its own IMMEDIATE txn — call OUTSIDE any write txn.
+    """Promote dependency waits and recoverable stops in an IMMEDIATE txn.
 
-    Agent-triage failure-budget stops retain the same recovery as legacy blocked
-    stops. Guard holds and other triage reasons still require explicit resolution.
-
-    ``blocked`` is skipped when sticky (explicit ``kanban_block``) or when
-    ``consecutive_failures`` reached the limit (else the breaker could never
-    trip). Limit order matches ``_record_task_failure``: ``max_retries`` >
-    ``failure_limit`` > ``DEFAULT_FAILURE_LIMIT``.
-
-    1. The most recent block event was a worker-initiated ``kanban_block`` — those stay blocked until an
-    explicit ``kanban_unblock`` (#28712).
+    Call OUTSIDE any write txn. Guard holds/sticky blocks require explicit resolution.
+    Failure limit: max_retries > failure_limit > DEFAULT_FAILURE_LIMIT; the
+    dependency-review release is precomputed outside the transaction and fenced inside.
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
@@ -1930,6 +1922,8 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
     from hermes_cli.kanban_wake_check import foreign_ids
     promoted = 0
     remote = _sync.has_remote_parents(conn)
+    from hermes_cli import kanban_review_release
+    releases = kanban_review_release.prepare(conn)
     with write_txn(conn):
         copies = foreign_ids(conn)
         todo_rows = conn.execute(
@@ -1956,6 +1950,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
                 continue
             if all(st in ("done", "archived") for _pid, st in states):
                 resume_status = _resume_status_from_events(conn, task_id)
+                promotion_payload = kanban_review_release.promotion_payload(conn, task_id, resume_status, releases)
                 if cur_status in ("blocked", "triage"):
                     # At the breaker limit, no auto-recovery (else block ->
                     # recover -> respawn -> exhaust -> block forever). The
@@ -1979,7 +1974,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
                     )
                 _append_event(
                     conn, task_id, "promoted",
-                    {"status": resume_status} if resume_status != "ready" else None,
+                    promotion_payload,
                 )
                 promoted += 1
     return promoted

@@ -547,7 +547,8 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     from hermes_cli import kanban_requeued_publisher
     if kanban_requeued_publisher.continues(conn, task_id, published, latest_pr_comment_id):
         return None  # its own publisher was paused by a core-update requeue: one continuation
-    if resumes_review(conn, task_id, pr_urls):
+    from hermes_cli.kanban_review_release import released
+    if released(conn, task_id, pr_urls) or resumes_review(conn, task_id, pr_urls):
         return None
     states = {u: pr_state(u) for u in dict.fromkeys(pr_urls)}
     discharged = {u for u, s in states.items() if s in TERMINAL_STATES or s == "REJECTED"}

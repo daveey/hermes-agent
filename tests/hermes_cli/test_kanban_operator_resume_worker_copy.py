@@ -118,6 +118,21 @@ def test_home_resume_releases_the_workers_kept_copy_at_its_next_tick(gws, clock,
     assert _status(worker.conn, tid) == "ready"
 
 
+def test_home_resume_accepts_worker_only_observation(gws, clock, monkeypatch):
+    """Real synced worker observation qualifies even when home's guard releases."""
+    hub, worker = gws
+    tid = _held_on_worker(gws, clock)
+    hub.enter()
+    clock[0] += 60
+    with monkeypatch.context() as patch:
+        patch.setattr(kbd, "check_respawn_guard", lambda *_: None)
+        resume.resume(hub.conn, tid, reason="worker-only hold", actor="operator")
+    hub.round()
+    worker.round()
+    worker.tick()
+    assert _status(worker.conn, tid) == "running"
+
+
 def test_without_a_resume_the_kept_copy_stays_held(gws, clock):
     hub, worker = gws
     tid = _held_on_worker(gws, clock)
