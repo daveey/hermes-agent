@@ -10,9 +10,17 @@ _IDENTITY_FIELDS = frozenset({
 })
 
 
+_IMAGE_PART_TYPES = frozenset({"image", "image_url", "input_image"})
+# Payload keys that can carry user/tool image parts. ``tools`` holds JSON schemas, never images:
+# a schema property NAMED "type" makes ``dict.get("type")`` a dict (unhashable) and an
+# ``{"type": "image"}`` default/example would falsely demand vision.
+_CONTENT_KEYS = ("messages", "input", "system", "instructions")
+
+
 def _has_image(value):
     if isinstance(value, dict):
-        return value.get("type") in {"image", "image_url", "input_image"} or any(
+        kind = value.get("type")
+        return (isinstance(kind, str) and kind in _IMAGE_PART_TYPES) or any(
             _has_image(item) for item in value.values())
     return isinstance(value, list) and any(_has_image(item) for item in value)
 
@@ -121,7 +129,8 @@ def _requirements(agent, request, streaming):
     context = _estimate_context_tokens(request, payload)
     context += output_reservation(agent, request)
     requirements["min_context_tokens"] = max(floor, context)
-    requirements.update(tools=bool(request.get("tools")), vision=_has_image(payload),
+    requirements.update(tools=bool(request.get("tools")),
+                        vision=_has_image([payload[key] for key in _CONTENT_KEYS if key in payload]),
                         streaming=streaming, json=bool(request.get("response_format") or
                         (request.get("text") or {}).get("format")))
     return requirements

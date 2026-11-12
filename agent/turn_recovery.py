@@ -1075,7 +1075,10 @@ def nonretryable_client_error_result(
             "      • Self-signed local endpoint (llama.cpp, LM Studio, vLLM)? Use http://",
             "        for localhost, or add the server's cert to your trust store.",
         )
-    logger.error("%sNon-retryable client error: %s", agent.log_prefix, api_error)
+    # No HTTP status = the request never reached the provider (a local bug while building or
+    # sending it): log the traceback, or the raising frame is lost (chat 20261110_184601_52504d).
+    logger.error("%sNon-retryable client error: %s", agent.log_prefix, api_error,
+                 exc_info=api_error if status_code is None else None)
     if classified.reason == FailoverReason.content_policy_blocked:
         # Safety refusal that arrived as an exception (400 / APIError) rather than an HTTP-200
         # finish_reason. Treat it exactly like the HTTP-200 refusal handler: do NOT persist the

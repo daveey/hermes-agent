@@ -88,3 +88,32 @@ def test_capability_mismatch_still_fails_closed_and_is_named(setup, extra, key):
         return
     with pytest.raises(ModelRoutingError, match=f"failing capability: .*{key}"):
         validate_class_request(agent, req, streaming=True)
+
+
+# Real shape from chat 20261110_184601_52504d: the deferred ``action_request`` tool's JSON schema has a
+# PROPERTY named "type" (receipt.evidence.items.properties.type), so ``dict.get("type")`` is a dict.
+# The vision scan's set-membership test raised "cannot use 'dict' as a set element" on every turn.
+_ACTION_REQUEST_TOOL = {"type": "function", "function": {"name": "action_request", "parameters": {
+    "type": "object", "properties": {"receipt": {"type": "object", "properties": {"evidence": {
+        "type": "array", "items": {"type": "object", "properties": {
+            "type": {"type": "string", "enum": ["message", "tool_call", "commit", "pr", "kanban", "file",
+                                                "url", "operation"]},
+            "id": {"type": "string"}, "board": {"type": "string"}, "note": {"type": "string"}}}}}}}}}}
+
+
+def test_tool_schema_with_property_named_type_does_not_crash_or_need_vision(setup):
+    agent, request = setup
+    validate_class_request(agent, request(10, tools=[_ACTION_REQUEST_TOOL]), streaming=True)
+    assert agent._model_routing_requirements.get("vision") is not True
+
+
+def test_tools_never_count_as_vision_but_image_block_in_messages_does(setup):
+    agent, request = setup
+    enum_tool = {"type": "function", "function": {"name": "t", "parameters": {
+        "type": "object", "properties": {"part": {"type": "object", "default": {"type": "image"}}}}}}
+    validate_class_request(agent, request(10, tools=[enum_tool]), streaming=True)
+    req = request(10)
+    req["messages"].append({"role": "user", "content": [
+        {"type": "image", "source": {"type": "base64", "data": "x"}}]})
+    with pytest.raises(ModelRoutingError, match="vision"):
+        validate_class_request(agent, req, streaming=True)
