@@ -8,6 +8,11 @@ from tests.ci.test_required_results import _OWN, _api_down, _dup, _fake_fetch, _
 from tests.ci.test_macos_state_routing import ROOT, context, gha, workflow
 
 
+def test_macos_gate_grants_private_actions_lookup_and_checkout_permissions():
+    job = workflow("ci.yaml")["jobs"]["macos-state-required"]
+    assert job["permissions"] == {"contents": "read", "actions": "read"}
+
+
 def needs(selected="true", lane="cancelled", detect="success"):
     return {"detect": {"result": detect, "outputs": {"hermes_state": selected}},
             "hermes-state-macos": {"result": lane}}

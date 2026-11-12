@@ -605,6 +605,9 @@ jobs:
   # The separately required fork macOS lane fails closed on unknown selection.
   macos-state-required:
     name: macOS state required (v1)
+    permissions:
+      contents: read
+      actions: read
     needs: [detect, hermes-state-macos]
     if: ${{ always() }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
