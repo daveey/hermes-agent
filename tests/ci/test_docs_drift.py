@@ -51,3 +51,14 @@ def test_detects_each_documentation_form(drift, monkeypatch):
         "providers.nous.models.hermes.timeout_seconds"])
     monkeypatch.setattr(drift, "slash_commands", list)
     assert drift.find_gaps()["config"] == ["agent.secret_knob", "auxiliary.vision.api_key"]
+
+
+def test_open_section_keys_are_checked(drift, monkeypatch):
+    """kanban.placement defaults to {}, so walking DEFAULT_CONFIG found none of its keys: a new placement key
+    (auto_overridable_skill_markers) shipped undocumented. Keys its reader takes via self.raw.get count now."""
+    keys = drift.open_section_keys()
+    assert "kanban.placement.auto_overridable_skill_markers" in keys and "kanban.placement.route" in keys, keys
+    monkeypatch.setattr(drift, "_docs_text", lambda: "`kanban.placement.route` maps gateways.\n")
+    monkeypatch.setattr(drift, "slash_commands", list)
+    gaps = drift.find_gaps()["config"]
+    assert "kanban.placement.auto_overridable_skill_markers" in gaps and "kanban.placement.route" not in gaps

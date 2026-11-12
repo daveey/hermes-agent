@@ -772,13 +772,23 @@ def marker_skills(args: dict, cfg: _Cfg):
     return [s for s in skills if not cfg.auto_overridable_skill(s)]
 
 
-def marker_remedy(why: str, cfg: Optional[dict] = None) -> str:
-    """The remedy for a ``local marker: ...`` decision: 'auto' only when it would actually move the card."""
+def marker_remedy(why: str, cfg: Optional[dict] = None, args: Optional[dict] = None) -> str:
+    """The remedy for a ``local marker: ...`` decision: 'auto' only when it would actually move the card.
+
+    Given the card's ``args``, a context-skill hit is re-checked as the card would be with placement='auto': a device
+    skill beside it ([babybear-*, computer-use]) still pins it there, so that skill's remedy comes right away instead
+    of an 'auto' that only leads to it. [daveey]"""
     if not why.startswith("local marker: skill "):
         return TEXT_MARKER_REMEDY
-    skill = why[len("local marker: skill "):]
-    overridable = _Cfg(config() if cfg is None else cfg).auto_overridable_skill(skill)
-    return LOCAL_MARKER_REMEDY if overridable else DEVICE_SKILL_MARKER_REMEDY
+    c = _Cfg(config() if cfg is None else cfg)
+    if not c.auto_overridable_skill(why[len("local marker: skill "):]):
+        return DEVICE_SKILL_MARKER_REMEDY
+    if args:
+        auto = {**args, "placement": "auto"}
+        hit = _local_marker(auto.get("title") or "", auto.get("body") or "", marker_skills(auto, c), c)
+        if hit and hit.startswith("skill ") and not c.auto_overridable_skill(hit[len("skill "):]):
+            return DEVICE_SKILL_MARKER_REMEDY
+    return LOCAL_MARKER_REMEDY
 
 
 def _raw_explicit_pin(args: dict) -> str:

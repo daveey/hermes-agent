@@ -1942,9 +1942,9 @@ DEFAULT_CONFIG = {
         # hermes-hub name to a target gateway (e.g. {"macbook": "hub"}); kanban_create then creates a
         # card with no local-only need on the target, bound to the creating chat. Other keys:
         # creator_session ({target: session id}), local_markers / extra_local_markers /
-        # local_skill_markers (regex lists), assignees (always placed; any profile the target
-        # advertises is placed too), carried_requires (profile tools the target is trusted to
-        # satisfy when it publishes no profile-tools; default terminal/file/git/kanban),
+        # local_skill_markers (regex lists), auto_overridable_skill_markers (skill regexes an explicit 'auto'
+        # ignores; default ^babybear, ^bb-), assignees (always placed; any profile the target advertises), carried_requires
+        # (profile tools the target is trusted to satisfy when it publishes no profile-tools; default terminal/file/git/kanban),
         # hub_live_seconds, wait_seconds, hub_cli; worker_pools maps origins to Board-worker lists.
         # Empty = upstream behaviour; an enrolled empty pool queues, never overflows locally.
         "placement": {},
