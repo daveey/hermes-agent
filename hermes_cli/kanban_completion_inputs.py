@@ -14,7 +14,6 @@ from typing import NamedTuple
 from hermes_cli.kanban_origin_ledger import _receipt_epoch, completion_verdict
 
 CHUNK = 500
-MAX_PAYLOAD = 32768
 
 
 class Completion(NamedTuple):
@@ -56,7 +55,7 @@ def read_completions(conn, ids) -> dict[str, Completion]:
                                             "completion_contract", "title", "body", "assignee", "session_id"))
     run_fields = _select(run_cols, "r.", ("id", "task_id", "uid", "status", "outcome", "ended_at", "summary"))
     event_fields = ",".join(("e.id", "e.task_id", "e.run_id", "e.kind", "e.created_at",
-                             f"substr(e.payload,1,{MAX_PAYLOAD + 1}) AS payload"))
+                             "e.payload"))
     epoch = []
     for start in range(0, len(ids), CHUNK):
         chunk = ids[start:start + CHUNK]
@@ -98,10 +97,10 @@ def read_completions(conn, ids) -> dict[str, Completion]:
 
 
 def _payload(raw):
-    """Decoded event payload; oversized or malformed payloads are not evidence (fail closed)."""
+    """Decoded event payload; malformed payloads are not evidence (fail closed). Never size-capped: the\n    owner verdict reads the whole payload, so the batch must too."""
     if raw is None:
         return {}
-    if not isinstance(raw, str) or len(raw) > MAX_PAYLOAD:
+    if not isinstance(raw, str):
         raise ValueError("completion payload unavailable")
     value = json.loads(raw)
     if not isinstance(value, dict):
@@ -131,8 +130,8 @@ def _completion(conn, tid, task, event, run, archived, bound, epoch):
         verified, legacy, _terminal = completion_verdict(
             tid, row, event_t, run_t, archived_t, bound_event=bound_event,
             current_task=lambda: (task["title"], task["body"]), receipt_epoch=receipt_epoch)
-    except (ValueError, TypeError):
-        verified = legacy = False  # one card's malformed evidence is unverified, never a failed batch
+    except Exception:  # any one card's bad evidence is unverified, never a failed batch
+        verified = legacy = False
     return Completion(task["status"], verified, legacy, None if event is None else event["id"],
                       None if event is None else event["run_id"], None if run is None else run["id"],
                       None if run is None else run["uid"], task["assignee"], task["session_id"])

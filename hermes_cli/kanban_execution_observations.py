@@ -86,6 +86,8 @@ def card(row, *, gateway=None, profile=None, now=None):
     done = row.get("_execution_done")
     if isinstance(done, dict) and not row.get("remote"):
         # Positive delivered-completion evidence (kanban_execution_receipt); nothing else is ever 'done'.
+        if row.get("stale"):  # a replayed busy-board list is not a current owner read
+            done = {**done, "state": "unknown", "last_known_state": "done", "unknown_reason": "source_unavailable"}
         return project(done, now=now, source_class="sidebar")
     source = row.get("_execution_source")
     if isinstance(source, dict) and not row.get("remote"):

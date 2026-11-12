@@ -130,7 +130,7 @@ def read_completed(conn, task_id, *, gateway, board):
     row = conn.execute(
         f"SELECT e.*, {fields} FROM task_events e "
         "LEFT JOIN task_runs r ON r.id=e.run_id AND r.task_id=e.task_id "
-        "WHERE e.task_id=? AND e.kind='completed' ORDER BY e.created_at DESC,e.id DESC LIMIT 1",
+        "WHERE e.task_id=? AND e.kind='completed' ORDER BY e.id DESC LIMIT 1",
         (task_id,)).fetchone()
     return _completed_receipt(row, task_id, gateway=gateway, board=board)
 
@@ -156,7 +156,7 @@ def read_completed_many(conn, task_ids, *, board, gateway):
             f"SELECT id, {'created_on' if created_on else 'NULL'} FROM tasks WHERE id IN ({marks})", chunk)}
         cursor = conn.execute(
             f"SELECT * FROM (SELECT e.*, {fields}, ROW_NUMBER() OVER (PARTITION BY e.task_id "
-            "ORDER BY e.created_at DESC, e.id DESC) AS _rank FROM task_events e "
+            "ORDER BY e.id DESC) AS _rank FROM task_events e "
             "LEFT JOIN task_runs r ON r.id=e.run_id AND r.task_id=e.task_id "
             f"WHERE e.task_id IN ({marks}) AND e.kind='completed') WHERE _rank=1", chunk)
         cursor.row_factory = sqlite3.Row
