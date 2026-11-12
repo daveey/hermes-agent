@@ -17,7 +17,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Optional
 
-from gateway.session_runtime_workers import kanban_managed_count
+from gateway.session_runtime_workers import cron_turn_count, kanban_managed_count
 
 # Only the update's post-grace Kanban wait: human turns retain their normal budget.
 CORE_UPDATE_KANBAN_WAIT_S = 15.0
@@ -52,7 +52,7 @@ class GatewayRestartWaitMixin:
         Each cut run is logged with its job id and start time; its next tick reruns it.
         """
         kanban = kanban_managed_count(self) if intent is not None else 0
-        cron = self._restart_wait_cron_counts()["awaitable"] if self._intent_cuts_cron(intent) else 0
+        cron = self._cut_cron_count(intent)
         if kanban + cron <= 0 or self._awaitable_work_count() != kanban + cron:
             return None, False
         since = now if since is None else since
@@ -83,10 +83,18 @@ class GatewayRestartWaitMixin:
         if intent is None or not intent.exists():
             return
         # Under a "cron_cut" intent the cron runs were cut with the cards (t_01a18dbde9f8b2f0).
-        cron = self._restart_wait_cron_counts()["awaitable"] if self._intent_cuts_cron(intent) else 0
+        cron = self._cut_cron_count(intent)
         if self._awaitable_work_count() > kanban_managed_count(self) + cron:
             return
         self._stop_kanban_leash_s = CORE_UPDATE_KANBAN_STOP_LEASH_S
+
+    def _cut_cron_count(self, intent: Optional[Path]) -> int:
+        """Awaitable work a ``cron_cut`` intent cuts: the awaitable cron runs plus the agent turns
+        those runs execute on this owner (``cron_turn_count``), which the total counts again as
+        turns; 0 without such an intent."""
+        if not self._intent_cuts_cron(intent):
+            return 0
+        return self._restart_wait_cron_counts()["awaitable"] + cron_turn_count(self)
 
     def _intent_cuts_cron(self, intent: Optional[Path]) -> bool:
         """The update intent says cron runs in flight are cut, not awaited (``"cron_cut": true``). Read per

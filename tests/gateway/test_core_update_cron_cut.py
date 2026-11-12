@@ -61,6 +61,21 @@ async def test_cron_cut_intent_caps_the_cron_wait_and_logs_each_cut(monkeypatch,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('cron_cut, turns, waited', [(True, 1, 15), (False, 1, 1800), (True, 0, 1800)])
+async def test_cron_cut_also_caps_the_agent_turn_of_a_restart_safe_cron_run(monkeypatch, tmp_path, cron_cut,
+                                                                           turns, waited):
+    """An agent cron run in a restart-safe worker is not awaitable itself, but its turn on this owner is
+    counted as work (hermes-hub 2026-11-12 10:36Z: kanban-hub-pin-sweep). A cron cut covers that turn;
+    a plain intent, or a unit that is not a cron turn, keeps the full wait."""
+    body = {'pid': 1, 'kind': 'unfenced', **({'cron_cut': True} if cron_cut else {})}
+    runner = _runner(tmp_path, monkeypatch, body, cron=0, kanban=1, chat=1)
+    monkeypatch.setattr(wait, 'cron_turn_count', lambda _: turns, raising=False)
+    clock = _virtual_clock(monkeypatch)
+    assert await runner._await_active_work_before_restart() is False
+    assert waited <= clock[0] < waited + 0.2, f'waited {clock[0]}s'
+
+
+@pytest.mark.asyncio
 async def test_plain_intent_still_waits_for_cron(monkeypatch, tmp_path):
     runner = _runner(tmp_path, monkeypatch, {'pid': 1, 'kind': 'unfenced'}, cron=1)
     clock = _virtual_clock(monkeypatch)

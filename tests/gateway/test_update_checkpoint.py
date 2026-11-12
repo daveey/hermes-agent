@@ -105,6 +105,24 @@ def test_unknown_work_in_callback_is_not_tolerated(checkpoint):
     runner.request_restart.assert_not_called()
 
 
+@pytest.mark.parametrize("cron_cut, turns, accepted", [
+    (True, 1, True),    # the agent turn of the cut cron run: cut with it
+    (False, 1, False),  # no cron cut: the turn is awaited like any work
+    (True, 0, False),   # the extra unit is not a cron turn: unknown work stays refused
+])
+def test_agent_cron_turn_is_cut_with_its_run(checkpoint, monkeypatch, cron_cut, turns, accepted):
+    """hermes-hub 2026-11-12 10:36-10:39Z: an hourly agent cron (kanban-hub-pin-sweep) counted once as
+    its scheduler run and once as its owner turn, so every checkpoint of its 11-minute run was refused."""
+    module, home, runner, intent = checkpoint
+    intent["cron_cut"] = cron_cut
+    (home / "core-update/intent").write_text(json.dumps(intent))
+    runner._active_work_count = lambda: 3  # 1 Kanban card + 1 cron run + its agent turn
+    runner._active_cron_job_count = lambda: 1
+    monkeypatch.setattr(module, "cron_turn_count", lambda r: turns, raising=False)
+    assert bool(invoke(module, runner)["pausing"]) is accepted
+    assert runner.request_restart.called is accepted
+
+
 def test_reservation_added_before_callback_is_rechecked(checkpoint):
     module, home, runner, _intent = checkpoint
     reservations = []
