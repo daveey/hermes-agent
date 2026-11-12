@@ -9,6 +9,8 @@ import threading
 
 from .method_ctx import bind_module
 from .kanban_notice_text import chat_wait_suffix as _kb_chat_wait, failure_suffix as _kb_failure
+from .kanban_notice_text import parent_unclaimed_suffix as _kb_parent_unclaimed, quota_episode_suffix as _kb_quota_episode
+from .kanban_notice_text import repin_suffix as _kb_repin_notice, timed_out_suffix as _kb_timed_out
 
 
 def _notif_locked_sessions(fn, default):
@@ -586,30 +588,6 @@ def _kb_left_open(payload: dict) -> str:
     from hermes_cli.kanban_pr_landing import left_open_notice
     notice = left_open_notice(payload)
     return f"\n{notice}" if notice else ""
-
-
-def _kb_timed_out(task, payload: dict, title: str) -> str:
-    from hermes_cli.kanban_failure_summary import retry_promised
-    limit = 0
-    with contextlib.suppress(TypeError, ValueError):
-        limit = int(payload.get("limit_seconds") or 0)
-    tail = "; will retry" if retry_promised(payload) else "; retry state was not recorded"
-    return f" timed out (max_runtime={limit}s){tail}"
-
-
-def _kb_quota_episode(payload: dict) -> str:
-    from hermes_cli.kanban_quota_episode import notice_text
-    return notice_text(payload)
-
-
-def _kb_repin_notice(payload: dict) -> str:
-    from hermes_cli.kanban_repin_notice import notice_text
-    return ": " + notice_text(payload)
-
-
-def _kb_parent_unclaimed(payload: dict) -> str:
-    from hermes_cli.kanban_parent_unclaimed import notice_text
-    return ": " + notice_text(payload)
 
 
 # kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
