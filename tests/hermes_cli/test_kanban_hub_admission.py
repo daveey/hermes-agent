@@ -717,6 +717,7 @@ def test_cli_edit_admission_metadata(board, monkeypatch):
 @pytest.mark.parametrize("options,reason", [
     (["--max-retries", "4"], "operator fields"),
     (["--completion-contract", "local-only", "--reason", "test"], "--completion-contract"),
+    (["--requires", "terminal"], "--requires"),
 ])
 def test_cli_admission_refuses_separate_transaction_edits(board, monkeypatch, capsys, options, reason):
     import argparse
