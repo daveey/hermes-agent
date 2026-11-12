@@ -113,6 +113,18 @@ _SUBAGENT_SEGMENT_PARENT_SQL = ("SELECT p.id FROM sessions c JOIN sessions p ON 
                                 f" WHERE c.id = ? AND p.source = 'subagent' AND {_CONTINUATION_EDGE_SQL}")
 _LINEAGE_WALK_CAP = 1000
 
+# The delegator is ended only when its whole compression lineage is: walk forward along continuation edges and
+# look for an open row. A delegator that compressed mid-run (an async parent, or a subagent segment B whose
+# delegate G outlives it while B2 runs) still owns its child through its open continuation tip. ``UNION`` dedups
+# ids, so a corrupt cycle terminates.
+_DELEGATOR_ENDED_SQL = ("WITH RECURSIVE fwd(id) AS ("
+                        " SELECT ?"
+                        " UNION"
+                        " SELECT c.id FROM fwd JOIN sessions p ON p.id = fwd.id JOIN sessions c ON c.parent_session_id = p.id"
+                        f" WHERE {_CONTINUATION_EDGE_SQL}"
+                        ") SELECT 1 FROM sessions d WHERE d.id = ? AND d.ended_at IS NOT NULL AND NOT EXISTS ("
+                        " SELECT 1 FROM fwd JOIN sessions s ON s.id = fwd.id WHERE s.ended_at IS NULL)")
+
 
 def _delegating_parent_on(conn, session_id: str) -> Optional[str]:
     """The row that delegated *session_id*: the ``parent_session_id`` of the first segment of its compression
@@ -130,8 +142,7 @@ def _delegating_parent_on(conn, session_id: str) -> Optional[str]:
 
 def _delegator_ended_on(conn, session_id: str) -> bool:
     delegator = _delegating_parent_on(conn, session_id)
-    return bool(delegator) and conn.execute(
-        "SELECT 1 FROM sessions WHERE id = ? AND ended_at IS NOT NULL", (delegator,)).fetchone() is not None
+    return bool(delegator) and conn.execute(_DELEGATOR_ENDED_SQL, (delegator, delegator)).fetchone() is not None
 
 
 class SessionMaintenanceMixin:
@@ -251,8 +262,9 @@ class SessionMaintenanceMixin:
         idle (by ``started_at`` AND canonical last activity) at least ``max_idle_seconds``. A delegate child's real
         owner is the process that ran its parent's turn, so ``sweep_orphaned_sessions``' heartbeat guess (any live
         backend started before the row could own it) kept such rows open for as long as some backend outlived them,
-        which on a host whose backends restart many times a day is indefinitely. A parent that has ended (reaped,
-        closed or rotated by compression) has no turn left to own the child. A compressed child's continuation has
+        which on a host whose backends restart many times a day is indefinitely. A parent that has ended (reaped or
+        closed) has no turn left to own the child; one rotated by compression counts as ended only once its open
+        continuation tip has ended too (``_DELEGATOR_ENDED_SQL``). A compressed child's continuation has
         its own compressed segment as ``parent_session_id``, so the delegating parent is found by walking past those
         segments (``_delegating_parent_on``): an open delegator keeps its child's continuation. ``end_reason``
         differs from ``startup_orphan_reap`` so the reap's killed-subagent notice is not re-sent hours late to a chat

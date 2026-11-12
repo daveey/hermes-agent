@@ -264,6 +264,53 @@ def test_startup_sweep_spares_pinned_subagent(db, monkeypatch):
     assert db.get_session("child")["ended_at"] is None
 
 
+def _child_of_compressed_delegator(db, *, nested: bool = False):
+    """Delegator ``parent`` compressed into the open tip ``parent-2`` (via ``parent-1b``) while its idle child
+    ``child`` still points at the first segment. ``nested``: the delegator is itself a subagent segment (a
+    delegate G of segment B while B2 is open)."""
+    stale = time.time() - 8 * 3600
+    if nested:
+        db.create_session("root", source="desktop")
+        parent_cfg = {"_delegate_from": "root"}
+        db.create_session("parent", source="subagent", parent_session_id="root", model_config=parent_cfg)
+    else:
+        parent_cfg = None
+        db.create_session("parent", source="desktop")
+    db.create_session("child", source="subagent", parent_session_id="parent",
+                      model_config={"_delegate_from": "parent"})
+    db.end_session("parent", "compression")
+    db.create_session("parent-1b", source="subagent" if nested else "desktop", parent_session_id="parent",
+                      model_config=parent_cfg)
+    db.end_session("parent-1b", "compression")
+    db.create_session("parent-2", source="subagent" if nested else "desktop", parent_session_id="parent-1b",
+                      model_config=parent_cfg)
+    for sid in ("parent", "parent-1b", "parent-2", "child"):
+        _backdate(db, sid, stale)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_child_of_compressed_delegator_with_open_tip_is_left_alone(db, nested):
+    """Nit 1 of review 5879422404: a delegator that ended by compression still runs on its continuation tip."""
+    _child_of_compressed_delegator(db, nested=nested)
+    assert db.end_subagents_of_ended_parents(max_idle_seconds=IDLE_S) == []
+    assert db.get_session("child")["ended_at"] is None
+
+    db.end_session("parent-2", "agent_close")
+    assert db.end_subagents_of_ended_parents(max_idle_seconds=IDLE_S) == ["child"]
+    assert db.get_session("child")["end_reason"] == "parent_ended_reap"
+
+
+def test_compressed_delegator_with_no_continuation_counts_as_ended(db):
+    """A compression-ended row whose continuation was never written (or was pruned) is its own ended tip."""
+    db.create_session("parent", source="desktop")
+    db.create_session("child", source="subagent", parent_session_id="parent",
+                      model_config={"_delegate_from": "parent"})
+    db.end_session("parent", "compression")
+    for sid in ("parent", "child"):
+        _backdate(db, sid, time.time() - 8 * 3600)
+    assert db.end_subagents_of_ended_parents(max_idle_seconds=IDLE_S) == ["child"]
+
+
 def _seed_compressed_unit_child(home):
     """``child-1`` (the id dispatch persisted) compressed into ``child-1b``, which compressed into the open tip
     ``child-1c``. ``grandchild`` is a delegate child of a segment, not a continuation, so it is not the unit's."""
