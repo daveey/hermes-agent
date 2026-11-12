@@ -263,6 +263,94 @@ def test_answered_hub_request_wakes_a_card_whose_probe_still_fails(kanban_home, 
         assert kb.get_task(conn, tid).status == "scheduled"
 
 
+# -- (e) comments that arrive through the Board feed -------------------------------------------------
+# Regression for t_01a1ccfca36ad3e3 (2026-11-12): parked on `wait-comment --from-gateway <gw>`, the card slept
+# through two replies a worker-1 chat wrote as author `default`. The Board row said origin_gateway=worker-1, but
+# the pulled copy stored NULL (origin_gateway is machine-local and nothing derived it), so no gateway matched.
+
+@pytest.fixture
+def synced_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """``kanban_home`` with ``kanban.sync.enabled: true`` (sync tables and capture triggers installed)."""
+    from tests.hermes_cli import kanban_sync_support as support
+    home = support.kanban_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_HUB_STATE", str(tmp_path / "hub-state"))
+    monkeypatch.setenv("HERMES_MAIL_CONFIG", str(tmp_path / "no-mail.json"))
+    support.write_sync_config(home, True)
+    kb.init_db()
+    return home
+
+
+def _synced_comment(tid: str, author: str) -> dict:
+    return {"task_id": tid, "author": author, "body": "PR1165 merged: measure from the next launch",
+            "created_at": int(time.time())}
+
+
+@pytest.mark.parametrize("author,feed_origin,want_origin", [
+    ("default", "worker-1", "worker-1"),        # the incident: a profile-named author written on worker-1
+    ("hub:gw:macbook", "hub", "macbook"),       # the relay names the real sender, which wins over the writer
+    ("default", "", None),                      # no sender on the wire: unknown, never this gateway's name
+    ("default", "not a gateway!", None),        # a malformed sender is not stored
+])
+def test_feed_comment_keeps_the_sending_gateway(synced_home, tmp_path, capsys, author, feed_origin,
+                                                want_origin) -> None:
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_sync_client as client
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="worker")
+        after = kb.add_comment(conn, tid, "default", "parked")
+        client.ensure_identity(conn, "default", "worker-3")
+        sync.set_mode(conn, "primary")
+        change = sync.RemoteChange(1, "task_comments", "01a1cebe-926b-753b-9c59-8a437dfc7269", "upsert",
+                                   _synced_comment(tid, author), 1, "", feed_origin)
+        sync.apply_remote_changes(conn, [change], new_cursor=1, observers=False)
+        got = conn.execute("SELECT origin_gateway FROM task_comments WHERE uid = ?",
+                           ("01a1cebe-926b-753b-9c59-8a437dfc7269",)).fetchone()[0]
+    assert got == want_origin
+    if want_origin:
+        assert _cli()("wait-comment", tid, "--after-id", str(after), "--from-gateway", want_origin) == 0
+    capsys.readouterr()
+
+
+def test_feed_does_not_overwrite_a_local_origin(synced_home) -> None:
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_sync_client as client
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="worker")
+        cid = kb.add_comment(conn, tid, "hub:gw:macbook", "relay", origin_gateway="macbook")
+        cuid = conn.execute("SELECT uid FROM task_comments WHERE id = ?", (cid,)).fetchone()[0]
+        client.ensure_identity(conn, "default", "worker-3")
+        sync.set_mode(conn, "primary")
+        change = sync.RemoteChange(1, "task_comments", cuid, "upsert",
+                                   _synced_comment(tid, "hub:gw:macbook"), 2, "", "hub")
+        sync.apply_remote_changes(conn, [change], new_cursor=1, observers=False)
+        got = conn.execute("SELECT origin_gateway FROM task_comments WHERE id = ?", (cid,)).fetchone()[0]
+    assert got == "macbook"
+
+
+def test_worker_import_carries_the_replica_origin(synced_home, tmp_path) -> None:
+    """A card a worker node copies from its replica keeps each comment's sender (kanban_worker_node)."""
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_sync_client as client
+    from hermes_cli import kanban_worker_node as node
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="worker")
+        fields = json.loads(conn.execute("SELECT fields FROM kanban_sync_outbox WHERE table_name='tasks' "
+                                         "AND row_uid=? ORDER BY rowid LIMIT 1", (tid,)).fetchone()[0])
+    fields.update(created_on="worker-1", runs_on=json.dumps(["machine:worker-3"]))
+    with kbc.connect(tmp_path / "replica.db") as replica, kbc.connect(tmp_path / "worker.db") as worker:
+        client.ensure_identity(replica, "default", "worker-3")
+        client.ensure_identity(worker, "default", "worker-3")
+        sync.set_mode(worker, "primary")
+        sync.apply_remote_changes(replica, [
+            sync.RemoteChange(1, "tasks", tid, "upsert", fields, 1, "", "worker-1"),
+            sync.RemoteChange(2, "task_comments", "01a1cebe-926b-753b-9c59-8a437dfc7269", "upsert",
+                              _synced_comment(tid, "default"), 1, "", "worker-1"),
+        ], new_cursor=2, observers=False)
+        assert node.import_cards(worker, replica, [tid]) == [tid]
+        got = worker.execute("SELECT origin_gateway FROM task_comments WHERE task_id = ?", (tid,)).fetchone()[0]
+    assert got == "worker-1"
+
+
 def test_pending_hub_request_keeps_the_card_parked(kanban_home, tmp_path, monkeypatch) -> None:
     _hub(tmp_path, "running")
     with kbc.connect_closing() as conn:

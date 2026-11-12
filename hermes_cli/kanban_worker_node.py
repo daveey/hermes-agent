@@ -443,8 +443,10 @@ def _changes_for(replica: sqlite3.Connection, tid: str, card: sqlite3.Row) -> li
             if row["uid"] is None:
                 continue
             version = int(row["sync_version"] or 0) if "sync_version" in row.keys() else 0
+            # A comment's sender is machine-local (never a wire field): carry the replica's as the change's writer.
+            sender = (row["origin_gateway"] or "") if table == "task_comments" and "origin_gateway" in row.keys() else ""
             out.append(sync.RemoteChange(0, table, row["uid"], "upsert", ksc._row_fields(replica, table, row),
-                                         version, "", ""))
+                                         version, "", sender))
     # Its parent edges too: once the copy is here the feed applies its later links (own_partition), so a copy
     # without the earlier ones disagreed with the Board for as long as it ran.
     for row in replica.execute("SELECT * FROM task_links WHERE child_id = ? ORDER BY parent_id", (tid,)).fetchall():

@@ -1343,6 +1343,13 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
     if table == "task_attachments":
         cols["stored_path"] = ""
         result.blobs_to_fetch.append(ch.uid)
+    if table == "task_comments" and "origin_gateway" in table_columns(conn, table):
+        # Machine-local, so never copied from the wire as a column: derive it the way a local write does, from
+        # the author (a relay names its sender) or else the gateway that wrote the row. [daveey]
+        from hermes_cli.kanban_comment_origin import synced_origin
+        origin = synced_origin(cols.get("author"), ch.origin_gateway)
+        if origin:
+            cols["origin_gateway"] = origin
     names = ["uid", *cols]
     conn.execute(f"INSERT INTO {table} ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
                  (ch.uid, *cols.values()))

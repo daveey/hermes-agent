@@ -61,6 +61,19 @@ def resolve_origin(author: Optional[str], explicit: Optional[str] = None) -> Opt
     return gateway_from_author(author) or _local_gateway()
 
 
+def synced_origin(author: Optional[str], writer: Optional[str]) -> Optional[str]:
+    """``origin_gateway`` for a comment pulled from the Board: the author's gateway, else the writing gateway.
+
+    Unlike :func:`resolve_origin` it never falls back to this gateway: a pulled row was written elsewhere, and an
+    unknown sender stays NULL rather than impersonating the local gateway (t_01a1ccfca36ad3e3 slept through two
+    worker-1 replies authored ``default`` because the pulled copies kept no sender at all)."""
+    found = gateway_from_author(author)
+    if found:
+        return found
+    name = str(writer or "").strip()
+    return name if _GATEWAY_NAME.match(name) else None
+
+
 def ensure_origin_column(conn: sqlite3.Connection) -> None:
     """Migration: add ``task_comments.origin_gateway`` to an older board and back-fill it once."""
     from hermes_cli.sqlite_util import add_column_if_missing
