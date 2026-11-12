@@ -40,8 +40,10 @@ _ASK = re.compile(
     r"Why only the user: " + _field("\nScope: ") + r"\n"
     r"(?P<rest>Scope: (?P<scope>" + _field("\nOpen task: ") + r")\nOpen task: @task:(?P<board>[^/@\s]+)(?:@(?P<gw>[^/\s]+))?/(?P<tid>[A-Za-z0-9_-]+))"
     r"(?P<hint>" + re.escape(TERMINAL_HINT) + r")?"
-    # A second "Open task:" line before the notice ends means a field quoted one: ambiguous, leave it.
-    r"(?!(?:(?!\n\n|blocked — actor: ).)*\nOpen task: )",
+    # A second "Open task:" line before the next notice's actor line (or the end of the text) means a
+    # field quoted one, so the matched Open task may be a quote: ambiguous, leave it. The scan does not
+    # stop at a blank line, since a human_request field may contain one (review F1/F2).
+    r"(?!(?:(?!blocked — actor: ).)*\nOpen task: )",
     re.DOTALL)
 logger = logging.getLogger(__name__)
 _PT = "America/Los_Angeles"
@@ -88,7 +90,8 @@ def _anchor(events, action: str, scope: str) -> Optional[int]:
     The read is bound to the notice: some event of the card must carry a human_request whose action AND
     scope equal the notice's (a scope that quotes another card's "Open task:" line makes the regex read
     that other card, whose asks then do not match). The anchor is the newest ``blocked`` event at or
-    before the newest such event, so an ask amended after its block still anchors on that block."""
+    before the newest such event (a metadata-only amendment is itself a ``blocked`` event, so an
+    amended ask anchors on the amendment; no labelled transition can sit between the two)."""
     for i in range(len(events) - 1, -1, -1):
         request = events[i][3].get("human_request")
         if (isinstance(request, dict) and _norm(request.get("action")) == action

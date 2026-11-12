@@ -208,6 +208,19 @@ def test_open_task_line_inside_scope_does_not_redirect_the_read(tmp_path, monkey
         assert refresh_stale_ask(text) == text  # still blocked on this very ask: byte-identical
 
 
+def test_scope_copied_from_a_done_cards_notice_keeps_the_ask(tmp_path, monkeypatch):
+    """Review F2: an ask copied from done card C's notice (same action, scope = C's scope + C's Open task
+    line + more) on still-blocked B must keep B's ask, whatever blank lines follow the quote."""
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    copied, _task = _card_with_scope("Only this card.")
+    _finish(copied)
+    for tail in ("\n\nand more.", "\nand more.", "\n\n\nblank lines, then more."):
+        tid, task = _card_with_scope(f"Only this card.\nOpen task: @task:default/{copied}{tail}")
+        text = _wake_text(tid, task)
+        assert refresh_stale_ask(text) == text, tail
+
+
 def test_open_task_line_inside_scope_of_a_done_card_is_left_alone(tmp_path, monkeypatch):
     """Ambiguous notice (two Open task lines): unchanged, never guessed."""
     from hermes_cli.kanban_stale_ask import refresh_stale_ask
