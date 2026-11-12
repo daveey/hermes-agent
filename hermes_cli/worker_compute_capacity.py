@@ -98,6 +98,12 @@ def occupied_owners(root: Path, owners: dict[str, Owner], active: set[Owner]) ->
     return occupied
 
 
+def pool_path() -> Path:
+    import os
+    uid = os.getuid()
+    return CGROUP_ROOT / 'user.slice' / f'user-{uid}.slice' / f'user@{uid}.service' / 'hermes.slice' / 'hermes-kanban.slice'
+
+
 def worker_enabled() -> bool:
     """Read installation policy, never a card's environment or profile override."""
     from hermes_constants import get_default_hermes_root

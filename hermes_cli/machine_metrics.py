@@ -70,7 +70,7 @@ def _mem_used_pct() -> Optional[float]:
     return None
 
 
-def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[int]:
+def active_card_runs(exclude=None, detail: Optional[dict] = None, *, owner_output=None) -> Optional[int]:
     """All profiles share the kanban root. Count its execution boards, not replicas.
 
     Unreadable/schema-unknown boards invalidate the whole sample. Conservative
@@ -88,6 +88,7 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[in
         default = kb.kanban_home() / "kanban.db"
         paths = [default, *(p for _, p in named_board_db_files())]
         total = excluded = 0
+        owners = set()
         seen = set()
         for path in paths:
             try:
@@ -112,9 +113,11 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[in
                     own = db.execute("SELECT gateway_id FROM kanban_sync_state LIMIT 1").fetchone()
                     if own is None or not own[0]:
                         return None
-                    total += db.execute("SELECT count(*) FROM tasks WHERE status='running' AND "
+                    rows = db.execute("SELECT id FROM tasks WHERE status='running' AND "
                                         "(claim_lock IS NOT NULL OR lease_holder IS NULL OR lease_holder=?)",
-                                        (own[0],)).fetchone()[0]
+                                        (own[0],)).fetchall()
+                    ids = {row[0] for row in rows}
+                    total += len(rows)
                     if exclude is not None and identity == tuple(exclude.db_identity) and own[0] == exclude.gateway_id:
                         from hermes_cli.kanban_grant_echo import match_rows
                         matched = match_rows(db, exclude)
@@ -122,18 +125,26 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[in
                             return None  # the proven row moved or duplicated under us: unknown, fail closed
                         total -= len(matched)
                         excluded += len(matched)
+                        if matched:
+                            ids.discard(exclude.task_id)
                 else:
-                    total += db.execute("SELECT count(*) FROM tasks WHERE status='running'").fetchone()[0]
+                    ids = {row[0] for row in db.execute("SELECT id FROM tasks WHERE status='running'")}
+                    total += len(ids)
                 if detail is not None and "pools" in detail:
                     from hermes_cli.kanban_admission_pools import board_pools
                     counts = board_pools(db, own=own[0] if own else None, excluded=matched,
                                          origins=detail.get("capacity_origins"))
                     for pool, count in counts.items():
                         detail["pools"][pool] += count
+                if owner_output is not None:
+                    from hermes_cli.kanban_db_sync import board_slug_for_path
+                    owners.update((board_slug_for_path(str(path)), task) for task in ids)
             finally:
                 db.close()
         if detail is not None:
             detail["excluded"] = excluded
+        if owner_output is not None:
+            owner_output.update(owners)
         return total
     except (OSError, sqlite3.Error, ValueError):
         return None

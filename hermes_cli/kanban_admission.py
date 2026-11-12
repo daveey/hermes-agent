@@ -37,6 +37,10 @@ def hub_cpu_advisory(task_id=None, *, conn=None):
     from hermes_cli import machine_cpu_metrics as cpu
     from hermes_cli import machine_metrics
 
+    from hermes_cli.worker_resource_admission import refusal
+    if reason := refusal():
+        _defer(task_id, reason)
+        return reason
     state, limit = cpu.root_limit()
     if state == cpu.OFF:
         return None
@@ -136,6 +140,9 @@ def _final_hub_gate(gate, started=None, *, conn=None, task_id=None):
     from hermes_cli import machine_cpu_metrics as cpu
 
     echo = getattr(gate, "echo", None)
+    from hermes_cli.worker_resource_admission import refusal
+    if reason := refusal(echo):
+        return reason, None
     state, limit = cpu.root_limit()
     if state == cpu.OFF:
         return None, None
