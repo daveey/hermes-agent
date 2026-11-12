@@ -1,4 +1,6 @@
 """Tool reads must see a foreign parent without importing it into the live board."""
+from contextlib import closing
+import gc
 import json
 
 import pytest
@@ -11,6 +13,10 @@ from tools import kanban_tools as kt
 
 @pytest.fixture
 def boards(tmp_path, monkeypatch):
+    return _make_boards(tmp_path, monkeypatch)
+
+
+def _make_boards(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -20,13 +26,33 @@ def boards(tmp_path, monkeypatch):
     kb.init_db()
     shadow = home / "kanban" / sync.SHADOW_DIR / "default.db"
     shadow.parent.mkdir(parents=True, exist_ok=True)
-    with kbc.connect(shadow) as replica:
+    # Commit, then close before returning: a sqlite context manager alone
+    # leaves WAL checkpointing to GC, racing callers' byte-level snapshots.
+    with closing(kbc.connect(shadow)) as replica, replica:
         tid = kb.create_task(replica, title="Foreign parent", assignee="default")
         kb.add_comment(replica, tid, author="owner", body="Parent evidence")
         if "created_on" not in {r[1] for r in replica.execute("PRAGMA table_info(tasks)")}:
             replica.execute("ALTER TABLE tasks ADD COLUMN created_on TEXT")
         replica.execute("UPDATE tasks SET created_on = 'owner-gateway' WHERE id = ?", (tid,))
     return tid, shadow
+
+
+def test_replica_fixture_settles_wal_before_read(tmp_path, monkeypatch):
+    # Force the formerly timing-dependent connection finalizer to run only
+    # after the byte snapshot, just as it can during the first show call.
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        tid, shadow = _make_boards(tmp_path, monkeypatch)
+        before = shadow.read_bytes()
+        gc.collect()
+        assert shadow.read_bytes() == before
+        out = json.loads(kt._handle_show({"task_id": tid}))
+        assert out["source"] == "replica"
+        assert shadow.read_bytes() == before
+    finally:
+        if was_enabled:
+            gc.enable()
 
 
 def test_foreign_parent_read_is_labelled_and_does_not_import(boards):
