@@ -37,14 +37,13 @@ def _backoff(ended_at, count, *, cap=None):
     return valid_deadline((ended if ended is not None else time.time()) + delay)
 
 
-def episode(conn, task_id, *, run_id=None):
-    from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_quota_receipt import receipt_deadline, receipt_route, receipt_unconfirmed
+def _episode_runs(conn, task_id, run_id=None):
+    """This replica's consecutive rate_limited runs ending at *run_id* (default: the latest), newest first."""
     runs = []
     bound = conn.execute("SELECT ended_at,id FROM task_runs WHERE task_id=? AND id=? AND ended_at IS NOT NULL",
                          (task_id, run_id)).fetchone() if run_id is not None else None
     if run_id is not None and bound is None:
-        return None
+        return runs
     from hermes_cli.kanban_quota_episode_release import released_run
     released = released_run(conn, task_id)  # a quota_episode_released event closes every run up to it
     for row in conn.execute(
@@ -54,6 +53,13 @@ def episode(conn, task_id, *, run_id=None):
         if row['outcome'] != 'rate_limited' or (released is not None and row['id'] <= released):
             break
         runs.append(row)
+    return runs
+
+
+def episode(conn, task_id, *, run_id=None):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_quota_receipt import receipt_deadline, receipt_route, receipt_unconfirmed
+    runs = _episode_runs(conn, task_id, run_id)
     if not runs:
         return None
     latest = runs[0]
@@ -114,24 +120,33 @@ def _disproved(wall, now, memo):
 
 def _unhinted(conn, task_id, wall):
     """*wall* with its disproved hint rejected: it keeps only the doubling backoff ('retry after 5s' x N
-    must stay paced). Episodes stored before ``backoff_until`` recompute it from their latest run."""
+    must stay paced). Episodes stored before ``backoff_until`` recompute it from their latest run, read
+    through this replica's run id (a synced payload names the recording gateway's); a run this replica
+    lacks anchors at the wall's recording time, never at now, which would renew the backoff each read."""
+    from hermes_cli.kanban_quota_episode_release import _local_run
     backoff = wall.get('backoff_until')
     if not isinstance(backoff, (int, float)):
         row = conn.execute('SELECT ended_at FROM task_runs WHERE task_id=? AND id=?',
-                           (task_id, wall.get('run_id'))).fetchone()
+                           (task_id, _local_run(conn, task_id, wall))).fetchone()
         count = wall.get('count') if isinstance(wall.get('count'), int) else 1
-        backoff = _backoff(row['ended_at'] if row else None, count)
+        backoff = _backoff(row['ended_at'] if row else _wall_origin(conn, task_id, wall)[0], count)
     until = min(wall['until'], backoff) if backoff is not None else wall['until']
     return {**wall, 'until': until, 'hinted': False}
 
 
 def _outstanding(conn, task_id, state, now):
-    """Every wall of this episode still before its deadline (earlier providers included)."""
+    """Every wall of this episode still before its deadline (earlier providers included).
+
+    The episode starts at this replica's first run of it: a stored *state* names the recording gateway's
+    run ids, which compared against local event rows also took in walls of earlier (released) episodes."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_quota_episode_release import _local_run
     out = [state] if state['until'] > now else []
+    latest = _local_run(conn, task_id, state)
+    runs = _episode_runs(conn, task_id, latest)
     for row in conn.execute(
         "SELECT payload FROM task_events WHERE task_id=? AND kind='quota_episode' AND run_id>=?",
-        (task_id, state['episode_id'])):
+        (task_id, runs[-1]['id'] if runs else latest)):
         prior = kb._json_dict(row[0])
         if isinstance(prior.get('until'), (int, float)) and prior['until'] > now:
             out.append(prior)
