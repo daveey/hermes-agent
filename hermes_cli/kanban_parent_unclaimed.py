@@ -51,6 +51,11 @@ def _place(conn, parent_id: str) -> dict[str, Any]:
 def _queue_words(place: dict[str, Any]) -> str:
     if place.get("lane") == "worker_pool":
         return f"waiting for a pool worker ({place.get('reason') or 'no reason recorded'})"
+    if place.get("lane") in ("machine", "unplaceable"):
+        # A card that runs on another machine has no local queue place; "queue place unknown" hid a drain or a
+        # hold on that machine from the chat (t_01a1cca8ed755919). [daveey]
+        from hermes_cli import kanban_queue_position as kqp
+        return kqp.headline(place) if place["lane"] == "machine" else str(kqp.describe(place))
     ahead = place.get("ahead")
     words = f"{ahead} card(s) ahead of it" if ahead is not None else "queue place unknown"
     if place.get("running") is not None and place.get("limit") is not None:

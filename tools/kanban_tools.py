@@ -25,7 +25,7 @@ from hermes_cli.kanban_capabilities import check_tool_create, declaration_requir
 from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc
 from tools.kanban_tools_placement import (_local_placement, _machine_placement, _marker_placement_fields, _persisted_session_id,
                                           _create_session_id, _placement_origin, _placement_refused, _runs_where,
-                                          _effective_board_args, _origin_enrollment)
+                                          _effective_board_args, _origin_enrollment, _pin_drain_note)
 from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_park_args import (_blocker_id_arg, _clear_blocker_arg, _blocker_scope_args, _park_guard,
                                           _wake_check_args, _wake_check_echo)
@@ -1732,6 +1732,8 @@ def _handle_create(args: dict, **kw) -> str:
                 extra["placement"] = _machine_placement(pinned_machine, runs_on)
                 extra["note"] = (f"Created here as {new_tid}; it runs on {pinned_machine} via the board lease "
                                  f"(runs_on={runs_on}). The pin was honoured: do not re-create it.")
+                if drain := _pin_drain_note(conn, new_tid):  # the target can't claim it yet (t_01a1cca8ed755919)
+                    extra["note"] += " " + drain
         # Every result says where the card runs (a caller that can't tell re-creates it or never learns it is stranded)
         extra.update(runs_where=_runs_where(runs_on, pinned_machine, marker_placement),  # + contract advisory [daveey]
                      **_contract_cli.create_warning_fields(kb.get_task(conn, new_tid)))

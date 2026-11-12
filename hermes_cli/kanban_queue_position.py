@@ -57,6 +57,28 @@ def _runs_on(conn: sqlite3.Connection, task_id: str) -> Optional[list[str]]:
     return _parse(row[0]) if row is not None else None
 
 
+# A drain flag older than this is not evidence: the machine stopped reporting, and a stale flag would hide that.
+DRAIN_SAMPLE_MAX_AGE_S = 15 * 60
+
+
+def draining(entry: Optional[dict[str, Any]], *, now: Optional[float] = None) -> Optional[dict[str, Any]]:
+    """``{}`` or ``{"until_ms": <announced bound>}`` when the machine's latest Board metrics sample (at most
+    :data:`DRAIN_SAMPLE_MAX_AGE_S` old) says a core-update drain holds its dispatcher; None otherwise. [daveey]
+
+    t_01a1cca8ed755919: the hub's dispatcher held every claim for a core-update drain from 13:49 to 14:14 PST
+    (11-11). A MacBook card pinned ``machine:hub`` at 13:49:38 read "queued, not stuck" for 20 min, then was
+    archived as lost. Each machine reports ``drain_active`` (``machine_drain_metrics``) while a drain-hold file
+    exists, so the origin can say why instead."""
+    import time
+    metrics = (entry or {}).get("metrics") or {}
+    at, until = metrics.get("at"), metrics.get("drain_until_ms")
+    if metrics.get("drain_active") != 1 or not isinstance(at, (int, float)):
+        return None
+    if ((time.time() if now is None else now) * 1000 - at) > DRAIN_SAMPLE_MAX_AGE_S * 1000:
+        return None
+    return {"until_ms": int(until)} if isinstance(until, (int, float)) and until > 0 else {}
+
+
 def placement(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]]:
     """For a card whose ``runs_on`` this machine does not satisfy, on a synced board with a readable machine
     registry: ``{"lane": "unplaceable", runs_on, missing, machines}`` when no known machine satisfies it (``missing``
@@ -91,6 +113,12 @@ def placement(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]
         held = [name for name in fits if (machines.get(name) or {}).get("hold")]
         if held:  # a held machine imports and leases nothing: the wait has no end until an operator releases it
             place["held"] = held
+        drains = {name: d for name in fits if (d := draining(machines.get(name))) is not None}
+        if drains:  # a draining machine's dispatcher imports and claims nothing until its drain ends
+            place["draining"] = sorted(drains)
+            until = [d["until_ms"] for d in drains.values() if "until_ms" in d]
+            if until:
+                place["drain_until_ms"] = max(until)
         return place
     every = set().union(*carried.values())
     return {"lane": "unplaceable", "runs_on": labels, "missing": [lb for lb in labels if lb not in every],
@@ -151,6 +179,32 @@ _NOT_STUCK = ("queued, not stuck: check placement and available capacity first; 
               "Only consider a bounded relative priority bump when below the lane median")
 
 
+def _all_draining(place: dict[str, Any]) -> bool:
+    return bool(place.get("draining")) and set(place["draining"]) >= set(place.get("machines") or [])
+
+
+def headline(place: dict[str, Any]) -> str:
+    """The wait itself for a ``machine`` lane, without advice: ``describe`` and the chat-wait notice share it."""
+    machines, runs_on = ", ".join(place.get("machines") or []), ", ".join(place.get("runs_on") or [])
+    if _all_draining(place):
+        until = place.get("drain_until_ms")
+        bound = (f"announced bound {_stamp_ms(until)}, not guaranteed" if until else "end time unknown")
+        return (f"waiting for {machines} (runs_on {runs_on}), which is DRAINING for a core update (Board registry "
+                f"metrics; {bound}): its dispatcher imports and claims no cards until the drain ends")
+    words = f"waiting for {machines} (runs_on {runs_on}); this machine cannot lease it"
+    if place.get("draining"):
+        words += f" ({', '.join(place['draining'])} draining for a core update)"
+    return words
+
+
+def _stamp_ms(ms: Any) -> str:
+    from datetime import UTC, datetime
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "unknown"
+
+
 def describe(place: Optional[dict[str, Any]]) -> Optional[str]:
     """One line for card reads (``kanban_show`` ``queue_note``, ``hermes kanban show``) saying what the card waits
     for, so "ready, no run" never reads as stuck. [daveey] kanban-7d720d4ab8: a chat saw only a null
@@ -178,9 +232,12 @@ def describe(place: Optional[dict[str, Any]]) -> Optional[str]:
                 f"machine-audit {place['held'][0]}` shows who set it and when). Not started by waiting: re-place it "
                 "(`hermes kanban move <id> --runs-on <label> --reason ...`) or wait for the release; do not clear "
                 "a hold to start a card")
+    if lane == "machine" and _all_draining(place):
+        return (headline(place) + ". Not lost and not refused: it starts when the drain ends. If it cannot wait, "
+                "re-place it (`hermes kanban move <id> --runs-on <label> --reason ...`); do not re-create it, "
+                "clear the drain, or run its work outside the dispatcher")
     if lane == "machine":
-        return (f"waiting for {', '.join(place.get('machines') or [])} (runs_on "
-                f"{', '.join(place.get('runs_on') or [])}); this machine cannot lease it. " + _NOT_STUCK)
+        return headline(place) + ". " + _NOT_STUCK
     if lane == "worker_pool":
         return f"waiting for a pool worker ({place.get('reason') or 'no reason recorded'}). " + _NOT_STUCK
     ahead = place.get("ahead")

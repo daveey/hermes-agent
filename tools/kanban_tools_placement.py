@@ -149,6 +149,25 @@ def _machine_placement(machine: str, runs_on: list[str]) -> dict:
     return {"where": "local", "runs_on": runs_on, "machine": machine, "why": why}
 
 
+def _pin_drain_note(conn, task_id: str):
+    """One sentence when every machine the new card can run on is draining for a core update; else None.
+
+    The create reply promised "it runs on hub" while the hub's dispatcher held all claims for a drain, and the
+    caller archived the card as lost (t_01a1cca8ed755919). Never raises. [daveey]"""
+    try:
+        from hermes_cli import kanban_queue_position as kqp
+        place = kqp.placement(conn, task_id)
+        if place is None or place.get("lane") != "machine" or not place.get("draining"):
+            return None
+        if not set(place["draining"]) >= set(place.get("machines") or []):
+            return None
+        return (kqp.headline(place) + ". It starts when the drain ends; `kanban_show` reports the wait. "
+                "Re-place it only if it cannot wait.")
+    except Exception:
+        logger.debug("drain note for %s failed", task_id, exc_info=True)
+        return None
+
+
 def _runs_where(runs_on, pinned_machine, marker_placement) -> str:
     """Where a card created on this board runs, for the kanban_create result. Never raises."""
     if marker_placement and marker_placement.get("placement_policy"):
