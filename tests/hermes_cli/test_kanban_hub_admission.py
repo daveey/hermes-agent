@@ -156,6 +156,10 @@ def test_concurrent_cross_board_claims_obey_origin_and_pool_caps(board, monkeypa
     for _ in range(4):
         with ThreadPoolExecutor(max_workers=4) as executor:
             list(executor.map(attempt, candidates))
+    # Concurrent rounds may admit fewer than the free slots (losers of admission.lock defer as busy and retry next
+    # tick); a final uncontended pass admits every remaining admissible card, so only the caps limit the result.
+    for candidate in candidates:
+        attempt(candidate)
     detail = {"pools": {"regular": 0, "priority": 0}, "capacity_origins": {}}
     assert mm.active_card_runs(detail=detail) == 7 + expected
     assert detail["pools"] == {"regular": 7, "priority": expected}

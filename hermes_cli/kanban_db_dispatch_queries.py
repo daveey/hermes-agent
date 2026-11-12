@@ -32,11 +32,10 @@ DISPATCH_ORDER = (
 
 def lane_rows(conn: sqlite3.Connection, status: str, *, marked_first: bool = False) -> list[sqlite3.Row]:
     """Unclaimed rows of one lane in dispatch order; optional pool ordering keeps priority ties per class."""
-    prefix = "admission_class IN ('capacity', 'urgent') DESC, " if marked_first else ""
     rows = conn.execute(
         "SELECT id, assignee, admission_class FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
-        f"ORDER BY {prefix}{DISPATCH_ORDER}"
+        f"ORDER BY {DISPATCH_ORDER}"
     ).fetchall()
     from hermes_cli.kanban_dispatch_priority import order_with_remote_waiters
     rows = order_with_remote_waiters(conn, rows)

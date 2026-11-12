@@ -72,7 +72,7 @@ def test_reporter_rechecks_policy_after_cpu_sample(monkeypatch, changed):
 
 
 @pytest.mark.parametrize("doc", [None, [], {}, {"kanban": []}, {"kanban": {"admission": []}},
-    *({"kanban": {"max_in_progress": cap, "admission": POLICY["kanban"]["admission"]}} for cap in [True, -1, 257]),
+    *({"kanban": {"max_in_progress": cap, "admission": POLICY["kanban"]["admission"]}} for cap in [True, -1, 0, 257]),
     *({"kanban": {"max_in_progress": 7, "admission": {**POLICY["kanban"]["admission"], key: value}}}
       for key, value in [("cpu_busy_below_pct", None), ("priority_slots", 0), ("priority_slots", True),
                          ("priority_slots", 257), ("priority_cpu_busy_below_pct", 101)])])

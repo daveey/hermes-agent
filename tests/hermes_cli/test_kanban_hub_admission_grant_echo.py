@@ -184,6 +184,18 @@ def test_frozen_counter_shape_own_lockless_echo_counts_foreign_does_not(rig):
     assert mm.active_card_runs() == 6
 
 
+def test_pool_census_skips_foreign_lockless_holder_like_the_scalar(rig):
+    rig.fill(6)
+    foreign = rig.card(title="foreign")
+    with kb.write_txn(rig.conn):
+        rig.conn.execute("UPDATE kanban_sync_state SET applying = 1")
+        rig.conn.execute("UPDATE tasks SET status='running', lease_holder='worker-2' WHERE id=?", (foreign,))
+        rig.conn.execute("UPDATE kanban_sync_state SET applying = 0")
+    detail = {"pools": {"regular": 0, "priority": 0}}
+    assert mm.active_card_runs(detail=detail) == 6
+    assert detail["pools"] == {"regular": 6, "priority": 0}
+
+
 @pytest.mark.parametrize("lane", LANES)
 def test_six_locals_plus_this_claims_own_grant_echo_admits_exactly_one_run(rig, lane):
     """RED before the fix: refused ``hub_capacity_full`` (the claim's own unused grant read as the 7th run)."""
