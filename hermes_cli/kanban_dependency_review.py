@@ -255,7 +255,15 @@ def is_review_result(metadata, summary, captured) -> bool:
 
 
 def _historical_parent(conn, parent_id, parked_at):
-    """Legacy checkpoints: exempt only provably finished, unchanged dependencies."""
+    """Use local custody first; eviction may require verified Board history."""
+    if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (parent_id,)).fetchone() is not None:
+        return _historical_parent_history(conn, parent_id, parked_at)
+    from hermes_cli.kanban_dependency_history import replica_historical_parent
+    return replica_historical_parent(conn, parent_id, parked_at)
+
+
+def _historical_parent_history(conn, parent_id, parked_at):
+    """Exempt only provably finished, unchanged dependencies in one snapshot."""
     from hermes_cli import kanban_db as kb
 
     row = conn.execute(
