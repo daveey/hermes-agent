@@ -22,6 +22,7 @@ def checkpoint(conn, task_id, expected_run_id):
     """Capture scope inside block_task's transaction, before closing the owner run."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_dispatch import _RESPAWN_GUARD_PR_URL_RE
+    from hermes_cli.kanban_db_dispatch_pr_policy import norm_pr
 
     if expected_run_id is None:
         return None
@@ -36,7 +37,7 @@ def checkpoint(conn, task_id, expected_run_id):
     parents = kb.parent_ids(conn, task_id)
     urls = set()
     for comment in conn.execute("SELECT body FROM task_comments WHERE task_id = ?", (task_id,)):
-        urls.update(u.lower() for u in _RESPAWN_GUARD_PR_URL_RE.findall(comment["body"] or ""))
+        urls.update(norm_pr(u) for u in _RESPAWN_GUARD_PR_URL_RE.findall(comment["body"] or ""))
     if not parents or not urls:
         return None
     awaited = [p for p, status in kb.parent_states(conn, task_id)
@@ -109,7 +110,13 @@ def _completed_review_run(conn, parent_id, parked_at, owner_run_id):
 
 
 def _named_prs(data, captured: set[str]) -> set[str] | None:
-    """Absent is checkpoint-bound; present must resolve uniquely, or fail closed."""
+    """Absent is checkpoint-bound; present must resolve uniquely, or fail closed.
+
+    ``captured`` holds :func:`norm_pr` keys, so a renamed repository's URL or
+    ``repo#N`` ref matches its canonical form (and vice versa); never number-only.
+    """
+    from hermes_cli.kanban_db_dispatch_pr_policy import canonical_repo, norm_pr
+
     key = "pr" if "pr" in data else "reviewed_pr"
     if key not in data:
         return None
@@ -117,7 +124,7 @@ def _named_prs(data, captured: set[str]) -> set[str] | None:
     if type(pr) is int and pr > 0:
         ref = f"#{pr}"
     elif isinstance(pr, str):
-        ref = pr.strip().rstrip("/").lower()
+        ref = norm_pr(pr)
     else:
         return set()
     if ref in captured:
@@ -126,8 +133,9 @@ def _named_prs(data, captured: set[str]) -> set[str] | None:
     if match is None:
         return set()
     suffix = "/pull/" + match["num"]
+    repo = canonical_repo(match["repo"]) if match["repo"] else None
     matches = {u for u in captured if u.endswith(suffix) and (
-        match["repo"] is None or u == "https://github.com/" + match["repo"] + suffix
+        repo is None or u == "https://github.com/" + repo + suffix
     )}
     return matches if len(matches) == 1 else set()
 
@@ -252,18 +260,22 @@ def is_review_result(metadata, summary, captured) -> bool:
     prose and names the PR is held too, and a review that keeps its outcome under other
     keys is treated as a prerequisite. [daveey]
     """
+    from hermes_cli.kanban_db_dispatch import _RESPAWN_GUARD_PR_URL_RE
+    from hermes_cli.kanban_db_dispatch_pr_policy import norm_pr
+
     if (any(key in metadata for key in _REVIEW_KEYS)
             or any(key.startswith("reviewed_sha_prefix") for key in metadata)
             or _SUMMARY_VERDICT.search(summary or "")):
         return True
-    prs = {u.rstrip("/").lower() for u in captured or () if isinstance(u, str)}
+    prs = {norm_pr(u) for u in captured or () if isinstance(u, str)}
     if not prs or not set(metadata) <= _LOST_REVIEW_KEYS:
         return False
     if _named_prs(metadata, prs):
         return True
     text = (summary or "").lower()
     nums = set(_SUMMARY_PR_NUM.findall(text))
-    return any(u in text or u.rsplit("/", 1)[-1] in nums for u in prs)
+    named = {norm_pr(u) for u in _RESPAWN_GUARD_PR_URL_RE.findall(text)}
+    return any(u in text or u in named or u.rsplit("/", 1)[-1] in nums for u in prs)
 
 
 def _historical_parent(conn, parent_id, parked_at):
@@ -322,6 +334,7 @@ def _checkpoint_matches_run(evidence, run):
 def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     """One continuation only: claiming any new run consumes the park's permission."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_dispatch_pr_policy import norm_pr
 
     row = conn.execute(
         "SELECT e.payload, e.created_at, r.*, t.assignee "
@@ -344,8 +357,9 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     captured = evidence.get("prs")
     if not isinstance(captured, list) or not all(isinstance(u, str) for u in captured):
         return False
-    urls = {u.rstrip("/").lower() for u in pr_urls}
-    if not urls or not urls.issubset(set(captured)):
+    captured_set = {norm_pr(u) for u in captured}
+    urls = {norm_pr(u) for u in pr_urls}
+    if not urls or not urls.issubset(captured_set):
         return False
     parked_at = kb._to_epoch(row["created_at"])
     if parked_at is None:
@@ -353,10 +367,9 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     parents = _awaited_parents(conn, parents, evidence, parked_at)
     if not parents:
         return False
-    urls -= {u.rstrip("/").lower() for u in discharged}
+    urls -= {norm_pr(u) for u in discharged}
     if not urls:
         return False
-    captured_set = {u.rstrip("/").lower() for u in captured}
     reviewed = set().union(*(_reviewed_prs(conn, p, parked_at, row["id"], captured_set) for p in parents))
     if urls.issubset(reviewed):
         return True

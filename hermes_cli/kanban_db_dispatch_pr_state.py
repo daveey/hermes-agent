@@ -23,6 +23,8 @@ import subprocess
 import time
 from typing import Iterable, Optional
 
+from hermes_cli.kanban_db_dispatch_pr_policy import norm_pr
+
 logger = logging.getLogger(__name__)
 
 TERMINAL_STATES = frozenset({"MERGED", "CLOSED"})
@@ -74,7 +76,7 @@ def _gh_pr_state(url: str) -> Optional[str]:
     except (ValueError, AttributeError):
         return None
     state = state.upper() if isinstance(state, str) and state else None
-    key = url.rstrip("/").lower()
+    key = norm_pr(url)
     _rejections.pop(key, None)
     if state == "OPEN":
         from hermes_cli.kanban_db_dispatch_pr_rejection import rejection_reason
@@ -88,7 +90,7 @@ def _gh_pr_state(url: str) -> Optional[str]:
 
 def pr_state(url: str) -> Optional[str]:
     """Cached :func:`_gh_pr_state`."""
-    key = url.rstrip("/").lower()
+    key = norm_pr(url)
     now = time.monotonic()
     hit = _cache.get(key)
     if hit is not None and (hit[1] is None or now < hit[1]):
@@ -107,7 +109,7 @@ def all_prs_finished(urls: Iterable[str]) -> bool:
     """True only when ``urls`` is non-empty and every PR is MERGED or CLOSED.
 
     An unknown state (gh failure) counts as unfinished: duplicate-PR risk fails closed."""
-    seen = {u.rstrip("/").lower(): u for u in urls}
+    seen = {norm_pr(u): u for u in urls}
     if not seen:
         return False
     return all(pr_state(u) in TERMINAL_STATES for u in seen.values())
@@ -177,7 +179,7 @@ def _comment_rejections(conn: sqlite3.Connection, task_id: str, urls: Iterable[s
 
     for url in dict.fromkeys(urls):
         if pr_state(url) == "REJECTED":
-            comment_rejection(conn, task_id, url, _rejections[url.rstrip("/").lower()])
+            comment_rejection(conn, task_id, url, _rejections[norm_pr(url)])
 
 
 # ``add_comment`` stamps the row before taking the write lock and its ``commented`` event
@@ -454,7 +456,7 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     """
     from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_dispatch as _kbd
-    from hermes_cli.kanban_db_dispatch_pr_policy import holding_urls, norm_pr
+    from hermes_cli.kanban_db_dispatch_pr_policy import holding_urls
     from hermes_cli.kanban_db_dispatch_rerun import is_handoff_event, reopened_after
 
     foreign_ids = _foreign_pr_comment_ids(conn, task_id)
@@ -494,7 +496,7 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
         from hermes_cli.kanban_db_dispatch_pr_rejection import comment_rejection
         for url in dict.fromkeys(pr_urls):
             if pr_state(url) == "REJECTED":
-                comment_rejection(conn, task_id, url, _rejections[url.rstrip("/").lower()])
+                comment_rejection(conn, task_id, url, _rejections[norm_pr(url)])
         return None
     from hermes_cli.kanban_hold_release import released_after
     if released_after(conn, task_id, max(pr_times), pr_urls):
@@ -521,7 +523,7 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
         from hermes_cli.kanban_db_dispatch_pr_rejection import comment_rejection
         for url, state in states.items():
             if state == "REJECTED":
-                comment_rejection(conn, task_id, url, _rejections[url.rstrip("/").lower()])
+                comment_rejection(conn, task_id, url, _rejections[norm_pr(url)])
         return None
     return "active_pr"
 

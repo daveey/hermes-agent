@@ -101,3 +101,35 @@ def test_no_run_receipt(board):
     with kbc.connect() as conn:
         task = kb.create_task(conn, title="No history", assignee="dev")
         assert not release.released_after(conn, task, 0, [cases.reviews.PR])
+
+
+def test_renamed_repo_spellings_share_scope_and_receipt(board, monkeypatch):
+    """A renamed repo's URL and its canonical URL are one PR to scope and receipt. [daveey]"""
+    from hermes_cli import kanban_db_dispatch_pr_policy as policy
+    monkeypatch.setattr(policy, "_alias_cache", None, raising=False)
+    monkeypatch.setattr(policy, "_configured_aliases", lambda: {"example/old": "example/repo"}, raising=False)
+    canon = cases.reviews.PR
+    old = canon.replace("example/repo", "Example/Old")
+    with kbc.connect() as conn:
+        task, _, _ = cases.held(conn, monkeypatch)
+        # Legacy checkpoint spelled with the old repo; the review names the canonical one.
+        event = conn.execute("SELECT id,payload FROM task_events WHERE task_id=? AND kind='dependency_wait'",
+                             (task,)).fetchone()
+        payload = json.loads(event["payload"])
+        payload["review_checkpoint"]["prs"] = [old.lower()]
+        conn.execute("UPDATE task_events SET payload=? WHERE id=?", (json.dumps(payload), event["id"]))
+        conn.commit()
+        assert release._scope(conn, task)[1] == {canon}
+        now = int(time.time()) + 2
+        monkeypatch.setattr(time, "time", lambda: now)
+        assert wake._unblock(task).get("ok")
+        assert release.released_after(conn, task, now - 1, [old])
+        receipt = conn.execute("SELECT id,payload FROM task_events WHERE task_id=? AND kind='hold_released'",
+                               (task,)).fetchone()
+        data = json.loads(receipt["payload"])
+        data["prs"] = [old]
+        conn.execute("UPDATE task_events SET payload=? WHERE id=?", (json.dumps(data), receipt["id"]))
+        conn.commit()
+        assert release.released_after(conn, task, now - 1, [canon])
+        assert not release.released_after(conn, task, now - 1, ["https://github.com/example/other/pull/10"])
+    policy._alias_cache = None

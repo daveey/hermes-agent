@@ -24,8 +24,64 @@ _NONBLOCKING_RE = re.compile(
 )
 
 
+# Renamed/transferred GitHub repositories: old ``owner/repo`` -> canonical ``owner/repo``.
+# Cards keep naming a PR by the URL they were given while ``gh`` reports the canonical
+# one; both name the same pull. Only exact, known repo identities are collapsed: matching
+# never falls back to the bare pull number across repositories. Extend per host with
+# ``kanban.github_repo_aliases`` in config.yaml.
+BUILTIN_GITHUB_REPO_ALIASES = {"daveey/hermes": "softmax-universe/daveey-hermes"}
+_REPO_RE = re.compile(r"[\w.-]+/[\w.-]+")
+_PULL_URL_RE = re.compile(r"https?://github\.com/(?P<repo>[^/\s]+/[^/\s]+)(?P<tail>/pull/\d+)")
+_ALIAS_TTL_SECONDS = 60.0
+_alias_cache: tuple[float, dict[str, str]] | None = None
+
+
+def _configured_aliases() -> dict:
+    """``kanban.github_repo_aliases`` from config.yaml; ``{}`` when unreadable."""
+    from ruamel.yaml.error import YAMLError
+
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+    except (ImportError, OSError, ValueError, TypeError, AttributeError, YAMLError):
+        return {}  # config errors can carry secrets: log nothing, built-ins only
+    kanban = cfg.get("kanban") if isinstance(cfg, dict) else None
+    aliases = kanban.get("github_repo_aliases") if isinstance(kanban, dict) else None
+    return aliases if isinstance(aliases, dict) else {}
+
+
+def repo_aliases() -> dict[str, str]:
+    """Lowercased alias -> canonical repo map (built-ins plus valid config entries)."""
+    global _alias_cache
+    import time
+
+    now = time.monotonic()
+    if _alias_cache is not None and now < _alias_cache[0]:
+        return _alias_cache[1]
+    merged = dict(BUILTIN_GITHUB_REPO_ALIASES)
+    for old, new in _configured_aliases().items():
+        if (isinstance(old, str) and isinstance(new, str)
+                and _REPO_RE.fullmatch(old.strip()) and _REPO_RE.fullmatch(new.strip())):
+            merged[old.strip().lower()] = new.strip().lower()
+    aliases = {old: new for old, new in merged.items() if old != new}
+    _alias_cache = (now + _ALIAS_TTL_SECONDS, aliases)
+    return aliases
+
+
+def canonical_repo(repo: str) -> str:
+    """Canonical lowercased ``owner/repo`` for a possibly renamed repository."""
+    repo = repo.lower()
+    return repo_aliases().get(repo, repo)
+
+
 def norm_pr(url: str) -> str:
-    return url.rstrip("/").lower()
+    """The one comparison key for a pull URL: lowercased, no trailing slash, and a
+    renamed repository's URL mapped to its canonical repository."""
+    key = url.strip().rstrip("/").lower()
+    match = _PULL_URL_RE.fullmatch(key)
+    if match is None:
+        return key
+    return "https://github.com/" + canonical_repo(match["repo"]) + match["tail"]
 
 
 def _says_pull_does_not_block(body: str) -> bool:
@@ -66,14 +122,15 @@ def _foreign_live_contract_keys(conn: sqlite3.Connection, task_id: str, keys: se
     """
     if not keys:
         return set()
-    placeholders = ",".join("?" * len(keys))
+    # Compare canonical keys in Python: a renamed repo's contract URL and the
+    # canonical mention are the same pull, which SQL lower/rtrim cannot see.
     rows = conn.execute(
-        "SELECT lower(rtrim(completion_contract, '/')) FROM tasks "
+        "SELECT completion_contract FROM tasks "
         "WHERE id != ? AND status NOT IN ('done', 'archived') "
-        f"AND lower(rtrim(completion_contract, '/')) IN ({placeholders})",
-        (task_id, *sorted(keys)),
+        "AND lower(completion_contract) LIKE 'http%'",
+        (task_id,),
     ).fetchall()
-    return {row[0] for row in rows}
+    return {norm_pr(row[0]) for row in rows} & keys
 
 
 def holding_urls(conn: sqlite3.Connection, task_id: str, mentions: list[tuple[str, str]]) -> set[str]:

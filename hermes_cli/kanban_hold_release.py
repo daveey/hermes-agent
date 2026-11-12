@@ -10,6 +10,7 @@ import time
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_dependency_review as review
+from hermes_cli.kanban_db_dispatch_pr_policy import norm_pr
 
 
 def _identity(row):
@@ -53,7 +54,7 @@ def _scope(conn, task_id):
     if (not isinstance(captured, list) or not captured
             or not all(isinstance(u, str) and u.startswith("https://github.com/") for u in captured)):
         raise ValueError("hold release requires captured PR scope")
-    captured = {u.rstrip("/").lower() for u in captured}
+    captured = {norm_pr(u) for u in captured}
     covered = set()
     proofs = []
     for parent in parents:
@@ -79,7 +80,7 @@ def _check_publications(conn, task_id, captured):
     for comment in conn.execute("SELECT * FROM task_comments WHERE task_id=?", (task_id,)):
         if comment["id"] in foreign or comment["author"] == "kanban-dispatcher":
             continue
-        urls = {u.rstrip("/").lower() for u in _RESPAWN_GUARD_PR_URL_RE.findall(comment["body"] or "")}
+        urls = {norm_pr(u) for u in _RESPAWN_GUARD_PR_URL_RE.findall(comment["body"] or "")}
         if not urls.issubset(captured):
             raise ValueError("hold release PR publication scope changed")
         at = kb._to_epoch(comment["created_at"])
@@ -135,7 +136,7 @@ def released_after(conn, task_id, since, pr_urls):
     run = conn.execute("SELECT * FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
     if run is None:
         return False
-    urls = {u.rstrip("/").lower() for u in pr_urls}
+    urls = {norm_pr(u) for u in pr_urls}
     for event in conn.execute("SELECT payload, created_at FROM task_events WHERE task_id=? AND kind='hold_released'",
                               (task_id,)):
         data = kb._json_dict(event["payload"])
@@ -147,6 +148,6 @@ def released_after(conn, task_id, since, pr_urls):
                 and review._checkpoint_matches_run(data.get("park"), run)
                 and ("run_uid" in data["park"] or not foreign_copy(conn, task_id))
                 and isinstance(captured, list) and all(isinstance(u, str) for u in captured)
-                and urls and urls.issubset(captured)):
+                and urls and urls.issubset({norm_pr(u) for u in captured})):
             return True
     return False
