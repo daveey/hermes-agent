@@ -91,6 +91,10 @@ def admit(card_fields, *, hub_reason=None) -> Verdict:
     """Deny if the managed subscription pool, rubric or judge is unavailable."""
     sha = ""
     try:
+        from hermes_cli import kanban_comment_relay
+        relay = kanban_comment_relay.verdict(card_fields, hub_reason)
+        if relay is not None:
+            return relay  # a comment relay is denied with its worker route, no model call
         from agent import auxiliary_client as aux
         from agent.model_routing_managed import managed_config
         if managed_config() is None:
