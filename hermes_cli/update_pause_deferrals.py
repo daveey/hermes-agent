@@ -162,11 +162,12 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _own_row(conn, keys: frozenset, legacy: str, own: frozenset):
-    """This host's newest non-archived alarm under one of its ``keys`` (one per name the host has
-    carried: a host that enrolls in the Board mid-streak keeps its hostname-keyed card), or under the
-    pre-host ``legacy`` key when this host created it (a streak open across the upgrade keeps its
-    owner; another host's never). An empty ``created_on`` is a card this board file created."""
+def _own_row(conn, key: str, keys: frozenset, legacy: str, own: frozenset):
+    """This host's newest non-archived alarm under its primary ``key``, or under another of its
+    ``keys`` (one per name the host has carried: a host that enrolls in the Board mid-streak keeps its
+    hostname-keyed card) or the pre-host ``legacy`` key when this host created it (a streak open
+    across the upgrade keeps its owner; another host's never, nor one whose hostname merely matches
+    this host's). An empty ``created_on`` is a card this board file created."""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
     on = "created_on" if "created_on" in cols else "NULL"
     wanted = sorted(keys | {legacy})
@@ -175,7 +176,7 @@ def _own_row(conn, keys: frozenset, legacy: str, own: frozenset):
         f"({','.join('?' * len(wanted))}) AND status != 'archived' ORDER BY created_at DESC, rowid DESC",
         wanted,
     ):
-        if row[2] in keys or not row[3] or row[3] in own:
+        if row[2] == key or not row[3] or row[3] in own:
             return row
     return None
 
@@ -194,7 +195,7 @@ def _report(conn, unit: str, count: int, first_at: str, reason: str) -> str:
     # Serialize lookup + create so overlapping unattended updates cannot create two owners.
     with kb.write_txn(conn, allow_nested=True):
         keys = frozenset({key, *(sib.alarm_key(name, root, unit) for name in own)})
-        row = _own_row(conn, keys, sib.legacy_key(root, unit), own)
+        row = _own_row(conn, key, keys, sib.legacy_key(root, unit), own)
         if row and row[1] not in {"done", "failed", "cancelled"}:
             if count % REFRESH_EVERY == 0 and not conn.execute(
                 "SELECT 1 FROM task_comments WHERE task_id = ? AND author = ? AND body = ?",

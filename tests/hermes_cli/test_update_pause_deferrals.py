@@ -457,3 +457,38 @@ def test_an_open_pre_host_key_card_of_this_host_is_kept(tmp_path, monkeypatch):
         old = kb.create_task(conn, title=sib.TITLE + FLEET, assignee="default", created_by="update-pause",
                              idempotency_key=sib.legacy_key(install_root(), FLEET), body="On `worker-1` ...")
     assert _file(monkeypatch, "worker-1") == old
+
+
+def _foreign_card(key, created_on):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import update_pause_siblings as sib
+    from hermes_cli.kanban_db_connect import connect_closing
+    with connect_closing() as conn:
+        task_id = kb.create_task(conn, title=sib.TITLE + FLEET, assignee="default", created_by="update-pause",
+                                 idempotency_key=key, body=f"On `{created_on}` ...")
+        if "created_on" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
+            conn.execute("ALTER TABLE tasks ADD COLUMN created_on TEXT")  # as a synced board has it
+        conn.execute("UPDATE tasks SET created_on = ? WHERE id = ?", (created_on, task_id))
+        conn.commit()
+    return task_id
+
+
+def test_a_pre_host_key_card_another_host_created_is_not_adopted(tmp_path, monkeypatch):
+    """worker-5's open card under the shared pre-host key is worker-5's, not worker-1's."""
+    from hermes_cli import update_pause_siblings as sib
+    from hermes_cli.update_pause_record import install_root
+    _board(tmp_path, monkeypatch)
+    w5 = _foreign_card(sib.legacy_key(install_root(), FLEET), "worker-5")
+    assert _file(monkeypatch, "worker-1") != w5
+
+
+def test_an_enrolled_host_does_not_adopt_a_foreign_card_under_its_hostname_key(tmp_path, monkeypatch):
+    """Enrolled as gateway ``worker-1``, this host still accepts its hostname-keyed card, but only one
+    it created: another machine that shares the hostname (created_on ``worker-5``) keeps its own."""
+    from hermes_cli import kanban_capability_routing as kcr
+    from hermes_cli import update_pause_siblings as sib
+    from hermes_cli.update_pause_record import install_root
+    _board(tmp_path, monkeypatch)
+    foreign = _foreign_card(sib.alarm_key("ip-10-0-0-1", install_root(), FLEET), "worker-5")
+    monkeypatch.setattr(kcr, "_own_gateway", lambda conn: "worker-1")
+    assert _file(monkeypatch, "ip-10-0-0-1") != foreign
