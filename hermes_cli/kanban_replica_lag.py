@@ -89,8 +89,9 @@ def acked_task_ids(rows: Iterable[dict]) -> list[str]:
         if row.get("table_name") == "tasks":
             out.append(row.get("row_uid"))
             continue
+        fields = row.get("fields") or {}
         try:
-            fields = json.loads(row.get("fields") or "{}")
+            fields = fields if isinstance(fields, dict) else json.loads(fields)
         except (TypeError, ValueError):
             continue
         if isinstance(fields, dict):

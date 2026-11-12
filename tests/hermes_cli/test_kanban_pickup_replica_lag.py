@@ -106,6 +106,17 @@ def test_a_lagging_card_is_not_reimported_until_the_replica_catches_up(gws, cloc
     assert "reclaimed" in kinds  # the re-imported copy carries what this gateway pushed
 
 
+@pytest.mark.parametrize("fields", [
+    {"task_id": "t_1"},
+    {"child_id": "t_1"},
+    '{"task_id": "t_1"}',
+    '{"child_id": "t_1"}',
+])
+def test_acked_task_ids_accepts_parsed_and_json_fields(fields):
+    rows = [{"table_name": "task_events", "fields": fields}]
+    assert lag.acked_task_ids(rows) == ["t_1"]
+
+
 def test_a_lag_entry_expires(monkeypatch):
     lag.reset()
     mono = [1000.0]
