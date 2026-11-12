@@ -1,5 +1,5 @@
-"""Explicit repin of an unstarted worker-first card back to its origin: ``hermes kanban move <id> --runs-on
-machine:<origin>``. [daveey]
+"""Explicit Board repin of a worker-first card: to the worker queue (``hermes kanban move <id> --pool``), or of an
+unstarted card back to its origin (``--runs-on machine:<origin>``). [daveey]
 
 A ``worker-first-v1`` card's ``runs_on`` and ``placement_policy`` are Board-owned: the Board refuses an ordinary
 field edit (``placement_fenced``) and the outbox strips ``runs_on`` from a policy card's push
@@ -10,10 +10,11 @@ exact acknowledged revision; it clears the policy and its reservation and sets t
 
 Scope (everything else refuses and writes nothing):
 
-* the card is ``worker-first-v1``, ``ready``, created on this gateway, with no local claim, no Board lease, no
-  ``started_at`` and no run row (never started anywhere);
-* the target is exactly ``[machine:<this gateway>]`` (the origin); another target is refused
-  ``repin_unavailable`` instead of a local relabel the Board would strip;
+* the card is ``worker-first-v1``, ``ready``, created on this gateway, with no local claim and no Board lease;
+* the target is ``[<pool label>]`` (``--pool``: the Board gets ``[<pool label>, *the card's coordination labels]``,
+  so ``requires: [hub:write]`` keeps ``capability:hub-write``; a started card may go, since any worker resumes
+  it from what it pushed), or exactly ``[machine:<this gateway>]`` (the origin) for a card with no ``started_at``
+  and no run row; another target is refused ``repin_unavailable`` instead of a local relabel the Board would strip;
 * the board is a Board primary, its ``sync_version`` is acknowledged and no task edit is pending in the outbox;
 * the Hub identity used is this board's own gateway.
 
@@ -64,6 +65,23 @@ def _board_code(detail: str) -> Optional[str]:
     return None
 
 
+def _pool_label() -> str:
+    from hermes_cli.kanban_placement import POOL_LABEL
+    return POOL_LABEL
+
+
+def _pool_target(row: sqlite3.Row) -> Optional[list[str]]:
+    """``[<pool label>, *coordination labels]`` for the card, as the worker queue writes them at creation
+    (``requires: [hub:write]`` -> ``capability:hub-write``), or None for an action no worker is labelled for."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_placement_coordination as coordination
+    task = kb.Task.from_row(row)
+    extra = coordination.required_labels({"title": task.title, "body": task.body, "skills": task.skills,
+                                          "requires": task.requires})
+    label = _pool_label()
+    return None if extra is None else [label, *sorted(extra - {label})]
+
+
 def eligibility(conn: sqlite3.Connection, task_id: str, labels: list[str]) -> dict[str, Any]:
     """Local preconditions (read-only, no transaction held). ``{"ok": True, me, board, revision, previous}`` or a
     refusal dict."""
@@ -77,16 +95,17 @@ def eligibility(conn: sqlite3.Connection, task_id: str, labels: list[str]) -> di
     if not me or not board:
         return _refuse("not_synced", "this board has no Board sync identity")
     row = conn.execute(
-        "SELECT status, placement_policy, created_on, claim_lock, lease_holder, started_at, current_run_id, "
-        "sync_version, runs_on FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        "SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None:
         return _refuse("not_found", f"task {task_id} not found")
     origin = f"machine:{me}"
-    unavailable = (f"{task_id} is placed by the worker-first policy; the only supported move is the Board repin "
-                   f"of an unstarted ready card to its origin (--runs-on {origin})")
+    pool = labels == [_pool_label()]
+    unavailable = (f"{task_id} is placed by the worker-first policy; the supported moves are the Board repin of a "
+                   f"ready card to the worker queue (--pool) or of an unstarted ready card to its origin "
+                   f"(--runs-on {origin})")
     if row["placement_policy"] != wp.POLICY:
         return _refuse("repin_unavailable", f"{task_id} has unknown placement policy {row['placement_policy']!r}")
-    if labels != [origin]:
+    if not pool and labels != [origin]:
         return _refuse("repin_unavailable", unavailable + f"; {labels} is not that target")
     if row["created_on"] != me:
         return _refuse("repin_unavailable", unavailable + f"; it was created on {row['created_on']!r}, not {me}")
@@ -94,10 +113,18 @@ def eligibility(conn: sqlite3.Connection, task_id: str, labels: list[str]) -> di
         return _refuse("repin_unavailable", unavailable + f"; it is {row['status']}, not ready")
     if row["claim_lock"] is not None or row["lease_holder"] is not None:
         return _refuse("repin_unavailable", unavailable + "; it holds a claim or Board lease")
-    started = row["started_at"] is not None or row["current_run_id"] is not None or conn.execute(
-        "SELECT 1 FROM task_runs WHERE task_id = ? LIMIT 1", (task_id,)).fetchone() is not None
+    # A started card may join the queue: any worker resumes it from what it pushed (t_01a1d0571c2f07d6). Only the
+    # origin repin, which runs it where it was created, stays limited to cards that never started.
+    started = not pool and (row["started_at"] is not None or row["current_run_id"] is not None or conn.execute(
+        "SELECT 1 FROM task_runs WHERE task_id = ? LIMIT 1", (task_id,)).fetchone() is not None)
     if started:
         return _refuse("repin_unavailable", unavailable + "; it has already started")
+    if pool:
+        target = _pool_target(row)
+        if target is None:
+            return _refuse("repin_unavailable", f"{task_id} names an action no pool worker is labelled for; "
+                                                "it keeps its worker-first placement")
+        labels = target
     if row["sync_version"] is None or conn.execute(
             "SELECT 1 FROM kanban_sync_outbox WHERE table_name = 'tasks' AND row_uid = ? AND state = 'pending' "
             "LIMIT 1", (task_id,)).fetchone() is not None:
@@ -107,7 +134,8 @@ def eligibility(conn: sqlite3.Connection, task_id: str, labels: list[str]) -> di
         previous = json.loads(row["runs_on"]) if row["runs_on"] else None
     except (TypeError, ValueError):
         previous = None
-    return {"ok": True, "me": me, "board": board, "revision": int(row["sync_version"]), "previous": previous}
+    return {"ok": True, "me": me, "board": board, "revision": int(row["sync_version"]), "previous": previous,
+            "labels": labels, "matches": [] if pool else [me]}
 
 
 def repin_to_origin(conn: sqlite3.Connection, task_id: str, labels: list[str], reason: str, *,
@@ -136,7 +164,7 @@ def repin_to_origin(conn: sqlite3.Connection, task_id: str, labels: list[str], r
     reply: Any = None
     for attempt in range(CONFLICT_ATTEMPTS):
         try:
-            reply = hub.repin(board, task_id=task_id, expected_revision=pre["revision"], runs_on=labels)
+            reply = hub.repin(board, task_id=task_id, expected_revision=pre["revision"], runs_on=pre["labels"])
             break
         except client.HubError as exc:
             if exc.status >= 500:
@@ -168,13 +196,14 @@ def repin_to_origin(conn: sqlite3.Connection, task_id: str, labels: list[str], r
     try:
         with kb.write_txn(conn):
             kb._append_event(conn, task_id, km.MOVED_EVENT, {
-                "from_machine": me, "runs_on": labels, "previous_runs_on": pre["previous"], "reason": reason[:500],
-                "move_no": move_no, "forced": False, "matches": [me], "queued": True, REPINNED_EVENT_FLAG: True,
+                "from_machine": me, "runs_on": pre["labels"], "previous_runs_on": pre["previous"],
+                "reason": reason[:500],
+                "move_no": move_no, "forced": False, "matches": pre["matches"], "queued": True, REPINNED_EVENT_FLAG: True,
                 "board_version": version})
     except sqlite3.Error:
         pass  # the Board's own placement_repinned event still records the change
 
-    out = {"ok": True, "runs_on": labels, "matches": [me], "move_no": move_no, "status": "ready",
+    out = {"ok": True, "runs_on": pre["labels"], "matches": pre["matches"], "move_no": move_no, "status": "ready",
            REPINNED_EVENT_FLAG: True, "board_version": version, "readback": "pending"}
     try:
         client.pull(conn, hub, board, observers=True, partition=me)
@@ -187,7 +216,7 @@ def repin_to_origin(conn: sqlite3.Connection, task_id: str, labels: list[str], r
         local = json.loads(row["runs_on"]) if row and row["runs_on"] else None
     except (TypeError, ValueError):
         local = None
-    if row is not None and row["placement_policy"] is None and local == labels:
+    if row is not None and row["placement_policy"] is None and local == pre["labels"]:
         out["readback"] = "confirmed"
         out["status"] = row["status"]
     else:

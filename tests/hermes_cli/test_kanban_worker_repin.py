@@ -88,6 +88,7 @@ def test_origin_repin_uses_board_cas_and_local_policy_changes_only_by_pull(gws, 
     hub = RepinHub(svc, HUB, during=lambda: seen.append(_local(origin.conn, tid)))
     res = km.move_queued(origin.conn, tid, runs_on=["machine:hub"], reason="run it on the hub", hub=hub)
     assert res["ok"] and res["repinned"] and res["readback"] == "confirmed", res
+    assert res["matches"] == [HUB]  # the origin repin names the machine it lands on
     assert hub.repins == [{"task_id": tid, "expected_revision": revision, "runs_on": ["machine:hub"]}]
     assert seen == [(wp.POLICY, None, "ready")]  # nothing local was edited before the Board answered
     assert _local(origin.conn, tid) == (None, ["machine:hub"], "ready")
@@ -377,3 +378,90 @@ def test_manual_and_running_cards_keep_the_generic_path(conn):
     assert res["reason_code"] == "no_machine"  # unchanged: the generic move never targets this machine
     for status in ("running", "done", "archived"):
         assert not repin.applies(conn, _acknowledged(conn, status=status))
+
+
+# --- --pool: any worker-first card that is ready goes to the one worker queue (t_01a1d0571c2f07d6) -----------------
+# 11-12 13:15Z: t_01a1cf7624ae27d9 (worker-first, started once, 765 re-reservations onto one worker) could not be
+# moved: `move --pool` refused repin_unavailable, and the origin-repin workaround only covers unstarted cards.
+
+def _started(origin, tid):
+    origin.conn.execute("INSERT INTO task_runs(task_id, status, started_at) VALUES(?, 'released', 1)", (tid,))
+    origin.conn.commit()
+
+
+def test_cli_move_pool_repins_a_started_worker_first_card(gws, svc, monkeypatch):
+    from hermes_cli import kanban as kcli
+    origin, _ = gws
+    tid, revision = _policy_card(origin)
+    _started(origin, tid)
+    hubs = []
+    monkeypatch.setattr(ksc, "load_identity", lambda cfg=None: ksc.Identity("https://hub.test", "k", HUB))
+    monkeypatch.setattr(ksc, "Hub", lambda ident, *a, **kw: hubs.append(RepinHub(svc, ident.gateway)) or hubs[-1])
+    out = json.loads(kcli.run_slash(f'move {tid} --pool --reason "one worker reserved for 4 h" --json'))
+    assert out["ok"] and out["readback"] == "confirmed" and out["runs_on"] == ["pool:worker"], out
+    assert hubs[0].repins == [{"task_id": tid, "expected_revision": revision, "runs_on": ["pool:worker"]}]
+    assert _local(origin.conn, tid) == (None, ["pool:worker"], "ready")
+    [ev] = _moved(origin.conn, tid)
+    assert ev["repinned"] is True and ev["runs_on"] == ["pool:worker"] and ev["previous_runs_on"] is None, ev
+    assert out["matches"] == [] == ev["matches"]  # the queue names no machine: whichever worker is free claims it
+
+
+def test_move_pool_keeps_the_cards_coordination_labels(gws, svc):
+    origin, _ = gws
+    origin.enter()
+    tid = kb.create_task(origin.conn, title="Read ~/.hermes/logs on the hub", assignee="default",
+                         placement_policy=wp.POLICY, requires=["hub:write"])
+    origin.round()
+    origin.round()
+    hub = RepinHub(svc, HUB)
+    res = km.move_queued(origin.conn, tid, runs_on=["pool:worker"], reason="any hub-write worker", hub=hub)
+    assert res["ok"] and res["readback"] == "confirmed", res
+    target = ["pool:worker", "capability:hub-write"]
+    assert hub.repins[0]["runs_on"] == target  # only a hub-write worker claims it
+    assert res["runs_on"] == target == _moved(origin.conn, tid)[-1]["runs_on"]
+    assert _local(origin.conn, tid)[:2] == (None, target)
+
+
+@pytest.mark.parametrize("fields,code", [
+    ({"status": "todo"}, "repin_unavailable"),
+    ({"claim_lock": "local:1"}, "repin_unavailable"),
+    ({"lease_holder": "worker-1", "lease_expires": 1}, "repin_unavailable"),
+    ({"created_on": "other"}, "repin_unavailable"),
+    ({"sync_version": None}, "not_acknowledged"),
+])
+def test_move_pool_still_refuses_what_the_board_refuses(conn, fields, code):
+    tid = _acknowledged(conn, **fields)
+    res = km.move_queued(conn, tid, runs_on=["pool:worker"], reason="x", hub=NoCallHub())
+    assert res["reason_code"] == code and not res["ok"], res
+    assert not _moved(conn, tid)
+
+
+class _RecordHub(NoCallHub):
+    def __init__(self):
+        self.calls = []
+
+    def repin(self, board, **kw):
+        self.calls.append(kw)
+        raise ksc.HubError(409, json.dumps({"error": "not_claimable"}))
+
+
+@pytest.mark.parametrize("started", [{"started_at": 1}, {"current_run_id": 7}])
+def test_move_pool_of_a_started_card_reaches_the_board(conn, started):
+    tid = _acknowledged(conn, **started)
+    hub = _RecordHub()
+    res = km.move_queued(conn, tid, runs_on=["pool:worker"], reason="x", hub=hub)
+    assert [c["runs_on"] for c in hub.calls] == [["pool:worker"]], res
+    origin = km.move_queued(conn, tid, runs_on=["machine:hub"], reason="x", hub=NoCallHub())
+    assert origin["reason_code"] == "repin_unavailable" and "started" in origin["error"]  # origin repin unchanged
+
+
+def test_move_to_another_single_machine_still_refuses(conn):
+    tid = _acknowledged(conn)
+    res = km.move_queued(conn, tid, runs_on=["machine:worker-1"], reason="x", hub=NoCallHub())
+    assert res["reason_code"] == "repin_unavailable"
+
+
+def test_move_pool_refuses_a_card_whose_action_no_worker_is_labelled_for(conn):
+    tid = _acknowledged(conn, title="Run install-boards.py on the hub")
+    res = km.move_queued(conn, tid, runs_on=["pool:worker"], reason="x", hub=NoCallHub())
+    assert res["reason_code"] == "repin_unavailable" and "no pool worker" in res["error"], res

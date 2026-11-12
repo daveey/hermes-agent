@@ -62,6 +62,8 @@ def _prior_landing(conn, request_id):
     out = {"where": "local", "why": "courier replay", **({"hub_admission": audit} if audit else {})}
     if options.get("placement_policy") == POLICY:
         out.update(placement_policy=POLICY, why=WAITING, requires=options.get("requires"))
+    elif options.get("runs_on"):
+        out.update(runs_on=list(options["runs_on"]), requires=options.get("requires"))  # a queued deny
     return out if audit or out.get("placement_policy") else {}
 
 
@@ -69,8 +71,9 @@ def courier_plan(conn, args, runs_on, *, cfg=None, gateway=None, request_id=None
     """A courier create landing on the hub: ``None`` (not hub-bound) or the admission placement.
 
     Runs in the receiving ``kanban_create`` before its write transaction, before the card can be
-    claimed. Admitted: ``{"hub_admission": audit}`` (stays here). Denied: worker-first enrollment
-    with ``requires`` + ``hub:write``; ``where="refuse"`` when it cannot go to the pool. A request
+    claimed. Admitted: ``{"hub_admission": audit}`` (stays here). Denied: :func:`pool_route` with
+    ``requires`` + ``hub:write`` (the worker queue, else worker-first enrollment), as a local deny;
+    ``where="refuse"`` when it cannot go to the pool. A request
     already applied reuses its stored placement and makes no model call.
     """
     from hermes_cli import kanban_placement as kp
@@ -98,12 +101,15 @@ def courier_plan(conn, args, runs_on, *, cfg=None, gateway=None, request_id=None
     audit = {**asdict(verdict), "entry": "courier"}
     if verdict.admit:
         return {"hub_admission": audit}
-    if pinned or gateway not in (cfg.get("worker_pools") or {}):
-        return {"where": "refuse", "why": verdict.why, "hub_admission": audit, "pin": "hub"}
     requires = args.get("requires") or []
     requires = [requires] if isinstance(requires, str) else list(requires)
-    # Courier creation never takes the worker queue (queue_decision's own rule): worker-first.
-    return pool_route(args, cfg, gateway, audit, list(dict.fromkeys([*requires, "hub:write"])), queue=False)
+    if pinned:
+        return {"where": "refuse", "why": verdict.why, "hub_admission": audit, "pin": "hub"}
+    # The worker queue exactly as for a local deny (t_01a1d0571c2f07d6); worker-first only without a live label.
+    out = pool_route(args, cfg, gateway, audit, list(dict.fromkeys([*requires, "hub:write"])))
+    if out.get("runs_on") is None and gateway not in (cfg.get("worker_pools") or {}):
+        return {"where": "refuse", "why": verdict.why, "hub_admission": audit, "pin": "hub"}
+    return out
 
 
 def gate_move(conn, task_id, runs_on, *, cfg=None):

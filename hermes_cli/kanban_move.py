@@ -250,7 +250,7 @@ def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason:
     from hermes_cli import kanban_worker_repin as repin
     if repin.applies(conn, task_id):
         # A worker-first card's placement is Board-owned: a local relabel would be stripped, so only the Board's
-        # explicit repin to the origin is supported (kanban_worker_repin); every other target refuses.
+        # explicit repin (to the worker queue, or to the origin) is supported (kanban_worker_repin).
         try:
             labels = wn.normalize_runs_on(runs_on)
         except ValueError as exc:
