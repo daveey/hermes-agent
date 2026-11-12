@@ -17,7 +17,9 @@ past ``GRACE_S`` (a live poller delivers a fresh result within seconds), not und
 was dispatched from a UI chat (``origin_ui_session_id``; messaging-gateway parents are the gateway's), and whose
 chat is in this host's stores, it:
 
-- skips the chat if another backend holds its active-session lease and this one does not (that backend's own pass
+- skips the chat if it is archived or moved to another gateway (``notice_fanout.chat_skip_reason``, as the kanban
+  sweep; the row stays pending and unclaimed), if another backend holds its active-session lease and this one does
+  not (that backend's own pass
   delivers it), or if the chat is live here mid-turn (its poller delivers at the turn's end);
 - otherwise claims the row (``claim_completion_delivery``: the one atomic cross-process gate, so the poller's copy,
   another backend's pass and this one deliver at most once between them) and runs ONE turn with the result in the
@@ -158,7 +160,10 @@ def _wake_job(wake, delegation_id: str, claim: str, chat: str, text: str, metada
             logger.warning("%s of %s for %s failed", LABEL, chat, delegation_id, exc_info=True)
             verdict = "error"
         if verdict == "started":
-            ad.complete_completion_delivery(delegation_id, claim)
+            if not ad.complete_completion_delivery(delegation_id, claim):
+                # The turn ran but the claim lease lapsed before the ack: another consumer may deliver it again.
+                logger.warning("%s: started a turn in chat %s for async delegation %s, but its claim lease lapsed "
+                               "before the ack; the row was not marked delivered", LABEL, chat, delegation_id)
             with _lock:
                 _wake_times.setdefault(chat, []).append(now)
                 _retry.pop(delegation_id, None)
@@ -179,9 +184,15 @@ def _wake_job(wake, delegation_id: str, claim: str, chat: str, text: str, metada
         _wake_slots.release()
 
 
-def _chat_and_tip(chat: str, opener) -> tuple[Optional[str], Optional[str]]:
+def _chat_and_tip(chat: str, opener) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """``(chat, tip, skip)``: ``skip`` is ``notice_fanout.chat_skip_reason`` (``archived`` / ``moved``), the gate
+    the kanban sweep applies. ``session.resume`` refuses neither, so without it an archived chat would be revived
+    and a chat moved to another gateway would run a turn here. (None, None, None) when no store has the chat."""
+    from tui_gateway.notice_fanout import chat_skip_reason
     with opener(chat) as (db, tip):
-        return (chat, tip) if db is not None else (None, None)
+        if db is None:
+            return None, None, None
+        return chat, tip, chat_skip_reason(db, chat)
 
 
 def sweep_once(*, now: Optional[float] = None, grace_s: float = GRACE_S,
@@ -217,9 +228,15 @@ def sweep_once(*, now: Optional[float] = None, grace_s: float = GRACE_S,
                 if _backing_off(did, now):
                     decision["verdict"] = "skipped:backoff"
                     continue
-                found, tip = _chat_and_tip(chat, opener)
+                found, tip, skip = _chat_and_tip(chat, opener)
                 if found is None:
                     decision["verdict"] = "skipped:no-store"
+                    continue
+                if skip is not None:
+                    # Left pending and unclaimed: an unarchived chat's poller can still take it, else the ledger's
+                    # expiry ends it. Back off so the pass does not re-read the chat every tick.
+                    _back_off(did, now)
+                    decision["verdict"] = f"skipped:{skip}"
                     continue
                 ids = {chat, tip or chat}
                 if (holder := held_elsewhere(holders, ids)) is not None:

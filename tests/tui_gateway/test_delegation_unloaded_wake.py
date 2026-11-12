@@ -183,6 +183,37 @@ def test_a_chat_no_store_has_is_left_pending(home):
     assert wake.calls == [] and _row(home)["delivery_state"] == "pending"
 
 
+@pytest.mark.parametrize("mark, verdict", [
+    ({"archived": 1}, "skipped:archived"),
+    ({"end_reason": "moved_to_gateway:macbook"}, "skipped:moved"),
+])
+def test_an_archived_or_moved_parent_is_never_woken(home, mark, verdict):
+    """``session.resume`` refuses neither, so the pass itself must apply the kanban sweep's ``chat_skip_reason``
+    gate: an archived chat must not be revived, and a chat moved to another gateway is no longer this host's."""
+    _completion()
+    conn = sqlite3.connect(home / "state.db")
+    try:
+        conn.execute(f"UPDATE sessions SET {', '.join(f'{k}=?' for k in mark)} WHERE id=?", (*mark.values(), CHAT))
+        conn.commit()
+    finally:
+        conn.close()
+    wake = _Waker()
+
+    assert [d["verdict"] for d in _sweep(home, wake)] == [verdict]
+    row = _row(home)
+    assert wake.calls == [] and row["delivery_state"] == "pending" and row["delivery_claim"] is None
+    assert row["delivery_attempts"] == 0  # unclaimed: an unarchived/reopened chat's poller can still take it
+
+
+def test_a_lapsed_claim_at_ack_is_logged_as_a_warning(home, monkeypatch, caplog):
+    _completion()
+    monkeypatch.setattr(ad, "complete_completion_delivery", lambda did, claim: False)
+
+    with caplog.at_level("WARNING", logger=du.__name__):
+        assert [d["verdict"] for d in _sweep(home, _Waker())] == ["started"]
+    assert any("lease" in r.getMessage() and DID in r.getMessage() for r in caplog.records)
+
+
 def test_a_chat_held_by_another_backend_is_left_to_it(home):
     _completion()
     wake = _Waker()
