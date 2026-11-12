@@ -44,12 +44,13 @@ def test_final_gate_counts_new_detached_jobs_and_releases_grant(worker_rig, lane
 def test_worker_own_grant_echo_does_not_take_extra_slot(worker_rig, lane):
     rig, pool = worker_rig
     started = rig.fill(1)
-    name = capacity.owner_slice('default', started[0])
+    owner = capacity.owner_for_connection(rig.conn, started[0])
+    name = capacity.owner_slice(*owner)
     (pool / name).mkdir()
     (pool / name / 'cgroup.events').write_text('populated 1\n')
     directory = rig.home / 'worker-resources' / 'owners'
     directory.mkdir()
-    (directory / f'{name}.json').write_text(json.dumps(['default', started[0]]))
+    (directory / f'{name}.json').write_text(json.dumps(owner))
     t = rig.card(lane)
     rig.echo_between_gate_and_txn()
     assert claim(rig.conn, t, lane) is not None

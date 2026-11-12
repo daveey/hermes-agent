@@ -137,8 +137,8 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None, *, owner_outpu
                     for pool, count in counts.items():
                         detail["pools"][pool] += count
                 if owner_output is not None:
-                    from hermes_cli.kanban_db_sync import board_slug_for_path
-                    owners.update((board_slug_for_path(str(path)), task) for task in ids)
+                    from hermes_cli.worker_compute_capacity import owner_for_db
+                    owners.update(owner_for_db(path, task) for task in ids)
             finally:
                 db.close()
         if detail is not None:

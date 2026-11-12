@@ -79,7 +79,7 @@ def pool_occupancy(pool: Path, owners, active):
     return capacity.occupied_owners(pool, owners, active)
 
 
-def occupied_count_for_host(echo=None) -> int | None:
+def occupied_count_for_host(echo=None, *, claimant=None) -> int | None:
     """One census for admission and Board reports; never mutate pressure state."""
     from hermes_cli import machine_metrics
     from hermes_cli.worker_account_boards import paths
@@ -100,11 +100,14 @@ def occupied_count_for_host(echo=None) -> int | None:
                 raise ValueError('invalid worker owner map')
             owners[path.stem] = tuple(owner)
     occupied = pool_occupancy(capacity.pool_path(), owners, active_owners)
+    # A prospective resume in a populated slice does not take a second slot.
+    if claimant is not None:
+        occupied.add(claimant)
     # Distinct installations can contain copied IDs. Preserve their row count.
     return len(occupied) + max(0, active - len(active_owners))
 
 
-def refusal(echo=None, *, enabled=None) -> str | None:
+def refusal(echo=None, *, enabled=None, claimant=None) -> str | None:
     """Pre-lease and final-lock check. Unknown observations fail closed."""
     try:
         if not (capacity.worker_enabled() if enabled is None else enabled):
@@ -112,12 +115,12 @@ def refusal(echo=None, *, enabled=None) -> str | None:
         directory = capacity.policy_root() / 'worker-resources'
         if _pressure(directory):
             return 'worker_load_pressure'
-        occupied_count = occupied_count_for_host(echo)
+        occupied_count = occupied_count_for_host(echo, claimant=claimant)
         from hermes_cli.kanban_admission import _root_max_in_progress
         ok, cap = _root_max_in_progress(root=capacity.policy_root())
         if occupied_count is None or not ok or cap is None:
             return 'worker_resources_unknown'
-        if occupied_count >= cap:
+        if occupied_count > cap if claimant is not None else occupied_count >= cap:
             return 'worker_capacity_full'
         return None
     except Exception:  # health: allow BLE001 -- any unreadable policy/controller must refuse claims

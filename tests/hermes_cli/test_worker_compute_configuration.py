@@ -75,9 +75,11 @@ def test_cpu_weight_readback_required(configured):
 
 def test_managed_worker_requires_card_slice_and_sets_priority(monkeypatch, configured):
     monkeypatch.setattr(capacity, 'worker_enabled', lambda: True)
-    scope = configured.card / 'hermes-worker-kanban-task-run-1.scope'
+    database = configured.home / 'kanban.db'
+    card = configured.card.rename(configured.pool / capacity.owner_slice(str(database), 'task'))
+    scope = card / 'hermes-worker-kanban-task-run-1.scope'
     scope.mkdir()
-    policy = SimpleNamespace(kanban_json=json.dumps({'task_id': 'task', 'board': 'board'}))
+    policy = SimpleNamespace(kanban_json=json.dumps({'task_id': 'task', 'board': 'wrong-label', 'db': str(database)}))
     assert capacity.managed_target(policy, scope) is True
     with pytest.raises(ValueError):
         capacity.managed_target(policy, configured.pool / scope.name)

@@ -38,7 +38,13 @@ def hub_cpu_advisory(task_id=None, *, conn=None):
     from hermes_cli import machine_metrics
 
     from hermes_cli.worker_resource_admission import refusal
-    if reason := refusal():
+    from hermes_cli.worker_compute_capacity import worker_enabled, owner_for_connection
+    try:
+        claimant = owner_for_connection(conn, task_id) if conn is not None and worker_enabled() else None
+    except Exception:  # health: allow BLE001 -- malformed worker policy/identity must refuse prelease
+        _defer(task_id, 'worker_resources_unknown')
+        return 'worker_resources_unknown'
+    if reason := refusal(claimant=claimant):
         _defer(task_id, reason)
         return reason
     state, limit = cpu.root_limit()
@@ -128,7 +134,7 @@ def _over_budget(started, needed_s=0.0):
     return started is not None and time.monotonic() - started + needed_s > _hold_budget_s()
 
 
-def _final_hub_gate(gate, started=None, *, conn=None, task_id=None):
+def _final_hub_gate(gate, started=None, claimant=None, *, conn=None, task_id=None):
     """Under admission.lock: ``(reason, evidence)``; reason None admits. Never touches the network.
 
     Cheap checks (whole-host cap, lease deadline) run BEFORE the ~1 s sample so a claim that must be refused anyway
@@ -148,7 +154,7 @@ def _final_hub_gate(gate, started=None, *, conn=None, task_id=None):
         return "worker_resources_unknown", None
     if worker and not getattr(_decision, "worker_fenced", True):
         return "worker_resources_unknown", None
-    if reason := refusal(echo, enabled=worker):
+    if reason := refusal(echo, enabled=worker, claimant=claimant):
         return reason, None
     if worker and (_expired(gate) or _over_budget(started)):
         return "worker_resources_unknown", None
@@ -392,7 +398,8 @@ def claim_transaction(conn, *, task_id=None, gate=None):
             previous_fenced = getattr(_decision, "worker_fenced", True)
             _decision.worker_fenced = worker
             try:
-                reason, evidence = _final_hub_gate(gate, started, conn=conn, task_id=task_id)
+                claimant = capacity.owner_for_connection(conn, task_id) if worker and task_id is not None else None
+                reason, evidence = _final_hub_gate(gate, started, claimant, conn=conn, task_id=task_id)
             finally:
                 _decision.worker_fenced = previous_fenced
             if reason is not None:

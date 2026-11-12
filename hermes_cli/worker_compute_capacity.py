@@ -44,14 +44,26 @@ def effective_cores() -> float:
     return cores
 
 
+def owner_for_db(database, task: str) -> tuple[str, str]:
+    """Stable local execution identity, independent of caller board labels."""
+    if not isinstance(database, (str, Path)) or not database or not Path(database).is_absolute():
+        raise ValueError('Worker identity requires an absolute database path')
+    if not isinstance(task, str) or not task:
+        raise ValueError('Worker identity requires a task')
+    return str(Path(database).resolve()), task
+
+
+def owner_for_connection(conn, task: str) -> tuple[str, str]:
+    from hermes_cli.kanban_db_connect import _main_db_file
+    return owner_for_db(_main_db_file(conn), task)
+
+
 def managed_target(policy, target: Path | None) -> bool:
     """Validate the actual owner-launched interpreter's destination before spawn."""
     if not policy or not getattr(policy, 'kanban_json', None) or not worker_enabled():
         return False
     context = json.loads(policy.kanban_json)
-    board, task = context.get('board') or 'default', context.get('task_id')
-    if not isinstance(board, str) or not isinstance(task, str) or not task:
-        raise ValueError('Worker compute scope requires board and task identity')
+    board, task = owner_for_db(context.get('db'), context.get('task_id'))
     name = configure_card(board, task)
     if target is None or target.parent.name != name:
         raise ValueError('Managed worker is outside its card CPU slice')

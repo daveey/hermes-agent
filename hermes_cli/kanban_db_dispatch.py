@@ -2708,7 +2708,8 @@ def _restart_safe_worker_argv(task: Task, command: list[str], board: Optional[st
     ).argv)
     # OOM recovery raises the cap; bounded_scope adds the shared pool (kanban_aggregate_scope)
     return _aggregate_scope.bounded_scope(
-        _worker_scope.apply_oom_recovery(argv, task.id, board), task_id=task.id, board=board or 'default')
+        _worker_scope.apply_oom_recovery(argv, task.id, board), task_id=task.id,
+        board=str(_kb.kanban_db_path(board=board).resolve()))
 
 
 def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, observation=None) -> Optional[int]:
