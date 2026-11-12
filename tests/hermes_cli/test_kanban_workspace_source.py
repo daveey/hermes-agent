@@ -381,12 +381,16 @@ def test_host_refusal_memo_skips_revision_until_republish(conn):
     assert sync._source_skip(conn, row) is None
 
 
+@pytest.mark.parametrize("lane", ["ready", "review"])
 @pytest.mark.parametrize("feed_order", ["task_first", "run_first"])
 @pytest.mark.parametrize("code", ["materialize_timeout", "remote_drift"])
-def test_primary_refusal_returns_unused_grant_without_competing_status(conn, code, feed_order):
+def test_primary_refusal_returns_unused_grant_without_competing_status(conn, code, feed_order, lane):
     from hermes_cli import kanban_source_dispatch as ksd
     tid = kb.create_task(conn, title="refusal", assignee="worker")
-    assert kb.claim_task(conn, tid, ttl_seconds=900, claimer=f"{kb._host_prefix()}:1")
+    if lane == "review":
+        assert kb.request_review(conn, tid, summary="ready for review")
+    claim = kb.claim_review_task if lane == "review" else kb.claim_task
+    assert claim(conn, tid, ttl_seconds=900, claimer=f"{kb._host_prefix()}:1")
     claimed = kb.get_task(conn, tid)
     assert claimed is not None
     sync.set_mode(conn, "primary")
@@ -406,7 +410,7 @@ def test_primary_refusal_returns_unused_grant_without_competing_status(conn, cod
         assert kb.get_task(conn, tid).status == "running"
         uid = sync.run_uid(conn, claimed.current_run_id)
         changes = [
-            sync.RemoteChange(seq=1, table="tasks", uid=tid, op="upsert", fields={"status": "ready", "current_run_uid": None,
+            sync.RemoteChange(seq=1, table="tasks", uid=tid, op="upsert", fields={"status": lane, "current_run_uid": None,
                               "lease_holder": None, "lease_expires": None}, version=2, hlc="", origin_gateway="board"),
             sync.RemoteChange(seq=2, table="task_runs", uid=uid, op="upsert", fields={"task_id": tid, "status": "released",
                               "outcome": "released", "ended_at": 2000, "metadata": json.dumps({"unused_grant": True})},
@@ -420,10 +424,22 @@ def test_primary_refusal_returns_unused_grant_without_competing_status(conn, cod
         assert kb.get_task(conn, tid).status == "blocked"
         sync.apply_remote_changes(conn, [], new_cursor=3)
         assert conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='blocked'", (tid,)).fetchone()[0] == 1
+        task = kb.get_task(conn, tid)
+        assert task.block_kind == "needs_input" and task.human_request
+        ended = conn.execute("SELECT outcome, metadata FROM task_runs WHERE id=?", (claimed.current_run_id,)).fetchone()
+        assert ended["outcome"] == "released" and json.loads(ended["metadata"])["unused_grant"] is True
+        pending = [dict(r) for r in conn.execute(
+            "SELECT * FROM kanban_sync_outbox WHERE table_name='tasks' AND op='upsert' ORDER BY rowid")]
+        wire = [ksc.translate(ksc._full_row_if_unseen(conn, r), "hlc") for r in pending]
+        assert any(op["fields"].get("status") == "blocked" for op in wire)
+        assert all(op["op"] == "upsert" for op in wire)  # Board rows.ts, NOT TASK_OPS.block
+        assert kb.unblock_task(conn, tid)
+        assert kb.get_task(conn, tid).status == lane
 
 
+@pytest.mark.parametrize("lane", ["ready", "review"])
 @pytest.mark.parametrize("superseded", [False, True])
-def test_refusal_block_ignores_lost_release_or_newer_run(conn, superseded):
+def test_refusal_block_ignores_lost_release_or_newer_run(conn, superseded, lane):
     from hermes_cli import kanban_source_dispatch as ksd
     from hermes_cli.kanban_source_refusal_block import drain
     tid = kb.create_task(conn, title="superseded refusal", assignee="worker")
@@ -433,15 +449,88 @@ def test_refusal_block_ignores_lost_release_or_newer_run(conn, superseded):
     assert ksd.refused(conn, claimed, kws.WorkspaceSourceRefusal("remote_drift"), SimpleNamespace(auto_blocked=[]))
     with kbc.write_txn(conn):
         conn.execute("UPDATE kanban_sync_state SET applying=1")
-        conn.execute("UPDATE tasks SET status='ready', current_run_id=NULL, claim_lock=NULL, claim_expires=NULL WHERE id=?", (tid,))
+        conn.execute("UPDATE tasks SET status=?, current_run_id=NULL, claim_lock=NULL, claim_expires=NULL WHERE id=?", (lane, tid))
         conn.execute("UPDATE task_runs SET ended_at=100, outcome=?, metadata=? WHERE id=?", (
             "released" if superseded else "expired", json.dumps({"unused_grant": True}), claimed.current_run_id))
         if superseded:
             conn.execute("INSERT INTO task_runs(task_id,status,started_at,ended_at,outcome) VALUES (?, 'done',101,102,'completed')", (tid,))
         conn.execute("UPDATE kanban_sync_state SET applying=0")
     drain(conn)
-    assert kb.get_task(conn, tid).status == "ready"
+    assert kb.get_task(conn, tid).status == lane
     assert conn.execute("SELECT COUNT(*) FROM kanban_source_blocks").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("failure", ["bad_json", "block_bug"])
+def test_followup_failure_does_not_poison_committed_feed(conn, monkeypatch, caplog, failure):
+    from hermes_cli import kanban_source_refusal_block as followup
+    tid = kb.create_task(conn, title="drain failure", assignee="worker")
+    assert kb.claim_task(conn, tid)
+    claimed = kb.get_task(conn, tid)
+    assert claimed is not None
+    if failure == "block_bug":
+        def broken_block(*args, **kwargs):
+            raise AttributeError("injected block failure")
+        monkeypatch.setattr(followup, "block", broken_block)
+    with kbc.write_txn(conn):
+        followup.defer(conn, claimed, kws.WorkspaceSourceRefusal("remote_drift"))
+        if failure == "bad_json":
+            conn.execute("UPDATE kanban_source_blocks SET refusal='not json'")
+        conn.execute("UPDATE kanban_sync_state SET applying=1")
+        conn.execute("UPDATE tasks SET status='ready', current_run_id=NULL, lease_holder=NULL WHERE id=?", (tid,))
+        conn.execute("UPDATE task_runs SET ended_at=100, outcome='released', metadata=? WHERE id=?",
+                     (json.dumps({"unused_grant": True}), claimed.current_run_id))
+        conn.execute("UPDATE kanban_sync_state SET applying=0")
+    for cursor in (101, 102):
+        result = sync.apply_remote_changes(conn, [], new_cursor=cursor)
+        assert result.cursor == cursor
+        assert conn.execute("SELECT cursor FROM kanban_sync_state").fetchone()[0] == cursor
+    assert conn.execute("SELECT COUNT(*) FROM kanban_source_blocks").fetchone()[0] == 1
+    assert "source refusal follow-up" in caplog.text
+
+
+@pytest.mark.parametrize("missing", ["task", "run"])
+def test_orphan_followups_expire_but_wait_for_separate_feed_pages(conn, monkeypatch, missing):
+    from hermes_cli import kanban_source_refusal_block as followup
+    import time
+    now = time.time()
+    monkeypatch.setattr(followup, "time", SimpleNamespace(time=lambda: now), raising=False)
+    tid = kb.create_task(conn, title="orphan", assignee="worker")
+    assert kb.claim_task(conn, tid)
+    claimed = kb.get_task(conn, tid)
+    with kbc.write_txn(conn):
+        followup.defer(conn, claimed, kws.WorkspaceSourceRefusal("remote_drift"))
+        conn.execute("UPDATE kanban_source_blocks SET " + (
+            "run_uid='run-not-arrived'" if missing == "run" else "task_id='task-not-arrived'"))
+    followup.drain(conn)
+    assert conn.execute("SELECT COUNT(*) FROM kanban_source_blocks").fetchone()[0] == 1
+    now += 8 * 24 * 3600
+    followup.drain(conn)
+    assert conn.execute("SELECT COUNT(*) FROM kanban_source_blocks").fetchone()[0] == 0
+
+
+def test_legacy_followup_schema_gets_full_orphan_retention(conn, monkeypatch):
+    from hermes_cli import kanban_source_refusal_block as followup
+    now = 1000000
+    monkeypatch.setattr(followup, "time", SimpleNamespace(time=lambda: now))
+    with kbc.write_txn(conn):
+        conn.execute("CREATE TABLE kanban_source_blocks (run_uid TEXT PRIMARY KEY, task_id TEXT NOT NULL, refusal TEXT NOT NULL)")
+        conn.execute("INSERT INTO kanban_source_blocks VALUES ('missing-run', 'missing-task', '{}')")
+    followup.drain(conn)
+    assert conn.execute("SELECT created_at FROM kanban_source_blocks").fetchone()[0] == now
+    now += followup.ORPHAN_RETENTION_S + 1
+    followup.drain(conn)
+    assert conn.execute("SELECT COUNT(*) FROM kanban_source_blocks").fetchone()[0] == 0
+
+
+def test_pickup_batch_import_precedes_worker_definitions():
+    import ast
+    from pathlib import Path
+    from hermes_cli import kanban_worker_node
+    tree = ast.parse(Path(kanban_worker_node.__file__).read_text())
+    pickup = next(n for n in tree.body if isinstance(n, ast.ImportFrom)
+                  and any(a.name == "pickup_batch" for a in n.names))
+    first_definition = next(n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)))
+    assert pickup.lineno < first_definition.lineno
 
 
 def test_refusal_codes_scoped():

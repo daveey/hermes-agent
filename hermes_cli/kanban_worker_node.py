@@ -33,6 +33,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli.kanban_db_dispatch_queries import DISPATCH_ORDER
+from hermes_cli.kanban_workspace_source import pickup_batch
 
 _log = logging.getLogger(__name__)
 
@@ -527,9 +528,6 @@ def _unimported_pinned(conn: sqlite3.Connection, replica: sqlite3.Connection, ow
     except Exception:  # health: allow BLE001 -- pickup evidence must never stop a pickup
         _log.warning("kanban worker node: could not list pinned cards for pickup evidence", exc_info=True)
         return set()
-
-
-from hermes_cli.kanban_workspace_source import pickup_batch
 
 
 @pickup_batch()

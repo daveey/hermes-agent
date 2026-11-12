@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import subprocess
 import time
@@ -49,7 +48,8 @@ def canonical_github(url: str) -> Optional[str]:
 
 
 def git(path: str | Path, *args: str, timeout: float = 30, check: bool = True) -> subprocess.CompletedProcess:
-    env = {**os.environ, **_BATCH_ENV}
+    from tools.environments.local import build_subprocess_env
+    env = build_subprocess_env(scrub_secrets=False, inherit_profile_home=False, extra=_BATCH_ENV)
     try:
         return subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=timeout, check=check, env=env)
@@ -61,7 +61,7 @@ def github_repo(full_name: str) -> dict:
     """``{id, full_name}`` from ``GET /repos/{owner}/{name}`` (follows renames) via the gh CLI and its broker token.
     Raises on any failure: no API access means no proof (fail closed)."""
     out = subprocess.run(["gh", "api", f"repos/{full_name}", "--jq", "{id: .id, full_name: .full_name}"],
-                         capture_output=True, text=True, timeout=15, check=True)
+                         capture_output=True, text=True, encoding="utf-8", timeout=15, check=True)
     data = json.loads(out.stdout)
     if not isinstance(data.get("id"), int) or not isinstance(data.get("full_name"), str):
         raise ValueError(f"unexpected GitHub API answer for {full_name}")
