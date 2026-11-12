@@ -1713,8 +1713,7 @@ def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None 
             # [daveey] A turn paused for an update belongs to the restarting backend's startup sweep; resuming it
             # here would continue it in a process its viewers are not attached to (update_pause).
             from tui_gateway.update_pause import paused_turn_homes, successor_owes_continuation
-            homes = paused_turn_homes(_hermes_home, _readopt_wake_profiles())
-            if any(successor_owes_continuation(home, key) for home in homes):
+            if any(successor_owes_continuation(h, key) for h in paused_turn_homes(_hermes_home, _readopt_wake_profiles())):
                 logger.info("%s: %s is paused for a Hermes update and its backend is restarting; left to that "
                             "backend's continuation", label, key)
                 return "busy"
