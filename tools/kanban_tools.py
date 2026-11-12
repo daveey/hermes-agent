@@ -1644,7 +1644,11 @@ def _handle_create(args: dict, **kw) -> str:
                 runs_on=runs_on, max_retries=max_retries,
                 placement_policy=(marker_placement or {}).get("placement_policy"),
                 placement_checked=True,  # this front door already checked pins, origins and portability
-                placement_audit=_creation_audit(args, admission=marker_placement, assignee=str(assignee),
+                # The audit diagnoses the caller's args, not the runs_on derived from a machine pin
+                # (runs_on is an uncarried option and would mask the real portable_reason). [daveey]
+                placement_audit=_creation_audit({k: v for k, v in args.items() if k != "runs_on"}
+                                                if pinned_machine else args,
+                                                admission=marker_placement, assignee=str(assignee),
                                                 skills=skills, project_id=project_id),
                 require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
                 model_override=model_override, provider_override=provider_override, pin_mandatory=pin_mandatory,

@@ -4,6 +4,7 @@ One test per path (CLI auto create, CLI runs_on machine:hub, CLI force, move to 
 capability owner routed to the hub, capability owner held locally by the hub); each checks the
 deny and the admit outcome with a fake judge (never a live model).
 """
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import argparse
 import json
 import time

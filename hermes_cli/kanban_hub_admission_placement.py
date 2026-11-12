@@ -237,6 +237,16 @@ def stored_owner_verdict(entry, title, body):
     return audit
 
 
+def mismatched_owner_verdict(entry, need):
+    """Final deny for relayed owner text that differs from the hub's own rebuild of it."""
+    audit = (entry or {}).get("hub_admission")
+    audit = audit if isinstance(audit, dict) else {}
+    sha = audit["skill_sha"] if isinstance(audit.get("skill_sha"), str) else ""
+    return {**asdict(judge.Verdict(why="relayed owner text does not match the hub's rebuild of it",
+                                   skill_sha=sha)),
+            "entry": "capability_owner", "capability": need, "invalid": True}
+
+
 def gate_owner(conn, waiting_task_id, title, body, *, need, audit=None):
     """Judge (or take ``audit`` judged at relay time) a hub-bound owner card; record the verdict.
 

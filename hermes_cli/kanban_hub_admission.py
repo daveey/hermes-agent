@@ -73,9 +73,10 @@ def _parse(text, fields, hub_reason, sha):
 
 def _cache(key, verdict=None):
     from hermes_cli.config import get_hermes_home
+    from hermes_cli import kanban_lockguard
     directory = get_hermes_home() / "kanban"
     directory.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(directory / "hub-admission.sqlite", timeout=1)) as conn, conn:
+    with closing(kanban_lockguard.connect(directory / "hub-admission.sqlite", timeout=1)) as conn, conn:
         conn.execute("CREATE TABLE IF NOT EXISTS verdicts (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         if verdict is None:
             row = conn.execute("SELECT value FROM verdicts WHERE key=?", (key,)).fetchone()

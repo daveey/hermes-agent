@@ -1,4 +1,5 @@
 """Hub candidate admission never changes non-hub or structural decisions."""
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 import pytest
 
 from hermes_cli import kanban_hub_admission as judge

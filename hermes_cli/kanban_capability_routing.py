@@ -371,10 +371,15 @@ def _park_relay(conn, task_id: str, needs: list[str], *, reason: str, gateway: s
     # it routes to judges on its own create). The verdict event is recorded only where it lands.
     from hermes_cli.kanban_hub_admission_placement import owner_verdict
     waiting = kb.get_task(conn, task_id)
-    if waiting is not None and mode == RELAY_HOME and _is_hub_gateway(gateway) and not conn.in_transaction:
+    excerpt = redact_sensitive_text((reason or "").strip(), force=True)[:3000]
+    # RELAY_RETRY on the hub parks on the hub itself; a later capability_held_locally there reaches
+    # _local_owner, so it needs the same relay-time verdict (else it loops to generation 5).
+    hub_home = (mode == RELAY_HOME and _is_hub_gateway(gateway)) or (mode == RELAY_RETRY and _is_hub_gateway(me))
+    if waiting is not None and hub_home and not conn.in_transaction:
         for r in routes:
+            # Built from the stored excerpt, exactly as the hub rebuilds it from the route entry.
             r["owner_title"], r["owner_body"] = local_owner_text(waiting, r["need"], self_gw=gateway,
-                                                                 from_gw=me, reason=reason)
+                                                                 from_gw=me, reason=excerpt)
             r["hub_admission"] = owner_verdict(r["owner_title"], r["owner_body"], need=r["need"])
     until = datetime.fromtimestamp(int(now) + WAKE_HORIZON, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     if mode == RELAY_HOME:
@@ -386,7 +391,6 @@ def _park_relay(conn, task_id: str, needs: list[str], *, reason: str, gateway: s
     park_reason = (f"Waiting on capability owner card(s): {summary} (request {ids}). Wakes when they are done. "
                    f"SCHEDULED_UNTIL={until}\n{(reason or '').strip()[:1500]}")
     wake_check = f"hermes kanban wait-check capability-owner {ids}"
-    excerpt = redact_sensitive_text((reason or "").strip(), force=True)[:3000]
     with kb.write_txn(conn):
         cur = conn.execute("SELECT status, current_run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if require_unclaimed and (cur is None or cur[0] != "ready" or cur[1] is not None):
@@ -870,11 +874,20 @@ def _local_owner(conn, task, entry: dict, *, need: str, rid: str, self_gw: str, 
         # [daveey] The hub holds the need: the owner stays here only if admitted; a denied owner
         # enrolls in the worker pool with the hub-write requirement (Board: capability:hub-write).
         # The card is created with exactly the text judged at relay time.
-        from hermes_cli.kanban_hub_admission_placement import gate_owner, stored_owner_verdict
+        from hermes_cli.kanban_hub_admission_placement import gate_owner, mismatched_owner_verdict, \
+            stored_owner_verdict
         from hermes_cli.kanban_worker_placement import POLICY
-        if isinstance(entry.get("owner_title"), str) and isinstance(entry.get("owner_body"), str):
-            title, body = entry["owner_title"], entry["owner_body"]
-        audit = stored_owner_verdict(entry, title, body)
+        stored = entry.get("owner_title"), entry.get("owner_body")
+        if all(isinstance(s, str) for s in stored):
+            # Never trust relayed text verbatim: rebuild it from the entry's own fields (redaction,
+            # caps and the least-privilege template included) and require equality; a mismatch is a
+            # final deny to the pool, created with the rebuilt text.
+            title, body = local_owner_text(task, need, self_gw=str(entry.get("gateway") or self_gw),
+                                           from_gw=str(entry.get("from_gateway") or from_gw), reason=reason)
+            audit = (stored_owner_verdict(entry, title, body) if stored == (title, body)
+                     else mismatched_owner_verdict(entry, need))
+        else:
+            audit = stored_owner_verdict(entry, title, body)
         if audit is None:  # never judged inside this probe; never a permanent route either
             return _relay_fail(conn, task.id, entry, "hub_admission_unavailable",
                                f"owner card for {need} was not opened on the hub: no hub admission verdict was "
