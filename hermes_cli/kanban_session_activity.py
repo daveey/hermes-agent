@@ -25,6 +25,7 @@ from hermes_cli import kanban_session_activity_revalidate as _revalidate
 from hermes_cli import kanban_counts_scopes as _count_scopes
 from hermes_cli.kanban_execution_source import transaction as _execution_transaction
 from hermes_cli import kanban_session_activity_recent_done as _recent_done
+from hermes_cli import kanban_execution_receipt as _receipts
 from hermes_cli.kanban_session_activity_origin_snapshot import remote_snapshot as _remote_snapshot
 from hermes_cli.kanban_session_activity_hub import _hub_content_signature
 from hermes_cli import kanban_scope_heartbeat as _scope_hb
@@ -1324,6 +1325,10 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                                           for _, tid in reads["pairs"]}
             finally:
                 _pairs_sink = outer
+            reads["done_pairs"], reads["done_execution"] = _receipts.counts_done(
+                conn, board=_board_slug(path), gateway=gateway, profile=profile, observed_at=read_at,
+                counted_sub_clause=_counted_sub_clause, authority=_require_local_execution_authority,
+                window=ATTENTION_WINDOW_S)
             if parked:
                 _parked_sink.pairs = (set(), set())
                 try:
@@ -1353,6 +1358,8 @@ def _collect_execution_evidence(reads: dict[str, Any], path: Path) -> None:
         value = reads.get("execution", {}).get(tid)
         if value is not None:
             evidence.setdefault(sid, {})[f"{_board_slug(path)}/{tid}"] = value
+    for sid, tid in reads.get("done_pairs", ()):  # observation-only done bucket, never counted
+        evidence.setdefault(sid, {})[f"done:{_board_slug(path)}/{tid}"] = reads["done_execution"][tid]
 
 
 def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: dict[str, int]) -> None:
@@ -1575,6 +1582,8 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
             _log.debug("kanban execution source failed for %s", path, exc_info=True)
             for info in found.values():
                 info["_execution_error"] = True
+        _receipts.attach_done(conn, found, board=_board_slug(path), gateway=gateway, profile=profile,
+                              observed_at=read_at)
         _add_card_details(conn, found)
         try:
             for tid, info in _local_wait_info(conn, found).items():

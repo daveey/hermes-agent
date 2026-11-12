@@ -111,6 +111,92 @@ def obligations(path: Path, *, gateway: str, profile: str, sessions: list[str]) 
     return result
 
 
+def completion_verdict(task_id, row, event, run, archived, *, bound_event, current_task, receipt_epoch):
+    """Whether a terminal owner record carries verified completion evidence: ``(verified, legacy, terminal)``.
+
+    Pure over rows already read, so a single card and a whole batch share one verdict. ``row`` is
+    ``(status, completed_at, current_run_id, goal_mode, completion_contract)``; ``event`` the latest
+    ``completed`` event ``(id, run_id, created_at, payload)``; ``run`` the latest run
+    ``(id, status, outcome, ended_at, summary)``; ``archived`` the latest ``archived`` event
+    ``(id, payload)``. Lookups return pre-read data and are invoked only where the gate needs them:
+    ``bound_event(kind, event_id, before_id)`` is that task's ``kind`` event with that id, earlier than
+    the completion, as ``(payload, run_id)``; ``current_task()`` is ``(title, body)``;
+    ``receipt_epoch()`` is the board's first judge receipt ``(id, created_at)`` or None.
+    """
+    terminal = row[0] == 'done'
+    if row[0] == 'archived' and event:
+        archive_payload = json.loads(archived[1] or '{}') if archived else None
+        terminal = bool(archived and archived[0] > event[0] and isinstance(archive_payload, dict)
+                        and archive_payload.get('source_status') == 'done')
+    contract_verified = row[4] == 'local-only'
+    if event and not contract_verified:
+        completed = json.loads(event[3] or '{}')
+        acceptance_id = completed.get('pr_acceptance_event_id') if isinstance(completed, dict) else None
+        acceptance = bound_event('pr_acceptance', acceptance_id, event[0]) if type(acceptance_id) is int else None
+        if acceptance and acceptance[1] is not None and acceptance[1] == event[1]:
+            receipt = json.loads(acceptance[0] or '{}')
+            # [daveey] A contract_waiver is accepted only on a no_required_checks receipt (kanban_pr_acceptance_store).
+            waived = (receipt.get('classification') == 'no_required_checks'
+                      and isinstance(receipt.get('waived'), dict)) if isinstance(receipt, dict) else False
+            contract_verified = bool(isinstance(receipt, dict)
+                                     # CLOSED is the gate's accepted disposition (not delivery), like success.
+                                     and ((receipt.get('ok') is True
+                                           and receipt.get('classification') in ('success', 'closed'))
+                                          or waived)
+                                     and receipt.get('pr_url') == row[4]
+                                     and isinstance(receipt.get('head_sha'), str)
+                                     and re.fullmatch(r'[0-9a-f]{40}', receipt['head_sha']))
+    goal_verified = not row[3]
+    if row[3] and event:
+        completed = json.loads(event[3] or '{}')
+        receipt_id = completed.get('goal_verified_event_id') if isinstance(completed, dict) else None
+        receipt = bound_event('goal_verified', receipt_id, event[0]) if type(receipt_id) is int else None
+        if receipt and receipt[1] is not None and receipt[1] == event[1]:
+            from hermes_cli.kanban_db import _first_line
+            from hermes_cli.kanban_goal_receipt import digest
+            proof = json.loads(receipt[0] or '{}')
+            subject = proof.get('subject') if isinstance(proof, dict) else None
+            current = current_task()
+            recorded = (completed.get('summary') or completed.get('result') or '').strip()
+            judged = subject.get('evidence') if isinstance(subject, dict) else None
+            # [daveey] The completed event keeps only the handoff's first line (400 chars). A longer or multi-line
+            # handoff is bound through the closing run, which stores it whole, so it can still match the judged
+            # evidence; comparing against the event alone never released such a card.
+            # The event preview hides FINAL SEND blocks (public_summary), so accept that form of the first line too.
+            from hermes_cli.kanban_final_send import public_summary
+            evidence_ok = isinstance(judged, str) and (judged == recorded or (
+                recorded in (_first_line(judged, 400).strip(), (_first_line(public_summary(judged), 400) or '').strip())
+                and run is not None and run[0] == event[1]
+                and judged == (run[4] or '').strip()))
+            goal_verified = bool(isinstance(subject, dict) and proof.get('snapshot') == digest(subject)
+                                 and subject.get('task_id') == task_id
+                                 and subject.get('title') == current[0] and subject.get('body') == current[1]
+                                 and subject.get('contract') == row[4]
+                                 and evidence_ok)
+    run_closed = bool(run and run[1] in ('done', 'completed') and run[2] == 'completed'
+                      and row[1] is not None and run[3] is not None and run[3] >= row[1])
+    verified = bool(terminal and row[2] is None and goal_verified and contract_verified
+                    and event and run_closed and event[1] == run[0] and event[2] >= row[1])
+    legacy = False
+    if not verified and row[2] is None and run_closed and (event or row[0] == 'done'):
+        # [daveey] Completed before this board's first judge receipt: no receipt could exist then, and holding the
+        # card ``unknown`` forever left every origin session waiting on work nobody will produce. A completion
+        # event (when the board still has it) must be the one that closed this run; a board whose completion
+        # events were lost keeps only the closing run, which ``complete_task`` writes in the same transaction.
+        # Receipt-era cards and boards that never recorded a receipt get no legacy pass.
+        epoch = receipt_epoch()
+        if epoch is not None:
+            if event:
+                legacy = bool(terminal and event[0] < epoch[0] and event[1] == run[0] and event[2] >= row[1])
+                contract_ok = contract_verified
+            else:
+                legacy = row[1] < epoch[1]
+                contract_ok = row[4] == 'local-only'
+            legacy = bool(legacy and contract_ok)
+            verified = legacy
+    return verified, legacy, terminal
+
+
 def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> dict:
     """Attach owner evidence during the collector's existing read transaction.
 
@@ -142,84 +228,16 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
     run = conn.execute(
         "SELECT id,status,outcome,ended_at,summary FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
         (task['id'],)).fetchone()
-    terminal = row[0] == 'done'
-    if row[0] == 'archived' and event:
-        archived = conn.execute(
-            "SELECT id,payload FROM task_events WHERE task_id=? AND kind='archived' ORDER BY id DESC LIMIT 1",
-            (task['id'],)).fetchone()
-        archive_payload = json.loads(archived[1] or '{}') if archived else None
-        terminal = bool(archived and archived[0] > event[0] and isinstance(archive_payload, dict)
-                        and archive_payload.get('source_status') == 'done')
-    contract_verified = row[4] == 'local-only'
-    if event and not contract_verified:
-        completed = json.loads(event[3] or '{}')
-        acceptance_id = completed.get('pr_acceptance_event_id') if isinstance(completed, dict) else None
-        acceptance = conn.execute(
-            "SELECT payload,run_id FROM task_events WHERE id=? AND task_id=? AND kind='pr_acceptance' AND id<?",
-            (acceptance_id, task['id'], event[0])).fetchone() if type(acceptance_id) is int else None
-        if acceptance and acceptance[1] is not None and acceptance[1] == event[1]:
-            receipt = json.loads(acceptance[0] or '{}')
-            # [daveey] A contract_waiver is accepted only on a no_required_checks receipt (kanban_pr_acceptance_store).
-            waived = (receipt.get('classification') == 'no_required_checks'
-                      and isinstance(receipt.get('waived'), dict)) if isinstance(receipt, dict) else False
-            contract_verified = bool(isinstance(receipt, dict)
-                                     # CLOSED is the gate's accepted disposition (not delivery), like success.
-                                     and ((receipt.get('ok') is True
-                                           and receipt.get('classification') in ('success', 'closed'))
-                                          or waived)
-                                     and receipt.get('pr_url') == row[4]
-                                     and isinstance(receipt.get('head_sha'), str)
-                                     and re.fullmatch(r'[0-9a-f]{40}', receipt['head_sha']))
-    goal_verified = not row[3]
-    if row[3] and event:
-        completed = json.loads(event[3] or '{}')
-        receipt_id = completed.get('goal_verified_event_id') if isinstance(completed, dict) else None
-        receipt = conn.execute(
-            "SELECT payload,run_id FROM task_events WHERE id=? AND task_id=? AND kind='goal_verified' AND id<?",
-            (receipt_id, task['id'], event[0])).fetchone() if type(receipt_id) is int else None
-        if receipt and receipt[1] is not None and receipt[1] == event[1]:
-            from hermes_cli.kanban_db import _first_line
-            from hermes_cli.kanban_goal_receipt import digest
-            proof = json.loads(receipt[0] or '{}')
-            subject = proof.get('subject') if isinstance(proof, dict) else None
-            current = conn.execute('SELECT title,body FROM tasks WHERE id=?', (task['id'],)).fetchone()
-            recorded = (completed.get('summary') or completed.get('result') or '').strip()
-            judged = subject.get('evidence') if isinstance(subject, dict) else None
-            # [daveey] The completed event keeps only the handoff's first line (400 chars). A longer or multi-line
-            # handoff is bound through the closing run, which stores it whole, so it can still match the judged
-            # evidence; comparing against the event alone never released such a card.
-            # The event preview hides FINAL SEND blocks (public_summary), so accept that form of the first line too.
-            from hermes_cli.kanban_final_send import public_summary
-            evidence_ok = isinstance(judged, str) and (judged == recorded or (
-                recorded in (_first_line(judged, 400).strip(), (_first_line(public_summary(judged), 400) or '').strip())
-                and run is not None and run[0] == event[1]
-                and judged == (run[4] or '').strip()))
-            goal_verified = bool(isinstance(subject, dict) and proof.get('snapshot') == digest(subject)
-                                 and subject.get('task_id') == task['id']
-                                 and subject.get('title') == current[0] and subject.get('body') == current[1]
-                                 and subject.get('contract') == row[4]
-                                 and evidence_ok)
-    run_closed = bool(run and run[1] in ('done', 'completed') and run[2] == 'completed'
-                      and row[1] is not None and run[3] is not None and run[3] >= row[1])
-    verified = bool(terminal and row[2] is None and goal_verified and contract_verified
-                    and event and run_closed and event[1] == run[0] and event[2] >= row[1])
-    legacy = False
-    if not verified and row[2] is None and run_closed and (event or row[0] == 'done'):
-        # [daveey] Completed before this board's first judge receipt: no receipt could exist then, and holding the
-        # card ``unknown`` forever left every origin session waiting on work nobody will produce. A completion
-        # event (when the board still has it) must be the one that closed this run; a board whose completion
-        # events were lost keeps only the closing run, which ``complete_task`` writes in the same transaction.
-        # Receipt-era cards and boards that never recorded a receipt get no legacy pass.
-        epoch = _receipt_epoch(conn)
-        if epoch is not None:
-            if event:
-                legacy = bool(terminal and event[0] < epoch[0] and event[1] == run[0] and event[2] >= row[1])
-                contract_ok = contract_verified
-            else:
-                legacy = row[1] < epoch[1]
-                contract_ok = row[4] == 'local-only'
-            legacy = bool(legacy and contract_ok)
-            verified = legacy
+    archived = conn.execute(
+        "SELECT id,payload FROM task_events WHERE task_id=? AND kind='archived' ORDER BY id DESC LIMIT 1",
+        (task['id'],)).fetchone() if row[0] == 'archived' and event else None
+    verified, legacy, terminal = completion_verdict(
+        task['id'], row, event, run, archived,
+        bound_event=lambda kind, event_id, before: conn.execute(
+            "SELECT payload,run_id FROM task_events WHERE id=? AND task_id=? AND kind=? AND id<?",
+            (event_id, task['id'], kind, before)).fetchone(),
+        current_task=lambda: conn.execute('SELECT title,body FROM tasks WHERE id=?', (task['id'],)).fetchone(),
+        receipt_epoch=lambda: _receipt_epoch(conn))
     payload = {k: v for k, v in task.items()
                if k not in ('origin_observation', 'withdrawal_notice', 'withdrawal_recipients')}
     from hermes_cli.kanban_withdrawal_notice import publish

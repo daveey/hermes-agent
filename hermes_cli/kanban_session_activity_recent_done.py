@@ -12,6 +12,30 @@ from typing import Any, Callable
 from hermes_cli import kanban_lockguard as _kanban_lockguard
 
 
+MAX_DONE_PAIRS = 200  # newest completions per board and statement; older ones are simply not observed
+_DONE_COND = "t.status = 'done' AND t.completed_at >= ?"
+
+
+def done_pairs_on(conn: sqlite3.Connection, since: float, counted_sub_clause: Callable[[sqlite3.Connection], str],
+                  limit: int = MAX_DONE_PAIRS) -> list[tuple[str, str]]:
+    """``(session_id, task_id)`` of the same done cards ``read_recent_done`` lists, on the caller's transaction.
+
+    Two bounded statements per board, whatever the card count: one for created links, one for tui
+    subscriptions. Newest first, capped at ``limit`` each.
+    """
+    pairs = [(str(r[0]), str(r[1])) for r in conn.execute(
+        "SELECT t.session_id, t.id FROM tasks t WHERE t.session_id IS NOT NULL AND t.session_id != '' "
+        f"AND {_DONE_COND} ORDER BY t.completed_at DESC, t.id LIMIT ?", (since, limit))]
+    try:
+        pairs.extend((str(r[0]), str(r[1])) for r in conn.execute(
+            "SELECT s.chat_id, t.id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
+            f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {counted_sub_clause(conn)} AND {_DONE_COND} "
+            "ORDER BY t.completed_at DESC, t.id LIMIT ?", (since, limit)))
+    except sqlite3.Error:  # board predates notify subscriptions
+        pass
+    return list(dict.fromkeys(pairs))
+
+
 def read_recent_done(path: Path, since: float, counted_sub_clause: Callable[[sqlite3.Connection], str],
                      board_slug: Callable[[Path], str]) -> list[tuple[str, dict[str, Any]]]:
     """``(session_id, card)`` for done cards completed since ``since`` that a session created or shepherds."""
@@ -23,7 +47,7 @@ def read_recent_done(path: Path, since: float, counted_sub_clause: Callable[[sql
         summary = ("COALESCE((SELECT r.summary FROM task_runs r WHERE r.task_id = t.id AND r.summary IS NOT NULL "
                    "AND r.summary != '' ORDER BY r.id DESC LIMIT 1), t.result)") if has_runs else "t.result"
         fields = f"t.id AS id, t.title AS title, t.completed_at AS completed_at, {summary} AS summary"
-        cond = "t.status = 'done' AND t.completed_at >= ?"
+        cond = _DONE_COND
         pairs = [(str(r["session_id"]), dict(r)) for r in conn.execute(
             f"SELECT t.session_id AS session_id, {fields} FROM tasks t WHERE t.session_id IS NOT NULL "
             f"AND t.session_id != '' AND {cond}", (since,))]

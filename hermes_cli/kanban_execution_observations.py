@@ -20,6 +20,7 @@ _log = logging.getLogger(__name__)
 ADAPTER_ERRORS = (OSError, RuntimeError, LookupError, ArithmeticError, TypeError, ValueError, AttributeError,
                   ImportError, sqlite3.Error)
 
+DONE_PREFIX = "done:"
 _STATE = {"running": "running", "ready": "queued", "todo": "queued", "scheduled": "waiting",
           "blocked": "waiting", "triage": "waiting", "review": "waiting", "done": "done",
           "failed": "failed", "cancelled": "cancelled", "archived": "cancelled"}
@@ -82,6 +83,10 @@ def card(row, *, gateway=None, profile=None, now=None):
     reported done cannot become verified completion here.
     """
     now = time.time() if now is None else now
+    done = row.get("_execution_done")
+    if isinstance(done, dict) and not row.get("remote"):
+        # Positive delivered-completion evidence (kanban_execution_receipt); nothing else is ever 'done'.
+        return project(done, now=now, source_class="sidebar")
     source = row.get("_execution_source")
     if isinstance(source, dict) and not row.get("remote"):
         from hermes_cli.kanban_execution_source import raw
@@ -164,6 +169,7 @@ def add_cards(rows, *, now=None):
         _merge(row, [observation])
         row.pop("_execution_event", None)
         row.pop("_execution_source", None)
+        row.pop("_execution_done", None)
         row.pop("_execution_error", None)
     return rows
 
@@ -231,7 +237,9 @@ def count_snapshot(row, keys, *, now=None, evidence=None):
     """
     rows = []
     evidence = evidence or {}
-    for key in sorted({key for key, bucket, _ in keys if bucket in {"active", "blocked"}}):
+    # ``done:`` evidence is a done-bucket observation: it is attached, never counted as open work.
+    done = {key for key in evidence if key.startswith(DONE_PREFIX)}
+    for key in sorted({key for key, bucket, _ in keys if bucket in {"active", "blocked"}} | done):
         if key in evidence:
             rows.append({"_raw": evidence[key]})
             continue
