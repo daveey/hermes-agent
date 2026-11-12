@@ -100,7 +100,12 @@ _HUB_READ_SSH = re.compile(r"\bssh[ \t]+hermes-hub[ \t]+(?:" + "|".join(HUB_READ
                            re.IGNORECASE)
 # A Hermes state path (same roots as ``kanban_placement.HERMES_STATE_PATH``). The path is an allow-list of path
 # characters, so a shell operator glued to it (``&&``, ``;``, ``:``, ``|``, ``$(``) ends it and stays in the text.
-_STATE_PATH = re.compile(r"(?:~|/home/[^/\s]+)/\.hermes/([\w.@+%~/-]*)")
+# The match must also end the shell word: end of text, whitespace, a shell operator, or closing punctuation that is
+# itself followed by whitespace or the end. Otherwise a quoted, brace, ``$``, ``\`` or glob remainder (``logs/'..'``,
+# ``logs/{..,x}``, ``logs/$(echo ..)``) would hide a ``..`` from :func:`_under_roots` (review 5877418508).
+# ``%`` is literal in shell (``%2e%2e`` is a directory name, not ``..``).
+_STATE_PATH = re.compile(r"(?:~|/home/[^/\s]+)/\.hermes/([\w.@+%~/-]*)"
+                         r"(?=$|[\s&;|<>()]|[`'\",:!?)\]]+\.*(?:\s|$))")
 
 
 def hub_read_roots(cfg) -> tuple:

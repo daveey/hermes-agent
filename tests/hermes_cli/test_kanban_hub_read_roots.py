@@ -42,6 +42,9 @@ def test_declared_read_step_is_portable(attested):
     "read `~/.hermes/kanban/boards/x/kanban.db`.",
     "ssh hermes-hub grep X ~/.hermes/logs/hermes-sync.log.",
     "ssh hermes-hub cat ~/.hermes/config.yaml: check kanban.placement",
+    'ssh hermes-hub cat "~/.hermes/logs/x.log"',
+    "ssh hermes-hub tail '~/.hermes/logs/x.log'.",
+    "(evidence: ssh hermes-hub cat ~/.hermes/logs/x.log)",
 ])
 def test_other_hub_read_shapes_are_portable(attested, body):
     cfg, _, _ = attested
@@ -93,6 +96,16 @@ def test_malformed_roots_clear_nothing(attested, roots):
     "rm -rf ~/.hermes/logs/x/..",
     "rm -rf ~/.hermes/logs/.",
     "rm -rf ~/.hermes/logs/...",
+    # The path must end its shell word, or a quoted/brace/$/backslash/glob remainder hides `..` (review 5877418508).
+    "chmod -R 777 ~/.hermes/logs/'..'",
+    'chmod -R 777 ~/.hermes/logs/"../state.db"',
+    "chmod -R 777 ~/.hermes/logs/x'/../../state.db'",
+    "chmod -R 777 ~/.hermes/logs/{..,x}",
+    "chmod -R 777 ~/.hermes/logs/{x,..}/state.db",
+    "chmod -R 777 ~/.hermes/logs/$(echo ..)",
+    "chmod -R 777 ~/.hermes/logs/${D}",
+    "chmod -R 777 ~/.hermes/logs/\\..",
+    "chmod -R 777 ~/.hermes/logs/[.][.]",
 ])
 def test_controls_still_pin(attested, body):
     cfg, _, _ = attested
