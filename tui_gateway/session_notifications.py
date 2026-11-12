@@ -1156,12 +1156,12 @@ def _kb_persist_batch(session: dict, batch: list, diagnostic: bool) -> tuple:
             if not target or db.get_session(target) is None:
                 return "unkeyed", batch, {}
             done = db.kanban_notice_keys_delivered(target, keys)
-            from tui_gateway.kanban_claim_custody import fresh_texts
+            from tui_gateway.kanban_claim_custody import batch_text, fresh_texts
             from tui_gateway.kanban_remote_late import missing_texts
             fresh = fresh_texts(missing_texts(batch, done), done)
             if not fresh:
                 return "delivered", [], {}
-            text = "\n".join(fresh)
+            text = batch_text(fresh)  # [daveey] stale block asks re-read at delivery
             fresh_keys = _kb_text_keys(fresh)
             import hashlib
             metadata = {"notice_id": "live:" + hashlib.sha1(",".join(sorted(fresh_keys)).encode()).hexdigest()[:20],
@@ -1248,7 +1248,7 @@ def _notif_poll_kanban_scoped(sid: str, session: dict, prepared=None) -> None:
         if session.get("_kanban_claims") or session.get("_kanban_pending"):
             _kb_release_claims(session)
         return
-    from tui_gateway.kanban_claim_custody import release_expired
+    from tui_gateway.kanban_claim_custody import batch_text, release_expired
     if release_expired(session, time.monotonic()):
         return
     texts, claims = prepared if prepared is not None else _notif_collect_kanban(session)
@@ -1274,8 +1274,7 @@ def _notif_poll_kanban_scoped(sid: str, session: dict, prepared=None) -> None:
         _notif_release_turn(session)
         _kb_rewind_refused(session, batch, not_owned=True)
         return
-    # At-least-once (t_01a1835174955959): the notices land in the transcript and the board claim is acked
-    # BEFORE the turn runs; until then the claim is in flight and a process that dies first hands it back.
+    # At-least-once (t_01a1835174955959): row written and claim acked BEFORE the turn; a dying process hands it back.
     verdict, fresh, submit_kwargs = _kb_persist_batch(session, batch, diagnostic)
     if verdict == "busy":
         with session["history_lock"]:
@@ -1291,7 +1290,8 @@ def _notif_poll_kanban_scoped(sid: str, session: dict, prepared=None) -> None:
     if verdict == "unkeyed" and diagnostic:
         submit_kwargs = {"display_metadata": {"notification_category": "diagnostic"}}
     try:
-        accepted = _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, "\n".join(fresh),
+        text = (submit_kwargs.get("display_metadata") or {}).get("display_text") or batch_text(fresh)  # = the row
+        accepted = _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text,
                                  "kanban notification dispatch failed", **submit_kwargs)
     except Exception:
         accepted = False
