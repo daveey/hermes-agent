@@ -103,9 +103,12 @@ supported `kanban_sync_client.push` API (no snapshot pull), rejects pending or
 rejected publication, and runs the canonical read-only verifier. Success requires
 canonical verification, not merely local apply receipts.
 
-A later apply refusal, SSH timeout or invalid response stops further applies and
+A later apply refusal, SSH timeout, invalid response, or **any exception from the
+in-process local writer** (for example `sqlite3.OperationalError: database is
+locked` under live dispatch) stops further applies and
 attempts guarded restore on **every attempted origin**, including the uncertain
-origin, in reverse order. The JSON report separates `attempted` origins from
+origin, in reverse order. A restore that raises on one origin is recorded and the
+remaining origins are still restored. The JSON report separates `attempted` origins from
 acknowledged, validated `applied` receipts and retains restore errors; the command
 exits nonzero even if recovery succeeds. The same CAS makes restore a no-op if
 apply never committed. Once all attempted origins have successful restore

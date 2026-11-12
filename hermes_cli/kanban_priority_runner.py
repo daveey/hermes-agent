@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 import shlex
 import subprocess
@@ -11,6 +12,8 @@ from types import SimpleNamespace
 from hermes_cli.kanban_supervisor_requests import _non_worker_refusal
 from hermes_cli.kanban_sync_client import HubError, SyncUnavailable
 from tools.environments.local import build_subprocess_env
+
+logger = logging.getLogger(__name__)
 
 
 def require_operator():
@@ -138,19 +141,24 @@ def run(conn, args):
         for origin in sorted(origins):
             # A lost reply can hide a committed write. Restore every attempted
             # origin on failure; the same CAS makes a non-applied origin a no-op.
+            # ANY exception (e.g. sqlite3.OperationalError from the in-process
+            # local writer) must reach the guarded restore, not escape it.
             report['attempted'].append(origin)
             report['applied'][origin] = checked(invoke(origin, 'apply'), origin)
-    except (ValueError, OSError, subprocess.SubprocessError, HubError, SyncUnavailable) as exc:
+    except Exception as exc:  # deliberate boundary: any failure must reach guarded restore
+        logger.exception('priority migrate: apply failed; restoring attempted origins')
         report['errors'].append(f'apply failed; attempting guarded restore of every attempted origin: {exc}')
         for origin in reversed(report['attempted']):
             try:
                 report['restored'][origin] = checked(invoke(origin, 'restore'), origin)
-            except (ValueError, OSError, subprocess.SubprocessError, HubError, SyncUnavailable) as restore_exc:
+            except Exception as restore_exc:  # deliberate boundary: keep restoring the rest
+                logger.exception('priority migrate: guarded restore failed on %s', origin)
                 report['errors'].append(f'{origin}: guarded restore refused; manual inspection required: {restore_exc}')
         if set(report['restored']) == set(report['attempted']):
             try:
                 settle(undo=True)
-            except (ValueError, OSError, subprocess.SubprocessError, HubError, SyncUnavailable) as restore_exc:
+            except Exception as restore_exc:  # deliberate boundary: always return the receipt
+                logger.exception('priority migrate: restore publication/verification failed')
                 report['errors'].append(f'restore publication/verification failed: {restore_exc}')
         return 1, report
 

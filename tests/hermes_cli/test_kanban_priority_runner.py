@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import shlex
+import sqlite3
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -305,3 +306,54 @@ def test_publish_hub_error_keeps_receipts(rig, monkeypatch):
     assert '503' in report['errors'][0]
     assert not report['restored']
     assert not any(event[0] == 'restore' for event in rig.events)
+
+
+@pytest.mark.parametrize('exc', [sqlite3.OperationalError('database is locked'), RuntimeError('unexpected')])
+def test_local_in_process_apply_exception_still_restores_and_reports(rig, monkeypatch, exc):
+    """Review of 806ff390: a non-ValueError from the in-process local writer escaped the
+    guarded restore. Any exception must reach restore and still return the JSON receipt."""
+    real_apply = executor.apply_attached
+
+    def apply(_conn, attachment, dg, *, writer, undo, allow_legacy_rollback):
+        if not undo:
+            rig.events.append(('apply', writer))
+            raise exc
+        return real_apply(_conn, attachment, dg, writer=writer, undo=undo,
+                          allow_legacy_rollback=allow_legacy_rollback)
+    monkeypatch.setattr(executor, 'apply_attached', apply)
+    code, report = runner.run(None, rig.args)
+    assert code == 1
+    assert report['attempted'] == ['a']
+    assert not report['applied']
+    assert set(report['restored']) == {'a'}
+    assert ('restore', 'a') in rig.events
+    assert not any(e[0] == 'apply' and e[1] != 'a' for e in rig.events)
+    assert any('attempting guarded restore' in s and str(exc) in s for s in report['errors'])
+
+
+@pytest.mark.parametrize('exc', [sqlite3.OperationalError('database is locked'), RuntimeError('unexpected')])
+def test_local_restore_exception_does_not_skip_remote_restores(rig, monkeypatch, exc):
+    real_apply = executor.apply_attached
+
+    def apply(_conn, attachment, dg, *, writer, undo, allow_legacy_rollback):
+        if undo:
+            rig.events.append(('restore', writer))
+            raise exc
+        return real_apply(_conn, attachment, dg, writer=writer, undo=undo,
+                          allow_legacy_rollback=allow_legacy_rollback)
+
+    def transport(cmd, **kwargs):
+        words = shlex.split(cmd[-1])
+        action = words[words.index('--priority-operation') + 1]
+        if action == 'apply' and words[words.index('--writer') + 1] == 'c':
+            return SimpleNamespace(returncode=1, stdout='', stderr='changed priority')
+        return rig.transport(cmd, **kwargs)
+    monkeypatch.setattr(executor, 'apply_attached', apply)
+    monkeypatch.setattr(runner.subprocess, 'run', transport)
+    code, report = runner.run(None, rig.args)
+    assert code == 1
+    assert report['attempted'] == ['a', 'b', 'c']
+    assert set(report['applied']) == {'a', 'b'}
+    assert set(report['restored']) == {'b', 'c'}
+    assert any(s.startswith('a: guarded restore refused') and str(exc) in s for s in report['errors'])
+    assert 'canonical_restore' not in report
