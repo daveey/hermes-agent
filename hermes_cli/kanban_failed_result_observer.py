@@ -38,7 +38,8 @@ def arm(context):
     if sys.platform == 'linux':
         from hermes_cli.kanban_failed_result_service import arm_service
         return arm_service(context, startup_seconds=START_SECONDS)
-    command = [sys.executable, '-m', __name__, json.dumps(context)]
+    from hermes_cli.kanban_failed_result_service import observer_argv_env
+    command, env = observer_argv_env(build_subprocess_env(extra=systemd_user_bus_env()), context)
     launch = restart_safe_gateway_child_argv(
         command, unit_suffix=f'failed-result-{os.getpid()}-{time.monotonic_ns()}',
         require_restart_safe_scope=True, outlives_parent=True)
@@ -48,7 +49,7 @@ def arm(context):
         launch.argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         # detached-spawn: ok — independent reconciler must outlive the failed writer to close its run
         start_new_session=True, close_fds=True,
-        env=build_subprocess_env(extra=systemd_user_bus_env()),
+        env=env,
         cwd=project_root_str(),
     )
     assert proc.stdout is not None
