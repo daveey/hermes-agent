@@ -182,7 +182,7 @@ def test_watcher_cancels_a_pending_clarify(env, sleeper):
     assert server._takeover_watch_pass() == 1
     waiter.join(5)
     assert unblocked.is_set()
-    assert req.result == {"answers": {}, "outcome": "cancelled"}
+    assert req.result == {"answers": {}, "outcome": "cancelled", "reason": "taken_over"}
     assert server_requests.open_requests(SID) == []
 
 
@@ -425,3 +425,15 @@ def test_take_over_refuses_a_live_writer_that_never_releases_at_the_live_cap(
                for r in caplog.records)
     assert proc.poll() is None  # never forced out
     assert durable_writer.db.session_turn_lease_owner(KEY)["holder"] == holder
+
+
+@pytest.mark.parametrize(("why", "label"), [("lease_takeover", "taken_over"), ("backend_exit", "shutdown"),
+                                            ("session_close", "session_closed"), (None, "interrupted")])
+def test_interrupting_a_turn_names_why_in_the_pending_clarify_result(env, why, label):
+    """A turn stop used to cancel its parked clarify as ``interrupted`` whatever the producer, so a takeover read
+    like a plain Stop in the stored result. The label rides the result; no answer content does."""
+    req = server_requests.ServerRequest(
+        SID, "clarify", {"questions": [{"qid": "q1", "question": "which one?"}]}, qids=["q1"])
+    server_requests._register(req)
+    server._interrupt_session_turn(SID, _session(), reason=why)
+    assert req.result == {"answers": {}, "outcome": "cancelled", "reason": label}

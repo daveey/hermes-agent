@@ -190,7 +190,7 @@ def _ask(events, session_id, method, params, *, cancelled, timeout, qids=None, r
         if still_open and pending.qids is not None:
             # A batch keeps every answer locked before the wait ended (main's sidecar: "locked
             # answers survive a timeout"); sudo/secret have no question ids and stay unanswered.
-            pending.result = settle_batch(pending.locked,
+            pending.result = settle_batch(pending.locked, reason=reason,
                                           ended="cancelled" if reason == "interrupted" else "timed_out")
     if still_open:
         # The same teardown main's renderers key on (``request.cancel``): the card closes and a

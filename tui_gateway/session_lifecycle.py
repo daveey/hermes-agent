@@ -924,7 +924,10 @@ def _interrupt_session_turn(
     # interrupt-at-grace) must also reach a background memory/skill review, not just the foreground
     # turn (``_cancel_background_review_on_stop``).
     _cancel_background_review_on_stop(session)
-    _clear_pending(sid)
+    # A takeover / close / backend exit must not read as a plain Stop in the stored clarify result.
+    pending_why = {"lease_takeover": "taken_over", "session_close": "session_closed",
+                   "backend_exit": "shutdown"}.get(reason or "")
+    _clear_pending(sid, reason=pending_why) if pending_why else _clear_pending(sid)
     with contextlib.suppress(Exception):
         # Deny-resolve every pending approval so no agent thread blocks on the queue. The
         # deny is silent without the broadcast: a reconnecting client sees a bare 4001 on

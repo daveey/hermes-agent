@@ -12,7 +12,7 @@ from __future__ import annotations
 OUTCOMES = ("submitted", "timed_out", "cancelled")
 
 
-def settle_batch(locked: dict, frame_result=None, *, ended: str | None = None) -> dict:
+def settle_batch(locked: dict, frame_result=None, *, ended: str | None = None, reason: str | None = None) -> dict:
     """``{answers, outcome}`` for a batch whose locks so far are *locked*.
 
     - ``ended`` (``"timed_out"`` / ``"cancelled"``): the wait ended with no frame (timeout, interrupt,
@@ -21,11 +21,20 @@ def settle_batch(locked: dict, frame_result=None, *, ended: str | None = None) -
       those answers over the locks (the frame wins per question) and keeps the frame's own outcome when it
       names a known one (main's classic CLI reports ``timed_out``), else ``submitted``. Anything else (Ink
       Esc / Desktop Skip send ``{}``; an error frame gives ``None``) is a cancel-all: locks kept, ``cancelled``.
+
+    A result that did not end in ``submitted`` also names *why* in ``reason``: the caller's lifecycle reason for an
+    ``ended`` wait (``interrupted`` / ``taken_over`` / ``timeout`` ...), ``client_empty`` for a cancel-all frame,
+    ``client_error`` for an error frame. A reason is a label only, never answer content: the stored result used to
+    say just ``cancelled`` for all of them.
     """
     if ended is not None:
-        return {"answers": dict(locked), "outcome": ended if ended in OUTCOMES else "cancelled"}
+        out = {"answers": dict(locked), "outcome": ended if ended in OUTCOMES else "cancelled"}
+        if reason and out["outcome"] != "submitted":
+            out["reason"] = str(reason)
+        return out
     if isinstance(frame_result, dict) and isinstance(frame_result.get("answers"), dict):
         outcome = frame_result.get("outcome")
         return {**frame_result, "answers": {**locked, **frame_result["answers"]},
                 "outcome": outcome if outcome in OUTCOMES else "submitted"}
-    return {"answers": dict(locked), "outcome": "cancelled"}
+    return {"answers": dict(locked), "outcome": "cancelled",
+            "reason": "client_empty" if isinstance(frame_result, dict) else "client_error"}

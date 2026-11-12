@@ -22,7 +22,7 @@ def ask_clarify_batch(turn, questions) -> dict:
     interrupted = (lambda: bool(getattr(agent, "_interrupt_requested", False))) if agent is not None else (
         lambda: False)
     if live is None:
-        return {"answers": {}, "outcome": "cancelled"}
+        return {"answers": {}, "outcome": "cancelled", "reason": "no_session"}
     wire = [{key: entry.get(key) for key in _QUESTION_KEYS if entry.get(key) is not None} for entry in questions]
     timeout = get_clarify_timeout()
     # ``qids``: the viewer's batch panel locks each answer with ``clarify.lock`` (#140400).
@@ -30,13 +30,18 @@ def ask_clarify_batch(turn, questions) -> dict:
                                cancelled=interrupted, timeout=timeout if timeout > 0 else None,
                                qids=[entry["qid"] for entry in questions])
     if result is None:
-        return {"answers": {}, "outcome": "cancelled" if interrupted() else "timed_out"}
+        stopped = interrupted()
+        return {"answers": {}, "outcome": "cancelled" if stopped else "timed_out",
+                "reason": "interrupted" if stopped else "timeout"}
     answers = result.get("answers")
     if not isinstance(answers, dict):
-        return {"answers": {}, "outcome": "cancelled"}
+        return {"answers": {}, "outcome": "cancelled", "reason": "client_error"}
     known = {entry["qid"] for entry in questions}
     clean = {qid: (value if isinstance(value, str) else None) for qid, value in answers.items() if qid in known}
     # ``session_server_requests`` settles a batch with its terminal outcome (an absent outcome on a frame
     # that carried answers is ``submitted``; a cancel-all or error is ``cancelled``).
     outcome = result.get("outcome") if result.get("outcome") in ("submitted", "timed_out", "cancelled") else "cancelled"
-    return {"answers": clean, "outcome": outcome}
+    reply = {"answers": clean, "outcome": outcome}
+    if outcome != "submitted" and isinstance(result.get("reason"), str):
+        reply["reason"] = result["reason"]
+    return reply

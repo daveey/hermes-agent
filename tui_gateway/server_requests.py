@@ -266,7 +266,7 @@ def send(method: str, sid: str, params: dict, *, timeout: float | None,
     if timed_out:
         _emit_cancel(req, "timeout")
         if req.qids is not None:
-            return settle_batch(locked, ended="timed_out")
+            return settle_batch(locked, ended="timed_out", reason="timeout")
     return None
 
 
@@ -400,7 +400,7 @@ def cancel(sid: str | None = None, reason: str = "interrupted", *, method: str |
         for req in targets:
             _open.pop(req.id, None)
             if req.qids is not None:
-                req.result, req.answered = settle_batch(req.locked, ended="cancelled"), True
+                req.result, req.answered = settle_batch(req.locked, ended="cancelled", reason=reason), True
             else:
                 req.result, req.answered = None, False
             if req.writing:

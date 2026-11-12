@@ -550,7 +550,7 @@ def test_clarify_batch_locks_resolve_in_order_and_keep_partial_on_timeout(captur
         thread.join(timeout=5)
     finally:
         server._clarify_timeout_seconds = original_timeout
-    assert box["answer"] == {"answers": {"q0": "kept"}, "outcome": "timed_out"}
+    assert box["answer"] == {"answers": {"q0": "kept"}, "outcome": "timed_out", "reason": "timeout"}
     cancels = [f for f in _frames(buf) if f.get("method") == "event" and f["params"]["type"] == "request.cancel"]
     assert [c["params"]["payload"]["id"] for c in cancels] == [req.id]
 
@@ -560,7 +560,7 @@ def test_clarify_batch_cancel_all_is_a_response_without_answers(capture):
     thread, box, req = _start_batch_clarify(server, buf, ["q0", "q1"])
     server.dispatch({"jsonrpc": "2.0", "id": req.id, "result": {}})
     thread.join(timeout=5)
-    assert box["answer"] == {"answers": {}, "outcome": "cancelled"}
+    assert box["answer"] == {"answers": {}, "outcome": "cancelled", "reason": "client_empty"}
 
 
 def test_clear_pending_cancels_only_that_session(capture):

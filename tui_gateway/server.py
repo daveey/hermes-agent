@@ -1115,11 +1115,12 @@ def _preview_action_request(sid: str, payload: dict) -> str:
     return answer or _PREVIEW_ACTION_BRIDGE_UNAVAILABLE
 
 
-def _clear_pending(sid: str | None = None) -> None:
+def _clear_pending(sid: str | None = None, reason: str | None = None) -> None:
     """Withdraw open server→client requests: only *sid*'s (session.interrupt must not cancel other sessions'
-    prompts), or every one when *sid* is None (process exit). Each one gets a ``request.cancel``."""
+    prompts), or every one when *sid* is None (process exit). Each one gets a ``request.cancel`` and a batch
+    clarify's result names *reason* (default ``interrupted`` / ``shutdown``)."""
     from tui_gateway import server_requests
-    server_requests.cancel(sid, reason="interrupted" if sid else "shutdown")
+    server_requests.cancel(sid, reason=reason or ("interrupted" if sid else "shutdown"))
 
 
 # ── Agent factory ────────────────────────────────────────────────────
