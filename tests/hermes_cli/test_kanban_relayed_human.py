@@ -140,6 +140,14 @@ def test_remote_relay_is_stored_as_sent():
     {"compressed": 1, "content": "summary of earlier turns"},
     {"content": "[System: the stream was cut; retry the tool call]"},
     {"content": "[Message from another Hermes session @session:default/abc]\nplease relay"},
+    # Review 5878871802: untyped runtime rows a notice-woken turn writes itself.
+    {"content": "[runtime] Your draft above was NOT shown to the user. Your next reply replaces it: include its "
+                "full content; don't refer to it as 'above'.\n\nFinish the answer."},
+    {"content": "[Your active task list was preserved across context compression]\n- [ ] relay"},
+    {"content": "[IMPORTANT: Background process proc_1 finished with exit code 0]"},
+    {"content": "[System note: Your previous turn was interrupted mid-run. Continue.]"},
+    {"content": "[System note: A new message has arrived. IGNORE pending results.]\n\nleft ring"},
+    {"content": "[/loop wakeup #3, every 5m]\nRecurring task: check the ring card"},
 ])
 def test_verify_skips_synthetic_user_rows(kanban_home, synthetic):
     """Review 5878485674 (1): only a row a person typed is the reply. A synthetic role='user' row newer than
@@ -150,6 +158,51 @@ def test_verify_skips_synthetic_user_rows(kanban_home, synthetic):
         reply = _state_db(kanban_home, "chat-1", now - 50)
         _state_db(kanban_home, "chat-1", now - 10, **synthetic)
         assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == reply
+
+
+def _loop_state(home: Path, session: str, *, awaiting: bool, fired_at: float) -> None:
+    db = sqlite3.connect(home / "state.db")
+    db.execute("CREATE TABLE IF NOT EXISTS state_meta (key TEXT PRIMARY KEY, value TEXT)")
+    db.execute("INSERT OR REPLACE INTO state_meta (key, value) VALUES (?, ?)", (f"loop:{session}", json.dumps(
+        {"prompt": "/recap", "status": "active", "awaiting_response": awaiting, "last_fired_at": fired_at})))
+    db.commit()
+    db.close()
+
+
+def test_a_running_slash_loop_ticks_prompt_is_not_a_reply(kanban_home):
+    """Review 5878871802: a ``/loop 10m /skill`` tick submits the command's prompt untyped. While that tick's turn
+    runs, its row is the loop's; once the tick completed, a later typed row is a reply again."""
+    now = int(time.time())
+    with kbc.connect_closing() as conn:
+        tid = _asked(conn, now - 100)
+        reply = _state_db(kanban_home, "chat-1", now - 50)
+        _loop_state(kanban_home, "chat-1", awaiting=True, fired_at=now - 10)
+        tick = _state_db(kanban_home, "chat-1", now - 10, content="Run the recap skill now")
+        assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == reply
+        _loop_state(kanban_home, "chat-1", awaiting=False, fired_at=now - 10)
+        assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == tick
+
+
+def _string_constants(path: str) -> dict:
+    import ast
+    tree = ast.parse((Path(__file__).resolve().parents[2] / path).read_text())
+    return {t.id: n.value.value for n in tree.body if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant)
+            for t in n.targets if isinstance(t, ast.Name) and isinstance(n.value.value, str)}
+
+
+def test_every_registered_synthetic_opening_is_excluded():
+    """The exclusion follows the producers' registries (review 5878871802), so a nudge added there is covered."""
+    from agent.conversation_compression_scaffolding import _SYNTHETIC_USER_PREFIXES
+    from agent.pre_final_gate import HELD_NOTICE, held_nudge
+    prefixes = krh._synthetic_prefixes()
+    openings = [*_SYNTHETIC_USER_PREFIXES, held_nudge("Finish it.", shown=False)]
+    openings += [v for k, v in _string_constants("gateway/run.py").items() if k.startswith("_AUTO_CONTINUE")]
+    openings += [_string_constants("tui_gateway/session_history.py")["_AUTO_CONTINUE_NOTE_PREFIX"]]
+    from hermes_cli import loops
+    openings += [loops.WAKEUP_PROMPT_TEMPLATE.format(tick=1, cadence="", prompt="p", until="u"),
+                 loops.WAKEUP_PROMPT_WITH_UNTIL_TEMPLATE.format(tick=1, cadence="", prompt="p", until="u")]
+    assert len(openings) >= 10 and HELD_NOTICE in prefixes
+    assert [o for o in openings if not o.lstrip().startswith(prefixes)] == []
 
 
 def test_a_notice_after_the_ask_with_no_reply_is_refused(kanban_home):

@@ -17,7 +17,10 @@ The origin (the chat writing the comment) verifies it:
 
 Only a row a person typed is a reply: a plain or ``steer`` user row, never a synthetic ``role='user'`` row (the
 card's own ``kanban_notice``, hidden scaffolding, process/delegation completions, internal notifications,
-compaction summaries, ``[System:`` notices or cross-session deliveries).
+compaction summaries, ``[System:`` notices or cross-session deliveries). Untyped synthetic rows are recognized
+by their producers' registered openings (runtime scaffolding, the pre-final gate's held-draft notice, auto-continue
+notes, the ``/loop`` wakeup frame) and a running ``/loop`` tick's row; a Kanban notice is always typed
+``kanban_notice``, the no-store fallback included.
 
 The card's holder checks every relay before storing it (``admit``, inside ``add_comment``'s write transaction,
 so the one-relay rule is atomic), a cross-gateway one included: the card asked, the message is not older than
@@ -39,8 +42,10 @@ SUSPECT_WINDOW_SECONDS = 15 * 60
 REMOTE_CLOCK_SKEW_SECONDS = 120
 # Display kinds of a user row a person typed (NULL/'' = a plain prompt). Every other kind is synthetic.
 _TYPED_KINDS = ("steer",)
-# Untyped role='user' rows that are still not the user's words (gateway scaffolding, session-mentions courier).
-_SYNTHETIC_PREFIXES = ("[System:", "[Message from another Hermes session")
+# Untyped role='user' rows that are still not the user's words, beyond core's registries (``_synthetic_prefixes``):
+# gateway ``[System:`` / ``[System note:`` notices (auto-continue and interrupted-turn notes) and the
+# session-mentions courier.
+_EXTRA_SYNTHETIC_PREFIXES = ("[System:", "[System note:", "[Message from another Hermes session")
 
 
 class RelayRefused(ValueError):
@@ -53,9 +58,33 @@ def _latest_ask(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
     return int(row[0]) if row and row[0] is not None else None
 
 
+def _synthetic_prefixes() -> tuple[str, ...]:
+    """Openings of untyped synthetic user rows, taken from their producers' registries so a nudge registered
+    there is excluded here too: compaction/runtime scaffolding (task-list snapshot, background-process notices,
+    ``[System:`` nudges), the pre-final gate's held-draft notice and the ``/loop`` wakeup frame."""
+    from agent.conversation_compression_scaffolding import _SYNTHETIC_USER_PREFIXES
+    from agent.pre_final_gate import HELD_NOTICE
+    from hermes_cli.loops import WAKEUP_PROMPT_TEMPLATE, WAKEUP_PROMPT_WITH_UNTIL_TEMPLATE
+    loop_frames = {t.split("{", 1)[0] for t in (WAKEUP_PROMPT_TEMPLATE, WAKEUP_PROMPT_WITH_UNTIL_TEMPLATE)}
+    return (*_SYNTHETIC_USER_PREFIXES, HELD_NOTICE, *sorted(loop_frames), *_EXTRA_SYNTHETIC_PREFIXES)
+
+
+def _loop_tick_since(sdb: sqlite3.Connection, session_id: str) -> Optional[float]:
+    """When this session's ``/loop`` tick fired, while that tick's turn still runs (``awaiting_response``): the
+    tick's row (a slash command's prompt, stored untyped) is the loop's, not a reply. ``None`` otherwise."""
+    try:
+        row = sdb.execute("SELECT value FROM state_meta WHERE key = ?", (f"loop:{session_id}",)).fetchone()
+        state = json.loads(row[0]) if row and row[0] else None
+        if not isinstance(state, dict) or not state.get("awaiting_response"):
+            return None
+        return float(state.get("last_fired_at") or 0) or None
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+
+
 def _latest_user_message(session_id: str, db_path: Optional[str] = None) -> Optional[tuple[int, float]]:
-    """``(message_id, timestamp)`` of the session's newest user row in ``state.db`` (the user turn is persisted
-    before the first model call, so it is there while the turn's tools run)."""
+    """``(message_id, timestamp)`` of the newest row in ``state.db`` the session's person typed (the user turn is
+    persisted before the first model call, so it is there while the turn's tools run)."""
     if db_path is None:
         from hermes_constants import get_hermes_home
         db_path = os.path.join(str(get_hermes_home()), "state.db")
@@ -63,16 +92,22 @@ def _latest_user_message(session_id: str, db_path: Optional[str] = None) -> Opti
         return None
     uri = f"file:{db_path}?mode=ro"
     kinds = ", ".join("?" for _ in _TYPED_KINDS)
-    not_synthetic = " ".join("AND instr(ltrim(COALESCE(content, '')), ?) <> 1" for _ in _SYNTHETIC_PREFIXES)
-    sql = ("SELECT id, timestamp FROM messages WHERE session_id = ? AND role = 'user' "
-           f"AND (COALESCE(display_kind, '') = '' OR display_kind IN ({kinds})) "
-           f"AND COALESCE(_compressed_summary, 0) = 0 {not_synthetic} ORDER BY id DESC LIMIT 1")
+    sql = ("SELECT id, timestamp, content, COALESCE(display_kind, '') FROM messages WHERE session_id = ? "
+           f"AND role = 'user' AND (COALESCE(display_kind, '') = '' OR display_kind IN ({kinds})) "
+           "AND COALESCE(_compressed_summary, 0) = 0 ORDER BY id DESC")
+    prefixes = _synthetic_prefixes()
     try:
         with sqlite3.connect(uri, uri=True, timeout=5) as sdb:
-            row = sdb.execute(sql, (session_id, *_TYPED_KINDS, *_SYNTHETIC_PREFIXES)).fetchone()
+            loop_since = _loop_tick_since(sdb, session_id)
+            for message_id, at, content, kind in sdb.execute(sql, (session_id, *_TYPED_KINDS)):
+                if str(content or "").lstrip().startswith(prefixes):
+                    continue
+                if loop_since is not None and not kind and float(at) >= loop_since - 1:
+                    continue  # the running /loop tick's own prompt row
+                return int(message_id), float(at)
     except sqlite3.Error:
         return None
-    return (int(row[0]), float(row[1])) if row else None
+    return None
 
 
 def _already_relayed(conn: sqlite3.Connection, task_id: str, session: str, message_id: int) -> bool:

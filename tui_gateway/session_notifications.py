@@ -1287,8 +1287,11 @@ def _notif_poll_kanban_scoped(sid: str, session: dict, prepared=None) -> None:
         _kb_mark_delivered(session, batch)
         _notif_release_turn(session)
         return
-    if verdict == "unkeyed" and diagnostic:
-        submit_kwargs = {"display_metadata": {"notification_category": "diagnostic"}}
+    if verdict == "unkeyed":  # [daveey] still a kanban_notice row (typed: never mistaken for a person's reply)
+        meta = {"display_text": batch_text(fresh)}
+        if diagnostic:
+            meta["notification_category"] = "diagnostic"
+        submit_kwargs = {"display_kind": "kanban_notice", "display_metadata": meta}
     try:
         text = (submit_kwargs.get("display_metadata") or {}).get("display_text") or batch_text(fresh)  # = the row
         accepted = _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text,
