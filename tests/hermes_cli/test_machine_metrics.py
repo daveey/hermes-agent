@@ -95,17 +95,15 @@ def cpu_reporter(send, *, limit=("on", 50.0), cpu=lambda: dict(CPU), calls=None,
         calls.append("collect")
         return {"cpus": 4, "drain_active": 0}
 
-    def sample(*args, **kwargs):
+    def take(_limit):
         calls.append("cpu")
         return cpu()
     return mm.Reporter(send, collect_fn=collect, clock=lambda: now[0], cpu_limit_fn=lambda: limit,
-                       cpu_begin_fn=lambda **kw: (now[0], None), cpu_finish_fn=sample)
+                       cpu_take_fn=take)
 
 
 def finish_report(reporter, now):
-    assert reporter.report_due() is False
-    now[0] += 1
-    return reporter.report_due()
+    return reporter.report_due()  # the sampler thread measured already: one call reports
 
 
 def test_cpu_triple_only_when_root_gate_configured_and_sampled_last():
