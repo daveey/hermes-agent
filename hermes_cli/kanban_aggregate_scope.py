@@ -21,10 +21,20 @@ def configure_pool():
         raise RestartSafeScopeUnavailable(f'Kanban aggregate memory budget unavailable: {exc}') from exc
 
 
-def bounded_scope(argv):
-    """Add the shared bounded slice only to the systemd scope wrapper, never worker args."""
+def bounded_scope(argv, *, task_id=None, board=None):
+    """Add the bounded pool, and the opt-in worker's stable per-card CPU slice."""
+    from hermes_cli.worker_compute_capacity import configure_card, worker_enabled
+
+    enabled = worker_enabled()
     if not argv or argv[0].rsplit('/', 1)[-1] != 'systemd-run' or '--scope' not in argv:
+        if enabled:
+            raise ValueError('Worker compute policy requires a systemd scope')
         return argv
     configure_pool()
-    at = argv.index('--') if '--' in argv else argv.index('--scope') + 1  # systemd-run option space only
-    return [*argv[:at], '--slice=hermes-kanban.slice', *argv[at:]]
+    at = argv.index('--') if '--' in argv else argv.index('--scope') + 1
+    if not enabled:
+        return [*argv[:at], '--slice=hermes-kanban.slice', *argv[at:]]
+    if not task_id or not board or '--' not in argv:
+        raise ValueError('Worker compute scope requires board and task identity')
+    name = configure_card(board, task_id)
+    return [*argv[:at], f'--slice={name}', '--', 'nice', '-n', '15', *argv[at + 1:]]
