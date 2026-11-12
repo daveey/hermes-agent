@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import heapq
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
@@ -146,6 +147,26 @@ def shares(slugs: list[str], cap: Optional[int], *, now: Optional[float] = None)
     return plan(heads, cap - running, now=time.time() if now is None else now)
 
 
+_tick = threading.local()
+
+
+@contextlib.contextmanager
+def tick_counts():
+    """One dispatcher tick over every board: :func:`count_running_tasks_other_boards` reads each board once.
+
+    Every board's tick asked every other board for its running count: 12 boards meant 132 connections per tick
+    (5% of hub gateway CPU, 2026-11-12). Inside this scope a board's count is kept until that board's own tick
+    asks (its tick is what starts workers there), so the next board reads it again and still sees those starts.
+    A worker that ends on another board mid-tick is counted until the next tick, which only delays a start.
+    Outside the scope (daemon, CLI, notices) every call reads every board, as before. [daveey]"""
+    previous = getattr(_tick, "counts", None)
+    _tick.counts = {}
+    try:
+        yield
+    finally:
+        _tick.counts = previous
+
+
 def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
     """Total ``running`` tasks across every board EXCEPT ``board`` (re-exported by ``kanban_db_dispatch``).
 
@@ -161,6 +182,10 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
         current_path = str(_kb.kanban_db_path(board=board).expanduser().resolve())
     except Exception:
         current_path = None
+    # Without the asking board's path nothing says whose count goes stale: read every board.
+    counts: Optional[dict[str, int]] = getattr(_tick, "counts", None) if current_path is not None else None
+    if counts is not None:
+        counts.pop(current_path, None)  # this board's tick is about to change its own count
     try:
         boards = _kb.list_boards(include_archived=False)
     except Exception:
@@ -173,14 +198,20 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
             resolved = str(path.resolve())
             if current_path is not None and resolved == current_path:
                 continue
+            if counts is not None and resolved in counts:
+                total += counts[resolved]
+                continue
             if not path.exists():
                 continue
             other = _kbc.connect(board=slug)
             try:
-                total += count_running_tasks(other)
+                running = count_running_tasks(other)
             finally:
                 with contextlib.suppress(Exception):
                     other.close()
+            total += running
+            if counts is not None:
+                counts[resolved] = running
         except Exception:
             continue
     return total

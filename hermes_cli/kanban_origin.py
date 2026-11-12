@@ -127,15 +127,18 @@ def gateway_names() -> tuple[str, set[str]]:
     memo, now = _names_memo, time.monotonic()
     if memo is not None and memo[0] == key and now - memo[1] < _NAMES_MAX_AGE_S:
         return memo[2], set(memo[3])
-    me, known = _read_gateway_names(path, cfg)
+    failed: list[sqlite3.Error] = []
+    me, known = _read_gateway_names(path, cfg, failed)
     # A file written within the timestamp granularity could change again under the same signature: not kept.
+    # Nor is an answer from a hub.db read that failed (locked, mid-replace): the next caller reads again.
     racy = time.time_ns() - _NAMES_RACY_NS
-    _names_memo = None if any(isinstance(sig, tuple) and sig[1] >= racy for sig in key) else (
+    _names_memo = None if failed or any(isinstance(sig, tuple) and sig[1] >= racy for sig in key) else (
         key, now, me, frozenset(known))
     return me, known
 
 
-def _read_gateway_names(path: Optional[Path], cfg: Path) -> tuple[str, set[str]]:
+def _read_gateway_names(path: Optional[Path], cfg: Path,
+                        failed: Optional[list[sqlite3.Error]] = None) -> tuple[str, set[str]]:
     me, known = "", set()
     if path is not None:
         try:
@@ -146,8 +149,9 @@ def _read_gateway_names(path: Optional[Path], cfg: Path) -> tuple[str, set[str]]
                 known = {str(r[0]) for r in conn.execute("SELECT DISTINCT gw FROM replica") if r[0]}
             finally:
                 conn.close()
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as exc:
+            if failed is not None:
+                failed.append(exc)
     if not me:
         try:
             me = str(json.loads(cfg.read_text(encoding="utf-8-sig")).get("gateway") or "")

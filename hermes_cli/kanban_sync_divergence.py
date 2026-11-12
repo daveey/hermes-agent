@@ -44,7 +44,9 @@ def repair_divergence(live: sqlite3.Connection, shadow: sqlite3.Connection, gate
             replica = {r["id"]: r for r in shadow.execute(
                 f"SELECT * FROM tasks WHERE id IN ({','.join('?' * len(ids))})", ids)}
         tid = row["id"]
-        theirs = replica[tid]
+        theirs = replica.get(tid)
+        if theirs is None:  # left the replica since ``seen`` was read: nothing to compare this pass
+            continue
         mine, remote = _row_fields(live, "tasks", row), _row_fields(shadow, "tasks", theirs)
         omitted = omissions.get(tid, ())
         fields = {k: v for k, v in mine.items() if k in remote and remote[k] != v and k not in omitted}
