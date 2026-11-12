@@ -233,3 +233,29 @@ def start_code_skew_watchdog(server, *, skew_fn: Optional[Callable[[], Skew]] = 
                                       on_retire=_on_retire)
     _SKEW_WATCHDOGS[:] = [t for t in _SKEW_WATCHDOGS if t.is_alive()] + [thread]
     return thread
+
+
+def start_superseded_watchdog(server, *, port: int, superseded: Optional[Callable[[int], bool]] = None,
+                              fence=None, poll_s: float = DEFAULT_SKEW_POLL_S,
+                              max_polls: Optional[int] = None) -> threading.Thread:
+    """[daveey] An always-on blue/green backend (``hermes_cli/always_on_rollover``) runs this INSTEAD of the
+    code-skew watchdog: the roller replaces it with a warmed successor, so it must not exit on skew before
+    that successor serves. It retires (through the same idle fence) once ``active.json`` names neither its
+    port as active nor as warming. Registered as a skew watchdog: a core-update-paused turn still learns
+    that this process will be replaced (``tui_gateway.update_pause``)."""
+    if superseded is None:
+        from hermes_cli.always_on_rollover import is_superseded
+
+        superseded = is_superseded
+    check: Callable[[int], bool] = superseded
+
+    def _observe() -> Optional[str]:
+        if not check(port):
+            return None
+        return (f"always-on backend :{port} was superseded by a warmed successor (active.json); "
+                "retiring now that it is idle.")
+
+    thread = _run_retirement_watchdog(server, observe=_observe, fence=fence, poll_s=poll_s,
+                                      max_polls=max_polls, thread_name="always-on-superseded-watchdog")
+    _SKEW_WATCHDOGS[:] = [t for t in _SKEW_WATCHDOGS if t.is_alive()] + [thread]
+    return thread
