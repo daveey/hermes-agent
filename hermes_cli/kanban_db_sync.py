@@ -114,6 +114,10 @@ REF_COLUMNS: dict[tuple[str, str], str] = {
     ("task_events", "run_id"): "run_uid",
 }
 SYNCED_TABLES = tuple(SYNCED_COLUMNS)
+# Wire-only fields: carried by an outbox op and sent, never a column (so never in ``SYNCED_COLUMNS``, which
+# ``undeclared_columns``, ``_row_fields`` and the import path read as real columns). ``source_receipt`` rides
+# the status-leaving tasks op (``kanban_source_receipt``); an old Board's refusal drops it with no omission.
+VIRTUAL_WIRE_FIELDS: dict[str, frozenset[str]] = {"tasks": frozenset({"source_receipt"})}
 # Synced columns core keeps in Unix SECONDS (``int(time.time())``). The service's own clocks (leases, HLCs, the feed,
 # tombstones) are milliseconds; a millisecond value in one of these columns makes every ``now - started_at`` reader
 # wrong by 1000x (2026-10-27: the Board's lease grants wrote ``task_runs.started_at`` in ms and

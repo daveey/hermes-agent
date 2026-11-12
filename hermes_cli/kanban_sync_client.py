@@ -547,6 +547,7 @@ def _next_hlc(conn: sqlite3.Connection, gateway: str) -> str:
 def _wire_fields(table: str, fields: dict) -> dict:
     """Only the synced wire columns (a column a later migration added is not sent until it is declared)."""
     allowed = {sync._wire_name(table, c) for c in sync.SYNCED_COLUMNS[table]}
+    allowed |= sync.VIRTUAL_WIRE_FIELDS.get(table, frozenset())
     return {k: v for k, v in fields.items() if k in allowed}
 
 
@@ -587,7 +588,9 @@ def _full_row_if_unseen(conn: sqlite3.Connection, row: dict) -> dict:
     if task is None or task["sync_version"] is not None:
         from hermes_cli.kanban_worker_placement import acknowledged_outbox
         return acknowledged_outbox(row, task)
-    return {**row, "fields": _row_fields(conn, "tasks", task)}
+    fields = row["fields"] if isinstance(row["fields"], dict) else json.loads(row["fields"])
+    virtual = {k: v for k, v in fields.items() if k in sync.VIRTUAL_WIRE_FIELDS["tasks"]}  # not in the row
+    return {**row, "fields": {**_row_fields(conn, "tasks", task), **virtual}}
 
 
 # Rejections the service lifts on its own; anything else is final. A capped number of retries keeps a real mismatch
