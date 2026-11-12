@@ -1,0 +1,76 @@
+"""Pickup budget must use the executor's current graph, not just a stale replica."""
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_worker_node as wn
+from tests.hermes_cli import test_kanban_worker_node as support
+
+svc = support.svc
+gws = support.gws
+
+
+@pytest.mark.parametrize("mutation", ["link", "unlink", "done", "archived"])
+def test_pickup_budget_respects_unpublished_local_waiter(gws, mutation):
+    home, executor = gws
+    home.enter()
+    parent = kb.create_task(home.conn, title="foreign prerequisite", assignee="default", priority=0,
+                            runs_on=[f"machine:{support.WORKER}"])
+    other = kb.create_task(home.conn, title="foreign independent", assignee="default", priority=100,
+                           runs_on=[f"machine:{support.WORKER}"])
+    waiter = kb.create_task(home.conn, title="foreign urgent waiter", assignee="default", priority=900,
+                            parents=[] if mutation == "link" else [parent], runs_on=[f"machine:{support.WORKER}"])
+    # Keep the waiter out of the pickup lane regardless of its local mutation.
+    home.conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (waiter,))
+    home.conn.commit()
+    home.round()
+    executor.round()
+    executor.enter()
+    replica = wn.open_replica(executor.conn)
+    assert replica is not None
+    try:
+        assert wn.import_cards(executor.conn, replica, [waiter]) == [waiter]
+        if mutation == "link":
+            executor.conn.execute("INSERT INTO task_links(parent_id, child_id) VALUES (?, ?)", (parent, waiter))
+        elif mutation == "unlink":
+            executor.conn.execute("DELETE FROM task_links WHERE child_id=?", (waiter,))
+        else:
+            executor.conn.execute("UPDATE tasks SET status=? WHERE id=?", (mutation, waiter))
+        executor.conn.commit()
+        # No sync round: this is exactly the local-authoritative overlay the lane
+        # sorter already uses. A one-card import budget must use it as well.
+        picked, skips = wn._evaluate(executor.conn, replica, support.WORKER, mode="all", limit=1,
+                                     profile_exists=None, full_detail="pickup batch full this tick")
+        wanted, deferred = (parent, other) if mutation == "link" else (other, parent)
+        assert picked == [wanted]
+        assert skips[deferred][0] == "budget_exhausted"
+        assert wn.import_cards(executor.conn, replica, picked) == [wanted]
+        imported = kb.get_task(executor.conn, wanted)
+        assert imported is not None and imported.priority == (0 if wanted == parent else 100)
+    finally:
+        replica.close()
+
+
+def test_pickup_ranking_preserves_review_lane_and_eligibility(gws, monkeypatch):
+    from hermes_cli import kanban_db_dispatch as dispatch
+
+    home, executor = gws
+    home.enter()
+    ready = kb.create_task(home.conn, title="high priority ready", assignee="default", priority=1000,
+                           runs_on=[f"machine:{support.WORKER}"])
+    review = kb.create_task(home.conn, title="low priority review", assignee="default", priority=0,
+                            runs_on=[f"machine:{support.WORKER}"])
+    home.conn.execute("UPDATE tasks SET status='review' WHERE id=?", (review,))
+    home.conn.commit()
+    home.round()
+    executor.round()
+    executor.enter()
+    replica = wn.open_replica(executor.conn)
+    assert replica is not None
+    try:
+        for enabled, expected in ((True, review), (False, ready)):
+            monkeypatch.setattr(dispatch, "review_dispatch_enabled", lambda: enabled)
+            picked, _ = wn._evaluate(executor.conn, replica, support.WORKER, mode="all", limit=1,
+                                      profile_exists=None, full_detail="full")
+            assert picked == [expected]
+    finally:
+        replica.close()

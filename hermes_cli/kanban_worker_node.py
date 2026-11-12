@@ -477,7 +477,12 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
     if not reg:
         return [], {tid: ("other", "machine registry unavailable") for tid in mine}
     review_enabled = review_dispatch_enabled()
+    from hermes_cli.kanban_dispatch_priority import order_with_remote_waiters
     listed = candidates(replica, own)
+    # Apply the executor's authoritative local graph before spending the import
+    # budget, just as dispatch does after pickup. Keep review ahead of ready.
+    listed = [row for lane in ("review", "ready") for row in order_with_remote_waiters(
+        conn, [row for row in listed if row["status"] == lane])]
     skips: dict[str, tuple[str, Optional[str]]] = {
         tid: ("parents_incomplete", "a parent is not done") for tid in mine - {c["id"] for c in listed}}
     picked: list[str] = []
