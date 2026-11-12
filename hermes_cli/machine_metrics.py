@@ -217,10 +217,11 @@ class Reporter:
         return sample
 
     def report_due(self) -> bool:
+        from hermes_cli import machine_cpu_metrics as cpu
         now = self.clock()
         pending = self._pending
         if pending is not None:
-            if now < pending[0] + 1.0:
+            if now < pending[0] + cpu.WINDOW_S:
                 return False
             # Consume before any fallible finish work: no stale A survives an exception.
             self._pending = None
@@ -230,7 +231,6 @@ class Reporter:
             self.next_at = now + REPORT_EVERY_S
         try:
             from hermes_cli import kanban_sync_timing as timing
-            from hermes_cli import machine_cpu_metrics as cpu
             from hermes_cli.machine_drain_metrics import send_compatible
             with timing.span("limit"):
                 state, limit = (self.cpu_limit_fn or cpu.root_limit)()
@@ -251,6 +251,7 @@ class Reporter:
                         measured = (self.cpu_finish_fn or cpu.finish)(pending[2], clock=self.clock)
                 if measured is None:
                     self.cpu_sample_drops += 1
+                    _log.info("machine metrics admission quality: cpu_sample_drops=%d", self.cpu_sample_drops)
             sample = self._sample(sample, measured)
             with timing.span("send"):  # preserve the transport's existing hard 2 s budget
                 send_compatible(self.send, sample)

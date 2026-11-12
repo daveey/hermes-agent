@@ -76,6 +76,16 @@ def test_unsupported_finish_uses_600s_retry(harness, status):
     assert rep.next_at == 701 and rep.pending_wake_in() is None
 
 
+def test_pending_wake_and_finish_use_same_window(harness, monkeypatch):
+    rep, now, _gate, _sent, _finishes = harness
+    monkeypatch.setattr(cpu, 'WINDOW_S', 0.5)
+    assert rep.report_due() is False
+    now[0] += 0.5
+    assert rep.pending_wake_in() == 0
+    assert rep.report_due() is True
+    assert rep.pending_wake_in() is None
+
+
 def test_slow_begin_cannot_return_a_due_pending_snapshot(harness):
     rep, now, _gate, sent, _finishes = harness
     def slow_begin(**kwargs):

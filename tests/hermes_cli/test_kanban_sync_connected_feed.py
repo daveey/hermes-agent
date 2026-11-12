@@ -91,7 +91,7 @@ def test_connected_feed_skips_unchanged_poll_and_observes_next_change(monkeypatc
     monkeypatch.setattr(client, 'outbox_pending', lambda paths: any(p in pending for p in paths))
     monkeypatch.setattr(client, 'time', SimpleNamespace(monotonic=lambda: clock[0], sleep=lambda _: None))
     from hermes_cli import machine_metrics
-    monkeypatch.setattr(machine_metrics, 'Reporter', lambda _: SimpleNamespace(report_due=lambda: None))
+    monkeypatch.setattr(machine_metrics, 'Reporter', lambda _: SimpleNamespace(report_due=lambda: None, pending_wake_in=lambda: None))
 
     class Watcher:
         def __init__(self, ident, board, wake, keep_running, **kwargs):
