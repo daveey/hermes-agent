@@ -337,9 +337,10 @@ class _Collector:
         task = self.kb.get_task(conn, sub["task_id"])
         logger.debug("kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                      len(events), sub["task_id"], slug, old_cursor, cursor)
-        from gateway.kanban_wake_sibling import has_tui_sibling
+        from gateway.kanban_wake_sibling import tui_sibling_floor
+        tui_floor = tui_sibling_floor(conn, sub)
         return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug,
-                "tui_notice": has_tui_sibling(conn, sub)}
+                "tui_notice": tui_floor is not None, "tui_floor": tui_floor}
 
     def collect_board(self, slug: str) -> None:
         """Claim events on one board, appending delivery dicts to ``deliveries``."""
@@ -712,7 +713,7 @@ class _KanbanNotification:
         if self.d.get("tui_notice"):
             # The chat's tui row stays silent for these events (kanban_wake_sibling): this turn shows its notice.
             from gateway.kanban_wake_sibling import notice_lines
-            if lines := notice_lines(sub, task, self.d["events"], self.board_slug):
+            if lines := notice_lines(sub, task, self.d["events"], self.board_slug, self.d.get("tui_floor")):
                 synth += "\n" + "\n".join(lines)
         self.synth = synth + "\n\n" + t("gateway.kanban.wake.guidance")
         # What a later wake for the same chat folds from while this one still waits (kanban_wake_fold).
@@ -831,9 +832,11 @@ class _KanbanNotification:
 
     async def _settle_tui_sibling(self) -> None:
         """Record this wake on the chat's tui row too (kanban_wake_sibling.settle_tui_sibling); never fails delivery."""
-        from gateway.kanban_wake_sibling import settle_tui_sibling
+        from gateway.kanban_wake_sibling import carried_ids, settle_tui_sibling
+        carried = carried_ids(self.d["events"], self.d.get("tui_floor"))  # their lines rode this wake turn
         try:
-            await _to_thread_process_service(partial(settle_tui_sibling, self.board_slug, self.sub, int(self.d["cursor"])))
+            await _to_thread_process_service(partial(settle_tui_sibling, self.board_slug, self.sub,
+                                                     int(self.d["cursor"]), carried))
         except Exception:  # health: allow BLE001 -- the wake is delivered; the tui row's claim-time check still covers it
             logger.warning("kanban notifier: settling the tui sibling of %s failed", self.task_id, exc_info=True)
 

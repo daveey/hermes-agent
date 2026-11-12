@@ -346,3 +346,97 @@ def test_archived_card_after_a_local_failure_wake_leaves_no_second_notice_turn(b
         conn.close()
     assert _notice_leg() == []
     assert len(adapter.turns) == 1
+
+
+# Review of PR #1465 at 8be3211785: an uncovered notice (status, quota, re-pin) ahead of the completion kept the wake
+# from settling the tui row, so after an archive the tui batch delivered the completion a second time.
+
+def _status(tid, status="ready"):
+    conn = kbc.connect()
+    try:
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "status", {"status": status})
+    finally:
+        conn.close()
+
+
+def _archive_and_drop_local(tid, rewind_tui=False):
+    from hermes_cli.kanban_db_archive import archive_task
+    conn = kbc.connect()
+    try:
+        archive_task(conn, tid)
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM kanban_notify_subs WHERE task_id = ? AND platform = 'local'", (tid,))
+            if rewind_tui:
+                row = conn.execute("SELECT * FROM kanban_notify_subs WHERE task_id = ? AND platform = 'tui'",
+                                   (tid,)).fetchone()
+                assert kbn._rewind_orphan(conn, kbn._sub_key(tid, "tui", CHAT, ""), row, why="stopped serving the chat")
+    finally:
+        conn.close()
+
+
+def test_uncovered_notice_before_the_completion_then_archive_leaves_no_second_completion(board):
+    runner, adapter = board
+    tid = _card()
+    _status(tid)
+    _event(tid, "completed")
+    _wake_leg(runner)
+    [turn] = adapter.turns
+    assert "→ ready" in turn and NOTICE["completed"].format(tid=tid) in turn  # the wake carries both lines
+    last, subs = _cursors(tid)
+    assert subs["tui"] == (last, None)  # settled past the status notice it carried
+    _archive_and_drop_local(tid)
+    texts = _notice_leg()
+    assert not any(NOTICE["completed"].format(tid=tid) in t for t in texts), texts
+    assert not any("→ ready" in t for t in texts), texts  # shown once, in the wake turn
+    assert len(adapter.turns) == 1
+
+
+def test_a_stuck_tui_claim_with_an_uncovered_notice_ahead_rewound_after_wake_and_archive_starts_no_second_turn(board):
+    runner, adapter = board
+    tid = _card()
+    _status(tid)
+    _event(tid, "completed")
+    conn = kbc.connect()
+    try:
+        old, cur, events = kbn.claim_unseen_events_for_sub(conn, task_id=tid, platform="tui", chat_id=CHAT,
+                                                           thread_id="", durable=True)
+        assert len(events) >= 2 and cur > old
+    finally:
+        conn.close()
+    _wake_leg(runner)
+    _archive_and_drop_local(tid, rewind_tui=True)
+    texts = _notice_leg()
+    assert not any(NOTICE["completed"].format(tid=tid) in t for t in texts), texts
+    assert len(adapter.turns) == 1
+
+
+def test_an_uncovered_notice_the_tui_row_already_delivered_is_not_repeated_in_the_wake(board):
+    runner, adapter = board
+    tid = _card()
+    _status(tid)
+    texts = _notice_leg()  # no covered event yet: the tui row shows the status itself
+    assert len(texts) == 1 and "→ ready" in texts[0]
+    _event(tid, "completed")
+    _wake_leg(runner)
+    [turn] = adapter.turns
+    assert "→ ready" not in turn and NOTICE["completed"].format(tid=tid) in turn
+    assert _notice_leg() == [] and len(adapter.turns) == 1
+
+
+def test_a_covered_event_landing_between_the_defer_check_and_the_claim_goes_only_to_the_wake(board, monkeypatch):
+    """Nit on PR #1465 at 8be3211785: tui_defer and the claim are separate statements. Model the race by letting
+    tui_defer miss the completion; the poller must hand the claim back rather than render it."""
+    from gateway import kanban_wake_sibling
+    runner, adapter = board
+    tid = _card()
+    _event(tid, "completed")
+    monkeypatch.setattr(kanban_wake_sibling, "tui_defer", lambda *a, **k: False)
+    assert _notice_leg() == []
+    last, subs = _cursors(tid)
+    assert subs["tui"][0] < last and subs["tui"][1] is None  # handed back, not acked or held
+    _wake_leg(runner)
+    assert len(adapter.turns) == 1 and NOTICE["completed"].format(tid=tid) in adapter.turns[0]
+    last, subs = _cursors(tid)
+    assert subs["tui"] == (last, None)
+    assert _notice_leg() == [] and len(adapter.turns) == 1

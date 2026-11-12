@@ -776,6 +776,12 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
                                                                    durable=claims is not None, **sub_ident)
             if not events:
                 continue
+            from gateway.kanban_wake_sibling import wake_owes_after
+            if wake_owes_after(conn, sub, _old):
+                # A covered event landed between tui_defer and the claim: hand it back to the wake. [daveey]
+                with contextlib.suppress(Exception):
+                    _kbn.rewind_notify_cursor(conn, claimed_cursor=_new, old_cursor=_old, **sub_ident)
+                continue
             claim = None
             if claims is not None:  # so a refused turn can hand the range back (_kb_rewind_refused) [daveey]
                 claim = {"board": slug, **sub_ident, "old": _old, "new": _new, "texts": [],
