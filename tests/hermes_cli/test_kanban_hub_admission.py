@@ -735,6 +735,22 @@ def test_cli_admission_refuses_separate_transaction_edits(board, monkeypatch, ca
     assert tuple(conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()) == before
 
 
+def test_cli_frees_alone_refuses_requires_edit(board, monkeypatch, capsys):
+    import argparse
+    from hermes_cli import kanban as cli
+
+    conn, home = board
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(home / "kanban.db"))
+    task_id = kb.create_task(conn, title="Unchanged")
+    before = tuple(conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
+    parser = argparse.ArgumentParser()
+    cli.build_parser(parser.add_subparsers())
+    args = parser.parse_args(["kanban", "edit", task_id, "--frees", "frees: worker slots", "--requires", "terminal"])
+    assert cli._cmd_edit(args) == 2
+    assert "admission metadata cannot be combined with --requires" in capsys.readouterr().err
+    assert tuple(conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()) == before
+
+
 @pytest.mark.parametrize("changes,reason", [
     ({"admission_class": "capacity"}, "capacity requires a one-line frees: claim"),
     ({"admission_class": "unknown"}, "admission_class must be normal, capacity or urgent"),

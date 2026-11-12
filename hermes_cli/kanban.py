@@ -1282,10 +1282,6 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     from hermes_cli.kanban_admission_class import AdmissionMetadataError
     from hermes_cli.kanban_requires_edit import edit_preflight  # --requires / --completion-contract / --reason
     admission = {name: getattr(args, name, None) for name in ("admission_class", "admission_frees")}
-    if any(value is not None for value in admission.values()):
-        for flag in ("completion_contract", "requires"):
-            if getattr(args, flag, None) is not None:
-                return _err(f"kanban edit: admission metadata cannot be combined with --{flag.replace('_', '-')}", 2)
     if (rc := edit_preflight(args)) is not None:
         return rc
     reason = getattr(args, "reason", None)

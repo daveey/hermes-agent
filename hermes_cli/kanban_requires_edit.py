@@ -41,6 +41,11 @@ def edit_preflight(args):
     from hermes_cli import kanban_contract_cli
     from hermes_cli.kanban import _err
 
+    if getattr(args, "admission_class", None) is not None or getattr(args, "admission_frees", None) is not None:
+        # [daveey] these flags edit in their own transaction and would silently drop admission metadata
+        for flag in ("completion_contract", "requires"):
+            if getattr(args, flag, None) is not None:
+                return _err(f"kanban edit: admission metadata cannot be combined with --{flag.replace('_', '-')}", 2)
     if getattr(args, "requires", None) is not None:
         return cmd_edit_requires(args)
     if getattr(args, "completion_contract", None) is not None:
