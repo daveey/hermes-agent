@@ -126,6 +126,38 @@ def test_rerun_cut_off_again_is_not_rescheduled(clock, monkeypatch, caplog):
     assert _due_ids() == []
 
 
+@pytest.mark.parametrize("settled", [False, True])
+def test_deferral_inherits_only_a_pending_rerun_marker(settled):
+    from cron.restart_rerun import _marker
+
+    old = "2026-10-28T09:00:00-07:00"
+    now = "2026-10-28T10:00:00-07:00"
+    job = {"restart_rerun": {"execution_id": "old", "at": old, "settled": settled}}
+    marker = _marker(job, {"id": "deferred"}, now, deferred=True)
+    assert marker == ({"execution_id": "deferred", "at": now, "deferred": True} if settled
+                      else {"execution_id": "deferred", "at": old})
+
+
+def test_skipped_rerun_expires_guard_but_still_rejects_replay(clock, monkeypatch):
+    from cron.restart_rerun import reschedule_interrupted
+
+    job = create_job("crashy", "every 60m", name="crashy")
+    clock["now"] += timedelta(minutes=61)
+    _start(job["id"])
+    assert _restart(monkeypatch) == 1
+    clock["now"] += timedelta(minutes=1)
+    _claimed, rerun = _start(job["id"])
+    assert _restart(monkeypatch) == 1
+    saved = get_job(job["id"])
+    assert not reschedule_interrupted(rerun)
+    assert get_job(job["id"]) == saved
+
+    clock["now"] = datetime.fromisoformat(saved["next_run_at"])
+    _start(job["id"])
+    assert _restart(monkeypatch) == 1
+    assert _due_ids() == [job["id"]], "a later natural execution gets its own rerun"
+
+
 def test_paused_deleted_or_edited_jobs_do_not_rerun(clock, monkeypatch, caplog):
     paused = create_job("a", "every 60m", name="paused")
     deleted = create_job("b", "every 60m", name="deleted")

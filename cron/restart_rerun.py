@@ -57,7 +57,7 @@ def _skip_reason(
         rescheduled_at = _parse(marker.get("at"))
         # A deferral re-arms a fire that never ran (defer_unadmitted), so it spends no rerun: neither
         # the attempt a deferral leads to nor a deferred rerun (re-armed, still the rerun) is skipped.
-        if (not deferred and not marker.get("deferred")
+        if (not deferred and not marker.get("deferred") and not marker.get("settled")
                 and rescheduled_at is not None and claimed >= rescheduled_at):
             # Claimed after a reschedule that no real outcome has settled: the rerun itself.
             return "the interrupted attempt was itself a restart rerun"
@@ -101,7 +101,8 @@ def _marker(job: dict[str, Any], record: dict[str, Any], now: str, deferred: boo
     if not deferred:
         return {"execution_id": record["id"], "at": now}
     prior = job.get(MARKER_KEY)
-    if isinstance(prior, dict) and not prior.get("deferred") and _parse(prior.get("at")) is not None:
+    if (isinstance(prior, dict) and not prior.get("deferred") and not prior.get("settled")
+            and _parse(prior.get("at")) is not None):
         return {"execution_id": record["id"], "at": prior["at"]}
     return {"execution_id": record["id"], "at": now, "deferred": True}
 
@@ -174,6 +175,11 @@ def reschedule_interrupted(record: dict[str, Any], *, restart_cut: bool = False,
         now = _hermes_now()
         reason = _skip_reason(job, record, claimed, now, restart_cut, deferred)
         if reason is not None:
+            if reason == "the interrupted attempt was itself a restart rerun":
+                # Expire the pending-rerun guard, not the replay guard. Popping it would let a
+                # repeated settlement of this same cut attempt schedule a second rerun.
+                job[MARKER_KEY] = {"execution_id": record["id"], "at": now.isoformat(), "settled": True}
+                save_jobs(jobs)
             logger.info("cron: not rescheduling %s (execution %s) after restart interruption: %s",
                         job_id, record["id"], reason)
             return False

@@ -95,7 +95,12 @@ def test_rerun_cut_again_is_not_rerun_a_second_time(home, monkeypatch):
     assert isinstance(rerun, dict)
     assert scheduler.run_one_job(rerun) is True
     saved = jobs.get_job(job["id"])
-    assert saved["restart_rerun"]["execution_id"] == first["execution_id"]
+    assert saved["restart_rerun"]["execution_id"] == rerun["execution_id"]
+    assert saved["restart_rerun"]["settled"] is True
+    from cron.restart_rerun import reschedule_interrupted
+
+    assert not reschedule_interrupted(executions.get_execution(rerun["execution_id"]), restart_cut=True)
+    assert jobs.get_job(job["id"]) == saved
     assert not _due(job["id"]), "a rerun cut again waits for its schedule"
     assert int(saved.get("failure_streak") or 0) == 0
 
@@ -393,12 +398,41 @@ def test_rerun_after_a_deferral_cut_again_is_not_rerun(home, monkeypatch, owner_
     waits for the schedule."""
     job = jobs.create_job(prompt="probe", schedule=FAR_FUTURE, name="probe", deliver="local")
     _defer_while_draining(job["id"], monkeypatch, owner_ops)
-    first_cut = _cut_next_attempt(job["id"], monkeypatch)
-    assert _due(job["id"])
     _cut_next_attempt(job["id"], monkeypatch)
+    assert _due(job["id"])
+    rerun_cut = _cut_next_attempt(job["id"], monkeypatch)
     saved = jobs.get_job(job["id"])
-    assert saved["restart_rerun"]["execution_id"] == first_cut
+    assert saved["restart_rerun"]["execution_id"] == rerun_cut
+    assert saved["restart_rerun"]["settled"] is True
     assert not _due(job["id"]), "a rerun cut again waits for its schedule"
+
+
+def test_later_natural_fire_deferred_after_a_skipped_rerun_gets_its_own_rerun(
+        home, monkeypatch, owner_ops):
+    from datetime import datetime, timedelta
+
+    clock = [datetime.fromisoformat("2026-10-28T09:00:00-07:00")]
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: clock[0])
+    monkeypatch.setattr(executions, "_hermes_now", lambda: clock[0])
+    job = jobs.create_job(prompt="probe", schedule="every 60m", name="probe", deliver="local")
+    real_run_job = scheduler.run_job
+    clock[0] += timedelta(minutes=61)
+    _cut_next_attempt(job["id"], monkeypatch)
+    clock[0] += timedelta(minutes=1)
+    _cut_next_attempt(job["id"], monkeypatch)
+    assert not _due(job["id"])
+
+    clock[0] = datetime.fromisoformat(jobs.get_job(job["id"])["next_run_at"])
+    assert _due(job["id"])
+    monkeypatch.setattr(scheduler, "run_job", real_run_job)
+    _defer_while_draining(job["id"], monkeypatch, owner_ops)
+    cut = _cut_next_attempt(job["id"], monkeypatch)
+    assert _due(job["id"]), "the later natural fire has not spent its restart rerun"
+    saved = jobs.get_job(job["id"])
+    assert saved["restart_rerun"]["execution_id"] == cut
+    assert not saved["restart_rerun"].get("settled")
+    _cut_next_attempt(job["id"], monkeypatch)
+    assert not _due(job["id"]), "the later fire also gets only one rerun"
 
 
 def test_deferring_a_pending_rerun_keeps_it_a_rerun(home, monkeypatch, owner_ops):
