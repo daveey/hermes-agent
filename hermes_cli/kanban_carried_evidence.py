@@ -18,6 +18,24 @@ MAX_AGE = 3600
 PATH_TOKEN = re.compile(r"(?<![\w/])(?:/home/[^/\s`\"']+|~)/\.hermes/kanban/(?:evidence|workspaces)/[^\s`\"'<>]+")
 
 
+def _label_members(labels: set[str]) -> set[str] | None:
+    """Every registry machine carrying any of ``labels``; None (fail closed) when unreadable or a label is empty."""
+    from hermes_cli import kanban_worker_node as wn
+    snapshot = wn.registry()
+    machines = snapshot.get("machines") if isinstance(snapshot, dict) else None
+    if not isinstance(machines, dict):
+        return None
+    members = set()
+    for label in labels:
+        names = {name for name, entry in machines.items()
+                 if isinstance(entry, dict) and isinstance(entry.get("labels"), list)
+                 and label in entry["labels"]}
+        if not names:
+            return None
+        members |= names
+    return members
+
+
 def without_carried_inputs(text: str, cfg: dict) -> str:
     """Remove only complete, locally intact file tokens with fresh fleet receipts.
 
@@ -34,9 +52,22 @@ def without_carried_inputs(text: str, cfg: dict) -> str:
         if not isinstance(members, list) or not all(isinstance(m, str) for m in members):
             return text
         destinations.update(members)
-    if not all(isinstance(m, str) for m in routes.values()):
+    queue = cfg.get("worker_queue") or {}
+    if not isinstance(queue, dict):
         return text
-    destinations.update(routes.values())
+    if not all(isinstance(m, str) for m in (*routes.values(), *queue.values())):
+        return text
+    from hermes_cli.kanban_placement import is_pool_label
+    labels = {m for m in (*routes.values(), *queue.values()) if is_pool_label(m)}
+    destinations.update(m for m in routes.values() if m not in labels)
+    if labels:
+        # A pool route (``pool:worker``) is every machine carrying the label, not a host named
+        # "pool:worker". Count each one, held or idle included, so a machine leaving a hold
+        # never runs an input its receipt does not cover. [daveey]
+        members = _label_members(labels)
+        if members is None:
+            return text
+        destinations.update(members)
     if not destinations:
         return text
     try:

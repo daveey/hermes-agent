@@ -528,7 +528,7 @@ def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
     """Legacy heavy routing; worker pools reuse portability without changing this opt-out path."""
     from hermes_cli.kanban_placement_coordination import legacy_refusal
     worker = c.heavy_target(self_gw)
-    if skip or not worker or legacy_refusal(args) or portable_reason(args, c.raw):
+    if skip or not worker or legacy_refusal(args, c.raw) or portable_reason(args, c.raw):
         return None
     title, body = args.get("title") or "", args.get("body") or ""
     heavy = _heavy_marker(title, body, c)

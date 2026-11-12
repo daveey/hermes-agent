@@ -61,7 +61,7 @@ def queue_decision(args, cfg, gateway, pin, origin_intent, machine_ok=None):
         return None
     if placement.portable_reason(args, cfg):
         return None
-    extra = coordination.required_labels(args)
+    extra = coordination.required_labels(args, cfg)
     if extra is None or not (machine_ok or placement._machine_picks_up)(label):
         return None
     return {"where": "local", "runs_on": [label, *sorted(extra - {label})], "why": QUEUED_WHY.format(label=label)}

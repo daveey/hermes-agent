@@ -200,19 +200,25 @@ def claim_refusal(card, me):
                  requires=requires)
 
 
-def required_labels(args):
-    """Coordination labels a card's text, skills and declared access need; None for an unsupported action."""
-    from hermes_cli.kanban_placement import without_evidence, without_placement_note
-    text = f"{args.get('title') or ''}\n{without_evidence(without_placement_note(args.get('body') or ''))}"
+def required_labels(args, cfg=None):
+    """Coordination labels a card's text, skills and declared access need; None for an unsupported action.
+
+    Reads the same text as portability's :func:`check`: verified carried inputs are removed first, so a
+    path such as ``.../evidence/token-broker-audit/BRIEF.md`` does not demand a label the check never did.
+    """
+    from hermes_cli import kanban_placement as placement
+    from hermes_cli.kanban_carried_evidence import without_carried_inputs
+    body = placement.without_evidence(placement.without_placement_note(args.get("body") or ""))
+    text = without_carried_inputs(f"{args.get('title') or ''}\n{body}", placement.config() if cfg is None else cfg)
     required, refusal = requirements(text)
     if refusal:
         return None
     return required | skill_requirements(args.get("skills")) | access_requirements(args.get("requires"))
 
 
-def legacy_refusal(args):
+def legacy_refusal(args, cfg=None):
     """Legacy automatic pins have no policy fence; do not apply coordination exemptions."""
-    labels = required_labels(args)
+    labels = required_labels(args, cfg)
     return labels is None or bool(labels)
 
 
