@@ -216,6 +216,40 @@ class SessionMaintenanceMixin:
             return victims
         return self._execute_write(_do) or []
 
+    def end_subagents_of_ended_parents(
+        self, *, max_idle_seconds: float, exclude_ids: tuple[str, ...] = (),
+        end_reason: str = "parent_ended_reap",
+    ) -> list[str]:
+        """[daveey] Close open ``subagent`` rows whose parent row is already ended and that have been idle (by
+        ``started_at`` AND canonical last activity) at least ``max_idle_seconds``. A delegate child's real owner is
+        the process that ran its parent's turn, so ``sweep_orphaned_sessions``' heartbeat guess (any live backend
+        started before the row could own it) kept such rows open for as long as some backend outlived them, which on
+        a host whose backends restart many times a day is indefinitely. A parent that has ended (reaped, closed or
+        rotated by compression) has no turn left to own the child. ``end_reason`` differs from
+        ``startup_orphan_reap`` so the reap's killed-subagent notice is not re-sent hours late to a chat that already
+        received the delegation's own result. Write guards and ``exclude_ids`` spare rows as in the orphan sweep."""
+        if max_idle_seconds <= 0:
+            return []
+        cutoff = time.time() - max_idle_seconds
+        scope_sql = (f" AND source = 'subagent' AND started_at < ? AND {_sql_session_last_active('sessions')} < ?"
+                     " AND parent_session_id IS NOT NULL AND EXISTS (SELECT 1 FROM sessions p WHERE"
+                     " p.id = sessions.parent_session_id AND p.ended_at IS NOT NULL)")
+        scope_params = (cutoff, cutoff)
+
+        def _do(conn):
+            rows = conn.execute(f"SELECT id FROM sessions WHERE ended_at IS NULL{scope_sql}", scope_params).fetchall()
+            excluded = {str(x) for x in exclude_ids if x}
+            victims = [sid for sid in (str(row["id"]) for row in rows)
+                       if sid not in excluded and not self._write_guards_reject(conn, sid)]
+            if not victims:
+                return []
+            conn.execute(
+                f"UPDATE sessions SET ended_at = ?, end_reason = ?"
+                f" WHERE id IN ({_placeholders(victims)}) AND ended_at IS NULL{scope_sql}",
+                (time.time(), end_reason, *victims, *scope_params))
+            return victims
+        return self._execute_write(_do) or []
+
     @staticmethod
     def _prune_filter_where(*, archived: Optional[bool] = None, include_pinned: bool = False,
                             lineage_tips_only: bool = False, include_open: bool = False,
