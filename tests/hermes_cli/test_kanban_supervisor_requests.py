@@ -504,3 +504,83 @@ def test_a_batch_with_any_link_op_is_refused_up_front(board):
     assert out["code"] == "link_not_requested", out
     with kbc.connect() as conn:
         assert ksr.list_requests(conn) == []
+
+
+def _age(conn, rid, seconds):
+    with kb.write_txn(conn):
+        conn.execute("UPDATE supervisor_requests SET created_at = ? WHERE id = ?", (int(time.time()) - seconds, rid))
+
+
+def test_a_request_pending_past_the_deadline_is_rejected_as_expired_at_accept(board, monkeypatch):
+    """No executor for over a day: the request is not run late; the requester gets a rejection receipt."""
+    from tools import kanban_tools as kt
+    out = _tool({"ops": _reorder(board)})
+    assert _park(kt, out["request_id"])["ok"]
+    _as_executor(monkeypatch)
+    with kbc.connect() as conn:
+        _age(conn, out["request_id"], 24 * 3600 + 60)
+        assert ksr.drain(conn)["processed"] == [(out["request_id"], "rejected")]
+        assert (board["qa119"], board["dev116"]) in _edges(conn)  # target not mutated
+        assert (board["dev67"], board["dev81"]) in _edges(conn)
+        req = ksr.get_request(conn, out["request_id"])
+        assert req["status"] == "rejected" and req["error"].startswith("expired: pending > ")
+        assert [r["outcome"] for r in req["result"]] == ["not_applied"] * 2
+        kinds = [k for k, _ in _events(conn, board["requester"])]
+        assert kinds == ["supervisor_request_queued", "supervisor_request_rejected", "supervisor_request_wake"]
+        comments = [c for c in kb.list_comments(conn, board["requester"]) if c.author == ksr.COMMENT_AUTHOR]
+        assert len(comments) == 1 and "expired" in comments[0].body
+        assert ksr.drain(conn)["processed"] == []  # settled, not retried
+        assert ksr._expire(conn, out["request_id"], req["executor"], "me:1:x") is False  # terminal: not re-taken
+
+
+def test_a_request_pending_just_under_the_deadline_still_runs(board, monkeypatch):
+    out = _tool({"ops": _reorder(board)})
+    _as_executor(monkeypatch)
+    with kbc.connect() as conn:
+        _age(conn, out["request_id"], 24 * 3600 - 600)
+        assert ksr.drain(conn)["processed"] == [(out["request_id"], "done")]
+        assert (board["qa119"], board["dev116"]) not in _edges(conn)
+
+
+def test_an_old_accepted_request_is_redelivered_not_expired(board, monkeypatch):
+    """Only a never-accepted request expires: one an executor took (and then lost) is finished by redelivery."""
+    out = _tool({"ops": _reorder(board)})
+    _as_executor(monkeypatch)
+    with kbc.connect() as conn:
+        _age(conn, out["request_id"], 3 * 24 * 3600)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE supervisor_requests SET status='accepted', executor='otherhost:1:x', "
+                         "lease_expires=1, attempts=1 WHERE id=?", (out["request_id"],))
+        assert ksr.drain(conn)["processed"] == [(out["request_id"], "done")]
+
+
+def test_an_expiry_that_crashed_before_its_receipt_is_expired_again(board, monkeypatch):
+    """_expire takes the row (accepted, attempts still 0) then dies: the next drain expires it, never runs it."""
+    out = _tool({"ops": _reorder(board)})
+    _as_executor(monkeypatch)
+    with kbc.connect() as conn:
+        _age(conn, out["request_id"], 2 * 24 * 3600)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE supervisor_requests SET status='accepted', executor='otherhost:1:x' "
+                         "WHERE id=?", (out["request_id"],))
+        assert ksr.drain(conn)["processed"] == [(out["request_id"], "rejected")]
+        assert (board["qa119"], board["dev116"]) in _edges(conn)
+        assert ksr.get_request(conn, out["request_id"])["error"].startswith("expired: ")
+
+
+def test_expiry_loses_the_row_to_a_peer_that_took_it_first(board, monkeypatch):
+    """_expire's compare-and-swap: a holder change or an acceptance since the scan keeps the row untouched."""
+    out = _tool({"ops": _reorder(board)})
+    rid = out["request_id"]
+    _as_executor(monkeypatch)
+    with kbc.connect() as conn:
+        _age(conn, rid, 2 * 24 * 3600)
+        with kb.write_txn(conn):  # another expirer took it after our scan (attempts still 0)
+            conn.execute("UPDATE supervisor_requests SET status='accepted', executor='peer:1:x' WHERE id=?", (rid,))
+        assert ksr._expire(conn, rid, None, "me:1:x") is False
+        with kb.write_txn(conn):  # a peer accepted it to run (attempts 1), seen by us as unheld
+            conn.execute("UPDATE supervisor_requests SET status='pending', executor=NULL, attempts=1 "
+                         "WHERE id=?", (rid,))
+        assert ksr._expire(conn, rid, None, "me:1:x") is False
+        req = ksr.get_request(conn, rid)
+        assert req["status"] == "pending" and req["error"] is None
