@@ -350,7 +350,7 @@ def _class_alternate_off_wall(conn, task, base):
     from hermes_cli import kanban_provider_walls as pw
     from hermes_cli.kanban_quota_episode import alternate_route
     model, provider = base[0], pw._norm(base[1])
-    if pw.REQUIRE_MODEL_MARKER in f"{getattr(task, 'title', '') or ''}\n{getattr(task, 'body', '') or ''}":
+    if pw.requires_model(task):
         return None
     if not model or not provider or provider == 'auto':
         return None

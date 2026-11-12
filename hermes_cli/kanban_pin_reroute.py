@@ -12,7 +12,7 @@ Rule (:func:`pinned_route`); every condition must hold, anything else keeps the 
    run and the live pool is quota-walled for the pinned model right now (:func:`fresh_live_wall`): its
    first run would only exit 75 into that wall to learn it (kanban-dd62aef001);
 2. it resets ``kanban.pin_quota_reroute_min_hours`` (default 6) or more from now;
-3. the pin is not mandatory: neither ``tasks.model_pin_mandatory`` nor the ``require_model`` marker;
+3. the pin is not mandatory: neither ``tasks.model_pin_mandatory`` nor a ``require_model: true`` body line;
 4. the lane is ready, not review;
 5. the pinned model sits in exactly one routing class of the assignee's policy, and a route of that
    class is eligible, on no walled or disabled provider, and not quota-walled in the live pool.
@@ -47,10 +47,10 @@ def _norm(value: Any) -> str:
 
 def is_mandatory_pin(task: Any) -> bool:
     """True when the card's creator said its pin must never move."""
-    from hermes_cli.kanban_provider_walls import REQUIRE_MODEL_MARKER
+    from hermes_cli.kanban_provider_walls import requires_model
     if getattr(task, "model_pin_mandatory", None):
         return True
-    return REQUIRE_MODEL_MARKER in f"{getattr(task, 'title', '') or ''}\n{getattr(task, 'body', '') or ''}"
+    return requires_model(task)
 
 
 def min_wall_seconds(cfg: Optional[dict]) -> float:

@@ -110,7 +110,7 @@ def test_mandatory_pin_is_never_rerouted(board, monkeypatch, all_assignees_spawn
     _, cfg = _deep(monkeypatch)
     with kbc.connect() as conn:
         tid = _walled_card(conn, cfg, clock, mandatory=why == 'flag',
-                           body='must run on astra: require_model' if why == 'marker' else None)
+                           body='must run on astra\nrequire_model: true' if why == 'marker' else None)
         assert dispatch.check_respawn_guard(conn, tid) == 'subscription_quota_reset'
         assert _tick(conn) == []
         assert _events(conn, tid, 'model_reroute') == [] and _comments(conn, tid) == []

@@ -10,9 +10,9 @@
   provider outside a quota episode: ``kanban.default_model`` first, then the strong tier when the default
   provider is the walled one. A provider also counts as walled when its OAuth pool is quota-exhausted for
   the model right now (:func:`live_quota_wall`). Explicit pins and strong tiers are never rewritten; a card
-  whose body contains ``require_model`` keeps its route. Attempt-specific admission, the class-route
-  alternate, backoff and notices live in ``kanban_quota_episode``.
-* :func:`rate_limit_storm` counts ``rate_limited`` runs in the last hour for the alert card.
+  whose body has a ``require_model: true`` line keeps its route (:func:`requires_model`). Attempt-specific
+  admission, the class-route alternate, backoff and notices live in ``kanban_quota_episode``.
+* :func:`rate_limit_storm` counts this host's ``rate_limited`` runs in the last hour for the alert card.
 """
 
 from __future__ import annotations
@@ -30,8 +30,16 @@ logger = logging.getLogger(__name__)
 MIN_WALL_SECONDS = 15 * 60
 DEFAULT_WALL_SECONDS = 30 * 60
 STORM_THRESHOLD = 10
-REQUIRE_MODEL_MARKER = "require_model"
+# A deliberate body line, not a substring: the storm alert's own prose named ``require_model`` and so opted the
+# alert card out of the wall reroute it was written about (2026-11-12, run 2805 spawned into the codex wall). [daveey]
+REQUIRE_MODEL_MARKER = "require_model: true"
+_REQUIRE_MODEL_RE = re.compile(r"^[ \t]*require_model[ \t]*:[ \t]*(?:true|yes|1)[ \t]*$", re.IGNORECASE | re.MULTILINE)
 _RETRY_RE = re.compile(r"retry[\s_-]*after[:=\s]+(\d+)\s*s", re.IGNORECASE)
+
+
+def requires_model(task: Any) -> bool:
+    """True when the card's body carries a ``require_model: true`` line: its route must never be moved."""
+    return bool(_REQUIRE_MODEL_RE.search(str(getattr(task, "body", "") or "")))
 
 
 def walls_path() -> Path:
@@ -132,7 +140,7 @@ def retier_for_walls(task: Any, cfg: dict[str, Any], *, now: Optional[float] = N
     """``(model, provider, walled_provider)`` to run on instead, or None to leave the task alone.
 
     ``extra_walls`` adds walls only the caller knows (a card's own quota episode)."""
-    if REQUIRE_MODEL_MARKER in f"{getattr(task, 'title', '') or ''}\n{getattr(task, 'body', '') or ''}":
+    if requires_model(task):
         return None
     walls = {**active_walls(now=now, path=path), **(extra_walls or {})}
     task_model = str(getattr(task, "model_override", "") or "").strip()
@@ -184,11 +192,25 @@ def live_quota_wall(provider: str, model: str) -> Optional[float]:
     return float(unavailable.resets_at) if unavailable is not None else None
 
 
-def rate_limit_storm(conn: sqlite3.Connection, *, now: Optional[float] = None) -> int:
+def rate_limit_storm(conn: sqlite3.Connection, *, now: Optional[float] = None, prefix: Optional[str] = None) -> int:
+    """``rate_limited`` runs in the last hour claimed by this host (claim ``prefix``, default this host's).
+
+    The board is synced, so every worker's runs land here; counting them all made each host file its own copy of
+    one board-wide storm under a title saying "on this host". A run with no claimer is nobody's. [daveey]"""
     now = int(time.time() if now is None else now)
+    if prefix is None:
+        from hermes_cli import kanban_db as _kb
+        prefix = _kb._host_prefix()
     return conn.execute(
-        "SELECT COUNT(*) FROM task_runs WHERE outcome = 'rate_limited' AND ended_at > ?", (now - 3600,)
+        "SELECT COUNT(*) FROM task_runs WHERE outcome = 'rate_limited' AND ended_at > ? AND substr(COALESCE("
+        "NULLIF(claim_lock, ''), json_extract(CASE WHEN json_valid(metadata) THEN metadata END, '$.claimer'), ''),"
+        " 1, ?) = ?",
+        (now - 3600, len(prefix), prefix),
     ).fetchone()[0]
+
+
+def _utc(ts: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%MZ", time.gmtime(ts))
 
 
 def alert_on_storm(conn: sqlite3.Connection, *, board: Optional[str] = None, now: Optional[float] = None) -> Optional[str]:
@@ -200,12 +222,12 @@ def alert_on_storm(conn: sqlite3.Connection, *, board: Optional[str] = None, now
     from hermes_cli import kanban_db as _kb
     host = socket.gethostname().split(".")[0]
     day = time.strftime("%Y%m%d", time.localtime(now or time.time()))
-    walls = ", ".join(f"{p} until {time.strftime('%H:%M', time.localtime(u))}" for p, u in active_walls(now=now).items())
+    walls = ", ".join(f"{p} until {_utc(u)}" for p, u in active_walls(now=now).items())
     return _kb.create_task(
         conn, title=f"{host}: {n} rate_limited kanban runs in the last hour (provider quota wall)",
         body=(f"More than {STORM_THRESHOLD} workers exited on a provider quota wall in an hour on this host ({host}). "
               f"Known walls: {walls or 'none recorded'}. Check `kanban.default_model`/`default_provider`, the "
-              "provider's usage limit, and cards pinned to the walled provider (`require_model`)."),
+              "provider's usage limit, and cards whose body says they must stay on the walled model."),
         assignee="default", created_by="rate-limit-alert", priority=80, idempotency_key=f"rate_limit_storm:{host}:{day}",
         board=board,
     )
