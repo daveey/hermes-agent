@@ -50,8 +50,17 @@ class RepinHub(FakeHub):
             refuse("not_found")
         if task.get("created_on") != self.gateway:
             refuse("not_creator")
-        if task.get("status") != "ready" or task_id in b["leases"]:
+        status = task.get("status")
+        if status not in ("ready", "scheduled", "todo") or task_id in b["leases"]:
             refuse("not_claimable")
+        # Waiting-state extension: server contract owned/tested in hermes-hub worker_placement.ts.
+        if status != "ready":
+            if task.get("placement_policy") != wp.POLICY:
+                refuse("invalid_policy")
+            if "pool:worker" not in runs_on or any(
+                    label != "pool:worker" and not label.startswith(("capability:", "profile:", "skill:"))
+                    for label in runs_on):
+                refuse("invalid_pool_pin")
         if expected_revision != task["version"]:
             refuse("revision_conflict")
         row = self.svc._put(b, "tasks", task_id, {"placement_policy": None, "runs_on": json.dumps(runs_on)},
@@ -303,6 +312,22 @@ def test_http_success_with_failed_readback_keeps_local_policy(conn, board_stub, 
     assert _local(conn, tid) == (wp.POLICY, None, "ready")
 
 
+@pytest.mark.parametrize("status", ["scheduled", "todo"])
+@pytest.mark.parametrize("started", [False, True])
+def test_waiting_http_success_with_failed_readback_retains_status(conn, board_stub, monkeypatch, status, started):
+    tid = _acknowledged(conn, status=status, started_at=1 if started else None)
+    # Exact 200 response contract from Board worker_placement.ts, verified by its HTTP tests.
+    board_stub.update(status=200, body={"version": 5, "runs_on": ["pool:worker"], "placement_policy": None})
+    monkeypatch.setattr(ksc, "pull", lambda *a, **kw: (_ for _ in ()).throw(ksc.HubError(503, "down")))
+    res = km.move_queued(conn, tid, runs_on=["pool:worker"], reason="pool migration", hub=board_stub["hub"])
+    assert res["ok"] and res["readback"] == "pending", res
+    assert res["status"] == status
+    assert board_stub["received"] == [("/v2/boards/default/placement/repin",
+                                       {"task_id": tid, "expected_revision": 4, "runs_on": ["pool:worker"]})]
+    assert _local(conn, tid) == (wp.POLICY, None, status)
+    assert _moved(conn, tid)[-1]["repinned"] is True
+
+
 def test_http_transport_failure_has_unknown_outcome(conn):
     tid = _acknowledged(conn)
     hub = ksc.Hub(ksc.Identity("http://127.0.0.1:9", "synthetic", "hub"), timeout=2)
@@ -406,6 +431,29 @@ def test_cli_move_pool_repins_a_started_worker_first_card(gws, svc, monkeypatch)
     assert out["matches"] == [] == ev["matches"]  # the queue names no machine: whichever worker is free claims it
 
 
+@pytest.mark.parametrize("status", ["scheduled", "todo"])
+@pytest.mark.parametrize("started", [False, True])
+def test_cli_waiting_pool_repin_keeps_authoritative_status(gws, svc, monkeypatch, status, started):
+    from hermes_cli import kanban as kcli
+    origin, _ = gws
+    tid, _ = _policy_card(origin)
+    if started:
+        _started(origin, tid)
+    b = svc.board(BOARD)
+    svc._put(b, "tasks", tid, {"status": status}, HUB, None, "9999999999996-0000-board")
+    origin.round()
+    assert _local(origin.conn, tid)[2] == status
+    monkeypatch.setattr(ksc, "load_identity", lambda cfg=None: ksc.Identity("https://hub.test", "k", HUB))
+    monkeypatch.setattr(ksc, "Hub", lambda ident, *a, **kw: RepinHub(svc, ident.gateway))
+    before = dict(b["rows"]["tasks"][tid])
+    out = json.loads(kcli.run_slash(f'move {tid} --pool --reason "preserve waiting state" --json'))
+    assert out["ok"] and out["readback"] == "confirmed" and out["status"] == status, out
+    assert _local(origin.conn, tid) == (None, ["pool:worker"], status)
+    after = b["rows"]["tasks"][tid]
+    assert after["status"] == before["status"]
+    assert _moved(origin.conn, tid)[-1]["repinned"] is True
+
+
 def test_move_pool_keeps_the_cards_coordination_labels(gws, svc):
     origin, _ = gws
     origin.enter()
@@ -423,7 +471,7 @@ def test_move_pool_keeps_the_cards_coordination_labels(gws, svc):
 
 
 @pytest.mark.parametrize("fields,code", [
-    ({"status": "todo"}, "repin_unavailable"),
+    ({"status": "blocked"}, "repin_unavailable"),
     ({"claim_lock": "local:1"}, "repin_unavailable"),
     ({"lease_holder": "worker-1", "lease_expires": 1}, "repin_unavailable"),
     ({"created_on": "other"}, "repin_unavailable"),
@@ -453,6 +501,41 @@ def test_move_pool_of_a_started_card_reaches_the_board(conn, started):
     assert [c["runs_on"] for c in hub.calls] == [["pool:worker"]], res
     origin = km.move_queued(conn, tid, runs_on=["machine:hub"], reason="x", hub=NoCallHub())
     assert origin["reason_code"] == "repin_unavailable" and "started" in origin["error"]  # origin repin unchanged
+
+
+@pytest.mark.parametrize("status", ["scheduled", "todo"])
+@pytest.mark.parametrize("started", [False, True])
+def test_waiting_pool_repin_eligibility_preserves_state(conn, status, started):
+    tid = _acknowledged(conn, status=status, started_at=1 if started else None)
+    before = dict(conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
+    result = repin.eligibility(conn, tid, ["pool:worker"])
+    assert result["ok"], result
+    assert result["status"] == status
+    assert result["labels"] == ["pool:worker"]
+    assert dict(conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()) == before
+    origin = repin.eligibility(conn, tid, ["machine:hub"])
+    assert not origin["ok"] and "not ready" in origin["error"]
+
+
+@pytest.mark.parametrize("status", ["scheduled", "todo"])
+@pytest.mark.parametrize("fields,fragment", [
+    ({"claim_lock": "local:1"}, "holds a claim"),
+    ({"lease_holder": "worker-1"}, "holds a claim"),
+    ({"created_on": "other"}, "was created on"),
+    ({"sync_version": None}, "not acknowledged"),
+])
+def test_waiting_pool_repin_keeps_ownership_fences(conn, status, fields, fragment):
+    tid = _acknowledged(conn, status=status, **fields)
+    result = km.move_queued(conn, tid, runs_on=["pool:worker"], reason="x", hub=NoCallHub())
+    assert not result["ok"] and fragment in result["error"], result
+    assert not _moved(conn, tid)
+
+
+@pytest.mark.parametrize("status", ["blocked", "review", "running", "done", "archived"])
+def test_pool_repin_rejects_nonwaiting_status(conn, status):
+    tid = _acknowledged(conn, status=status)
+    result = repin.eligibility(conn, tid, ["pool:worker"])
+    assert not result["ok"] and f"it is {status}, not" in result["error"], result
 
 
 def test_move_to_another_single_machine_still_refuses(conn):

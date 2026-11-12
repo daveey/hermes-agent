@@ -5,12 +5,14 @@ A ``worker-first-v1`` card's ``runs_on`` and ``placement_policy`` are Board-owne
 field edit (``placement_fenced``) and the outbox strips ``runs_on`` from a policy card's push
 (:func:`hermes_cli.kanban_worker_placement.acknowledged_outbox`). So a generic ``move_queued`` relabel of such a card
 would report success while nothing changes. The one supported change is the Board's explicit CAS repin
-(``POST /v2/boards/<id>/placement/repin``, worker ``repinWorker``): creator-only, ``ready`` with no lease, at the
-exact acknowledged revision; it clears the policy and its reservation and sets the pin.
+(``POST /v2/boards/<id>/placement/repin``, worker ``repinWorker``): creator-only, with no lease, at the
+exact acknowledged revision; it clears the policy and its reservation and sets the pin without changing status.
+The Board must support its waiting-state worker-queue extension before scheduled/todo migrations can succeed.
 
 Scope (everything else refuses and writes nothing):
 
-* the card is ``worker-first-v1``, ``ready``, created on this gateway, with no local claim and no Board lease;
+* the card is ``worker-first-v1``, created on this gateway, with no local claim and no Board lease;
+* pool moves accept ``ready``, ``scheduled`` and ``todo``; origin moves remain ``ready`` only;
 * the target is ``[<pool label>]`` (``--pool``: the Board gets ``[<pool label>, *the card's coordination labels]``,
   so ``requires: [hub:write]`` keeps ``capability:hub-write``; a started card may go, since any worker resumes
   it from what it pushed), or exactly ``[machine:<this gateway>]`` (the origin) for a card with no ``started_at``
@@ -101,7 +103,7 @@ def eligibility(conn: sqlite3.Connection, task_id: str, labels: list[str]) -> di
     origin = f"machine:{me}"
     pool = labels == [_pool_label()]
     unavailable = (f"{task_id} is placed by the worker-first policy; the supported moves are the Board repin of a "
-                   f"ready card to the worker queue (--pool) or of an unstarted ready card to its origin "
+                   f"ready/scheduled/todo card to the worker queue (--pool) or of an unstarted ready card to its origin "
                    f"(--runs-on {origin})")
     if row["placement_policy"] != wp.POLICY:
         return _refuse("repin_unavailable", f"{task_id} has unknown placement policy {row['placement_policy']!r}")
@@ -109,8 +111,9 @@ def eligibility(conn: sqlite3.Connection, task_id: str, labels: list[str]) -> di
         return _refuse("repin_unavailable", unavailable + f"; {labels} is not that target")
     if row["created_on"] != me:
         return _refuse("repin_unavailable", unavailable + f"; it was created on {row['created_on']!r}, not {me}")
-    if row["status"] != "ready":
-        return _refuse("repin_unavailable", unavailable + f"; it is {row['status']}, not ready")
+    allowed_statuses = ("ready", "scheduled", "todo") if pool else ("ready",)
+    if row["status"] not in allowed_statuses:
+        return _refuse("repin_unavailable", unavailable + f"; it is {row['status']}, not {'/'.join(allowed_statuses)}")
     if row["claim_lock"] is not None or row["lease_holder"] is not None:
         return _refuse("repin_unavailable", unavailable + "; it holds a claim or Board lease")
     # A started card may join the queue: any worker resumes it from what it pushed (t_01a1d0571c2f07d6). Only the
@@ -135,7 +138,7 @@ def eligibility(conn: sqlite3.Connection, task_id: str, labels: list[str]) -> di
     except (TypeError, ValueError):
         previous = None
     return {"ok": True, "me": me, "board": board, "revision": int(row["sync_version"]), "previous": previous,
-            "labels": labels, "matches": [] if pool else [me]}
+            "labels": labels, "matches": [] if pool else [me], "status": row["status"]}
 
 
 def repin_to_origin(conn: sqlite3.Connection, task_id: str, labels: list[str], reason: str, *,
@@ -203,7 +206,7 @@ def repin_to_origin(conn: sqlite3.Connection, task_id: str, labels: list[str], r
     except sqlite3.Error:
         pass  # the Board's own placement_repinned event still records the change
 
-    out = {"ok": True, "runs_on": pre["labels"], "matches": pre["matches"], "move_no": move_no, "status": "ready",
+    out = {"ok": True, "runs_on": pre["labels"], "matches": pre["matches"], "move_no": move_no, "status": pre["status"],
            REPINNED_EVENT_FLAG: True, "board_version": version, "readback": "pending"}
     try:
         client.pull(conn, hub, board, observers=True, partition=me)
