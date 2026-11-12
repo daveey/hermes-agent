@@ -30,6 +30,35 @@ A missing database with no proof cannot be recovered by this command. Restore th
 original database from a trusted backup, verify/drain its work, and use normal
 board removal. Never delete a registration merely to make admission green.
 
+## Independent sustained-load observer
+
+`python -m hermes_cli.worker_load_observer` performs one sample. Enrollment must
+schedule it every 30 seconds in a **system** oneshot service with `User=<worker>`,
+`Slice=system.slice`, and `TimeoutStartSec=20s` (including publication). Do not put
+it in the user manager: the user CPU backstop can starve it. The timer and service
+are still rollout work; this module alone does not install or enable them.
+
+The durable observer outbox fires after load/core is strictly above 2 for 600
+seconds. Gaps over 90 seconds, reversed clocks and unreadable load reset continuity
+as unknown. A pending alert survives load recovery and retries with the same
+idempotency key, including after an uncertain successful create or archived alert.
+A recovered valid load at or below 2 rearms the next incident. Evidence failures
+never suppress load observations. Process evidence reports sanitized comm/PID,
+interval CPU, mapped card, and active uncontained same-UID processes. These are
+**not proven escapes**: gateways and user shells also legitimately live outside
+the compute pool. No argv, environment, execution DB path or cgroup path is sent.
+Corrupt observer state fails loudly; operators must preserve it for diagnosis
+rather than silently declaring a continuous observation window.
+
+## Execution ownership
+
+Worker identities are `(resolved absolute execution database path, task id)`.
+Board labels cannot distinguish two installations and are not ownership proof.
+Admission counts the prospective owner union, allowing a parked owner to resume
+at the cap when its populated slice already reserves that slot. A new owner must
+fit. Load pressure still refuses both kinds of claim. Existing slug-based owner
+maps and legacy flat scopes require explicit rollout migration before enabling.
+
 ## Pressure contention
 
 Hysteresis writers wait up to 250 ms for the pressure lock, then refuse as unknown.
