@@ -701,6 +701,32 @@ def _check_plugins_in_both_lists(should_fix: bool, f: Finding) -> None:
                                f"memory.provider set), or keep it off with `hermes plugins disable {name}`")
 
 
+@doctor_check("")  # best-effort: a busy or missing board must never break doctor
+def _check_hub_admission_claims(should_fix: bool, f: Finding) -> None:
+    """On the hub: its claims of cards with no hub-admission verdict in the last week (should be 0). [daveey]"""
+    import sqlite3
+    from contextlib import closing
+    from hermes_cli import kanban_placement as kp
+    from hermes_cli.kanban_db import kanban_db_path
+    from hermes_cli.kanban_hub_admission_claim import WINDOW_SECONDS, unjudged_claims
+    from hermes_cli.kanban_hub_admission_placement import is_hub
+    path = kanban_db_path()
+    if not path.is_file():
+        return
+    with closing(sqlite3.connect(read_only_db_uri(path), uri=True, timeout=2.0)) as conn:
+        row = conn.execute("SELECT gateway_id FROM kanban_sync_state LIMIT 1").fetchone()
+        if row is None or not row[0] or not is_hub(row[0], kp.config()):
+            return
+        found = unjudged_claims(conn, row[0])
+    days = WINDOW_SECONDS // 86400
+    if not found:
+        return check_ok(f"Kanban: 0 hub claims of unjudged cards in the last {days} days")
+    ids = ", ".join(tid for tid, _at in found[:10])
+    check_warn(f"Kanban: {len(found)} hub claim(s) of unjudged cards in the last {days} days", f"({ids})")
+    f.manual_issues.append(f"The hub claimed {len(found)} card(s) with no hub_admission verdict (the claim screen "
+                           f"failed open on a judge outage, or it is not deployed): {ids}")
+
+
 @doctor_check("")  # best-effort: profile enumeration must never break doctor
 def _check_profiles(should_fix: bool, f: Finding) -> None:
     from hermes_constants import PROFILE_ID_RE
