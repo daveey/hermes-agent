@@ -31,6 +31,7 @@ from hermes_cli import kanban_workflow
 from hermes_cli import kanban_contract_cli as _contract_cli
 from hermes_cli import kanban_foreign_card as _foreign_card
 from hermes_cli import kanban_review_contract as _review_contract
+from hermes_cli import kanban_worker_shell as _worker_shell
 from hermes_cli.kanban_cli_triage_lines import _decompose_ok_line, _retitled_suffix
 from hermes_cli.kanban_cli_flags import (parse_branch_flag as _parse_branch_flag,
                                          parse_workspace_flag as _parse_workspace_flag)
@@ -1248,10 +1249,13 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 fail_msg[tid] = f"cannot complete {tid}: {_foreign_card.REJECTION}: {foreign}"
                 return False
             try:
-                _review_contract.refuse_outside(conn, tid, metadata, _worker_run_id_for(tid))  # ship would refuse
+                own_run, shell_why = _worker_run_id_for(tid), None
+                if own_run is None:  # a worker's terminal shell: its run, once proven [daveey]
+                    own_run, shell_why = _worker_shell.run_for(conn, tid)
+                _review_contract.refuse_outside(conn, tid, metadata, own_run, worker_shell=shell_why)
                 done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
                                         goal_verification=verified[0] if verified else None,
-                                        expected_run_id=_worker_run_id_for(tid),
+                                        expected_run_id=own_run,
                                         force=bool(getattr(args, "force", False)))
             except _review_contract.IndependenceRefused as outside:  # --force does not override it [daveey]
                 fail_msg[tid] = f"cannot complete {tid}: {outside}"

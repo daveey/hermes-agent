@@ -138,7 +138,7 @@ def board(monkeypatch, tmp_path):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_PROFILE", "test-worker")
-    for var in ("HERMES_SESSION_ID", "HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID"):
+    for var in ("HERMES_SESSION_ID", "HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_WORKER_TASK"):
         monkeypatch.delenv(var, raising=False)
     from pathlib import Path as _Path
     monkeypatch.setattr(_Path, "home", lambda: tmp_path)
@@ -303,7 +303,9 @@ def test_tool_leaves_cards_without_contract_alone(board, monkeypatch):
                          ids=["approve", "request_changes", "pr_key", "review_verdict", "approved"])
 def test_independence_refuses_outside_verdict_on_ship_review(body, md):
     msg = krc.independence_refusal(body, md, None) or ""
-    assert msg.startswith(f"this is a ship review card for {krc.core_pull(body)}; `hermes-core-wt ship` accepts only")
+    card = (f"this is a ship review card for {krc.core_pull(body)}" if krc.states_contract(body)
+            else f"this card names core pull {krc.core_pull(body)}")
+    assert msg.startswith(f"{card}; `hermes-core-wt ship` accepts only")
     assert "no completed review record" in msg and "kanban_comment" in msg
     assert krc.independence_refusal(body, md, 7) is None  # the card's own dispatched worker run
 
@@ -417,3 +419,100 @@ def test_dashboard_done_refuses_outside_approval_on_ship_review(board):
 
 def kb_status(kb, conn, tid):
     return kb.get_task(conn, tid).status
+
+
+# --- a dispatched worker's terminal shell (CLI fallback) -----------------------------------------------------
+# A worker's terminal shell carries HERMES_KANBAN_WORKER_TASK and HERMES_SESSION_ID, not HERMES_KANBAN_TASK /
+# HERMES_KANBAN_RUN_ID. Its `hermes kanban complete` (the fallback on kanban tool DB errors) closes the card's own
+# claimed run, whose owner_admitted session is the reviewer's: ship's _review_verdict accepts that record. The env
+# alone is never trusted: the shell must descend from the run's live bound worker and carry its admitted session.
+
+WORKER_SESSION = "local-reviewer-session"
+
+
+def _worker_shell_card(kb, monkeypatch, body, *, bound_pid=None, session=WORKER_SESSION, env_session=WORKER_SESSION):
+    import os
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="Independent exact-head review PR1349", body=body, assignee="test-worker")
+        kb.claim_task(conn, tid)
+        run_id = kb._current_run_id(conn, tid)
+        with kb.write_txn(conn):
+            if session:
+                kb._append_event(conn, tid, "owner_admitted", {"session_id": session, "pid": 1}, run_id=run_id)
+            kb._append_event(conn, tid, "worker_bound", {"pid": bound_pid or os.getppid()}, run_id=run_id)
+    for var in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HERMES_KANBAN_WORKER_TASK", tid)
+    if env_session:
+        monkeypatch.setenv("HERMES_SESSION_ID", env_session)
+    return tid, run_id
+
+
+def _closing_run(kb, tid):
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect() as conn:
+        return conn.execute("SELECT id, outcome, status FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                            (tid,)).fetchone()
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_cli_from_the_cards_worker_shell_completes_its_own_run(board, monkeypatch, force):
+    tid, run_id = _worker_shell_card(board, monkeypatch, SHIP_BODY)
+    assert _cli_complete(tid, dict(GOOD), force=force) == 0
+    assert _status(board, tid) == "done"
+    row = _closing_run(board, tid)
+    assert (row["id"], row["outcome"], row["status"]) == (run_id, "completed", "done")  # the record ship reads
+    assert _runs(board, tid) == 1  # no synthesized run
+
+
+def _foreign_pid():
+    import subprocess
+    import sys
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
+@pytest.mark.parametrize("case", ["not_descendant", "session_mismatch", "no_session_env", "no_admitted_session"])
+def test_cli_worker_env_alone_is_not_trusted(board, monkeypatch, capsys, case):
+    proc = _foreign_pid() if case == "not_descendant" else None
+    try:
+        tid, _ = _worker_shell_card(
+            board, monkeypatch, SHIP_BODY, bound_pid=proc.pid if proc else None,
+            session=None if case == "no_admitted_session" else WORKER_SESSION,
+            env_session={"session_mismatch": "local-other-chat", "no_session_env": None}.get(case, WORKER_SESSION))
+        if case == "no_session_env":
+            monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+        assert _cli_complete(tid, dict(GOOD), force=True) != 0
+    finally:
+        if proc:
+            proc.kill()
+            proc.wait()
+    err = capsys.readouterr().err
+    assert "review_independence" in err
+    assert "CLI fallback cannot record a review ship accepts" in err and "kanban_block" in err
+    assert "Leave the card for a worker" not in err  # wrong advice for the card's own worker
+    assert _status(board, tid) == "running"
+
+
+def test_cli_worker_env_on_an_unclaimed_card_is_refused(board, monkeypatch, capsys):
+    tid = _outside_card(board, SHIP_BODY)
+    monkeypatch.setenv("HERMES_KANBAN_WORKER_TASK", tid)
+    monkeypatch.setenv("HERMES_SESSION_ID", WORKER_SESSION)
+    assert _cli_complete(tid, dict(GOOD), force=True) != 0
+    assert "CLI fallback cannot record a review ship accepts" in capsys.readouterr().err
+    assert _status(board, tid) == "ready" and _runs(board, tid) == 0
+
+
+def test_cli_worker_env_for_another_card_keeps_the_outside_advice(board, monkeypatch, capsys):
+    tid = _outside_card(board, SHIP_BODY)
+    monkeypatch.setenv("HERMES_KANBAN_WORKER_TASK", "t_0123456789abcdef")
+    assert _cli_complete(tid, dict(GOOD), force=True) != 0
+    err = capsys.readouterr().err
+    assert "Leave the card for a worker" in err and "CLI fallback" not in err
+
+
+def test_independence_names_a_core_pull_card_softly():
+    """A card that only names a core pull (no stated contract) is not called a ship review card (nit 1)."""
+    msg = krc.independence_refusal(PR_KEY_BODY, dict(PR_KEY_MD), None) or ""
+    assert msg.startswith(f"this card names core pull {PR_KEY_PULL}; ")
+    assert krc.independence_refusal(SHIP_BODY, dict(GOOD), None).startswith(f"this is a ship review card for {PR};")
