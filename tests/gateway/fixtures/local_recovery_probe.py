@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -14,7 +15,7 @@ import time
 
 from websockets.asyncio.client import connect
 from tests.gateway.test_normal_runtime_boot import control
-from tests.waiting import async_wait_until
+from tests.waiting import async_wait_until, wait_until
 from tests.child_log import ChildLog
 
 
@@ -127,6 +128,43 @@ def daemon(root, home, env, *, barrier, fixture='local_recovery_daemon.py'):
             yield proc, desc
         finally:
             stop_child(proc)
+
+
+def free_port():
+    with closing(socket.socket()) as sock:
+        sock.bind(('127.0.0.1', 0))
+        return sock.getsockname()[1]
+
+
+def api_listener_state(home, desc):
+    """This daemon's settled ``api_server`` state from its ``gateway_state.json``: ``connected``, or
+    ``fatal`` when the port was already taken. Keyed on identify's pid, so a killed predecessor's
+    retained record never answers for its successor."""
+    def settled():
+        try:
+            record = json.loads((Path(home) / 'gateway_state.json').read_text())
+        except (OSError, ValueError):
+            return None
+        api = ((record.get('platforms') or {}).get('api_server') or {}) if record.get('pid') == desc['pid'] else {}
+        return api.get('state') if api.get('state') in ('connected', 'fatal') else None
+    return wait_until(settled, timeout=RPC_DEADLINE, what='api_server listener settled')
+
+
+@contextmanager
+def api_daemon(root, home, env, write_config, attempts=5):
+    """``daemon`` (no barrier) whose ``api_server`` listener is its own. A port picked free here can
+    be bound by a concurrent test's daemon before this one starts; the loser parks api_server
+    (``api_server_port_in_use``) yet still reports ready, and the winner, built from the same
+    fixtures (API key, model stub), answers every request, so the turns land in its state.db, not
+    this home's. ``write_config(port)`` writes the boot's config.yaml; yields ``(proc, desc, port)``."""
+    for _ in range(attempts):
+        port = free_port()
+        write_config(port)
+        with daemon(root, home, {**env, 'API_SERVER_PORT': str(port)}, barrier=False) as (proc, desc):
+            if api_listener_state(home, desc) == 'connected':
+                yield proc, desc, port
+                return
+    raise AssertionError(f'api_server never owned a free port in {attempts} boots')
 
 
 def probe(tmp_path):

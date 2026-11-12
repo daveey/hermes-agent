@@ -5,7 +5,6 @@ from http.server import ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
-import socket
 import sqlite3
 import threading
 import time
@@ -14,7 +13,7 @@ import pytest
 pytest.importorskip("aiohttp.test_utils", reason="aiohttp not installed (optional 'messaging' extra)")
 import aiohttp
 
-from tests.gateway.fixtures.local_recovery_probe import daemon, Model
+from tests.gateway.fixtures.local_recovery_probe import api_daemon, Model
 
 
 def test_hosted_grant_inference_survives_owner_restart(tmp_path):
@@ -24,24 +23,23 @@ def test_hosted_grant_inference_survives_owner_restart(tmp_path):
     peer = ThreadingHTTPServer(('127.0.0.1', 0), Model)
     peer.requests = []
     threading.Thread(target=peer.serve_forever, daemon=True).start()
-    with socket.socket() as sock:
-        sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
     base = f'http://127.0.0.1:{peer.server_port}/v1'
-    cfg = {'model': {'provider': 'custom', 'default': 'local-wire-stub', 'base_url': base},
-           'gateway': {'platforms': {'api_server': {'enabled': True, 'port': port, 'host': '127.0.0.1'}}, 'multiplex_profiles': False},
-           'auxiliary': {'title_generation': {'enabled': False}}, 'terminal': {'cwd': str(home)},
-           'platform_toolsets': {'api_server': []}, 'approvals': {'mode': 'manual'}}
-    (home / 'config.yaml').write_text(json.dumps(cfg))
+
+    def write_config(port):
+        cfg = {'model': {'provider': 'custom', 'default': 'local-wire-stub', 'base_url': base},
+               'gateway': {'platforms': {'api_server': {'enabled': True, 'port': port, 'host': '127.0.0.1'}}, 'multiplex_profiles': False},
+               'auxiliary': {'title_generation': {'enabled': False}}, 'terminal': {'cwd': str(home)},
+               'platform_toolsets': {'api_server': []}, 'approvals': {'mode': 'manual'}}
+        (home / 'config.yaml').write_text(json.dumps(cfg))
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED') if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
                OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=base, API_SERVER_KEY='ordinary-daemon-owned-secret',
-               API_SERVER_ENABLED='true', API_SERVER_PORT=str(port), PYTHONUNBUFFERED='1')
-    url = f'http://127.0.0.1:{port}/v1'
+               API_SERVER_ENABLED='true', PYTHONUNBUFFERED='1')
     invitation, run_ids, sessions, epochs = {}, {}, [], []
     identity = {'room_id': 'room-owned', 'home_install_id': 'owned-home', 'authority_gateway_id': 'owned-authority',
                 'authority_epoch': 1, 'member_id': 'member-owned'}
 
-    async def exercise(restart):
+    async def exercise(restart, url):
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as client:
             if not restart:
                 async with client.post(url + '/room-members/invitations', json=identity,
@@ -85,9 +83,9 @@ def test_hosted_grant_inference_survives_owner_restart(tmp_path):
                 assert response.status == 401
     try:
         for restart in (False, True):
-            with daemon(root, home, env, barrier=False) as (proc, desc):
+            with api_daemon(root, home, env, write_config) as (proc, desc, port):
                 epochs.append(desc['authority_epoch'])
-                asyncio.run(exercise(restart))
+                asyncio.run(exercise(restart, f'http://127.0.0.1:{port}/v1'))
                 with sqlite3.connect(home / 'state.db') as db:
                     assert db.execute('SELECT source,hidden FROM sessions WHERE id=?', (sessions[-1],)).fetchone() == ('bot_room', 1)
                 proc.kill(); proc.wait(timeout=10)
