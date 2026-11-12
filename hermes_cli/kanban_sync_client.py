@@ -224,7 +224,11 @@ def _bounded_call(ident: Identity, method: str, path: str, body: Optional[dict],
     worker.join(max(0.0, deadline - time.monotonic()))
     if worker.is_alive():
         if probe is not None:
-            probe["worker"] = schedstat(worker.native_id)
+            # The worker's socket times out at this same deadline, so it may exit between is_alive() and this read.
+            # Its task entry goes only after run() returned, whose finally already stored its own schedstat.
+            stat = schedstat(worker.native_id)
+            if stat is not None:
+                probe["worker"] = stat
         with expiry:
             box["expired"] = True
             if "conn" in box:

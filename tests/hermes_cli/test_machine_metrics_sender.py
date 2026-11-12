@@ -399,7 +399,7 @@ class _SlowBoard(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self.rfile.read(int(self.headers.get("content-length") or 0))
         _SlowBoard.seen.append(self.path)
-        _SlowBoard.release.wait(30)
+        type(self).release.wait(30)
         try:
             self.send_response(200)
             self.send_header("content-length", "2")
@@ -422,7 +422,7 @@ def test_a_sample_without_a_cpu_triple_is_bounded_to_2_s_and_probed(caplog):
         t0 = time.monotonic()
         with caplog.at_level("INFO", logger=ms.__name__):
             assert sender.tick() is False
-        assert time.monotonic() - t0 < client.CPU_REPORT_BUDGET_S + 1.0
+        assert time.monotonic() - t0 < client.CPU_REPORT_BUDGET_S + 3.0  # far below the 30 s kept-alive path
         line = next(_fields(r.getMessage()) for r in caplog.records
                     if r.getMessage().startswith("metrics_sender send "))
         assert line["out"] == "timeout" and line["written"] == "True" and line["end_ms"] == "None"
@@ -430,6 +430,37 @@ def test_a_sample_without_a_cpu_triple_is_bounded_to_2_s_and_probed(caplog):
         assert _SlowBoard.seen == [ms.METRICS_PATH]
     finally:
         _SlowBoard.release.set()
+        server.shutdown()
+
+
+class _SilentBoard(_SlowBoard):
+    release = threading.Event()  # its own: _SlowBoard's is left set by the test above
+
+
+@pytest.mark.platforms("linux")  # /proc/self/task/<tid>/schedstat
+def test_a_worker_that_exits_at_the_deadline_keeps_its_own_schedstat(monkeypatch):
+    """The worker's socket times out at the caller's join deadline, so it can exit between the caller's is_alive()
+    and its /proc/self/task/<tid> read (seen on a throttled CI runner: worker_run_ns=None). That lost read must not
+    erase the schedstat the worker stored on its way out."""
+    real = client.schedstat
+
+    def worker_gone_first(tid=None):
+        if tid is not None:  # the caller's read of a timed-out worker: let the worker exit before it, deterministically
+            wait_until(lambda: not Path(f"/proc/self/task/{tid}").exists(), timeout=30, what="the worker exits")
+        return real(tid)
+    monkeypatch.setattr(client, "schedstat", worker_gone_first)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _SilentBoard)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ident = client.Identity(url=f"http://127.0.0.1:{server.server_address[1]}", key="k" * 16, gateway="gw")
+        probe: dict = {}
+        with pytest.raises(TimeoutError):
+            client._bounded_call(ident, "POST", ms.METRICS_PATH, {"cpus": 2}, 0.5, probe=probe)
+        assert probe["written"] is True
+        run_ns, wait_ns = probe["worker"]
+        assert run_ns > 0 and wait_ns >= 0
+    finally:
+        _SilentBoard.release.set()
         server.shutdown()
 
 
