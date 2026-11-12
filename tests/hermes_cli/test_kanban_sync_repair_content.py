@@ -37,6 +37,10 @@ def test_event_only_feed_skips_content_and_partition_repairs(
     with connection_scope():
         parent, _ = window._settle(live, svc, kanban_home, mode)
         window._round(kanban_home, svc)
+        # The settle push's own acknowledgement is credited (kanban_sync_own_writes), so its round deferred:
+        # let that deferred pass run, so the content stamp is current before the event-only round.
+        clock[0] += ksc.REPLICA_REPAIR_MIN_S + 1
+        window._round(kanban_home, svc)
         calls = window._spy(monkeypatch, (
             "repair_divergence", "repair_missing_children", "repair_partition_links",
             "repair_partition_chat_links", "retire_lost_placeholder_links",
