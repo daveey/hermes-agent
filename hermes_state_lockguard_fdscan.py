@@ -8,9 +8,10 @@ the board's lifecycle lock across that scan, which made every reader on the hub 
 "board lifecycle is busy" in bursts across all boards.
 
 ``identity(fd)`` calls libc's ``fstat`` through ``ctypes.PyDLL``, which keeps the GIL for the call,
-and reads ``(st_dev, st_ino)``, the first two 64-bit fields of glibc's ``struct stat`` on x86_64 and
-aarch64. It is armed only on Linux with those architectures, and only after it agrees with
-``os.fstat`` at import. Anywhere else, or if anything about the ctypes path fails, it is ``os.fstat``.
+and reads ``(st_dev, st_ino)`` using a platform-specific verified layout: glibc on Linux
+x86_64/aarch64, and Darwin on arm64/x86_64. Darwin's bounded proc_pidinfo listing avoids
+per-entry GIL handoffs and rejects potentially truncated snapshots. Both paths must agree
+with ``os.fstat`` at import; unsupported or unverified runtimes retain ``os.fstat``.
 """
 
 from __future__ import annotations
@@ -85,6 +86,13 @@ def _build_native() -> Optional[tuple[Callable[[int], Optional[Identity]], Calla
 _built = _build_native()
 _native = _built[0] if _built else None
 _read_status = _built[1] if _built else None
+_darwin_descriptors = None
+if sys.platform == "darwin":
+    from hermes_state_lockguard_darwin import build as _build_darwin
+
+    _darwin = _build_darwin()
+    if _darwin is not None:
+        _native, _darwin_descriptors = _darwin
 
 
 def identity(fd: int) -> Optional[Identity]:
@@ -118,19 +126,25 @@ def _fd_table_size() -> Optional[int]:
 
 
 def open_fd_identities() -> Optional[list[tuple[int, Identity]]]:
-    """Every open ``(fd, identity)`` of this process from one GIL-held sweep, or ``None`` when that
-    is unavailable (the caller lists ``/proc/self/fd`` instead). ``os.listdir`` releases the GIL on
-    every directory entry, which cost 100+ ms for 600 descriptors with one busy thread; this sweep
-    reads ``/proc/self/status`` once, then fstats each fd number below ``FDSize`` without releasing
-    the GIL (a closed number fails at once with EBADF)."""
+    """Open ``(fd, identity)`` pairs without a GIL handoff per syscall, or ``None``
+    for the caller's platform directory-listing fallback. Linux sweeps below
+    ``FDSize``; Darwin uses a bounded ``proc_pidinfo`` listing. Each native call
+    holds the GIL, but the Python loop can still be scheduled between calls:
+    this is not an atomic snapshot of descriptor opens/closes."""
     if _native is None:
         return None
-    size = _fd_table_size()
-    if size is None or size <= 0 or size > MAX_NATIVE_SWEEP:
-        return None
+    if _darwin_descriptors is not None:
+        descriptors = _darwin_descriptors()
+        if descriptors is None:
+            return None
+    else:
+        size = _fd_table_size()
+        if size is None or size <= 0 or size > MAX_NATIVE_SWEEP:
+            return None
+        descriptors = range(size)
     native = _native
     out = []
-    for fd in range(size):
+    for fd in descriptors:
         ident = native(fd)
         if ident is not None:
             out.append((fd, ident))

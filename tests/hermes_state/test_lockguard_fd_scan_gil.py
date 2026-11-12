@@ -17,7 +17,8 @@ import pytest
 import hermes_state_lockguard as guard
 import hermes_state_lockguard_fdscan as fdscan
 
-linux_native = pytest.mark.skipif(not fdscan.native_enabled(), reason="native fstat only on Linux x86_64/aarch64")
+linux_native = pytest.mark.skipif(not sys.platform.startswith("linux") or not fdscan.native_enabled(),
+                                  reason="Linux fd-table sweep")
 
 
 @linux_native
@@ -67,6 +68,7 @@ def test_sweep_finds_exactly_the_listed_descriptors(tmp_path):
 
 
 def test_oversized_fd_table_falls_back_to_the_listing(monkeypatch):
+    monkeypatch.setattr(fdscan, "_darwin_descriptors", None)
     monkeypatch.setattr(fdscan, "_fd_table_size", lambda: fdscan.MAX_NATIVE_SWEEP + 1)
     assert fdscan.open_fd_identities() is None
     fd = os.open(os.devnull, os.O_RDONLY)
