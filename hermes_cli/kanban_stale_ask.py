@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import re
 import sqlite3
 from datetime import datetime
@@ -20,11 +21,18 @@ from typing import Optional
 ASK_MARK = "Next action for the user: "
 TERMINAL_HINT = ("\nUse the owner Desktop session's user-terminal flow; opening this task or unblocking it does not "
                  "execute a command or grant terminal authority.")
+# Every free-text field is a tempered token: it may span lines (a human_request field can) but never
+# another notice's actor line or ask mark, so a stray "Next action for the user:" in prose or a second
+# joined notice cannot pull the text between them into one match. The ask mark must also sit at the
+# start of the line right under block_notice()'s own "blocked — actor:" line.
+_FIELD = r"(?:(?!Next action for the user: |\nblocked — actor: ).)*?"
 _ASK = re.compile(
-    r"Next action for the user: (?P<action>.*?)\nWhy only the user: .*?\n"
-    r"(?P<rest>Scope: .*?\nOpen task: @task:(?P<board>[^/@\s]+)(?:@(?P<gw>[^/\s]+))?/(?P<tid>[A-Za-z0-9_-]+))"
+    r"(?P<head>blocked — actor: [^\n]*\n)Next action for the user: (?P<action>" + _FIELD + r")\n"
+    r"Why only the user: " + _FIELD + r"\n"
+    r"(?P<rest>Scope: " + _FIELD + r"\nOpen task: @task:(?P<board>[^/@\s]+)(?:@(?P<gw>[^/\s]+))?/(?P<tid>[A-Za-z0-9_-]+))"
     r"(?P<hint>" + re.escape(TERMINAL_HINT) + r")?",
     re.DOTALL)
+logger = logging.getLogger(__name__)
 _PT = "America/Los_Angeles"
 # Transitions worth naming; claims, spawns, heartbeats and comments are noise here.
 _LABELS = {"unblocked": "unblocked", "blocked": "blocked again", "scheduled": "scheduled",
@@ -87,15 +95,19 @@ def since_line(status: str, events, anchor: int) -> Optional[str]:
     if status in {"blocked", "triage"} and not later:
         return None  # still the same block: the ask stands
     base_day = datetime.fromtimestamp(int(events[anchor][2]), ZoneInfo(_PT)).date()
-    parts, zone = [], ""
-    for _id, kind, created_at, _p in later:
-        clock, zone = _clock(created_at, base_day)
-        parts.append(f"{_LABELS[kind]} {clock}")
-    text = ", ".join(parts) + (f" {zone}" if zone else "")
+    stamped = [(_LABELS[kind], *_clock(created_at, base_day)) for _id, kind, created_at, _p in later]
+    zones = {zone for _l, _c, zone in stamped}
+    if len(zones) > 1:  # the window crossed a DST change: label each time
+        text = ", ".join(f"{label} {clock} {zone}" for label, clock, zone in stamped)
+    else:
+        text = ", ".join(f"{label} {clock}" for label, clock, _z in stamped) + (f" {zones.pop()}" if zones else "")
     if not later or _LAST_STATUS.get(later[-1][1]) != status:
         text = f"{text}; now {status}" if text else f"now {status}"
     if status in {"blocked", "triage"}:
-        return f"Since then: {text}. This ask was replaced by a newer one; answer that, not this."
+        newest = next((ev for ev in reversed(events) if ev[1] == "blocked"), None)
+        if newest is not None and isinstance(newest[3].get("human_request"), dict):
+            return f"Since then: {text}. This ask was replaced by a newer one; answer that, not this."
+        return f"Since then: {text}. This ask no longer applies; the card is blocked on something else."
     return f"Since then: {text}. No action needed."
 
 
@@ -116,12 +128,25 @@ def refresh_stale_ask(text):
         status, events = card
         anchor = _anchor(events, _norm(match["action"]))
         line = since_line(status, events, anchor) if anchor is not None else None
-        return match[0] if line is None else f"{line}\n{match['rest']}"
+        return match[0] if line is None else f"{match['head']}{line}\n{match['rest']}"
 
     return _ASK.sub(swap, text)
 
 
+def _is_producer_row(payload) -> bool:
+    """A producer wake (Kanban notifier, automation), never text a person typed or pasted."""
+    native = payload.get("native_text_v1")
+    return bool(payload.get("local_automation_v1")) or (isinstance(native, dict) and bool(native.get("automation")))
+
+
 def refresh_payload(payload) -> None:
-    """Refresh a claimed FIFO admission's text in place, before it becomes a turn or a note."""
-    if isinstance(payload, dict) and isinstance(payload.get("text"), str) and ASK_MARK in payload["text"]:
-        payload["text"] = refresh_stale_ask(payload["text"])
+    """Refresh a claimed producer wake's text in place, before it becomes a turn or a note.
+
+    Human-typed rows are never touched. Any failure leaves the text as it was: a refresh must never
+    cost the wake itself."""
+    try:
+        if (isinstance(payload, dict) and isinstance(payload.get("text"), str) and ASK_MARK in payload["text"]
+                and _is_producer_row(payload)):
+            payload["text"] = refresh_stale_ask(payload["text"])
+    except Exception:  # unchanged on any doubt
+        logger.warning("stale block-ask refresh failed; delivering the wake unchanged", exc_info=True)

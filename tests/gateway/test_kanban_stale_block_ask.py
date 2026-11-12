@@ -120,3 +120,65 @@ def test_remote_or_unreadable_cards_are_left_alone(tmp_path, monkeypatch):
     assert refresh_stale_ask(remote) == remote
     missing = remote.replace("@hub-ec2", "")
     assert refresh_stale_ask(missing) == missing
+
+
+def _stale_notice(tmp_path, monkeypatch):
+    """A rendered wake for a card that has since finished, and the card id."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    tid, task = _blocked_card()
+    text = _wake_text(tid, task)
+    _finish(tid)
+    return tid, text
+
+
+def test_user_typed_row_quoting_a_stale_notice_is_left_alone(tmp_path, monkeypatch):
+    """David pasting an old notice ("what do I do with this?") must reach the agent as he typed it."""
+    from hermes_cli.kanban_stale_ask import refresh_payload
+    _tid, text = _stale_notice(tmp_path, monkeypatch)
+    typed = {"text": "what do I do with this?\n" + text, "native_text_v1": {"source": {"platform": "desktop"}}}
+    before = typed["text"]
+    refresh_payload(typed)
+    assert typed["text"] == before
+    wake = {"text": text, "native_text_v1": {"source": {}, "automation": {"identity": "x", "owner": "s"}}}
+    refresh_payload(wake)
+    assert "Next action for the user" not in wake["text"]
+    local = {"text": text, "local_automation_v1": {"owner": "s"}}
+    refresh_payload(local)
+    assert "Since then: unblocked 20:08, completed 20:25 PST. No action needed." in local["text"]
+
+
+def test_stray_ask_mark_before_a_stale_notice_keeps_the_text_between(tmp_path, monkeypatch):
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    _tid, text = _stale_notice(tmp_path, monkeypatch)
+    prose = "Result: the worker wrote Next action for the user: something.\nIMPORTANT OTHER CONTENT\n\n"
+    out = refresh_stale_ask(prose + text)
+    assert out.startswith(prose)
+    assert "IMPORTANT OTHER CONTENT" in out
+    assert out.count("Since then:") == 1 and "Why only the user" not in out
+    # A quoted notice line at line start, not preceded by the notice's own actor line, is not touched either.
+    quoted = "Next action for the user: quoted.\nIMPORTANT OTHER CONTENT\n" + text
+    out = refresh_stale_ask(quoted)
+    assert out.startswith("Next action for the user: quoted.\nIMPORTANT OTHER CONTENT\n")
+    assert out.count("Since then:") == 1
+
+
+def test_two_joined_notices_only_the_stale_one_changes(tmp_path, monkeypatch):
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    _tid, stale = _stale_notice(tmp_path, monkeypatch)
+    tid2, task2 = _blocked_card()
+    live = _wake_text(tid2, task2)
+    out = refresh_stale_ask(stale + "\n" + live)
+    assert out.endswith("\n" + live)  # the still-blocked notice is byte-identical
+    assert out.count("Next action for the user") == 1 and out.count("Since then:") == 1
+
+
+def test_unexpected_refresh_error_leaves_the_text_unchanged(tmp_path, monkeypatch):
+    from hermes_cli import kanban_stale_ask
+    _tid, text = _stale_notice(tmp_path, monkeypatch)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("odd row")
+    monkeypatch.setattr(kanban_stale_ask, "_read_card", boom)
+    payload = {"text": text, "local_automation_v1": {"owner": "s"}}
+    kanban_stale_ask.refresh_payload(payload)
+    assert payload["text"] == text
