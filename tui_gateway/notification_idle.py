@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import threading
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,72 @@ def board_quiet(path, session_key):
     except Exception:
         logger.debug("Kanban empty proof unavailable", exc_info=True)
         return False
+
+
+# [daveey] Board path -> (reader, data_version, events scanned up to, newest notify-kind event id, tui subs by
+# chat). data_version moves on every commit, and the main board commits ~40 times a minute with heartbeats,
+# claims and run bookkeeping that no chat poller reads, so a commit gate re-polled every board for every chat on
+# nearly every tick (t_01a1cee98b798343). What a chat's poll can claim is fixed by two inputs: the newest
+# deliverable-kind event id (AUTOINCREMENT, so any new one is above it) and that chat's own tui subscription
+# rows (cursor, in-flight mark). Read both once per commit for every chat in this process.
+_SIGS: dict[str, tuple] = {}
+_SIGS_LOCK = threading.Lock()
+_SIGS_MAX = 64
+
+
+def _notify_content(conn, version, held):
+    from tui_gateway.session_notifications import _KANBAN_NOTIFY_KINDS
+    present = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
+                                          "('task_events', 'kanban_notify_subs')")}
+    if len(present) != 2:
+        return None  # not a board (yet): fall back to the commit revision
+    conn.execute("BEGIN")  # one snapshot for the event scan and the subscription rows
+    try:
+        top = int(conn.execute("SELECT MAX(id) FROM task_events").fetchone()[0] or 0)
+        start, newest = (held[2], held[3]) if held is not None and held[2] <= top else (0, 0)
+        if top > start:
+            marks = ",".join("?" for _ in _KANBAN_NOTIFY_KINDS)
+            row = conn.execute(f"SELECT MAX(id) FROM task_events WHERE id > ? AND id <= ? AND kind IN ({marks})",
+                               (start, top, *_KANBAN_NOTIFY_KINDS)).fetchone()
+            newest = max(newest, int(row[0] or 0))
+        rows = conn.execute("SELECT chat_id, task_id, platform, thread_id, last_event_id, inflight_from "
+                            "FROM kanban_notify_subs WHERE LOWER(platform) = 'tui' "
+                            "ORDER BY chat_id, task_id, platform, thread_id").fetchall()
+    finally:
+        conn.execute("COMMIT")
+    by_chat: dict = {}
+    for row in rows:
+        by_chat.setdefault(row[0], []).append(tuple(row))
+    return conn, version, top, newest, {chat: tuple(subs) for chat, subs in by_chat.items()}
+
+
+def board_signature(path, chat_id=None):
+    """What a poll of ``path`` for ``chat_id`` could claim: equal signatures mean no new deliverable event and no
+    change to that chat's subscription rows, so a bookkeeping commit (heartbeat, claim of another card, run
+    stamps) keeps it. A board without the notify tables keys on its commit revision. Raises like any read."""
+    from hermes_cli.kanban_session_activity import cached_ro
+    key = str(path)
+    with cached_ro(Path(path)) as conn:
+        version = conn.execute("PRAGMA data_version").fetchone()[0]
+        with _SIGS_LOCK:
+            held = _SIGS.get(key)
+        if held is not None and held[0] is not conn:
+            held = None  # another reader (reopened, replaced file): its scan offsets prove nothing here
+        if held is None or held[1] != version:
+            held = _notify_content(conn, version, held)
+            if held is None:
+                return conn, version
+            with _SIGS_LOCK:
+                if len(_SIGS) >= _SIGS_MAX:
+                    _SIGS.clear()
+                _SIGS[key] = held
+    subs = held[4] if chat_id is None else held[4].get(chat_id, ())
+    return "notify", held[3], subs
+
+
+def reset_board_signatures() -> None:
+    with _SIGS_LOCK:
+        _SIGS.clear()
 
 
 def state_revision(db):

@@ -667,12 +667,13 @@ def _kb_board_key(_kb, board_meta) -> tuple[str, str]:
         return slug, f"slug:{slug}"
 
 
-def _kb_board_file_sig(db_path) -> tuple | None:
-    """A commit revision from a guarded retained reader (stat alone misses WAL publication)."""
-    from hermes_cli.kanban_session_activity import cached_ro
+def _kb_board_file_sig(db_path, chat_id: str | None = None) -> tuple | None:
+    """What a poll of this board for ``chat_id`` could claim, read through a guarded retained reader once per
+    commit for every chat (``notification_idle.board_signature``): bookkeeping commits keep it, so they no
+    longer re-poll every board for every chat (t_01a1cee98b798343). Stat alone misses WAL publication."""
+    from tui_gateway.notification_idle import board_signature
     try:
-        with cached_ro(Path(db_path)) as conn:
-            return conn, conn.execute("PRAGMA data_version").fetchone()[0]
+        return board_signature(db_path, chat_id)
     except Exception:
         logger.debug("Kanban revision unavailable", exc_info=True)
         return None  # unreadable never means unchanged
@@ -684,10 +685,11 @@ def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None,
     writable unless it has a subscription owned by this exact session (a failed read-only probe — locked/corrupt DB —
     falls through so delivery is preserved).
 
-    *seen* (the session's ``{db path: file signature}``) skips a board whose files have not moved since this
-    session's last completed poll: no commit means no new event to claim. 21 open chats each probing every board
-    every 5 s, and opening it writable to re-claim nothing, kept the Desktop backend busy. The signature is taken
-    before the poll, so a commit during it is polled again next tick."""
+    *seen* (the session's ``{db path: signature}``) skips a board where nothing this session could claim has
+    changed since its last completed poll (``_kb_board_file_sig``): no new deliverable event and no change to its
+    own subscription rows. 21 open chats each probing every board every 5 s, and opening it writable to re-claim
+    nothing, kept the Desktop backend busy. The signature is taken before the poll, so a commit during it is
+    polled again next tick."""
     from hermes_cli import kanban_db_connect as _kbc
     from hermes_cli import kanban_db_notify as _kbn
     from hermes_cli.kanban_placement import is_placeholder_session
@@ -701,7 +703,7 @@ def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None,
     if seen is not None:
         with contextlib.suppress(Exception):
             db_path = str(_kb.kanban_db_path(board=slug))
-            sig = _kb_board_file_sig(db_path)
+            sig = _kb_board_file_sig(db_path, session_key)
         if reclaimed and sig is not None and seen.get(db_path) == (session_key, sig):
             from hermes_constants import get_hermes_home
             from tui_gateway.kanban_consumer_health import polled
@@ -859,14 +861,25 @@ def _collect_kanban_notifications(session: dict, claims: list | None = None) -> 
     return texts + _collect_remote_kanban_notifications(session_key, claims)
 
 
+_LINEAGE_TTL_S = 30.0
+_lineage_memo: dict[tuple, tuple] = {}  # (state.db, session key) -> (monotonic at, lineage)
+
+
 def _session_lineage(session_key: str, limit: int = 8) -> tuple:
-    """Earlier ids of this chat (compaction parents): a remote card stays linked to the id that created it."""
+    """Earlier ids of this chat (compaction parents): a remote card stays linked to the id that created it.
+
+    Every live chat's poller asked for it every 5 s, opening state.db each time (t_01a1cee98b798343). A chat's
+    parents are set when it is created and only change on import or deletion repair, so a found chain is reused
+    for ``_LINEAGE_TTL_S``; a chat not yet in the store is looked up again on the next poll."""
+    from hermes_constants import get_hermes_home
+    path = Path(get_hermes_home()) / "state.db"
+    memo_key, now = (str(path), session_key), time.monotonic()
+    if (hit := _lineage_memo.get(memo_key)) is not None and now - hit[0] < _LINEAGE_TTL_S:
+        return hit[1]
     out: list = []
+    found = False
     with contextlib.suppress(Exception):
         import sqlite3
-        from pathlib import Path
-        from hermes_constants import get_hermes_home
-        path = Path(get_hermes_home()) / "state.db"
         if not path.is_file():
             return ()
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
@@ -874,12 +887,17 @@ def _session_lineage(session_key: str, limit: int = 8) -> tuple:
             sid = session_key
             for _ in range(limit):
                 row = conn.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (sid,)).fetchone()
+                found = found or (row is not None and sid == session_key)
                 if not row or not row[0] or row[0] in out:
                     break
                 sid = str(row[0])
                 out.append(sid)
         finally:
             conn.close()
+    if found:
+        if len(_lineage_memo) >= 256:
+            _lineage_memo.clear()
+        _lineage_memo[memo_key] = (now, tuple(out))
     return tuple(out)
 
 
