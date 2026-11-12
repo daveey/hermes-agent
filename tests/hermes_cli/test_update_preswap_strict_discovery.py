@@ -11,6 +11,7 @@ from hermes_cli import update_cmd_posix_pause as pause
 from hermes_cli import update_fleet_scope as scope, update_pause_deferrals as deferrals
 
 UNIT = "hermes-gateway-review"
+REAL_STOP_GATEWAYS = pause._stop_gateways
 
 
 @pytest.fixture
@@ -121,7 +122,7 @@ def test_stop_verification_failures_report_third_attempt_and_rollback(probes, mo
 
     _, report = probes
     # Use the real stop transaction and async systemctl helper, never a host mutation.
-    monkeypatch.setattr(pause, "_stop_gateways", pause._stop_busy_gateways)
+    monkeypatch.setattr(pause, "_stop_gateways", REAL_STOP_GATEWAYS)
     entries = [{"kind": "systemd", "scope": "user", "unit": UNIT, "pid": 424242},
                {"pid": 424243, "argv": ["fixture"]}]
     monkeypatch.setattr(pause, "_discover_systemd", lambda: entries[:1])

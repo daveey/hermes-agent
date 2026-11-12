@@ -249,10 +249,12 @@ def test_the_pause_hands_one_deadline_to_the_stop_that_covers_discovery(monkeypa
     monkeypatch.setattr(record, "record_pause", lambda *a: None)
     monkeypatch.setattr(record, "mark_stop_requested", lambda *a, **k: None)
     monkeypatch.setattr(record, "sync", lambda token: None)
-    monkeypatch.setattr(pause, "_stop_gateways", lambda token, entries, deadline=None: seen.update(deadline=deadline))
+    monkeypatch.setattr(pause, "_stop_gateways", lambda token, entries, deadline=None, **kw:
+                        seen.update(deadline=deadline, **kw))
     token = pause._empty_token()
     assert pause._pause(token) is None
     assert seen["deadline"] == 100.0 + pause._PRE_SWAP_DRAIN_WAIT_S
+    assert seen["fence_checked"] is True
 
 
 def test_discovery_that_spent_the_whole_budget_stops_nothing(monkeypatch):
