@@ -15,9 +15,9 @@ def test_dispatch_publishes_pressure_without_changing_decision(capacity_board, a
     monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda sample=None: "critical")
     seen = []
     result = dispatch.dispatch_once(conn, spawn_fn=lambda *a: seen.append(a),
-                                    max_in_progress=4, reconcile_orphans=False, board="sample")
+                                    max_in_progress=4, reconcile_orphans=False, board="default")
     assert seen == [] and result.memory_pressure == "critical"
-    out = evidence.read(conn, kb.get_task(conn, ids[0]), board="sample")
+    out = evidence.read(conn, kb.get_task(conn, ids[0]), board="default")
     assert out["freshness"] == "current"
     assert out["reasons"][0]["code"] == "capacity.memory_pressure"
     assert kb.get_task(conn, child).status == "todo"
@@ -26,12 +26,12 @@ def test_dispatch_publishes_pressure_without_changing_decision(capacity_board, a
 def test_drain_is_explicit_not_inferred_from_zero_budget(capacity_board, all_assignees_spawnable, monkeypatch):
     conn, ids, _ = capacity_board
     monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda sample=None: "ok")
-    dispatch.dispatch_once(conn, max_spawn=0, reconcile_orphans=False, board="sample",
+    dispatch.dispatch_once(conn, max_spawn=0, reconcile_orphans=False, board="default",
                            observation_update_drain=True)
-    out = evidence.read(conn, kb.get_task(conn, ids[0]), board="sample")
+    out = evidence.read(conn, kb.get_task(conn, ids[0]), board="default")
     assert [r["code"] for r in out["reasons"]] == ["capacity.update_drain"]
-    dispatch.dispatch_once(conn, max_spawn=0, reconcile_orphans=False, board="sample")
-    assert evidence.read(conn, kb.get_task(conn, ids[0]), board="sample")["reasons"] == []
+    dispatch.dispatch_once(conn, max_spawn=0, reconcile_orphans=False, board="default")
+    assert evidence.read(conn, kb.get_task(conn, ids[0]), board="default")["reasons"] == []
 
 
 def test_observer_exception_cannot_change_dispatch_return(capacity_board, monkeypatch):
@@ -39,7 +39,7 @@ def test_observer_exception_cannot_change_dispatch_return(capacity_board, monkey
     expected = dispatch.DispatchResult(memory_pressure="critical")
     monkeypatch.setattr(dispatch, "_dispatch_once_locked", lambda *a, **kw: expected)
     monkeypatch.setattr(evidence, "record", lambda *a, **kw: (_ for _ in ()).throw(ValueError("fixture")))
-    result = dispatch.dispatch_once(conn, board="sample")
+    result = dispatch.dispatch_once(conn, board="default")
     assert result is expected and asdict(result) == asdict(expected)
 
 
@@ -47,8 +47,8 @@ def test_existing_queue_read_adds_optional_fields(capacity_board, monkeypatch):
     conn, ids, _ = capacity_board
     task = kb.get_task(conn, ids[0])
     monkeypatch.setattr(queue, "_running_and_limit", lambda *a: (0, 4))
-    evidence.record(conn, dispatch.DispatchResult(memory_pressure="critical"), board="sample", machine="m")
-    fields = queue.detail_fields(conn, task, "sample")
+    evidence.record(conn, dispatch.DispatchResult(memory_pressure="critical"), board="default", machine="m")
+    fields = queue.detail_fields(conn, task, "default")
     place = fields["queue"]
     assert fields["capacity_evidence"]["freshness"] == "current"
     assert fields["execution_observations"][0]["state"] == "unknown"

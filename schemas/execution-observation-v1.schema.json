@@ -32,7 +32,7 @@
     "last_known_state": {"type": ["string", "null"]},
     "source": {"type": "string", "minLength": 1},
     "source_revision": {"type": "string", "minLength": 1},
-    "evidence_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "evidence_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
     "observed_at": {"$ref": "#/$defs/epoch"},
     "valid_until": {"$ref": "#/$defs/epoch"},
     "last_activity": {"anyOf": [{"$ref": "#/$defs/epoch"}, {"type": "null"}]},
@@ -47,7 +47,8 @@
       }
     }},
     "required_sources": {"type": "array", "items": {"type": "object", "required": ["observed_at", "valid_until"], "properties": {
-      "observed_at": {"$ref": "#/$defs/epoch"}, "valid_until": {"$ref": "#/$defs/epoch"}
+      "observed_at": {"$ref": "#/$defs/epoch"}, "valid_until": {"$ref": "#/$defs/epoch"},
+      "source_class": {"enum": ["sidebar", "imported_owner"]}
     }}}
   },
   "$defs": {"epoch": {"type": "number", "minimum": 0, "maximum": 8640000000000}},

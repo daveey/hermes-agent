@@ -31,16 +31,21 @@ def capacity_reason(code, *, native_code, phase, evidence_ref):
             "phase": phase, "evidence_ref": evidence_ref}
 
 
+def _attempt_valid(value):
+    return (type(value) is int and value > 0) or (isinstance(value, str) and bool(value))
+
+
 def _identity_valid(identity):
     if not isinstance(identity, dict):
         return False
     required = ["gateway", "profile", "kind", "work_id"]
     if identity.get("kind") == "card":
         required.append("board")
-    elif not (identity.get("session") or identity.get("lineage")):
+    elif not any(isinstance(identity.get(k), str) and identity[k] for k in ("session", "lineage")):
         return False
     return (all(isinstance(identity.get(k), str) and identity[k] for k in required)
-            and any(type(identity.get(k)) in (str, int) and bool(identity[k]) for k in ("run_id", "generation")))
+            and any(k in identity for k in ("run_id", "generation"))
+            and all(_attempt_valid(identity[k]) for k in ("run_id", "generation") if k in identity))
 
 
 def _unknown(out, reason, *, freshness="unknown"):
@@ -68,6 +73,13 @@ def adapt(value, *, now, source_class):
         return _unknown(out, "legacy_or_unsupported_version")
     if not _identity_valid(raw.get("identity")):
         return _unknown(out, "missing_qualified_identity")
+    owner = raw.get("owner")
+    if not isinstance(owner, dict) or not all(isinstance(owner.get(k), str) and owner[k]
+                                             for k in ("gateway", "profile")):
+        return _unknown(out, "missing_qualified_owner")
+    refs = raw.get("evidence_refs")
+    if not isinstance(refs, list) or not refs or not all(isinstance(v, str) and v for v in refs):
+        return _unknown(out, "missing_evidence_references")
     if not all(isinstance(raw.get(k), str) and raw[k] for k in ("source", "source_revision")):
         return _unknown(out, "missing_source_identity")
     ttl = SOURCE_TTLS.get(source_class)
@@ -88,7 +100,10 @@ def adapt(value, *, now, source_class):
             return _unknown(out, "missing_required_source_timing")
         if end < at or now < at:
             return _unknown(out, "clock_inconsistent")
-        until = min(until, end)
+        source_ttl = SOURCE_TTLS.get(source.get("source_class", source_class))
+        if source_ttl is None:
+            return _unknown(out, "invalid_required_source_class")
+        until = min(until, end, at + source_ttl)
     out.update(valid_until=until, age_seconds=now - observed)
     if now >= until:
         return _unknown(out, "source_expired", freshness="stale")

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import time
 import uuid
@@ -19,13 +20,21 @@ TASK_LIMIT = 128
 
 
 def _lifecycle(conn, task_id):
+    from hermes_cli import kanban_db as kb
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
     if row is None:
         return None
     row = dict(row)
     count = conn.execute("SELECT count(*) FROM task_runs WHERE task_id=?", (task_id,)).fetchone()[0]
     return {"status": row["status"], "run_id": row["current_run_id"],
-            "runs_on": row.get("runs_on"), "run_count": count}
+            "runs_on": row.get("runs_on"), "run_count": count, "assignee": row.get("assignee"),
+            "parents": [list(p) for p in kb.parent_states(conn, task_id)]}
+
+
+def _board(conn):
+    from hermes_cli import kanban_db_sync as sync
+    path = next(row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main")
+    return sync.board_slug_for_path(path)
 
 
 def _reason(code, native, reference, phase="pre_claim"):
@@ -36,11 +45,16 @@ def _native_restrictions(result, tid, reference):
     """Keep unmapped admission restrictions without inventing a capacity category."""
     rows = []
     if result.at_capacity:
-        rows.append({"native_code": "at_capacity", "evidence_ref": reference})
+        rows.append({"source_field": "at_capacity", "native_code": result.at_capacity, "evidence_ref": reference})
     for name in ("claim_deferred", "capsule_refused", "owner_down", "skipped_per_profile_capped", "respawn_guarded"):
         for item in getattr(result, name):
             if item[0] == tid:
-                rows.append({"native_code": name, "evidence_ref": reference})
+                native = item[2] if name == "owner_down" else item[1]
+                if name == "skipped_per_profile_capped":
+                    native = name
+                # Native diagnostic tokens only, never arbitrary error text.
+                native = native if isinstance(native, str) and re.fullmatch(r"[A-Za-z0-9_.:/=-]{1,160}", native) else name
+                rows.append({"source_field": name, "native_code": native, "evidence_ref": reference})
     return rows
 
 
@@ -48,6 +62,9 @@ def _task_reasons(result, tid, reference):
     reasons = []
     for task, native in result.skipped_ineligible:
         if task == tid:
+            reasons.append(_reason("placement", native, reference))
+    for task, native in result.claim_deferred:
+        if task == tid and native in {"labels_mismatch", "pinned_only", "offline"}:
             reasons.append(_reason("placement", native, reference))
     if tid in result.rate_limited:
         # A reaped submitter can refuse before its managed worker ever starts.
@@ -64,6 +81,31 @@ def _task_reasons(result, tid, reference):
     return reasons
 
 
+def _provider_phase(conn, tid, reasons, now):
+    """A reaped rate-limit result is post-start only with its own bound receipt."""
+    if not any(r["native_code"] == "rate_limited" for r in reasons):
+        return
+    from hermes_cli.kanban_capacity_metrics import attempts
+    refusal = conn.execute("SELECT id, run_id, created_at FROM task_events "
+                           "WHERE task_id=? AND kind='rate_limited' ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
+    if refusal is None or refusal["run_id"] is None:
+        return
+    events = [dict(e) for e in conn.execute(
+        "SELECT id, kind, created_at, run_id, payload FROM task_events "
+        "WHERE task_id=? AND run_id=? AND id<=? ORDER BY id DESC LIMIT 256",
+        (tid, refusal["run_id"], refusal["id"])).fetchall()][::-1]
+    rows = attempts(events, board=_board(conn), task_id=tid, now=now)
+    matched = next((r for r in rows if r["run_id"] == refusal["run_id"]
+                    and r["claim_to_process_start_s"] is not None
+                    and r["process_start_at"] <= refusal["created_at"] <= now), None)
+    if matched:
+        for reason in reasons:
+            if reason["native_code"] == "rate_limited":
+                reason.update(phase="post_start", run_id=refusal["run_id"],
+                              evidence_ref=f"task_event:{_board(conn)}:{tid}:{refusal['id']}",
+                              process_ref=matched["process_ref"])
+
+
 def record(conn, result, *, board, machine, now=None, update_drain=False, dry_run=False):
     """Record only genuine dispatch observations; a failed diagnostic cannot stop dispatch.
 
@@ -75,6 +117,7 @@ def record(conn, result, *, board, machine, now=None, update_drain=False, dry_ru
     from hermes_cli import kanban_db as kb
 
     now = time.time() if now is None else now
+    board = _board(conn)
     revision = str(uuid.uuid4())
     reference = f"dispatch:{machine}:{board}:{revision}"
     common = []
@@ -90,11 +133,12 @@ def record(conn, result, *, board, machine, now=None, update_drain=False, dry_ru
             rows = conn.execute(
                 "SELECT id, assignee, status, current_run_id, claim_lock FROM tasks "
                 "WHERE status IN ('ready','todo','running','review','scheduled','blocked') "
-                "ORDER BY CASE status WHEN 'ready' THEN 0 ELSE 1 END, id LIMIT ?", (TASK_LIMIT,)).fetchall()
+                "ORDER BY CASE status WHEN 'ready' THEN 0 ELSE 1 END, id LIMIT ?", (TASK_LIMIT + 1,)).fetchall()
             tasks = {}
-            for row in rows:
+            for row in rows[:TASK_LIMIT]:
                 tid = row["id"]
                 reasons = _task_reasons(result, tid, reference)
+                _provider_phase(conn, tid, reasons, now)
                 parents = kb.unsatisfied_parents(conn, tid)
                 if parents:
                     reasons.append(_reason("dependency", "unsatisfied_parents", reference))
@@ -108,7 +152,7 @@ def record(conn, result, *, board, machine, now=None, update_drain=False, dry_ru
                      "source": "kanban.dispatch", "source_revision": revision, "machine": machine,
                      "board": board, "evidence_ref": reference, "tasks": tasks,
                      "machine_reasons": common,
-                     "coverage_truncated": len(rows) == TASK_LIMIT}
+                     "coverage_truncated": len(rows) > TASK_LIMIT}
         finally:
             conn.execute("RELEASE capacity_snapshot")
         with kb.write_txn(conn):
@@ -127,7 +171,7 @@ def observe_dispatch(conn, result, *, board, dry_run=False, update_drain=False):
         import socket
         from hermes_cli import kanban_db_sync as sync
         machine = (sync.sync_state(conn) or {}).get("gateway_id") or socket.gethostname()
-        record(conn, result, board=board or "default", machine=machine,
+        record(conn, result, board=_board(conn), machine=machine,
                dry_run=dry_run, update_drain=update_drain)
     except Exception:  # health: allow BLE001 -- optional evidence cannot control admission
         _log.warning("capacity observation unavailable", exc_info=True)
@@ -141,10 +185,10 @@ def _unknown(reason, **fields):
 
 def read(conn, task, *, board=None, now=None):
     """Read a lifecycle-qualified observation without manufacturing freshness."""
-    if board is None:
-        from hermes_cli import kanban_db_sync as sync
-        path = conn.execute("PRAGMA database_list").fetchone()[2]
-        board = sync.board_slug_for_path(path)
+    actual_board = _board(conn)
+    if board is not None and board != actual_board:
+        return _unknown("missing_or_foreign_observation")
+    board = actual_board
     now = time.time() if now is None else now
     if task is None:
         return _unknown("missing_task")
@@ -157,7 +201,9 @@ def read(conn, task, *, board=None, now=None):
         return _unknown("missing_or_foreign_observation")
     stored = value.get("tasks", {}).get(task.id)
     if not stored:
-        return _unknown("task_not_observed")
+        truncated = value.get("coverage_truncated", False)
+        return _unknown("task_coverage_truncated" if truncated else "task_not_observed",
+                        coverage_truncated=truncated)
     source = {k: value[k] for k in ("observed_at_ms", "valid_until_ms", "source", "source_revision",
                                    "machine", "board", "evidence_ref")}
     if stored["lifecycle"] != _lifecycle(conn, task.id):
@@ -181,6 +227,7 @@ def read(conn, task, *, board=None, now=None):
     if all(epoch(v) for v in (at, until, now)) and at <= now and until >= at:
         freshness = "current" if now < min(until, at + 180) else "stale"
     out = {"version": 1, **source, "task_id": task.id, "lifecycle": stored["lifecycle"],
+           "coverage_truncated": value.get("coverage_truncated", False),
            "freshness": freshness, "reasons": stored["reasons"],
            "native_restrictions": stored.get("native_restrictions", []),
            "machine_reasons": value.get("machine_reasons", []),
@@ -194,8 +241,9 @@ def read(conn, task, *, board=None, now=None):
 
 def describe(value):
     """Never turn an incomplete restriction list into an assertion of availability."""
-    codes = ", ".join(r["code"] + " (" + r["native_code"] + ")" for r in value.get("reasons", []))
-    native = ", ".join(r["native_code"] for r in value.get("native_restrictions", []))
+    codes = ", ".join(r["code"] + " (" + r["native_code"] + "; " + r["phase"] + ")" for r in value.get("reasons", []))
+    native = ", ".join(r.get("source_field", "restriction") + " (" + r["native_code"] + ")"
+                       for r in value.get("native_restrictions", []))
     codes = "; ".join(v for v in (codes, native) if v)
     return (f"{value.get('freshness', 'unknown')}: {codes or 'restriction coverage incomplete'}; "
             "admissible capacity unknown")

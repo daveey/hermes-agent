@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hermes:kanban-capacity-evidence:v1",
+  "title": "Advisory task capacity evidence v1",
+  "type": "object",
+  "required": ["version", "freshness", "reasons", "eligible_backlog", "admissible_slots", "unknown_coverage"],
+  "properties": {
+    "version": {"const": 1},
+    "freshness": {"enum": ["current", "stale", "unknown"]},
+    "unknown_reason": {"type": "string", "minLength": 1},
+    "observed_at_ms": {"type": "number", "minimum": 0},
+    "valid_until_ms": {"type": "number", "minimum": 0},
+    "source": {"const": "kanban.dispatch"},
+    "source_revision": {"type": "string", "minLength": 1},
+    "machine": {"type": "string", "minLength": 1},
+    "board": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "evidence_ref": {"type": "string", "minLength": 1},
+    "lifecycle": {"type": "object", "required": ["status", "run_id", "run_count", "assignee", "parents"], "properties": {
+      "status": {"type": "string"}, "run_id": {"type": ["integer", "null"]},
+      "run_count": {"type": "integer", "minimum": 0}, "assignee": {"type": ["string", "null"]},
+      "parents": {"type": "array"}
+    }},
+    "reasons": {"type": "array", "items": {"$ref": "#/$defs/reason"}},
+    "machine_reasons": {"type": "array", "items": {"$ref": "#/$defs/reason"}},
+    "native_restrictions": {"type": "array", "items": {
+      "type": "object", "required": ["source_field", "native_code", "evidence_ref"],
+      "properties": {"source_field": {"type": "string"}, "native_code": {"type": "string"}, "evidence_ref": {"type": "string"}}
+    }},
+    "eligible_backlog": {"type": ["boolean", "null"]},
+    "admissible_slots": {"type": ["integer", "null"], "minimum": 0},
+    "unknown_coverage": {"type": "array", "items": {"type": "string"}},
+    "coverage_truncated": {"type": "boolean"},
+    "execution_observation": {"type": "object"}
+  },
+  "allOf": [{"if": {"properties": {"freshness": {"enum": ["current", "stale"]}}}, "then": {
+    "required": ["observed_at_ms", "valid_until_ms", "source", "source_revision", "machine", "board", "task_id", "evidence_ref", "lifecycle"]
+  }}],
+  "$defs": {"reason": {
+    "type": "object", "required": ["code", "native_code", "phase", "evidence_ref"],
+    "properties": {
+      "code": {"enum": ["capacity.memory_pressure", "capacity.provider_limit", "capacity.placement", "capacity.dependency", "capacity.update_drain"]},
+      "native_code": {"type": "string", "minLength": 1},
+      "phase": {"enum": ["pre_claim", "post_claim", "post_start"]},
+      "evidence_ref": {"type": "string", "minLength": 1}
+    }
+  }},
+  "$comment": "Optional additive evidence only. Unknown/stale is never admissible capacity. An unknown execution adapter may lack a producer-complete identity. Current capacity evidence does not imply current execution or complete admission coverage."
+}

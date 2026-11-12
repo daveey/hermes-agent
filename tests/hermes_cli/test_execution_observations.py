@@ -113,5 +113,42 @@ def test_provider_after_start_stays_after_start():
     assert reason["phase"] == "post_start"
 
 
+@pytest.mark.parametrize("field,value", [
+    ("owner", None), ("owner", {}), ("owner", {"gateway": "g"}),
+    ("owner", {"gateway": "g", "profile": False}),
+    ("evidence_refs", None), ("evidence_refs", []), ("evidence_refs", [""]),
+    ("evidence_refs", "event:31"), ("evidence_refs", [True]),
+])
+def test_missing_owner_or_evidence_is_unknown(field, value):
+    raw = observation()
+    raw[field] = value
+    out = adapt(raw, now=1100, source_class="sidebar")
+    assert out["state"] == "unknown"
+    assert out["last_known_state"] == "queued"
+
+
+@pytest.mark.parametrize("attempt", [-1, 0, True, "", [], {}])
+def test_invalid_attempt_identity_is_unknown(attempt):
+    raw = observation()
+    raw["identity"]["run_id"] = attempt
+    assert adapt(raw, now=1100, source_class="sidebar")["state"] == "unknown"
+
+
+def test_required_source_retains_its_own_shorter_ttl():
+    raw = observation()
+    raw["valid_until"] = 1600
+    raw["required_sources"] = [{"observed_at": 990, "valid_until": 5000,
+                                "source_class": "sidebar"}]
+    out = adapt(raw, now=1200, source_class="imported_owner")
+    assert out["state"] == "unknown" and out["valid_until"] == 1170
+
+
+def test_unknown_required_source_class_is_unknown():
+    raw = observation()
+    raw["required_sources"] = [{"observed_at": 990, "valid_until": 1180,
+                                "source_class": "invented"}]
+    assert adapt(raw, now=1100, source_class="sidebar")["state"] == "unknown"
+
+
 def test_unknown_source_class_cannot_manufacture_validity():
     assert adapt(observation(), now=1100, source_class="invented")["state"] == "unknown"
