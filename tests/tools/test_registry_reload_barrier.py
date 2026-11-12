@@ -6,6 +6,7 @@ session had just been handed by ``tool_search``. These tests hold a real ``Plugi
 reload open inside the plugin's ``register()`` and drive the real dispatch entry points meanwhile.
 """
 
+import asyncio
 import json
 import sys
 import threading
@@ -222,3 +223,83 @@ def test_wait_is_bounded_and_overlap_is_reported():
     assert registry_reload.settle_reload_since(registry_reload.reload_epoch()) is False
     with registry_reload.reload_barrier(False):
         assert not registry_reload.reload_active()
+
+
+# A session's tool list is computed once and kept: one built mid-pass would lack the home's plugin tools
+# for the whole session ("not available in this session"). get_tool_definitions waits the pass out,
+# except on an event-loop thread (the gateway's /reload-mcp refreshes cached agents from async handlers).
+
+def _tool_names():
+    return sorted(t["function"]["name"] for t in model_tools.get_tool_definitions(
+        enabled_toolsets=[TOOLSET], quiet_mode=True, skip_tool_search_assembly=True) or [])
+
+
+def test_tool_definitions_during_force_reload_wait_and_list_the_tool(manager, gate):
+    reload_thread, _ = _reload_held_open(manager, gate)
+    defs_thread, defs_box = _start(_tool_names)
+
+    defs_thread.join(0.5)
+    assert defs_thread.is_alive(), f"tool list computed mid-reload: {defs_box}"
+
+    gate.release.set()
+    reload_thread.join(20)
+    defs_thread.join(20)
+    assert defs_box.get("value") == [TOOL], defs_box
+
+
+def test_new_session_agent_build_during_force_reload_waits(manager, gate):
+    """The real build: AIAgent -> agent_init._load_tools -> discover_plugins, which queues on the pass's
+    ``_discovery_lock`` before the tool snapshot is read."""
+    from run_agent import AIAgent
+
+    def build():
+        agent = AIAgent(api_key="sk-test", base_url="https://openrouter.ai/api/v1", model="x/y", quiet_mode=True,
+                        skip_context_files=True, skip_memory=True, enabled_toolsets=[TOOLSET])
+        return agent._tool_snapshot_generation, sorted(agent.valid_tool_names)  # type: ignore[attr-defined]
+
+    reload_thread, _ = _reload_held_open(manager, gate)
+    build_thread, build_box = _start(build)
+
+    build_thread.join(0.5)
+    assert build_thread.is_alive(), f"agent built mid-reload: {build_box}"
+
+    gate.release.set()
+    reload_thread.join(20)
+    build_thread.join(30)
+    assert "value" in build_box, build_box
+    assert build_box["value"] == build(), "the mid-pass build differs from a build after the pass"
+    assert _tool_names() == [TOOL]
+
+
+def test_tool_definitions_on_an_event_loop_thread_never_wait(manager, gate):
+    reload_thread, _ = _reload_held_open(manager, gate)
+
+    async def on_loop():
+        return _tool_names()
+
+    loop_thread, loop_box = _start(lambda: asyncio.run(on_loop()))
+    loop_thread.join(10)
+    assert not loop_thread.is_alive(), "get_tool_definitions blocked an event-loop thread on a reload"
+    assert loop_box.get("value") == [], loop_box  # the registry as it is, mid-pass
+    gate.release.set()
+    reload_thread.join(20)
+
+
+def test_tool_definitions_in_another_home_do_not_wait(manager, gate, tmp_path):
+    reload_thread, _ = _reload_held_open(manager, gate)
+    other = tmp_path / "other_home"
+    other.mkdir()
+
+    def from_other_home():
+        token = set_hermes_home_override(Path(other))
+        try:
+            return _tool_names()
+        finally:
+            reset_hermes_home_override(token)
+
+    call_thread, call_box = _start(from_other_home)
+    call_thread.join(10)
+    assert not call_thread.is_alive(), "another home's tool list waited on this home's reload"
+    assert "value" in call_box, call_box
+    gate.release.set()
+    reload_thread.join(20)

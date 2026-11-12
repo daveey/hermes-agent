@@ -1983,3 +1983,6 @@ def _(rid, params: dict) -> dict:
 def register(server) -> None:
     """Rebind this module's helpers + handlers onto ``server`` and register the handlers."""
     bind_module(globals(), server, skip=("_",))
+    # [daveey] tools.show reads the tool list, which waits out a plugin force-reload (up to
+    # tools.registry_reload.RELOAD_WAIT_SECONDS): on the pool, never the RPC reader.
+    server._LONG_HANDLERS = server._LONG_HANDLERS | {"tools.show"}

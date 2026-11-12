@@ -22,7 +22,7 @@ from tools.registry import (
     CHECK_FN_CACHE_BYPASS, check_fn_cache_epoch, check_fn_cache_scope, check_fn_verdict_window, discover_builtin_tools,
     registry, tool_error)
 from tools.registry import _MAX_TOOL_ERROR_CHARS as _TOOL_ERROR_MAX_LEN
-from tools.registry_reload import reload_epoch, settle_reload_since, wait_for_reload
+from tools.registry_reload import reload_epoch, settle_reload_since, wait_for_reload, wait_for_reload_off_loop
 from toolsets import resolve_toolset, validate_toolset
 from tools.arg_coercion import coerce_tool_args
 from tools.todo_tool import TODO_LEGACY_ALIASES, TODO_SCHEMA
@@ -274,6 +274,9 @@ def get_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disabled_
     def compute():
         return _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
                                          skip_tool_search_assembly=skip_tool_search_assembly)
+    # [daveey] A list read mid plugin force-reload lacks the home's plugin tools, and a session keeps it:
+    # wait the pass out first (never on an event-loop thread). See tools/registry_reload.py.
+    wait_for_reload_off_loop()
     if not quiet_mode:
         return compute()
     cache_key = _tool_defs_cache_key(enabled_toolsets, disabled_toolsets, skip_tool_search_assembly)
