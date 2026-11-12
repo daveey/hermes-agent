@@ -96,20 +96,32 @@ def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, 
 
 
 def _ledger_links(board: str, gateway: str) -> dict[str, dict[str, Any]]:
-    """This gateway's chats' links to other gateways' cards on ``board``, from the origin-ledger projection."""
+    """This gateway's chats' links to other gateways' cards on ``board``, from the origin-ledger projection.
+
+    Machine sessions are classified once per origin profile (``machine_sessions``, keyed ``str(ref)``), not once
+    per row: each per-row ``is_machine_session`` repeated profile discovery and the state.db reads. [daveey]"""
+    from hermes_cli.kanban_db_notify import machine_sessions
+    from hermes_cli.kanban_placement import is_placeholder_session
     from hermes_cli.kanban_session_activity import _remote_links
     now = int(time.time())
     out: dict[str, dict[str, Any]] = {}
+    eligible: list[tuple[dict[str, Any], tuple]] = []
+    groups: dict[tuple, tuple[Any, list[Any]]] = {}  # exact profile (type, value) -> (profile, refs)
     for card in _remote_links():
         if card.get("board") != board or card.get("origin_gateway") not in (None, gateway) or not card.get("session"):
             continue
-        from hermes_cli.kanban_placement import is_placeholder_session
-        kind = "created" if card.get("via") == "origin" else "shepherd"
         if is_placeholder_session(card["session"]):
             continue
-        from hermes_cli.kanban_db_notify import is_machine_session
-        if is_machine_session(gateway, card["session"], local_gateway=gateway, profile=card.get("origin_profile")):
+        profile = card.get("origin_profile")
+        key = (type(profile), profile)
+        groups.setdefault(key, (profile, []))[1].append(card["session"])
+        eligible.append((card, key))
+    machine = {key: machine_sessions(gateway, refs, local_gateway=gateway, profile=profile)
+               for key, (profile, refs) in groups.items()}
+    for card, key in eligible:
+        if str(card["session"]) in machine[key]:
             continue
+        kind = "created" if card.get("via") == "origin" else "shepherd"
         profile = card.get("origin_profile")
         uid = link_uid(card["id"], gateway, profile, card["session"], kind)
         out[uid] = {"uid": uid, "task_id": card["id"], "chat_gateway": gateway, "chat_profile": profile,
