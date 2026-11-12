@@ -33,7 +33,20 @@ On Linux, the writer starts a transient user-manager service outside the worker
 cgroup and waits for the observer's board-open acknowledgment before committing
 the result. The service uses `Restart=on-failure`, a 500ms restart delay and a
 500ms read-only observation interval. Board connections use a 250ms busy timeout
-without creating or migrating a board. A removed target terminates observation.
+without creating or migrating a board.
+
+### Board generation safety
+
+The observer pins the board file's device/inode under a separate short generation
+lock when it opens (retrying contention for up to two seconds). Every poll checks,
+lock-free, that this inode remains at its path; archive, deletion or replacement
+ends observation. Closure takes only the generation lock, revalidates the inode,
+and retains the lock through finalization. Native removal takes dispatch then
+generation, both non-blocking, before changing the current pointer or moving files.
+An observer never takes the dispatch lock and holds no generation lock while idle.
+A dispatcher stalled holding its tick lock therefore does not delay independent
+closure. If removal wins first, revalidation refuses closure on the stale handle.
+The observer never closes a run in an archived board or on a recreated board.
 
 The real-child regression and separate-cgroup natural-teardown test require
 closure within **five seconds after both processes exit**, with the owner
@@ -62,3 +75,10 @@ Forced observer restart, Mac/Windows behavior, a production owner-lock fault,
 and production deployment are not established by these fixtures. Merely reading
 `Restart=on-failure` is not a successful restart test. The live hub's loaded
 `code_sha` must be verified separately after landing.
+
+## Owner-only restart before bootstrap
+
+An owner-only witnessed restart (recorded before the worker bootstrap binds its
+own process) can be closed by the dispatcher once the outer worker and every bound
+process are dead, but it does **not** arm an observer. Its guarantee is
+dispatcher-only: while the dispatcher is stalled there is no independent bound.

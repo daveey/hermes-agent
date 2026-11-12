@@ -186,7 +186,13 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
     with _dispatch_tick_lock(path, create_parent=False) as held:
         if not held:
             raise ValueError("board dispatcher is busy; retry removal")
-        return _remove_board_locked(normed, archive=archive)
+        # Lock order is dispatch -> generation. Observers only take generation,
+        # so a stalled dispatcher never prevents independent result closure.
+        key = path.with_name(path.name + '.generation')
+        with _dispatch_tick_lock(key, create_parent=False) as generation_held:
+            if not generation_held:
+                raise ValueError("board generation is busy; retry removal")
+            return _remove_board_locked(normed, archive=archive)
 
 
 def _remove_board_locked(slug: str, *, archive: bool = True) -> dict:

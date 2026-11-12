@@ -9,7 +9,7 @@ import sqlite3
 import tempfile
 
 
-def connect_with_identity(path, *, existing_only=False, **kwargs):
+def connect_with_identity(path, *, existing_only=False, generation_only=False, **kwargs):
     """Capture the opened inode while native archive/delete cannot relocate it.
 
     Ordinary clients may still connect during a tick. Such handles cannot later
@@ -28,7 +28,11 @@ def connect_with_identity(path, *, existing_only=False, **kwargs):
     timeout = kwargs.get("timeout", 5.0)
 
     def open_once(remaining):
-        with lifecycle_access(canonical, remaining) as lock, _dispatch_tick_lock(canonical) as held:
+        key = canonical.with_name(canonical.name + '.generation') if generation_only else canonical
+        with lifecycle_access(canonical, remaining) as lock, _dispatch_tick_lock(
+                key, create_parent=not generation_only) as held:
+            if generation_only and not held:
+                raise sqlite3.OperationalError('database is locked: board generation busy')
             recover(str(canonical))
             # Observer opens must never resurrect an archived/deleted board.
             database = canonical.as_uri() + '?mode=rw' if existing_only else str(canonical)
