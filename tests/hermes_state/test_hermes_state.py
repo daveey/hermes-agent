@@ -2027,10 +2027,7 @@ class TestAsyncDelegationsSchemaAgreement:
         from hermes_state_common import SCHEMA_SQL
 
         legacy_sql = SCHEMA_SQL.replace(
-            "    origin_session_id TEXT NOT NULL DEFAULT ''\n", ""
-        ).replace(
-            "    delivery_claimed_at REAL,\n",
-            "    delivery_claimed_at REAL\n",
+            "    origin_session_id TEXT NOT NULL DEFAULT '',\n", ""
         )
         conn = sqlite3.connect(db_path)
         try:
