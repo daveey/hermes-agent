@@ -525,10 +525,14 @@ def _unimported_pinned(conn: sqlite3.Connection, replica: sqlite3.Connection, ow
 
 def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *, mode: str, limit: int,
               profile_exists: Optional[Callable[[str], bool]], full_detail: str,
+              held: Optional[dict[str, tuple]] = None,
               ) -> tuple[list[str], dict[str, tuple[str, Optional[str]]]]:
     """One pass over the candidates: ids to copy (at most ``limit``, in candidate order) and, for each card pinned
     to this machine that the pass leaves on the Board, why. ``budget_exhausted`` only for a card this pass would
-    otherwise have copied, so a refusal is never hidden behind a full queue."""
+    otherwise have copied, so a refusal is never hidden behind a full queue. A card the Board shows held by a
+    respawn guard never takes the budget (``kanban_pickup_held``): with ``held`` it is copied outside ``limit``
+    (its id and hold signature added to ``held``), else it is left as ``hold``."""
+    from hermes_cli import kanban_pickup_held as kph
     from hermes_cli.kanban_db_dispatch import review_dispatch_enabled
     mine = _unimported_pinned(conn, replica, own)
     reg = registry()
@@ -544,14 +548,23 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
     skips: dict[str, tuple[str, Optional[str]]] = {
         tid: ("parents_incomplete", "a parent is not done") for tid in mine - {c["id"] for c in listed}}
     picked: list[str] = []
+    free = 0
     for card in listed:
-        full = len(picked) >= limit
+        full = len(picked) - free >= limit
         if full and card["id"] not in mine:
             continue
         reason = _skip_reason(conn, card, own, reg["machines"], mode=mode, review_enabled=review_enabled,
                               profile_exists=profile_exists)
         if reason is None:
             reason = _quota_held(replica, card)
+        hold = kph.board_hold(replica, card) if reason is None else None
+        if hold is not None:
+            if held is not None and free < kph.FREE_PER_TICK and not kph.recently_copied(card["id"], hold[1]):
+                held[card["id"]] = hold[1]
+                picked.append(card["id"])
+                free += 1
+                continue
+            reason = ("hold", f"respawn_guarded: {hold[0]}")
         if reason is None and full:
             reason = ("budget_exhausted", full_detail)
         if reason is None:
@@ -624,13 +637,15 @@ def pickup(conn: sqlite3.Connection, *, budget: Optional[int],
     if replica is None:
         return []
     from hermes_cli import kanban_hub_admission_pickup as admission
+    from hermes_cli import kanban_pickup_held as kph
     own = _own(conn)
+    held: dict[str, tuple] = {}
     try:
         picked, skips = _evaluate(conn, replica, own, mode=mode, limit=limit, profile_exists=profile_exists,
-                                  full_detail="pickup batch full this tick")
+                                  full_detail="pickup batch full this tick", held=held)
         # [daveey] The hub judges a hub-bound foreign card before copying it (t_01a1cf65a941bf43).
-        picked, plans, held = admission.screen(conn, replica, own, picked)
-        skips.update(held)
+        picked, plans, judged = admission.screen(conn, replica, own, picked)
+        skips.update(judged)
         imported = import_cards(conn, replica, picked)
     finally:
         replica.close()
@@ -638,9 +653,12 @@ def pickup(conn: sqlite3.Connection, *, budget: Optional[int],
     skips.update({tid: ("other", "import failed") for tid in picked if tid not in imported})
     skips.update(denied)
     imported = [tid for tid in imported if tid not in denied]
+    kph.remember({tid: sig for tid, sig in held.items() if tid in imported})
     _record_skips(conn, {tid: why for tid, why in skips.items() if tid not in imported})
     if imported:
-        _log.info("kanban worker node: picked up %d card(s) from other gateways: %s", len(imported), imported)
+        guarded = [tid for tid in imported if tid in held]
+        _log.info("kanban worker node: picked up %d card(s) from other gateways: %s%s", len(imported), imported,
+                  f" ({len(guarded)} held on the Board, outside the budget: {guarded})" if guarded else "")
     return imported
 
 
