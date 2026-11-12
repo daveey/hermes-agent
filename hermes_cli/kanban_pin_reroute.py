@@ -8,9 +8,10 @@ an explicit pin had no fallback, and workers cannot re-pin a card. David, 11-11 
 Rule (:func:`pinned_route`); every condition must hold, anything else keeps the pin as before:
 
 1. one of the card's own runs hit a wall on the pin's provider (its ``quota_episode`` receipts, an
-   earlier ``model_reroute``, or the live episode), and that wall is still up; or the card has no earlier
-   run and the live pool is quota-walled for the pinned model right now (:func:`fresh_live_wall`): its
-   first run would only exit 75 into that wall to learn it (kanban-dd62aef001);
+   earlier ``model_reroute``, or the live episode), and that wall is still up; or the pin's provider is
+   walled right now in ``provider_walls.json`` or the live pool is quota-walled for the pinned model
+   (:func:`known_wall`), fresh card or not: its next run would only exit 75 into that wall to learn it
+   (kanban-dd62aef001; t_c21c170e, 11-12: a card woken from ``scheduled`` paid one wall run);
 2. it resets ``kanban.pin_quota_reroute_min_hours`` (default 6) or more from now;
 3. the pin is not mandatory: neither ``tasks.model_pin_mandatory`` nor a ``require_model: true`` body line;
 4. the lane is ready, not review;
@@ -123,13 +124,25 @@ def fresh_live_wall(conn: Any, task: Any, now: Optional[float] = None,
     return {pinned[1]: float(until)}
 
 
+def known_wall(pinned: tuple[str, str], now: Optional[float] = None) -> Optional[dict[str, float]]:
+    """``{provider: reset}`` when the pin's provider is walled right now in ``provider_walls.json`` or the live
+    pool is quota-walled for the pinned model (the later reset of the two), whatever the card's history."""
+    from hermes_cli.kanban_provider_walls import active_walls, live_quota_wall
+    now = time.time() if now is None else now
+    model, provider = pinned
+    resets = [until for until in (active_walls(now=now).get(provider), live_quota_wall(provider, model))
+              if isinstance(until, (int, float)) and until > now]
+    return {provider: float(max(resets))} if resets else None
+
+
 def pinned_route(conn: Any, task: Any, *, lane: str, now: float, cfg: Optional[dict],
                  current: Optional[dict[str, float]] = None) -> Optional[tuple[str, str]]:
     """Same-class ``(model, provider)`` this pinned card's run may use instead of its walled pin, or None.
 
-    ``current`` is the live quota episode's walls. Other cards' walls (the provider wall files and the
-    live pool) only rule peers out, never move a pin. Non-allocating: reads config and the credential
-    pool and writes nothing, so preview and admission decide alike."""
+    ``current`` is the live quota episode's walls. A wall the provider file or the live pool knows on the
+    pin's own provider counts as the card's (rule 1); on any other provider it only rules peers out.
+    Non-allocating: reads config and the credential pool and writes nothing, so preview and admission
+    decide alike."""
     from agent.model_routing import ModelRoutingError, eligible_routes, validate_policy
     from agent.model_routing_agent import class_requirements
     from hermes_cli.config import is_provider_enabled
@@ -140,6 +153,8 @@ def pinned_route(conn: Any, task: Any, *, lane: str, now: float, cfg: Optional[d
         return None
     model, provider = pinned
     own = own_walls(conn, task.id, now, current)
+    if provider not in own:
+        own.update({name: (until, None) for name, until in (known_wall(pinned, now) or {}).items()})
     if provider not in own or own[provider][0] - now < min_wall_seconds(cfg):
         return None
     config = _assignee_config(getattr(task, "assignee", None)) or {}
@@ -181,9 +196,10 @@ def record(conn: Any, task: Any, origin: tuple[str, str], target: tuple[str, str
     for wall in (_outstanding(conn, task.id, state, now) if state else []):
         if origin[1] in _providers(wall):
             current[origin[1]] = max(current.get(origin[1], 0), wall["until"])
-    if not current:
-        current = fresh_live_wall(conn, task, now, pinned=origin) or {}
-    resets_at, episode_id = own_walls(conn, task.id, now, current).get(origin[1], (None, None))
+    own = own_walls(conn, task.id, now, current)
+    if origin[1] not in own:  # moved by a wall the provider file / live pool knows (pinned_route rule 1)
+        own.update({name: (until, None) for name, until in (known_wall(origin, now) or {}).items()})
+    resets_at, episode_id = own.get(origin[1], (None, None))
     payload = {"from_model": origin[0], "from_provider": origin[1], "to_model": target[0],
                "to_provider": target[1], "walled_provider": origin[1], "resets_at": resets_at,
                "episode_id": episode_id, "run_id": getattr(task, "current_run_id", None)}

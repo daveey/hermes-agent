@@ -157,6 +157,31 @@ def _independent(pin, cfg, assignee, *, registered=False):
     return _distinct_deep(pin, assignee, registered=registered)
 
 
+def independent_routes(pin, cfg, assignee):
+    """Every ``(model, provider)`` :func:`_independent` may pick for an implementer on *pin*, in its order:
+    the concrete strong tier, then each eligible deep route. Read-only; an unreadable policy yields none."""
+    strong = str(cfg.get("strong_model") or "").strip()
+    if strong and strong != pin and not is_class_selector(strong):
+        from hermes_cli.kanban_model_tier import infer_provider
+        yield strong, str(cfg.get("strong_provider") or "").strip() or infer_provider(strong)
+    from agent.model_routing_agent import class_requirements
+    from hermes_cli.config import is_provider_enabled
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    config = _assignee_config(assignee) or {}
+    policy = config.get("model_routing") or {}
+    try:
+        validate_policy(policy)
+    except ModelRoutingError:  # no provable alternate; the caller keeps its route
+        return
+    if not policy.get("enabled", False):
+        return
+    providers = config.get("providers") or {}
+    for route in eligible_routes(policy, "deep", class_requirements(config), eligible=lambda r: is_provider_enabled(
+            providers.get(r["provider"], {}))):
+        if route["model"] != pin:
+            yield route["model"], route["provider"]
+
+
 def resolve_review_model(conn, task, cfg):
     """Return a review override/distinct route, or None for legacy unpinned reviews."""
     override = _override(conn, task)

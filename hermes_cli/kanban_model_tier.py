@@ -308,12 +308,11 @@ def resolve_dispatch_tier(conn, task, *, lane, cfg=None):
     if base[2] == 'pinned':
         from hermes_cli.kanban_pin_reroute import REASON, pinned_route
         if not route and not active(conn, task.id):
-            # The episode is closed (a rerouted run ended) but the pin's wall may still be up.
+            # No live episode (none yet, or a rerouted run ended) but the pin's wall may still be up: the card's
+            # own, or one the provider file / live pool knows (kanban_pin_reroute rule 1).
             import time
-            from hermes_cli.kanban_pin_reroute import fresh_live_wall
             try:
-                now = time.time()  # a fresh card's live-pool wall stands in for its own run's (kanban-dd62aef001)
-                route = pinned_route(conn, task, lane=lane, now=now, current=fresh_live_wall(conn, task, now),
+                route = pinned_route(conn, task, lane=lane, now=time.time(),
                                      cfg=load_tier_config() if cfg is None else cfg)
             except sqlite3.Error:
                 raise
@@ -336,7 +335,41 @@ def resolve_dispatch_tier(conn, task, *, lane, cfg=None):
             probe, load_tier_config() if cfg is None else cfg)
         if moved:
             return moved[0], moved[1], f'{base[2]}+wall:{moved[2]}'
+    if base[2] == 'review_unpinned':
+        moved = _review_off_wall(conn, task, base, load_tier_config() if cfg is None else cfg)
+        if moved:
+            return moved[0], moved[1], f'{base[2]}+wall:{moved[2]}'
     return base
+
+
+def _review_off_wall(conn, task, base, cfg):
+    """``(model, provider, walled_provider)``: another independent reviewer when the ``review_unpinned`` route's
+    provider is walled right now (provider file or live pool), else None. [daveey]
+
+    Candidates are the ones the review resolver itself would pick (strong tier, then deep routes distinct
+    from the implementer), skipping any on a walled provider. None keeps the route: never a second wall.
+    Hub run 174730 (2026-11-12): review_unpinned chose openai-codex while provider_walls.json held it for
+    days, and the reviewer exited 75 into the wall."""
+    import time
+    from hermes_cli import kanban_provider_walls as pw
+    from hermes_cli.kanban_review_model import _implementer_model, independent_routes
+    model, provider = _str(base[0]), pw._norm(base[1])
+    if not model or not provider or provider == 'auto' or pw.requires_model(task):
+        return None
+    now = time.time()
+    walled = pw.active_walls(now=now)
+    if not (walled.get(provider) or pw.live_quota_wall(provider, model)):
+        return None
+    implementer = _implementer_model(conn, task)
+    if not implementer:
+        return None
+    for alt_model, alt_provider in independent_routes(implementer, cfg, getattr(task, 'assignee', None)):
+        alt_provider = pw._norm(alt_provider)
+        if (not alt_provider or alt_provider == 'auto' or alt_provider == provider or alt_provider in walled
+                or pw.live_quota_wall(alt_provider, alt_model)):
+            continue
+        return alt_model, alt_provider, provider
+    return None
 
 
 def _class_alternate_off_wall(conn, task, base):
