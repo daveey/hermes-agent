@@ -254,6 +254,43 @@ async def test_a_wake_queued_before_the_upgrade_still_folds(tmp_path, monkeypatc
         authority.db.close()
 
 
+@pytest.mark.asyncio
+async def test_a_wake_past_the_card_cap_queues_alone_instead_of_being_refused(tmp_path, monkeypatch, board):
+    """A fold past ``_MAX_CARDS`` distinct cards was refused (``invalid_params``) and raised
+    ``WakeNotAccepted``, so the notifier rewound and every later wake to the chat was refused until
+    the drain claimed the tail (t_01a1cf7adf592a71). The unfolded wake admits."""
+    authority, adapter, source, queued, _human = await _local_chat(tmp_path, monkeypatch)
+    try:
+        cap = kanban_wake_fold._MAX_CARDS
+        for n in range(cap):  # completed wakes never read the board, so the ids need no cards
+            await _wake(adapter, source, f't_full{n:04d}', 'completed')
+        [full] = _automation(queued())
+        assert len(full['payload']['local_automation_v1']['kanban_cards']) == cap
+        await _wake(adapter, source, 't_overflow', 'completed')
+        await _wake(adapter, source, 't_after', 'completed')  # later wakes fold into the new tail
+        rows = _automation(queued())
+        assert rows[0]['admission_id'] == full['admission_id']
+        assert rows[0]['payload'] == full['payload']  # the full row is untouched
+        assert len(rows) == 2
+        assert [card['task_id'] for card in rows[1]['payload']['local_automation_v1']['kanban_cards']] == [
+            't_overflow', 't_after']
+    finally:
+        authority.db.close()
+
+
+def test_the_relabel_reads_the_notifiers_db_under_the_env_pin(tmp_path, monkeypatch, board):
+    """A card on a non-default board relabels from the DB the notifier read it from: on a box that pins
+    ``HERMES_KANBAN_DB`` that is the pinned file, never a per-slug DB the read would create."""
+    tid = board('waited on')
+    _claim(tid)
+    card = {'task_id': tid, 'board': 'side-board', 'kinds': ['chat_wait_unclaimed'],
+            'text': f'[kanban] Task {tid} is ready with no worker claiming it.\nBoard: side-board'}
+    side_db = kb.board_own_db_path('side-board')
+    refreshed = kanban_wake_fold.refresh_card(card)
+    assert refreshed['text'].startswith(f'[kanban] Task {tid} claimed by a worker (running).')
+    assert not side_db.exists() and not side_db.parent.exists()
+
+
 def test_card_metadata_rejects_malformed_cards():
     from hermes_state_runtime import RuntimeStoreError
     assert kanban_wake_fold.card_metadata({}) == {}

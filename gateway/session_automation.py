@@ -905,7 +905,9 @@ async def _admit_route_wake_event(runner, authority, adapter, event, identity, e
     """A Kanban wake carrying its cards folds into a Kanban wake still waiting at the FIFO tail
     (``gateway.kanban_wake_fold``), so a busy chat runs ONE turn for every card event that piled up.
     The waiting row is cancelled in this admission's own transaction (``_fold_queued``); when it was
-    claimed first, or a prompt landed behind it meanwhile, this wake queues alone."""
+    claimed first, or a prompt landed behind it meanwhile, this wake queues alone. So does a fold the
+    store refuses (``invalid_params``: e.g. past ``kanban_wake_fold._MAX_CARDS`` cards) while the
+    wake alone is valid: refusing it would refuse every later wake to the chat."""
     from gateway import kanban_wake_fold
     if producer != kanban_wake_fold.PRODUCER or not event.metadata.get('kanban_cards'):
         return await authority.admit_automation(adapter, event, identity)
@@ -920,7 +922,7 @@ async def _admit_route_wake_event(runner, authority, adapter, event, identity, e
                 return await authority.admit_automation(adapter, event, identity,
                                                         replaces=waiting['admission_id'], fold=())
             except RuntimeStoreError as exc:
-                if exc.reason != 'stale_generation':
+                if exc.reason not in ('stale_generation', 'invalid_params'):
                     raise
                 event.text, event.metadata = unfolded
         return await authority.admit_automation(adapter, event, identity)

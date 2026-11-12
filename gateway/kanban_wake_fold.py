@@ -124,10 +124,12 @@ def _merge(old_cards, new_cards):
 
 
 def _live_task(card):
-    """``(status, latest handoff summary)`` of the card on its board, or ``(None, '')``."""
+    """``(status, latest handoff summary)`` of the card on its board, or ``(None, '')``. The board slug
+    came from the notifier's board enumeration, so it resolves like the notifier read it
+    (``pin_first_board_resolution``): a ``HERMES_KANBAN_DB`` pin outranks it."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
-    with contextlib.closing(kbc.connect(board=card.get('board') or None)) as conn:
+    with kb.pin_first_board_resolution(), contextlib.closing(kbc.connect(board=card.get('board') or None)) as conn:
         task = kb.get_task(conn, card['task_id'])
         if task is None:
             return None, ''
