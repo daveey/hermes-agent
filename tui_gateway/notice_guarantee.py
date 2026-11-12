@@ -27,7 +27,8 @@ unloaded sweeper's loop therefore looks, in every profile store, for chats whose
   ``BUSY_RETRY_S`` doubling up to ``BUSY_RETRY_MAX_S``, at most ``MAX_BUSY_ATTEMPTS`` busy wakes per row (counted in
   ``busy_attempts``, apart from the failed-wake budget); the last one stamps ``busy``. Before this ``busy`` was
   final: a notice that landed while a hub core update held admission for 30 min stayed ``unresolved{notice_tail}``
-  after the hold lifted (two hub chats, 2026-11-12). [daveey]
+  after the hold lifted (two hub chats, 2026-11-12). A ``busy`` stamp without ``busy_attempts`` (that older core's)
+  within ``LOOKBACK_S`` is offered again as busy wake 2, so those rows resolve once this ships. [daveey]
 
 Ownership follows the unloaded sweeper's: a chat another live backend holds is that backend's (its own pass
 handles it); a chat with a live turn is skipped. The close-out prompt row is itself a notice, stamped as claimed,
@@ -62,7 +63,7 @@ WAKES_PER_HOUR = 2
 # no sooner than the failure's quota/route reset (or the automation replay's floor) plus this slack.
 MAX_ATTEMPTS = 3
 DEFER_SLACK_S = 600.0
-# A busy wake is offered again after BUSY_RETRY_S, doubling to BUSY_RETRY_MAX_S: ~4.6 h of busy wakes per row.
+# A busy wake is offered again after BUSY_RETRY_S, doubling to BUSY_RETRY_MAX_S: 8 wakes over ~4.25 h per row.
 BUSY_RETRY_S = 300.0
 BUSY_RETRY_MAX_S = 3600.0
 MAX_BUSY_ATTEMPTS = 8
@@ -118,7 +119,7 @@ def candidates(db: Any, now: float) -> list[dict]:
             continue
         if row["timestamp"] > now - GRACE_S:
             continue
-        if "closeout" not in meta or deferred_due:
+        if "closeout" not in meta or deferred_due or _legacy_busy(meta):
             out.append({"sid": str(row["sid"]), "msg_id": int(row["msg_id"]), "content": str(row["content"] or ""),
                         "meta": meta, "raw_meta": row["display_metadata"]})
     return out
@@ -133,6 +134,13 @@ def _deferred_due(meta: dict, now: float) -> bool:
     return isinstance(retry_at, (int, float)) and not isinstance(retry_at, bool) and retry_at <= now
 
 
+def _legacy_busy(meta: dict) -> bool:
+    """A row stamped final ``busy`` by a core from before busy wakes were deferred (no ``busy_attempts``): that core
+    gave up after one busy wake, so the row is offered again as its first deferred busy wake (within LOOKBACK_S)."""
+    closeout = meta.get("closeout")
+    return isinstance(closeout, dict) and closeout.get("state") == "busy" and "busy_attempts" not in closeout
+
+
 def _attempts(meta: Any, field: str = "attempts") -> int:
     closeout = meta.get("closeout") if isinstance(meta, dict) else None
     n = closeout.get(field) if isinstance(closeout, dict) else None
@@ -144,8 +152,12 @@ def started_last_hour(db: Any, sid: str, now: float) -> int:
     return int(db._read_one(_LINEAGE_CTE_SQL + _STARTED_SQL, (sid, sid, now - 3600.0))[0])
 
 
+def _busy_attempts(meta: Any) -> int:
+    return max(_attempts(meta, "busy_attempts"), 1 if isinstance(meta, dict) and _legacy_busy(meta) else 0)
+
+
 def _claim(db: Any, cand: dict, now: float) -> bool:
-    busy = _attempts(cand["meta"], "busy_attempts")
+    busy = _busy_attempts(cand["meta"])
     meta = {**cand["meta"], "closeout": {"state": "claimed", "at": now, "pid": os.getpid(),
                                          "attempts": _attempts(cand["meta"]) + 1,
                                          **({"busy_attempts": busy} if busy else {})}}
@@ -369,7 +381,7 @@ def _handle(db, cand: dict, now: float, *, holders, session_db, wake, spawn, see
         return "skipped:claimed"
     try:
         attempts = _attempts(cand["meta"]) + 1
-        busy = _attempts(cand["meta"], "busy_attempts")
+        busy = _busy_attempts(cand["meta"])
         spawn(lambda: _closeout_job(session_db, wake, sid, cand["msg_id"], attempts=attempts, busy_attempts=busy))
     except Exception:
         _wake_slots.release()

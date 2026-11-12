@@ -220,6 +220,43 @@ def test_busy_wakes_do_not_spend_the_failed_wake_budget(db, monkeypatch):
     assert (state, attempts, _busy_attempts(db, row)) == ("deferred", 4, 3)  # 1 of MAX_ATTEMPTS errors used
 
 
+def _stamp_legacy_busy(db, row):
+    # What the core before busy deferral wrote: busy after one wake, final, no busy_attempts.
+    db._write_rowcount("UPDATE messages SET display_metadata = json_set(display_metadata, '$.closeout', "
+                       "json('{\"state\": \"busy\", \"at\": 1, \"pid\": 1, \"attempts\": 1}')) WHERE id = ?",
+                       (row,))
+
+
+def test_a_row_stamped_busy_by_the_old_core_is_offered_again(db):
+    # The two hub chats of 2026-11-12 were stamped final busy before the fix landed; they resolve after it.
+    row = _notice(db, "✔ Kanban t_aaa done — deploy card")
+    _stamp_legacy_busy(db, row)
+
+    _out, calls = _run(db, verdict="started")
+
+    assert calls == [(CHAT, row)] and _closeout(db, row) == "started"
+    assert _run(db, now=time.time() + 99999) == ([], [])
+
+
+def test_a_legacy_busy_row_counts_its_old_busy_wake(db):
+    row = _notice(db, "✔ Kanban t_aaa done — deploy card")
+    _stamp_legacy_busy(db, row)
+
+    _run(db, verdict="busy")
+
+    state, retry_at, _attempts = _closeout_meta(db, row)
+    assert (state, _busy_attempts(db, row)) == ("deferred", 2)
+    assert retry_at >= time.time() + 2 * ng.BUSY_RETRY_S - 60
+
+
+def test_a_legacy_busy_row_past_the_lookback_is_left_alone(db):
+    row = _notice(db, "✔ Kanban t_aaa done — deploy card")
+    _stamp_legacy_busy(db, row)
+
+    assert _run(db, now=time.time() + ng.LOOKBACK_S + 3600) == ([], [])
+    assert _closeout(db, row) == "busy"
+
+
 def test_retry_at_follows_the_build_failures_quota_reset(monkeypatch):
     from tui_gateway import automation_replay, server
     now = 1_000_000.0
