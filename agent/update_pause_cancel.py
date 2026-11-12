@@ -106,8 +106,9 @@ _YIELDABLE_TRIGGERS = frozenset({"post_tool", "pre_api"})
 def compression_can_yield(trigger: Any, messages: Any, *, api_call_count: int) -> bool:
     """A compression may yield to the update pause only where the pause can land: a post-tool or pre-API
     compression over a transcript that ends on a tool result (``_step_boundary_pause``'s own precondition; a
-    scripted prelude tool results do not imply a model call ran)."""
-    if api_call_count <= 0:
+    scripted prelude's tool results do not imply a model call ran). Pre-API runs after
+    begin_iteration reserves the upcoming call, which is refunded before the pause boundary."""
+    if api_call_count - (trigger == "pre_api") <= 0:
         return False
     if trigger not in _YIELDABLE_TRIGGERS or not isinstance(messages, list) or not messages:
         return False

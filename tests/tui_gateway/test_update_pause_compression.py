@@ -117,14 +117,14 @@ class _StreamingSummary:
         return [{"role": "user", "content": "[summary]"}], "compressed prompt"
 
 
-def _run_turn(agent, session, responses):
+def _run_turn(agent, session, responses, **kwargs):
     """The gateway's per-turn wiring (prompt_turn._invoke_agent): hook + watcher around run_conversation."""
     agent.client.chat.completions.create.side_effect = responses
     hook = up.boundary_pause_hook(session, "session-key")
     agent.step_boundary_pause = hook
     stop = up.start_mid_tool_cancel(session, "session-key", agent)
     try:
-        return agent.run_conversation("run the quick job")
+        return agent.run_conversation("run the quick job", **kwargs)
     finally:
         stop()
         agent.step_boundary_pause = None
@@ -294,7 +294,7 @@ def test_an_overflow_recovery_compression_never_yields(home, tmp_path, monkeypat
 @pytest.mark.parametrize("trigger", ["post_tool", "pre_api"])
 def test_scripted_tool_tail_before_any_api_call_cannot_yield(tmp_path, monkeypatch, trigger):
     agent = _make_agent(tmp_path)
-    agent._api_call_count = 0
+    agent._api_call_count = int(trigger == "pre_api")  # begin_iteration reserves the upcoming call
     observed = []
 
     def summary(_agent, messages, system_message, **kwargs):
@@ -307,6 +307,37 @@ def test_scripted_tool_tail_before_any_api_call_cannot_yield(tmp_path, monkeypat
         "system", trigger=trigger,
     )
     assert observed == [{}]
+
+
+def test_first_preflight_after_scripted_prelude_does_not_yield(home, tmp_path, monkeypatch):
+    record_turn_start(home, "session-key", "run the quick job")
+    agent = _make_agent(tmp_path)
+    session = {"agent": agent, "session_key": "session-key", "profile_home": str(home),
+               "history_lock": threading.RLock()}
+    streaming = _StreamingSummary(cap_s=1.5)
+    seen = []
+
+    def prelude():
+        yield "Opening", "quick_job", {}
+
+    def summary(worker_agent, messages, system_message, **kwargs):
+        seen.append((kwargs["trigger"], agent._api_call_count, messages[-1]["role"],
+                     update_pause_cancel.in_flight(agent)))
+        return streaming(worker_agent, messages, system_message, **kwargs)
+
+    monkeypatch.setattr(cc, "compress_context", summary)
+    monkeypatch.setattr(agent.context_compressor, "should_compress",
+                        lambda *a, **k: agent._api_call_count > 0 and not streaming.started.is_set())
+    monkeypatch.setattr("model_tools.handle_function_call", lambda *a, **k: "opening result")
+    _pause_once_summary_streams(home, streaming)
+    result = _run_turn(agent, session, [_response()], prelude=prelude())
+
+    assert seen == [("pre_api", 1, "tool", {})]
+    assert streaming.outcome == "committed"
+    assert result["final_response"] == "done" and not result.get("failed")
+    assert not result.get("paused_for_update")
+    assert agent.client.chat.completions.create.call_count == 1
+    assert not agent._interrupt_requested
 
 
 def _release_pause_at_boundary(home, streaming, monkeypatch):
@@ -351,9 +382,14 @@ def test_forced_overflow_preflight_yields_without_spending_attempt(home, tmp_pat
 
     def capture(*args, **kwargs):
         before = args[1].compression_attempts
+        reserved_calls = args[1].api_call_count
         result = original(*args, **kwargs)
         if streaming.started.is_set():
             attempts.append((before, result.compression_attempts))
+            if result.action == "continue" and streaming.outcome == "cancelled":
+                assert result.api_call_count == reserved_calls - 1
+                assert agent._api_call_count == result.api_call_count
+                assert result._last_preflight_pressure is None  # a declined pause must permit another pass
         return result
 
     monkeypatch.setattr("agent.turn_preflight_gate.run_preflight_compression", capture)
@@ -405,7 +441,7 @@ def test_only_a_tool_result_boundary_compression_can_yield():
     tool_tail = [{"role": "user", "content": "go"}, {"role": "tool", "tool_call_id": "c", "content": "ok"}]
     user_tail = [{"role": "user", "content": "go"}]
     assert update_pause_cancel.compression_can_yield("post_tool", tool_tail, api_call_count=1)
-    assert update_pause_cancel.compression_can_yield("pre_api", tool_tail, api_call_count=1)
-    assert not update_pause_cancel.compression_can_yield("pre_api", user_tail, api_call_count=1)
+    assert update_pause_cancel.compression_can_yield("pre_api", tool_tail, api_call_count=2)
+    assert not update_pause_cancel.compression_can_yield("pre_api", user_tail, api_call_count=2)
     for trigger in ("overflow", "turn_start_threshold", "engine_preflight", "idle", "gateway_hygiene", None):
         assert not update_pause_cancel.compression_can_yield(trigger, tool_tail, api_call_count=1)
