@@ -22,7 +22,6 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import re
 import sqlite3
 import time
 from pathlib import Path
@@ -48,14 +47,6 @@ _NOTICE_KIND = "kanban_notice"
 # ``messages.display_kind`` of a row a person wrote: a plain message, or one steered into a running turn.
 _TYPED_KINDS = frozenset({None, "steer"})
 _PROGRESS_OPENERS = ("let me ", "i'll ", "i will ", "now i", "next, i", "next i ", "working on")
-
-# A reply that names a Kanban card and, in the same message, says work remains. Judge and heuristic both read
-# "the remaining items are owned by a card" as a closing report, which is only safe while that card is counted as
-# live work. This is consulted only when no card is counted, so the claim is unverified (or the read failed): never done.
-_CARD_REF = re.compile(r"\bt_[0-9a-f]{8,}\b")
-_UNFINISHED_CUE = re.compile(
-    r"\b(remaining|remains|not yet|not (?:yet )?(?:running|started|built|verified|complete[d]?)|unverified|pending"
-    r"|still (?:open|unfinished|pending|running|queued|ready)|awaiting)\b", re.IGNORECASE)
 
 ProviderFn = Callable[[str], Optional[dict]]
 # ``fn(sid, text, *, source=None)``; a judge without the ``source`` keyword is called as ``fn(sid, text)``.
@@ -314,8 +305,8 @@ def _gateway_running(home: Path) -> bool:
     return get_running_pid(home / "gateway.pid", cleanup_stale=False) is not None
 
 
-def _card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
-    """(decision items, waits) from the cards these chats created or shepherd: a card parked on a
+def _card_items(ids: list[str]) -> tuple[list[dict], list[dict], bool]:
+    """(decision items, waits, read failed) from the cards these chats created or shepherd: a card parked on a
     validated ``human_request`` is a decision, every other open card is a wait."""
     from hermes_cli.kanban_human_request import needs_human
     from hermes_cli.kanban_session_activity import LISTED_STATUSES, session_tasks
@@ -341,7 +332,7 @@ def _card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
         if isinstance(eta, (int, float)) and not isinstance(eta, bool):
             item["eta"] = float(eta)
         waits.append(item)
-    return decisions, waits
+    return decisions, waits, False
 
 
 def _cron_items(ids: list[str]) -> list[dict]:
@@ -405,14 +396,12 @@ def _provider_items(sid: str) -> tuple[list[dict], list[dict]]:
     return decisions, waits
 
 
-def _guarded(label: str, sid: str, fn: Callable[[], Any], empty: Any, on_fail: Optional[Callable[[], None]] = None) -> Any:
-    """One live-work source; a failed read is logged and counts as nothing from that source."""
+def _guarded(label: str, sid: str, fn: Callable[[], Any], empty: Any) -> Any:
+    """One live-work source; a failed read is logged and returns its explicit fallback."""
     try:
         return fn()
     except Exception:
         logger.warning("session outcome: %s unavailable for %s", label, sid, exc_info=True)
-        if on_fail is not None:
-            on_fail()
         return empty
 
 
@@ -562,16 +551,16 @@ def _outcome(kind: str, now: float, **fields: Any) -> dict[str, Any]:
     return {"kind": kind, "source": "derived", "at": now, **fields}
 
 
-def _live_work(db: Any, sid: str, ids: list[str]) -> tuple[list[dict], list[dict]]:
-    """(open decision items, named waits) across every live-work source. A recurring cron is not one: it never
+def _live_work(db: Any, sid: str, ids: list[str]) -> tuple[list[dict], list[dict], bool]:
+    """(open decision items, named waits, card read failed). A recurring cron is not live work: it never
     ends, so a chat that owns one would wait forever (see ``_derive``, which names it on the outcome instead)."""
-    card_decisions, card_waits = _guarded("kanban cards", sid, lambda: _card_items(ids), ([], []),
-                                          on_fail=lambda: _CARD_READ_FAILED.add(sid))
+    card_decisions, card_waits, card_read_failed = _guarded(
+        "kanban cards", sid, lambda: _card_items(ids), ([], [], True))
     prov_decisions, prov_waits = _provider_items(sid)
     waits = (card_waits + _guarded("processes", sid, lambda: _process_items(sid, ids), [])
              + _guarded("subagents", sid, lambda: _subagent_items(db, ids), [])
              + _guarded("goal", sid, lambda: _goal_items(sid, ids), []) + prov_waits)
-    return prov_decisions + card_decisions, waits
+    return prov_decisions + card_decisions, waits, card_read_failed
 
 
 def _derive(db: Any, sid: str, *, ignore_live_turn: bool = False,
@@ -593,14 +582,6 @@ def _derive(db: Any, sid: str, *, ignore_live_turn: bool = False,
     return {**historical, **current}
 
 
-_CARD_READ_FAILED: set[str] = set()  # sids whose card read failed in the current derivation (single-threaded per call)
-
-
-def _names_unverified_card(text: str, card_read_failed: bool) -> bool:
-    """The reply names a card id and says work remains (or the card read failed, so any named card is unverified)."""
-    return bool(_CARD_REF.search(text)) and (card_read_failed or bool(_UNFINISHED_CUE.search(text)))
-
-
 def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
                     pending_reply: Optional[str] = None) -> dict[str, Any]:
     now = time.time()
@@ -610,9 +591,7 @@ def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
         return _outcome("muted", now, **({"declared": _declared(stored)} if _declared(stored) else {}))
     if not ignore_live_turn and _live_turn(db, sid):
         return _outcome("running", now)
-    decisions, waits = _live_work(db, sid, _lineage_ids(db, sid))
-    card_unknown = sid in _CARD_READ_FAILED
-    _CARD_READ_FAILED.discard(sid)
+    decisions, waits, card_read_failed = _live_work(db, sid, _lineage_ids(db, sid))
     tail = _without_finished_notes(_tail(db, sid))
     if pending_reply is not None:  # the unsaved final reply is the last assistant message
         tail.insert(0, {"role": "assistant", "content": pending_reply, "timestamp": now})
@@ -631,6 +610,11 @@ def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
     if holds and declared.get("kind") in ("done", "waiting"):
         return {**{k: v for k, v in declared.items() if k != "crons"},
                 **(named if declared.get("kind") == "done" else {})}
+    if card_read_failed:
+        # Unknown card state is not evidence of completion, regardless of the reply.
+        if stored and stored.get("kind") in ("waiting", "decision"):
+            return stored
+        return _outcome("unresolved", now, reason="card_read_failed", **carry)
     if not tail:
         return _outcome("unresolved", now, reason="empty", **carry)
     reason = _tail_reason(tail)
@@ -652,8 +636,6 @@ def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
     judged = {"judged": True, "judged_msg": msg_id} if verdict is not None and msg_id is not None else {}
     if verdict is None:
         verdict = looks_like_summary(text)
-    if verdict and _names_unverified_card(text, card_unknown):
-        verdict = False  # an unfinished card the reader does not count is unknown remote state, never done
     if verdict:
         return _outcome("done", now, summary=text[:SUMMARY_CHARS], **judged, **named, **carry)
     return _outcome("unresolved", now, reason="no_summary", **judged, **carry)

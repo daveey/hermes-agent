@@ -622,7 +622,7 @@ def test_unfinished_agrees_with_the_title_producer(result, unfinished):
     for evt in ({"goal": "g", **result}, {"is_batch": True, "goals": ["g"], "results": [{"task_index": 0, **result}]}):
         assert async_delegation_display_unfinished(async_delegation_display_text(evt)) is unfinished
 
-# ── a reply naming an unfinished card the reader does not count is never done ──
+# ── failed card reads are unknown, not evidence of completion ────────────────
 
 REAL_UNFINISHED = (
     "Resumed and cleared the placement blocker: refreshed the registry and moved the existing owner back.\n\n"
@@ -632,11 +632,26 @@ REAL_UNFINISHED = (
 
 
 @pytest.mark.parametrize("verdict", [True, None])
-def test_reply_naming_unfinished_uncounted_card_is_not_done(db, verdict):
+@pytest.mark.parametrize("prior_kind", [None, "waiting", "decision", "done"])
+def test_busy_card_read_cannot_derive_done(db, board, monkeypatch, verdict, prior_kind):
+    from hermes_cli.kanban_generation import BoardLifecycleBusy
+
+    add_card(board, "t_open", "chat", "ready")
+    turn(db)
+    prior = {"kind": prior_kind, "source": "derived", "at": 1}
+    if prior_kind:
+        so._write(db, "chat", prior)
+
+    def busy(*args, **kwargs):
+        raise BoardLifecycleBusy("database is locked: board lifecycle is busy")
+
+    monkeypatch.setattr(ksa, "session_tasks", busy)
     so.register_outcome_judge(lambda sid, text: verdict)
-    turn(db, REAL_UNFINISHED)
     out = so.refresh_outcome("chat", "turn_end", db=db)
-    assert (out["kind"], out["reason"]) == ("unresolved", "no_summary")
+    if prior_kind in ("waiting", "decision"):
+        assert out == prior
+    else:
+        assert (out["kind"], out["reason"]) == ("unresolved", "card_read_failed")
 
 
 def test_same_unfinished_reply_with_the_card_counted_is_waiting(db, board):
@@ -649,6 +664,8 @@ def test_same_unfinished_reply_with_the_card_counted_is_waiting(db, board):
 
 @pytest.mark.parametrize("reply", [
     SUMMARY,  # no card named
+    "Completed t_01a1c7b8ebe8316f; all tests pass. No remaining work.",
+    "Earlier t_01a1c7b8ebe8316f was not yet running; it has now completed and all tests pass.",
     "Shipped the fix in t_01a1c7b8ebe8316f, which merged; all 12 tests pass and nothing else is open.",  # card done
     "Nothing else to do. The explanation: stale cache, cleared, verified by running the suite twice.",
 ])
@@ -658,16 +675,33 @@ def test_truly_done_replies_stay_done(db, reply):
     assert so.refresh_outcome("chat", "turn_end", db=db)["kind"] == "done"
 
 
-def test_card_read_failure_never_vouches_for_a_named_card(db, monkeypatch):
-    def boom(*a, **k):
-        raise sqlite3.OperationalError("database is locked")
-    monkeypatch.setattr(ksa, "session_tasks", boom)
-    so.register_outcome_judge(lambda sid, text: True)
+@pytest.mark.parametrize("failed_outer", [True, False])
+def test_same_sid_interleaved_card_reads_are_invocation_local(db, monkeypatch, failed_outer):
+    from hermes_cli.kanban_generation import BoardLifecycleBusy
+
     turn(db, "Fixed and merged via t_01a1c7b8ebe8316f; all 12 tests pass.")
-    assert so.refresh_outcome("chat", "turn_end", db=db)["reason"] == "no_summary"
-    say(db, "user", "and the other one?")
-    say(db, "assistant", SUMMARY)  # no card named: a failed read alone does not downgrade a done report
-    assert so.refresh_outcome("chat", "turn_end", db=db)["kind"] == "done"
+    so.register_outcome_judge(lambda sid, text: True)
+    nested = []
+    reading_outer = True
+
+    def cards(*args, **kwargs):
+        if reading_outer == failed_outer:
+            raise BoardLifecycleBusy("database is locked: board lifecycle is busy")
+        return []
+
+    def provider(sid):
+        nonlocal reading_outer
+        if reading_outer:
+            reading_outer = False
+            nested.append(so.derive_outcome(sid, db=db))
+        return {}
+
+    monkeypatch.setattr(ksa, "session_tasks", cards)
+    so.register_outcome_provider("interleave", provider)
+    outer = so.derive_outcome("chat", db=db)
+    failed, succeeded = (outer, nested[0]) if failed_outer else (nested[0], outer)
+    assert succeeded["kind"] == "done"
+    assert (failed["kind"], failed["reason"]) == ("unresolved", "card_read_failed")
 
 
 def test_human_decision_card_still_outranks_the_reply(db, board):
@@ -675,3 +709,31 @@ def test_human_decision_card_still_outranks_the_reply(db, board):
     so.register_outcome_judge(lambda sid, text: True)
     turn(db, REAL_UNFINISHED)
     assert so.refresh_outcome("chat", "turn_end", db=db)["kind"] == "decision"
+
+
+@pytest.mark.parametrize("precedence", ["declared", "provider", "silent_cron"])
+def test_busy_card_read_preserves_authority_but_not_silent_completion(db, monkeypatch, precedence):
+    from hermes_cli.kanban_generation import BoardLifecycleBusy
+
+    turn(db)
+    declared = None
+    if precedence == "declared":
+        declared = so.declare_outcome("chat", {"kind": "done", "summary": SUMMARY}, db=db)
+    elif precedence == "provider":
+        so.register_outcome_provider("approval", lambda sid: {
+            "decision_items": [{"id": "approval", "question": "Deploy?"}]})
+    else:
+        db._write_rowcount("UPDATE sessions SET source='cron', end_reason='cron_complete' WHERE id='chat'", ())
+        say(db, "assistant", "[SILENT]")
+
+    def busy(*args, **kwargs):
+        raise BoardLifecycleBusy("database is locked: board lifecycle is busy")
+
+    monkeypatch.setattr(ksa, "session_tasks", busy)
+    out = so.refresh_outcome("chat", "manual", db=db)
+    if precedence == "declared":
+        assert out == declared
+    elif precedence == "provider":
+        assert out["kind"] == "decision" and out["items"][0]["id"] == "approval"
+    else:
+        assert (out["kind"], out["reason"]) == ("unresolved", "card_read_failed")
