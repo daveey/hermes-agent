@@ -290,7 +290,9 @@ async def _drain(authority, row, monkeypatch):
         return 'ok'
     monkeypatch.setattr(authority.runner, '_handle_message', turn)
     descriptor = kanban_wake_fold._descriptor(row['payload'])
-    await execute_admission(authority, SessionRef(authority.profile_id, descriptor['owner']), row)
+    from tests.gateway.session_claims import claim
+    ref = SessionRef(authority.profile_id, descriptor['owner'])
+    await execute_admission(authority, ref, claim(authority, ref, row))
     assert seen, 'the queued wake never ran as a turn'
     return seen[0]
 

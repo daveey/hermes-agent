@@ -23,6 +23,15 @@ def _no_delegations():
     delegation._reset_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _completion_is_a_note(monkeypatch):
+    # Upstream runs an unviewed final result as the parent's turn (``resumes_parent``,
+    # test_unviewed_completion_resumes_parent.py). These cases cover the note path (a cron result, a
+    # chat the user closed), so keep the outcome a note.
+    import tools.process_registry_notifications as notifications
+    monkeypatch.setattr(notifications, 'completion_resumes_parent', lambda evt: False)
+
+
 def _target(runner, authority, ref):
     return runner.session_store.lookup_by_session_key(authority.sessions[ref.session_id].route).session_id
 

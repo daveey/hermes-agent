@@ -71,8 +71,10 @@ def test_local_review_reviews_the_stored_conversation_once_the_cached_agent_is_g
         assert 'Review started' in json.dumps(result), (focus, result)
 
         def reviewer(request):
-            # The reviewer's first user turn is the context the command passes, then its goal.
-            return any(str(m.get('content') or '').endswith('\n\nTASK:\nReview: ' + focus) for m in request.get('messages', []))
+            # The reviewer's first user turn is the context the command passes, then its goal, then the
+            # fork's private-scratch note on a fresh child (the excerpt can quote earlier ones). [daveey]
+            return any(str(m.get('content') or '').rsplit('\n\nPRIVATE SCRATCH: ', 1)[0].endswith('\n\nTASK:\nReview: ' + focus)
+                       for m in request.get('messages', []))
         await async_wait_until(lambda: any(reviewer(r) for r in peer.requests[before:]), timeout=45,
                                what=f'the {focus} reviewer reaching the model')
         request = next(r for r in peer.requests[before:] if reviewer(r))
