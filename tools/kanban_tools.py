@@ -1124,7 +1124,8 @@ def _handle_block(args: dict, **kw) -> str:
         if escalated:
             return escalated
         landed_kind = kb.get_task(conn, tid).block_kind
-        extra: dict = {"block_kind": landed_kind}
+        from hermes_cli.kanban_ask_premise import warning_fields
+        extra: dict = {"block_kind": landed_kind, **warning_fields(args.get("human_request"))}
         if blocker_id:
             extra["blocker_id"] = blocker_id
         landed_status = kb.get_task(conn, tid).status

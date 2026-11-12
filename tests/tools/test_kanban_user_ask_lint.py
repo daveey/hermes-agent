@@ -72,6 +72,57 @@ def test_block_without_human_request_is_not_this_lint(worker_env):
     assert "archiving" in user_ask_lint_error({**CLEAR, "action": "Unblock to proceed"})
 
 
+@pytest.mark.parametrize("premise, probe", [
+    ("Merge https://github.com/example/project/pull/42", "gh pr view 42 -R example/project"),
+    ("Remove /var/cache/example-build", "test -e /var/cache/example-build"),
+    ("Install build 649; version read: `device-info --version`", "device-info --version"),
+])
+def test_machine_premise_warns_without_refusing(worker_env, premise, probe):
+    from tools import kanban_tools as kt
+    ask = {**CLEAR, "action": premise + ". Unblock = proceed; archive = drop it."}
+    result = json.loads(kt._handle_block({"reason": "Human step", "kind": "needs_input",
+                                         "human_request": ask}))
+    assert result.get("ok") is True, result
+    assert _task(worker_env).status == "blocked"
+    assert probe in result["resolved_check_warning"]
+    assert "resolved_check" in result["resolved_check_warning"]
+
+
+@pytest.mark.parametrize("extra", [
+    {"action": "Press the door-release button. Unblock = proceed; archive = drop it.", "evidence": "Door is closed"},
+    {"evidence": "https://github.com/example/project/pull/42", "resolved_check": "false"},
+])
+def test_no_premise_warning_for_physical_or_probed_asks(worker_env, extra):
+    from tools import kanban_tools as kt
+    result = json.loads(kt._handle_block({"reason": "Human step", "kind": "needs_input",
+                                         "human_request": {**CLEAR, **extra}}))
+    assert result.get("ok") is True, result
+    assert "resolved_check_warning" not in result
+
+
+@pytest.mark.parametrize("evidence, expected", [
+    ("See https://github.com/example/project/pull/42", "MERGED|CLOSED"),
+    ('Remove `/var/cache/build files`', "test -e '/var/cache/build files'"),
+    ('Remove "/var/cache/build files"', "test -e '/var/cache/build files'"),
+    ("Remove '/var/cache/build files'", "test -e '/var/cache/build files'"),
+    ("Install version v649", "existing version read"),
+    ("Device needs ios-app1655", "existing version read"),
+])
+def test_evidence_premises_preserve_probe_targets(worker_env, evidence, expected):
+    from tools import kanban_tools as kt
+    result = json.loads(kt._handle_block({"reason": "Human step", "kind": "needs_input",
+                                         "human_request": {**CLEAR, "evidence": evidence}}))
+    assert result.get("ok") is True, result
+    assert expected in result["resolved_check_warning"]
+
+
+@pytest.mark.parametrize("ask", [None, {}, {"action": "See https://example.com/docs"},
+    {"action": "https://github.com/example/project/pull/42oops"}])
+def test_no_machine_premise_has_no_advice(ask):
+    from hermes_cli.kanban_ask_premise import warning_fields
+    assert warning_fields(ask) == {}
+
+
 def test_create_blocked_with_vague_ask_is_refused(worker_env, monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     from tools import kanban_tools as kt
