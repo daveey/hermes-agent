@@ -2696,8 +2696,8 @@ def claim_dispatch(job_id: str) -> bool:
         completed = repeat.get("completed", 0)
         label = job.get("name", job.get("id", "?"))
         if completed >= times:
-            from cron.scheduler_authority import has_pending_admission
-            if has_pending_admission(job_id):
+            from cron.scheduler_authority import admission_holds
+            if admission_holds(job, logger):
                 return False  # settlement owns the record; no dispatch and no retirement
             if job.get("last_run_at") is not None:
                 # A prior run completed normally (mark_job_run raced this tick). Retain the terminal
@@ -3249,8 +3249,8 @@ def _oneshot_dispatch_limit_reached(job: dict[str, Any], scan: _DueScan) -> bool
     completed = repeat.get("completed", 0)
     if times is None or times <= 0 or completed < times:
         return False
-    from cron.scheduler_authority import has_pending_admission
-    if has_pending_admission(job["id"]):
+    from cron.scheduler_authority import admission_holds
+    if admission_holds(job, logger):
         return True  # a dead firer can still have a canonical receipt awaiting reconciliation
     name = job.get("name", job.get("id", "?"))
     # A live run must never have its job record deleted underneath it (#62002): a run that outlives the

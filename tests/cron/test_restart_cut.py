@@ -350,6 +350,95 @@ def test_oneshot_due_scan_before_journal_recovery(home, monkeypatch, owner_ops, 
     assert not _due(job["id"])
 
 
+def _corrupt_journal(shape, job_id):
+    """A damaged admission journal: unreadable, or naming this job under the wrong key."""
+    payload = {"json": "{not json", "no-params": json.dumps({"receipt": None}),
+               "not-a-dict": json.dumps([1]), "bad-params": json.dumps({"params": None}),
+               "misnamed": json.dumps({"params": {"job_id": job_id, "request_id": "r1"}})}[shape]
+    path = scheduler_authority.journal_path(job_id, "").parent / f"{shape}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload)
+    return path
+
+
+@pytest.mark.parametrize("shape", ["json", "no-params", "not-a-dict", "bad-params", "misnamed"])
+def test_oneshot_corrupt_journal_holds_and_names_the_journal(home, monkeypatch, owner_ops, caplog,
+                                                             shape):
+    """[daveey] A damaged journal fails closed (the exhausted one-shot is kept, the journal is never
+    deleted) and the due scan names the journal, not the healthy job, as the cause."""
+    from datetime import UTC, datetime, timedelta
+    import logging
+
+    now = datetime.now(UTC)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job = jobs.create_job(prompt="probe", schedule="in 1m", repeat=1, name="probe", deliver="local")
+    now += timedelta(minutes=1, seconds=1)
+    jobs.claim_job_for_fire(job["id"], return_job=True)
+    assert jobs.claim_dispatch(job["id"])
+    fire = executions.create_execution(job["id"], source="builtin")["id"]
+    executions.mark_execution_running(fire)
+    corrupt = _corrupt_journal(shape, job["id"])
+    _dead_firer(monkeypatch)
+    caplog.set_level(logging.INFO)
+    with monkeypatch.context() as headless:
+        headless.setattr("gateway.session_cron.owner_for_home", lambda home: None)
+        headless.setattr(scheduler, "_maybe_run_worktree_maintenance", lambda: None)
+        headless.setattr(scheduler, "_sweep_mcp_orphans", lambda: None)
+        assert scheduler.tick(verbose=False, headless=True) == 0
+    assert jobs.get_job(job["id"]) is not None, "an uncheckable journal must not retire the job"
+    assert not _due(job["id"])
+    messages = [r.getMessage() for r in caplog.records]
+    assert not [m for m in messages if "Skipping malformed cron job" in m], messages
+    assert [m for m in messages if str(corrupt) in m and "holding the job unretired" in m], messages
+    assert not jobs.claim_dispatch(job["id"])
+    assert jobs.get_job(job["id"]) is not None
+    scheduler_authority.reconcile_pending()
+    assert corrupt.exists(), "an uncertain journal is never deleted by recovery"
+    assert jobs.get_job(job["id"]) is not None
+    # Healthy one-shots never reach the journal check; their dispatch is unaffected.
+    other = jobs.create_job(prompt="other", schedule="in 1m", repeat=1, deliver="local")
+    assert jobs.claim_dispatch(other["id"])
+    # Once the operator removes the damaged journal, the old wedged-claim cleanup resumes.
+    corrupt.unlink()
+    assert not jobs.claim_dispatch(job["id"])
+    assert jobs.get_job(job["id"]) is None
+
+
+def test_claim_dispatch_race_with_corrupt_journal_holds_without_bookkeeping(home, monkeypatch, caplog):
+    """[daveey] The scan saw budget left, another process spent it before this claim, and a damaged
+    journal makes the check raise: hold the fire, never book a failed run or send a crash notice."""
+    from datetime import UTC, datetime, timedelta
+    import logging
+
+    now = datetime.now(UTC)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job = jobs.create_job(prompt="probe", schedule="in 1m", repeat=1, name="probe", deliver="local")
+    now += timedelta(minutes=1, seconds=1)
+    claimed = jobs.claim_job_for_fire(job["id"], return_job=True)
+    assert isinstance(claimed, dict) and claimed["repeat"]["completed"] == 0
+    assert jobs.claim_dispatch(job["id"])  # the concurrent firer exhausts the one-shot
+    corrupt = _corrupt_journal("json", job["id"])
+    claimed["execution_id"] = executions.create_execution(job["id"], source="builtin")["id"]
+    booked, notices = [], []
+    monkeypatch.setattr(scheduler, "_launch_external_cron_worker", lambda _job: False)
+    monkeypatch.setattr(scheduler, "mark_job_run", lambda *a, **k: booked.append(a) or True)
+    monkeypatch.setattr(scheduler, "_deliver_crash_failure",
+                        lambda *a, **k: notices.append(a) or (None, "suppressed"))
+    monkeypatch.setattr(scheduler, "run_job", lambda *a, **k: pytest.fail("must not run"))
+    caplog.set_level(logging.WARNING)
+
+    assert scheduler.run_one_job(claimed) is True
+
+    assert booked == [] and notices == []
+    saved = jobs.get_job(job["id"])
+    assert saved["repeat"] == {"times": 1, "completed": 1}
+    assert saved.get("last_status") is None and int(saved.get("failure_streak") or 0) == 0
+    row = executions.get_execution(claimed["execution_id"])
+    assert "Dispatch claim rejected" in row["error"]
+    assert corrupt.exists()
+    assert [r for r in caplog.records if str(corrupt) in r.getMessage()]
+
+
 def test_manual_fire_refused_while_draining_is_deferred_not_failed(home, monkeypatch, owner_ops):
     """Hub sample 2: ``hermes cron run`` while the owner drains: refused, never admitted."""
     from hermes_state_runtime import RuntimeStoreError
