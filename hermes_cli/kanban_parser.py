@@ -555,6 +555,8 @@ _SPECS = [
     _cmd("quota-release", [
         _TASK_ID,
         _arg("--reason", default="", help="Why the quota episode no longer holds (recorded as an event + comment)"),
+        _arg("--probe", action="store_true",
+             help="Release only when a live usage read shows headroom on every walled provider (else refuse, audited)"),
     ], help="Operator-only: end the card's quota episode (a stale 'resets at' hold) so it is admissible again"),
     _cmd("promote", [
         _TASK_ID,

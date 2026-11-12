@@ -20,6 +20,7 @@ from __future__ import annotations
 import time
 
 KIND = "quota_episode_released"
+REFUSED_KIND = "quota_release_refused"  # [daveey] a ``--probe`` release the live usage read did not disprove
 
 
 class ReleaseRefused(ValueError):
@@ -49,14 +50,40 @@ def covers_latest(conn, task_id) -> dict | None:
     return None if later else payload
 
 
-def record(conn, task_id, state, *, reason, via, actor):
+def record(conn, task_id, state, *, reason, via, actor, verdicts=None):
     """Append the release event (boundary for ``episode()``) inside the caller's transaction."""
     from hermes_cli import kanban_db as kb
     payload = {"reason": reason, "via": via, "actor": actor, "run_id": state["run_id"],
                "episode_id": state["episode_id"], "until": state["until"], "hinted": bool(state.get("hinted")),
                "providers": list(state.get("providers") or [])}
+    if verdicts is not None:
+        payload["verdicts"] = verdicts
     kb._append_event(conn, task_id, KIND, payload)
     return payload
+
+
+def _probe(conn, task_id, verdict, actor):
+    """``--probe``: every provider the held walls name must show live headroom; else record an audited
+    ``quota_release_refused`` and raise. Returns the verdicts, or None when no episode holds the card (the
+    release itself refuses that). The usage read runs outside any write transaction. [daveey]"""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_quota_probe as qp
+    from hermes_cli.kanban_db_connect import write_txn
+    from hermes_cli.kanban_quota_episode import _outstanding, episode
+    from hermes_cli.kanban_wake_check import foreign_copy
+    state = episode(conn, task_id) if kb.get_task(conn, task_id) and not foreign_copy(conn, task_id) else None
+    if not state:
+        return None
+    held = _outstanding(conn, task_id, state, time.time()) or [state]
+    found = qp.verdicts(held, qp.probe_model(conn, task_id, state), verdict)
+    if found and all(v["state"] == "headroom" for v in found.values()):
+        return found
+    with write_txn(conn):
+        kb._append_event(conn, task_id, REFUSED_KIND, {
+            "actor": actor, "run_id": state["run_id"], "episode_id": state["episode_id"],
+            "until": max(wall["until"] for wall in held), "verdicts": found}, run_id=state["run_id"])
+    states = ", ".join(f"{name}={v['state']}" for name, v in found.items()) or "no provider named"
+    raise ReleaseRefused(f"live probe does not disprove the wall ({states}); {REFUSED_KIND} recorded")
 
 
 def _drop_walls(walls):
@@ -72,8 +99,11 @@ def _drop_walls(walls):
         pw.drop_wall(name, not_after=until)
 
 
-def release(conn, task_id: str, *, reason: str, actor: str) -> dict:
-    """Operator release of the card's quota episode; raises ReleaseRefused."""
+def release(conn, task_id: str, *, reason: str, actor: str, probe=None) -> dict:
+    """Operator release of the card's quota episode; raises ReleaseRefused.
+
+    *probe* (``kanban_quota_probe.live_verdict`` for ``--probe``) gates it on a live usage read that
+    disproves every walled provider; a confirmed or unreadable wall refuses, audited. [daveey]"""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import write_txn
     from hermes_cli.kanban_db_dispatch_quota import clear_quota_error, is_quota_error
@@ -83,6 +113,7 @@ def release(conn, task_id: str, *, reason: str, actor: str) -> dict:
     marker = worker_lineage()
     if marker:
         raise ReleaseRefused(f"operator-only: refused under worker lineage ({marker})")
+    verdicts = _probe(conn, task_id, probe, actor) if probe is not None else None
     reason = (reason or "").strip() or "operator release"
     with write_txn(conn):
         task = kb.get_task(conn, task_id)
@@ -94,7 +125,8 @@ def release(conn, task_id: str, *, reason: str, actor: str) -> dict:
         if not state:
             raise ReleaseRefused("no quota episode holds this card")
         held = _outstanding(conn, task_id, state, time.time())
-        payload = record(conn, task_id, state, reason=reason[:500], via="operator", actor=actor)
+        payload = record(conn, task_id, state, reason=reason[:500], via="probe" if verdicts else "operator",
+                         actor=actor, verdicts=verdicts)
         stamp = kb._lossy_text(task.last_failure_error)
         if stamp and is_quota_error(stamp):
             clear_quota_error(conn, task_id, stamp)
@@ -104,13 +136,15 @@ def release(conn, task_id: str, *, reason: str, actor: str) -> dict:
 
 
 def cmd(args) -> int:
-    """``hermes kanban quota-release <id> [--reason ...]``."""
+    """``hermes kanban quota-release <id> [--reason ...] [--probe]``."""
     from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_quota_probe as qp
     from hermes_cli.kanban import _profile_author
     from hermes_cli.kanban_output import _err
+    probe = qp.live_verdict if getattr(args, "probe", False) else None
     try:
         with kbc.connect_closing() as conn:
-            payload = release(conn, args.task_id, reason=args.reason, actor=_profile_author())
+            payload = release(conn, args.task_id, reason=args.reason, actor=_profile_author(), probe=probe)
     except ReleaseRefused as exc:
         return _err(f"kanban quota-release: {exc}", 2)
     until = time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime(payload["until"]))

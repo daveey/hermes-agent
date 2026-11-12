@@ -14,6 +14,50 @@ class SubscriptionQuotaUnavailable(ModelRoutingError):
         super().__init__(message)
 
 
+class SubscriptionAuthUnavailable(ModelRoutingError):
+    """[daveey] The OAuth pool is empty because rows are auth-benched (401/revoked), not only quota-capped.
+
+    Capacity is unknown, so it carries no reset: a worker retries soon (exit 75) without a quota
+    episode or provider wall. 2026-11-12: 3 revoked rows + 4 opus-capped rows read as a 5-day wall."""
+
+    status_code = 503
+
+    def __init__(self, provider, model):
+        self.provider, self.model = provider, model
+        super().__init__(f"Subscription credentials for {provider}/{model} are auth-benched (401); "
+                         "quota unconfirmed, retry after the pool re-reads its tokens")
+
+
+class QuotaContradicted(SubscriptionAuthUnavailable):
+    """[daveey] The pool read quota-walled, but the provider's live usage windows show an account with
+    headroom (``hermes_cli.kanban_quota_probe.contradicted``): unconfirmed, so it carries no reset either."""
+
+    def __init__(self, provider, model, detail):
+        super().__init__(provider, model)
+        self.args = (f"Subscription quota for {provider}/{model} unconfirmed: the pool is empty but live usage "
+                     f"shows headroom ({str(detail)[:200]}); retrying without a quota deadline",)
+
+
+def auth_benched(entry, model, now):
+    """True for a row benched by a 401 whose own capacity for *model* is unknown (no model cap of its own)."""
+    from agent.credential_pool import STATUS_EXHAUSTED
+    from agent.credential_pool_model_cooldowns import model_cooldown_until
+    if entry.last_status != STATUS_EXHAUSTED or entry.last_error_code != 401:
+        return False
+    return not ((model_cooldown_until(entry, model) or 0) > now)
+
+
+def auth_churned(pool, model):
+    """At least one live OAuth row of *pool* is benched only by a 401 (see ``auth_benched``)."""
+    from agent.credential_pool import STATUS_DEAD
+    import time
+    if pool is None:
+        return False
+    now = time.time()
+    return any(entry.auth_type == "oauth" and entry.last_status != STATUS_DEAD and auth_benched(entry, model, now)
+               for entry in pool.entries())
+
+
 def _quota_scan(pool, model):
     """``(room, waits)`` for *model*: room when a live OAuth entry can serve it now, else its quota resets.
 

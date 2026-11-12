@@ -1,15 +1,22 @@
 """Typed quota deadlines retained in attempt receipts, not provider-wide guesses."""
 import math
 
+# Receipt reason of a start-time refusal whose quota was not confirmed (auth churn, or a live usage
+# read that contradicted the pool). It is retryable and never carries a deadline.
+UNCONFIRMED = 'quota_unconfirmed'
+
 
 def quota_fields(failure):
     """Allowlisted, credential-free fields from a failed turn or startup exception."""
-    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    from agent.model_routing_unavailable import SubscriptionAuthUnavailable, SubscriptionQuotaUnavailable
     from hermes_cli.auth import AuthError, is_rate_limited_auth_error
     import time
     seen = set()
     while isinstance(failure, BaseException) and id(failure) not in seen:
         seen.add(id(failure))
+        if isinstance(failure, SubscriptionAuthUnavailable):
+            # [daveey] Auth churn: retryable, but no deadline (no episode, no provider wall).
+            return {'failure_reason': UNCONFIRMED, 'failure_retryable': True}
         if isinstance(failure, SubscriptionQuotaUnavailable):
             failure = {'failure_reason': 'rate_limit', 'failure_resets_at': failure.resets_at}
             break
@@ -97,6 +104,8 @@ def receipt_deadline(conn, task_id, run_id):
     if owned is None:
         return None
     receipt, created = owned
+    if receipt.get('failure_reason') == UNCONFIRMED:
+        return None  # an unconfirmed quota refusal never yields a deadline, whatever its text says
     reset = valid_deadline(quota_fields(receipt).get('failure_resets_at'))
     if reset is not None:
         return reset
@@ -144,6 +153,12 @@ def route_fields(failure, agent=None):
     if not provider:
         return {}
     return {'route_provider': provider, 'route_model': _route_name(getattr(agent, 'model', None))}
+
+
+def receipt_unconfirmed(conn, task_id, run_id):
+    """True when the exact attempt's own receipt says its quota refusal was unconfirmed (auth churn)."""
+    owned = _owned_receipt(conn, task_id, run_id)
+    return bool(owned) and owned[0].get('failure_reason') == UNCONFIRMED
 
 
 def receipt_route(conn, task_id, run_id):

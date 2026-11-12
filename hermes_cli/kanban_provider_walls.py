@@ -109,6 +109,8 @@ def record_wall_for_run(conn: sqlite3.Connection, task_id: str, run_id: Optional
     from hermes_cli.kanban_quota_episode import _disproved, _unhinted, episode
     state = episode(conn, task_id)
     if state and state['run_id'] == run_id:
+        if state.get('auth_churn'):
+            return None  # [daveey] an unconfirmed (auth-churn) refusal never walls the provider
         # Exact-run receipt/backoff owns the deadline; never extend it with an
         # unscoped log tail or the legacy provider-wide default. A hint the live
         # pool already disproves is mirrored as its backoff only.
