@@ -34,7 +34,7 @@ def _origin_enrollment(args, origin, marker, **effective):
     decision = creation_decision(view, cfg, gateway,
                                  kp.canonical_pin(args.get("placement") or "auto", gateway, cfg), None,
                                  queue=False)  # [daveey] origin-bound: the worker queue is not applied here
-    return apply(view, decision or {"where": "local", "why": "origin-bound storage"}, gateway, cfg)
+    return apply(view, decision or {"where": "local", "why": "origin-bound storage"}, gateway, cfg, queue=False)
 
 
 def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:

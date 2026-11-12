@@ -769,7 +769,7 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
         from hermes_cli.kanban_hub_admission_placement import apply, is_hub
         raw_cfg = config() if cfg is None else cfg
         try:
-            out = apply(args, out, sg, raw_cfg, origin_intent=origin_intent)
+            out = apply(args, out, sg, raw_cfg, origin_intent=origin_intent, machine_ok=machine_ok)
         except Exception as exc:  # health: allow BLE001 -- admission must fail closed on the hub
             if is_hub(sg, raw_cfg) or is_hub(out.get("where"), raw_cfg):
                 return {"where": "refuse", "why": f"hub admission failed: {exc}", "pin": "hub"}

@@ -160,3 +160,45 @@ def test_tool_keeps_verdict_and_effective_contract(gate):
     result = _local_placement(placement, fields, decision, machine_ok=None, note_local_pin=True)
     assert result == decision
     assert len(gate) == 1
+
+
+QUEUE_CFG = {"worker_queue": {"hub": "pool:worker"}}
+
+
+@pytest.mark.parametrize("cfg", [QUEUE_CFG, {**QUEUE_CFG, "worker_pools": {"hub": ["worker-1"]}}])
+def test_denied_follows_worker_queue(gate, cfg):
+    """Operator 11-12 (PR #1247): a denied card joins the one worker queue, never machine:worker-N;
+    hub:write rides along as capability:hub-write so only a hub-write worker claims it."""
+    result = placement.decide({"title": "Read ~/.hermes/logs on the hub"}, self_gw="hub", cfg=cfg,
+                              live=lambda _: None, carries=True, machine_ok=lambda label: label == "pool:worker")
+    assert result["where"] == "local"
+    assert result["runs_on"][0] == "pool:worker"
+    assert "capability:hub-write" in result["runs_on"]
+    assert not any(v.startswith("machine:") for v in result["runs_on"])
+    assert "placement_policy" not in result
+    assert "hub:write" in result["requires"]
+    assert result["hub_admission"]["admit"] is False
+    assert len(gate) == 1
+
+
+def test_denied_without_live_queue_label_is_worker_first(gate):
+    cfg = {**QUEUE_CFG, "worker_pools": {"hub": ["worker-1"]}}
+    result = placement.decide({"title": "Read ~/.hermes/logs on the hub"}, self_gw="hub", cfg=cfg,
+                              live=lambda _: None, carries=True, machine_ok=lambda _label: False)
+    assert result.get("placement_policy") == "worker-first-v1"
+    assert "runs_on" not in result
+
+
+def test_admitted_ignores_worker_queue(gate):
+    result = placement.decide({"title": "Chrome"}, self_gw="hub", cfg=QUEUE_CFG, live=lambda _: None,
+                              carries=True, machine_ok=lambda _label: True)
+    assert result["hub_admission"]["admit"] is True
+    assert not result.get("runs_on")
+
+
+def test_origin_and_courier_denies_never_queue(gate, monkeypatch):
+    from hermes_cli import kanban_hub_admission_placement as hap
+    monkeypatch.setattr(placement, "_machine_picks_up", lambda _label: True)
+    audit = {"admit": False}
+    assert "runs_on" not in hap.pool_route({"title": "x"}, QUEUE_CFG, "hub", audit, ["hub:write"], queue=False)
+    assert hap.pool_route({"title": "x"}, QUEUE_CFG, "hub", audit, ["hub:write"])["runs_on"][0] == "pool:worker"

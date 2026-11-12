@@ -61,6 +61,30 @@ def test_cli_hub_auto_create(hub_cli, admit):
         assert "hub:write" in task.requires
 
 
+@pytest.mark.parametrize("mode,queued", [("primary", True), ("off", False)])
+def test_cli_denied_follows_worker_queue(hub_cli, monkeypatch, mode, queued):
+    """Operator 11-12 (PR #1247): with kanban.placement.worker_queue set, a denied CLI card joins
+    the pool queue (Board primary only, runs_on being a Board field), never machine:worker-N."""
+    from hermes_cli import kanban_db_sync as sync
+    monkeypatch.setattr(placement, "config", lambda: {"worker_pools": {"hub": []},
+                                                      "worker_queue": {"hub": "pool:worker"}})
+    monkeypatch.setattr(placement, "_machine_picks_up", lambda label: label == "pool:worker")
+    monkeypatch.setattr(sync, "board_mode", lambda _conn: mode)
+    hub_cli.admit_next = False
+    assert _cli_create(MARKED) == 0
+    with kbc.connect_closing() as db:
+        (task,) = kb.list_tasks(db)
+        raw = db.execute("SELECT runs_on FROM tasks WHERE id = ?", (task.id,)).fetchone()[0]
+    runs_on = json.loads(raw) if raw else None
+    assert "hub:write" in (task.requires or [])
+    if queued:
+        assert {"pool:worker", "capability:hub-write"} <= set(runs_on or [])
+        assert task.placement_policy is None
+    else:
+        assert not runs_on and task.placement_policy == "worker-first-v1"
+    assert not any(v.startswith("machine:") for v in runs_on or [])
+
+
 def test_cli_receive_judges_without_the_origin_placement_note(hub_cli):
     """Review t_01a1ced25af29218: only courier_plan stripped the origin's note (its Chrome and
     Keychain), so a plain create-task receive on the hub judged the origin's host needs."""

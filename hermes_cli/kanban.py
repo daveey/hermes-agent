@@ -459,7 +459,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         return _err(f"kanban: {exc.code}: {exc}", 2)
     origin_binding = None
     # [daveey] Hub admission (a model call) runs before any connection/write lock.
-    from hermes_cli.kanban_hub_admission_placement import cli_preflight, with_admission as _with_admission
+    from hermes_cli.kanban_hub_admission_placement import cli_create_fields, cli_preflight
     assignee = (args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
                 or _cli_default_assignee(args))
     plan, refused_rc = cli_preflight(args, body, ws_kind, ws_path, getattr(args, "board", None)
@@ -493,7 +493,6 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_capabilities import RequiresDeclarationMissing, declaration_required
         from hermes_cli.kanban_worker_node import MachinePinRefused, check_machine_pins
         from hermes_cli.kanban_ask_resolved import AskFilingRefused, check_create_filing, create_context
-        from hermes_cli.kanban_worker_placement import cli_audit, cli_runs_on
         try:
             # [daveey] A blocked ask's resolved_check runs once first, as the sweep will run it for this assignee
             # and workspace: already met or broken refuses the create. A key hit returns the card: no probe.
@@ -504,7 +503,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             task_id = kb.create_task(
                 conn, title=args.title, body=body,
                 assignee=assignee,
-                session_id=session_id, requires=plan.get("requires", getattr(args, "requires", None)),
+                session_id=session_id,
                 chat_origin=origin.ref if origin else getattr(args, "origin_session", None),
                 # [daveey] Same declaration gate as the kanban_create tool, for agent/worker shells only.
                 require_declaration=(in_worker or _agent_invoked()) and declaration_required(),
@@ -524,13 +523,9 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 human_request=getattr(args, "human_request", None),
                 creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                                  if in_worker else None),
-                validate_workspace=True, validate_skills=True,  # [daveey] no --runs-on: queue for the worker pool
-                runs_on=(None if plan.get("placement_policy") else
-                         cli_runs_on(conn, args, body, ws_kind, ws_path, board, assignee=assignee)),
-                placement_policy=plan.get("placement_policy"),
-                placement_checked=True, board=board,
-                placement_audit=_with_admission(cli_audit(args, body, ws_kind, ws_path, board, assignee=assignee),
-                                                plan),
+                validate_workspace=True, validate_skills=True, placement_checked=True, board=board,
+                # [daveey] no --runs-on: queue for the worker pool; hub admission's placement and receipt
+                **cli_create_fields(conn, plan, args, body, ws_kind, ws_path, board, assignee=assignee),
                 insert_guard=after_create.guard,  # re-checks overlap under the write lock [daveey]
             )
         except kanban_overlap.OverlapRefused as exc:  # landed under the write lock after the first check

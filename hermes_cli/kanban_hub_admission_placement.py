@@ -102,8 +102,8 @@ def courier_plan(conn, args, runs_on, *, cfg=None, gateway=None, request_id=None
         return {"where": "refuse", "why": verdict.why, "hub_admission": audit, "pin": "hub"}
     requires = args.get("requires") or []
     requires = [requires] if isinstance(requires, str) else list(requires)
-    return {"where": "local", "placement_policy": POLICY, "why": WAITING, "hub_admission": audit,
-            "requires": list(dict.fromkeys([*requires, "hub:write"]))}
+    # Courier creation never takes the worker queue (queue_decision's own rule): worker-first.
+    return pool_route(args, cfg, gateway, audit, list(dict.fromkeys([*requires, "hub:write"])), queue=False)
 
 
 def gate_move(conn, task_id, runs_on, *, cfg=None):
@@ -274,6 +274,26 @@ def with_admission(audit, plan):
     return audit
 
 
+def cli_create_fields(conn, plan, args, body, workspace_kind, workspace_path, board, *, assignee):
+    """``create_task`` placement kwargs for ``hermes kanban create`` from the preflight ``plan``.
+
+    A denied card the plan queued (``runs_on: [<pool label>, ...]``) keeps that queue only on a Board
+    primary (``runs_on`` is a Board placement field); elsewhere it is enrolled worker-first instead.
+    """
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli.kanban_worker_placement import POLICY, cli_audit, cli_runs_on
+
+    policy, runs_on = plan.get("placement_policy"), plan.get("runs_on")
+    if runs_on is not None and sync.board_mode(conn) != "primary":
+        policy, runs_on = (POLICY if plan.get("hub_admission") else policy), None
+    if policy is None and runs_on is None:
+        runs_on = cli_runs_on(conn, args, body, workspace_kind, workspace_path, board, assignee=assignee)
+    return {"requires": plan.get("requires", getattr(args, "requires", None)), "runs_on": runs_on,
+            "placement_policy": policy,
+            "placement_audit": with_admission(cli_audit(args, body, workspace_kind, workspace_path, board,
+                                                        assignee=assignee), plan)}
+
+
 def cli_plan(args, body, workspace_kind, workspace_path, board, *, assignee=None):
     """``hermes kanban create``: the worker-first decision plus admission, computed before any write."""
     from hermes_cli import kanban_placement as kp
@@ -291,7 +311,7 @@ def cli_plan(args, body, workspace_kind, workspace_path, board, *, assignee=None
     return apply(fields, decision or {"where": "local", "why": "cli create"}, gateway, cfg)
 
 
-def apply(args, decision, gateway, cfg, *, origin_intent=None):
+def apply(args, decision, gateway, cfg, *, origin_intent=None, queue=True, machine_ok=None):
     """Keep structural/non-hub outcomes unchanged; denied explicit hub pins refuse.
 
     Returned requires are effective persistence inputs, not just creation-time checks.
@@ -349,18 +369,42 @@ def apply(args, decision, gateway, cfg, *, origin_intent=None):
         return {**decision, "hub_admission": audit}
     if explicit:
         return {"where": "refuse", "why": verdict.why, "hub_admission": audit, "pin": "hub"}
-    pools = cfg.get("worker_pools") or {}
-    if gateway not in pools:
-        return {"where": "refuse", "why": "hub admission denied; no worker pool configured",
-                "hub_admission": audit}
     requires = args.get("requires") or []
     requires = [requires] if isinstance(requires, str) else list(requires)
     # Board contract (hermes-hub #90): requires hub:write -> capability:hub-write at reservation and
-    # claim. runs_on stays owned by the worker-first reservation, so the label travels in requires,
-    # and only for cards whose text hit a hub-state marker (they may still need hub-admin).
+    # claim, and the worker queue's coordination labels; only for cards whose text hit a hub-state
+    # marker (they may still need hub-admin).
     from hermes_cli.kanban_placement import portable_reason
-    out = {"where": "local", "placement_policy": POLICY, "why": WAITING, "hub_admission": audit}
     if portable_reason(args, cfg):
         # Only when hub:write is added: an omitted requires must stay omitted (declaration gate).
-        out["requires"] = list(dict.fromkeys([*requires, "hub:write"]))
+        requires = list(dict.fromkeys([*requires, "hub:write"]))
+    elif not args.get("requires"):
+        requires = None
+    out = pool_route(args, cfg, gateway, audit, requires, queue=queue, machine_ok=machine_ok)
+    if out.get("runs_on") is None and gateway not in (cfg.get("worker_pools") or {}):
+        return {"where": "refuse", "why": "hub admission denied; no worker pool configured",
+                "hub_admission": audit}
+    return out
+
+
+def pool_route(args, cfg, gateway, audit, requires, *, queue=True, machine_ok=None):
+    """Where a denied card goes: the worker queue (``runs_on: [<pool label>, ...]``) when ``queue``
+    and ``kanban.placement.worker_queue`` names a live label for this gateway, else worker-first.
+
+    Never a ``machine:worker-N`` pin. The queue's coordination labels include ``requires``'
+    (``hub:write`` -> ``capability:hub-write``), so only a hub-write worker claims it.
+    """
+    from hermes_cli import kanban_placement as kp
+    from hermes_cli import kanban_placement_coordination as coordination
+    from hermes_cli.kanban_worker_placement import POLICY, QUEUED_WHY, WAITING
+
+    label = kp._Cfg(cfg).queue_label(gateway) if queue else None
+    extra = coordination.required_labels({**args, "requires": requires}) if label else None
+    if label and extra is not None and (machine_ok or kp._machine_picks_up)(label):
+        out = {"where": "local", "runs_on": [label, *sorted(extra - {label})],
+               "why": QUEUED_WHY.format(label=label), "hub_admission": audit}
+    else:
+        out = {"where": "local", "placement_policy": POLICY, "why": WAITING, "hub_admission": audit}
+    if requires is not None:
+        out["requires"] = requires
     return out
