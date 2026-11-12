@@ -290,9 +290,10 @@ def _build_child_agent(
                                  else dict(getattr(parent_agent, "request_overrides", {}) or {}))
         parent_sid = getattr(parent_agent, "session_id", None)
         provenance = {
-            "model_source": model_source or ("delegation_default" if routing_cfg and (
-                routing_cfg.get("model") or routing_cfg.get("provider")) else
-                "caller_pin" if model or override_provider else "parent_inherit"),
+            "model_source": model_source or (
+                "caller_pin" if model or override_provider else
+                "delegation_default" if routing_cfg and (
+                    routing_cfg.get("model") or routing_cfg.get("provider")) else "parent_inherit"),
             "requested_model": rt["model"],
         }
         child_session_db = _open_child_session_db(parent_agent, model_provenance=provenance)
@@ -567,8 +568,8 @@ def _build_children(
                 model=route.creds["model"], max_iterations=max_iterations, task_count=len(task_list),
                 model_source=("caller_pin" if route.profile_home is None and any(
                     isinstance(t.get(k), str) and t[k].strip() for k in ("model", "provider")) else
-                    "delegation_default" if route.routing_cfg.get("model") or route.routing_cfg.get("provider")
-                    else "parent_inherit"),
+                    "delegation_default" if route.profile_home is not None or route.routing_cfg.get("model")
+                    or route.routing_cfg.get("provider") else "parent_inherit"),  # a profile runs its own model
                 parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **_route_overrides(route),
             )
         except ValueError as exc:

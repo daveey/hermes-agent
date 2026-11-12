@@ -407,6 +407,20 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
             self.journal = candidate
             return self.retry_pending()[0]
 
+    def reissue_pending_without(self, operation, keys):
+        """Re-send the one refused pending ``operation`` without payload ``keys``, once (same sequence: the owner
+        committed nothing for a refusal). Anything else pending is refused, and the owner's answer propagates."""
+        with self.lock:
+            pending = self.journal['pending']
+            if len(pending) != 1 or pending[0]['operation'] != operation:
+                raise WorkerPersistenceError(self.failure or 'pending_receipt')
+            entry = dict(pending[0], payload={k: v for k, v in pending[0]['payload'].items() if k not in keys})
+            candidate = dict(self.journal, pending=[entry])
+            self._save(candidate)
+            self.journal = candidate
+            self.failure = None
+            return self.retry_pending()[0]
+
     def _persist(self, entry):
         return self.rpc('worker.persist', **self.scope, **entry)
 
