@@ -224,9 +224,90 @@ def test_workflow_shape():
     yaml = pytest.importorskip("hermes_yaml")
     doc = yaml.safe_load((Path(__file__).resolve().parents[2] / ".github/workflows/ci-review-comment.yml").read_text())
     on = doc.get("on", doc.get(True))
-    assert set(on) == {"schedule", "workflow_dispatch"}
+    assert set(on) == {"schedule", "workflow_dispatch", "workflow_run"}
+    # The hourly sweep stays: it refreshes every PR, including heads no CI completion reached.
     assert on["schedule"] == [{"cron": "17 * * * *"}]
     assert doc["concurrency"]["cancel-in-progress"] is False
     job = doc["jobs"]["comment"]
     assert job["timeout-minutes"] == 15 and job["runs-on"] == "blacksmith-2vcpu-ubuntu-2404"
     assert any("batch_review_comments.py" in (s.get("run") or "") for s in job["steps"])
+
+
+def _workflow():
+    yaml = pytest.importorskip("hermes_yaml")
+    return yaml.safe_load((Path(__file__).resolve().parents[2] / ".github/workflows/ci-review-comment.yml").read_text())
+
+
+def test_ci_completion_on_a_ship_head_triggers_a_targeted_refresh():
+    """A PR whose CI completes on a new (rebased) head gets a bot run for exactly that head, with no dispatch.
+
+    Regression PR1104 (2026-11-12): required CI green and exact-head review approved at 10:42-10:43Z, but ship
+    refused (rc 3, "ci-review-bot has not finished") until a hand dispatch, because the bot ran only hourly.
+    """
+    doc = _workflow()
+    on = doc.get("on", doc.get(True))
+    assert on["workflow_run"] == {"workflows": ["CI"], "types": ["completed"], "branches": ["wt/**"]}
+    job = doc["jobs"]["comment"]
+    cond = " ".join(job["if"].split())
+    # schedule/dispatch keep the full sweep; workflow_run only for same-repo PR runs that finished green or red.
+    assert cond.startswith("github.event_name != 'workflow_run' || (")
+    assert "github.event.workflow_run.event == 'pull_request'" in cond
+    assert "github.event.workflow_run.head_repository.full_name == github.repository" in cond
+    assert "github.event.workflow_run.conclusion == 'success'" in cond
+    assert "github.event.workflow_run.conclusion == 'failure'" in cond
+    step = next(s for s in job["steps"] if "batch_review_comments.py" in (s.get("run") or ""))
+    assert step["env"]["TARGET_HEAD_SHA"] == "${{ github.event.workflow_run.head_sha }}"
+    # Untrusted event data never reaches a run: line directly (script injection).
+    assert "${{" not in step["run"]
+    # Each head refreshes in its own group: a shared group keeps one pending run and cancels the rest.
+    group = doc["concurrency"]["group"]
+    assert "github.event.workflow_run.head_sha" in group and group.startswith("ci-review-comment")
+    # The default-branch checkout is kept for every trigger: PR code never runs with the write token.
+    checkout = job["steps"][0]
+    assert checkout["with"]["ref"] == "${{ github.event.repository.default_branch }}"
+
+
+def test_targeted_run_refreshes_only_the_pr_at_that_head(monkeypatch):
+    old, new, other = "1" * 40, "2" * 40, "3" * 40
+    prs = [_pr(1104, new), _pr(7, other)]
+    runs = {new: [_run(1, new, "t") | {"status": "completed", "conclusion": "success"}],
+            other: [_run(2, other, "t") | {"status": "completed", "conclusion": "success"}],
+            old: [_run(3, old, "t") | {"status": "completed", "conclusion": "success"}]}
+    f = Fake(monkeypatch, prs, runs, fresh=_fresh(prs))
+    assert b.run_batch("t", REPO, NOW, head_sha=new) == 0
+    assert list(f.posted) == ["1104"] and f.collected == ["1"]
+    match = re.search(r"<sub>(running|ran) on \[[0-9a-f]+\]\([^)]*/commits/([0-9a-f]{40})\)", f.posted["1104"])
+    assert match and match.groups() == ("ran", new)
+
+
+def test_targeted_run_without_an_open_pr_at_that_head_writes_nothing(monkeypatch):
+    prs = [_pr(1, "a" * 40)]
+    f = Fake(monkeypatch, prs, {}, fresh=_fresh(prs))
+    assert b.run_batch("t", REPO, NOW, head_sha="b" * 40) == 0
+    assert f.posted == {} and f.collected == []
+
+
+def test_main_targets_the_completed_runs_head_from_the_workflow_env(monkeypatch):
+    head = "c" * 40
+    seen = {}
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("TARGET_HEAD_SHA", head.upper())
+    monkeypatch.setattr(sys, "argv", ["x"])
+    monkeypatch.setattr(b, "run_batch", lambda token, repo, **kw: seen.update(kw) or 0)
+    assert b.main() == 0
+    assert seen == {"head_sha": head}
+    # schedule/dispatch: the workflow expression renders empty, so every PR is swept
+    monkeypatch.setenv("TARGET_HEAD_SHA", "")
+    assert b.main() == 0
+    assert seen == {"head_sha": ""}
+
+
+@pytest.mark.parametrize("bad", ["abc123", "g" * 40, "1" * 39, "1" * 41, "$(id)"])
+def test_main_refuses_a_target_that_is_not_a_full_sha(monkeypatch, bad):
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("TARGET_HEAD_SHA", bad)
+    monkeypatch.setattr(sys, "argv", ["x"])
+    monkeypatch.setattr(b, "run_batch", lambda *a, **k: pytest.fail("ran with an invalid target"))
+    assert b.main() == 1

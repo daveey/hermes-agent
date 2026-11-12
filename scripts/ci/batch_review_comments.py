@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Hourly batched CI review summaries for open same-repo PRs.
+"""Batched CI review summaries for open same-repo PRs.
 
-Replaces the per-run live poller. One scheduled invocation lists every open
-PR whose head lives in this repository (forks are excluded), picks the newest
-``CI`` ``pull_request`` run on each PR's exact head SHA, builds a snapshot
-with the :mod:`live_comment` helpers, and upserts the review comment.
+Replaces the per-run live poller. One scheduled (hourly) invocation lists every
+open PR whose head lives in this repository (forks are excluded), picks the
+newest ``CI`` ``pull_request`` run on each PR's exact head SHA, builds a
+snapshot with the :mod:`live_comment` helpers, and upserts the review comment.
+
+Targeted mode (``--head-sha`` / ``$TARGET_HEAD_SHA``): the workflow's
+``workflow_run`` trigger passes the head of the CI run that just completed, and
+only the open PR(s) at exactly that head are refreshed. Why: ``hermes-core-wt
+ship`` lands only once this comment names the PR's exact head ("ran on
+<sha>"); every ship rebase changes the head, so an approved, CI-green PR
+otherwise waited up to an hour for the next sweep (PR1104, 2026-11-12).
 
 Safety / behaviour:
 
@@ -25,6 +32,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -136,7 +144,13 @@ def process_pr(token: str, repo: str, pr: dict, now: datetime) -> str:
     return "posted"
 
 
-def run_batch(token: str, repo: str, now: datetime | None = None) -> int:
+def run_batch(token: str, repo: str, now: datetime | None = None, *, head_sha: str = "") -> int:
+    """Snapshot every eligible open PR, or only those whose head is exactly ``head_sha``.
+
+    ``head_sha`` is the targeted mode the workflow uses on ``workflow_run``: the
+    CI run on that head just completed, so only its PR's comment is refreshed
+    (no other PR's comment is rewritten).
+    """
     now = now or datetime.now(UTC)
     owner, name = repo.split("/")
     try:
@@ -149,6 +163,9 @@ def run_batch(token: str, repo: str, now: datetime | None = None) -> int:
 
     targets = eligible_prs(prs, repo)
     print(f"{len(prs)} open PR(s), {len(targets)} same-repo")
+    if head_sha:
+        targets = [pr for pr in targets if pr["head"]["sha"] == head_sha]
+        print(f"targeted at head {head_sha}: {len(targets)} PR(s)")
     failures = 0
     for pr in targets:
         try:
@@ -164,13 +181,21 @@ def run_batch(token: str, repo: str, now: datetime | None = None) -> int:
 
 
 def main() -> int:
-    argparse.ArgumentParser(description=__doc__).parse_args()
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--head-sha", default=os.environ.get("TARGET_HEAD_SHA", ""),
+                   help="only the open PR(s) whose head is exactly this sha (default: $TARGET_HEAD_SHA; "
+                        "empty = every open same-repo PR)")
+    a = p.parse_args()
     token = os.environ.get("GITHUB_TOKEN", "")
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     if not token or not repo:
         print("GITHUB_TOKEN and GITHUB_REPOSITORY are required", file=sys.stderr)
         return 1
-    return run_batch(token, repo)
+    head_sha = a.head_sha.strip().lower()
+    if head_sha and not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        print(f"--head-sha must be a full 40-hex commit sha, got {a.head_sha!r}", file=sys.stderr)
+        return 1
+    return run_batch(token, repo, head_sha=head_sha)
 
 
 if __name__ == "__main__":
