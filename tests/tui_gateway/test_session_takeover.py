@@ -406,7 +406,6 @@ def test_take_over_keeps_the_ack_deadline_for_a_foreign_namespace_pid_that_is_li
         durable_writer, sleeper, rpc, monkeypatch):
     """A pid number from another pid namespace says nothing about the process with that number here:
     it must not earn the live-writer wait or an "alive ... pid N" message naming the wrong process."""
-    import os
     import time
     _same_ns_holder(0)  # skips off Linux
     monkeypatch.setenv("HERMES_SESSION_TAKEOVER_ACK_TIMEOUT_S", "0.3")
