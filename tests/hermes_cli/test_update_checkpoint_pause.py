@@ -265,3 +265,85 @@ def test_lost_checkpoint_ack_settles_seventy_seconds_without_authorizing_mutatio
         assert 70 <= now[0] < 71
         disarm.assert_not_called()
 
+
+
+# ---- a refusal names its cause (hermes-hub 2026-11-12 13:53-13:56Z) ---------------------
+
+def test_a_gateway_chat_turn_refusal_names_the_turn_through_the_real_socket(episode):
+    """The hub's three refusals said only "busy or cannot acknowledge an idle pause": the gateway refused
+    the checkpoint for a gateway-hosted chat turn (lane ``boundary-opus-review``, a ``oneshot``) and the
+    updater threw the reason away. The real handler on a real socket must say which unit and session."""
+    write_intent(episode.home)
+    hold(episode)
+    episode.runner.active = 2  # one managed card + one gateway chat turn
+    episode.runner._running_agent_count = lambda: 1
+    episode.runner._running_agents = {"agent:main:local:dm:local-be7f": object()}
+    result, entry, idle = ask(episode)
+    assert result is False and idle == []
+    episode.runner.request_restart.assert_not_called()
+    assert entry["refusal_reason"].startswith("gateway refused the update checkpoint: unpreservable work: ")
+    assert "1 chat turn (agent:main:local:dm:local-be7f)" in entry["refusal_reason"]
+
+
+@pytest.mark.parametrize("change, cause", [
+    ("nonce", "nonce is not the live update intent's"),
+    ("reservation", "admission reservation(s) not published by a cut cron run"),
+])
+def test_every_refusing_check_names_itself(episode, monkeypatch, change, cause):
+    write_intent(episode.home)
+    hold(episode)
+    if change == "nonce":
+        monkeypatch.setattr(pause, "_checkpoint_nonce", lambda entry: "other-episode")
+    else:
+        reservation(episode, cron=False)
+    result, entry, _ = ask(episode)
+    assert result is False and cause in entry["refusal_reason"]
+
+
+def test_the_refusal_message_keeps_the_retry_token_and_adds_the_cause(monkeypatch):
+    """hermes-sync retries only output containing "busy or cannot acknowledge an idle pause"; the cause
+    rides along in brackets so the sync log names it."""
+    monkeypatch.setattr(record, "mark_stop_sent", lambda *a: None)
+    monkeypatch.setattr(record, "mark_stop_refused", lambda *a: None)
+    def refuse(e):
+        e["refusal_reason"] = "gateway refused the update checkpoint: unpreservable work: 1 chat turn (s1)"
+        return False
+    monkeypatch.setattr(pause, "_ask_to_drain", refuse)
+    with pytest.raises(pause.PauseRefused) as raised:
+        pause._stop_gateways({}, [entry()])
+    text = str(raised.value)
+    assert "busy or cannot acknowledge an idle pause [cause: gateway refused the update checkpoint: " \
+           "unpreservable work: 1 chat turn (s1)]; retry when idle" in text
+
+
+# ---- a duplicate `gateway run` is not a second gateway (12:29, 13:15, 13:55Z) -------------
+
+def _bare_scan(monkeypatch, *, served, pids=(5555,)):
+    from gateway import status
+    from hermes_cli import gateway as gw, update_cmd_fleet, update_fleet_scope
+    monkeypatch.setattr(pause, "_stop_busy_opted_in", lambda: False)
+    monkeypatch.setattr(pause, "_supervisor_markers", lambda pid: None)
+    monkeypatch.setattr(gw, "_get_service_pids", lambda **k: [4242])
+    monkeypatch.setattr(gw, "find_gateway_pids", lambda **k: list(pids))
+    monkeypatch.setattr(gw, "_capture_gateway_argv", lambda pid: ["hermes", "gateway", "run"])
+    monkeypatch.setattr(update_cmd_fleet, "_scoped_manual_gateway_pids", lambda found: list(found))
+    monkeypatch.setattr(update_fleet_scope, "gateway_pid_home", lambda pid: Path("/h/.hermes"))
+    monkeypatch.setattr(status, "live_gateway_pid_for_home", lambda home: served)
+    monkeypatch.setattr(status, "get_process_start_time", lambda pid: 1.0)
+    return pause._discover_bare({4242})
+
+
+def test_a_gateway_run_that_is_not_its_homes_gateway_is_not_paused(monkeypatch):
+    """The hub update asked the real gateway (unit, PID 322771) to checkpoint, then asked a transient
+    `gateway run` PID 487116 for the same home, which refused; the rollback restarted the drained real
+    gateway on the old code. A PID that is not its home's verified gateway is not inventoried."""
+    bare, notices = _bare_scan(monkeypatch, served=4242)
+    assert bare == []
+    assert notices == ["  ↷ gateway PID 5555 is not the gateway of /h/.hermes (PID 4242 serves it; "
+                       "a duplicate start exits on its own): not paused"]
+
+
+@pytest.mark.parametrize("served", [5555, None])
+def test_a_bare_gateway_that_serves_its_home_or_is_unprovable_is_still_paused(monkeypatch, served):
+    bare, notices = _bare_scan(monkeypatch, served=served)
+    assert [b["pid"] for b in bare] == [5555] and notices == []

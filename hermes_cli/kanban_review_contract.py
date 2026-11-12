@@ -52,9 +52,17 @@ def states_contract(body: Optional[str]) -> bool:
     return any(m.group("repo").lower() in CORE_REPOS for m in _PULL.finditer(text))
 
 
+def core_pull(body: Optional[str]) -> Optional[str]:
+    """The first core-fork pull request URL ``body`` names, else None."""
+    for m in _PULL.finditer(body or ""):
+        if m.group("repo").lower() in CORE_REPOS:
+            return "https://" + m.group(0)
+    return None
+
+
 def names_core_pull(body: Optional[str]) -> bool:
     """True when ``body`` names a pull request of the core fork: the cards whose review ship lands from."""
-    return any(m.group("repo").lower() in CORE_REPOS for m in _PULL.finditer(body or ""))
+    return core_pull(body) is not None
 
 
 def is_review_result(metadata: Any) -> bool:
@@ -90,15 +98,19 @@ def refusal(body: Optional[str], metadata: Any) -> Optional[str]:
     """The refusal text for a review result on a core-fork pull card that ship cannot read, else None."""
     if not is_review_result(metadata):
         return None
-    if not states_contract(body):
+    if states_contract(body):
+        cause = "this card states the ship review contract"
+    else:
         # The body does not spell the contract out: a core-fork pull card still gates a review that carries a
         # verdict (PR1462's brief asked for `pr`); a verdictless landing/cleanup handoff is not a review.
-        if not names_core_pull(body) or not any(key in metadata for key in _VERDICT_KEYS):
+        pull = core_pull(body)
+        if pull is None or not any(key in metadata for key in _VERDICT_KEYS):
             return None
+        cause = f"this card reviews a core-fork pull ({pull})"
     found = problems(metadata)
     if not found:
         return None
-    return ("kanban_complete refused: this card states the ship review contract, and `hermes-core-wt ship "
+    return (f"kanban_complete refused: {cause}, and `hermes-core-wt ship "
             "--review-task` reads only metadata.verdict, metadata.reviewed_sha and metadata.reviewed_pr. "
             + "; ".join(found) + ". Nothing changed: retry kanban_complete with the same summary and metadata "
             "that also carries {\"verdict\": \"approve\" | \"request_changes\", \"reviewed_sha\": \"<40-hex head>\", "

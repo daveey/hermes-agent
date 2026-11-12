@@ -742,15 +742,27 @@ def test_interrupted_snapshot_rolls_back_destination(tmp_path, monkeypatch):
 
     # The fake clock is the repair module's own seam (never the shared time
     # module, which teardown and other callers read) and never runs dry: after
-    # the start tick it stays past the deadline for any number of reads.
-    expired = hermes_state._REPAIR_LOCK_TIMEOUT_SECONDS + 1.0
-    ticks = itertools.chain((0.0,), itertools.repeat(expired))
-    monkeypatch.setattr(hermes_state_repair, "_monotonic", lambda: next(ticks))
+    # the start tick it stays past the deadline for any number of reads. It
+    # starts far ahead of the real clock, so a deadline check that read the
+    # shared time.monotonic instead of the seam would never see it expire.
+    start = time.monotonic() + 10**6
+    expired = start + hermes_state_repair._repair_snapshot_timeout_seconds(source) + 1.0
+    ticks = itertools.chain((start,), itertools.repeat(expired))
+    reads = 0
+
+    def fake_monotonic():
+        nonlocal reads
+        reads += 1
+        return next(ticks)
+
+    monkeypatch.setattr(hermes_state_repair, "_monotonic", fake_monotonic)
     real_monotonic = time.monotonic
 
     with pytest.raises(TimeoutError):
         hermes_state_repair._copy_database_snapshot(source, destination)
 
+    # The start tick plus at least one deadline-check read, both from the seam.
+    assert reads >= 2
     assert time.monotonic is real_monotonic
     assert [hermes_state_repair._monotonic() for _ in range(5)] == [expired] * 5
 
