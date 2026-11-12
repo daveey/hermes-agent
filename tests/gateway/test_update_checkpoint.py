@@ -217,3 +217,34 @@ def test_withdrawal_after_admission_cancels_real_restart_without_stop(checkpoint
     asyncio.run(scenario())
     runner.stop.assert_not_awaited()
     assert runner._restart_requested is False and runner._draining is False
+
+
+@pytest.mark.parametrize("change, cause", [
+    ("no-hold", "no live instant-update intent"),
+    ("nonce", "nonce is not the live update intent's"),
+])
+def test_invalid_episode_refusal_names_its_check(checkpoint, change, cause):
+    module, home, runner, _intent = checkpoint
+    if change == "no-hold":
+        admission_fence.clear_hold(home)
+    result = invoke(module, runner, nonce="wrong" if change == "nonce" else "episode-one")
+    assert result["busy"] and cause in result["reason"]
+
+
+def test_unknown_work_refusal_names_the_kinds_and_chat_sessions(checkpoint):
+    module, _home, runner, _intent = checkpoint
+    runner._active_work_count = lambda: 3
+    runner._running_agent_count = lambda: 1
+    runner._running_agents = {"agent:main:local:dm:local-7829": object()}
+    runner._active_api_run_count = lambda: 1
+    result = invoke(module, runner)
+    assert not result["pausing"]
+    assert result["reason"].startswith("unpreservable work: 1 chat turn (agent:main:local:dm:local-7829); "
+                                       "1 API-server run (active=3, preservable managed=1, cron=0)")
+
+
+def test_live_delegation_refusal_says_so(checkpoint, monkeypatch):
+    module, _home, runner, _intent = checkpoint
+    monkeypatch.setattr("gateway.run_active_work_verb._delegation_units", lambda now: [{"id": "d1"}])
+    result = invoke(module, runner)
+    assert "1 live async delegation(s)" in result["reason"]

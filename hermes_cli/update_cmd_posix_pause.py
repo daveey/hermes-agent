@@ -300,6 +300,22 @@ def _respawning_service(pid: int) -> str | None:
     return None
 
 
+def home_served_by_other(pid: int, home) -> int | None:
+    """The verified gateway PID serving *home* when it is not *pid*, else None.
+
+    A ``gateway run`` that is not its home's canonical gateway (PID file + runtime lock, then the
+    runtime status record) cannot serve it: a duplicate start exits once it finds the home served.
+    The process scan still sees it for that moment; pausing it as a second gateway made the update
+    drain the real one, then refuse on the duplicate and restart the real one on the old code
+    (hermes-hub 2026-11-12 12:29, 13:15, 13:55Z). Unprovable identity returns None (kept, as before)."""
+    from gateway.status import live_gateway_pid_for_home
+    try:
+        served = live_gateway_pid_for_home(Path(home))
+    except Exception:  # health: allow BLE001 -- unreadable identity proves nothing either way
+        return None
+    return int(served) if served and int(served) != int(pid) else None
+
+
 def _discover_bare(service_pids: set[int]) -> tuple[list[dict], list[str]]:
     """``(bare gateways, notices)``: this install's ``gateway run`` processes outside any unit."""
     if _stop_busy_opted_in():
@@ -316,6 +332,10 @@ def _discover_bare(service_pids: set[int]) -> tuple[list[dict], list[str]]:
         pid = int(pid)
         marker = _supervisor_markers(pid)
         argv, home = _capture_gateway_argv(pid), gateway_pid_home(pid)
+        if home and not marker and (served := home_served_by_other(pid, home)) is not None:
+            notices.append(f"  ↷ gateway PID {pid} is not the gateway of {home} (PID {served} serves it; "
+                           "a duplicate start exits on its own): not paused")
+            continue
         if marker or not argv or not home:
             why = f"supervised by {marker}" if marker else "its command line could not be read" if not argv \
                 else "its Hermes home could not be proved"
@@ -554,6 +574,7 @@ def _ask_to_drain(entry: dict) -> bool | None:
         return False  # no request was sent
     entry.pop("checkpoint_drain_timeout", None)
     entry.pop("checkpoint_settle_timeout", None)
+    entry.pop("refusal_reason", None)
     nonce = _checkpoint_nonce(entry)
     try:
         if nonce is not None:
@@ -571,14 +592,21 @@ def _ask_to_drain(entry: dict) -> bool | None:
                 if ack.get("pausing"):
                     entry["checkpoint_drain_timeout"] = float(ack["drain_timeout"])
                 return True
+            elif ack and ack.get("busy"):
+                # The cause is printed with the refusal (core's ``checkpoint_for_update`` reason).
+                entry["refusal_reason"] = ("gateway refused the update checkpoint: "
+                                           + str(ack.get("reason") or "no reason given (older gateway)"))
         else:
             ack = pause_gateway_for_update(Path(entry["home"]), idle_only=True)
-    except Exception:  # health: allow BLE001 -- unknown/busy gateways must not authorize a tree mutation
+    except Exception as exc:  # health: allow BLE001 -- unknown/busy gateways must not authorize a tree mutation
+        entry["refusal_reason"] = f"did not answer the pause request ({type(exc).__name__}: {exc})"
         return None
     if ack and (ack.get("pausing") or ack.get("already_stopping")):
         return True
     if ack and ack.get("unsupported"):
         entry["pause_unsupported"] = True
+    if not ack:
+        entry.setdefault("refusal_reason", "gave no answer on its control socket")
     return False if ack and (ack.get("busy") or ack.get("unsupported")) else None
 
 
@@ -793,8 +821,13 @@ def _stop_gateways(token: dict, entries: list[dict], deadline: float | None = No
         else:
             if acknowledged is False:
                 pause_record.mark_stop_refused(token, entry["pid"])
+            # "busy or cannot acknowledge an idle pause" is the token hermes-sync matches to retry (keep it);
+            # the bracketed cause names the refusing check.
+            cause = entry.get("refusal_reason")
             reason = ("does not support idle pause; restart that gateway on the installed code when idle"
-                      if entry.get("pause_unsupported") else "is busy or cannot acknowledge an idle pause; retry when idle")
+                      if entry.get("pause_unsupported") else
+                      "is busy or cannot acknowledge an idle pause" + (f" [cause: {cause}]" if cause else "")
+                      + "; retry when idle")
             refusals.append(f"{_names([entry])} {reason}")
             refused.append(_names([entry]))
             if acknowledged is None:
