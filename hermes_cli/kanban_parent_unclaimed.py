@@ -192,7 +192,7 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
                 "admission": ({"reason": "core_update_hold", "status": "held"} if (extra or {}).get("core_update_hold")
                               else {"reason": None, "status": "unknown"})}
     guard = place.get("reason") if place.get("lane") == "respawn_guard" else None
-    checkpoint = last_checkpoint.fields(conn, waiting_on)  # what the card already did (kanban-3debc730ab) [daveey]
+    checkpoint = last_checkpoint.notice_fields(conn, waiting_on)  # same lookup supplies fields and evidence [daveey]
     with kb.write_txn(conn):
         if _already_posted(conn, task_id, waiting_on, wait_key, kind):
             return False

@@ -23,21 +23,60 @@ PARK_OUTCOMES = frozenset({"continued", "blocked", "scheduled"})
 LIMIT = 200
 
 
-def fields(conn, task_id: str) -> dict[str, Any]:
+def fields(conn, task_id: str, *, diagnostic: dict[str, Any] | None = None) -> dict[str, Any]:
     """``{"last_checkpoint", "last_checkpoint_at"}`` when ``task_id``'s latest run (core-update requeues and
     unused Board grants skipped) ended by parking with a summary; ``{}`` otherwise. Advisory: a failed read
     drops the fields, never the notice."""
+    diagnostic = {} if diagnostic is None else diagnostic
+    diagnostic["reason"] = "lookup_error"
     try:
         from hermes_cli import kanban_db as kb
         from hermes_cli.kanban_core_update_requeue import latest_run_skipping_requeues
         run = latest_run_skipping_requeues(conn, task_id)
-        if run is None or run["outcome"] not in PARK_OUTCOMES or run["ended_at"] is None:
+        if run is None:
+            diagnostic["reason"] = "no_run"
+            return {}
+        diagnostic.update(run_id=run["id"], outcome=run["outcome"], ended_at=run["ended_at"],
+                          run_uid=run["uid"] if "uid" in run.keys() else None)
+        if run["outcome"] not in PARK_OUTCOMES:
+            diagnostic["reason"] = "nonpark"
+            return {}
+        if run["ended_at"] is None:
+            diagnostic["reason"] = "unfinished"
             return {}
         text = kb._first_line(run["summary"], LIMIT)
-        return {"last_checkpoint": text, "last_checkpoint_at": int(kb._to_epoch(run["ended_at"]) or 0)} if text else {}
+        result = {"last_checkpoint": text, "last_checkpoint_at": int(kb._to_epoch(run["ended_at"]) or 0)} if text else {}
+        diagnostic["reason"] = "included" if text else "empty_summary"
+        return result
     except Exception:  # health: allow BLE001 -- the checkpoint is advisory; the notice must still go out
         _log.warning("last-checkpoint: lookup failed for %s", task_id, exc_info=True)
         return {}
+
+
+def notice_fields(conn, task_id: str) -> dict[str, Any]:
+    """Persist bounded lookup evidence alongside a notice, not a second lookup or another event.
+
+    Boot revision is intentionally unknown for unbootstrapped callers: today's disk HEAD cannot
+    establish what an old process loaded. Run IDs are local; the UID correlates replicated rows.
+    """
+    import os
+    import socket
+    from pathlib import Path
+    from hermes_cli.git_fingerprint import process_boot_fingerprint
+    from hermes_cli.kanban_sync_client import SyncUnavailable, load_identity
+
+    fingerprint = process_boot_fingerprint(Path(__file__).resolve().parents[1])
+    diagnostic: dict[str, Any] = {
+        "emitter_pid": os.getpid(), "emitter_host": socket.gethostname(),
+        "core_revision": fingerprint.rsplit(":", 1)[-1] if fingerprint else None,
+        "emitter_gateway": None,
+    }
+    try:
+        diagnostic["emitter_gateway"] = load_identity().gateway
+    except (SyncUnavailable, OSError, ValueError):
+        pass  # local-only boards have no enrollment; host/PID still identify the emitter
+    result = fields(conn, task_id, diagnostic=diagnostic)
+    return {**result, "checkpoint_diagnostic": diagnostic}
 
 
 def sentence(payload: Any) -> str:
