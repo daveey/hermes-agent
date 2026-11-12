@@ -204,6 +204,10 @@ def test_failed_async_injection_is_retried_and_only_success_is_acked(
 def _persist_pending_completion(event):
     from tools import async_delegation
 
+    # These are live-delivery fixtures, not expired historical replays.
+    event = dict(event, dispatched_at=async_delegation.time.time() - 12,
+                 completed_at=async_delegation.time.time())
+
     async_delegation._persist_dispatch({
         "delegation_id": event["delegation_id"],
         "session_key": event["session_key"],

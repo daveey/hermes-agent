@@ -340,7 +340,8 @@ def test_offer_dropped_by_a_session_that_cannot_own_it_is_re_offered_to_the_owne
         assert _row(home, delegation_id)["delivery_state"] == "pending"
 
         monkeypatch.setitem(server._sessions, "sid-owner", owner)  # the owner resumes
-        assert ad.sweep_orphaned_completions(q, now=later + ad.ORPHAN_SWEEP_INTERVAL_S) == 1
+        assert ad.sweep_orphaned_completions(q, now=later + ad.ORPHAN_SWEEP_INTERVAL_S) == 0
+        assert ad.sweep_orphaned_completions(q, now=later + ad._CLAIM_LEASE_S + 1) == 1
         drain("sid-owner", owner)
     assert started == ["sid-owner"]
     assert _row(home, delegation_id)["delivery_state"] == "delivered"
@@ -368,7 +369,8 @@ def test_offer_released_after_a_failed_tui_turn_is_re_offered(tmp_path, monkeypa
         server._notif_dispatch_event("sid-owner", owner, evt, "text")
         row = _row(home, delegation_id)
         assert (row["delivery_state"], row["delivery_claim"], row["delivery_attempts"]) == ("pending", None, 1)
-        assert ad.sweep_orphaned_completions(q, now=row["updated_at"] + ad._ORPHAN_STALE_S + 1) == 1
+        assert ad.sweep_orphaned_completions(q, now=row["updated_at"] + ad._ORPHAN_STALE_S + 1) == 0
+        assert ad.sweep_orphaned_completions(q, now=max(later, row["updated_at"]) + ad._CLAIM_LEASE_S + 1) == 1
     assert [e["delegation_id"] for e in _drain(q)] == [delegation_id]
 
 

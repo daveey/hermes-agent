@@ -1274,8 +1274,11 @@ class GatewayNotificationsMixin(
         The supervised ``_async_delegation_watcher`` and startup-recovered process watchers run under
         the ROOT scope, so a secondary profile's completion was looked up in the DEFAULT profile's
         state.db — classified ``terminal`` and dropped, its ledger row stranded ``pending`` forever."""
+        from gateway.completion_local_route import resolve_legacy_local_event
         from gateway.run import _async_profile_runtime_scope
         from hermes_constants import get_hermes_home_override
+        # A raw legacy Desktop key names no profile: its owner's receipt decides the scope, before selection.
+        evt = resolve_legacy_local_event(self, evt)
         source = self._build_process_event_source(evt)
         if source is None or not getattr(source, "profile", None):
             raw_sid = _raw_process_event_session_id(evt)
@@ -1326,6 +1329,8 @@ class GatewayNotificationsMixin(
         from tools.process_registry_notifications import should_surface_notification
         if not should_surface_notification(evt):
             return None  # Suppressed noise is terminal, not a consumed process result.
+        from gateway.completion_local_route import resolve_legacy_local_event
+        evt = resolve_legacy_local_event(self, evt)
         restore_completion_route(self, str(evt.get("session_key") or ""))
         from gateway.session_detached import follow_detached_pin
         evt = await follow_detached_pin(self, evt)
@@ -1566,6 +1571,8 @@ class GatewayNotificationsMixin(
         from gateway.run import _format_gateway_process_notification
         from gateway.session_local_recovery import restore_completion_route
         from tools.process_registry import process_registry as _pr
+        from gateway.completion_local_route import resolve_legacy_local_event
+        group = [resolve_legacy_local_event(self, evt) for evt in group]
         restore_completion_route(self, str(group[0].get("session_key") or ""))
         # API delivery does not start a model turn, so there is nothing to coalesce.
         # Keep each unit's stable identity with its row across partial delivery/retry.

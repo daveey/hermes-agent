@@ -71,13 +71,14 @@ _orphan_lock = threading.Lock()
 # that copy is alive. A consumer that discards its copy with the row still pending hands it back
 # (``return_completion_offer``); the delivery claim stays the only thing that settles the row.
 _offered: set = set()
+# Every offer retains its lease even when the consumer hands its copy back.
+_offered_at: dict[tuple[str, str], float] = {}
 # Delegation ids this process first offered from its startup replay. Their copies carry
 # ``startup_replay`` on the sweep's later re-offers too, so a refused one stays gated.
 _startup_replayed: set = set()
 _last_orphan_sweep: dict[str, float] = {}
-# (home key, delegation_id) -> when the sweep last re-offered a lost copy. A consumer that keeps
-# handing the copy back would otherwise be re-offered every tick: re-offering touches no ledger
-# column, so each re-offer gets its own ``_CLAIM_LEASE_S`` here, and only the first one warns.
+# (home key, delegation_id) -> last lost-copy warning; only the first re-offer warns.
+# The independent _offered_at map enforces the lease even after a consumer hands the copy back.
 _reoffered_at: dict[tuple[str, str], float] = {}
 # delegation_id -> number of copies a consumer holds off-queue (``mark_copy_held``). The sweep counts
 # them as live alongside the queued ones, so it never adds a duplicate beside a held copy.
@@ -368,33 +369,77 @@ def restore_undelivered_completions(target_queue) -> int:
     recover_abandoned_delegations()
     now = time.time()
     with _DB_LOCK, _transaction() as conn:
+        _expire_pending_completions(conn, now)
         rows = conn.execute("""SELECT delegation_id, event_json, completed_at, dispatched_at
                FROM async_delegations
-               WHERE state != 'running' AND delivery_state='pending' AND event_json IS NOT NULL
-               ORDER BY completed_at, delegation_id""").fetchall()
+               WHERE state NOT IN ('running','finalizing') AND delivery_state='pending' AND event_json IS NOT NULL
+                 AND (delivery_claim IS NULL OR delivery_claimed_at < ?)
+               ORDER BY completed_at, delegation_id""", (now - _CLAIM_LEASE_S,)).fetchall()
         return _replay_pending(conn, rows, target_queue, now, startup=True)
+
+
+def _expire_pending_completions(conn, now: float) -> None:
+    """Resolve expired terminal rows even if their copies are queued or held; never steal a live claim."""
+    rows = conn.execute("""SELECT delegation_id, delivery_attempts,
+                  COALESCE(NULLIF(completed_at, 0), dispatched_at)
+           FROM async_delegations
+           WHERE state NOT IN ('running','finalizing') AND delivery_state='pending'
+             AND event_json IS NOT NULL
+             AND (delivery_claim IS NULL OR delivery_claimed_at < ?)
+             AND (delivery_attempts >= ? OR
+                  (COALESCE(NULLIF(completed_at, 0), dispatched_at) > 0 AND
+                   COALESCE(NULLIF(completed_at, 0), dispatched_at) < ?))""",
+        (now - _CLAIM_LEASE_S, _MAX_DELIVERY_ATTEMPTS, now - _MAX_COMPLETION_REPLAY_AGE_S)).fetchall()
+    for delegation_id, attempts, age_basis in rows:
+        expired = age_basis and now - age_basis > _MAX_COMPLETION_REPLAY_AGE_S
+        reason = "replay age expired" if expired else "delivery attempts exhausted"
+        attempts = max(1, attempts or 0)
+        changed = conn.execute("""UPDATE async_delegations SET delivery_state='dropped',
+                      delivery_claim=NULL, delivery_claimed_at=NULL, delivery_attempts=MAX(1, delivery_attempts), updated_at=?
+               WHERE delegation_id=? AND delivery_state='pending'
+                 AND (delivery_claim IS NULL OR delivery_claimed_at < ?)""",
+            (now, delegation_id, now - _CLAIM_LEASE_S)).rowcount
+        if changed:
+            logger.warning("Async delegation %s: %s; terminally dropped after %d delivery attempt(s) "
+                           "(result remains queryable).", delegation_id, reason, attempts)
+    _prune_offer_history(conn)
+
+
+def _prune_offer_history(conn) -> None:
+    """Keep custody history only for this home's pending rows (including live claims).
+
+    Time alone is unsafe: a copy can remain queued beyond a lease. Terminal/deleted rows cannot
+    be replayed, while another home's history must survive this home's sweep.
+    """
+    home = hermes_home_key(get_hermes_home())
+    pending = {row[0] for row in conn.execute(
+        "SELECT delegation_id FROM async_delegations WHERE delivery_state='pending'")}
+    with _orphan_lock:
+        keys = _offered | _offered_at.keys() | _reoffered_at.keys()
+        stale = {key for key in keys if key[0] == home and key[1] not in pending}
+        _offered.difference_update(stale)
+        for key in stale:
+            _offered_at.pop(key, None)
+            _reoffered_at.pop(key, None)
+        remaining_ids = {key[1] for key in keys - stale}
+        _startup_replayed.difference_update({key[1] for key in stale} - remaining_ids)
 
 
 def _replay_pending(conn, rows, target_queue, now: float, *, startup: bool = False) -> int:
     """Put each pending ``(delegation_id, event_json, completed_at, dispatched_at)`` row on ``target_queue``
     stamped ``restored``, or terminally drop it past ``_MAX_COMPLETION_REPLAY_AGE_S``. Records the offer so
-    the orphan sweep skips the row until the copy is handed back (``return_completion_offer``)."""
+    the orphan sweep retains the offer lease even after ``return_completion_offer``."""
     home, restored = hermes_home_key(get_hermes_home()), 0
     for delegation_id, payload, completed_at, dispatched_at in rows:
         age_basis = completed_at or dispatched_at
         if age_basis and (now - age_basis) > _MAX_COMPLETION_REPLAY_AGE_S:
-            conn.execute("""UPDATE async_delegations SET delivery_state='dropped',
-                          delivery_claim=NULL, delivery_claimed_at=NULL,
-                          updated_at=?
-                   WHERE delegation_id=? AND delivery_state='pending'""", (now, delegation_id))
-            logger.warning("Async delegation %s: pending completion is %.1fh old "
-                           "(cap %.1fh); terminally dropping the replay (result remains queryable).",
-                           delegation_id, (now - age_basis) / 3600.0, _MAX_COMPLETION_REPLAY_AGE_S / 3600.0)
-            continue
+            continue  # the caller expires all rows once, before selecting replay candidates
         with _orphan_lock:
             if (home, delegation_id) in _offered:
                 # The owner's explicit startup replay and the first-consume replay
                 # (process_registry.restore_completions) may both run: offer once.
+                continue
+            if startup and _offered_at.get((home, delegation_id), float("-inf")) >= now - _CLAIM_LEASE_S:
                 continue
         evt = json.loads(payload)
         if isinstance(evt, dict):
@@ -409,6 +454,7 @@ def _replay_pending(conn, rows, target_queue, now: float, *, startup: bool = Fal
         target_queue.put(evt)
         with _orphan_lock:
             _offered.add((home, delegation_id))
+            _offered_at[(home, delegation_id)] = now
         restored += 1
     return restored
 
@@ -470,7 +516,7 @@ def _copy_may_be_live(delegation_id: str, pid, updated_at: float, live_ids: set,
     if delegation_id in live_ids or updated_at >= now - _CLAIM_LEASE_S:
         return True
     with _orphan_lock:
-        return _reoffered_at.get((home, delegation_id), float("-inf")) >= now - _CLAIM_LEASE_S
+        return _offered_at.get((home, delegation_id), float("-inf")) >= now - _CLAIM_LEASE_S
 
 
 def _note_reoffers(home: str, lost: list, now: float) -> None:
@@ -519,29 +565,21 @@ def sweep_orphaned_completions(target_queue, *, now: Optional[float] = None) -> 
     from tools.process_registry import process_registry
     live = _queued_completion_ids(target_queue, process_registry.completion_queue)
     with _orphan_lock:
-        offered = {delegation_id for key, delegation_id in _offered if key == home}
+        offered = {delegation_id for key, delegation_id in _offered | _offered_at.keys() if key == home}
     with _DB_LOCK, _transaction() as conn:
+        _expire_pending_completions(conn, now)
         rows = conn.execute("""SELECT delegation_id, event_json, completed_at, dispatched_at,
-                      owner_pid, owner_started_at, delivery_attempts, updated_at
+                      owner_pid, owner_started_at, updated_at
                FROM async_delegations
                WHERE state NOT IN ('running','finalizing') AND delivery_state='pending'
                  AND event_json IS NOT NULL AND updated_at < ?
                  AND (delivery_claim IS NULL OR delivery_claimed_at < ?)
                ORDER BY completed_at, delegation_id""", (now - _ORPHAN_STALE_S, now - _CLAIM_LEASE_S)).fetchall()
         orphans, lost = [], []
-        for delegation_id, payload, completed_at, dispatched_at, pid, started, attempts, updated_at in rows:
+        for delegation_id, payload, completed_at, dispatched_at, pid, started, updated_at in rows:
             copy_lost = alive(pid, started) or delegation_id in offered
             if copy_lost and (live is None or _copy_may_be_live(delegation_id, pid, updated_at, live, home,
                                                                   offered, now)):
-                continue
-            if (attempts or 0) >= _MAX_DELIVERY_ATTEMPTS:
-                # Its last claimant died holding the final attempt; converge like release_completion_delivery.
-                conn.execute("""UPDATE async_delegations SET delivery_state='dropped',
-                              delivery_claim=NULL, delivery_claimed_at=NULL, updated_at=?
-                       WHERE delegation_id=? AND delivery_state='pending'""", (now, delegation_id))
-                logger.warning("Async delegation %s exhausted its %d delivery attempts; "
-                               "marking terminally dropped (result remains queryable).",
-                               delegation_id, _MAX_DELIVERY_ATTEMPTS)
                 continue
             orphans.append((delegation_id, payload, completed_at, dispatched_at))
             if copy_lost:
@@ -727,7 +765,7 @@ def release_event_delivery(evt: dict[str, Any], claim_id: str) -> None:
 def return_completion_offer(evt: dict[str, Any]) -> None:
     """Hand an offered completion back to the orphan sweep after its in-memory copy was discarded while
     the durable row stays pending, e.g. a TUI session that cannot prove it owns the event drops it (every
-    session poller drains one process-wide queue). The next sweep may offer the row again. Delegation ids
+    session poller drains one process-wide queue). After its offer lease the sweep may offer it again. Delegation ids
     are unique across profiles, so this clears the offer in every home."""
     delegation_id = str(evt.get("delegation_id") or "") if evt.get("type") == "async_delegation" else ""
     if not delegation_id or is_interim_delegation_event(evt):
@@ -1479,6 +1517,7 @@ def _reset_for_tests() -> None:
         _refused_by.clear()
     with _orphan_lock:
         _offered.clear()
+        _offered_at.clear()
         _startup_replayed.clear()
         _last_orphan_sweep.clear()
         _reoffered_at.clear()
