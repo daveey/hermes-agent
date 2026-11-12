@@ -64,6 +64,15 @@ def root_settings():
     return slots, ceiling
 
 
+def lane_rows(conn, status):
+    """Offer marked candidates before normal rows only on an opted-in hub."""
+    from hermes_cli import machine_cpu_metrics as cpu
+    from hermes_cli.kanban_db_dispatch_queries import lane_rows as query
+
+    marked_first = cpu.root_limit()[0] == cpu.ON and root_settings()[0] > 0
+    return query(conn, status, marked_first=marked_first)
+
+
 def dispatch_remaining(regular_cap):
     """Upper bound for candidate attempts; final locked claims enforce each pool."""
     from hermes_cli import machine_cpu_metrics as cpu, machine_metrics

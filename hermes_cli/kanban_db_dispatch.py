@@ -41,7 +41,8 @@ from hermes_cli import kanban_owner_death as _owner_death, kanban_parent_unclaim
 from hermes_cli.kanban_db_dispatch_crash_accounting import _account_crashes  # [daveey]
 from hermes_cli.kanban_failure_accounting import _record_task_failure
 from hermes_cli.kanban_db_dispatch_dead_worker import _DeadWorker
-from hermes_cli.kanban_db_dispatch_queries import lane_rows, skip_reap
+from hermes_cli.kanban_db_dispatch_queries import skip_reap
+from hermes_cli.kanban_admission_pools import host_remaining, lane_rows
 from hermes_cli.kanban_db_dispatch_clock import record_clock_hold as _record_clock_hold
 from hermes_cli.kanban_db_dispatch_rerun import reopened_after
 
@@ -2150,7 +2151,6 @@ def _tick_spawn_budget(
         spawn_budget = max_spawn - running_count
 
     if max_in_progress is not None:
-        from hermes_cli.kanban_admission_pools import host_remaining
         remaining = host_remaining(max_in_progress, running_count, board)
         if remaining <= 0:
             result.at_capacity = f"max_in_progress={max_in_progress - remaining}/{max_in_progress}"

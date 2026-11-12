@@ -264,6 +264,95 @@ def test_dispatch_budget_reaches_extra_pool_at_regular_cap(board, monkeypatch, p
         assert result.memory_pressure == pressure
 
 
+@pytest.mark.parametrize("review", [False, True])
+def test_dispatch_marked_candidate_precedes_normal_in_same_lane(
+    board, monkeypatch, all_assignees_spawnable, review,
+):
+    from hermes_cli import kanban_db_dispatch as dispatch
+    conn, home = board
+    configure(home, cap=7)
+    with (home / "config.yaml").open("a") as config:
+        config.write("    priority_slots: 3\n")
+    advisory(home)
+    monkeypatch.setattr(cm, "sample", fake_sample(10))
+    monkeypatch.setattr(dispatch, "review_dispatch_enabled", lambda: True)
+    monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda: "normal")
+    normal = task(conn, review=review, title="higher numeric priority")
+    kb.edit_task(conn, normal, priority=1000)
+    marked = task(conn, review=review, title="restore capacity")
+    kb.edit_task(conn, marked, admission_class="capacity", admission_frees="frees: worker slots")
+    spawned = []
+
+    def spawn(candidate, workspace, board=None):
+        spawned.append(candidate.id)
+
+    result = dispatch.dispatch_once(conn, spawn_fn=spawn, max_spawn=1, max_in_progress=7)
+    assert spawned == [marked], result
+    assert kb.get_task(conn, normal).status == ("review" if review else "ready")
+    receipt = conn.execute("SELECT admission_pool FROM task_runs WHERE task_id=?", (marked,)).fetchone()
+    assert receipt[0] == "priority"
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_dispatch_pool_order_keeps_worker_priority(board, monkeypatch, all_assignees_spawnable, enabled):
+    from hermes_cli import kanban_db_dispatch as dispatch
+    conn, home = board
+    configure(home, limit=None, cap=7)
+    if enabled:
+        with (home / "config.yaml").open("a") as config:
+            config.write("  admission:\n    priority_slots: 3\n")
+    monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda: "normal")
+    high = task(conn, title="high normal")
+    kb.edit_task(conn, high, priority=1000)
+    marked = task(conn, title="marked low")
+    kb.edit_task(conn, marked, admission_class="urgent")
+    spawned = []
+
+    def spawn(candidate, workspace, board=None):
+        spawned.append(candidate.id)
+
+    dispatch.dispatch_once(conn, spawn_fn=spawn, max_spawn=1, max_in_progress=7)
+    assert spawned == [high]
+
+
+@pytest.mark.parametrize("review", [False, True])
+@pytest.mark.parametrize("pressure,expected", [("normal", 2), ("elevated", 1), ("critical", 0)])
+def test_dispatch_full_regular_pool_claims_marked_with_shared_memory_budget(
+    board, monkeypatch, all_assignees_spawnable, review, pressure, expected,
+):
+    from hermes_cli import kanban_db_dispatch as dispatch
+    conn, home = board
+    configure(home, limit=None)
+    for index in range(7):
+        tid = task(conn, title=f"active {index}")
+        assert kb.claim_task(conn, tid)
+    configure(home, cap=7)
+    with (home / "config.yaml").open("a") as config:
+        config.write("    priority_slots: 3\n")
+    normal = task(conn, review=not review, title="normal opposite lane")
+    marked = [task(conn, review=review, title=f"incident {index}") for index in range(3)]
+    for tid in marked:
+        kb.edit_task(conn, tid, admission_class="urgent")
+    advisory(home, pct=70)
+    monkeypatch.setattr(cm, "sample", fake_sample(70))
+    monkeypatch.setattr(dispatch, "review_dispatch_enabled", lambda: True)
+    monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda: pressure)
+    spawned = []
+
+    def spawn(candidate, workspace, board=None):
+        spawned.append(candidate.id)
+
+    dispatch.dispatch_once(conn, spawn_fn=spawn, max_spawn=9, max_in_progress=7, reconcile_orphans=False)
+    assert len(spawned) == expected
+    assert set(spawned) <= set(marked)
+    assert normal not in spawned
+    for tid in spawned:
+        assert conn.execute("SELECT admission_pool FROM task_runs WHERE task_id=?", (tid,)).fetchone()[0] == "priority"
+    detail = {"pools": {"regular": 0, "priority": 0}}
+    assert mm.active_card_runs(detail=detail) == 7 + expected
+    assert detail["pools"] == {"regular": 7, "priority": expected}
+
+
 def test_pool_census_uses_one_board_snapshot(board, monkeypatch):
     from hermes_cli import kanban_admission_pools as pools
     conn, home = board

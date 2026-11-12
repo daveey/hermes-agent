@@ -12,11 +12,14 @@ Local run pool/class/origin receipts now survive task class and chat-release edi
 The whole-host census uses a consistent read snapshot per board and enforces the
 capacity-origin cap in final admission. Opt-in pre-lease/final CPU gates select the
 separate priority pool. The dispatcher budget can reach the extra pool at regular
-saturation, preserving the shared critical/elevated memory guard. Ready and review
-claim tests admit urgent work at 70% CPU with seven regular slots full. These are
-isolated budget/claim-path tests, not complete dispatcher or live proof.
+saturation, preserving the shared critical/elevated memory guard. Opted-in hubs
+order marked candidates first within each lane, retaining effective priority
+within each group. Composed ready/review dispatcher tests now reach real final
+claims at 70% CPU with seven regular runs, including an opposite normal lane,
+critical/elevated memory and a hard per-board `max_spawn` ceiling. Workers retain
+plain priority. These isolated tests do not establish Board or live acceptance.
 
-Still pending: composed dispatcher selection and queue notes, Board and
+Still pending: queue notes, Board and
 courier receiver compatibility, full malformed-config/receipt tests, sync replay
 coverage, guard mutations, scoring, reporting and live activation. Do not enable
 this incomplete implementation. `priority_slots` is currently opt-in (absent = 0)
