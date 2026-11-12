@@ -3135,7 +3135,7 @@ def request_review(
                 *(() if reviewer is None else (reviewer,)), task_id,
                 *(() if expected_run_id is None else (int(expected_run_id),)),
             )
-            cur = conn.execute(
+            cur = _sr.with_source_receipt(conn, task_id, lambda: conn.execute(
                 """
                 UPDATE tasks
                    SET status        = 'review',
@@ -3148,7 +3148,7 @@ def request_review(
                    AND status IN ('running', 'ready')
                 """ + run_guard,
                 params,
-            )
+            ))
             if cur.rowcount != 1:
                 return _ret(
                     False, "task is not in running/ready (or expected_run_id did not match the current run)",
@@ -3238,7 +3238,7 @@ def request_changes(
         new_status = _landing_status_after_parents(conn, task_id)
         # consecutive_failures deliberately PRESERVED: a review transition is
         # not evidence the pathology cleared; only complete_task resets it.
-        cur = conn.execute(
+        cur = _sr.with_source_receipt(conn, task_id, lambda: conn.execute(
             """
             UPDATE tasks
                SET status = ?,
@@ -3249,7 +3249,7 @@ def request_changes(
              WHERE id = ? AND status = 'running' AND current_run_id = ?
             """,
             (new_status, implementer, task_id, int(current_run_id)),
-        )
+        ))
         if cur.rowcount != 1:
             return False, "task changed during review handoff"
         run_id = _end_run(

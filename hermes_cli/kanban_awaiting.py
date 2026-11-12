@@ -870,7 +870,9 @@ def escalate(conn: sqlite3.Connection, task_id: str, *, record: dict, reason: Op
     if expected_run_id is not None:
         sql += " AND current_run_id = ?"
         params = (task_id, int(expected_run_id))
-    if conn.execute(sql, params).rowcount != 1:
+    # Q2 (t_01a1d0ec4ab93f32): a voluntary ending's escalation; the receipt its enclosing ending staged rides this op.
+    from hermes_cli.kanban_source_receipt import with_source_receipt
+    if with_source_receipt(conn, task_id, lambda: conn.execute(sql, params).rowcount) != 1:
         return None
     key = f"{ESCALATION_PREFIX}{task_id}:{record['premise']}"
     existing = conn.execute("SELECT id, status FROM tasks WHERE idempotency_key = ?", (key,)).fetchone()

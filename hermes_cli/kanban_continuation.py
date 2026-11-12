@@ -179,13 +179,14 @@ def continue_task(
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
         # A successful checkpoint supersedes stale auth/quota diagnostics, not counters.
-        cur = conn.execute(
+        from hermes_cli.kanban_source_receipt import with_source_receipt
+        cur = with_source_receipt(conn, task_id, lambda: conn.execute(
             "UPDATE tasks SET status = ?, claim_lock = NULL, claim_expires = NULL, "
             "worker_pid = NULL, worker_started_at = NULL, last_heartbeat_at = NULL, "
             "last_failure_error = NULL "
             "WHERE id = ? AND status = 'running' AND current_run_id = ?",
             (new_status, task_id, int(row["current_run_id"])),
-        )
+        ))
         if cur.rowcount != 1:
             return {"ok": False, "error": "task changed state concurrently"}
         kpp.apply(conn, task_id, pin)  # unpushed state keeps a pooled card on this worker

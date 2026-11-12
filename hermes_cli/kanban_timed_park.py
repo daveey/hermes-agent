@@ -186,7 +186,8 @@ def park(
     if expected_run_id is not None:
         sql += " AND current_run_id = ?"
         params = (task_id, int(expected_run_id))
-    if conn.execute(sql, params).rowcount != 1:
+    from hermes_cli.kanban_source_receipt import with_source_receipt
+    if with_source_receipt(conn, task_id, lambda: conn.execute(sql, params).rowcount) != 1:
         return False
     from hermes_cli.kanban_blocker_metadata import blocker_metadata, FIELDS
     meta = blocker_metadata(conn, task_id, reason=reason, metadata=run_metadata,

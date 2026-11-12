@@ -622,6 +622,8 @@ def install_triggers(conn: sqlite3.Connection) -> None:
     """(Re)generate every capture trigger from the live column list. A no-op when the installed set already
     matches, so ordinary process starts never touch them; callers hold a write transaction so a rebuild has no
     window in which another process's write goes uncaptured."""
+    from hermes_cli import kanban_source_receipt
+    kanban_source_receipt.ensure_schema(conn)  # the tasks UPDATE trigger reads its pending table
     wanted = wanted_triggers(conn)
     have = dict(conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'kanban_sync_%'"))
     if have == wanted:

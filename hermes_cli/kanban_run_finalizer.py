@@ -24,14 +24,15 @@ def close_dead_run(conn, row, dead):
     if run is None or run['status'] != 'running' or run['ended_at'] is not None:
         return None
     retry_status = kb._retry_status_for_run(conn, row['id'])
-    cur = conn.execute(
+    from hermes_cli.kanban_source_receipt import with_source_receipt
+    cur = with_source_receipt(conn, row['id'], lambda: conn.execute(
         'UPDATE tasks SET status=?, claim_lock=NULL, claim_expires=NULL, '
         'worker_pid=NULL, worker_started_at=NULL '
         "WHERE id=? AND status='running' AND current_run_id=? "
         'AND worker_pid IS ? AND worker_started_at IS ? AND claim_lock IS ?',
         (retry_status, row['id'], run_id, row['worker_pid'],
          row['worker_started_at'], row['claim_lock']),
-    )
+    ), run_id=run_id)
     if cur.rowcount != 1:
         return None
     dead.event_payload['retry_status'] = retry_status
