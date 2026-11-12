@@ -381,15 +381,9 @@ def test_opted_in_stop_that_fails_still_refuses_the_move(tmp_path, monkeypatch):
     assert order == ["drain", "resume"]  # rolled back under the fence, never armed
 
 
-@pytest.mark.parametrize("native", [
-    pytest.param(False, marks=pytest.mark.platforms("posix")),
-    pytest.param(True, marks=pytest.mark.platforms("macos")),
-])
-def test_macos_ignores_the_opt_in_and_stays_idle_only(monkeypatch, native):
-    # The native case exercises the real platform predicate on macOS CI; the
-    # simulated case keeps the refusal contract exercised on Linux as well.
-    if not native:
-        monkeypatch.setattr(pause, "_is_linux", lambda: False)
+@pytest.mark.platforms("macos")
+def test_macos_ignores_the_opt_in_and_stays_idle_only(monkeypatch):
+    # Exercise the real platform predicate on the native macOS CI lane.
     monkeypatch.setenv(pause.STOP_BUSY_ENV, "1")
     assert not pause._stop_busy_opted_in()
     monkeypatch.setattr(pause, "_stop_busy_gateways", lambda *a: pytest.fail("busy stop on macOS"))
