@@ -28,11 +28,12 @@ REASON = f"Renew the Board dashboard session in {QUOTE}; read back the cookie ex
 
 
 @pytest.fixture
-def pair(tmp_path, monkeypatch):
+def pair(tmp_path, monkeypatch, request):
+    home = getattr(request, "param", HUB)
     svc = FakeService(lease_runs=True)
     monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: None)
     sync.consume_dispatcher_wake()
-    hub = Gw(tmp_path, HUB, svc, monkeypatch, pickup=False, hub_replica=True)
+    hub = Gw(tmp_path, home, svc, monkeypatch, pickup=False, hub_replica=True)
     worker = Gw(tmp_path, WORKER, svc, monkeypatch, pickup="explicit", hub_replica=False)
     hub.holds(NEED)
     worker.holds("sudo:nopasswd")
@@ -124,11 +125,64 @@ def test_owner_verdict_inside_an_open_transaction_is_recorded(pair):
         "admission unavailable"]
 
 
-def test_stored_admit_whose_quote_left_the_text_is_not_used():
+def test_stored_owner_verdict_runs_the_judges_full_validation():
+    """Review t_01a1ced25af29218: only the quote was re-checked, and a failed check read as
+    "judge unavailable" (a retry that replays the same cached verdict up to generation 5)."""
     from hermes_cli.kanban_hub_admission_placement import stored_owner_verdict
     entry = {"hub_admission": {"admit": True, "need": "hub_chrome", "evidence": QUOTE, "why": "x"}}
     assert stored_owner_verdict(entry, "title", f"body with {QUOTE}")["admit"] is True
-    assert stored_owner_verdict(entry, "title", "body without it") is None
+    moved = stored_owner_verdict(entry, "title", "body without it")
+    assert moved["admit"] is False and moved["invalid"] is True  # a final deny, not None (retry)
+    off_list = {"hub_admission": {"admit": True, "need": "hub_gpu", "evidence": QUOTE, "why": "x"}}
+    assert stored_owner_verdict(off_list, "title", f"body with {QUOTE}")["admit"] is False
     assert stored_owner_verdict({}, "t", "b") is None
     assert stored_owner_verdict({"hub_admission": {"admit": False, "why": "admission unavailable"}}, "t", "b") is None
     assert stored_owner_verdict({"hub_admission": {"admit": False, "why": "pool can"}}, "t", "b")["admit"] is False
+
+
+def test_admit_quoting_owner_template_text_creates_exactly_the_judged_card(pair, monkeypatch):
+    """Review blocker: the relay judged owner_body() text but the hub's probe created a card from
+    another template, so an admit quoting the template failed the quote check."""
+    hub, worker, calls, _verdict = pair
+
+    def quoting_template(fields, *, hub_reason=None):
+        calls.append(fields)
+        first = fields["body"].splitlines()[0]  # template boilerplate, not the waiting card's reason
+        return judge.Verdict(admit=True, need="hub_chrome", evidence=first, why="template quote")
+
+    monkeypatch.setattr(judge, "admit", quoting_template)
+    _tid, _res, rid = _relay(hub, worker)
+    rc, msg = kcr.wait_check(rid)
+    assert rc == 1 and "hub_admission" not in msg, msg
+    owner = hub.conn.execute("SELECT title, body, runs_on, placement_policy FROM tasks WHERE idempotency_key = ?",
+                             (rid,)).fetchone()
+    assert owner is not None, msg
+    assert (owner["title"], owner["body"]) == (calls[0]["title"], calls[0]["body"])
+    assert json.loads(owner["runs_on"]) == [f"machine:{HUB}"] and owner["placement_policy"] is None
+    assert len(calls) == 1
+
+
+def test_invalid_stored_admit_is_a_final_deny_not_a_retry(pair):
+    hub, worker, calls, verdict = pair
+    verdict["value"] = judge.Verdict(admit=True, need="hub_gpu", evidence=QUOTE, why="off the allowlist")
+    tid, _res, rid = _relay(hub, worker)
+    rc, msg = kcr.wait_check(rid)
+    assert rc == 1 and "hub_admission_unavailable" not in msg, msg
+    owner = _owner(hub, rid)
+    assert owner["placement_policy"] == "worker-first-v1" and json.loads(owner["requires"]) == ["hub:write"]
+    (event,) = [e.payload for e in kb.list_events(hub.conn, tid) if e.kind == "hub_admission"]
+    assert event["admit"] is False and event["invalid"] is True
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("pair", ["mini"], indirect=True)
+def test_relay_to_a_non_hub_home_makes_no_model_call_and_no_event(pair):
+    hub, worker, calls, _verdict = pair  # "hub" here is the mini: the card's home, holding the need
+    tid, res, rid = _relay(hub, worker)
+    assert calls == [] and "hub_admission" not in res["routes"][0]
+    rc, msg = kcr.wait_check(rid)
+    assert rc == 1, msg
+    assert calls == []
+    assert json.loads(_owner(hub, rid)["runs_on"]) == ["machine:mini"]
+    for g in (hub, worker):
+        assert [e for e in kb.list_events(g.conn, tid) if e.kind == "hub_admission"] == []

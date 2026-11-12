@@ -60,6 +60,16 @@ def test_cli_hub_auto_create(hub_cli, admit):
         assert "hub:write" in task.requires
 
 
+def test_cli_receive_judges_without_the_origin_placement_note(hub_cli):
+    """Review t_01a1ced25af29218: only courier_plan stripped the origin's note (its Chrome and
+    Keychain), so a plain create-task receive on the hub judged the origin's host needs."""
+    note = ("Placed on hub by macbook's default placement rule (kanban.placement): only the MacBook's "
+            "Chrome profile and Keychain count; don't park or ask David.")
+    assert _cli_create(MARKED, "--body", f"Work text.\n\n{note}") == 0
+    body = hub_cli.calls[0]["card"]["body"]
+    assert "Work text." in body and "Placed on hub" not in body and "Keychain" not in body
+
+
 @pytest.mark.parametrize("admit", [True, False])
 def test_cli_runs_on_machine_hub(hub_cli, monkeypatch, admit):
     from hermes_cli import kanban_worker_node as wn

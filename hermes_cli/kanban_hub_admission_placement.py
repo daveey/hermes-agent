@@ -39,12 +39,39 @@ def _verdict(fields, hub_reason=None):
         return judge.Verdict()
 
 
-def courier_plan(conn, args, runs_on, *, cfg=None, gateway=None):
+def _prior_landing(conn, request_id):
+    """The placement an earlier apply of the same courier request persisted, or None.
+
+    A re-applied request (crash after commit, adapter timeout) must rebuild the identical
+    immutable envelope; judging again could flip the verdict and raise origin_creation_conflict.
+    """
+    import json
+    import sqlite3
+    if conn is None or not request_id:
+        return None
+    try:
+        row = conn.execute("SELECT intent_json FROM origin_creation_intents WHERE request_id = ?",
+                           (request_id,)).fetchone()
+        options = (json.loads(row[0]) or {}).get("options") or {} if row else None
+    except (sqlite3.OperationalError, TypeError, ValueError):
+        return None  # no intents table yet, or an unreadable row: create_with_origin reports it
+    if not isinstance(options, dict):
+        return None
+    from hermes_cli.kanban_worker_placement import POLICY, WAITING
+    audit = (options.get("placement_audit") or {}).get("hub_admission")
+    out = {"where": "local", "why": "courier replay", **({"hub_admission": audit} if audit else {})}
+    if options.get("placement_policy") == POLICY:
+        out.update(placement_policy=POLICY, why=WAITING, requires=options.get("requires"))
+    return out if audit or out.get("placement_policy") else {}
+
+
+def courier_plan(conn, args, runs_on, *, cfg=None, gateway=None, request_id=None):
     """A courier create landing on the hub: ``None`` (not hub-bound) or the admission placement.
 
     Runs in the receiving ``kanban_create`` before its write transaction, before the card can be
     claimed. Admitted: ``{"hub_admission": audit}`` (stays here). Denied: worker-first enrollment
-    with ``requires`` + ``hub:write``; ``where="refuse"`` when it cannot go to the pool.
+    with ``requires`` + ``hub:write``; ``where="refuse"`` when it cannot go to the pool. A request
+    already applied reuses its stored placement and makes no model call.
     """
     from hermes_cli import kanban_placement as kp
     from hermes_cli.kanban_worker_placement import POLICY, WAITING
@@ -55,8 +82,9 @@ def courier_plan(conn, args, runs_on, *, cfg=None, gateway=None):
     machines = [v[8:] for v in runs_on or [] if v.startswith("machine:")]
     if runs_on is not None and not any(is_hub(m, cfg) for m in machines) and not hub_only(runs_on, cfg):
         return None  # the lease labels let a worker claim it: not a hub slot
-    if args.get("placement_policy"):
-        return None
+    prior = _prior_landing(conn, request_id)
+    if prior is not None:
+        return prior or None
     # validate_creation's own fences: a worker-first card cannot carry a host workspace, board or project.
     pinned = (runs_on is not None or (args.get("workspace_kind") or "scratch") != "scratch"
               or args.get("workspace_path") or args.get("project_id")
@@ -188,17 +216,24 @@ def owner_verdict(title, body, *, need):
 
 
 def stored_owner_verdict(entry, title, body):
-    """The relay-time verdict for the owner card being sent now, or None when it cannot be used.
+    """The relay-time verdict for the owner card being created now, or None when it cannot be used.
 
-    An admit counts only while its evidence still occurs verbatim in the text being sent.
+    None means the judge was unavailable (retryable). A stored verdict that fails the judge's own
+    validation (need off the allowlist, evidence not verbatim in ``title``/``body``) is a final
+    deny, never a retry: re-relaying would replay the same cached verdict on the same text.
     """
     audit = (entry or {}).get("hub_admission")
     if not isinstance(audit, dict) or not isinstance(audit.get("admit"), bool):
         return None
     if audit.get("why") == judge.Verdict().why:
         return None  # the judge was unavailable at relay time: retry, never a permanent answer
-    if audit["admit"] and not (audit.get("evidence") and (audit["evidence"] in title or audit["evidence"] in body)):
-        return None
+    sha = audit["skill_sha"] if isinstance(audit.get("skill_sha"), str) else ""
+    result = {k: audit.get(k) for k in ("admit", "need", "evidence", "why")}
+    if judge.validated(result, {"title": title, "body": body}, None, sha) is None:
+        return {**asdict(judge.Verdict(why="relay-time admission verdict failed validation (need or verbatim "
+                                           "evidence)", skill_sha=sha)),
+                "entry": audit.get("entry") or "capability_owner", "capability": audit.get("capability"),
+                "invalid": True}
     return audit
 
 
@@ -294,10 +329,9 @@ def apply(args, decision, gateway, cfg, *, origin_intent=None):
             return {"where": "refuse", "why": "force_hub is unavailable to dispatcher workers"}
         verdict = judge.Verdict(admit=True, why="operator override", forced=True)
     else:
-        try:
-            verdict = judge.admit(args, hub_reason=args.get("hub_reason"))
-        except Exception:  # health: allow BLE001 -- never let caller fallback admit a failed judge
-            verdict = judge.Verdict()
+        from hermes_cli.kanban_placement import without_placement_note
+        # A routed card's placement note names the origin's host needs (Chrome, Keychain): never hub evidence.
+        verdict = _verdict({**args, "body": without_placement_note(args.get("body") or "")}, args.get("hub_reason"))
     audit = asdict(verdict)
     if verdict.forced:
         audit["session"] = os.environ.get("HERMES_SESSION_ID", "")

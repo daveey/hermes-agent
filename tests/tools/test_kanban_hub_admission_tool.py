@@ -158,6 +158,27 @@ def test_tool_courier_create_landing_on_hub_is_judged(on_gateway, admit):
     assert [e["admit"] for e in _events(result["task_id"])] == [admit]
 
 
+@pytest.mark.parametrize("first", [False, True])
+def test_tool_courier_replay_reuses_the_first_landing(on_gateway, first):
+    """Review t_01a1ced25af29218: a re-applied request whose verdict flipped (an unavailable deny is
+    not cached) rebuilt a different envelope and raised origin_creation_conflict."""
+    judge = on_gateway("hub")
+    judge.admit_next = first
+    intent = {"request_id": f"request-replay-{first}",
+              "owner": {"gateway": "hub", "profile": "default", "board": "default"},
+              "origin": {"gateway": "macbook", "profile": "default", "session": "s_mac"}}
+    args = {"title": MARKED, "requires": [], "assignee": "default"}
+    one = json.loads(kt._handle_create(dict(args), origin_intent=intent))
+    judge.admit_next = not first
+    two = json.loads(kt._handle_create(dict(args), origin_intent=intent))
+    assert one.get("task_id") and two.get("task_id") == one["task_id"], two
+    assert len(judge.calls) == 1  # the replay makes no model call
+    with kbc.connect() as conn:
+        assert len(kb.list_tasks(conn)) == 1
+        task = kb.get_task(conn, one["task_id"])
+    assert (task.placement_policy is None) is first
+
+
 @pytest.mark.parametrize("admit", [True, False])
 def test_tool_placement_hub_from_another_gateway(on_gateway, monkeypatch, admit):
     import functools

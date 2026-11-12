@@ -364,18 +364,18 @@ def _park_relay(conn, task_id: str, needs: list[str], *, reason: str, gateway: s
                "generation": generations.get(n, 1), "relay": mode, "relayed_at": int(now), "from_gateway": me}
               for n in needs]
     ids = ",".join(r["request_id"] for r in routes)
-    # [daveey] Judge the owner card at relay time, never in the wait-check probe that applies the relay:
-    # the home may route it to the hub, and the probe's own 30 s timeout cannot hold a 30 s judge call.
+    # [daveey] An owner card lands on the hub only when the hub is the card's home and holds the need
+    # (_local_owner there). Judge exactly that card's text now, never in the wait-check probe that
+    # applies the relay (its 30 s timeout cannot hold a 30 s judge call), and store the judged text
+    # on the route so the probe creates that very card. A non-hub home makes no model call (a hub
+    # it routes to judges on its own create). The verdict event is recorded only where it lands.
     from hermes_cli.kanban_hub_admission_placement import owner_verdict
     waiting = kb.get_task(conn, task_id)
-    relay_board = kb.get_current_board() or "default"
-    if waiting is not None and not conn.in_transaction:
+    if waiting is not None and mode == RELAY_HOME and _is_hub_gateway(gateway) and not conn.in_transaction:
         for r in routes:
-            owner_title = redact_sensitive_text(
-                f"Capability owner: {r['need']} for {gateway}/{task_id} ({(waiting.title or '')[:80]})", force=True)
-            r["hub_admission"] = owner_verdict(
-                owner_title, owner_body(waiting, r["need"], self_gw=gateway, board=relay_board, reason=reason),
-                need=r["need"])
+            r["owner_title"], r["owner_body"] = local_owner_text(waiting, r["need"], self_gw=gateway,
+                                                                 from_gw=me, reason=reason)
+            r["hub_admission"] = owner_verdict(r["owner_title"], r["owner_body"], need=r["need"])
     until = datetime.fromtimestamp(int(now) + WAKE_HORIZON, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     if mode == RELAY_HOME:
         summary = (f"relayed {', '.join(needs)} to {gateway}, this card's home gateway: {me} is a Board worker "
@@ -399,10 +399,6 @@ def _park_relay(conn, task_id: str, needs: list[str], *, reason: str, gateway: s
             "awaiting": [{"kind": "card", "ref": f"{gateway}/request/{r['request_id']}",
                           "why": f"capability {r['need']} ({mode} relay)"} for r in routes],
         })
-        for r in routes:
-            if r.get("hub_admission"):
-                kb._append_event(conn, task_id, "hub_admission", {**r["hub_admission"], "relay": mode,
-                                                                  "request_id": r["request_id"]})
         ok = ktp.park(conn, task_id, reason=park_reason, requested_kind="capability", source_status=source,
                       expected_run_id=expected_run_id, wake_check=wake_check, check_every=WAKE_EVERY,
                       awaiting={"kind": "card", "ref": routes[0]["request_id"], "gateway": gateway,
@@ -815,17 +811,8 @@ def _apply_relay(conn, task, entry: dict, payload: dict, *, now: Optional[float]
     body = owner_body(task, need, self_gw=self_gw, board=board, reason=reason)
     argv = [_hub_cli(), "create-task", gw, title, "--body", body, "--assignee", _owner_assignee(),
             "--origin-session", "", "--id", rid, *_overlap_option_argv(None, overlap_exclusions(conn, task.id))]
-    if _is_hub_gateway(gw):
-        from hermes_cli.kanban_hub_admission_placement import gate_owner, stored_owner_verdict
-        audit = stored_owner_verdict(entry, title, body)
-        if audit is None:  # no usable relay-time verdict: fail retryably, the worker re-relays (re-judged)
-            return _relay_fail(conn, task.id, entry, "hub_admission_unavailable",
-                               f"owner card for {need} was not sent to the hub: no hub admission verdict was "
-                               "recorded at relay time (judge unavailable). Route the need again to retry.")
-        gate_owner(conn, task.id, title, body, need=need, audit=audit)
-        if not audit["admit"]:
-            return _relay_fail(conn, task.id, entry, "hub_admission_denied",
-                               f"owner card for {need} was not sent to the hub: hub admission denied ({audit['why']})")
+    # [daveey] An owner sent to the hub is judged there, on this exact text, by its own create
+    # (hermes kanban create's admission preflight), outside this probe's timeout.
     rc, out = _create_task(argv)
     if rc not in (0, 3):
         if age < RELAY_RETRY_S:
@@ -842,11 +829,11 @@ def _apply_relay(conn, task, entry: dict, payload: dict, *, now: Optional[float]
     return 1, f"{rid} sent to {gw} (relayed from {from_gw})"
 
 
-def _local_owner(conn, task, entry: dict, *, need: str, rid: str, self_gw: str, from_gw: str,
-                 reason: str) -> tuple[int, str]:
-    """The waiting card's own gateway holds the need: the owner card is a local card pinned to this machine."""
-    from hermes_cli import kanban_db as kb
+def local_owner_text(task, need: str, *, self_gw: str, from_gw: str, reason: str) -> tuple[str, str]:
+    """Title and body of the owner card the waiting card's own gateway opens for ``need``.
 
+    Shared by the relay-time judge and :func:`_local_owner`, so the judged text is the card's text.
+    """
     excerpt = redact_sensitive_text((reason or "").strip(), force=True)[:3000]
     title = redact_sensitive_text(f"Capability owner: {need} for {task.id} ({(task.title or '')[:80]})", force=True)
     body = (
@@ -869,12 +856,24 @@ def _local_owner(conn, task, entry: dict, *, need: str, rid: str, self_gw: str, 
         f"{task.id} is parked on this card: completing it wakes {task.id} within about {WAKE_EVERY // 60} min, "
         f"and it resumes on {from_gw}.\n"
     )
+    return title, body
+
+
+def _local_owner(conn, task, entry: dict, *, need: str, rid: str, self_gw: str, from_gw: str,
+                 reason: str) -> tuple[int, str]:
+    """The waiting card's own gateway holds the need: the owner card is a local card pinned to this machine."""
+    from hermes_cli import kanban_db as kb
+
+    title, body = local_owner_text(task, need, self_gw=self_gw, from_gw=from_gw, reason=reason)
     own = _own_gateway(conn)
     if _is_hub_gateway(self_gw) or (own and _is_hub_gateway(own)):
         # [daveey] The hub holds the need: the owner stays here only if admitted; a denied owner
         # enrolls in the worker pool with the hub-write requirement (Board: capability:hub-write).
+        # The card is created with exactly the text judged at relay time.
         from hermes_cli.kanban_hub_admission_placement import gate_owner, stored_owner_verdict
         from hermes_cli.kanban_worker_placement import POLICY
+        if isinstance(entry.get("owner_title"), str) and isinstance(entry.get("owner_body"), str):
+            title, body = entry["owner_title"], entry["owner_body"]
         audit = stored_owner_verdict(entry, title, body)
         if audit is None:  # never judged inside this probe; never a permanent route either
             return _relay_fail(conn, task.id, entry, "hub_admission_unavailable",

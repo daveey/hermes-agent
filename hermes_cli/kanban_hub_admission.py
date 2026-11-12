@@ -45,26 +45,30 @@ def _skill():
     return body, hashlib.sha256(text.encode()).hexdigest()
 
 
-def _parse(text, fields, hub_reason, sha):
-    invalid = Verdict(why="invalid admission verdict", skill_sha=sha)
-    try:
-        result = json.loads(text)
-    except (ValueError, TypeError):
-        return invalid
+def validated(result, fields, hub_reason, sha):
+    """The Verdict for a well-formed, evidence-checked ``{admit, need, evidence, why}`` dict, else None."""
     if not isinstance(result, dict) or set(result) != {"admit", "need", "evidence", "why"}:
-        return invalid
+        return None
     if (type(result["admit"]) is not bool or not isinstance(result["evidence"], str)
             or not isinstance(result["why"], str) or not result["why"].strip()):
-        return invalid
+        return None
     need = result["need"]
     if need is not None and (not isinstance(need, str) or need not in NEEDS):
-        return invalid
+        return None
     if result["admit"]:
         quote = result["evidence"]
         inputs = (fields.get("title") or "", fields.get("body") or "", hub_reason or "")
         if need is None or not quote.strip() or not any(quote in item for item in inputs):
-            return invalid
+            return None
     return Verdict(**result, skill_sha=sha)
+
+
+def _parse(text, fields, hub_reason, sha):
+    try:
+        result = json.loads(text)
+    except (ValueError, TypeError):
+        result = None
+    return validated(result, fields, hub_reason, sha) or Verdict(why="invalid admission verdict", skill_sha=sha)
 
 
 def _cache(key, verdict=None):

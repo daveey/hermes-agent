@@ -19,7 +19,7 @@ def _courier_landing(conn, args, origin_intent, marker, runs_on, **effective):
     if origin_intent is None:
         return marker
     from hermes_cli.kanban_hub_admission_placement import courier_plan
-    return courier_plan(conn, {**args, **effective}, runs_on) or marker
+    return courier_plan(conn, {**args, **effective}, runs_on, request_id=origin_intent.get("request_id")) or marker
 
 
 def _origin_enrollment(args, origin, marker, **effective):
