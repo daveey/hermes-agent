@@ -265,10 +265,12 @@ def _restart_cut(authority, stop, execution_id):
     fire claim, so the firer forwarded a "lost ownership" cancel)."""
     from cron.cancellation import cancel_requested
     runner = getattr(authority, 'runner', None)
-    if not getattr(runner, '_draining', False):
-        return False
+    # Sticky for this process, read first: a run interrupted by the stop can unwind after stop()
+    # finished and reset ``_draining`` (the run outlives the executor quiesce).
     if getattr(runner, '_interrupting_remaining_work', False):
         return True
+    if not getattr(runner, '_draining', False):
+        return False
     return bool(stop is not None and stop.is_set() and not cancel_requested(execution_id))
 
 
@@ -338,7 +340,11 @@ async def execute(authority, ref, row, policy):
                 if fire_interrupted_by_shutdown(job_id):
                     return True
                 runner = getattr(authority, 'runner', None)
-                return bool(getattr(runner, '_draining', False)) and not cancel_requested(execution_id)
+                if cancel_requested(execution_id):
+                    return False
+                # The interrupt latch outlives stop()'s ``_draining`` reset (see _restart_cut).
+                return bool(getattr(runner, '_interrupting_remaining_work', False)
+                            or getattr(runner, '_draining', False))
 
             stop = _CombinedCancelEvent(
                 CancelRequest(execution_id),

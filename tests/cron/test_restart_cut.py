@@ -127,9 +127,9 @@ def _owner(tmp_path, *, draining=False):
 
 
 @pytest.mark.parametrize("case", ["interrupting", "claim_cleared", "operator_cancel", "not_draining",
-                                  "finished_anyway"])
+                                  "finished_anyway", "returned_after_stop_finished"])
 def test_owner_marks_only_its_own_restart_cut(home, monkeypatch, case):
-    from cron.cancellation import request_cancel
+    from cron.cancellation import cancel_is_shutdown, request_cancel
     from gateway import run, session_cron
     from gateway.session_contract import SessionRef
     from hermes_state_runtime import admit_session_input, claim_session_input
@@ -138,10 +138,18 @@ def test_owner_marks_only_its_own_restart_cut(home, monkeypatch, case):
     monkeypatch.setattr(run, "_profile_runtime_scope", lambda home: nullcontext())
     execution = executions.create_execution("job", source="direct")
     request_id = "cron:job:" + execution["id"]
+    captured = {}
 
     def run_job(job, *, extra_prompt, execution_id, cancel_event):
         if case == "interrupting":
             authority.runner._interrupting_remaining_work = True
+        elif case == "returned_after_stop_finished":
+            # Live hub shape: the drain timed out and interrupted the run, then stop() finished and
+            # reset ``_draining`` before this thread unwound (it outlives the executor quiesce).
+            authority.runner._interrupting_remaining_work = True
+            authority._cron_cancellations[row["admission_id"]].set()
+            authority.runner._draining = False
+            captured["shutdown"] = cancel_is_shutdown(cancel_event)
         elif case == "operator_cancel":
             request_cancel(execution_id, reason="stop it")
             authority._cron_cancellations[row["admission_id"]].set()
@@ -173,7 +181,9 @@ def test_owner_marks_only_its_own_restart_cut(home, monkeypatch, case):
     finally:
         db.close()
     cut = result["cron_job_flags"].get("_restart_cut", False)
-    assert cut is (case in {"interrupting", "claim_cleared"})
+    assert cut is (case in {"interrupting", "claim_cleared", "returned_after_stop_finished"})
+    if case == "returned_after_stop_finished":
+        assert captured == {"shutdown": True}  # logged as this gateway's shutdown, not lost ownership
     if cut:
         assert result["cron_result"][0] is False
 
