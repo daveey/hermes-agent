@@ -1701,14 +1701,8 @@ def _cmd_stats(args: argparse.Namespace) -> int:
 
 
 def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
-    delivery_metadata = {
-        key: value
-        for key, value in (
-            ("parent_chat_id", getattr(args, "parent_chat_id", None)),
-            ("guild_id", getattr(args, "guild_id", None)),
-        )
-        if value
-    }
+    delivery_metadata = {key: value for key, value in (("parent_chat_id", getattr(args, "parent_chat_id", None)),
+                                                       ("guild_id", getattr(args, "guild_id", None))) if value}
     if args.platform in ("tui", "hub"):
         # An explicit subscribe is a shepherd: the chat's sidebar row stays busy until the card
         # lands (kanban_session_activity.COUNTED_SUB_REASONS). Upgrades an earlier touch sub, never

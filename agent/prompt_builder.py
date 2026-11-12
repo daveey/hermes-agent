@@ -810,9 +810,8 @@ PLATFORM_HINTS = {
         "or URL in plain text."
     ),
     "desktop": (
-        # Every claim verified against the shipping renderer (inline-preview-directive.tsx). Widget text is
-        # recipe-first: HOW (an inline widget IS a ::preview'd HTML file) and WHY (the frame injects the theme
-        # prelude first; the frame spans the column up to its cap). setup_mcp is taught by its own tool schema.
+        # Every claim verified against inline-preview-directive.tsx. Recipe-first: HOW (an inline widget IS a ::preview'd HTML
+        # file) and WHY (theme prelude injected first; the frame spans the column to its cap). setup_mcp: its own tool schema.
         "You are chatting inside the Hermes desktop app, a graphical chat surface. Markdown renders with full GitHub "
         "flavor (tables, syntax-highlighted code, math via $...$, task lists, callouts). Deliver files by writing "
         "MEDIA:/absolute/path/to/file — any file type: images/audio/video render inline, everything else becomes a "
@@ -822,16 +821,16 @@ PLATFORM_HINTS = {
         "frame already themes it — the app's live theme arrives as var(--foreground), var(--muted-foreground), "
         "var(--accent), var(--border), var(--card), plus the app font, zero margins, and a transparent background, "
         "injected before your styles — so use those vars for color and don't set your own background, font, or margins "
-        "(only a standalone PAGE — mockup, poster, game — overrides them). The frame spans the chat column up to 960px "
-        "and follows it on resize, and its height follows your content live: lay content out fluidly and "
-        "flush left, with no centering wrappers, and size charts from the frame's current width, redrawing on resize. "
-        "Widgets talk back: data-hermes-send=\"prompt\" on any clickable "
-        "element (or window.hermes.send(\"prompt\")) sends that prompt as a hidden user turn — answer it by updating "
-        "the widget's file, not with prose. hermes.send takes at most 500 characters, one per second, and returns a "
-        "Promise of {ok:true} or {ok:false,error,retryAfterMs}: await it, retry after retryAfterMs when throttled, "
-        "show the user any other failure, and send large data in chunks (one record or a few per send). The frame is "
-        "sandboxed, so localStorage/sessionStorage/IndexedDB are unavailable: keep state with yourself (write it into "
-        "the widget's file) and never promise the user local saving."
+        "(only a standalone PAGE — mockup, poster, game — overrides them). The frame spans the chat column up to "
+        "960px and follows it on resize, and its height follows your content live: lay content out fluidly and flush "
+        "left, with no centering wrappers, and size charts from the frame's current width, redrawing on resize. "
+        "Widgets talk back: data-hermes-send=\"prompt\" on any clickable element (or window.hermes.send(\"prompt\")) "
+        "sends that prompt as a hidden user turn — answer it by updating the widget's file, not with prose. "
+        "hermes.send takes at most 500 characters, one per second, and returns a Promise of {ok:true} or "
+        "{ok:false,error,retryAfterMs}: await it, retry after retryAfterMs when throttled, show the user any other "
+        "failure, and send large data in chunks (one record or a few per send). The frame is sandboxed, so "
+        "localStorage/sessionStorage/IndexedDB are unavailable: keep state with yourself (write it into the widget's "
+        "file) and never promise the user local saving."
     ),
     "api_server": (
         "You're responding through an API server. The rendering layer is unknown — assume plain text. No markdown "
@@ -1011,8 +1010,7 @@ def _format_backend_probe(output: str) -> str:
 
 
 def _probe_remote_backend(env_type: str) -> str | None:
-    """Describe the active non-local backend via a live probe; None if it failed (cached, failures included)
-    or in a hosted scope (the probe's throwaway environment; a hosted agent's only one is its own sandbox)."""
+    """Live-probe description of the active non-local backend; None if it failed (cached) or in a hosted scope."""
     from hermes_constants import hermes_home_key
     from tools.hosted_tool_policy import host_feature_enabled
     if not host_feature_enabled("backend_probe"):
