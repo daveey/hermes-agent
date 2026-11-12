@@ -35,6 +35,42 @@ export const outcomeStripe = (outcome: null | SessionOutcome | undefined): null 
   }
 }
 
+/** [daveey] The tone an UNREAD dot takes from the stored outcome. The emerald unread dot means "finished, not yet
+ *  seen", and users read it as done; a chat whose outcome is waiting / running / unresolved / decision / muted is not
+ *  done, so its unread dot paints that outcome's stripe colour instead (still filled, so it still reads as new).
+ *  Null = keep the emerald unread dot (outcome `done`, no outcome, or a kind this app does not know). */
+export const unreadDotOutcomeStripe = (outcome: null | SessionOutcome | undefined): null | SessionStatusStripe => {
+  const stripe = outcomeStripe(outcome)
+
+  return stripe && stripe !== 'done' ? stripe : null
+}
+
+/** [daveey] The unread dot's label when its outcome is not done: unread, plus what the outcome says (not "Finished"). */
+export const unreadDotOutcomeLabel = (
+  outcome: SessionOutcome,
+  r: Pick<
+    Translations['sidebar']['row'],
+    'outcomeDecision' | 'outcomeMuted' | 'outcomeRunning' | 'outcomeUnresolved' | 'outcomeWaiting' | 'unreadNotDone'
+  >
+): string => {
+  switch (outcome.kind) {
+    case 'decision':
+      return r.unreadNotDone(r.outcomeDecision)
+
+    case 'muted':
+      return r.unreadNotDone(r.outcomeMuted)
+
+    case 'running':
+      return r.unreadNotDone(r.outcomeRunning)
+
+    case 'unresolved':
+      return r.unreadNotDone(r.outcomeUnresolved(outcome.reason ?? null))
+
+    default:
+      return r.unreadNotDone(r.outcomeWaiting)
+  }
+}
+
 const pad2 = (n: number) => String(n).padStart(2, '0')
 
 /** Local wall-clock `HH:MM` for an epoch-seconds ETA. */

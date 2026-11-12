@@ -4,7 +4,15 @@ import { TRANSLATIONS } from '@/i18n/catalog'
 import { type SessionDotState, sessionStatusStripe } from '@/store/session-dot-state'
 import type { SessionOutcome } from '@/types/session-outcome'
 
-import { outcomeEtaLabel, outcomeHasCrons, outcomeStripe, outcomeTooltip, outcomeWaitingLine } from './session-outcome'
+import {
+  outcomeEtaLabel,
+  outcomeHasCrons,
+  outcomeStripe,
+  outcomeTooltip,
+  outcomeWaitingLine,
+  unreadDotOutcomeLabel,
+  unreadDotOutcomeStripe
+} from './session-outcome'
 
 const r = TRANSLATIONS.en.sidebar.row
 
@@ -424,5 +432,36 @@ describe('a finished chat that owns a cron', () => {
   it('leaves a plain done alone', () => {
     expect(outcomeHasCrons(OUTCOMES.done)).toBe(false)
     expect(outcomeTooltip(OUTCOMES.done, r)).toBe('Shipped PR #12 and closed the card.')
+  })
+})
+
+// [daveey] desktop.log `state=unread … outcome=waiting` with every card parked: the dot painted the emerald unread
+// colour, which users read as done. Unread is emerald only when the stored outcome is done (or absent).
+describe('unread dot precedence against the stored outcome', () => {
+  it.each([
+    ['waiting', 'waiting'],
+    ['running', 'waiting'],
+    ['unresolved', 'attention'],
+    ['decision', 'stuck'],
+    ['muted', 'blocked']
+  ] as const)('an unread %s chat paints the %s tone, not the done emerald', (kind, stripe) => {
+    expect(unreadDotOutcomeStripe(OUTCOMES[kind])).toBe(stripe)
+    expect(unreadDotOutcomeStripe(OUTCOMES[kind])).not.toBe('done')
+  })
+
+  it('keeps the emerald unread dot for done, no outcome, or an unknown kind', () => {
+    expect(unreadDotOutcomeStripe(OUTCOMES.done)).toBeNull()
+    expect(unreadDotOutcomeStripe(null)).toBeNull()
+    expect(unreadDotOutcomeStripe(undefined)).toBeNull()
+    expect(unreadDotOutcomeStripe({ kind: 'from-the-future' })).toBeNull()
+  })
+
+  it('labels the dot unread plus the outcome, never "Finished"', () => {
+    expect(unreadDotOutcomeLabel(OUTCOMES.waiting, r)).toBe('Unread — Waiting')
+    expect(unreadDotOutcomeLabel(OUTCOMES.unresolved, r)).toBe(
+      'Unread — Unresolved: a card update arrived and nothing answered it'
+    )
+    expect(unreadDotOutcomeLabel(OUTCOMES.decision, r)).toBe('Unread — Waiting on your decision')
+    expect(unreadDotOutcomeLabel(OUTCOMES.waiting, r)).not.toContain(r.finishedUnread)
   })
 })

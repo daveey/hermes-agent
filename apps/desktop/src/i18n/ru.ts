@@ -2533,6 +2533,7 @@ export const ruOverrides = {
       needsInput: 'Нужен ваш ввод',
       waitingForAnswer: 'Ждёт вашего ответа',
       finishedUnread: 'Завершён — не прочитан',
+      unreadNotDone: (outcome: string) => `Не прочитан — ${outcome}`,
       backgroundRunning: 'Фоновая задача выполняется',
       draftSession: 'Черновик — ещё ничего не отправлено',
       handoffOrigin: platform => `Передано из ${platform}`,

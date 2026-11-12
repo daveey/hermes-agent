@@ -3740,6 +3740,7 @@ export const deOverrides = {
       needsInput: 'Braucht Ihre Eingabe',
       waitingForAnswer: 'Wartet auf Ihre Antwort',
       finishedUnread: 'Abgeschlossen – ungelesen',
+      unreadNotDone: (outcome: string) => `Ungelesen – ${outcome}`,
       backgroundRunning: 'Hintergrundaufgabe läuft',
       draftSession: 'Entwurf – noch nichts gesendet',
       handoffOrigin: platform => `Übergeben von ${platform}`,

@@ -3747,6 +3747,7 @@ export const frOverrides = {
       needsInput: 'Nécessite votre saisie',
       waitingForAnswer: 'En attente de votre réponse',
       finishedUnread: 'Terminée — non lue',
+      unreadNotDone: (outcome: string) => `Non lue — ${outcome}`,
       backgroundRunning: 'Tâche en arrière-plan en cours',
       draftSession: 'Brouillon — aucun message envoyé',
       handoffOrigin: platform => `Transférée depuis ${platform}`,

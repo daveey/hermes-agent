@@ -32,6 +32,7 @@ export const enSessionRowStatus = {
   pausedQueue: 'A message queued before a restart may not have run: Send again or Discard',
   outcomeUnresolved: reason =>
     reason && Object.hasOwn(UNRESOLVED_REASONS, reason) ? UNRESOLVED_REASONS[reason] : 'Unresolved',
+  unreadNotDone: outcome => `Unread — ${outcome}`,
   muteFailed: 'Could not update the parked state',
   backgroundProcesses: count => `${count} background ${count === 1 ? 'process' : 'processes'} running`,
   backgroundProcessUnnamed: 'background process',

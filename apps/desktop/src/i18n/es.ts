@@ -3728,6 +3728,7 @@ export const esOverrides = {
       needsInput: 'Necesita tu respuesta',
       waitingForAnswer: 'Esperando tu respuesta',
       finishedUnread: 'Finalizada — sin leer',
+      unreadNotDone: (outcome: string) => `Sin leer — ${outcome}`,
       backgroundRunning: 'Tarea en segundo plano en ejecución',
       draftSession: 'Borrador — aún no se ha enviado nada',
       handoffOrigin: platform => `Transferido desde ${platform}`,

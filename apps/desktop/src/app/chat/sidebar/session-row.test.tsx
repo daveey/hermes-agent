@@ -15,6 +15,7 @@ import type * as ComposerStatusStore from '@/store/composer-status'
 import { $sidebarRowMeta } from '@/store/layout'
 import { $projectTree } from '@/store/project-tree'
 import { $pullRequestsByBranch, branchPrKey } from '@/store/pull-requests'
+import { $unreadFinishedSessionIds } from '@/store/session'
 import type * as SessionStore from '@/store/session'
 import { clearAllSessionStates, publishSessionState } from '@/store/session-states'
 import type * as SessionStatesStore from '@/store/session-states'
@@ -1138,5 +1139,55 @@ describe('SidebarSessionRow stored outcome', () => {
     )
 
     expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('blocked')
+  })
+
+  // [daveey] desktop.log `state=unread … outcome=waiting`, every card parked: the dot painted the emerald unread
+  // colour and read as done. An unread dot takes the outcome's tone unless the outcome is done.
+  describe('unread dot against the stored outcome', () => {
+    afterEach(() => {
+      $unreadFinishedSessionIds.set([])
+    })
+
+    const dotOf = (container: HTMLElement) =>
+      container.querySelector('[role="status"][aria-label^="Unread"], [role="status"][aria-label="Finished"]')
+
+    it.each([
+      [{ kind: 'waiting', on: [{ kind: 'card', id: 't_1', state: 'scheduled' }] }, 'zinc', 'Unread — Waiting'],
+      [{ kind: 'running', on: [] }, 'zinc', 'Unread — Running'],
+      [{ kind: 'unresolved', reason: 'notice_tail' }, 'amber', 'Unread — Unresolved: notice_tail'],
+      [{ kind: 'decision', items: [{ id: 'us_1', question: 'Merge?' }] }, 'red', 'Unread — Waiting on your decision']
+    ] as const)('an unread %j chat paints %s, never the done emerald', (outcome, colour, label) => {
+      $unreadFinishedSessionIds.set(['s1'])
+
+      const { container } = renderRow(
+        makeSession({
+          kanban_active: 2,
+          kanban_parked: 2,
+          message_count: 4,
+          outcome,
+          title: 'Parked cards'
+        } as Partial<SessionInfo> & { title: string })
+      )
+
+      const dot = dotOf(container)
+      expect(dot?.getAttribute('aria-label')).toBe(label)
+      expect(dot?.className).toContain(colour)
+      expect(dot?.className).not.toContain('ui-success')
+    })
+
+    it('an unread done chat (or one with no outcome) keeps the emerald unread dot', () => {
+      $unreadFinishedSessionIds.set(['s1'])
+
+      for (const outcome of [{ kind: 'done', summary: 'Shipped' }, undefined]) {
+        const { container, unmount } = renderRow(
+          makeSession({ message_count: 4, outcome, title: 'Done' } as Partial<SessionInfo> & { title: string })
+        )
+
+        const dot = dotOf(container)
+        expect(dot?.getAttribute('aria-label')).toBe('Finished')
+        expect(dot?.className).toContain('ui-success')
+        unmount()
+      }
+    })
   })
 })

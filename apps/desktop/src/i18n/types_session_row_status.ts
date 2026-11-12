@@ -14,6 +14,8 @@ export interface SessionRowStatusCopy {
   /** [daveey] The red is a queue card a restart may have lost (this app's queue, not the backend's status). */
   pausedQueue: string
   outcomeUnresolved: (reason: null | string) => string
+  /** [daveey] An unread dot whose stored outcome is not done: unread, then what the outcome says. */
+  unreadNotDone: (outcome: string) => string
   muteFailed: string
   backgroundProcesses: (count: number) => string
   backgroundProcessUnnamed: string
