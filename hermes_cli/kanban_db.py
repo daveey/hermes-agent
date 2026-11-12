@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_priority
+from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_priority, kanban_source_receipt as _sr
 from hermes_cli.kanban_db_values import _first_line, _opt_int, _json_or_null
 from hermes_cli.kanban_db_event import Event  # public kb.Event; helpers import lazily: no cycle
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
@@ -2550,8 +2550,7 @@ def complete_task(
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
             params = (*params, int(expected_run_id))
-        from hermes_cli.kanban_source_receipt import with_source_receipt
-        if with_source_receipt(conn, task_id, lambda: conn.execute(sql, params).rowcount) != 1:
+        if _sr.with_source_receipt(conn, task_id, lambda: conn.execute(sql, params).rowcount) != 1:
             return False
         if isinstance(metadata, dict):
             staged.extend(_stage_completion_artifacts(conn, task_id, metadata, now))
