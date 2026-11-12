@@ -69,9 +69,20 @@ def _release(events) -> None:
         if is_delegation:
             return_completion_offer(evt)
         unhold([evt])
-        (logger.warning if is_delegation else logger.debug)(
-            "Dropping parked %s notification past its retention window (key=%r)",
-            evt.get("type", "completion"), str(evt.get("session_key") or ""))
+        if is_delegation:
+            logger.warning("Dropping parked %s notification past its retention window (key=%r)",
+                           evt.get("type", "completion"), str(evt.get("session_key") or ""))
+        else:
+            log_drop(evt, "parked past its retention window")
+
+
+def log_drop(evt: dict, why: str) -> None:
+    """[daveey] One line for a process notification nobody will deliver. A completion (re-adopted or parked) is
+    INFO, naming the process and its owner session, so a chat that never woke for an exit leaves a trace in
+    agent.log; progress notices (``watch_*``, ``heartbeat``) stay DEBUG."""
+    (logger.debug if _is_progress(evt) else logger.info)(
+        "Dropped %s notification for process %s (session=%s): %s", evt.get("type", "completion"),
+        evt.get("session_id") or "?", str(evt.get("session_key") or "") or "?", why)
 
 
 def _key(evt: dict) -> str:
@@ -108,8 +119,7 @@ def park(evt: dict) -> bool:
             _parked.append((now + RETENTION_SECONDS, evt))
     _release(expired)
     for held in displaced:
-        logger.debug("Dropping parked %s notification to make room for a %s (key=%r)",
-                     held.get("type"), evt.get("type", "completion"), _key(held))
+        log_drop(held, f"displaced from the park by a {evt.get('type', 'completion')}")
     if admitted:
         from tools.process_registry import process_registry
         from tui_gateway.notification_wait import wake

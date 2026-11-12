@@ -336,15 +336,17 @@ def _notif_unowned_event(sid: str, evt: dict, deferred) -> None:
         if is_delegation:
             deferred.append(evt)
         else:
-            logger.debug("Dropping unowned %s notification during shutdown drain (origin=%r key=%r)",
-                         evt_type, origin, key)
+            notification_park.log_drop(evt, f"unowned during shutdown drain (origin={origin!r})")
     else:
         # A durable replay stays pending: hand it back so the orphan sweep re-offers it once its owner
         # is live (#97202), and keep that retry out of WARNING.
         restored = is_delegation and bool(evt.get("restored"))
-        (logger.warning if is_delegation and not restored else logger.debug)(
-            "Dropping unowned %s notification (origin=%r key=%r) instead of delivering to session %s",
-            evt_type, origin, key, sid)
+        if is_delegation:
+            (logger.debug if restored else logger.warning)(
+                "Dropping unowned %s notification (origin=%r key=%r) instead of delivering to session %s",
+                evt_type, origin, key, sid)
+        else:
+            notification_park.log_drop(evt, f"unowned and not parkable (origin={origin!r}, poller={sid})")
         if is_delegation:
             from tools.async_delegation import return_completion_offer
             return_completion_offer(evt)

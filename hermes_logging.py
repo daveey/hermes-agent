@@ -405,7 +405,8 @@ def setup_logging(
     """Configure the Hermes logging subsystem; returns the ``logs/`` directory.
 
     Safe to call multiple times; the second call is a no-op unless *force*. Level and
-    rotation defaults come from config.yaml ``logging.*``. ``mode="gateway"`` adds
+    rotation defaults come from config.yaml ``logging.*``; ``logging.<stem>_max_size_mb`` /
+    ``logging.<stem>_backup_count`` (stem errors, gateway, gui) size the fixed-size files. ``mode="gateway"`` adds
     ``gateway.log`` and ``mode="gui"`` adds ``gui.log``.
     """
     global _logging_initialized
@@ -426,7 +427,8 @@ def setup_logging(
     # an existing router.
     if _adopt_secondary_home(home):
         return log_dir
-    cfg_level, cfg_max_size, cfg_backup = _read_logging_config()
+    log_cfg = _read_logging_section()
+    cfg_level, cfg_max_size, cfg_backup = log_cfg.get("level"), log_cfg.get("max_size_mb"), log_cfg.get("backup_count")
     level_name = (log_level or cfg_level or "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     max_bytes = (max_size_mb or cfg_max_size or 5) * 1024 * 1024
@@ -440,9 +442,9 @@ def setup_logging(
     # the file on ``mode`` and restricts it to that component's logger prefixes.
     handler_specs = (
         ("agent.log", level, max_bytes, backups, None),
-        ("errors.log", logging.WARNING, 2 * 1024 * 1024, 2, None),
-        ("gateway.log", logging.INFO, 5 * 1024 * 1024, 3, "gateway"),
-        ("gui.log", logging.INFO, 10 * 1024 * 1024, 5, "gui"),
+        ("errors.log", logging.WARNING, *_file_rotation(log_cfg, "errors", 2 * 1024 * 1024, 2), None),
+        ("gateway.log", logging.INFO, *_file_rotation(log_cfg, "gateway", 5 * 1024 * 1024, 3), "gateway"),
+        ("gui.log", logging.INFO, *_file_rotation(log_cfg, "gui", 10 * 1024 * 1024, 5), "gui"),
     )
     for filename, lvl, size, count, component in handler_specs:
         if component is not None and mode != component:
@@ -1071,7 +1073,29 @@ def _add_rotating_handler(
 
 
 def _read_logging_config():
-    """Best-effort read of ``logging.*`` from config.yaml."""
+    """Best-effort read of ``logging.*`` from config.yaml: (level, max_size_mb, backup_count)."""
+    log_cfg = _read_logging_section()
+    return (log_cfg.get("level"), log_cfg.get("max_size_mb"), log_cfg.get("backup_count"))
+
+
+def _positive_int(value) -> Optional[int]:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def _file_rotation(log_cfg: dict, stem: str, size: int, count: int) -> tuple[int, int]:
+    """[daveey] ``logging.<stem>_max_size_mb`` / ``logging.<stem>_backup_count`` override a fixed-size file's
+    rotation (errors.log, gateway.log, gui.log), so a busy host can keep days of history; unset keeps the default."""
+    mb = _positive_int(log_cfg.get(f"{stem}_max_size_mb"))
+    backups = _positive_int(log_cfg.get(f"{stem}_backup_count"))
+    return (mb * 1024 * 1024 if mb else size), (backups or count)
+
+
+def _read_logging_section() -> dict:
+    """Best-effort read of the ``logging`` mapping from config.yaml ({} when absent or unreadable)."""
     try:
         # Prefer the shared effective-config cache (managed overlay included, so an administrator
         # can pin logging.*) so this reuses hermes_cli.main's early parse (one config.yaml parse
@@ -1079,15 +1103,15 @@ def _read_logging_config():
         try:
             from hermes_cli.config_effective import load_user_config_effective
             cfg = load_user_config_effective(get_config_path())
-        except Exception:
+        except Exception:  # health: allow BLE001 -- any cache failure falls back to the direct parse below
             from hermes_cli.config_backend import config_exists, read_config_doc
             config_path = get_config_path()
             cfg = (read_config_doc(config_path) or {}) if config_exists(config_path) else {}
         if not cfg:
-            return (None, None, None)
+            return {}
         log_cfg = cfg.get("logging", {})
         if isinstance(log_cfg, dict):
-            return (log_cfg.get("level"), log_cfg.get("max_size_mb"), log_cfg.get("backup_count"))
-    except Exception:
+            return log_cfg
+    except Exception:  # health: allow BLE001,S110 -- runs before logging exists; a bad config must not stop it
         pass
-    return (None, None, None)
+    return {}

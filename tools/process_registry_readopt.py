@@ -206,7 +206,12 @@ class ProcessReadoptMixin:
             if self._parked_events is None:
                 self._parked_events = []
             self._parked_events.append(event)
+            evicted = self._parked_events[:-_MAX_PARKED_EVENTS]
             del self._parked_events[:-_MAX_PARKED_EVENTS]
+        for old in evicted:  # [daveey] never silent: a lost exit must leave a trace in agent.log
+            logger.info("Dropped %s notification for process %s (session=%s): parked-event box full (%d)",
+                        old.get("type", "completion"), old.get("session_id") or "?",
+                        old.get("session_key") or "?", _MAX_PARKED_EVENTS)
         from tui_gateway.notification_wait import wake
         wake(self.completion_queue)
 

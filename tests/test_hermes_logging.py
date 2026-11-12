@@ -738,6 +738,31 @@ class TestReadLoggingConfig:
         assert max_size == 10
         assert backup == 5
 
+    def test_per_file_rotation_overrides_reach_the_handlers(self, hermes_home, monkeypatch):
+        """[daveey] errors.log/gateway.log/gui.log rotation was hard-coded (2 MB x 2, 5 MB x 3), so a busy hub kept
+        about an hour of history; ``logging.<stem>_max_size_mb`` / ``_backup_count`` now size them."""
+        import hermes_yaml as yaml
+        config = {"logging": {"max_size_mb": 50, "backup_count": 12, "errors_max_size_mb": 20,
+                              "errors_backup_count": 5, "gateway_max_size_mb": 40, "gateway_backup_count": 6,
+                              "gui_backup_count": "bogus"}}
+        (hermes_home / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+        seen = {}
+        monkeypatch.setattr(hermes_logging, "_add_rotating_handler",
+                            lambda path, **kw: seen.__setitem__(Path(path).name, (kw["max_bytes"], kw["backup_count"])))
+        for mode in ("gateway", "gui"):
+            hermes_logging.setup_logging(hermes_home=hermes_home, mode=mode, force=True)
+        mb = 1024 * 1024
+        assert seen == {"agent.log": (50 * mb, 12), "errors.log": (20 * mb, 5), "gateway.log": (40 * mb, 6),
+                        "gui.log": (10 * mb, 5)}
+
+    def test_per_file_rotation_defaults_unchanged(self, hermes_home, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(hermes_logging, "_add_rotating_handler",
+                            lambda path, **kw: seen.__setitem__(Path(path).name, (kw["max_bytes"], kw["backup_count"])))
+        hermes_logging.setup_logging(hermes_home=hermes_home, mode="gateway", force=True)
+        mb = 1024 * 1024
+        assert seen == {"agent.log": (5 * mb, 3), "errors.log": (2 * mb, 2), "gateway.log": (5 * mb, 3)}
+
 
 
 class TestExternalRotationRecovery:
