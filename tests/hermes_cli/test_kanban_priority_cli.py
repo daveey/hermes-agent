@@ -36,7 +36,9 @@ def test_cli_stage_apply_restore(conn, tmp_path, capsys):
               '--writer', sync_helpers.ME]
     assert cli.run(conn, args('--priority-operation', 'apply', *common)) == 0
     assert helpers.helpers.priorities(conn, ids) == [899, 10000, 900]
-    assert cli.run(conn, args('--priority-operation', 'restore', *common)) != 0
+    assert cli.run(conn, args('--priority-operation', 'restore', *common)) == 0  # capped: never above 1000
+    assert helpers.helpers.priorities(conn, ids) == [1000, 10000, 1000]
+    assert cli.run(conn, args('--priority-operation', 'apply', *common)) == 0
     assert cli.run(conn, args('--priority-operation', 'restore', '--allow-legacy-rollback', *common)) == 0
     assert helpers.helpers.priorities(conn, ids) == [10000, 10000, 50000]
 

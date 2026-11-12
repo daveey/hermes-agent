@@ -86,12 +86,21 @@ attachment tasks must already belong to their corresponding writers.
 ```sh
 hermes kanban --board default supervisor-requests --priority-operation migrate \
   --writer origin-a --host-map-file /absolute/operator-host-map.json \
-  --exception EXCEPTION_LOW --exception EXCEPTION_HIGH --allow-legacy-rollback
+  --exception EXCEPTION_LOW --exception EXCEPTION_HIGH
 ```
 
 Alternatively pass the JSON directly with `--host-map '{...}'` (exactly one map
-flag). `--allow-legacy-rollback` explicitly permits automatic guarded recovery
-of above-cap originals; omit it only if refusing that policy rollback is intended.
+flag). `--allow-legacy-rollback` makes the automatic guarded recovery restore
+above-cap originals exactly (a policy rollback). Without it, recovery restores
+them at the cap (1000), which ranks identically because effective priority is
+capped at read time, so a guarded restore never raises a card above the cap.
+Prefer omitting it.
+
+Apply and restore treat a stored value of exactly 1000 as holding an above-cap
+manifest original (clamp equivalence, `kanban_priority.at_value`): the sync pull
+bounds every received priority in place with no event or outbox op, so an
+origin's replica can read 1000 while the Board, and therefore the manifest, keeps
+the raw legacy value. Any other difference is still a refusing edit.
 Do not pass separate task, backup, manifest, attachment or digest flags to migrate.
 
 Before a run, check the map against the live origins with the read-only
@@ -227,13 +236,13 @@ Save stdout as the durable operation report. No credentials or lineage are clear
 
    ```sh
    hermes kanban --board default supervisor-requests --priority-operation restore \
-     --writer ORIGIN --attachment-id LOCAL_ATTACHMENT_ID --digest SHA256 \
-     --allow-legacy-rollback
+     --writer ORIGIN --attachment-id LOCAL_ATTACHMENT_ID --digest SHA256
    ```
 
-   The explicit flag acknowledges policy rollback when restoring above-cap old
-   values; coordinate cap-aware import/deployment policy first or imports may
-   immediately clip restored values. Restore requires exact owned membership and
+   Without `--allow-legacy-rollback` an above-cap original is restored at the cap
+   (1000, same effective rank). The explicit flag restores the exact legacy value
+   (policy rollback); the sync pull may clip it again on any replica. Restore
+   requires exact owned membership and
    target-value CAS, just like apply (new cards also cause refusal). It never
    reverts lifecycle state, lease, parents or runs. Publish and read back restore
    through normal sync too.
