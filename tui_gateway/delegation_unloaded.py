@@ -207,7 +207,7 @@ def sweep_once(*, now: Optional[float] = None, grace_s: float = GRACE_S,
     from tools import async_delegation as ad
     from tools.process_registry_notifications import format_process_notification
     from tui_gateway import kanban_unloaded as ku
-    from tui_gateway.session_notifications import _async_delegation_display_metadata
+    from tui_gateway import server
     opener = opener or ku.find_session_db
     holders = holders or ku.registry_holders
     now = time.time() if now is None else now
@@ -273,7 +273,7 @@ def sweep_once(*, now: Optional[float] = None, grace_s: float = GRACE_S,
                     _wake_slots.release()
                     decision["verdict"] = "skipped:claimed"
                     continue
-                meta = {**_async_delegation_display_metadata(evt), "woken": True}
+                meta = {**server._async_delegation_display_metadata(evt), "woken": True}
                 job = lambda did=did, claim=claim, chat=tip or chat, text=text, meta=meta: _wake_job(
                     wake, did, claim, chat, text, meta, now)
                 try:
