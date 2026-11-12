@@ -68,6 +68,27 @@ def test_many_unreadable_dirs_do_not_eat_the_result_budget(locked_tree, target, 
     assert "(+59 more)" in (full.warning or "")
 
 
+def test_rg_killed_mid_diagnostic_keeps_the_first_match(tmp_path, monkeypatch):
+    # rg writes one diagnostic in several write() calls, so the kill at the bound can
+    # land mid-line. That unterminated stderr fragment must not swallow the first match.
+    root = tmp_path
+    fake_rg = tmp_path / "fake-rg"
+    fake_rg.write_text(
+        "#!/bin/sh\n"
+        f"printf 'rg: {root}/d00: Permission' >&2\n"
+        f"for i in 0 1 2 3 4; do echo \"{root}/zz/f$i.log:1:needle\"; done\n"
+        "exec sleep 60\n")
+    fake_rg.chmod(0o755)
+    ops = ShellFileOperations(LocalEnvironment(cwd=str(root)), cwd=str(root))
+    if not ops._native_read_enabled():
+        pytest.skip("native rg lane only")
+    monkeypatch.setattr(ops, "_has_command", lambda cmd: True)
+    monkeypatch.setattr(ops, "_resolve_command", lambda cmd: str(fake_rg) if cmd == "rg" else None)
+    result = ops.search("needle", path=str(root), target="content", limit=3)
+    assert result.error is None
+    assert [m.path for m in result.matches] == [f"{root}/zz/f{i}.log" for i in range(3)]
+
+
 def test_find_fallback_names_the_unreadable_dir(locked_tree, monkeypatch):
     ops = ShellFileOperations(LocalEnvironment(cwd=str(locked_tree)), cwd=str(locked_tree))
     real_has = ops._has_command

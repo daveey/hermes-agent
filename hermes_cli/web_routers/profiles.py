@@ -38,6 +38,7 @@ from hermes_cli.kanban_session_activity import annotate_kanban_activity, one_ann
 from hermes_cli.cron_session_activity import annotate_cron_activity
 from hermes_cli.goal_session_activity import annotate_goal_activity
 from hermes_cli.process_session_activity import annotate_background_activity
+from hermes_cli.subagent_session_activity import annotate_subagent_activity
 from hermes_cli.turn_session_activity import annotate_turn_activity
 from hermes_cli.review_session_activity import annotate_review_wait
 from hermes_cli.web_server_gateway import _strip_session_list_rows
@@ -495,6 +496,7 @@ def get_profiles_sessions(
     annotate_cron_activity(window)
     annotate_background_activity(window)
     annotate_turn_activity(window)
+    annotate_subagent_activity(window)
     annotate_review_wait(window)
     return {"sessions": window, "total": sum(totals.values()), "profile_totals": totals,
             "limit": limit, "offset": offset, "errors": errors,
@@ -548,6 +550,7 @@ def get_profiles_session_stamps(ids: str = Query(..., max_length=8000), profile:
     stamp_outcome_rows(_tag_rows(rows, name, now))
     stamp_automated(rows, home)
     base = [set(row) for row in rows]
+    annotate_subagent_activity(rows)
     annotate_review_wait(annotate_turn_activity(annotate_background_activity(annotate_cron_activity(
         annotate_goal_activity(annotate_kanban_activity(rows))))))
     out = []
@@ -646,6 +649,7 @@ def get_profiles_sessions_sidebar(
         rows[key].sort(key=_recency, reverse=True)
         win = _pinned_window(rows[key], 0, cap[key])
         _strip_session_list_rows(win)
+        annotate_subagent_activity(win)
         return annotate_review_wait(annotate_turn_activity(annotate_background_activity(annotate_cron_activity(
             annotate_goal_activity(annotate_kanban_activity(win))))))
 

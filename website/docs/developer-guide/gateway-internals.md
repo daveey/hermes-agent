@@ -912,6 +912,14 @@ every producer identity, a "N background process results" header), cancelling th
 the same transaction. Only the tail folds, so a prompt queued after a completion keeps its place
 between them; a waiting row claimed first leaves the new completion to queue alone.
 
+Kanban wakes (producer `kanban-wake`) fold the same way (`gateway/kanban_wake_fold.py`). Each wake
+carries its card (`kanban_cards`: task id, board, kinds, text), so a later wake rebuilds the batch
+from cards instead of concatenating text. Several events for one card collapse to the latest. A card
+whose premise no longer holds when the batch is built (an unclaimed wait that has since been claimed
+or completed, a block that has since been resolved) is relabelled with its live board status. Every
+card keeps its `[kanban] Task <id> <kind>.` line, which the follow-through and ask-gate plugins
+match. A wake never folds into a completion or a prompt, nor a completion into a wake.
+
 Cron execution has its own session. Eligible continuable deliveries may mirror or seed the
 reply-facing conversation: origin, origin-less home fallback, user-written bare-platform home,
 or opted-in explicit targets. `all` expansions do not gain home mirror eligibility. Mirrored

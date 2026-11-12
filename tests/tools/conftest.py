@@ -20,6 +20,14 @@ fake_docker = _capsule_fixtures.fake_docker
 
 
 @pytest.fixture(autouse=True)
+def _admitting_hub_judge(monkeypatch):
+    """Hub admission never reaches a live model in tool tests; the default fake admits. [daveey]"""
+    from hermes_cli import kanban_hub_admission as judge
+    from tests.hermes_cli.hub_judge_support import FakeJudge
+    monkeypatch.setattr(judge, "admit", FakeJudge())
+
+
+@pytest.fixture(autouse=True)
 def _no_host_browser_use_cli():
     """Keep the host's browser-harness install out of tests.
 

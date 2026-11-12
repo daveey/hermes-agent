@@ -502,7 +502,24 @@ def _tail_reason(tail: list[dict]) -> Optional[str]:
         return "interrupted"
     if (last.get("finish_reason") or "").strip().lower() in _ERROR_FINISH_REASONS:
         return "turn_failed"
+    if _failed_turn_boundary(last):  # the only role left here is assistant
+        # [daveey] A closer's failed-turn row (finish_reason NULL) after a notice or an untyped trigger, which
+        # ``_lost_request`` does not cover: error copy is not a summary, so it never reaches the judge.
+        return "turn_failed"
     return None
+
+
+def _failed_turn_boundary(row: dict) -> bool:
+    """[daveey] ``row`` is a failed-turn boundary (typed, or a legacy row with the exact notice text), other than
+    the interrupted-automation notice, which ``_lost_request`` also leaves to the rest of the derivation."""
+    from agent.turn_failure_copy import (
+        AUTOMATION_INTERRUPTED_NOTICE,
+        FAILED_TURN_DISPLAY_KIND,
+        untyped_failed_turn_display_kind,
+    )
+
+    kind = row.get("display_kind") or untyped_failed_turn_display_kind(row["role"], _text(row.get("content")))
+    return kind == FAILED_TURN_DISPLAY_KIND and _text(row.get("content")) != AUTOMATION_INTERRUPTED_NOTICE
 
 
 def looks_like_summary(text: str) -> bool:

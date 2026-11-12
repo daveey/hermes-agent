@@ -189,7 +189,7 @@ def _disk_space_preflight(source: Path, work_root: Path, output_parent: Optional
 def _copy_source_bundle(source: Path, snapshot_dir: Path) -> tuple[Path, list[str]]:
     """Copy the source DB bundle aside so SQLite never opens the original.
 
-    The whole copy runs inside ``offline_file_access`` (holds the connection-lifecycle lock). Recovery
+    The whole copy runs inside ``offline_file_access`` (reserves the path against new tracked connections). Recovery
     normally runs as its own CLI process against an offline file, so the refusal should never fire; the
     guard keeps this path consistent with ``hermes_state_repair._backup_db_file``.
 

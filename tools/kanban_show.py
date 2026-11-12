@@ -56,12 +56,17 @@ def _detail(kb, conn, task, args, *, replica: bool) -> dict:
         except Exception:  # health: allow BLE001 -- an advisory hint must never fail the read
             queue_hint = None
         details = kqp.detail_fields(conn, task, args.get("board"))
+    from hermes_cli.kanban_hub_admission_placement import describe, latest_verdict
+    verdict = latest_verdict(conn, tid)
+    if verdict and details.get("queue_note"):
+        details["queue_note"] = f"{details['queue_note']} ({describe(verdict)})"
     return {
         "task": kt._fields(task, kt._TASK_FIELDS),
         "source": "replica" if replica else "live",
         **capsule,
         "queue_reason": kqr.latest(conn, tid),
         **details,
+        **({"hub_admission": verdict} if verdict else {}),
         **({"queue_hint": queue_hint} if queue_hint else {}),
         "parents": kb.parent_ids(conn, tid),
         "unsatisfied_parents": [

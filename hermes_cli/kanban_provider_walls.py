@@ -10,9 +10,9 @@
   provider outside a quota episode: ``kanban.default_model`` first, then the strong tier when the default
   provider is the walled one. A provider also counts as walled when its OAuth pool is quota-exhausted for
   the model right now (:func:`live_quota_wall`). Explicit pins and strong tiers are never rewritten; a card
-  whose body contains ``require_model`` keeps its route. Attempt-specific admission, the class-route
-  alternate, backoff and notices live in ``kanban_quota_episode``.
-* :func:`rate_limit_storm` counts ``rate_limited`` runs in the last hour for the alert card.
+  whose body has a ``require_model: true`` line keeps its route (:func:`requires_model`). Attempt-specific
+  admission, the class-route alternate, backoff and notices live in ``kanban_quota_episode``.
+* :func:`rate_limit_storm` counts this host's ``rate_limited`` runs in the last hour for the alert card.
 """
 
 from __future__ import annotations
@@ -30,8 +30,16 @@ logger = logging.getLogger(__name__)
 MIN_WALL_SECONDS = 15 * 60
 DEFAULT_WALL_SECONDS = 30 * 60
 STORM_THRESHOLD = 10
-REQUIRE_MODEL_MARKER = "require_model"
+# A deliberate body line, not a substring: the storm alert's own prose named ``require_model`` and so opted the
+# alert card out of the wall reroute it was written about (2026-11-12, run 2805 spawned into the codex wall). [daveey]
+REQUIRE_MODEL_MARKER = "require_model: true"
+_REQUIRE_MODEL_RE = re.compile(r"^[ \t]*require_model[ \t]*:[ \t]*(?:true|yes|1)[ \t]*$", re.IGNORECASE | re.MULTILINE)
 _RETRY_RE = re.compile(r"retry[\s_-]*after[:=\s]+(\d+)\s*s", re.IGNORECASE)
+
+
+def requires_model(task: Any) -> bool:
+    """True when the card's body carries a ``require_model: true`` line: its route must never be moved."""
+    return bool(_REQUIRE_MODEL_RE.search(str(getattr(task, "body", "") or "")))
 
 
 def walls_path() -> Path:
@@ -98,11 +106,14 @@ def record_wall(provider: str, retry_after: Optional[int], *, now: Optional[floa
 def record_wall_for_run(conn: sqlite3.Connection, task_id: str, run_id: Optional[int],
                         log_path: Optional[Path]) -> Optional[float]:
     """Wall bookkeeping for a rate-limited exit: provider from the run's ``model_tier`` event."""
-    from hermes_cli.kanban_quota_episode import episode
+    from hermes_cli.kanban_quota_episode import _disproved, _unhinted, episode
     state = episode(conn, task_id)
     if state and state['run_id'] == run_id:
         # Exact-run receipt/backoff owns the deadline; never extend it with an
-        # unscoped log tail or the legacy provider-wide default.
+        # unscoped log tail or the legacy provider-wide default. A hint the live
+        # pool already disproves is mirrored as its backoff only.
+        if _disproved(state, time.time(), {}):
+            state = _unhinted(conn, task_id, state)
         return record_wall(state.get('provider'), max(0, state['until'] - time.time()))
     provider = ""
     try:
@@ -132,7 +143,7 @@ def retier_for_walls(task: Any, cfg: dict[str, Any], *, now: Optional[float] = N
     """``(model, provider, walled_provider)`` to run on instead, or None to leave the task alone.
 
     ``extra_walls`` adds walls only the caller knows (a card's own quota episode)."""
-    if REQUIRE_MODEL_MARKER in f"{getattr(task, 'title', '') or ''}\n{getattr(task, 'body', '') or ''}":
+    if requires_model(task):
         return None
     walls = {**active_walls(now=now, path=path), **(extra_walls or {})}
     task_model = str(getattr(task, "model_override", "") or "").strip()
@@ -184,11 +195,104 @@ def live_quota_wall(provider: str, model: str) -> Optional[float]:
     return float(unavailable.resets_at) if unavailable is not None else None
 
 
-def rate_limit_storm(conn: sqlite3.Connection, *, now: Optional[float] = None) -> int:
+def live_quota_room(provider: str, model: str) -> bool:
+    """True only when this gateway's OAuth pool has a live entry that can serve ``model`` right now.
+
+    Positive evidence, unlike ``live_quota_wall() is None``: an empty, unreadable or auth-benched pool
+    is no room. Pools are per gateway, so another worker's wall can be this one's room. [daveey]"""
+    provider = _norm(provider)
+    if not provider or provider == "auto" or not model or model.startswith("class:"):
+        return False
+    try:
+        from agent.credential_pool import load_pool
+        from agent.model_routing_unavailable import quota_room
+        return bool(quota_room(load_pool(provider, allowed_auth_types={"oauth"}), model))
+    except Exception as exc:  # never break dispatch over a pool read
+        logger.debug("kanban walls: live quota room check failed for %s/%s (%s)", provider, model, exc, exc_info=True)
+        return False
+
+
+def live_pool_serving(provider: str, model: Optional[str] = None) -> bool:
+    """True when ``provider``'s OAuth pool can serve ``model`` right now (``None``: any model, judged
+    conservatively): no quota wall and an entry out of cooldown. Any read fault is False."""
+    provider = _norm(provider)
+    if not provider or provider == "auto":
+        return False
+    try:
+        from agent.credential_pool import load_pool
+        from agent.model_routing_unavailable import quota_unavailable
+        pool = load_pool(provider, allowed_auth_types={"oauth"})
+        return quota_unavailable(pool, model) is None and bool(pool.has_available(model=model))
+    except Exception as exc:  # health: allow BLE001 -- a pool read fault keeps every hold
+        logger.debug("kanban walls: live serving check failed for %s/%s (%s)", provider, model, exc, exc_info=True)
+        return False
+
+
+def prune_disproved_walls(*, now: Optional[float] = None, path: Optional[Path] = None) -> list[str]:
+    """Drop provider-wide walls longer than the backoff cap that the live OAuth pool disproves.
+
+    Only a quota hint sets a wall past ``MAX_BACKOFF_SECONDS``; a pool that serves (any model, judged
+    conservatively) proves it false, e.g. a mirror of a hint born of a transient auth bench. Returns the
+    providers dropped. [daveey]"""
+    from hermes_cli.kanban_quota_episode import MAX_BACKOFF_SECONDS
+    now = time.time() if now is None else now
+    p = path or walls_path()
+    walls = active_walls(now=now, path=p)
+    dropped = [name for name, until in walls.items()
+               if until - now > MAX_BACKOFF_SECONDS and live_pool_serving(name, None)]
+    if dropped:
+        current = active_walls(now=now, path=p)
+        for name in dropped:
+            current.pop(name, None)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(current), encoding="utf-8")
+        tmp.replace(p)
+        logger.info("kanban walls: dropped %s (live OAuth pool serving)", ", ".join(sorted(dropped)))
+    return dropped
+
+
+def drop_wall(provider: str, *, not_after: float, path: Optional[Path] = None) -> bool:
+    """Remove ``provider``'s wall when it ends no later than ``not_after`` (an operator-released episode's deadline:
+    the reaper copied the wall from that hint). A later wall came from other evidence and stays. True when removed.
+
+    ``record_wall`` only ever extends, so without this a released hint's wall outlived its episode's release.
+    """
+    provider = _norm(provider)
+    p = path or walls_path()
+    walls = _load(p)
+    until = walls.get(provider)
+    if until is None or until > not_after + 1:
+        return False
+    del walls[provider]
+    try:
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(walls), encoding="utf-8")
+        tmp.replace(p)
+    except OSError as exc:
+        logger.warning("kanban walls: cannot write %s (%s)", p, exc)
+        return False
+    return True
+
+
+def rate_limit_storm(conn: sqlite3.Connection, *, now: Optional[float] = None, prefix: Optional[str] = None) -> int:
+    """``rate_limited`` runs in the last hour claimed by this host (claim ``prefix``, default this host's).
+
+    The board is synced, so every worker's runs land here; counting them all made each host file its own copy of
+    one board-wide storm under a title saying "on this host". A run with no claimer is nobody's. [daveey]"""
     now = int(time.time() if now is None else now)
+    if prefix is None:
+        from hermes_cli import kanban_db as _kb
+        prefix = _kb._host_prefix()
     return conn.execute(
-        "SELECT COUNT(*) FROM task_runs WHERE outcome = 'rate_limited' AND ended_at > ?", (now - 3600,)
+        "SELECT COUNT(*) FROM task_runs WHERE outcome = 'rate_limited' AND ended_at > ? AND substr(COALESCE("
+        "NULLIF(claim_lock, ''), json_extract(CASE WHEN json_valid(metadata) THEN metadata END, '$.claimer'), ''),"
+        " 1, ?) = ?",
+        (now - 3600, len(prefix), prefix),
     ).fetchone()[0]
+
+
+def _utc(ts: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%MZ", time.gmtime(ts))
 
 
 def alert_on_storm(conn: sqlite3.Connection, *, board: Optional[str] = None, now: Optional[float] = None) -> Optional[str]:
@@ -200,12 +304,22 @@ def alert_on_storm(conn: sqlite3.Connection, *, board: Optional[str] = None, now
     from hermes_cli import kanban_db as _kb
     host = socket.gethostname().split(".")[0]
     day = time.strftime("%Y%m%d", time.localtime(now or time.time()))
-    walls = ", ".join(f"{p} until {time.strftime('%H:%M', time.localtime(u))}" for p, u in active_walls(now=now).items())
+    walls = ", ".join(f"{p} until {_utc(u)}" for p, u in active_walls(now=now).items())
     return _kb.create_task(
         conn, title=f"{host}: {n} rate_limited kanban runs in the last hour (provider quota wall)",
         body=(f"More than {STORM_THRESHOLD} workers exited on a provider quota wall in an hour on this host ({host}). "
               f"Known walls: {walls or 'none recorded'}. Check `kanban.default_model`/`default_provider`, the "
-              "provider's usage limit, and cards pinned to the walled provider (`require_model`)."),
+              "provider's usage limit, and cards whose body says they must stay on the walled model."),
         assignee="default", created_by="rate-limit-alert", priority=80, idempotency_key=f"rate_limit_storm:{host}:{day}",
         board=board,
     )
+
+
+def tick_upkeep(conn: sqlite3.Connection, *, board: Optional[str] = None, dry_run: bool = False) -> None:
+    """Per-tick wall upkeep: drop walls the live pool disproves, then alert on a rate-limit storm."""
+    try:
+        if not dry_run:
+            prune_disproved_walls()
+        alert_on_storm(conn, board=board)
+    except Exception:  # health: allow BLE001 -- wall upkeep never strands the reclaim phase; traceback logged
+        logger.warning("kanban: provider wall pruning / rate-limit storm alert failed", exc_info=True)

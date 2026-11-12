@@ -32,7 +32,8 @@ def test_siblings_send_one_system_prompt_and_get_their_context_in_the_user_turn(
     assert first["tools"] == second["tools"]
     assert "auditing numbers" not in str(first["messages"][0])
     task = first["messages"][1]
-    assert task["role"] == "user" and task["content"] == "CONTEXT:\nThe parent is auditing numbers.\n\nTASK:\ncount the files"
+    # The fork's private-scratch note (non-git child) rides after the goal, never in the shared prefix.
+    assert task["role"] == "user" and task["content"].split("\n\nPRIVATE SCRATCH: ")[0] == "CONTEXT:\nThe parent is auditing numbers.\n\nTASK:\ncount the files"
     assert "The parent is fixing the gateway." in second["messages"][1]["content"]
 
 

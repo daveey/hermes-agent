@@ -89,7 +89,64 @@ def _path(database) -> str | None:
         value = unquote(value[5:].split("?", 1)[0])
     if not value or value == ":memory:":
         return None
-    return os.path.realpath(value)
+    return _resolved(value)
+
+
+# Board paths are resolved on every cached read, under the board lock in ``recover``. ``realpath`` makes one
+# GIL-releasing syscall per path component; with a hundred busy serve threads each one waits out the switch
+# interval, which was a top board-lock holder on the hub after the fd-scan fix (t_01a1ce5c1d7bfe42).
+# An absolute path's resolution is reused for ``_RESOLVE_TTL_S``: a symlink retargeted under a live board is seen
+# within that window (board paths are not retargeted in practice). Relative paths depend on the cwd: never cached.
+# Plain dict get/set/clear are atomic under the GIL; a racing clear only costs one extra ``realpath``.
+_RESOLVE_TTL_S = 30.0
+_CACHE_MAX = 256
+_clock = time.monotonic
+_resolved_paths: dict[str, tuple[str, float]] = {}
+
+
+def _resolved(value: str) -> str:
+    if not os.path.isabs(value):
+        return os.path.realpath(value)
+    now = _clock()
+    hit = _resolved_paths.get(value)
+    if hit is not None and now - hit[1] < _RESOLVE_TTL_S:
+        return hit[0]
+    real = os.path.realpath(value)
+    if len(_resolved_paths) >= _CACHE_MAX:
+        _resolved_paths.clear()
+    _resolved_paths[value] = (real, now)
+    return real
+
+
+# A clean ``stranded_sidecars`` scan reads every ``/proc/self/fd`` link under the board lock (~7 s for 600 fds behind
+# 4 busy threads). A handle is stranded only when the board's ``-shm`` or ``-wal`` is replaced or deleted, which
+# changes that file's ``(st_dev, st_ino)`` (a held inode cannot be reused); so a clean verdict is reused while both
+# identities are unchanged, for at most ``_CLEAN_SCAN_TTL_S``. A positive verdict is never reused.
+_CLEAN_SCAN_TTL_S = 5.0
+_clean_scans: dict[str, tuple[object, float]] = {}
+
+
+def _file_identity(path: str):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _stranded(path, current, scan):
+    key = (current, _file_identity(path + "-wal"))
+    hit = _clean_scans.get(path)
+    if hit is not None and hit[0] == key and _clock() - hit[1] < _CLEAN_SCAN_TTL_S:
+        return []
+    found = scan(path)
+    if found:
+        _clean_scans.pop(path, None)
+    else:
+        if len(_clean_scans) >= _CACHE_MAX:
+            _clean_scans.clear()
+        _clean_scans[path] = (key, _clock())
+    return found
 
 
 def remember(conn, *, strict=False) -> None:
@@ -107,7 +164,7 @@ def remember(conn, *, strict=False) -> None:
             raise
         return
     with _lock:
-        conn._hermes_generation_path = os.path.realpath(path)
+        conn._hermes_generation_path = _resolved(path)
         conn._hermes_generation_shm = shm_identity(path)
         conn._hermes_generation_thread = threading.get_ident()
         _connections.add(conn)
@@ -170,7 +227,7 @@ def evict_readers(path: str) -> None:
     from hermes_cli import kanban_session_activity as activity
 
     with _cache_registry_available(activity._RO_CACHE_LOCK):
-        entries = [(key, entry) for key, entry in activity._RO_CACHE.items() if os.path.realpath(key) == path]
+        entries = [(key, entry) for key, entry in activity._RO_CACHE.items() if _resolved(key) == path]
     for key, entry in entries:
         # Never wait while a caller might hold the cache lock: borrowers take that lock
         # on error. A busy borrower owns its lifecycle and will release it for a retry.
@@ -231,7 +288,12 @@ def recover(database) -> None:
         poisoned = path in _poisoned
     # Also refuse unregistered legacy handles on first/uncached opens. Once poisoned,
     # keep refusing retries and mode=rw fallbacks until the last dead mapping is gone.
-    stranded = stranded_sidecars(path) if stale or poisoned or not handles else []
+    if stale or poisoned:
+        stranded = stranded_sidecars(path)
+    elif not handles:
+        stranded = _stranded(path, current, stranded_sidecars)
+    else:
+        stranded = []
     if not stale and not stranded:
         with _lock:
             _poisoned.discard(path)

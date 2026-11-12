@@ -306,6 +306,27 @@ def test_fresh_card_skips_a_known_wall_before_its_first_spawn(board, monkeypatch
         assert receipt['tier_reason'] == 'default+wall:openai-codex'
 
 
+def test_class_alternate_ignores_require_model_named_in_prose(board, monkeypatch, all_assignees_spawnable):
+    """Mutant M2f (t_01a1d00e5aa896fd): ``_class_alternate_off_wall`` must use the deliberate-line check, not a
+    substring. A default card whose prose names `require_model` (the storm alert's own body did) still moves
+    off the walled default provider before its first spawn; only the class alternate can move it here."""
+    clock = _clock(monkeypatch)
+    config, _ = routing(monkeypatch)
+    route = config['model_routing']['routes']['standard'][0]
+    config['model_routing']['routes'] = {'deep': [dict(route, model='claude-opus-5-5'),
+                                                   dict(route, provider='openai-codex', model='gpt-6-astra')]}
+    monkeypatch.setattr(tier, 'load_tier_config', lambda: LIVE_CFG)
+    monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'openai-codex': float(clock[0] + 5000)})
+    monkeypatch.setattr(walls, 'live_quota_wall', lambda *_a, **_k: None)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title='storm alert', assignee='a', body=(
+            'Cards pinned to the walled provider (`require_model`) keep their route.\n'
+            'require_model: false'))
+        assert not walls.requires_model(kb.get_task(conn, tid))
+        assert tier.resolve_dispatch_tier(conn, kb.get_task(conn, tid), lane='ready') == (
+            'claude-opus-5-5', 'anthropic', 'default+wall:openai-codex')
+
+
 def test_fresh_card_class_alternate_never_lands_on_another_wall(board, monkeypatch, all_assignees_spawnable):
     """Control: the class alternate is walled too (live pool); with no usable route the card keeps its
     default route rather than being sent into a second wall."""

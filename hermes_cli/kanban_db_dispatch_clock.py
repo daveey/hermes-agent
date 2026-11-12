@@ -33,10 +33,13 @@ def guard_hold_until(conn: sqlite3.Connection, task_id: str, reason: str, now: i
     from hermes_cli import kanban_db as kb
     if reason in _EPISODE_REASONS:
         # A quota episode's deadline (doubling backoff, every provider's wall) is what the guard holds on.
-        from hermes_cli.kanban_quota_episode import hold_until
+        from hermes_cli.kanban_quota_episode import episode, hold_until
         until = hold_until(conn, task_id, now)
         if until is not None:
             return int(until) if until > now else None
+        from hermes_cli.kanban_quota_episode_release import covers_latest
+        if covers_latest(conn, task_id) or episode(conn, task_id):  # released, expired or stale: no clock
+            return None
     if reason == "subscription_quota_reset":
         reset = _receipt_reset_at(conn, task_id)
         return int(reset) if reset is not None and reset > now else None

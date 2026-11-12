@@ -22,6 +22,8 @@ Guards:
 * the board must sync to the Board service (``runs_on`` is a Board placement field).
 * a target must attest ``capability:host_repo`` when required and ``skill:<pin>`` for every pinned skill,
   in addition to satisfying the assignee's existing profile-tool check.
+* a reason claiming ship/landing custody needs ``host_reason`` (``ship_custody_portable``): ship lands from every
+  machine (:mod:`hermes_cli.kanban_move_ship`).
 
 Every move is a ``moved`` event ``{from_machine, runs_on, previous_runs_on, reason, move_no, forced}``: the audit log.
 """
@@ -110,9 +112,13 @@ def _requirement_matches(matches, machines, requires, skills, *, me=None, assign
 
 def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool = False,
           machines: Optional[Mapping[str, Mapping[str, Any]]] = None, me: Optional[str] = None,
-          cfg: Optional[dict] = None) -> dict[str, Any]:
-    """Validate a move; returns ``{runs_on, previous, matches, move_no, forced, me}`` or raises :class:`MoveRefused`."""
+          cfg: Optional[dict] = None, host_reason: Optional[str] = None,
+          reason: Optional[str] = None) -> dict[str, Any]:
+    """Validate a move; returns ``{runs_on, previous, matches, move_no, forced, me, host}`` or raises
+    :class:`MoveRefused`. ``host`` holds the event fields of a pin to one pool worker (:mod:`kanban_move_pool`).
+    A ``reason`` claiming ship custody needs ``host_reason`` (:mod:`kanban_move_ship`)."""
     from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_move_ship as kms
     from hermes_cli import kanban_worker_node as wn
     try:
         labels = wn.normalize_runs_on(runs_on)
@@ -120,8 +126,11 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
         raise MoveRefused("invalid_runs_on", str(exc)) from exc
     if not labels:
         raise MoveRefused("invalid_runs_on", "runs_on must name at least one label, e.g. ['machine:worker-1']")
-    row = conn.execute("SELECT status, workspace_kind, runs_on, assignee, requires, skills FROM tasks WHERE id = ?",
-                       (task_id,)).fetchone()
+    ship_custody = kms.refusal(reason, host_reason)
+    if ship_custody:
+        raise MoveRefused(kms.SHIP_CUSTODY_REFUSED, ship_custody)
+    row = conn.execute("SELECT status, workspace_kind, workspace_path, runs_on, assignee, requires, skills FROM tasks "
+                       "WHERE id = ?", (task_id,)).fetchone()
     if row is None:
         raise MoveRefused("not_found", f"task {task_id} not found")
     if row["workspace_kind"] in ("dir", "worktree"):
@@ -144,6 +153,10 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
         wn.check_machine_pins(conn, labels, machines=pool, me=me)
     except wn.MachinePinRefused as exc:
         raise MoveRefused(exc.code, str(exc)) from exc
+    from hermes_cli import kanban_move_pool as kmp
+    host = kmp.check(labels, pool, me=me, running=exclude_me, previous=wn._parse(row["runs_on"]),
+                     workspace_path=row["workspace_path"], host_reason=host_reason, force=force, refused=MoveRefused,
+                     task_id=task_id)
     from hermes_cli import kanban_runs_on_capabilities as roc
     try:
         requires = json.loads(row["requires"]) if row["requires"] else []
@@ -166,13 +179,13 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
     if back and len(back) == len(matches) and not force:
         raise MoveRefused("ping_pong", f"the card already left {', '.join(back)}; pass force to move it back")
     return {"runs_on": labels, "previous": wn._parse(row["runs_on"]), "matches": matches, "move_no": len(past) + 1,
-            "forced": bool(back and force), "me": me}
+            "forced": bool(back and force), "me": me, "host": host}
 
 
 def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: str, checkpoint: str,
               expected_run_id: Optional[int] = None, force: bool = False,
               machines: Optional[Mapping[str, Mapping[str, Any]]] = None, me: Optional[str] = None,
-              cfg: Optional[dict] = None) -> dict[str, Any]:
+              cfg: Optional[dict] = None, host_reason: Optional[str] = None) -> dict[str, Any]:
     """Move a RUNNING card: ``{"ok": True, "runs_on", "matches", "move_no", "run_id", "status"}`` or
     ``{"ok": False, "error", "reason_code"}``."""
     from hermes_cli import kanban_db as kb
@@ -181,8 +194,12 @@ def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: s
     reason = (reason or "").strip()
     if not reason:
         return {"ok": False, "reason_code": "reason_required", "error": "reason is required (why this card must move)"}
+    from hermes_cli.kanban_hub_admission_placement import gate_move
+    if (refused := gate_move(conn, task_id, runs_on)) is not None:
+        return refused  # a hub target must convince the admission judge first [daveey]
     try:
-        plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg)
+        plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg, host_reason=host_reason,
+                     reason=reason)
     except MoveRefused as exc:
         return {"ok": False, "reason_code": exc.code, "error": str(exc)}
 
@@ -198,7 +215,8 @@ def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: s
         kb._append_event(c, task_id, MOVED_EVENT, {
             "from_machine": plan["me"], "runs_on": plan["runs_on"], "previous_runs_on": plan["previous"],
             "reason": reason[:500], "move_no": plan["move_no"], "forced": plan["forced"],
-            "matches": plan["matches"], **({"repin_requested": True} if requested else {})}, run_id=run_id)
+            "matches": plan["matches"], **plan["host"], **({"repin_requested": True} if requested else {})},
+            run_id=run_id)
 
     note = f"Moving to {plan['runs_on']} ({', '.join(plan['matches'])}): {reason}"
     res = continue_task(conn, task_id, checkpoint=f"{checkpoint.strip()}\n\n[{note}]",
@@ -216,7 +234,8 @@ def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: s
 
 def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: str, checkpoint: str = "", force: bool = False,
                 machines: Optional[Mapping[str, Mapping[str, Any]]] = None, me: Optional[str] = None,
-                cfg: Optional[dict] = None, hub: Any = None, event_extra: Optional[dict] = None) -> dict[str, Any]:
+                cfg: Optional[dict] = None, hub: Any = None, host_reason: Optional[str] = None,
+                event_extra: Optional[dict] = None) -> dict[str, Any]:
     """Move a card that is NOT running (ready/todo/scheduled/blocked/triage): same guards, no run to end.
     A worker-first policy card instead takes the explicit Board repin path (``hub`` is for tests).
     ``event_extra`` is merged into the ``moved`` event (audit provenance, e.g. an operator call's uid)."""
@@ -225,6 +244,9 @@ def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason:
     reason = (reason or "").strip()
     if not reason:
         return {"ok": False, "reason_code": "reason_required", "error": "reason is required (why this card must move)"}
+    from hermes_cli.kanban_hub_admission_placement import gate_move
+    if (refused := gate_move(conn, task_id, runs_on)) is not None:
+        return refused  # a hub target must convince the admission judge first [daveey]
     from hermes_cli import kanban_worker_repin as repin
     if repin.applies(conn, task_id):
         # A worker-first card's placement is Board-owned: a local relabel would be stripped, so only the Board's
@@ -235,7 +257,8 @@ def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason:
             return {"ok": False, "reason_code": "invalid_runs_on", "error": str(exc)}
         return repin.repin_to_origin(conn, task_id, list(labels or []), reason, hub=hub)
     try:
-        plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg)
+        plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg, host_reason=host_reason,
+                     reason=reason)
     except MoveRefused as exc:
         return {"ok": False, "reason_code": exc.code, "error": str(exc)}
     with kb.write_txn(conn):
@@ -248,7 +271,8 @@ def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason:
         kb._append_event(conn, task_id, MOVED_EVENT, {
             "from_machine": plan["me"], "runs_on": plan["runs_on"], "previous_runs_on": plan["previous"],
             "reason": reason[:500], "move_no": plan["move_no"], "forced": plan["forced"],
-            "matches": plan["matches"], "queued": True, "checkpoint": checkpoint.strip(), **(event_extra or {})})
+            "matches": plan["matches"], "queued": True, "checkpoint": checkpoint.strip(), **plan["host"],
+            **(event_extra or {})})
         if checkpoint.strip():
             kb.add_comment(conn, task_id, "kanban-operator", f"Move checkpoint:\n\n{checkpoint.strip()}")
     return {"ok": True, "runs_on": plan["runs_on"], "matches": plan["matches"], "move_no": plan["move_no"],
@@ -257,7 +281,7 @@ def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason:
 
 def move_reclaim(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: str, force: bool = False,
                  machines: Optional[Mapping[str, Mapping[str, Any]]] = None, me: Optional[str] = None,
-                 cfg: Optional[dict] = None) -> dict[str, Any]:
+                 cfg: Optional[dict] = None, host_reason: Optional[str] = None) -> dict[str, Any]:
     """Operator move of a card running on THIS gateway (``hermes kanban move --reclaim``): write the new labels
     first (``runs_on`` is not lease-fenced), then reclaim the run (stops its worker) and release the Board lease.
     Labels first means a re-claim between the two steps already sees the new placement."""
@@ -267,8 +291,12 @@ def move_reclaim(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason
     reason = (reason or "").strip()
     if not reason:
         return {"ok": False, "reason_code": "reason_required", "error": "reason is required (why this card must move)"}
+    from hermes_cli.kanban_hub_admission_placement import gate_move
+    if (refused := gate_move(conn, task_id, runs_on)) is not None:
+        return refused  # a hub target must convince the admission judge first [daveey]
     try:
-        plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg)
+        plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg, host_reason=host_reason,
+                     reason=reason)
     except MoveRefused as exc:
         return {"ok": False, "reason_code": exc.code, "error": str(exc)}
     row = conn.execute("SELECT t.status, t.claim_lock, t.placement_policy, r.uid AS run_uid FROM tasks t "
@@ -284,7 +312,8 @@ def move_reclaim(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason
         kb._append_event(conn, task_id, MOVED_EVENT, {
             "from_machine": plan["me"], "runs_on": plan["runs_on"], "previous_runs_on": plan["previous"],
             "reason": reason[:500], "move_no": plan["move_no"], "forced": plan["forced"],
-            "matches": plan["matches"], "reclaimed": True, **({"repin_requested": True} if requested else {})})
+            "matches": plan["matches"], "reclaimed": True, **plan["host"],
+            **({"repin_requested": True} if requested else {})})
     if not kb.reclaim_task(conn, task_id, reason=f"moved to {plan['runs_on']}: {reason}"[:400]):
         return {"ok": False, "reason_code": "reclaim_failed",
                 "error": f"labels set to {plan['runs_on']} but the run could not be reclaimed; it ends on its own"}

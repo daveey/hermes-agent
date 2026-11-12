@@ -13,8 +13,10 @@ on a card another gateway created refuse ``foreign_card``. This module is the su
    ordinary functions on its live file and appends ``operator_call_result`` on the target card.
 3. Request side again (:func:`poll`): finds that result in the replica, finishes the request and wakes the caller.
 
-Only comment, move and unblock exist. complete / archive / link / unlink / block / edit of a foreign card stay with
-its owner and are refused; so is any second op or a card the op does not name. No Board admin key is read here.
+Only comment, move and unblock of a card exist, plus ``label_publish`` of a machine (``kanban_operator_labels``: the
+hub executes it with its Board admin key, after re-running its own probe of that machine, and answers on the
+requester's card). complete / archive / link / unlink / block / edit of a foreign card stay with its owner and are
+refused; so is any second op or a card the op does not name. No Board admin key is read here.
 Every call, accepted or refused, is logged in ``operator_calls`` on the gateway that saw it.
 """
 from __future__ import annotations
@@ -33,9 +35,10 @@ from typing import Any, Iterator, Optional
 _log = logging.getLogger(__name__)
 
 OP = "operator"
-ACTIONS = ("comment", "move", "unblock")
+CARD_ACTIONS = ("comment", "move", "unblock")
+LABEL_PUBLISH = "label_publish"  # names a machine, not a card (kanban_operator_labels)
+ACTIONS = (*CARD_ACTIONS, LABEL_PUBLISH)
 OWNER_ONLY = ("complete", "archive", "link", "unlink", "block", "edit", "assign", "delete", "reclaim")
-DEFERRED = ("label_publish",)
 REQUEST_KIND = "operator_call_requested"
 RESULT_KIND = "operator_call_result"
 REFUSED_KIND = "operator_call_refused"
@@ -91,8 +94,11 @@ def _err(code: str, message: str):
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    for stmt in _SCHEMA:
+    from hermes_cli import kanban_operator_labels as kol
+    for stmt in (*_SCHEMA, *kol.SCHEMA):
         conn.execute(stmt)
+    if "target_machine" not in {r[1] for r in conn.execute("PRAGMA table_info(operator_calls)")}:
+        conn.execute("ALTER TABLE operator_calls ADD COLUMN target_machine TEXT")
 
 
 def _has_log(conn: sqlite3.Connection) -> bool:
@@ -111,8 +117,9 @@ def normalize_op(i: int, op: dict) -> dict:
     if action in OWNER_ONLY:
         raise _err("operator_action_refused", f"op {i}: {action} of another gateway's card stays with its owner; "
                    f"the operator call only does {', '.join(ACTIONS)}")
-    if action in DEFERRED:
-        raise _err("operator_action_refused", f"op {i}: {action} is not available through the operator call yet")
+    if action == LABEL_PUBLISH:
+        from hermes_cli import kanban_operator_labels as kol
+        return kol.normalize(i, op)
     if action not in ACTIONS:
         raise _err("operator_action_refused", f"op {i}: action must be one of {', '.join(ACTIONS)}")
     task_id = str(op.get("task_id") or "").strip()
@@ -146,6 +153,8 @@ def normalize_op(i: int, op: dict) -> dict:
 
 
 def label(op: dict) -> str:
+    if op.get("action") == LABEL_PUBLISH:
+        return f"operator {LABEL_PUBLISH} {op.get('machine')} {','.join(op.get('labels') or [])}"
     return f"operator {op.get('action')} {op.get('task_id')}"
 
 
@@ -212,15 +221,16 @@ def log(conn: sqlite3.Connection, *, request_uid: str, side: str, outcome: str, 
     conn.execute(
         "INSERT INTO operator_calls (request_uid, side, board, action, target_task_id, caller_gateway, "
         "caller_task_id, caller_run_id, caller_run_uid, caller_profile, caller_host, executor_gateway, args_digest, "
-        "request_event_uid, outcome, detail, supervisor_request_id, created_at, finished_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(request_uid, side) DO UPDATE SET "
+        "request_event_uid, outcome, detail, supervisor_request_id, created_at, finished_at, target_machine) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(request_uid, side) DO UPDATE SET "
         "outcome=excluded.outcome, detail=COALESCE(excluded.detail, detail), "
         "request_event_uid=COALESCE(excluded.request_event_uid, request_event_uid), "
         "executor_gateway=COALESCE(excluded.executor_gateway, executor_gateway), finished_at=excluded.finished_at",
         (request_uid, side, board, op.get("action"), op.get("task_id"), caller.get("gateway"),
          caller.get("task_id"), caller.get("run_id"), caller.get("run_uid"), caller.get("profile"),
          caller.get("host"), executor_gateway, _digest(op) if op else None, request_event_uid, outcome,
-         (detail or None) and str(detail)[:500], supervisor_request_id, now, now if finished else None))
+         (detail or None) and str(detail)[:500], supervisor_request_id, now, now if finished else None,
+         op.get("machine")))
 
 
 def _caller_here(conn: sqlite3.Connection, task: Optional[str], run: Optional[int]) -> dict:
@@ -244,7 +254,8 @@ def log_submit_refusal(conn: sqlite3.Connection, *, env_task: Optional[str], env
     except ValueError:
         run = None
     op = next((o for o in raw_ops if isinstance(o, dict) and o.get("op") == OP), {}) if isinstance(raw_ops, list) else {}
-    op = {"action": str(op.get("action") or "")[:40], "task_id": str(op.get("task_id") or "")[:64]}
+    op = {"action": str(op.get("action") or "")[:40], "task_id": str(op.get("task_id") or "")[:64],
+          "machine": str(op.get("machine") or "")[:64] or None}
     try:
         with kb.write_txn(conn):
             caller = _caller_here(conn, env_task, run)
@@ -285,6 +296,12 @@ def _rate_refusal(conn: sqlite3.Connection, requester: str) -> Optional[str]:
 def preflight_op(conn: sqlite3.Connection, requester: str, op: dict) -> dict:
     from hermes_cli import kanban_capability_routing as kcr
     from hermes_cli import kanban_db as kb
+    if op.get("action") == LABEL_PUBLISH:
+        from hermes_cli import kanban_operator_labels as kol
+        synced = _synced(conn)
+        own = _own_gateway(conn) if synced else None
+        return kol.preflight(conn, requester, op, own=own, synced=synced,
+                             rate=_rate_refusal(conn, requester) if own else None)
     target = op["task_id"]
     verdict = {**op}
 
@@ -307,6 +324,8 @@ def preflight_op(conn: sqlite3.Connection, requester: str, op: dict) -> dict:
         human = None
         if op["action"] == "unblock" and rep is not None:
             human = rep.execute("SELECT human_request, block_kind FROM tasks WHERE id = ?", (target,)).fetchone()
+        from hermes_cli import kanban_pickup_stall_repin as stall
+        alarm_scope = stall.operator_refusal(conn, rep, requester, op)  # None unless an alarm asks
     if not home:
         return refuse("no_home", f"{target} has no created_on; no gateway owns it")
     if home == _own_gateway(conn):
@@ -315,6 +334,9 @@ def preflight_op(conn: sqlite3.Connection, requester: str, op: dict) -> dict:
         return refuse("terminal", f"{target} is {status}")
     if op["action"] == "move" and status == "running":
         return refuse("running", f"{target} is running; only its own run may move it (kanban_move)")
+    if alarm_scope is not None:
+        return refuse("pickup_stall_scope", f"a pickup-stall alarm moves only a card it lists, off the stalled "
+                                            f"machine, to the pool or one machine eligible now: {alarm_scope}")
     if op["action"] == "unblock":
         if status != "blocked":
             return refuse("not_blocked", f"{target} is {status}, not blocked")
@@ -354,7 +376,7 @@ def start(conn: sqlite3.Connection, req: dict, executor: str) -> str:
                                                            "detail": verdict.get("reason")}],
                 error=verdict.get("reason"))
         return "rejected"
-    payload = {"request_uid": uid, "board": board, "action": op["action"], "target_task_id": op["task_id"],
+    payload = {"request_uid": uid, "board": board, "action": op["action"], "target_task_id": op.get("task_id"),
                "args": {k: v for k, v in op.items() if k not in ("op", "action", "task_id")},
                "caller": caller, "requested_at": int(time.time()), "supervisor_request_id": req["id"],
                "home": verdict.get("home")}
@@ -459,7 +481,9 @@ def poll(conn: sqlite3.Connection, executor: str, *, now: Optional[int] = None) 
         if req is None:
             continue
         state, op = req["result"], req["ops"][0]
-        res = _result_for(conn, op["task_id"], state["request_uid"], state.get("home"), _board_slug(conn))
+        # A card action is answered on its target card; label_publish (a machine) on the requester's own card.
+        answered_on = op.get("task_id") or req["requester_task_id"]
+        res = _result_for(conn, answered_on, state["request_uid"], state.get("home"), _board_slug(conn))
         if res is _RETRY:
             res = None
         if res is None and now < int(state.get("deadline") or 0):
@@ -663,6 +687,7 @@ def _scan_start(conn: sqlite3.Connection, board: str, rep: sqlite3.Connection) -
 def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     """Home side, each dispatcher tick: execute calls naming this gateway's own cards. Returns (uid, outcome)."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_operator_labels as kol
     own = _own_gateway(conn)
     if not own:
         return []
@@ -672,7 +697,9 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
         if rep is None:
             return []
         if not _has_log(conn) or not conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='operator_call_scan'").fetchone():
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='operator_call_scan'").fetchone() \
+                or not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='operator_label_jobs'").fetchone():
             with kb.write_txn(conn):
                 ensure_schema(conn)
         last = _scan_start(conn, board, rep)
@@ -687,7 +714,12 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
             except ValueError:
                 continue
             uid, target = payload.get("request_uid"), payload.get("target_task_id")
-            if not uid or not target or not _is_home(conn, own, target):
+            labels = payload.get("action") == LABEL_PUBLISH
+            if labels:
+                # A machine has no home card: the call names its executor, and only that gateway takes it.
+                if not uid or own != kol.HOME or payload.get("home") != own:
+                    continue
+            elif not uid or not target or not _is_home(conn, own, target):
                 continue
             if conn.execute("SELECT 1 FROM operator_calls WHERE request_uid = ? AND side = 'execute'",
                             (uid,)).fetchone():
@@ -701,6 +733,9 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
             if retry:
                 hi = eid - 1
                 break
+            if labels:
+                done.append((uid, kol.handle(conn, own, event, payload, refusal)))
+                continue
             outcome, _detail = _execute_one(conn, payload, own, refusal)
             done.append((uid, outcome))
         stored = conn.execute("SELECT last_id, last_uid FROM operator_call_scan WHERE board = ?",
@@ -717,6 +752,8 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
                              "ON CONFLICT(board) DO UPDATE SET last_id = excluded.last_id, "
                              "last_uid = excluded.last_uid", (board, new, anchor))
             _PERSISTED[key] = time.time()
+    if own == kol.HOME:
+        kol.tick(conn, own, board)  # start queued label jobs, answer finished ones on the requesters' cards
     return done
 
 

@@ -375,7 +375,9 @@ def _annotate_tree_activity(sessions: list[dict]) -> list[dict]:
         from hermes_cli.kanban_session_activity import annotate_kanban_activity
         from hermes_cli.process_session_activity import annotate_background_activity
         from hermes_cli.review_session_activity import annotate_review_wait
+        from hermes_cli.subagent_session_activity import annotate_subagent_activity
         from hermes_cli.turn_session_activity import annotate_turn_activity
+        annotate_subagent_activity(sessions)
         annotate_review_wait(annotate_turn_activity(annotate_background_activity(annotate_cron_activity(
             annotate_goal_activity(annotate_kanban_activity(sessions))))))
     except Exception:  # the tree must render without them

@@ -83,9 +83,12 @@ def bound_worker() -> bool:
 
 
 def guard_refusal(board, args: dict, tool_name: str, tid: str) -> Optional[str]:
-    """``refusal`` for ``_worker_guard``; opens the board only for a bound worker."""
+    """``refusal`` for ``_worker_guard``; opens the board only for a bound worker. An outside caller (no bound
+    run; ``_worker_guard`` already refused other workers' cards) gets ``kanban_tools_live_park``'s live-claim
+    refusal instead."""
     if not bound_worker():
-        return None
+        from tools.kanban_tools_live_park import guard_refusal as live_park_refusal
+        return live_park_refusal(board, args, tool_name, tid)
     with board(args.get("board")) as (_kb, conn):
         return refusal(conn, tool_name, tid)
 

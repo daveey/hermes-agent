@@ -46,7 +46,7 @@ async def test_a_timeout_keeps_the_answer_already_locked(tmp_path, monkeypatch):
     from tools import clarify_gateway
     monkeypatch.setattr(clarify_gateway, 'get_clarify_timeout', lambda: 1)
     out, peer = await _locked_then(tmp_path, monkeypatch, lambda *a: None)
-    assert out == {'answers': {'q0': 'blue'}, 'outcome': 'timed_out'}, out
+    assert out == {'answers': {'q0': 'blue'}, 'outcome': 'timed_out', 'reason': 'timeout'}, out
     # The open cards still close.
     assert any(f.get('params', {}).get('type') == 'request.cancel' for f in peer.frames)
 
@@ -56,7 +56,7 @@ async def test_an_interrupt_keeps_the_answer_already_locked(tmp_path, monkeypatc
     def interrupt(connection, rid, worker):
         _frame_of(worker)._ctx.agent_holder[0]._interrupt_requested = True
     out, _peer = await _locked_then(tmp_path, monkeypatch, interrupt)
-    assert out == {'answers': {'q0': 'blue'}, 'outcome': 'cancelled'}, out
+    assert out == {'answers': {'q0': 'blue'}, 'outcome': 'cancelled', 'reason': 'interrupted'}, out
 
 
 @pytest.mark.asyncio
@@ -64,7 +64,7 @@ async def test_a_cancel_all_after_a_lock_keeps_the_answer_and_reports_cancelled(
     def skip(connection, rid, worker):
         connection._resolve_response({'jsonrpc': '2.0', 'id': rid, 'result': {}})
     out, _peer = await _locked_then(tmp_path, monkeypatch, skip)
-    assert out == {'answers': {'q0': 'blue'}, 'outcome': 'cancelled'}, out
+    assert out == {'answers': {'q0': 'blue'}, 'outcome': 'cancelled', 'reason': 'client_empty'}, out
 
 
 @pytest.mark.asyncio
@@ -80,4 +80,4 @@ async def test_an_error_frame_after_a_lock_keeps_the_answer(tmp_path, monkeypatc
     def fail(connection, rid, worker):
         connection._resolve_response({'jsonrpc': '2.0', 'id': rid, 'error': {'code': -32603, 'message': 'x'}})
     out, _peer = await _locked_then(tmp_path, monkeypatch, fail)
-    assert out == {'answers': {'q0': 'blue'}, 'outcome': 'cancelled'}, out
+    assert out == {'answers': {'q0': 'blue'}, 'outcome': 'cancelled', 'reason': 'client_error'}, out

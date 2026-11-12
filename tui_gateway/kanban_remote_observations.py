@@ -10,6 +10,7 @@ from tui_gateway.kanban_remote_notice_state import state as _notice_state
 
 _lock = threading.Lock()
 _memo: dict[tuple, tuple] = {}
+_generation: dict[tuple, int] = {}  # observe key -> ledger writes started, so only the newest publishes its memo
 
 
 def _snapshot(replica: Path, previous=None) -> tuple[bool, list[tuple] | None, tuple | None]:
@@ -60,6 +61,8 @@ _decoded_files: dict[str, tuple | None] = {}  # replica -> file identity its _de
 
 
 def _summary(task) -> dict | None:
+    from tui_gateway.kanban_remote_notices import drop_mark
+
     if not isinstance(task, dict):
         return None
     withdrawal = _withdrawal(task)
@@ -73,6 +76,8 @@ def _summary(task) -> dict | None:
     notice = notice if isinstance(notice, dict) else {}
     return {"status": task.get("status"), "completed_at": task.get("completed_at"),
             "run": {"ended_at": run.get("ended_at")},
+            "human_request": ({"resolved_check_dropped_at": drop_mark(task)}
+                              if drop_mark(task) is not None else None),
             "completion_notice": {"created_at": notice.get("created_at")}}
 
 
@@ -111,9 +116,33 @@ def _changed_rows_cards(conn, replica: Path, me) -> list[tuple]:
 
 
 def _persist(source: str, cards: list[tuple], ledger, now: float) -> dict[tuple, float | None]:
-    """Seed retained history once; later current-key states receive one local window."""
+    """Seed retained history once; later current-key states receive one local window.
+
+    [daveey] ``observations`` rows are insert-only, so a ``(source, ref, state)`` already read from (or written to)
+    this ledger file keeps its ``first_seen`` for good: it is answered from ``_known`` and only cards in a state not
+    seen yet touch SQLite. Re-reading every terminal card per replica change was most of the notice pollers' wait.
+    ``observe`` calls this without ``_lock``; concurrent callers serialize on the ledger's ``BEGIN IMMEDIATE`` and,
+    the rows being insert-only, agree on every ``first_seen``. Nothing enters ``_known`` before its commit.
+    """
     from tui_gateway.kanban_remote_notices import FRESH_S, _fresh_at, _ledger
 
+    ledger = Path(ledger)
+    slot = (str(ledger), source)
+    file_id = _file_id(ledger)
+    with _known_lock:
+        entry = _known.get(slot)
+    known = entry[1] if entry is not None and file_id is not None and entry[0] == file_id else None
+    states = []
+    missing = []
+    for owner, key, task in cards:
+        at, state, ref = _fresh_at(task), _notice_state(task), f"{owner}/{key}"
+        states.append((owner, key, state, ref, at))
+        if known is None or (ref, state) not in known:
+            missing.append((key, state, ref, at))
+    if known is not None and not missing:  # an entry also proves the source's baseline is recorded
+        return _fresh_map(states, known)
+    stats["transactions"] += 1
+    added = {}
     with contextlib.closing(_ledger(ledger)) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS observation_sources (source TEXT PRIMARY KEY)")
         conn.execute("CREATE TABLE IF NOT EXISTS observations (source TEXT, ref TEXT, state TEXT, "
@@ -124,24 +153,40 @@ def _persist(source: str, cards: list[tuple], ledger, now: float) -> dict[tuple,
             initial = conn.execute("SELECT 1 FROM observation_sources WHERE source=?", (source,)).fetchone() is None
             if initial:
                 conn.execute("INSERT INTO observation_sources VALUES (?)", (source,))
-            fresh = {}
-            for owner, key, task in cards:
-                at = _fresh_at(task)
-                state = _notice_state(task)
-                ref = f"{owner}/{key}"
+            for key, state, ref, at in missing:
                 # Unknown ages and frozen legacy keys cannot establish local freshness.
                 seen = now if at is not None and key.count('/') >= 2 and (not initial or now - at <= FRESH_S) else None
                 row = conn.execute("SELECT first_seen FROM observations WHERE source=? AND ref=? AND state=?",
                                    (source, ref, state)).fetchone()
                 if row is None:
                     conn.execute("INSERT INTO observations VALUES (?,?,?,?)", (source, ref, state, seen))
-                first = row[0] if row is not None else seen
-                fresh[(owner, key, state)] = max(at, first) if at is not None and first is not None else at
+                added[(ref, state)] = row[0] if row is not None else seen
             conn.commit()
-            return fresh
         except BaseException:
             conn.rollback()
             raise
+    after = _file_id(ledger)
+    merged = {**(known or {}), **added} if after == file_id else added
+    if after is not None:
+        with _known_lock:  # a racing caller's entries may be dropped here: they are only re-read, never wrong
+            _known[slot] = (after, merged)
+            while len(_known) > 16:
+                _known.pop(next(iter(_known)))
+    return _fresh_map(states, {**(known or {}), **added})
+
+
+def _fresh_map(states: list[tuple], first_seen: dict) -> dict[tuple, float | None]:
+    fresh = {}
+    for owner, key, state, ref, at in states:
+        first = first_seen[(ref, state)]
+        fresh[(owner, key, state)] = max(at, first) if at is not None and first is not None else at
+    return fresh
+
+
+_known_lock = threading.Lock()
+# (ledger, source) -> (ledger file identity, {(ref, state): first_seen}): rows known to be in that ledger file.
+_known: dict[tuple, tuple] = {}
+stats = {"transactions": 0}
 
 
 def _file_id(path: Path) -> tuple | None:
@@ -190,15 +235,27 @@ def observe(replica: Path, ledger, now: float) -> dict[tuple, float | None]:
             return {}
         if cards is None and cached is not None:
             fresh = cached[1]
-        else:
-            fresh = _persist(key[0], cards or [], ledger, now)
-        if ident is not None:
-            _memo[key] = (signature, fresh, _file_id(ledger), stamp, ident)
-        else:
-            _memo.pop(key, None)
-        while len(_memo) > 16:
-            _memo.pop(next(iter(_memo)))
+            _remember(key, (signature, fresh, _file_id(ledger), stamp, ident))
+            return fresh
+        _generation[key] = generation = _generation.get(key, 0) + 1
+    # [daveey] The ledger write runs without ``_lock``: holding it there kept every notice poller waiting on one
+    # poller's transaction. ``cards`` is this call's own snapshot, so the answer is the one it would have had under
+    # the lock; only the newest snapshot started for ``key`` publishes its memo, and only after its commit.
+    fresh = _persist(key[0], cards or [], ledger, now)
+    with _lock:
+        if _generation.get(key) == generation:
+            _remember(key, (signature, fresh, _file_id(ledger), stamp, ident))
         return fresh
+
+
+def _remember(key: tuple, entry: tuple) -> None:
+    """Publish (caller holds ``_lock``). An entry without a replica file identity is never kept."""
+    if entry[4] is not None:
+        _memo[key] = entry
+    else:
+        _memo.pop(key, None)
+    while len(_memo) > 16:
+        _memo.pop(next(iter(_memo)))
 
 
 def _forget_decoded(tag: str) -> None:

@@ -1,32 +1,65 @@
 name: CI review comment
 
-# Hourly batched PR review summaries.
+# Batched PR review summaries: an hourly sweep, plus one targeted refresh
+# whenever CI or a watched sibling (Docker) completes on a ship branch's PR head.
 #
-# One scheduled run snapshots every open same-repo PR: the newest CI
+# The scheduled run snapshots every open same-repo PR: the newest CI
 # ``pull_request`` run on the PR's exact head, one comment per PR. It replaces
 # the per-run live poller (one 40-minute per-run poller).
 #
+# workflow_run (CI completed on a ``wt/**`` head): refresh only the PR at that
+# exact head (TARGET_HEAD_SHA). ``hermes-core-wt ship`` lands a PR only once
+# this comment says "ran on <its head>", and every ship rebase makes a new
+# head; on the hourly sweep alone an approved, CI-green PR waited up to an hour
+# (or for a hand dispatch) after each rebase (PR1104, 2026-11-12). CI on PR
+# heads usually finishes after the sibling Docker run (60 of 60 wt/ heads
+# sampled 2026-11-12: Docker done 5-36 min earlier), so the CI-triggered run
+# usually posts the final "ran on" comment. Docker is a trigger too, by its
+# exact ``name:`` (every WATCH_WORKFLOWS entry must be listed): when Docker
+# finishes after CI (a rerun, a slow build) the comment would otherwise show
+# it pending until the next sweep. A Docker completion while CI is still
+# running writes nothing (CI's completion refreshes). Only ``wt/**`` branches
+# (what ship pushes), and only runs that ended success/failure: main pushes
+# and other branches start no run here, and other PRs' comments are not
+# rewritten. Each write records its head and run start in the comment, and an
+# older run never overwrites a newer run's snapshot of the same head.
+#
 # It runs from the default branch only and never checks out or executes PR
-# code, which makes a write token safe here. Fork PRs are skipped.
+# code, which makes a write token safe here (workflow_run included: only the
+# head sha, a 40-hex string the script validates, and the triggering
+# workflow's name, compared for equality only, cross from the event).
+# Fork PRs are skipped.
 
 on:
   schedule:
     - cron: "17 * * * *"
   workflow_dispatch:
+  workflow_run:
+    workflows: [CI, "Docker Build, Test, and Publish"]
+    types: [completed]
+    branches: ["wt/**"]
 
 permissions:
   contents: read
   actions: read
   pull-requests: write
 
-# One batch at a time; a running batch is never cancelled.
+# One batch at a time; a running batch is never cancelled. A targeted refresh
+# has its own group per head sha: in a shared group GitHub keeps only the newest
+# pending run and cancels the others, which would drop another PR's refresh.
 concurrency:
-  group: ci-review-comment
+  group: ci-review-comment${{ github.event_name == 'workflow_run' && format('-{0}', github.event.workflow_run.head_sha) || '' }}
   cancel-in-progress: false
 
 jobs:
   comment:
-    name: CI review comment (hourly)
+    name: CI review comment
+    if: >-
+      github.event_name != 'workflow_run' || (
+        github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.head_repository.full_name == github.repository &&
+        (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure')
+      )
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
@@ -39,7 +72,14 @@ jobs:
       - name: Post batched review summaries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Empty on schedule/dispatch (every open PR); the completed run's
+          # head on workflow_run (only that PR).
+          TARGET_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          # Which workflow completed (CI or a watched sibling); empty on
+          # schedule/dispatch. A sibling completing before CI writes nothing.
+          TRIGGER_WORKFLOW: ${{ github.event.workflow_run.name }}
           # Sibling workflows whose jobs join each comment, one name per line.
+          # Each must also be listed under on.workflow_run.workflows.
           WATCH_WORKFLOWS: |
             Docker Build, Test, and Publish
         run: python3 -u scripts/ci/batch_review_comments.py

@@ -685,6 +685,8 @@ class SubagentSnapshot(Result):
     accepting_steer: bool | None = None
     #: The child's own stored session (``session.transcript`` reads it by ``subagent_id``); None until it has one.
     child_session_id: str | None = None
+    #: Optional v1 execution observations (``hermes_cli.execution_observations``), absent from older gateways.
+    execution_observations: list[dict[str, JsonValue]] | None = None
 
 
 class FailedDelegation(Result):
@@ -714,6 +716,8 @@ class SubagentRosterEntry(Result):
     session_id: str
     subagents: int = 0
     background: int = 0
+    #: Optional v1 observations for the counted children/processes; counts stay legacy metadata, not proof.
+    execution_observations: list[dict[str, JsonValue]] | None = None
 
 
 class SubagentRosterResult(Result):

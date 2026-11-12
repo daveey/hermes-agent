@@ -317,6 +317,8 @@ def _on_compute_host_turn_done(rid: str, sid: str, session: dict, frame: dict) -
     if not frame.get("session_info_emitted"):
         _emit("session.info", sid, info)
     _drain_queued_prompt(rid, sid, session)
+    from tui_gateway.detached_turn_cleanup import settled
+    settled(session)
 
 
 def _submit_prompt_to_compute_host(

@@ -90,3 +90,28 @@ def test_llm_cannot_supply_internal_creation_context(world):
     assert 'unknown parameter' in result['error']
     with kbc.connect_closing() as conn:
         assert conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 0
+
+
+def test_placed_create_keeps_creator_key_and_retry_returns_same_card(world):
+    key = 'review:pr1305:848af5adae9e29a2ac677f26c732c996997a26b2'
+    first = create(world, idempotency_key=key)
+    assert first.get('created') is True, first
+    again = create(world, idempotency_key=key)
+    assert again['task_id'] == first['task_id']
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, first['task_id']).idempotency_key == key
+        assert conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 1
+
+
+def test_placed_create_whose_key_names_another_card_is_rejected(world):
+    key = 'review:pr1305:848af5adae9e29a2ac677f26c732c996997a26b2'
+    with kbc.connect_closing() as conn:
+        local = kb.create_task(conn, title='Local review', idempotency_key=key)
+    result = create(world, idempotency_key=key)
+    assert result.get('code') == 'origin_idempotency_conflict', result
+    assert result['handoff_complete'] is False
+    assert local in result.get('error', ''), result
+    from hermes_cli.kanban_origin_owner import _dispatch_result
+    assert _dispatch_result(json.dumps(result))['status'] == 'rejected'
+    with kbc.connect_closing() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 1

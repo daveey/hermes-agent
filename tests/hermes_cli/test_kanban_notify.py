@@ -484,6 +484,12 @@ async def test_notifier_wake_only_skips_send_and_advances_cursor(kanban_home):
     # cursor advanced; otherwise it would re-wake on every poll).
     wake_mock.assert_awaited_once()
     assert tid in wake_mock.await_args.kwargs["text"]
+    # The wake carries its card, so a later wake for the same chat folds into it while it waits
+    # (gateway/kanban_wake_fold.py, t_01a1cec8510df47f).
+    card = wake_mock.await_args.kwargs["kanban_card"]
+    assert (card["task_id"], card["kinds"]) == (tid, ["blocked"])
+    assert card["text"].startswith(f"[kanban] Task {tid} ")
+    assert wake_mock.await_args.kwargs["text"].startswith(card["text"])
 
     # The subscription survives (blocked is non-terminal) but its cursor moved
     # past the blocked event.

@@ -16,28 +16,15 @@ def portability(args: dict, cfg=None) -> tuple[str | None, str | None]:
     from hermes_cli.kanban_published_worktree import without_published_worktrees
 
     c = p._Cfg(p.config() if cfg is None else cfg)
-    if args.get("needs"):
-        return "gateway-scoped need", None
-    if (args.get("workspace_kind") or "scratch") != "scratch":
-        return "host workspace", None
-    board = args.get("board")
-    if board and board != "default":
-        return "non-default board", None
-    if (args.get("assignee") or "default") not in c.assignees():
-        return "assignee not allowlisted", None
-    if any(args.get(k) not in (None, "", [], False)
-           for k in p.UNCARRIED_OPTIONS if not (k == "initial_status" and args.get(k) == "running")):
-        return "uncarried option", None
+    if reason := p.structural_reason(args, c.raw):
+        return reason, None
     reqs = args.get("requires") or []
     reqs = [reqs] if isinstance(reqs, str) else list(reqs)
-    ordinary = [r for r in reqs if r not in coordination.ACCESS_LABELS]
-    if any(p.reg.is_gateway_need(r) for r in ordinary):
-        return "gateway-scoped requirement", None
-    if any(str(r) not in c.carried_requires() for r in ordinary):
-        return "uncarried requirement", None
+    if refusal := coordination.board_refusal(reqs):
+        return refusal, None
     title = args.get("title") or ""
     body = p.without_evidence(p.without_placement_note(args.get("body") or ""))
-    if hit := p._local_marker(title, body, args.get("skills"), c):
+    if hit := p._local_marker(title, body, p.marker_skills(args, c), c):
         return "local marker", hit
     full = without_carried_inputs(f"{title}\n{body}", c.raw)
     if refusal := coordination.check(full, c.raw, skills=args.get("skills"), requires=reqs):
@@ -106,3 +93,5 @@ def cli_json_fields(diagnostic) -> dict:
 def print_cli_creation(diagnostic) -> None:
     if diagnostic:
         print(f"Placement: {diagnostic['why']}")
+        if diagnostic.get("note"):  # a hub-admission-denied card: where it runs instead [daveey]
+            print(diagnostic["note"])

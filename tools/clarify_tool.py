@@ -107,6 +107,8 @@ def _result(normalized: list[dict], reply: dict, shown: list[dict] | None = None
         responses.append({"question": entry["question"], "choices_offered": entry["choices_offered"],
                           "status": status, "user_response": value})
     result: dict[str, object] = {"responses": responses, "outcome": reply["outcome"]}
+    if reply.get("reason") and reply["outcome"] != "submitted":
+        result["reason"] = str(reply["reason"])  # a label (interrupted / taken_over / ...), never answer content
     if reply.get("notice"):
         result["notice"] = str(reply["notice"])
     return json.dumps(result, ensure_ascii=False)

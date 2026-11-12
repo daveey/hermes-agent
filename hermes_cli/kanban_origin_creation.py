@@ -36,6 +36,15 @@ def _subscribe_origin(conn, task_id: str, origin: dict) -> None:
         (task_id, chat_id, origin["profile"], int(time.time()), task_id))
 
 
+def _insert_intent(conn, row: tuple) -> None:
+    """Store the intent row and its synced copy in one transaction. The row is machine-local and its binding id is a
+    random secret, so only the copy lets an owner restored from the Board rebuild it (``kanban_origin_intent_carry``)."""
+    from hermes_cli.kanban_origin_intent_carry import record
+    conn.execute("INSERT INTO origin_creation_intents VALUES (?,?,?,?,?)", row)
+    request_id, intent_json, task_id, binding_json, child_request_id = row
+    record(conn, task_id, request_id, intent_json, binding_json, child_request_id)
+
+
 def create_with_origin(conn, intent: dict, options: dict) -> str:
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_origin_ledger import validate_binding
@@ -87,15 +96,25 @@ def create_with_origin(conn, intent: dict, options: dict) -> str:
             if existing["intent_json"] != immutable:
                 raise OriginError("origin_creation_conflict", "request ID reused with a different creation intent")
             return existing["task_id"]
-        # The receipt request ID, not legacy best-effort idempotency, owns this
-        # creation. Never adopt an unrelated existing task by its legacy key.
-        options["idempotency_key"] = None
+        # The receipt request ID, not legacy best-effort idempotency, owns this creation: never adopt an
+        # unrelated existing task by the creator's key. The key is still stored on the new card, so a guard or
+        # probe that looks the card up by it matches (it used to be dropped to NULL). [daveey] A live card that
+        # already holds it is a typed refusal naming that card, never a duplicate and never an adoption; an
+        # exact retry is answered by the request ID above. Checked inside this write txn, so no race.
+        key = options.get("idempotency_key")
+        if key:
+            held = conn.execute(
+                "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' "
+                "ORDER BY created_at DESC LIMIT 1", (key,)).fetchone()
+            if held:
+                raise OriginError("origin_idempotency_conflict",
+                                  f"idempotency_key {key!r} already names card {held['id']} on this board")
         task_id = kb.create_task(conn, **options, placement_checked=True)  # courier retains owner placement
         marker = {"binding_id": "binding-" + secrets.token_hex(16), "version": 1,
                   "owner": {**intent["owner"], "task_id": task_id}, "origin": intent["origin"],
                   "task_record_key": f"{intent['owner']['profile']}/{intent['owner']['board']}/{task_id}"}
-        conn.execute("INSERT INTO origin_creation_intents VALUES (?,?,?,?,?)",
-                     (intent["request_id"], immutable, task_id, _json(marker), "origin-bind-" + secrets.token_hex(16)))
+        _insert_intent(conn, (intent["request_id"], immutable, task_id, _json(marker),
+                              "origin-bind-" + secrets.token_hex(16)))
         _subscribe_origin(conn, task_id, intent["origin"])
         return task_id
 
@@ -154,7 +173,7 @@ def adopt_with_origin(conn, intent: dict, *, board: str) -> str:
             if previous.get("owner") == owner and previous.get("origin") == intent["origin"]:
                 raise OriginError("origin_already_bound", "retry existing origin request " + row["request_id"])
         marker["binding_id"] = "binding-" + secrets.token_hex(16)
-        conn.execute("INSERT INTO origin_creation_intents VALUES (?,?,?,?,?)",
-                     (intent["request_id"], immutable, task_id, _json(marker), "origin-bind-" + secrets.token_hex(16)))
+        _insert_intent(conn, (intent["request_id"], immutable, task_id, _json(marker),
+                              "origin-bind-" + secrets.token_hex(16)))
         _subscribe_origin(conn, task_id, intent["origin"])
         return task_id

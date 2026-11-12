@@ -17,6 +17,13 @@ fleet = fleet_helpers.fleet
 conn = db_helpers.conn
 
 
+@pytest.fixture(autouse=True)
+def _board_maps_access(monkeypatch):
+    """These contracts only matter once the Board places declared access (core keeps it home until then)."""
+    from hermes_cli import kanban_placement_coordination as coordination
+    monkeypatch.setattr(coordination, "BOARD_PLACEABLE_ACCESS", frozenset(coordination.ACCESS_LABELS))
+
+
 @pytest.mark.parametrize('stored', ['["hub:read"', '"hub:read"', '42', '[{}]',
                                      '{}', 'null', 'false', '[null]', '[[]]'])
 def test_malformed_remote_contract_refused(conn, fleet, tmp_path, monkeypatch, stored):

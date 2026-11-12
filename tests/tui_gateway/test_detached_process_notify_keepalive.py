@@ -233,6 +233,36 @@ def test_queued_notice_survives_registry_pruning(server, registry, detached):
     assert not server._session_is_reapable(sid, session)
 
 
+def test_notice_held_for_refused_turn_keeps_session(server, registry, detached, monkeypatch):
+    """A completion whose turn could not start (update admission hold, a paused turn's continuation due) waits in
+    the session's own held list, off the queue and out of the in-flight hold. The reapers must still see it as
+    pending: hub chat 20261111_005201_05663e ended on "the tests are still running, I'll report back", its job
+    exited at 10:36:18 during a core-update admission hold, the notice went to ``_notif_held``, the headless session
+    was reaped, and the completion was parked, then dropped. The chat never woke and ended without a summary."""
+    from tools.process_registry_awaiting import release, take_ready
+
+    sid, session, _ = detached
+    session["_notif_held"] = []
+    proc = _spawn(registry, session["session_key"], notify_on_complete=True)
+    proc.mark_exited(0)
+    registry._move_to_finished(proc)
+    monkeypatch.setattr(server, "_notif_claim_turn", lambda s: False)  # admission refused the notice turn
+    monkeypatch.setattr(server, "_emit", lambda *a, **k: None)
+
+    ready = take_ready(registry.completion_queue, 0)
+    try:
+        server._notif_handle_ready(sid, session, ready, set(), registry,
+                                   lambda evt: "process finished", None)
+    finally:
+        release(ready)
+
+    assert registry.completion_queue.empty() and len(session["_notif_held"]) == 1, "held for this session's poller"
+    assert not server._session_is_reapable(sid, session), "a held notice is still owed: reaping drops it"
+
+    session["_turn_cancel_requested"] = True  # after Stop the held notice waits for the next prompt: never pins
+    assert server._session_is_reapable(sid, session)
+
+
 def test_notice_held_after_stop_does_not_pin_session(server, registry, detached):
     """After the user's Stop the poller requeues notices until their next prompt; that wait must not be forever."""
     sid, session, _ = detached

@@ -12,6 +12,8 @@ const UNRESOLVED_REASONS: Readonly<Record<string, string>> = {
 
 // [daveey] Sidebar row status copy (kanban + process badges, outcome stripe tooltips), spread into en.ts.
 export const enSessionRowStatus = {
+  kanbanUnknown: count =>
+    `${count} work ${count === 1 ? 'item has' : 'items have'} unknown current status: evidence is missing, expired or unverified. This does not mean done; no new check was requested.`,
   kanbanTasks: (open, blocked) =>
     [open > 0 ? `Waiting on ${open} ${open === 1 ? 'card' : 'cards'}` : '', blocked > 0 ? `${blocked} blocked` : '']
       .filter(Boolean)

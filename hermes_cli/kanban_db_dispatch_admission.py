@@ -11,7 +11,7 @@ import sqlite3
 
 
 def lane_admission_refused(conn: sqlite3.Connection, task_id: str, assignee: str, result, *,
-                           profile_exists, spawn_fn, dry_run: bool) -> bool:
+                           profile_exists, spawn_fn, dry_run: bool, lane: str = "ready") -> bool:
     """True (recorded on ``result``) when the row is not admissible on this dispatcher."""
     from hermes_cli.kanban_capsule_admission import dispatch_refusal
 
@@ -33,7 +33,9 @@ def lane_admission_refused(conn: sqlite3.Connection, task_id: str, assignee: str
     if not dry_run and (held := no_progress_hold(conn, task_id)) is not None:
         result.no_progress_held.append((task_id, held))
         return True
-    return False
+    # A fresh card pinned to a quota-walled model would only spawn into the wall (kanban_dispatch_skip). [daveey]
+    from hermes_cli.kanban_dispatch_skip import hold_pinned_quota
+    return hold_pinned_quota(conn, task_id, result, lane=lane)
 
 
 def capsule_claim_check(conn: sqlite3.Connection, task_id: str, assignee: str, spawn_fn):

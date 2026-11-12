@@ -62,6 +62,26 @@ def fresh_texts(batch, delivered):
     return fresh
 
 
+def batch_text(texts) -> str:
+    """The turn text for a buffered batch, each block notice's ask re-read against its card NOW (delivery).
+
+    A notice is rendered when it is claimed, then may wait in ``_kanban_pending`` behind a busy turn while its
+    card is unblocked or finished; ``refresh_stale_ask`` swaps such a stale "Next action for the user" ask for a
+    ``Since then:`` line (still-blocked, remote and unreadable cards stay byte-identical). The texts themselves
+    are not replaced: claims track them by identity and keep their ``_kb_*`` attributes. Never raises. [daveey]"""
+    import logging
+
+    from hermes_cli.kanban_stale_ask import ASK_MARK, refresh_stale_ask
+    out = []
+    for text in texts:
+        try:
+            out.append(refresh_stale_ask(str(text)) if ASK_MARK in text else str(text))
+        except Exception:  # health: allow BLE001 -- a refresh must never cost the notice itself
+            logging.getLogger(__name__).warning("stale block-ask refresh failed; delivering unchanged", exc_info=True)
+            out.append(str(text))
+    return "\n".join(out)
+
+
 def release_claims(session: dict, log_failure, logger) -> None:
     """The poller is stopping with notices still buffered: hand their claimed ranges back (newest first, CAS) so
     the chat's next consumer delivers them now instead of after this process exits. Never raises; takes no

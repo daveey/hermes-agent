@@ -35,13 +35,17 @@ _IGNORING_CHILD = textwrap.dedent(
     """
 )
 
+# The pid files are published by rename: the backend waits on their existence, and write_text
+# creates the file empty before writing, so a child descheduled in between would hand out ''.
+
 # A wedged hosted TUI: ignores SIGTERM and the SIGHUP its PTY master's close delivers.
 _WEDGED_DESCENDANT = textwrap.dedent(
     """
     import os, pathlib, signal, sys, time
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
-    pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
+    pathlib.Path(sys.argv[1] + ".tmp").write_text(str(os.getpid()))
+    os.replace(sys.argv[1] + ".tmp", sys.argv[1])
     time.sleep(300)
     """
 )
@@ -49,7 +53,8 @@ _WEDGED_DESCENDANT = textwrap.dedent(
 _DETACHED_BOT = textwrap.dedent(
     """
     import os, pathlib, sys, time
-    pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
+    pathlib.Path(sys.argv[1] + ".tmp").write_text(str(os.getpid()))
+    os.replace(sys.argv[1] + ".tmp", sys.argv[1])
     time.sleep(300)
     """
 )

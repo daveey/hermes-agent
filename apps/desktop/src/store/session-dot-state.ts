@@ -25,14 +25,16 @@
 
 import { computed } from 'nanostores'
 
+import { summarizeExecutionObservations } from '@/lib/execution-observations'
 import { outcomeStripe } from '@/lib/session-outcome'
 import { stableArray, stableRecord } from '@/lib/stable-array'
 import type { SessionBackgroundProcess, SessionInfo } from '@/types/hermes'
 import type { SessionOutcome } from '@/types/session-outcome'
 
-import { $backgroundRunningSessionIds } from './composer-status'
+import { $backgroundRunningSessionIds, $backgroundStatusBySession } from './composer-status'
+import { executionHoldsRow, executionKey, rowExecution } from './execution-observation-row'
 import { $kanbanObservationTick, hasFreshKanbanObservation } from './kanban-observation'
-import { $liveWorkRoster, noteEventFed, rosterLiveIds, rosterSaysIdle } from './live-work-roster'
+import { $liveWorkRoster, noteEventFed, rosterLiveIds, rosterSaysIdle, selectWorkObservations } from './live-work-roster'
 import { $pausedQueueSessionIds } from './owner-queue-reconcile'
 import { $messagingSessions, $sessions, $unreadFinishedSessionIds, lineageAliases } from './session'
 import {
@@ -43,7 +45,7 @@ import {
   $workingSessionIds
 } from './session-states'
 import { $unreadWriteGuard, UNREAD_WRITE_GUARD_MS } from './session-unread-remote'
-import { $subagentsBySession, activeSubagentCount } from './subagents'
+import { $subagentsBySession } from './subagents'
 
 // Sessions parked in async delegation: the parent turn has ended (busy=false —
 // delegate_task(background=true) returns its handle the moment the children
@@ -55,7 +57,7 @@ import { $subagentsBySession, activeSubagentCount } from './subagents'
 // lineageAliases covers whichever tip of the conversation a surface holds.
 let delegatingIds: readonly string[] = []
 export const $delegatingSessionIds = computed(
-  [$subagentsBySession, $sessionStates, $sessions, $liveWorkRoster],
+  [$subagentsBySession, $sessionStates, $sessions, $liveWorkRoster, $kanbanObservationTick],
   (bySession, states, sessions, roster) => {
     const ids = new Set<string>()
     const eventFedAt = new Map<string, number>()
@@ -69,7 +71,9 @@ export const $delegatingSessionIds = computed(
       const heardAt = Math.max(...items.map(item => item.updatedAt || 0))
       noteEventFed(eventFedAt, aliases, heardAt)
 
-      if (activeSubagentCount(items) > 0 && !rosterSaysIdle(roster, 'subagents', aliases, heardAt)) {
+      const evidence = items.filter(i => i.status === 'running').flatMap(i => i.executionObservations ?? [])
+
+      if (summarizeExecutionObservations(selectWorkObservations(evidence, Date.now() / 1000), Date.now() / 1000, 'sidebar').counts.running > 0 && !rosterSaysIdle(roster, 'subagents', aliases, heardAt)) {
         for (const alias of aliases) {
           ids.add(alias)
         }
@@ -91,7 +95,7 @@ export const $delegatingSessionIds = computed(
 // the session as done (green stripe) while its workers were still going. The
 // backend stamps `kanban_active` on every list row (summed over the lineage).
 let kanbanBusyIds: readonly string[] = []
-export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions, $kanbanObservationTick], (sessions, messaging) => {
+export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions, $kanbanObservationTick, $liveWorkRoster, $subagentsBySession], (sessions, messaging) => {
   const ids: string[] = []
 
   for (const rows of [sessions, messaging]) {
@@ -103,7 +107,8 @@ export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions, $k
         (row.kanban_blocked ?? 0) > 0 ||
         row.kanban_unknown === true ||
         (row.kanban_remote_stale ?? 0) > 0 ||
-        !hasFreshKanbanObservation(row)
+        !hasFreshKanbanObservation(row) ||
+        executionHoldsRow(rowExecution(row))
       ) {
         ids.push(row.id)
       }
@@ -111,6 +116,26 @@ export const $kanbanBusySessionIds = computed([$sessions, $messagingSessions, $k
   }
 
   return (kanbanBusyIds = stableArray(kanbanBusyIds, ids))
+})
+
+/** Per-row execution evidence signature at the render clock. Re-evaluated by the existing 15 s tick (time-only
+ *  expiry, no fetch); the reference changes only when some row's verdict does, so subscribers re-render on
+ *  transitions, not on every tick. Rows without observations are absent. */
+let executionKeys: Readonly<Record<string, string>> = {}
+export const $executionRowKeys = computed([$sessions, $messagingSessions, $kanbanObservationTick, $liveWorkRoster, $backgroundStatusBySession, $subagentsBySession], (sessions, messaging) => {
+  const next: Record<string, string> = {}
+
+  for (const rows of [sessions, messaging]) {
+    for (const row of rows) {
+      const key = executionKey(rowExecution(row))
+
+      if (key) {
+        next[row.id] = key
+      }
+    }
+  }
+
+  return (executionKeys = stableRecord(executionKeys, next))
 })
 
 // [daveey] Sessions whose kanban cards finished while no backend held the chat:
@@ -376,7 +401,7 @@ export const sessionStatusStripe = (
 }
 
 type KanbanCounts = Pick<SessionInfo, 'kanban_active' | 'kanban_blocked' | 'kanban_held' | 'kanban_parked'> &
-  Partial<Pick<SessionInfo, 'kanban_stalled'>>
+  Partial<Pick<SessionInfo, 'execution_observations' | 'kanban_stalled'>>
 
 /** [daveey] Open kanban cards someone is actually working (running/ready/review, or a todo about to be promoted).
  *  `kanban_parked` (scheduled, non-human blocks, todo behind an open parent) and `kanban_held` (todo behind a human
@@ -391,14 +416,19 @@ export const liveKanbanCount = (row: KanbanCounts): number =>
  *  behind one (red); `waiting` = parked cards when nothing is live (grey). Live cards give neither, so a chat whose
  *  cards are running reads as working (no stripe) instead of grey like one parked until Thursday. Against a
  *  backend without `kanban_parked` every open card waits, as before. */
-export const kanbanStripeCounts = (row: KanbanCounts): { blocked: number; stalled: number; waiting: number } => {
-  const blocked = (row.kanban_blocked ?? 0) + (row.kanban_held ?? 0)
+export const kanbanStripeCounts = (row: KanbanCounts, nowSeconds: number = Date.now() / 1000): { blocked: number; stalled: number; waiting: number } => {
+  // Optional execution evidence only adds: asks (even retained by an expired entry) are red, current waits are grey,
+  // current running/queued work defers the grey wait exactly like a live card does.
+  const exec = rowExecution(row, nowSeconds)
+  const blocked = (row.kanban_blocked ?? 0) + (row.kanban_held ?? 0) + (exec ? Math.max(exec.needsUser, exec.outstanding) : 0)
+  const execLive = exec?.live ?? 0
+  const execWaiting = exec?.waiting ?? 0
 
   if (row.kanban_parked === undefined) {
-    return { blocked, stalled: 0, waiting: row.kanban_active ?? 0 }
+    return { blocked, stalled: 0, waiting: execLive > 0 ? 0 : (row.kanban_active ?? 0) + execWaiting }
   }
 
-  const waiting = liveKanbanCount(row) > 0 ? 0 : row.kanban_parked
+  const waiting = liveKanbanCount(row) + execLive > 0 ? 0 : row.kanban_parked + execWaiting
 
   // [daveey] Stalled is a subset of parked: only meaningful while the row is waiting at all.
   return { blocked, stalled: waiting > 0 ? Math.min(row.kanban_stalled ?? 0, waiting) : 0, waiting }
@@ -412,7 +442,7 @@ export const kanbanStripeCounts = (row: KanbanCounts): { blocked: number; stalle
  *  Same claim (and priority) as the store: it beats idle/unread/draft only. */
 type RowActivity = Pick<SessionInfo, 'background_active' | 'goal_active' | 'kanban_active' | 'kanban_blocked'> &
   Partial<Pick<SessionInfo, 'kanban_held' | 'kanban_parked'>> &
-  Partial<Pick<SessionInfo, 'kanban_observed_at' | 'kanban_remote_stale' | 'kanban_unknown' | 'kanban_unseen' | 'offline_cached'>> &
+  Partial<Pick<SessionInfo, 'execution_observations' | 'kanban_observed_at' | 'kanban_remote_stale' | 'kanban_unknown' | 'kanban_unseen' | 'offline_cached'>> &
   Partial<Pick<SessionInfo, 'message_count' | 'turn_live'>>
 
 /** [daveey] Work the row's own stamps say is still in flight outside a turn: a goal, cards, a background job. */
@@ -422,6 +452,7 @@ const rowHasBackgroundWork = (row: RowActivity): boolean =>
   row.kanban_unknown === true ||
   (row.kanban_remote_stale ?? 0) > 0 ||
   !hasFreshKanbanObservation(row) ||
+  executionHoldsRow(rowExecution(row)) ||
   (row.kanban_blocked ?? 0) > 0 ||
   (row.background_active ?? 0) > 0
 

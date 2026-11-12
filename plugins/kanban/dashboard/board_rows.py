@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-MAX_OBSERVERS = 4  # board files with a retained observer connection
+MAX_OBSERVERS = 16  # board files with a retained observer (GET /boards observes every live board)
 MAX_ENTRIES = 8  # materialized row sets (board x query params)
 OBSERVER_IDLE_S = 600.0  # an observer unused this long is closed (archived/removed boards)
 
@@ -223,10 +223,13 @@ def version(path: str) -> Optional[tuple]:
     return (obs.gen, ident[0], ident[1], int(schema), int(data))
 
 
-def materialized(key: tuple, path: str, build: Callable[[], T]) -> T:
+def materialized(key: tuple, path: str, build: Callable[[], T],
+                 update: Optional[Callable[[T], T]] = None) -> T:
     """Rows for ``key`` (``key[0]`` must be ``path``), rebuilt when the version moved.
     The version is read before ``build``. A failing build stores nothing, so the next call
-    retries; unobservable boards are always built."""
+    retries; unobservable boards are always built. ``update(previous rows)``, when given,
+    replaces ``build`` for a key that already holds older rows: it reads the board in full
+    but may reuse what is unchanged (board_read.materialize ``prev``)."""
     ver = version(path)
     if ver is None:
         return build()
@@ -235,7 +238,7 @@ def materialized(key: tuple, path: str, build: Callable[[], T]) -> T:
         if hit is not None and hit[0] == ver:
             _entries.move_to_end(key)
             return hit[1]
-    rows = build()
+    rows = update(hit[1]) if update is not None and hit is not None else build()
     with _lock:
         obs = _observers.get(str(path))
         if obs is not None and obs.gen == ver[0]:  # the observer this version came from is still current

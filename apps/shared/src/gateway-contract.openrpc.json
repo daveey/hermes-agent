@@ -30588,6 +30588,22 @@
             ],
             "default": null,
             "title": "Detached"
+          },
+          "execution_observations": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Execution Observations"
           }
         },
         "required": [
@@ -45679,6 +45695,22 @@
             "default": 0,
             "title": "Background",
             "type": "integer"
+          },
+          "execution_observations": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Execution Observations"
           }
         },
         "required": [
@@ -45839,6 +45871,22 @@
             ],
             "default": null,
             "title": "Child Session Id"
+          },
+          "execution_observations": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Execution Observations"
           }
         },
         "required": [

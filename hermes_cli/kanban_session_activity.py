@@ -23,10 +23,14 @@ from hermes_cli import kanban_session_activity_busy as _busy
 from hermes_cli import kanban_session_activity_hub as _hub_signature
 from hermes_cli import kanban_session_activity_revalidate as _revalidate
 from hermes_cli import kanban_counts_scopes as _count_scopes
+from hermes_cli.kanban_execution_source import transaction as _execution_transaction
 from hermes_cli import kanban_session_activity_recent_done as _recent_done
+from hermes_cli import kanban_execution_receipt as _receipts
 from hermes_cli.kanban_session_activity_origin_snapshot import remote_snapshot as _remote_snapshot
 from hermes_cli.kanban_session_activity_hub import _hub_content_signature
 from hermes_cli import kanban_scope_heartbeat as _scope_hb
+from hermes_cli import kanban_replica_projection as _replica_projection
+from hermes_cli import kanban_replica_rows as _replica_rows
 from hermes_cli.kanban_session_activity_release import TERMINAL_STATUSES
 from hermes_cli.kanban_session_activity_release import owner_attests_terminal as _owner_attests_terminal
 from hermes_cli.kanban_db_sync import sync_enabled as _board_sync_enabled
@@ -37,6 +41,8 @@ from hermes_cli.kanban_session_activity_attention import run_checks as _run_done
 from hermes_cli.kanban_session_activity_card_details import _add_card_details
 from hermes_cli.kanban_watch import not_watch_sql as _not_watch
 from hermes_cli.kanban_links_refresh import ScopeRefresher
+from hermes_cli import kanban_links_narrow as _links_narrow
+from hermes_cli.kanban_session_wait_rows import _describe_waits, _local_wait_info, _local_wait_rows, _stored_needs_human
 import contextlib
 import json
 import logging
@@ -77,6 +83,7 @@ _stalled_cache: list[dict[str, int]] = [{}]
 _remote_keys_cache: list[dict[str, frozenset[tuple[str, str, bool]]]] = [{}]
 _local_keys_cache: list[dict[str, frozenset[tuple[str, str, bool]]]] = [{}]
 _local_keys_sink = threading.local()
+_execution_cache = [{}]
 _pairs_lock = threading.Lock()
 # _all_counts single flight: held for a whole recompute; the generation bumps when one publishes.
 _counts_flight = threading.Lock()
@@ -145,18 +152,6 @@ def _status_filter(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> tuple
     return f"((t.status IN ({ph}) OR ({parked} AND NOT {human})) AND {_not_watch(conn)})", statuses  # [daveey]
 
 
-def _stored_needs_human(value, kind) -> bool:
-    """Decode the DB's JSON text before applying the shared evidence contract."""
-    from hermes_cli.kanban_human_request import needs_human
-
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except ValueError:
-            return False
-    return needs_human(value, kind=kind)
-
-
 # Set while ``_all_counts`` reads local boards: collects the (session, task) pairs behind the counts, so the
 # open card ids per session (``waiting_on_task_ids``) cost no extra queries. [daveey]
 _pairs_sink: set[tuple[str, str]] | None = None
@@ -203,27 +198,24 @@ def _read_counts(path: Path, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dic
         conn.close()
 
 
-def _counts_on(conn: sqlite3.Connection, statuses: tuple[str, ...] = ACTIVE_STATUSES) -> dict[str, int]:
-    if "session_id" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
+def _counts_on(conn: sqlite3.Connection, statuses: tuple[str, ...] = ACTIVE_STATUSES, *, tasks=None) -> dict[str, int]:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    if "session_id" not in cols:
         return {}  # explicitly supported pre-session schema, not a failed read
     match, params = _status_filter(conn, statuses)
-    pairs: set[tuple[str, str]] = {
-        (str(sid), str(tid)) for sid, tid in conn.execute(
-            f"SELECT session_id, id FROM tasks t WHERE session_id IS NOT NULL "
-            f"AND session_id != '' AND {match}",
-            params,
-        )
-    }
+    request = "t.human_request" if "human_request" in cols else "NULL"
+    rows = list(conn.execute(
+        f"SELECT session_id, id, {request} FROM tasks t WHERE session_id IS NOT NULL "
+        f"AND session_id != '' AND {match}", params))
     try:
-        pairs.update(
-            (str(sid), str(tid)) for sid, tid in conn.execute(
-                f"SELECT s.chat_id, t.id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
-                f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {match}",
-                params,
-            )
-        )
+        rows.extend(conn.execute(
+            f"SELECT s.chat_id, t.id, {request} FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
+            f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)} AND {match}", params))
     except sqlite3.Error:  # board predates notify subscriptions
         pass
+    pairs = {(str(sid), str(tid)) for sid, tid, _ in rows}
+    if tasks is not None:
+        tasks.update({str(tid): {"id": str(tid), "human_request": request} for _, tid, request in rows})
     counts: dict[str, int] = {}
     for sid, _tid in pairs:
         counts[sid] = counts.get(sid, 0) + 1
@@ -238,70 +230,6 @@ def _counts_on(conn: sqlite3.Connection, statuses: tuple[str, ...] = ACTIVE_STAT
 # unfinished parent. "Held" is the subset of those queued cards whose chain waits on a human ask upstream.
 PARKED_STATUSES = ("scheduled",) + BLOCKED_STATUSES
 _FINISHED_STATUSES = ("done", "archived")
-
-
-def _local_wait_info(conn: sqlite3.Connection, task_ids: Iterable[str], now: float | None = None,
-                     ) -> dict[str, dict[str, Any]]:
-    """[daveey] ``{task_id: wait info}`` (``kanban_wait_info.describe``) for the parked cards among ``task_ids``: what
-    each waits on, since when, and whether only an agent can end it. One query for the cards, one for their newest
-    park events. Missing columns/tables degrade to status-only info."""
-    return _describe_waits(*_local_wait_rows(conn, task_ids), now=now)
-
-
-def _local_wait_rows(conn: sqlite3.Connection, task_ids: Iterable[str]) -> tuple[dict[str, tuple], dict[str, tuple]]:
-    """``(parked, events)``: the stored rows ``_describe_waits`` turns into wait info. Separate so a board memo can
-    keep the rows and re-judge their age at each read (the stall cut-off moves with the clock, the rows do not)."""
-    from hermes_cli import kanban_wait_info as kwi
-
-    ids = [str(t) for t in dict.fromkeys(task_ids)]
-    if not ids:
-        return {}, {}
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
-    pick = ", ".join(f"t.{c}" if c in cols else f"NULL AS {c}" for c in ("id", "status", "block_kind", "human_request",
-                                                                          "awaiting"))
-    parked: dict[str, tuple] = {}
-    for i in range(0, len(ids), 500):
-        chunk = ids[i:i + 500]
-        ph = ",".join("?" for _ in chunk)
-        for tid, status, kind, request, awaiting in conn.execute(
-                f"SELECT {pick} FROM tasks t WHERE t.id IN ({ph}) AND t.status IN ('scheduled', 'blocked', 'triage')",
-                chunk):
-            parked[str(tid)] = (status, kind, request, awaiting)
-    if not parked:
-        return {}, {}
-    events: dict[str, tuple] = {}
-    keys = list(parked)
-    kph = ",".join("?" for _ in kwi.PARK_EVENT_KINDS)
-    for i in range(0, len(keys), 500):
-        chunk = keys[i:i + 500]
-        ph = ",".join("?" for _ in chunk)
-        try:
-            for tid, kind, payload, at in conn.execute(
-                    f"SELECT e.task_id, e.kind, e.payload, e.created_at FROM task_events e WHERE e.id IN ("
-                    f"SELECT MAX(id) FROM task_events WHERE task_id IN ({ph}) AND kind IN ({kph}) GROUP BY task_id)",
-                    (*chunk, *kwi.PARK_EVENT_KINDS)):
-                events[str(tid)] = (kind, payload, at)
-        except sqlite3.Error:  # board predates task_events
-            break
-    return parked, events
-
-
-def _describe_waits(parked: dict[str, tuple], events: dict[str, tuple], now: float | None = None,
-                    ) -> dict[str, dict[str, Any]]:
-    from hermes_cli import kanban_wait_info as kwi
-
-    out: dict[str, dict[str, Any]] = {}
-    for tid, (status, kind, request, awaiting) in parked.items():
-        ev_kind, payload, at = events.get(tid, (None, None, None))
-        try:
-            human = _stored_needs_human(request, kind)
-        except Exception:
-            human = False
-        info = kwi.describe(status, block_kind=kind, human=human, park=payload, park_kind=ev_kind, since=at,
-                            awaiting=awaiting, now=now)
-        if info is not None:
-            out[tid] = info
-    return out
 
 
 def _read_parked(path: Path) -> tuple[dict[str, int], dict[str, int]]:
@@ -492,11 +420,8 @@ def replica_task_resolution(ids: list[str], now: float | None = None) -> tuple[s
         try:
             offline = _meta_float(conn, "offline_since")
             synced = max(filter(None, (_meta_float(conn, "last_ok"), _meta_float(conn, "last_digest"))), default=None)
-            found = {
-                tid for tid in ids
-                if conn.execute("SELECT 1 FROM replica WHERE coll = 'tasks' AND substr(key, -?) = ? LIMIT 1",
-                                (len(tid) + 1, "/" + tid)).fetchone()
-            }
+            from hermes_cli.kanban_prose_refs import hub_replica_lookup
+            found = {tid for tid in ids if conn.execute(*hub_replica_lookup(tid)).fetchone()}
         finally:
             conn.close()
     except sqlite3.Error:
@@ -611,7 +536,6 @@ HUB_STALE_AFTER_S = 180.0  # same as the hub-sync plugin: no successful hub sync
 # owner's collector publishes (floor 450 s, the window every owner gets when it publishes none). A fixed 450 s
 # against a loaded hub's ~440 s cycle flapped closed cards between released and "never released". [daveey]
 SCOPE_HEARTBEAT_FRESH_S = _scope_hb.SCOPE_HEARTBEAT_FLOOR_S
-_REMOTE_FIELDS = ("title", "status", "block_kind", "human_request", "assignee", "created_at", "started_at", "priority")
 _remote_last: list[dict[str, Any]] | None = None  # last good read (process lifetime)
 _remote_scope: tuple[str, ...] | None = None
 _snapshot_saved: tuple[tuple[str, ...], list[dict[str, Any]]] | None = None  # last (scope, cards) written to disk
@@ -664,7 +588,8 @@ _REPLICA_PROBE = ("SELECT count(*), count(seq), max(seq), total(seq), total(vers
 def _read_remote_links(path: Path, now: float | None = None, *,
                        qualified_out: set | None = None,
                        owners_out: set | None = None,
-                       moved_out: dict | None = None) -> list[dict[str, Any]]:
+                       moved_out: dict | None = None,
+                       closed_out: set | None = None) -> list[dict[str, Any]]:
     """Replica cards linked to a session on this gateway, one row per (session, card).
 
     Open and unproven cards come back ``unfinished``; cards their owner attests closed
@@ -676,6 +601,7 @@ def _read_remote_links(path: Path, now: float | None = None, *,
 
     live = now is None
     now = time.time() if now is None else now
+    ident = _replica_rows.file_ident(path) if live else None
     conn = _open_ro(path)
     try:
         conn.execute("BEGIN")  # one snapshot: the memo key must describe the rows it maps to
@@ -687,7 +613,7 @@ def _read_remote_links(path: Path, now: float | None = None, *,
         version_column = 'version' if 'version' in columns else 'NULL'
         info_rows = conn.execute("SELECT gw, data FROM replica WHERE coll = 'gateway' AND key = 'info'").fetchall()
         last_ok, offline = _meta_float(conn, "last_ok"), _meta_float(conn, "offline_since")
-        key = None
+        key = view = rows = probe = None
         stale = offline is not None or last_ok is None or now - last_ok > HUB_STALE_AFTER_S
         if live and {'seq', 'version'} <= columns:
             probe = conn.execute(_REPLICA_PROBE).fetchone()
@@ -708,33 +634,43 @@ def _read_remote_links(path: Path, now: float | None = None, *,
                     owners_out.update(memo[5])
                 if moved_out is not None:
                     moved_out.update(memo[9])
+                if closed_out is not None:
+                    closed_out.update(memo[10])
                 return list(memo[3])  # cards are read-only, as in ``_links_cache``
-        # Aggregate raw text, not json(data): malformed task JSON retains its per-row decode semantics.
-        # sqlite3 releases/reacquires the GIL per fetched row; under contention 12k rows can stall for 90s.
-        packed = conn.execute(f"SELECT json_group_array(json_array(gw, key, data, updated_at, {version_column})) "
-                              "FROM replica WHERE coll = 'tasks'").fetchone()[0]
-        rows = [tuple(row) for row in json.loads(packed)]
+        if key is not None:  # [daveey] a miss reads and re-projects only the rows whose seq moved
+            view = _replica_rows.read(conn, path, version_column, probe, ident)
+        else:
+            # Aggregate raw text, not json(data): malformed task JSON retains its per-row decode semantics.
+            # sqlite3 releases/reacquires the GIL per fetched row; under contention 12k rows can stall for 90s.
+            packed = conn.execute(f"SELECT json_group_array(json_array(gw, key, data, updated_at, {version_column})) "
+                                  "FROM replica WHERE coll = 'tasks'").fetchone()[0]
+            rows = [tuple(row) for row in json.loads(packed)]
     finally:
         conn.close()
     if key is None:
         return _project_replica(path, now, me, rows, info_rows, last_ok, offline,
-                                qualified_out=qualified_out, owners_out=owners_out, moved_out=moved_out)
+                                qualified_out=qualified_out, owners_out=owners_out, moved_out=moved_out,
+                                closed_out=closed_out)
     qualified: set = set()
     owners: set = set()
     moved: dict = {}
+    closed: set = set()
     seen_at: dict[str, float] = {}
-    cards = _project_replica(path, now, me, rows, info_rows, last_ok, offline,
-                             qualified_out=qualified, owners_out=owners, seen_out=seen_at, moved_out=moved)
+    cards = _replica_projection.project(view, now, me, info_rows, last_ok, offline, fresh=key[3],
+                                        qualified_out=qualified, owners_out=owners, seen_out=seen_at,
+                                        moved_out=moved, closed_out=closed)
     # Heartbeat cut-offs are the live verdicts in ``key``, hub staleness the ``stale`` check; a clock step back rereads.
     _remote_read_memo = (key, now, None, list(cards),
                          frozenset(qualified), frozenset(owners), stale, _replica_synced(seen_at, last_ok),
-                         dict(seen_at), dict(moved))
+                         dict(seen_at), dict(moved), frozenset(closed))
     if qualified_out is not None:
         qualified_out.update(qualified)
     if owners_out is not None:
         owners_out.update(owners)
     if moved_out is not None:
         moved_out.update(moved)
+    if closed_out is not None:
+        closed_out.update(closed)
     return cards
 
 
@@ -751,7 +687,7 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
                      offline: float | None, *, qualified_out: set | None = None, owners_out: set | None = None,
                      horizon_out: list[float] | None = None,
                      seen_out: dict[str, float] | None = None,
-                     moved_out: dict | None = None) -> list[dict[str, Any]]:
+                     moved_out: dict | None = None, closed_out: set | None = None) -> list[dict[str, Any]]:
     """``_read_remote_links`` of rows already read. ``horizon_out`` collects every wall time after ``now`` at which
     the same rows could project differently (hub-sync staleness, scope-heartbeat freshness)."""
     stale = offline is not None or last_ok is None or now - last_ok > HUB_STALE_AFTER_S
@@ -768,7 +704,8 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
     legacy_records: dict[tuple, dict] = {}
     global _replica_decoded
     previous_decoded, decoded = _replica_decoded, {}
-    for gw, record_key, data, updated, version in rows:
+    # (gw, key) order, which ``kanban_replica_rows`` also keeps: the answer's order never depends on the scan.
+    for gw, record_key, data, updated, version in sorted(rows, key=lambda r: (str(r[0]), str(r[1]))):
         memo_key = (str(path), str(gw), str(record_key))
         hit = previous_decoded.get(memo_key)
         row = hit[1] if hit is not None and hit[0] == data else _decode_replica_task(record_key, data)
@@ -792,6 +729,8 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
             raw[key] = t
             if _owner_attests_terminal(t, str(gw), owner_profile, board, heartbeats, now, stale, evidence):
                 released.add(key)
+                if closed_out is not None and evidence.get('verified') is True:
+                    closed_out.add(key)
             elif owner_profile is None or t.get('status') not in LISTED_STATUSES:
                 # Legacy links carry no authoritative release receipt. Preserve
                 # terminal/unknown reports even on cold start; only owner-attested
@@ -815,6 +754,8 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
         qualified_out.update((gw, board, tid) for gw, _, board, tid in blank_before - set(tasks))
     from hermes_cli.profiles import get_active_profile_name
 
+    card_rows = _replica_projection.card_rows
+    historical_fields, linked_sessions = _replica_projection.historical_fields, _replica_projection.linked_sessions
     origin_profile = get_active_profile_name()
     found: dict[tuple[str, str], dict[str, Any]] = {}
     for (gw, owner_profile, board, tid), t in tasks.items():
@@ -822,43 +763,16 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
         # Other profiles on this gateway, and unqualified legacy owners, are not.
         if gw == me and owner_profile == origin_profile:
             continue
-        links = t.get("sessions") if isinstance(t.get("sessions"), list) else []
-        sids = {str(link['session']) for link in links
-                if isinstance(link, dict) and link.get('session') and link.get('gw') == me
-                and link.get('profile') == origin_profile
-                and link.get('rel') in ('shepherd', 'cross_task', 'create-task', 'adopt-task')}
+        sids = linked_sessions(t, me, origin_profile)
         if not sids:
             continue
         owner_seen = seen_at.get(gw) or None
         synced = min(owner_seen, last_ok) if (owner_seen and last_ok) else (owner_seen or last_ok)
         # Observation scope: the linked card only, never its dependency descendants.
-        closed = (gw, owner_profile, board, tid) in released
-        prefix = f'{gw}/{owner_profile}/{board}' if owner_profile is not None else f'{gw}/{board}'
-        ref = f'{prefix}/{tid}'
-        from hermes_cli.kanban_completion_receipt_projection import remote_fields
-        historical = remote_fields(raw[(gw, owner_profile, board, tid)], gateway=gw,
-                                   profile=owner_profile, board=board, task_id=tid)
-        for sid in sids:
-            found[(sid, ref)] = {
-                **historical,
-                **{f: t.get(f) for f in _REMOTE_FIELDS},
-                "id": tid, "board": board, "gateway": gw, "key": ref, "session": sid,
-                "via": "shepherd", "root": ref, "remote": True,
-                "profile": owner_profile, "owner_profile": owner_profile,
-                "origin_gateway": me, "origin_profile": origin_profile,
-                "ownership_state": 'unknown' if owner_profile is None else 'qualified',
-                "unfinished": not closed and (t.get("status") in LISTED_STATUSES or bool(t.get("unfinished"))),
-                "released": closed,
-                **({"closed_uncompleted": True} if closed and t.get("status") == "archived"
-                   and _owner_evidence_of(t).get("verified") is not True else {}),
-                "reported_status": t.get('reported_status', t.get('status')),
-                "synced_at": synced, "stale": stale,
-                "legacy_record": legacy_records.get((gw, owner_profile, board, tid)),
-                "legacy_key": t.get('_legacy_key'),
-                # [daveey] What the card waits on is recomputed at read time from these (``_remote_wait``).
-                "park": _park_of(t),
-                **{k: t[k] for k in ("awaiting", "wake_check") if t.get(k)},
-            }
+        key = (gw, owner_profile, board, tid)
+        found.update(card_rows(key, t, sids=sids, closed=key in released, synced=synced, stale=stale, me=me,
+                               origin_profile=origin_profile, legacy_record=legacy_records.get(key),
+                               historical=historical_fields(raw[key], key)))
     return list(found.values())
 
 
@@ -1024,15 +938,25 @@ def _links_lookup(scope: tuple, stale_ok: bool) -> tuple:
         _refresh_links_in_background(scope)
         return hit
     fingerprint = _links_fingerprint()
-    if hit is not None and hit[2] == fingerprint and time.monotonic() < hit[0]:
+    if hit is not None and _links_fresh(hit, fingerprint):
         return hit
     with _links_lock:
         hit = _links_cache.get(scope)
-        if hit is not None and hit[2] == fingerprint and time.monotonic() < hit[0]:
+        if hit is not None and _links_fresh(hit, fingerprint):
             return hit
         if stale_ok and hit is not None:
             return hit
-        return _store_links(scope, fingerprint)
+        return _publish_links(scope, fingerprint)
+
+
+def _links_fresh(hit: tuple, fingerprint: tuple) -> bool:
+    """Within its max age, and read under ``fingerprint`` except for boards it never read (``kanban_links_narrow``)."""
+    return time.monotonic() < hit[0] and (hit[2] == fingerprint or _links_narrow.matches(hit, fingerprint))
+
+
+def _publish_links(scope: tuple, fingerprint: tuple) -> tuple:
+    projector = _project_remote_links  # the one ``_store_links`` runs: a replaced projection declares no reads
+    return _links_narrow.remember(_store_links(scope, fingerprint), projector, _board_db_paths(), _board_slug)
 
 
 def _store_links(scope: tuple, fingerprint: tuple) -> tuple:
@@ -1068,8 +992,8 @@ def _refresh_links_scope(scope: tuple) -> None:
             return
         fingerprint = _links_fingerprint()
         hit = _links_cache.get(scope)
-        if hit is None or hit[2] != fingerprint or time.monotonic() >= hit[0]:
-            _store_links(scope, fingerprint)
+        if hit is None or not _links_fresh(hit, fingerprint):
+            _publish_links(scope, fingerprint)
 
 
 _links_refresher = ScopeRefresher(lambda scope: _refresh_links_scope(scope), _LINKS_SCOPE_CAP)
@@ -1149,6 +1073,10 @@ def _project_remote_links() -> list[dict[str, Any]]:
             _close_quietly(conn)
 
 
+# Local boards are read only for this origin's own rows, each at its row's board (kanban_links_narrow). [daveey]
+setattr(_project_remote_links, _links_narrow.DECLARES_BOARD_READS, True)
+
+
 def _legacy_remote_links() -> list[dict[str, Any]]:
     """``_read_remote_links`` of this gateway's replica. A failed read (corrupt/locked/vanished hub.db) is not
     "no remote work": it returns the last good answer with every row marked stale, so a session never paints
@@ -1165,9 +1093,9 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
         if path is None:
             raise FileNotFoundError("no hub.db")
         qualified: set[tuple[str, str, str]] = set()
-        owners: set[tuple[str, str, str]] = set()
+        closed: set[tuple[str, str | None, str, str]] = set()
         moved: dict[str, Any] = {}
-        cards = _read_remote_links(path, qualified_out=qualified, owners_out=owners, moved_out=moved)
+        cards = _read_remote_links(path, qualified_out=qualified, closed_out=closed, moved_out=moved)
     except Exception as exc:  # a broken replica must never break the sidebar
         if previous is None:
             if path is not None:
@@ -1191,8 +1119,10 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
                  # Successful reads migrate graph-inferred cache entries only.
                  # Receipt-backed obligations remain in the separate ledger.
                  and c.get("via") != "descendant"
-                 # Fresh replica + owner row present but this session's link gone: expire the ghost.
-                 and (c.get("gateway"), c.get("board"), c.get("id")) not in owners
+                 # Fresh replica: the owner row (exact profile) dropped this session's link and verifies the
+                 # completion: expire the ghost. An open or unverified row keeps it: a reprovisioned owner
+                 # republishes its cards with ``sessions: []`` (hub, 2026-11-11). [daveey]
+                 and (c.get("gateway"), c.get("profile"), c.get("board"), c.get("id")) not in closed
                  and not (c.get("ownership_state") == "unknown"
                           and (c["session"], c.get("gateway"), c.get("board"), c.get("id")) in qualified_now)
                  # Fresh replica: the named owner publishes the scope without it, another gateway owns the card.
@@ -1254,6 +1184,8 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
     _parked_sink.stalled = stalled
     local_keys: dict[str, set[tuple[str, str, bool]]] = {}
     _local_keys_sink.keys = local_keys
+    execution = {}
+    _local_keys_sink.execution = execution
     _busy.begin_recompute()
     try:
         pairs = _read_local_pairs_into(active, blocked, unseen)
@@ -1261,6 +1193,7 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         _parked_sink.maps = None
         _parked_sink.stalled = None
         _local_keys_sink.keys = None
+        _local_keys_sink.execution = None
     waiting: dict[str, set[str]] = {}
     for sid, tid in pairs:
         waiting.setdefault(sid, set()).add(tid)
@@ -1310,6 +1243,7 @@ def _recompute_all_counts(scope, now: float, fingerprint, *, include_waiting: bo
         _stalled_cache[0] = stalled
         _remote_keys_cache[0] = remote_ids
         _local_keys_cache[0] = local_ids
+        _execution_cache[0] = execution
         _count_scopes.remember_locked()
         return _cached_count_result(include_waiting, include_snapshot)
 
@@ -1329,9 +1263,22 @@ def _read_local_pairs_into(active: dict[str, int], blocked: dict[str, int],
 
 # [daveey] Per-board read memo: {board path: (content key, reads)}. A board whose read rows have not changed since
 # its last read (``_board_content_key``: bookkeeping writes do not count) holds the same answer, so a write on one
-# board re-reads that board only; the other boards cost a stat. Only the stall verdict depends on the clock, so the
-# memo keeps its rows and re-judges them on each use. Touched only under ``_pairs_lock``.
+# board re-reads that board only; the other boards cost a stat while warm. Source observation validity also has
+# the existing 30s counts bound: an unchanged authoritative board must actually be read again, never re-dated by
+# a memo hit. The stall verdict is re-judged on each use. Touched only under ``_pairs_lock``.
 _board_memo: dict[str, tuple[tuple, dict[str, Any]]] = {}
+
+
+def _require_local_execution_authority(conn: sqlite3.Connection) -> None:
+    """A read of a PRIMARY mirror is not an owner observation, even with a recent pull.
+
+    Inspect persisted mode: read-only connections need not be in the writer's _SYNCED_PATHS.
+    Missing source clocks stay unknown; callers retain legacy rows and human requests.
+    """
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_sync_state'").fetchone():
+        row = conn.execute("SELECT mode FROM kanban_sync_state LIMIT 1").fetchone()
+        if row is None or row[0] not in ("off", "shadow"):
+            raise ValueError("local execution authority unavailable for sync mirror")
 
 
 def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, Any], bool]:
@@ -1340,6 +1287,7 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
     failed (unseen/stalled log and count nothing, as before); such a read is not memoized, so the next pass retries."""
     global _pairs_sink
     reads: dict[str, Any] = {}
+    read_at = time.time()
     complete = True
     with cached_ro(path) as conn:
         conn.execute("BEGIN")
@@ -1352,13 +1300,32 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                 complete = False
             outer, _pairs_sink = _pairs_sink, set()
             try:
-                reads["active"] = _counts_on(conn, ACTIVE_STATUSES)
+                tasks = {}
+                reads["active"] = _counts_on(conn, ACTIVE_STATUSES, tasks=tasks)
                 reads["active_pairs"], _pairs_sink = _pairs_sink, set()
-                reads["blocked"] = _counts_on(conn, BLOCKED_STATUSES)
+                reads["blocked"] = _counts_on(conn, BLOCKED_STATUSES, tasks=tasks)
                 reads["blocked_pairs"] = _pairs_sink
                 reads["pairs"] = reads["active_pairs"] | reads["blocked_pairs"]
+                from hermes_cli.kanban_execution_source import assemble, safe_raw, unknown_raw
+                from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, card_scope
+                gateway, profile = card_scope(path)
+                try:
+                    _require_local_execution_authority(conn)
+                    sources = assemble(conn, {tid for _, tid in reads["pairs"]}, board=_board_slug(path),
+                                       gateway=gateway, profile=profile, observed_at=read_at)
+                    reads["execution"] = {tid: safe_raw(source["task"], source) for tid, source in sources.items()}
+                except ADAPTER_ERRORS:
+                    # Optional evidence only: legacy counts and asks stay; each card is an explicit unknown.
+                    _log.debug("kanban execution source failed for %s", path, exc_info=True)
+                    reads["execution"] = {tid: unknown_raw(tasks[tid], gateway=gateway, profile=profile,
+                                                           board=_board_slug(path))
+                                          for _, tid in reads["pairs"]}
             finally:
                 _pairs_sink = outer
+            reads["done_pairs"], reads["done_execution"] = _receipts.counts_done(
+                conn, board=_board_slug(path), gateway=gateway, profile=profile, observed_at=read_at,
+                counted_sub_clause=_counted_sub_clause, authority=_require_local_execution_authority,
+                window=ATTENTION_WINDOW_S)
             if parked:
                 _parked_sink.pairs = (set(), set())
                 try:
@@ -1375,7 +1342,21 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                     complete = False
         finally:
             conn.execute("COMMIT")
+    reads["source_read_at"] = read_at
     return reads, complete
+
+
+def _collect_execution_evidence(reads: dict[str, Any], path: Path) -> None:
+    """Copy this board's per-card execution sources into the active evidence sink, keyed by board/card."""
+    evidence = getattr(_local_keys_sink, "execution", None)
+    if evidence is None:
+        return
+    for sid, tid in reads["pairs"]:
+        value = reads.get("execution", {}).get(tid)
+        if value is not None:
+            evidence.setdefault(sid, {})[f"{_board_slug(path)}/{tid}"] = value
+    for sid, tid in reads.get("done_pairs", ()):  # observation-only done bucket, never counted
+        evidence.setdefault(sid, {})[f"done:{_board_slug(path)}/{tid}"] = reads["done_execution"][tid]
 
 
 def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: dict[str, int]) -> None:
@@ -1389,6 +1370,10 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
         key = _revalidate.board_memo_key(path)
         hit = _board_memo.get(str(path))
         reads = hit[1] if hit is not None and hit[0] == key else None
+        read_at = reads.get("source_read_at") if reads is not None else None
+        if (not isinstance(read_at, (int, float)) or isinstance(read_at, bool)
+                or not 0 <= now - read_at < _COUNTS_MAX_AGE_S):
+            reads = None
         if reads is not None and ((sink is not None and "parked" not in reads)
                                   or (stalled is not None and "stall_rows" not in reads)):
             reads = None
@@ -1414,6 +1399,7 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
                     stalled[sid] = stalled.get(sid, 0) + n
             except Exception as exc:  # display-only: a failed read never fails the counts
                 _log.debug("kanban stalled read failed for %s: %s", path, exc)
+        _collect_execution_evidence(reads, path)
         keys = getattr(_local_keys_sink, "keys", None)
         if keys is not None:
             for sid, cards in _identity.local_keys(path, {**reads, "stalled_pairs": stalled_pairs},
@@ -1542,7 +1528,8 @@ def blocked_task_counts() -> dict[str, int]:
 # What a session's task strip lists: the sidebar's open + blocked sets, plus
 # ``review`` (also waiting on a human). [daveey]
 LISTED_STATUSES = tuple(dict.fromkeys(ACTIVE_STATUSES + BLOCKED_STATUSES + ("review",)))
-_TASK_FIELDS = ("id", "title", "status", "assignee", "session_id", "created_at", "started_at", "block_kind", "human_request")
+_TASK_FIELDS = ("id", "title", "status", "assignee", "session_id", "created_at", "started_at", "block_kind", "human_request",
+                "current_run_id", "last_heartbeat_at")
 
 
 def _board_slug(path: Path) -> str:
@@ -1554,7 +1541,7 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
     of, in ``statuses`` — the same pairs ``_read_counts`` counts."""
     sid_ph = ",".join("?" for _ in ids)
     st_ph = ",".join("?" for _ in statuses)
-    with cached_ro(path) as conn:
+    with cached_ro(path) as conn, _execution_transaction(conn) as read_at:
         conn.row_factory = sqlite3.Row
         cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
         if "session_id" not in cols:
@@ -1563,7 +1550,7 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
         run_start = "NULL"
         if "current_run_id" in cols and conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_runs'").fetchone():
-            run_start = "(SELECT r.started_at FROM task_runs r WHERE r.id = t.current_run_id)"
+            run_start = "(SELECT r.started_at FROM task_runs r WHERE r.id = t.current_run_id AND r.task_id = t.id)"
         found: dict[str, dict[str, Any]] = {}
         watch = _not_watch(conn)  # [daveey] a watch park is not the chat's open card (close-out gate)
         for row in conn.execute(
@@ -1578,6 +1565,31 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
                 found.setdefault(row["id"], {**dict(row), "via": "subscribed"})
         except sqlite3.Error:  # board predates notify subscriptions
             pass
+        from hermes_cli.kanban_execution_source import assemble
+        from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, card_scope
+        gateway, profile = card_scope(path)
+        for info in found.values():  # board-root owner scope, kept for the failure path too (C9)
+            info["_execution_scope"] = {"gateway": gateway, "profile": profile, "board": _board_slug(path)}
+        try:
+            _require_local_execution_authority(conn)
+            authority = True
+        except ADAPTER_ERRORS:
+            authority = False  # a pulled mirror attests neither open nor delivered cards
+        try:
+            if not authority:
+                raise RuntimeError("local execution authority unavailable")
+            sources = assemble(conn, found, board=_board_slug(path), gateway=gateway, profile=profile,
+                               observed_at=read_at)
+            for tid, source in sources.items():
+                found[tid]["_execution_source"] = source
+        except ADAPTER_ERRORS:
+            # Optional evidence: the task list and asks stay; each card becomes an explicit unknown.
+            _log.debug("kanban execution source failed for %s", path, exc_info=True)
+            for info in found.values():
+                info["_execution_error"] = True
+        if authority:  # receipts are independent of the open-card read, but not of owner authority
+            _receipts.attach_done(conn, found, board=_board_slug(path), gateway=gateway, profile=profile,
+                                  observed_at=read_at)
         _add_card_details(conn, found)
         try:
             for tid, info in _local_wait_info(conn, found).items():
@@ -1634,7 +1646,8 @@ def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED
             if wait is not None:
                 row["wait"] = wait
             out.append(row)
-    return out
+    from hermes_cli.kanban_execution_observations import add_cards
+    return add_cards([dict(row) for row in out])
 
 
 # [daveey] A "done" card can still need the user: its handoff admits part of the
@@ -1695,7 +1708,7 @@ def attention_task_counts(now: float | None = None) -> dict[str, int]:
     pairs: set[tuple[str, str]] = set()
     for path in paths:
         try:
-            recent = _read_recent_done(path, since)
+            recent = _recent_done.memoized(path, since, _read_recent_done, _revalidate.board_memo_key, scope)  # [daveey]
         except sqlite3.Error as exc:
             _log.debug("kanban attention read failed for %s: %s", path, exc)
             continue
@@ -1711,22 +1724,23 @@ def attention_task_counts(now: float | None = None) -> dict[str, int]:
 
 
 def _read_annotation_parts() -> tuple:
-    (active, blocked, unseen, remote_stale, waiting, parked, held, stalled,
-     remote_keys) = _all_counts(include_snapshot=True)
+    snapshot = _all_counts(include_snapshot=True)
+    active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys = snapshot[:9]
+    execution = getattr(snapshot, "execution", {})
     extra = _extra_waiting()
     try:
         attention = attention_task_counts()
     except Exception:
         _log.debug("kanban attention unavailable", exc_info=True)
         attention = {}
-    raw = (active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra, attention)
+    raw = (active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra, attention, execution)
     # [daveey] Nothing moved since the last read of this scope: return that read's frozen copy instead of freezing an
     # equal one. Safe: frozen parts are never mutated (every poll already shares one), and ``==`` per part (sets and
     # frozensets compare by members) proves the copy is exactly what freezing ``raw`` would build. The same object
     # also lets ``_annotation_copy.published`` skip its deep comparison.
     scope = _origin_scope()
     previous = _frozen_parts.get(scope)
-    if previous is not None and all(old is new or old == new for old, new in zip(previous, raw)):
+    if previous is not None and len(previous) == len(raw) and all(old is new or old == new for old, new in zip(previous, raw)):
         return previous
     frozen = _identity.freeze_annotation(raw)
     _frozen_parts[scope] = frozen
@@ -1831,7 +1845,13 @@ def one_annotation_snapshot() -> Iterator[None]:
         _annotation_scope.reads = _annotation_scope.attention = _annotation_scope.links = None
 
 
-_mark_kanban_unknown = _identity.mark_unknown
+def _mark_kanban_unknown(rows):
+    from hermes_cli.kanban_execution_observations import count_snapshot
+
+    _identity.mark_unknown(rows)
+    for row in rows:
+        count_snapshot(row, ())
+    return rows
 
 
 def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1849,7 +1869,8 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     try:
         if shared:
             *parts, copy_at = shared[0]
-            active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra = parts
+            active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra = parts[:10]
+            execution = parts[10] if len(parts) > 10 else {}
         else:
             parts = _annotation_snapshot()
             copy_at = _annotation_copy.observed_at(parts)  # [daveey] a previous process's copy keeps its own date
@@ -1861,10 +1882,11 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
                 _log.warning("kanban annotation unavailable (no snapshot); rows marked kanban_unknown")
                 return _mark_kanban_unknown(rows)
             (active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra,
-             attention) = parts
+             attention) = parts[:11]
+            execution = parts[11] if len(parts) > 11 else {}
             if shared is not None:
                 shared.append((active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys,
-                               extra, copy_at))
+                               extra, execution, copy_at))
                 _annotation_scope.attention = attention
     except Exception:
         # [daveey] A failed read is "unknown", never "no work": stamp ``kanban_unknown`` (the sidebar keeps the
@@ -1925,6 +1947,9 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             row["kanban_waiting_on"] = ids_waiting[:WAITING_ON_CAP]
         else:
             row.pop("kanban_waiting_on", None)
+        from hermes_cli.kanban_execution_observations import count_snapshot
+        count_snapshot(row, [key for sid in ids for key in remote_keys.get(sid, ())],
+                       evidence={key: value for sid in ids for key, value in execution.get(sid, {}).items()})
     return rows
 
 
@@ -1933,18 +1958,22 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
     global _annotate_flight_scope, _annotate_flight_result, _annotate_waiters
     _remote_read_memo = None
     _hub_signature.reset()
+    _replica_rows.reset()
+    _replica_projection.reset()
     _annotate_flight_scope = None
     _annotate_flight_result = None
     _annotate_waiters = 0
     _last_annotation.clear()
     _frozen_parts.clear()
     _bounded.reset()
+    _recent_done.reset()
     _annotation_copy.reset()
     with _pairs_lock:
         _board_memo.clear()
     _busy.reset()
     with _links_lock:
         _links_cache.clear()
+        _links_narrow.reset()
     with _cache_lock:
         _cache = None
         _count_scopes.reset_locked()
@@ -1956,6 +1985,7 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
         _parked_cache[0] = ({}, {})
         _stalled_cache[0] = {}
         _local_keys_cache[0] = {}
+        _execution_cache[0] = {}
         _remote_keys_cache[0] = {}
     with _RO_CACHE_LOCK:
         held = [entry[0] for entry in _RO_CACHE.values()]

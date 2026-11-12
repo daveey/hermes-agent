@@ -8,7 +8,8 @@ local run. Cards without ``placement_policy`` are still placed without it.
 
 Hub overflow: on a host whose installation-root config sets ``kanban.admission.cpu_busy_below_pct`` the reporter
 also attaches the complete triple ``cpu_busy_pct``/``cpu_busy_window_ms``/``cpu_busy_sample_end_ms`` measured by the
-sync loop's advisory sampler thread (``machine_cpu_sampler``: a ~1 s window every 5 s, off the loop thread).
+sync loop's advisory sampler thread (``machine_cpu_sampler``: rolling ~1 s windows, off the loop thread; a triple
+ends at most 1.5 s before the report takes it, inside the Board's 2 s window).
 ``collect()`` itself never samples CPU busy. A CPU-bearing report has a hard 2 s total transport budget and is never
 replayed: each sample is reported at most once, and a failed round drops it.
 """
@@ -20,6 +21,7 @@ import re
 import shutil
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -195,6 +197,11 @@ class Reporter:
         self.cpu_take_fn = cpu_take_fn
         self.next_at = 0.0
         self.counters_off_until = 0.0  # a Board without throughput counters 400s them: skip until then
+        # The sync loop (report_due) and the anchored sender thread (report_tick, machine_metrics_sender) share one
+        # Reporter: one report at a time (non-blocking), and report starts at least REPORT_EVERY_S / 2 apart (the
+        # loop's next_at is always a full period after the latest start; the sender checks started_at).
+        self._lock = threading.Lock()
+        self.started_at: Optional[float] = None
 
     def _sample(self, sample: dict, measured: Optional[dict]) -> dict:
         from hermes_cli import kanban_sync_timing as timing
@@ -204,11 +211,41 @@ class Reporter:
             sample.update({k: measured[k] for k in cpu.FIELDS})
         return sample
 
+    def _spaced(self, now: float) -> bool:
+        return self.started_at is None or now - self.started_at >= REPORT_EVERY_S / 2
+
     def report_due(self) -> bool:
-        now = self.clock()
-        if now < self.next_at:
-            return False
-        self.next_at = now + REPORT_EVERY_S
+        if not self._lock.acquire(blocking=False):
+            return False  # the sender thread is reporting right now
+        try:
+            now = self.clock()
+            if now < self.next_at:
+                return False
+            self.next_at = now + REPORT_EVERY_S
+            return self._report(now, self.send)
+        finally:
+            self._lock.release()
+
+    def report_tick(self, send: Callable[[dict], Any]) -> Optional[bool]:
+        """The anchored sender's report through its own transport *send*: True sent, False failed, None skipped.
+
+        Due rule: the caller's anchor itself, plus one guard: skip while another report is in flight, while a
+        report (on either path) started less than REPORT_EVERY_S / 2 ago, or during the Board's 404/405 backoff.
+        Unlike report_due it never compares against ``next_at = entry + period``, which would drop a tick that woke
+        earlier relative to its anchor than the tick before it."""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            now = self.clock()
+            if self.next_at - now > REPORT_EVERY_S or not self._spaced(now):
+                return None
+            self.next_at = now + REPORT_EVERY_S
+            return self._report(now, send)
+        finally:
+            self._lock.release()
+
+    def _report(self, now: float, send: Callable[[dict], Any]) -> bool:
+        self.started_at = now
         try:
             from hermes_cli import kanban_sync_timing as timing
             from hermes_cli import machine_cpu_metrics as cpu
@@ -229,7 +266,7 @@ class Reporter:
             def counters_rejected() -> None:
                 self.counters_off_until = now + UNSUPPORTED_RETRY_S
             with timing.span("send"):  # preserve the transport's existing hard 2 s budget
-                send_compatible(self.send, sample, counters_rejected)
+                send_compatible(send, sample, counters_rejected)
             return True
         except Exception as exc:  # health: allow BLE001 -- load reporting must never stop kanban sync
             status = getattr(exc, "status", None)

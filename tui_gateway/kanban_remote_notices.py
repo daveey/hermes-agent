@@ -73,7 +73,27 @@ def _ro(path: Path) -> sqlite3.Connection:
         return conn
 
 
+def drop_mark(task: dict) -> Optional[float]:
+    """``human_request.resolved_check_dropped_at`` of a blocked remote card (the owner's dropped-probe mark).
+
+    A drop is a new state of the block, so it is the state's time: the dropped card gets its own ledger identity
+    (``blocked@<dropped_at>``) and notifies each origin once more, even after the earlier block was delivered."""
+    request = task.get("human_request")
+    if isinstance(request, str):
+        try:
+            request = json.loads(request)
+        except ValueError:
+            return None
+    if task.get("status") != "blocked" or not isinstance(request, dict):
+        return None
+    with contextlib.suppress(TypeError, ValueError):
+        return float(request.get("resolved_check_dropped_at")) or None
+    return None
+
+
 def _terminal_at(task: dict) -> Optional[float]:
+    if (dropped := drop_mark(task)) is not None:
+        return dropped
     run = task.get("run") if isinstance(task.get("run"), dict) else {}
     for value in (task.get("completed_at") if task.get("status") == "done" else None, run.get("ended_at")):
         with contextlib.suppress(TypeError, ValueError):
@@ -191,19 +211,36 @@ def _released(link: dict) -> bool:
     return link_released(link)
 
 
+def _wal(conn: sqlite3.Connection, deadline: float) -> None:
+    """[daveey] ``journal_mode=WAL`` answers SQLITE_BUSY without calling the busy handler while another opener of a
+    fresh ledger holds it, so concurrent first polls raised ``database is locked``. Retry until the connect timeout."""
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.005)
+
+
 def _ledger(path: Optional[Path] = None) -> sqlite3.Connection:
     path = path or ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=5.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    _wal(conn, deadline=time.monotonic() + 5.0)
     conn.execute("CREATE TABLE IF NOT EXISTS notices (session TEXT NOT NULL, ref TEXT NOT NULL, state TEXT NOT NULL, "
                  "at REAL NOT NULL, delivered INTEGER NOT NULL, PRIMARY KEY (session, ref, state))")
     cols = {row[1] for row in conn.execute("PRAGMA table_info(notices)")}
     for name, decl in (("holder_pid", "INTEGER"), ("holder_start", "INTEGER"), ("notice_key", "TEXT"),
                        ("legacy_seen", "INTEGER NOT NULL DEFAULT 0"), ("settled", "TEXT")):
         if name not in cols:
-            conn.execute(f"ALTER TABLE notices ADD COLUMN {name} {decl}")
+            try:
+                conn.execute(f"ALTER TABLE notices ADD COLUMN {name} {decl}")
+            except sqlite3.OperationalError as exc:  # [daveey] a concurrent opener added it first
+                if "duplicate column name" not in str(exc):
+                    raise
     return conn
 
 
@@ -719,7 +756,7 @@ def _record_swept(keys: list[tuple], ledger: Optional[Path], *, reason: str) -> 
 
 def _reset_for_tests() -> None:
     """Forget this process's memos, as a restarted backend would (the ledger file stays)."""
-    from tui_gateway.kanban_remote_observations import _decoded, _decoded_files, _memo
+    from tui_gateway.kanban_remote_observations import _decoded, _decoded_files, _generation, _known, _memo
     from tui_gateway.kanban_replica_observer import reset as reset_observers
     from tui_gateway.remote_sweep_projection import reset as reset_projection
 
@@ -730,6 +767,8 @@ def _reset_for_tests() -> None:
     _sweep_memo = None
     reset_observers()
     _memo.clear()
+    _known.clear()
+    _generation.clear()
     _decoded.clear()
     _decoded_files.clear()
     _index_memo = None

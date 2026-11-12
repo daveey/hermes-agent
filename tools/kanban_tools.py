@@ -25,7 +25,10 @@ from hermes_cli.kanban_capabilities import check_tool_create, declaration_requir
 from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kanban_reason_comment as krc
 from tools.kanban_tools_placement import (_local_placement, _machine_placement, _marker_placement_fields, _persisted_session_id,
                                           _create_session_id, _placement_origin, _placement_refused, _runs_where,
-                                          _effective_board_args, _origin_enrollment, _pinned_note)
+                                          _effective_board_args, _origin_enrollment, _courier_landing, _pinned_note,
+                                          _admission_refused, _effective_requires, _with_admission)
+# SSRF-checked capped download lives in a sibling; tests monkeypatch it on this module.
+from tools.kanban_tools_attach_url import _download_url_with_cap
 from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_park_args import (_blocker_id_arg, _clear_blocker_arg, _blocker_scope_args, _park_guard,
                                           _wake_check_args, _wake_check_echo, _escalated)
@@ -161,6 +164,7 @@ COMPLETE_REJECTION_CLASSES = frozenset({
     "stale_run",      # run superseded, card already terminal, or unknown id
     "not_running",    # card waits (scheduled/todo/ready) with no run: archive it or re-park it as a watch [daveey]
     "foreign_card",   # card exists here only as a Board replica copy; its owner gateway must write it [daveey]
+    "review_contract",  # ship review card completed without metadata ship can read [daveey]
     "pr_acceptance",  # completion contract's PR CI acceptance refused (pr_acceptance event ok=false)
     "parents",        # unsatisfied parent dependencies
     "not_owner",      # delegate child / other task / unbound run id
@@ -379,7 +383,10 @@ def _enforce_worker_task_ownership(tid: str) -> None:
     if env_tid and tid != env_tid:
         raise _Reject(
             f"worker is scoped to task {env_tid}; refusing to mutate {tid}. Use kanban_comment "
-            f"to hand off information to other tasks, or kanban_create to spawn follow-up work.")
+            f"to hand off information to other tasks, or kanban_create to spawn follow-up work. "
+            f"If {tid} is a ready card stranded on runs_on labels no machine carries, re-route it yourself: "
+            f"kanban_move(task_id='{tid}', runs_on=[...], reason=...). A card another gateway created: "
+            "kanban_supervisor_request operator op. Never ask David to edit, complete or archive a card.")
 
 
 def _worker_guard(tool_name: str, args: dict) -> str:
@@ -894,6 +901,10 @@ def _handle_complete(args: dict, **kw) -> str:
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
+        from hermes_cli import kanban_review_contract as _krc  # [daveey] a review ship cannot read: fix it now
+        unreadable = _krc.refusal(getattr(task, "body", None), metadata)
+        if unreadable:
+            raise _Reject(unreadable, _krc.REJECTION)
         goal_verification = _goal_gate("kanban_complete", task, tid, (summary or result or "").strip(), conn=conn)
         try:
             run_id = _worker_run_id(tid)
@@ -1245,11 +1256,11 @@ def _handle_move(args: dict, **kw) -> str:
         "steps so the run on the other machine can resume"))
     reason = _require_text(args, "reason", "reason is required — say what this machine lacks")
     runs_on = args.get("runs_on")
-    _check(isinstance(runs_on, list) and runs_on, "runs_on must be a non-empty list of labels, e.g. ['machine:worker-1']")
+    _check(isinstance(runs_on, list) and runs_on, "runs_on must be a non-empty list of labels, e.g. ['pool:worker']")
     from hermes_cli.kanban_move import move_task
     with _board(args.get("board")) as (kb, conn):
-        res = move_task(conn, tid, runs_on=runs_on, reason=reason, checkpoint=checkpoint,
-                        expected_run_id=_worker_run_id(tid), force=bool(args.get("force")))
+        res = move_task(conn, tid, runs_on=runs_on, reason=reason, checkpoint=checkpoint, expected_run_id=_worker_run_id(tid),
+                        force=bool(args.get("force")), host_reason=args.get("host_reason"))
         _check(res.get("ok"), f"could not move {tid}: {res.get('error')}")
         note = (f"Moved: the card is re-queued for {res['runs_on']} (eligible now: {', '.join(res['matches'])}); "
                 "this run is over. End your turn with a one-line reply; do not call more tools.")
@@ -1400,47 +1411,6 @@ def _handle_attach(args: dict, **kw) -> str:
     return _store_attachment(args.get("board"), tid, filename, data, args.get("content_type"))
 
 
-_MAX_ATTACH_URL_REDIRECTS = 5
-
-
-def _download_url_with_cap(url: str, max_bytes: int) -> tuple[bytes, Optional[str]]:
-    """Fetch ``url`` over http(s) capped at ``max_bytes`` -> ``(data, content_type)``.
-    Every hop is SSRF-checked (redirects followed manually) so a model-controlled URL, or a
-    public host 302ing, cannot reach loopback/private/cloud-metadata ranges. ``ValueError``
-    for bad scheme, blocked target, too many redirects, or a body over the cap (checked
-    while streaming, so nothing oversize is buffered)."""
-    from urllib.parse import urljoin, urlparse
-    import httpx
-    from tools.url_safety import is_safe_url
-    current_url = url
-    for _ in range(_MAX_ATTACH_URL_REDIRECTS + 1):
-        scheme = (urlparse(current_url).scheme or "").lower()
-        if scheme not in ("http", "https"):
-            raise ValueError(f"unsupported URL scheme {scheme!r}; only http/https are allowed")
-        if not is_safe_url(current_url):
-            raise ValueError(
-                f"URL blocked by SSRF protection (private/internal address): {current_url}")
-        chunks: list[bytes] = []
-        total = 0
-        with httpx.stream("GET", current_url, headers={"User-Agent": "hermes-kanban/attach"},
-                          timeout=30, follow_redirects=False) as resp:
-            if resp.is_redirect:
-                location = resp.headers.get("location")
-                if not location:
-                    raise ValueError(f"redirect without Location header from {current_url}")
-                current_url = urljoin(current_url, location)
-                continue
-            resp.raise_for_status()
-            content_type = (resp.headers.get("content-type") or "").split(";")[0].strip() or None
-            for chunk in resp.iter_bytes(1024 * 1024):
-                total += len(chunk)
-                if total > max_bytes:
-                    raise ValueError(f"attachment exceeds {max_bytes // (1024 * 1024)} MB limit")
-                chunks.append(chunk)
-        return b"".join(chunks), content_type
-    raise ValueError(f"too many redirects fetching {url}")
-
-
 @_kanban_handler("kanban_attach_url")
 def _handle_attach_url(args: dict, **kw) -> str:
     """Attach a file fetched server-side from an http(s) URL (shared size cap)."""
@@ -1475,6 +1445,31 @@ def _handle_attachments(args: dict, **kw) -> str:
                 _fields(a, _ATTACHMENT_FIELDS) for a in kb.list_attachments(conn, tid)]})
 
 
+def _placed_rejection(kp, rid: str, target: str, fields: dict) -> Optional[str]:
+    """[daveey] The tool error for a placed create the target refused (terminal), None while it is not refused.
+
+    origin_idempotency_conflict: a live card on the target already holds the creator's idempotency_key. That
+    card is named as ``existing_task_id`` (kanban_create's key semantics: the key's card, not a new one); it
+    was not bound to this chat, so the creator uses it or picks another key."""
+    import re
+    why = kp.remote_rejection(rid)
+    if not why:
+        return None
+    code = why.get("code") or "placement_rejected"
+    error = why.get("error") or f"{target} {why.get('state') or 'rejected'} request {rid}"
+    extra: dict = {"created": False, **fields}
+    if code == "origin_idempotency_conflict" and (m := re.search(r"already names card (t_[A-Za-z0-9_]+)", error)):
+        extra["existing_task_id"] = m.group(1)
+        error = (f"No card was created: {m.group(1)} on {target} already holds this idempotency_key. Use that "
+                 f"card (cross_task @task:default@{target}/{m.group(1)}) or create with a different key. "
+                 f"({error})")
+    else:
+        error = f"No card was created: {target} refused request {rid}: {error}"
+    if why.get("matches"):
+        extra["matches"] = why["matches"]
+    return tool_error(error, code=code, **extra)
+
+
 def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, session_id, conn=None,
                   note_local_pin: bool = True, origin_profile=None) -> tuple[Optional[str], Optional[dict]]:
     """[daveey] Create the card on the gateway ``kanban.placement`` routes this one to.
@@ -1497,7 +1492,9 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         decision = kp.decide(view, machine_ok=machine_ok)
         target = decision["where"]
         if target == "refuse":
-            return _placement_refused(decision["pin"], decision.get("why", "")), None
+            return _placement_refused(decision.get("pin", "hub"), decision.get("why", ""),
+                                      hub_admission=decision.get("hub_admission"),
+                                      remedy=decision.get("remedy")), None
         if target == "local":
             local = _local_placement(kp, view, decision, machine_ok=machine_ok, note_local_pin=note_local_pin)
             stranded = _runstate.stranded_create((local or {}).get("runs_on"))
@@ -1530,6 +1527,8 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                     f"`hermes-hub tasks --gw {target}`.")
             return _ok(task_id=tid, status=remote_status or "created", **fields, runs_where=target,
                        note=note), None
+        if not placed.get("queued_only") and (refused := _placed_rejection(kp, rid, target, fields)):
+            return refused, None  # the target refused it: no card, never "IS created" [daveey]
         note = (f"{retry}The card IS created: it is queued on {target} as request {rid} and {target} makes the "
                 f"card from it (it runs there, not here: {decision['why']}). Do NOT call kanban_create again "
                 "for this card: an identical call returns this same request. Changed calls with an explicit "
@@ -1632,7 +1631,7 @@ def _handle_create(args: dict, **kw) -> str:
             runs_on = _runstate.placement_runs_on(conn, args.get("placement"))
             if runs_on is not None:
                 pinned_machine = str(args.get("placement")).strip()
-                args = {**args, "placement": "local"}
+                args = {**args, "placement": "local", "runs_on": runs_on}
         # [daveey] Refuse a second owner: open cards on every board/gateway, not this chat's links.
         refused, after_create = kanban_overlap.check(conn, args, courier=origin_intent is not None,
                                                      title=str(title).strip(), session_id=session_id,
@@ -1660,6 +1659,9 @@ def _handle_create(args: dict, **kw) -> str:
                 return _placement_refused(_pin, "an origin-bound card is created on this gateway")
         marker_placement = _origin_enrollment(args, origin, marker_placement, assignee=assignee,
                                                skills=skills, project_id=project_id)
+        marker_placement = _courier_landing(conn, args, origin_intent, marker_placement, runs_on, title=title,
+                                            assignee=assignee, skills=skills, project_id=project_id)
+        _admission_refused(marker_placement)  # raises the typed refusal for a denied hub pin
         try:
             new_tid = kb.create_task(
                 conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
@@ -1674,10 +1676,16 @@ def _handle_create(args: dict, **kw) -> str:
                 creator_task_id=self_tid,
                 idempotency_key=args.get("idempotency_key"),
                 max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
-                requires=args.get("requires"), runs_on=runs_on, max_retries=max_retries,
+                requires=_effective_requires(marker_placement, args),
+                runs_on=runs_on, max_retries=max_retries,
                 placement_policy=(marker_placement or {}).get("placement_policy"),
                 placement_checked=True,  # this front door already checked pins, origins and portability
-                placement_audit=_creation_audit(args, assignee=str(assignee), skills=skills, project_id=project_id),
+                # The audit diagnoses the caller's args, not the runs_on derived from a machine pin
+                # (runs_on is an uncarried option and would mask the real portable_reason). [daveey]
+                placement_audit=_creation_audit({k: v for k, v in args.items() if k != "runs_on"}
+                                                if pinned_machine else args,
+                                                admission=marker_placement, assignee=str(assignee),
+                                                skills=skills, project_id=project_id),
                 require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
                 model_override=model_override, provider_override=provider_override, pin_mandatory=pin_mandatory,
                 goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
@@ -1722,7 +1730,7 @@ def _handle_create(args: dict, **kw) -> str:
             # and a caller that archives and re-creates it makes a duplicate. [daveey]
             extra["runs_on"] = runs_on
             if pinned_machine:
-                extra["placement"] = _machine_placement(pinned_machine, runs_on)
+                extra["placement"] = _with_admission(_machine_placement(pinned_machine, runs_on), marker_placement)
                 extra["note"] = _pinned_note(conn, new_tid, pinned_machine, runs_on)  # + drain wait [daveey]
         # Every result says where the card runs (a caller that can't tell re-creates it or never learns it is stranded)
         extra.update(runs_where=_runs_where(runs_on, pinned_machine, marker_placement),  # + contract advisory [daveey]

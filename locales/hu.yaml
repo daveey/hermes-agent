@@ -229,6 +229,8 @@ gateway:
     no_output: "(nincs kimenet)"
     wake:
       request_withdrawn: "kérés visszavonva (nem jóváhagyás és nem bizonyítja a befejezést)"
+      resolved_check_broken: "a lépésed automatikus észlelése leállt (az ellenőrzés újra és újra meghiúsult); a kérést újra be kell nyújtani, hogy magától folytatódjon"
+      resolved_check_lost: "a lépésed automatikus észlelése leállt (az ellenőrzés elveszett); a kérést újra be kell nyújtani, hogy magától folytatódjon"
       completed: "befejeződött"
       gave_up: "feladva (az újrapróbálkozások elfogytak)"
       crashed: "összeomlott (a worker kilépett); a diszpécser újrapróbálja"
@@ -237,6 +239,8 @@ gateway:
       review_requested: "átadva átnézésre; a megvalósítás elkészült"
       changes_requested: "az átnézés módosításokat kért (BLOCK); a megvalósítás nincs jóváhagyva"
       block_loop_detected: "ismételt blokkolások után triázsra irányítva; orkesztrációs figyelmet igényel"
+      dependency_parent_unclaimed: "has a parent card waiting with no worker"
+      chat_wait_unclaimed: "is ready with no worker claiming it"
       status_default: "állapota megváltozott"
       status_joiner: ", "
       message: "[kanban] A(z) {task_id} feladat {status}.\nCím: {title}\nFelelős: @{assignee}\nTábla: {board}\n\nNézd meg az eredményt, vagy dönts a következő lépésről."

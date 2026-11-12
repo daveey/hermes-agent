@@ -19,9 +19,12 @@ def initialize_ownership(conn, task_id, creator_task_id, parents, created_at, ch
     from hermes_cli.kanban_db import _append_event
     from hermes_cli.kanban_origin import parse_origin
     from hermes_cli.kanban_chat_links import link_uid
+    from hermes_cli.kanban_session_provenance import proven_foreign_chats
 
     origin = parse_origin(chat_origin) if chat_origin else None
-    if origin is None or is_headless_session(origin.chat_id):
+    # The ancestor walk reads this card's ``created`` event and task_links: create_task writes both first.
+    if origin is None or (is_headless_session(origin.chat_id)
+                          and origin.chat_id not in proven_foreign_chats(conn, (task_id,))):
         inherit_creator_origin(conn, task_id, creator_task_id, created_at=created_at)
         _inherit_notify_subs(conn, task_id, parents, created_at=created_at)
         if origin is not None and not conn.execute(
@@ -79,12 +82,25 @@ def resolve_chats(conn: sqlite3.Connection, creator_task_id: str) -> list[dict]:
     """Nearest unreleased human links; creator edges precede dependency parents, cycles stop.
 
     A machine session (``is_machine_session``: a worker/cron/one-shot/subagent transcript, whatever its id
-    shape) owns nothing: its link is skipped and the walk goes on to the next level. [daveey]"""
+    shape) owns nothing: its link is skipped and the walk goes on to the next level. Another gateway's
+    ``local-<sha256>`` chat is one only without this board's proof on the card or an ancestor
+    (``proven_foreign_chats``). [daveey]"""
     from hermes_cli.kanban_db_notify import is_machine_session
     from hermes_cli.kanban_origin import gateway_names
     from hermes_cli.kanban_placement import is_placeholder_session
+    from hermes_cli.kanban_session_provenance import proven_foreign_chats
 
     me = gateway_names()[0]
+    proofs: dict[str, frozenset[str]] = {}
+
+    def _owner(task_id: str, row: dict) -> bool:
+        if not is_machine_session(row["chat_gateway"], row["chat_session"], local_gateway=me,
+                                  profile=row["chat_profile"]):
+            return True
+        if task_id not in proofs:
+            proofs[task_id] = proven_foreign_chats(conn, (task_id,), local_gateway=me)
+        return f"{row['chat_gateway']}/{row['chat_profile']}/{row['chat_session']}" in proofs[task_id]
+
     frontier, seen = [creator_task_id], set()
     for _depth in range(MAX_DEPTH):
         owners, following = {}, []
@@ -93,9 +109,7 @@ def resolve_chats(conn: sqlite3.Connection, creator_task_id: str) -> list[dict]:
                 continue
             seen.add(task_id)
             for row in _chat_links(conn, task_id):
-                if (not is_machine_session(row["chat_gateway"], row["chat_session"], local_gateway=me,
-                                           profile=row["chat_profile"])
-                        and not is_placeholder_session(row["chat_session"])):
+                if not is_placeholder_session(row["chat_session"]) and _owner(task_id, row):
                     key = (row["chat_gateway"], row["chat_profile"], row["chat_session"])
                     owners.setdefault(key, dict(row))
             row = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='created' "
@@ -114,8 +128,14 @@ def resolve_chats(conn: sqlite3.Connection, creator_task_id: str) -> list[dict]:
 
 
 def _copy_delivery(conn: sqlite3.Connection, task_id: str, owner: dict) -> None:
-    """Retain every delivery column, never the source card's notification cursor."""
+    """Retain every delivery column, never the source card's notification cursor.
+
+    A picked-up or synced copy of another gateway's owner card (``created_on`` set and not this gateway) carries
+    its links but never its subs (they do not sync): with nothing to copy, the link alone still owns the child, as
+    on the replica path. This gateway's own card is authoritative: a chat that removed its sub there stays
+    unsubscribed, so its children get no sub either. [daveey]"""
     hub_chat = f"{owner['chat_gateway']}/{owner['chat_profile'] or 'default'}/{owner['chat_session']}"
+    match = "((platform='hub' AND chat_id=?) OR (platform='tui' AND chat_id=?))"
     conn.execute(
         "INSERT OR IGNORE INTO kanban_notify_subs "
         "(task_id, platform, chat_id, thread_id, user_id, user_id_alt, chat_type, notifier_profile, "
@@ -123,9 +143,21 @@ def _copy_delivery(conn: sqlite3.Connection, task_id: str, owner: dict) -> None:
         "SELECT ?, platform, chat_id, thread_id, user_id, user_id_alt, chat_type, notifier_profile, "
         "delivery_mode, delivery_metadata, unixepoch(), "
         "(SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?) "
-        "FROM kanban_notify_subs WHERE task_id=? AND "
-        "((platform='hub' AND chat_id=?) OR (platform='tui' AND chat_id=?))",
+        "FROM kanban_notify_subs WHERE task_id=? AND " + match,
         (task_id, task_id, owner["task_id"], hub_chat, owner["chat_session"]))
+    if _foreign_copy(conn, owner["task_id"]) and not conn.execute(
+            f"SELECT 1 FROM kanban_notify_subs WHERE task_id=? AND {match}",
+            (task_id, hub_chat, owner["chat_session"])).fetchone():
+        _owner_delivery(conn, task_id, owner)
+
+
+def _foreign_copy(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True for a local copy of another gateway's card (its subs live on that gateway, not here). [daveey]"""
+    from hermes_cli.kanban_origin import gateway_names
+    if not any(c[1] == "created_on" for c in conn.execute("PRAGMA table_info(tasks)")):
+        return False
+    row = conn.execute("SELECT created_on FROM tasks WHERE id=?", (task_id,)).fetchone()
+    return bool(row and row[0] and row[0] != gateway_names()[0])
 
 
 class _ReplicaReader:

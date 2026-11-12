@@ -25,6 +25,7 @@ import os
 import re
 import shlex
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
@@ -96,10 +97,46 @@ def _ro(path: Path) -> sqlite3.Connection:
         return conn
 
 
+_NAMES_MAX_AGE_S = 5.0
+_NAMES_RACY_NS = 100_000_000
+_names_memo: Optional[tuple[tuple, float, str, frozenset]] = None
+
+
+def _stat_sig(path: Path) -> Optional[tuple[int, int, int]]:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_ino, st.st_mtime_ns, st.st_size
+
+
+def _mail_config() -> Path:
+    return Path(os.environ.get("HERMES_MAIL_CONFIG") or Path.home() / ".config" / "hermes-mail" / "config.json")
+
+
 def gateway_names() -> tuple[str, set[str]]:
-    """``(this gateway, every gateway hermes-hub knows)`` from the local hub.db; ("", set()) without one."""
+    """``(this gateway, every gateway hermes-hub knows)`` from the local hub.db; ("", set()) without one.
+
+    The answer is reused while its inputs (hub.db, its WAL, the mail config) keep their identity, size and mtime,
+    for at most ``_NAMES_MAX_AGE_S``: links reconcile, creator backfill and provenance checks ask once per row,
+    and each uncached answer opens hub.db (4% of hub gateway CPU, 2026-11-12). [daveey]"""
+    global _names_memo
+    path, cfg = _hub_db(), _mail_config()
+    key = (str(path), _stat_sig(path) if path else None, _stat_sig(Path(f"{path}-wal")) if path else None,
+           str(cfg), _stat_sig(cfg))
+    memo, now = _names_memo, time.monotonic()
+    if memo is not None and memo[0] == key and now - memo[1] < _NAMES_MAX_AGE_S:
+        return memo[2], set(memo[3])
+    me, known = _read_gateway_names(path, cfg)
+    # A file written within the timestamp granularity could change again under the same signature: not kept.
+    racy = time.time_ns() - _NAMES_RACY_NS
+    _names_memo = None if any(isinstance(sig, tuple) and sig[1] >= racy for sig in key) else (
+        key, now, me, frozenset(known))
+    return me, known
+
+
+def _read_gateway_names(path: Optional[Path], cfg: Path) -> tuple[str, set[str]]:
     me, known = "", set()
-    path = _hub_db()
     if path is not None:
         try:
             conn = _ro(path)
@@ -113,7 +150,6 @@ def gateway_names() -> tuple[str, set[str]]:
             pass
     if not me:
         try:
-            cfg = Path(os.environ.get("HERMES_MAIL_CONFIG") or Path.home() / ".config" / "hermes-mail" / "config.json")
             me = str(json.loads(cfg.read_text(encoding="utf-8-sig")).get("gateway") or "")
         except (OSError, ValueError, AttributeError):
             me = ""

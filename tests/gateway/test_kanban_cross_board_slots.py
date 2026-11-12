@@ -41,6 +41,14 @@ def _card(board, title, priority, *, ready_since=None):
     return tid
 
 
+def _running(board):
+    """One worker really running on ``board``: the queue place counts it through that board's file (read-only)."""
+    with kbc.connect_closing(board=board) as conn:
+        busy = kb.create_task(conn, title="busy", assignee="default")
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (busy,))
+        conn.commit()
+
+
 def _dispatcher(monkeypatch, spawned, *, start_board):
     from gateway.kanban_watchers_dispatcher import _DispatcherSettings, _KanbanDispatcher
     real = kbd.dispatch_once
@@ -124,7 +132,7 @@ def test_a_guarded_starved_head_does_not_win_its_board_every_first_pick(home, mo
     with kbc.connect_closing(board="hermes") as conn:
         assert kb.get_task(conn, filler).status == "ready"
     mine = _card("default", "default p900 card", 900)
-    monkeypatch.setattr(kbd, "count_running_tasks_other_boards", lambda board=None: 1)
+    _running("hermes")
     with kbc.connect_closing(board="default") as conn:
         place = kqp.position(conn, kb.get_task(conn, mine), "default")
     assert place is not None and "ahead_other_boards" not in place, place
@@ -144,7 +152,7 @@ def test_board_started_nothing_keeps_the_starvation_pick(home):
 def test_queue_text_counts_higher_ranked_cards_on_other_boards(home, monkeypatch):
     from hermes_cli import kanban_parent_unclaimed as pu
     from hermes_cli import kanban_queue_position as kqp
-    monkeypatch.setattr(kbd, "count_running_tasks_other_boards", lambda board=None: 1)
+    _running("hermes")
     _card("hermes", "hermes higher card", 900)
     _card("hermes", "hermes lower card", 0)
     mine = _card("default", "default card", 500)
@@ -160,7 +168,7 @@ def test_queue_text_counts_higher_ranked_cards_on_other_boards(home, monkeypatch
 def test_no_other_board_ahead_keeps_the_single_board_wording(home, monkeypatch):
     from hermes_cli import kanban_parent_unclaimed as pu
     from hermes_cli import kanban_queue_position as kqp
-    monkeypatch.setattr(kbd, "count_running_tasks_other_boards", lambda board=None: 1)
+    _running("hermes")
     _card("hermes", "hermes lower card", 0)
     mine = _card("default", "default card", 500)
     with kbc.connect_closing(board="default") as conn:

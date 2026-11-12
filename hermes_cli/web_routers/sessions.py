@@ -29,6 +29,7 @@ from hermes_cli.kanban_session_activity import annotate_kanban_activity, session
 from hermes_cli.cron_session_activity import annotate_cron_activity
 from hermes_cli.goal_session_activity import annotate_goal_activity
 from hermes_cli.process_session_activity import annotate_background_activity, stop_session_process
+from hermes_cli.subagent_session_activity import annotate_subagent_activity
 from hermes_cli.turn_session_activity import annotate_turn_activity
 from hermes_cli.review_session_activity import annotate_review_wait
 from hermes_cli.web_server_gateway import _strip_session_list_rows
@@ -314,6 +315,7 @@ def _list_sessions_payload(
             annotate_cron_activity(sessions)
             annotate_background_activity(sessions)
             annotate_turn_activity(sessions)
+            annotate_subagent_activity(sessions)
             annotate_review_wait(sessions)
             # ``storage`` tells an empty page apart from an unreadable store (#72046); same
             # ``{profile: "corrupt"}`` shape as the /api/profiles/sessions* lists.

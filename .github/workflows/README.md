@@ -41,6 +41,7 @@ pull_request / push main
  └─ path-filtered: pm-bundle, termux-verify, plugin-catalog-ci, sandbox-image, windows-bundle-sdk
 
 hourly / manual dispatch → ci-review-comment.yml (batched PR snapshots)
+CI or Docker completed on a wt/** PR → ci-review-comment.yml (that PR's head only)
 PR labeled run-e2e       → label-rerun.yml (reruns CI, Docker, Nix)
 
 schedule daily 06:41 UTC → canary-release.yml → (release.py dispatches) desktop-bundled-release.yml
@@ -339,7 +340,7 @@ branch protection.
 
 | Workflow | Trigger | What it does / skip conditions |
 |---|---|---|
-| `ci-review-comment.yml`, **CI review comment** | Hourly (`17 * * * *`) and manual dispatch | One batch snapshots every open same-repository PR using its newest exact-head CI pull-request run and sibling Docker results. Always runs trusted default-branch scripts; no polling or PR code execution. Forks, closed/moved heads, and heads with no CI run are skipped. Comments identify their SHA and hourly refresh cadence. One non-cancelling concurrency group, 15-minute job timeout; 168 scheduled runs/week. |
+| `ci-review-comment.yml`, **CI review comment** | Hourly (`17 * * * *`), manual dispatch, and `workflow_run` when **CI** or **Docker Build, Test, and Publish** completes on a `wt/**` branch | One batch snapshots every open same-repository PR using its newest exact-head CI pull-request run and sibling Docker results. On `workflow_run` (same-repo `pull_request` run that ended success/failure) it refreshes only the PR at that exact head (`TARGET_HEAD_SHA`), so `hermes-core-wt ship` sees "ran on <head>" minutes after a rebased head's CI instead of at the next hourly sweep; a Docker completion while that head's CI is still running writes nothing (CI's completion refreshes). Each write records its head and run start in a hidden `hermes-ci-review-bot:state` line; a run never overwrites a snapshot of the same head written by a run that started later. Always runs trusted default-branch scripts; no polling or PR code execution. Forks, closed/moved heads, and heads with no CI run are skipped. Comments identify their SHA. Non-cancelling concurrency (one group for the batch, one per head for targeted runs), 15-minute job timeout; 168 scheduled runs/week plus one per completed `wt/**` PR CI or Docker run. |
 | `label-rerun.yml`, **Label rerun** | `pull_request: labeled` | Only for the `run-e2e` label. Cancels the head commit's `ci.yaml`, `docker.yml` and `nix.yml` runs if they are still going, then reruns them. Their `detect` reads the live labels, so Docker and Nix build. Exits if the PR head moved. The E2E suites stay off. |
 
 ---
@@ -555,7 +556,7 @@ gh workflow run windows-install-update-e2e.yml --ref <branch> -f strict_acceptan
 | `bootstrap-installer.yml` | Bootstrap installer | R | ci |
 | `canary-release.yml` | Canary Release | cron daily 06:41, dispatch | none |
 | `catalog-tests.yml` | Catalog tests | R | ci |
-| `ci-review-comment.yml` | CI review comment | workflow_run(CI in_progress) | none |
+| `ci-review-comment.yml` | CI review comment | cron hourly :17, dispatch, workflow_run(CI or Docker completed, wt/**) | none |
 | `ci.yaml` | CI | PR, main, dispatch, call | stable |
 | `deploy-site.yml` | Deploy Site | main (paths), release published, dispatch | skills-index (dispatch) |
 | `desktop-bundled-release.yml` | Desktop Bundled Release | dispatch, call | stable; canary/release.py (dispatch) |

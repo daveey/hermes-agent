@@ -62,7 +62,22 @@ _TOOLS = {
 # Explicit task contracts, not authority inferred from prose. These declarations
 # describe existing restricted access; they never install credentials or grant writes.
 ACCESS_LABELS = {"ssh:mbp": "capability:ssh-mbp", "ssh:mini": "capability:ssh-mini",
-                 "hub:read": "capability:hub-read"}
+                 "hub:read": "capability:hub-read", "hub:write": "capability:hub-write"}
+# Declared access the Board's pool placement can carry today. It must mirror hermes-hub
+# worker/src/worker_placement.ts ``supportedRequirement`` (terminal/file/git/kanban/hub:write, unchanged
+# on hermes-hub main 2026-11-12): a card the Board cannot place would enroll and then queue for
+# good (``task_requirement_unsupported``), where a home-only card at least runs at home. Add a
+# name here only after the Board maps it to the label in ACCESS_LABELS. [daveey] kanban-1663abf6ab
+BOARD_PLACEABLE_ACCESS: frozenset = frozenset({"hub:write"})
+BOARD_REASON = "declared access the Board cannot place"
+
+
+def board_refusal(requires):
+    """:data:`BOARD_REASON` when ``requires`` declares access the Board's pool selection cannot carry."""
+    return BOARD_REASON if any(r in ACCESS_LABELS and r not in BOARD_PLACEABLE_ACCESS
+                               for r in requires or []) else None
+
+
 _ACCESS = (
     (re.compile(r"\bssh\b", re.IGNORECASE), {"ssh:mbp", "ssh:mini"}),
     (re.compile(r"\bon the hub\b|\bthe hub's\b|\bjournalctl\b|\bkanban\.db\b", re.IGNORECASE),
@@ -105,39 +120,73 @@ def destinations(cfg, target=None):
         return [target]
     from hermes_cli import kanban_capability_registry as reg
     pools = cfg.get("worker_pools")
-    names = pools.get(reg.self_gateway()) if isinstance(pools, dict) else None
+    gateway = reg.self_gateway()
+    names = pools.get(gateway) if isinstance(pools, dict) else None
     if (not isinstance(names, list) or not names or len(names) > 64
             or not all(isinstance(n, str) and n.strip() for n in names)):
-        return []
+        # The worker queue: every machine carrying this gateway's pool label is a possible destination.
+        from hermes_cli import kanban_placement as placement
+        label = placement._Cfg(cfg).queue_label(gateway)
+        return placement.label_machines(label) if label else []
     return names
 
 
-def attested(names, required):
-    """Every possible destination needs a recent operator label; cached records age out."""
+FRESH_S = 300
+
+
+def _machines():
     from hermes_cli import kanban_worker_node as wn
-    if not names:
-        return False
     snapshot = wn.registry()
     machines = snapshot.get("machines") if isinstance(snapshot, dict) else None
-    if not isinstance(machines, dict):
+    return machines if isinstance(machines, dict) else None
+
+
+def _fresh(entry, now):
+    try:
+        age = now - float(entry.get("last_seen")) / 1000
+    except (TypeError, ValueError, OverflowError):
         return False
-    now = time.time()
+    return math.isfinite(age) and 0 <= age <= FRESH_S
+
+
+def eligible(names, machines, *, now=None):
+    """Members that can lease work now: active, unheld, advertising pickup, fresh. None = malformed entry.
+
+    The Board's selection skips the rest too (``worker_placement.ts::available``), so they can never take the card.
+    A missing entry is a machine the Board does not know, so it leases nothing either. [daveey]"""
+    from hermes_cli import kanban_worker_node as wn
+    now = time.time() if now is None else now
+    out = []
     for name in names:
         entry = machines.get(name)
+        if entry is None:
+            continue
         if not isinstance(entry, dict):
-            return False
-        labels = entry.get("labels")
-        if (entry.get("state") != "active" or entry.get("hold") or not wn.advertises_pickup(entry)
-                or not isinstance(labels, list) or not all(isinstance(v, str) for v in labels)
-                or not required.issubset(labels)):
-            return False
-        try:
-            age = now - float(entry.get("last_seen")) / 1000
-        except (TypeError, ValueError, OverflowError):
-            return False
-        if not math.isfinite(age) or not 0 <= age <= 300:
-            return False
-    return True
+            return None
+        if (entry.get("state") == "active" and not entry.get("hold") and wn.advertises_pickup(entry)
+                and _fresh(entry, now)):
+            out.append(name)
+    return out
+
+
+def _carries(entry, required):
+    labels = entry.get("labels")
+    return (isinstance(labels, list) and all(isinstance(v, str) for v in labels)
+            and required.issubset(labels))
+
+
+def attested(names, required):
+    """Every destination that could take the card carries a recent operator label; cached records age out.
+
+    Only eligible members are judged (:func:`eligible`): a held, inactive, pickup-off or stale member is skipped,
+    not a refusal. kanban-1663abf6ab: worker-1 on hold made every access-label card on the hub home-only while
+    workers 2-6 carried the labels. Fail closed on a malformed registry, no eligible member, or an eligible member
+    without the labels (the claim gate rechecks the actual destination either way)."""
+    machines = _machines() if names else None
+    if machines is None:
+        return False
+    names = eligible(names, machines)
+    return bool(names) and all(_carries(machines[name], required) for name in names)
 
 
 def check(text, cfg, *, target=None, skills=None, requires=None):
@@ -196,13 +245,64 @@ def claim_refusal(card, me):
                  requires=requires)
 
 
-def legacy_refusal(args):
-    """Legacy automatic pins have no policy fence; do not apply coordination exemptions."""
-    from hermes_cli.kanban_placement import without_evidence, without_placement_note
-    text = f"{args.get('title') or ''}\n{without_evidence(without_placement_note(args.get('body') or ''))}"
+def _free_slot(entry):
+    metrics = entry.get("metrics") if isinstance(entry.get("metrics"), dict) else {}
+    active, cap = metrics.get("active_card_runs"), entry.get("max_card_runs")
+    return type(active) is int and type(cap) is int and 0 <= active < cap
+
+
+def stranded(card, cfg, created_reason):
+    """Pool workers that could run a home-waiting card now, or ``[]``. [daveey] kanban-1663abf6ab
+
+    A card created while the pool did not attest its access labels (``created_reason`` == :data:`REASON`) stays
+    home-only for good: enrollment is create-only. When an eligible pool member now carries every label the card
+    needs and has a free slot, and the card is otherwise portable (its full ``portable_reason`` judged against just
+    those members is None, so a home marker the early refusal hid still counts), the wait is the stale creation
+    verdict, not capacity. Read-only and advisory."""
+    if created_reason != REASON or card.get("placement_policy") or not isinstance(cfg, dict):
+        return []
+    from hermes_cli import kanban_capability_registry as reg
+    from hermes_cli.kanban_placement import portable_reason
+    from hermes_cli.kanban_runs_on_capabilities import _loads
+    args = {k: card.get(k) for k in ("title", "body", "assignee", "workspace_kind", "workspace_path", "tenant",
+                                     "project_id", "max_retries")}
+    args.update(skills=_loads(card.get("skills"), []), requires=_loads(card.get("requires"), []),
+                runs_on=_loads(card.get("runs_on"), None))
+    if not isinstance(args["requires"], list):
+        return []
+    required = required_labels(args, cfg)  # same text as portability: carried inputs stripped
+    pool = destinations(cfg)
+    if not required or not pool:
+        return []
+    machines = _machines()
+    names = eligible(pool, machines) if machines is not None else None
+    if machines is None or not names:
+        return []
+    ready = [n for n in names if _carries(machines[n], required) and _free_slot(machines[n])]
+    pools = {**(cfg.get("worker_pools") or {}), reg.self_gateway(): ready}
+    return ready if ready and portable_reason(args, {**cfg, "worker_pools": pools}) is None else []
+
+
+def required_labels(args, cfg=None):
+    """Coordination labels a card's text, skills and declared access need; None for an unsupported action.
+
+    Reads the same text as portability's :func:`check`: verified carried inputs are removed first, so a
+    path such as ``.../evidence/token-broker-audit/BRIEF.md`` does not demand a label the check never did.
+    """
+    from hermes_cli import kanban_placement as placement
+    from hermes_cli.kanban_carried_evidence import without_carried_inputs
+    body = placement.without_evidence(placement.without_placement_note(args.get("body") or ""))
+    text = without_carried_inputs(f"{args.get('title') or ''}\n{body}", placement.config() if cfg is None else cfg)
     required, refusal = requirements(text)
-    return bool(refusal or required or skill_requirements(args.get("skills"))
-                or access_requirements(args.get("requires")))
+    if refusal:
+        return None
+    return required | skill_requirements(args.get("skills")) | access_requirements(args.get("requires"))
+
+
+def legacy_refusal(args, cfg=None):
+    """Legacy automatic pins have no policy fence; do not apply coordination exemptions."""
+    labels = required_labels(args, cfg)
+    return labels is None or bool(labels)
 
 
 def skill_requirements(skills):

@@ -41,6 +41,18 @@ def moved_parent(gws, monkeypatch):
     return hub, worker, task, parent
 
 
+MOVE_ONLY = {"missing_move", "queued_false", "checkpoint_list", "checkpoint_blank", "bad_move", "move_before_end"}
+
+
+def strip_park_checkpoint(conn, task):
+    """Leave only the move path: the park-scoped path has its own boundary tests below."""
+    for event_id, payload in conn.execute(
+            "SELECT id, payload FROM task_events WHERE task_id = ? AND kind = 'dependency_wait'", (task,)).fetchall():
+        data = json.loads(payload or "{}")
+        data.pop("review_checkpoint", None)
+        conn.execute("UPDATE task_events SET payload = ? WHERE id = ?", (json.dumps(data), event_id))
+
+
 @pytest.mark.parametrize("case", [
     "local_parent", "not_parent", "missing_move", "queued_false", "checkpoint_list",
     "checkpoint_blank", "missing_run", "outcome", "unfinished", "bad_end", "bad_move",
@@ -50,6 +62,8 @@ def test_reader_rejects_invalid_custody(moved_parent, monkeypatch, case):
     _, worker, task, parent = moved_parent
     conn = worker.conn
     original = kb.get_task
+    if case in MOVE_ONLY:
+        strip_park_checkpoint(conn, task)
 
     def change_payload(**updates):
         payload = {"queued": True, "checkpoint": "Resume", **updates}
@@ -108,6 +122,7 @@ def test_unchanged_sync_does_not_write_and_removed_parent_drops_evidence(moved_p
 def test_prepare_scopes_only_latest_active_checkpoint(moved_parent, case):
     hub, worker, task, parent = moved_parent
     assert evidence.prepare(worker.conn, hub.conn, [parent])[0]
+    strip_park_checkpoint(worker.conn, task)
     payload = {"queued": True, "checkpoint": "Resume"}
     wanted = [] if case == "unwanted" else [parent]
     setup = {
@@ -188,3 +203,47 @@ def test_refresh_reads_status_and_result_in_one_snapshot(moved_parent, monkeypat
     sync.refresh_remote_parents(worker.conn, hub.conn)
     assert dict(kb.parent_states(worker.conn, task))[parent] == "ready"
     assert evidence.result(worker.conn, task, parent)["outcome"] == "crashed"
+
+
+def _set_park(conn, task, mutate):
+    event_id, payload = conn.execute(
+        "SELECT id, payload FROM task_events WHERE task_id = ? AND kind = 'dependency_wait' ORDER BY id DESC LIMIT 1",
+        (task,)).fetchone()
+    data = json.loads(payload)
+    mutate(data)
+    conn.execute("UPDATE task_events SET payload = ? WHERE id = ?", (json.dumps(data), event_id))
+
+
+@pytest.mark.parametrize("case", [
+    "valid", "uid_mismatch", "uid_missing_int_only", "parent_unnamed", "parents_not_list", "not_dependency",
+    "older_run", "crashed",
+])
+def test_park_scoped_reader_without_move_checkpoint(moved_parent, case):
+    """No checkpointed move: only the owner's own authenticated review park admits the mirror."""
+    _, worker, task, parent = moved_parent
+    conn = worker.conn
+    conn.execute("DELETE FROM task_events WHERE task_id = ? AND kind = 'moved'", (task,))
+    setup = {
+        "valid": lambda: None,
+        "uid_mismatch": lambda: _set_park(conn, task, lambda d: d["review_checkpoint"].update(run_uid="other-run")),
+        # A missing uid falls back to the legacy integer, which on an importing file names another run.
+        "uid_missing_int_only": lambda: _set_park(conn, task, lambda d: (
+            d["review_checkpoint"].pop("run_uid"), d["review_checkpoint"].update(run_id=-5))),
+        "parent_unnamed": lambda: _set_park(conn, task, lambda d: d["review_checkpoint"].update(parents=["t_other"])),
+        "parents_not_list": lambda: _set_park(conn, task, lambda d: d["review_checkpoint"].update(parents=parent)),
+        "not_dependency": lambda: _set_park(conn, task, lambda d: d.update(kind="needs_input")),
+        "older_run": lambda: conn.execute(
+            "UPDATE task_events SET run_id = -1 WHERE task_id = ? AND kind = 'dependency_wait'", (task,)),
+        "crashed": lambda: kb._append_event(conn, task, "crashed", {}),
+    }
+    setup[case]()
+    actual = evidence.result(conn, task, parent)
+    assert (actual is not None) == (case == "valid")
+
+
+def test_prepare_scopes_park_named_foreign_parents(moved_parent):
+    hub, worker, task, parent = moved_parent
+    worker.conn.execute("DELETE FROM task_events WHERE task_id = ? AND kind = 'moved'", (task,))
+    assert [p for p, _ in evidence.prepare(worker.conn, hub.conn, [parent])[0]] == [parent]
+    _set_park(worker.conn, task, lambda d: d["review_checkpoint"].update(run_uid="other-run"))
+    assert evidence.prepare(worker.conn, hub.conn, [parent])[0] == []

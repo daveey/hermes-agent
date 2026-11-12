@@ -723,8 +723,18 @@ def _last_run_end_ts(runs: Iterable[Any]) -> int:
 
 def _last_ready_entry_ts(events: Iterable[Any], runs: Iterable[Any] = ()) -> int:
     """Latest ready-entry floor; a ``continued`` checkpoint counts only when it resumed straight to ready.
-    The latest run's end bounds it too, whatever event (if any) the requeue left."""
-    events = list(events)
+    The latest run's end bounds it too, whatever event (if any) the requeue left.
+
+    A Board grant returned unused (``kanban_unused_grant``) is a reservation, not execution: its ``claimed``
+    event and its run's end never reset the clock, so a card whose grants keep bouncing keeps its real age
+    (default/t_01a1c6c56a99c3e1, 2026-11-10: ready@1794369068 hid a wait since 1794351914). Actual execution,
+    loss and ready transitions still count. [daveey]"""
+    from hermes_cli.kanban_unused_grant import unused_grant_run_ids
+    events, runs = list(events), list(runs)
+    unused = unused_grant_run_ids(runs, events)
+    if unused:
+        events = [ev for ev in events if _task_field(ev, "run_id", None) not in unused]
+        runs = [r for r in runs if _task_field(r, "id", None) not in unused]
     continued_ready = [_event_ts(ev) for ev in events
                        if _event_kind(ev) == "continued" and _parse_payload(ev).get("status") == "ready"]
     return max([_latest_event_ts(events, _READY_WAIT_FLOOR_KINDS), *continued_ready, _last_run_end_ts(runs)])
@@ -767,19 +777,53 @@ def _foreign_machines(task, cfg) -> list[str]:
             if str(l).startswith("machine:") and str(l).split(":", 1)[1] != own]
 
 
-def _ready_hold_reason(task, events, cfg) -> Optional[str]:
+def _pinned_quota_hold_until(events, now) -> Optional[int]:
+    """Reset time when the current ready episode's latest ``dispatch_skipped`` is a ``pinned_quota_wall``
+    hold still in the future (``kanban_dispatch_skip``); else None. Same episode bounds as its reader."""
+    from hermes_cli.kanban_dispatch_skip import EVENT, PINNED_QUOTA_WALL, _episode_kinds
+    bounds = _episode_kinds() | {EVENT}
+    for ev in sorted(events or [], key=lambda ev: (_event_ts(ev), _task_field(ev, "id", 0) or 0), reverse=True):
+        if _event_kind(ev) not in bounds:
+            continue
+        payload = _parse_payload(ev) if _event_kind(ev) == EVENT else {}
+        until = payload.get("until")
+        if payload.get("reason") == PINNED_QUOTA_WALL and isinstance(until, (int, float)) and until > now:
+            return int(until)
+        return None
+    return None
+
+
+def _ready_hold_reason(task, events, cfg, now=None) -> Optional[str]:
     """Last observed guard or current foreign-machine pin, not a live admission verdict.
 
     Capacity checks can precede pickup/guard evaluation, leaving old guard history on a
     replica-only card. A same-second clear must outrank the guard it retired.
     """
-    evs = list(events or [])
+    evs = [ev for ev in (events or []) if _event_kind(ev) != "dispatch_skipped"]  # skip records end no guard
     latest = max(evs, key=lambda ev: (_event_ts(ev), _task_field(ev, "id", 0) or 0)) if evs else None
     if latest is not None and _event_kind(latest) == "respawn_guarded":
         return "respawn_guarded"
     if _foreign_machines(task, cfg):
         return "foreign_runs_on"
+    if _pinned_quota_hold_until(events, time.time() if now is None else now):
+        return "pinned_quota_wall"  # a fresh pin held on its live quota wall (kanban-dd62aef001)
     return None
+
+
+def _impossible_runs_on(task, cfg) -> Optional[list[str]]:
+    """The card's runs_on when the Board registry is known and no enrolled machine carries every label (a typo or
+    alias such as ``hermes-hub``), else None. The registry comes from cfg ``registry`` (``{me, machines}``) or, when
+    absent, this process's cached registry read only (never a network fetch from a diagnostic)."""
+    from hermes_cli import kanban_runs_on_capabilities as roc
+    from hermes_cli import kanban_worker_node as wn
+    labels = wn._parse(_task_field(task, "runs_on"))
+    if not labels:
+        return None
+    reg = cfg["registry"] if "registry" in cfg else (wn._REGISTRY.get("value") if wn._REGISTRY.get("at") else None)
+    if not reg:
+        return None
+    me = str(reg.get("me") or "")
+    return labels if roc.impossible(labels, reg.get("machines") or {}, me) else None
 
 
 def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
@@ -798,7 +842,7 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     if not assignee.strip():
         return []
     # A deliberate hold is reported by _rule_held_in_ready, not as a stranded card.
-    if _ready_hold_reason(task, events, cfg):
+    if _ready_hold_reason(task, events, cfg, now):
         return []
 
     # Most recent event that put the task into ready; with none (old task /
@@ -832,17 +876,33 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
                          payload={"current_assignee": assignee}),
         _cli_hint("Check dispatcher status", "hermes kanban diagnostics"),
     ]
+    detail = (f"This task has been ready for {age_str} but nothing has claimed it. Common causes: "
+              f"assignee {assignee!r} is misspelled, the profile was deleted, or the external worker "
+              f"pool for this lane is down. Confirm the assignee is correct and that a worker is "
+              f"actually polling for it.")
+    title = f"Ready for {age_str} with no worker"
+    impossible = _impossible_runs_on(task, cfg)
+    held: dict = {}
+    if impossible:
+        # [daveey] self-heal agent-7489fcf5cd: a stored label no enrolled machine carries never leases; any
+        # worker may re-route it (kanban_creator_repin.stranded_refusal), so name that instead of a human edit.
+        tid = _task_field(task, "id") or "<task_id>"
+        held = {"held_reason": "impossible_runs_on", "runs_on": impossible}
+        title = f"Ready for {age_str}: runs_on {impossible} matches no enrolled machine"
+        detail = (f"No enrolled Board machine carries every label in runs_on={impossible} (labels_mismatch), so "
+                  f"this card can never be claimed. Any worker can re-route it: kanban_move(task_id='{tid}', "
+                  "runs_on=['machine:<registered-name>' or a real label], reason=...). This is agent work, not "
+                  "an ask for David.")
+        actions.insert(0, _cli_hint("Re-route to a real machine",
+                                    f"hermes kanban move {tid} --runs-on machine:<registered-name>", suggested=True))
     return [Diagnostic(
         kind="stranded_in_ready", severity=severity,
-        title=f"Ready for {age_str} with no worker",
-        detail=f"This task has been ready for {age_str} but nothing has claimed it. Common causes: "
-               f"assignee {assignee!r} is misspelled, the profile was deleted, or the external worker "
-               f"pool for this lane is down. Confirm the assignee is correct and that a worker is "
-               f"actually polling for it.",
+        title=title,
+        detail=detail,
         actions=actions,
         first_seen_at=last_ready_ts, last_seen_at=last_ready_ts, count=1,
         data={"ready_since": last_ready_ts, "age_seconds": int(age_seconds),
-              "assignee": assignee, "threshold_seconds": int(threshold_seconds)},
+              "assignee": assignee, "threshold_seconds": int(threshold_seconds), **held},
     )]
 
 
@@ -854,7 +914,7 @@ def _rule_held_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
         return []
     if not (_task_field(task, "assignee") or "").strip():
         return []
-    reason = _ready_hold_reason(task, events, cfg)
+    reason = _ready_hold_reason(task, events, cfg, now)
     if not reason:
         return []
     since = _last_ready_entry_ts(events, runs) or int(_task_field(task, "created_at", 0) or 0)
@@ -862,6 +922,8 @@ def _rule_held_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     if not since or age < float(cfg.get("stranded_threshold_seconds", 30 * 60)):
         return []
     guard_reason, hold_until = _guard_clock(events, runs, cfg, since) if reason == "respawn_guarded" else (None, None)
+    if reason == "pinned_quota_wall":
+        hold_until = _pinned_quota_hold_until(events, now)
     hold = f"{reason}: {guard_reason}" if guard_reason else reason
     if hold_until:
         stamp = time.strftime("%H:%M:%SZ", time.gmtime(hold_until))
@@ -869,11 +931,13 @@ def _rule_held_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     return [Diagnostic(
         kind="held_in_ready", severity="warning",
         title=(f"Ready {int(age / 60)}m, last observed hold ({hold})" if reason == "respawn_guarded"
-               else f"Ready {int(age / 60)}m, held ({reason})"),
+               else f"Ready {int(age / 60)}m, held ({hold})"),
         detail=("The last recorded dispatch decision was a guard hold; the current hold is not verified. "
                 "A cleared blocker, capacity limit, or missing pickup can leave this historical event "
                 "unchanged. Check the execution machine's current dispatcher verdict."
                 if reason == "respawn_guarded" else
+                "Its explicit model pin is quota-walled and no same-class reroute applies; it starts when "
+                "the wall resets." if reason == "pinned_quota_wall" else
                 "A foreign machine:* pin waits for that machine (or a re-file)."),
         actions=[_cli_hint("Check dispatcher status", "hermes kanban diagnostics")],
         first_seen_at=since, last_seen_at=since, count=1,

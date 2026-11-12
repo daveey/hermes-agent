@@ -54,7 +54,19 @@ def config_leaves() -> list[str]:
                 out.append(".".join(p))
 
     walk(DEFAULT_CONFIG, ())
-    return sorted(out)
+    out += open_section_keys()
+    return sorted(set(out))
+
+
+# Sections whose default is an empty dict, so walking DEFAULT_CONFIG finds no leaves: their keys are the
+# ones each reader module takes from its section config (``self.raw.get("key")``). [daveey]
+OPEN_SECTIONS = {"kanban.placement": ("hermes_cli/kanban_placement.py",)}
+_RAW_GET = re.compile(r"""\bself\.raw\.get\(\s*["']([A-Za-z_]\w*)["']""")
+
+
+def open_section_keys() -> list[str]:
+    return sorted({f"{section}.{key}" for section, readers in OPEN_SECTIONS.items() for rel in readers
+                   for key in _RAW_GET.findall((ROOT / rel).read_text(encoding="utf-8-sig"))})
 
 
 def slash_commands() -> list[str]:

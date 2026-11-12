@@ -2519,6 +2519,7 @@ export interface SubagentSnapshot {
   last_tool?: string | null
   accepting_steer?: boolean | null
   child_session_id?: string | null
+  execution_observations?: Record<string, unknown>[] | null
 }
 /** Lifecycle of one delegated child (``tools/delegate_tool_child_run.py``); ``failed`` / ``error`` / ``timeout`` / ``interrupted`` / ``completed`` are terminal. */
 export type SubagentStatus = 'queued' | 'running' | 'completed' | 'failed' | 'error' | 'timeout' | 'interrupted'
@@ -2539,6 +2540,7 @@ export interface SubagentRosterEntry {
   session_id: string
   subagents?: number
   background?: number
+  execution_observations?: Record<string, unknown>[] | null
 }
 export interface SubagentIdParams {
   session_id: string
@@ -3992,6 +3994,7 @@ export interface ProcessEntry {
   started_epoch?: number | null
   completion_reason?: string | null
   detached?: boolean | null
+  execution_observations?: Record<string, unknown>[] | null
   [key: string]: unknown
 }
 export interface ProcessKillParams {

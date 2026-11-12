@@ -17,6 +17,7 @@ from urllib.parse import unquote_plus
 # drift: a blocked file_tools read that falls back to ``cat`` is still caught.
 from agent.file_safety import _BLOCKED_PROJECT_ENV_BASENAMES as _ENV_FILE_BASENAMES
 from agent.redact_connstr import _KV_CONNSTR_GATE_RE, _redact_kv_connection_strings
+from agent.redact_identifier_keys import IDENTIFIER_KEY_NAMES  # dedupe/cache/db keys: never masked
 from agent.redact_argv import _SUBPROCESS_COMMAND_SPAN, _redact_subprocess_argv  # SPAN re-exported for tests
 from agent.redact_headers import (
     _COOKIE_HEADER_JSON_RE, _COOKIE_HEADER_JSON_UNTERMINATED_RE, _SECRET_HEADER_JSON_RE,
@@ -456,7 +457,7 @@ def _should_redact_assignment(key: str, value: str, *, check_keyword: bool) -> b
     # is a code snippet, not a leaked secret value.
     # Same programmatic-env-lookup exception as _redact_env above (issue #2852): api_key: os.getenv('X') is
     # a code snippet, not a leaked secret value.
-    if _ENV_LOOKUP_VALUE_RE.match(value):
+    if _ENV_LOOKUP_VALUE_RE.match(value) or key.lower() in IDENTIFIER_KEY_NAMES:
         return False
     # An earlier pass already masked this value (``***`` or the ``«redacted:…»`` sentinel). Masking it
     # again only erases what the sentinel deliberately kept — the vendor label (``Digest ***`` →

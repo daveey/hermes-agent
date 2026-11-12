@@ -1115,11 +1115,12 @@ def _preview_action_request(sid: str, payload: dict) -> str:
     return answer or _PREVIEW_ACTION_BRIDGE_UNAVAILABLE
 
 
-def _clear_pending(sid: str | None = None) -> None:
+def _clear_pending(sid: str | None = None, reason: str | None = None) -> None:
     """Withdraw open server→client requests: only *sid*'s (session.interrupt must not cancel other sessions'
-    prompts), or every one when *sid* is None (process exit). Each one gets a ``request.cancel``."""
+    prompts), or every one when *sid* is None (process exit). Each one gets a ``request.cancel`` and a batch
+    clarify's result names *reason* (default ``interrupted`` / ``shutdown``)."""
     from tui_gateway import server_requests
-    server_requests.cancel(sid, reason="interrupted" if sid else "shutdown")
+    server_requests.cancel(sid, reason=reason or ("interrupted" if sid else "shutdown"))
 
 
 # ── Agent factory ────────────────────────────────────────────────────
@@ -1934,7 +1935,27 @@ def _session_processes(session: dict) -> list:
         if proc is not None and str(getattr(proc, "session_key", "") or "") == key:
             entry["output_tail"] = (proc.output_buffer or "")[-4000:]  # the 200-char list preview is too thin for the viewer
             owned.append(entry)
-    return owned
+    return _with_process_observations(session, owned)
+
+
+def _with_process_observations(session: dict, entries: list) -> list:
+    """Optional v1 ``execution_observations`` per authorized ``process.list`` row (same projector as the
+    sidebar); legacy fields unchanged and never raises."""
+    from hermes_cli.process_session_activity import annotate_registry_entries
+    try:
+        return annotate_registry_entries(entries, owner=str(session.get("session_key") or "") or None,
+                                         profile=_session_profile_label(session))
+    except Exception:
+        logger.debug("process.list observations unavailable", exc_info=True)
+        return entries
+
+
+def _session_profile_label(session: dict) -> str | None:
+    home = session.get("profile_home")
+    if not home:
+        return None
+    from gateway.session_authorities import served_profile_name
+    return served_profile_name(home)
 
 
 # Serialize reload.mcp (runs on the pool): overlapping shutdown+discover pairs would leave the registry half-built.

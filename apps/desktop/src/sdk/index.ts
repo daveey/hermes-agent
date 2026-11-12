@@ -1547,6 +1547,7 @@ export * from './sidebar-sections'
 
 // -- ui: the design language --------------------------------------------------
 
+export * from './theme'
 export type { ViewportRect } from './viewport'
 /** THE whole Capabilities surface (Skills / Tools / MCP tabs, installed
  *  lists, full-skill detail pane, embedded hub picker with one-click
@@ -1608,12 +1609,12 @@ export { PALETTE_AREA, type PaletteContribution } from '@/app/command-palette/co
  *  over a raw `<Contribute area={WORKSPACE_PAGE_HEADER_AREA}>`, which nothing
  *  paints outside the workspace pane. */
 export { WorkspacePageHeaderControl } from '@/app/contrib/workspace-page-header'
+
 /** THE overdue test for a cron job's `next_run_at`: non-null once the stored slot
  *  sits past the scheduler grace and the job is expected to fire. Every surface
  *  that prints a next run switches its label on this (`t.cron.next` →
  *  `t.cron.overdueSince`) so a dead scheduler never reads as "Next: 7 hr ago". */
 export { nextRunOverdueMs } from '@/app/cron/job-state'
-
 /** Master-detail components for pane content; the overlay-bound Panel root is deliberately private. */
 export {
   PanelAction,
@@ -1633,6 +1634,7 @@ export {
   PanelRowMenu,
   PanelSectionLabel
 } from '@/app/overlays/panel'
+
 export {
   type ProfileGroupHeaderContribution,
   type ProfileGroupRoute,
@@ -1644,7 +1646,6 @@ export {
   type SidebarNavContribution,
   WORKSPACE_PAGE_HEADER_AREA
 } from '@/app/routes'
-
 /** Appearance settings' plugin seam: register a render contribution at
  *  `APPEARANCE_AREAS.extra` to add controls at the end of the Appearance page.
  *  `ColorSwatches` is the app's own swatch grid (profile rail / project dialog
@@ -1782,11 +1783,11 @@ export type { GatewayEventListener } from '@/contrib/events'
  *  `ctx.register` stays the door for permanent contributions. Namespace the
  *  id with your plugin slug (`kanban:board-switcher`). */
 export { Contribute, type ContributeProps } from '@/contrib/react/contribute'
-/** Settings ▸ Plugins entries (`ctx.registerSettingsPage`); `pluginSettingsHref` deep-links one. */
-export { pluginSettingsHref, SETTINGS_PLUGINS_AREA } from '@/contrib/settings-pages'
 
 // -- contracts ----------------------------------------------------------------
 
+/** Settings ▸ Plugins entries (`ctx.registerSettingsPage`); `pluginSettingsHref` deep-links one. */
+export { pluginSettingsHref, SETTINGS_PLUGINS_AREA } from '@/contrib/settings-pages'
 export type { Contribution } from '@/contrib/types'
 /** The live gateway instance type — for typing the `gateway` prop `ConnectorsTab`
  *  takes; obtain the instance from `host.getGateway()`. */
@@ -1830,6 +1831,17 @@ export { CHAT_EMPTY_AREA, type ChatEmptyContribution, type ChatEmptyProps } from
  *  selection copy where an insecure origin has no Clipboard API. Never call
  *  `navigator.clipboard.writeText` directly. */
 export { writeClipboardText } from '@/lib/clipboard'
+/** Pure v1 work-observation projector (never reads clocks; pass epoch seconds). The same function the sidebar
+ *  consumes, so a plugin classifies identical evidence identically. Feature-detect: older hosts lack it. */
+export {
+  executionIdentityKey,
+  type ExecutionObservation,
+  type ExecutionState,
+  type ObservationSourceClass,
+  projectExecutionObservation,
+  selectExecutionObservation,
+  summarizeExecutionObservations
+} from '@/lib/execution-observations'
 /** THE confirm flow for guarded model switches — when a gateway model-switch
  *  RPC answers `confirm_required` (data-policy / expensive-model guard),
  *  route it through this shared applier instead of forking a per-surface
@@ -1871,6 +1883,7 @@ export { PROFILE_SWATCHES, profileColor, profileColorSoft } from '@/lib/profile-
  *  `ctx.socket` frame invalidating a query). Inside components keep using
  *  `useQueryClient`. */
 export { queryClient } from '@/lib/query-client'
+
 /** Compact labels for the reasoning levels exported from @hermes/shared, so a
  *  plugin surfacing a thinking depth uses the same spelling as the app. */
 export { reasoningEffortLabel } from '@/lib/reasoning-effort'
@@ -1879,7 +1892,6 @@ export { reasoningEffortLabel } from '@/lib/reasoning-effort'
  *  setup.runtime_check, reconciled) — pass `host.request`. Don't hand-roll
  *  readiness from raw RPC shapes. */
 export { evaluateRuntimeReadiness, type RuntimeReadinessResult } from '@/lib/runtime-readiness'
-
 /** Row-decoration slots: register a `data` contribution with a `render` for
  *  `SESSION_ROW_AREAS.leading` / `.trailing` to decorate sidebar session rows
  *  (the props carry the row's stored session id). */
@@ -1922,37 +1934,6 @@ export { ackStoredSessionId, forgetSessionUnread, markSessionUnreadFinished } fr
  *  contribution, not a `host.sidebar` verb, so it is attributed and dropped
  *  on disable. */
 export { SIDEBAR_NAV_PREFS_AREA, type SidebarNavPrefsContribution } from '@/store/sidebar-nav'
-/** Live accent override — set a hex and the ACTIVE theme repaints with its
- *  accent family re-seeded from it (see `retintTheme`); `null` restores the
- *  authored palette. Deliberately not persisted: it is an authoring knob, not
- *  a setting, so a plugin that sets it must clear it on dispose. */
-export { $accentOverride, setAccentOverride } from '@/themes/accent-override'
-/** OKLCH colour maths, for anything deriving a palette rather than hardcoding
- *  one: perceptual conversion, the sRGB gamut boundary, and hue-stable
- *  blending. `readableOn` is the SDK's public name for the desktop's ink pick
- *  (`#161616` or `#ffffff`, whichever measures better on the background). */
-export {
-  hexToOklch,
-  hueDelta,
-  maxChroma,
-  mixOklab,
-  normalizeHex,
-  type Oklch,
-  oklchToHex,
-  oklchToSrgb255,
-  readableInk as readableOn
-} from '@/themes/color'
-/** The painted theme, its name, and the appearance it resolved to — plus
- *  `setTheme` / `setMode` to change it from a component. */
-export { useTheme } from '@/themes/context'
-/** Switch the theme from outside React (a gateway event, a connection coming
- *  up, any callback with no component around it). Returns false and leaves the
- *  appearance alone when the name doesn't resolve, so it doubles as the "is
- *  this theme installed?" check. */
-export { requestTheme } from '@/themes/request'
-export { retintTheme, themeHue } from '@/themes/retint'
-export type { DesktopTheme, DesktopThemeColors } from '@/themes/types'
-export { THEMES_AREA } from '@/themes/user-themes'
 export type { StatusResponse } from '@/types/hermes'
 /** Public SDK name for the shared gateway wire event; kept stable for plugins. */
 export type { GatewayEvent as RpcEvent } from '@hermes/shared'

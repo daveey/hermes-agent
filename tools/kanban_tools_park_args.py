@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from hermes_cli import kanban_wake_check_secret
+
 
 def _check(cond: Any, message: str, rejection: Optional[str] = None) -> None:
     from tools.kanban_tools import _check as check  # lazy: kanban_tools imports this module
@@ -64,13 +66,28 @@ def _wake_check_args(args: dict) -> tuple[Optional[str], Optional[int], bool]:
     try:
         cmd = kwc.normalize_cmd(args.get("wake_check"))
         every = kwc.normalize_every(raw_every) if cmd else None
+    except ValueError as exc:
+        _check(False, str(exc))
+        raise  # unreachable: _check raised
+    secret = _wake_check_secret_error(cmd) if cmd else None
+    _check(secret is None, secret or "", WAKE_CHECK_SECRET)  # before the dry run executes it
+    try:
         err = kwc.dry_run_error(cmd, blocker_id=args.get("blocker_id"))
         if err:
             raise ValueError(err)
     except ValueError as exc:
         _check(False, str(exc), kwc.refusal_code(str(exc)))
-    from tools.kanban_tools import _redact  # lazy: kanban_tools imports this module
-    return (_redact(cmd) if cmd else None), every, clock_only
+    return cmd, every, clock_only  # verbatim: the stored probe is the command that runs
+
+
+WAKE_CHECK_SECRET = kanban_wake_check_secret.WAKE_CHECK_SECRET
+
+
+def _wake_check_secret_error(cmd: str) -> Optional[str]:
+    """Refusal text when the display redactor would change ``cmd``, else None. [daveey]
+
+    Shared with ``hermes kanban block/schedule --wake-check`` (``hermes_cli/kanban_wake_check_secret``)."""
+    return kanban_wake_check_secret.secret_error(cmd)
 
 
 def _wake_check_echo(wake: tuple) -> dict:

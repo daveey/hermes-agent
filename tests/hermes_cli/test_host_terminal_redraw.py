@@ -101,7 +101,9 @@ async def test_a_resize_back_waits_until_the_program_answered_the_step(tmp_path,
     await session.start()
     try:
         assert await session.attach(tab)
-        await async_wait_until(lambda: b"READY" in tab.output, timeout=10)
+        # The whole line: Python's print writes 'READY' and its newline separately, and a newline
+        # read after the step would count as the program's answer to it.
+        await async_wait_until(lambda: b"READY\r\n" in tab.output, timeout=60)
         start = len(tab.output)
         # The redraw's two frames, arriving together as they leave the browser.
         tab.send("\x1b[RESIZE:80;23]", "\x1b[RESIZE:80;24]")

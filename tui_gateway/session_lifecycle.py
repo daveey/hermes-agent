@@ -697,6 +697,8 @@ def _teardown_popped_session(session: dict | None, *, end_reason: str = "tui_clo
     """Finish a close after the caller has atomically detached the session."""
     if session is None:
         return False
+    from tui_gateway.detached_turn_cleanup import cancel
+    cancel(session)
     run_thread = session.get("_run_thread")
     if end_reason != "tui_shutdown" and run_thread is not None and run_thread is not threading.current_thread():
         try:
@@ -922,7 +924,10 @@ def _interrupt_session_turn(
     # interrupt-at-grace) must also reach a background memory/skill review, not just the foreground
     # turn (``_cancel_background_review_on_stop``).
     _cancel_background_review_on_stop(session)
-    _clear_pending(sid)
+    # A takeover / close / backend exit must not read as a plain Stop in the stored clarify result.
+    pending_why = {"lease_takeover": "taken_over", "session_close": "session_closed",
+                   "backend_exit": "shutdown"}.get(reason or "")
+    _clear_pending(sid, reason=pending_why) if pending_why else _clear_pending(sid)
     with contextlib.suppress(Exception):
         # Deny-resolve every pending approval so no agent thread blocks on the queue. The
         # deny is silent without the broadcast: a reconnecting client sees a bare 4001 on
@@ -1006,6 +1011,8 @@ def _rebind_live_transport(sid: str, session: dict, transport: Transport) -> Non
                 _schedule_ws_orphan_reap(sid)
         return
     _attach_session_transport(session, transport)
+    from tui_gateway.detached_turn_cleanup import cancel
+    cancel(session)
     # Every transport that showed this session (pop-outs resume the same sid); on disconnect the last
     # viewer becomes the transport instead of the drop sentinel.
     session.setdefault("viewers", {})[transport] = time.time()

@@ -845,6 +845,7 @@ Multi-profile, multi-project collaboration board. Each install can host many boa
 | `request-review <id>` | Move a task to `review` with a reviewer handoff — NOT a block. Flags: `--summary`, `--metadata`, `--reviewer` (reassigns before review dispatch). |
 | `request-changes <id> <reason>` | Reviewer verdict for an active review run: close the review attempt and route the task back to its original implementer. |
 | `reopen-review <id>...` | Send review task(s) back for changes (`review` → ready/todo). Flag: `--reason` (appended as a comment). |
+| `resume <id> --reason "..."` | Operator-only: let a `ready` card held by the `active_pr` respawn guard run once more (records an `operator_resumed` event and a `RESUMED:` comment; refused from a Kanban worker or its tool shells; never authorizes a merge). |
 | `schedule <id> "<reason>"` | Park time-delay/follow-up work in `scheduled` so it is not shown as a human blocker. |
 | `unblock <id>` | Restore a blocked task to its source phase (`review` or `ready`), or `todo` while dependencies remain open. |
 | `archive <id>` | Hide from default list. `gc` will remove scratch workspaces. |

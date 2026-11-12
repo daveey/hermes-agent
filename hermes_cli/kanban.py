@@ -46,7 +46,7 @@ from hermes_cli.kanban_cli_park import (
 from hermes_cli.kanban_ops import (
     _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_recover, _cmd_repair, _cmd_tail, _cmd_watch,
 )
-from hermes_cli.kanban_parser import build_parser
+from hermes_cli.kanban_parser import build_parser, cmd_resume as _cmd_resume, cmd_quota_release as _cmd_quota_release
 from hermes_cli.kanban_sync_cli import cmd_sync as _cmd_sync
 from hermes_cli.kanban_archive_scope import (  # moved here from this module; re-exported for callers
     _capability_owner_waiting_card, _creator_task_id, _is_stranded_runs_on_copy,
@@ -273,7 +273,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair", "recover",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
-    "request-review", "request-changes", "reopen-review", "reopen",
+    "request-review", "request-changes", "reopen-review", "reopen", "resume", "quota-release",
     "gc", "origin-bind", "origin-create", "origin-adopt", "sync", "supervisor-requests",
 })
 
@@ -417,16 +417,11 @@ def _print_overlap_refusal(args: argparse.Namespace, refused: str) -> int:
 @publication_scope
 def _cmd_create(args: argparse.Namespace) -> int:
     from agent.delegation_context import is_dispatcher_owned_worker_context
+    from hermes_cli.kanban_cli_body import read_body
 
-    body = args.body
-    body_file = getattr(args, "body_file", None)
-    if body is not None and body_file is not None:
-        return _err("kanban: --body and --body-file are mutually exclusive", 2)
-    if body_file is not None:
-        try:
-            body = sys.stdin.read() if body_file == "-" else Path(body_file).read_text(encoding="utf-8-sig")
-        except OSError as exc:
-            return _err(f"kanban: --body-file: {exc}", 2)
+    body, body_error = read_body(args)
+    if body_error:
+        return _err(body_error, 2)
 
     try:
         ws_kind, ws_path = _parse_workspace_flag(args.workspace)
@@ -464,6 +459,14 @@ def _cmd_create(args: argparse.Namespace) -> int:
     except kanban_origin.OriginError as exc:
         return _err(f"kanban: {exc.code}: {exc}", 2)
     origin_binding = None
+    # [daveey] Hub admission (a model call) runs before any connection/write lock.
+    from hermes_cli.kanban_hub_admission_placement import cli_create_fields, cli_preflight, cli_report
+    assignee = (args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
+                or _cli_default_assignee(args))
+    plan, refused_rc = cli_preflight(args, body, ws_kind, ws_path, getattr(args, "board", None)
+                                     or kb.get_current_board(), assignee=assignee)
+    if refused_rc is not None:
+        return refused_rc
     with kbc.connect_closing() as conn:
         # An --idempotency-key hit returns an existing card: never re-stamp/re-subscribe it.
         idem_hit = bool(idem_key) and conn.execute(
@@ -491,9 +494,6 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_capabilities import RequiresDeclarationMissing, declaration_required
         from hermes_cli.kanban_worker_node import MachinePinRefused, check_machine_pins
         from hermes_cli.kanban_ask_resolved import AskFilingRefused, check_create_filing, create_context
-        assignee = (args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
-                    or _cli_default_assignee(args))
-        from hermes_cli.kanban_worker_placement import cli_audit, cli_policy
         try:
             # [daveey] A blocked ask's resolved_check runs once first, as the sweep will run it for this assignee
             # and workspace: already met or broken refuses the create. A key hit returns the card: no probe.
@@ -504,7 +504,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             task_id = kb.create_task(
                 conn, title=args.title, body=body,
                 assignee=assignee,
-                session_id=session_id, requires=getattr(args, "requires", None),
+                session_id=session_id,
                 chat_origin=origin.ref if origin else getattr(args, "origin_session", None),
                 # [daveey] Same declaration gate as the kanban_create tool, for agent/worker shells only.
                 require_declaration=(in_worker or _agent_invoked()) and declaration_required(),
@@ -524,10 +524,9 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 human_request=getattr(args, "human_request", None),
                 creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                                  if in_worker else None),
-                validate_workspace=True, validate_skills=True, runs_on=getattr(args, "runs_on", None),
-                placement_policy=cli_policy(args, body, ws_kind, ws_path, board, assignee=assignee),
-                placement_checked=True, board=board,
-                placement_audit=cli_audit(args, body, ws_kind, ws_path, board, assignee=assignee),
+                validate_workspace=True, validate_skills=True, placement_checked=True, board=board,
+                # [daveey] no --runs-on: queue for the worker pool; hub admission's placement and receipt
+                **cli_create_fields(conn, plan, args, body, ws_kind, ws_path, board, assignee=assignee),
                 insert_guard=after_create.guard,  # re-checks overlap under the write lock [daveey]
             )
         except kanban_overlap.OverlapRefused as exc:  # landed under the write lock after the first check
@@ -555,7 +554,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             placement = preflight(conn, task_id, board=getattr(args, "board", None))
         task = kb.get_task(conn, task_id)
     from hermes_cli.kanban_placement_diagnostics import cli_creation, cli_json_fields, print_cli_creation
-    creation_placement = cli_creation(args, body, ws_kind, ws_path, board, task, skip=idem_hit)
+    creation_placement = cli_report(cli_creation(args, body, ws_kind, ws_path, board, task, skip=idem_hit), plan)
     contract_extra = _contract_cli.create_warning_fields(task, skip=idem_hit, stderr=True)
     unlinked_warning = None
     if not in_worker and not session_id and not idem_hit and _agent_invoked():
@@ -762,7 +761,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         from hermes_cli import kanban_queue_reason as kqr
         queue_reason = kqr.latest(conn, args.task_id)
         # Same ``queue`` as kanban_show and the REST read (kanban-7d720d4ab8): a ready card says where it waits. [daveey]
-        from hermes_cli import kanban_queue_position as kqp
+        from hermes_cli import kanban_queue_position as kqp, kanban_hub_admission_placement as _hub_admission_show
         details = kqp.detail_fields(conn, task, getattr(args, "board", None))
         queue = details.get("queue")
         if not want_json:
@@ -777,6 +776,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
             "wake_check": wake_check,
             "queue_reason": queue_reason,
             **details,
+            **_hub_admission_show.show_json(events),
         })
         return 0
 
@@ -801,6 +801,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         field("model", f"{task.model_override}{_prov}")
     _print_max_retries(task)
     field("created", f"{_fmt_ts(task.created_at)} by {task.created_by or '-'}")
+    _hub_admission_show.print_show_field(events, field)  # [daveey] why this card is (or is not) on the hub
 
     # Diagnostics up top so CLI users see distress signals before scrolling.
     from hermes_cli import kanban_diagnostics as kd
@@ -889,8 +890,11 @@ def _cmd_reclaim(args: argparse.Namespace) -> int:
 def _cmd_move(args: argparse.Namespace) -> int:
     """[daveey] ``hermes kanban move``: the card's own worker (HERMES_KANBAN_TASK + run id) moves its running card;
     otherwise a queued card is relabelled, or with --reclaim a card running here is stopped first."""
-    from hermes_cli import kanban_move as km
-    labels = [x.strip() for x in str(args.runs_on).split(",") if x.strip()]
+    from hermes_cli import kanban_move as km, kanban_move_pool as kmp
+    labels, host, err = kmp.cli_labels(args)
+    if labels is None:
+        print(err, file=sys.stderr)
+        return 1
     own_run = os.environ.get("HERMES_KANBAN_TASK") == args.task_id and os.environ.get("HERMES_KANBAN_RUN_ID")
     with kbc.connect_closing() as conn:
         status = (conn.execute("SELECT status FROM tasks WHERE id = ?", (args.task_id,)).fetchone() or {"status": None})
@@ -899,16 +903,16 @@ def _cmd_move(args: argparse.Namespace) -> int:
                    "error": "--checkpoint is required when a worker moves its own running card"}
         elif own_run:
             res = km.move_task(conn, args.task_id, runs_on=labels, reason=args.reason, checkpoint=args.checkpoint,
-                               expected_run_id=int(os.environ["HERMES_KANBAN_RUN_ID"]), force=args.force)
+                               expected_run_id=int(os.environ["HERMES_KANBAN_RUN_ID"]), force=args.force, **host)
         elif status["status"] == "running":
             if not args.reclaim:
                 res = {"ok": False, "reason_code": "running",
                        "error": f"{args.task_id} is running: its worker moves it (kanban_move), or pass --reclaim"}
             else:
-                res = km.move_reclaim(conn, args.task_id, runs_on=labels, reason=args.reason, force=args.force)
+                res = km.move_reclaim(conn, args.task_id, runs_on=labels, reason=args.reason, force=args.force, **host)
         else:
             res = km.move_queued(conn, args.task_id, runs_on=labels, reason=args.reason,
-                                 checkpoint=args.checkpoint or "", force=args.force)
+                                 checkpoint=args.checkpoint or "", force=args.force, **host)
     if getattr(args, "json", False):
         print(json.dumps(res))
     elif res.get("ok"):
@@ -1881,7 +1885,7 @@ _HANDLERS = {
     "complete": _cmd_complete, "edit": _cmd_edit, "reopen": _cmd_reopen, "block": _cmd_block,
     "schedule": _cmd_schedule, "unblock": _cmd_unblock,
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
-    "reopen-review": _cmd_reopen_review, "promote": _cmd_promote,
+    "reopen-review": _cmd_reopen_review, "promote": _cmd_promote, "resume": _cmd_resume, "quota-release": _cmd_quota_release,
     "archive": _cmd_archive, "tail": _cmd_tail, "dispatch": _cmd_dispatch,
     "daemon": _cmd_daemon, "watch": _cmd_watch, "stats": _cmd_stats,
     "log": _cmd_log, "runs": _cmd_runs, "heartbeat": _cmd_heartbeat,

@@ -240,6 +240,12 @@ async def operation(authority, name, params, actor=None):
         flags = (saved['result'].get('cron_job_flags') or {}) if saved else {}
         if result is None:
             result = [False, '', '', row.get('outcome') or 'unknown_execution']
+            if row.get('outcome') == 'interrupted' and saved is None:
+                # [daveey] The run's turn was lost across this owner's restart (boot recovery
+                # settles an unattended ``unknown`` admission interrupted, with no result): a
+                # restart cut, rerun once by whoever books it (cron/restart_cut.py), not a failure.
+                from cron.restart_cut import RESTART_CUT_FLAG
+                flags = dict(flags, **{RESTART_CUT_FLAG: True})
     from cron.scheduler_liveness import owner_progress
     return {'status': row['status'], 'result': result, 'job_flags': flags,
             'progress_at': owner_progress.get(row['request_id'].rsplit(':', 1)[-1])}
@@ -250,6 +256,20 @@ def _cancellations(authority):
     if cancellations is None:
         cancellations = authority._cron_cancellations = {}
     return cancellations
+
+
+def _restart_cut(authority, stop, execution_id):
+    """[daveey] Whether this owner's own restart stopped the run: it is draining for a stop or an
+    update and has either begun interrupting remaining work (tools killed, agents interrupted) or
+    the run was torn down by something other than an operator's cancel (the shutdown cleared the
+    fire claim, so the firer forwarded a "lost ownership" cancel)."""
+    from cron.cancellation import cancel_requested
+    runner = getattr(authority, 'runner', None)
+    if not getattr(runner, '_draining', False):
+        return False
+    if getattr(runner, '_interrupting_remaining_work', False):
+        return True
+    return bool(stop is not None and stop.is_set() and not cancel_requested(execution_id))
 
 
 async def rpc(connection, name, params):
@@ -314,11 +334,23 @@ async def execute(authority, ref, row, policy):
             stop = _CombinedCancelEvent(
                 CancelRequest(execution_id),
                 ShutdownAwareCancel(cancel, lambda: fire_interrupted_by_shutdown(job_id)))
-            result = await asyncio.to_thread(_run_identified, run_job, job, execution_id,
-                                             extra_prompt=data['extra_prompt'], cancel_event=stop)
+            try:
+                result = await asyncio.to_thread(_run_identified, run_job, job, execution_id,
+                                                 extra_prompt=data['extra_prompt'], cancel_event=stop)
+            except Exception as exc:
+                if not _restart_cut(authority, stop, execution_id):
+                    raise
+                result = (False, '', '', f'{type(exc).__name__}: {exc}')
         # run_job stamps run-side verdicts on ITS job copy (quota hold, unreachable model); the
         # firing scheduler's bookkeeping reads them off its own dict, so they ride the result.
         flags = {key: job[key] for key in RUN_JOB_FLAGS if key in job}
+        if not result[0] and _restart_cut(authority, stop, execution_id):
+            # [daveey] This owner's restart stopped the run (killed its tools, interrupted its agent,
+            # or cleared its claim): whatever it returned is not the job's verdict. The firer books
+            # an interruption and reruns it once (cron/restart_cut.py), never a failure.
+            from cron.restart_cut import RESTART_CUT_FLAG, RESTART_CUT_REASON
+            flags[RESTART_CUT_FLAG] = True
+            result = (False, result[1], '', result[3] or RESTART_CUT_REASON)
         authority.pending_results[row['admission_id']] = {
             'result': {'final_response': result[2], 'cron_result': list(result), 'cron_job_flags': flags,
                        'failed': not result[0], 'completed': result[0]}, 'usage': {}}

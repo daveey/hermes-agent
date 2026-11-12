@@ -86,3 +86,25 @@ def test_exact_target_release_is_single_use(board, monkeypatch):
         assert dispatch.check_respawn_guard(conn, task) == "active_pr"
         assert kb.reclaim_task(conn, task, reason="Worker died", signal_fn=lambda *_: None)
         assert dispatch.check_respawn_guard(conn, task) == "active_pr"
+
+
+@pytest.mark.parametrize("reason,expected", [("core_update", None), ("Worker died", "active_pr")],
+                         ids=["core_update_requeue", "crash"])
+def test_core_update_requeue_keeps_the_hold_release(board, monkeypatch, reason, expected):
+    """release -> claim -> core-update requeue resumes; a crash consumes the release. [daveey]"""
+    from hermes_cli.kanban_core_update_requeue import CORE_UPDATE_REQUEUE_REASON
+    reason = CORE_UPDATE_REQUEUE_REASON if reason == "core_update" else reason
+    with kbc.connect() as conn:
+        task, _, _ = held(conn, monkeypatch)
+        now = int(time.time()) + 2
+        monkeypatch.setattr(time, "time", lambda: now)
+        assert wake._unblock(task).get("ok") is True
+        assert kb.claim_task(conn, task) is not None
+        assert kb.reclaim_task(conn, task, reason=reason, signal_fn=lambda *_: None)
+        assert kb.get_task(conn, task).status == "ready"
+        assert dispatch.check_respawn_guard(conn, task) == expected
+        if expected is None:
+            # The next real claim consumes it, as before.
+            assert kb.claim_task(conn, task) is not None
+            assert kb.reclaim_task(conn, task, reason="Worker died", signal_fn=lambda *_: None)
+            assert dispatch.check_respawn_guard(conn, task) == "active_pr"

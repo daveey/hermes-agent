@@ -216,6 +216,34 @@ _RELAY = re.compile(
     re.IGNORECASE)
 
 ROUTE_GAP_CODE = "agent_route_gap"
+BOARD_OP_CODE = "board_op_ask"
+# [daveey] self-heal agent-7489fcf5cd: "One board action is required: mark `t_01a1a521638d0a78` Done in Hermes
+# Kanban". The ask line (before its Unblock/archive tail) is an imperative Kanban write on a named card: a
+# bookkeeping step agents have routes for. Kept narrow: a card id, a board verb first in the clause, a board term.
+_BOARD_OP = re.compile(
+    r"(?:^|[.:;]\s*)(?:please\s+)?(?:mark|move|set|complete|close|archive|edit|change|re-?route|delete|cancel)\b"
+    r"(?:\s+(?:card|task))?\s+`?t_[0-9a-f]{8,}`?"
+    r"[^.;]{0,80}?\b(?:done|complete[d]?|archived?|runs_on|labels?|status|board|kanban|dashboard)\b",
+    re.IGNORECASE)
+_ASK_TAIL = re.compile(r"\bun-?block\s*=", re.IGNORECASE)
+
+
+def board_op_ask_error(human_request) -> Optional[str]:
+    """Typed refusal for a human_request whose ask is only a Kanban edit/complete/archive of a named card."""
+    if not isinstance(human_request, dict):
+        return None
+    action = " ".join(str(human_request.get("action") or "").split())
+    head = _ASK_TAIL.split(action, 1)[0]
+    m = _BOARD_OP.search(head)
+    if not m:
+        return None
+    return (f"{BOARD_OP_CODE}: human_request.action only asks David to edit, complete or archive a Kanban card "
+            f"({m.group(0).strip(' .:;')!r}). Board bookkeeping is agent work: a ready card stranded on runs_on no "
+            "machine carries -> kanban_move(task_id=<it>, runs_on=['machine:<registered-name>'], reason=...); a "
+            "card another gateway created -> kanban_supervisor_request operator op; an unstarted orphan in your "
+            "creator tree -> kanban_supervisor_request archive op; a card whose own run must finish it -> "
+            "kanban_comment the proof on it so its worker completes it. Keep human_request for what only David "
+            "can do: approve, pay, sign in, a physical step.")
 # The typed answers of the agent routes (capability routing, placement, supervisor routing). A human_request that
 # cites one of them as its reason asks David to do an agent's step because the route failed. [daveey]
 _ROUTE_GAP = re.compile(
@@ -316,7 +344,8 @@ def user_ask_lint_error(human_request) -> Optional[str]:
     if not isinstance(human_request, dict):
         return None
     action = " ".join(str(human_request.get("action") or "").split())
-    relay = agent_relay_ask_error(action, human_request) or agent_route_gap_error(human_request)
+    relay = (agent_relay_ask_error(action, human_request) or agent_route_gap_error(human_request)
+             or board_op_ask_error(human_request))
     if relay:
         return relay
     missing = [label for label, rx in (("what unblocking the card does", _UNBLOCK),
@@ -334,7 +363,8 @@ def user_ask_lint_error(human_request) -> Optional[str]:
 def ask_lint_check(human_request) -> tuple:
     """``_check`` args for the tool entry points: ``(ok, message, rejection)``."""
     err = user_ask_lint_error(human_request)
-    code = next((c for c in (RELAY_ASK_CODE, ROUTE_GAP_CODE) if err and err.startswith(c)), ASK_LINT_CODE)
+    code = next((c for c in (RELAY_ASK_CODE, ROUTE_GAP_CODE, BOARD_OP_CODE) if err and err.startswith(c)),
+                ASK_LINT_CODE)
     return err is None, err or "", code
 
 

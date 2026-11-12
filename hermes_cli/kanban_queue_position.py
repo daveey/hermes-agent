@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from typing import Any, Optional
 
 _log = logging.getLogger(__name__)
@@ -33,13 +34,14 @@ def _ahead(conn: sqlite3.Connection, task) -> int:
 
 
 def _running_and_limit(conn: sqlite3.Connection, board: Optional[str]) -> tuple[Optional[int], Optional[int]]:
-    """The host's running workers (every board) and its ``max_in_progress`` cap, as the dispatcher counts them."""
+    """The host's running workers (every board) and its ``max_in_progress`` cap, as the dispatcher counts them.
+
+    The board to exclude from the other-board sum is the one ``conn`` is attached to (``kanban_host_counts``),
+    never the process's current board; ``board`` only labels a connection that matches no active board. An
+    unreadable count is unknown (None), not zero or a partial sum."""
     from hermes_cli import kanban_db_dispatch as kbd
-    try:
-        running = kbd.count_running_tasks(conn) + kbd.count_running_tasks_other_boards(board)
-    except Exception:  # health: allow BLE001 -- an unreadable count is unknown, not zero
-        _log.debug("kanban queue position: running count unavailable", exc_info=True)
-        running = None
+    from hermes_cli import kanban_host_counts as khc
+    running = khc.running_on_host(conn)["running"]
     try:
         limit = kbd.resolve_max_in_progress(kbd.configured_max_in_progress())
     except Exception:  # health: allow BLE001 -- an unreadable cap is unknown
@@ -133,9 +135,10 @@ def recorded_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_diagnostics import _READY_WAIT_FLOOR_KINDS
+    from hermes_cli.kanban_quota_episode_release import KIND as QUOTA_RELEASED
 
     kinds = {*_READY_WAIT_FLOOR_KINDS, "respawn_guarded", "continued", "scheduled", "reassigned", "reopened",
-             "hold_released"}
+             "hold_released", "dispatch_skipped", QUOTA_RELEASED}  # a later dispatcher skip is the newer verdict
     slots = ",".join("?" for _ in kinds)
     row = conn.execute(
         f"SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ({slots}) "
@@ -148,7 +151,20 @@ def recorded_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
 
 
 def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Optional[dict[str, Any]]:
-    """The queue a ``ready`` ``task`` in this gateway's live file waits in; None for any other status."""
+    """The queue a ``ready`` ``task`` in this gateway's live file waits in; None for any other status.
+
+    A quota episode released since the card's last run (``quota_episode_released``) is named on the place, so
+    a read says the quota hold is gone instead of echoing the old ``subscription_quota_reset``."""
+    place = _position(conn, task, board)
+    if place:
+        from hermes_cli.kanban_quota_episode_release import covers_latest
+        released = covers_latest(conn, task.id)
+        if released:
+            place["quota_released"] = {k: released.get(k) for k in ("reason", "via", "actor", "until")}
+    return place
+
+
+def _position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Optional[dict[str, Any]]:
     if task is None or task.status != "ready":
         return None
     # [daveey] A ready card still holding a local claim is never picked (the dispatcher claims only claim_lock IS
@@ -170,6 +186,7 @@ def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Opt
     placed = placement(conn, task.id)
     if placed is not None:
         return placed
+    from hermes_cli import kanban_host_counts as khc
     running, limit = _running_and_limit(conn, board)
     from hermes_cli import kanban_board_share as share
     try:
@@ -177,10 +194,39 @@ def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Opt
     except Exception:  # health: allow BLE001 -- other boards are advisory; an unreadable count is unknown
         _log.debug("kanban queue position: other boards unavailable", exc_info=True)
         elsewhere = None
-    place = {"lane": "local", "ahead": _ahead(conn, task), "running": running, "limit": limit, "approximate": True}
+    place = {"lane": "local", "ahead": _ahead(conn, task), "running": running, "limit": limit, "approximate": True,
+             "board": khc.board_of(conn) or board, "observed_at": int(time.time())}
     if elsewhere:  # only when other boards' cards rank ahead: the single-board payload keeps its shape
         place["ahead_other_boards"] = elsewhere
+    from hermes_cli import kanban_dispatch_skip as skips
+    skip = skips.latest(conn, task.id)
+    if skip:  # why the last tick passed it over (kanban-dd62aef001): no longer a bare slot wait [daveey]
+        place["skip"] = skip
+    pool = _pool_could_run(conn, task.id)
+    if pool:
+        place["pool_could_run"], place["task_id"] = pool, task.id
     return place
+
+
+def _pool_could_run(conn: sqlite3.Connection, task_id: str) -> Optional[list[str]]:
+    """Pool workers that could run this home-waiting card now (``kanban_placement_coordination.stranded``).
+
+    [daveey] kanban-1663abf6ab: one held pool member made every access-label card home-only; 15 sat behind a
+    full hub for up to 37 h while five workers carried the labels, and the note only said "waiting for a slot"."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_placement as placement
+    from hermes_cli import kanban_placement_coordination as coordination
+    try:
+        ev = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'created' "
+                          "ORDER BY id LIMIT 1", (task_id,)).fetchone()
+        reason = kb._json_dict(ev["payload"]).get("portable_reason") if ev is not None else None
+        if reason != coordination.REASON:
+            return None
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return (coordination.stranded(dict(row), placement.config(), reason) or None) if row is not None else None
+    except Exception:  # health: allow BLE001 -- advisory; an unreadable registry or config is no verdict
+        _log.debug("kanban queue position: pool check unavailable for %s", task_id, exc_info=True)
+        return None
 
 
 def ahead_words(place: dict[str, Any], template: str) -> str:
@@ -229,6 +275,15 @@ def describe(place: Optional[dict[str, Any]]) -> Optional[str]:
     """One line for card reads (``kanban_show`` ``queue_note``, ``hermes kanban show``) saying what the card waits
     for, so "ready, no run" never reads as stuck. [daveey] kanban-7d720d4ab8: a chat saw only a null
     ``queue_reason`` for a card waiting on a full hub, called it stuck and ran its work in a subagent."""
+    words = _describe_lane(place)
+    released = (place or {}).get("quota_released")
+    if words and isinstance(released, dict):
+        words = (f"quota hold released ({released.get('reason') or 'no reason'}, via {released.get('via')}); "
+                 "the card is admissible again. " + words)
+    return words
+
+
+def _describe_lane(place: Optional[dict[str, Any]]) -> Optional[str]:
     if not place:
         return None
     lane = place.get("lane")
@@ -260,12 +315,31 @@ def describe(place: Optional[dict[str, Any]]) -> Optional[str]:
         return headline(place) + ". " + _NOT_STUCK
     if lane == "worker_pool":
         return f"waiting for a pool worker ({place.get('reason') or 'no reason recorded'}). " + _NOT_STUCK
+    return local_words(place)
+
+
+def local_words(place: dict[str, Any]) -> str:
+    """``describe`` for the ``local`` lane: the recorded dispatcher skip first, when there is one."""
+    from hermes_cli import kanban_dispatch_skip as skips
+    skip = place.get("skip")
     ahead = place.get("ahead")
     words = (ahead_words(place, "waiting for a local slot: ~{n} ahead") if ahead is not None
              else "waiting for a local slot")
     if place.get("running") is not None and place.get("limit") is not None:
         words += f", {place['running']}/{place['limit']} running"
-    return words + ". " + _NOT_STUCK
+    elif place.get("limit") is not None and "running" in place:
+        words += f", running count unknown (cap {place['limit']})"
+    pool = place.get("pool_could_run")
+    if pool:
+        from hermes_cli.kanban_placement_coordination import REASON
+        return (words + f". Home-only by a stale creation verdict ({REASON}): pool worker(s) "
+                f"{', '.join(pool)} now carry its access labels and have free slots. Re-place it "
+                f"(`hermes kanban move {place.get('task_id') or '<id>'} --runs-on machine:{pool[0]} --reason \"pool attests its labels\"`) "
+                "instead of waiting for a local slot; do not run its work outside the dispatcher")
+    if not skip:
+        return words + ". " + _NOT_STUCK
+    words = f"last dispatcher skip of this ready episode: {skips.words(skip)} ({words})"
+    return words + ". " + (_NOT_STUCK if skips.is_ordering(skip) else skips.advice(skip))
 
 
 def read(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Optional[dict[str, Any]]:
@@ -291,9 +365,34 @@ def detail_fields(conn, task, board=None):
     except Exception:  # health: allow BLE001 -- diagnostics cannot fail a card read
         capacity = evidence._unknown("observation_unavailable")
     observation = capacity.get("execution_observation")
-    out.update(capacity_evidence=capacity, execution_observations=[observation] if observation else [])
+    out.update(capacity_evidence=capacity,
+               execution_observations=([observation] if observation else []) + _work_observations(conn, task, board))
     out["capacity_note"] = evidence.describe(capacity)
     return out
+
+
+def _work_observations(conn, task, board):
+    """Optional card evidence for a detail read: any adapter failure is an explicit unknown, never a failed read."""
+    from dataclasses import asdict
+    from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, add_cards, card_scope, conn_path, failed_card
+    from hermes_cli.kanban_execution_source import assemble, transaction
+    row = {**asdict(task), "board": board or "default"}
+    try:
+        gateway, profile = card_scope(conn_path(conn))
+        row["_execution_scope"] = {"gateway": gateway, "profile": profile, "board": row["board"]}
+        with transaction(conn) as read_at:
+            from hermes_cli.kanban_session_activity import _require_local_execution_authority
+            _require_local_execution_authority(conn)
+            sources = assemble(conn, [task.id], board=board or "default", gateway=gateway, profile=profile,
+                               observed_at=read_at)
+        row["_execution_source"] = sources.get(task.id)
+        return add_cards([row])[0].get("execution_observations", [])
+    except ADAPTER_ERRORS:
+        _log.debug("kanban queue position: execution observation unavailable for %s", task.id, exc_info=True)
+        try:
+            return [failed_card(row)]
+        except ADAPTER_ERRORS:
+            return []
 
 
 def print_field(place: Optional[dict[str, Any]], queue_reason: Any, field) -> None:

@@ -46,6 +46,36 @@ def kanban_managed_count(runner):
                for worker in getattr(authority, '_managed_workers', {}).values())
 
 
+def cron_turn_count(runner):
+    """Executing authority turns of scheduled-job sessions (frozen policy source ``cron``).
+
+    An agent cron fire runs its turn on the owner (``session_cron.operation('submit')``), so the
+    work total counts it once as the scheduler's cron run and once more as this authority turn
+    (``_running_agents``, a managed worker or an unmapped executing session). A ``cron_cut``
+    update cuts that turn with its run; callers that tolerate cut cron runs add this count, or an
+    hourly agent cron refuses every checkpoint for its whole run [daveey]. A session counts once and
+    only when a bucket of the total counts it (never more than the total holds for it); a policy
+    that cannot be read is not a cron turn, so the turn stays awaited (fail closed).
+    """
+    from gateway.session_policy import policy_for_source
+    running = getattr(runner, '_running_agents', {})
+    count = 0
+    for authority in all_authorities(runner):
+        workers = getattr(authority, '_managed_workers', {})
+        sids = {sid for sid, live, _generation in executing_sessions(authority)
+                if live.route in running or sid not in workers}
+        sids.update(sid for sid, worker in list(workers.items()) if not worker.closed.is_set())
+        sessions = getattr(authority, 'sessions', {})
+        for sid in sids:
+            live = sessions.get(sid)
+            try:
+                policy = policy_for_source(runner, getattr(live, 'source', None))
+            except Exception:  # health: allow BLE001 -- unreadable policy: not provably a cron turn, stays awaited
+                continue
+            count += getattr(policy, 'source', None) == 'cron'
+    return count
+
+
 def managed_worker_units(authority):
     """One ``active_work`` entry per live managed worker of *authority*: its session and its own process."""
     return [{'kind': 'managed', 'session': sid, 'pid': (worker.worker or (worker.process.pid,))[0]}

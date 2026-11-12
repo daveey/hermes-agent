@@ -288,10 +288,10 @@ def _get_board_uncached(tenant, include_archived, board, workflow_template_id, c
     board = _resolve_board(board)
     done_limit = int(done_limit or 0)
 
-    def build():
+    def build(prev=None):
         with closing(_conn(board=board)) as conn:
             return board_read.materialize(conn, tenant, include_archived, workflow_template_id, current_step_key,
-                                          done_limit, diagnostic_inputs=_diagnostic_inputs)
+                                          done_limit, diagnostic_inputs=_diagnostic_inputs, prev=prev)
 
     try:
         path = str(kanban_db.kanban_db_path(board=board))
@@ -299,7 +299,8 @@ def _get_board_uncached(tenant, include_archived, board, workflow_template_id, c
         rows = build()
     else:
         rows = board_rows.materialized(
-            (path, tenant, bool(include_archived), workflow_template_id, current_step_key, done_limit), path, build)
+            (path, tenant, bool(include_archived), workflow_template_id, current_step_key, done_limit), path, build,
+            update=build)
     return board_read.project(rows, include_archived, _diagnostics_from_inputs)
 
 
@@ -1548,7 +1549,8 @@ def list_boards(include_archived: bool = Query(False)):
     """Every board on disk with task counts and the active slug."""
     boards = kanban_db.list_boards(include_archived=include_archived)
     current = kanban_db.get_current_board()
-    proj_map = _projects_by_id()
+    # The switcher polls this: open the projects db only when a listed board is project-scoped.
+    proj_map = _projects_by_id() if any(b.get("project_id") for b in boards) else {}
     for b in boards:
         b["is_current"] = (b["slug"] == current)
         b["counts"] = _board_counts(b["slug"])

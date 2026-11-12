@@ -1,5 +1,3 @@
-import { KeyboardSensor, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
-import { sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { useStore } from '@nanostores/react'
 import type * as React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -27,6 +25,7 @@ import { useI18n } from '@/i18n'
 import { comboTokens } from '@/lib/keybinds/combo'
 import { sessionCreatedAt } from '@/lib/session-branch-tree'
 import { normalizeSessionSource, sessionSourceLabel } from '@/lib/session-source'
+import { useExecutionObservationClock } from '@/lib/use-execution-observation-clock'
 import { cn } from '@/lib/utils'
 import { markSidebarFirstRows } from '@/store/boot-snapshot'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
@@ -195,6 +194,8 @@ import { CONTEXT_SPLIT_KIT, SplitSubmenu } from './split-submenu'
 import { useEnteredProjectSessions } from './use-entered-project-sessions'
 import { useOverviewPreviews } from './use-overview-previews'
 import { useServerSessionSearch } from './use-server-session-search'
+import { useSidebarDndSensors } from './use-sidebar-dnd-sensors'
+import { useSidebarNavCollapsed } from './use-sidebar-nav-collapsed'
 
 export { mergeSearchResults, searchResultToSession, stripFtsMarkers } from './search-results'
 
@@ -372,27 +373,7 @@ export function ChatSidebar({
   const [searchQuery, setSearchQuery] = useState('')
   const [newSessionKbdFlash, setNewSessionKbdFlash] = useState(false)
 
-  const [navCollapsed, setNavCollapsed] = useState(() => {
-    try {
-      return localStorage.getItem('sidebar.nav.collapsed') === '1'
-    } catch {
-      return false
-    }
-  })
-
-  const toggleNavCollapsed = useCallback(() => {
-    setNavCollapsed(prev => {
-      const next = !prev
-
-      try {
-        localStorage.setItem('sidebar.nav.collapsed', next ? '1' : '0')
-      } catch {
-        // ignore quota / disabled storage
-      }
-
-      return next
-    })
-  }, [])
+  const { navCollapsed, toggleNavCollapsed } = useSidebarNavCollapsed()
 
   const [messagingLoadMorePending, setMessagingLoadMorePending] = useState<Record<string, boolean>>({})
   const [recentsLoadMorePending, setRecentsLoadMorePending] = useState(false)
@@ -433,10 +414,7 @@ export function ChatSidebar({
   const activeSidebarSessionId = currentView === 'chat' ? selectedSessionId : null
   const profileRailVisible = useStore($profileRailVisible)
 
-  const dndSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
-  )
+  const dndSensors = useSidebarDndSensors()
 
   // Profile scope = the "workspace switcher" context. Concrete scope shows only
   // that profile's sessions (clean rows, no per-row tags); ALL fans every
@@ -485,8 +463,11 @@ export function ChatSidebar({
   // (same rule as the overview overlay), so filtering to Home keeps Home's rows.
   const hiddenGatewayIds = useStore($hiddenGatewayIds)
   const gatewayRegistry = useStore($connectionsRegistry)
+  const executionRows = useMemo(() => [sessions, messagingSessions, projectTree], [sessions, messagingSessions, projectTree])
+  const executionNow = useExecutionObservationClock(executionRows)
 
   const sessionMatchesFilters = useCallback(
+    // The shared tick must invalidate memoized filters even when the dot stays `background`.
     (session: SessionInfo) => {
       // [daveey] A hidden gateway's rows leave every list and lane.
       if (sessionOnHiddenGateway(session, hiddenGatewayIds, gatewayRegistry)) {
@@ -497,6 +478,7 @@ export function ChatSidebar({
       // and blocked / needs-input rows stay). Same predicate ⌘] / ⌘[ use.
       if (
         sessionHiddenAsAutomated(session, showAutomated, {
+          nowSeconds: executionNow,
           dotState: dotStates[session.id] ?? 'idle',
           pinnedIds: pinnedSessionIds
         })
@@ -541,7 +523,8 @@ export function ChatSidebar({
       projects,
       projectOwners,
       knownProjects,
-      dotStates
+      dotStates,
+      executionNow
     ]
   )
 
@@ -584,11 +567,12 @@ export function ChatSidebar({
       filterSessionsByProfileScope(messagingSessions, profileScope).filter(
         session =>
           !sessionHiddenAsAutomated(session, showAutomated, {
+            nowSeconds: executionNow,
             dotState: dotStates[session.id] ?? 'idle',
             pinnedIds: pinnedSessionIds
           })
       ),
-    [messagingSessions, profileScope, showAutomated, dotStates, pinnedSessionIds]
+    [messagingSessions, profileScope, showAutomated, dotStates, pinnedSessionIds, executionNow]
   )
 
   // Index sessions by every id a pin might be stored under — recents, cron,

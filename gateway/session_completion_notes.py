@@ -34,6 +34,11 @@ _ALWAYS_NOTED = frozenset({'cron'})
 # re-dispatches into the same failure (billing, a usage limit) would otherwise wake itself forever; past
 # the limit the failure is a note again until a viewer attaches or the user sends something.
 UNATTENDED_WAKE_LIMIT = 3
+# Backoff while another turn holds the conversation's lease (``_write_note``); the warning repeats
+# at most this often, so a long turn ahead of the note is visible without flooding the log.
+_LEASE_RETRY_MIN_S = 0.25
+_LEASE_RETRY_MAX_S = 2.0
+_LEASE_NOTICE_EVERY_S = 60.0
 
 
 def _producer(identity):
@@ -115,20 +120,58 @@ async def note_if_unviewed(authority, ref, row):
         # The claim left a closed row closed for a note; the turn reopens it as any first turn does.
         await reopen_for_turn(authority, ref)
         return None
-    from gateway.session_viewer_close import _physical_target
-    metadata = {'completion_note': sorted(set(descriptor.get('identities') or ()) | {descriptor['identity']})}
-    metadata.update({key: descriptor[key] for key in ('display_text', 'notification_category') if key in descriptor})
-    target = _physical_target(authority, ref.session_id)
+    metadata = note_metadata(descriptor)
     # Keyed by its admission: a claim is never replayed, and this keeps a write retry exact.
-    await tracked_write(authority, partial(
+    target = await _write_note(authority, ref, lambda target: tracked_write(authority, partial(
         authority.db.append_completion_note, target, row['admission_id'], row['payload']['text'],
-        descriptor.get('display_kind', 'internal_notification'), metadata))
+        descriptor.get('display_kind', 'internal_notification'), metadata)))
     refresh = getattr(authority.runner, '_refresh_agent_cache_message_count', None)
     if refresh is not None:  # the owner's own row: a cached agent stays, as after a turn's writes
         await refresh(live.route, target)
     _refresh_outcome_after_note(authority.db, target)
     authority.pending_results[row['admission_id']] = {'result': {'final_response': '', 'messages': []}, 'usage': {}}
     return ''
+
+
+def note_metadata(descriptor):
+    """A completion note's display metadata: every identity it covers and the producer's card fields."""
+    metadata = {'completion_note': sorted(set(descriptor.get('identities') or ()) | {descriptor['identity']})}
+    metadata.update({key: descriptor[key] for key in ('display_text', 'notification_category') if key in descriptor})
+    return metadata
+
+
+async def _write_note(authority, ref, write):
+    """Run ``write(target)`` against the session's physical tip; return that target.
+
+    The note refuses a transcript another turn on the same conversation holds the turn lease of
+    (``SessionTurnLeaseLostError``): another process's turn, or a sibling session's. That refusal is
+    transient (the lease ends with its turn, or goes stale and the guard reclaims it), while failing
+    the admission loses the completion for good: its producer was acknowledged at admission and its
+    request id is admitted once, so a re-offer resolves to the failed row (deleg_e757744d). The FIFO
+    head waits for the lease instead, as a turn of this session waits for it, and writes then; the
+    note is keyed by its admission, so a refused try leaves nothing to repeat. A drain that stops
+    meanwhile cancels the wait, as it does a running turn. The tip is re-read each try: a
+    compression may rotate it while we wait."""
+    import asyncio
+    import logging
+
+    from gateway.session_viewer_close import _physical_target
+    from hermes_state_errors import SessionTurnLeaseLostError
+    delay, waited, notice_at = 0.0, 0.0, 0.0
+    while True:
+        target = _physical_target(authority, ref.session_id)
+        try:
+            await write(target)
+            return target
+        except SessionTurnLeaseLostError:
+            if waited >= notice_at:
+                logging.getLogger(__name__).warning(
+                    'Completion note for %s waits for another turn\'s lease on %s (%.0fs so far)',
+                    ref.session_id, target, waited)
+                notice_at = waited + _LEASE_NOTICE_EVERY_S
+        delay = min(max(delay * 2, _LEASE_RETRY_MIN_S), _LEASE_RETRY_MAX_S)
+        await asyncio.sleep(delay)
+        waited += delay
 
 
 def _refresh_outcome_after_note(db, target):

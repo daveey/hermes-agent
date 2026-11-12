@@ -45,6 +45,7 @@ def _at_or_after(value: Any, claimed: datetime) -> bool:
 
 def _skip_reason(
     job: dict[str, Any], record: dict[str, Any], claimed: datetime, now: datetime,
+    restart_cut: bool = False,
 ) -> Optional[str]:
     from cron.jobs import _is_recoverable_error_job, is_job_runnable, is_terminal_job
     from cron.scheduler_ownership import _claim_owner_is_dead
@@ -57,10 +58,13 @@ def _skip_reason(
         if rescheduled_at is not None and claimed >= rescheduled_at:
             # Claimed after a reschedule that no real outcome has settled: the rerun itself.
             return "the interrupted attempt was itself a restart rerun"
-    if _at_or_after(job.get("edited_at"), claimed):
+    # A verified restart cut (the owner's own verdict) is settled by its firer or journal recovery,
+    # whose uncertainty pause/resume stamps ``edited_at`` and whose claim may still be its own:
+    # neither says an operator changed the job or another process will settle it.
+    if not restart_cut and _at_or_after(job.get("edited_at"), claimed):
         return "edited since the attempt started"  # pause, resume and run-now included
     claim = job.get("fire_claim")
-    if isinstance(claim, dict) and not _claim_owner_is_dead(claim):
+    if not restart_cut and isinstance(claim, dict) and not _claim_owner_is_dead(claim):
         # Only the attempt's executor died (an external cron worker); the scheduler process
         # that claimed the fire is alive (or unprovable) and settles the outcome itself.
         return "the claiming scheduler is still alive"
@@ -121,8 +125,12 @@ def _newest_attempt_id(job_id: str) -> Optional[str]:
     return None
 
 
-def reschedule_interrupted(record: dict[str, Any]) -> bool:
-    """Put ``record``'s job back on the schedule for now; True when it was rescheduled."""
+def reschedule_interrupted(record: dict[str, Any], *, restart_cut: bool = False) -> bool:
+    """Put ``record``'s job back on the schedule for now; True when it was rescheduled.
+
+    ``restart_cut``: the owner itself reported that its restart cut this attempt (``RESTART_CUT_FLAG``
+    on the canonical result), and the caller (the attempt's firer or its journal recovery) is the
+    one settling it, so the journal and a live claim are no reason to defer."""
     from cron.jobs import _MISSING, _hermes_now, _under_fire_fence, _with_job, save_jobs
 
     job_id = str(record.get("job_id") or "")
@@ -131,11 +139,12 @@ def reschedule_interrupted(record: dict[str, Any]) -> bool:
         return False
     from cron.scheduler_authority import journal_path
 
-    if journal_path(job_id, record["id"]).exists():
+    if not restart_cut and journal_path(job_id, record["id"]).exists():
         # An admitted canonical fire: its journal recovery observes the owner's receipt and
-        # must never be raced by a second submit (cron/observer_reconnect.py).
-        logger.info("cron: not rescheduling %s (execution %s): its admission journal owns recovery",
-                    job_id, record["id"])
+        # reschedules it there when the owner says a restart cut it (settle_restart_cut); it must
+        # never be raced by a second submit (cron/observer_reconnect.py).
+        logger.info("cron: not rescheduling %s (execution %s) here: its admission journal recovery "
+                    "settles it", job_id, record["id"])
         return False
     if _newest_attempt_id(job_id) != record.get("id"):
         logger.info("cron: not rescheduling %s (execution %s): a newer attempt exists",
@@ -147,7 +156,7 @@ def reschedule_interrupted(record: dict[str, Any]) -> bool:
     def apply(jobs, _i, job):
         _fence_reported[0] = True
         now = _hermes_now()
-        reason = _skip_reason(job, record, claimed, now)
+        reason = _skip_reason(job, record, claimed, now, restart_cut)
         if reason is not None:
             logger.info("cron: not rescheduling %s (execution %s) after restart interruption: %s",
                         job_id, record["id"], reason)

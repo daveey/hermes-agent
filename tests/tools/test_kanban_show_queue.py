@@ -36,7 +36,12 @@ def home(tmp_path, monkeypatch):
     kb.init_db()
     from hermes_cli import kanban_db_dispatch as kbd
     monkeypatch.setattr(kbd, "configured_max_in_progress", lambda: 7)
-    monkeypatch.setattr(kbd, "count_running_tasks_other_boards", lambda board=None: 7)
+    kb.create_board("other")  # 7 workers on another board, really counted through its file (read-only)
+    with kbc.connect_closing(board="other") as other:
+        for i in range(7):
+            busy = kb.create_task(other, title=f"busy {i}", assignee="default")
+            other.execute("UPDATE tasks SET status='running' WHERE id=?", (busy,))
+        other.commit()
     yield h
     kwn.set_registry_fetch(None)
 
@@ -88,14 +93,20 @@ def _rest(tid):
     return TestClient(app).get(f"/api/plugins/kanban/tasks/{tid}").json()
 
 
-LOCAL_BEHIND_ONE = {"lane": "local", "ahead": 1, "running": 7, "limit": 7, "approximate": True}
+LOCAL_BEHIND_ONE = {"lane": "local", "ahead": 1, "running": 7, "limit": 7, "approximate": True, "board": "default"}
+
+
+def _placed(queue):
+    """The queue place without its observation time (it varies by the second)."""
+    assert isinstance(queue.pop("observed_at"), int)
+    return queue
 
 
 def test_tool_shows_queue_for_a_fresh_ready_card_at_the_cap(home):
     _card("p5 ahead", priority=5, created_at=200)
     tid = _card("p0 mine", priority=0, created_at=100)
     out = _tool(tid)
-    assert out.get("queue") == LOCAL_BEHIND_ONE
+    assert _placed(out.get("queue")) == LOCAL_BEHIND_ONE
     note = out.get("queue_note") or ""
     assert "1 ahead" in note and "7/7" in note
     assert "not stuck" in note and "outside the dispatcher" in note
@@ -105,7 +116,7 @@ def test_cli_json_and_text_show_the_queue(home, capsys):
     _card("p5 ahead", priority=5, created_at=200)
     tid = _card("p0 mine", priority=0, created_at=100)
     rc, out = _cli(capsys, "show", tid, "--json")
-    assert rc == 0 and json.loads(out).get("queue") == LOCAL_BEHIND_ONE
+    assert rc == 0 and _placed(json.loads(out).get("queue")) == LOCAL_BEHIND_ONE
     rc, out = _cli(capsys, "show", tid)
     assert rc == 0
     line = next((ln for ln in out.splitlines() if ln.strip().startswith("queue:")), "")
@@ -166,7 +177,12 @@ def test_rest_tool_and_cli_agree_on_queue(home, monkeypatch, capsys, unplaceable
     rest = _rest(tid).get("queue")
     tool = _tool(tid).get("queue")
     rc, out = _cli(capsys, "show", tid, "--json")
-    assert rc == 0 and rest is not None and rest == tool == json.loads(out).get("queue")
+    assert rc == 0 and rest is not None
+
+    def place(queue):
+        """The place each read reports, without its wall-clock observation second (three reads can straddle one)."""
+        return {k: v for k, v in queue.items() if k != "observed_at"}
+    assert place(rest) == place(tool) == place(json.loads(out).get("queue"))
 
 
 def test_dispatcher_records_unplaceable_once(home, monkeypatch):

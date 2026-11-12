@@ -32,8 +32,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from hermes_cli import kanban_db_sync as _sync, kanban_priority
+from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_priority
 from hermes_cli.kanban_db_values import _first_line, _opt_int, _json_or_null
+from hermes_cli.kanban_db_event import Event  # public kb.Event; helpers import lazily: no cycle
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
 from hermes_cli import kanban_placement_forward as _placement_fwd  # stdlib-only at import: no cycle
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
@@ -783,25 +784,6 @@ class Attachment:
         )
 
 
-@dataclass
-class Event:
-    id: int
-    task_id: str
-    kind: str
-    payload: Optional[dict]
-    created_at: int
-    run_id: Optional[int] = None
-
-    @classmethod
-    def from_row(cls, row: sqlite3.Row) -> Event:
-        run_id = _row_get(row, "run_id")
-        return cls(
-            id=row["id"], task_id=row["task_id"], kind=_lossy_text(row["kind"]),
-            payload=_json_or(_lossy_text(row["payload"])), created_at=_to_epoch(row["created_at"]) or 0,
-            run_id=_opt_int(run_id),
-        )
-
-
 # --- Schema ---
 
 SCHEMA_SQL = """
@@ -1019,7 +1001,7 @@ CREATE TABLE IF NOT EXISTS task_wake_checks (
     last_at   INTEGER,
     last_rc   INTEGER,
     last_out  TEXT,
-    fails     INTEGER NOT NULL DEFAULT 0,
+    fails     INTEGER NOT NULL DEFAULT 0, first_failure_at INTEGER,
     generation TEXT, purpose TEXT NOT NULL DEFAULT 'wake'  -- 'wake' (park) | 'ask_resolved' (kanban_ask_resolved)
 );
 
@@ -1308,7 +1290,7 @@ def create_task(
     project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
         conn, project_id, project_source_task_id, workspace_kind, workspace_path
     )
-    placement_policy, placement_audit = resolved_db_placement(locals())
+    placement_policy, placement_audit, runs_on = resolved_db_placement(locals())
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
 
@@ -1441,38 +1423,6 @@ VALID_SORT_ORDERS: dict[str, str] = {
     "updated": "started_at DESC NULLS LAST, created_at DESC",
     "completed-desc": "completed_at DESC NULLS LAST, id DESC",
 }
-
-
-def list_tasks(
-    conn: sqlite3.Connection, *, assignee: Optional[str] = None, status: Optional[str] = None,
-    tenant: Optional[str] = None, session_id: Optional[str] = None, include_archived: bool = False,
-    limit: Optional[int] = None, order_by: Optional[str] = None,
-    workflow_template_id: Optional[str] = None, current_step_key: Optional[str] = None,
-) -> list[Task]:
-    if status is not None and status not in VALID_STATUSES:
-        raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
-    query = "SELECT * FROM tasks WHERE 1=1"
-    params: list[Any] = []
-    for col, val in (
-        ("assignee", _canonical_assignee(assignee)), ("status", status), ("tenant", tenant),
-        ("session_id", session_id), ("workflow_template_id", workflow_template_id),
-        ("current_step_key", current_step_key),
-    ):
-        if val is not None:
-            query += f" AND {col} = ?"
-            params.append(val)
-    if not include_archived and status != "archived":
-        query += " AND status != 'archived'"
-    if order_by is not None:
-        order_by = order_by.strip().lower()
-        if order_by not in VALID_SORT_ORDERS:
-            raise ValueError(f"order_by must be one of {sorted(VALID_SORT_ORDERS.keys())}")
-        query += f" ORDER BY {VALID_SORT_ORDERS[order_by]}"
-    else:  # the dispatcher's lane order: a card others wait on first among its effective priority [daveey]
-        query += f" ORDER BY {DISPATCH_ORDER}"
-    if limit:
-        query += f" LIMIT {int(limit)}"
-    return [Task.from_row(r) for r in conn.execute(query, params).fetchall()]
 
 
 def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:
@@ -2222,7 +2172,7 @@ def goal_run_status(
             return "superseded"
     if task.status in {"ready", "todo"}:
         event = conn.execute(
-            "SELECT kind FROM task_events WHERE task_id = ? "
+            "SELECT kind FROM task_events WHERE task_id = ? AND kind != 'dispatch_skipped' "
             "ORDER BY id DESC LIMIT 1", (task_id,),
         ).fetchone()
         if event and event["kind"] == "changes_requested":
@@ -2452,6 +2402,10 @@ def _verify_created_cards(
     # Pull the set of cards linked as children of the completing task.
     # Cheap: one query, indexed on parent_id.
     linked_children: set[str] = set(child_ids(conn, completing_task_id))
+    # A Board-synced live file is partial: ask the Board replica for the rest (same trust rule). [daveey]
+    remote, remote_children = _replica_tasks([c for c in ordered if c not in found], completing_task_id)
+    found.update(remote)
+    linked_children |= remote_children
 
     verified: list[str] = []
     phantom: list[str] = []
@@ -2466,31 +2420,8 @@ def _verify_created_cards(
     return verified, phantom
 
 
-# Matches ``kanban_create`` (12 hex) and ``_new_task_id`` (8 hex) ids; 8+ for forward compat.
-_TASK_ID_PROSE_RE = re.compile(r"\bt_[a-f0-9]{8,}\b")
-
-
-def _scan_prose_for_phantom_ids(conn: sqlite3.Connection, text: str) -> list[str]:
-    """``t_<hex>`` references in ``text`` that resolve neither to a local task nor to a card in the hermes-hub
-    replica of other gateways (deduped; advisory). An unreadable/stale replica leaves them unflagged."""
-    if not text:
-        return []
-    missing = _missing_task_ids(conn, dict.fromkeys(_TASK_ID_PROSE_RE.findall(text)))
-    return unresolved_after_replica(missing)
-
-
-def unresolved_after_replica(missing: list[str]) -> list[str]:
-    """``missing`` (not on the local board) minus ids the hub replica knows; [] when the replica cannot say."""
-    if not missing:
-        return []
-    try:
-        from hermes_cli.kanban_session_activity import replica_task_resolution
-        found, authoritative = replica_task_resolution(missing)
-    except Exception:  # health: allow BLE001 -- advisory scan; an unusable replica means "unknown", never a flag
-        return []
-    if not authoritative:
-        return []
-    return [p for p in missing if p not in found]
+from hermes_cli.kanban_prose_refs import _TASK_ID_PROSE_RE, _scan_prose_for_phantom_ids  # re-exported
+from hermes_cli.kanban_board_replica_refs import replica_tasks as _replica_tasks, unresolved_after_replica
 
 
 class HallucinatedCardsError(ValueError):
@@ -2950,14 +2881,14 @@ def block_task(
     from hermes_cli.kanban_goal_recovery import record_block
     from hermes_cli.kanban_reason_comment import reason_comment
     human_request = validate_block_request(human_request, kind)
+    pin = _park_pin.plan(conn, task_id, reason)  # git reads stay outside the write txn
     with write_txn(conn), reason_comment(conn, task_id, comment) as noted:
         if not record_block(conn, task_id, goal_rejection, reason, expected_run_id, kind, human_request):
             return False
-        cur_row = conn.execute(
-            "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,),
-        ).fetchone()
+        cur_row = conn.execute("SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if cur_row is None:
             return False
+        _park_pin.apply(conn, task_id, pin)  # unpushed state keeps a pooled card on this worker (same run only)
         from hermes_cli.kanban_dependency_validation import validate_dependency_block
         validate_dependency_block(conn, task_id, kind)
         from hermes_cli import kanban_assignment_routing as assignment_routing
@@ -3084,7 +3015,7 @@ def block_task(
         ):
             return False
         store_request(conn, task_id, human_request)
-        payload.update(human_request=human_request, **({"actor": actor} if actor else {}), **(filing_fields(conn, human_request) if new_status == "blocked" else {}))
+        payload.update(status=new_status, human_request=human_request, **({"actor": actor} if actor else {}), **(filing_fields(conn, human_request) if new_status == "blocked" else {}))  # status: where it landed, read by the sync heal [daveey]
         from hermes_cli.kanban_shared_blockers import CLEAR_FLAG
         payload.update(run_meta)
         if clear_blocker:
@@ -3910,7 +3841,7 @@ def _retention_seconds(older_than_seconds: int) -> int:
 
 
 def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3600) -> int:
-    """Prune old done/archived events, retaining decomposition identity until task deletion.
+    """Prune old done/archived events, retaining decomposition identity and carried origin intents until task deletion.
 
     ``older_than_seconds=0`` means everything older than now; the CLI maps
     ``--event-retention-days 0`` to "disabled" before calling this.
@@ -3918,8 +3849,8 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3
     cutoff = int(time.time()) - _retention_seconds(older_than_seconds)
     with write_txn(conn):
         cur = conn.execute(
-            "DELETE FROM task_events WHERE created_at < ? AND kind != 'decomposed' AND task_id IN "
-            "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
+            "DELETE FROM task_events WHERE created_at < ? AND kind NOT IN ('decomposed', 'origin_intent_recorded') "
+            "AND task_id IN (SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
         )
     return int(cur.rowcount or 0)
 
@@ -4097,6 +4028,7 @@ def current_run_started_ats(conn: sqlite3.Connection, task_ids: Iterable[str]) -
 from hermes_cli.kanban_db_comment_ids import (
     add_comment, agent_comment_ids, comment_id_before_run_start, delivered_comment_ids, own_comment_ids, writer_provenance)
 from hermes_cli.kanban_db_archive import archive_task
+from hermes_cli.kanban_db_list import list_task_rows, list_tasks
 from hermes_cli.kanban_db_schedule import schedule_task
 from hermes_cli.kanban_db_edit import PriorityLowerRefused, edit_task
 from hermes_cli.kanban_reason_comment import _awaiting_human_answer

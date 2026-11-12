@@ -53,7 +53,14 @@ def _board(path: Path, rows, *, counted: bool = True) -> sqlite3.Connection:
 
 @pytest.fixture
 def spies(monkeypatch):
-    calls = {"recompute": 0, "threads": 0}
+    calls = {"recompute": 0, "threads": 0, "boards": []}
+    read_board = ksa._read_board
+
+    def counting_board(path, **kw):
+        calls['boards'].append(str(path))
+        return read_board(path, **kw)
+
+    monkeypatch.setattr(ksa, '_read_board', counting_board)
     recompute, bounded = ksa._recompute_all_counts, ksa._bounded.refresh_bounded
 
     def counting_recompute(*a, **k):
@@ -86,6 +93,7 @@ def test_unchanged_polls_past_the_ttl_reuse_one_read_without_a_refresh_thread(cl
             dates.append(row["kanban_observed_at"])
         assert spies["recompute"] == 1
         assert spies["threads"] == cold_threads  # no additional warm refresh worker
+        assert len(spies['boards']) == 1
         # Each revalidation is a new observation: the Desktop's freshness checks see a current date.
         assert dates == sorted(dates) and len(set(dates)) == 4
         assert dates[-1] >= clock["wall"] - ksa._CACHE_TTL_S
@@ -117,6 +125,47 @@ def test_time_derived_states_are_re_read_after_the_max_age(clock, spies, tmp_pat
         _advance(clock, ksa._COUNTS_MAX_AGE_S + 0.5)
         _poll()
         assert spies["recompute"] == 2
+        assert len(spies['boards']) == 2
+        for _ in range(5):
+            _poll()
+        assert len(spies['boards']) == 2
+    finally:
+        conn.close()
+
+
+def test_two_boards_reread_only_changed_or_due_sources(clock, spies, tmp_path, monkeypatch):
+    paths = [tmp_path / 'kanban.db', tmp_path / 'boards' / 'second' / 'kanban.db']
+    monkeypatch.setattr(ksa, '_board_db_paths', lambda: paths)
+    conns = [_board(path, [('t1', 'ready', 's1')]) for path in paths]
+    try:
+        _poll()
+        assert spies['boards'] == [str(p) for p in paths]
+        _advance(clock, 10)
+        conns[0].execute("INSERT INTO tasks VALUES ('t2','ready','s1')")
+        _poll()
+        assert spies['boards'][-1] == str(paths[0]) and len(spies['boards']) == 3
+        _advance(clock, 21)
+        # The outer recompute is still warm; a write forces it to check each board's own source age.
+        conns[0].execute("INSERT INTO tasks VALUES ('t3','ready','s1')")
+        _poll()
+        assert spies['boards'][-2:] == [str(p) for p in paths]
+        assert len(spies['boards']) == 5
+    finally:
+        for conn in conns:
+            conn.close()
+
+
+@pytest.mark.parametrize('stamp', [None, True, '1000', float('nan'), float('inf'), 999999, -1])
+def test_invalid_or_future_source_read_metadata_requires_actual_read(clock, spies, tmp_path, stamp):
+    path = tmp_path / 'kanban.db'
+    conn = _board(path, [('t1', 'ready', 's1')])
+    try:
+        _poll()
+        ksa._board_memo[str(path)][1]['source_read_at'] = stamp
+        # Exercise the board-read entry directly, below the unrelated outer 30s gate.
+        ksa._read_local_boards({}, {}, {})
+        assert len(spies['boards']) == 2
+        assert ksa._board_memo[str(path)][1]['source_read_at'] == clock['wall']
     finally:
         conn.close()
 
@@ -145,7 +194,8 @@ def test_a_settled_stat_keyed_board_revalidates_until_it_is_written(clock, spies
         cold_threads = spies["threads"]
         _advance(clock, ksa._CACHE_TTL_S + 0.5)
         assert _poll()["kanban_active"] == 1
-        assert spies == {"recompute": 1, "threads": cold_threads}
+        assert spies['recompute'] == 1 and spies['threads'] == cold_threads
+        assert spies['boards'] == [str(path)]
         conn.execute("INSERT INTO tasks VALUES ('t2', 'ready', 's1')")
         _advance(clock, 0.1)
         assert _poll()["kanban_active"] == 2

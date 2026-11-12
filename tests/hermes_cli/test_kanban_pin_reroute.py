@@ -110,7 +110,7 @@ def test_mandatory_pin_is_never_rerouted(board, monkeypatch, all_assignees_spawn
     _, cfg = _deep(monkeypatch)
     with kbc.connect() as conn:
         tid = _walled_card(conn, cfg, clock, mandatory=why == 'flag',
-                           body='must run on astra: require_model' if why == 'marker' else None)
+                           body='must run on astra\nrequire_model: true' if why == 'marker' else None)
         assert dispatch.check_respawn_guard(conn, tid) == 'subscription_quota_reset'
         assert _tick(conn) == []
         assert _events(conn, tid, 'model_reroute') == [] and _comments(conn, tid) == []
@@ -227,8 +227,9 @@ def test_an_expired_earlier_wall_does_not_rule_out_its_provider(board, monkeypat
 
 
 def test_pin_walled_only_by_another_cards_wall_holds(board, monkeypatch, all_assignees_spawnable):
-    """Rule 1: the card's own episode must have hit the pin's provider. Here its run was walled on
-    anthropic and codex is walled only by another card's wall: the pin waits, as before."""
+    """The card's live episode walled anthropic; codex is walled only by another card's wall. That known
+    codex wall counts for rule 1, but the only class peer is anthropic, behind the card's own wall: the pin
+    waits, never into a second wall."""
     clock = _clock(monkeypatch)
     _deep(monkeypatch)
     with kbc.connect() as conn:
@@ -293,6 +294,184 @@ def test_failed_record_keeps_the_pin(board, monkeypatch, all_assignees_spawnable
         assert _tick(conn) == [PIN]
         assert _events(conn, tid, 'run_route')[-1]['tier_reason'] == 'pinned+pin_quota_reroute_unrecorded'
         assert _events(conn, tid, 'model_tier')[-1]['reason'] != 'pinned+pin_quota_reroute:openai-codex'
+
+
+# --- a fresh card on a live-pool wall (kanban-dd62aef001) -----------------------------------------
+
+def _live_codex_wall(monkeypatch, until):
+    monkeypatch.setattr(walls, 'live_quota_wall', lambda p, m: until[0] if (m, p) == PIN else None)
+
+
+def test_fresh_pin_on_a_far_live_wall_reroutes_on_its_first_run(board, monkeypatch, all_assignees_spawnable):
+    """Review 5871917933: a fresh pin has no run to put the wall in its episode, so a pre-claim hold on the
+    live wall used to wait the whole wall out. The live wall now stands in for rule 1 on a fresh card."""
+    clock = _clock(monkeypatch)
+    _deep(monkeypatch)
+    until = [float(clock[0] + 55 * 3600)]
+    _live_codex_wall(monkeypatch, until)
+    with kbc.connect() as conn:
+        tid = _pinned_card(conn)
+        assert _tick(conn) == [PEER]  # no exit-75 run into the wall first
+        assert _events(conn, tid, 'dispatch_skipped') == []
+        task = kb.get_task(conn, tid)
+        assert (task.model_override, task.provider_override) == PIN
+        [event] = _events(conn, tid, 'model_reroute')
+        assert (event['walled_provider'], event['resets_at'], event['episode_id']) == ('openai-codex', until[0], None)
+        [comment] = _comments(conn, tid)
+        assert 'gpt-6-astra (openai-codex) is out until' in comment
+        # Its rerouted run ends: the card is no longer fresh, and its own reroute keeps it off the wall.
+        kb.reclaim_task(conn, tid, reason='test')
+        clock[0] += 3600
+        assert _tick(conn) == [PEER]
+        assert len(_events(conn, tid, 'model_reroute')) == 2 and len(_comments(conn, tid)) == 1
+        # After the reset the pin is back, even though the card still carries the reroute history.
+        kb.reclaim_task(conn, tid, reason='test')
+        clock[0] = int(until[0]) + 1
+        until[0] = None
+        assert _tick(conn) == [PIN]
+
+
+@pytest.mark.parametrize('case', ['mandatory', 'near_wall', 'no_peer'])
+def test_fresh_pin_with_no_reroute_is_held_on_its_live_wall(board, monkeypatch, all_assignees_spawnable, case):
+    from hermes_cli.kanban_diagnostics import compute_task_diagnostics
+    clock = _clock(monkeypatch)
+    config, _ = _deep(monkeypatch)
+    if case == 'no_peer':
+        _block_peer('disabled', monkeypatch, config, clock)
+    until = [float(clock[0] + (4 if case == 'near_wall' else 55) * 3600)]
+    _live_codex_wall(monkeypatch, until)
+    with kbc.connect() as conn:
+        tid = _pinned_card(conn, mandatory=case == 'mandatory')
+        for _ in range(4):
+            assert _tick(conn) == []
+            clock[0] += 1800
+        [skip] = _events(conn, tid, 'dispatch_skipped')
+        assert (skip['reason'], skip['until']) == ('pinned_quota_wall', int(until[0]))
+        assert _events(conn, tid, 'model_reroute') == []
+        # Board diagnostics read the deliberate hold as held_in_ready (warning), never stranded_in_ready.
+        diags = compute_task_diagnostics(kb.get_task(conn, tid), kb.list_events(conn, tid),
+                                         kb.list_runs(conn, tid), now=clock[0])
+        assert [(d.kind, d.severity) for d in diags] == [('held_in_ready', 'warning')]
+        assert diags[0].data['hold_reason'] == 'pinned_quota_wall' and diags[0].data['hold_until'] == int(until[0])
+
+
+# --- a non-fresh pin on a wall the host already knows (t_c21c170e, 2026-11-12) ---------------------------
+
+def _known_codex_wall(monkeypatch, evidence, until):
+    if evidence == 'provider_file':
+        monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'openai-codex': until})
+    else:
+        monkeypatch.setattr(walls, 'live_quota_wall', lambda p, m: until if (m, p) == PIN else None)
+
+
+def _card_with_an_earlier_run(conn, **kw):
+    """A pinned card whose earlier run ended without any wall (it ran on its pin, then was reclaimed)."""
+    tid = _pinned_card(conn, **kw)
+    assert _tick(conn) == [PIN]
+    kb.reclaim_task(conn, tid, reason='test')
+    assert kb.get_task(conn, tid).status == 'ready'
+    assert conn.execute('SELECT COUNT(*) FROM task_runs WHERE task_id=? AND ended_at IS NOT NULL',
+                        (tid,)).fetchone()[0] == 1
+    return tid
+
+
+@pytest.mark.parametrize('evidence', ['provider_file', 'live_pool'])
+def test_non_fresh_pin_on_a_known_wall_reroutes_before_its_next_spawn(
+        board, monkeypatch, all_assignees_spawnable, evidence):
+    """MBP run 13181: a pinned card with earlier runs, woken while provider_walls.json held codex, spawned on
+    codex and exited 75; only run 13184 rerouted. The known wall on the pin's provider now counts for
+    rule 1 whatever the card's history, so no run pays the wall to learn it."""
+    clock = _clock(monkeypatch)
+    _deep(monkeypatch)
+    with kbc.connect() as conn:
+        tid = _card_with_an_earlier_run(conn)
+        until = float(clock[0] + 55 * 3600)
+        _known_codex_wall(monkeypatch, evidence, until)
+        clock[0] += 60
+        assert _tick(conn) == [PEER]
+        task = kb.get_task(conn, tid)
+        assert (task.model_override, task.provider_override) == PIN
+        assert _events(conn, tid, 'run_route')[-1]['tier_reason'] == 'pinned+pin_quota_reroute:openai-codex'
+        [event] = _events(conn, tid, 'model_reroute')
+        assert (event['walled_provider'], event['resets_at'], event['episode_id']) == ('openai-codex', until, None)
+        assert len(_comments(conn, tid)) == 1
+
+
+@pytest.mark.parametrize('case', ['flag', 'marker', 'peer_walled', 'near_wall'])
+def test_non_fresh_pin_on_a_known_wall_controls_never_move(board, monkeypatch, all_assignees_spawnable, case):
+    """Controls: a mandatory pin (column or ``require_model: true`` line), a walled only peer, or a wall under
+    the min-hours threshold keep the pin exactly as before."""
+    clock = _clock(monkeypatch)
+    _deep(monkeypatch)
+    with kbc.connect() as conn:
+        tid = _card_with_an_earlier_run(conn, mandatory=case == 'flag',
+                                        body='must run on astra\nrequire_model: true' if case == 'marker' else None)
+        hours = 2 if case == 'near_wall' else 55
+        monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'openai-codex': float(clock[0] + hours * 3600)})
+        if case == 'peer_walled':
+            monkeypatch.setattr(walls, 'live_quota_wall',
+                                lambda p, m: float(clock[0] + 3600) if p == 'anthropic' else None)
+        clock[0] += 60
+        assert _tick(conn) == [PIN]
+        assert _events(conn, tid, 'model_reroute') == [] and _comments(conn, tid) == []
+
+
+# --- the review lane on a known wall (hub run 174730, 2026-11-12) ---------------------------------------
+
+GROK = ('grok-5', 'xai-oauth')
+
+
+def _review_card(conn, body=None):
+    """A card in review whose implementer ran opus: strong tier = opus, so review_unpinned picks the next
+    deep route distinct from it, astra on openai-codex."""
+    tid = kb.create_task(conn, title='review me', body=body, assignee='a', model_override=PEER[0],
+                         provider_override=PEER[1])
+    conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
+    conn.commit()
+    return tid
+
+
+@pytest.mark.parametrize('evidence', ['provider_file', 'live_pool'])
+def test_review_unpinned_on_a_walled_provider_moves_to_a_free_independent_reviewer(
+        board, monkeypatch, evidence):
+    clock = _clock(monkeypatch)
+    config, _ = _deep(monkeypatch)
+    config['model_routing']['routes']['deep'].append(
+        dict(config['model_routing']['routes']['deep'][0], model=GROK[0], provider=GROK[1]))
+    with kbc.connect() as conn:
+        tid = _review_card(conn)
+        task = kb.get_task(conn, tid)
+        assert tier.resolve_dispatch_tier(conn, task, lane='review') == (*PIN, 'review_unpinned')  # no wall yet
+        _known_codex_wall(monkeypatch, evidence, float(clock[0] + 55 * 3600))
+        assert tier.resolve_dispatch_tier(conn, task, lane='review') == (
+            *GROK, 'review_unpinned+wall:openai-codex')
+        # Admission (before the first spawn) pins the free reviewer on the in-memory task and records it.
+        reason = tier.apply_model_tier(conn, task, lane='review')
+        assert reason == 'review_unpinned+wall:openai-codex'
+        assert (task.model_override, task.provider_override) == GROK
+        tier_event = _events(conn, tid, 'model_tier')[-1]
+        assert (tier_event['model'], tier_event['provider'], tier_event['implementer_model']) == (*GROK, PEER[0])
+        persisted = kb.get_task(conn, tid)
+        assert (persisted.model_override, persisted.provider_override) == PEER  # the row never moves
+
+
+@pytest.mark.parametrize('case', ['no_alternative', 'alternative_walled', 'marker'])
+def test_review_unpinned_keeps_its_route_without_a_free_alternative(board, monkeypatch, case):
+    """Never a second wall: with every other independent reviewer walled (or none), or a ``require_model``
+    line, the review keeps its route, as before."""
+    clock = _clock(monkeypatch)
+    config, _ = _deep(monkeypatch)
+    if case != 'no_alternative':
+        config['model_routing']['routes']['deep'].append(
+            dict(config['model_routing']['routes']['deep'][0], model=GROK[0], provider=GROK[1]))
+    until = float(clock[0] + 55 * 3600)
+    if case == 'alternative_walled':
+        monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'openai-codex': until, 'xai-oauth': until})
+    else:
+        monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'openai-codex': until})
+    with kbc.connect() as conn:
+        tid = _review_card(conn, body='must review on astra\nrequire_model: true' if case == 'marker' else None)
+        assert tier.resolve_dispatch_tier(conn, kb.get_task(conn, tid), lane='review') == (*PIN, 'review_unpinned')
 
 
 # --- the mandatory mark: create, set-model, tool, sync ---------------------------------------------

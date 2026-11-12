@@ -34,6 +34,7 @@ from hermes_state_common import (
 logger = logging.getLogger("hermes_state")
 
 _REPAIR_LOCK_POLL_SECONDS = 0.1
+_monotonic = time.monotonic  # snapshot-deadline clock seam: tests patch this, never the shared time module
 # Snapshot copies are data transfer, not locking: bounded separately at 10 MiB/s (historical two-minute floor).
 _REPAIR_SNAPSHOT_MIN_THROUGHPUT_BYTES_PER_SECOND = 10 * 1024 * 1024
 # ── Repair-loop bounding + dead-backup hygiene (#86747) ───────────────────── ``_claim_repair_attempt``
@@ -708,10 +709,10 @@ def _copy_database_snapshot(source_path: Path, destination_path: Path, *,
     back if interrupted), so ``state.db`` is never swapped out from under handles that refer to it."""
     # Deadline first: a sidecar vanishing mid-stat must not leak a just-opened descriptor.
     deadline_seconds = _repair_snapshot_timeout_seconds(source_path)
-    deadline = time.monotonic() + deadline_seconds
+    deadline = _monotonic() + deadline_seconds
 
     def _check_deadline(_status: int, _remaining: int, _total: int) -> None:
-        if time.monotonic() >= deadline:
+        if _monotonic() >= deadline:
             raise TimeoutError(f"timed out copying SQLite repair snapshot after {deadline_seconds:.0f}s")
 
     with contextlib.ExitStack() as owned:  # closes only connections opened here, destination first

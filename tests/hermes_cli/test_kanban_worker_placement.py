@@ -2,6 +2,9 @@
 import pytest
 
 from hermes_cli import kanban_placement as placement
+from tests.hermes_cli import hub_judge_support
+
+hub_judge = hub_judge_support.hub_judge
 
 
 @pytest.mark.parametrize("title", ["Summarize a public paper", "Run the full test suite"])
@@ -91,9 +94,12 @@ def test_hub_bound_work_keeps_legacy_route(fields):
     assert placement.decide(args, cfg={**cfg, "worker_pools": {"macbook": ["worker-1"]}}, **options) == legacy
 
 
-def test_courier_and_host_work_bypass_worker_policy():
+def test_courier_and_host_work_bypass_worker_policy(hub_judge):
     cfg = {"worker_pools": {"hub": ["worker-1"]}}
     assert "placement_policy" not in placement.decide({"title": "Analyze data"}, origin_intent=object(), cfg=cfg, self_gw="hub")
+    hub_judge.admit_next = False  # a courier apply keeps the origin's route: no judge, no enrollment
+    assert "placement_policy" not in placement.decide({"title": "Analyze data"}, origin_intent=object(), cfg=cfg, self_gw="hub")
+    assert hub_judge.calls == []
     assert "placement_policy" not in placement.decide({"title": "Inspect ~/code/repo", "requires": ["host_repo"]},
                                                       cfg=cfg, self_gw="hub")
 
@@ -127,9 +133,19 @@ def test_ordinary_repo_work_enrolls_worker_first(title):
     "Prune ~/.hermes/kanban/workspaces", "Fix the hermes-hub ssh config", "Restart the gateway",
     "Continue in worktree ~/code/_wt/fix-x and push", "cd /home/ubuntu/code/_wt/foo then pytest",
 ])
-def test_hub_state_work_stays_local(title):
+@pytest.mark.parametrize("admit", [True, False])
+def test_hub_state_work_stays_local_only_when_admitted(title, admit, hub_judge):
+    """A hub-state marker only asks the judge; denied work enrolls with the hub-write requirement."""
+    hub_judge.admit_next = admit
     result = placement.decide({"title": title}, cfg={"worker_pools": {"hub": ["worker-1"]}}, self_gw="hub")
-    assert "placement_policy" not in result
+    assert len(hub_judge.calls) == 1
+    assert result["hub_admission"]["admit"] is admit
+    if admit:
+        assert "placement_policy" not in result
+    else:
+        assert result["placement_policy"] == "worker-first-v1"
+        assert "hub:write" in result["requires"]
+        assert result.get("runs_on") is None
 
 
 @pytest.mark.parametrize("title", [
@@ -152,11 +168,16 @@ def test_hub_state_work_stays_local(title):
     "Run hermes-hub create-task hub --title x", "hermes-hub adopt-task t_1 --session s", "Run `hermes-hub sync`",
     "Check hermes-hub requests for the stuck ask",
 ])
-def test_host_specific_state_and_identity_stay_local(title):
+def test_host_specific_state_and_identity_stay_local(title, hub_judge):
     assert placement.portable_reason({"title": title, "requires": ["terminal", "file", "git"]}, {}) is not None
     result = placement.decide({"title": title, "requires": ["terminal", "file", "git"]},
                               cfg={"worker_pools": {"hub": ["worker-1"]}}, self_gw="hub")
-    assert "placement_policy" not in result
+    assert "placement_policy" not in result  # admitted (fake judge): stays on the hub
+    hub_judge.admit_next = False
+    denied = placement.decide({"title": title, "requires": ["terminal", "file", "git"]},
+                              cfg={"worker_pools": {"hub": ["worker-1"]}}, self_gw="hub")
+    assert denied["placement_policy"] == "worker-first-v1"
+    assert denied["requires"] == ["terminal", "file", "git", "hub:write"]
 
 
 

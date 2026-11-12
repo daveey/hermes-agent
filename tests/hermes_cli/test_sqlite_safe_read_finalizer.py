@@ -224,7 +224,9 @@ def test_collection_never_waits_for_the_guard(db, tmp_path):
         holding, done = threading.Event(), threading.Event()
 
         def hold():
-            with offline_file_access(tmp_path / "other.db"):
+            # Hold the registry lock itself: offline_file_access only reserves a path and
+            # releases the lock across its body, so it no longer stands in for a lock holder.
+            with sr._live_lock:
                 holding.set()
                 done.wait(10)
 
@@ -347,7 +349,8 @@ def test_exit_with_a_leaked_connection_is_clean(tmp_path):
         del h
         held = threading.Event()
         def worker():
-            with sr.offline_file_access(other):
+            # The registry lock itself: offline_file_access releases it across its body.
+            with sr._live_lock:
                 held.set(); time.sleep(60)
         threading.Thread(target=worker, daemon=True).start()
         held.wait()

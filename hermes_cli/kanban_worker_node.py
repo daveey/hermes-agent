@@ -47,7 +47,7 @@ DEFAULT_PICKUP_BATCH = 4
 # rows, so ship's land gate refused) are refilled by kanban_pickup_history.
 _CHILD_TABLES = ("task_runs", "task_comments", "task_attachments", "task_events")
 
-_REGISTRY: dict[str, Any] = {"at": None, "value": None, "retry": False}
+_REGISTRY: dict[str, Any] = {"at": None, "value": None, "retry": False, "ok_at": None}
 _REGISTRY_LOCK = threading.Lock()
 _FETCH: Optional[Callable[[], Mapping[str, Any]]] = None
 
@@ -211,7 +211,7 @@ def set_registry_fetch(fn: Optional[Callable[[], Mapping[str, Any]]]) -> None:
     global _FETCH
     with _REGISTRY_LOCK:
         _FETCH = fn
-        _REGISTRY.update(at=None, value=None, retry=False)
+        _REGISTRY.update(at=None, value=None, retry=False, ok_at=None)
 
 
 def registry() -> Optional[Mapping[str, Any]]:
@@ -221,6 +221,21 @@ def registry() -> Optional[Mapping[str, Any]]:
     # into another HTTP request. The Board still authorizes every actual lease.
     with _REGISTRY_LOCK:
         return _registry_locked()
+
+
+def registry_fresh(max_age_s: float) -> Optional[Mapping[str, Any]]:
+    """:func:`registry`, but None unless its last successful fetch is within ``max_age_s``.
+
+    ``registry()`` keeps the last good snapshot through an outage (the Board still
+    authorizes every lease). A caller that must not act on a frozen membership,
+    such as the carried-input exemption, reads this instead and fails closed. [daveey]
+    """
+    with _REGISTRY_LOCK:
+        value = _registry_locked()
+        ok_at = _REGISTRY.get("ok_at")
+    if ok_at is None or time.monotonic() - ok_at > max_age_s:
+        return None
+    return value
 
 
 def _registry_locked() -> Optional[Mapping[str, Any]]:
@@ -240,7 +255,8 @@ def _registry_locked() -> Optional[Mapping[str, Any]]:
         _log.info("kanban worker node: machine registry unavailable (%s: %s)", type(exc).__name__, exc)
         return _REGISTRY["value"]
     value = {"me": raw.get("me"), "machines": {m["name"]: m for m in raw.get("machines") or [] if m.get("name")}}
-    _REGISTRY.update(at=time.monotonic(), value=value, retry=False)
+    now = time.monotonic()
+    _REGISTRY.update(at=now, value=value, retry=False, ok_at=now)
     return value
 
 
@@ -401,6 +417,8 @@ def local_refusals(conn: sqlite3.Connection, status: str) -> dict[str, str]:
     if not reg:
         return out
     machines = reg["machines"]
+    from hermes_cli.kanban_hub_admission_pickup import refusals as unjudged
+    out.update(unjudged(conn, rows, own, machines))  # [daveey] never claim an unjudged hub-bound foreign copy
     for row in rows:
         reason = eligible(dict(row), own, machines)
         if reason is not None and reason != "held":
@@ -443,8 +461,10 @@ def _changes_for(replica: sqlite3.Connection, tid: str, card: sqlite3.Row) -> li
             if row["uid"] is None:
                 continue
             version = int(row["sync_version"] or 0) if "sync_version" in row.keys() else 0
+            # A comment's sender is machine-local (never a wire field): carry the replica's as the change's writer.
+            sender = (row["origin_gateway"] or "") if table == "task_comments" and "origin_gateway" in row.keys() else ""
             out.append(sync.RemoteChange(0, table, row["uid"], "upsert", ksc._row_fields(replica, table, row),
-                                         version, "", ""))
+                                         version, "", sender))
     # Its parent edges too: once the copy is here the feed applies its later links (own_partition), so a copy
     # without the earlier ones disagreed with the Board for as long as it ran.
     for row in replica.execute("SELECT * FROM task_links WHERE child_id = ? ORDER BY parent_id", (tid,)).fetchall():
@@ -505,10 +525,15 @@ def _unimported_pinned(conn: sqlite3.Connection, replica: sqlite3.Connection, ow
 
 def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *, mode: str, limit: int,
               profile_exists: Optional[Callable[[str], bool]], full_detail: str,
+              held: Optional[dict[str, tuple]] = None,
               ) -> tuple[list[str], dict[str, tuple[str, Optional[str]]]]:
     """One pass over the candidates: ids to copy (at most ``limit``, in candidate order) and, for each card pinned
     to this machine that the pass leaves on the Board, why. ``budget_exhausted`` only for a card this pass would
-    otherwise have copied, so a refusal is never hidden behind a full queue."""
+    otherwise have copied, so a refusal is never hidden behind a full queue. A card the Board shows held by a
+    respawn guard never takes the budget (``kanban_pickup_held``): with ``held`` it is copied outside ``limit``
+    (its id and hold signature added to ``held``), else it is left as ``guard_held`` (never ``hold``: that
+    one is this machine's registry hold)."""
+    from hermes_cli import kanban_pickup_held as kph
     from hermes_cli.kanban_db_dispatch import review_dispatch_enabled
     mine = _unimported_pinned(conn, replica, own)
     reg = registry()
@@ -524,12 +549,23 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
     skips: dict[str, tuple[str, Optional[str]]] = {
         tid: ("parents_incomplete", "a parent is not done") for tid in mine - {c["id"] for c in listed}}
     picked: list[str] = []
+    free = 0
     for card in listed:
-        full = len(picked) >= limit
+        full = len(picked) - free >= limit
         if full and card["id"] not in mine:
             continue
         reason = _skip_reason(conn, card, own, reg["machines"], mode=mode, review_enabled=review_enabled,
                               profile_exists=profile_exists)
+        if reason is None:
+            reason = _quota_held(replica, card)
+        hold = kph.board_hold(replica, card) if reason is None else None
+        if hold is not None:
+            if held is not None and free < kph.FREE_PER_TICK and not kph.recently_copied(card["id"], hold[1]):
+                held[card["id"]] = hold[1]
+                picked.append(card["id"])
+                free += 1
+                continue
+            reason = ("guard_held", f"respawn_guarded: {hold[0]}")
         if reason is None and full:
             reason = ("budget_exhausted", full_detail)
         if reason is None:
@@ -537,6 +573,34 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
         elif reason[0] and card["id"] in mine:
             skips[card["id"]] = reason
     return picked, skips
+
+
+def _quota_held(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, Optional[str]]]:
+    """[daveey] ``("quota_hold", detail)`` when the local dispatcher would hold ``card`` on its quota episode, judged
+    before the copy: the same read-only :func:`kanban_quota_episode.decision` ``check_respawn_guard`` returns for a
+    card with an episode, on the card's own runs/events in the replica (a copy carries exactly those) and this
+    machine's provider walls. Such a card would only be copied, held, evicted and copied again each tick, while
+    taking the pickup budget: worker-3 2026-11-12, 4 cards walled until 11-17/18 filled the batch and two
+    priority-0 cards pinned to it waited ``budget_exhausted`` (t_01a1cf9f2b838cbb). Not copied, it spends no
+    budget; an episode with a free alternate route (``decision`` -> None) is copied as before. Any failure copies
+    as before: the local guard still decides after the copy."""
+    from hermes_cli.kanban_quota_episode import decision, episode, hold_until
+    try:
+        if not episode(replica, card["id"]):
+            return None
+        from hermes_cli import kanban_db as kb
+        task = kb.get_task(replica, card["id"])
+        guard = decision(replica, task, lane=card["status"])[0] if task is not None else None
+        if guard is None:
+            return None
+        until = hold_until(replica, card["id"])
+    except Exception:  # health: allow BLE001 -- a hold prediction must never stop a pickup
+        _log.warning("kanban worker node: quota hold check for %s failed", card["id"], exc_info=True)
+        return None
+    from datetime import UTC, datetime
+    when = f" until {datetime.fromtimestamp(until, UTC):%Y-%m-%dT%H:%M:%SZ}" if until else ""
+    # Not "hold": that groups with a registry hold of the whole machine (kanban_pickup_stall._HOST_GROUPS).
+    return "quota_hold", f"{guard}{when} (local dispatch would hold it)"
 
 
 def note_capped(conn: sqlite3.Connection, profile_exists: Optional[Callable[[str], bool]] = None) -> None:
@@ -573,16 +637,29 @@ def pickup(conn: sqlite3.Connection, *, budget: Optional[int],
     replica = open_replica(conn)
     if replica is None:
         return []
+    from hermes_cli import kanban_hub_admission_pickup as admission
+    from hermes_cli import kanban_pickup_held as kph
+    own = _own(conn)
+    held: dict[str, tuple] = {}
     try:
-        picked, skips = _evaluate(conn, replica, _own(conn), mode=mode, limit=limit, profile_exists=profile_exists,
-                                  full_detail="pickup batch full this tick")
+        picked, skips = _evaluate(conn, replica, own, mode=mode, limit=limit, profile_exists=profile_exists,
+                                  full_detail="pickup batch full this tick", held=held)
+        # [daveey] The hub judges a hub-bound foreign card before copying it (t_01a1cf65a941bf43).
+        picked, plans, judged = admission.screen(conn, replica, own, picked)
+        skips.update(judged)
         imported = import_cards(conn, replica, picked)
     finally:
         replica.close()
+    denied = admission.apply(conn, own, plans, imported)
     skips.update({tid: ("other", "import failed") for tid in picked if tid not in imported})
+    skips.update(denied)
+    imported = [tid for tid in imported if tid not in denied]
+    kph.remember({tid: sig for tid, sig in held.items() if tid in imported})
     _record_skips(conn, {tid: why for tid, why in skips.items() if tid not in imported})
     if imported:
-        _log.info("kanban worker node: picked up %d card(s) from other gateways: %s", len(imported), imported)
+        guarded = [tid for tid in imported if tid in held]
+        _log.info("kanban worker node: picked up %d card(s) from other gateways: %s%s", len(imported), imported,
+                  f" ({len(guarded)} held on the Board, outside the budget: {guarded})" if guarded else "")
     return imported
 
 

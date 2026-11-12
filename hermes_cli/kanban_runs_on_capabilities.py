@@ -134,6 +134,18 @@ def check(runs_on: Optional[list[str]], *, assignee: Optional[str], requires, wo
     raise PlacementCapabilityMismatch(assignee, list(runs_on), {n: v for n, v in verdicts.items() if v})
 
 
+def impossible(labels: Optional[list[str]], machines: Optional[Mapping[str, Mapping[str, Any]]], me: str) -> bool:
+    """True when the registry is known and NO enrolled machine carries every label (a typo'd or alias label such as
+    ``hermes-hub``), so the card can never be leased. No candidates is not evidence of missing profile tools
+    (:func:`check` deliberately allows unknown tools), but it IS evidence of an impossible label conjunction.
+    Held/inactive machines count: temporary unavailability is not a typo. An empty registry or a missing self entry
+    is incomplete evidence (as in :func:`runs_elsewhere`), so it never says impossible."""
+    from hermes_cli import kanban_worker_node as wn
+    if not labels or not machines or not machines.get(me):
+        return False
+    return not any(set(labels) <= wn.effective_labels(entry, name) for name, entry in machines.items())
+
+
 def check_create(conn, runs_on, *, assignee: Optional[str], requires, workspace_kind: str = "scratch") -> None:
     """:func:`check` for ``create_task`` on a Board primary: the local check read THIS machine's profile."""
     if runs_on is None:
@@ -149,12 +161,7 @@ def check_create(conn, runs_on, *, assignee: Optional[str], requires, workspace_
         reg = None
     machines = reg.get("machines") if reg is not None else None
     me = wn._own(conn)
-    # No candidates is not evidence of missing profile tools (check deliberately
-    # allows unknown tools). It IS evidence of an impossible label conjunction.
-    # Include held/inactive machines: temporary unavailability is not a typo.
-    # A missing self entry is incomplete evidence, as in runs_elsewhere.
-    if labels and machines and machines.get(me) and not any(
-            set(labels) <= wn.effective_labels(entry, name) for name, entry in machines.items()):
+    if impossible(labels, machines, me):
         raise ValueError(
             f"runs_on={labels}: no enrolled machine carries all these labels. Nothing was written. "
             "Use placement='<gateway>' to name a gateway, or runs_on=['machine:<registered-name>'] "

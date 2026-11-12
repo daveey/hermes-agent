@@ -82,5 +82,5 @@ def test_probe_open_failure_disarms(monkeypatch):
     def unavailable(*args):
         raise OSError("descriptor limit")
 
-    monkeypatch.setattr(darwin.os, "open", unavailable)
+    monkeypatch.setattr(darwin, "_open", unavailable)  # the module seam, never the shared os.open
     assert darwin.build() is None

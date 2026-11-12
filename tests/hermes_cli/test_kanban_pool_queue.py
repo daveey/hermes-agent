@@ -1,0 +1,400 @@
+"""One worker queue: portable cards get ``runs_on: [pool:worker]``, not a machine pin. [daveey]
+
+11-12 05:40Z: ten ready cards were pinned ``machine:worker-2`` while worker-2 was drain-held, and worker-1 and
+worker-4 had free slots; the oldest waited 261 min. Every route that put portable work on a worker wrote one machine
+name (the Board reservation, ``heavy_route``, agent moves). Here, one test per entry path: the agent tool create,
+the CLI create, the heavy route, ``hermes kanban move --pool``, a machine move without ``host_reason`` (refused), and a
+park of a pushed workspace (stays on the pool; only unpushed state pins it, with the reason in the event).
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_move as km
+from hermes_cli import kanban_placement as kp
+from hermes_cli import kanban_worker_node as wn
+from tests.hermes_cli.kanban_sync_fake_board import FakeService
+from tests.hermes_cli.test_kanban_worker_node import HUB, MACHINES, WORKER, Gateway
+
+POOL = "pool:worker"
+CFG = {"worker_queue": {HUB: POOL}}
+W1 = {**MACHINES[WORKER], "labels": ["linux", POOL]}
+W2 = {**MACHINES[WORKER], "name": "worker-2", "labels": ["linux", POOL]}
+
+
+def _machines(*, held=()):
+    return {m["name"]: {**m, "hold": m["name"] in held} for m in (MACHINES[HUB], W1, W2, MACHINES["macbook"])}
+
+
+def _registry(*, held=()):
+    machines = list(_machines(held=held).values())
+    wn.set_registry_fetch(lambda: {"me": HUB, "machines": machines})
+
+
+@pytest.fixture
+def svc():
+    return FakeService(lease_runs=True, machines=MACHINES)
+
+
+@pytest.fixture
+def hub(tmp_path, monkeypatch, svc):
+    monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: None)
+    monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: HUB)
+    monkeypatch.setattr(kp, "config", lambda: CFG)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)  # card worktrees are looked up under ~/code/_wt
+    sync.consume_dispatcher_wake()
+    gw = Gateway(tmp_path, HUB, svc, monkeypatch, pickup=False)
+    gw.enter()
+    yield gw
+    gw.conn.close()
+    sync.set_lease_client(None)
+    wn.set_registry_fetch(None)
+
+
+def _runs_on(conn, tid):
+    raw = conn.execute("SELECT runs_on FROM tasks WHERE id = ?", (tid,)).fetchone()[0]
+    return json.loads(raw) if raw else None
+
+
+def _moved(conn, tid):
+    return [json.loads(p) for (p,) in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'moved' ORDER BY id", (tid,))]
+
+
+# --- create -----------------------------------------------------------------------------------------------------
+
+def test_tool_create_queues_a_portable_card_for_the_pool_while_one_worker_is_held(hub):
+    from tools import kanban_tools
+    _registry(held=("worker-1",))
+    out = json.loads(kanban_tools._handle_create({"title": "summarise the failing CI jobs", "assignee": "default",
+                                                  "requires": []}))
+    assert out.get("ok") and out["runs_on"] == [POOL], out
+    assert _runs_on(hub.conn, out["task_id"]) == [POOL]
+    assert "worker_queue" in out["placement"]["why"], out
+    # No machine is named, so the held worker cannot strand it: unheld worker-2 is eligible right now.
+    card = dict(hub.conn.execute("SELECT * FROM tasks WHERE id = ?", (out["task_id"],)).fetchone())
+    assert wn.eligible(card, "worker-2", _machines(held=("worker-1",))) is None
+    assert wn.eligible(card, "worker-1", _machines(held=("worker-1",))) == "held"
+
+
+def test_tool_create_keeps_host_work_and_an_empty_pool_off_the_queue(hub):
+    from tools import kanban_tools
+    _registry()
+    out = json.loads(kanban_tools._handle_create({"title": "restart the gateway service on the hub",
+                                                  "assignee": "default", "requires": []}))
+    assert out.get("ok") and _runs_on(hub.conn, out["task_id"]) is None, out
+    _registry(held=("worker-1", "worker-2"))
+    out = json.loads(kanban_tools._handle_create({"title": "summarise CI", "assignee": "default", "requires": []}))
+    assert out.get("ok") and _runs_on(hub.conn, out["task_id"]) is None, out
+
+
+def test_cli_create_queues_a_portable_card_for_the_pool(hub):
+    from hermes_cli import kanban as kcli
+    _registry(held=("worker-1",))
+    out = kcli.run_slash('create "summarise the failing CI jobs" --assignee default --json')
+    tid = json.loads(out)["id"]
+    assert _runs_on(hub.conn, tid) == [POOL], out
+    out = kcli.run_slash('create "pinned" --assignee default --runs-on machine:worker-2 --json')
+    assert _runs_on(hub.conn, json.loads(out)["id"]) == ["machine:worker-2"], out  # an explicit pin wins
+
+
+def test_explicit_auto_beats_a_skill_local_marker_and_the_remedy_names_it(hub, monkeypatch):
+    """11-12: the marker remedy said re-create with placement='hub'; hub admission refuses portable work, so the
+    caller was left with an archived card and no replacement. An explicit 'auto' now queues it for the pool;
+    an omitted placement still keeps it local, and the remedy names 'auto'. [daveey]"""
+    from hermes_cli import kanban_skill_check
+    from tools import kanban_tools
+    monkeypatch.setattr(kanban_skill_check, "check_task_skills", lambda *a, **k: None)  # no skills dir here
+    _registry()
+    card = {"title": "Fix the parser and add unit tests", "assignee": "default", "requires": [],
+            "skills": ["babybear-development"]}
+    out = json.loads(kanban_tools._handle_create({**card, "placement": "auto"}))
+    assert out.get("ok") and out["runs_on"] == [POOL] and "remedy" not in out, out
+    assert _runs_on(hub.conn, out["task_id"]) == [POOL]
+    out = json.loads(kanban_tools._handle_create({**card, "title": "Fix the lexer and add unit tests"}))
+    assert out.get("ok") and _runs_on(hub.conn, out["task_id"]) is None, out
+    placement = out["placement"]
+    assert (placement["where"], placement["why"]) == ("local", "local marker: skill babybear-development"), out
+
+
+def test_explicit_auto_keeps_a_device_skill_local(hub, monkeypatch):
+    """Review of #1441: 'auto' is also the routine default callers spell out, so it must not move a card whose
+    skill drives this machine (apple-*, computer-use, macos-, ios-, a local Chrome). [daveey]"""
+    from hermes_cli import kanban_skill_check
+    from tools import kanban_tools
+    monkeypatch.setattr(kanban_skill_check, "check_task_skills", lambda *a, **k: None)
+    _registry()
+    titles = ("Click through the Settings pane", "Tag the reading list notes", "Reorder the dock icons",
+              "Sign the shortcut bundle")
+    for title, skill in zip(titles, ("computer-use", "apple-notes", "macos-dock-management", "ios-shortcuts-build")):
+        out = json.loads(kanban_tools._handle_create({
+            "title": title, "assignee": "default", "requires": [], "skills": [skill],
+            "placement": "auto"}))
+        assert out.get("ok") and _runs_on(hub.conn, out["task_id"]) is None, out
+        assert out["placement"]["why"] == f"local marker: skill {skill}", out
+    # A device skill beside a context skill still pins: 'auto' drops only the context one.
+    assert kp.marker_skills({"skills": ["babybear-development", "computer-use"], "placement": "auto"},
+                            kp._Cfg(CFG)) == ["computer-use"]
+    assert kp.marker_skills({"skills": ["bb-self-fix"]}, kp._Cfg(CFG)) == ["bb-self-fix"]  # omitted: unchanged
+
+
+def test_marker_remedies_name_the_override_that_works():
+    skill = kp.marker_remedy("local marker: skill babybear-development", {})
+    assert skill == "if the work doesn't need this machine, archive and re-create with placement='auto'"
+    assert kp.marker_remedy("local marker: skill bb-self-fix", {}) == skill
+    assert kp.marker_remedy("local marker: skill computer-use", {}) == kp.DEVICE_SKILL_MARKER_REMEDY
+    text = kp.marker_remedy("local marker: mentions 'macbook'", {})
+    assert text == kp.TEXT_MARKER_REMEDY and "placement='hub'" not in text, text
+    # A replaced overridable list is honoured.
+    assert kp.marker_remedy("local marker: skill computer-use",
+                            {"auto_overridable_skill_markers": ["^computer-use$"]}) == skill
+    cfg, live = {"route": {"macbook": HUB}}, (lambda _t: None)
+    card = {"title": "Fix the parser", "skills": ["babybear-development"]}
+    assert kp.decide(card, cfg=cfg, self_gw="macbook", live=live)["why"] == "local marker: skill babybear-development"
+    assert kp.decide({**card, "placement": "auto"}, cfg=cfg, self_gw="macbook", live=live)["where"] == HUB
+    apple = {"title": "Fix the parser", "skills": ["apple-notes"], "placement": "auto"}
+    assert kp.decide(apple, cfg=cfg, self_gw="macbook", live=live)["why"] == "local marker: skill apple-notes"
+    title = {"title": "Verify 57094b7a60 live on the MacBook", "placement": "auto"}
+    assert kp.decide(title, cfg=cfg, self_gw="macbook", live=live)["why"].startswith("local marker: mentions")
+
+
+def test_a_local_pin_note_simulates_an_omitted_placement_not_an_explicit_auto(hub):
+    """A context-skill card pinned local stays local without the pin too (the skill marker holds when placement is
+    omitted), so it gets no "would run elsewhere" note; the same card without the skill does. [daveey]"""
+    from tools.kanban_tools_placement import _local_placement
+    _registry()
+    pinned = {"where": "local", "why": kp.PINNED_LOCAL_WHY}
+    card = {"title": "summarise the failing CI jobs", "assignee": "default", "requires": [], "placement": "local"}
+    plain = _local_placement(kp, card, pinned, machine_ok=None, note_local_pin=True)
+    assert plain.get("note"), plain  # control: portable work pinned local is told where it would go
+    skilled = _local_placement(kp, {**card, "skills": ["babybear-development"]}, pinned, machine_ok=None,
+                               note_local_pin=True)
+    assert "note" not in skilled, skilled
+
+
+def test_heavy_route_accepts_a_pool_label_and_checks_it_is_live(hub):
+    cfg = {"heavy_route": {HUB: POOL}}
+    _registry(held=("worker-1",))
+    d = kp.decide({"title": "Run the regression tests for the parser"}, cfg=cfg, self_gw=HUB)
+    assert d["where"] == "local" and d["runs_on"] == [POOL], d
+    wn.set_registry_fetch(None)
+    _registry(held=("worker-1", "worker-2"))
+    d = kp.decide({"title": "Run the regression tests for the parser"}, cfg=cfg, self_gw=HUB)
+    assert "runs_on" not in d, d  # no unheld machine carries the label: the card stays on the hub
+
+
+# --- move -------------------------------------------------------------------------------------------------------
+
+def test_cli_move_pool_requeues_a_worker_pin_for_any_worker(hub):
+    from hermes_cli import kanban as kcli
+    _registry()
+    tid = kb.create_task(hub.conn, title="stuck on worker-1", assignee="default", runs_on=["machine:worker-1"])
+    out = kcli.run_slash(f'move {tid} --pool --reason "worker-1 is held; any worker can run it" --json')
+    res = json.loads(out)
+    assert res["ok"] and res["runs_on"] == [POOL] and res["matches"] == ["worker-1", "worker-2"], res
+    assert _runs_on(hub.conn, tid) == [POOL]
+
+
+def test_machine_move_to_one_pool_worker_needs_a_host_reason(hub):
+    from hermes_cli import kanban as kcli
+    _registry()
+    tid = kb.create_task(hub.conn, title="work", assignee="default", runs_on=[POOL])
+    res = km.move_queued(hub.conn, tid, runs_on=["machine:worker-2"], reason="worker-2 has free slots")
+    assert not res["ok"] and res["reason_code"] == "host_reason_required" and "--pool" in res["error"], res
+    out = kcli.run_slash(f'move {tid} --runs-on machine:worker-2 --reason "free slots" --json')
+    assert json.loads(out)["reason_code"] == "host_reason_required", out
+    assert _runs_on(hub.conn, tid) == [POOL]  # nothing was written
+    res = km.move_queued(hub.conn, tid, runs_on=["machine:worker-2"], reason="repro the worker-2 disk alert",
+                         host_reason="the card fixes worker-2's own disk")
+    assert res["ok"], res
+    assert _moved(hub.conn, tid)[-1]["host_reason"] == "the card fixes worker-2's own disk"
+
+
+def _git(cwd, *args):
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *args], cwd=cwd, check=True,
+                   capture_output=True)
+
+
+def _commit(tree, name):
+    (tree / name).write_text(name + "\n")
+    _git(tree, "add", name)
+    _git(tree, "commit", "-qm", name)
+
+
+def _pushed_clone(tmp_path, where):
+    """A clone at ``where`` whose one commit is on its remote."""
+    remote = tmp_path / f"{where.name}-remote.git"
+    _git(tmp_path, "init", "--bare", "-q", str(remote))
+    _git(tmp_path, "clone", "-q", str(remote), str(where))
+    _commit(where, "a.txt")
+    _git(where, "push", "-q", "origin", "HEAD:refs/heads/wt/x")
+    return where
+
+
+# --- park -------------------------------------------------------------------------------------------------------
+
+@pytest.fixture
+def w2(tmp_path, monkeypatch, svc):
+    """The gateway of pool worker ``worker-2``, running its own card's run as a dispatched worker would."""
+    monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: None)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    sync.consume_dispatcher_wake()
+    gw = Gateway(tmp_path, "worker-2", svc, monkeypatch, pickup="true")
+    gw.enter()
+    yield gw
+    gw.conn.close()
+    sync.set_lease_client(None)
+    wn.set_registry_fetch(None)
+
+
+def _run(gw, monkeypatch, tid):
+    with kb.write_txn(gw.conn):
+        gw.conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
+    assert kb.claim_task(gw.conn, tid) is not None
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(kb._current_run_id(gw.conn, tid)))
+
+
+def _placement_events(conn, tid):
+    return [(k, json.loads(p)) for k, p in conn.execute(
+        "SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ('pool_pinned', 'pool_unpinned') "
+        "ORDER BY id", (tid,))]
+
+
+def test_park_keeps_a_pushed_card_on_the_pool_and_pins_only_unpushed_state(w2, tmp_path, monkeypatch):
+    """Through the real park entry points (kanban_continue, kanban_block kind=time, kanban_schedule)."""
+    from tools import kanban_tools as kt
+    conn = w2.conn
+    tid = kb.create_task(conn, title="pool card with a worktree", assignee="default", runs_on=[POOL])
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET workspace_path = ? WHERE id = ?", (str(ws), tid))
+    # The card's tree lives outside its scratch workspace, where card worktrees usually are (~/code/_wt/<slug>).
+    tree = _pushed_clone(tmp_path, tmp_path / "code" / "_wt" / "pool-card")
+
+    # 1. Clean and pushed: kanban_continue leaves the card on the pool, so any worker can resume it.
+    _run(w2, monkeypatch, tid)
+    out = json.loads(kt._handle_continue({"checkpoint": f"Done: a.txt. Worktree {tree}, pushed as wt/x."}))
+    assert out.get("ok"), out
+    assert _runs_on(conn, tid) == [POOL] and _placement_events(conn, tid) == []
+
+    # 2. An unpushed commit: the time park pins the card to this worker and says why.
+    _run(w2, monkeypatch, tid)
+    _commit(tree, "b.txt")
+    out = json.loads(kt._handle_block({"kind": "time", "clock_only": True, "reason": (
+        f"SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on CI; b.txt is committed in {tree}")}))
+    assert out.get("ok"), out
+    assert _runs_on(conn, tid) == ["machine:worker-2"]
+    kind, ev = _placement_events(conn, tid)[-1]
+    assert kind == "pool_pinned" and ev["unpushed_state"] == f"unpushed commits in {tree.resolve()}", ev
+    assert ev["previous_runs_on"] == [POOL] and str(tree.resolve()) in ev["trees"], ev
+
+    # 3. Pushed again: the next park (kanban_schedule) puts the card back on the pool.
+    _run(w2, monkeypatch, tid)
+    _git(tree, "push", "-q", "origin", "HEAD:refs/heads/wt/x")
+    out = json.loads(kt._handle_schedule({"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on CI",
+                                          "clock_only": True}))
+    assert out.get("ok"), out
+    assert _runs_on(conn, tid) == [POOL]
+    assert [k for k, _ in _placement_events(conn, tid)] == ["pool_pinned", "pool_unpinned"]
+
+
+def test_park_pins_a_dirty_tree_found_by_its_owner_marker(w2, tmp_path, monkeypatch):
+    from tools import kanban_tools as kt
+    conn = w2.conn
+    tid = kb.create_task(conn, title="pool card", assignee="default", runs_on=[POOL])
+    main = _pushed_clone(tmp_path, tmp_path / "main")
+    tree = tmp_path / "code" / "_wt" / "marked"
+    _git(main, "worktree", "add", "-q", "-b", "wt/marked", str(tree))
+    gitdir = (tree / ".git").read_text().split(":", 1)[1].strip()
+    (Path(gitdir) / "hermes-owner.json").write_text(json.dumps({"task_id": tid}))
+    (tree / "wip.txt").write_text("not committed\n")
+    _run(w2, monkeypatch, tid)
+    out = json.loads(kt._handle_continue({"checkpoint": "half done", "resume_after_seconds": 600,
+                                          "clock_only": True}))
+    assert out.get("ok"), out
+    assert _runs_on(conn, tid) == ["machine:worker-2"]
+    assert _placement_events(conn, tid)[-1][1]["unpushed_state"] == f"dirty worktree {tree.resolve()}"
+
+
+# --- worker-origin cards ----------------------------------------------------------------------------------------
+
+def test_a_worker_created_card_joins_the_pool_and_a_pin_to_the_ship_host_stays(w2, monkeypatch):
+    """A card a worker run creates used to be a local row only that worker could claim (11-12 06:40: worker-4 held
+    5 waiting cards, one it created itself, while worker-5 ran 3 of 10)."""
+    from tools import kanban_tools as kt
+    monkeypatch.setattr("hermes_cli.kanban_capability_registry.self_gateway", lambda: "worker-2")
+    monkeypatch.setattr(kp, "config", lambda: {"worker_queue": {"worker-2": POOL}})
+    machines = list(_machines().values())
+    wn.set_registry_fetch(lambda: {"me": "worker-2", "machines": machines})
+    out = json.loads(kt._handle_create({"title": "summarise the failing CI jobs", "assignee": "default",
+                                        "requires": []}))
+    assert out.get("ok") and _runs_on(w2.conn, out["task_id"]) == [POOL], out
+    out = json.loads(kt._handle_create({"title": "re-review PR 1 exact head", "assignee": "default", "requires": [],
+                                        "placement": "worker-2"}))  # a review the land card on worker-2 must read
+    assert out.get("ok") and _runs_on(w2.conn, out["task_id"]) is None, out
+    out = json.loads(kt._handle_create({"title": "pinned", "assignee": "default", "requires": [],
+                                        "runs_on": ["machine:worker-1"]}))
+    assert out.get("ok") and _runs_on(w2.conn, out["task_id"]) == ["machine:worker-1"], out
+
+
+def test_move_to_self_refuses_only_on_a_found_clean_tree(hub, tmp_path):
+    _registry()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    tid = kb.create_task(hub.conn, title="parked pool card", assignee="default", runs_on=[POOL])
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET workspace_path = ? WHERE id = ?", (str(ws), tid))
+    move = dict(runs_on=["machine:worker-2"], reason="resume here", host_reason="my worktree is here",
+                me="worker-2", machines=_machines())
+    # No tree of the card on this host (it may sit elsewhere): the host reason stands.
+    res = km.move_queued(hub.conn, tid, **move)
+    assert res["ok"], res
+    tid = kb.create_task(hub.conn, title="parked pool card 2", assignee="default", runs_on=[POOL])
+    _pushed_clone(tmp_path, ws / "repo")
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET workspace_path = ? WHERE id = ?", (str(ws), tid))
+    res = km.move_queued(hub.conn, tid, **move)
+    assert not res["ok"] and res["reason_code"] == "pool_keeps_pushed", res  # found, clean and pushed
+    _commit(ws / "repo", "b.txt")
+    res = km.move_queued(hub.conn, tid, **move)
+    assert res["ok"] and _moved(hub.conn, tid)[-1]["unpushed_state"].startswith("unpushed commits in "), res
+
+
+# --- direct create_task producers (swarm, triage sweep, alert cards) -------------------------------------------
+
+def test_direct_create_task_queues_a_portable_card_like_the_front_doors(hub, monkeypatch):
+    """11-12 11:10Z: with ``worker_queue`` set, the old ``db_policy`` judged the queue decision but kept only its
+    (absent) ``placement_policy``, so a direct ``kb.create_task`` card was neither queued nor pool-enrolled: it ran on
+    the hub."""
+    monkeypatch.setattr(kp, "config", lambda: {**CFG, "worker_pools": {HUB: ["worker-1", "worker-2"]}})
+    _registry(held=("worker-1",))
+    tid = kb.create_task(hub.conn, title="summarise the failing CI jobs", assignee="default", requires=[])
+    assert _runs_on(hub.conn, tid) == [POOL]
+    assert kb.get_task(hub.conn, tid).placement_policy is None  # queued, not also enrolled
+    # Host work stays local and unqueued; an explicit pin and a checked front-door decision are kept as given.
+    tid = kb.create_task(hub.conn, title="restart the gateway service on the hub", assignee="default", requires=[])
+    assert _runs_on(hub.conn, tid) is None and kb.get_task(hub.conn, tid).placement_policy is None
+    tid = kb.create_task(hub.conn, title="pinned", assignee="default", requires=[], runs_on=["machine:worker-2"])
+    assert _runs_on(hub.conn, tid) == ["machine:worker-2"]
+    tid = kb.create_task(hub.conn, title="summarise CI", assignee="default", requires=[], placement_checked=True)
+    assert _runs_on(hub.conn, tid) is None
+
+
+def test_direct_create_task_keeps_pool_enrollment_when_it_cannot_queue(hub, monkeypatch):
+    monkeypatch.setattr(kp, "config", lambda: {**CFG, "worker_pools": {HUB: ["worker-1", "worker-2"]}})
+    _registry(held=("worker-1", "worker-2"))  # no unheld machine carries the label
+    tid = kb.create_task(hub.conn, title="summarise the failing CI jobs", assignee="default", requires=[])
+    assert _runs_on(hub.conn, tid) is None and kb.get_task(hub.conn, tid).placement_policy == "worker-first-v1"
+    _registry()
+    sync.set_mode(hub.conn, "off")  # runs_on is a Board placement field: off a primary, enroll instead
+    tid = kb.create_task(hub.conn, title="summarise the failing CI jobs", assignee="default", requires=[])
+    assert _runs_on(hub.conn, tid) is None and kb.get_task(hub.conn, tid).placement_policy == "worker-first-v1"

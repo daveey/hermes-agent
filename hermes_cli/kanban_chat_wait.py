@@ -107,8 +107,8 @@ def notice_text(payload: Any) -> str:
         stamp = time.strftime("%H:%M:%SZ", time.gmtime(int(payload["hold_until"])))
         hold = f"; dispatcher hold {payload['hold_reason']} until {stamp}"
     return (f"{named}, which this chat waits on, has been ready {payload.get('ready_minutes', '?')} min with no "
-            f"worker ({payload.get('queue') or 'queue place unknown'}{hold}). "
-            + pu._options(tid, payload.get("priority_evidence")) + ".")
+            f"worker ({payload.get('queue') or 'queue place unknown'}{hold}){pu._observation(payload)}. "
+            + pu._options(tid, payload.get("priority_evidence"), payload) + ".")
 
 
 def _floor_kinds() -> str:
@@ -117,14 +117,19 @@ def _floor_kinds() -> str:
 
 
 # Prefilter only (``pu.ready_since`` decides): the same event floor as the diagnostic, and the latest run's end,
-# so a long run that a restart requeued never counts as ready time. [daveey]
+# so a long run that a restart requeued never counts as ready time. A Board grant returned unused (a released run
+# with only ``{"unused_grant": true}`` metadata and no worker) is a reservation: neither its ``claimed`` event nor
+# its run's end counts, or a card whose grants keep bouncing would be hidden from the exact check. [daveey]
+_UNUSED_RUN = ("r.outcome = 'released' AND r.worker_pid IS NULL AND r.worker_started_at IS NULL "
+               "AND json_extract(r.metadata, '$.unused_grant') = 1 AND json_extract(r.metadata, '$.lock') IS NULL")
 _CANDIDATES = (
     "SELECT t.id, t.title, t.created_at FROM tasks t "
     "WHERE t.status = 'ready' AND t.claim_lock IS NULL "
     "AND (t.session_id IS NOT NULL OR EXISTS (SELECT 1 FROM kanban_notify_subs s WHERE s.task_id = t.id)) "
     f"AND MAX(COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id AND e.kind IN "
-    f"({_floor_kinds()})), t.created_at), "
-    "COALESCE((SELECT MAX(r.ended_at) FROM task_runs r WHERE r.task_id = t.id), 0)) "
+    f"({_floor_kinds()}) AND NOT (e.kind = 'claimed' AND e.run_id IN "
+    f"(SELECT r.id FROM task_runs r WHERE r.task_id = t.id AND {_UNUSED_RUN}))), t.created_at), "
+    f"COALESCE((SELECT MAX(r.ended_at) FROM task_runs r WHERE r.task_id = t.id AND NOT ({_UNUSED_RUN})), 0)) "
     "BETWEEN ? AND ? ORDER BY t.id"
 )
 

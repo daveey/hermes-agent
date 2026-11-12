@@ -66,7 +66,12 @@ def test_tool_cli_rest_read_actual_persisted_evidence(capacity_board, monkeypatc
     from tools.kanban_show import show
     from tests.plugins.test_kanban_foreign_card_api import _load_plugin_router
 
+    from hermes_cli import kanban_db_sync, kanban_origin
+
     conn, ids, child = capacity_board
+    # Hermetic gateway identity: never inherit the host's hub.db / hermes-mail name (a CI runner has none).
+    monkeypatch.setattr(kanban_db_sync, "sync_config", lambda: {"gateway": "fixture-gw"})
+    monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("", set()))
     monkeypatch.setattr(queue, "_running_and_limit", lambda *a: (0, 4))
     evidence.record(conn, dispatch.DispatchResult(memory_pressure="critical"), board="default", machine="m")
     app = FastAPI()
@@ -81,6 +86,10 @@ def test_tool_cli_rest_read_actual_persisted_evidence(capacity_board, monkeypatc
             for payload in (tool, command, response.json()):
                 assert reason in [r["code"] for r in payload["capacity_evidence"]["reasons"]]
                 assert payload["capacity_evidence"]["observed_at_ms"] == tool["capacity_evidence"]["observed_at_ms"]
+                work = [value for value in payload["execution_observations"] if value["source"] == "kanban.card"]
+                assert len(work) == 1 and work[0]["state"] == ("waiting" if tid == child else "queued")
+                assert work[0]["identity"]["work_id"] == tid
+                assert work[0]["last_progress"] is None
                 if tid == child:
                     assert "queue" not in payload
                     assert payload["capacity_evidence"]["eligible_backlog"] is False

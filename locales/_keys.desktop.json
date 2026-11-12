@@ -4926,6 +4926,7 @@
     "sidebar.row.kanbanAttention",
     "sidebar.row.kanbanStalled",
     "sidebar.row.kanbanTasks",
+    "sidebar.row.kanbanUnknown",
     "sidebar.row.markRead",
     "sidebar.row.markUnread",
     "sidebar.row.messageCount",

@@ -172,7 +172,12 @@ def _set(tid, **cols):
 def test_ready_card_reports_local_queue_position(kanban_home, api, monkeypatch):
     from hermes_cli import kanban_db_dispatch as kbd
     monkeypatch.setattr(kbd, "configured_max_in_progress", lambda: 6)
-    monkeypatch.setattr(kbd, "count_running_tasks_other_boards", lambda board=None: 2)
+    kb.create_board("other")  # 2 workers on another board, really counted through its file
+    with kbc.connect_closing(board="other") as other:
+        for i in range(2):
+            busy = kb.create_task(other, title=f"busy {i}", assignee="default")
+            other.execute("UPDATE tasks SET status='running' WHERE id=?", (busy,))
+        other.commit()
     high = _live_card("p5 new", assignee="default", priority=5)
     old = _live_card("p0 old", assignee="default", priority=0)
     new = _live_card("p0 new", assignee="default", priority=0)
@@ -189,7 +194,8 @@ def test_ready_card_reports_local_queue_position(kanban_home, api, monkeypatch):
     from hermes_cli import kanban_worker_placement as kwp
     _set(pool, placement_policy=kwp.POLICY, created_at=10)  # waits for the worker pool, not a local slot
     q = api.get(f"/api/plugins/kanban/tasks/{new}").json()["queue"]
-    assert q == {"lane": "local", "ahead": 2, "running": 3, "limit": 6, "approximate": True}
+    assert isinstance(q.pop("observed_at"), int)
+    assert q == {"lane": "local", "ahead": 2, "running": 3, "limit": 6, "approximate": True, "board": "default"}
     assert api.get(f"/api/plugins/kanban/tasks/{old}").json()["queue"]["ahead"] == 1
     assert api.get(f"/api/plugins/kanban/tasks/{high}").json()["queue"]["ahead"] == 0
 

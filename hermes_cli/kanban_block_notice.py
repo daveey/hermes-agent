@@ -66,7 +66,66 @@ def ask_update_notice(task, task_id: str, board: str, payload, *, chat_id: str |
     return f"ask updated (card still blocked): {text} — open task: {link}"
 
 
-def block_notice(task, task_id: str, board: str, *, gateway: str = "", reason: str = "", actor: str = "") -> str:
+DROP_EVENTS = ("resolved_check_broken", "resolved_check_lost")
+_DROP_CAUSE = {"resolved_check_broken": "its probe kept failing", "resolved_check_lost": "its probe went missing"}
+
+
+def _drop_backfilled_origins(events):
+    """Remove a historical drop event when a backfill re-emission in the same batch names it as its origin.
+
+    Match stable UIDs across replicas. Integer references are safe only for UID-less,
+    unsynced events; a sender's local ID must never suppress a different receiver event.
+    """
+    origins = set()
+    local_origins = set()
+    for e in events:
+        payload = getattr(e, "payload", None)
+        if e.kind in DROP_EVENTS and isinstance(payload, dict) and payload.get("backfilled") is True:
+            uid = payload.get("origin_event_uid")
+            if isinstance(uid, str) and uid:
+                origins.add((uid, e.kind))
+                continue
+            if "origin_event_uid" in payload or getattr(e, "uid", None):
+                continue
+            try:
+                local_origins.add((int(payload["origin_event_id"]), e.kind))
+            except (KeyError, TypeError, ValueError):
+                pass
+    if not origins and not local_origins:
+        return events
+    return [e for e in events if (getattr(e, "uid", None), e.kind) not in origins
+            and not (not getattr(e, "uid", None) and (int(e.id), e.kind) in local_origins)]
+
+
+def coalesce_superseded_blocks(events):
+    """Drop ``blocked`` events that a later drop event in the same unseen batch supersedes. [daveey]
+
+    The drop notice renders the current card (block text plus the lost-detection warning), so the earlier
+    ``blocked`` of the same batch would print the same marked card twice. Only blocks older than a drop event
+    in this batch go; an ordinary block, or one re-filed after the drop, is kept. Callers keep the full claimed
+    cursor range, so ack/rewind semantics are unchanged.
+    """
+    events = _drop_backfilled_origins(list(events))
+    last_drop = max((int(e.id) for e in events if e.kind in DROP_EVENTS), default=None)
+    if last_drop is None:
+        return events
+    return [e for e in events if not (e.kind == "blocked" and int(e.id) < last_drop)]
+
+
+def drop_warning(request: dict, drop_event: str = "") -> str:
+    """Notice head for an ask whose resolved_check was dropped. [daveey]
+
+    The filed ask text may promise "I'll notice automatically"; that was true when it was filed and is not now,
+    so the caller renders it under a label that makes it historical (persisted text is never edited).
+    """
+    cause = _DROP_CAUSE.get(str(request.get("resolved_check_drop_reason") or drop_event))
+    return ("Automatic detection stopped" + (f" ({cause})" if cause else "") + ": this ask's resolved_check is no "
+            "longer probed, so the card will NOT resume by itself when your step is done. It resumes only if you "
+            "unblock it or the ask is re-filed with a working resolved_check.")
+
+
+def block_notice(task, task_id: str, board: str, *, gateway: str = "", reason: str = "",
+                 actor: str = "", drop_event: str = "") -> str:
     """Use current card evidence, never event prose, to assign a human action.
 
     Links open the existing task flow; this function grants no authority and
@@ -89,6 +148,14 @@ def block_notice(task, task_id: str, board: str, *, gateway: str = "", reason: s
         lines = [f"blocked — actor: {actor or 'user'}", f"Next action for the user: {request['action']}",
                  f"Why only the user: {request['why_human']}", f"Scope: {request['scope']}",
                  f"Open task: {link}"]
+        if request.get("resolved_check_dropped_at"):
+            lines[1:2] = [drop_warning(request, drop_event),
+                          "Your step is still needed. Filed ask, historical wording (any promise below to detect "
+                          "it automatically no longer applies):", lines[1]]
+            lines.insert(1, f"Work: {get('title') or task_id}")
+        elif drop_event in DROP_EVENTS:  # re-filed since the drop: never report "stopped" as the current state
+            lines.insert(1, "Automatic detection had stopped for an earlier version of this ask; it was re-filed "
+                            "since, so this is the current ask.")
         if request["interaction"] == "user_terminal":
             lines.append("Use the owner Desktop session's user-terminal flow; opening this task or unblocking it does not execute a command or grant terminal authority.")
         return "\n".join(lines)

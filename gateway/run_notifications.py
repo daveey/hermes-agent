@@ -1345,9 +1345,10 @@ class GatewayNotificationsMixin(
                 return claim.early_result
             if getattr(self, 'session_authority', None) is not None:
                 from gateway.session_automation import completion_admission
-                if completion_admission(self, evt) is not None:
-                    accepted = True  # Lost ACK: finish durable claims, never infer again.
-                    return True
+                if (admitted := completion_admission(self, evt)) is not None:
+                    from gateway.completion_admission_recovery import deliver_admitted
+                    accepted = await deliver_admitted(self, admitted)  # Lost ACK, or a failed admission's note
+                    return accepted
             if identity is not None:
                 if self._completion_identity_seen(identity, claim=True):
                     return None
@@ -1697,6 +1698,8 @@ class GatewayNotificationsMixin(
         consumer; both must progress without a later foreground turn.
         """
         await asyncio.sleep(3)  # let platforms finish connecting
+        from gateway.completion_admission_recovery import reconcile_at_start
+        await reconcile_at_start(self)  # acknowledged results whose admission failed (deleg_e757744d)
         from tools.async_delegation import ORPHAN_SWEEP_INTERVAL_S
         from tools.process_registry import process_registry as _pr
         last_orphan_sweep = None

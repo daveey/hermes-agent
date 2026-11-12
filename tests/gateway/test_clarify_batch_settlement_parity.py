@@ -19,7 +19,7 @@ QIDS = ['q0', 'q1']
 
 # ending -> (how the wait ends after q0 is locked, expected result)
 CASES = {
-    'cancel_all_frame': ({'result': {}}, {'answers': {'q0': 'blue'}, 'outcome': 'cancelled'}),
+    'cancel_all_frame': ({'result': {}}, {'answers': {'q0': 'blue'}, 'outcome': 'cancelled', 'reason': 'client_empty'}),
     'closing_frame_with_tail': ({'result': {'answers': {'q1': 'large'}}},
                                 {'answers': {'q0': 'blue', 'q1': 'large'}, 'outcome': 'submitted'}),
     'frame_names_its_outcome': ({'result': {'answers': {'q1': 'large'}, 'outcome': 'timed_out'}},
@@ -27,7 +27,7 @@ CASES = {
     'frame_overrides_a_lock': ({'result': {'answers': {'q0': 'red', 'q1': 'large'}}},
                                {'answers': {'q0': 'red', 'q1': 'large'}, 'outcome': 'submitted'}),
     'last_lock': ('lock', {'answers': {'q0': 'blue', 'q1': 'large'}, 'outcome': 'submitted'}),
-    'timeout': ('timeout', {'answers': {'q0': 'blue'}, 'outcome': 'timed_out'}),
+    'timeout': ('timeout', {'answers': {'q0': 'blue'}, 'outcome': 'timed_out', 'reason': 'timeout'}),
 }
 
 
@@ -108,8 +108,46 @@ def test_both_registries_settle_a_locked_batch_the_same_way(case, monkeypatch):
 def test_the_rule_itself():
     locked = {'q0': 'blue'}
     assert settle_batch(locked, ended='cancelled') == {'answers': {'q0': 'blue'}, 'outcome': 'cancelled'}
-    assert settle_batch(locked, {}) == {'answers': {'q0': 'blue'}, 'outcome': 'cancelled'}
-    assert settle_batch(locked, None) == {'answers': {'q0': 'blue'}, 'outcome': 'cancelled'}  # error frame
+    assert settle_batch(locked, {}) == {'answers': {'q0': 'blue'}, 'outcome': 'cancelled', 'reason': 'client_empty'}
+    # error frame
+    assert settle_batch(locked, None) == {'answers': {'q0': 'blue'}, 'outcome': 'cancelled', 'reason': 'client_error'}
     assert settle_batch(locked, {'answers': {}, 'outcome': 'bogus'}) == {'answers': locked, 'outcome': 'submitted'}
     # The caller's dict is never aliased into the result.
     assert settle_batch(locked, ended='timed_out')['answers'] is not locked
+
+
+@pytest.mark.parametrize('why', ['interrupted', 'taken_over', 'shutdown'])
+def test_a_lifecycle_cancel_names_why_in_both_registries(why, monkeypatch):
+    """The stored result used to say only ``cancelled`` whatever ended the wait, so an incident could not tell a
+    turn interrupt from a takeover or a shutdown. The reason is a label: no answer content rides it."""
+    from tui_gateway import server_requests
+    frames = []
+    monkeypatch.setattr(server_requests, '_write', frames.append)
+    monkeypatch.setattr(server_requests, '_emit', lambda *a: None)
+    monkeypatch.setattr(server_requests, '_answerable', lambda sid: True)
+    server_requests.reset_for_tests()
+    out = {}
+    worker = threading.Thread(target=lambda: out.update(
+        result=server_requests.send('clarify', 's1', {'questions': QUESTIONS}, timeout=10, qids=QIDS)))
+    worker.start()
+    try:
+        _wait_for(lambda: frames)
+        assert server_requests.lock_answer(frames[0]['id'], 'q0', 'blue') == ['q1']
+        assert server_requests.cancel('s1', why) == 1
+        worker.join(5)
+    finally:
+        server_requests.reset_for_tests()
+    assert out['result'] == {'answers': {'q0': 'blue'}, 'outcome': 'cancelled', 'reason': why}
+    assert 'reason' not in settle_batch({'q0': 'blue'}, ended='submitted', reason=why)  # a submit has no cause
+
+
+def test_the_tool_result_carries_the_reason_but_no_answer_text():
+    import json
+
+    from tools.clarify_tool import clarify_tool
+    result = json.loads(clarify_tool(
+        QUESTIONS, lambda qs: {'answers': {'q0': 'secret-blue'}, 'outcome': 'cancelled', 'reason': 'interrupted'}))
+    assert result['outcome'] == 'cancelled' and result['reason'] == 'interrupted'
+    submitted = json.loads(clarify_tool(
+        QUESTIONS, lambda qs: {'answers': {'q0': 'blue'}, 'outcome': 'submitted', 'reason': 'stale'}))
+    assert 'reason' not in submitted

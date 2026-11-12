@@ -226,6 +226,8 @@ gateway:
     no_output: "(sem saída)"
     wake:
       request_withdrawn: "pedido retirado (não é aprovação nem prova de conclusão)"
+      resolved_check_broken: "a deteção automática do seu passo parou (a verificação continuou a falhar); o pedido tem de ser reenviado para retomar sozinho"
+      resolved_check_lost: "a deteção automática do seu passo parou (a verificação perdeu-se); o pedido tem de ser reenviado para retomar sozinho"
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
       crashed: "crashed (worker exited); dispatcher will retry"
@@ -234,6 +236,8 @@ gateway:
       review_requested: "handed off for review; the implementation is done"
       changes_requested: "review requested changes (BLOCK); implementation is not approved"
       block_loop_detected: "routed to triage after repeated blocks; orchestration attention needed"
+      dependency_parent_unclaimed: "has a parent card waiting with no worker"
+      chat_wait_unclaimed: "is ready with no worker claiming it"
       status_default: "status changed"
       status_joiner: ", "
       message: "[kanban] Task {task_id} {status}.\nTitle: {title}\nAssignee: @{assignee}\nBoard: {board}\n\nCheck the result or decide the next step."

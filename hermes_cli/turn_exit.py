@@ -33,7 +33,9 @@ def turn_exit_code(
         return 0
     if kanban_worker:
         reason = result.get("failure_reason")
-        if reason in transient_reasons:
+        # A 401 on one pooled account whose siblings come back on their own (``auth_pool_transient``,
+        # agent/credential_pool_pushed.py) is a wait, not a configuration error.
+        if reason in transient_reasons or (reason == "auth" and result.get("auth_pool_transient")):
             from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
             return KANBAN_RATE_LIMIT_EXIT_CODE
         if reason in terminal_reasons:

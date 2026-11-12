@@ -13,14 +13,27 @@ import sys
 
 MAX_FDS = 8192
 
+# Module-local seams: tests patch these, never the shared os/platform/ctypes
+# functions every other caller in the process (pytest's fd capture included) uses.
+_open = os.open
+_close = os.close
+_fstat = os.fstat
+_machine = platform.machine
+
+
+def _load_libc():
+    import ctypes
+
+    return ctypes.PyDLL(None)
+
 
 def build():
-    if sys.platform != "darwin" or platform.machine() not in ("arm64", "x86_64"):
+    if sys.platform != "darwin" or _machine() not in ("arm64", "x86_64"):
         return None
     try:
         import ctypes
 
-        libc = ctypes.PyDLL(None)
+        libc = _load_libc()
         fstat = getattr(libc, "fstat$INODE64", None) or libc.fstat
         fstat.argtypes, fstat.restype = [ctypes.c_int, ctypes.c_void_p], ctypes.c_int
         pidinfo = libc.proc_pidinfo
@@ -42,7 +55,7 @@ def build():
         # GIL-releasing fstat) and learn its conversion only from a consistent
         # answer. Python's own st_dev is always the authoritative identity.
         try:
-            st = os.fstat(fd)
+            st = _fstat(fd)
         except OSError:
             return None
         if st.st_ino == ino and st.st_dev in (dev, dev & mask):
@@ -77,11 +90,11 @@ def build():
         return [fd for fd, _kind in struct.iter_unpack("=iI", buf.raw[:size])]
 
     try:
-        probe = os.open(os.devnull, os.O_RDONLY)
+        probe = _open(os.devnull, os.O_RDONLY)
     except OSError:
         return None
     try:
-        st = os.fstat(probe)
+        st = _fstat(probe)
         # A negative /dev/null device proves the conversion now; a nonnegative
         # one (devfs numbering varies by host) leaves it to learn() at runtime.
         # Either way the native identity must match Python's exactly.
@@ -102,5 +115,5 @@ def build():
     except (OSError, ValueError, TypeError, struct.error, ctypes.ArgumentError):
         return None
     finally:
-        os.close(probe)
+        _close(probe)
     return identity, descriptors

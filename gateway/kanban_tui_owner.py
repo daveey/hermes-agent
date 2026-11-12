@@ -142,9 +142,20 @@ def has_local_sibling(conn: Any, sub: dict) -> bool:
     return row is not None
 
 
+def _owned_this_tick(collector: Any, sub: dict) -> Any:
+    """:func:`owned_live_session` once per chat per collector tick: a chat's cards share one answer, and each
+    answer costs a lineage walk in state.db (1,655 pending tui rows over 122 chats on the hub). The delivery
+    re-check still reads fresh. [daveey]"""
+    seen = collector.__dict__.setdefault("_tui_owned", {})
+    key = (sub.get("notifier_profile") or None, str(sub.get("chat_id") or ""), bool(sub.get("thread_id")))
+    if key not in seen:
+        seen[key] = owned_live_session(collector.runner, sub)
+    return seen[key]
+
+
 def claim(collector: Any, conn: Any, slug: str, sub: dict) -> Optional[dict]:
     """Claim one tui row's unseen events for this gateway, or None (left to the legacy backend)."""
-    if has_local_sibling(conn, sub) or owned_live_session(collector.runner, sub) is None:
+    if has_local_sibling(conn, sub) or _owned_this_tick(collector, sub) is None:
         return None
     from hermes_cli import kanban_db_notify as _kbn
     old_cursor, cursor, events = _kbn.claim_unseen_events_for_sub(
@@ -185,7 +196,10 @@ async def deliver(notification: Any) -> None:
         return
     from gateway.session_automation import admit_route_wake
     from hermes_state_runtime import RuntimeStoreError
-    metadata = {"notification_category": "diagnostic"} if diagnostic else {}
+    metadata: dict[str, Any] = {"notification_category": "diagnostic"} if diagnostic else {}
+    # What a later wake for this chat folds from while this one still waits (kanban_wake_fold).
+    metadata["kanban_cards"] = [{"task_id": notification.task_id, "board": notification.board_slug or "",
+                                 "kinds": sorted({ev.kind for ev in d["events"]}), "text": "\n".join(texts)}]
     try:
         admitted = await admit_route_wake(runner, adapter, live.source, "\n".join(texts), "kanban-wake", metadata)
     except Exception as exc:  # health: allow BLE001 -- delivery boundary: any admission failure rewinds the claim (logged with traceback) so no notice is lost

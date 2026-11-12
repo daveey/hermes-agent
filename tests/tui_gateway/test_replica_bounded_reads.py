@@ -73,8 +73,15 @@ def test_remote_links_miss_preserves_rows_with_bounded_fetches(tmp_path, monkeyp
     monkeypatch.setattr(activity, '_meta_float', lambda conn, key: None)
     monkeypatch.setattr(activity, '_remote_read_memo', None)
     monkeypatch.setattr(activity, '_project_replica', lambda path, now, me, rows, *args, **kwargs: rows)
+    # [daveey] A seq-stamped replica is read through ``kanban_replica_rows`` (incremental), in (gw, key) order.
+    monkeypatch.setattr(activity._replica_projection, 'project', lambda view, *args, **kwargs: view.rows())
+    if modern:
+        expected = sorted(expected, key=lambda r: (r[0], r[1]))
     assert activity._read_remote_links(path) == expected
-    assert conn.fetched <= 12
+    # [daveey] The incremental reader fetches one aggregate row per page of ``_PAGE`` task rows (a single
+    # whole-replica string was a 256 MB+ transient): still bounded by rows / page, never once per task.
+    pages = -(-len(rows) // activity._replica_rows._PAGE) if modern else 0  # rows this small fill whole pages
+    assert conn.fetched <= 12 + pages
 
 
 def test_warm_observation_identity_scan_is_bounded(tmp_path, monkeypatch):

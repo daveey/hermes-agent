@@ -42,12 +42,22 @@ def fake_daemon(tmp_path):
     proc = subprocess.Popen([sys.executable, "-m", "browser_harness.daemon"], cwd=str(tmp_path / "pkgroot"),
                             stdin=subprocess.DEVNULL, start_new_session=True,
                             env={**os.environ, **process_identity.spawn_env("browser-harness-daemon")})
+    # Popen returns once exec has begun, but the kernel publishes the new argv a moment later: a
+    # throttled CI container can read an empty /proc/<pid>/cmdline for both of a test's back-to-back
+    # ownership checks. The real harness publishes its pid file from the running daemon, so its argv
+    # is always visible by then; establish only that precondition, never retry the verdict under test.
+    import psutil
+
     runtime = tmp_path / "runtime"
     runtime.mkdir()
-    yield proc, runtime
-    if proc.poll() is None:
-        proc.kill()
-    proc.wait(timeout=10)
+    try:
+        wait_until(lambda: "browser_harness.daemon" in psutil.Process(proc.pid).cmdline(), timeout=30,
+                   what="the stand-in harness daemon's argv to become visible")
+        yield proc, runtime
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=10)
 
 
 @pytest.fixture

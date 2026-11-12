@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from tests.hermes_cli.test_kanban_placement import HUB_TID, NEW_HELP, _done_parent, _forwarder, _options
+from tests.hermes_cli.test_kanban_placement import HUB_TID, NEW_HELP, ROUTE, _done_parent, _forwarder, _options
 
 pytest_plugins = ["tests.hermes_cli.test_kanban_placement"]  # its ``mac`` fixture (fake hub + board)
 
@@ -192,3 +192,36 @@ def test_remote_rejection_reads_the_incident_row(mac):
     _reject(mac, "placement:x:1", error="exit 1")
     assert kp.remote_rejection("placement:x:1") == {"state": "rejected", "code": None, "matches": [],
                                                      "total_matches": 0, "error": "exit 1"}
+
+
+@pytest.mark.parametrize("shape", ["idempotency_conflict", "plain"])
+def test_direct_placed_create_reports_a_rejection_never_says_created(mac, monkeypatch, shape):
+    """Review t_01a1cf610e4e2f39: the owner refuses a placed create whose idempotency_key a live card already
+    holds (origin_idempotency_conflict). The creator's kanban_create must surface that refusal, naming the
+    holding card, instead of "The card IS created ... Do NOT call kanban_create again" with task_id null."""
+    from hermes_cli import kanban_placement as kp
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: {**ROUTE, "wait_seconds": 2})
+    mac["result"]["help"] = NEW_HELP  # a client that carries idempotency_key
+    key = "review:pr1305:848af5adae9e29a2ac677f26c732c996997a26b2"
+    held = "t_01a1cec8510df47f"
+    res = ({"error": f"origin_idempotency_conflict: idempotency_key {key!r} already names card {held} on this board",
+            "code": "origin_idempotency_conflict", "handoff_complete": False, "status": "rejected"}
+           if shape == "idempotency_conflict" else {"error": "no such profile/session here"})
+
+    def reject_on_spawn(argv):
+        rid = mac["calls"][-1][mac["calls"][-1].index("--id") + 1]
+        mac["hub"].execute("UPDATE sent SET state='rejected', result=?, done_at=? WHERE id=?",
+                           (json.dumps(res), time.time(), rid))
+        mac["hub"].commit()
+    monkeypatch.setattr(kp, "hub_spawn", reject_on_spawn)
+    out = json.loads(kt._handle_create({"title": "Review PR 1305", "idempotency_key": key,
+                                        "session_id": "20261027_183000_abc123"}))
+    assert out.get("ok") is not True and "error" in out, out
+    assert "IS created" not in json.dumps(out) and "Do NOT call kanban_create again" not in json.dumps(out)
+    assert out["placed"]["request_id"] and out["placed"]["task_id"] is None and out["created"] is False
+    if shape == "idempotency_conflict":
+        assert out["code"] == "origin_idempotency_conflict" and out["existing_task_id"] == held, out
+        assert held in out["error"]
+    else:
+        assert out["code"] == "placement_rejected" and "no such profile" in out["error"], out

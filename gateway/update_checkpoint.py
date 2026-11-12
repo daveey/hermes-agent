@@ -15,7 +15,7 @@ from hermes_constants import get_default_hermes_root, get_hermes_home
 from hermes_cli import admission_fence
 from gateway.cron_pause import preserve_cron_slots
 from gateway.status import _pid_exists
-from gateway.session_runtime_workers import kanban_managed_count
+from gateway.session_runtime_workers import cron_turn_count, kanban_managed_count
 from gateway.run_shutdown_restart_wait import CORE_UPDATE_KANBAN_WAIT_S, CORE_UPDATE_KANBAN_STOP_LEASH_S
 
 CHECKPOINT_PAUSE = True
@@ -99,7 +99,9 @@ def checkpoint_for_update(runner, loop, params):
             if not state["held"] or not set(state["reservation_ids"]).issubset(known):
                 return
             from gateway.run_active_work_verb import _delegation_units
-            cron = runner._active_cron_job_count() if intent.get("cron_cut") is True else 0
+            # A cut cron run includes its agent turn on this owner (``cron_turn_count``).
+            cron = (runner._active_cron_job_count() + cron_turn_count(runner)
+                    if intent.get("cron_cut") is True else 0)
             if (_delegation_units(time.time())
                     or runner._active_work_count() != kanban_managed_count(runner) + cron):
                 return

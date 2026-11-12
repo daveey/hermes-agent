@@ -226,6 +226,8 @@ gateway:
     no_output: "（無輸出）"
     wake:
       request_withdrawn: "請求已撤回（不代表批准或完成證明）"
+      resolved_check_broken: "你的步驟自動偵測已停止（其檢查持續失敗）；必須重新提交請求才能自行恢復"
+      resolved_check_lost: "你的步驟自動偵測已停止（其檢查已遺失）；必須重新提交請求才能自行恢復"
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
       crashed: "crashed (worker exited); dispatcher will retry"
@@ -234,6 +236,8 @@ gateway:
       review_requested: "handed off for review; the implementation is done"
       changes_requested: "review requested changes (BLOCK); implementation is not approved"
       block_loop_detected: "routed to triage after repeated blocks; orchestration attention needed"
+      dependency_parent_unclaimed: "has a parent card waiting with no worker"
+      chat_wait_unclaimed: "is ready with no worker claiming it"
       status_default: "status changed"
       status_joiner: ", "
       message: "[kanban] Task {task_id} {status}.\nTitle: {title}\nAssignee: @{assignee}\nBoard: {board}\n\nCheck the result or decide the next step."

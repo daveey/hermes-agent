@@ -12,6 +12,12 @@ from pathlib import Path
 from hermes_platform.resolver import locate_command
 
 OBSERVER_MODULE = 'hermes_cli.kanban_failed_result_observer'
+# Finite restart budget: at most this many starts per interval, then the unit fails
+# and ``--collect`` removes it. Committed results stay queued for crash recovery.
+START_LIMIT_BURST = 10
+START_LIMIT_INTERVAL_SECONDS = 300
+READY_ENV = 'HERMES_FAILED_RESULT_READY'
+READY_DIR_ENV = 'HERMES_FAILED_RESULT_READY_DIR'
 
 
 def observer_argv_env(env, context):
@@ -29,6 +35,24 @@ def observer_argv_env(env, context):
     return [*hermes_module_argv(sys.executable, OBSERVER_MODULE), json.dumps(context)], env
 
 
+def _ready_cleanup_args(ready):
+    """[daveey] Manager-side release of the readiness tempdir after every stop.
+
+    A unit that retires (exit 78) or exhausts ``StartLimitBurst`` never reaches the
+    observer's own cleanup. ``ExecStopPost`` runs after each stop, so a restarted
+    observer recreates the directory before acknowledging. Paths travel as
+    environment values, expanded by ``${...}`` as one word: no specifier or quoting
+    rules apply to board paths. ``-`` keeps a failed cleanup from changing the
+    unit's result. Without ``rm``/``rmdir`` the unit keeps its previous behavior.
+    """
+    rm, rmdir = locate_command('rm').command, locate_command('rmdir').command
+    if not rm or not rmdir:
+        return []
+    return [f'--setenv={READY_ENV}={ready}', f'--setenv={READY_DIR_ENV}={ready.parent}',
+            f'--property=ExecStopPost=-{rm[0]} -f -- ${{{READY_ENV}}}',
+            f'--property=ExecStopPost=-{rmdir[0]} -- ${{{READY_DIR_ENV}}}']
+
+
 def arm_service(context, *, startup_seconds=5.0):
     """Acknowledge initialized board access only after systemd takes custody.
 
@@ -38,6 +62,7 @@ def arm_service(context, *, startup_seconds=5.0):
     from tools.environments.local import build_subprocess_env
     from tools.process_registry import systemd_user_bus_env
     from hermes_cli._startup_fast import project_root_str
+    from hermes_cli.kanban_failed_result_observer import STARTUP_FAILURE_EXIT
 
     binary = locate_command('systemd-run').command
     if not binary:
@@ -52,8 +77,15 @@ def arm_service(context, *, startup_seconds=5.0):
                '--property=Type=exec', '--property=Slice=app.slice',
                '--property=Restart=on-failure', '--property=RestartSec=500ms',
                '--property=RestartForceExitStatus=SIGTERM SIGHUP SIGINT SIGPIPE',
-               '--property=StartLimitIntervalSec=0',
+               # [daveey] A deterministic startup failure must retire the unit, not
+               # loop forever (~1.7k journal lines / 5 min). The observer exits
+               # STARTUP_FAILURE_EXIT on import/context errors; anything else that
+               # crashes it repeatedly still stops at the start limit.
+               f'--property=RestartPreventExitStatus={STARTUP_FAILURE_EXIT}',
+               f'--property=StartLimitIntervalSec={START_LIMIT_INTERVAL_SECONDS}s',
+               f'--property=StartLimitBurst={START_LIMIT_BURST}',
                f'--working-directory={project_root_str()}']
+    command += _ready_cleanup_args(ready)
     # A manager-created service does not inherit its submitter's environment.
     # Keep profile/path resolution, without forwarding secrets or worker pins. The rate-limit
     # cooldown is policy the reaper applies when it records a quota episode for this run: without it

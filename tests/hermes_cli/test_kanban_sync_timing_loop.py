@@ -53,6 +53,10 @@ def test_real_loop_records_full_report_cost_and_matches_a_change_to_its_boards_s
     monkeypatch.setattr(timing, "_code_identity", lambda: ("0123456789abcdef0123456789abcdef01234567", "boot", False))
     monkeypatch.setattr(timing, "_DIAG", timing.TimingDiag())
     monkeypatch.setattr(mm, "REPORT_EVERY_S", 3.0)
+    # The loop's own report path is under test: no anchored sender thread, so the loop reports as on a host
+    # without one (machine_metrics_sender; its delegated record is pinned in test_machine_metrics_sender).
+    from hermes_cli import machine_metrics_sender
+    monkeypatch.setattr(machine_metrics_sender.MetricsSender, "start", lambda self: None)
     _config(root, None)
     log = timing.log_path(root)
 

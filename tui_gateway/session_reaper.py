@@ -209,8 +209,9 @@ def install_exit_flush_signal_handlers() -> bool:
 
 
 def _transport_is_dead(transport) -> bool:
-    # _detached_ws_transport is the post-disconnect drop sentinel. _stdio_transport is the REAL transport for
-    # standalone `hermes --tui` and must NOT count as dead.
+    # Headless gateways share the stdio object but have no attached RPC client.
+    if transport is _stdio_transport:
+        return not _stdio_is_rpc_channel
     if transport is _detached_ws_transport:
         return True
     if isinstance(transport, FanoutTransport):
@@ -305,6 +306,8 @@ def _reap_idle_sessions() -> None:
             sid, end_reason="idle_timeout",
             predicate=lambda session, vs=sid: _session_is_evictable(vs, session, time.time()))
     _repair_missing_ws_orphan_reaps()
+    from tui_gateway.detached_turn_cleanup import repair
+    repair()
     _enforce_session_cap()
     _reclaim_orphaned_leases()
     # Long-lived processes: gen2 GC rarely runs at steady state and glibc retains freed pages as RSS, so trim
@@ -336,6 +339,7 @@ def _repair_missing_ws_orphan_reaps() -> None:
     with _sessions_lock:
         closed_transports = [session.get("transport") for session in _sessions.values()
                              if session.get("transport") is not _detached_ws_transport
+                             and session.get("transport") is not _stdio_transport
                              and _transport_is_dead(session.get("transport"))]
     for transport in closed_transports:
         _close_sessions_for_transport(transport)

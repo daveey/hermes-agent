@@ -363,9 +363,9 @@ KANBAN_GUIDANCE = (
     "Workers may only attach to their own task.\n"
     "- **Created cards.** List ids in `kanban_complete(created_cards=[...])` ONLY when captured from a successful "
     "`kanban_create` return — never invent or paste ids; the kernel rejects the completion on any phantom id. "
-    "If that result has `placement.where` `local` because of a text marker and the work does not need this "
-    "machine, `kanban_archive` the unclaimed card (only one your task created) and re-create it with "
-    "`placement='hub'`.\n"
+    "If that result has `placement.where` `local` because of a local marker and the work does not need this "
+    "machine, `kanban_archive` the unclaimed card (only one your task created) and re-create it as its "
+    "`placement.remedy` says (`placement='auto'` for a context skill such as babybear-*).\n"
     "- **Orchestrating: discover profiles first.** The dispatcher SILENTLY drops a card with an unknown assignee (it "
     "sits in `ready` forever). Ground every assignee in a real profile (`hermes profile list`, or ask the user), and "
     "express dependencies via `parents=[...]` on `kanban_create`, not prose.\n"
@@ -1058,7 +1058,9 @@ def _local_host_hints() -> list[str]:
     # naming Hermes' scratch dir here is what makes the TMPDIR export a habit rather than a hidden default.
     try:
         host_lines.append(f"Scratch directory: {get_scratch_dir()} (TMPDIR points here; write temporary files "
-                          "and probes there, never under the system temp dir; entries idle for 24h are pruned)")
+                          "and probes there, never under the system temp dir; entries idle for 24h are pruned; "
+                          "shared by every session on this host: give files task-unique names (for example "
+                          "prefix the task id) or use `mktemp`)")
     except OSError:
         pass
     if not (sys.platform == "win32" and not is_wsl()):

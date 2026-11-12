@@ -82,15 +82,23 @@ def test_a_write_rereads_only_the_board_that_moved(kanban_root, monkeypatch):
 
 def test_a_memoized_board_still_turns_stalled_when_the_clock_passes_the_cutoff(kanban_root, monkeypatch):
     now = time.time()
+    # Cross the 2 h cutoff inside the memo's max age: only the verdict may move, the rows are not re-read.
     _board(kanban_root / "kanban.db", [
         {"id": "t_probe", "status": "scheduled", "session": "s_a",
-         "events": [("scheduled", {"reason": "grant", "wake_check": "python3 probe.py"}, int(now - H))]},
+         "events": [("scheduled", {"reason": "grant", "wake_check": "python3 probe.py"}, int(now - 2 * H + 10))]},
     ])
     reads = _count_board_reads(monkeypatch)
     assert _snapshot()[6] == {}
-    monkeypatch.setattr(ksa.time, "time", lambda: now + 2 * H)
+    step = (ksa._CACHE_TTL_S + ksa._COUNTS_MAX_AGE_S) / 2
+    assert 10 < step < ksa._COUNTS_MAX_AGE_S
+    monkeypatch.setattr(ksa.time, "time", lambda: now + step)
     assert _snapshot()[6] == {"s_a": 1}
     assert len(reads) == 1  # the rows were read once; only the verdict moved
+    # Past the max age an unchanged board is re-read once (bounded source age), and the verdict holds.
+    monkeypatch.setattr(ksa.time, "time", lambda: now + 2 * H)
+    assert _snapshot()[6] == {"s_a": 1}
+    assert _snapshot()[6] == {"s_a": 1}
+    assert len(reads) == 2
 
 
 def test_a_failed_display_read_is_not_memoized(kanban_root, monkeypatch):

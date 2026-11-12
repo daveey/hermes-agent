@@ -126,6 +126,92 @@ def test_a_held_machine_files_one_hold_card_not_one_per_card(gws):
     assert "do not lift it" in card["body"] and card["priority"] == -1
 
 
+def _hold_worker(gws, **hold):
+    """Two stalled cards pinned to a worker the registry holds with ``hold`` fields; returns (worker, kps)."""
+    hub, worker = gws
+    a = _pinned(hub, title="a")
+    b = _pinned(hub, title="b")
+    worker.round()
+    worker.enter()
+    machines = {**support.MACHINES, WORKER: {**support.MACHINES[WORKER], "hold": True, **hold}}
+    wn.set_registry_fetch(lambda: {"me": WORKER, "machines": list(machines.values())})
+    wn._REGISTRY.update(at=None, value=None, retry=False)
+    wn.pickup(worker.conn, budget=4)
+    _age(worker, a, 900)
+    _age(worker, b, 700)
+    from hermes_cli import kanban_pickup_stall as kps
+    return worker, kps
+
+
+def _hhmmz(epoch):
+    import time
+    return time.strftime("%H:%MZ", time.gmtime(epoch))
+
+
+@pytest.mark.parametrize("owner,reason", [
+    # t_01a1cec7cd7fe7ce: hub-worker-core-rollout's own hold, filed during its 07:47-08:16Z window.
+    ("rollout:worker-core-rollout@hub", "worker-core-rollout: aaaaaaaaaaaa -> bbbbbbbbbbbb; idle tick applies; "
+                                        "release by {release}"),
+    ("ops@hub", "migrating the disk; release by {release}"),  # any hold stating its release, like worker-claim-watch
+])
+def test_a_hold_inside_its_stated_release_window_files_no_card_and_files_once_it_expires(gws, owner, reason):
+    import time
+    t0 = time.time()
+    release = t0 + 30 * 60
+    worker, kps = _hold_worker(gws, hold_owner=owner, hold_at=int(t0 * 1000),
+                               hold_reason=reason.format(release=_hhmmz(release)))
+    assert kps.sweep(worker.conn, now=t0) == []
+    assert kps.sweep(worker.conn, now=release + kps.stall_seconds() - 60) == []  # threshold grace past release
+    assert not _repairs(worker.conn)
+    kps.sweep(worker.conn, now=release + kps.stall_seconds() + 120)  # the hold outlived its release: alert
+    [card] = _repairs(worker.conn)
+    assert "held" in card["title"].lower()
+
+
+def test_a_rollout_hold_with_no_stated_release_is_expected_for_the_rollout_cap(gws):
+    import time
+    t0 = time.time()
+    worker, kps = _hold_worker(gws, hold_owner="rollout:worker-core-rollout@hub", hold_at=int(t0 * 1000),
+                               hold_reason="worker-core-rollout: aaaaaaaaaaaa -> bbbbbbbbbbbb")
+    assert kps.sweep(worker.conn, now=t0 + 60 * 60) == []
+    assert not _repairs(worker.conn)
+    kps.sweep(worker.conn, now=t0 + kps.ROLLOUT_MAX_SECONDS + kps.stall_seconds() + 120)
+    assert len(_repairs(worker.conn)) == 1
+
+
+def test_an_operator_hold_with_no_stated_release_still_files_a_card(gws):
+    import time
+    t0 = time.time()
+    worker, kps = _hold_worker(gws, hold_owner="ops@hub", hold_at=int(t0 * 1000), hold_reason="disk migration")
+    kps.sweep(worker.conn, now=t0)
+    assert len(_repairs(worker.conn)) == 1
+
+
+@pytest.mark.parametrize("reason,hold_at_off,now_off,want", [
+    ("release by 08:16Z", 0, 60, True),
+    ("release by 08:16Z", 0, 29 * 60 + 600, True),          # release + threshold, inclusive
+    ("release by 08:16Z", 0, 29 * 60 + 601, False),
+    ("release by 00:10Z", 0, 16 * 3600 + 600, True),        # past midnight: the next day's 00:10Z
+    ("released at 8:16:30 z", 0, 60, True),                 # worker-claim-watch's RELEASE_RE spelling
+    ("release by 25:00Z", 0, 60, False),                    # invalid time: no stated release
+    ("no release", 0, 60, False),
+])
+def test_expected_hold_release_rule(reason, hold_at_off, now_off, want):
+    from datetime import UTC, datetime
+    from hermes_cli import kanban_pickup_stall as kps
+    held_at = datetime(2026, 11, 12, 7, 47, tzinfo=UTC).timestamp() + hold_at_off
+    entry = {"hold": True, "hold_owner": "ops@hub", "hold_at": int(held_at * 1000), "hold_reason": reason}
+    assert (kps.expected_hold(entry, now_ms=int((held_at + now_off) * 1000), stall_s=600) is not None) is want
+
+
+def test_expected_hold_needs_a_known_start_and_an_actual_hold():
+    from hermes_cli import kanban_pickup_stall as kps
+    entry = {"hold": True, "hold_owner": "rollout:worker-core-rollout@hub", "hold_reason": "release by 08:16Z"}
+    assert kps.expected_hold(entry, now_ms=1, stall_s=600) is None            # no hold_at: cannot place the window
+    assert kps.expected_hold({**entry, "hold": False, "hold_at": 1000}, now_ms=2000, stall_s=600) is None
+    assert kps.expected_hold(None, now_ms=1, stall_s=600) is None
+
+
 def test_a_refused_card_is_not_hidden_behind_a_full_queue(gws, monkeypatch):
     """budget_exhausted only for cards a slot would start: a capped tick still names a profile refusal."""
     hub, worker = gws
@@ -425,3 +511,72 @@ def test_a_card_whose_import_fails_is_recorded(gws, monkeypatch):
     assert wn.pickup(worker.conn, budget=4) == []
     from hermes_cli import kanban_pickup_stall as kps
     assert kps.latest(worker.conn, tid)["detail"] == "import failed"
+
+
+# --- the clock starts when the card was pinned here -------------------------------------------------------------
+# t_01a1cea82846df08 (2026-11-12): t_01a1ce97cef93c46 waited 10 min on the hub, worker-share-watch moved it to
+# worker-6 at 07:20:36Z, and worker-6 filed "Pickup queue full ... waiting 10 min" 9 s later.
+
+def _moved_onto(hub, worker, tid, ago, to=WORKER, kind="moved"):
+    """The hub re-pins ``tid`` to ``machine:<to>`` the way ``kanban_move`` records it; the event syncs to the
+    worker's replica, backdated ``ago`` seconds there."""
+    hub.enter()
+    with kb.write_txn(hub.conn):
+        wn.set_runs_on(hub.conn, tid, [f"machine:{to}"])
+        kb._append_event(hub.conn, tid, kind, {"from_machine": HUB, "runs_on": [f"machine:{to}"],
+                                               "previous_runs_on": [f"machine:{HUB}"], "reason": "test move"})
+    hub.round()
+    worker.round()
+    with sqlite3.connect(wn._replica_path(worker.conn)) as replica:
+        n = replica.execute("UPDATE task_events SET created_at = created_at - ? WHERE task_id = ? AND kind = ?",
+                            (ago, tid, kind)).rowcount
+    assert n == 1
+
+
+def _queue_full_repairs(worker):
+    worker.tick(max_spawn=0)  # the capped path records budget_exhausted
+    worker.tick(max_spawn=0)
+    return _repairs(worker.conn)
+
+
+@pytest.mark.parametrize("kind", ["moved", "placement_repinned"])
+def test_a_card_moved_here_after_waiting_elsewhere_is_not_stalled_yet(gws, kind):
+    hub, worker = gws
+    tid = _pinned(hub, to=HUB)
+    worker.round()
+    _age(worker, tid, 900)  # ready on the Board for 15 min, all of it pinned to the hub
+    _moved_onto(hub, worker, tid, 30, kind=kind)
+    assert not _queue_full_repairs(worker)
+
+
+def test_a_card_moved_here_stalls_from_the_move_and_reports_that_wait(gws):
+    hub, worker = gws
+    tid = _pinned(hub, to=HUB)
+    worker.round()
+    _age(worker, tid, 3000)  # 50 min ready, 11 of them pinned here
+    _moved_onto(hub, worker, tid, 700)
+    [card] = _queue_full_repairs(worker)
+    assert tid in card["title"] and "waiting 11 min" in card["title"]
+    assert f"- {tid} (pinned to the worker), ready 11 min" in card["body"]
+
+
+def test_a_move_older_than_ready_since_or_naming_another_machine_does_not_restart_the_clock(gws):
+    from hermes_cli import kanban_pickup_stall as kps
+    hub, worker = gws
+    tid = _pinned(hub, to=HUB)
+    worker.round()
+    _moved_onto(hub, worker, tid, 5000)  # pinned here long before it last became ready
+    _age(worker, tid, 700)
+    with sqlite3.connect(wn._replica_path(worker.conn)) as rw:  # newer events that are not a move onto WORKER
+        for kind, labels in (("moved", ["machine:worker-9"]), ("skipped_unplaceable", [f"machine:{WORKER}"])):
+            rw.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, "
+                       "CAST(strftime('%s','now') AS INTEGER))", (tid, kind, json.dumps({"runs_on": labels})))
+        rw.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'moved', 'not json', "
+                   "CAST(strftime('%s','now') AS INTEGER))", (tid,))
+    replica = wn.open_replica(worker.conn)
+    try:
+        [card] = kps.stalled(worker.conn, replica, WORKER)
+    finally:
+        replica.close()
+    waited = kps._now_ms() // 1000 - card["since_ms"] // 1000
+    assert card["id"] == tid and 690 <= waited <= 720  # ready_since: neither the old move nor the later events

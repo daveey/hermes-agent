@@ -292,8 +292,8 @@ def test_broken_resolved_check_comments_once_and_never_unblocks(board):
         for i in range(kwc.BROKEN_AFTER - 1):
             kwc.run_due_wake_checks(conn, now=now + 200 * (i + 1), wait=True)
             assert kwc.get_state(conn, tid)["fails"] == i + 1
-        kwc.run_due_wake_checks(conn, now=now + 200 * kwc.BROKEN_AFTER, wait=True)
-        kwc.run_due_wake_checks(conn, now=now + 200 * (kwc.BROKEN_AFTER + 2), wait=True)
+        kwc.run_due_wake_checks(conn, now=now + 200 + kar.BROKEN_MIN_SECONDS, wait=True)
+        kwc.run_due_wake_checks(conn, now=now + 400 + kar.BROKEN_MIN_SECONDS, wait=True)
         assert kb.get_task(conn, tid).status == "blocked"
         broken = _events(conn, tid, kar.BROKEN_EVENT)
         assert len(broken) == 1 and "kaput" in broken[0].payload["output"]

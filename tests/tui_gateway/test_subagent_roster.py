@@ -26,6 +26,11 @@ def roster(monkeypatch, tmp_path):
     db.close()
 
 
+def _counts(rows):
+    """Legacy count fields only: the roster also carries optional ``execution_observations``."""
+    return {sid: {k: v for k, v in row.items() if k != "execution_observations"} for sid, row in rows.items()}
+
+
 def test_roster_reports_live_children_without_an_attached_session(roster):
     """A conversation nobody has open (no live session record, no transport) still reports its running
     top-level children, so its sidebar row can light up after a reload."""
@@ -34,7 +39,7 @@ def test_roster_reports_live_children_without_an_attached_session(roster):
     active["c2"] = {"subagent_id": "c2", "depth": 0, "owner_agent_session_id": "parent-a", "status": "running"}
     active["g1"] = {"subagent_id": "g1", "depth": 1, "owner_agent_session_id": "child-x", "status": "running"}
 
-    assert call() == {"parent-a": {"session_id": "parent-a", "subagents": 2, "background": 0}}
+    assert _counts(call()) == {"parent-a": {"session_id": "parent-a", "subagents": 2, "background": 0}}
 
 
 def test_roster_omits_conversations_stored_in_another_profile(roster):
@@ -60,4 +65,4 @@ def test_roster_resolves_a_background_process_route_key_to_its_stored_conversati
     monkeypatch.setattr(process_registry, "list_sessions", lambda **_: [{"session_id": proc.id}])
     monkeypatch.setattr(process_registry, "get", lambda pid: proc if pid == proc.id else None)
 
-    assert call() == {"local-abc123": {"session_id": "local-abc123", "subagents": 0, "background": 1}}
+    assert _counts(call()) == {"local-abc123": {"session_id": "local-abc123", "subagents": 0, "background": 1}}

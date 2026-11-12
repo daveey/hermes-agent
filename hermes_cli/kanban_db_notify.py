@@ -48,7 +48,7 @@ _SUB_KEY_WHERE = "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_
 
 # Compatibility exports: provenance is shared by link reconciliation and notice delivery.
 from hermes_cli.kanban_session_provenance import (
-    is_headless_session, is_machine_session, machine_sessions, _source_cache,
+    is_headless_session, is_machine_session, machine_sessions, proven_foreign_chats, _source_cache,
 )
 
 
@@ -112,7 +112,9 @@ def add_notify_sub(
     ``MAX(task_events.id)``) so the notifier never replays history at boot.
     """
     from hermes_cli.kanban_placement import is_placeholder_session
-    if platform in ("hub", "tui") and (is_placeholder_session(chat_id) or is_headless_session(chat_id)):
+    if platform in ("hub", "tui") and (is_placeholder_session(chat_id) or (
+            is_headless_session(chat_id)
+            and not (platform == "hub" and chat_id in proven_foreign_chats(conn, (task_id,))))):
         return
     valid_mode = delivery_mode if delivery_mode in _NOTIFY_DELIVERY_MODES else None
     # api_server is stateless: the adapter has no send(), the wake self-post IS
@@ -580,8 +582,16 @@ def claim_unseen_events_for_sub(
     like an orphan: a holder that cannot deliver (it does not own the chat) blocked the owner forever
     (t_01a199de3003e911). [daveey]
     """
+    key = _sub_key(task_id, platform, chat_id, thread_id)
+    # [daveey] Read-only probe first: every chat's poller calls this every few seconds, and taking the board's
+    # write lock (``BEGIN IMMEDIATE``) only to find nothing new queued the pollers behind each other and behind
+    # workers. Nothing is claimed here: when the probe sees an unseen event or an in-flight marker it may have to
+    # act on, the transaction below decides again, so claim exclusivity is unchanged.
+    if not _claim_may_act(conn, key, task_id, kinds, kinds if deliverable_kinds is None else deliverable_kinds,
+                          durable):
+        cursor = _notify_cursor(conn, task_id, platform, chat_id, thread_id)
+        return (0, 0, []) if cursor is None else (cursor, cursor, [])
     with _kb.write_txn(conn):
-        key = _sub_key(task_id, platform, chat_id, thread_id)
         if durable:
             row = conn.execute(
                 "SELECT inflight_from, inflight_pid, inflight_start, inflight_at, last_event_id "
@@ -629,6 +639,38 @@ def claim_unseen_events_for_sub(
 # ---------------------------------------------------------------------------
 # In-flight (claimed, not yet durably delivered) notice claims. [daveey]
 # ---------------------------------------------------------------------------
+
+
+def _claim_may_act(conn: sqlite3.Connection, key: tuple, task_id: str, kinds: Optional[Iterable[str]],
+                   deliverable: Optional[Iterable[str]], durable: bool) -> bool:
+    """Read-only: could :func:`claim_unseen_events_for_sub` write anything for this row now? False exactly when it
+    would return no events without writing: unsubscribed, another live process's claim that is not stuck, or no
+    unseen event of ``kinds``. The decision is made again inside the write transaction. [daveey]"""
+    row = conn.execute(
+        "SELECT inflight_from, inflight_pid, inflight_start, inflight_at, last_event_id "
+        "FROM kanban_notify_subs " + _SUB_KEY_WHERE, key,
+    ).fetchone()
+    if row is None:
+        return False
+    if durable and row["inflight_from"] is not None:
+        if not _holder_alive(row) or _stuck_live_claim(conn, task_id, row, deliverable, key=key):
+            return True  # a rewind is due
+        if not _holder_is_me(row):
+            return False
+    kind_list = list(kinds) if kinds else None
+    return conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM task_events WHERE task_id = ? AND id > ?"
+        + (" AND kind IN (" + ",".join("?" * len(kind_list)) + ")" if kind_list else "") + ")",
+        (task_id, int(row["last_event_id"]), *(kind_list or ())),
+    ).fetchone()[0] == 1
+
+
+def _recovery_due(conn: sqlite3.Connection, row, key: tuple) -> Optional[str]:
+    """Why :func:`recover_orphaned_notify_claims` rewinds this in-flight row (``None``: it is left alone)."""
+    if not _holder_alive(row):
+        return ""
+    return _stuck_live_claim(conn, row["task_id"], row, None, key=key)
+
 
 _MY_HOLDER: Optional[tuple[int, Optional[int]]] = None
 
@@ -798,22 +840,28 @@ def recover_orphaned_notify_claims(
         where.append("chat_id = ?")
         params.append(chat_id)
     n = 0
+    sql = ("SELECT task_id, platform, chat_id, thread_id, inflight_from, inflight_pid, inflight_start, "
+           "inflight_at, last_event_id FROM kanban_notify_subs WHERE " + " AND ".join(where))
+    # [daveey] Read-only probe first: every chat's poller runs this every few seconds, almost always with nothing
+    # to rewind, and ``BEGIN IMMEDIATE`` queued those pollers for the board's write lock. The transaction below
+    # reads and decides again, so only a row the probe found due takes the lock.
+    try:
+        probe = conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        return 0  # pre-migration board
+    from hermes_cli.kanban_notify_clock import prune
+    if not any(_recovery_due(conn, r, _sub_key(r["task_id"], r["platform"], r["chat_id"], r["thread_id"]))
+               is not None for r in probe):
+        prune(conn)
+        return 0
     with _kb.write_txn(conn):
-        try:
-            rows = conn.execute(
-                "SELECT task_id, platform, chat_id, thread_id, inflight_from, inflight_pid, inflight_start, "
-                "inflight_at, last_event_id FROM kanban_notify_subs WHERE " + " AND ".join(where), params,
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return 0  # pre-migration board
-        from hermes_cli.kanban_notify_clock import prune
+        rows = conn.execute(sql, params).fetchall()
         prune(conn)
         for r in rows:
             key = _sub_key(r["task_id"], r["platform"], r["chat_id"], r["thread_id"])
-            if not _holder_alive(r):
-                n += _rewind_orphan(conn, key, r)
-            elif why := _stuck_live_claim(conn, r["task_id"], r, None, key=key):
-                n += _rewind_orphan(conn, key, r, why=why)
+            why = _recovery_due(conn, r, key)
+            if why is not None:
+                n += _rewind_orphan(conn, key, r, why=why or None)
     return n
 
 
@@ -1000,7 +1048,9 @@ def _inherit_notify_subs(
 
 def _machine_sub_chats(conn: sqlite3.Connection, parent_ids: tuple) -> list[str]:
     """``platform\\x1fchat_id`` of the parents' ``tui``/``hub`` subs whose chat is a machine session
-    (``is_machine_session``: a worker/cron/one-shot/subagent transcript), which a child must not inherit. [daveey]"""
+    (``is_machine_session``: a worker/cron/one-shot/subagent transcript), which a child must not inherit. Another
+    gateway's ``local-<sha256>`` chat with an unreleased ``created`` link on a parent or its ancestors
+    (``proven_foreign_chats``) is no machine. [daveey]"""
     from hermes_cli.kanban_origin import OriginError, gateway_names, parse_origin
     rows = conn.execute(
         f"SELECT DISTINCT platform, chat_id FROM kanban_notify_subs WHERE task_id IN ({','.join('?' * len(parent_ids))})"
@@ -1018,8 +1068,13 @@ def _machine_sub_chats(conn: sqlite3.Connection, parent_ids: tuple) -> list[str]
                 gateway = ""
         by_gateway.setdefault(gateway, {})[chat_id] = f"{platform}\x1f{chat_id}"
     out = []
+    proven: Optional[frozenset[str]] = None
     for gateway, chats in by_gateway.items():
         hits = machine_sessions(gateway, chats, local_gateway=me)
+        if hits and gateway != me:
+            if proven is None:
+                proven = proven_foreign_chats(conn, parent_ids, local_gateway=me)
+            hits = {c for c in hits if c not in proven}
         out.extend(chats[c] for c in hits)
     return out
 

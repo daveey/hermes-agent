@@ -21,7 +21,8 @@ def release_unused(conn, task, clock, *, evidence=None, unused=True):
                      (clock[0], '{"unused_grant":true}', run))
         conn.execute("UPDATE task_events SET payload = ? WHERE task_id = ? AND run_id = ? AND kind = 'claimed'",
                      ('{"holder":"hub"}', task, run))
-        conn.execute("UPDATE tasks SET status = 'ready', claim_lock = NULL, current_run_id = NULL WHERE id = ?", (task,))
+        conn.execute("UPDATE tasks SET status = 'ready', claim_lock = NULL, claim_expires = NULL, "
+                     "current_run_id = NULL WHERE id = ?", (task,))
         kb._append_event(conn, task, "released", {"unused_grant": unused, "retry_status": "ready"}, run_id=run)
         if evidence:
             kb._append_event(conn, task, evidence, {}, run_id=run)

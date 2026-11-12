@@ -33,8 +33,8 @@ def ready_since(conn, task_id: str, created_at: Optional[int] = None) -> int:
     included), else its creation."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_diagnostics import _last_ready_entry_ts
-    ended = conn.execute("SELECT MAX(ended_at) AS ended_at FROM task_runs WHERE task_id = ?", (task_id,)).fetchall()
-    since = _last_ready_entry_ts(kb.list_events(conn, task_id), [dict(r) for r in ended])
+    runs = conn.execute("SELECT * FROM task_runs WHERE task_id = ?", (task_id,)).fetchall()
+    since = _last_ready_entry_ts(kb.list_events(conn, task_id), [dict(r) for r in runs])
     return int(since or created_at or 0)
 
 
@@ -57,16 +57,35 @@ def _queue_words(place: dict[str, Any]) -> str:
         from hermes_cli import kanban_queue_position as kqp
         return kqp.headline(place) if place["lane"] == "machine" else str(kqp.describe(place))
     from hermes_cli.kanban_queue_position import ahead_words
+    from hermes_cli import kanban_dispatch_skip as skips
     ahead = place.get("ahead")
     words = ahead_words(place, "{n} card(s) ahead of it") if ahead is not None else "queue place unknown"
     if place.get("running") is not None and place.get("limit") is not None:
         words += f", {place['running']}/{place['limit']} worker slots busy"
+    elif place.get("limit") is not None and "running" in place:
+        words += f", running count unknown (cap {place['limit']})"
+    if place.get("skip"):  # the recorded reason comes first: a bare queue place read as an ordering wait [daveey]
+        words = f"{skips.words(place['skip'])}; {words}"
     return words
 
 
-def _options(parent_id: str, evidence: Optional[dict[str, Any]] = None) -> str:
+def _observation(payload: dict[str, Any]) -> str:
+    """``board <b>, observed <HH:MM:SSZ>, admission reason <r | unknown>`` for the notice text (empty on an old
+    payload without those fields)."""
+    if "observed_at" not in payload:
+        return ""
+    stamp = time.strftime("%H:%M:%SZ", time.gmtime(int(payload["observed_at"])))
+    admission = payload.get("admission") if isinstance(payload.get("admission"), dict) else {}
+    reason = admission.get("reason") or "unknown"
+    return f" [board {payload.get('board') or 'unknown'}, observed {stamp}, admission reason {reason}]"
+
+
+def _options(parent_id: str, evidence: Optional[dict[str, Any]] = None,
+             payload: Optional[dict[str, Any]] = None) -> str:
+    """Capacity advice, or the recorded skip's (or the unrecorded skip's) advice without priority changes."""
+    from hermes_cli.kanban_dispatch_skip import notice_advice
     from hermes_cli.kanban_priority import advice
-    return f"{NO_FIX}: " + advice(parent_id, evidence)
+    return f"{NO_FIX}: " + (notice_advice(payload or {}) or advice(parent_id, evidence))
 
 
 def notice_text(payload: Any) -> str:
@@ -76,10 +95,10 @@ def notice_text(payload: Any) -> str:
     title = str(payload.get("parent_title") or "").strip()[:120]
     named = f"{parent} ({title})" if title else parent
     advice = ("Check the current dispatcher verdict and resolve the recorded guard; priority changes do not clear it"
-              if payload.get("respawn_guard") else _options(parent, payload.get("priority_evidence")))
+              if payload.get("respawn_guard") else _options(parent, payload.get("priority_evidence"), payload))
     return (f"Waiting {payload.get('wait_minutes', '?')} min on parent {named}, which has been ready "
-            f"{payload.get('ready_minutes', '?')} min with no worker ({payload.get('queue') or 'queue place unknown'}). "
-            + advice + ".")
+            f"{payload.get('ready_minutes', '?')} min with no worker ({payload.get('queue') or 'queue place unknown'})"
+            + _observation(payload) + ". " + advice + ".")
 
 
 def ready_hint(conn, task, *, now: Optional[float] = None) -> Optional[str]:
@@ -95,8 +114,9 @@ def ready_hint(conn, task, *, now: Optional[float] = None) -> Optional[str]:
     place = _place(conn, task.id)
     if place.get("lane") == "respawn_guard":
         return f"Ready {_minutes(waited)} min, unclaimed; {kqp.describe(place)}."
+    from hermes_cli.kanban_dispatch_skip import notice_fields
     return (f"Ready {_minutes(waited)} min, unclaimed; {_queue_words(place)}. "
-            + _options(task.id, lane_evidence(conn, task.id)) + ".")
+            + _options(task.id, lane_evidence(conn, task.id), notice_fields(place, waited)) + ".")
 
 
 _CANDIDATES = (
@@ -144,6 +164,13 @@ def safe_sweep(conn) -> int:
     return posted + kanban_chat_wait.safe_sweep(conn)
 
 
+def _already_posted(conn, task_id: str, waiting_on: str, wait_key: Any, kind: str) -> bool:
+    from hermes_cli import kanban_db as kb
+    return any(kb._json_dict(p).get("wait_event_id") == wait_key and kb._json_dict(p).get("parent") == waiting_on
+               for (p,) in conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+                                        (task_id, kind)))
+
+
 def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_seconds: float,
                 ready_seconds: float, parent_title: Optional[str] = None, kind: str = NOTICE_KIND,
                 extra: Optional[dict[str, Any]] = None) -> bool:
@@ -153,23 +180,29 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
     wait (``kanban_chat_wait``), where ``waiting_on`` is ``task_id`` itself; ``extra`` adds payload fields (its
     clock hold). Returns True when it posted."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_host_counts as khc
     from hermes_cli import kanban_queue_position as kqp
+    if _already_posted(conn, task_id, waiting_on, wait_key, kind):
+        return False  # before the queue place: every tick asks again for each long-ready card [daveey]
     place = _place(conn, waiting_on)
+    observed = {"board": place.get("board") or khc.board_of(conn), "observed_at": place.get("observed_at") or int(time.time()),
+                "admission": ({"reason": "core_update_hold", "status": "held"} if (extra or {}).get("core_update_hold")
+                              else {"reason": None, "status": "unknown"})}
     guard = place.get("reason") if place.get("lane") == "respawn_guard" else None
     with kb.write_txn(conn):
-        if any(kb._json_dict(p).get("wait_event_id") == wait_key and kb._json_dict(p).get("parent") == waiting_on
-               for (p,) in conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
-                                        (task_id, kind))):
+        if _already_posted(conn, task_id, waiting_on, wait_key, kind):
             return False
         still = conn.execute("SELECT status, claim_lock FROM tasks WHERE id = ?", (waiting_on,)).fetchone()
         if still is None or still["status"] != "ready" or still["claim_lock"]:
             return False
+        from hermes_cli.kanban_dispatch_skip import notice_fields
         from hermes_cli.kanban_priority import lane_evidence
         kb._append_event(conn, task_id, kind, {
             "parent": waiting_on, "parent_title": parent_title, "wait_event_id": wait_key,
             "wait_minutes": _minutes(waited_seconds), "ready_minutes": _minutes(ready_seconds),
-            "queue": kqp.describe(place) if guard else _queue_words(place), **(extra or {}),
+            "queue": kqp.describe(place) if guard else _queue_words(place), **observed, **(extra or {}),
             "respawn_guard": guard,
             "priority_evidence": lane_evidence(conn, waiting_on),
+            **({} if guard else notice_fields(place, ready_seconds)),
         })
     return True

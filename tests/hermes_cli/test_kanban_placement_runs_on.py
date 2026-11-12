@@ -60,6 +60,7 @@ HANDLED_ELSEWHERE = {
     "placement",                  # the routing input itself
     "board", "parents", "workspace_kind",  # decide() keeps the card local on these
     "human_action_now",           # only meaningful with initial_status, which is uncarried
+    "hub_reason", "force_hub",    # consumed by hub admission at the origin, before routing [daveey]
 }
 
 

@@ -72,3 +72,27 @@ class TestBackgroundGuidanceRecipes:
 
     def test_quoted_ampersand_not_flagged(self):
         assert _foreground_background_guidance('git commit -m "a & b"') is None
+
+
+class TestRefusalSaysNothingRan:
+    """A refusal that doesn't say "nothing ran" invites re-sending only the refused tail, dropping
+    setup (a heredoc that writes the script). The tail then runs whatever stale file another session
+    left in the shared scratch dir under the same name."""
+
+    NOTHING_RAN = "Nothing in this command ran"
+
+    def test_heredoc_then_inline_ampersand_says_nothing_ran(self):
+        cmd = "cat > $TMPDIR/suite.sh <<'EOF'\npytest -q\nEOF\nbash $TMPDIR/suite.sh & sleep 280"
+        msg = _foreground_background_guidance(cmd)
+        assert msg is not None
+        assert msg.startswith("Foreground command uses '&' backgrounding.")  # forensics _FG_AMP prefix
+        assert self.NOTHING_RAN in msg
+        assert "heredocs" in msg
+
+    def test_nohup_refusal_says_nothing_ran(self):
+        msg = _foreground_background_guidance("mkdir -p out && nohup ./worker.sh > /dev/null 2>&1")
+        assert msg is not None and self.NOTHING_RAN in msg
+
+    def test_server_refusal_says_nothing_ran(self):
+        msg = _foreground_background_guidance("cd app && uvicorn main:app --port 8000")
+        assert msg is not None and self.NOTHING_RAN in msg

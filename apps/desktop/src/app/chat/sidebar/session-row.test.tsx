@@ -25,7 +25,10 @@ import { SidebarSessionRow } from './session-row'
 
 afterEach(cleanup)
 
-vi.mock('@/i18n', () => ({
+vi.mock('@/i18n', async () => {
+  const { enSessionRowStatus } = await import('@/i18n/en_session_row_status')
+
+  return {
   useI18n: () => ({
     t: {
       sidebar: {
@@ -35,6 +38,7 @@ vi.mock('@/i18n', () => ({
           home: 'Home'
         },
         row: {
+          ...enSessionRowStatus,
           ageMin: 'm',
           ageNow: 'now',
           kanbanTasks: (open: number, blocked: number) => `${open} open, ${blocked} blocked`,
@@ -69,7 +73,8 @@ vi.mock('@/i18n', () => ({
       }
     }
   })
-}))
+  }
+})
 
 vi.mock('@/app/chat/profile-tag', () => ({ ProfileTag: () => null }))
 vi.mock('@/app/chat/session-drag', () => ({ startSessionDrag: vi.fn() }))
@@ -632,9 +637,47 @@ describe('SidebarSessionRow kanban counts', () => {
     expect(screen.getByTestId('session-row-kanban-counts').getAttribute('aria-label')).toBe('2 open, 0 blocked')
   })
 
+  afterEach(() => vi.useRealTimers())
+  it('shows time-only expiry even when the row stays background and its props do not change', async () => {
+    const { $kanbanObservationTick } = await import('@/store/kanban-observation')
+    const fixture = await import('../../../../../../schemas/fixtures/execution-observations-v1.json')
+    vi.useFakeTimers()
+    vi.setSystemTime(1001_000)
+
+    const { container } = renderRow(makeSession({
+      execution_observations: [{ ...fixture.base, valid_until: 1010 }],
+      kanban_active: 1, kanban_parked: 1, message_count: 2, title: 'Expiry'
+    }))
+
+    expect(container.querySelector('[data-kanban-count="unknown"]')).toBeNull()
+    expect(container.querySelector('[data-sidebar-stripe]')).toBeNull()
+    await act(async () => {
+      vi.setSystemTime(1011_000)
+      $kanbanObservationTick.set($kanbanObservationTick.get() + 1)
+    })
+    expect(container.querySelector('[data-kanban-count="unknown"]')?.textContent).toBe('1')
+    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('waiting')
+  })
+
+  it('explains unknown work in the accessible label and tooltip without implying a new poll', () => {
+    vi.useFakeTimers()
+    renderRow(makeSession({ execution_observations: [{ source: 'unavailable.work' }], title: 'Unknown' }))
+    const counts = screen.getByTestId('session-row-kanban-counts')
+    const explanation = '1 work item has unknown current status: evidence is missing, expired or unverified. This does not mean done; no new check was requested.'
+
+    expect(counts.querySelector('[data-kanban-count="unknown"]')?.textContent).toBe('1')
+    expect(counts.getAttribute('aria-label')).toBe(explanation)
+    act(() => {
+      fireEvent.pointerMove(counts, { pointerType: 'mouse' })
+      vi.advanceTimersByTime(700)
+    })
+    expect(screen.getByRole('tooltip').textContent).toBe(explanation)
+    vi.useRealTimers()
+  })
+
   it('shows open and blocked counts right after the age', () => {
     const { container } = renderRow(
-      makeSession({ kanban_active: 3, kanban_blocked: 1, title: 'Waiting' } as Partial<SessionInfo> & {
+      makeSession({ execution_observations: [], kanban_active: 3, kanban_blocked: 1, title: 'Waiting' } as Partial<SessionInfo> & {
         title: string
       }),
       { card: true }
@@ -648,6 +691,14 @@ describe('SidebarSessionRow kanban counts', () => {
     const time = container.querySelector('time')!
     // The counts follow the age in document order.
     expect(time.compareDocumentPosition(counts) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('labels live cards from an older producer without observations as unknown, not certain work', () => {
+    renderRow(makeSession({ kanban_active: 3, kanban_blocked: 1, title: 'Legacy' } as Partial<SessionInfo> & { title: string }))
+
+    const label = screen.getByTestId('session-row-kanban-counts').getAttribute('aria-label') ?? ''
+    expect(label).toContain('3 work items have unknown current status')
+    expect(label).toContain('3 open, 1 blocked')
   })
 
   it('shows blocked-only work and hides the zero side', () => {
@@ -1053,6 +1104,32 @@ describe('SidebarSessionRow stored outcome', () => {
 
     expect(settled.container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('stuck')
     expect(settled.container.querySelector('[data-working="true"]')).toBeNull()
+  })
+
+  it('renders initial partial roster uncertainty beside live work and repaints clock-only expiry', async () => {
+    const { $liveWorkRoster, setLiveWorkRosterSource } = await import('@/store/live-work-roster')
+    const { gatewayRouteState } = await import('@/store/gateway')
+    const { $kanbanObservationTick } = await import('@/store/kanban-observation')
+    const fixture = await import('../../../../../../schemas/fixtures/execution-observations-v1.json')
+    vi.useFakeTimers()
+    vi.setSystemTime(1001000)
+    const session = makeSession({ id: 'roster-row', title: 'Roster', message_count: 2 })
+    const source = gatewayRouteState(null, 'default').key
+    const record = { ...fixture.base, identity: { ...fixture.base.identity, kind: 'process', session: 'roster-row' }, valid_until: 1010 }
+    setLiveWorkRosterSource(source, [{ session_id: session.id, background: 1, subagents: 1, execution_observations: [record] }], 1001000, [session.id])
+
+    try {
+      const { container } = renderRow(session)
+      expect(container.querySelector('[data-kanban-count="unknown"]')?.textContent).toBe('1')
+      await act(async () => {
+        vi.setSystemTime(1011000)
+        $kanbanObservationTick.set($kanbanObservationTick.get() + 1)
+      })
+      expect(container.querySelector('[data-kanban-count="unknown"]')?.textContent).toBe('2')
+    } finally {
+      $liveWorkRoster.set({})
+      vi.useRealTimers()
+    }
   })
 
   it('reads the park from row.muted', () => {

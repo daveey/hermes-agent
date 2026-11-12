@@ -234,6 +234,16 @@ def child_task_message(goal: str, context: Optional[str]) -> str:
     return prefix + goal
 
 
+def _build_private_scratch_block(private_scratch: str, shared_cwd: Optional[str]) -> str:
+    """System-prompt block for a child without git worktree isolation: it inherits the parent's cwd, which the parent
+    and sibling subagents also write, so it gets a private folder for its own scratch files (self-heal agent-c97f5ffde4)."""
+    where = f"Your working directory {shared_cwd}" if shared_cwd else "Your working directory"
+    return (
+        f"PRIVATE SCRATCH: {private_scratch} (yours alone). {where} is SHARED with your parent and sibling "
+        "subagents: never overwrite or delete files there that you did not create in this task; put new scratch "
+        "files, scripts and logs in the private folder."
+    )
+
 def _resolve_workspace_hint(parent_agent) -> Optional[str]:
     """Best-effort local workspace hint for child prompts: only a concrete
     absolute directory is ever injected (never a fake container path).

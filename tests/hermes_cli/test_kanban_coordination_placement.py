@@ -1,4 +1,5 @@
 """Coordination tooling is portable only to attested worker destinations."""
+import json
 import time
 
 import pytest
@@ -17,6 +18,14 @@ def fleet(monkeypatch):
     monkeypatch.setattr(kp.reg, "self_gateway", lambda: "hub")
     monkeypatch.setattr(wn, "registry", lambda: {"machines": machines})
     return cfg, entry, machines
+
+
+@pytest.fixture
+def board_maps_access(monkeypatch):
+    """The Board after it maps declared access (ssh:mbp/ssh:mini/hub:read) to pool labels; until then core keeps
+    those cards home (``BOARD_PLACEABLE_ACCESS`` is empty), so the attestation logic below is dormant."""
+    from hermes_cli import kanban_placement_coordination as coord
+    monkeypatch.setattr(coord, "BOARD_PLACEABLE_ACCESS", frozenset(coord.ACCESS_LABELS))
 
 
 def reason(body, cfg, requires=None):
@@ -65,10 +74,108 @@ def test_unusable_attestation_fails_closed(fleet, field, value):
 
 
 def test_every_member_must_carry_the_capability(fleet):
-    cfg, _, machines = fleet
+    cfg, entry, machines = fleet
     cfg["worker_pools"]["hub"].append("other")
-    machines["other"] = {"labels": []}
+    machines["other"] = {**entry, "labels": []}  # fresh, active, unheld: it could take the card
     assert reason("cross_task read", cfg) == "needs worker coordination capability"
+
+
+# --- kanban-1663abf6ab: only members that could take the card are judged -----------------------------------
+@pytest.mark.parametrize("field,value", [
+    ("hold", True), ("state", "disabled"), ("pickup", None), ("last_seen", 0),
+    ("last_seen", (time.time() + 3600) * 1000),
+], ids=["held", "inactive", "pickup_off", "stale", "future"])
+def test_unusable_member_is_skipped_not_a_refusal(fleet, board_maps_access, field, value):
+    cfg, entry, machines = fleet
+    cfg["worker_pools"]["hub"] = ["held", "worker"]
+    machines["held"] = {**entry, "labels": [], field: value}
+    assert reason("cross_task read; token-broker exec for gh read", cfg) is None
+    assert reason("ssh mini and read the log", cfg, ["ssh:mini"]) == "needs worker coordination capability"
+    entry["labels"].append("capability:ssh-mini")
+    assert reason("ssh mini and read the log", cfg, ["ssh:mini"]) is None
+
+
+def test_every_member_held_is_not_attested(fleet):
+    cfg, entry, machines = fleet
+    cfg["worker_pools"]["hub"] = ["a", "worker"]
+    machines["a"] = {**entry, "hold": True}
+    entry["hold"] = True
+    assert reason("cross_task read", cfg) == "needs worker coordination capability"
+
+
+def test_unknown_member_is_skipped_but_malformed_entry_fails_closed(fleet):
+    cfg, _, machines = fleet
+    cfg["worker_pools"]["hub"] = ["retired", "worker"]
+    assert reason("cross_task read", cfg) is None
+    machines["retired"] = "corrupt"
+    assert reason("cross_task read", cfg) == "needs worker coordination capability"
+
+
+def test_hub_pool_with_one_held_member_attests(fleet):
+    """The 11-12 hub pool: worker-1 held, workers 2-6 carrying every label (readback False before the fix)."""
+    from hermes_cli import kanban_placement_coordination as coord
+    _, entry, machines = fleet
+    pool = ["worker-2", "worker-1", *(f"worker-{n}" for n in range(3, 7))]
+    entry["labels"] += ["capability:terminal"]
+    machines.update({name: dict(entry) for name in pool})
+    machines["worker-1"]["hold"] = True
+    for label in ("capability:coordination-read", "capability:token-broker", "capability:terminal"):
+        assert coord.attested(pool, {label})
+    machines["worker-4"] = {**entry, "labels": []}
+    assert not coord.attested(pool, {"capability:token-broker"})
+
+
+def _home_card(**extra):
+    return {"title": "Review PR 1", "body": "token-broker exec for gh; kanban_show the parent",
+            "assignee": "default", "workspace_kind": "scratch", "requires": '["terminal"]', **extra}
+
+
+def test_stranded_names_free_attesting_pool_workers(fleet, monkeypatch):
+    from hermes_cli import kanban_placement_coordination as coord
+    cfg, entry, machines = fleet
+    cfg["carried_requires"] = ["terminal"]
+    cfg["worker_pools"]["hub"] = ["busy", "worker", "held"]
+    entry.update(max_card_runs=2, metrics={"active_card_runs": 1})
+    machines["busy"] = {**entry, "metrics": {"active_card_runs": 2}}
+    machines["held"] = {**entry, "hold": True}
+    assert coord.stranded(_home_card(), cfg, coord.REASON) == ["worker"]
+    assert coord.stranded(_home_card(), cfg, None) == []  # created portable: not this diagnostic
+    assert coord.stranded(_home_card(placement_policy="worker-first-v1"), cfg, coord.REASON) == []
+    assert coord.stranded(_home_card(body="token-broker; systemctl restart x"), cfg, coord.REASON) == []
+    entry["labels"] = []
+    assert coord.stranded(_home_card(), cfg, coord.REASON) == []
+
+
+def test_queue_note_names_a_home_card_the_pool_could_run(fleet, tmp_path, monkeypatch):
+    """The read of a hub card stranded by its creation verdict says so, instead of "waiting for a local slot"."""
+    from pathlib import Path
+
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_queue_position as kqp
+    cfg, entry, _ = fleet
+    entry.update(max_card_runs=2, metrics={"active_card_runs": 0})
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(kp, "config", dict)  # created home-only, as under the 11-12 pool
+    kb._INITIALIZED_PATHS.discard(str(kb.kanban_db_path(board="default").resolve()))
+    kb.init_db()
+    with kbc.connect() as conn:
+        stuck = kb.create_task(conn, title="Review PR 1", body="token-broker exec for gh", assignee="default",
+                               placement_audit={"portable_reason": "needs worker coordination capability"})
+        plain = kb.create_task(conn, title="Review PR 2", body="token-broker exec for gh", assignee="default",
+                               placement_audit={"portable_reason": None})
+        monkeypatch.setattr(kp, "config", lambda: cfg)
+        place = kqp.position(conn, kb.get_task(conn, stuck))
+        assert place["lane"] == "local" and place["pool_could_run"] == ["worker"]
+        note = kqp.describe(place)
+        assert "stale creation verdict" in note and "--runs-on machine:worker" in note
+        assert "pool_could_run" not in kqp.position(conn, kb.get_task(conn, plain))
+        entry["hold"] = True
+        assert "pool_could_run" not in kqp.position(conn, kb.get_task(conn, stuck))
 
 
 @pytest.mark.parametrize("body", [
@@ -298,7 +405,7 @@ def test_ordinary_work_does_not_read_registry(monkeypatch):
 ACCESS = ["capability:ssh-mbp", "capability:ssh-mini", "capability:hub-read"]
 
 
-def test_ssh_card_needs_mac_ssh_attestation(fleet):
+def test_ssh_card_needs_mac_ssh_attestation(fleet, board_maps_access):
     cfg, entry, _ = fleet
     assert reason("ssh mini and check the watcher output", cfg) == "home gateway marker"
     entry["labels"] += ACCESS
@@ -313,7 +420,7 @@ def test_ssh_attestation_needs_the_declared_mac_key(fleet):
 
 @pytest.mark.parametrize("body", ["read the log on the hub", "the hub's log output", "journalctl -u x",
                                     "query kanban.db for the run"])
-def test_hub_reads_need_hub_read_attestation(fleet, body):
+def test_hub_reads_need_hub_read_attestation(fleet, board_maps_access, body):
     cfg, entry, _ = fleet
     assert reason(body, cfg) == "home gateway marker"
     entry["labels"] += ["capability:hub-read"]
@@ -338,8 +445,47 @@ def test_claim_refusal_revalidates_access_labels(fleet):
     assert claim_refusal(card, "worker") is None
 
 
-def test_unattested_access_leaves_cards_home_as_before(fleet):
+def test_unattested_access_leaves_cards_home_as_before(fleet, board_maps_access):
     cfg, entry, _ = fleet
     entry["labels"] += ["capability:hub-read"]  # hub reads attested, ssh not
     assert reason("ssh mini and read the log on the hub", cfg) == "home gateway marker"
     assert reason("read the log on the hub", cfg, ["hub:read"]) is None
+
+
+# --- PR #1330 review: the Board cannot place declared access yet (worker_placement.ts supportedRequirement) ----
+@pytest.mark.parametrize("requires", [["ssh:mini"], ["ssh:mbp"], ["hub:read"], ["terminal", "hub:read"]])
+def test_declared_access_stays_home_until_the_board_maps_it(fleet, monkeypatch, requires):
+    """Every eligible member attests every label, yet the Board would leave an enrolled card queued
+    (``task_requirement_unsupported``): keep it home-only, where it at least runs."""
+    from hermes_cli import kanban_placement_coordination as coord
+    cfg, entry, machines = fleet
+    cfg["carried_requires"] = ["terminal"]
+    cfg["worker_pools"]["hub"] = ["held", "worker"]
+    machines["held"] = {**entry, "hold": True}
+    entry["labels"] += ACCESS
+    assert reason("read the log", cfg, requires) == coord.BOARD_REASON
+    assert reason("read the log", cfg, ["terminal"]) is None
+    card = {"title": "Read the log", "body": "read the log", "assignee": "default", "workspace_kind": "scratch",
+            "requires": json.dumps(requires)}
+    entry.update(max_card_runs=2, metrics={"active_card_runs": 0})
+    assert coord.stranded(card, cfg, coord.REASON) == []
+    monkeypatch.setattr(coord, "BOARD_PLACEABLE_ACCESS", frozenset(coord.ACCESS_LABELS))
+    assert reason("read the log", cfg, requires) is None
+    assert coord.stranded(card, cfg, coord.REASON) == ["worker"]
+
+
+def test_declared_hub_write_is_board_placeable(fleet):
+    """hub:write is the one declared access the Board maps (``capability:hub-write``): it is not refused, and a
+    held member still does not decide attestation for it."""
+    from hermes_cli import kanban_placement_coordination as coord
+    cfg, entry, machines = fleet
+    cfg["carried_requires"] = ["terminal"]
+    cfg["worker_pools"]["hub"] = ["held", "worker"]
+    machines["held"] = {**entry, "labels": [], "hold": True}
+    assert coord.board_refusal(["hub:write"]) is None
+    assert coord.board_refusal(["hub:write", "hub:read"]) == coord.BOARD_REASON
+    entry["labels"] = [v for v in entry["labels"] if v != "capability:hub-write"]
+    assert coord.attested(["held", "worker"], {"capability:hub-write"}) is False
+    entry["labels"].append("capability:hub-write")
+    assert coord.attested(["held", "worker"], {"capability:hub-write"}) is True
+    assert reason("read the log", cfg, ["hub:write"]) is None

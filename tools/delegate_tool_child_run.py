@@ -7,6 +7,7 @@ import logging
 import contextvars
 import json
 import os
+import tempfile
 import threading
 import time
 from tools.delegation_redaction import redact_child_result, redact_child_text
@@ -832,6 +833,7 @@ class _ChildRun:
     heartbeat: Any = None
     child_start: float = field(default_factory=time.monotonic)
     worktree_info: Optional[dict[str, str]] = None
+    private_scratch: Optional[str] = None
     child_task_id: str = ""
     parent_task_id: Optional[str] = None
     wall_start: float = 0.0
@@ -890,6 +892,7 @@ class _ChildRun:
         # action='continue': the child picks up where it stopped (its last cwd, its own worktree), not the parent's.
         resumed = getattr(self.child, "_delegate_continue_workspace", None)
         resumed = resumed if isinstance(resumed, dict) else None
+        parent_cwd: Optional[str] = None
         with _quiet("Child cwd seed failed: %s"):
             from tools.terminal_tool import get_session_cwd, record_session_cwd, register_container_alias
             parent_cwd = get_session_cwd(self.parent_task_id)
@@ -909,6 +912,8 @@ class _ChildRun:
             # the goal message instead (same turn, no system-prompt mutation).
             from tools.subagent_worktree import build_worktree_context_note
             self.goal = self.goal + build_worktree_context_note(self.worktree_info)
+        else:
+            self.attach_private_scratch(parent_cwd)
         self.wall_start = time.time()
         self.parent_reads_snapshot = list(file_state.known_reads(self.parent_task_id)) if self.parent_task_id else []
         with _quiet("Durable subagent record failed: %s"):
@@ -917,6 +922,24 @@ class _ChildRun:
             if self.heartbeat is not None:
                 self.heartbeat.checkpoint = lambda: checkpoint(self)
             self.child.tool_progress_callback = _checkpointing(self.child.tool_progress_callback, lambda: checkpoint(self))
+
+    def attach_private_scratch(self, parent_cwd: Optional[str]) -> None:
+        """Without git isolation the child shares its parent's cwd with the parent and its siblings: give it a
+        private folder under TMPDIR (pruned with the rest of scratch) and name both on its goal turn, like the
+        worktree note: the system prompt stays byte-identical across siblings so they share one prompt cache. The
+        session cwd stays the parent's, since brief paths are relative to it. Local backend only: a host folder is
+        invisible to a docker/ssh child's tools."""
+        from tools import subagent_worktree
+        from tools.delegate_tool_progress import _build_private_scratch_block, _resolve_workspace_hint
+        if not subagent_worktree.local_backend_active():
+            return
+        with _quiet("private scratch setup failed: %s"):
+            self.private_scratch = tempfile.mkdtemp(
+                prefix=f"subagent-{self.subagent_id or self.child_task_id}-",
+                dir=os.environ.get("TMPDIR") or tempfile.gettempdir(),
+            )
+            shared = parent_cwd or _resolve_workspace_hint(self.parent_agent)
+            self.goal = self.goal + "\n\n" + _build_private_scratch_block(self.private_scratch, shared)
 
     def finish_failed(
         self, entry: dict[str, Any], late_steer: Optional[str], *, preview: str, summary: str = "", status: Optional[str] = None,

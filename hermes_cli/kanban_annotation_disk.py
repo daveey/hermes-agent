@@ -110,7 +110,7 @@ def save(scope: tuple[str, ...], parts: tuple) -> bool:
     if not enabled():
         return False
     try:
-        if len(parts) != _PARTS:
+        if len(parts) not in (_PARTS, _PARTS + 1):
             return False
         body = {
             "version": _VERSION,
@@ -141,7 +141,7 @@ def load(scope: tuple[str, ...], *, max_age_s: float = MAX_AGE_S) -> tuple[tuple
         if not 0 <= time.time() - saved_at <= max_age_s:
             return None
         raw = body["parts"]
-        if not isinstance(raw, list) or len(raw) != _PARTS or not all(isinstance(p, dict) for p in raw):
+        if not isinstance(raw, list) or len(raw) not in (_PARTS, _PARTS + 1) or not all(isinstance(p, dict) for p in raw):
             return None
         parts = tuple({k: _decode(v) for k, v in part.items()} for part in raw)
         return parts, saved_at

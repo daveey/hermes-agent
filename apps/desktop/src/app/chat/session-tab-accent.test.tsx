@@ -3,11 +3,15 @@ import type { WritableAtom } from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { PaneTab } from '@/components/ui/pane-tab'
+import { rowExecution } from '@/store/execution-observation-row'
+import { $kanbanObservationTick } from '@/store/kanban-observation'
 import { $selectedStoredSessionId, $sessions } from '@/store/session'
 import { $blockedSessionIds } from '@/store/session-blocked'
 import { $sessionDotStateById, type SessionDotState } from '@/store/session-dot-state'
 import type * as DotStateModule from '@/store/session-dot-state'
 import type { SessionInfo } from '@/types/hermes'
+
+import fixture from '../../../../../schemas/fixtures/execution-observations-v1.json'
 
 import { SessionTabAccent } from './session-tab-accent'
 import { SessionTabMenu, WorkspaceTabMenu } from './session-tile'
@@ -30,6 +34,7 @@ function tab(session: SessionInfo | null = row) {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   $blockedSessionIds.set([])
   $selectedStoredSessionId.set(null)
   $sessions.set([])
@@ -37,6 +42,35 @@ afterEach(() => {
 })
 
 describe('session tab underline', () => {
+  it.each([false, true])('expires observation-derived waiting on the existing tick (listed=%s)', async listed => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1001_000)
+
+    const session = {
+      ...row,
+      kanban_observed_at: 1001,
+      execution_observations: [{
+        ...fixture.base, state: 'waiting', valid_until: 1010,
+        wait: {
+          kind: 'dependency', owner: fixture.base.owner, predicate: 'parent finishes', since: 1000,
+          target: fixture.base.identity
+        }
+      }]
+    } as SessionInfo
+
+    if (listed) { $sessions.set([session]) }
+    const { container } = render(tab(session))
+    const stripe = () => container.querySelector('[data-session-tab-accent]')?.getAttribute('data-session-tab-accent')
+
+    expect(stripe()).toBe('waiting')
+    await act(async () => {
+      vi.setSystemTime(1011_000)
+      $kanbanObservationTick.set($kanbanObservationTick.get() + 1)
+    })
+    expect(rowExecution(session)).toMatchObject({ unknown: 1, waiting: 0 })
+    expect(stripe()).toBe('neutral')
+  })
+
   it('scopes the accent on the real workspace and tile tab wrappers', () => {
     const { container, rerender } = render(
       <WorkspaceTabMenu>

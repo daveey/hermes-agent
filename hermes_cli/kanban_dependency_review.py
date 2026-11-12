@@ -6,6 +6,9 @@ A completed review then authorizes one continuation of those same PRs: a repair
 when it records changes or an absent/unrecognised verdict with an exact
 ``reviewed_sha``/``head``/``exact_head``, or a landing
 continuation when it records an exact-head approval. The next claim consumes it.
+A review parent linked after the park by someone else (an orchestrator's
+``kanban_link``) counts as awaited only as an exact-current-head re-review of a
+captured PR (:mod:`kanban_dependency_review_relink`).
 A later comment that repeats a captured PR does not re-arm the hold; a new PR,
 a review naming a different PR, or a crash/reclaim does.
 """
@@ -94,8 +97,10 @@ def _completed_review_run(conn, parent_id, parked_at, owner_run_id):
         # A checkpointed move can leave the parent's run on another gateway.
         # Use the refreshed Board result, never a move-supplied verdict or a
         # source database's integer run ID as a local identity.
-        from hermes_cli.kanban_move_parent_evidence import result
+        from hermes_cli.kanban_move_parent_evidence import owner_faulted_since, result
         owner = conn.execute("SELECT task_id FROM task_runs WHERE id = ?", (owner_run_id,)).fetchone()
+        if owner and owner_faulted_since(conn, owner[0], parked_at):
+            return None  # Neither foreign source may release a crashed/reclaimed owner.
         mirrored = result(conn, owner[0], parent_id) if owner else None
         if (mirrored and mirrored.get("parent_status") == "done" and mirrored.get("was_claimed")
                 and mirrored.get("outcome") == "completed"
@@ -335,18 +340,23 @@ def _checkpoint_matches_run(evidence, run):
 
 
 def resumes_review(conn, task_id, pr_urls, *, discharged=()):
-    """One continuation only: claiming any new run consumes the park's permission."""
+    """One continuation only: claiming any new run consumes the park's permission
+    (a hermes-sync core-update requeue does not: :mod:`kanban_core_update_requeue`)."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_core_update_requeue import latest_run_skipping_requeues
     from hermes_cli.kanban_db_dispatch_pr_policy import norm_pr
 
+    # The park must be the card's latest run that executed. Passed over: a core-update
+    # requeue (that pause is not the consuming claim; 2026-11-12: t_01a1ce8aff1f09c1 held
+    # after an exact-head APPROVE) and a Board grant returned unused (it ran nothing). [daveey]
+    latest = latest_run_skipping_requeues(conn, task_id)
     row = conn.execute(
         "SELECT e.payload, e.created_at, r.*, t.assignee "
         "FROM task_events e JOIN task_runs r ON r.id = e.run_id "
         "JOIN tasks t ON t.id = e.task_id "
         "WHERE e.task_id = ? AND e.kind = 'dependency_wait' AND r.task_id = t.id "
-        "AND r.id = (SELECT MAX(id) FROM task_runs WHERE task_id = t.id) "
-        "ORDER BY e.id DESC LIMIT 1", (task_id,),
-    ).fetchone()
+        "AND r.id = ? ORDER BY e.id DESC LIMIT 1", (task_id, latest["id"]),
+    ).fetchone() if latest is not None else None
     if row is None or row["outcome"] != "blocked" or row["profile"] != row["assignee"]:
         return False
     payload = kb._json_dict(row["payload"])
@@ -354,8 +364,9 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     if not isinstance(evidence, dict) or not _checkpoint_matches_run(evidence, row):
         return False
     parents = kb.parent_ids(conn, task_id)
-    if (not parents or sorted(parents) != evidence.get("parents")
-            or kb.unsatisfied_parents(conn, task_id)):
+    checkpointed = evidence.get("parents")
+    if (not parents or not isinstance(checkpointed, list) or kb.unsatisfied_parents(conn, task_id)
+            or [p for p in parents if p in checkpointed] != checkpointed):
         return False
     captured = evidence.get("prs")
     if not isinstance(captured, list) or not all(isinstance(u, str) for u in captured):
@@ -367,13 +378,21 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     parked_at = kb._to_epoch(row["created_at"])
     if parked_at is None:
         return False
+    # A parent the checkpoint never saw counts as awaited only as an exact-current-head
+    # re-review of a captured PR, linked after the park (an orchestrator's kanban_link).
+    late = {p for p in parents if p not in checkpointed}
+    if late:
+        from hermes_cli.kanban_dependency_review_relink import late_review_parents
+        if not late_review_parents(conn, task_id, late, parked_at, row["id"], captured_set):
+            return False
     parents = _awaited_parents(conn, parents, evidence, parked_at)
     if not parents:
         return False
     urls -= {norm_pr(u) for u in discharged}
     if not urls:
         return False
-    reviewed = set().union(*(_reviewed_prs(conn, p, parked_at, row["id"], captured_set) for p in parents))
+    repairs = {p: _reviewed_prs(conn, p, parked_at, row["id"], captured_set) for p in parents}
+    reviewed = set().union(*repairs.values())
     if urls.issubset(reviewed):
         return True
     # Without repair evidence, every awaited parent must approve a checkpointed PR. One approval
@@ -383,10 +402,14 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     # A parent that is here only because its history could not be proven finished before the
     # park (legacy checkpoint, reopened or replica-unverified) must approve every holding PR on
     # its own: its pre-park approval of another PR is not evidence for this one.
+    # Mixed split reviews (one named parent requests changes on its PR, a sibling approves
+    # the other) also resume: each named parent left exact-head evidence for a checkpointed
+    # PR and together they cover every holding PR. Still no merge approval, one continuation.
     approvals = {p: _approval_prs(conn, p, parked_at, row["id"], captured_set) for p in parents}
-    if not all(approvals.values()):
+    if not all(approvals[p] or repairs[p] for p in parents):
         return False
-    named = evidence.get("awaited") if isinstance(evidence.get("awaited"), list) else ()
+    named_awaited = evidence.get("awaited")
+    named = [*(named_awaited if isinstance(named_awaited, list) else ()), *late]
     if not all(urls.issubset(a) for p, a in approvals.items() if p not in named):
         return False
-    return urls.issubset(set().union(*approvals.values()))
+    return urls.issubset(reviewed.union(*approvals.values()))

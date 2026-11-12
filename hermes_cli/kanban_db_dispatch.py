@@ -105,7 +105,6 @@ DEFAULT_GUARD_HOLD_CAP_LONG_SECONDS = 6 * 3600
 _GUARD_HOLD_SHORT_CAP_REASONS = frozenset({"blocker_auth"})
 _GUARD_HOLD_EXEMPT_REASONS = frozenset({"shared_blocker", "model_provider_mismatch", "model_pin_not_in_routing_registry", "subscription_quota_reset"})
 
-
 def _env_seconds(name: str, default: int) -> int:
     try:
         return max(0, int(os.environ.get(name, "") or default))
@@ -155,16 +154,12 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
 @dataclass
 class DispatchResult:
     """Outcome of a single ``dispatch`` pass.
-
     ``kanban.default_assignee`` applied this tick before spawning (#27145). Surfaces the auto-assignment to
     telemetry / CLI / dashboard so the operator can see when the dispatcher is acting on the fallback rule
-    ``kanban.max_in_progress_per_profile`` (#21582). Each entry is ``(task_id, assignee,
-    current_running_count)``. NOT an operator-actionable failure — the task will be picked up on a
-    subsequent tick when the assignee has capacity. Separate bucket so telemetry / dashboards can show "this
-    profile is busy" vs
-    the board's dispatch lock (issue #35240). A losing dispatcher does no DB writes this tick — the lock
-    holder is making progress on the same board. This is the steady-state signal that a single-writer guard
-    is
+    ``kanban.max_in_progress_per_profile`` (#21582): ``(task_id, assignee, current_running_count)``.
+    NOT an operator-actionable failure — the task will be picked up on a subsequent tick when the assignee
+    has capacity. Separate bucket so telemetry / dashboards can show "this profile is busy" vs the board's
+    dispatch lock (issue #35240). A losing dispatcher does no DB writes this tick; the holder is progressing.
     """
 
     scheduling_admitted: bool = False
@@ -207,8 +202,8 @@ class DispatchResult:
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
     capsule_refused: list[tuple[str, str]] = field(default_factory=list)  # (task_id, code): kanban_capsule_admission [daveey]
-    remote_archived: list[str] = field(default_factory=list)
-    """Task ids archived on a stop request from another gateway (``kanban_remote_stop``)."""
+    pinned_quota_held: list = field(default_factory=list)  # (task_id, model, provider, reset): kanban_dispatch_skip
+    remote_archived: list[str] = field(default_factory=list)  # archived on another gateway's stop (kanban_remote_stop)
     auto_blocked: list[str] = field(default_factory=list)
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
     agent_block_escalated: list[str] = field(default_factory=list)
@@ -1578,13 +1573,10 @@ def check_respawn_guard(
             _kbq.clear_quota_error(conn, task_id, stamp)
         return guard
     # Only the latest run gates admission; quota and infrastructure failures are neutral.
+    # A core-update requeue or an unused Board grant ran nothing and is not that run. [daveey]
+    from hermes_cli.kanban_core_update_requeue import latest_ended_run_skipping_requeues
     rl_cooldown = _kb._resolve_rate_limit_cooldown_seconds()
-    latest_run = conn.execute(
-        "SELECT outcome, ended_at, metadata FROM task_runs "
-        "WHERE task_id = ? AND ended_at IS NOT NULL "
-        "ORDER BY ended_at DESC LIMIT 1",
-        (task_id,),
-    ).fetchone()
+    latest_run = latest_ended_run_skipping_requeues(conn, task_id, by_ended_at=True)
     if latest_run is not None and latest_run["outcome"] == "spawn_failed":
         if rl_cooldown > 0 and _kb._json_dict(latest_run["metadata"]).get("infrastructure"):
             ended_at = _kb._to_epoch(latest_run["ended_at"])
@@ -1933,7 +1925,7 @@ def _dispatch_lane_task(
     task_id = row["id"]
     from hermes_cli.kanban_db_dispatch_admission import lane_admission_refused  # nonspawnable, capsule [daveey]
     if lane_admission_refused(conn, task_id, assignee, result, profile_exists=_profile_exists_fn(),
-                              spawn_fn=spawn_fn, dry_run=dry_run):
+                              spawn_fn=spawn_fn, dry_run=dry_run, lane=lane):
         return False
     # Per-profile cap: one profile's local model / API quota / browser pool
     # must not be overwhelmed by a fan-out even with global headroom.
@@ -2023,17 +2015,16 @@ def _dispatch_lane_task(
         _count_spawn(claimed.assignee)
         return True
     except Exception as exc:
-        from tools.process_registry import RestartSafeScopeUnavailable
-        from hermes_cli.kanban_review_model import ReviewModelUnavailable
+        from hermes_cli.kanban_review_model import admission_refusal
 
-        # Admission failed before any worker ran; preserve its retry budget.
-        infrastructure = isinstance(exc, (RestartSafeScopeUnavailable, ReviewModelUnavailable))
+        # Admission failed before any worker ran; preserve its retry budget (a repeated review refusal: visible block).
+        infrastructure, exhausted, extra = admission_refusal(conn, claimed.id, exc)
         if infrastructure:
             _kb._log.warning("kanban dispatcher: spawn of %s deferred, host cannot place the worker: %s", claimed.id, exc)
         if _record_task_failure(
             conn, claimed.id, str(exc),
             outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
-            infrastructure=infrastructure,
+            infrastructure=infrastructure, force_trip=exhausted, event_payload_extra=extra,
         ):
             result.auto_blocked.append(claimed.id)
         return False
@@ -2118,11 +2109,8 @@ def _run_reclaim_phase(
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
     from hermes_cli.kanban_idle_candidates import sweep_shared_blockers
     sweep_shared_blockers(conn, result)
-    try:
-        from hermes_cli import kanban_provider_walls as _walls
-        _walls.alert_on_storm(conn, board=board)
-    except Exception:
-        _kb._log.warning("kanban: rate-limit storm alert failed", exc_info=True)
+    from hermes_cli.kanban_provider_walls import tick_upkeep
+    tick_upkeep(conn, board=board, dry_run=dry_run)
     try:
         result.quota_block_released = _kbq.release_recovered_quota_blocks(conn)
     except Exception:

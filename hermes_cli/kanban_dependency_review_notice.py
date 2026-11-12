@@ -10,13 +10,15 @@ def finished_review_hold(conn, task_id):
     """
     from hermes_cli import kanban_db as kb
 
+    from hermes_cli.kanban_core_update_requeue import latest_run_skipping_requeues
+    # Same run the guard reads: not a core-update requeue, not an unused Board grant.
+    latest = latest_run_skipping_requeues(conn, task_id)
     row = conn.execute(
         "SELECT e.payload, e.created_at, r.* FROM task_events e "
         "JOIN task_runs r ON r.id=e.run_id WHERE e.task_id=? "
         "AND e.kind='dependency_wait' AND r.task_id=e.task_id "
-        "AND r.id=(SELECT MAX(id) FROM task_runs WHERE task_id=e.task_id) "
-        "ORDER BY e.id DESC LIMIT 1", (task_id,),
-    ).fetchone()
+        "AND r.id=? ORDER BY e.id DESC LIMIT 1", (task_id, latest["id"]),
+    ).fetchone() if latest is not None else None
     if row is None:
         return ""
     evidence = kb._json_dict(row["payload"]).get("review_checkpoint")

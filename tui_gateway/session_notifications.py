@@ -1,6 +1,6 @@
 """Per-session notification poller: kanban/loop/delegation events routed to the owning session,
-desktop UI wiring, HUD surface note. Bodies are rebound onto server.py's globals at install time
-(method_ctx.bind_module), so they reference server.py globals bare."""
+desktop UI wiring (HUD surface note: session_notifications_surface). Bodies are rebound onto server.py's
+globals at install time (method_ctx.bind_module), so they reference server.py globals bare."""
 
 from __future__ import annotations
 
@@ -8,7 +8,10 @@ import contextlib
 import threading
 
 from .method_ctx import bind_module
+from . import session_notifications_surface as _surface
 from .kanban_notice_text import chat_wait_suffix as _kb_chat_wait, failure_suffix as _kb_failure
+from .kanban_notice_text import parent_unclaimed_suffix as _kb_parent_unclaimed, quota_episode_suffix as _kb_quota_episode
+from .kanban_notice_text import repin_suffix as _kb_repin_notice, timed_out_suffix as _kb_timed_out
 
 
 def _notif_locked_sessions(fn, default):
@@ -169,7 +172,8 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 # past them and they can't wedge a later completed/blocked event behind an unclaimed row.
 _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked",
                         "quota_episode_notice", "worker_repin_notice", "dependency_parent_unclaimed",
-                        "chat_wait_unclaimed", "request_withdrawn", "failure_finalized")
+                        "chat_wait_unclaimed", "request_withdrawn", "failure_finalized", "resolved_check_broken",
+                        "resolved_check_lost")
 # kanban, /loop + /heartbeat and the bot mailbox share one idle-poll cadence; probing the lease registry on
 # every 0.5s queue timeout cost ~a core at 11 sessions (#108005).
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0
@@ -237,6 +241,8 @@ def _notif_release_turn(session: dict) -> None:
     with session["history_lock"]:
         if settle(session):
             session["running"] = False
+    from tui_gateway.detached_turn_cleanup import settled
+    settled(session)
 
 
 def _notif_claim_turn(session: dict) -> bool:
@@ -334,18 +340,18 @@ def _notif_unowned_event(sid: str, evt: dict, deferred) -> None:
         if is_delegation:
             deferred.append(evt)
         else:
-            logger.debug("Dropping unowned %s notification during shutdown drain (origin=%r key=%r)",
-                         evt_type, origin, key)
+            notification_park.log_drop(evt, f"unowned during shutdown drain (origin={origin!r})")
     else:
         # A durable replay stays pending: hand it back so the orphan sweep re-offers it once its owner
         # is live (#97202), and keep that retry out of WARNING.
-        restored = is_delegation and bool(evt.get("restored"))
-        (logger.warning if is_delegation and not restored else logger.debug)(
-            "Dropping unowned %s notification (origin=%r key=%r) instead of delivering to session %s",
-            evt_type, origin, key, sid)
         if is_delegation:
+            (logger.debug if evt.get("restored") else logger.warning)(
+                "Dropping unowned %s notification (origin=%r key=%r) instead of delivering to session %s",
+                evt_type, origin, key, sid)
             from tools.async_delegation import return_completion_offer
             return_completion_offer(evt)
+        else:
+            notification_park.log_drop(evt, f"unowned and not parkable (origin={origin!r}, poller={sid})")
 
 
 # A retried notice the canonical ledger refuses (SESSION_NOT_OWNED persists while a gateway owns the
@@ -516,6 +522,11 @@ def _session_owns_pending_process_notification(session: dict) -> bool:
         # After Stop no notification turn can start until the user's next prompt (``_notif_claim_turn``), so a
         # pending notice is no reason to keep the session: the user's prompt resumes it like any other.
         return False
+    if session.get("_notif_held"):
+        # [daveey] A notice whose turn admission refused (update hold, a paused turn's continuation due) waits in
+        # this session's held list: off the queue, out of the in-flight hold, so awaits_notification cannot see
+        # it. Reaping now parks it unowned and drops it 10 min later (hub chat 20261111_005201_05663e).
+        return True
     from tools.process_registry import process_registry
     from tools.process_registry_awaiting import awaits_notification
     return awaits_notification(process_registry, _session_process_owners(session))
@@ -585,34 +596,12 @@ def _kb_left_open(payload: dict) -> str:
     return f"\n{notice}" if notice else ""
 
 
-def _kb_timed_out(task, payload: dict, title: str) -> str:
-    from hermes_cli.kanban_failure_summary import retry_promised
-    limit = 0
-    with contextlib.suppress(TypeError, ValueError):
-        limit = int(payload.get("limit_seconds") or 0)
-    tail = "; will retry" if retry_promised(payload) else "; retry state was not recorded"
-    return f" timed out (max_runtime={limit}s){tail}"
-
-
-def _kb_quota_episode(payload: dict) -> str:
-    from hermes_cli.kanban_quota_episode import notice_text
-    return notice_text(payload)
-
-
-def _kb_repin_notice(payload: dict) -> str:
-    from hermes_cli.kanban_repin_notice import notice_text
-    return ": " + notice_text(payload)
-
-
-def _kb_parent_unclaimed(payload: dict) -> str:
-    from hermes_cli.kanban_parent_unclaimed import notice_text
-    return ": " + notice_text(payload)
-
-
 # kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
 _KANBAN_EVENT_FORMATTERS = {
     "request_withdrawn": ("ℹ", lambda t, p, title: " request withdrawn: the card was archived. "
                          "No answer is needed for this request; this is not approval and not proof of completion."),
+    "resolved_check_broken": ("⏸", lambda t, p, title: " blocked"),  # body rendered by block_notice in the formatter
+    "resolved_check_lost": ("⏸", lambda t, p, title: " blocked"),
     "completed": ("✔", _kb_completed),
     "blocked": ("⏸", lambda t, p, title: " blocked" + (f": {str(p.get('reason'))[:160]}" if p.get("reason") else "")),
     "failure_finalized": ("✖", lambda t, p, title: _kb_failure("failure_finalized", p, title)),
@@ -641,12 +630,14 @@ def _format_kanban_event_text(sub: dict, task, ev, board_slug: str) -> Optional[
     who = getattr(task, "assignee", None) or ""
     prefix = f"{glyph} " + (f"[{board_slug}] " if board_slug else "") + (f"@{who} " if who else "")
     payload = getattr(ev, "payload", None) or {}
-    if getattr(ev, "kind", "") == "blocked":
+    if getattr(ev, "kind", "") in ("blocked", "resolved_check_broken", "resolved_check_lost"):
         from hermes_cli.kanban_block_notice import ask_update_notice, block_notice, is_metadata_only
-        if is_metadata_only(payload):  # an ask amendment, not a new block; silent for the editing chat [daveey]
+        if ev.kind == "blocked" and is_metadata_only(payload):  # an ask amendment, not a new block [daveey]
             body = ask_update_notice(task, task_id, board_slug, payload, chat_id=sub.get("chat_id"))
             return f"{prefix}Kanban {task_id} {body}" if body is not None else None
-        return f"{prefix}Kanban {task_id} " + block_notice(task, task_id, board_slug, reason=str(payload.get("reason") or ""), actor=str(payload.get("actor") or ""))
+        return f"{prefix}Kanban {task_id} " + block_notice(task, task_id, board_slug, reason=str(payload.get("reason") or ""),
+                                                         actor=str(payload.get("actor") or ""),
+                                                         drop_event=ev.kind if ev.kind != "blocked" else "")
     if getattr(ev, "kind", "") == "completed":
         # A worker refused a send into this chat put its message in the summary as a FINAL SEND line. [daveey]
         from hermes_cli.kanban_final_send import final_send_for_chat
@@ -665,12 +656,13 @@ def _kb_board_key(_kb, board_meta) -> tuple[str, str]:
         return slug, f"slug:{slug}"
 
 
-def _kb_board_file_sig(db_path) -> tuple | None:
-    """A commit revision from a guarded retained reader (stat alone misses WAL publication)."""
-    from hermes_cli.kanban_session_activity import cached_ro
+def _kb_board_file_sig(db_path, chat_id: str | None = None) -> tuple | None:
+    """What a poll of this board for ``chat_id`` could claim, read through a guarded retained reader once per
+    commit for every chat (``notification_idle.board_signature``): bookkeeping commits keep it, so they no
+    longer re-poll every board for every chat (t_01a1cee98b798343). Stat alone misses WAL publication."""
+    from tui_gateway.notification_idle import board_signature
     try:
-        with cached_ro(Path(db_path)) as conn:
-            return conn, conn.execute("PRAGMA data_version").fetchone()[0]
+        return board_signature(db_path, chat_id)
     except Exception:
         logger.debug("Kanban revision unavailable", exc_info=True)
         return None  # unreadable never means unchanged
@@ -682,10 +674,11 @@ def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None,
     writable unless it has a subscription owned by this exact session (a failed read-only probe — locked/corrupt DB —
     falls through so delivery is preserved).
 
-    *seen* (the session's ``{db path: file signature}``) skips a board whose files have not moved since this
-    session's last completed poll: no commit means no new event to claim. 21 open chats each probing every board
-    every 5 s, and opening it writable to re-claim nothing, kept the Desktop backend busy. The signature is taken
-    before the poll, so a commit during it is polled again next tick."""
+    *seen* (the session's ``{db path: signature}``) skips a board where nothing this session could claim has
+    changed since its last completed poll (``_kb_board_file_sig``): no new deliverable event and no change to its
+    own subscription rows. 21 open chats each probing every board every 5 s, and opening it writable to re-claim
+    nothing, kept the Desktop backend busy. The signature is taken before the poll, so a commit during it is
+    polled again next tick."""
     from hermes_cli import kanban_db_connect as _kbc
     from hermes_cli import kanban_db_notify as _kbn
     from hermes_cli.kanban_placement import is_placeholder_session
@@ -699,7 +692,7 @@ def _kb_poll_board(_kb, slug: str, session_key: str, claims: list | None = None,
     if seen is not None:
         with contextlib.suppress(Exception):
             db_path = str(_kb.kanban_db_path(board=slug))
-            sig = _kb_board_file_sig(db_path)
+            sig = _kb_board_file_sig(db_path, session_key)
         if reclaimed and sig is not None and seen.get(db_path) == (session_key, sig):
             from hermes_constants import get_hermes_home
             from tui_gateway.kanban_consumer_health import polled
@@ -786,10 +779,10 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
                          "claimed_mono": time.monotonic()}
                 claims.append(claim)
             task = _kb.get_task(conn, sub["task_id"])
-            from gateway.kanban_watchers_notifier import diagnostic_event
+            from gateway.kanban_watchers_notifier import coalesce_superseded_blocks, diagnostic_event
             from gateway.warning_notifications import DiagnosticText
             sub_texts = []
-            for ev in events:
+            for ev in coalesce_superseded_blocks(events):  # a block superseded by a drop in this batch renders once
                 text = _format_kanban_event_text(sub, task, ev, slug)
                 if text:
                     text = DiagnosticText(text) if diagnostic_event(ev) else _KanbanText(text)
@@ -857,14 +850,25 @@ def _collect_kanban_notifications(session: dict, claims: list | None = None) -> 
     return texts + _collect_remote_kanban_notifications(session_key, claims)
 
 
+_LINEAGE_TTL_S = 30.0
+_lineage_memo: dict[tuple, tuple] = {}  # (state.db, session key) -> (monotonic at, lineage)
+
+
 def _session_lineage(session_key: str, limit: int = 8) -> tuple:
-    """Earlier ids of this chat (compaction parents): a remote card stays linked to the id that created it."""
+    """Earlier ids of this chat (compaction parents): a remote card stays linked to the id that created it.
+
+    Every live chat's poller asked for it every 5 s, opening state.db each time (t_01a1cee98b798343). A chat's
+    parents are set when it is created and only change on import or deletion repair, so a found chain is reused
+    for ``_LINEAGE_TTL_S``; a chat not yet in the store is looked up again on the next poll."""
+    from hermes_constants import get_hermes_home
+    path = Path(get_hermes_home()) / "state.db"
+    memo_key, now = (str(path), session_key), time.monotonic()
+    if (hit := _lineage_memo.get(memo_key)) is not None and now - hit[0] < _LINEAGE_TTL_S:
+        return hit[1]
     out: list = []
+    found = False
     with contextlib.suppress(Exception):
         import sqlite3
-        from pathlib import Path
-        from hermes_constants import get_hermes_home
-        path = Path(get_hermes_home()) / "state.db"
         if not path.is_file():
             return ()
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
@@ -872,12 +876,17 @@ def _session_lineage(session_key: str, limit: int = 8) -> tuple:
             sid = session_key
             for _ in range(limit):
                 row = conn.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (sid,)).fetchone()
+                found = found or (row is not None and sid == session_key)
                 if not row or not row[0] or row[0] in out:
                     break
                 sid = str(row[0])
                 out.append(sid)
         finally:
             conn.close()
+    if found:
+        if len(_lineage_memo) >= 256:
+            _lineage_memo.clear()
+        _lineage_memo[memo_key] = (now, tuple(out))
     return tuple(out)
 
 
@@ -1136,12 +1145,12 @@ def _kb_persist_batch(session: dict, batch: list, diagnostic: bool) -> tuple:
             if not target or db.get_session(target) is None:
                 return "unkeyed", batch, {}
             done = db.kanban_notice_keys_delivered(target, keys)
-            from tui_gateway.kanban_claim_custody import fresh_texts
+            from tui_gateway.kanban_claim_custody import batch_text, fresh_texts
             from tui_gateway.kanban_remote_late import missing_texts
             fresh = fresh_texts(missing_texts(batch, done), done)
             if not fresh:
                 return "delivered", [], {}
-            text = "\n".join(fresh)
+            text = batch_text(fresh)  # [daveey] stale block asks re-read at delivery
             fresh_keys = _kb_text_keys(fresh)
             import hashlib
             metadata = {"notice_id": "live:" + hashlib.sha1(",".join(sorted(fresh_keys)).encode()).hexdigest()[:20],
@@ -1228,7 +1237,7 @@ def _notif_poll_kanban_scoped(sid: str, session: dict, prepared=None) -> None:
         if session.get("_kanban_claims") or session.get("_kanban_pending"):
             _kb_release_claims(session)
         return
-    from tui_gateway.kanban_claim_custody import release_expired
+    from tui_gateway.kanban_claim_custody import batch_text, release_expired
     if release_expired(session, time.monotonic()):
         return
     texts, claims = prepared if prepared is not None else _notif_collect_kanban(session)
@@ -1254,8 +1263,7 @@ def _notif_poll_kanban_scoped(sid: str, session: dict, prepared=None) -> None:
         _notif_release_turn(session)
         _kb_rewind_refused(session, batch, not_owned=True)
         return
-    # At-least-once (t_01a1835174955959): the notices land in the transcript and the board claim is acked
-    # BEFORE the turn runs; until then the claim is in flight and a process that dies first hands it back.
+    # At-least-once (t_01a1835174955959): row written and claim acked BEFORE the turn; a dying process hands it back.
     verdict, fresh, submit_kwargs = _kb_persist_batch(session, batch, diagnostic)
     if verdict == "busy":
         with session["history_lock"]:
@@ -1271,7 +1279,8 @@ def _notif_poll_kanban_scoped(sid: str, session: dict, prepared=None) -> None:
     if verdict == "unkeyed" and diagnostic:
         submit_kwargs = {"display_metadata": {"notification_category": "diagnostic"}}
     try:
-        accepted = _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, "\n".join(fresh),
+        text = (submit_kwargs.get("display_metadata") or {}).get("display_text") or batch_text(fresh)  # = the row
+        accepted = _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text,
                                  "kanban notification dispatch failed", **submit_kwargs)
     except Exception:
         accepted = False
@@ -1638,6 +1647,9 @@ def _wake_chat_for_readopted_exit(key: str):
     if handler is None:
         logger.warning("readopt wake: session.resume not installed; %s waits until it is opened", key)
         return None
+    from tui_gateway.update_pause import readopt_wake_yields
+    if readopt_wake_yields(key):  # [daveey] waited out a paused turn's hand-off and the chat is now loaded here
+        return None
     for n, profile in zip(_it.count(1), _readopt_wake_profiles()):
         params = {"session_id": key, "omit_messages": True, **({"profile": profile} if profile else {})}
         try:
@@ -1698,6 +1710,10 @@ def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None 
     try:
         live = _find_live_session_by_key(key)
         if live is None:
+            # [daveey] A paused turn is its restarting backend's: here its viewers are not attached (update_pause).
+            from tui_gateway.update_pause import left_to_successor
+            if left_to_successor(_hermes_home, _readopt_wake_profiles(), key, label):
+                return "busy"
             handler = _methods.get("session.resume")
             if handler is None:
                 return "error"
@@ -1947,35 +1963,7 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     return stop
 
 
-def _hud_surface_note(session: dict) -> str:
-    """The per-surface note for this turn ("" for the plain app window): HUD -> the read-the-window-below
-    prior; voice-live -> the spoken-delegation contract with the recent transcript."""
-    from gateway.session_surface import surface_note
-    surface, agent = session.get("client_surface"), session.get("agent")
-    direct = getattr(agent, "valid_tool_names", None) or set()
-    if surface == "hud":
-        from tools.tool_search_catalog import TOOL_CALL_NAME
-        if TOOL_CALL_NAME in direct:
-            # Tool search defers the desktop tools by default: they stay callable through the
-            # tool_call bridge, so the HUD note must count them and name the bridge (main 312f6bc2fd6).
-            from agent.prompt_builder import hud_surface_note
-            from agent.tool_executor import _tool_search_scoped_names
-            return hud_surface_note(direct, _tool_search_scoped_names(agent))
-    committed = {"surface": surface, "voice_context": session.get("voice_live_context")}
-    return surface_note(committed, direct)
-
-
-def _prepend_note(run_message: Any, note: str) -> Any:
-    """Prefix a per-turn note onto the MODEL INPUT, leaving the prompt alone: everything the model must know that the
-    user did not type (interrupted reply, reactions, surface) arrives this way, so no scaffolding reaches the
-    transcript and no sent message is rewritten — the cached prefix survives."""
-    if note and isinstance(run_message, str):
-        return f"{note}\n\n{run_message}"
-    if note and isinstance(run_message, list):
-        return [{"type": "text", "text": note}, *run_message]
-    return run_message
-
-
 def register(server) -> None:
     """Publish this module's helpers + handlers onto ``server``, rebound to its globals."""
     bind_module(globals(), server, skip=("_",))
+    _surface.register(server)

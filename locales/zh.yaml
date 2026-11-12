@@ -226,6 +226,8 @@ gateway:
     no_output: "（无输出）"
     wake:
       request_withdrawn: "请求已撤回（不代表批准或完成证明）"
+      resolved_check_broken: "你的步骤自动检测已停止（其检查持续失败）；必须重新提交请求才能自行恢复"
+      resolved_check_lost: "你的步骤自动检测已停止（其检查已丢失）；必须重新提交请求才能自行恢复"
       completed: "已完成"
       gave_up: "已放弃（重试次数耗尽）"
       crashed: "崩溃（worker 异常退出），dispatcher 将重试"
@@ -234,6 +236,8 @@ gateway:
       review_requested: "已交付评审；实现已完成"
       changes_requested: "评审要求修改（BLOCK)，实现未获批准"
       block_loop_detected: "反复阻塞后被转入待分诊，需要编排关注"
+      dependency_parent_unclaimed: "has a parent card waiting with no worker"
+      chat_wait_unclaimed: "is ready with no worker claiming it"
       status_default: "状态变化"
       status_joiner: "，"
       message: "[kanban] 任务 {task_id} {status}。\n标题: {title}\n执行者: @{assignee}\n看板: {board}\n\n请检查结果或决定下一步动作。"

@@ -7,10 +7,13 @@ an explicit pin had no fallback, and workers cannot re-pin a card. David, 11-11 
 
 Rule (:func:`pinned_route`); every condition must hold, anything else keeps the pin as before:
 
-1. one of the card's own runs hit a wall on the pin's provider (its ``quota_episode`` receipts, or the
-   live episode), and that wall is still up;
+1. one of the card's own runs hit a wall on the pin's provider (its ``quota_episode`` receipts, an
+   earlier ``model_reroute``, or the live episode), and that wall is still up; or the pin's provider is
+   walled right now in ``provider_walls.json`` or the live pool is quota-walled for the pinned model
+   (:func:`known_wall`), fresh card or not: its next run would only exit 75 into that wall to learn it
+   (kanban-dd62aef001; t_c21c170e, 11-12: a card woken from ``scheduled`` paid one wall run);
 2. it resets ``kanban.pin_quota_reroute_min_hours`` (default 6) or more from now;
-3. the pin is not mandatory: neither ``tasks.model_pin_mandatory`` nor the ``require_model`` marker;
+3. the pin is not mandatory: neither ``tasks.model_pin_mandatory`` nor a ``require_model: true`` body line;
 4. the lane is ready, not review;
 5. the pinned model sits in exactly one routing class of the assignee's policy, and a route of that
    class is eligible, on no walled or disabled provider, and not quota-walled in the live pool.
@@ -45,10 +48,10 @@ def _norm(value: Any) -> str:
 
 def is_mandatory_pin(task: Any) -> bool:
     """True when the card's creator said its pin must never move."""
-    from hermes_cli.kanban_provider_walls import REQUIRE_MODEL_MARKER
+    from hermes_cli.kanban_provider_walls import requires_model
     if getattr(task, "model_pin_mandatory", None):
         return True
-    return REQUIRE_MODEL_MARKER in f"{getattr(task, 'title', '') or ''}\n{getattr(task, 'body', '') or ''}"
+    return requires_model(task)
 
 
 def min_wall_seconds(cfg: Optional[dict]) -> float:
@@ -79,8 +82,8 @@ def own_walls(conn: Any, task_id: str, now: float,
               current: Optional[dict[str, float]] = None) -> dict[str, tuple[float, Any]]:
     """``provider -> (until, episode_id)`` for every wall this card's own runs hit that is still up.
 
-    Read from the card's ``quota_episode`` receipts; ``current`` adds the live episode's walls (its
-    receipt may not carry them yet)."""
+    Read from the card's ``quota_episode`` receipts and earlier ``model_reroute`` events (a fresh card's
+    reroute has no episode); ``current`` adds the live episode's walls (its receipt may not carry them yet)."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_quota_episode import _providers, episode
     out: dict[str, tuple[float, Any]] = {}
@@ -92,6 +95,10 @@ def own_walls(conn: Any, task_id: str, now: float,
         state = kb._json_dict(row[0])
         for name in _providers(state):
             add(name, state.get("until"), state.get("episode_id"))
+    for row in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=?", (task_id, EVENT)):
+        moved = kb._json_dict(row[0])
+        if isinstance(moved.get("walled_provider"), str):
+            add(moved["walled_provider"], moved.get("resets_at"), moved.get("episode_id"))
     if current:
         live = episode(conn, task_id) or {}
         for name, until in current.items():
@@ -99,13 +106,43 @@ def own_walls(conn: Any, task_id: str, now: float,
     return out
 
 
+def fresh_live_wall(conn: Any, task: Any, now: Optional[float] = None,
+                    pinned: Optional[tuple[str, str]] = None) -> Optional[dict[str, float]]:
+    """``{provider: reset}`` when ``task`` has no run before its current one and the live pool is quota-walled
+    for its concrete pin (``pinned``, default :func:`pin`) right now; else None.
+
+    The same evidence the worker's startup resolver exits 75 on (``kanban_provider_walls.live_quota_wall``),
+    so it stands in for rule 1's own-run wall on a card that has had no run to hit it."""
+    from hermes_cli.kanban_provider_walls import live_quota_wall
+    pinned = pinned or pin(task)
+    if pinned is None or conn.execute("SELECT 1 FROM task_runs WHERE task_id = ? AND id IS NOT ? LIMIT 1",
+                                      (task.id, getattr(task, "current_run_id", None))).fetchone() is not None:
+        return None
+    until = live_quota_wall(pinned[1], pinned[0])
+    if until is None or until <= (time.time() if now is None else now):
+        return None
+    return {pinned[1]: float(until)}
+
+
+def known_wall(pinned: tuple[str, str], now: Optional[float] = None) -> Optional[dict[str, float]]:
+    """``{provider: reset}`` when the pin's provider is walled right now in ``provider_walls.json`` or the live
+    pool is quota-walled for the pinned model (the later reset of the two), whatever the card's history."""
+    from hermes_cli.kanban_provider_walls import active_walls, live_quota_wall
+    now = time.time() if now is None else now
+    model, provider = pinned
+    resets = [until for until in (active_walls(now=now).get(provider), live_quota_wall(provider, model))
+              if isinstance(until, (int, float)) and until > now]
+    return {provider: float(max(resets))} if resets else None
+
+
 def pinned_route(conn: Any, task: Any, *, lane: str, now: float, cfg: Optional[dict],
                  current: Optional[dict[str, float]] = None) -> Optional[tuple[str, str]]:
     """Same-class ``(model, provider)`` this pinned card's run may use instead of its walled pin, or None.
 
-    ``current`` is the live quota episode's walls. Other cards' walls (the provider wall files and the
-    live pool) only rule peers out, never move a pin. Non-allocating: reads config and the credential
-    pool and writes nothing, so preview and admission decide alike."""
+    ``current`` is the live quota episode's walls. A wall the provider file or the live pool knows on the
+    pin's own provider counts as the card's (rule 1); on any other provider it only rules peers out.
+    Non-allocating: reads config and the credential pool and writes nothing, so preview and admission
+    decide alike."""
     from agent.model_routing import ModelRoutingError, eligible_routes, validate_policy
     from agent.model_routing_agent import class_requirements
     from hermes_cli.config import is_provider_enabled
@@ -116,6 +153,8 @@ def pinned_route(conn: Any, task: Any, *, lane: str, now: float, cfg: Optional[d
         return None
     model, provider = pinned
     own = own_walls(conn, task.id, now, current)
+    if provider not in own:
+        own.update({name: (until, None) for name, until in (known_wall(pinned, now) or {}).items()})
     if provider not in own or own[provider][0] - now < min_wall_seconds(cfg):
         return None
     config = _assignee_config(getattr(task, "assignee", None)) or {}
@@ -157,7 +196,10 @@ def record(conn: Any, task: Any, origin: tuple[str, str], target: tuple[str, str
     for wall in (_outstanding(conn, task.id, state, now) if state else []):
         if origin[1] in _providers(wall):
             current[origin[1]] = max(current.get(origin[1], 0), wall["until"])
-    resets_at, episode_id = own_walls(conn, task.id, now, current).get(origin[1], (None, None))
+    own = own_walls(conn, task.id, now, current)
+    if origin[1] not in own:  # moved by a wall the provider file / live pool knows (pinned_route rule 1)
+        own.update({name: (until, None) for name, until in (known_wall(origin, now) or {}).items()})
+    resets_at, episode_id = own.get(origin[1], (None, None))
     payload = {"from_model": origin[0], "from_provider": origin[1], "to_model": target[0],
                "to_provider": target[1], "walled_provider": origin[1], "resets_at": resets_at,
                "episode_id": episode_id, "run_id": getattr(task, "current_run_id", None)}

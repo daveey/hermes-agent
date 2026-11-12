@@ -99,7 +99,7 @@ def test_inline_poll_reads_each_board_revision_once(clock, spies, tmp_path, monk
         reads.clear()
         helpers._advance(clock, ksa._CACHE_TTL_S + 0.5)
         assert helpers._poll()["kanban_active"] == 2
-        assert spies == {"recompute": 1, "threads": cold_threads}
+        assert {k: spies[k] for k in ("recompute", "threads")} == {"recompute": 1, "threads": cold_threads}
         assert reads == Counter({path: 1 for path in paths})
     finally:
         for conn in conns:

@@ -14,6 +14,10 @@ import json
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_notify as kbn
+# The `resume` handler rides kanban.py's existing kanban_parser import, so kanban.py (at its
+# FILE_LINES cap) gains no line for it. [daveey]
+from hermes_cli.kanban_operator_resume import cmd as cmd_resume
+from hermes_cli.kanban_quota_episode_release import cmd as cmd_quota_release  # same ride as cmd_resume
 
 
 def _arg(*flags: str, **kw):
@@ -239,6 +243,13 @@ _SPECS = [
         _arg("--runs-on", dest="runs_on", default=None, metavar="LABELS",
              help="Machine labels the card needs, comma-separated (synced boards only): linux, "
                   "macos,xcode, machine:<name>; '' or '[]' = any machine; omit for the default placement"),
+        _arg("--hub-reason", dest="hub_reason", default=None, metavar="TEXT",
+             help="Why this card needs the hub itself (hub Chrome, Board admin key, ...). Fed to the "
+                  "hub-admission judge; its quote can be the evidence. Without admission a hub card "
+                  "goes to the worker pool (or an explicit hub pin is refused)."),
+        _arg("--force-hub", dest="force_hub", action="store_true",
+             help="Operator override: keep the card on the hub without the admission judge. Refused "
+                  "inside a dispatcher worker; recorded as a forced hub_admission event."),
         _arg("--parent", action="append", default=[], help="Parent task id (repeatable)"),
         _arg("--workspace",
              help="scratch | worktree | worktree:<path> | dir:<path> (default: scratch; "
@@ -363,8 +374,14 @@ _SPECS = [
     _cmd("reclaim", [_TASK_ID, _RECLAIM_REASON], help="Release an active worker claim on a running task"),
     _cmd("move", [
         _TASK_ID,
-        _arg("--runs-on", dest="runs_on", required=True,
-             help="Comma-separated labels the next machine must have, e.g. machine:worker-1 or macos"),
+        _arg("--runs-on", dest="runs_on", default=None,
+             help="Comma-separated labels the next machine must have, e.g. pool:worker or macos"),
+        _arg("--pool", action="store_true",
+             help="Queue the card for any worker (= --runs-on pool:worker): the first worker with a free slot "
+                  "claims it"),
+        _arg("--host-reason", dest="host_reason", default=None,
+             help="Required to pin one pool worker (machine:worker-N): the card works on that host, or holds "
+                  "unpushed state there"),
         _arg("--reason", required=True, help="Why the card must move (logged as a `moved` event)"),
         _arg("--checkpoint", default=None,
              help="Resume notes (required when a card's own worker moves its running card)"),
@@ -531,6 +548,14 @@ _SPECS = [
         _TASK_IDS,
         _reason("Optional reason/note — recorded as a comment before reopening. Quote multi-word reasons."),
     ], help="Send one or more review tasks back for changes (review -> ready/todo)"),
+    _cmd("resume", [
+        _TASK_ID,
+        _arg("--reason", required=True, help="Why this owner should continue its PR (recorded as an event + comment)"),
+    ], help="Operator-only: let a READY card held by the active_pr respawn guard run once more"),
+    _cmd("quota-release", [
+        _TASK_ID,
+        _arg("--reason", default="", help="Why the quota episode no longer holds (recorded as an event + comment)"),
+    ], help="Operator-only: end the card's quota episode (a stale 'resets at' hold) so it is admissible again"),
     _cmd("promote", [
         _TASK_ID,
         _arg("reason", nargs="*", help="Audit-trail reason (recorded on the task_events row)"),

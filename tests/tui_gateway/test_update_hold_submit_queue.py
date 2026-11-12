@@ -586,6 +586,110 @@ def test_idle_stop_on_an_unreachable_compute_host_keeps_the_held_prompt(stoppabl
     assert not held.session.get("queued_prompt")
 
 
+# ── t_01a1ceb141b10c7c: one hold-queued submit is ONE user row in state.db, not an accept row + a replay row ──
+# Live (hub, 2026-11-12, t_01a1c8d8a5c1f725): a submit queued with queued_reason=core_update left msg 1217133
+# (accept, deactivated) and msg 1217162 (drain re-append) for one prompt; the turn ran once.
+_REAL_PERSIST_QUEUED_USER_ROW = server._persist_queued_user_row
+_REAL_REPLACE_QUEUED_USER_ROW = server._replace_queued_user_row_for_turn
+
+
+def _real_rows_drain(held, monkeypatch):
+    """Real accept-time persist, real claim/dispatch and real drain row handling over a real state.db; only the
+    turn body is recorded (the slot it would adopt via ``_adopt_submit_user_row``)."""
+    from hermes_state import SessionDB
+    db = SessionDB(held.home / "state.db")
+    monkeypatch.setattr(server, "_persist_queued_user_row", _REAL_PERSIST_QUEUED_USER_ROW)
+    monkeypatch.setattr(server, "_dispatch_claimed_queue", _REAL_DISPATCH_CLAIMED_QUEUE)
+    monkeypatch.setattr(server, "_replace_queued_user_row_for_turn", _REAL_REPLACE_QUEUED_USER_ROW)
+    turns = []
+
+    def turn_body(rid, sid, session, text, **kw):
+        turns.append((text, session.get("_submit_user_row")))
+        session["running"] = False
+        server._clear_inflight_turn(session)
+
+    monkeypatch.setattr(server, "_run_prompt_submit", turn_body)
+    return db, turns
+
+
+def _user_rows(db, text):
+    with db._lock:
+        rows = db._conn.execute(
+            "SELECT id, active, display_metadata FROM messages WHERE session_id = ? AND role = 'user' "
+            "AND content = ? ORDER BY id", ("session-key", text)).fetchall()
+    return [(r[0], r[1], json.loads(r[2]) if r[2] else None) for r in rows]
+
+
+def test_hold_queued_submit_then_replay_writes_exactly_one_user_row(held, monkeypatch):
+    db, turns = _real_rows_drain(held, monkeypatch)
+    resp = _submit()
+    assert resp["result"]["queued_reason"] == "core_update", resp
+    accepted = _user_rows(db, "hello there")
+    assert len(accepted) == 1 and accepted[0][1] == 1, "durable and visible at accept"
+    af.clear_hold(held.home)
+    held.timers.pop().target()
+    assert len(turns) == 1, "the turn ran once"
+    rows = _user_rows(db, "hello there")
+    assert len(rows) == 1, f"one submit must be one user row, got {rows}"
+    row_id, active, meta = rows[0]
+    assert active == 1 and not (meta or {}).get("_queued_prompt"), "drained: active and no longer marked queued"
+    assert row_id == accepted[0][0], "the accept-time row itself is the turn's row"
+    text, slot = turns[0]
+    assert text == "hello there" and slot and slot["_row_id"] == row_id, "the turn adopts that row (no 2nd write)"
+    assert not (slot.get("display_metadata") or {}).get("_queued_prompt")
+    assert db.retire_undrained_queue_rows("session-key") == 0, "a restart after the drain does not retire it"
+
+
+def test_queued_row_behind_a_later_row_is_still_replaced_at_the_end(held, monkeypatch):
+    """Control: when the transcript grew past the accept row (the busy-queue shape: the in-flight turn's reply
+    landed after it), the drain must still re-place it at the end so alternation stays [uA, aA, uB]."""
+    db, turns = _real_rows_drain(held, monkeypatch)
+    _submit()
+    db.append_message("session-key", "assistant", content="a reply that landed after the accept")
+    af.clear_hold(held.home)
+    held.timers.pop().target()
+    rows = _user_rows(db, "hello there")
+    assert [r[1] for r in rows] == [0, 1], rows
+    assert turns[0][1]["_row_id"] == rows[1][0]
+    with db._lock:
+        order = [r[0] for r in db._conn.execute(
+            "SELECT role FROM messages WHERE session_id = ? AND active = 1 ORDER BY id", ("session-key",))]
+    assert order == ["assistant", "user"]
+
+
+def test_a_compaction_resequenced_accept_row_is_adopted_at_its_live_id(held, monkeypatch):
+    """An in-place compaction can re-sequence the accept row to a clone at a higher id (#123675): the drain
+    adopts the LIVE clone and appends nothing."""
+    db, turns = _real_rows_drain(held, monkeypatch)
+    _submit()
+    (orig, _, _), = _user_rows(db, "hello there")
+    with db._lock:
+        db._conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp, display_metadata) SELECT session_id, role, "
+            "content, timestamp, display_metadata FROM messages WHERE id = ?", (orig,))
+        db._conn.execute("UPDATE messages SET active = 0 WHERE id = ?", (orig,))
+        db._conn.commit()
+    clone = _user_rows(db, "hello there")[1][0]
+    af.clear_hold(held.home)
+    held.timers.pop().target()
+    rows = _user_rows(db, "hello there")
+    assert [(r[0], r[1]) for r in rows] == [(orig, 0), (clone, 1)], rows
+    assert not (rows[1][2] or {}).get("_queued_prompt")
+    assert turns[0][1]["_row_id"] == clone
+
+
+def test_a_still_queued_envelope_is_never_unmarked_in_place(held, monkeypatch):
+    """Only the DISPATCHING envelope adopts in place: a still-queued one must keep its never-drained marker so a
+    restart before its own drain retires it (#125577) instead of gluing it into the previous turn."""
+    db, _ = _real_rows_drain(held, monkeypatch)
+    _submit()
+    envelope = held.session["queued_prompt"]
+    server._replace_queued_user_row_for_turn(held.session, envelope)
+    rows = _user_rows(db, "hello there")
+    assert [(r[1], (r[2] or {}).get("_queued_prompt")) for r in rows] == [(0, True), (1, True)], rows
+    assert db.retire_undrained_queue_rows("session-key") == 1
+
+
 def test_hold_started_at_reads_the_marker(tmp_path):
     root = tmp_path / "core-update"
     assert af.hold_started_at(root) is None, "no hold: unknown, never a guess"

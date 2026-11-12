@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import sqlite3
 
 from hermes_completion_receipt import validate_completion_receipt
 
@@ -70,23 +71,17 @@ def validate_receipt_source(value, receipt, *, expected_ref=None):
                                      'attached_from_workspace') if key in out}
 
 
-def read_completed(conn, task_id, *, gateway, board):
-    """Return receipt plus source-qualified provenance, or None (legacy/invalid).
-
-    Caller supplies the authoritative source namespace, not the observing host.
-    Source event/run UIDs survive replica integer remapping; integer fallbacks
-    are explicitly store-local. This is a projection, never a second writer.
-    """
-    if not gateway or not board:
-        raise ValueError("completion_receipt: projection requires the source gateway and board")
+def _receipt_columns(conn):
     run_columns = {r[1] for r in conn.execute("PRAGMA table_info(task_runs)")}
-    run_uid = "r.uid" if "uid" in run_columns else "NULL"
-    row = conn.execute(
-        f"SELECT e.*, r.metadata AS receipt_metadata, r.outcome AS receipt_outcome, "
-        f"{run_uid} AS receipt_run_uid FROM task_events e "
-        "LEFT JOIN task_runs r ON r.id=e.run_id AND r.task_id=e.task_id "
-        "WHERE e.task_id=? AND e.kind='completed' ORDER BY e.created_at DESC,e.id DESC LIMIT 1",
-        (task_id,)).fetchone()
+    return "r.uid" if "uid" in run_columns else "NULL"
+
+
+_COMPLETED_FIELDS = ("r.metadata AS receipt_metadata, r.outcome AS receipt_outcome, "
+                     "{run_uid} AS receipt_run_uid")
+
+
+def _completed_receipt(row, task_id, *, gateway, board):
+    """Project one latest ``completed`` event row (with its run) into receipt + source, or None."""
     if row is None or row["receipt_outcome"] != "completed":
         return None
     try:
@@ -120,6 +115,56 @@ def read_completed(conn, task_id, *, gateway, board):
     except (ValueError, TypeError):
         return None
     return {"completion_receipt": receipt, "completion_receipt_source": source}
+
+
+def read_completed(conn, task_id, *, gateway, board):
+    """Return receipt plus source-qualified provenance, or None (legacy/invalid).
+
+    Caller supplies the authoritative source namespace, not the observing host.
+    Source event/run UIDs survive replica integer remapping; integer fallbacks
+    are explicitly store-local. This is a projection, never a second writer.
+    """
+    if not gateway or not board:
+        raise ValueError("completion_receipt: projection requires the source gateway and board")
+    fields = _COMPLETED_FIELDS.format(run_uid=_receipt_columns(conn))
+    row = conn.execute(
+        f"SELECT e.*, {fields} FROM task_events e "
+        "LEFT JOIN task_runs r ON r.id=e.run_id AND r.task_id=e.task_id "
+        "WHERE e.task_id=? AND e.kind='completed' ORDER BY e.id DESC LIMIT 1",
+        (task_id,)).fetchone()
+    return _completed_receipt(row, task_id, gateway=gateway, board=board)
+
+
+def read_completed_many(conn, task_ids, *, board, gateway):
+    """:func:`read_completed` for many tasks in a fixed number of SELECTs per 500 (never one per task).
+
+    ``gateway`` is the fallback source namespace, exactly as :func:`read_inventory` uses it: a synced
+    task's ``created_on`` wins. Returns ``{task_id: result-or-None}`` for every requested id.
+    """
+    if not gateway or not board:
+        raise ValueError("completion_receipt: projection requires the source gateway and board")
+    ids = list(dict.fromkeys(task_ids))
+    out = {tid: None for tid in ids}
+    if not ids:
+        return out
+    fields = _COMPLETED_FIELDS.format(run_uid=_receipt_columns(conn))
+    created_on = "created_on" in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        marks = ",".join("?" for _ in chunk)
+        sources = {r[0]: r[1] for r in conn.execute(
+            f"SELECT id, {'created_on' if created_on else 'NULL'} FROM tasks WHERE id IN ({marks})", chunk)}
+        cursor = conn.execute(
+            f"SELECT * FROM (SELECT e.*, {fields}, ROW_NUMBER() OVER (PARTITION BY e.task_id "
+            "ORDER BY e.id DESC) AS _rank FROM task_events e "
+            "LEFT JOIN task_runs r ON r.id=e.run_id AND r.task_id=e.task_id "
+            f"WHERE e.task_id IN ({marks}) AND e.kind='completed') WHERE _rank=1", chunk)
+        cursor.row_factory = sqlite3.Row
+        for row in cursor:
+            tid = row["task_id"]
+            source = (sources.get(tid) or gateway)
+            out[tid] = _completed_receipt(row, tid, gateway=source, board=board)
+    return out
 
 
 def remote_fields(task, *, gateway, profile, board, task_id):

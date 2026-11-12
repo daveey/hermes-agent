@@ -106,21 +106,13 @@ def _session_filter_where(
     """Shared ``sessions s`` WHERE builder so counts line up with listed rows. ``exclude_children``
     hides sub-agent runs and compression continuations but keeps branch/reset children
     (``_LISTABLE_CHILD_SQL``); ``include_subagents`` re-admits the sub-agent runs only
-    (``sessions.show_subagents``). Clause order is part of the SQL text contract."""
+    (``sessions.show_subagents``). Clause order is part of the SQL text contract: SQLite tests
+    ANDed terms left to right, so the plain-column clauses come first and reject most rows (an
+    excluded source, empty or archived) before the child-lineage clauses pay ``json_valid`` +
+    ``json_extract`` on ``model_config`` and a parent lookup. The lineage clauses bind no
+    parameters, so moving them last leaves the parameter order unchanged."""
     where: list[str] = []
     params: list[Any] = []
-    if exclude_children and include_subagents:
-        where.append(f"({_LISTABLE_CHILD_SQL} OR {_delegate_from_json('s.model_config')} IS NOT NULL)")
-    elif exclude_children:
-        where += [_LISTABLE_CHILD_SQL, f"{_delegate_from_json('s.model_config')} IS NULL"]
-    # Show roots and user-visible branch/reset sessions, while still hiding sub-agent runs and compression
-    # continuations. All four carry parent_session_id, so the shared predicate classifies the edge from
-    # stable markers plus legacy-compatible parent metadata. Branch sessions are identified two ways, OR'd
-    # for robustness: 1. A stable ``_branched_from`` marker in model_config, written by /branch at creation
-    # time. This survives the parent being reopened and re-ended with a different end_reason (e.g.
-    # tui_shutdown overwriting 'branched'), which otherwise hides the branch — see issue #20856. 2. The
-    # legacy heuristic (parent ended with 'branched' before the child started), covering branch sessions
-    # created before the marker existed.
     include_sources = [source] if source else list(sources or [])
     source_clause, source_params = _source_match_clause(include_sources, local_created_sources)
     for clause, values in (
@@ -138,6 +130,18 @@ def _session_filter_where(
         where.append("s.archived = 1")
     elif not include_archived:
         where.append("s.archived = 0")
+    # Show roots and user-visible branch/reset sessions, while still hiding sub-agent runs and compression
+    # continuations. All four carry parent_session_id, so the shared predicate classifies the edge from
+    # stable markers plus legacy-compatible parent metadata. Branch sessions are identified two ways, OR'd
+    # for robustness: 1. A stable ``_branched_from`` marker in model_config, written by /branch at creation
+    # time. This survives the parent being reopened and re-ended with a different end_reason (e.g.
+    # tui_shutdown overwriting 'branched'), which otherwise hides the branch — see issue #20856. 2. The
+    # legacy heuristic (parent ended with 'branched' before the child started), covering branch sessions
+    # created before the marker existed.
+    if exclude_children and include_subagents:
+        where.append(f"({_LISTABLE_CHILD_SQL} OR {_delegate_from_json('s.model_config')} IS NOT NULL)")
+    elif exclude_children:
+        where += [_LISTABLE_CHILD_SQL, f"{_delegate_from_json('s.model_config')} IS NULL"]
     return where, params
 
 
@@ -1353,68 +1357,12 @@ class SessionSessionsMixin:
         )
         from_sessions = f"FROM sessions s\n                {prompt_join}"
         if order_by_last_active:
-            # The CTE walks compression-continuation edges forward from the admitted
-            # rows; MAX over the chain gives effective_last_active in SQL. Do NOT
-            # require child.started_at >= parent.ended_at: races insert the
-            # continuation before ended_at is written.
-            #
-            # The page is ranked and cut on ids alone (``page``); only its rows then
-            # pay for the projection. Projecting in the ranked query made SQLite
-            # build every admitted row's full result — s.*, the resolved system
-            # prompt, the preview subquery over message content — before LIMIT:
-            # 4-11s per page at 25k rows, for LIMIT 1 as much as LIMIT 200.
-            #
-            # Unless a search needs every row's chain (it matches a row's own id and
-            # title through it), only rows that HAVE a child seed the walk. A
-            # childless row's chain is itself alone, so its MAX is just its own
-            # last_active, which the outer COALESCE reads directly.
-            # Drive from distinct parent ids via idx_sessions_parent, then look up each seed by PK.
-            # A correlated EXISTS still parsed every childless row's JSON before rejecting it.
-            id_needle = (id_query or "").strip().lower()
-            search_needle = (search_query or "").strip().lower()
-            seed_from = "sessions s" if (id_needle or search_needle) else (
-                "(SELECT DISTINCT parent_session_id FROM sessions WHERE parent_session_id IS NOT NULL) roots "
-                "CROSS JOIN sessions s ON s.id = roots.parent_session_id")
-            outer_where, id_params = self._chain_search_where(where_sql, id_needle, search_needle)
-            query = f"""
-                WITH RECURSIVE chain(root_id, cur_id) AS (
-                    SELECT s.id, s.id FROM {seed_from} {where_sql}
-                    UNION ALL
-                    SELECT c.root_id, child.id
-                    FROM chain c
-                    JOIN sessions parent ON parent.id = c.cur_id
-                    JOIN sessions child ON child.parent_session_id = c.cur_id
-                    WHERE parent.end_reason = 'compression'
-                      AND {_sql_json_extract('child.model_config', '$._branched_from')} IS NULL
-                      AND {_sql_json_extract('child.model_config', '$._delegate_from')} IS NULL
-                      AND NOT ({_RESET_CHILD_SQL.format(a='child')})
-                      AND COALESCE(child.source, '') != 'tool'
-                ),
-                chain_max AS (
-                    SELECT
-                        root_id,
-                        MAX({_sql_session_last_active_by_id("cur_id")}) AS effective_last_active
-                    FROM chain
-                    GROUP BY root_id
-                ),
-                page AS (
-                    SELECT s.id AS page_id,
-                        COALESCE(cm.effective_last_active, {_sql_session_last_active("s")},
-                                 {_sql_in_window("s.started_at")}) AS effective_last_active
-                    FROM sessions s
-                    LEFT JOIN chain_max cm ON cm.root_id = s.id
-                    {outer_where}
-                    ORDER BY effective_last_active DESC, s.started_at DESC, s.id DESC
-                    LIMIT ? OFFSET ?
-                )
-                {select_head}{_sql_session_last_active("s")} AS last_active,
-                    page.effective_last_active AS _effective_last_active
-                FROM page
-                JOIN sessions s ON s.id = page.page_id
-                {prompt_join}
-                ORDER BY _effective_last_active DESC, s.started_at DESC, s.id DESC
-            """
-            params = params + params + id_params + [limit, offset]  # WHERE binds twice (seed + outer)
+            # Exact chain-tip ranking (hermes_state_recency): messages are probed only for rows that
+            # can reach the page, not for every admitted session on every read.
+            from hermes_state_recency import ranked_rows
+            raw_rows = ranked_rows(
+                self, where_clauses, params, select_head, prompt_join, (id_query or "").strip().lower(),
+                (search_query or "").strip().lower(), limit, offset)
         else:
             query = f"""
                 {select_head}{_sql_session_last_active("s")} AS last_active
@@ -1423,8 +1371,8 @@ class SessionSessionsMixin:
                 ORDER BY s.started_at DESC
                 LIMIT ? OFFSET ?
             """
-            params.extend([limit, offset])
-        sessions = [self._list_row(row) for row in self._read_all(query, params)]
+            raw_rows = self._read_all(query, [*params, limit, offset])
+        sessions = [self._list_row(row) for row in raw_rows]
         # Pinned back-fill runs BEFORE compression projection so a back-filled root
         # projects to its tip like any other row. Do not inherit the archived
         # constraint: the sidebar lists with include_archived=False, and a pin

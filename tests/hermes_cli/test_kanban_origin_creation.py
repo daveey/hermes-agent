@@ -142,3 +142,38 @@ def test_retry_with_non_default_late_option_still_conflicts(board):
         with pytest.raises(OriginError) as err:
             kb.create_task(conn, title="Build", origin_intent=intent(), chat_origin="gw/prof/sess")
         assert err.value.code == "origin_creation_conflict"
+
+
+# [daveey] A placed create (origin courier) used to store NULL: the creator's key was dropped, so a guard
+# looking the card up by it (`where idempotency_key='review:pr1305:…'`) never matched.
+KEY = "review:pr1305:848af5adae9e29a2ac677f26c732c996997a26b2"
+
+
+def test_creator_key_is_stored_and_retry_returns_same_card(board):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Build", idempotency_key=KEY, origin_intent=intent())
+        assert kb.get_task(conn, tid).idempotency_key == KEY
+        assert kb.create_task(conn, title="Build", idempotency_key=KEY, origin_intent=intent()) == tid
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+
+
+def test_key_held_by_another_card_is_a_typed_refusal_not_an_adoption(board):
+    with kbc.connect_closing() as conn:
+        local = kb.create_task(conn, title="Local review", idempotency_key=KEY)
+        with pytest.raises(OriginError) as err:
+            kb.create_task(conn, title="Build", idempotency_key=KEY, origin_intent=intent())
+        assert err.value.code == "origin_idempotency_conflict"
+        assert local in str(err.value)
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+        ledger = conn.execute("SELECT name FROM sqlite_master WHERE name='origin_creation_intents'").fetchone()
+        assert not ledger or conn.execute("SELECT COUNT(*) FROM origin_creation_intents").fetchone()[0] == 0
+
+
+def test_key_held_only_by_an_archived_card_is_reused(board):
+    with kbc.connect_closing() as conn:
+        old = kb.create_task(conn, title="Old", idempotency_key=KEY)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='archived' WHERE id=?", (old,))
+        tid = kb.create_task(conn, title="Build", idempotency_key=KEY, origin_intent=intent())
+        assert tid != old
+        assert kb.get_task(conn, tid).idempotency_key == KEY

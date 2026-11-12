@@ -73,7 +73,7 @@ def test_reader_close_does_not_wait_for_busy_native_opener(tmp_path, monkeypatch
         activity._reset_cache_for_tests()
 
 
-def test_untracked_reader_close_while_native_open_waits_for_file_probe(tmp_path, monkeypatch):
+def test_untracked_reader_close_while_native_open_waits_for_registry(tmp_path, monkeypatch):
     from hermes_cli import sqlite_safe_read
 
     path = tmp_path / "board.db"
@@ -102,14 +102,14 @@ def test_untracked_reader_close_while_native_open_waits_for_file_probe(tmp_path,
         conn = connect_with_identity(path, timeout=30)
         conn.close()
 
-    other = tmp_path / "other.bin"
-    other.write_bytes(b"data")
     with ThreadPoolExecutor(max_workers=2) as pool:
         reading = pool.submit(read)
         assert ready.wait(10)
         entered.clear()
         try:
-            with sqlite_safe_read.offline_file_access(other):
+            # Pin registry contention explicitly: unrelated raw I/O no longer
+            # owns this mutex. Keep the blocked-open assertion below unchanged.
+            with sqlite_safe_read._live_lock:
                 opening = pool.submit(native)
                 assert entered.wait(10)
                 # Synchronize on the tracking-open boundary, not a sleep.

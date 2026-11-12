@@ -265,5 +265,6 @@ def route(conn, task, payload):
     )
     kb._link(conn, supervisor_id, task.id)
     conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (task.id,))
+    payload['status'] = 'todo'  # where the card landed (block_task recorded 'blocked'); the sync heal restores it
     payload['supervisor_task_id'] = supervisor_id
     payload['supervisor_profile'] = name

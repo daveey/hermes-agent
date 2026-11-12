@@ -192,6 +192,13 @@ def _sweep_owner(server, db, profile: Optional[str], owner: str) -> dict:
     tip = db.get_compression_tip(owner) or owner
     live = _live(server, tip, profile)
     if live is None:
+        # A turn paused for an update is its restarting backend's to continue (update_pause); resuming the chat
+        # here would run it in a process its viewers are not attached to. The row stays queued for the next pass.
+        from tui_gateway.update_pause import successor_owes_continuation
+        if any(successor_owes_continuation(_profile_home(profile), k) for k in {owner, tip}):
+            logger.info("producer admission: %s is paused for a Hermes update and its backend is restarting; "
+                        "left to that backend's continuation", tip)
+            return {**record, "verdict": "paused_turn"}
         handler = server._methods.get("session.resume")
         if handler is None:
             return {**record, "verdict": "no_resume"}

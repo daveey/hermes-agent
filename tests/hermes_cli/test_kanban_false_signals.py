@@ -147,3 +147,50 @@ def test_diagnostic_re_resolves_old_warning_at_read_time(board):
     assert not [d for d in diags if d.kind == "prose_phantom_refs"]
 
 
+
+
+# Short-form refs: the 8-hex prefix of a real card (often in its own branch name) is not a phantom.
+REAL_FULL_ID = "t_01a1cf03b74efb8d"
+
+
+def _real_card(conn, monkeypatch):
+    monkeypatch.setattr(kb, "_new_task_id", lambda: REAL_FULL_ID)
+    assert kb.create_task(conn, title="land-lane design", assignee="worker") == REAL_FULL_ID
+    monkeypatch.undo()
+
+
+def test_card_prefix_inside_branch_name_is_not_flagged(board, monkeypatch):
+    conn, _ = board
+    _real_card(conn, monkeypatch)
+    tid = _complete_with_summary(conn, "pushed design/t_01a1cf03-land-lane for review")
+    assert _phantom_events(conn, tid) == []
+
+
+def test_prose_prefix_of_a_real_card_is_not_flagged(board, monkeypatch):
+    conn, _ = board
+    _real_card(conn, monkeypatch)
+    tid = _complete_with_summary(conn, "follow-up of t_01a1cf03 (land lane)")
+    assert _phantom_events(conn, tid) == []
+
+
+def test_nonexistent_full_length_id_is_still_flagged(board, monkeypatch):
+    conn, _ = board
+    _real_card(conn, monkeypatch)
+    ghost = "t_01a1cf03b74efb8e"  # shares the real card's prefix, but a full id resolves exactly
+    payloads = [r[0] for r in _phantom_events(conn, _complete_with_summary(conn, f"see {ghost}"))]
+    assert len(payloads) == 1 and ghost in payloads[0]
+
+
+def test_short_token_prefixing_no_card_is_flagged(board, monkeypatch):
+    conn, _ = board
+    _real_card(conn, monkeypatch)
+    payloads = [r[0] for r in _phantom_events(conn, _complete_with_summary(conn, "see t_feedf00d"))]
+    assert len(payloads) == 1 and "t_feedf00d" in payloads[0]
+
+
+def test_prefix_of_a_replica_only_card_is_not_flagged(board):
+    conn, hub = board
+    _make_hub_db(hub)
+    tid = _complete_with_summary(conn, f"hub card {REMOTE_ID[:10]} and t_feedf00d")
+    payloads = [r[0] for r in _phantom_events(conn, tid)]
+    assert len(payloads) == 1 and "t_feedf00d" in payloads[0] and REMOTE_ID[:10] not in payloads[0]

@@ -113,3 +113,18 @@ def test_subscription_deadline_ignores_paid_pool_rows(managed):
     pool.mark_exhausted_and_rotate(status_code=429, model='anthropic-deep',
         credential_id='subscription', error_context={'reset_at': now + 7200})
     assert quota_unavailable(pool, 'anthropic-deep').resets_at == pytest.approx(now + 7200, rel=0, abs=0.01)
+
+
+def test_quota_room_is_positive_evidence_only(managed):
+    """``quota_room`` (the Kanban cross-gateway wall check) needs a live OAuth entry with no cooldown;
+    the same pool exhausted reads as no room, and the paid row never counts."""
+    from agent.credential_pool import load_pool
+    from agent.model_routing_unavailable import quota_room, quota_unavailable
+    pool = load_pool('anthropic', allowed_auth_types={'oauth'})
+    assert quota_unavailable(pool, 'anthropic-deep') is None
+    assert quota_room(pool, 'anthropic-deep') is True
+    pool.mark_exhausted_and_rotate(status_code=429, model='anthropic-deep',
+        credential_id='subscription', error_context={'reset_at': time.time() + 7200})
+    assert quota_unavailable(pool, 'anthropic-deep') is not None
+    assert quota_room(pool, 'anthropic-deep') is False
+    assert quota_room(None, 'anthropic-deep') is False

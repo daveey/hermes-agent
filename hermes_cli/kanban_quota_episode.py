@@ -17,21 +17,36 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 
 MAX_BACKOFF_SECONDS = 7200
+# A wall this gateway recorded holds as recorded for this long; after it, only while this pool agrees.
+LOCAL_WALL_TRUST_SECONDS = 30 * 60
+
+
+def _backoff(ended_at, count):
+    """The doubling-backoff deadline after the *count*-th consecutive rate_limited run ending at *ended_at*."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_quota_receipt import valid_deadline
+    cooldown = max(0, kb._resolve_rate_limit_cooldown_seconds())
+    delay = min(MAX_BACKOFF_SECONDS, cooldown * 2 ** min(max(count, 1) - 1, 20))
+    ended = kb._to_epoch(ended_at)
+    # An unreadable end stamp anchors backoff at now; an unrepresentable sum holds one full cap.
+    return valid_deadline((ended if ended is not None else time.time()) + delay)
 
 
 def episode(conn, task_id, *, run_id=None):
     from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_quota_receipt import receipt_deadline, receipt_route, valid_deadline
+    from hermes_cli.kanban_quota_receipt import receipt_deadline, receipt_route
     runs = []
     bound = conn.execute("SELECT ended_at,id FROM task_runs WHERE task_id=? AND id=? AND ended_at IS NOT NULL",
                          (task_id, run_id)).fetchone() if run_id is not None else None
     if run_id is not None and bound is None:
         return None
+    from hermes_cli.kanban_quota_episode_release import released_run
+    released = released_run(conn, task_id)  # a quota_episode_released event closes every run up to it
     for row in conn.execute(
         "SELECT id, outcome, ended_at FROM task_runs WHERE task_id=? AND ended_at IS NOT NULL "
         "AND (? IS NULL OR (ended_at,id)<=(?,?)) ORDER BY ended_at DESC, id DESC",
         (task_id, run_id, bound['ended_at'] if bound else None, run_id)):
-        if row['outcome'] != 'rate_limited':
+        if row['outcome'] != 'rate_limited' or (released is not None and row['id'] <= released):
             break
         runs.append(row)
     if not runs:
@@ -43,11 +58,7 @@ def episode(conn, task_id, *, run_id=None):
     if stored:
         return kb._json_dict(stored[0])
     reset = receipt_deadline(conn, task_id, latest['id'])
-    cooldown = max(0, kb._resolve_rate_limit_cooldown_seconds())
-    delay = min(MAX_BACKOFF_SECONDS, cooldown * 2 ** min(len(runs) - 1, 20))
-    ended = kb._to_epoch(latest['ended_at'])
-    # An unreadable end stamp anchors backoff at now; an unrepresentable sum holds one full cap.
-    backoff = valid_deadline((ended if ended is not None else time.time()) + delay)
+    backoff = _backoff(latest['ended_at'], len(runs))
     # A hint extends the wait, never shortens it below the doubling backoff ('retry after 5s' x N).
     found = [t for t in (reset, backoff) if t is not None]
     until = max(found) if found else None
@@ -61,7 +72,8 @@ def episode(conn, task_id, *, run_id=None):
     providers = sorted({p for p in (actual, admitted) if p})
     return {'episode_id': runs[-1]['id'], 'run_id': latest['id'], 'count': len(runs),
             'until': until if until is not None else time.time() + MAX_BACKOFF_SECONDS,
-            'hinted': reset is not None, 'provider': actual or admitted, 'providers': providers,
+            'backoff_until': backoff, 'hinted': reset is not None,
+            'provider': actual or admitted, 'providers': providers,
             'model': route.get('model')}
 
 
@@ -70,6 +82,41 @@ def _providers(state):
     if isinstance(found, list):
         return [p for p in found if isinstance(p, str) and p]
     return [state['provider']] if state.get('provider') else []
+
+
+def _disproved(wall, now, memo):
+    """True for a hinted wall the live OAuth pool now contradicts: every provider it names serves its
+    model (any model for a class route) and no later provider-wide wall stands. A transient auth bench
+    once made ``quota_unavailable`` report a days-long false wall; the stored deadline must not outlive it.
+    A file wall ending no later than this one may be its own mirror (``record_wall_for_run``), so only a
+    later one is independent evidence. *memo* caches the pool reads for one ``_outstanding`` call."""
+    from agent.model_routing import is_class_selector
+    from hermes_cli import kanban_provider_walls as pw
+    names = _providers(wall)
+    if not wall.get('hinted') or not names:
+        return False
+    model = wall.get('model')
+    if not isinstance(model, str) or not model or is_class_selector(model) or len(names) > 1:
+        model = None
+    if 'walls' not in memo:
+        memo['walls'] = pw.active_walls(now=now)
+    for name in names:
+        if (name, model) not in memo:
+            memo[name, model] = pw.live_pool_serving(name, model)
+    return all(memo['walls'].get(name, 0) <= wall['until'] and memo[name, model] for name in names)
+
+
+def _unhinted(conn, task_id, wall):
+    """*wall* with its disproved hint rejected: it keeps only the doubling backoff ('retry after 5s' x N
+    must stay paced). Episodes stored before ``backoff_until`` recompute it from their latest run."""
+    backoff = wall.get('backoff_until')
+    if not isinstance(backoff, (int, float)):
+        row = conn.execute('SELECT ended_at FROM task_runs WHERE task_id=? AND id=?',
+                           (task_id, wall.get('run_id'))).fetchone()
+        count = wall.get('count') if isinstance(wall.get('count'), int) else 1
+        backoff = _backoff(row['ended_at'] if row else None, count)
+    until = min(wall['until'], backoff) if backoff is not None else wall['until']
+    return {**wall, 'until': until, 'hinted': False}
 
 
 def _outstanding(conn, task_id, state, now):
@@ -82,7 +129,9 @@ def _outstanding(conn, task_id, state, now):
         prior = kb._json_dict(row[0])
         if isinstance(prior.get('until'), (int, float)) and prior['until'] > now:
             out.append(prior)
-    return out
+    memo = {}
+    out = [_unhinted(conn, task_id, wall) if _disproved(wall, now, memo) else wall for wall in out]
+    return [wall for wall in out if wall['until'] > now]
 
 
 def _base_route(task, base):
@@ -132,16 +181,30 @@ def hold_until(conn, task_id, now=None):
     return max(s['until'] for s in outstanding) if outstanding else None
 
 
+def _strong_class(base):
+    """True for an unpinned strong-tier class route (``retry_after_*``/``pattern:*``/``review`` on
+    ``class:<x>``/``auto``): the worker would allocate any route of that class, so a wall on one provider
+    leaves the class's other providers open to it. [daveey]"""
+    from agent.model_routing import is_class_selector
+    model, provider, reason = base
+    return (isinstance(model, str) and is_class_selector(model) and str(provider or 'auto').strip().lower() == 'auto'
+            and (reason == 'review' or str(reason).startswith(('retry_after_', 'pattern:'))))
+
+
 def alternate_route(conn, task, walls, base, now):
-    """Non-allocating probe using the worker's billing/capability eligibility."""
+    """Non-allocating probe using the worker's billing/capability eligibility.
+
+    A strong-tier class route (``_strong_class``) also requires the route's provider to serve on this
+    gateway's live pool: the strong tier is chosen for its strength, so it moves only to proven room."""
     from agent.model_routing import eligible_routes, validate_policy, ModelRoutingError
     from agent.model_routing_agent import class_requirements
     from hermes_cli.config import is_provider_enabled
     from hermes_cli.kanban_model_assignment import _assignee_config
-    from hermes_cli.kanban_provider_walls import active_walls
+    from hermes_cli.kanban_provider_walls import active_walls, live_pool_serving
     model, _provider, reason = base
-    if (task.model_override or task.provider_override or reason not in {'default', 'off', 'profile_out_of_scope'}
-            or not walls):
+    strong = _strong_class(base)
+    if (task.model_override or task.provider_override
+            or (reason not in {'default', 'off', 'profile_out_of_scope'} and not strong) or not walls):
         return None
     config = _assignee_config(task.assignee) or {}
     policy = config.get('model_routing') or {}
@@ -166,7 +229,63 @@ def alternate_route(conn, task, walls, base, now):
     providers = config.get('providers') or {}
     routes = eligible_routes(policy, level, class_requirements(config), eligible=lambda r: (
         r['provider'] not in walled and is_provider_enabled(providers.get(r['provider'], {}))))
+    if strong:
+        routes = [r for r in routes if live_pool_serving(r['provider'], r['model'])]
     return (routes[0]['model'], routes[0]['provider']) if routes else None
+
+
+def _wall_origin(conn, task_id, wall):
+    """``(recorded_at, local)`` for one stored wall: when it was recorded and whether this gateway ran it.
+
+    Run ids in a synced payload are the recording gateway's; the event row's ``run_id`` is this replica's,
+    and that run's ``claimed`` lock names the host (``kanban_host_identity``). No lock reads as local."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_host_identity import is_local_claim
+    row = conn.execute(
+        "SELECT run_id, created_at FROM task_events WHERE task_id=? AND kind='quota_episode' AND json_valid(payload) "
+        "AND json_extract(payload, '$.run_id') IS ? AND json_extract(payload, '$.episode_id') IS ? "
+        "ORDER BY id DESC LIMIT 1", (task_id, wall.get('run_id'), wall.get('episode_id'))).fetchone()
+    if row is not None:
+        run_id, recorded = row[0], kb._to_epoch(row[1])
+    else:  # computed from this replica's own runs, not yet stored
+        run_id = wall.get('run_id')
+        ended = conn.execute("SELECT ended_at FROM task_runs WHERE task_id=? AND id=?", (task_id, run_id)).fetchone()
+        recorded = kb._to_epoch(ended[0]) if ended else None
+    locks = [kb._json_dict(raw).get('lock') for (raw,) in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='claimed'", (task_id, run_id))]
+    locks = [lock for lock in locks if isinstance(lock, str) and lock]
+    return recorded, (not locks or any(is_local_claim(lock) for lock in locks))
+
+
+def _wall_models(task, wall, provider):
+    """Concrete models this gateway would run *provider* on for the walled route (a class's routes), or []."""
+    from agent.model_routing import is_class_selector
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    model = wall.get('model')
+    if not isinstance(model, str) or not model:
+        return []
+    if not is_class_selector(model):
+        return [model]
+    policy = (_assignee_config(task.assignee) or {}).get('model_routing') or {}
+    routes = (policy.get('routes') or {}).get(model.removeprefix('class:')) or []
+    return [r['model'] for r in routes if isinstance(r, dict) and str(r.get('provider') or '').strip().lower() == provider
+            and isinstance(r.get('model'), str) and r['model']]
+
+
+def _served_here(conn, task, wall, now):
+    """True when this gateway's own pool can serve every provider of a wall it did not just see itself.
+
+    A wall another gateway recorded (pools are per gateway), or this gateway's own once older than
+    ``LOCAL_WALL_TRUST_SECONDS``, holds only while this pool agrees. A wall this gateway just saw holds
+    as recorded; an unknown provider or model, or a pool with no live entry, is never room."""
+    from hermes_cli.kanban_provider_walls import live_quota_room
+    names = _providers(wall)
+    if not names:
+        return False
+    recorded, local = _wall_origin(conn, task.id, wall)
+    if local and (recorded is None or now - recorded < LOCAL_WALL_TRUST_SECONDS):
+        return False
+    return all(any(live_quota_room(p, m) for m in _wall_models(task, wall, p)) for p in names)
 
 
 def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
@@ -181,6 +300,15 @@ def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
         return None, None
     state = max(outstanding, key=lambda s: s['until'])
     held = 'subscription_quota_reset' if state['hinted'] else 'rate_limit_cooldown'
+    try:
+        outstanding = [wall for wall in outstanding if not _served_here(conn, task, wall, now)]
+    except sqlite3.Error:
+        raise
+    except Exception:
+        logger.warning('kanban quota: local pool check failed for %s; keeping its walls', task.id, exc_info=True)
+    # Every wall was another gateway's (or a stale one of ours) and this pool has room now. The base route
+    # still goes through the walled-elsewhere check below; a run that hits the wall here records a new episode.
+    lifted = not outstanding
     walls, unknown = {}, False
     for wall in outstanding:
         names = _providers(wall)
@@ -191,6 +319,9 @@ def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
     try:
         base = base or resolve_model_tier(conn, task, lane=lane, cfg=cfg)
         target = _base_route(task, base)
+        if target is None and lifted:
+            # A class route: the worker allocates it against this gateway's live pool, which has room.
+            return None, None
         if target is not None and not unknown and target[1] not in walls:
             # A provider this episode never hit may still be walled (another card's wall, the live pool):
             # admitting it would send a card moved off codex, then walled on anthropic, back to codex.
@@ -204,8 +335,10 @@ def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
     except Exception:
         logger.warning('kanban quota: route resolve failed for %s; holding', task.id, exc_info=True)
         return held, None
-    if lane == 'review' or base[2] in ('review_unpinned', 'review_override', 'review_override_refused') or unknown:
-        # An unrecorded wall may be any provider: no route can be proven to avoid it.
+    if (lane == 'review' and not _strong_class(base)) or base[2] in (
+            'review_unpinned', 'review_override', 'review_override_refused') or unknown:
+        # An unrecorded wall may be any provider: no route can be proven to avoid it. A legacy unpinned
+        # review on a class route (reason ``review``) chose no reviewer, so another route of its class may take it.
         return held, None
     try:
         if base[2] == 'pinned':

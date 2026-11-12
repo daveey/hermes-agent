@@ -42,12 +42,40 @@ def _notice_from_stored(conn, task_id, gateway, pool):
     repin.maybe_notify(conn, task_id, gateway, queue.latest(conn, task_id), pool)
 
 
-def creation_decision(args, cfg, gateway, pin, origin_intent):
-    """Resolve explicit local pins and pool enrollment before legacy routing."""
+QUEUED_WHY = ("portable: queued for any machine labelled {label} (kanban.placement.worker_queue); the first one "
+              "with a free slot claims it through the Board lease")
+
+
+def queue_decision(args, cfg, gateway, pin, origin_intent, machine_ok=None):
+    """``runs_on: [<pool label>, *coordination labels]`` for a portable card of a ``worker_queue`` gateway, or None.
+
+    One queue instead of a machine pin: no worker is chosen at creation, so a held or full worker never strands the
+    card while another has free slots. None (legacy routing applies) for a pin, an explicit ``runs_on``, courier
+    creation, non-portable work, or when no active, unheld machine carries the label. [daveey]
+    """
+    from hermes_cli import kanban_placement as placement
+    from hermes_cli import kanban_placement_coordination as coordination
+
+    label = placement._Cfg(cfg).queue_label(gateway)
+    if not label or pin not in ("", "auto") or args.get("runs_on") is not None or origin_intent is not None:
+        return None
+    if placement.portable_reason(args, cfg):
+        return None
+    extra = coordination.required_labels(args, cfg)
+    if extra is None or not (machine_ok or placement._machine_picks_up)(label):
+        return None
+    return {"where": "local", "runs_on": [label, *sorted(extra - {label})], "why": QUEUED_WHY.format(label=label)}
+
+
+def creation_decision(args, cfg, gateway, pin, origin_intent, machine_ok=None, queue=True):
+    """Resolve explicit local pins, the worker queue and pool enrollment before legacy routing."""
     from hermes_cli.kanban_placement import PINNED_LOCAL_WHY, portable_reason
 
     if pin in ("local", "here", (gateway or "").lower()):
         return {"where": "local", "why": PINNED_LOCAL_WHY}
+    queued = queue_decision(args, cfg, gateway, pin, origin_intent, machine_ok) if queue else None
+    if queued is not None:
+        return queued
     pools = cfg.get("worker_pools")
     if pin not in ("", "auto") or not isinstance(pools, dict) or gateway not in pools:
         return None
@@ -78,28 +106,40 @@ def creation_audit(args, cfg=None):
 
 
 def resolved_db_placement(fields):
-    """Validate the effective workspace after project inheritance, enrolling only unchecked producers."""
-    policy = fields["placement_policy"]
+    """``(policy, audit, runs_on)``: validate the effective workspace after project inheritance, placing only
+    unchecked producers (worker queue, else pool enrollment) exactly as the front doors do."""
+    policy, runs_on = fields["placement_policy"], fields["runs_on"]
     if policy is None and not fields["placement_checked"]:
-        policy = db_policy(fields)
-    validate_creation(policy, runs_on=fields["runs_on"], workspace_kind=fields["workspace_kind"],
+        policy, queued = db_placement(fields)
+        runs_on = queued if queued is not None else runs_on
+    validate_creation(policy, runs_on=runs_on, workspace_kind=fields["workspace_kind"],
                       workspace_path=fields["workspace_path"], project=fields["project_id"],
                       origin_intent=None, board=fields["board"])
     audit = fields["placement_audit"]
     if audit is None:
         audit = creation_audit(_db_fields(fields))
-    return policy, audit
+    return policy, audit, runs_on
 
 
-def db_policy(fields):
-    """Enroll direct producers at insertion; front doors may preserve an already checked decision."""
+def db_placement(fields):
+    """``(placement_policy, runs_on)`` for a direct ``create_task`` producer (swarm, triage sweep, alerts, ...).
+
+    Same outcome as the front doors: a portable card of a ``worker_queue`` gateway queues for the pool label on a
+    Board primary (``runs_on`` is a Board placement field); elsewhere, or with no live labelled machine, it keeps
+    worker-pool enrollment. Judging the queue but keeping only ``placement_policy`` (11-12) dropped both. [daveey]
+    """
+    from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_placement as placement
 
     cfg = placement.config()
-    if not cfg.get("worker_pools"):
-        return None
-    result = creation_decision(_db_fields(fields), cfg, placement.reg.self_gateway(), "auto", None)
-    return (result or {}).get("placement_policy")
+    if not cfg.get("worker_pools") and not cfg.get("worker_queue"):
+        return None, None
+    queue = bool(cfg.get("worker_queue")) and sync.board_mode(fields["conn"]) == "primary"
+    result = creation_decision(_db_fields(fields), cfg, placement.reg.self_gateway(), "auto", None,
+                               queue=queue) or {}
+    if result.get("runs_on") is not None:
+        return None, list(result["runs_on"])
+    return result.get("placement_policy"), None
 
 
 def _db_fields(fields):
@@ -136,20 +176,45 @@ def cli_policy(args, body, workspace_kind, workspace_path, board, *, assignee):
     return (result or {}).get("placement_policy")
 
 
+def cli_runs_on(conn, args, body, workspace_kind, workspace_path, board, *, assignee):
+    """``runs_on`` for a CLI-created card: an explicit ``--runs-on`` as given, else what the worker queue
+    (``kanban.placement.worker_queue``) gives it, or None. The queue applies only on a Board primary
+    (``runs_on`` is a Board placement field)."""
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_placement as placement
+
+    if getattr(args, "runs_on", None) is not None:
+        return args.runs_on
+    if sync.board_mode(conn) != "primary":
+        return None
+    cfg = placement.config()
+    if not cfg.get("worker_queue"):
+        return None
+    fields = _cli_fields(args, body, workspace_kind, workspace_path, board, assignee=assignee)
+    fields.pop("runs_on", None)
+    result = queue_decision(fields, cfg, placement.reg.self_gateway(), "auto", None)
+    return (result or {}).get("runs_on")
+
+
 def cli_audit(args, body, workspace_kind, workspace_path, board, *, assignee):
     """:func:`creation_audit` over the same fields :func:`cli_policy` judged."""
     return creation_audit(_cli_fields(args, body, workspace_kind, workspace_path, board, assignee=assignee))
 
 
 def validate_creation(policy, *, runs_on, workspace_kind, workspace_path, project, origin_intent, board):
-    """Reject contradictory enrollment rather than quietly erasing a caller pin."""
+    """Reject contradictory enrollment rather than quietly erasing a caller pin.
+
+    A courier create may carry the policy: only the receiving hub's admission judge sets it
+    (``courier_plan``), re-enrolling a denied routed card in the worker pool. [daveey]
+    """
+    del origin_intent
     if policy is None:
         return
     if policy != POLICY:
         raise ValueError("unknown placement policy")
     if (runs_on is not None or workspace_kind not in (None, "scratch") or workspace_path
-            or project or origin_intent is not None or board not in (None, "default")):
-        raise ValueError("worker-first policy cannot override manual, courier or host placement")
+            or project or board not in (None, "default")):
+        raise ValueError("worker-first policy cannot override manual or host placement")
 
 
 def execution_refusal(conn, row):

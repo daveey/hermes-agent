@@ -14,6 +14,14 @@ def _effective_board_args(args, origin_intent):
     return args if origin_intent is not None else {**args, "board": args.get("board") or kb.get_current_board()}
 
 
+def _courier_landing(conn, args, origin_intent, marker, runs_on, **effective):
+    """A routed create landing here is judged by the receiving hub before its txn. [daveey]"""
+    if origin_intent is None:
+        return marker
+    from hermes_cli.kanban_hub_admission_placement import courier_plan
+    return courier_plan(conn, {**args, **effective}, runs_on, request_id=origin_intent.get("request_id")) or marker
+
+
 def _origin_enrollment(args, origin, marker, **effective):
     """Chat ownership pins storage, not execution; never forward an origin-bound card."""
     if origin is None:
@@ -21,8 +29,12 @@ def _origin_enrollment(args, origin, marker, **effective):
     from hermes_cli import kanban_placement as kp
     from hermes_cli.kanban_worker_placement import creation_decision
     cfg, gateway = kp.config(), kp.reg.self_gateway()
-    return creation_decision({**args, **effective}, cfg, gateway,
-                             kp.canonical_pin(args.get("placement") or "auto", gateway, cfg), None)
+    from hermes_cli.kanban_hub_admission_placement import apply
+    view = {**args, **effective}
+    decision = creation_decision(view, cfg, gateway,
+                                 kp.canonical_pin(args.get("placement") or "auto", gateway, cfg), None,
+                                 queue=False)  # [daveey] origin-bound: the worker queue is not applied here
+    return apply(view, decision or {"where": "local", "why": "origin-bound storage"}, gateway, cfg, queue=False)
 
 
 def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:
@@ -77,13 +89,42 @@ def _placement_origin(conn, creator_task_id: Optional[str], session_id: Optional
     return {"session_id": session_id, "origin_profile": None}
 
 
-def _placement_refused(pin: str, why: str) -> str:
-    """[daveey] A caller-pinned gateway cannot be honoured: say so instead of creating the card here."""
+def _placement_refused(pin: str, why: str, *, hub_admission=None, remedy=None) -> str:
+    """[daveey] A caller-pinned gateway cannot be honoured: say so instead of creating the card here.
+
+    ``remedy`` replaces the generic alternatives when they cannot work: on the hub a denied stay-here card was
+    told to "use placement='local'", which is what it had passed (t_01a1cf9334ff49bc)."""
+    alternatives = remedy or (
+        "Use placement='local' (or omit it) to create the card on this "
+        "gateway, or create it on the target with `hermes-hub create-task <gateway> ...`.")
     return tool_error(
         f"placement={pin!r} was not honoured and no card was created: {why}. A pinned gateway is never "
-        "silently replaced by a local card. Use placement='local' (or omit it) to create the card on this "
-        "gateway, or create it on the target with `hermes-hub create-task <gateway> ...`.",
-        code="placement_unavailable", placement=pin, created=False)
+        f"silently replaced by a local card. {alternatives}",
+        code="placement_unavailable", placement=pin, created=False,
+        **({"hub_admission": hub_admission} if hub_admission else {}))
+
+
+def _admission_refused(marker_placement) -> None:
+    """[daveey] Raise the refusal for a denied hub admission found after origin enrollment.
+
+    ``_Reject`` carries the finished payload to ``_kanban_handler`` (no branch in ``_handle_create``)."""
+    if not marker_placement or marker_placement.get("where") != "refuse":
+        return
+    from tools.kanban_tools import _Reject
+    raise _Reject("", payload=_placement_refused(marker_placement.get("pin", "hub"), marker_placement.get("why", ""),
+                                                 hub_admission=marker_placement.get("hub_admission"),
+                                                 remedy=marker_placement.get("remedy")))
+
+
+def _effective_requires(marker_placement, args: dict):
+    """[daveey] Requirements to persist: a denied hub card carries ``hub:write`` from the planner."""
+    return (marker_placement or {}).get("requires", args.get("requires"))
+
+
+def _with_admission(placement: dict, marker_placement) -> dict:
+    """[daveey] A machine-pin create reply keeps the hub admission verdict that let it through."""
+    verdict = (marker_placement or {}).get("hub_admission")
+    return {**placement, "hub_admission": verdict} if verdict else placement
 
 
 def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_pin: bool) -> dict:
@@ -94,6 +135,10 @@ def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_p
     elsewhere without the pin also gets a ``note`` naming that target (the card is still created here).
     """
     why = decision.get("why") or ""
+    if decision.get("hub_admission"):
+        # Admission already resolved the execution target; advisory re-deciding
+        # would make another model call and could discard the effective contract.
+        return dict(decision)
     if decision.get("placement_policy"):
         return {"where": "local", "placement_policy": decision["placement_policy"], "why": why}
     if decision.get("defer"):
@@ -104,10 +149,11 @@ def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_p
         return {"where": "local", "runs_on": decision["runs_on"], "why": why}
     logger.info("kanban placement: local (%s)", why)
     if why.startswith("local marker"):
-        return {"where": "local", "why": why, "remedy": kp.LOCAL_MARKER_REMEDY}
+        return {"where": "local", "why": why, "remedy": kp.marker_remedy(why, None, view)}
     placement = {"where": "local", "why": why}
     if note_local_pin and why == kp.PINNED_LOCAL_WHY:
-        unpinned = kp.decide({**view, "placement": "auto"}, machine_ok=machine_ok)
+        # Unpinned means placement omitted: an explicit 'auto' would also drop a skill marker (marker_skills).
+        unpinned = kp.decide({k: v for k, v in view.items() if k != "placement"}, machine_ok=machine_ok)
         where = unpinned.get("where")
         elsewhere = (unpinned.get("defer") or ", ".join(unpinned.get("runs_on") or ())) if where == "local" else where
         if elsewhere and where != "refuse":
@@ -115,11 +161,36 @@ def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_p
     return placement
 
 
+def _denied_fields(conn, task_id: str, marker_placement: dict) -> Optional[dict]:
+    """``placement`` + ``note`` for a card hub admission denied: the pool route it was persisted with,
+    never the pre-judge ``where: local`` (self-heal t_01a1cfae6c9413c8). None for any other card. [daveey]"""
+    import json
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli.kanban_hub_admission_placement import denied_placement
+
+    verdict = marker_placement.get("hub_admission")
+    if not isinstance(verdict, dict) or verdict.get("admit") is not False:
+        return None
+    # runs_on is a Board column: an unsynced board has none (its denied cards are worker-first).
+    cols = "runs_on, placement_policy" if "runs_on" in sync.table_columns(conn, "tasks") else "NULL, placement_policy"
+    row = conn.execute(f"SELECT {cols} FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    report = denied_placement(verdict, runs_on=json.loads(row[0]) if row and row[0] else None,
+                              placement_policy=row[1] if row else None)
+    if report is None:
+        return None
+    note = report.pop("note")
+    if marker_placement.get("requires") is not None:
+        report["requires"] = marker_placement["requires"]
+    return {"placement": report, "note": note}
+
+
 def _marker_placement_fields(conn, new_tid: str, marker_placement: Optional[dict], session_id: Optional[str],
                              origin_profile: Optional[str] = None) -> dict:
     """Result fields for a card a placement marker kept here; a deferred card records its forward. [daveey]"""
     if not marker_placement:
         return {}
+    if denied := _denied_fields(conn, new_tid, marker_placement):
+        return denied
     if marker_placement.get("defer"):
         # Run on the routed gateway once the parents finish (kanban_placement_forward).
         from hermes_cli import kanban_placement_forward as _kpf
@@ -130,7 +201,8 @@ def _marker_placement_fields(conn, new_tid: str, marker_placement: Optional[dict
                 "note": (f"Created here as {new_tid} so it can wait on its parents; it runs on "
                          f"{marker_placement['defer']}, not here: when the parents finish the dispatcher "
                          f"forwards it there and this card completes when that one does.")}
-    if marker_placement.get("runs_on") or marker_placement.get("placement_policy"):
+    if (marker_placement.get("runs_on") or marker_placement.get("placement_policy")
+            or marker_placement.get("hub_admission")):
         return {"placement": dict(marker_placement)}
     out: dict = {"placement": {"where": marker_placement["where"], "why": marker_placement["why"]}}
     if marker_placement.get("remedy"):
@@ -184,6 +256,8 @@ def _runs_where(runs_on, pinned_machine, marker_placement) -> str:
     if runs_on is not None:
         if pinned_machine:
             return f"{pinned_machine} via the board lease (runs_on={runs_on})"
+        if ((marker_placement or {}).get("hub_admission") or {}).get("admit") is False:
+            return f"worker pool: a machine matching runs_on={runs_on} via the board lease (hub admission denied)"
         return f"a machine matching runs_on={runs_on} via the board lease"
     if marker_placement and marker_placement.get("defer"):
         return f"{marker_placement['defer']} once its parents finish"

@@ -7,12 +7,14 @@ import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { outcomeHasCrons, outcomeStripe, outcomeTooltip } from '@/lib/session-outcome'
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
+import { useExecutionObservationClock } from '@/lib/use-execution-observation-clock'
 import { useSessionParked } from '@/lib/use-session-parked'
 import { cn } from '@/lib/utils'
 import { stuckOnPausedQueue } from '@/store/owner-queue-landed'
 import { $pausedQueueSessionIds } from '@/store/owner-queue-reconcile'
 import { $sessions } from '@/store/session'
 import {
+
   kanbanStripeCounts,
   outcomePaintsStripe,
   recordStripeTransition,
@@ -34,7 +36,9 @@ export function useSessionRowStripe(
   live: boolean
 ): { outcomePainted: boolean; statusStripe: null | SessionStatusStripe; userBlocked: boolean } {
   const userBlocked = useSessionParked(session.id, session)
-  const counts = kanbanStripeCounts(session)
+  // Make time an explicit input so React Compiler cannot cache counts across evidence expiry.
+  const nowSeconds = useExecutionObservationClock(session)
+  const counts = kanbanStripeCounts(session, nowSeconds)
 
   const statusStripe = live
     ? sessionStatusStripe(

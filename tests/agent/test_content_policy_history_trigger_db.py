@@ -83,3 +83,37 @@ def test_history_refusal_retry_keeps_system_prompt_and_one_current_row(session):
     assert sum(c.startswith("U13 ") for c in live) == 1
     assert sum(c.startswith("U13 ") for c in shown) == 1
     assert not any(MARKER in c for c in live)
+
+
+def test_history_refusal_retry_rotation_mode_sends_current_once(session):
+    """Legacy ``compression.in_place: false``: the compressor's head already ends in the current message
+    (merged into the user-turn anchor), so appending it again sent it 3x and stored it doubled."""
+    db, agent = session
+    agent.compression_in_place = False
+    for n in range(1, 13):
+        extra = f" {MARKER}" if n == 2 else ""
+        body = f"A{n} answer{extra} " + "lorem ipsum dolor " * 400
+        _gateway_turn(db, agent, f"U{n} question", lambda body=body, **kw: _reply(content=body))
+
+    calls = []
+
+    def provider(**kw):
+        calls.append(kw)
+        if any(MARKER in str(m.get("content") or "") for m in kw.get("messages") or []):
+            return _reply(refusal="I can't continue this conversation.")
+        return _reply(content="A13 It runs on the hub.")
+
+    current = "U13 does it run on the mini or the hub?"
+    result = _gateway_turn(db, agent, current, provider)
+
+    assert len(calls) == 2
+    assert result.get("final_response") == "A13 It runs on the hub."
+    retry_users = [m for m in calls[-1]["messages"] if m.get("role") == "user"]
+    assert retry_users[-1]["content"] == current
+    sent = "\n".join(str(m.get("content") or "") for m in calls[-1]["messages"])
+    assert sent.count(current) == 1
+    child = agent.session_id
+    assert child != "sid"  # rotation mode moved the turn to a child session
+    rows = [m.get("content") or "" for m in db.get_messages_as_conversation(child)
+            if isinstance(m.get("content"), str)]
+    assert "\n".join(rows).count(current) == 1

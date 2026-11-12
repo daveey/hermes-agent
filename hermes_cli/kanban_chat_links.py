@@ -158,8 +158,10 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
         return {}
     out: dict[str, dict[str, Any]] = {}
     for r in rows:
-        if r["uid"] in want or is_placeholder_session(r["chat_session"]) or _worker_shepherd(
-                r["chat_session"], "created", gateway, r["chat_profile"]):
+        # [daveey] A worker's ``local-<sha256>`` is released like any machine session, not skipped as a shepherd:
+        # another gateway proves a foreign hash chat by an unreleased ``created`` link (``proven_foreign_chats``),
+        # and only this gateway can say the hash is a worker (review t_01a1cf9aab0349a9).
+        if r["uid"] in want or is_placeholder_session(r["chat_session"]):
             continue
         if r.pop("status") not in TERMINAL_STATUSES and not is_machine_session(
                 gateway, r["chat_session"], local_gateway=gateway, profile=r["chat_profile"]):
@@ -235,7 +237,10 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
     # A placement attribution id is not a chat: its link is deleted (captured, so the Board drops it too), never
     # merely released; a released one still counted in every diff and replica read. A worker transcript's
     # shepherd link is no chat either (its wakes are refused). [daveey]
-    placeholders = {r[0] for r in rows if is_placeholder_session(r[2]) or _worker_shepherd(r[2], r[3], gateway, r[5])}
+    # A released ``created`` row to a worker hash is the release record of an owner-written link
+    # (``_owner_written_releases``): deleting it would hand the owner's unreleased copy back. [daveey]
+    placeholders = {r[0] for r in rows if is_placeholder_session(r[2]) or (
+        _worker_shepherd(r[2], r[3], gateway, r[5]) and not (r[1] and r[3] == "created"))}
     added = changed = released = retired = 0
     with write_txn(conn):
         for uid in placeholders - set(want):

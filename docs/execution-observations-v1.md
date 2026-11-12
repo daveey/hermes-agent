@@ -1,5 +1,33 @@
 # Execution observations v1 (capacity adapter)
 
+## Canonical child activity
+
+`turn_process_execution_observations.subagent` is the pure normalizer for
+`{child_session_id, parent_session_id, activity_at, started_at, live}`. Both registry
+RPCs and `subagent_session_activity.annotate_subagent_activity(rows)` produce source
+`subagent.activity`: gateway/profile/parent session, `work_id=<child session id>`,
+`generation=session=<child session id>`. Registry ids, delegation ids, PIDs and spawn
+timestamps never identify this execution. The registry adapter reads the child's
+actual `session_id` and original `_parent_session_id`; legacy records without an
+actual child id remain unknown. Equal activity clocks normalize to identical records,
+including source revision and evidence refs, irrespective of reservation/spawn time.
+
+The persisted reader runs on the existing session-list, profile stamps/bootstrap and
+project-tree annotation cadence, never inside `subagent.list`. It uses URI `mode=ro`,
+one batched SELECT per profile state.db per three-second cache (including failures),
+and discovers unended children started within six hours. Stale activity expires after
+180 seconds without a fetch; activity is never substantive progress. Finished rows
+are absent after cache refresh. Read failures produce unknown, not an empty inventory.
+The old `subagent.registry` source remains in replacement sets for mixed versions.
+
+Managed-worker children are owner-reserved in the owner's profile state.db by
+`gateway.session_worker_child.reserve_child_execution`. `ChildSessionStore` then
+persists `session.activity` via `worker.persist`; the local worker need not open a
+state.db. Observe these rows at the owner gateway, not the worker host. Persist-disabled
+children, inaccessible owner stores and children outside the discovery window are
+not complete inventory coverage; absence never proves zero children or completion.
+No new timer, store, migration, writer or lifecycle policy is introduced.
+
 Optional `execution_observations[]` is additive advisory evidence. Existing outcomes,
 completion/origin release receipts, admission and structured human requests remain
 authoritative and unchanged. Missing optional fields never erase outstanding work.
@@ -17,7 +45,16 @@ example its durable event), not merely the adapter build.
 All execution-envelope timestamps are finite nonnegative epoch **seconds**.
 Capacity-event fields named `*_ms` are milliseconds and must be explicitly converted.
 `observed_at` and `valid_until` belong to the producer. Consumer age is derived;
-fetch, copy and file mtime never renew validity. Apply separate existing upper
+fetch, copy and file mtime never renew validity. An actual successful read transaction
+of a local-authority board (sync mode `off` or `shadow`) is the producer's observation.
+API fetches, annotation copies, disk snapshots, memo hits and sync-`primary` mirrors
+are not. Unchanged local boards are re-read through the existing counts path at its
+30-second maximum-age cadence, not on each warm poll. Failed/busy reads retain the
+original evidence clock. This renews knowledge of queued/waiting state, not its
+phase/generation, activity or progress; running observations still use the joined
+run's original heartbeat. PRIMARY mirror reads have no authoritative local source
+clock and remain unknown on counts, task lists and detail; `pulled_at` never supplies
+one. Frozen snapshots still expire without a new authoritative read. Apply separate existing upper
 bounds: sidebar 180 seconds, imported-owner 600 seconds. Validity cannot exceed
 any required source's validity. Each required source may specify its original
 `source_class`; absent that field it inherits the envelope's class, never the
@@ -33,6 +70,76 @@ execution evidence does not revoke historical delivery evidence. `last_activity`
 and nullable `last_progress` are independent: claim, heartbeat, poll and comment
 alone never establish substantive progress. Missing progress does not mean stalled.
 A wait, when present, carries qualified target, predicate, since, due_at and owner.
+
+## Work projection hardening (additive; adapter semantics unchanged)
+
+`hermes_cli/execution_observations.py` (`project`, `select`, `summarize`) and
+`apps/desktop/src/lib/execution-observations.ts` (`projectExecutionObservation`,
+`selectExecutionObservation`, `summarizeExecutionObservations`) are pure and share
+`schemas/fixtures/execution-observations-v1.json`; both test suites load that one
+file, so verdicts live only there. `adapt` keeps its published behavior and existing
+tests; it additionally rejects non-string/bool/array values instead of raising,
+and treats `version: true` as unsupported.
+
+- **Attempt identity**: `run_id`/`generation` is an integral JSON number in
+  1..9007199254740991 (7.0 is the integer 7, never "7") or a nonblank identifier
+  string. Booleans, fractions, unsafe integers, arrays are invalid. Identifier
+  strings (identity, owner, wait target) must be nonempty with no leading/trailing
+  whitespace; whitespace set = union of Python `str.isspace` and JS `trim`.
+- **TTL lookup** is own-property and string-typed first. A required source's
+  `source_class` absent inherits the envelope; explicit null/array/unknown/inherited
+  names are invalid. `required_sources: null` is invalid.
+- `unknown_reason` is kept only when a nonempty string, else `source_unknown`.
+- **Human requests**: `resolved_check`/`resolved_check_every` are stripped from
+  `human_request` and each `retained_human_requests` entry on projector entry (input
+  untouched), before validation and output; all other fields and expired asks are retained. Visible semantics (five text fields,
+  interaction set, 2-6 distinct `{label<=60, value<=120}` choices by code point) are
+  implemented identically in both languages. `needs_user` with a `time`,
+  `dependency` or `transient` wait is unknown (`invalid_human_wait`).
+  `summarize(...).outstanding_human_requests` counts retained valid requests
+  regardless of freshness or state (a request with such a nonhuman wait is not valid).
+- **Progress** needs an explicit successful, nonblank referenced evidence record and
+  `last_progress <= observed_at` and `<= now`; kinds are never coerced.
+- **last_known_state** is a known non-unknown state or null, and `done` survives only
+  with a matching verified `delivered` receipt (also for stale and legacy input). The
+  verified historical receipt itself is retained through expiration.
+- **select** matches the exact normalized identity key, ignores malformed entries,
+  is independent of input order, and returns unknown for invalid candidate timing, a
+  future-dated winner, different sources, or conflicting same-time records, using
+  JSON equality (bool is not a number; 7 equals 7.0).
+- TS output is a deep copy (own keys defined as data, so `__proto__` is inert).
+
+### Unknown selection preserves outstanding evidence
+
+When `select` has exact identity-matched candidates but its result is `unknown`, it
+projects each matched candidate before collecting evidence. Conflicts, invalid timing,
+future-dated winners and expiration do not resolve an outstanding human request or
+revoke verified historical delivery. The additive result fields are:
+
+- `retained_human_requests`: every distinct valid visible request, including previously
+  retained requests. Singular requests accompanied by nonhuman waits are excluded.
+- `historical_delivery_receipts`: every distinct verified `delivered` receipt whose
+  identity matches the selected execution, including previously historical receipts.
+
+Both arrays use structural JSON-semantic deduplication, independent of object property
+order (7 and 7.0 coincide; booleans, missing/null and array order remain distinct).
+They have a canonical typed structural ordering, using code-point string encoding and
+IEEE-754 number bits with zero normalized. This is deterministic, **not** an ordering
+of authority, chronology, request resolution or execution outcomes. Only exact matched
+candidates contribute: another gateway, profile, board, run or generation is fenced out.
+
+A valid already-selected singular `human_request` / `delivery_receipt` stays selected.
+Otherwise a unique retained value also fills its singular field; multiple distinct values
+stay in the arrays without inventing a winner. Matching verified historical receipts
+support `last_known_state: done`, but **never** change `state: unknown` to current success.
+Re-projection preserves these arrays and strips their private request probes again.
+Summarization counts the union of valid retained and singular requests **per observation**
+without double counting, while work state counts remain one per observation. Historical
+receipts are not additional completed work.
+
+This change does not wire a consumer. Two review notes remain explicit future design:
+expected-identity mismatch output retains its existing shape, and no-match selection
+retains its existing reason rather than adding a new no-match reason.
 
 ## Diagnostics
 

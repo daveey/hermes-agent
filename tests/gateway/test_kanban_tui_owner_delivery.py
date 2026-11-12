@@ -375,3 +375,28 @@ async def test_registry_backed_gateway_claims_and_delivers_owned_tui_row(env, tm
     _complete(tid)
     await _tick(runner)
     assert [a["chat"] for a in admitted] == [CHAT_B] and _row(tid, CHAT_B)[0] == _max_event(tid)
+
+
+def test_an_unowned_chat_costs_one_lineage_read_per_tick_however_many_cards_it_has(env, monkeypatch):
+    """Hub profile 2026-11-12: 1,655 pending tui rows over 122 chats, one state.db lineage walk per row per
+    tick (9% of gateway CPU). Rows of one chat share the tick's answer; each tick still asks again. [daveey]"""
+    runner, authority, admitted, _outcome = env
+    calls = []
+    real = authority.logical_owner
+
+    def counted(sid):
+        calls.append(sid)
+        return real(sid)
+
+    authority.logical_owner = counted
+    for i in range(6):
+        _complete(_task(f"a{i}", CHAT_A))
+    _complete(_task("b", CHAT_B))
+    assert asyncio.run(_tick(runner)) == []
+    assert sorted(calls) == [CHAT_A, CHAT_B]
+    calls.clear()
+    authority.sessions[CHAT_A] = _Live(CHAT_A)  # the gateway now runs chat A with work in its ledger
+    authority.db.work(CHAT_A)
+    deliveries = asyncio.run(_tick(runner))
+    assert len(deliveries) == 6 and {d["sub"]["chat_id"] for d in deliveries} == {CHAT_A}
+    assert calls.count(CHAT_B) == 1 and len(admitted) == 6

@@ -200,6 +200,7 @@ def _drop_session_column(path, column):
     with closing(sqlite3.connect(path)) as conn:
         # SQLite refuses DROP COLUMN while an index references it; a pre-column store has neither.
         conn.execute("DROP INDEX IF EXISTS idx_sessions_effective_activity")
+        conn.execute("DROP INDEX IF EXISTS idx_sessions_pinned")
         conn.execute("DROP TRIGGER IF EXISTS sessions_projection_update")
         conn.execute(f"ALTER TABLE sessions DROP COLUMN {column}")
         conn.commit()
@@ -605,6 +606,74 @@ def test_slow_browse_reconcile_gives_up_inside_its_budget_and_boot_waits_it_out(
     assert "`hermes -p scribe sessions repair`" in detail and "gateway" not in detail.lower()
     assert _file_state(path) == before
     assert "last_read_at" not in _session_columns(path)
+
+
+class _ArmTrackingConnection:
+    """Records each statement with whether the budget's progress handler was armed when it ran;
+    the handler fires on every VM op so an expired deadline interrupts the very next statement."""
+
+    def __init__(self, conn, executed):
+        self._conn, self._executed, self._armed = conn, executed, False
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def set_progress_handler(self, handler, n):
+        self._armed = handler is not None
+        return self._conn.set_progress_handler(handler, 1 if handler is not None else n)
+
+    def execute(self, sql, *args):
+        self._executed.append((sql, self._armed))
+        return self._conn.execute(sql, *args)
+
+    def close(self):
+        return self._conn.close()
+
+
+@pytest.mark.parametrize("deadline_hits", ["never", "during_macos_pragma"])
+def test_browse_budget_is_armed_before_the_macos_durability_pragmas(tmp_path, monkeypatch, deadline_hits):
+    """On macOS the DDL connection's first statements are the durability pragmas, and the first one
+    that needs the schema loads it. Armed after them, that load ran unbounded under gateway.lock, so a
+    slow store outlasted gateway boot's wait (OwnershipConflict, t_01a1cfdfa4c7e85f), and the late
+    interrupt hit BEGIN outside the rollback path as a 'corrupt' 503. Runs the darwin pragmas on
+    every platform: Linux CI never executes them otherwise."""
+    import contextlib
+
+    import hermes_cli.sqlite_safe_read as ssr
+    import hermes_state_reconcile as reconcile
+    import hermes_state_wal as wal
+
+    def darwin_pragma(conn, pragma):  # wal._darwin_pragma's macOS branch
+        with contextlib.suppress(sqlite3.OperationalError):
+            conn.execute(pragma)
+
+    path = _lagging_store_with_history(_profile_home(tmp_path), rows=10)
+    before = _file_state(path)
+    executed = []
+    original = ssr.connect_tracked
+    monkeypatch.setattr(wal, "_darwin_pragma", darwin_pragma)
+    monkeypatch.setattr(ssr, "connect_tracked",
+                        lambda *a, **kw: _ArmTrackingConnection(original(*a, **kw), executed))
+    budget = reconcile._Budget(60)
+    deadline = budget.deadline
+    expires = deadline_hits == "during_macos_pragma"
+
+    def clock():  # the deadline passes once the schema-loading pragma starts
+        in_pragma = any("synchronous" in sql for sql, _ in executed)
+        return deadline + 1 if expires and in_pragma else deadline - 30
+
+    budget._clock = clock
+
+    if expires:
+        with pytest.raises(reconcile.BrowseBudgetExceeded):
+            reconcile._apply_additive_schema(path, budget)
+        assert _file_state(path) == before
+        assert "last_read_at" not in _session_columns(path)
+    else:
+        reconcile._apply_additive_schema(path, budget)
+        assert "last_read_at" in _session_columns(path)
+    assert [sql for sql, _ in executed][:2] == ["PRAGMA checkpoint_fullfsync=1", "PRAGMA synchronous=FULL"]
+    assert [sql for sql, armed in executed if not armed] == []
 
 
 def test_equal_cardinality_corrupt_index_plus_drift_is_not_written(tmp_path):

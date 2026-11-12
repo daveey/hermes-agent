@@ -11,14 +11,18 @@ read back: pickup kept no record of why a pass skipped a candidate.
   :data:`MAX_ROWS`. ``kanban_show`` of the card on this host returns the latest as ``pickup_skip``.
 * Detector (:func:`sweep`, every non-dry dispatcher tick before the spawn cap): a card ``ready`` in this host's full
   replica, pinned ``machine:<this host>``, created elsewhere, with no live lease and not imported here, whose
-  ``ready_since`` is older than ``kanban.sync.pickup_stall_seconds`` (default 600) gets ONE agent repair card filed
+  ``ready_since`` and newest move onto this host are older than ``kanban.sync.pickup_stall_seconds`` (default 600)
+  gets ONE agent repair card filed
   by this host (an open one, or one closed less than :data:`REPLACE_AFTER_SECONDS` ago, is reused). The repair is
   never pinned here (:func:`alarm_placement`): this host is the one taking no Board work, so the repair is pinned
   to another active, unheld machine that can run it now, or the hub operator lane, and an open unclaimed repair
   whose pin is stranded is re-pinned. Its body carries this host's machine-local evidence (pickup skips, registry
   entry, replica path). Host-wide causes share
   ONE card per host naming the oldest card: ``budget_exhausted`` (the queue is simply full), ``hold`` and an
-  unreadable machine registry. Missing evidence gets one additional stall interval of durable grace, then one
+  unreadable machine registry. A ``hold`` that states ``release by HH:MMZ`` (or is the core rollout's own,
+  :func:`expected_hold`) files nothing until that release plus the stall threshold has passed; nor does a card's own
+  ``quota_hold`` (local dispatch would hold it on its quota wall) before its stated deadline. Missing evidence gets
+  one additional stall interval of durable grace, then one
   host alert (not a fabricated refusal); a failed pickup must not silence the detector forever.
   ``budget_exhausted`` is recorded only for a card a slot would have started, so a
   refusal is never hidden behind a full queue. No Inbox post, no human ask.
@@ -26,6 +30,8 @@ read back: pickup kept no record of why a pass skipped a candidate.
 from __future__ import annotations
 
 import logging
+import math
+import re
 import time
 from typing import Any, Mapping, Optional
 
@@ -33,7 +39,9 @@ _log = logging.getLogger(__name__)
 
 TABLE = "kanban_pickup_skips"
 REASONS = ("budget_exhausted", "profile_ineligible", "capability_missing", "parents_incomplete", "hold", "other",
-           "evidence_missing")
+           "evidence_missing", "quota_hold", "guard_held")
+# ``hold`` is this machine's registry hold (host-wide, an operator's); ``guard_held`` is one card the Board shows held
+# by a dispatcher respawn guard (active_pr, subscription_quota_reset, ...), which lifts when that guard does.
 DEFAULT_STALL_SECONDS = 600
 REFRESH_SECONDS = 60
 RETENTION_SECONDS = 7 * 86400
@@ -147,15 +155,56 @@ def stall_seconds() -> int:
     return int(value)
 
 
+# Events that rewrite a card's ``runs_on`` and carry the new labels as ``payload.runs_on``.
+_PIN_EVENTS = ("moved", "placement_repinned", "pool_pinned", "pool_unpinned")
+
+
+def _pinned_here_since_ms(replica, task_id: str, own: str) -> Optional[int]:
+    """When the newest placement event naming ``machine:<own>`` was recorded (ms), or None.
+
+    t_01a1cea82846df08 (2026-11-12): a card ready on the hub for 10 min was moved to worker-6 and worker-6 raised
+    "waiting 10 min" 9 s later. Time pinned elsewhere is not this machine's stall."""
+    marks = ",".join("?" * len(_PIN_EVENTS))
+    row = replica.execute(
+        f"SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND kind IN ({marks}) AND json_valid(payload) "
+        "AND EXISTS (SELECT 1 FROM json_each(task_events.payload, '$.runs_on') WHERE value = ?)",
+        (task_id, *_PIN_EVENTS, f"machine:{own}")).fetchone()
+    return None if row is None or row[0] is None else int(row[0]) * 1000
+
+
+# The origin's worker-first placement observation (``kanban_queue_reason.EVENT``); ``lifecycle.runs_on`` is the
+# card's ``runs_on`` (JSON text, or null) on the origin when the Board answered.
+_QUEUE_EVENT = "worker_queue_reason"
+
+
+def _seen_unpinned_here_ms(replica, task_id: str, own: str) -> Optional[int]:
+    """When the origin's newest worker-placement observation saw the card NOT pinned ``machine:<own>`` (ms), or None.
+
+    t_01a1cfdfb6f3f7ea (2026-11-12): a worker-first card's Board reservation pins it to a worker for seconds and
+    lapses (``runs_on`` null again), with no placement event. t_01a1cfa91548dad7 was reserved to worker-2 at
+    12:49:27Z, unpinned by 12:50:35Z and reserved again; worker-2 counted from ``ready_since`` (12:09Z) and filed
+    "waiting 40 min" at 12:50:44Z. A pin lasts at most since the last time it was seen absent."""
+    row = replica.execute(
+        "SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND kind = ? AND json_valid(payload) "
+        "AND NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(json_extract(task_events.payload, "
+        "'$.lifecycle.runs_on')) THEN json_extract(task_events.payload, '$.lifecycle.runs_on') ELSE '[]' END) "
+        "WHERE value = ?)", (task_id, _QUEUE_EVENT, f"machine:{own}")).fetchone()
+    return None if row is None or row[0] is None else int(row[0]) * 1000
+
+
 def stalled(conn, replica, own: str, *, now: Optional[float] = None) -> list[dict[str, Any]]:
     """Cards ready in ``replica``, pinned ``machine:<own>``, created elsewhere, unleased, not in the live file,
-    ready longer than :func:`stall_seconds`; oldest first."""
+    ready AND pinned here longer than :func:`stall_seconds`; oldest first. The clock starts at the latest of
+    ``ready_since`` (else creation), the newest placement event naming this machine and the newest worker-placement
+    observation of the card not pinned here (:func:`_seen_unpinned_here_ms`)."""
     from hermes_cli import kanban_worker_node as wn
     now_ms = _now_ms(now)
     limit_ms = stall_seconds() * 1000
     out = []
     for row in wn.pinned_rows(replica, own, now_ms=now_ms, statuses=("ready",)):
         since = row["ready_since"] if row["ready_since"] is not None else int(row["created_at"] or 0) * 1000
+        since = max(int(since), _pinned_here_since_ms(replica, row["id"], own) or 0,
+                    _seen_unpinned_here_ms(replica, row["id"], own) or 0)
         if now_ms - int(since) <= limit_ms:
             continue
         if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (row["id"],)).fetchone():
@@ -186,6 +235,7 @@ def _minutes(since_ms: int, now_ms: int) -> int:
 def _tail(conn, own: str) -> str:
     """The repair runs on another machine (:func:`alarm_placement`), so name where ``own``'s machine-local
     evidence lives instead of saying "on this host"."""
+    from hermes_cli import kanban_pickup_stall_repin as repin
     from hermes_cli import kanban_worker_node as wn
     try:
         replica = str(wn._replica_path(conn))
@@ -197,8 +247,9 @@ def _tail(conn, own: str) -> str:
             "Board row from any machine: `Hub(load_identity()).row_evidence(<board>, 'tasks', <card>)`. Check "
             "`kanban.sync.pickup`, the machine registry entry (labels, hold, pickup), profiles, capabilities and "
             "dispatcher capacity, fix the cause (or re-place the card on a machine that can run it), and verify the "
-            "card is imported and claimed. Do not claim a cause the recorded evidence does not show, and never lift "
-            "or shorten a registry hold you did not set. This is agent-owned repair, not a human decision.")
+            "card is imported and claimed. " + repin.howto(own) + " Do not claim a cause the recorded evidence "
+            "does not show, and never lift or shorten a registry hold you did not set. This is agent-owned repair, "
+            "not a human decision.")
 
 
 # --- where the alarm runs ------------------------------------------------------------------------------------
@@ -218,15 +269,22 @@ def _free_slots(entry: Mapping[str, Any]) -> Optional[int]:
     return cap - int(active)
 
 
-def _can_host(name: str, entry: Optional[Mapping[str, Any]], own: str, need: set[str]) -> bool:
-    """Another active, unheld machine that copies cards, carries ``need`` and reaches the hub (it is the operator
-    lane, or attests ``capability:hub-write``): re-placing or handing off another gateway's card goes through it."""
+def _takes_work(name: str, entry: Optional[Mapping[str, Any]], own: str, need: set[str]) -> bool:
+    """Another active, unheld machine that copies cards and carries ``need`` (also the rule for where an alarm's
+    run may re-place a stalled card: :mod:`hermes_cli.kanban_pickup_stall_repin`)."""
     from hermes_cli import kanban_worker_node as wn
     if name == own or not entry or entry.get("state", "active") != "active" or entry.get("hold") \
             or not wn.advertises_pickup(entry):
         return False
-    labels = wn.effective_labels(entry, name)
-    return need <= labels and (name == OPERATOR_LANE or HUB_ACCESS in labels)
+    return need <= wn.effective_labels(entry, name)
+
+
+def _can_host(name: str, entry: Optional[Mapping[str, Any]], own: str, need: set[str]) -> bool:
+    """:func:`_takes_work`, and reaches the hub (it is the operator lane, or attests ``capability:hub-write``):
+    re-placing or handing off another gateway's card goes through it."""
+    from hermes_cli import kanban_worker_node as wn
+    return _takes_work(name, entry, own, need) and (name == OPERATOR_LANE
+                                                    or HUB_ACCESS in wn.effective_labels(entry, name))
 
 
 def _ready_now(entry: Mapping[str, Any], now_ms: int) -> bool:
@@ -334,10 +392,11 @@ _HOST_GROUPS = {
     "budget_exhausted": (QUEUE_FULL, "Pickup queue full on {own}",
                          "the last pickup skip of each is budget_exhausted (no spawn slot on {own}). Decide "
                          "whether the queue drains on its own (running cards near done) or work must move to a "
-                         "machine with slots."),
+                         "machine with slots (the kanban_move command below)."),
     "hold": ("hold", "Pickup held on {own}",
              "{own} is on hold in the machine registry, so it takes no Board work. An operator set that on "
-             "purpose: do not lift it; re-place cards that cannot wait for the hold to end."),
+             "purpose: do not lift it; re-place cards that cannot wait for the hold to end with the kanban_move "
+             "command below."),
     "registry": ("registry", "Pickup blind on {own}: machine registry unavailable",
                  "{own} could not read the machine registry, so its pickup copies nothing. Restore registry access "
                  "(Board identity, network) and confirm the next pass imports the cards."),
@@ -355,6 +414,78 @@ def _registry_line(own: str) -> str:
     fields = ", ".join(f"{k}={entry.get(k)!r}" for k in keys if k in entry)
     active = (entry.get("metrics") or {}).get("active_card_runs")
     return f"Registry entry for {own} at {_stamp(_now_ms())}: {fields}, active_card_runs={active!r}."
+
+
+# --- expected holds ------------------------------------------------------------------------------------------
+# t_01a1cedb2faf7341 (2026-11-12): hub-worker-core-rollout holds ONE worker at a time to drain it for a core update
+# (owner ``rollout:worker-core-rollout@<host>``, reason ``...; release by HH:MMZ``, released within 90 min), and each
+# rollout filed a "Pickup held on worker-N" repair (t_01a1cec7cd7fe7ce) whose answer is always "expected". Same rule
+# as state's worker-claim-watch: a hold that states its release, or is the rollout's own, is expected until that
+# release plus the stall threshold; past it, the hold outlived its word and alerts as before.
+ROLLOUT_OWNER_PREFIX = "rollout:worker-core-rollout@"
+ROLLOUT_MAX_SECONDS = 90 * 60  # the rollout's hard cap: its hold's implied release when the reason states none
+_RELEASE_RE = re.compile(r"release(?:d)?\s+(?:by|at)\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*Z", re.IGNORECASE)
+
+
+def _release_s(reason: Optional[str], held_at: float) -> Optional[float]:
+    """First UTC ``release by HH:MM[:SS]Z`` instant at/after the hold start (None: no valid stated release)."""
+    m = _RELEASE_RE.search(reason or "")
+    if not m:
+        return None
+    h, mi, sec = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+    if h > 23 or mi > 59 or sec > 59:
+        return None
+    t = held_at - (held_at % 86400) + h * 3600 + mi * 60 + sec
+    return t if t >= held_at else t + 86400
+
+
+def expected_hold(entry: Optional[Mapping[str, Any]], *, now_ms: int, stall_s: int) -> Optional[float]:
+    """The release instant (epoch s) of ``entry``'s hold while it is still expected, else None (alert as usual).
+
+    Expected: a hold with a known start (``hold_at``, Board epoch ms) whose reason states ``release by HH:MMZ``,
+    or whose owner is the core rollout (implied release: start + :data:`ROLLOUT_MAX_SECONDS`), until that release
+    plus ``stall_s``. An unknown start, no release and no rollout owner, or a passed window fail toward alerting."""
+    if not isinstance(entry, Mapping) or entry.get("hold") is not True:
+        return None
+    at = entry.get("hold_at")
+    if isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at) or at <= 0:
+        return None
+    held_at = at / 1000.0 if at > 1e11 else float(at)
+    reason = entry.get("hold_reason") if isinstance(entry.get("hold_reason"), str) else None
+    release = _release_s(reason, held_at)
+    if release is None and str(entry.get("hold_owner") or "").startswith(ROLLOUT_OWNER_PREFIX):
+        release = held_at + ROLLOUT_MAX_SECONDS
+    if release is None or now_ms > (release + stall_s) * 1000:
+        return None
+    return release
+
+
+def _hold_expected(own: str, now_ms: int) -> bool:
+    """``own``'s registry hold is inside its stated window (:func:`expected_hold`): file no hold repair now."""
+    from hermes_cli import kanban_worker_node as wn
+    entry = ((wn.registry() or {}).get("machines") or {}).get(own)
+    release = expected_hold(entry, now_ms=now_ms, stall_s=stall_seconds())
+    if release is None:
+        return False
+    _log.debug("pickup-stall: %s hold by %s is expected until %s + %ss; no repair", own,
+               (entry or {}).get("hold_owner") or (entry or {}).get("hold_by"), _stamp(int(release * 1000)),
+               stall_seconds())
+    return True
+
+
+_QUOTA_UNTIL = re.compile(r" until (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)Z")
+
+
+def _quota_hold_expected(skip: Mapping[str, Any], now_ms: int) -> bool:
+    """A ``quota_hold`` skip (the card's own quota wall: local dispatch would hold a copy) whose stated deadline plus
+    the stall threshold is still ahead: the wait is expected, file nothing. Past it, or with no readable deadline,
+    the card alerts on its own like any card-specific reason, never as the machine-wide registry ``hold``."""
+    found = _QUOTA_UNTIL.search(str(skip.get("detail") or "")) if skip.get("reason") == "quota_hold" else None
+    if found is None:
+        return False
+    from datetime import UTC, datetime
+    until = datetime.strptime(found.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=UTC).timestamp()
+    return now_ms < (until + stall_seconds()) * 1000
 
 
 def _group(card: Mapping[str, Any]) -> Optional[str]:
@@ -382,12 +513,38 @@ def _refresh_targets(conn, task_id: str, members: list[dict[str, Any]], now_ms: 
             _log.info("pickup-stall refreshed card=%s added_targets=%d", task_id, len(added))
 
 
+def _open_coverage(conn, own: str) -> dict[str, str]:
+    """``{target card id: slug}`` for every card an OPEN host-wide repair about ``own`` (:data:`_HOST_GROUPS`) lists
+    in its body or the detector's target comments: a card whose host-wide cause changed (evidence missing, then
+    queue full) is not handed a second open host-wide repair. A card-specific refusal still gets its own card.
+
+    t_01a1cfdfb6f3f7ea (2026-11-12): worker-2 filed "Pickup evidence missing" for t_01a1cfa91548dad7 at 12:50:44Z;
+    pickup recorded budget_exhausted 0.3 s later, and the next tick filed "Pickup queue full" for the same card."""
+    prefix = f"{KEY_PREFIX}{own}:"
+    slugs = {spec[0] for spec in _HOST_GROUPS.values()}
+    out: dict[str, str] = {}
+    for row in conn.execute("SELECT id, body, idempotency_key FROM tasks WHERE idempotency_key >= ? "
+                            "AND idempotency_key < ? AND status NOT IN ('done', 'archived')",
+                            (prefix, prefix + "\U0010ffff")).fetchall():
+        slug = row["idempotency_key"][len(prefix):].split(":", 1)[0]
+        if slug not in slugs:
+            continue
+        text = (row["body"] or "") + "\n" + "\n".join(
+            r[0] for r in conn.execute("SELECT body FROM task_comments WHERE task_id = ? AND author = ?",
+                                       (row["id"], DETECTOR)))
+        for tid in re.findall(r"^- (\S+) \(", text, re.MULTILINE):
+            out.setdefault(tid, slug)
+    return out
+
+
 def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[float] = None) -> list[str]:
     """One repair per stalled card with a card-specific last reason; one per host per host-wide cause
-    (:data:`_HOST_GROUPS`), naming the oldest card. Returns the covering repair ids."""
+    (:data:`_HOST_GROUPS`), naming the oldest card. A card an open repair about this host already lists under
+    another key gets no second one (:func:`_open_coverage`). Returns the covering repair ids."""
     now_ms = _now_ms(now)
     ids: list[str] = []
     groups: dict[str, list[dict[str, Any]]] = {}
+    covered = _open_coverage(conn, own)
     for card in cards:
         # The sweep precedes pickup/note_capped. A first post-drain tick may
         # have old ready rows but no observation yet: missing evidence is not
@@ -399,12 +556,28 @@ def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[f
         if (card["skip"]["reason"] == "evidence_missing"
                 and now_ms - card["skip"]["first_at"] < stall_seconds() * 1000):
             continue
+        if _quota_hold_expected(card["skip"], now_ms):
+            continue
         group = _group(card)
         if group is not None:
+            if covered.get(card["id"], _HOST_GROUPS[group][0]) != _HOST_GROUPS[group][0]:
+                continue  # an open host-wide repair about this machine already lists it
             groups.setdefault(group, []).append(card)
             continue
         reason = (card["skip"] or {}).get("reason") or "none recorded"
         waited = _minutes(card["since_ms"], now_ms)
+        if reason == "guard_held":
+            ids.append(_create(
+                conn, key=f"{KEY_PREFIX}{own}:{card['id']}:", tenant=card["tenant"], own=own, now_ms=now_ms,
+                title=(f"Pickup stalled: {card['id']} pinned to machine:{own}, ready {waited} min, held by a "
+                       f"respawn guard ({card['skip'].get('detail') or 'guard_held'})"),
+                body=(f"Card {card['id']} ({card['title']}) has been ready on the Board, pinned to machine:{own}, "
+                      f"for {waited} min (threshold {stall_seconds()} s). {own} is not on a registry hold: the "
+                      f"card's Board history shows a dispatcher respawn guard holding it, and that hold lifts when "
+                      f"the guard does. Check whether the guard named below is still right (an open PR, a quota "
+                      f"reset clock, a shared blocker) rather than the machine.\n\nLast pickup skip recorded on "
+                      f"{own}: {describe(card['skip'])}.")))
+            continue
         ids.append(_create(
             conn, key=f"{KEY_PREFIX}{own}:{card['id']}:", tenant=card["tenant"], own=own, now_ms=now_ms,
             title=f"Pickup stalled: {card['id']} pinned to machine:{own}, ready {waited} min, not imported ({reason})",
@@ -413,6 +586,8 @@ def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[f
                   f"it.\n\nLast pickup skip recorded on {own}: {describe(card['skip'])}.")))
     for group, members in groups.items():
         slug, title, why = _HOST_GROUPS[group]
+        if group == "hold" and _hold_expected(own, now_ms):
+            continue
         oldest = members[0]
         listed = "\n".join(f"- {c['id']} ({c['title']}), ready {_minutes(c['since_ms'], now_ms)} min, "
                            f"last skip {describe(c['skip'])}" for c in members[:20])

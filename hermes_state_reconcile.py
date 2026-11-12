@@ -232,10 +232,13 @@ def _apply_additive_schema(path: Path, budget: _Budget | None = None) -> None:
     budget.check()
     with closing(connect_tracked(path, tracking_path=path, timeout=budget.busy_timeout(),
                                  isolation_level=None)) as conn:
-        _reapply_durability_barriers(conn)
+        # Armed before the first statement: on macOS the durability pragmas run first and load the
+        # schema, so arming after them left that work (and BEGIN) outside the budget under the lock.
         budget.arm(conn)
-        conn.execute('BEGIN IMMEDIATE')
         try:
+            _reapply_durability_barriers(conn)  # swallows an interrupt; check() below reports it
+            budget.check()
+            conn.execute('BEGIN IMMEDIATE')
             cursor = conn.cursor()
             apply_declared_schema(cursor)
             # Postcondition, still inside the transaction: every declared table/column resolves.

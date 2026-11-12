@@ -138,7 +138,16 @@ def recover_auth_failure(agent, pool, *, status_code, has_retried_429, error_con
     refreshed = pool.try_refresh_matching(**refresh_kwargs)
     if refreshed is None:
         # Refresh failed; rotate (the failed entry is already marked exhausted).
-        return (True, False) if rotate_and_swap(401, "auth refresh failed") else (False, has_retried_429)
+        if rotate_and_swap(401, "auth refresh failed"):
+            return True, False
+        # Nothing left to rotate to: a row revoked earlier may have its minter-pushed replacement on disk.
+        from agent.credential_pool_pushed import adopt_pushed_replacements
+        replacement = adopt_pushed_replacements(pool, getattr(agent, "model", None))
+        if replacement is not None and agent._swap_credential(replacement) is not False:
+            log.info("Credential 401 — pool exhausted; adopted pushed replacement for pool entry %s",
+                     getattr(replacement, "id", "?"))
+            return True, False
+        return False, has_retried_429
     refreshed_id = getattr(refreshed, "id", None)
     if nous:
         episode = _episode(agent, provider, refreshed_id or entry_id)

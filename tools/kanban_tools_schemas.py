@@ -461,15 +461,27 @@ KANBAN_MOVE_SCHEMA = _schema(
         "for dir/worktree cards. After it returns, end your turn with a one-line reply; do not call more tools. "
         "Exception: task_id = a worker-first card YOUR task created that no pool worker can run (its "
         "'No pool worker can run this card' notice) and runs_on = [\"machine:<origin>\"] repins that card to the "
-        "origin instead; your own run continues. Every other card is refused."
+        "origin instead; your own run continues. Second exception: task_id = a READY, unclaimed card of this "
+        "gateway whose runs_on no enrolled machine carries (stranded: e.g. ['hermes-hub']) may be re-routed by any "
+        "worker to labels a machine does carry (e.g. ['machine:hub']); the old labels are kept in a comment. "
+        "Third: a pickup-stall alarm's run may move a ready card its alarm lists off the stalled machine to "
+        "runs_on = [\"pool:worker\"] while another pool worker is eligible now (or [\"machine:<X>\"] for one other "
+        "eligible machine outside the pool). "
+        "Every other card is refused."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "runs_on": {"type": "array", "items": {"type": "string"}, "description": (
-            "Labels the next machine must have, e.g. [\"machine:worker-1\"], [\"macos\"], [\"linux\"]. "
-            "machine:<name> pins one registered machine that picks up this board (else refused)."
+            "Labels the next machine must have, e.g. [\"pool:worker\"] (any worker with a free slot: the default "
+            "for portable work), [\"macos\"], [\"linux\"]. machine:<name> pins one registered machine that picks "
+            "up this board (else refused); pinning one pool worker also needs host_reason."
         )},
         "reason": _prop("string", "Why the card must move (what this machine lacks). Logged on the card."),
+        "host_reason": _prop("string", (
+            "Required for runs_on naming one pool worker (machine:worker-N): the card works on that host, or "
+            "holds unpushed state there. Capacity is never a host reason: use [\"pool:worker\"]. Also required "
+            "when reason claims ship/landing custody: hermes-core-wt ship lands from every machine."
+        )),
         "checkpoint": _prop("string", (
             "Everything the next run needs to resume on the other machine: what is done (commits, branches, "
             "pushed work, with ids), what is NOT portable (local files, processes) and the exact next steps. "
@@ -787,6 +799,16 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "Ids of open cards a create_overlap refusal named that this card is NOT a duplicate of. "
                 "Needs distinct_reason; recorded as a create_overlap event on the new card.")},
         "distinct_reason": _prop("string", "Why this card is separate work from the distinct_from cards."),
+        "hub_reason": _prop("string", (
+                "Only for a card that needs the hub itself: what only the hub has (its signed-in "
+                "Chrome, the Board admin key, instance-role SSM, a Desktop-session interaction, an "
+                "existing hub worktree with unpushed commits, a hermes-hub command acting with the "
+                "hub's key, or live gateway state hub-admin cannot reach). A Sonnet admission judge "
+                "reads it with the card; without admission a hub card goes to the worker pool (pool "
+                "workers have hub ssh + hub-admin) and an explicit hub pin is refused.")),
+        "force_hub": _prop("boolean", (
+                "Operator override: keep the card on the hub without the admission judge. Refused "
+                "inside dispatcher workers; recorded as a forced hub_admission event.")),
         "idempotency_key": _prop("string", (
                 "If a non-archived task with this key already "
                 "exists, return that task's id instead of creating "
@@ -981,9 +1003,9 @@ KANBAN_ARCHIVE_SCHEMA = _schema(
     (
         "Archive a card. A dispatcher worker may archive an unclaimed or done card "
         "its own task created (creator_task_id is the caller's task): the "
-        "cleanup when kanban_create kept a card local because of a text "
-        "marker and the work does not need this machine (re-create it with "
-        "placement='hub'), or of a scratch card (e.g. a live-proof waiter) that "
+        "cleanup when kanban_create kept a card local because of a local "
+        "marker and the work does not need this machine (re-create it as the "
+        "result's placement.remedy says), or of a scratch card (e.g. a live-proof waiter) that "
         "has finished. A done card is refused while an open card lists it as a "
         "parent. It may also archive a done or unclaimed capability "
         "owner card (idempotency_key capability-owner:<card>:...) when <card> "
@@ -1039,7 +1061,11 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
         "created (the ones kanban_comment/kanban_move/kanban_unblock refuse as foreign_card): action "
         "comment {text}, move {runs_on, reason} (not while it runs) or unblock {reason} (an agent's block "
         "only, never one waiting on a human). That card's home gateway executes it; complete/archive/link/"
-        "unlink of a foreign card are refused (its owner's), one op per request, every call logged."
+        "unlink of a foreign card are refused (its owner's), one op per request, every call logged. "
+        "Action label_publish {machine, labels, proof: {kind: 'hub_probe'}} (no task_id) asks the hub to ADD "
+        "skill:/capability: labels to one machine's Board registry entry (never machine:*, never a removal): the "
+        "hub re-runs its own probe of that machine and publishes only what it proves, as one atomic add on the Board; "
+        "the answer lands on this card."
     ),
     {
         "ops": {
@@ -1051,11 +1077,16 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
                 "properties": {
                     "op": {"type": "string", "enum": ["link", "unlink", "reconcile_notify", "resume", "retry_limit",
                                                          "archive", "operator"]},
-                    "action": {"type": "string", "enum": ["comment", "move", "unblock"],
-                               "description": "operator: what to do on the foreign card."},
+                    "action": {"type": "string", "enum": ["comment", "move", "unblock", "label_publish"],
+                               "description": "operator: what to do on the foreign card (label_publish: on a "
+                                              "machine's registry labels)."},
                     "text": {"type": "string", "description": "operator comment: the comment body."},
                     "runs_on": {"type": "array", "items": {"type": "string"},
                                 "description": "operator move: the new machine labels."},
+                    "machine": {"type": "string", "description": "operator label_publish: the Board machine."},
+                    "labels": {"type": "array", "items": {"type": "string"},
+                               "description": "operator label_publish: skill:/capability: labels to add."},
+                    "proof": {"type": "object", "description": "operator label_publish: {kind: 'hub_probe'}."},
                     "reason": {"type": "string", "description": "operator move/unblock: why (required)."},
                     "parent_id": {"type": "string"},
                     "child_id": {"type": "string"},

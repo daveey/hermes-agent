@@ -398,6 +398,13 @@ def _starts_long_lived_server(unquoted: str) -> bool:
         return True
     return any(_names_a_server(text) and not command.excused(index) for index, text in enumerate(command.texts))
 
+# Every refusal below rejects the WHOLE command before anything runs. Saying so stops the resend
+# that keeps only the refused tail: a dropped `cat > x.sh <<EOF` setup then runs another session's
+# stale x.sh from the shared scratch dir instead of failing "not found".
+_NOTHING_RAN = (
+    " Nothing in this command ran (no file writes, heredocs, cd or setup steps). Re-send all of it: "
+    "put setup in a foreground call first, or the whole script in the background call."
+)
 
 # Ordered (predicate on the unquoted command, guidance) — first hit wins.
 _FOREGROUND_GUIDANCE = (
@@ -406,19 +413,19 @@ _FOREGROUND_GUIDANCE = (
         "Foreground command uses shell-level background wrappers (nohup/disown/setsid). "
         "Re-send WITHOUT the wrapper as terminal(command=\"<cmd>\", background=true, "
         "notify_on_complete=true) so Hermes tracks the process, then run readiness "
-        "checks and tests in separate commands.",
+        "checks and tests in separate commands." + _NOTHING_RAN,
     ),
     (
         lambda s: _INLINE_BACKGROUND_AMP_RE.search(s) or _TRAILING_BACKGROUND_AMP_RE.search(s),
         "Foreground command uses '&' backgrounding. Re-send WITHOUT the '&' as "
         "terminal(command=\"<cmd>\", background=true) — add notify_on_complete=true "
-        "for bounded jobs — then run health checks and tests in follow-up terminal calls.",
+        "for bounded jobs — then run health checks and tests in follow-up terminal calls." + _NOTHING_RAN,
     ),
     (
         _starts_long_lived_server,
         "This foreground command appears to start a long-lived server/watch process. "
         "Run it with background=true, verify readiness (health endpoint/log signal), "
-        "then execute tests in a separate command.",
+        "then execute tests in a separate command." + _NOTHING_RAN,
     ),
 )
 

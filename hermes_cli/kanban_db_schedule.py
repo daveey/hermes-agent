@@ -35,6 +35,8 @@ def schedule_task(
     Triage parks reset the dispatcher failure streak without an intermediate dispatchable
     status; block-loop recurrence evidence is retained, as on unblock."""
     from hermes_cli.kanban_reason_comment import reason_comment
+    from hermes_cli import kanban_park_pin as kpp
+    pin = kpp.plan(conn, task_id, reason)  # git reads stay outside the write txn
     with _kb.write_txn(conn), reason_comment(conn, task_id, comment) as noted:
         if _kb._awaiting_human_answer(conn, task_id):
             return False
@@ -79,6 +81,7 @@ def schedule_task(
             params.append(int(expected_run_id))
         if conn.execute(sql, params).rowcount != 1:
             return False
+        kpp.apply(conn, task_id, pin)  # unpushed state keeps a pooled card on this worker
         # A card behind a shared blocker stays behind it: a park without the id says nothing about
         # the wall (kanban_shared_blockers.run_effect) unless ``clear_blocker`` says it is gone.
         from hermes_cli.kanban_block_routing import clear_meta

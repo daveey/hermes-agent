@@ -165,7 +165,7 @@ def test_worker_comments_on_foreign_card_through_operator_call(fleet):
 def test_worker_moves_foreign_card_through_operator_call(fleet, monkeypatch):
     f = fleet
     plan = {"runs_on": ["machine:worker-1"], "previous": [], "matches": ["worker-1"], "move_no": 1,
-            "forced": False, "me": "hub"}
+            "forced": False, "me": "hub", "host": {}}
     monkeypatch.setattr(km, "check", lambda *a, **k: plan)
     from hermes_cli import kanban_worker_repin as repin
     monkeypatch.setattr(repin, "applies", lambda conn, tid: False)
@@ -216,10 +216,10 @@ def test_owner_only_ops_are_refused(fleet, action):
     assert exc.value.code == "operator_action_refused"
 
 
-def test_label_publish_is_not_offered_yet(fleet):
+def test_label_publish_needs_machine_labels_and_proof(fleet):
     with pytest.raises(ksr.SupervisorRequestError) as exc:
         _submit(fleet, {"op": "operator", "action": "label_publish", "task_id": fleet.target})
-    assert exc.value.code == "operator_action_refused"
+    assert exc.value.code == "invalid_ops"
 
 
 def test_only_one_named_card_per_call(fleet):
@@ -537,7 +537,7 @@ def test_operator_path_never_touches_an_admin_key(fleet, tmp_path, monkeypatch):
     monkeypatch.setattr(os, "open", spy_os_open)
     monkeypatch.setattr(subprocess, "Popen", SpyPopen)
     plan = {"runs_on": ["machine:worker-1"], "previous": [], "matches": ["worker-1"], "move_no": 1,
-            "forced": False, "me": "hub"}
+            "forced": False, "me": "hub", "host": {}}
     monkeypatch.setattr(km, "check", lambda *a, **k: plan)
     from hermes_cli import kanban_worker_node as wn
     from hermes_cli import kanban_worker_repin as repin

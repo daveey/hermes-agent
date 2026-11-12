@@ -6,6 +6,19 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _admitting_hub_judge(monkeypatch):
+    """Hub admission never reaches a live model in tests. [daveey]
+
+    Legacy placement/move/routing suites pin the pre-admission logic, so the default fake
+    admits (the old "stays on the hub" outcome). Gate behaviour is tested with the explicit
+    ``hub_judge`` fixture (tests/hermes_cli/hub_judge_support.py) and tests/test_kanban_hub_admission*.
+    """
+    from hermes_cli import kanban_hub_admission as judge
+    from tests.hermes_cli.hub_judge_support import FakeJudge
+    monkeypatch.setattr(judge, "admit", FakeJudge())
+
+
+@pytest.fixture(autouse=True)
 def _isolate_kanban_worker_process_registries(monkeypatch):
     """Spawn doubles and exit classifications belong to one test, not the next tick's test.
 
@@ -127,8 +140,12 @@ def _pr_state_offline(monkeypatch):
         return
     prs.clear_cache()
     monkeypatch.setattr(prs, "_gh_pr_state", lambda url: None)
+    from hermes_cli import kanban_dependency_review_relink as relink
+    relink.clear_cache()
+    monkeypatch.setattr(relink, "_gh_pr_head", lambda url: None)
     yield
     prs.clear_cache()
+    relink.clear_cache()
 
 
 @pytest.fixture(autouse=True)

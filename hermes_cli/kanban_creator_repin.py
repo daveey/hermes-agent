@@ -10,6 +10,11 @@ not a running card, not a card another task created, not a card without a worker
 A second, equally narrow grant covers an orphaned wait (``kanban_repin_owner``): the generated
 ``repin-owner:<target>`` supervisor may make the same origin repin of exactly its one listed target
 (``supervisor_refusal``). It is not a general owner-wake move power: no other card, board or target.
+
+A third grant covers a stranded card (``stranded_refusal``, self-heal agent-7489fcf5cd): any scoped worker may
+re-route a READY, never-claimed card of this gateway whose stored ``runs_on`` no enrolled machine carries (rows
+written before the create-time check, e.g. ``["hermes-hub"]``) to labels an active machine does carry. The registry
+must be known; a satisfiable placement is never touched. Without it the worker could only ask David to edit the card.
 """
 from __future__ import annotations
 
@@ -48,15 +53,104 @@ def creator_repin(conn: sqlite3.Connection, task_id: str, env_task: str, *, runs
     if _creator_task_id(conn, task_id) != env_task:
         refusal = supervisor_refusal(conn, task_id, env_task, runs_on)
         if refusal is not None:
+            stranded = stranded_refusal(conn, task_id)
+            if stranded is None:
+                return stranded_reroute(conn, task_id, env_task, runs_on=runs_on, reason=reason, hub=hub)
+            from hermes_cli import kanban_pickup_stall_repin as stall
+            stalled = stall.refusal(conn, task_id, env_task, runs_on)
+            if stalled is None:
+                return stall.move(conn, task_id, env_task, runs_on=runs_on, reason=reason, hub=hub)
             return {"ok": False, "reason_code": "not_creator_task",
                     "error": f"worker is scoped to task {env_task}; it may move another card only to repin a "
                              f"worker-first card its own task created (or, as its generated repin-owner "
-                             f"supervisor, its one listed orphaned card), and {task_id} is neither ({refusal})"}
+                             f"supervisor, its one listed orphaned card; or, as a pickup-stall alarm, a card it "
+                             f"lists off the stalled machine), or to re-route a ready card whose runs_on no "
+                             f"enrolled machine carries, and {task_id} is none of these ({refusal}; {stranded}; "
+                             f"pickup-stall alarm: {stalled})"}
     if not repin.applies(conn, task_id):
+        # The creator is the likeliest worker to find its own stranded child: the reroute open to every
+        # worker is open to it too.
+        stranded = stranded_refusal(conn, task_id)
+        if stranded is None:
+            return stranded_reroute(conn, task_id, env_task, runs_on=runs_on, reason=reason, hub=hub)
         return {"ok": False, "reason_code": "not_repinnable",
                 "error": f"{task_id} is not an unstarted worker-first card (running, done, archived or no "
-                         "placement policy); only the explicit origin repin is allowed here"}
+                         f"placement policy) nor a ready card stranded on impossible runs_on ({stranded}); "
+                         "only the explicit origin repin or a stranded reroute is allowed here"}
     return km.move_queued(conn, task_id, runs_on=runs_on, reason=reason, hub=hub)
+
+
+REROUTE_AUTHOR = "kanban-reroute"
+
+
+def _registry_view(conn: sqlite3.Connection) -> tuple[str | None, dict | None]:
+    """``(me, machines)`` from the Board registry, ``(me, None)`` when it is unknown (unreachable or empty)."""
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_worker_node as wn
+    me = (sync.sync_state(conn) or {}).get("gateway_id")
+    try:
+        reg = wn.registry()
+    except Exception:  # health: allow BLE001 -- unknown registry: refuse, never guess impossibility
+        reg = None
+    machines = (reg or {}).get("machines") or None
+    return (str(me) if me else None), machines
+
+
+def stranded_refusal(conn: sqlite3.Connection, task_id: str) -> str | None:
+    """None when ``task_id`` is a ready, never-claimed card of this gateway whose stored ``runs_on`` no enrolled
+    machine carries (the create-time check of PR #971 only guards new rows), so any scoped worker may re-route it
+    with ``kanban_move(task_id=...)``; else why not. An unknown registry is a refusal: impossibility needs evidence.
+    The new labels are checked by ``kanban_move.move_queued`` (an active, unheld machine must carry them)."""
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_runs_on_capabilities as roc
+    from hermes_cli import kanban_worker_node as wn
+    if sync.board_mode(conn) != "primary":
+        return "board is not a Board primary"
+    row = conn.execute("SELECT status, runs_on, claim_lock, lease_holder, current_run_id, created_on FROM tasks "
+                       "WHERE id = ?", (task_id,)).fetchone()
+    if row is None:
+        return f"no card {task_id} here"
+    me, machines = _registry_view(conn)
+    if row["created_on"] not in (None, me):
+        return f"{task_id} was created on {row['created_on']}; ask its home (operator call)"
+    if row["status"] != "ready" or row["claim_lock"] or row["lease_holder"] or row["current_run_id"] is not None:
+        return f"{task_id} is not a ready, unclaimed card"
+    labels = wn._parse(row["runs_on"])
+    if not labels:
+        return f"{task_id} has no runs_on labels to re-route"
+    if machines is None or not me:
+        return "the Board machine registry is unknown, so impossible labels cannot be proven"
+    if not roc.impossible(labels, machines, me):
+        return f"runs_on={labels} is carried by an enrolled machine (a deliberate placement)"
+    return None
+
+
+def stranded_reroute(conn: sqlite3.Connection, task_id: str, env_task: str, *, runs_on: Any, reason: str,
+                     hub: Any = None) -> dict[str, Any]:
+    """Re-route a card :func:`stranded_refusal` cleared: ``move_queued`` (which refuses unsatisfiable new labels),
+    then a comment keeping the old labels so the rewrite can be undone, and a note on any open ask that names it."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_move as km
+    from hermes_cli import kanban_worker_node as wn
+    old = wn._parse(conn.execute("SELECT runs_on FROM tasks WHERE id = ?", (task_id,)).fetchone()[0])
+    res = km.move_queued(conn, task_id, runs_on=runs_on, reason=reason, hub=hub,
+                         event_extra={"rerouted_by": env_task, "stranded_runs_on": old})
+    if not res.get("ok"):
+        return res
+    note = (f"Re-routed by {env_task}: runs_on {old} matched no enrolled machine (stranded in ready); now "
+            f"{res.get('runs_on')}. Reason: {reason[:500]}. Previous runs_on kept here for undo (no machine "
+            "carries it, so restoring it strands the card again).")
+    asks = [r[0] for r in conn.execute(
+        "SELECT id FROM tasks WHERE status = 'blocked' AND id != ? AND human_request LIKE ?",
+        (task_id, f"%{task_id}%")).fetchall()]
+    with kb.write_txn(conn):
+        kb.add_comment(conn, task_id, REROUTE_AUTHOR, note)
+        for ask in asks:
+            kb.add_comment(conn, ask, REROUTE_AUTHOR,
+                           f"Superseded: the board step this ask names on {task_id} was done by an agent "
+                           f"({env_task} re-routed it to {res.get('runs_on')}). Archive this ask unless it asks "
+                           "for something else.")
+    return {**res, "rerouted_from": old, "superseded_asks": asks}
 
 
 def supervisor_refusal(conn: sqlite3.Connection, task_id: str, env_task: str, runs_on: Any) -> str | None:

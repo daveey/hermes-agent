@@ -23,11 +23,16 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS
+from hermes_cli.turn_process_execution_observations import TURN_SOURCE, profile_for_state_path, replace, turn
+
 _log = logging.getLogger(__name__)
 
 _CACHE_TTL_S = 2.0
 _cache_lock = threading.Lock()
 _cache: tuple[float, frozenset[str]] | None = None
+# Live lease rows behind the last collection, keyed by lineage root. Source times only.
+_leases: dict[str, list[dict[str, Any]]] = {}
 
 
 def _state_db_paths() -> list[Path]:
@@ -80,7 +85,9 @@ def _holder_dead(holder: str) -> bool:
 
 
 def _collect(now: float) -> frozenset[str]:
+    global _leases
     live: set[str] = set()
+    leases: dict[str, list[dict[str, Any]]] = {}
     for path in _state_db_paths():
         try:
             conn = _open_ro(path)
@@ -89,13 +96,19 @@ def _collect(now: float) -> frozenset[str]:
             continue
         try:
             rows = conn.execute(
-                "SELECT conversation_id, holder FROM session_turn_leases WHERE expires_at > ?", (now,)
+                "SELECT conversation_id, holder, acquired_at, expires_at FROM session_turn_leases WHERE expires_at > ?",
+                (now,)
             ).fetchall()
         except sqlite3.Error:  # no lease table yet (nothing ever ran a turn there) or a busy/odd store
             rows = []
         finally:
             conn.close()
-        live.update(cid for cid, holder in rows if cid and not _holder_dead(str(holder or "")))
+        for cid, holder, acquired_at, expires_at in rows:
+            if cid and not _holder_dead(str(holder or "")):
+                live.add(cid)
+                leases.setdefault(cid, []).append({"conversation_id": cid, "holder": holder, "acquired_at": acquired_at,
+                               "expires_at": expires_at, "profile": profile_for_state_path(path)})
+    _leases = leases
     return frozenset(live)
 
 
@@ -128,11 +141,26 @@ def annotate_turn_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     except (sqlite3.Error, OSError):
         _log.debug("turn activity unavailable", exc_info=True)
         return rows
+    leases = _leases
+    try:
+        from hermes_cli.kanban_execution_observations import local_scope
+        gateway = local_scope()[0]
+    except ADAPTER_ERRORS:
+        _log.debug("turn gateway identity unavailable", exc_info=True)
+        gateway = None
+    now = time.time()
     for row in rows:
-        if any(sid in live for sid in _row_ids(row)):
+        roots = [sid for sid in _row_ids(row) if sid in live]
+        if roots:
             row["turn_live"] = True
         else:
             row.pop("turn_live", None)
+        try:
+            found = [lease for sid in dict.fromkeys(roots) for lease in leases.get(sid, ())]
+            replace(row, {TURN_SOURCE}, [turn(lease, gateway=gateway, profile=lease["profile"], now=now)
+                                         for lease in found])
+        except ADAPTER_ERRORS:
+            _log.debug("turn execution observation unavailable", exc_info=True)
     return rows
 
 

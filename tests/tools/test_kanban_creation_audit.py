@@ -18,9 +18,15 @@ kanban_home = audit_support.kanban_home
     ("implicit-assignee", "assignee not allowlisted", None),
     ("portable", None, "worker-first-v1"),
     ("empty-project", None, "worker-first-v1"),
-    ("local-pin", None, None),
+    ("local-pin", None, "worker-first-v1"),
 ])
 def test_effective_creation_audit_preserves_enrollment(kanban_home, tmp_path, monkeypatch, case, reason, policy):
+    from hermes_cli import kanban_hub_admission as judge
+    calls = []
+    def deny(*args, **kwargs):
+        calls.append(args)
+        return judge.Verdict(admit=False, why="Public analysis needs no hub context")
+    monkeypatch.setattr(judge, "admit", deny)
     monkeypatch.setattr(placement.reg, "self_gateway", lambda: "hub")
     monkeypatch.setattr(kt, "_persisted_identity", lambda: "specialist" if case == "implicit-assignee" else "default")
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
@@ -39,7 +45,14 @@ def test_effective_creation_audit_preserves_enrollment(kanban_home, tmp_path, mo
     if case == "local-pin":
         args["placement"] = "local"
     result = json.loads(kt._handle_create(args))
+    if case in {"inherited-project", "implicit-assignee", "local-pin"}:
+        # Spec owner 11-12: a structural keep-local or an explicit stay-here pin on the hub is
+        # judged, and (unable to go to the pool) a deny refuses the create with the verdict.
+        assert not result.get("ok") and result.get("hub_admission", {}).get("admit") is False, result
+        assert len(calls) == 1
+        return
     assert result.get("ok"), result
+    assert calls == []
     with kbc.connect() as conn:
         task = kb.get_task(conn, result["task_id"])
         event = next(e for e in kb.list_events(conn, task.id) if e.kind == "created")

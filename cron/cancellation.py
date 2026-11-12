@@ -238,7 +238,8 @@ def finish_cancelled_run(job: dict[str, Any], execution_id: str, fire_owner: Opt
         # A stopped ladder re-run re-ran an occurrence that already counted: no second repeat slot.
         rung = {"ladder_rung": True} if is_retry_run(job) else {}
         scheduler.mark_job_run(
-            job["id"], False, f"Cancelled: {reason}", status="cancelled", **owner, **rung)
+            job["id"], False, f"Cancelled: {reason}", status="cancelled",
+            execution_id=execution_id, **owner, **rung)
     scheduler.finish_execution(execution_id, success=False, error=reason, cancelled=True)
 
 

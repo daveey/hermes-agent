@@ -71,7 +71,7 @@ def _task_reasons(result, tid, reference):
         reasons.append(_reason("provider_limit", "rate_limited", reference, "post_claim"))
     # Only explicit provider quota clocks; generic cooldowns are not provider limits.
     held = result.clock_held.get(tid)
-    if held and held[0] in {"subscription_quota_reset", "rate_limit_cooldown"}:
+    if held and held[0] in {"subscription_quota_reset", "rate_limit_cooldown", "pinned_quota_wall"}:
         reasons.append(_reason("provider_limit", held[0], reference))
     for task, native in result.respawn_guarded:
         if task == tid and native in {"subscription_quota_reset", "rate_limit_cooldown"}:
@@ -175,6 +175,9 @@ def observe_dispatch(conn, result, *, board, dry_run=False, update_drain=False):
                dry_run=dry_run, update_drain=update_drain)
     except Exception:  # health: allow BLE001 -- optional evidence cannot control admission
         _log.warning("capacity observation unavailable", exc_info=True)
+    # One durable reason per passed-over card and ready episode (kanban-dd62aef001); never raises. [daveey]
+    from hermes_cli.kanban_dispatch_skip import record_tick
+    record_tick(conn, result, dry_run=dry_run)
 
 
 def _unknown(reason, **fields):
@@ -239,10 +242,23 @@ def read(conn, task, *, board=None, now=None):
     return out
 
 
+# Restrictions of the observing dispatcher's machine, not of the card: a card pinned
+# elsewhere waits for another machine, so the note names the one that observed them.
+MACHINE_CODES = frozenset({"capacity.memory_pressure", "capacity.update_drain"})
+MACHINE_FIELDS = frozenset({"at_capacity"})
+
+
 def describe(value):
     """Never turn an incomplete restriction list into an assertion of availability."""
-    codes = ", ".join(r["code"] + " (" + r["native_code"] + "; " + r["phase"] + ")" for r in value.get("reasons", []))
-    native = ", ".join(r.get("source_field", "restriction") + " (" + r["native_code"] + ")"
+    machine = value.get("machine")
+
+    def on(text, scoped):
+        return f"{text} on {machine}" if scoped and isinstance(machine, str) and machine else text
+
+    codes = ", ".join(on(r["code"] + " (" + r["native_code"] + "; " + r["phase"] + ")", r["code"] in MACHINE_CODES)
+                      for r in value.get("reasons", []))
+    native = ", ".join(on(r.get("source_field", "restriction") + " (" + r["native_code"] + ")",
+                          r.get("source_field") in MACHINE_FIELDS)
                        for r in value.get("native_restrictions", []))
     codes = "; ".join(v for v in (codes, native) if v)
     return (f"{value.get('freshness', 'unknown')}: {codes or 'restriction coverage incomplete'}; "

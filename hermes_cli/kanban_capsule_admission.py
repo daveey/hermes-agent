@@ -314,7 +314,7 @@ def _record_refusal(conn: sqlite3.Connection, task_id: str, payload: dict) -> No
     """Audit only (never authority): one event per distinct refusal, not one per tick."""
     from hermes_cli import kanban_db as kb
     with kb.write_txn(conn):
-        last = conn.execute("SELECT kind, payload FROM task_events WHERE task_id = ? "
+        last = conn.execute("SELECT kind, payload FROM task_events WHERE task_id = ? AND kind != 'dispatch_skipped' "
                             "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id,)).fetchone()
         if last is None or last["kind"] != REFUSAL_EVENT or last["payload"] != kb._json_or_null(payload):
             kb._append_event(conn, task_id, REFUSAL_EVENT, payload)

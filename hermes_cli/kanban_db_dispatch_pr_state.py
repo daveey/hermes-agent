@@ -124,12 +124,10 @@ def _immediate_checkpoint_after(
     Same-second PR reporting and checkpointing is normal within one worker run.
     """
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_core_update_requeue import latest_ended_run_skipping_requeues
 
-    run = conn.execute(
-        "SELECT id, outcome, ended_at, metadata FROM task_runs "
-        "WHERE task_id = ? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1",
-        (task_id,),
-    ).fetchone()
+    # A core-update requeue or an unused Board grant after the checkpoint is not a newer run. [daveey]
+    run = latest_ended_run_skipping_requeues(conn, task_id)
     if run is None or run["outcome"] != "continued":
         return False
     ended_at = kb._to_epoch(run["ended_at"])
@@ -331,9 +329,10 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
     """
     from hermes_cli import kanban_db as kb
 
-    from hermes_cli.kanban_unused_grant import latest_started_run
+    from hermes_cli.kanban_core_update_requeue import latest_run_skipping_requeues, requeued_run_ids
 
-    run = latest_started_run(conn, task_id)
+    # A core-update requeue is a pause, not the consuming execution (kanban_core_update_requeue).
+    run = latest_run_skipping_requeues(conn, task_id)
     task = kb.get_task(conn, task_id)
     if run is not None and (task is None or run["profile"] != task.assignee):
         return False
@@ -374,7 +373,9 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
     if not any(e["kind"] == "claimed" and e["run_id"] == run["id"] and at <= parked_at
                for at, e in timed):
         return False
+    requeued = requeued_run_ids(conn, task_id)
     if any(e["kind"] in {"crashed", "reclaimed", "timed_out"} and at >= parked_at
+           and not (e["kind"] == "reclaimed" and e["run_id"] in requeued)
            for at, e in timed):
         return False
     if not any(e["kind"] == "promoted" and at >= ended
@@ -418,6 +419,32 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
     return True
 
 
+def _handed_off_after(conn: sqlite3.Connection, task_id: str, since: int, latest_pr_comment_id: int,
+                      pr_urls: list[str]) -> bool:
+    """Any supported handoff strictly after the newest PR comment (see :func:`active_pr_reason`)."""
+    from hermes_cli import kanban_db_dispatch as _kbd
+    from hermes_cli.kanban_db_dispatch_rerun import is_handoff_event, reopened_after
+    from hermes_cli.kanban_hold_release import released_after
+    from hermes_cli.kanban_operator_resume import resumed_after
+
+    if released_after(conn, task_id, since, pr_urls):
+        return True
+    if resumed_after(conn, task_id, since):
+        return True  # operator `kanban resume`: one continuation of the latest run
+    if _immediate_checkpoint_after(conn, task_id, since, latest_pr_comment_id):
+        return True
+    # Strictly after: a same-second handoff tie stays guarded (fail closed).
+    if any(is_handoff_event(e["kind"], e["payload"]) for _, e in _kbd._rows_since(
+            conn, "task_events", task_id, since,
+            "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked', "
+            "'continued', 'scheduled')",
+            cols=", kind, payload", strict=True)):
+        return True
+    if reopened_after(conn, task_id, since):
+        return True  # operator reopen of the PR owner: it resumes THAT PR (its comments are in context)
+    return _dependency_handoff_after(conn, task_id, since, latest_pr_comment_id)
+
+
 def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Optional[str]:
     """Respawn-guard step 4: ``"active_pr"`` when a comment in the last 24 h names a PR, else None.
 
@@ -434,7 +461,8 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     one continuation after parent completion/promotion: it must belong to the latest
     claimed run of this card and assignee, ended orderly as blocked, with no subsequent
     crash/reclaim/timeout. Operator-only links or synthetic unclaimed runs do not count;
-    the next execution claim consumes the handoff (a proven unused grant does not).
+    the next execution claim consumes the handoff (a proven unused grant or a hermes-sync
+    core-update restart-safe requeue does not: :mod:`kanban_core_update_requeue`).
     A same-second dependency park counts only when
     its server-stamped comment watermark covers the newest PR comment; otherwise it stays guarded.
     This does not change the separate review-checkpoint exception below. So does
@@ -457,7 +485,7 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     from hermes_cli import kanban_db as _kb
     from hermes_cli import kanban_db_dispatch as _kbd
     from hermes_cli.kanban_db_dispatch_pr_policy import holding_urls
-    from hermes_cli.kanban_db_dispatch_rerun import is_handoff_event, reopened_after
+    from hermes_cli.kanban_dependency_review import resumes_review
 
     foreign_ids = _foreign_pr_comment_ids(conn, task_id)
     fyi_urls: list[str] = []
@@ -498,23 +526,8 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
             if pr_state(url) == "REJECTED":
                 comment_rejection(conn, task_id, url, _rejections[norm_pr(url)])
         return None
-    from hermes_cli.kanban_hold_release import released_after
-    if released_after(conn, task_id, max(pr_times), pr_urls):
+    if _handed_off_after(conn, task_id, max(pr_times), latest_pr_comment_id, pr_urls):
         return None
-    if _immediate_checkpoint_after(conn, task_id, max(pr_times), latest_pr_comment_id):
-        return None
-    # Strictly after: a same-second handoff tie stays guarded (fail closed).
-    if any(is_handoff_event(e["kind"], e["payload"]) for _, e in _kbd._rows_since(
-            conn, "task_events", task_id, max(pr_times),
-            "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked', "
-            "'continued', 'scheduled')",
-            cols=", kind, payload", strict=True)):
-        return None
-    if reopened_after(conn, task_id, max(pr_times)):
-        return None  # operator reopen of the PR owner: it resumes THAT PR (its comments are in context)
-    if _dependency_handoff_after(conn, task_id, max(pr_times), latest_pr_comment_id):
-        return None
-    from hermes_cli.kanban_dependency_review import resumes_review
     if resumes_review(conn, task_id, pr_urls):
         return None
     states = {u: pr_state(u) for u in dict.fromkeys(pr_urls)}

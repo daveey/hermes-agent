@@ -82,6 +82,10 @@ RESTART_WAIT_WS_METHODS = frozenset({
     "ping", "runtime.describe", "session.resume", "session.detach", "session.events.since",
     "session.info", "session.list", "prompt.submit", "prompt.receipt", "session.interrupt",
     "approval.pending", "approval.received", "approval.respond", "clarify.respond", "clarify.lock",
+    # An external (restart-safe) cron firer observes or stops the run it already admitted, which
+    # the drain is waiting for; a refusal made it give up the fire and lose the running job's
+    # ownership. ``cron.submit`` stays refused (new work).
+    "cron.status", "cron.recover", "cron.cancel",
 })
 
 

@@ -1141,6 +1141,18 @@ class ApplyResult:
     # [daveey] A feed pull or snapshot: task fields with an unanswered local edit keep the local value
     # (``_without_unacked_fields``), checked inside the apply transaction.
     local_pending_wins: bool = False
+    # [daveey] ``kanban_repair_revision`` read right after the apply transaction began and right before it
+    # committed (None: no table or row). The sync client credits a live revision change made only by applies.
+    revision_before: Optional[int] = None
+    revision_after: Optional[int] = None
+
+
+def _repair_revision(conn: sqlite3.Connection) -> Optional[int]:
+    try:
+        row = conn.execute("SELECT revision FROM kanban_repair_revision WHERE id = 1").fetchone()
+    except sqlite3.OperationalError:  # no such table: a board the sync client never repaired
+        return None
+    return None if row is None else row[0]
 
 
 _STATUS_HOOKS = {"running": "kanban_task_claimed", "done": "kanban_task_completed", "blocked": "kanban_task_blocked"}
@@ -1165,6 +1177,7 @@ def apply_remote_changes(
     from hermes_cli.kanban_db_connect import write_txn
     result = ApplyResult(cursor=new_cursor, local_pending_wins=local_pending_wins)
     with write_txn(conn):
+        result.revision_before = _repair_revision(conn)
         # Serialize with set_mode(off): a feed fetched before detach must not
         # overwrite locally held custody after the detach transaction commits.
         if board_mode(conn) == "off":
@@ -1178,6 +1191,7 @@ def apply_remote_changes(
         # the state row at all when both persisted values already match.
         conn.execute("UPDATE kanban_sync_state SET cursor = ?, applying = 0 "
                      "WHERE cursor IS NOT ? OR applying IS NOT 0", (new_cursor, new_cursor))
+        result.revision_after = _repair_revision(conn)
     if observers:
         _after_commit(conn, result, board)
     return result
@@ -1254,6 +1268,8 @@ def _upsert_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: A
         conn.execute(f"INSERT INTO tasks ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
                      (ch.uid, *cols.values(), ch.version))
         changed = set(cols)
+        from hermes_cli.kanban_restore_chat_subs import note_restored_task
+        note_restored_task(conn, ch.uid, cols.get("created_on"), own)  # our own card back from the Board
     else:
         changed = {c for c, v in cols.items() if old[c] != v}
         assignments = ", ".join(f"{c} = ?" for c in cols)
@@ -1343,11 +1359,24 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
     if table == "task_attachments":
         cols["stored_path"] = ""
         result.blobs_to_fetch.append(ch.uid)
+    if table == "task_comments" and "origin_gateway" in table_columns(conn, table):
+        # Machine-local, so never copied from the wire as a column: derive it the way a local write does, from
+        # the author (a relay names its sender) or else the gateway that wrote the row. [daveey]
+        from hermes_cli.kanban_comment_origin import synced_origin
+        origin = synced_origin(cols.get("author"), ch.origin_gateway)
+        if origin:
+            cols["origin_gateway"] = origin
     names = ["uid", *cols]
     conn.execute(f"INSERT INTO {table} ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
                  (ch.uid, *cols.values()))
     if table == "task_events" and ch.fields.get("kind") in ("archive_requested", "capability_owner_archive_requested"):
         result.wake_dispatcher = True  # a stop request (kanban_remote_stop) or forwarded owner archive to apply
+    if table == "task_chat_links":
+        from hermes_cli.kanban_restore_chat_subs import restore_link_sub
+        restore_link_sub(conn, cols, own)  # a restored card's hub delivery (kanban_notify_subs does not sync)
+    if table == "task_events" and cols.get("kind") == "origin_intent_recorded":
+        from hermes_cli.kanban_origin_intent_carry import restore_from_event
+        restore_from_event(conn, cols, own)  # a restored courier card's origin intent (a machine-local table)
     return True
 
 

@@ -1,5 +1,7 @@
 import { atom } from 'nanostores'
 
+import { executionIdentityKey, projectExecutionObservation, selectExecutionObservation, summarizeExecutionObservations } from '@/lib/execution-observations'
+
 import { lineageAliases } from './session'
 
 // App-wide answer to "which conversations still have work running outside
@@ -16,9 +18,11 @@ import { lineageAliases } from './session'
 export interface LiveWorkCounts {
   background: number
   subagents: number
+  execution_observations?: unknown[]
 }
 
 export interface LiveWorkBucket {
+  failed?: boolean
   at: number
   /** Stored ids of the sidebar rows this source answers for: a row it covers
    *  and does not list has no live work as of `at`. */
@@ -63,7 +67,11 @@ export function setLiveWorkRosterSource(
       continue
     }
 
-    bucket[sid] = { background: Number(row.background) || 0, subagents: Number(row.subagents) || 0 }
+    bucket[sid] = {
+      background: Number(row.background) || 0,
+      subagents: Number(row.subagents) || 0,
+      ...(Array.isArray(row.execution_observations) ? { execution_observations: row.execution_observations } : {})
+    }
   }
 
   $liveWorkRoster.set({ ...current, [source]: { at, covers: new Set(covers), sessions: bucket } })
@@ -77,15 +85,24 @@ export function setLiveWorkRosterSource(
  *  the roster saw start since. */
 export function rosterLiveIds(
   roster: LiveWorkRoster,
-  kind: keyof LiveWorkCounts,
+  kind: 'background' | 'subagents',
   eventFedAt: ReadonlyMap<string, number>,
   sessions: Parameters<typeof lineageAliases>[1]
 ): string[] {
   const ids = new Set<string>()
 
-  for (const { at, sessions: bucket } of Object.values(roster)) {
+  for (const { at, sessions: bucket, failed } of Object.values(roster)) {
+    if (failed) {continue}
+
     for (const [storedId, counts] of Object.entries(bucket)) {
-      if (counts[kind] <= 0) {
+      const work = (counts.execution_observations ?? []).filter(record => {
+        const identity = record && typeof record === 'object' ? (record as Record<string, unknown>).identity : null
+
+        return identity && typeof identity === 'object' &&
+          (identity as Record<string, unknown>).kind === (kind === 'background' ? 'process' : 'subagent')
+      })
+
+      if (summarizeExecutionObservations(selectWorkObservations(work, Date.now() / 1000), Date.now() / 1000, 'sidebar').counts.running <= 0) {
         continue
       }
 
@@ -112,13 +129,13 @@ export function rosterLiveIds(
  *  its event-fed state. */
 export function rosterSaysIdle(
   roster: LiveWorkRoster,
-  kind: keyof LiveWorkCounts,
+  kind: 'background' | 'subagents',
   aliases: readonly string[],
   eventAt: number
 ): boolean {
   return Object.values(roster).some(
-    ({ at, covers, sessions }) =>
-      at > eventAt &&
+    ({ at, covers, sessions, failed }) =>
+      !failed && at > eventAt &&
       aliases.some(alias => covers.has(alias)) &&
       aliases.every(alias => (sessions[alias]?.[kind] ?? 0) <= 0)
   )
@@ -134,3 +151,84 @@ export function noteEventFed(eventFedAt: Map<string, number>, aliases: readonly 
 /** True when the source's last read reported any live work. */
 export const rosterSourceHasWork = (roster: LiveWorkRoster, source: string) =>
   Object.values(roster[source]?.sessions ?? {}).some(c => c.subagents > 0 || c.background > 0)
+
+const isRecord = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
+
+/** Roster counts discover work, never establish liveness. Missing per-kind records stay unknown
+ * beside other fresh records. `source` is the row's owner route, not its unqualified session id. */
+export function rosterRowEvidence(roster: LiveWorkRoster, source: string, aliases: readonly string[]) {
+  const records: unknown[] = []
+  let missing = 0
+
+  for (const alias of aliases) {
+    const counts = roster[source]?.sessions[alias]
+
+    if (roster[source]?.failed) {
+      // A failed read revokes current state, never outstanding asks: keep each cached record as an
+      // explicit unknown under its own identity, with its human requests and original clocks.
+      const cached = (counts?.execution_observations ?? []).filter(isRecord).map(record => ({
+        ...record,
+        state: 'unknown',
+        last_known_state: record.state,
+        unknown_reason: 'source_unavailable'
+      }))
+
+      records.push(...cached)
+
+      if (counts || roster[source].covers.has(alias)) {
+        const live = (counts?.background ?? 0) + (counts?.subagents ?? 0)
+        missing += Math.max(cached.length > 0 ? 0 : 1, live - cached.length)
+      }
+
+      continue
+    }
+
+    if (!counts) {continue}
+    const observations = counts.execution_observations ?? []
+    records.push(...observations)
+
+    for (const [kind, count] of [['process', counts.background], ['subagent', counts.subagents]] as const) {
+      const keys = new Set(observations.flatMap(record => {
+        const id = record && typeof record === 'object' ? (record as Record<string, unknown>).identity : null
+
+        return id && typeof id === 'object' && (id as Record<string, unknown>).kind === kind ? [JSON.stringify(id)] : []
+      }))
+
+      missing += Math.max(0, count - keys.size)
+    }
+  }
+
+  return { records, missing }
+}
+
+/** A failed read is not authoritative absence. Retain discovery, not a positive verdict. */
+export function failLiveWorkRosterSource(source: string, covers: readonly string[] = []) {
+  const current = $liveWorkRoster.get()
+  const bucket = current[source] ?? { at: 0, covers: new Set(covers), sessions: {} }
+  $liveWorkRoster.set({ ...current, [source]: { ...bucket, failed: true } })
+}
+
+/** Select duplicate snapshots by exact execution identity using the shared projector. */
+export function selectWorkObservations(records: readonly unknown[], now: number): unknown[] {
+  const selected: unknown[] = []
+  const groups = new Map<string, { identity: unknown; records: unknown[] }>()
+
+  for (const record of records) {
+    const identity = record && typeof record === 'object' ? (record as Record<string, unknown>).identity : undefined
+    const key = executionIdentityKey(identity)
+
+    if (!key) { selected.push(record);
+
+ continue }
+
+    const group = groups.get(key) ?? { identity, records: [] }
+    // RPC and row projections of the same cached probe have different derived ages.
+    // Re-project at one consumer clock before comparing snapshots; real evidence conflicts remain.
+    group.records.push(projectExecutionObservation(record, now))
+    groups.set(key, group)
+  }
+
+  for (const group of groups.values()) {selected.push(selectExecutionObservation(group.records, group.identity, now, 'sidebar'))}
+
+  return selected
+}

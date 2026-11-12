@@ -1128,6 +1128,7 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     if _table_exists(conn, "task_wake_checks"):
         _add_column_if_missing(conn, "task_wake_checks", "generation", "generation TEXT")
         _add_column_if_missing(conn, "task_wake_checks", "purpose", "purpose TEXT NOT NULL DEFAULT 'wake'")
+        _add_column_if_missing(conn, "task_wake_checks", "first_failure_at", "first_failure_at INTEGER")
     cols = _column_names(conn, "tasks")
     for name, ddl in _BASE_TASK_COLUMNS + _EARLY_TASK_COLUMNS:
         if name not in cols:

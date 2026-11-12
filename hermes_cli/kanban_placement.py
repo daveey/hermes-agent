@@ -41,6 +41,16 @@ A card stays local when any of these holds:
   target's capability record is stale. A name hermes-hub has no record of at all is refused as
   unknown, with the gateway names it does know.
 
+Markers do not keep a card on the hub by themselves: they only decide whether the hub admission judge
+(:mod:`hermes_cli.kanban_hub_admission`, skill ``hub-admission-test``) is consulted. Every hub-bound
+outcome (a routeless hub keeping a card local for a marker or for no route, an explicit ``hub`` pin
+from any gateway, ``runs_on=[machine:hub]``, a move there, a capability owner routed there) needs an
+evidenced admit from a pinned Sonnet judge (:mod:`hermes_cli.kanban_hub_admission_placement`). A denied
+automatic card is enrolled in the worker pool with ``requires: [hub:write]`` (Board label
+``capability:hub-write``); a denied explicit pin is refused. Structural limits (``needs``, host workspace,
+non-default board, uncarried options, assignee) are unchanged and never call the judge, and non-hub
+gateways make zero judge calls unless the caller names the hub.
+
 Heavy work (tests, builds, benchmarks, installs: :data:`DEFAULT_HEAVY_MARKERS`, replaced by
 ``kanban.placement.heavy_markers``) with no local-only need goes to a worker node instead of the target
 when ``kanban.placement.heavy_route`` maps this gateway to one (``{"macbook": "worker-1"}``): the card is
@@ -145,8 +155,17 @@ APPLE_CONTEXT_MARKERS = (
     r"\bcatalyst\b", r"\bcore ?ml\b", r"\bwatch app\b", r"\bav(foundation|audiosession)\b", r"\bapple\b",
     r"\bmac\b", MACOS_MARKER, r"\bmacbook\b", r"\bmac ?mini\b", r"\bthe mini\b", r"\bkeychain\b", r"\btcc\b",
 )
+# A context skill marker (:data:`DEFAULT_AUTO_OVERRIDABLE_SKILL_MARKERS`) yields to an explicit placement='auto'
+# (:func:`marker_skills`). A 'hub' pin is refused by hub admission for portable work, so naming it here left callers
+# with an archived card and nothing created. [daveey]
 LOCAL_MARKER_REMEDY = (
-    "if the work doesn't need this machine, archive and re-create with placement='hub'")
+    "if the work doesn't need this machine, archive and re-create with placement='auto'")
+DEVICE_SKILL_MARKER_REMEDY = (
+    "this skill drives this machine and placement='auto' does not override it; if the work doesn't need this "
+    "machine, archive and re-create without it in skills (name it in the body instead)")
+TEXT_MARKER_REMEDY = (
+    "if the work doesn't need this machine, archive and re-create without naming the machine in the title or body "
+    "(placement='auto' overrides only a context skill such as babybear-*)")
 PINNED_LOCAL_WHY = "placement pinned local by the caller"
 
 
@@ -165,6 +184,11 @@ DEFAULT_LOCAL_SKILL_MARKERS = (
     r"^apple", r"^imessage$", r"^findmy$", r"^macos-", r"^mac-", r"^invisible-chrome-agent$",
     r"^local-chrome-remote-debugging$", r"^computer-use$", r"^babybear", r"^bb-", r"^ios-",
 )
+# Skill markers that only say what a card is about (a Baby Bear repo skill on a Python fix), not that it drives this
+# machine: an explicit placement='auto' drops them from the local-marker scan. Device-bound skills (apple-*, macos-,
+# computer-use, ios-, a local Chrome) stay local even then, since 'auto' is also the routine default callers spell
+# out. Replace with kanban.placement.auto_overridable_skill_markers. [daveey]
+DEFAULT_AUTO_OVERRIDABLE_SKILL_MARKERS = (r"^babybear", r"^bb-")
 # Phrases that mean the card runs tests, builds or benchmarks (CPU/IO heavy): with ``heavy_route`` set it
 # runs on a worker node rather than the routed target. Case-insensitive, title + body.
 DEFAULT_HEAVY_MARKERS = (
@@ -199,6 +223,34 @@ DEFAULT_CARRIED_REQUIRES = ("terminal", "file", "git", "kanban")
 _help_cache: dict = {}
 
 
+# The registry label every worker node carries (added at its enroll readiness gate, removed on drain). A card with
+# ``runs_on: [POOL_LABEL]`` waits in one queue: any worker with a free slot claims it through the Board lease.
+POOL_LABEL = "pool:worker"
+_LABEL = re.compile(r"[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9:._-]*")
+
+
+def is_pool_label(value) -> bool:
+    """``value`` names a class of machines (``pool:worker``), not one machine (``machine:<x>``) or a bare name."""
+    return (isinstance(value, str) and len(value) <= 64 and bool(_LABEL.fullmatch(value))
+            and not value.startswith("machine:"))
+
+
+def route_labels(dest: str) -> list[str]:
+    """``runs_on`` for a ``heavy_route``/``worker_queue`` value: a label as is, a machine name as ``machine:<x>``."""
+    return [dest] if is_pool_label(dest) else [f"machine:{dest}"]
+
+
+def label_machines(label: str, machines: Optional[dict] = None) -> list[str]:
+    """Active, unheld registry machines that carry ``label`` and pick up other gateways' cards (sorted)."""
+    from hermes_cli import kanban_worker_node as wn
+    if machines is None:
+        machines = (wn.registry() or {}).get("machines") or {}
+    return sorted(name for name, entry in machines.items()
+                  if isinstance(entry, dict) and entry.get("state", "active") == "active" and not entry.get("hold")
+                  and ("pickup" not in entry or wn.advertises_pickup(entry))
+                  and label in (entry.get("labels") or []))
+
+
 class _Cfg:
     def __init__(self, raw: dict):
         self.raw = raw if isinstance(raw, dict) else {}
@@ -229,6 +281,18 @@ class _Cfg:
         pats = list(base) if isinstance(base, list) else list(DEFAULT_LOCAL_SKILL_MARKERS)
         return [re.compile(str(p), re.IGNORECASE) for p in pats]
 
+    def auto_overridable_skill(self, skill) -> bool:
+        """True when an explicit placement='auto' drops ``skill`` from the local-marker scan (a context skill)."""
+        base = self.raw.get("auto_overridable_skill_markers")
+        pats = list(base) if isinstance(base, list) else list(DEFAULT_AUTO_OVERRIDABLE_SKILL_MARKERS)
+        for p in pats:
+            try:
+                if re.search(str(p), str(skill), re.IGNORECASE):
+                    return True
+            except re.error:
+                continue
+        return False
+
     def creator_session(self, target: str) -> str:
         v = self.raw.get("creator_session")
         if isinstance(v, dict):
@@ -248,6 +312,14 @@ class _Cfg:
             return None
         tgt = route.get(self_gw)
         return tgt if isinstance(tgt, str) and tgt and tgt != self_gw else None
+
+    def queue_label(self, self_gw: Optional[str]) -> Optional[str]:
+        """``kanban.placement.worker_queue[<this gateway>]``: the pool label portable cards queue for, or None."""
+        queue = self.raw.get("worker_queue")
+        if not self_gw or not isinstance(queue, dict):
+            return None
+        label = queue.get(self_gw)
+        return label if is_pool_label(label) else None
 
     def heavy_markers(self) -> list[re.Pattern]:
         base = self.raw.get("heavy_markers")
@@ -389,7 +461,9 @@ def _heavy_marker(title: str, body: str, cfg: _Cfg) -> Optional[str]:
 # state under ``~/.hermes`` other than the code checkout (``~/.hermes/skills`` is host state: curator ledger,
 # usage counts, live-patched skills), a
 # ``hermes-hub <subcommand>`` run (it acts with this gateway's key and replica), and a card that declares
-# ``requires: [host_repo]`` or a ``dir``/``worktree`` workspace.
+# ``requires: [host_repo]`` or a ``dir``/``worktree`` workspace. On the hub these markers only nominate a
+# card for the hub admission judge (see the module docstring): a denied card goes to the worker pool with
+# ``requires: [hub:write]``, so a mention of a hub path no longer holds a hub slot by itself.
 HERMES_STATE_PATH = r"(?:~|/home/[^/\s]+)/\.hermes/(?!(?:hermes-agent|repos|bin)(?:/|\b))[\w.-]"
 HOST_WORKTREE_PATH = r"(?:~|/home/[^/\s]+)/code/_wt(?:-[\w-]+)?(?:/|\b)"
 # Any home-rooted ``<dir>/.worktrees`` (``~/code/<repo>/.worktrees/t_*``, ``~/.hermes/hermes-agent/.worktrees``):
@@ -437,8 +511,36 @@ def without_evidence(body: str) -> str:
     return _EVIDENCE.sub("", body or "")
 
 
+def structural_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
+    """Non-textual restrictions that admission cannot override."""
+    c = _Cfg(config() if cfg is None else cfg)
+    if args.get("needs"):
+        return "gateway-scoped need"
+    if (args.get("workspace_kind") or "scratch") != "scratch":
+        return "host workspace"
+    board = args.get("board")
+    if board and board != "default":
+        return "non-default board"
+    if (args.get("assignee") or "default") not in c.assignees():
+        return "assignee not allowlisted"
+    # Explicit tool defaults are equivalent to omission, as on the CLI path.
+    # A blocked initial status still needs origin-side human-request handling.
+    if any(args.get(k) not in (None, "", [], False)
+           for k in UNCARRIED_OPTIONS if not (k == "initial_status" and args.get(k) == "running")):
+        return "uncarried option"
+    reqs = args.get("requires") or []
+    reqs = [reqs] if isinstance(reqs, str) else list(reqs)
+    from hermes_cli import kanban_placement_coordination as coordination
+    ordinary = [r for r in reqs if r not in coordination.ACCESS_LABELS]
+    if any(reg.is_gateway_need(r) for r in ordinary):
+        return "gateway-scoped requirement"
+    if any(str(r) not in c.carried_requires() for r in ordinary):
+        return "uncarried requirement"
+    return None
+
+
 def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
-    """Why a card cannot leave its origin; None means structurally portable, not admitted.
+    """Legacy portability scan; hub text matches request admission, not permission to stay.
 
     Keep the conservative legacy routeless-heavy boundary, excluding only its heavy-marker
     requirement. Worker profile/tool/skill attestations and capacity are Board admission checks.
@@ -452,13 +554,13 @@ def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
     """Legacy heavy routing; worker pools reuse portability without changing this opt-out path."""
     from hermes_cli.kanban_placement_coordination import legacy_refusal
     worker = c.heavy_target(self_gw)
-    if skip or not worker or legacy_refusal(args) or portable_reason(args, c.raw):
+    if skip or not worker or legacy_refusal(args, c.raw) or portable_reason(args, c.raw):
         return None
     title, body = args.get("title") or "", args.get("body") or ""
     heavy = _heavy_marker(title, body, c)
     if not heavy or not (machine_ok or _machine_picks_up)(worker):
         return None
-    return {"where": "local", "runs_on": [f"machine:{worker}"],
+    return {"where": "local", "runs_on": route_labels(worker),
             "why": f"heavy work ({heavy}): runs on {worker} through the Board lease"}
 
 
@@ -466,8 +568,11 @@ def _machine_picks_up(name: str) -> bool:
     """``name`` is an active machine in the Board registry that is not held (draining) and has not turned
     pickup off. The Board registry does not publish ``pickup`` today (10-28: every entry lacked it, the hub
     and worker-1 included, though both claim ``runs_on`` cards), so a missing field counts as on:
-    ``heavy_route`` naming the worker is the operator saying it picks up."""
+    ``heavy_route`` naming the worker is the operator saying it picks up. A pool label (:func:`is_pool_label`) is
+    live when some such machine carries it."""
     from hermes_cli import kanban_worker_node as wn
+    if is_pool_label(name):
+        return bool(label_machines(name))
     entry = ((wn.registry() or {}).get("machines") or {}).get(name)
     if not entry or entry.get("state", "active") != "active" or entry.get("hold"):
         return False
@@ -634,7 +739,7 @@ def canonical_pin(pin, self_gw: Optional[str] = None, cfg: Optional[dict] = None
             hit = {str(k).strip().lower(): str(v).strip().lower() for k, v in aliases.items()}.get(p)
             if hit:
                 return hit
-        known = {str(self_gw or "").strip().lower()}
+        known = {"hub", str(self_gw or "").strip().lower()}
         route = raw.get("route")
         if isinstance(route, dict):
             known |= {str(k).strip().lower() for k in route} | {str(v).strip().lower() for v in route.values()}
@@ -653,6 +758,37 @@ def explicit_foreign_pin(args: dict, self_gw: Optional[str], cfg: Optional[dict]
     if pin in ("", "auto", "local", "here", (self_gw or "").lower()):
         return ""
     return pin
+
+
+def marker_skills(args: dict, cfg: _Cfg):
+    """The skills a local-marker scan checks. With placement='auto' passed outright, context skills
+    (:data:`DEFAULT_AUTO_OVERRIDABLE_SKILL_MARKERS`) are dropped: babybear-development on a Python fix says what the
+    card is about, not that it needs this machine. Device-bound skills (apple-*, computer-use, ...) are kept, and an
+    omitted placement honours every skill. Title and body markers are never overridden: 'auto' is also the routine
+    default callers spell out. [daveey]"""
+    skills = args.get("skills")
+    if not skills or str(args.get("placement") or "").strip().lower() != "auto":
+        return skills
+    return [s for s in skills if not cfg.auto_overridable_skill(s)]
+
+
+def marker_remedy(why: str, cfg: Optional[dict] = None, args: Optional[dict] = None) -> str:
+    """The remedy for a ``local marker: ...`` decision: 'auto' only when it would actually move the card.
+
+    Given the card's ``args``, a context-skill hit is re-checked as the card would be with placement='auto': a device
+    skill beside it ([babybear-*, computer-use]) still pins it there, so that skill's remedy comes right away instead
+    of an 'auto' that only leads to it. [daveey]"""
+    if not why.startswith("local marker: skill "):
+        return TEXT_MARKER_REMEDY
+    c = _Cfg(config() if cfg is None else cfg)
+    if not c.auto_overridable_skill(why[len("local marker: skill "):]):
+        return DEVICE_SKILL_MARKER_REMEDY
+    if args:
+        auto = {**args, "placement": "auto"}
+        hit = _local_marker(auto.get("title") or "", auto.get("body") or "", marker_skills(auto, c), c)
+        if hit and hit.startswith("skill ") and not c.auto_overridable_skill(hit[len("skill "):]):
+            return DEVICE_SKILL_MARKER_REMEDY
+    return LOCAL_MARKER_REMEDY
 
 
 def _raw_explicit_pin(args: dict) -> str:
@@ -687,6 +823,14 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
         known = sg.strip().lower() if isinstance(sg, str) else ""
         out = _decide(args, origin_intent=origin_intent, now=now, cfg=cfg, self_gw=sg, live=live,
                       locate=locate, carries=carries, machine_ok=machine_ok, info=info)
+        from hermes_cli.kanban_hub_admission_placement import apply, is_hub
+        raw_cfg = config() if cfg is None else cfg
+        try:
+            out = apply(args, out, sg, raw_cfg, origin_intent=origin_intent, machine_ok=machine_ok)
+        except Exception as exc:  # health: allow BLE001 -- admission must fail closed on the hub
+            if is_hub(sg, raw_cfg) or is_hub(out.get("where"), raw_cfg):
+                return {"where": "refuse", "why": f"hub admission failed: {exc}", "pin": "hub"}
+            raise
         pin = explicit_foreign_pin(args, sg, cfg)
         if pin and origin_intent is None and out.get("where") == "local" and not out.get("defer"):
             return {"where": "refuse", "why": out.get("why", ""), "pin": pin}
@@ -714,7 +858,7 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
         self_gw = reg.self_gateway() if self_gw is None else self_gw
         pin = canonical_pin(args.get("placement") or "auto", self_gw, c.raw)
         from hermes_cli.kanban_worker_placement import creation_decision
-        enrollment = creation_decision(args, c.raw, self_gw, pin, origin_intent)
+        enrollment = creation_decision(args, c.raw, self_gw, pin, origin_intent, machine_ok=machine_ok)
         if enrollment is not None:
             return enrollment
         explicit = pin not in ("", "auto")
@@ -788,14 +932,13 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
             if not on_target:
                 return {"where": "local", "why": f"needs {need}, which {target} does not hold"}
         if not explicit:
-            hit = _local_marker(args.get("title") or "", args.get("body") or "",
-                                args.get("skills"), c)
+            hit = _local_marker(args.get("title") or "", args.get("body") or "", marker_skills(args, c), c)
             if hit:
                 return {"where": "local", "why": f"local marker: {hit}"}
             worker = c.heavy_target(self_gw)
             heavy = _heavy_marker(args.get("title") or "", args.get("body") or "", c) if worker else None
             if heavy and (machine_ok or _machine_picks_up)(worker):
-                return {"where": "local", "runs_on": [f"machine:{worker}"],
+                return {"where": "local", "runs_on": route_labels(worker),
                         "why": f"heavy work ({heavy}): runs on {worker} through the Board lease"}
         if has_parents:
             # Liveness is checked when the card is forwarded, not now: its parents may run for hours.
@@ -860,6 +1003,9 @@ def remote_body(args: dict, *, self_gw: str, target: str, carried: bool = False)
     """The body sent to ``target``. ``carried`` (the client passes options as fields) drops the
     body-text fallback for skills and the runtime budget."""
     body = (args.get("body") or "").rstrip()
+    if str(args.get("hub_reason") or "").strip():
+        # The receiving hub re-judges a routed card (courier_plan); the reason must reach its judge. [daveey]
+        body = f"{body}\n\nHub reason (hub admission): {str(args['hub_reason']).strip()}".strip()
     extra = []
     skills = [] if carried else args.get("skills") or []
     if skills:
