@@ -99,13 +99,19 @@ def _open_alarms(db: sqlite3.Connection, unit: str) -> list[dict]:
         host = created_on or (m.group(1) if (m := _HOST.search(body)) else None)
         refusal = m.group(1).strip() if (m := _REFUSAL.search(body)) else ""
         sibling = m.group(1) if (m := _SIBLING.search(body)) else None
-        out.append({"id": task_id, "host": host, "created_at": created_at, "refusal": refusal, "sibling": sibling})
+        out.append({"id": task_id, "host": host, "created_on": created_on,
+                    "created_at": created_at, "refusal": refusal, "sibling": sibling})
     return out
 
 
 def _board_alarms(conn: sqlite3.Connection, unit: str) -> list[dict]:
     """Open alarms for ``unit`` on this board: the live file's, then the replica's (the whole board)."""
-    found = {a["id"]: dict(a, local=True) for a in _open_alarms(conn, unit)}
+    from hermes_cli import kanban_capability_routing as kcr
+    gateway = kcr._own_gateway(conn)
+    # A live row can be a foreign pickup copy. Legacy rows without created_on belong to
+    # this board even when their body names another host; that host is not write authority.
+    found = {a["id"]: dict(a, local=not a["created_on"] or a["created_on"] == gateway)
+             for a in _open_alarms(conn, unit)}
     try:
         with _replica(conn) as rep:
             if rep is not None:
