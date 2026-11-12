@@ -98,13 +98,33 @@ def _assignment_routes(task) -> bool:
         return False
 
 
-# Conservative advisory only: these are human boundaries, not an authorization classifier.
+# Conservative advisory only: these are human boundaries, not an authorization classifier. A miss here
+# nudges a worker to self-apply an ask that needs David, so each category lists common synonyms; the
+# review of PR1220 (t_01a1ce72aa3e4cb0) found 17 realistic such asks the first vocabulary missed. [daveey]
 _RECOMMENDATION_BOUNDARY = re.compile(
-    r"\b(?:spend\w*|cost\w*|budget\w*|pay\w*|purchas\w*|money|dollars?|"
-    r"permission\w*|credential\w*|password\w*|tokens?|secrets?|access|"
-    r"consent|privacy|safety|delet\w*|irreversible|destructive|"
-    r"person|people|Rose|colleague\w*|reviewer\w*|customer\w*|vendor\w*|"
-    r"physical|press|plug|unplug|touch|sign[ -]?in)\b|[$€£]", re.IGNORECASE)
+    # money
+    r"\b(?:spend\w*|cost\w*|budget\w*|pay\w*|purchas\w*|money|dollars?|bill\w*|charg\w*|rent\w*|"
+    r"subscri\w*|pric\w*|fees?|invoic\w*|refund\w*|"
+    # permissions and credentials
+    r"permission\w*|credential\w*|password\w*|tokens?|secrets?|access|(?:api|ssh|signing|private|deploy)[ -]keys?|"
+    r"log[ -]?in\w*|log[ -]?out|sign[ -]?(?:in|out|up)|auth\w*|oauth|accounts?|revok\w*|rotat\w*|grant\w*|admin\w*|"
+    # safety, privacy, consent
+    r"consent|privacy|private|safety|health|medical|"
+    # destructive or hard to reverse
+    r"delet\w*|remov\w*|wip\w*|drop\w*|purg\w*|eras\w*|destroy\w*|truncat\w*|overwrit\w*|reset\w*|"
+    r"force[- ]?push\w*|irreversibl\w*|destructive|permanent\w*|unrecoverabl\w*|hard[- ]to[- ]reverse|"
+    r"bypass\w*|without\s+(?:ci|review|tests?|checks?|approval)|skip\w*\s+(?:ci|review|tests?|checks?)|"
+    # other people and outward communication
+    r"person|people|someone|anyone|Rose|David's|wife|husband|partner|family|friend\w*|landlord|neighbou?r\w*|"
+    r"colleague\w*|team\w*|reviewer\w*|customer\w*|client\w*|user\w*|vendor\w*|contractor\w*|recipient\w*|"
+    r"email\w*|e-mail\w*|send\w*|sent|publish\w*|public\w*|message\w*|tweet\w*|"
+    r"(?:on|to)\s+(?:x|twitter|bluesky|slack|discord|linkedin|social\w*)|"
+    r"announc\w*|invit\w*|notify\w*|"
+    # physical
+    r"physical|press|plug|unplug|touch)\b|[$€£]", re.IGNORECASE)
+# "Ask Alice to review", "tell Sam": a request to a named person (case-sensitive on the name). [daveey]
+_RECOMMENDATION_NAMED_PERSON = re.compile(
+    r"\b(?:[Aa]sk|[Tt]ell|[Pp]ing|[Cc]ontact|[Cc]all|[Tt]ext|[Cc]c)\s+[A-Z][a-z]+\b")
 
 
 def recommended_choice_warning(human_request) -> dict:
@@ -124,14 +144,18 @@ def recommended_choice_warning(human_request) -> dict:
     text = " ".join(str(human_request.get(key) or "")
                     for key in ("action", "scope", "why_human", "evidence"))
     text += " " + " ".join(str(choice.get(key) or "") for choice in choices for key in ("label", "value"))
-    if _RECOMMENDATION_BOUNDARY.search(text):
+    if _RECOMMENDATION_BOUNDARY.search(text) or _RECOMMENDATION_NAMED_PERSON.search(text):
         return {}
-    return {"warning": "this looks like a decision you can apply yourself under David's standing rule; "
-            "apply the recommended option and comment the pick and reversal only if it is in scope, "
-            "reversible, and within existing review and landing gates. Do not apply it for spend beyond "
-            "standing limits, permissions, credentials, other people, safety or privacy consent, "
-            "hard-to-reverse effects, or a toss-up. "
-            "This warning does not undo the block or grant permission; this run still ends."}
+    # The block has already landed and David has been asked, so the advice is for this card's comment
+    # and for next time, never "apply it now": a worker can't unblock itself, and David may pick the
+    # other option. [daveey]
+    return {"warning": "this looks like a decision you could have applied yourself under David's "
+            "standing rule: in scope, reversible, and within existing review and landing gates, with no "
+            "spend beyond standing limits, permissions, credentials, other people, safety or privacy "
+            "consent, hard-to-reverse effects, or toss-up. This block stands and this run still ends, so "
+            "do not apply the option now: comment your recommended pick and how to reverse it so David "
+            "can just unblock. Next time, apply the recommended option and comment the pick instead of "
+            "blocking, unless it is a toss-up. This warning grants no permission."}
 
 
 ASK_LINT_CODE = "user_ask_incomplete"

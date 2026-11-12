@@ -108,6 +108,42 @@ def test_recommendation_requires_explicit_positive_marker(label, warns):
         assert "reversible" in result["warning"]
         assert "existing review and landing gates" in result["warning"]
         assert "this run still ends" in result["warning"]
+        # Post-block reality: David is already asked, so the worker comments its pick; it must not apply it now.
+        assert "do not apply the option now" in result["warning"]
+        assert "comment your recommended pick and how to reverse it" in result["warning"]
+
+
+# Asks that really need David which the first vocabulary nudged anyway (review t_01a1ce72aa3e4cb0).
+@pytest.mark.parametrize("action", [
+    "Choose the billing plan for the new GPU pod", "Rent an H100 for 48 hours",
+    "Upgrade the subscription to Pro tier", "Charge the card on file",
+    "Pick which API key to rotate", "Log in to the App Store Connect account", "Revoke the GitHub app",
+    "Send the email to the landlord", "Post the draft publicly on X", "Post the draft on X",
+    "Publish the App Store release",
+    "Tell David's wife about the schedule", "Ask Alice to review",
+    "Remove the old backups from S3", "Wipe the hub database and reseed", "Drop the users table",
+    "Force-push main to drop the bad commit", "Merge the PR now without CI",
+])
+def test_recommendation_boundary_synonyms_suppress_nudge(action):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    request = {"interaction": "reply", "action": action, "scope": "this card",
+               "choices": [{"label": "A (recommended)", "value": "a"}, {"label": "B", "value": "b"}]}
+    assert recommended_choice_warning(request) == {}
+
+
+# In-gate code decisions from the red-sweep evidence (and similar) still get the nudge.
+@pytest.mark.parametrize("action", [
+    "Choose fixture timing: premerge or postmerge",
+    "Pick coworld-terraform D1 c and D2 a",
+    "Use worker Chrome :9333 instead of toggling remote debugging",
+    "Pick the retry backoff for the poller",
+    "Rename the helper module and keep a shim",
+])
+def test_recommendation_nudge_still_fires_for_in_gate_code_decisions(action):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    request = {"interaction": "reply", "action": action, "scope": "code in this card's PR",
+               "choices": [{"label": "A (recommended)", "value": "a"}, {"label": "B", "value": "b"}]}
+    assert "apply the recommended option" in recommended_choice_warning(request).get("warning", "")
 
 
 def test_worker_guidance_applies_recommendation_with_boundaries():
