@@ -792,6 +792,16 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "Ids of open cards a create_overlap refusal named that this card is NOT a duplicate of. "
                 "Needs distinct_reason; recorded as a create_overlap event on the new card.")},
         "distinct_reason": _prop("string", "Why this card is separate work from the distinct_from cards."),
+        "hub_reason": _prop("string", (
+                "Only for a card that needs the hub itself: what only the hub has (its signed-in "
+                "Chrome, the Board admin key, instance-role SSM, a Desktop-session interaction, an "
+                "existing hub worktree with unpushed commits, a hermes-hub command acting with the "
+                "hub's key, or live gateway state hub-admin cannot reach). A Sonnet admission judge "
+                "reads it with the card; without admission a hub card goes to the worker pool (pool "
+                "workers have hub ssh + hub-admin) and an explicit hub pin is refused.")),
+        "force_hub": _prop("boolean", (
+                "Operator override: keep the card on the hub without the admission judge. Refused "
+                "inside dispatcher workers; recorded as a forced hub_admission event.")),
         "idempotency_key": _prop("string", (
                 "If a non-archived task with this key already "
                 "exists, return that task's id instead of creating "

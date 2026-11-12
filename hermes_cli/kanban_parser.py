@@ -239,6 +239,13 @@ _SPECS = [
         _arg("--runs-on", dest="runs_on", default=None, metavar="LABELS",
              help="Machine labels the card needs, comma-separated (synced boards only): linux, "
                   "macos,xcode, machine:<name>; '' or '[]' = any machine; omit for the default placement"),
+        _arg("--hub-reason", dest="hub_reason", default=None, metavar="TEXT",
+             help="Why this card needs the hub itself (hub Chrome, Board admin key, ...). Fed to the "
+                  "hub-admission judge; its quote can be the evidence. Without admission a hub card "
+                  "goes to the worker pool (or an explicit hub pin is refused)."),
+        _arg("--force-hub", dest="force_hub", action="store_true",
+             help="Operator override: keep the card on the hub without the admission judge. Refused "
+                  "inside a dispatcher worker; recorded as a forced hub_admission event."),
         _arg("--parent", action="append", default=[], help="Parent task id (repeatable)"),
         _arg("--workspace",
              help="scratch | worktree | worktree:<path> | dir:<path> (default: scratch; "

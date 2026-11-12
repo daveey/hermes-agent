@@ -754,8 +754,14 @@ def decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg: 
         known = sg.strip().lower() if isinstance(sg, str) else ""
         out = _decide(args, origin_intent=origin_intent, now=now, cfg=cfg, self_gw=sg, live=live,
                       locate=locate, carries=carries, machine_ok=machine_ok, info=info)
-        from hermes_cli.kanban_hub_admission_placement import apply
-        out = apply(args, out, sg, config() if cfg is None else cfg)
+        from hermes_cli.kanban_hub_admission_placement import apply, is_hub
+        raw_cfg = config() if cfg is None else cfg
+        try:
+            out = apply(args, out, sg, raw_cfg, origin_intent=origin_intent)
+        except Exception as exc:  # health: allow BLE001 -- admission must fail closed on the hub
+            if is_hub(sg, raw_cfg) or is_hub(out.get("where"), raw_cfg):
+                return {"where": "refuse", "why": f"hub admission failed: {exc}", "pin": "hub"}
+            raise
         pin = explicit_foreign_pin(args, sg, cfg)
         if pin and origin_intent is None and out.get("where") == "local" and not out.get("defer"):
             return {"where": "refuse", "why": out.get("why", ""), "pin": pin}

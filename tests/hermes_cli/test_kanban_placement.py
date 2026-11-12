@@ -17,13 +17,7 @@ import pytest
 
 from hermes_cli import kanban_capability_registry as reg
 from hermes_cli import kanban_placement as kp
-from tests.hermes_cli.hub_judge_support import hub_judge
 
-
-@pytest.fixture(autouse=True)
-def _admitting_judge(hub_judge):
-    """Hub candidates are judged; legacy routing tests run under an admitting fake judge."""
-    return hub_judge
 
 ROUTE = {"route": {"macbook": "hub"}, "creator_session": {"hub": "20261023_052109_5b3dee"}}
 ALIVE = lambda target: None

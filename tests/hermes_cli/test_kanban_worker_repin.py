@@ -286,7 +286,10 @@ def test_http_refusal_leaves_policy_and_outbox_unchanged(conn, board_stub, statu
                                        {"task_id": tid, "expected_revision": 4, "runs_on": ["machine:hub"]})]
     assert board_stub["lock_free"] == [True]  # no write transaction held across the network call
     assert _local(conn, tid) == (wp.POLICY, None, "ready")
-    assert conn.execute("SELECT count(*) FROM kanban_sync_outbox").fetchone()[0] == 0 and not _moved(conn, tid)
+    # The admitted hub_admission audit event is the only write (the judge runs before the Board call).
+    assert conn.execute("SELECT count(*) FROM kanban_sync_outbox WHERE table_name != 'task_events'"
+                        ).fetchone()[0] == 0 and not _moved(conn, tid)
+    assert [e.kind for e in kb.list_events(conn, tid) if e.kind == "hub_admission"] == ["hub_admission"]
 
 
 def test_http_success_with_failed_readback_keeps_local_policy(conn, board_stub, monkeypatch):

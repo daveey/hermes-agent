@@ -463,6 +463,20 @@ def _cmd_create(args: argparse.Namespace) -> int:
     except kanban_origin.OriginError as exc:
         return _err(f"kanban: {exc.code}: {exc}", 2)
     origin_binding = None
+    # [daveey] Hub admission runs before any connection/write lock: the judge is a model call.
+    from hermes_cli.kanban_hub_admission_placement import cli_plan
+    plan = cli_plan(args, body, ws_kind, ws_path, getattr(args, "board", None) or kb.get_current_board(),
+                    assignee=(args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
+                              or _cli_default_assignee(args)))
+    if plan.get("where") == "refuse":
+        if getattr(args, "json", False):
+            _print_json({"ok": False, "created": False, "code": "hub_admission_denied",
+                         "error": plan.get("why", ""), "hub_admission": plan.get("hub_admission")})
+            return 2
+        verdict = plan.get("hub_admission") or {}
+        return _err(f"kanban: hub_admission_denied: {plan.get('why', '')} (no card was created; "
+                    f"need={verdict.get('need')!r}). Drop the hub pin, or give --hub-reason "
+                    "quoting what only the hub can do.", 2)
     with kbc.connect_closing() as conn:
         # An --idempotency-key hit returns an existing card: never re-stamp/re-subscribe it.
         idem_hit = bool(idem_key) and conn.execute(
@@ -492,7 +506,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_ask_resolved import AskFilingRefused, check_create_filing, create_context
         assignee = (args.assignee or (_profile_author() if in_worker or _agent_invoked() else None)
                     or _cli_default_assignee(args))
-        from hermes_cli.kanban_worker_placement import cli_audit, cli_policy, cli_runs_on
+        from hermes_cli.kanban_worker_placement import cli_audit, cli_runs_on
+        from hermes_cli.kanban_hub_admission_placement import with_admission as _with_admission
         try:
             # [daveey] A blocked ask's resolved_check runs once first, as the sweep will run it for this assignee
             # and workspace: already met or broken refuses the create. A key hit returns the card: no probe.
@@ -503,7 +518,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             task_id = kb.create_task(
                 conn, title=args.title, body=body,
                 assignee=assignee,
-                session_id=session_id, requires=getattr(args, "requires", None),
+                session_id=session_id, requires=plan.get("requires", getattr(args, "requires", None)),
                 chat_origin=origin.ref if origin else getattr(args, "origin_session", None),
                 # [daveey] Same declaration gate as the kanban_create tool, for agent/worker shells only.
                 require_declaration=(in_worker or _agent_invoked()) and declaration_required(),
@@ -524,10 +539,12 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                                  if in_worker else None),
                 validate_workspace=True, validate_skills=True,  # [daveey] no --runs-on: queue for the worker pool
-                runs_on=cli_runs_on(conn, args, body, ws_kind, ws_path, board, assignee=assignee),
-                placement_policy=cli_policy(args, body, ws_kind, ws_path, board, assignee=assignee),
+                runs_on=(None if plan.get("placement_policy") else
+                         cli_runs_on(conn, args, body, ws_kind, ws_path, board, assignee=assignee)),
+                placement_policy=plan.get("placement_policy"),
                 placement_checked=True, board=board,
-                placement_audit=cli_audit(args, body, ws_kind, ws_path, board, assignee=assignee),
+                placement_audit=_with_admission(cli_audit(args, body, ws_kind, ws_path, board, assignee=assignee),
+                                                plan),
                 insert_guard=after_create.guard,  # re-checks overlap under the write lock [daveey]
             )
         except kanban_overlap.OverlapRefused as exc:  # landed under the write lock after the first check
@@ -777,6 +794,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
             "wake_check": wake_check,
             "queue_reason": queue_reason,
             **details,
+            **({"hub_admission": [e.payload for e in events if e.kind == "hub_admission"][-1]}
+               if any(e.kind == "hub_admission" for e in events) else {}),
         })
         return 0
 
@@ -801,6 +820,10 @@ def _cmd_show(args: argparse.Namespace) -> int:
         field("model", f"{task.model_override}{_prov}")
     _print_max_retries(task)
     field("created", f"{_fmt_ts(task.created_at)} by {task.created_by or '-'}")
+    _verdicts = [e.payload for e in events if e.kind == "hub_admission" and isinstance(e.payload, dict)]
+    if _verdicts:  # [daveey] why this card is (or is not) on the hub
+        from hermes_cli.kanban_hub_admission_placement import describe as _describe_admission
+        field("hub", _describe_admission(_verdicts[-1]))
 
     # Diagnostics up top so CLI users see distress signals before scrolling.
     from hermes_cli import kanban_diagnostics as kd

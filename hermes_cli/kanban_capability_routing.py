@@ -108,6 +108,13 @@ def needs_from_requires(requires) -> list[str]:
     return [r for r in (requires or []) if reg.is_gateway_need(r)]
 
 
+def _is_hub_gateway(name) -> bool:
+    """[daveey] Hub-bound owner cards go through hub admission (kanban_hub_admission_placement)."""
+    from hermes_cli.kanban_hub_admission_placement import is_hub
+    from hermes_cli import kanban_placement as kp
+    return bool(name) and is_hub(str(name), kp.config())
+
+
 def _hub_cli() -> str:
     return reg.hub_cli_path(reg._config().get("hub_cli"))
 
@@ -518,6 +525,21 @@ def route(conn, task_id: str, needs, *, reason: str, expected_run_id: Optional[i
             overlap_opts = _overlap_option_argv(None, overlap_exclusions(conn, task_id))
         argv = [hub, "create-task", gw, title, "--body", body, "--assignee", assignee,
                 "--origin-session", "", "--id", rid, *overlap_opts]
+        if stored is None and _is_hub_gateway(gw):
+            # [daveey] An owner card bound for the hub must convince the admission judge first;
+            # a denied one is refused visibly (the waiting card's worker re-plans with hub-admin).
+            from hermes_cli.kanban_hub_admission_placement import gate_owner
+            audit = gate_owner(conn, task_id, title, body, need=r["need"])
+            if not audit["admit"]:
+                done = ", ".join(x["request_id"] for x in routes)
+                raise CapabilityRouteError(
+                    "hub_admission_denied",
+                    f"owner card for {r['need']} was not sent to the hub: hub admission denied "
+                    f"({audit['why']}). Pool workers have hub ssh + hub-admin (capability:hub-write): "
+                    "do the action from a worker, or give the waiting card a hub_reason."
+                    + (f" Already queued: {done}." if done else ""),
+                    details={"need": r["need"], "gateway": gw, "hub_admission": audit,
+                             "queued": [x["request_id"] for x in routes]})
         rc, out = _create_task(argv)
         # 0 = sent, 3 = queued locally (hub unreachable; sent on the next sync). Both are durable.
         if rc not in (0, 3):
@@ -772,6 +794,12 @@ def _apply_relay(conn, task, entry: dict, payload: dict, *, now: Optional[float]
     body = owner_body(task, need, self_gw=self_gw, board=board, reason=reason)
     argv = [_hub_cli(), "create-task", gw, title, "--body", body, "--assignee", _owner_assignee(),
             "--origin-session", "", "--id", rid, *_overlap_option_argv(None, overlap_exclusions(conn, task.id))]
+    if _is_hub_gateway(gw):
+        from hermes_cli.kanban_hub_admission_placement import gate_owner
+        audit = gate_owner(conn, task.id, title, body, need=need)
+        if not audit["admit"]:
+            return _relay_fail(conn, task.id, entry, "hub_admission_denied",
+                               f"owner card for {need} was not sent to the hub: hub admission denied ({audit['why']})")
     rc, out = _create_task(argv)
     if rc not in (0, 3):
         if age < RELAY_RETRY_S:
@@ -816,6 +844,26 @@ def _local_owner(conn, task, entry: dict, *, need: str, rid: str, self_gw: str, 
         f"and it resumes on {from_gw}.\n"
     )
     own = _own_gateway(conn)
+    if _is_hub_gateway(self_gw) or (own and _is_hub_gateway(own)):
+        # [daveey] The hub holds the need: the owner stays here only if admitted; a denied owner
+        # enrolls in the worker pool with the hub-write requirement (Board: capability:hub-write).
+        from hermes_cli.kanban_hub_admission_placement import gate_owner
+        from hermes_cli.kanban_worker_placement import POLICY
+        audit = gate_owner(conn, task.id, title, body, need=need)
+        if not audit["admit"]:
+            owner = kb.create_task(conn, title=title, body=body, assignee=_owner_assignee(),
+                                   created_by="capability-relay", idempotency_key=rid,
+                                   requires=["hub:write"], placement_policy=POLICY,
+                                   placement_audit={"hub_admission": audit})
+            with kb.write_txn(conn):
+                kb._append_event(conn, task.id, ROUTED_EVENT, {
+                    "routes": [{"need": need, "gateway": "worker-pool", "request_id": rid,
+                                "generation": entry.get("generation", 1), "owner_task": owner,
+                                "relayed_from": from_gw, "hub_admission": "denied"}],
+                    "local": [need], "self_gateway": self_gw,
+                    "awaiting": [{"kind": "card", "ref": owner, "why": f"capability {need}"}],
+                })
+            return 1, f"{rid} -> pool owner {owner} (hub admission denied: {audit['why']})"
     try:
         owner = kb.create_task(conn, title=title, body=body, assignee=_owner_assignee(),
                                created_by="capability-relay", idempotency_key=rid,

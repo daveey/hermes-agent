@@ -5,12 +5,6 @@ from hermes_cli import kanban_placement as placement
 from tests.hermes_cli.hub_judge_support import hub_judge
 
 
-@pytest.fixture(autouse=True)
-def _admitting_judge(hub_judge):
-    """Hub candidates are judged; these suites pin the pre-admission logic under an admitting judge."""
-    return hub_judge
-
-
 @pytest.mark.parametrize("title", ["Summarize a public paper", "Run the full test suite"])
 def test_portable_reason_accepts_light_and_heavy_scratch_work(title):
     assert placement.portable_reason({"title": title, "requires": ["terminal", "file"]}, {}) is None
@@ -101,9 +95,9 @@ def test_hub_bound_work_keeps_legacy_route(fields):
 def test_courier_and_host_work_bypass_worker_policy(hub_judge):
     cfg = {"worker_pools": {"hub": ["worker-1"]}}
     assert "placement_policy" not in placement.decide({"title": "Analyze data"}, origin_intent=object(), cfg=cfg, self_gw="hub")
-    hub_judge.admit_next = False  # a denied courier card is still a hub candidate: it enrolls, no hub:write
-    denied = placement.decide({"title": "Analyze data"}, origin_intent=object(), cfg=cfg, self_gw="hub")
-    assert denied["placement_policy"] == "worker-first-v1" and "hub:write" not in denied["requires"]
+    hub_judge.admit_next = False  # a courier apply keeps the origin's route: no judge, no enrollment
+    assert "placement_policy" not in placement.decide({"title": "Analyze data"}, origin_intent=object(), cfg=cfg, self_gw="hub")
+    assert hub_judge.calls == []
     assert "placement_policy" not in placement.decide({"title": "Inspect ~/code/repo", "requires": ["host_repo"]},
                                                       cfg=cfg, self_gw="hub")
 

@@ -186,6 +186,9 @@ def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: s
     reason = (reason or "").strip()
     if not reason:
         return {"ok": False, "reason_code": "reason_required", "error": "reason is required (why this card must move)"}
+    from hermes_cli.kanban_hub_admission_placement import gate_move
+    if (refused := gate_move(conn, task_id, runs_on)) is not None:
+        return refused  # a hub target must convince the admission judge first [daveey]
     try:
         plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg, host_reason=host_reason)
     except MoveRefused as exc:
@@ -232,6 +235,9 @@ def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason:
     reason = (reason or "").strip()
     if not reason:
         return {"ok": False, "reason_code": "reason_required", "error": "reason is required (why this card must move)"}
+    from hermes_cli.kanban_hub_admission_placement import gate_move
+    if (refused := gate_move(conn, task_id, runs_on)) is not None:
+        return refused  # a hub target must convince the admission judge first [daveey]
     from hermes_cli import kanban_worker_repin as repin
     if repin.applies(conn, task_id):
         # A worker-first card's placement is Board-owned: a local relabel would be stripped, so only the Board's
@@ -275,6 +281,9 @@ def move_reclaim(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason
     reason = (reason or "").strip()
     if not reason:
         return {"ok": False, "reason_code": "reason_required", "error": "reason is required (why this card must move)"}
+    from hermes_cli.kanban_hub_admission_placement import gate_move
+    if (refused := gate_move(conn, task_id, runs_on)) is not None:
+        return refused  # a hub target must convince the admission judge first [daveey]
     try:
         plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg, host_reason=host_reason)
     except MoveRefused as exc:
