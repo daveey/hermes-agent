@@ -1458,7 +1458,8 @@ def _run_admitted_prompt(
                     update_pause.start_in_place_watcher(sid, session, st.marker_key)
             from tui_gateway.turn_outcome import concluding_turn_identity
             concluding = concluding_turn_identity(st.agent, st.own_marker)
-            _schedule_refused_turn_retry(sid, session, st.marker_key, concluding)
+            _schedule_refused_turn_retry(sid, session, st.marker_key, concluding,
+                outcome_sid=str(getattr(st.agent, "session_id", "") or session.get("session_key") or ""))
             if status == "complete":
                 # [daveey] This turn's context carried any failed delivery already in the transcript.
                 automation_replay.cancel_carried(st.marker_key, str(session.get("session_key") or ""))

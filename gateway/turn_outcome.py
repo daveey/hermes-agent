@@ -10,20 +10,24 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextvars import ContextVar
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
-def _turn_agent(runner, session_key: Optional[str]):
-    """The agent that ran this turn (``turn.agent`` stays set until the session's next turn is claimed)."""
-    if not session_key:
-        return None
-    try:
-        return getattr(runner._session_state(session_key).turn, "agent", None)
-    except Exception:  # health: allow BLE001 -- no agent = its lease is not named, so it reads live (fail safe)
-        logger.debug("gateway turn agent lookup failed for %s", session_key, exc_info=True)
-        return None
+run_outcome: ContextVar[Optional[dict]] = ContextVar("gateway_run_outcome", default=None)
+
+
+def capture_run_outcome(agent) -> None:
+    """Freeze worker-owned evidence before the cached agent can run again.
+
+    The handler owns this dict; copied executor contexts share it, never the mutable session turn slot.
+    """
+    owned = run_outcome.get()
+    if owned is not None:
+        owned["lease_holder"] = getattr(agent, "_last_session_turn_lease_holder", None)
+        owned["session_id"] = str(getattr(agent, "session_id", "") or owned["session_id"])
 
 
 def concluding_turn_identity(runner, event=None, session_key: Optional[str] = None) -> frozenset:
@@ -34,8 +38,7 @@ def concluding_turn_identity(runner, event=None, session_key: Optional[str] = No
     try:
         from hermes_state_outcome import turn_identity
 
-        agent = _turn_agent(runner, session_key)
-        holder = getattr(agent, "_last_session_turn_lease_holder", None)
+        holder = (run_outcome.get() or {}).get("lease_holder")
         token = getattr(event, "_gateway_active_turn_token", None)
         return turn_identity(lease_holder=holder if isinstance(holder, str) else None,
                              gateway_token=token if isinstance(token, str) else None)
@@ -57,7 +60,8 @@ def refresh_gateway_turn_outcome(runner, session_entry, event=None,
                                  session_key: Optional[str] = None) -> Optional[threading.Thread]:
     """Start the refresh off the reply path; the started thread (None when there is nothing to refresh).
     The concluding turn's identity is taken here, before the thread is scheduled."""
-    sid = str(getattr(session_entry, "session_id", "") or "")
+    owned = run_outcome.get()
+    sid = str(owned["session_id"] if owned is not None else getattr(session_entry, "session_id", "") or "")
     store = getattr(runner, "_session_db", None)
     db = getattr(store, "_db", store)
     if not sid or db is None:

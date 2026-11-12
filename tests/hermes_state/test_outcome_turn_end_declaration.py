@@ -104,7 +104,12 @@ def test_both_turn_end_callers_pass_the_concluding_turn_never_a_blanket_bypass(m
 
     agent = SimpleNamespace(_last_session_turn_lease_holder="h")
     runner = SimpleNamespace(_session_state=lambda key: SimpleNamespace(turn=SimpleNamespace(agent=agent)))
-    gw._refresh("chat", object(), gw.concluding_turn_identity(runner, None, "key"))
+    token = gw.run_outcome.set({"session_id": "chat"})
+    try:
+        gw.capture_run_outcome(agent)
+        gw._refresh("chat", object(), gw.concluding_turn_identity(runner, None, "key"))
+    finally:
+        gw.run_outcome.reset(token)
     assert calls[-1][1] == "turn_end" and calls[-1][2].get("concluding_turn") == frozenset({"lease:h"})
     assert "ignore_live_turn" not in calls[-1][2]
 

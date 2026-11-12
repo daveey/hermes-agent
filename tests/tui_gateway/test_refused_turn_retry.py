@@ -361,7 +361,7 @@ def test_a_new_message_that_works_ends_the_replay(emits, turn_env, marker_home, 
     assert read_turn_marker(marker_home, "session-key") is None
     monkeypatch.setattr(server, "_maybe_schedule_auto_continue", lambda *a: calls.append(a))
     monkeypatch.setattr("tui_gateway.update_pause._detect_skew", lambda: None)
-    monkeypatch.setattr("tui_gateway.turn_outcome.refresh_turn_outcome", lambda *a: None)
+    monkeypatch.setattr("tui_gateway.turn_outcome.refresh_turn_outcome", lambda *a, **kw: None)
     timers[0][1]()
     assert len(calls) == 1  # it looks, and the guard finds no marker
 
@@ -394,7 +394,7 @@ def test_a_skewed_backend_leaves_the_marker_for_the_boot_sweep(emits, turn_env, 
 def test_a_marker_that_aged_out_settles_the_outcome(emits, turn_env, marker_home, timers, monkeypatch):
     refreshed = []
     monkeypatch.setattr("tui_gateway.update_pause._detect_skew", lambda: None)
-    monkeypatch.setattr("tui_gateway.turn_outcome.refresh_turn_outcome", lambda *a: refreshed.append(a))
+    monkeypatch.setattr("tui_gateway.turn_outcome.refresh_turn_outcome", lambda *a, **kw: refreshed.append(a))
     _, fire = _armed(marker_home, timers, monkeypatch)
 
     def aged_out(sid, sess, key):

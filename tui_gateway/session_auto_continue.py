@@ -120,7 +120,7 @@ def _hold_refused_turn(session: dict, marker_key: str, display_kind, error_surfa
 
 
 def _schedule_refused_turn_retry(sid: str, session: dict, marker_key: str,
-                                 concluding: frozenset = frozenset()) -> None:
+                                 concluding: frozenset = frozenset(), *, outcome_sid: str | None = None) -> None:
     """Start the wait ``_hold_refused_turn`` armed. A skewed backend leaves the marker for its replacement's boot
     sweep; a replay that can no longer run (the marker aged out) settles the chat's outcome. ``concluding``: the
     refused turn's own evidence (``turn_outcome.concluding_turn_identity``); a turn the user starts during the wait
@@ -129,6 +129,10 @@ def _schedule_refused_turn_retry(sid: str, session: dict, marker_key: str,
     if delay is None:
         return
 
+    if outcome_sid is None:
+        from tui_gateway.turn_outcome import _turn_sid
+        outcome_sid = _turn_sid(session, session.get("agent"))
+
     def fire() -> None:
         from tui_gateway.update_pause import _detect_skew
         if _detect_skew() is not None:
@@ -136,7 +140,7 @@ def _schedule_refused_turn_retry(sid: str, session: dict, marker_key: str,
         if _maybe_schedule_auto_continue(sid, session, marker_key) is None \
                 and read_turn_marker(_session_home(session), marker_key) is None:
             from tui_gateway.turn_outcome import refresh_turn_outcome
-            refresh_turn_outcome(session, session.get("agent"), concluding)
+            refresh_turn_outcome(session, concluding_turn=concluding, session_id=outcome_sid)
 
     timer = threading.Timer(delay, fire)
     timer.daemon = True

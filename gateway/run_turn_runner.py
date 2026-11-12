@@ -1120,6 +1120,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                     with update_pause_installed(agent, message_id=ctx.inbound_message_id):
                         result = agent.run_conversation(api_message, **kwargs)
                 finally:
+                    from gateway.turn_outcome import capture_run_outcome
+                    capture_run_outcome(agent)
                     agent._silence_marker_needs_reply = False
             if captured is not None:
                 incoming = max(0, (getattr(agent, 'session_prompt_tokens', 0) or 0) - before[0])

@@ -28,7 +28,7 @@ def own_turn_marker(session: dict, marker_key: str) -> Optional[dict]:
 
         return read_turn_marker(server._session_home(session), marker_key)
     except Exception:  # health: allow BLE001 -- unreadable = not named, so the marker reads live (fail safe)
-        logger.debug("own turn marker read failed for %s", marker_key, exc_info=True)
+        logger.warning("own turn marker read failed for %s", marker_key, exc_info=True)
         return None
 
 
