@@ -43,6 +43,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_sync_timing as sync_timing  # off unless kanban.sync.diagnostics.timing_until arms it
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
+from hermes_cli.kanban_sync_hub_routes import HubRoutesMixin
 from hermes_cli.kanban_sync_client_attempt import note_attempt, raise_bounded_error, replay_after_timeout
 from hermes_cli.kanban_sync_bounded_probe import DeadlineRequests as _DeadlineRequests, schedstat, watch_written
 from hermes_cli.kanban_sync_repair_window import (  # shared per-board repair-window state, re-exported
@@ -231,7 +232,7 @@ def _bounded_call(ident: Identity, method: str, path: str, body: Optional[dict],
     return box["result"]
 
 
-class Hub:
+class Hub(HubRoutesMixin):
     """The Board service's HTTP API for one gateway.
 
     Requests reuse one kept-alive HTTP/1.1 connection per thread. A fresh connection per request (``urlopen``) paid a
@@ -430,27 +431,6 @@ class Hub:
         from urllib.parse import urlencode
         return self._call("GET", f"/v2/boards/{board}/evidence?" + urlencode({"table": table, "uid": uid}))
 
-    def leases(self, board: str, body: dict) -> dict:
-        return self._call("POST", f"/v2/boards/{board}/leases", body)
-
-    def repin(self, board: str, *, task_id: str, expected_revision: int, runs_on: list[str]) -> dict:
-        """Explicit rollback/manual pin; caller must pull the authoritative row afterward."""
-        return self._call("POST", f"/v2/boards/{board}/placement/repin", {
-            "task_id": task_id, "expected_revision": expected_revision, "runs_on": runs_on})
-
-    def recover(self, board: str, *, task_id: str, expected_revision: int, mode: str,
-                candidates: list[str]) -> dict:
-        """Creator/CAS recovery; pull authoritative state after success or uncertain delivery."""
-        return self._call("POST", f"/v2/boards/{board}/placement/recover", {
-            "task_id": task_id, "expected_revision": expected_revision, "mode": mode,
-            "policy": "worker-first-v1", "candidates": candidates})
-
-    def reserve(self, board: str, *, task_id: str, expected_revision: int, candidates: list[str]) -> dict:
-        """Atomic Board placement; errors leave the persisted local queue fence intact."""
-        return self._call("POST", f"/v2/boards/{board}/placement/reserve", {
-            "task_id": task_id, "expected_revision": expected_revision,
-            "policy": "worker-first-v1", "candidates": candidates}, replay_safe=True)
-
     def sessions(self, board: str, body: dict) -> dict:
         """Session owners (session handover, :mod:`hermes_cli.session_owner`): ``get`` / ``move``. A 409 refusal
         returns its body (``{reason, owner}``) instead of raising."""
@@ -467,10 +447,6 @@ class Hub:
                 raise
             return res
 
-    def machines(self) -> dict:
-        """The machine registry (RFC "One machine registry"): ``{me, machines: [{name, labels, pinned_only, ...}]}``."""
-        return self._call("GET", "/v2/machines")
-
     def report_metrics(self, metrics: dict) -> dict:
         """This machine's own load for the registry: Runners display and worker-first pool admission
         (see hermes_cli.machine_metrics). Sending stays best-effort.
@@ -483,10 +459,6 @@ class Hub:
         if not any(k in metrics for k in _CPU_FIELDS):
             return self._call("POST", "/v2/machines/me/metrics", metrics)
         return _bounded_call(self.ident, "POST", "/v2/machines/me/metrics", metrics, CPU_REPORT_BUDGET_S)
-
-    def report_pickup(self, pickup: Optional[str]) -> dict:
-        """Publish this machine's ``kanban.sync.pickup`` (None → null) on its own registry row."""
-        return self._call("POST", "/v2/machines/me", {"pickup": pickup})
 
 
 # --- boards ---------------------------------------------------------------------------------------
