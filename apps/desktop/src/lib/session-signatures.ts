@@ -53,7 +53,8 @@ export function sameCronSignature(a: SessionInfo[], b: SessionInfo[]): boolean {
       // or a background job exiting moves only these, and they drive the
       // sidebar badge and the done/working stripe. [daveey]
       session.kanban_active === other.kanban_active &&
-      session.kanban_blocked === other.kanban_blocked &&
+      JSON.stringify([session.kanban_blocked, session.kanban_blocked_on]) ===
+        JSON.stringify([other.kanban_blocked, other.kanban_blocked_on]) &&
       session.kanban_unseen === other.kanban_unseen &&
       session.kanban_attention === other.kanban_attention &&
       // Evidence can become unknown, stale, or fresh without a count change.

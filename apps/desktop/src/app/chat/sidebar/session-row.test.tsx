@@ -600,6 +600,38 @@ describe('SidebarSessionRow card project label', () => {
 // [daveey] A session waiting on kanban work shows its open and blocked task
 // counts after the age (and before the gateway glyph).
 describe('SidebarSessionRow kanban counts', () => {
+  it('names the forwarded blocked owner rather than its scheduled relay in the red reason', () => {
+    const { container } = renderRow(
+      makeSession({
+        kanban_active: 1,
+        kanban_parked: 1,
+        kanban_blocked: 1,
+        kanban_blocked_on: ['remote/default/t_owner'],
+        title: 'Forwarded'
+      })
+    )
+
+    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('stuck')
+    expect(screen.getByTestId('session-row-kanban-counts').getAttribute('aria-label')).toBe(
+      '1 open, 1 blocked; remote/default/t_owner'
+    )
+  })
+
+  it('does not show a red reason for a scheduled relay with a nonblocked remote owner', () => {
+    const { container } = renderRow(
+      makeSession({
+        kanban_active: 2,
+        kanban_parked: 2,
+        kanban_blocked: 0,
+        kanban_blocked_on: ['remote/default/t_old'],
+        title: 'Scheduled'
+      })
+    )
+
+    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).not.toBe('stuck')
+    expect(screen.getByTestId('session-row-kanban-counts').getAttribute('aria-label')).toBe('2 open, 0 blocked')
+  })
+
   it('shows open and blocked counts right after the age', () => {
     const { container } = renderRow(
       makeSession({ kanban_active: 3, kanban_blocked: 1, title: 'Waiting' } as Partial<SessionInfo> & {

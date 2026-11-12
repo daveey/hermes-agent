@@ -84,6 +84,16 @@ def freeze_annotation(parts):
     )
 
 
+def stamp_blocked_owners(row, card_keys, ids, cap):
+    """Name the blocked owners from the very snapshot that supplies the red count."""
+    owners = sorted({key for sid in ids for key, bucket, _ in card_keys.get(sid, ())
+                     if bucket == "blocked"})
+    if owners:
+        row["kanban_blocked_on"] = owners[:cap]
+    else:
+        row.pop("kanban_blocked_on", None)
+
+
 def mark_unknown(rows):
     """Drop the counts and stamp ``kanban_unknown`` (a failed read is unknown, never \"no work\")."""
     for row in rows:
@@ -92,5 +102,6 @@ def mark_unknown(rows):
             row.pop(key, None)
         row.pop("kanban_observed_at", None)
         row.pop("kanban_waiting_on", None)
+        row.pop("kanban_blocked_on", None)
         row["kanban_unknown"] = True
     return rows

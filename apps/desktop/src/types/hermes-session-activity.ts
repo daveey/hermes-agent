@@ -41,6 +41,8 @@ export interface SessionActivityFields {
    *  are blocked on a human, summed over its compression lineage. Shown next
    *  to the open count on the sidebar row. Absent when zero. */
   kanban_blocked?: number
+  /** Owner-qualified blocked card keys, from the same snapshot as kanban_blocked (capped). */
+  kanban_blocked_on?: string[]
   /** [daveey] How many of `kanban_active` nobody is working: scheduled on a timed/event wake, blocked on a
    *  non-human kind, or todo behind an unfinished parent. Stamped (even 0) whenever `kanban_active` is, so its
    *  absence means a backend that predates it. */

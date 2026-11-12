@@ -55,6 +55,7 @@ import {
 } from './chrome'
 import { shellOwnsPress } from './reorderable-list'
 import { SessionContextMenu } from './session-actions-menu'
+import { sessionKanbanLabel } from './session-kanban-label'
 import { sessionRowDetails } from './session-row-details'
 import { resolveSessionRowClick } from './session-row-gesture'
 import { RowHoverActions } from './session-row-hover-actions'
@@ -219,13 +220,7 @@ function SidebarSessionRowImpl({
   // shows even while other cards run (they don't make the stalled one move); only the stripe defers to live work.
   const kanbanStalled = session.kanban_stalled ?? 0
 
-  const kanbanLabel = [
-    kanbanOpen > 0 || kanbanBlocked > 0 ? r.kanbanTasks(kanbanOpen, kanbanBlocked) : '',
-    kanbanStalled > 0 ? r.kanbanStalled(kanbanStalled) : '',
-    kanbanAttention > 0 ? r.kanbanAttention(kanbanAttention) : ''
-  ]
-    .filter(Boolean)
-    .join('; ')
+  const kanbanLabel = sessionKanbanLabel(session, r)
 
   const kanbanCounts =
     kanbanOpen > 0 || kanbanBlocked > 0 || kanbanAttention > 0 ? (

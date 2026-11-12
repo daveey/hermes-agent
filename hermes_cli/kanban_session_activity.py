@@ -1883,6 +1883,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         row.pop("kanban_unknown", None)
         ids = list(_identity.row_ids(row))
         dup = _identity.lineage_duplicates(remote_keys, ids)
+        _identity.stamp_blocked_owners(row, remote_keys, ids, WAITING_ON_CAP)
         for key, counts in (("kanban_active", active), ("kanban_blocked", blocked), ("kanban_unseen", unseen),
                             ("kanban_attention", attention), ("kanban_remote_stale", remote_stale)):
             n = sum(counts.get(sid, 0) for sid in ids) - dup.get(key, 0)
