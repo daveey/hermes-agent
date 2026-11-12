@@ -214,14 +214,15 @@ async def _mutate_via_gateway_owner(profile, actor, params):
     from fastapi import HTTPException
     from gateway.runtime_ownership import OwnershipConflict
     from hermes_cli.gateway_client import GatewayClientError, GatewayRPCError, connect_gateway
-    from hermes_cli.gateway_runtime import discover_gateway_endpoint
     from hermes_cli.gateway_runtime_discovery import DiscoveryError
+    from hermes_cli.session_owner_discovery import discover_session_owner, owner_unavailable_detail
     from hermes_cli.web_server_cron import _cron_profile_home
     from hermes_state import _default_db_path
 
     home = Path(_cron_profile_home(profile)[1]) if profile else Path(_default_db_path()).parent
-    # Discovery is read-only and never starts a gateway.
-    discovery = await asyncio.to_thread(discover_gateway_endpoint, home, timeout=1.5)
+    # Discovery is read-only and never starts a gateway; a missed identify deadline is re-read
+    # within one bounded budget before anything is sent.
+    discovery = await discover_session_owner(home)
     endpoint = discovery.endpoint
     if endpoint is None:
         try:
@@ -231,8 +232,7 @@ async def _mutate_via_gateway_owner(profile, actor, params):
                 raise
             known = ''.join(f', {value}' for value in (discovery.reason_code, discovery.detail) if value)
             _log.warning('session write for %s: gateway owner not reachable (%s%s)', home, discovery.state, known)
-            reason = discovery.reason_code or discovery.state
-            raise HTTPException(status_code=503, detail=f'owner_unavailable: {reason}: {exc.detail}') from exc
+            raise HTTPException(status_code=503, detail=owner_unavailable_detail(discovery, exc.detail)) from exc
     if not getattr(endpoint, 'control_home', True):
         # The selected home answered on its own socket (a multiplexer-served profile already
         # names the multiplexer root). Pin it, so the ticket is minted on the socket that just

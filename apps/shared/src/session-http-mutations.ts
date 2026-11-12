@@ -46,12 +46,22 @@ export function createSessionMutationClient() {
     } catch (error) {
       // These responses definitively rejected the write. Show the conflict;
       // only a later explicit user action may read a new precondition.
-      if (/revision_conflict|stale_generation|permission_denied|profile_mismatch|invalid_params|admission_conflict|session_busy|retained_receipts|runtime_coordination_required|unknown_execution|not_found|mutation_identity_required/.test(String(error))) {
+      if (isDefinitiveSessionMutationRefusal(error)) {
         pending.delete(key)
       }
       throw error
     }
   }
+}
+
+/** The refusals that end a write for good (the retained identity is dropped). Anything else
+ * (a 503 owner_unavailable/owner_unreachable, a timeout, a lost reply) keeps the identity, so a
+ * user's Retry of the same intent replays the same request_id and expected revision. */
+const DEFINITIVE_SESSION_MUTATION_REFUSAL =
+  /revision_conflict|stale_generation|permission_denied|profile_mismatch|invalid_params|admission_conflict|session_busy|retained_receipts|runtime_coordination_required|unknown_execution|not_found|mutation_identity_required/
+
+export function isDefinitiveSessionMutationRefusal(error: unknown): boolean {
+  return DEFINITIVE_SESSION_MUTATION_REFUSAL.test(String(error))
 }
 
 /** A v4 UUID on every origin, the one id minter for renderer and plugin code. `crypto.randomUUID`

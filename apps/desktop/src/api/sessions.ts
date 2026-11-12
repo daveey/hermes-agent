@@ -756,8 +756,24 @@ export function deleteSession(id: string, profile?: ProfileScope): Promise<{ ok:
   return mutateSessionHttp(id, 'DELETE', {}, profile)
 }
 
-export function renameSession(id: string, title: string, profile?: string | null): Promise<{ ok: boolean; title: string }> {
-  return mutateSessionHttp(id, 'PATCH', { title }, sessionWriteProfile(profile))
+export function renameSession(id: string, title: string, profile?: ProfileScope): Promise<{ ok: boolean; title: string }> {
+  // An object owner (a selected row's gateway) keeps its connection, normalised like archive's.
+  const owner: ProfileScope =
+    profile && typeof profile === 'object'
+      ? { ...profile, profile: sessionWriteProfile(profile.profile) ?? null }
+      : sessionWriteProfile(profile)
+
+  return mutateSessionHttp(id, 'PATCH', { title }, owner)
+}
+
+/** [daveey] Resolve a session write's destination ONCE, so a Retry of a failed edit goes to the
+ *  same connection/profile and so carries the same retained identity (its mutation key) instead
+ *  of re-reading whichever connection or profile the window shows by then. */
+export function pinSessionWriteOwner(profile?: ProfileScope): ProfileScope {
+  const named = profile && typeof profile === 'object' ? profile : { profile }
+  const connectionId = (named.connectionId ?? '').trim() || getApiRequestConnection()
+
+  return { ...(connectionId ? { connectionId } : {}), profile: sessionWriteProfile(named.profile) ?? null }
 }
 
 /** [daveey] Stop one live background process a sidebar row owns (the process

@@ -126,7 +126,7 @@ describe('archiveSession linked-work confirmation', () => {
     await act(() => handle.archiveSession('s-1'))
 
     expect($confirmRequest.get()).toBeNull()
-    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('s-1', true, 'default')
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('s-1', true, { profile: 'default' })
   })
 
   it('asks before archiving a chat with open Kanban tasks; Cancel keeps it', async () => {
@@ -185,7 +185,7 @@ describe('archiveSession linked-work confirmation', () => {
       await done
     })
 
-    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('s-1', true, 'default')
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('s-1', true, { profile: 'default' })
     expect($sessions.get()).toEqual([])
   })
 
@@ -553,6 +553,6 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
     await act(() => handle.archiveSession('hub-1', { selectedRow }))
 
     expect(ancestryGuard).toHaveBeenCalledWith(expect.objectContaining({ connectionId: undefined }))
-    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('hub-1', true, 'default')
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('hub-1', true, { profile: 'default' })
   })
 })

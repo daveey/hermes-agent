@@ -2,7 +2,6 @@ import { useStore } from '@nanostores/react'
 import type * as React from 'react'
 import { useEffect, useRef, useState } from 'react'
 
-import { hermesApi } from '@/api/client'
 import { openSession } from '@/app/open-session'
 import {
   closeAllTreeTabs,
@@ -32,6 +31,7 @@ import { ArchiveOff } from '@/lib/icons'
 import { isSubmitEnter } from '@/lib/ime'
 import { PROFILE_SWATCHES } from '@/lib/profile-color'
 import { exportSession } from '@/lib/session-export'
+import { sessionWriteRetryAction } from '@/lib/session-write-retry'
 import { activeGateway, requestGatewayForAgent } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
 import { queueOfflineSessionAction } from '@/store/offline-session-actions'
@@ -184,13 +184,11 @@ export async function renameSessionPreferringRpc(
   }
 
   if (owner) {
-    return hermesApi<{ ok: boolean; title: string }>({
-      connectionId: owner.connectionId,
-      profile: owner.profile,
-      path: `/api/sessions/${encodeURIComponent(storedSessionId)}`,
-      method: 'PATCH',
-      body: { title, profile: owner.profile }
-    })
+    // The fenced edit (snapshot + request_id/expected_revision) on the row's own gateway: a bare
+    // PATCH carries no mutation identity, which every current backend refuses as an old client.
+    const result = await renameSession(storedSessionId, title, { connectionId: owner.connectionId, profile: owner.profile })
+
+    return { title: result?.title ?? title }
   }
 
   return renameSession(storedSessionId, title, resolvedProfile)
@@ -876,26 +874,47 @@ export function RenameSessionDialog({
 
     setSubmitting(true)
 
-    try {
-      const targetProfile =
-        (profile ?? '').trim() || $sessions.get().find(s => sessionMatchesStoredId(s, sessionId))?.profile || undefined
+    const targetProfile =
+      (profile ?? '').trim() || $sessions.get().find(s => sessionMatchesStoredId(s, sessionId))?.profile || undefined
 
-      const result = await renameSessionPreferringRpc(sessionId, next, targetProfile, selectedRow)
-      const finalTitle = result.title || next || ''
+    // One attempt bound to this id, title and owner; a failure's Retry reruns exactly it.
+    const attempt = async (): Promise<void> => {
+      let result: Awaited<ReturnType<typeof renameSessionPreferringRpc>>
 
-      // One write, every list: patch the main store AND the project surfaces.
-      // Bare-id patching only the recents slice left project-scoped rows
-      // (overview previews, entered-project lanes) on the stale title until a
-      // profile switch forced a refetch (#123337).
-      if (!selectedRow?.offline_cached) {
-        applySessionTitle(sessionId, finalTitle || null)
-        applyRenamedSessionTitle(sessionId, finalTitle || null)
+      try {
+        result = await renameSessionPreferringRpc(sessionId, next, targetProfile, selectedRow)
+      } catch (err) {
+        // The row keeps its title (nothing was applied); the button replays the same intent.
+        notifyError(err, r.renameFailed, {
+          action: sessionWriteRetryAction(err, t.common.retry, () => void attempt()),
+          id: `rename-failed:${sessionId}`
+        })
+
+        return
       }
 
-      notify({ durationMs: 2_000, kind: 'success', message: r.renamed })
-      onOpenChange(false)
-    } catch (err) {
-      notifyError(err, r.renameFailed)
+      const finalTitle = result.title || next || ''
+
+      try {
+        // One write, every list: patch the main store AND the project surfaces.
+        // Bare-id patching only the recents slice left project-scoped rows
+        // (overview previews, entered-project lanes) on the stale title until a
+        // profile switch forced a refetch (#123337).
+        if (!selectedRow?.offline_cached) {
+          applySessionTitle(sessionId, finalTitle || null)
+          applyRenamedSessionTitle(sessionId, finalTitle || null)
+        }
+
+        notify({ durationMs: 2_000, kind: 'success', message: r.renamed })
+        onOpenChange(false)
+      } catch (err) {
+        // The owner already took the edit: a local refresh failure gets no Retry (no second write).
+        notifyError(err, r.renameFailed)
+      }
+    }
+
+    try {
+      await attempt()
     } finally {
       setSubmitting(false)
     }

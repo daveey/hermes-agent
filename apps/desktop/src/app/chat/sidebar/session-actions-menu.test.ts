@@ -204,13 +204,10 @@ describe('offline rename owner isolation', () => {
     $sessions.set([{ ...selected, offline_cached: false }])
     await renameSessionPreferringRpc(STORED_ID, 'New', 'work', selected)
     expect(hubRequest).not.toHaveBeenCalled()
-    expect(hermesApi).toHaveBeenCalledWith({
-      connectionId: 'mini',
-      profile: 'work',
-      path: '/api/sessions/' + STORED_ID,
-      method: 'PATCH',
-      body: { title: 'New', profile: 'work' }
-    })
+    // The selected row's own gateway takes the FENCED edit (snapshot + request identity), never a
+    // bare PATCH: current backends refuse an identity-less write as an out-of-date client.
+    expect(renameSession).toHaveBeenCalledWith(STORED_ID, 'New', { connectionId: 'mini', profile: 'work' })
+    expect(hermesApi).not.toHaveBeenCalled()
   })
   it('does not guess an offline owner from a bare id', async () => {
     $offlineSessions.set([cached(), cached('cloud')])
