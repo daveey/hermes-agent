@@ -102,6 +102,77 @@ def test_reparks_after_the_same_probe_fired_never_escalate(kanban_home, monkeypa
         assert not [e for e in kb.list_events(conn, tid) if e.kind == kaw.ESCALATED_EVENT]
 
 
+# -- a probe that keeps firing while the worker keeps re-parking is a broken probe -------------------------------
+
+def _fire_cycles(monkeypatch, conn, tid, n: int, start: int = 0) -> list:
+    """``n`` parks on MAC_PROBE, each followed by the probe firing; returns the park results."""
+    outs = []
+    for i in range(start, start + n):
+        _claim(monkeypatch, conn, tid)
+        outs.append(_tool("schedule", _mac_park(i)))
+        assert outs[-1].get("status") == "scheduled", (i, outs[-1])
+        _probe_fires(conn, tid)
+    return outs
+
+
+def test_five_fire_reparks_do_not_escalate(kanban_home, monkeypatch) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _mac_card(conn)
+        _fire_cycles(monkeypatch, conn, tid, 5)
+        _claim(monkeypatch, conn, tid)
+        assert _tool("schedule", _mac_park(5)).get("status") == "scheduled"  # 6th park after 5 fires
+        assert not _owners(conn)
+
+
+def test_the_park_after_six_fires_escalates_naming_the_fire_count(kanban_home, monkeypatch) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _mac_card(conn)
+        _fire_cycles(monkeypatch, conn, tid, kaw.PROBE_FIRE_REPARK_LIMIT)
+        _claim(monkeypatch, conn, tid)
+        out = _tool("schedule", _mac_park(6))
+        assert out.get("status") == "todo" and out.get("code") == kaw.ESCALATED_EVENT, out
+        owners = _owners(conn)
+        assert len(owners) == 1
+        owner = kb.get_task(conn, owners[0][0])
+        assert owner is not None and owner.body
+        assert "probe fired 6 times and the worker re-parked each time" in owner.body
+        assert "fix the probe or the worker's check" in owner.body
+        esc = [e for e in kb.list_events(conn, tid) if e.kind == kaw.ESCALATED_EVENT]
+        assert esc and (esc[-1].payload or {})["awaiting"]["fired_reparks"] == 6
+
+
+def test_another_probes_fire_resets_the_fire_count(kanban_home, monkeypatch) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _mac_card(conn)
+        _fire_cycles(monkeypatch, conn, tid, 3)
+        _claim(monkeypatch, conn, tid)
+        assert _tool("schedule", _mac_park(3, OTHER_PROBE)).get("status") == "scheduled"
+        _probe_fires(conn, tid, OTHER_PROBE)
+        _fire_cycles(monkeypatch, conn, tid, 5, start=4)
+        _claim(monkeypatch, conn, tid)
+        assert _tool("schedule", _mac_park(9)).get("status") == "scheduled"  # 5 fires since OTHER_PROBE's
+        assert not _owners(conn)
+
+
+def test_an_escalation_resets_the_fire_count(kanban_home, monkeypatch) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _mac_card(conn)
+        _fire_cycles(monkeypatch, conn, tid, kaw.PROBE_FIRE_REPARK_LIMIT)
+        _claim(monkeypatch, conn, tid)
+        assert _tool("schedule", _mac_park(6)).get("code") == kaw.ESCALATED_EVENT
+        owner = _owners(conn)[0][0]
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready', assignee='boss' WHERE id=?", (owner,))
+        assert kb.claim_task(conn, owner, claimer="boss") is not None
+        assert kb.complete_task(conn, owner, summary="probe fixed")  # the supervisor acted; the card resumes
+        task = kb.get_task(conn, tid)
+        assert task is not None and task.status == "ready"
+        _fire_cycles(monkeypatch, conn, tid, 5, start=7)
+        _claim(monkeypatch, conn, tid)
+        assert _tool("schedule", _mac_park(12)).get("status") == "scheduled"
+        assert len(_owners(conn)) == 1
+
+
 def test_same_probe_woken_only_by_its_deadline_still_escalates(kanban_home, monkeypatch) -> None:
     """Control: no fire between parks is no new evidence, however the reason is worded."""
     with kbc.connect_closing() as conn:
