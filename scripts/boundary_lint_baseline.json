@@ -213,6 +213,7 @@
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.kanban_queue_position": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.kanban_remote_stop.RemoteArchiveRefused": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.kanban_remote_stop.archive": 1,
+    "plugins/kanban/dashboard/plugin_api.py hermes_cli.kanban_review_contract": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.kanban_transfer": 2,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.kanban_wait_live.owner_proof": 1,
     "plugins/kanban/dashboard/plugin_api.py hermes_cli.kanban_wake_check": 1,
