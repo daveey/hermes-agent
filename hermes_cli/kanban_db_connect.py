@@ -1080,6 +1080,8 @@ _LATER_TASK_COLUMNS = (
     ("placement_policy", "placement_policy TEXT"),
     ("admission_class", "admission_class TEXT NOT NULL DEFAULT 'normal'"),
     ("admission_frees", "admission_frees TEXT"),
+    # Local-only: a picked-up foreign card's origin, read from the replica at pickup (its chat links stay out).
+    ("admission_origin", "admission_origin TEXT"),
     ("session_id", "session_id TEXT"),
     # Typed operational reason; neither NULL nor capability implies a human ask.
     ("block_kind", "block_kind TEXT"),

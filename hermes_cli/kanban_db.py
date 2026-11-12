@@ -50,6 +50,7 @@ _log = logging.getLogger(__name__)
 # --- Shared micro-helpers (row access, JSON, env, git) ---
 
 from hermes_cli.kanban_db_values import _lossy_text
+from hermes_cli.kanban_admission_class import validate as validate_admission_class  # module scope: not in locals()
 
 
 def _row_get(row: Any, col: str, default: Any = None) -> Any:
@@ -1228,7 +1229,6 @@ def create_task(
     ``workspace_kind=None`` (omitted) inherits a project-scoped board's project;
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
     """
-    from hermes_cli.kanban_admission_class import validate as validate_admission_class
     validate_admission_class(admission_class, admission_frees)
     validate_creation(placement_policy, runs_on=runs_on, workspace_kind=workspace_kind,
                       workspace_path=workspace_path, project=project_id,

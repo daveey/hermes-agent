@@ -467,8 +467,6 @@ def _changes_for(replica: sqlite3.Connection, tid: str, card: sqlite3.Row) -> li
             sender = (row["origin_gateway"] or "") if table == "task_comments" and "origin_gateway" in row.keys() else ""
             out.append(sync.RemoteChange(0, table, row["uid"], "upsert", ksc._row_fields(replica, table, row),
                                          version, "", sender))
-    from hermes_cli.kanban_admission_origin import pickup_links
-    out.extend(pickup_links(replica, tid))
     # Its parent edges too: once the copy is here the feed applies its later links (own_partition), so a copy
     # without the earlier ones disagreed with the Board for as long as it ran.
     for row in replica.execute("SELECT * FROM task_links WHERE child_id = ? ORDER BY parent_id", (tid,)).fetchall():
@@ -493,6 +491,8 @@ def import_cards(conn: sqlite3.Connection, replica: sqlite3.Connection, ids: Ite
         # The copy's foreign parents are gated by the mirror; filled only in the sync round, a parent read as
         # missing in this tick would demote the ready copy to todo and push that to the Board.
         sync.refresh_remote_parents(conn, replica)
+        from hermes_cli.kanban_admission_origin import record_pickup_origins
+        record_pickup_origins(conn, replica, done)
     return done
 
 

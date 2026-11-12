@@ -34,7 +34,9 @@ def test_pickup_carries_original_chat_without_outbox(live, svc, kanban_home, pro
     for _ in range(2):
         _import(live, "t_copy")
         assert json.loads(origin_key(live, "t_copy")) == ["chat", "source", profile or "default", "original"]
-        assert live.execute("SELECT count(*) FROM task_chat_links WHERE task_id='t_copy'").fetchone()[0] == 3
+        # The origin rides a local-only column: another gateway's chat links never enter the live copy
+        # (test_kanban_sync_foreign_chat_links), so the pickup must not import them to attribute the card.
+        assert not live.execute("SELECT 1 FROM task_chat_links WHERE task_id='t_copy'").fetchone()
         assert not live.execute("SELECT 1 FROM kanban_sync_outbox").fetchone()
         assert wn.evict(live) == ["t_copy"]
         assert not live.execute("SELECT 1 FROM task_chat_links WHERE task_id='t_copy'").fetchone()

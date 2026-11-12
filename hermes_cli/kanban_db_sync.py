@@ -82,7 +82,7 @@ LOCAL_COLUMNS: dict[str, frozenset[str]] = {
     "tasks": frozenset({
         "claim_lock", "claim_expires", "worker_pid", "worker_started_at", "last_heartbeat_at",
         "workspace_path", "session_id", "project_id", "sync_version", "field_hlc", "lease_holder",
-        "lease_expires", "lease_version",
+        "lease_expires", "lease_version", "admission_origin",
     }),
     "task_links": frozenset(),
     # ``origin_gateway``: the sending gateway as this gateway saw it (relay sender); peers keep their own.
