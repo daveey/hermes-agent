@@ -220,10 +220,10 @@ def _refuse_live_database(target: Path) -> None:
     """Point-in-time 409 before streaming ``target`` while a SQLite connection to it is live.
 
     ``FileResponse`` opens and closes the file in-process, and that raw close cancels the
-    connection's POSIX locks. The registry lock can't be held across a streamed response
+    connection's POSIX locks. The reservation can't be held across a streamed response
     (never across an await/yield), so streamed routes only get this admission check. It
-    takes the global registry lock, which other threads hold across whole-file reads, so
-    call it via ``asyncio.to_thread``."""
+    can wait for another thread's whole-file read of the same path, so call it via
+    ``asyncio.to_thread``."""
     with _serve_offline(target):
         pass
 
@@ -425,7 +425,7 @@ def _read_base64_file(path: Path) -> str:
     """Read and encode a bounded file from a worker thread; 409 while a SQLite connection to it is live."""
     with _serve_offline(path):
         data = path.read_bytes()
-    # Encode after release: only the open/read/close needs the registry lock.
+    # Encode after release: only the open/read/close needs the reservation.
     return base64.b64encode(data).decode("ascii")
 
 

@@ -324,7 +324,7 @@ def _expand_path_reference(ref: ContextReference, cwd: Path, *, allowed_root: Pa
     try:
         # Keep admission through every sniff, stat and text read (a connection can start
         # between a check and a later open otherwise), but release it before token
-        # counting/formatting: the registry lock blocks every tracked connect/close.
+        # counting/formatting: the reservation blocks every tracked connect to this path.
         with offline_file_access(path, what="preview context reference"):
             early, text = _read_file_reference(ref, path, max_inline_tokens)
     except LiveConnectionError:
@@ -707,7 +707,7 @@ def _file_metadata(path: Path) -> str:
     except OSError:
         return "unknown size"
     try:
-        # A directory preview inspects each entry separately; the registry lock
+        # A directory preview inspects each entry separately; the reservation
         # must cover both its binary sniff and optional line-count read.
         with offline_file_access(path, what="inspect folder entry"):
             # A listing line is a summary, not content: past the cap, byte size conveys

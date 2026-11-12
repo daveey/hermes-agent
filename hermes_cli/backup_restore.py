@@ -332,8 +332,8 @@ def _restore_db_pages(src: Path, dst: Path) -> bool:
             # on main: `/proc/self/fd` shows `state.db-wal (deleted)` right
             # after this fallback ran under a tracked connection).
             # ``offline_file_access`` fails CLOSED when any tracked
-            # connection to *dst* is live and holds the connection-lifecycle
-            # lock across the whole swap so no new connection can appear
+            # connection to *dst* is live and reserves the path across the
+            # whole swap so no new tracked connection to it can appear
             # mid-replace.
             with offline_file_access(dst, what="unlink+move restore of"):
                 tmp = dst.parent / f".{dst.name}.snap_restore"

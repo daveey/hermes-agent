@@ -3,6 +3,9 @@
 Completion uses an Event rather than reacquiring that mutex: a legacy caller may
 wait for a reservation while recursively owning the registry mutex. No SQLite
 handle can be opened between checking a reservation and registering its handle.
+
+Reservations, like the live-connection registry, are keyed by resolved path: a
+hardlink alias or an ATTACHed database is not recognised as the reserved file.
 """
 from __future__ import annotations
 
