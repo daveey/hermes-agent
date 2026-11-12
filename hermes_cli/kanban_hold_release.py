@@ -19,15 +19,16 @@ def _identity(row):
 
 
 def _park(conn, task_id):
-    from hermes_cli.kanban_core_update_requeue import latest_run_id
-    # Latest run passing over core-update requeues: that pause is not a newer run. [daveey]
+    from hermes_cli.kanban_core_update_requeue import latest_run_skipping_requeues
+    # Latest run that executed: a core-update requeue is a pause, not a newer run, and an
+    # unused Board grant ran nothing. [daveey]
+    latest = latest_run_skipping_requeues(conn, task_id, skip_unused_grants=True)
     row = conn.execute(
         "SELECT e.payload, e.created_at, r.*, t.assignee FROM task_events e "
         "JOIN task_runs r ON r.id=e.run_id JOIN tasks t ON t.id=e.task_id "
         "WHERE e.task_id=? AND e.kind='dependency_wait' AND r.task_id=t.id "
-        "AND r.id IS ? "
-        "ORDER BY e.id DESC LIMIT 1", (task_id, latest_run_id(conn, task_id)),
-    ).fetchone()
+        "AND r.id=? ORDER BY e.id DESC LIMIT 1", (task_id, latest["id"]),
+    ).fetchone() if latest is not None else None
     if row is None or row["outcome"] != "blocked" or row["profile"] != row["assignee"]:
         raise ValueError("hold release requires latest orderly owner park")
     payload = kb._json_dict(row["payload"])
@@ -137,7 +138,7 @@ def released_after(conn, task_id, since, pr_urls):
     """A receipt older than any claim, or tied with publication, grants nothing."""
     from hermes_cli.kanban_core_update_requeue import latest_run_skipping_requeues
     from hermes_cli.kanban_wake_check import foreign_copy
-    run = latest_run_skipping_requeues(conn, task_id, skip_unused_grants=False)
+    run = latest_run_skipping_requeues(conn, task_id, skip_unused_grants=True)
     if run is None:
         return False
     urls = {norm_pr(u) for u in pr_urls}

@@ -19,7 +19,6 @@ have opened a PR it had not yet reported. The next run sees the requeued run's t
 from __future__ import annotations
 
 import sqlite3
-from typing import Optional
 
 CORE_UPDATE_REQUEUE_REASON = "hermes-sync core update: restart-safe worker requeue"
 
@@ -65,7 +64,3 @@ def latest_run_skipping_requeues(conn: sqlite3.Connection, task_id: str, *, skip
         return run
     return None
 
-
-def latest_run_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
-    run = latest_run_skipping_requeues(conn, task_id, skip_unused_grants=False)
-    return None if run is None else run["id"]
