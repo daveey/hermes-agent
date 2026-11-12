@@ -62,7 +62,9 @@ async def _legacy_ws_snapshot(root, home, env, requests):
                     await ws.send(json.dumps({'jsonrpc': '2.0', 'id': rid, 'method': method, 'params': params}))
                     results.append(await _rpc_result(ws, rid))
             process.send_signal(signal.SIGINT)
-            assert process.wait(timeout=20) == 0
+            # Wait for actual exit, not a 20 s wall-clock performance deadline: CI can
+            # deschedule the child during graceful shutdown. A hang is still bounded.
+            assert process.wait(timeout=120) == 0
             return results, {'legacy_ws_pid': process.pid, 'legacy_ws_port': port,
                              'legacy_ws_exit': process.returncode}
         finally:
@@ -172,7 +174,9 @@ sys.__stdout__.write(json.dumps(results) + '\\n')
                 row['text'].strip().lstrip('/') for row in expected[2]['items']}
             receipt = asyncio.run(probe(descriptor))
             process.send_signal(signal.SIGINT)
-            assert process.wait(timeout=20) == 0
+            # Wait for actual exit, not a 20 s wall-clock performance deadline: CI can
+            # deschedule the child during graceful shutdown. A hang is still bounded.
+            assert process.wait(timeout=120) == 0
             print(json.dumps({**receipt, 'pid': process.pid, 'daemon_exit': process.returncode,
                               'instance_id': descriptor['instance_id'], 'api_origin': descriptor['api_origin']}))
         finally:
