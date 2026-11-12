@@ -11,6 +11,7 @@ an unreadable board or a remote card (``@task:<board>@<gateway>/...``) leaves it
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import logging
 import re
@@ -21,32 +22,16 @@ from typing import Optional
 ASK_MARK = "Next action for the user: "
 TERMINAL_HINT = ("\nUse the owner Desktop session's user-terminal flow; opening this task or unblocking it does not "
                  "execute a command or grant terminal authority.")
-# Every free-text field is a tempered token: it may span lines (a human_request field can) but never
-# another notice's actor line or ask mark, so a stray "Next action for the user:" in prose or a second
-# joined notice cannot pull the text between them into one match. The ask mark must also sit at the
-# start of the line right under block_notice()'s own "blocked — actor:" line. Each field also stops at
-# the next field's own line mark, so a field can end in one place only: the match is linear (no
-# backtracking across thousands of repeated "\nWhy only the user:" lines) and a field that quotes the
-# next mark makes the notice ambiguous, which leaves it unchanged.
-_STOPS = r"Next action for the user: |\nblocked — actor: "
-
-
-def _field(*marks: str) -> str:
-    return r"(?:(?!" + "|".join([_STOPS, *(re.escape(m) for m in marks)]) + r").)*"
-
-
-_ASK = re.compile(
-    r"(?P<head>blocked — actor: [^\n]*\n)Next action for the user: (?P<action>" + _field("\nWhy only the user: ") + r")\n"
-    r"Why only the user: " + _field("\nScope: ") + r"\n"
-    r"(?P<rest>Scope: (?P<scope>" + _field("\nOpen task: ") + r")\nOpen task: @task:(?P<board>[^/@\s]+)(?:@(?P<gw>[^/\s]+))?/(?P<tid>[A-Za-z0-9_-]+)(?![A-Za-z0-9_-]))"
-    # (The tid guard makes a shorter tid fail at once, so a long token cannot backtrack: review F4.)
-    r"(?P<hint>" + re.escape(TERMINAL_HINT) + r")?"
-    # A second "Open task:" line before the next notice's head (its actor line followed by the ask mark)
-    # or the end of the text means a field quoted one, so the matched Open task may be a quote:
-    # ambiguous, leave it. The scan stops neither at a blank line nor at a bare "blocked — actor: "
-    # substring, since a human_request field may contain either (review F1/F2/F3).
-    r"(?!(?:(?!blocked — actor: [^\n]*\nNext action for the user: ).)*\nOpen task: )",
-    re.DOTALL)
+HEAD_MARK = "blocked — actor: "
+LINK_MARK = "\nOpen task: @task:"
+# A notice's fields are free text (a scope may quote another notice, blank lines, actor lines, ask
+# marks), so no text stop can delimit them (review F1-F5). Instead the notice is matched to its card:
+# a card owns the ask only if one of its events' human_request renders, in block_notice()'s exact
+# layout, to the text from the ask mark to that card's "Open task:" link. Everything is str.find and
+# startswith, so the cost is linear in the text (review N2/F4/F6).
+_LINK = re.compile(r"(?P<board>[^/@\s]+)(?:@(?P<gw>[^/\s]+))?/(?P<tid>[A-Za-z0-9_-]+)")
+_TID_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+_MAX_LINKS = 32  # more "Open task:" links after one ask than this: leave the text unchanged
 logger = logging.getLogger(__name__)
 _PT = "America/Los_Angeles"
 # Transitions worth naming; claims, spawns, heartbeats and comments are noise here.
@@ -86,20 +71,30 @@ def _read_card(board: str, task_id: str):
         conn.close()
 
 
-def _anchor(events, action: str, scope: str) -> Optional[int]:
-    """Index of the block this notice's own ask belongs to, else ``None``.
+def _render(request, board: str, tid: str):
+    """The ask block_notice() renders for ``request``, from the ask mark to the end of the link."""
+    try:
+        return (f"{ASK_MARK}{request['action']}\nWhy only the user: {request['why_human']}\n"
+                f"Scope: {request['scope']}\nOpen task: @task:{board}/{tid}")
+    except (KeyError, TypeError):
+        return None
 
-    The read is bound to the notice: some event of the card must carry a human_request whose action AND
-    scope equal the notice's (a scope that quotes another card's "Open task:" line makes the regex read
-    that other card, whose asks then do not match). The anchor is the newest ``blocked`` event at or
-    before the newest such event (a metadata-only amendment is itself a ``blocked`` event, so an
-    amended ask anchors on the amendment; no labelled transition can sit between the two)."""
+
+def _owner_event(events, text: str, pos: int, end: int, board: str, tid: str) -> Optional[int]:
+    """Index of the newest event whose human_request renders exactly to ``text[pos:end]``, else ``None``."""
     for i in range(len(events) - 1, -1, -1):
         request = events[i][3].get("human_request")
-        if (isinstance(request, dict) and _norm(request.get("action")) == action
-                and _norm(request.get("scope")) == scope):
-            return next((j for j in range(i, -1, -1) if events[j][1] == "blocked"), None)
+        if isinstance(request, dict):
+            rendered = _render(request, board, tid)
+            if rendered is not None and len(rendered) == end - pos and text.startswith(rendered, pos):
+                return i
     return None
+
+
+def _anchor(events, owner: int) -> Optional[int]:
+    """The ``blocked`` event at or before the owner event (a metadata-only amendment is itself a
+    ``blocked`` event, so an amended ask anchors on the amendment)."""
+    return next((j for j in range(owner, -1, -1) if events[j][1] == "blocked"), None)
 
 
 def _clock(ts: int, base_day) -> tuple[str, str]:
@@ -132,26 +127,84 @@ def since_line(status: str, events, anchor: int) -> Optional[str]:
     return f"Since then: {text}. No action needed."
 
 
+def _links(text: str, pos: int):
+    """``(link_end, board, gw, tid)`` for each "Open task:" link after ``pos``, at most ``_MAX_LINKS + 1``."""
+    out = []
+    at = text.find(LINK_MARK, pos)
+    while at != -1 and len(out) <= _MAX_LINKS:
+        start = at + len(LINK_MARK)
+        m = _LINK.match(text, start)
+        if m and (m.end() == len(text) or text[m.end()] not in _TID_CHARS):
+            out.append((m.end(), m["board"], m["gw"], m["tid"]))
+        at = text.find(LINK_MARK, start)
+    return out
+
+
+def _stale_swap(text: str, pos: int, read):
+    """``(pos, scope_at, link_end, end, line)`` for the ask at ``pos`` if its card has moved on, else ``None``.
+
+    ``text[pos:scope_at]`` (the ask and why lines) becomes ``line``; ``text[link_end:end]`` is the
+    user-terminal hint, dropped with the ask."""
+    links = _links(text, pos)
+    if len(links) > _MAX_LINKS:
+        return None
+    owners = []
+    for end, board, gw, tid in links:
+        if gw:
+            return None  # another gateway's card may own this ask; this host cannot read it
+        card = read(board, tid)
+        if card is None:
+            return None  # unreadable or unknown card: it could be the owner
+        owner = _owner_event(card[1], text, pos, end, board, tid)
+        if owner is not None:
+            owners.append((end, card, owner))
+    if len(owners) != 1:
+        return None  # no owner, or a field quotes another card's whole ask: ambiguous, leave it
+    link_end, (status, events), owner = owners[0]
+    if text.find(LINK_MARK, pos) != text.rfind(LINK_MARK, pos, link_end):
+        return None  # the owner's own fields quote another "Open task:" link: never guess
+    anchor = _anchor(events, owner)
+    line = since_line(status, events, anchor) if anchor is not None else None
+    if line is None:
+        return None
+    request = events[owner][3]["human_request"]
+    scope_at = pos + len(f"{ASK_MARK}{request['action']}\nWhy only the user: {request['why_human']}\n")
+    end = link_end + len(TERMINAL_HINT) if text.startswith(TERMINAL_HINT, link_end) else link_end
+    return pos, scope_at, link_end, end, line
+
+
 def refresh_stale_ask(text):
     """``text`` with each stale ask swapped for a ``Since then:`` line; unchanged on any doubt."""
     if not isinstance(text, str) or ASK_MARK not in text:
         return text
+    cache = {}
 
-    def swap(match):
-        if match["gw"]:
-            return match[0]  # another gateway's card: this host cannot read its current state
-        try:
-            card = _read_card(match["board"], match["tid"])
-        except (sqlite3.Error, OSError, ValueError):
-            return match[0]
-        if card is None:
-            return match[0]
-        status, events = card
-        anchor = _anchor(events, _norm(match["action"]), _norm(match["scope"]))
-        line = since_line(status, events, anchor) if anchor is not None else None
-        return match[0] if line is None else f"{match['head']}{line}\n{match['rest']}"
+    def read(board, tid):
+        if (board, tid) not in cache:
+            try:
+                cache[board, tid] = _read_card(board, tid)
+            except (sqlite3.Error, OSError, ValueError):
+                cache[board, tid] = None
+        return cache[board, tid]
 
-    return _ASK.sub(swap, text)
+    swaps, asks = [], 0
+    at = text.find(ASK_MARK)
+    while at != -1:
+        line_start = text.rfind("\n", 0, at - 1) + 1
+        # The ask mark starts a line directly under block_notice()'s own actor line.
+        if at > 0 and text[at - 1] == "\n" and HEAD_MARK in text[line_start:at - 1]:
+            asks += 1
+            if asks > _MAX_LINKS:
+                return text
+            swap = _stale_swap(text, at, read)
+            if swap is not None:
+                swaps.append(swap)
+        at = text.find(ASK_MARK, at + 1)
+    if any(later[0] < earlier[3] for earlier, later in itertools.pairwise(swaps)):
+        return text  # one swap's span holds another ask mark: ambiguous, leave it all
+    for pos, scope_at, link_end, end, line in reversed(swaps):
+        text = text[:pos] + line + "\n" + text[scope_at:link_end] + text[end:]
+    return text
 
 
 def _is_producer_row(payload) -> bool:

@@ -237,11 +237,12 @@ def test_copied_scope_with_an_actor_substring_in_its_tail_keeps_the_ask(tmp_path
 def test_long_task_token_does_not_backtrack(tmp_path, monkeypatch):
     """Review F4: a long task token followed by a later Open task line must not cost seconds."""
     import time
-    from hermes_cli.kanban_stale_ask import _ASK
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     text = ("blocked — actor: user\nNext action for the user: Choose.\nWhy only the user: y\nScope: z\n"
             "Open task: @task:default/" + "a" * 8000 + "\nOpen task: @task:default/t_x")
     start = time.monotonic()
-    assert _ASK.search(text) is None
+    assert refresh_stale_ask(text) == text
     assert time.monotonic() - start < 0.5
 
 
@@ -257,21 +258,88 @@ def test_open_task_line_inside_scope_of_a_done_card_is_left_alone(tmp_path, monk
 
 
 def test_pathological_producer_text_is_bounded(tmp_path, monkeypatch):
-    """Review N2: thousands of field-mark lines after an ask mark cannot cost seconds of regex backtracking."""
+    """Review N2: thousands of field-mark lines after an ask mark cannot cost seconds."""
     import time
-    from hermes_cli.kanban_stale_ask import _ASK, refresh_stale_ask
-    _tid, text = _stale_notice(tmp_path, monkeypatch)
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     head = "blocked — actor: user\nNext action for the user: Choose.\n"
     no_match = (head + "\nWhy only the user: x" * 3000,
                 head + "Why only the user: y\n" + "\nScope: x" * 3000,
                 head + "Why only the user: y\nScope: z" + "\nWhy only the user: x" * 3000)
     for big in no_match:
         start = time.monotonic()
-        assert _ASK.search(big) is None
+        assert refresh_stale_ask(big) == big
         assert time.monotonic() - start < 0.5
-    # Inside a real stale notice the repeated lines are just a long field: still fast, still refreshed.
-    big = text.replace("Why only the user: ", "Why only the user: " + "\nWhy only the user: x" * 3000, 1)
+    # A real stale notice whose stored why has 3000 such lines: still fast, still refreshed.
+    tid, task = _card_with_why("why" + "\nWhy only the user: x" * 3000)
+    text = _wake_text(tid, task)
+    _finish(tid)
+    start = time.monotonic()
+    out = refresh_stale_ask(text)
+    assert time.monotonic() - start < 0.5
+    assert "Since then: unblocked 20:08, completed 20:25 PST. No action needed." in out
+    assert "Why only the user" not in out
+
+
+def _card_with_why(why):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect_closing
+    with connect_closing() as conn:
+        tid = kb.create_task(conn, title="why fixture", assignee="default")
+        assert kb.block_task(conn, tid, kind="needs_input", reason="Choose",
+                             human_request=dict(REQUEST, why_human=why))
+        conn.execute("UPDATE task_events SET created_at=? WHERE task_id=? AND kind='blocked'", (BLOCKED_AT, tid))
+        conn.commit()
+        return tid, kb.get_task(conn, tid)
+
+
+def test_copied_scope_with_a_forged_notice_head_in_its_tail_keeps_the_ask(tmp_path, monkeypatch):
+    """Review F5: no text stop can be trusted inside a scope. A copied ask whose tail looks like a whole
+    notice head (actor line + ask mark) must still leave still-blocked B byte-identical."""
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    copied, _task = _card_with_scope("Only this card.")
+    _finish(copied)
+    for tail in ("\nblocked — actor: x\nNext action for the user: y",
+                 "\n\nblocked — actor: agent\nNext action for the user: see above"):
+        tid, task = _card_with_scope(f"Only this card.\nOpen task: @task:default/{copied}{tail}")
+        text = _wake_text(tid, task)
+        assert refresh_stale_ask(text) == text, tail
+
+
+def test_long_line_of_actor_substrings_after_a_notice_is_fast(tmp_path, monkeypatch):
+    """Review F6: one long line of repeated " blocked — actor: " after a notice must not cost seconds."""
+    import time
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    _tid, text = _stale_notice(tmp_path, monkeypatch)
+    big = text + "\n" + " blocked — actor: " * 20000
     start = time.monotonic()
     out = refresh_stale_ask(big)
     assert time.monotonic() - start < 0.5
     assert "Since then: unblocked 20:08, completed 20:25 PST. No action needed." in out
+
+
+def test_user_terminal_hint_goes_with_a_stale_ask_and_stays_with_a_live_one(tmp_path, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect_closing
+    from hermes_cli.kanban_stale_ask import TERMINAL_HINT, refresh_stale_ask
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    kb.init_db()
+    with connect_closing() as conn:
+        tids = []
+        for _ in range(2):
+            tid = kb.create_task(conn, title="terminal fixture", assignee="default")
+            assert kb.block_task(conn, tid, kind="needs_input", reason="Run it",
+                                 human_request=dict(REQUEST, interaction="user_terminal"))
+            conn.execute("UPDATE task_events SET created_at=? WHERE task_id=? AND kind='blocked'", (BLOCKED_AT, tid))
+            tids.append((tid, kb.get_task(conn, tid)))
+        conn.commit()
+    (done, done_task), (live, live_task) = tids
+    stale_text, live_text = _wake_text(done, done_task), _wake_text(live, live_task)
+    assert TERMINAL_HINT in stale_text
+    _finish(done)
+    out = refresh_stale_ask(stale_text + "\n" + live_text)
+    assert out.endswith("\n" + live_text)
+    stale_out = out[:-len("\n" + live_text)]
+    assert TERMINAL_HINT not in stale_out and "Next action for the user" not in stale_out
+    assert "Since then: unblocked 20:08, completed 20:25 PST. No action needed." in stale_out
