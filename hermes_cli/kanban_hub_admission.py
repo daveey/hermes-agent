@@ -1,9 +1,11 @@
 """Evidence-checked hub admission, using an exact subscription-only judge."""
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import sqlite3
+import threading
 import time
 from contextlib import closing
 from dataclasses import asdict, dataclass, replace
@@ -96,13 +98,10 @@ def admit(card_fields, *, hub_reason=None) -> Verdict:
             payload = {k: getattr(cached, k) for k in ("admit", "need", "evidence", "why")}
             return replace(_parse(json.dumps(payload), card_fields, hub_reason, sha), cached=True)
         route = {}
-        with aux.aux_stream_deadline(time.monotonic() + TIMEOUT):
-            response = aux.call_llm(
-                task="hub_admission", provider=PROVIDER, model=MODEL, timeout=TIMEOUT,
-                max_tokens=1024, temperature=0, route_info=route,
-                messages=[{"role": "system", "content": body}, {"role": "user", "content": json.dumps({
-                    "title": card_fields.get("title") or "", "body": card_fields.get("body") or "",
-                    "hub_reason": hub_reason})}])
+        deadline = time.monotonic() + TIMEOUT
+        response = _bounded(lambda: _ask(aux, body, card_fields, hub_reason, route, deadline), deadline)
+        if response is None:
+            return Verdict(skill_sha=sha)
         if (route.get("provider"), route.get("model"), route.get("billing_group")) != (
                 PROVIDER, MODEL, "subscription"):
             return Verdict(skill_sha=sha)
@@ -111,3 +110,40 @@ def admit(card_fields, *, hub_reason=None) -> Verdict:
         return verdict
     except Exception:  # health: allow BLE001 -- a judge outage must deny placement, never fall back
         return Verdict(skill_sha=sha)
+
+
+def _ask(aux, body, card_fields, hub_reason, route, deadline):
+    with aux.aux_stream_deadline(deadline):
+        return aux.call_llm(
+            task="hub_admission", provider=PROVIDER, model=MODEL, timeout=TIMEOUT,
+            max_tokens=1024, temperature=0, route_info=route,
+            messages=[{"role": "system", "content": body}, {"role": "user", "content": json.dumps({
+                "title": card_fields.get("title") or "", "body": card_fields.get("body") or "",
+                "hub_reason": hub_reason})}])
+
+
+def _bounded(call, deadline):
+    """Run ``call`` with a hard total deadline, route and credential resolution included.
+
+    The stream deadline clamps provider sockets, but nothing bounds the work before a stream
+    starts; a placement decision must not wait on it. Past the deadline the owner denies and
+    the daemon is abandoned: it holds no lock or DB handle, its socket is clamped by the same
+    absolute stream deadline, and its result is discarded (never cached).
+    """
+    done, outcome = threading.Event(), {}
+
+    def run():
+        try:
+            outcome["result"] = call()
+        except BaseException as exc:  # health: allow BLE001 -- reported to the owner as a deny
+            outcome["exception"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=contextvars.copy_context().run, args=(run,), name="hub-admission-judge",
+                     daemon=True).start()
+    if not done.wait(max(0.0, deadline - time.monotonic())):
+        return None
+    if "exception" in outcome:
+        raise outcome["exception"]
+    return outcome.get("result")

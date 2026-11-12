@@ -164,6 +164,30 @@ def test_absolute_stream_deadline_is_installed(judge, monkeypatch):
     assert aux._current_aux_stream_deadline() is None
 
 
+def test_total_deadline_bounds_route_acquisition(judge, monkeypatch):
+    """A hang before any stream (route or credential resolution) still denies within the deadline."""
+    import threading
+    import time
+    gate, _, _, _ = judge
+    from agent import auxiliary_client as aux
+    release = threading.Event()
+
+    def hang(**kwargs):
+        release.wait(10)  # never reaches the provider stream, so the stream clamp cannot fire
+        raise RuntimeError("released")
+
+    monkeypatch.setattr(aux, "call_llm", hang)
+    monkeypatch.setattr(gate, "TIMEOUT", 0.3)
+    started = time.monotonic()
+    try:
+        result = gate.admit({"title": "Use signed-in Chrome"})
+    finally:
+        release.set()
+    assert time.monotonic() - started < 2
+    assert result.admit is False
+    assert result.why == "admission unavailable"
+
+
 def test_malformed_json(judge, monkeypatch):
     gate, _, _, _ = judge
     from agent import auxiliary_client as aux
