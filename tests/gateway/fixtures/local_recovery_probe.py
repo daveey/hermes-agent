@@ -151,18 +151,30 @@ def free_port():
         return sock.getsockname()[1]
 
 
-def api_listener_state(home, desc):
-    """This daemon's settled ``api_server`` state from its ``gateway_state.json``: ``connected``, or
-    ``fatal`` when the port was already taken. Keyed on identify's pid, so a killed predecessor's
-    retained record never answers for its successor."""
+def _log_text(path):
+    try:
+        return Path(path).read_text(encoding='utf-8', errors='replace')
+    except FileNotFoundError:
+        return ''
+
+
+def api_listener_state(home, desc, log=None):
+    """This daemon's settled ``api_server`` record from its ``gateway_state.json``: ``state`` is
+    ``connected``, or ``fatal`` with its ``error_code`` (``api_server_port_in_use`` when the port was
+    already taken). Keyed on identify's pid, so a killed predecessor's retained record never answers
+    for its successor. A timeout carries the daemon's log (``log``, default ``restart.log``), as
+    ``daemon()``'s ready assert does."""
     def settled():
         try:
             record = json.loads((Path(home) / 'gateway_state.json').read_text())
         except (OSError, ValueError):
             return None
         api = ((record.get('platforms') or {}).get('api_server') or {}) if record.get('pid') == desc['pid'] else {}
-        return api.get('state') if api.get('state') in ('connected', 'fatal') else None
-    return wait_until(settled, timeout=RPC_DEADLINE, what='api_server listener settled')
+        return api if api.get('state') in ('connected', 'fatal') else None
+    try:
+        return wait_until(settled, timeout=RPC_DEADLINE, what='api_server listener settled')
+    except AssertionError as exc:
+        raise AssertionError(f'{exc}\n{_log_text(log or Path(home) / "restart.log")}') from None
 
 
 @contextmanager
@@ -171,14 +183,18 @@ def api_daemon(root, home, env, write_config, attempts=5):
     be bound by a concurrent test's daemon before this one starts; the loser parks api_server
     (``api_server_port_in_use``) yet still reports ready, and the winner, built from the same
     fixtures (API key, model stub), answers every request, so the turns land in its state.db, not
-    this home's. ``write_config(port)`` writes the boot's config.yaml; yields ``(proc, desc, port)``."""
+    this home's. Only that race re-boots on a fresh port; any other fatal fails at once with its
+    own error code. ``write_config(port)`` writes the boot's config.yaml; yields ``(proc, desc, port)``."""
     for _ in range(attempts):
         port = free_port()
         write_config(port)
         with daemon(root, home, {**env, 'API_SERVER_PORT': str(port)}, barrier=False) as (proc, desc):
-            if api_listener_state(home, desc) == 'connected':
+            api = api_listener_state(home, desc)
+            if api['state'] == 'connected':
                 yield proc, desc, port
                 return
+            if api.get('error_code') != 'api_server_port_in_use':
+                raise AssertionError(f'api_server fatal on port {port}: {api}\n{_log_text(Path(home) / "restart.log")}')
     raise AssertionError(f'api_server never owned a free port in {attempts} boots')
 
 
