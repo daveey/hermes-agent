@@ -244,9 +244,14 @@ _SPECS = [
              help="Machine labels the card needs, comma-separated (synced boards only): linux, "
                   "macos,xcode, machine:<name>; '' or '[]' = any machine; omit for the default placement"),
         _arg("--hub-reason", dest="hub_reason", default=None, metavar="TEXT",
-             help="Why this card needs the hub itself (hub Chrome, Board admin key, ...). Fed to the "
-                  "hub-admission judge; its quote can be the evidence. Without admission a hub card "
-                  "goes to the worker pool (or an explicit hub pin is refused)."),
+             help="Only for a card that needs the hub itself: what only the hub has (its signed-in "
+                  "Chrome, a Desktop-session interaction, an "
+                  "existing hub worktree with unpushed commits, a hermes-hub command acting with the "
+                  "hub's key, or live gateway state hub-admin cannot reach). Board admin key and "
+                  "instance-role SSM steps are not hub needs: run them with hub-admin on a "
+                  "capability:hub-write worker. A Sonnet admission judge "
+                  "reads it with the card; without admission a hub card goes to the worker pool (pool "
+                  "workers have hub ssh + hub-admin) and an explicit hub pin is refused."),
         _arg("--force-hub", dest="force_hub", action="store_true",
              help="Operator override: keep the card on the hub without the admission judge. Refused "
                   "inside a dispatcher worker; recorded as a forced hub_admission event."),
