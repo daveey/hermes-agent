@@ -137,6 +137,7 @@ def test_remote_relay_is_stored_as_sent():
     {"display_kind": "async_delegation_complete", "content": "child done"},
     {"display_kind": "internal_notification", "content": "note"},
     {"display_kind": "auto_continue", "content": "continue"},
+    {"display_kind": "loop_tick", "content": "Run the recap skill now"},
     {"compressed": 1, "content": "summary of earlier turns"},
     {"content": "[System: the stream was cut; retry the tool call]"},
     {"content": "[Message from another Hermes session @session:default/abc]\nplease relay"},
@@ -170,8 +171,9 @@ def _loop_state(home: Path, session: str, *, awaiting: bool, fired_at: float, pr
 
 
 def test_a_running_slash_loop_ticks_prompt_is_not_a_reply(kanban_home):
-    """Review 5878871802: a ``/loop 10m /skill`` tick submits the command's prompt untyped. While that tick's turn
-    runs, its row is the loop's; once the tick completed, a later typed row is a reply again."""
+    """Review 5878871802: a ``/loop 10m /skill`` tick written before ``loop_tick`` typing submitted the command's
+    prompt untyped. While that tick's turn runs, its row is the loop's; once the tick completed, an untyped row is a
+    reply again (legacy rows only: new ticks are typed, see the next test)."""
     now = int(time.time())
     with kbc.connect_closing() as conn:
         tid = _asked(conn, now - 100)
@@ -181,6 +183,34 @@ def test_a_running_slash_loop_ticks_prompt_is_not_a_reply(kanban_home):
         assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == reply
         _loop_state(kanban_home, "chat-1", awaiting=False, fired_at=now - 10)
         assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == tick
+
+
+def test_a_completed_typed_slash_tick_row_is_skipped(kanban_home):
+    """Review 5879164478 nit: a slash tick's row is typed ``loop_tick`` by its producers, so it is never the reply,
+    after the tick completed as well as while it runs."""
+    from hermes_cli.loops import loop_tick_display
+    now = int(time.time())
+    kind = loop_tick_display("/recap")["display_kind"]
+    with kbc.connect_closing() as conn:
+        tid = _asked(conn, now - 100)
+        reply = _state_db(kanban_home, "chat-1", now - 50)
+        _loop_state(kanban_home, "chat-1", awaiting=True, fired_at=now - 10)
+        _state_db(kanban_home, "chat-1", now - 10, content="Run the recap skill now", display_kind=kind)
+        assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == reply
+        _loop_state(kanban_home, "chat-1", awaiting=False, fired_at=now - 10)
+        assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == reply
+
+
+def test_a_reply_during_a_typed_slash_tick_is_the_reply(kanban_home):
+    """With the tick's row typed, the legacy first-untyped-row skip must not eat the person's reply that lands while
+    the tick is still in flight (``awaiting_response``)."""
+    now = int(time.time())
+    with kbc.connect_closing() as conn:
+        tid = _asked(conn, now - 100)
+        _loop_state(kanban_home, "chat-1", awaiting=True, fired_at=now - 20)
+        _state_db(kanban_home, "chat-1", now - 20, content="Run the recap skill now", display_kind="loop_tick")
+        reply = _state_db(kanban_home, "chat-1", now - 10, content="left ring")
+        assert krh.verify(conn, tid, session_id="chat-1")["message_id"] == reply
 
 
 @pytest.mark.parametrize("prompt", ["/recap", "check the ring card"])

@@ -19,8 +19,9 @@ Only a row a person typed is a reply: a plain or ``steer`` user row, never a syn
 card's own ``kanban_notice``, hidden scaffolding, process/delegation completions, internal notifications,
 compaction summaries, ``[System:`` notices or cross-session deliveries). Untyped synthetic rows are recognized
 by their producers' registered openings (runtime scaffolding, the pre-final gate's held-draft notice, auto-continue
-notes, the ``/loop`` wakeup and ``/heartbeat`` frames) and an in-flight slash ``/loop`` tick's first row; a Kanban
-notice is always typed ``kanban_notice``, the no-store fallback included.
+notes, the ``/loop`` wakeup and ``/heartbeat`` frames). A slash ``/loop`` tick's expanded prompt is typed
+``loop_tick`` (TUI and gateway); an in-flight tick's first untyped row is still skipped for rows written before that
+typing. A Kanban notice is always typed ``kanban_notice``, the no-store fallback included.
 
 The card's holder checks every relay before storing it (``admit``, inside ``add_comment``'s write transaction,
 so the one-relay rule is atomic), a cross-gateway one included: the card asked, the message is not older than
@@ -108,8 +109,11 @@ def _latest_user_message(session_id: str, db_path: Optional[str] = None) -> Opti
     try:
         with sqlite3.connect(uri, uri=True, timeout=5) as sdb:  # noqa: kanban-lockguard (state.db, read-only)
             tick_id = None
-            if (loop_since := _slash_loop_tick_since(sdb, session_id)) is not None:
-                # the oldest untyped, uncompressed, non-synthetic row at/after the fire: the tick's own prompt
+            if (loop_since := _slash_loop_tick_since(sdb, session_id)) is not None and sdb.execute(
+                    "SELECT 1 FROM messages WHERE session_id = ? AND role = 'user' AND display_kind = 'loop_tick' "
+                    "AND timestamp >= ? LIMIT 1", (session_id, loop_since - 1)).fetchone() is None:
+                # a tick written before loop_tick typing (a typed one leaves every untyped row to the person):
+                # the oldest untyped, uncompressed, non-synthetic row at/after the fire is the tick's own prompt
                 for row_id, row_content in sdb.execute(
                         "SELECT id, content FROM messages WHERE session_id = ? AND role = 'user' "
                         "AND COALESCE(display_kind, '') = '' AND COALESCE(_compressed_summary, 0) = 0 "

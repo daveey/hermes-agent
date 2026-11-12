@@ -192,6 +192,10 @@ def _collect_resume_entries(display_history, disp: dict, clean_assistant):
         tool_calls = msg.get("tool_calls") or []
         if display_kind == "hidden":
             continue
+        if display_kind == "loop_tick":  # a /loop slash tick's expanded prompt: its ``↻ /loop /cmd`` line
+            label = (msg.get("display_metadata") or {}).get("display_text")
+            entries.append(("event", _sanitize_display_text(label if isinstance(label, str) and label else "↻ /loop")))
+            continue
         if display_kind in _RESUME_EVENT_KEYS:
             metadata = msg.get("display_metadata") or {}
             label = metadata.get("display_text") if display_kind in ("async_delegation_complete", "process_complete") else None

@@ -188,6 +188,8 @@ const NOTICE_DISPLAY_KINDS = [
   'turn_stopped',
   // [daveey] A kanban result persisted into a chat no backend had loaded.
   'kanban_notice',
+  // [daveey] A slash-command /loop tick's expanded prompt (hermes_cli/loops.py loop_tick_display).
+  'loop_tick',
   // A safety-refused turn retained for display: the user's own message, shown
   // greyed with a notice. Rendered through the system path, never a user bubble.
   'content_refused'
@@ -386,6 +388,10 @@ function timelineDisplayContent(message: SessionMessage, content: string): strin
 
   if (message.display_kind === 'kanban_notice') {
     return timelineDisplayText(message.display_metadata) ?? content
+  }
+
+  if (message.display_kind === 'loop_tick') {
+    return timelineDisplayText(message.display_metadata) ?? '↻ /loop'
   }
 
   if (message.display_kind === 'async_delegation_complete') {

@@ -97,6 +97,24 @@ describe('toTranscriptMessages', () => {
     expect(result[0]?.text).toBeTruthy()
     expect(result[0]?.text).not.toBe('event')
   })
+
+  it('projects a /loop slash tick prompt as its loop line, never the expanded prompt', () => {
+    const rows = [
+      {
+        role: 'user',
+        text: 'Run the recap skill now',
+        display_kind: 'loop_tick',
+        display_metadata: { display_text: '↻ /loop /recap' }
+      },
+      { role: 'user', text: 'Run it again', display_kind: 'loop_tick' }
+    ]
+
+    const result = toTranscriptMessages(rows)
+    expect(result.map(m => [m.kind, m.role, m.text])).toEqual([
+      ['event', 'system', '↻ /loop /recap'],
+      ['event', 'system', '↻ /loop']
+    ])
+  })
 })
 
 describe('MessageLine', () => {

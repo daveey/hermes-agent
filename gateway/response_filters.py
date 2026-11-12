@@ -32,8 +32,10 @@ _BRACKETED_SILENCE_MARKERS = tuple(
 # machinery kinds may vanish on a bare silence marker.
 INTERNAL_NOTIFICATION_DISPLAY_KIND = "internal_notification"
 # Async-result cards the in-process TUI persisted: a producer's internal event naming one (with a
-# display_text) persists as that row kind instead of internal_notification.
-PRODUCER_NOTICE_DISPLAY_KINDS = frozenset({"process_complete", "async_delegation_complete", "kanban_notice"})
+# display_text) persists as that row kind instead of internal_notification. A slash-command /loop tick's
+# expanded prompt names ``loop_tick`` (hermes_cli/loops.py) the same way. [daveey]
+PRODUCER_NOTICE_DISPLAY_KINDS = frozenset(
+    {"process_complete", "async_delegation_complete", "kanban_notice", "loop_tick"})
 MACHINERY_DISPLAY_KINDS = frozenset({INTERNAL_NOTIFICATION_DISPLAY_KIND, *PRODUCER_NOTICE_DISPLAY_KINDS})
 # What a gateway producer's card may name (a liveness tick names internal_notification for its CLI
 # receipt). Closed, and kept apart from the silence set above so a kind added there never becomes

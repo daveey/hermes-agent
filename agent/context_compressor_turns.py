@@ -11,7 +11,7 @@ from typing import Any
 # User-row kinds that start a new turn (persisted notices, not same-turn continuations such as
 # auto_continue or steer): after a completed reply, one of these means the earlier request is done.
 TURN_STARTING_NOTICE_KINDS = frozenset(
-    {"kanban_notice", "internal_notification", "process_complete", "async_delegation_complete"}
+    {"kanban_notice", "internal_notification", "process_complete", "async_delegation_complete", "loop_tick"}
 )
 
 

@@ -23,6 +23,38 @@ export const userDisplay = (text: string) => {
 const storedRowId = (role: string, rowId: unknown): Pick<Msg, 'rowId'> =>
   role === 'user' && Number.isSafeInteger(rowId) && (rowId as number) > 0 ? { rowId: rowId as number } : {}
 
+type RowMeta = TranscriptRow['display_metadata']
+
+const metaText = (meta: RowMeta): string | undefined =>
+  typeof meta?.display_text === 'string' && meta.display_text.trim() ? meta.display_text : undefined
+
+const agentsFinished = (meta: RowMeta) => {
+  const count = meta && typeof meta.task_count === 'number' ? meta.task_count : undefined
+
+  return count === undefined
+    ? t('libText.messages.backgroundAgentWorkFinished')
+    : t(
+        count === 1 ? 'libText.messages.backgroundAgentsFinishedOne' : 'libText.messages.backgroundAgentsFinishedOther',
+        count
+      )
+}
+
+// display_kind -> its event line. Rows of these kinds are backend notices, drawn as markers, never messages.
+const TIMELINE_EVENTS: Record<string, (meta: RowMeta) => string> = {
+  model_switch: () => t('libText.messages.modelChanged'),
+  auto_continue: () => t('libText.messages.resumedInterruptedTurn'),
+  personality_switch: () => t('libText.messages.personalityChanged'),
+  // A slash-command /loop tick's expanded prompt: its `↻ /loop /cmd` line, never the prompt.
+  loop_tick: meta => metaText(meta) ?? '↻ /loop',
+  async_delegation_complete: meta =>
+    typeof meta?.display_text === 'string' ? meta.display_text : agentsFinished(meta),
+  process_complete: meta =>
+    typeof meta?.display_text === 'string' ? meta.display_text : t('libText.messages.backgroundProcessFinished')
+}
+
+const timelineEventText = (displayKind: string, meta: RowMeta): string | undefined =>
+  Object.hasOwn(TIMELINE_EVENTS, displayKind) ? TIMELINE_EVENTS[displayKind]!(meta) : undefined
+
 export const toTranscriptMessages = (rows: unknown): Msg[] => {
   if (!Array.isArray(rows)) {
     return []
@@ -57,48 +89,12 @@ export const toTranscriptMessages = (rows: unknown): Msg[] => {
       continue
     }
 
-    if (display_kind === 'model_switch') {
-      out.push({ kind: 'event', role: 'system', text: t('libText.messages.modelChanged') })
-      pending = []
+    const eventText = display_kind
+      ? timelineEventText(display_kind, (row as TranscriptRow).display_metadata)
+      : undefined
 
-      continue
-    }
-
-    if (display_kind === 'auto_continue') {
-      out.push({ kind: 'event', role: 'system', text: t('libText.messages.resumedInterruptedTurn') })
-      pending = []
-
-      continue
-    }
-
-    if (display_kind === 'personality_switch') {
-      out.push({ kind: 'event', role: 'system', text: t('libText.messages.personalityChanged') })
-      pending = []
-
-      continue
-    }
-
-    if (display_kind === 'async_delegation_complete' || display_kind === 'process_complete') {
-      const meta = (row as TranscriptRow).display_metadata
-      const count = meta && typeof meta.task_count === 'number' ? meta.task_count : undefined
-
-      const label =
-        display_kind === 'process_complete'
-          ? t('libText.messages.backgroundProcessFinished')
-          : count === undefined
-            ? t('libText.messages.backgroundAgentWorkFinished')
-            : t(
-                count === 1
-                  ? 'libText.messages.backgroundAgentsFinishedOne'
-                  : 'libText.messages.backgroundAgentsFinishedOther',
-                count
-              )
-
-      out.push({
-        kind: 'event',
-        role: 'system',
-        text: typeof meta?.display_text === 'string' ? meta.display_text : label
-      })
+    if (eventText !== undefined) {
+      out.push({ kind: 'event', role: 'system', text: eventText })
       pending = []
 
       continue

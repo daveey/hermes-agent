@@ -412,7 +412,9 @@ def _notif_slash_loop_tick(rid: str, sid: str, session: dict, mgr, wakeup: str) 
                 _publish_session_control_snapshot(sid, session)  # back to the countdown, not "running now"
                 return
             # Releases the claim on failure: the swallow below would otherwise leave the session busy for good.
-            _notif_submit(rid, sid, session, payload["message"], "loop wakeup send failed")
+            # Typed loop_tick: the expanded command is the loop's, never read as a person's reply. [daveey]
+            from hermes_cli.loops import loop_tick_display
+            _notif_submit(rid, sid, session, payload["message"], "loop wakeup send failed", **loop_tick_display(wakeup))
             return
     except Exception:
         pass
