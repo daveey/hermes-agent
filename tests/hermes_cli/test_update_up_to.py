@@ -250,7 +250,12 @@ def test_an_unresolvable_origin_main_refuses(fork, capsys):
 
 
 def test_capability_marker_names_the_flag():
-    """hermes-sync reads this file's text in the live checkout to decide whether to pass the flag."""
+    """hermes-sync reads this file's text in the live checkout to decide whether to pass the flag.
+
+    Deliberate exception to tests/AGENTS.md's ban on asserting source text: the literal
+    ``"--up-to"`` in hermes_cli/subcommands/update.py IS the capability marker hermes-sync greps
+    for, so the source text is the contract. Do not rename or remove the marker.
+    """
     from pathlib import Path
 
     from hermes_cli.subcommands import update as parser_module

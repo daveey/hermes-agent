@@ -48,6 +48,7 @@ def _run(stop: str | None, *, applied: bool = False, code: int = 1, user_action:
     *[(name, {}, (name, "failed")) for name in sorted(contract.UPDATE_STOP_CLASSES - {"lock_held", "managed_install"})],
     ("not_a_class: /home/alice", {}, ("aborted_before_apply", "failed")),  # only closed tokens pass
     (None, {}, ("aborted_before_apply", "failed")),  # the fallback stays for an exit with no reason
+    ("up_to_refused", {}, ("up_to_refused", "failed")),  # an --up-to refusal reads its own class
     ("fetch_failed", {"applied": True}, ("deps_failed", "failed")),  # a reason never outlives the apply
     (None, {"applied": True, "code": 1, "user_action": True}, ("local_changes_parked", "partial")),
 ])

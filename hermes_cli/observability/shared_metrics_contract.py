@@ -543,6 +543,7 @@ UPDATE_STOP_CLASSES = frozenset({
     "target_syntax_error",    # the target failed the syntax check before anything moved
     "target_unresolved",      # the fetched target ref did not resolve to a commit
     "unexpected_branch",      # the checkout ended on a branch that is not the target
+    "up_to_refused",          # --up-to <sha> refused (malformed, not first-parent ahead, or an unsupported combo)
     "venv_foreign_owner",     # the venv belongs to another OS user
     "zip_failed",             # the ZIP fallback swap failed and was rolled back
 })
