@@ -21,10 +21,14 @@ process ANCESTRY's start-time environments, not from this process's mutable ``os
 
 No input asserts ``human``: no flag, no variable. Human is only a COMPLETE walk to init that found
 no marker; an inconclusive walk (psutil unusable, an ancestor vanishing mid-walk, a same-user
-process whose environment can't be read, the depth cap) records ``agent``. Only ROOT's unreadable
+process whose environment can't be read, the depth cap) records ``agent``. ROOT's unreadable
 process is skipped (``login``/``sshd``, launchd, a setuid ``login`` whose effective uid is root, a
-non-dumpable ``sshd-session`` whose environ is root's): an agent's own processes are this user's
-and readable. The ``/kanban`` slash command typed into a chat composer passes ``human`` explicitly
+non-dumpable ``sshd-session`` whose environ is root's). Linux also skips a same-uid
+``systemd --user`` with permitted capabilities beyond ours when environment access is denied:
+CAP_WAKE_ALARM can deny ptrace even though its environ is user-owned. Third-uid managers and
+ordinary unreadable processes remain inconclusive; readable markers always win. Agent user
+units carry their markers below the manager.
+The ``/kanban`` slash command typed into a chat composer passes ``human`` explicitly
 (``run_slash(human_typed=True)`` at its ingress points). Fail-safe direction: a leaked marker (a
 terminal app started from an agent, the TUI's ``!`` shell) labels a person's note ``agent``, which
 only withholds operator authority; so does Windows, where an unreadable or exited ancestor (the
@@ -39,6 +43,7 @@ HTTP peers retain the legacy human default, not a claim of authenticated human i
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Callable, Mapping, Optional
 
 # Any one, non-empty, in a process's start-time environment marks it (and its descendants) as an
@@ -65,7 +70,7 @@ class Inconclusive(Exception):
     """The ancestry could not be read far enough to rule an agent out."""
 
 
-# (ppid, start-time environ, or None for root's unreadable process) for a pid. Raises
+# (ppid, start-time environ, or None for a skipped OS supervisor) for a pid. Raises
 # :class:`Inconclusive` when the pid is gone or any other process can't be read.
 ProcReader = Callable[[int], tuple[int, Optional[Mapping[str, str]]]]
 
@@ -95,7 +100,38 @@ def _read_proc(pid: int) -> tuple[int, Optional[Mapping[str, str]]]:
     except (psutil.Error, OSError) as exc:
         if _foreign(proc, pid):  # root's login/sshd, launchd, a non-dumpable sshd-session
             return ppid, None
+        if isinstance(exc, (psutil.AccessDenied, PermissionError)) and _capable_user_manager(proc, pid):
+            return ppid, None
         raise Inconclusive(f"pid {pid}: environment unreadable") from exc
+
+
+def _capable_user_manager(proc, pid: int) -> bool:
+    """Recognize Linux's same-uid user manager at a capability/ptrace boundary.
+
+    commoncap's PTRACE_MODE_READ_FSCREDS check compares the reader's effective
+    capabilities with the target's *permitted* set. Use our permitted set as a
+    stricter bound: only skip a manager with privilege we cannot even enable.
+    Do not skip arbitrary capable services (which can themselves be agents).
+    This is a provenance heuristic, not authentication against forged argv.
+    """
+    import psutil
+
+    try:
+        uid = getattr(os, "getuid", lambda: 0)()
+        if uid == 0 or tuple(proc.uids()) != (uid, uid, uid):
+            return False
+        status = dict(line.split(":", 1) for line in
+                      Path(f"/proc/{pid}/status").read_text(encoding="utf-8", errors="replace").splitlines() if ":" in line)
+        own = dict(line.split(":", 1) for line in
+                   Path("/proc/self/status").read_text(encoding="utf-8", errors="replace").splitlines() if ":" in line)
+        if status.get("Name", "").strip() != "systemd":
+            return False
+        if not (int(status["CapPrm"], 16) & ~int(own["CapPrm"], 16)):
+            return False
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().rstrip(b"\0").split(b"\0")
+        return len(argv) == 2 and argv[0].rsplit(b"/", 1)[-1] == b"systemd" and argv[1] == b"--user"
+    except (psutil.Error, OSError, ValueError, KeyError, AttributeError):
+        return False
 
 
 def _foreign(proc, pid: int) -> bool:
