@@ -22,6 +22,8 @@ Guards:
 * the board must sync to the Board service (``runs_on`` is a Board placement field).
 * a target must attest ``capability:host_repo`` when required and ``skill:<pin>`` for every pinned skill,
   in addition to satisfying the assignee's existing profile-tool check.
+* a reason claiming ship/landing custody needs ``host_reason`` (``ship_custody_portable``): ship lands from every
+  machine (:mod:`hermes_cli.kanban_move_ship`).
 
 Every move is a ``moved`` event ``{from_machine, runs_on, previous_runs_on, reason, move_no, forced}``: the audit log.
 """
@@ -110,10 +112,13 @@ def _requirement_matches(matches, machines, requires, skills, *, me=None, assign
 
 def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool = False,
           machines: Optional[Mapping[str, Mapping[str, Any]]] = None, me: Optional[str] = None,
-          cfg: Optional[dict] = None, host_reason: Optional[str] = None) -> dict[str, Any]:
+          cfg: Optional[dict] = None, host_reason: Optional[str] = None,
+          reason: Optional[str] = None) -> dict[str, Any]:
     """Validate a move; returns ``{runs_on, previous, matches, move_no, forced, me, host}`` or raises
-    :class:`MoveRefused`. ``host`` holds the event fields of a pin to one pool worker (:mod:`kanban_move_pool`)."""
+    :class:`MoveRefused`. ``host`` holds the event fields of a pin to one pool worker (:mod:`kanban_move_pool`).
+    A ``reason`` claiming ship custody needs ``host_reason`` (:mod:`kanban_move_ship`)."""
     from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_move_ship as kms
     from hermes_cli import kanban_worker_node as wn
     try:
         labels = wn.normalize_runs_on(runs_on)
@@ -121,6 +126,9 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
         raise MoveRefused("invalid_runs_on", str(exc)) from exc
     if not labels:
         raise MoveRefused("invalid_runs_on", "runs_on must name at least one label, e.g. ['machine:worker-1']")
+    ship_custody = kms.refusal(reason, host_reason)
+    if ship_custody:
+        raise MoveRefused(kms.SHIP_CUSTODY_REFUSED, ship_custody)
     row = conn.execute("SELECT status, workspace_kind, workspace_path, runs_on, assignee, requires, skills FROM tasks "
                        "WHERE id = ?", (task_id,)).fetchone()
     if row is None:
@@ -190,7 +198,8 @@ def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: s
     if (refused := gate_move(conn, task_id, runs_on)) is not None:
         return refused  # a hub target must convince the admission judge first [daveey]
     try:
-        plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg, host_reason=host_reason)
+        plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg, host_reason=host_reason,
+                     reason=reason)
     except MoveRefused as exc:
         return {"ok": False, "reason_code": exc.code, "error": str(exc)}
 
@@ -248,7 +257,8 @@ def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason:
             return {"ok": False, "reason_code": "invalid_runs_on", "error": str(exc)}
         return repin.repin_to_origin(conn, task_id, list(labels or []), reason, hub=hub)
     try:
-        plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg, host_reason=host_reason)
+        plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg, host_reason=host_reason,
+                     reason=reason)
     except MoveRefused as exc:
         return {"ok": False, "reason_code": exc.code, "error": str(exc)}
     with kb.write_txn(conn):
@@ -285,7 +295,8 @@ def move_reclaim(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason
     if (refused := gate_move(conn, task_id, runs_on)) is not None:
         return refused  # a hub target must convince the admission judge first [daveey]
     try:
-        plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg, host_reason=host_reason)
+        plan = check(conn, task_id, runs_on, force=force, machines=machines, me=me, cfg=cfg, host_reason=host_reason,
+                     reason=reason)
     except MoveRefused as exc:
         return {"ok": False, "reason_code": exc.code, "error": str(exc)}
     row = conn.execute("SELECT t.status, t.claim_lock, t.placement_policy, r.uid AS run_uid FROM tasks t "

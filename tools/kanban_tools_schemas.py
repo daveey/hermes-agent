@@ -473,7 +473,8 @@ KANBAN_MOVE_SCHEMA = _schema(
         "reason": _prop("string", "Why the card must move (what this machine lacks). Logged on the card."),
         "host_reason": _prop("string", (
             "Required for runs_on naming one pool worker (machine:worker-N): the card works on that host, or "
-            "holds unpushed state there. Capacity is never a host reason: use [\"pool:worker\"]."
+            "holds unpushed state there. Capacity is never a host reason: use [\"pool:worker\"]. Also required "
+            "when reason claims ship/landing custody: hermes-core-wt ship lands from every machine."
         )),
         "checkpoint": _prop("string", (
             "Everything the next run needs to resume on the other machine: what is done (commits, branches, "
