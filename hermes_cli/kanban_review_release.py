@@ -60,8 +60,6 @@ def _build(conn, task_id):
         return None
     urls = {norm_pr(u) for u in captured}
     parents = kb.parent_ids(conn, task_id)
-    if kb.unsatisfied_parents(conn, task_id):
-        return None
     # Discharge terminal superseded publications at home, not on every executor.
     discharged = {u for u in urls if pr_state(u) in TERMINAL_STATES}
     if not review.resumes_review(conn, task_id, urls, discharged=discharged):

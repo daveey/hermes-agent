@@ -43,3 +43,17 @@ def test_observation_must_be_in_current_ready_episode(kanban_home, clock, monkey
         monkeypatch.setattr(dispatch, "check_respawn_guard", lambda *_: None)
         with pytest.raises(resume.ResumeRefused, match="active_pr"):
             resume.resume(conn, task, reason="no current hold", actor="operator")
+
+
+def test_observation_does_not_override_another_local_guard(kanban_home, clock, monkeypatch):
+    # An imported active_pr observation widens only a local "no hold" verdict:
+    # it never resumes a card this gateway holds for a different reason.
+    with kbc.connect_closing() as conn:
+        task = helpers._held(conn)
+        clock[0] += 10
+        with kb.write_txn(conn):
+            kb._append_event(conn, task, "promoted")
+            kb._append_event(conn, task, "respawn_guarded", {"reason": "active_pr"})
+        monkeypatch.setattr(dispatch, "check_respawn_guard", lambda *_: "shared_blocker")
+        with pytest.raises(resume.ResumeRefused, match="guard: shared_blocker"):
+            resume.resume(conn, task, reason="other hold", actor="operator")
