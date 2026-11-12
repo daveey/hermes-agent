@@ -69,6 +69,32 @@ def fake_sample(pct, calls=None, check=None):
     return sample
 
 
+def test_capacity_class_and_frees_claim_survive_task_readback(board):
+    conn, _home = board
+    task_id = kb.create_task(
+        conn, title="Restore worker disk headroom", assignee="default",
+        admission_class="capacity", admission_frees="frees: worker disk slots",
+    )
+    stored = kb.get_task(conn, task_id)
+    assert stored.admission_class == "capacity"
+    assert stored.admission_frees == "frees: worker disk slots"
+
+
+@pytest.mark.parametrize("admission_class,frees,reason", [
+    ("boosted", None, "admission_class must be normal, capacity or urgent"),
+    ("capacity", None, "capacity requires a one-line frees: claim"),
+    ("capacity", "disk", "capacity requires a one-line frees: claim"),
+    ("capacity", "frees:   ", "capacity requires a one-line frees: claim"),
+    ("capacity", "frees: disk\nother", "capacity requires a one-line frees: claim"),
+])
+def test_invalid_admission_metadata_refuses_before_insertion(board, admission_class, frees, reason):
+    conn, _home = board
+    before = conn.execute("SELECT count(*) FROM tasks").fetchone()[0]
+    with pytest.raises(ValueError, match=f"^{reason}$"):
+        kb.create_task(conn, title="Invalid class", admission_class=admission_class, admission_frees=frees)
+    assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == before
+
+
 def runs(conn):
     return conn.execute("SELECT count(*) FROM task_runs").fetchone()[0]
 

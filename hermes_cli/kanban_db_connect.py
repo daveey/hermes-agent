@@ -1078,6 +1078,8 @@ _LATER_TASK_COLUMNS = (
     ("goal_max_turns", "goal_max_turns INTEGER"),
     ("completion_contract", "completion_contract TEXT"),
     ("placement_policy", "placement_policy TEXT"),
+    ("admission_class", "admission_class TEXT NOT NULL DEFAULT 'normal'"),
+    ("admission_frees", "admission_frees TEXT"),
     ("session_id", "session_id TEXT"),
     # Typed operational reason; neither NULL nor capability implies a human ask.
     ("block_kind", "block_kind TEXT"),

@@ -59,6 +59,7 @@ SYNCED_COLUMNS: dict[str, frozenset[str]] = {
         "workflow_template_id", "current_step_key", "skills", "requires", "model_override",
         "provider_override", "model_pin_mandatory", "reasoning_effort", "max_retries", "goal_mode", "goal_max_turns",
         "block_kind", "human_request", "block_recurrences", "completion_contract", "runs_on", "placement_policy",
+        "admission_class", "admission_frees",
     }),
     "task_links": frozenset({"parent_id", "child_id"}),
     "task_comments": frozenset({"task_id", "author", "body", "created_at"}),
