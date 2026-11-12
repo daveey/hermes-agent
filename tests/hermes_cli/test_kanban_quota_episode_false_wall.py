@@ -69,6 +69,7 @@ def test_hinted_episode_wall_holds_only_while_the_live_pool_confirms_it(
     from hermes_cli import kanban_provider_walls as pw
 
     monkeypatch.setattr(kb.time, 'time', lambda: NOW)
+    monkeypatch.setenv('HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS', '300')
     _pool(tmp_path, monkeypatch, kind)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='false wall', assignee='a')
@@ -82,6 +83,56 @@ def test_hinted_episode_wall_holds_only_while_the_live_pool_confirms_it(
             assert quota.hold_until(conn, tid) == reset
             assert dispatch.check_respawn_guard(conn, tid) == 'subscription_quota_reset'
         else:
-            assert quota.hold_until(conn, tid) is None
-            assert not quota.active(conn, tid)
-            assert dispatch.check_respawn_guard(conn, tid) is None
+            # The disproved hint is rejected; the run's doubling backoff (first run: 300 s) still paces it.
+            assert quota.hold_until(conn, tid) == NOW + 300
+            assert dispatch.check_respawn_guard(conn, tid) == 'rate_limit_cooldown'
+            assert quota.hold_until(conn, tid, NOW + 301) is None
+            assert not quota.active(conn, tid, NOW + 301)
+
+
+def _short_hint_run(conn, tid, pid, reset):
+    task = kb.claim_task(conn, tid, claimer=kb._claimer_id())
+    assert task is not None
+    conn.execute('UPDATE tasks SET worker_pid=? WHERE id=?', (pid, tid))
+    kb._append_event(conn, tid, 'run_route', {'model': MODEL, 'provider': 'anthropic', 'source': 'pin',
+                     'tier_reason': 'default', 'lane': 'ready'}, run_id=task.current_run_id)
+    kb._append_event(conn, tid, 'worker_result', {
+        'pid': pid, 'claim_lock': task.claim_lock, 'exit_code': 75,
+        'last_output': 'rate limited; retry after 5s', 'failure_reason': 'rate_limit',
+        'failure_retryable': True, 'failure_resets_at': float(reset),
+        'route_provider': 'anthropic', 'route_model': MODEL}, run_id=task.current_run_id)
+    conn.commit()
+    dispatch._record_worker_exit(pid, 75 << 8)
+    dispatch.detect_crashed_workers(conn)
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_a_disproved_short_hint_keeps_the_doubling_backoff(board, tmp_path, monkeypatch, legacy):
+    """Rejecting a hint the pool disproves must not drop the backoff, or a 'retry after 5s' x N storm
+    respawns at once. Episodes stored before ``backoff_until`` existed recompute it from the run."""
+    from hermes_cli import kanban_provider_walls as pw
+
+    monkeypatch.setattr(kb.time, 'time', lambda: NOW)
+    monkeypatch.setenv('HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS', '300')
+    _pool(tmp_path, monkeypatch, 'serving')
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title='short hints', assignee='a')
+        for i in range(4):
+            _short_hint_run(conn, tid, 72000 + i, NOW + 5)
+        if legacy:
+            rows = conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind='quota_episode'",
+                                (tid,)).fetchall()
+            assert rows
+            for row in rows:
+                payload = json.loads(row['payload'])
+                payload.pop('backoff_until', None)
+                conn.execute('UPDATE task_events SET payload=? WHERE id=?', (json.dumps(payload), row['id']))
+            conn.commit()
+        state = quota.episode(conn, tid)
+        assert state is not None and state['hinted'] and state['count'] == 4
+        pw.walls_path().write_text(json.dumps({}))
+        # 4th rate_limited run: backoff 300 * 2**3 = 2400 s; the 5 s hint has long elapsed.
+        assert quota.hold_until(conn, tid, NOW + 60) == NOW + 2400
+        # Held on the backoff, not on the rejected hint.
+        assert dispatch.check_respawn_guard(conn, tid) == 'rate_limit_cooldown'
+        assert quota.hold_until(conn, tid, NOW + 2401) is None

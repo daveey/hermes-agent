@@ -21,9 +21,20 @@ MAX_BACKOFF_SECONDS = 7200
 LOCAL_WALL_TRUST_SECONDS = 30 * 60
 
 
+def _backoff(ended_at, count):
+    """The doubling-backoff deadline after the *count*-th consecutive rate_limited run ending at *ended_at*."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_quota_receipt import valid_deadline
+    cooldown = max(0, kb._resolve_rate_limit_cooldown_seconds())
+    delay = min(MAX_BACKOFF_SECONDS, cooldown * 2 ** min(max(count, 1) - 1, 20))
+    ended = kb._to_epoch(ended_at)
+    # An unreadable end stamp anchors backoff at now; an unrepresentable sum holds one full cap.
+    return valid_deadline((ended if ended is not None else time.time()) + delay)
+
+
 def episode(conn, task_id, *, run_id=None):
     from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_quota_receipt import receipt_deadline, receipt_route, valid_deadline
+    from hermes_cli.kanban_quota_receipt import receipt_deadline, receipt_route
     runs = []
     bound = conn.execute("SELECT ended_at,id FROM task_runs WHERE task_id=? AND id=? AND ended_at IS NOT NULL",
                          (task_id, run_id)).fetchone() if run_id is not None else None
@@ -45,11 +56,7 @@ def episode(conn, task_id, *, run_id=None):
     if stored:
         return kb._json_dict(stored[0])
     reset = receipt_deadline(conn, task_id, latest['id'])
-    cooldown = max(0, kb._resolve_rate_limit_cooldown_seconds())
-    delay = min(MAX_BACKOFF_SECONDS, cooldown * 2 ** min(len(runs) - 1, 20))
-    ended = kb._to_epoch(latest['ended_at'])
-    # An unreadable end stamp anchors backoff at now; an unrepresentable sum holds one full cap.
-    backoff = valid_deadline((ended if ended is not None else time.time()) + delay)
+    backoff = _backoff(latest['ended_at'], len(runs))
     # A hint extends the wait, never shortens it below the doubling backoff ('retry after 5s' x N).
     found = [t for t in (reset, backoff) if t is not None]
     until = max(found) if found else None
@@ -63,7 +70,8 @@ def episode(conn, task_id, *, run_id=None):
     providers = sorted({p for p in (actual, admitted) if p})
     return {'episode_id': runs[-1]['id'], 'run_id': latest['id'], 'count': len(runs),
             'until': until if until is not None else time.time() + MAX_BACKOFF_SECONDS,
-            'hinted': reset is not None, 'provider': actual or admitted, 'providers': providers,
+            'backoff_until': backoff, 'hinted': reset is not None,
+            'provider': actual or admitted, 'providers': providers,
             'model': route.get('model')}
 
 
@@ -74,10 +82,11 @@ def _providers(state):
     return [state['provider']] if state.get('provider') else []
 
 
-def _disproved(wall, now):
+def _disproved(wall, now, memo):
     """True for a hinted wall the live OAuth pool now contradicts: every provider it names serves its
     model (any model for a class route) and no provider-wide wall stands. A transient auth bench once
-    made ``quota_unavailable`` report a days-long false wall; the stored deadline must not outlive it."""
+    made ``quota_unavailable`` report a days-long false wall; the stored deadline must not outlive it.
+    *memo* caches the pool reads for one ``_outstanding`` call (walls of an episode share providers)."""
     from agent.model_routing import is_class_selector
     from hermes_cli import kanban_provider_walls as pw
     names = _providers(wall)
@@ -86,8 +95,25 @@ def _disproved(wall, now):
     model = wall.get('model')
     if not isinstance(model, str) or not model or is_class_selector(model) or len(names) > 1:
         model = None
-    known = pw.active_walls(now=now)
-    return all(known.get(name) is None and pw.live_pool_serving(name, model) for name in names)
+    if 'walls' not in memo:
+        memo['walls'] = pw.active_walls(now=now)
+    for name in names:
+        if (name, model) not in memo:
+            memo[name, model] = memo['walls'].get(name) is None and pw.live_pool_serving(name, model)
+    return all(memo[name, model] for name in names)
+
+
+def _unhinted(conn, task_id, wall):
+    """*wall* with its disproved hint rejected: it keeps only the doubling backoff ('retry after 5s' x N
+    must stay paced). Episodes stored before ``backoff_until`` recompute it from their latest run."""
+    backoff = wall.get('backoff_until')
+    if not isinstance(backoff, (int, float)):
+        row = conn.execute('SELECT ended_at FROM task_runs WHERE task_id=? AND id=?',
+                           (task_id, wall.get('run_id'))).fetchone()
+        count = wall.get('count') if isinstance(wall.get('count'), int) else 1
+        backoff = _backoff(row['ended_at'] if row else None, count)
+    until = min(wall['until'], backoff) if backoff is not None else wall['until']
+    return {**wall, 'until': until, 'hinted': False}
 
 
 def _outstanding(conn, task_id, state, now):
@@ -100,7 +126,9 @@ def _outstanding(conn, task_id, state, now):
         prior = kb._json_dict(row[0])
         if isinstance(prior.get('until'), (int, float)) and prior['until'] > now:
             out.append(prior)
-    return [wall for wall in out if not _disproved(wall, now)]
+    memo = {}
+    out = [_unhinted(conn, task_id, wall) if _disproved(wall, now, memo) else wall for wall in out]
+    return [wall for wall in out if wall['until'] > now]
 
 
 def _base_route(task, base):
