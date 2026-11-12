@@ -2342,7 +2342,7 @@ def _dispatch_once_locked(
     # one slot back.
     ready_budget = spawn_budget
     if spawn_budget is not None and spawn_budget > 0 and _any_spawnable_review(
-        conn, [row for row in review_rows if pool_admits(result, row)],
+        conn, review_rows,
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
     ):
         ready_budget = max(spawn_budget - 1, 0)

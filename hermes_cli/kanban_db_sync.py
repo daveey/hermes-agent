@@ -1069,7 +1069,7 @@ def set_runs_on(conn: sqlite3.Connection, task_id: str, runs_on: Any) -> None:
     wn.set_runs_on(conn, task_id, wn.normalize_runs_on(runs_on if isinstance(runs_on, str) else list(runs_on)))
 
 
-def worker_pickup(conn: sqlite3.Connection, budget: Optional[int], dry_run: bool, profile_exists_fn: Any) -> None:
+def worker_pickup(conn: sqlite3.Connection, budget: Any, dry_run: bool, profile_exists_fn: Any) -> None:
     """Dispatcher seam: a worker node copies eligible cards other gateways created (``kanban_worker_node``)."""
     if dry_run or board_mode(conn) != "primary":
         return

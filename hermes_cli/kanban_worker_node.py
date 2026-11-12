@@ -527,7 +527,7 @@ def _unimported_pinned(conn: sqlite3.Connection, replica: sqlite3.Connection, ow
         return set()
 
 
-def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *, mode: str, limit: int,
+def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *, mode: str, limit: Any,
               profile_exists: Optional[Callable[[str], bool]], full_detail: str,
               held: Optional[dict[str, tuple]] = None,
               ) -> tuple[list[str], dict[str, tuple[str, Optional[str]]]]:
@@ -628,7 +628,7 @@ def note_capped(conn: sqlite3.Connection, profile_exists: Optional[Callable[[str
     _record_skips(conn, skips)
 
 
-def pickup(conn: sqlite3.Connection, *, budget: Optional[int],
+def pickup(conn: sqlite3.Connection, *, budget: Any,
            profile_exists: Optional[Callable[[str], bool]] = None) -> list[str]:
     """One tick's pickup: evict finished copies, then copy up to ``budget`` eligible foreign cards. Returns the
     ids copied. A no-op unless the board is primary and ``kanban.sync.pickup`` is on. Each card pinned to this

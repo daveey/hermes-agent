@@ -103,3 +103,6 @@ def test_pickup_pool_budget_imports_only_marked_cards_when_regular_full(gws):
         assert picked == [normal]
     finally:
         replica.close()
+    assert wn.pickup(executor.conn, budget=PoolBudget(0, 0, 3)) == []  # no free slot in any pool
+    assert wn.pickup(executor.conn, budget=PoolBudget(0, 3)) == [marked]
+    assert kb.get_task(executor.conn, normal) is None

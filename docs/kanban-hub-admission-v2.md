@@ -14,7 +14,13 @@ capacity-origin cap in final admission. Opt-in pre-lease/final CPU gates select 
 separate priority pool. The dispatcher budget can reach the extra pool at regular
 saturation, preserving the shared critical/elevated memory guard. Opted-in hubs
 order marked candidates first within each lane, retaining effective priority
-within each group. Composed ready/review dispatcher tests now reach real final
+within each group. The dispatcher budget is per pool (`PoolBudget`): a normal
+row only fits a regular slot, so once this tick's regular slots are spent no
+normal row is attempted (no CPU advisory, Board claim gate or locked census),
+marked rows charge a priority slot first, and foreign pickup gets the same pool
+budget capped to the tick's total. At regular 7/7 the tick reports
+`at_capacity = "regular pool max_in_progress=7/7 (priority n/3 is marked-only)"`
+and a normal card's queue note says `regular pool full (7/7)`. Composed ready/review dispatcher tests now reach real final
 claims at 70% CPU with seven regular runs, including an opposite normal lane,
 critical/elevated memory and a hard per-board `max_spawn` ceiling. Workers retain
 plain priority. These isolated tests do not establish live acceptance.

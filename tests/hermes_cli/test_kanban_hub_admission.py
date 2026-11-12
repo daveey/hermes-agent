@@ -622,6 +622,16 @@ def test_pool_budget_charges_marked_to_priority_then_regular():
     assert not plain.admits("capacity")
 
 
+def test_row_without_admission_column_reads_as_normal():
+    from hermes_cli.kanban_admission_pools import row_class
+    with closing(sqlite3.connect(":memory:")) as db:
+        db.row_factory = sqlite3.Row
+        legacy = db.execute("SELECT 't_1' AS id").fetchone()
+        marked = db.execute("SELECT 't_2' AS id, 'urgent' AS admission_class").fetchone()
+        unset = db.execute("SELECT 't_3' AS id, NULL AS admission_class").fetchone()
+    assert (row_class(legacy), row_class(marked), row_class(unset)) == ("normal", "urgent", "normal")
+
+
 def test_pool_census_uses_one_board_snapshot(board, monkeypatch):
     from hermes_cli import kanban_admission_pools as pools
     conn, home = board
