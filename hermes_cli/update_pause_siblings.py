@@ -34,6 +34,7 @@ _HOST = re.compile(r"^On `([^`]+)`", re.MULTILINE)
 _REFUSAL = re.compile(r"Latest refusal: (.*)$", re.MULTILINE)
 _SIBLING = re.compile(r"^Sibling alarm: (t_\w+)", re.MULTILINE)
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
+_CAUSE = re.compile(r"\[cause: (.*)\]")
 
 
 def alarm_key(host: str, root, unit: str) -> str:
@@ -55,13 +56,21 @@ def host_identity(conn: sqlite3.Connection) -> tuple[str, frozenset]:
 
 
 def refusal_class(unit: str, reason) -> str:
-    """The refusal without its variable parts: the unit name, numbers (pids, seconds) and the detail
-    after the first ``": "`` (stderr, exception text). Two hosts refused alike when the classes match."""
-    text = str(reason or "")
+    """The refusal's first line without its variable parts: the unit name, numbers (pids, seconds) and
+    detail (stderr, exception text) after a ``": "``. Two hosts refused alike when the classes match.
+
+    The busy refusal carries its cause as ``[cause: <cause>]`` (``update_cmd_posix_pause``): the cause's
+    head is kept and only its own detail dropped, so "refused the update checkpoint", "did not answer
+    the pause request (TimeoutError" and "gave no answer on its control socket" stay distinct classes."""
+    lines = str(reason or "").strip().splitlines()
+    text = lines[0] if lines else ""  # the body keeps only this line (``_REFUSAL``): class both alike
     if unit:
         text = text.replace(unit, "<unit>")
-    text = _NUMBER.sub("N", text.split(": ", 1)[0])
-    return " ".join(text.lower().split())[:200]
+    if m := _CAUSE.search(text):
+        text = f"{text[:m.start()]}[cause: {m.group(1).split(': ', 1)[0]}]{text[m.end():]}"
+    else:
+        text = text.split(": ", 1)[0]
+    return " ".join(_NUMBER.sub("N", text).lower().split())[:200]
 
 
 def _db_path(conn: sqlite3.Connection) -> Optional[str]:
@@ -108,13 +117,17 @@ def _board_alarms(conn: sqlite3.Connection, unit: str) -> list[dict]:
 
 
 def find_sibling(conn: sqlite3.Connection, unit: str, reason, own: frozenset) -> Optional[dict]:
-    """The oldest open alarm another host filed for ``unit`` with this refusal's class, else None.
-    Oldest, so a third host joins the first investigation rather than a follower of it."""
+    """The open alarm another host filed for ``unit`` with this refusal's class that leads the shared
+    investigation, else None: the oldest one that names no open sibling itself, so a third host joins
+    the first investigation rather than a follower of it. ``created_at`` has one-second resolution and
+    ids are random, so age alone cannot order two alarms filed in the same second."""
     want = refusal_class(unit, reason)
-    for alarm in _board_alarms(conn, unit):
-        if alarm["host"] and alarm["host"] not in own and refusal_class(unit, alarm["refusal"]) == want:
-            return alarm
-    return None
+    alarms = _board_alarms(conn, unit)
+    open_ids = {a["id"] for a in alarms}
+    matches = [a for a in alarms
+               if a["host"] and a["host"] not in own and refusal_class(unit, a["refusal"]) == want]
+    leads = [a for a in matches if a["sibling"] not in open_ids]
+    return (leads or matches or [None])[0]
 
 
 def sibling_section(sibling: dict, host: str) -> str:
