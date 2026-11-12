@@ -61,11 +61,11 @@ def notice_fields(conn, task_id: str) -> dict[str, Any]:
     """
     import os
     import socket
-    from pathlib import Path
+    from hermes_cli._startup_fast import project_root_str
     from hermes_cli.git_fingerprint import process_boot_fingerprint
     from hermes_cli.kanban_sync_client import SyncUnavailable, load_identity
 
-    fingerprint = process_boot_fingerprint(Path(__file__).resolve().parents[1])
+    fingerprint = process_boot_fingerprint(project_root_str())
     diagnostic: dict[str, Any] = {
         "emitter_pid": os.getpid(), "emitter_host": socket.gethostname(),
         "core_revision": fingerprint.rsplit(":", 1)[-1] if fingerprint else None,
