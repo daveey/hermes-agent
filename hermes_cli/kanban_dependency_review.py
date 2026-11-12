@@ -89,7 +89,19 @@ def _completed_review_run(conn, parent_id, parked_at, owner_run_id):
         "WHERE t.id = ? AND t.status = 'done' ORDER BY r.id DESC LIMIT 1",
         (parent_id,),
     ).fetchone()
-    if (row is None or not row["was_claimed"] or row["outcome"] != "completed"
+    if row is None:
+        # A checkpointed move can leave the parent's run on another gateway.
+        # Use the refreshed Board result, never a move-supplied verdict or a
+        # source database's integer run ID as a local identity.
+        from hermes_cli.kanban_move_parent_evidence import result
+        owner = conn.execute("SELECT task_id FROM task_runs WHERE id = ?", (owner_run_id,)).fetchone()
+        mirrored = result(conn, owner[0], parent_id) if owner else None
+        if (mirrored and mirrored.get("parent_status") == "done" and mirrored.get("was_claimed")
+                and mirrored.get("outcome") == "completed"
+                and (kb._to_epoch(mirrored.get("ended_at")) or 0) >= parked_at):
+            return mirrored
+        return None
+    if (not row["was_claimed"] or row["outcome"] != "completed"
             or row["id"] == owner_run_id
             or (kb._to_epoch(row["ended_at"]) or 0) < parked_at):
         return None

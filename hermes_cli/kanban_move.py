@@ -214,7 +214,7 @@ def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: s
     return out
 
 
-def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: str, force: bool = False,
+def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: str, checkpoint: str = "", force: bool = False,
                 machines: Optional[Mapping[str, Mapping[str, Any]]] = None, me: Optional[str] = None,
                 cfg: Optional[dict] = None, hub: Any = None) -> dict[str, Any]:
     """Move a card that is NOT running (ready/todo/scheduled/blocked/triage): same guards, no run to end.
@@ -247,7 +247,9 @@ def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason:
         kb._append_event(conn, task_id, MOVED_EVENT, {
             "from_machine": plan["me"], "runs_on": plan["runs_on"], "previous_runs_on": plan["previous"],
             "reason": reason[:500], "move_no": plan["move_no"], "forced": plan["forced"],
-            "matches": plan["matches"], "queued": True})
+            "matches": plan["matches"], "queued": True, "checkpoint": checkpoint.strip()})
+        if checkpoint.strip():
+            kb.add_comment(conn, task_id, "kanban-operator", f"Move checkpoint:\n\n{checkpoint.strip()}")
     return {"ok": True, "runs_on": plan["runs_on"], "matches": plan["matches"], "move_no": plan["move_no"],
             "status": row["status"]}
 

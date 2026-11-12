@@ -400,6 +400,9 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
             "SELECT metadata, summary FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (parent,),
         ).fetchone()
         if result is None:
+            from hermes_cli.kanban_move_parent_evidence import result as moved_parent_result
+            result = moved_parent_result(conn, task_id, parent)
+        if result is None:
             # A synced parent another gateway owns has no local run to read. When the
             # owner's checkpoint names it as already done at park time (in parents,
             # not awaited), its result predates the park and cannot authorize or

@@ -900,7 +900,8 @@ def _cmd_move(args: argparse.Namespace) -> int:
             else:
                 res = km.move_reclaim(conn, args.task_id, runs_on=labels, reason=args.reason, force=args.force)
         else:
-            res = km.move_queued(conn, args.task_id, runs_on=labels, reason=args.reason, force=args.force)
+            res = km.move_queued(conn, args.task_id, runs_on=labels, reason=args.reason,
+                                 checkpoint=args.checkpoint or "", force=args.force)
     if getattr(args, "json", False):
         print(json.dumps(res))
     elif res.get("ok"):

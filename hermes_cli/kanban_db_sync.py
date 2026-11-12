@@ -351,22 +351,34 @@ def refresh_remote_parents(live: sqlite3.Connection, replica: sqlite3.Connection
         return []
     wanted = [r[0] for r in live.execute(
         "SELECT DISTINCT l.parent_id FROM task_links l LEFT JOIN tasks p ON p.id = l.parent_id WHERE p.id IS NULL")]
-    found: dict[str, str] = {}
-    for i in range(0, len(wanted), 500):
-        chunk = wanted[i:i + 500]
-        found.update({r[0]: r[1] for r in replica.execute(
-            f"SELECT id, status FROM tasks WHERE id IN ({','.join('?' * len(chunk))})", chunk)})
-    current = {r[0]: r[1] for r in live.execute(f"SELECT parent_id, status FROM {REMOTE_PARENTS_TABLE}")}
-    if current == found:
-        return []
-    changed = sorted(k for k in set(current) | set(found) if current.get(k) != found.get(k))
-    now = int(time.time())
+    from hermes_cli import kanban_move_parent_evidence as evidence
     from hermes_cli.kanban_db_connect import write_txn
+
+    # Status and result must describe the same replica snapshot. A savepoint also
+    # composes with callers already reading a transaction on this connection.
+    replica.execute("SAVEPOINT move_parent_snapshot")
+    try:
+        found: dict[str, str] = {}
+        for i in range(0, len(wanted), 500):
+            chunk = wanted[i:i + 500]
+            found.update({r[0]: r[1] for r in replica.execute(
+                f"SELECT id, status FROM tasks WHERE id IN ({','.join('?' * len(chunk))})", chunk)})
+        values, evidence_changed = evidence.prepare(live, replica, wanted)
+    finally:
+        replica.execute("RELEASE move_parent_snapshot")
+    current = {r[0]: r[1] for r in live.execute(f"SELECT parent_id, status FROM {REMOTE_PARENTS_TABLE}")}
+    changed = {k for k in set(current) | set(found) if current.get(k) != found.get(k)}
+    if not changed and not evidence_changed:
+        return []  # An unchanged sync round must not acquire a primary write lock.
     with write_txn(live):
-        live.execute(f"DELETE FROM {REMOTE_PARENTS_TABLE}")
-        live.executemany(f"INSERT INTO {REMOTE_PARENTS_TABLE} (parent_id, status, refreshed_at) VALUES (?, ?, ?)",
-                         [(pid, st, now) for pid, st in found.items()])
-    return changed
+        if evidence_changed:
+            evidence.apply(live, values)
+        if changed:
+            now = int(time.time())
+            live.execute(f"DELETE FROM {REMOTE_PARENTS_TABLE}")
+            live.executemany(f"INSERT INTO {REMOTE_PARENTS_TABLE} (parent_id, status, refreshed_at) VALUES (?, ?, ?)",
+                             [(pid, st, now) for pid, st in found.items()])
+    return sorted(changed | set(evidence_changed))
 
 
 def install_or_remove(conn: sqlite3.Connection, db_path: str) -> None:
