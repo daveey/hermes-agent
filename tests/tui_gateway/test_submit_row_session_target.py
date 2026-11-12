@@ -359,3 +359,37 @@ def test_busy_queue_accept_row_lands_with_the_turn_and_is_addressed_there(monkey
     finally:
         server._sessions.pop(sid, None)
         db.close()
+
+
+def test_queued_row_accepted_before_a_rotation_is_not_adopted_in_the_parent(monkeypatch, tmp_path):
+    """A busy-queued prompt accepted into parent P, then turn A compresses and rotates the agent to
+    continuation C (reply A lands in C). In P the accept row is still the last active row, so the
+    in-place adoption guard would match there — but the drained turn flushes under C. Adopting in P
+    strands the turn's user row (marked persisted, so the flush never re-writes it) in the closed
+    parent: the #123545 split. The drain must re-append into C and retire P's copy."""
+    db = SessionDB(db_path=tmp_path / "state.db")
+    sid, key = _desktop_session(monkeypatch, db)
+    session = server._sessions[sid]
+    try:
+        assert server._ensure_session_db_row(session) is not False
+        agent = _flush_agent(db, key)
+        session["agent"] = agent
+        with session["history_lock"]:
+            session["running"] = True
+            server._start_inflight_turn(session, "turn A")
+        db.append_message(key, "user", content="turn A")
+        assert server._handle_busy_submit("r1", sid, session, "QUEUED-B", "ws-1",
+                                          queued=True, display_kind=None)["result"]["status"] == "queued"
+        child = _rotate_to_compression_child(db, key, agent, reopen_parent=False)
+        db.append_message(child, "assistant", content="reply A")
+
+        fresh = server._replace_queued_user_row_for_turn(session, session["queued_prompt"],
+                                                         is_dispatching=True)
+        assert fresh and fresh.get("_submit_row_session_id") == child, fresh
+        child_active = [r["content"] for r in db.get_messages_as_conversation(child) if r["role"] == "user"]
+        parent_active = [r["content"] for r in db.get_messages_as_conversation(key) if r["role"] == "user"]
+        assert [c for c in child_active if "QUEUED-B" in str(c)] == ["QUEUED-B"], child_active
+        assert not [c for c in parent_active if "QUEUED-B" in str(c)], parent_active
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()

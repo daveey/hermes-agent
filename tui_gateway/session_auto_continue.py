@@ -564,6 +564,12 @@ def _adopt_queued_user_row_in_place(session: dict, early: dict) -> dict | None:
             return None
         try:
             key = _submit_row_owner_key(early, session)
+            # The row was written under the session live at ACCEPT; the turn flushes under the
+            # session live NOW. A mid-turn compression in between rotated the agent to a
+            # continuation: adopting the row in the closed parent strands the drained turn's user
+            # row there (#123545 split). Re-append into the flush session instead.
+            if key != _submit_row_target_key(session):
+                return None
             live_id = db.resolve_active_row_id(key, early["_row_id"])
             if not adopt_queued_user_row_in_place(db, key, live_id):
                 return None
