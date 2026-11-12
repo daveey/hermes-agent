@@ -196,3 +196,39 @@ def test_live_quota_room_needs_a_live_entry(monkeypatch):
         raise OSError('unreadable')
     monkeypatch.setattr(credential_pool, 'load_pool', boom)
     assert walls.live_quota_room('anthropic', 'claude-opus-5-5') is False
+
+
+@pytest.mark.parametrize('evidence', ['provider_file', 'live_pool'])
+def test_lifted_foreign_wall_still_honours_base_route_walled_elsewhere(
+        board, monkeypatch, all_assignees_spawnable, evidence):
+    """Review of PR #1400: lifting every wall must not skip the walled-elsewhere check on the base route.
+
+    A card moved off codex onto Opus and walled there on A must not be admitted on B (Opus room) onto its
+    codex base route while codex is walled by the provider file or B's live pool."""
+    from hermes_cli.kanban_quota_episode import episode
+    from tests.hermes_cli.test_kanban_quota_episode import reap
+    from tests.hermes_cli.test_kanban_quota_episode_walls import _clock as _walls_clock, _hub_tier
+    clock = _walls_clock(monkeypatch)
+    config, _ = routing(monkeypatch)
+    config['model_routing']['enabled'] = False
+    _hub_tier(monkeypatch)
+    codex_reset = clock[0] + 55 * 3600
+    if evidence == 'provider_file':
+        monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'openai-codex': float(codex_reset)})
+        monkeypatch.setattr(walls, 'live_quota_wall', lambda *_a, **_k: None)
+    else:
+        monkeypatch.setattr(walls, 'active_walls', lambda **_k: {})
+        monkeypatch.setattr(walls, 'live_quota_wall',
+                            lambda provider, model: float(codex_reset) if provider == 'openai-codex' else None)
+    monkeypatch.setattr(walls, 'live_quota_room', lambda provider, model: provider == 'anthropic')
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title='moved to anthropic then walled there on A', assignee='a')
+        reap(conn, tid, text='Anthropic usage limit resets in ~11h', provider='anthropic',
+             fields={'route_provider': 'anthropic', 'route_model': 'claude-opus-5-5'})
+        assert episode(conn, tid)['providers'] == ['anthropic']
+        monkeypatch.setattr(kb, '_host_prefix', lambda: 'worker-b:')
+        clock[0] += 301
+        seen = []
+        dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.model_override, task.provider_override)))
+        # Codex (the base route) is walled elsewhere: never spawn into it. Opus (room here) or a hold are fine.
+        assert ('gpt-6-astra', 'openai-codex') not in seen, seen

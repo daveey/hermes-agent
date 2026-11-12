@@ -235,18 +235,17 @@ def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
     outstanding = _outstanding(conn, task.id, state, now)
     if not outstanding:
         return None, None
+    state = max(outstanding, key=lambda s: s['until'])
+    held = 'subscription_quota_reset' if state['hinted'] else 'rate_limit_cooldown'
     try:
         outstanding = [wall for wall in outstanding if not _served_here(conn, task, wall, now)]
     except sqlite3.Error:
         raise
     except Exception:
         logger.warning('kanban quota: local pool check failed for %s; keeping its walls', task.id, exc_info=True)
-    if not outstanding:
-        # Every wall was another gateway's (or a stale one of ours) and this pool has room now: admit.
-        # If the run hits the wall here, its own new episode holds it on this gateway.
-        return None, None
-    state = max(outstanding, key=lambda s: s['until'])
-    held = 'subscription_quota_reset' if state['hinted'] else 'rate_limit_cooldown'
+    # Every wall was another gateway's (or a stale one of ours) and this pool has room now. The base route
+    # still goes through the walled-elsewhere check below; a run that hits the wall here records a new episode.
+    lifted = not outstanding
     walls, unknown = {}, False
     for wall in outstanding:
         names = _providers(wall)
@@ -257,6 +256,9 @@ def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
     try:
         base = base or resolve_model_tier(conn, task, lane=lane, cfg=cfg)
         target = _base_route(task, base)
+        if target is None and lifted:
+            # A class route: the worker allocates it against this gateway's live pool, which has room.
+            return None, None
         if target is not None and not unknown and target[1] not in walls:
             # A provider this episode never hit may still be walled (another card's wall, the live pool):
             # admitting it would send a card moved off codex, then walled on anthropic, back to codex.
