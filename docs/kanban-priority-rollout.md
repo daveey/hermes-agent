@@ -39,6 +39,13 @@ CLI. A dispatched worker or delegated descendant cannot execute it, including
 through a shell subprocess. Do not clear lineage, proxy it through SSH, or invoke
 Python/SQL directly to evade this boundary. An actual operator must execute the
 commands in their own operator session. No automatic worker grant is introduced.
+A running non-worker dispatcher is not authorization for a worker to enqueue
+board-wide changes: existing supervisor request families remain creator-scoped.
+The rollout owner must arrange genuine operator execution on **each** origin;
+without that operator, stop before preparing or applying and request their action.
+The commands below are an operator handoff, not a worker-executable runbook.
+Digest binding and membership/value CAS provide freshness; there is no time-based
+grant or expiry. Implementation tests do not establish live operator authorization.
 
 1. Coordinate a quiet migration window across all origins. Before installing any
    cap-aware imports, prepare from the raw canonical Board snapshot (no local

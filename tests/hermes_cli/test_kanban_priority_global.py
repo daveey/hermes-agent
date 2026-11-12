@@ -42,3 +42,15 @@ def test_global_plan_reserves_exception_bands_and_records_terminal_resolution():
         {"id": "operator", "status": "ready", "origin": "one", "old": 20002},
     ]
     assert "earlier" not in by_id
+
+
+def test_both_open_exceptions_keep_requested_order_above_ordinary():
+    rows = [
+        {"id": "ordinary", "priority": 90000, "created_on": "one", "status": "ready"},
+        {"id": "earlier", "priority": 50000, "created_on": "two", "status": "blocked"},
+        {"id": "operator", "priority": 20002, "created_on": "one", "status": "running"},
+    ]
+    plan = migration.plan_global(rows, board_id="board", exceptions=["earlier", "operator"])
+    by_id = {row["id"]: row for row in plan["rows"]}
+    assert 0 < by_id["ordinary"]["new"] < by_id["earlier"]["new"] < by_id["operator"]["new"] == 900
+    assert [row["old"] for row in plan["exceptions"]] == [50000, 20002]
