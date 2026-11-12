@@ -14,8 +14,9 @@ import time
 REASON = "needs worker coordination capability"
 ACTION_REASON = "needs home coordination action"
 # Intentionally narrower than the CLI: status and pull are the reader install's proof.
-_HUB = re.compile(r"(?<![\w/.-])hermes-hub\b(?![/.-])", re.IGNORECASE)
-_CROSS = re.compile(r"(?<![\w/.-])cross_task\b(?![/.-])", re.IGNORECASE)
+# A possessive (``hermes-hub's older core``) names the host in prose; it is not an invocation.
+_HUB = re.compile(r"(?<![\w/.-])hermes-hub\b(?![/.-]|['\u2019]s(?![\w-]))", re.IGNORECASE)
+_CROSS = re.compile(r"(?<![\w/.-])cross_task\b(?![/.-]|['\u2019]s(?![\w-]))", re.IGNORECASE)
 _HUB_ACTIONS = set(("status pull sync sessions inbox tasks where links request requests "
                     "inspect-legacy reconcile-legacy inspect-alias retire-alias adopt-task "
                     "create-task depend outcomes install-watch watch diff-shared").split())
