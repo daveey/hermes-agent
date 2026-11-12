@@ -135,6 +135,9 @@ class GatewayChatView:
         # connection (set by ``run_gateway_chat``); None never redials.
         self.reconnect: Callable[[], Awaitable[Any]] | None = None
         self.redials = 0
+        # [daveey] A finite run's bounded pre-admission wait (``gateway_update_wait.UpdateWait``), shared with
+        # its attach: a submit a draining owner refused goes to the next owner (``_submit_finite``).
+        self.update_wait: Any = None
         self._renderer: asyncio.Task | None = None
 
     def unknown_admissions(self):
@@ -244,6 +247,12 @@ class GatewayChatView:
                     logger.debug("gateway redial gave up: %s", exc)
                     return False
                 await asyncio.sleep(REDIAL_RETRY_S)
+        await self._swap_client(client)
+        await self._reattach()
+        return self.failure is None
+
+    async def _swap_client(self, client):
+        """Render from *client* (a fresh connection to the restarted owner) instead of the old one."""
         renderer = self._renderer
         if renderer is not None:
             renderer.cancel()
@@ -252,8 +261,32 @@ class GatewayChatView:
         self.client, self.failure = client, None
         self.failed.clear()
         self._renderer = asyncio.create_task(self.render())
-        await self._reattach()
-        return self.failure is None
+
+    async def _submit_finite(self, query):
+        """[daveey] The one-shot's submit. An owner draining for a core update refuses it (``runtime_draining``,
+        ``runtime_retired``) with nothing admitted, so the prompt goes to the restarted owner instead: dial it,
+        re-attach the session and submit again, within the run's ``update_wait`` window. Any other refusal, or
+        a view without a dialer or wait, raises as before."""
+        from hermes_cli.gateway_client import GatewayRPCError
+        wait = self.update_wait
+        while True:
+            try:
+                return await self.submit(query)
+            except GatewayRPCError as exc:
+                if wait is None or self.reconnect is None:
+                    raise
+                await wait.retry(exc)
+            while True:
+                client = await wait.dial(self.reconnect)
+                try:
+                    snapshot = await client.rpc("session.resume", session_id=self.session_id)
+                    break
+                except GatewayRPCError as exc:
+                    await wait.retry(exc)
+            await self._swap_client(client)
+            self.generation = snapshot.get("execution_generation", self.generation)
+            self.pending = snapshot.get("pending", self.pending)
+            self.prompts = {p["prompt_id"]: p for p in snapshot.get("prompts", [])}
 
     async def _redial_or_raise(self):
         """The one-shot wait's failure: redialled (``_redial``), or raised as before."""
@@ -607,7 +640,8 @@ class GatewayChatView:
                                 "and /discard the paused turn there; then send it again.")
         renderer = self._renderer = asyncio.create_task(self.render())
         try:
-            receipt = await self.submit(query) if query else None
+            submit = self._submit_finite if oneshot else self.submit
+            receipt = await submit(query) if query else None
             if oneshot:
                 admission = _oneshot_admission(receipt)
                 if admission is None:
