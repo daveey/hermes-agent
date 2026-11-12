@@ -644,7 +644,10 @@ def _format_kanban_event_text(sub: dict, task, ev, board_slug: str) -> Optional[
     prefix = f"{glyph} " + (f"[{board_slug}] " if board_slug else "") + (f"@{who} " if who else "")
     payload = getattr(ev, "payload", None) or {}
     if getattr(ev, "kind", "") == "blocked":
-        from hermes_cli.kanban_block_notice import block_notice
+        from hermes_cli.kanban_block_notice import ask_update_notice, block_notice, is_metadata_only
+        if is_metadata_only(payload):  # an ask amendment, not a new block; silent for the editing chat [daveey]
+            body = ask_update_notice(task, task_id, board_slug, payload, chat_id=sub.get("chat_id"))
+            return f"{prefix}Kanban {task_id} {body}" if body is not None else None
         return f"{prefix}Kanban {task_id} " + block_notice(task, task_id, board_slug, reason=str(payload.get("reason") or ""), actor=str(payload.get("actor") or ""))
     if getattr(ev, "kind", "") == "completed":
         # A worker refused a send into this chat put its message in the summary as a FINAL SEND line. [daveey]

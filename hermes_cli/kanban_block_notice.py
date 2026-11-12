@@ -13,6 +13,59 @@ def blocked_actor_fields(conn, task_id: str) -> dict:
     return {"block_actor": actor} if isinstance(actor, str) and actor else {}
 
 
+def _actor_session(actor) -> str:
+    """The chat session id an ``agent (chat <id>)`` audit label names, else ``""``."""
+    if not isinstance(actor, str) or not actor.startswith("agent (chat ") or not actor.endswith(")"):
+        return ""
+    return actor[len("agent (chat "):-1].strip()
+
+
+def actor_is_chat(actor, chat_id) -> bool:
+    """Whether the audit actor is the subscriber chat ``chat_id``.
+
+    The actor carries either the raw session id or the gateway session key
+    (``agent:<ns>:<platform>:dm:<id>``); subscriptions store the bare ``<id>``.
+    Only DM keys are reduced to their chat id: group/thread keys append thread
+    and participant segments, so they never match by suffix. [daveey]
+    """
+    session, chat = _actor_session(actor), str(chat_id or "").strip()
+    if not session or not chat:
+        return False
+    if session == chat:
+        return True
+    parts = session.split(":")
+    return len(parts) >= 5 and parts[0] == "agent" and parts[3] == "dm" and ":".join(parts[4:]) == chat
+
+
+def is_metadata_only(payload) -> bool:
+    """A ``blocked`` event that amended a parked card's ask without a new block transition."""
+    return isinstance(payload, dict) and payload.get("metadata_only") is True
+
+
+def ask_update_notice(task, task_id: str, board: str, payload, *, chat_id: str | None = "", gateway: str = "") -> str | None:
+    """Notice text for a metadata-only ask amendment; ``None`` = silent for this chat.
+
+    The chat that made the edit already knows it, so it gets nothing. Other
+    subscribers get one line with the new action, not a fresh "blocked —"
+    notice: the card did not block again. [daveey]
+    """
+    if actor_is_chat(payload.get("actor"), chat_id):
+        return None
+
+    def get(key, default=None):
+        return task.get(key, default) if isinstance(task, dict) else getattr(task, key, default)
+
+    status = get("status")
+    if status and status not in {"blocked", "triage"}:
+        return block_notice(task, task_id, board, gateway=gateway, reason=str(payload.get("reason") or ""),
+                            actor=str(payload.get("actor") or ""))
+    request = payload.get("human_request")
+    action = request.get("action") if isinstance(request, dict) else None
+    link = f"@task:{board or 'default'}{'@' + gateway if gateway else ''}/{task_id}"
+    text = " ".join(str(action).split()) if action else "no human action recorded"
+    return f"ask updated (card still blocked): {text} — open task: {link}"
+
+
 def block_notice(task, task_id: str, board: str, *, gateway: str = "", reason: str = "", actor: str = "") -> str:
     """Use current card evidence, never event prose, to assign a human action.
 

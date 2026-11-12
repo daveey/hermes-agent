@@ -467,8 +467,19 @@ def _fmt_block_loop_detected(ev, n) -> tuple:
     return msg, None, None
 
 
+def _own_ask_amend(ev, chat_id) -> bool:
+    """A metadata-only ask amendment made by the subscriber chat itself."""
+    from hermes_cli.kanban_block_notice import actor_is_chat, is_metadata_only
+    return ev.kind == "blocked" and is_metadata_only(ev.payload) and actor_is_chat(ev.payload.get("actor"), chat_id)
+
+
 def _fmt_blocked(ev, n) -> tuple:
-    from hermes_cli.kanban_block_notice import block_notice
+    from hermes_cli.kanban_block_notice import ask_update_notice, block_notice, is_metadata_only
+    if is_metadata_only(ev.payload):
+        # An ask amendment on a card already parked, not a new block. [daveey]
+        chat_id = (getattr(n, "sub", None) or {}).get("chat_id")
+        body = ask_update_notice(n.task, n.task_id, n.board_slug, ev.payload, chat_id=chat_id)
+        return (f"⏸ {n.head} {body}", body, None) if body is not None else (None, None, None)
     body = block_notice(n.task, n.task_id, n.board_slug, reason=str(_payload(ev, "reason") or ""), actor=str(_payload(ev, "actor") or ""))
     return f"⏸ {n.head} {body}", body, None
 
@@ -558,6 +569,10 @@ class _KanbanNotification:
         self.platform_cls = platform_cls
         self.sub_fail_counts = sub_fail_counts
         self.sub = sub = d["sub"]
+        # The chat that amended an ask metadata-only already knows it: no ping and no wake for it,
+        # while the claimed cursor still passes the event. [daveey]
+        if any(_own_ask_amend(ev, sub.get("chat_id")) for ev in d["events"]):
+            self.d = d = {**d, "events": [ev for ev in d["events"] if not _own_ask_amend(ev, sub.get("chat_id"))]}
         self.task = task = d["task"]
         self.board_slug = d.get("board")
         self.platform_str = (sub["platform"] or "").lower()

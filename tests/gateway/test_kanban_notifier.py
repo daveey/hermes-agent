@@ -796,3 +796,80 @@ def test_review_requested_does_not_wake_a_notify_only_subscription(
     assert adapter.handled == [], (
         "notify-only subscriptions must not be woken by a review handoff"
     )
+
+
+_ASK = dict(action="Choose A. Unblock = proceed; archive = drop it.", why_human="Owner decision",
+            interaction="reply", scope="Fixture", evidence="Fixture decision")
+_EDITOR = "agent (chat agent:main:telegram:dm:chat-1)"
+
+
+def _amend_fixture(monkeypatch, tmp_path, *, metadata_only):
+    """Two notify+wake subs on a parked card; chat-1 then amends (or really blocks) it."""
+    from hermes_cli.kanban_human_request_migration import classify_parked_request
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "ask-amend.db"))
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    kb.init_db()
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="ask amend", assignee="worker")
+        for chat in ("chat-1", "chat-2"):
+            kbn.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id=chat,
+                               chat_type="dm", delivery_mode="notify+wake")
+        if not metadata_only:
+            assert kb.block_task(conn, tid, reason="decide", kind="needs_input", human_request=_ASK, actor=_EDITOR)
+        else:
+            assert kb.block_task(conn, tid, reason="decide", kind="needs_input",
+                                 human_request={**_ASK, "action": "Choose A."}, actor="user")
+    finally:
+        conn.close()
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    if metadata_only:
+        asyncio.run(_run_one_notifier_tick(monkeypatch, runner))  # drain the original block
+        adapter.sent.clear()
+        adapter.handled.clear()
+        conn = kbc.connect()
+        try:
+            assert classify_parked_request(conn, tid, human_request=_ASK, actor=_EDITOR, reason="decide")
+        finally:
+            conn.close()
+        runner._running = True
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    return tid, adapter
+
+
+def _cursor_passes_last_event(tid, chat):
+    conn = kbc.connect()
+    try:
+        _, events = kbn.unseen_events_for_sub(conn, task_id=tid, platform="telegram", chat_id=chat, kinds=["blocked"])
+        return events == []
+    finally:
+        conn.close()
+
+
+def test_metadata_only_ask_amend_is_silent_for_the_editing_chat(tmp_path, monkeypatch):
+    """(a) The chat that amended the ask gets no ping and no wake; its cursor still passes the event."""
+    tid, adapter = _amend_fixture(monkeypatch, tmp_path, metadata_only=True)
+    assert [m["chat_id"] for m in adapter.sent] == ["chat-2"]
+    assert all(e.source.chat_id != "chat-1" for e in adapter.handled)
+    assert _cursor_passes_last_event(tid, "chat-1")
+
+
+def test_metadata_only_ask_amend_tells_other_subscribers_ask_updated(tmp_path, monkeypatch):
+    """(b) Another subscriber gets one "ask updated" line carrying the new action, no "blocked —" notice."""
+    tid, adapter = _amend_fixture(monkeypatch, tmp_path, metadata_only=True)
+    (text,) = [m["text"] for m in adapter.sent if m["chat_id"] == "chat-2"]
+    assert "ask updated (card still blocked): " + _ASK["action"] in text
+    assert "blocked —" not in text and "Next action for the user" not in text
+    assert len(text.splitlines()) == 1
+    assert _cursor_passes_last_event(tid, "chat-2")
+
+
+def test_real_block_by_the_same_chat_still_notifies_it(tmp_path, monkeypatch):
+    """(c) Current policy: a real block transition notifies every subscriber, its own actor chat included."""
+    _, adapter = _amend_fixture(monkeypatch, tmp_path, metadata_only=False)
+    assert sorted(m["chat_id"] for m in adapter.sent) == ["chat-1", "chat-2"]
+    for m in adapter.sent:
+        assert f"blocked — actor: {_EDITOR}" in m["text"]
+        assert "Next action for the user: " + _ASK["action"] in m["text"]
+    assert sorted(e.source.chat_id for e in adapter.handled) == ["chat-1", "chat-2"]

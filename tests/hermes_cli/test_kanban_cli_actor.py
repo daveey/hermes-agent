@@ -46,14 +46,22 @@ def test_cli_block_actor_and_notice(monkeypatch, marker, metadata_only):
     if marker in {"HERMES_SESSION_ID", "HERMES_SESSION_KEY"}:
         assert "chat fixture-chat-123" in actor
     text = _format_kanban_event_text({"task_id": tid}, task, event, "default")
-    assert f"actor: {actor}" in text
+    if metadata_only:  # an ask amendment reads as one "ask updated" line, never a fresh block [daveey]
+        assert text.endswith(f"Kanban {tid} ask updated (card still blocked): {REQUEST['action']} "
+                             f"— open task: @task:default/{tid}")
+        assert "blocked —" not in text
+        chat = actor[len("agent (chat "):-1] if actor.startswith("agent (chat ") else None
+        if chat:
+            assert _format_kanban_event_text({"task_id": tid, "chat_id": chat}, task, event, "default") is None
+    else:
+        assert f"actor: {actor}" in text
     from hermes_cli.kanban_origin_ledger import observe_owner_task
     from tui_gateway.kanban_remote_notices import format_notice
     with connect_closing() as conn, db.write_txn(conn):
         projected = observe_owner_task(conn, {"id": tid, "status": "blocked", "human_request": REQUEST}, now=0)
     remote = format_notice("other-host", "default/" + tid, projected)
     assert f"actor: {actor}" in remote
-    assert "Next action for the user:" in text
+    assert "Next action for the user:" in text or metadata_only
     if marker:
         assert "actor: user" not in text
     assert cli("unblock", tid) == 0
