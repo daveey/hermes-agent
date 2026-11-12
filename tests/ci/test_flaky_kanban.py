@@ -298,6 +298,8 @@ def test_flaky_test_passes_and_files_a_card_while_a_hard_failure_stays_red(tmp_p
     (root / "scripts" / "ci").mkdir(parents=True)
     shutil.copy2(_ROOT / "scripts" / "run_tests_parallel.py", root / "scripts")
     shutil.copy2(_ROOT / "scripts" / "run_tests_host_slots.py", root / "scripts")
+    from tests._fixtures.runner_probe import add_runner_imports
+    add_runner_imports(root)
     shutil.copy2(_ROOT / "scripts" / "run_tests_parallel_rss.py", root / "scripts")
     shutil.copy2(_ROOT / "scripts" / "run_tests_launch.py", root / "scripts")
     shutil.copy2(_ROOT / "scripts" / "run_tests_fork_child.py", root / "scripts")

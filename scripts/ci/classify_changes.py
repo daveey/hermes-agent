@@ -273,6 +273,7 @@ _PY_TEST_HARNESS = (
     "scripts/run_tests.sh",
     "scripts/run_tests_parallel.py",
     "scripts/run_tests_host_slots.py",
+    "scripts/worker_test_budget.py",
     "scripts/run_tests_parallel_rss.py",
     "scripts/run_tests_launch.py",
     "scripts/run_tests_fork_child.py",
