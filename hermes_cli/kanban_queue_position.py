@@ -135,9 +135,10 @@ def recorded_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_diagnostics import _READY_WAIT_FLOOR_KINDS
+    from hermes_cli.kanban_quota_episode_release import KIND as QUOTA_RELEASED
 
     kinds = {*_READY_WAIT_FLOOR_KINDS, "respawn_guarded", "continued", "scheduled", "reassigned", "reopened",
-             "hold_released", "dispatch_skipped"}  # a later dispatcher skip is the newer verdict
+             "hold_released", "dispatch_skipped", QUOTA_RELEASED}  # a later dispatcher skip is the newer verdict
     slots = ",".join("?" for _ in kinds)
     row = conn.execute(
         f"SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ({slots}) "
@@ -150,7 +151,20 @@ def recorded_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
 
 
 def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Optional[dict[str, Any]]:
-    """The queue a ``ready`` ``task`` in this gateway's live file waits in; None for any other status."""
+    """The queue a ``ready`` ``task`` in this gateway's live file waits in; None for any other status.
+
+    A quota episode released since the card's last run (``quota_episode_released``) is named on the place, so
+    a read says the quota hold is gone instead of echoing the old ``subscription_quota_reset``."""
+    place = _position(conn, task, board)
+    if place:
+        from hermes_cli.kanban_quota_episode_release import covers_latest
+        released = covers_latest(conn, task.id)
+        if released:
+            place["quota_released"] = {k: released.get(k) for k in ("reason", "via", "actor", "until")}
+    return place
+
+
+def _position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Optional[dict[str, Any]]:
     if task is None or task.status != "ready":
         return None
     # [daveey] A ready card still holding a local claim is never picked (the dispatcher claims only claim_lock IS
@@ -261,6 +275,15 @@ def describe(place: Optional[dict[str, Any]]) -> Optional[str]:
     """One line for card reads (``kanban_show`` ``queue_note``, ``hermes kanban show``) saying what the card waits
     for, so "ready, no run" never reads as stuck. [daveey] kanban-7d720d4ab8: a chat saw only a null
     ``queue_reason`` for a card waiting on a full hub, called it stuck and ran its work in a subagent."""
+    words = _describe_lane(place)
+    released = (place or {}).get("quota_released")
+    if words and isinstance(released, dict):
+        words = (f"quota hold released ({released.get('reason') or 'no reason'}, via {released.get('via')}); "
+                 "the card is admissible again. " + words)
+    return words
+
+
+def _describe_lane(place: Optional[dict[str, Any]]) -> Optional[str]:
     if not place:
         return None
     lane = place.get("lane")

@@ -251,6 +251,29 @@ def prune_disproved_walls(*, now: Optional[float] = None, path: Optional[Path] =
     return dropped
 
 
+def drop_wall(provider: str, *, not_after: float, path: Optional[Path] = None) -> bool:
+    """Remove ``provider``'s wall when it ends no later than ``not_after`` (an operator-released episode's deadline:
+    the reaper copied the wall from that hint). A later wall came from other evidence and stays. True when removed.
+
+    ``record_wall`` only ever extends, so without this a released hint's wall outlived its episode's release.
+    """
+    provider = _norm(provider)
+    p = path or walls_path()
+    walls = _load(p)
+    until = walls.get(provider)
+    if until is None or until > not_after + 1:
+        return False
+    del walls[provider]
+    try:
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(walls), encoding="utf-8")
+        tmp.replace(p)
+    except OSError as exc:
+        logger.warning("kanban walls: cannot write %s (%s)", p, exc)
+        return False
+    return True
+
+
 def rate_limit_storm(conn: sqlite3.Connection, *, now: Optional[float] = None, prefix: Optional[str] = None) -> int:
     """``rate_limited`` runs in the last hour claimed by this host (claim ``prefix``, default this host's).
 

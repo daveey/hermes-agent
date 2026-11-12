@@ -17,6 +17,7 @@ from hermes_cli import kanban_db_notify as kbn
 # The `resume` handler rides kanban.py's existing kanban_parser import, so kanban.py (at its
 # FILE_LINES cap) gains no line for it. [daveey]
 from hermes_cli.kanban_operator_resume import cmd as cmd_resume
+from hermes_cli.kanban_quota_episode_release import cmd as cmd_quota_release  # same ride as cmd_resume
 
 
 def _arg(*flags: str, **kw):
@@ -551,6 +552,10 @@ _SPECS = [
         _TASK_ID,
         _arg("--reason", required=True, help="Why this owner should continue its PR (recorded as an event + comment)"),
     ], help="Operator-only: let a READY card held by the active_pr respawn guard run once more"),
+    _cmd("quota-release", [
+        _TASK_ID,
+        _arg("--reason", default="", help="Why the quota episode no longer holds (recorded as an event + comment)"),
+    ], help="Operator-only: end the card's quota episode (a stale 'resets at' hold) so it is admissible again"),
     _cmd("promote", [
         _TASK_ID,
         _arg("reason", nargs="*", help="Audit-trail reason (recorded on the task_events row)"),

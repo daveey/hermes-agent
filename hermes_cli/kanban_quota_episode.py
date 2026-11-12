@@ -40,11 +40,13 @@ def episode(conn, task_id, *, run_id=None):
                          (task_id, run_id)).fetchone() if run_id is not None else None
     if run_id is not None and bound is None:
         return None
+    from hermes_cli.kanban_quota_episode_release import released_run
+    released = released_run(conn, task_id)  # a quota_episode_released event closes every run up to it
     for row in conn.execute(
         "SELECT id, outcome, ended_at FROM task_runs WHERE task_id=? AND ended_at IS NOT NULL "
         "AND (? IS NULL OR (ended_at,id)<=(?,?)) ORDER BY ended_at DESC, id DESC",
         (task_id, run_id, bound['ended_at'] if bound else None, run_id)):
-        if row['outcome'] != 'rate_limited':
+        if row['outcome'] != 'rate_limited' or (released is not None and row['id'] <= released):
             break
         runs.append(row)
     if not runs:
