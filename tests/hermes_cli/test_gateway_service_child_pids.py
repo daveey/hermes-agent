@@ -126,3 +126,118 @@ def test_update_manual_sweep_leaves_the_units_gateway_child_alone(monkeypatch, w
     assert armed == [], "no detached --replace relaunch may be armed for the unit's own gateway"
     assert signalled == [] and killed == []
     assert out.killed_pids == set() and out.relaunched_profiles == []
+
+
+# --- the walk stops at the unit's gateway -------------------------------------------------------------
+# Kanban workers and agent terminals run below the unit's gateway. A `gateway run` an agent starts there is
+# a MANUAL gateway: the update sweep must see it, and `_stop_host_multiplexer`/uninstall must not take it
+# for the unit's own. Each tree below is real processes; every node records its pid in ``pids/<role>``.
+
+_NODE_SRC = textwrap.dedent("""
+    import json, os, subprocess, sys, time
+    spec = json.load(open(os.environ["TREE_SPEC"]))
+    role = os.environ["TREE_ROLE"]
+    for child in spec[role]["children"]:
+        subprocess.Popen([sys.executable, *spec[child]["argv"]], env={**os.environ, "TREE_ROLE": child})
+    with open(os.path.join(os.environ["TREE_PIDS"], role + ".tmp"), "w") as f:
+        f.write(str(os.getpid()))
+    os.replace(os.path.join(os.environ["TREE_PIDS"], role + ".tmp"), os.path.join(os.environ["TREE_PIDS"], role))
+    time.sleep(60)
+""")
+
+
+@pytest.fixture()
+def process_tree(tmp_path):
+    """Start ``{role: (kind, [child roles])}`` from role ``root``; kind is ``gateway`` (a ``hermes_cli/main.py
+    gateway run`` command line), ``wrapper_matching`` (gateway argv carried after ``--`` as data, like
+    ``github_quota.py … -- hermes gateway run``) or ``plain``. Returns ``{role: pid}``."""
+    import json
+
+    gateway_py = tmp_path / "hermes_cli" / "main.py"
+    gateway_py.parent.mkdir()
+    plain_py = tmp_path / "card_worker.py"
+    for script in (gateway_py, plain_py):
+        script.write_text(_NODE_SRC)
+    procs = []
+
+    def start(tree: dict):
+        argv_for = {
+            "gateway": [str(gateway_py), "gateway", "run"],
+            "wrapper_matching": [str(plain_py), "--reason=unit", "--", str(gateway_py), "gateway", "run"],
+            "plain": [str(plain_py)],
+        }
+        spec = {role: {"argv": argv_for[kind], "children": children} for role, (kind, children) in tree.items()}
+        spec_path = tmp_path / "spec.json"
+        spec_path.write_text(json.dumps(spec))
+        pids_dir = tmp_path / "pids"
+        pids_dir.mkdir()
+        env = {**os.environ, "TREE_SPEC": str(spec_path), "TREE_PIDS": str(pids_dir), "TREE_ROLE": "root"}
+        procs.append(subprocess.Popen([sys.executable, *spec["root"]["argv"]], env=env))
+
+        def all_started():
+            if not all((pids_dir / role).exists() for role in tree):
+                return None
+            return {role: int((pids_dir / role).read_text()) for role in tree}
+        return wait_until(all_started, timeout=20, what="every node of the process tree")
+
+    try:
+        yield start
+    finally:
+        for proc in procs:
+            try:
+                descendants = psutil.Process(proc.pid).children(recursive=True)
+            except psutil.NoSuchProcess:
+                descendants = []
+            for child in reversed(descendants):  # leaves first: an orphan leaves the test's subtree
+                child.kill()
+            proc.kill()
+            proc.wait(timeout=10)
+
+
+@pytest.mark.spawns_gateway_lookalike
+def test_walk_stops_at_the_wrapper_child_gateway(process_tree, monkeypatch):
+    """wrapper -> gateway -> card worker -> nested manual `gateway run`: only the first gateway is the unit's."""
+    pids = process_tree({
+        "root": ("plain", ["gateway"]),
+        "gateway": ("gateway", ["worker"]),
+        "worker": ("plain", ["nested"]),
+        "nested": ("gateway", []),
+    })
+    from hermes_cli.gateway_service_members import gateway_descendant_pids
+
+    assert gateway_descendant_pids(pids["root"]) == {pids["gateway"]}
+    gateway_mod = _systemd_host(monkeypatch, pids["root"])
+    service = gateway_mod._get_service_pids(all_profiles=True)
+    assert pids["nested"] not in service, "an agent's `gateway run` below the unit gateway is manual"
+    assert service == {pids["root"], pids["gateway"]}
+
+
+@pytest.mark.spawns_gateway_lookalike
+def test_no_descent_when_main_pid_is_the_gateway(process_tree, monkeypatch):
+    pids = process_tree({
+        "root": ("gateway", ["worker"]),
+        "worker": ("plain", ["nested"]),
+        "nested": ("gateway", []),
+    })
+    from hermes_cli.gateway_service_members import gateway_descendant_pids
+
+    assert gateway_descendant_pids(pids["root"]) == set()
+    gateway_mod = _systemd_host(monkeypatch, pids["root"])
+    assert gateway_mod._get_service_pids(all_profiles=True) == {pids["root"]}
+
+
+@pytest.mark.spawns_gateway_lookalike
+def test_a_wrapper_whose_command_line_matches_is_walked_through(process_tree):
+    """The worker-node wrapper (``github_quota.py … -- hermes gateway run``) matches the gateway matcher itself,
+    so "stop at the first match" alone would stop at the wrapper and lose the unit's real gateway (PR #1523)."""
+    pids = process_tree({
+        "root": ("wrapper_matching", ["gateway"]),
+        "gateway": ("gateway", ["worker"]),
+        "worker": ("plain", ["nested"]),
+        "nested": ("gateway", []),
+    })
+    from gateway.status import _read_process_cmdline, looks_like_gateway_command_line
+    from hermes_cli.gateway_service_members import gateway_descendant_pids
+
+    assert looks_like_gateway_command_line(_read_process_cmdline(pids["root"])), "fixture: wrapper must match"
+    assert gateway_descendant_pids(pids["root"]) == {pids["gateway"]}

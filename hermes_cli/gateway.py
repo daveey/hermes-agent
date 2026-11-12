@@ -146,11 +146,11 @@ def _get_service_pids(all_profiles: bool = False) -> set:
         pattern = "hermes-gateway*" if all_profiles else get_service_name()
         for scope_args in [["systemctl", "--user"], ["systemctl"]]:
             try:
-                # Belt-and-suspenders for the EXCLUDE use case (#74075): a bare ``launchctl list`` prefix
-                # scan also catches ai.hermes.gateway* agents the label derivation can't map (renamed
-                # profiles, other installs sharing this user). Over-inclusion is safe here — these PIDs are
-                # only ever protected from the kill sweep, never targeted. Restart paths use the
-                # label-derived set only.
+                # [daveey] These PIDs are not only protected: update/reaper sweeps skip them and inventory
+                # labels them service-managed, but find_gateway_pids -> kill_gateway_processes also TARGETS
+                # them (default scope: _stop_host_multiplexer, uninstall; all_profiles: `gateway stop --all`).
+                # So keep the set exact: the MainPID plus, behind a wrapper ExecStart, the unit's own
+                # `gateway run` child -- never a manual gateway an agent started below it.
                 result = subprocess.run(
                     scope_args
                     + ["list-units", pattern, "--plain", "--no-legend", "--no-pager"],
@@ -198,7 +198,7 @@ def _get_service_pids(all_profiles: bool = False) -> set:
                 pids.add(pid)
         if all_profiles:
             # Prefix scan also catches ai.hermes.gateway* agents the label derivation can't map
-            # (renamed profiles, other installs). Over-inclusion is safe: PIDs are only protected.
+            # (renamed profiles, other installs). Each is a launchd job's own PID (`gateway stop --all` targets it).
             try:
                 result = subprocess.run(["launchctl", "list"], timeout=5, **_CAPTURE_TEXT, check=False)
                 if result.returncode == 0:
