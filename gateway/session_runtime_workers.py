@@ -46,7 +46,7 @@ def kanban_managed_count(runner):
                for worker in getattr(authority, '_managed_workers', {}).values())
 
 
-def cron_turn_count(runner):
+def cron_turn_count(runner, *, mapped_only=False):
     """Executing authority turns of scheduled-job sessions (frozen policy source ``cron``).
 
     An agent cron fire runs its turn on the owner (``session_cron.operation('submit')``), so the
@@ -72,8 +72,14 @@ def cron_turn_count(runner):
                 policy = policy_for_source(runner, getattr(live, 'source', None))
             except Exception:  # health: allow BLE001 -- unreadable policy: not provably a cron turn, stays awaited
                 continue
-            count += getattr(policy, 'source', None) == 'cron'
+            count += (getattr(policy, 'source', None) == 'cron'
+                      and (not mapped_only or getattr(live, 'route', None) in running))
     return count
+
+
+def cron_chat_count(runner):
+    """The cut-cron turns also counted in the named chat bucket (not all cron turns)."""
+    return cron_turn_count(runner, mapped_only=True)
 
 
 def managed_worker_units(authority):

@@ -1,11 +1,11 @@
 """The ``active-work`` census and the instant-update checkpoint agree on what the checkpoint preserves.
 
-hermes-hub 2026-11-12 18:11Z: at the instant cap hermes-sync's census read ``active=7 units=7
-(cron,managed)``, found no unpreservable kind and launched the update; 9 s later the gateway refused the
-checkpoint (``preservable managed=3, cron=3``). Three units were Kanban cards and three were cron runs; the
-seventh was an executing session outside ``_running_agents`` (a turn before its agent is mapped), which
-``_describe_active_work`` lists as a sessionless ``managed`` unit while ``kanban_managed_count`` (rightly)
-does not preserve it. Once its agent was mapped it became the "1 chat turn" the refusal named.
+Synthetic accounting scenario consistent with hermes-hub's 2026-11-12 18:11Z logs: the census read
+``active=7 units=7 (cron,managed)``; nine seconds later a checkpoint refused with
+``preservable managed=3, cron=3`` and a named chat. Those aggregate snapshots do not prove continuity
+of the seventh unit. This fixture demonstrates one possible representation gap: an executing session
+outside ``_running_agents`` is listed as sessionless ``managed`` but is not a preservable card.
+Mapping that synthetic session then makes it a named chat; this is not a historical identity claim.
 
 Real ``GatewayRunner`` accounting (``_describe_active_work``, ``_active_work_count``, the legacy
 ``_running_agents`` view, ``uncounted_runtime_work``, ``kanban_managed_count``, ``cron_turn_count``) over
@@ -43,7 +43,7 @@ def _card_worker(pid):
 
 @pytest.fixture
 def hub(tmp_path, monkeypatch):
-    """The 18:11:25Z gateway: 3 Kanban card workers, 3 cron runs, 1 executing turn not yet mapped."""
+    """Synthetic gateway: 3 Kanban card workers, 3 cron runs, 1 executing turn not yet mapped."""
     from cron import scheduler
     from gateway import update_checkpoint as checkpoint
     monkeypatch.setattr(session_policy, "policy_for_source",
@@ -91,10 +91,11 @@ def ask_checkpoint(hub):
 def test_the_census_at_the_cap_reports_the_unit_the_checkpoint_refuses(hub):
     answer = census(hub.runner)
     kinds = sorted({unit["kind"] for unit in answer["active_work"]})
-    # What hermes-sync logged: kinds alone show nothing the checkpoint refuses...
+    # The same aggregate shape as the log: kinds alone show nothing the checkpoint refuses...
     assert answer["active_agents"] == len(answer["active_work"]) == 7 and kinds == ["cron", "managed"]
     # ...but the census now carries the checkpoint's own verdict on the same work.
-    assert answer["checkpoint"] == {"active": 7, "preservable_managed": 3, "cron": 3, "preservable": False}
+    assert answer["checkpoint"] == {"active": 7, "preservable_managed": 3, "cron": 3,
+                                    "unlisted": 1, "preservable": False}
     refused = ask_checkpoint(hub)
     assert refused["busy"] and not refused.get("pausing")
     hub.runner.request_restart.assert_not_called()
@@ -104,8 +105,8 @@ def test_the_census_at_the_cap_reports_the_unit_the_checkpoint_refuses(hub):
 
 
 def test_once_mapped_the_same_turn_is_a_named_chat_turn_in_both(hub):
-    """9 s later the turn's agent was mapped: census shows a chat unit, the refusal names its session key
-    (the live ``_running_agents`` is a SessionFieldView, not a dict, so the key used to be dropped)."""
+    """A possible mapping transition: census and refusal name the synthetic session's chat turn.
+    The live ``_running_agents`` is a SessionFieldView, not a dict."""
     hub.runner._running_agents["agent:main:local:dm:local-dcf9"] = SimpleNamespace()
     answer = census(hub.runner)
     assert [u["session"] for u in answer["active_work"] if u["kind"] == "chat"] == ["agent:main:local:dm:local-dcf9"]
@@ -118,7 +119,8 @@ def test_cards_and_cut_cron_alone_are_preservable_in_both(hub):
     authority = hub.runner.session_authorities[0]
     del authority.sessions["local-dcf9"]
     answer = census(hub.runner)
-    assert answer["checkpoint"] == {"active": 6, "preservable_managed": 3, "cron": 3, "preservable": True}
+    assert answer["checkpoint"] == {"active": 6, "preservable_managed": 3, "cron": 3,
+                                    "unlisted": 0, "preservable": True}
     assert ask_checkpoint(hub)["pausing"] is True
 
 
@@ -130,6 +132,35 @@ def test_a_managed_turn_that_is_not_a_card_is_unpreservable_in_both(hub):
     assert {u["kind"] for u in answer["active_work"]} == {"cron", "managed"}
     assert answer["checkpoint"]["preservable"] is False
     assert "1 other unit" in ask_checkpoint(hub)["reason"]
+
+
+@pytest.mark.parametrize("mapped", [False, True])
+def test_cut_cron_turn_does_not_mask_hidden_noncard(hub, monkeypatch, mapped):
+    from cron import scheduler
+    authority = hub.runner.session_authorities[0]
+    authority.sessions.clear()
+    authority._managed_workers.clear()
+    authority.sessions["cron_j"] = _live("cron_j", "cron")
+    authority.sessions["hidden"] = _live("hidden", "gui")
+    authority._managed_workers["hidden"] = _card_worker(1001)
+    authority._managed_workers["hidden"].kanban_card = False
+    monkeypatch.setattr(scheduler, "get_running_job_ids", lambda: frozenset({"j"}))
+    monkeypatch.setattr(scheduler, "get_running_job_details", lambda: [
+        {"job_id": "j", "elapsed_s": 60.0, "worker_pid": None, "restart_safe": False}])
+    if mapped:
+        hub.runner._running_agents["cron_j"] = SimpleNamespace()
+    answer = census(hub.runner)
+    assert answer["checkpoint"]["active"] == 3
+    assert answer["checkpoint"]["cron"] == 2
+    refused = ask_checkpoint(hub)
+    assert refused["busy"] and "1 other unit" in refused["reason"]
+    assert answer["checkpoint"]["unlisted"] == 1
+    hub.runner.request_restart.assert_not_called()
+    hub.checkpoint.preserve_cron_slots.assert_not_called()
+    # Without cron cutting, the mapped chat remains named but the cron job is also unlisted.
+    uncut = hub.checkpoint.checkpoint_work(hub.runner, cron_cut=False)
+    assert uncut["unlisted"] == (2 if mapped else 3)
+    assert uncut["preservable"] is False
 
 
 def test_an_unreadable_verdict_is_omitted_not_reported_preservable(hub, monkeypatch):

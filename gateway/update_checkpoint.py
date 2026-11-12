@@ -16,7 +16,7 @@ from hermes_constants import get_default_hermes_root, get_hermes_home
 from hermes_cli import admission_fence
 from gateway.cron_pause import preserve_cron_slots
 from gateway.status import _pid_exists
-from gateway.session_runtime_workers import cron_turn_count, kanban_managed_count
+from gateway.session_runtime_workers import cron_chat_count, cron_turn_count, kanban_managed_count
 from gateway.run_shutdown_restart_wait import CORE_UPDATE_KANBAN_WAIT_S, CORE_UPDATE_KANBAN_STOP_LEASH_S
 
 CHECKPOINT_PAUSE = True
@@ -73,12 +73,23 @@ def checkpoint_work(runner, *, cron_cut: bool) -> dict:
     Kanban card or (when cron is cut) a cron run or its agent turn. The ``active-work`` verb publishes
     the same dict, so an updater census decides with this predicate instead of guessing from unit kinds:
     a ``managed`` unit there also covers unmapped turns, side agents and managed turns that are not
-    cards, none of which a checkpoint preserves (hermes-hub 2026-11-12 18:11Z)."""
+    cards, none of which a checkpoint preserves (hermes-hub 2026-11-12 18:11Z).
+    ``unlisted`` excludes the union of preserved work and named chat/API/deferred buckets:
+    a cut cron's mapped agent turn belongs to both, so add that intersection back once."""
     cron = runner._active_cron_job_count() + cron_turn_count(runner) if cron_cut else 0
     managed = kanban_managed_count(runner)
     total = runner._active_work_count()
+    named = sum(_named_work_counts(runner))
+    overlap = cron_chat_count(runner) if cron_cut else 0
     return {"active": total, "preservable_managed": managed, "cron": cron,
+            "unlisted": max(0, total - managed - cron - named + overlap),
             "preservable": total == managed + cron}
+
+
+def _named_work_counts(runner):
+    """Chat/API/deferred buckets; absent probes are supported by older runner adapters."""
+    return [getattr(runner, name, lambda: 0)() for name in
+            ("_running_agent_count", "_active_api_run_count", "_active_deferred_agent_worker_count")]
 
 
 def _unpreservable_work(runner, managed: int, cron: int) -> str:
@@ -107,7 +118,9 @@ def _unpreservable_work(runner, managed: int, cron: int) -> str:
         total = int(runner._active_work_count())
     except Exception:  # health: allow BLE001 -- see above
         total = -1
-    if (other := total - managed - cron - named) > 0:
+    # Cut cron turns in the chat bucket were already subtracted in ``cron``.
+    overlap = min(cron, cron_chat_count(runner))
+    if (other := total - managed - cron - named + overlap) > 0:
         parts.append(f"{other} other unit{'s' if other != 1 else ''} (an unmapped turn, a side agent or "
                      "a managed turn that is not a Kanban card)")
     summary = "; ".join(parts) or "work the gateway cannot classify"
