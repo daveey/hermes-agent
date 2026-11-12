@@ -36,6 +36,43 @@ async def test_checkpoint_resumes_ahead_of_held_notifier_wake(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_started_notifier_wake_checkpoint_resumes_ahead_of_queued_rows(tmp_path, monkeypatch):
+    """The checkpoint is itself a notifier wake: notifier eligibility filters only queued
+    selection, so a held drain never hands its resume to a queued human behind it."""
+    from gateway import session_notifier_drain, session_update_pause
+    from hermes_state_runtime import claim_session_input
+    from hermes_state_update_pause import checkpoint_session_input
+    from tests.gateway.test_authority_update_pause import tool_boundary
+    from tests.gateway.test_session_authority_cancel_settlement import _authority
+    db, owner = _authority(tmp_path, monkeypatch)
+    identity = json.dumps(['kanban-wake', 'route', 'started'])
+    admit_session_input(db, epoch=owner.epoch, session_id='s', principal_id='automation:route',
+                        request_id=identity, payload=wake_payload(identity, local=True))
+    started = claim_session_input(db, epoch=owner.epoch, session_id='s')
+    tool_boundary(db)
+    checkpoint_session_input(db, epoch=owner.epoch, admission_id=started['admission_id'],
+        generation=started['generation'], physical_session_id='s', transcript_mark=started['transcript_mark'])
+    assert session_notifier_drain.notifier_wake(started)
+    admit_session_input(db, epoch=owner.epoch, session_id='s', principal_id='human',
+                        request_id='human', payload={'text': 'human'})
+    monkeypatch.setattr(owner, '_schedule', lambda ref: None)
+    monkeypatch.setattr(session_notifier_drain, 'held', lambda: True)
+    monkeypatch.setattr(session_update_pause, 'update_held', lambda authority: False)
+    resumed = []
+
+    async def resume(authority, ref, live, first):
+        resumed.append(first['admission_id'] if first else None)
+        return first
+    monkeypatch.setattr(session_update_pause, 'resume_checkpoint', resume)
+    selected = []
+    with db:
+        row, _first = await owner._claim_next(REF, owner.sessions['s'], selected)
+    assert row != 'notifier_held'
+    assert resumed == [started['admission_id']], 'held notifier eligibility filtered the started checkpoint'
+    assert [r['admission_id'] for r in selected] == [started['admission_id']]
+
+
+@pytest.mark.asyncio
 async def test_update_hold_parks_checkpoint_before_notifier_selection(tmp_path, monkeypatch):
     from gateway import session_notifier_drain, session_update_pause
     db, owner, _head = parked_fixture(tmp_path, monkeypatch)
