@@ -2,7 +2,9 @@
 from pathlib import Path
 
 from hermes_cli import kanban_sync_client as ksc
+from hermes_cli import machine_drain_metrics as md
 from hermes_cli import machine_metrics as mm
+from hermes_cli import machine_throughput_metrics as mt
 
 MEMINFO = "MemTotal:       65000000 kB\nMemFree:         1000000 kB\nMemAvailable:   13000000 kB\n"
 VM_STAT = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
@@ -31,7 +33,7 @@ def test_collect_reads_this_machine(tmp_path: Path):
     assert 0 < out["disk_free_gb"] <= out["disk_total_gb"]
     assert 0 <= out["mem_used_pct"] <= 100  # this platform's reader (linux or macos)
     assert set(out) <= {"cpu_load1", "cpus", "mem_used_pct", "disk_free_gb", "disk_total_gb", "active_card_runs",
-                        "drain_active", "drain_until_ms"}
+                        "drain_active", "drain_until_ms", *mt.FIELDS}
     assert out["active_card_runs"] is None or out["active_card_runs"] >= 0
     assert out.get("drain_active") in (None, 0, 1)  # omitted when the hold marker cannot be read
     assert "drain_until_ms" not in out or out.get("drain_active") == 1
@@ -177,3 +179,144 @@ def test_active_card_runs_absent_default_board_counts_named_but_vanished_named_b
     gone = tmp_path / "kanban" / "boards" / "gone" / "kanban.db"
     monkeypatch.setattr(kbb, "named_board_db_files", lambda: [("proj", named), ("gone", gone)])
     assert mm.active_card_runs() is None
+
+
+# --- throughput counters -------------------------------------------------------------------------------------------
+
+
+def _state_db(path: Path, sessions):
+    """A real ``state.db`` (production schema via SessionDB); ``sessions`` = [(id, io_in, io_out, cr, cw, ended)]."""
+    from hermes_state import SessionDB
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = SessionDB(db_path=path)
+    try:
+        for sid, tin, tout, cread, cwrite, ended in sessions:
+            db.create_session(sid, "cli", model="m")
+            db.update_token_counts(sid, input_tokens=tin, output_tokens=tout, cache_read_tokens=cread,
+                                   cache_write_tokens=cwrite, reasoning_tokens=1000, model="m", source="cli")
+            if ended:
+                db.end_session(sid, "done")
+    finally:
+        db.close()
+    return path
+
+
+def _root(tmp_path: Path) -> Path:
+    root = tmp_path / "hermes"
+    _state_db(root / "state.db", [("a", 10, 5, 100, 1, True), ("b", 20, 7, 200, 2, False)])
+    _state_db(root / "profiles" / "coach" / "state.db", [("c", 1, 2, 3, 4, True)])
+    return root
+
+
+def test_throughput_counters_sum_root_and_profiles_from_real_state_dbs(tmp_path):
+    root = _root(tmp_path)
+    assert mt.counters(root) == {"tokens_io_total": 45, "tokens_cache_total": 310,  # reasoning is not counted
+                                 "sessions_started_total": 3, "sessions_ended_total": 2}
+
+
+def test_throughput_tokens_count_auxiliary_usage_rows(tmp_path):
+    """``session_model_usage`` carries auxiliary calls (compression ...) that ``sessions`` never totals."""
+    import sqlite3
+
+    root = _root(tmp_path)
+    db = sqlite3.connect(root / "state.db")
+    db.execute("INSERT INTO session_model_usage (session_id, model, task, input_tokens, output_tokens, "
+               "cache_read_tokens) VALUES ('a', 'aux', 'compression', 1000, 50, 7)")
+    db.commit()
+    db.close()
+    out = mt.counters(root)
+    assert out["tokens_io_total"] == 45 + 1050 and out["tokens_cache_total"] == 317
+
+
+def test_throughput_counters_omitted_when_any_db_is_unreadable_never_zero(tmp_path):
+    root = _root(tmp_path)
+    (root / "profiles" / "broken").mkdir()
+    (root / "profiles" / "broken" / "state.db").write_bytes(b"not a sqlite database" * 100)
+    assert mt.counters(root) == {}
+    assert mt.counters(tmp_path / "empty") == {}  # no state.db at all: unknown, not 0
+
+
+def test_throughput_counters_cached_for_60s(tmp_path):
+    root, now = _root(tmp_path), [100.0]
+    mt.reset_cache()
+    try:
+        first = mt.cached_counters(root, clock=lambda: now[0])
+        _state_db(root / "state.db", [("d", 1, 1, 0, 0, False)])
+        now[0] += mt.CACHE_TTL_S - 0.1
+        assert mt.cached_counters(root, clock=lambda: now[0]) == first
+        now[0] += 0.1
+        assert mt.cached_counters(root, clock=lambda: now[0])["sessions_started_total"] == 4
+    finally:
+        mt.reset_cache()
+    assert mt.CACHE_TTL_S == 60.0
+
+
+def test_throughput_counters_stay_cheap_on_a_hub_sized_state_db(tmp_path):
+    """Timing guard: the hub's root state.db holds ~22k sessions; one uncached read must stay well under 1 s."""
+    import sqlite3
+    import time
+
+    root = tmp_path / "hermes"
+    _state_db(root / "state.db", [])
+    db = sqlite3.connect(root / "state.db")
+    db.executemany("INSERT INTO sessions (id, source, started_at, ended_at, input_tokens, output_tokens) "
+                   "VALUES (?, 'cli', 1, ?, 5, 5)", ((f"s{i}", 2 if i % 10 else None) for i in range(22_000)))
+    db.executemany("INSERT INTO session_model_usage (session_id, model, input_tokens, output_tokens) "
+                   "VALUES (?, 'm', 5, 5)", ((f"s{i}",) for i in range(22_000)))
+    db.commit()
+    db.close()
+    start = time.perf_counter()
+    out = mt.counters(root)
+    elapsed = time.perf_counter() - start
+    assert out["sessions_started_total"] == 22_000 and out["sessions_ended_total"] == 19_800
+    assert out["tokens_io_total"] == 220_000
+    assert elapsed < 0.5, f"throughput counters took {elapsed:.3f}s on 22k sessions"
+
+
+def test_collect_attaches_cached_throughput_counters(tmp_path, monkeypatch):
+    monkeypatch.setattr(mt, "cached_counters", lambda: {"tokens_io_total": 7})
+    assert mm.collect(disk_path=tmp_path)["tokens_io_total"] == 7
+
+
+COUNTERS = {"tokens_io_total": 45, "tokens_cache_total": 310, "sessions_started_total": 3, "sessions_ended_total": 2}
+
+
+def test_board_without_counters_gets_the_normal_report_and_is_not_asked_again_for_600s():
+    sent, now = [], [1000.0]
+    sample = {"cpus": 4, "drain_active": 0, **COUNTERS}
+
+    def old_board(value):
+        sent.append(value)
+        if set(COUNTERS) & set(value):
+            raise ksc.HubError(400, '{"error":"unknown field(s): tokens_io_total, tokens_cache_total"}')
+    r = mm.Reporter(old_board, collect_fn=lambda: dict(sample), clock=lambda: now[0])
+    assert r.report_due()
+    assert sent == [sample, {"cpus": 4, "drain_active": 0}]  # drain fields survive: only the counters go
+    assert r.counters_off_until == now[0] + mm.UNSUPPORTED_RETRY_S
+    now[0] += mm.REPORT_EVERY_S
+    assert r.report_due() and sent[2:] == [{"cpus": 4, "drain_active": 0}]  # one request, no failing first try
+    now[0] = 1000.0 + mm.UNSUPPORTED_RETRY_S
+    assert r.report_due() and len(sent) == 5 and sent[3] == sample  # asks again after the backoff
+
+
+def test_counter_retry_drops_cpu_sample_and_still_falls_back_for_pre_drain_boards():
+    sent = []
+    sample = {"cpus": 4, "drain_active": 0, **CPU, **COUNTERS}
+
+    def ancient(value):
+        sent.append(value)
+        if set(value) - {"cpus"}:
+            raise ksc.HubError(400, "unknown field(s): drain_active")
+    md.send_compatible(ancient, sample)
+    assert sent[1] == {"cpus": 4, "drain_active": 0} and sent[2:] == [{"cpus": 4}]
+
+
+def test_other_400_with_counters_is_not_treated_as_an_old_board():
+    sent = []
+
+    def picky(value):
+        sent.append(value)
+        raise ksc.HubError(400, "tokens_io_total must be a non-negative integer")
+    r = mm.Reporter(picky, collect_fn=lambda: {"cpus": 4, **COUNTERS})
+    assert r.report_due() is False and len(sent) == 1 and r.counters_off_until == 0.0
