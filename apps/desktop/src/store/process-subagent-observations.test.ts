@@ -38,6 +38,32 @@ afterEach(() => {
 })
 
 describe('process/subagent source to sidebar consumers', () => {
+  it('counts one non-launch-profile process once across real row, RPC and roster producers', () => {
+    const sample = JSON.parse(execFileSync('python3', ['tests/fixtures/process_profile_parity.py'], {
+      cwd: resolve(process.cwd(), '../..'), encoding: 'utf8',
+      env: { ...process.env, PYTHONPATH: resolve(process.cwd(), '../..') },
+    }))
+
+    vi.useFakeTimers(); vi.setSystemTime(sample.now * 1000)
+    const stamped = sample.row as SessionInfo
+    $sessions.set([stamped])
+    setLiveWorkRosterSource(gatewayRouteState(null, 'work').key, sample.roster, sample.now * 1000, ['owner'])
+    expect(rowExecution(stamped, sample.now)).toMatchObject({ live: 1, unknown: 0 })
+    reconcileBackgroundProcesses('owner', sample.processes)
+    expect(rowExecution(stamped, sample.now)).toMatchObject({ live: 1, unknown: 0 })
+    expect(stamped.background_active).toBe(1)
+  })
+
+  it('dedupes derived ages but preserves real same-time conflicts and profile isolation', () => {
+    const current = records[0]
+    const stamped: SessionInfo = { ...row, execution_observations: [{ ...current, age_seconds: 0 }, { ...current, age_seconds: 1 }] }
+    expect(rowExecution(stamped, 1001)).toMatchObject({ live: 1, unknown: 0 })
+    stamped.execution_observations = [current, { ...current, state: 'queued' }]
+    expect(rowExecution(stamped, 1001)).toMatchObject({ live: 0, unknown: 1 })
+    stamped.execution_observations = [current, { ...current, identity: { ...(current.identity as object), profile: 'default' } }]
+    expect(rowExecution(stamped, 1001)).toMatchObject({ live: 2, unknown: 0 })
+  })
+
   it('owner-qualified roster reaches row projection; failed reads retain unknown, including initial failure', () => {
     vi.useFakeTimers(); vi.setSystemTime(1001000)
     $sessions.set([row])

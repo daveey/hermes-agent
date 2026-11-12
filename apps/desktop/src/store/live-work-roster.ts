@@ -1,6 +1,6 @@
 import { atom } from 'nanostores'
 
-import { executionIdentityKey, selectExecutionObservation, summarizeExecutionObservations } from '@/lib/execution-observations'
+import { executionIdentityKey, projectExecutionObservation, selectExecutionObservation, summarizeExecutionObservations } from '@/lib/execution-observations'
 
 import { lineageAliases } from './session'
 
@@ -206,7 +206,9 @@ export function selectWorkObservations(records: readonly unknown[], now: number)
  continue }
 
     const group = groups.get(key) ?? { identity, records: [] }
-    group.records.push(record)
+    // RPC and row projections of the same cached probe have different derived ages.
+    // Re-project at one consumer clock before comparing snapshots; real evidence conflicts remain.
+    group.records.push(projectExecutionObservation(record, now))
     groups.set(key, group)
   }
 

@@ -210,6 +210,27 @@ def test_checkpoint_process_identity_is_birth_qualified_and_owned_by_matching_se
     assert set(rows[0]["background_processes"][0]) <= {"id", "command", "started_at", "pid"}
 
 
+@pytest.mark.parametrize("profile,namespace", [("work", "work"), ("main", "main~")])
+def test_profile_qualified_processes_do_not_cross_same_session_id_rows(home, sleeper, profile, namespace):
+    import tools.process_registry as pr
+
+    checkpoint, registered = sleeper(), sleeper()
+    path = home / "profiles" / profile / "processes.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps([_entry("proc_checkpoint", checkpoint.pid)]))
+    pr.process_registry._running["proc_registry"] = ProcessSession(
+        id="proc_registry", command="wait", session_key=f"agent:{namespace}:local:dm:42", parent_session_id="s_own",
+        pid=registered.pid, host_start_time=ProcessRegistry._safe_host_start_time(registered.pid))
+    rows = psa.annotate_background_activity([
+        {"id": "s_own", "profile": "default"}, {"id": "s_own", "profile": profile},
+        {"id": "s_own", "profile": "other"}])
+    assert {v["identity"]["work_id"] for v in rows[1]["execution_observations"]} == {"proc_checkpoint", "proc_registry"}
+    assert all(v["identity"]["profile"] == profile for v in rows[1]["execution_observations"])
+    for row in (rows[0], rows[2]):
+        assert not row.get("execution_observations")
+        assert not row.get("background_active")
+
+
 def test_profile_checkpoint_gets_its_profile(home, sleeper):
     live = sleeper()
     path = home / "profiles" / "work" / "processes.json"

@@ -107,6 +107,14 @@ def _detail(proc_id: str, command: Any, started_at: Any, pid: Any) -> dict[str, 
     return out
 
 
+def _registry_profile(session_key: str) -> str | None:
+    """A named multiplex route qualifies its owner; legacy ``agent:main`` does not."""
+    parts = session_key.split(":")
+    if len(parts) < 3 or parts[0] != "agent" or parts[1] == "main":
+        return None
+    return "main" if parts[1] == "main~" else parts[1]
+
+
 def _collect() -> dict[str, frozenset[str]]:
     global _details, _evidence
     details: dict[str, dict[str, Any]] = {}
@@ -124,7 +132,8 @@ def _collect() -> dict[str, frozenset[str]]:
                     "owner_task_id": s.owner_task_id, "task_id": s.task_id}
             pairs.update((sid, s.id) for sid in _owner_ids(item))
             details[s.id] = _detail(s.id, s.command, s.started_at, s.pid)
-            evidence[s.id] = {"id": s.id, "pid": s.pid, "host_start_time": s.host_start_time, "profile": None,
+            evidence[s.id] = {"id": s.id, "pid": s.pid, "host_start_time": s.host_start_time,
+                              "profile": _registry_profile(s.session_key),
                               "pid_scope": s.pid_scope, "source": "process.registry", "observed_at": time.time(),
                               "owners": frozenset(_owner_ids(item))}
     except Exception:
@@ -205,6 +214,10 @@ def annotate_background_activity(rows: list[dict[str, Any]]) -> list[dict[str, A
     for row in rows:
         ids = set(_row_ids(row))
         procs = set().union(*(owned.get(sid, ()) for sid in ids))
+        # A row supplies missing registry scope, never overrides recorded foreign ownership.
+        if row.get("profile"):
+            procs = {p for p in procs if not evidence.get(p, {}).get("profile")
+                     or evidence[p]["profile"] == row["profile"]}
         try:
             observations = []
             for proc_id in sorted(procs):
@@ -212,7 +225,7 @@ def annotate_background_activity(rows: list[dict[str, Any]]) -> list[dict[str, A
                 if entry is None:
                     continue
                 owners = sorted(entry["owners"] & ids)
-                observations.append(process(entry, gateway=gateway, profile=entry["profile"] or local_profile,
+                observations.append(process(entry, gateway=gateway, profile=entry["profile"] or row.get("profile") or local_profile,
                                             session=owners[0] if owners else None, now=now))
             replace(row, PROCESS_SOURCES, observations)
         except ADAPTER_ERRORS:

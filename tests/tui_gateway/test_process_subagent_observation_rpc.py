@@ -104,6 +104,20 @@ def _child(rt, sid="c1", *, activity=None, started=None, delegation="d1", owner=
     return rt.active[sid]
 
 
+def test_nonlaunch_profile_row_rpc_and_roster_share_one_process_identity():
+    import runpy
+    from pathlib import Path
+
+    sample = runpy.run_path(str(Path(__file__).parents[1] / "fixtures" / "process_profile_parity.py"))["sample"]()
+    stamp = sample["row"]["execution_observations"][0]
+    roster = sample["roster"][0]["execution_observations"][0]
+    rpc = sample["processes"][0]["execution_observations"][0]
+    assert stamp["state"] == roster["state"] == rpc["state"] == "running"
+    assert stamp["identity"] == roster["identity"] == rpc["identity"]
+    assert stamp["identity"]["profile"] == "work"
+    assert sample["row"]["background_active"] == sample["roster"][0]["background"] == 1
+
+
 # ── process.list ────────────────────────────────────────────────────────────────────────────────
 
 
