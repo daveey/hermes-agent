@@ -128,8 +128,12 @@ def resolve_chats(conn: sqlite3.Connection, creator_task_id: str) -> list[dict]:
 
 
 def _copy_delivery(conn: sqlite3.Connection, task_id: str, owner: dict) -> None:
-    """Retain every delivery column, never the source card's notification cursor."""
+    """Retain every delivery column, never the source card's notification cursor.
+
+    A picked-up or synced copy of the owner card carries its links but never its subs (they do not sync): with
+    nothing to copy, the link alone still owns the child, as on the replica path. [daveey]"""
     hub_chat = f"{owner['chat_gateway']}/{owner['chat_profile'] or 'default'}/{owner['chat_session']}"
+    match = "((platform='hub' AND chat_id=?) OR (platform='tui' AND chat_id=?))"
     conn.execute(
         "INSERT OR IGNORE INTO kanban_notify_subs "
         "(task_id, platform, chat_id, thread_id, user_id, user_id_alt, chat_type, notifier_profile, "
@@ -137,9 +141,11 @@ def _copy_delivery(conn: sqlite3.Connection, task_id: str, owner: dict) -> None:
         "SELECT ?, platform, chat_id, thread_id, user_id, user_id_alt, chat_type, notifier_profile, "
         "delivery_mode, delivery_metadata, unixepoch(), "
         "(SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?) "
-        "FROM kanban_notify_subs WHERE task_id=? AND "
-        "((platform='hub' AND chat_id=?) OR (platform='tui' AND chat_id=?))",
+        "FROM kanban_notify_subs WHERE task_id=? AND " + match,
         (task_id, task_id, owner["task_id"], hub_chat, owner["chat_session"]))
+    if not conn.execute(f"SELECT 1 FROM kanban_notify_subs WHERE task_id=? AND {match}",
+                        (task_id, hub_chat, owner["chat_session"])).fetchone():
+        _owner_delivery(conn, task_id, owner)
 
 
 class _ReplicaReader:
