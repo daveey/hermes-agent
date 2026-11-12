@@ -8,6 +8,7 @@ import time
 from hermes_cli import kanban_db_sync as sync
 
 _log = logging.getLogger(__name__)
+_CHUNK = 500
 
 
 def repair_divergence(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> dict[str, list[str]]:
@@ -22,20 +23,30 @@ def repair_divergence(live: sqlite3.Connection, shadow: sqlite3.Connection, gate
     status, and the service refused every lease as ``not_claimable`` for 3 h. Returns {task id: fields queued}."""
     from hermes_cli.kanban_sync_client import _row_fields, _diverged_runs
     from hermes_cli.kanban_db_connect import write_txn
-    from hermes_cli.kanban_sync_omissions import held_fields, repair_holds
+    from hermes_cli.kanban_sync_omissions import repair_holds
     held = repair_holds(live, "tasks")
     seen = {r[0]: r[1] for r in shadow.execute(
         "SELECT id, sync_version FROM tasks WHERE (created_on = ? OR created_on IS NULL) AND sync_version IS NOT NULL",
         (gateway,))}
     repaired: dict[str, list[str]] = {}
-    rows = live.execute("SELECT * FROM tasks WHERE sync_version IS NOT NULL").fetchall()
+    rows = [r for r in live.execute("SELECT * FROM tasks WHERE sync_version IS NOT NULL").fetchall()
+            if r["id"] not in held and seen.get(r["id"]) == r["sync_version"]]
+    # One replica read per chunk and one omissions read per pass, not one of each per settled card: the scan
+    # visits every synced card each round (13% of hub gateway CPU at 4,948 cards, 2026-11-12). [daveey]
+    replica: dict[str, sqlite3.Row] = {}
+    for i in range(0, len(rows), _CHUNK):
+        ids = [r["id"] for r in rows[i:i + _CHUNK]]
+        replica.update((r["id"], r) for r in shadow.execute(
+            f"SELECT * FROM tasks WHERE id IN ({','.join('?' * len(ids))})", ids))
+    omissions: dict[str, set[str]] = {}
+    for uid, field in live.execute(
+            "SELECT row_uid, field FROM kanban_sync_omissions WHERE table_name='tasks' AND state!='delivered'"):
+        omissions.setdefault(uid, set()).add(field)
     for row in rows:
         tid = row["id"]
-        if tid in held or seen.get(tid) != row["sync_version"]:
-            continue
-        theirs = shadow.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
+        theirs = replica[tid]
         mine, remote = _row_fields(live, "tasks", row), _row_fields(shadow, "tasks", theirs)
-        omitted = held_fields(live, "tasks", tid)
+        omitted = omissions.get(tid, ())
         fields = {k: v for k, v in mine.items() if k in remote and remote[k] != v and k not in omitted}
         if not fields:
             continue

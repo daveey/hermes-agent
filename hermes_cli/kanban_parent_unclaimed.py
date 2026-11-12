@@ -164,6 +164,13 @@ def safe_sweep(conn) -> int:
     return posted + kanban_chat_wait.safe_sweep(conn)
 
 
+def _already_posted(conn, task_id: str, waiting_on: str, wait_key: Any, kind: str) -> bool:
+    from hermes_cli import kanban_db as kb
+    return any(kb._json_dict(p).get("wait_event_id") == wait_key and kb._json_dict(p).get("parent") == waiting_on
+               for (p,) in conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+                                        (task_id, kind)))
+
+
 def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_seconds: float,
                 ready_seconds: float, parent_title: Optional[str] = None, kind: str = NOTICE_KIND,
                 extra: Optional[dict[str, Any]] = None) -> bool:
@@ -175,15 +182,15 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_host_counts as khc
     from hermes_cli import kanban_queue_position as kqp
+    if _already_posted(conn, task_id, waiting_on, wait_key, kind):
+        return False  # before the queue place: every tick asks again for each long-ready card [daveey]
     place = _place(conn, waiting_on)
     observed = {"board": place.get("board") or khc.board_of(conn), "observed_at": place.get("observed_at") or int(time.time()),
                 "admission": ({"reason": "core_update_hold", "status": "held"} if (extra or {}).get("core_update_hold")
                               else {"reason": None, "status": "unknown"})}
     guard = place.get("reason") if place.get("lane") == "respawn_guard" else None
     with kb.write_txn(conn):
-        if any(kb._json_dict(p).get("wait_event_id") == wait_key and kb._json_dict(p).get("parent") == waiting_on
-               for (p,) in conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
-                                        (task_id, kind))):
+        if _already_posted(conn, task_id, waiting_on, wait_key, kind):
             return False
         still = conn.execute("SELECT status, claim_lock FROM tasks WHERE id = ?", (waiting_on,)).fetchone()
         if still is None or still["status"] != "ready" or still["claim_lock"]:

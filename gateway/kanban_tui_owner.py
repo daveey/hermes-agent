@@ -142,9 +142,20 @@ def has_local_sibling(conn: Any, sub: dict) -> bool:
     return row is not None
 
 
+def _owned_this_tick(collector: Any, sub: dict) -> Any:
+    """:func:`owned_live_session` once per chat per collector tick: a chat's cards share one answer, and each
+    answer costs a lineage walk in state.db (1,655 pending tui rows over 122 chats on the hub). The delivery
+    re-check still reads fresh. [daveey]"""
+    seen = collector.__dict__.setdefault("_tui_owned", {})
+    key = (sub.get("notifier_profile") or None, str(sub.get("chat_id") or ""), bool(sub.get("thread_id")))
+    if key not in seen:
+        seen[key] = owned_live_session(collector.runner, sub)
+    return seen[key]
+
+
 def claim(collector: Any, conn: Any, slug: str, sub: dict) -> Optional[dict]:
     """Claim one tui row's unseen events for this gateway, or None (left to the legacy backend)."""
-    if has_local_sibling(conn, sub) or owned_live_session(collector.runner, sub) is None:
+    if has_local_sibling(conn, sub) or _owned_this_tick(collector, sub) is None:
         return None
     from hermes_cli import kanban_db_notify as _kbn
     old_cursor, cursor, events = _kbn.claim_unseen_events_for_sub(
