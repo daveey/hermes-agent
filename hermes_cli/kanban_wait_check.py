@@ -146,7 +146,13 @@ def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] =
             return check(gateway, target, board=board, until=until, since=since,
                          live_timeout=25 - (time.monotonic() - started))
         return 2, f"error: ssh {host}: {exc}"
-    if p.returncode == 255 and kind == "task":
+    # A forced-command key can reach SSH but cannot execute the owner CLI.
+    # Treat only its explicit refusal as unavailable transport, not arbitrary
+    # rc2 owner errors. The existing replica reader preserves gateway/board
+    # identity, freshness (rc3), missing/error (rc2), and orphan evidence; it
+    # never upgrades a cached observation to a live authoritative read.
+    restricted = p.returncode == 2 and p.stderr.strip().startswith("hub-read: refused:")
+    if (p.returncode == 255 or restricted) and kind == "task":
         from hermes_cli.kanban_wait_replica import check
         return check(gateway, target, board=board, until=until, since=since,
                          live_timeout=25 - (time.monotonic() - started))
