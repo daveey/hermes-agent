@@ -153,7 +153,8 @@ async def test_persisted_work_count_returns_to_zero_when_the_drain_ends():
     authority = SessionAuthority.__new__(SessionAuthority)
     runner = SimpleNamespace(_running_agents={}, session_authority=authority,
                              _persist_active_agents=lambda: persisted.append(uncounted_runtime_work(runner)))
-    live = SimpleNamespace(task=None, route='route', event_stream=SimpleNamespace(execution={'execution_generation': 1}))
+    live = SimpleNamespace(task=None, route='route', claim_changed=asyncio.Event(),
+                           event_stream=SimpleNamespace(execution={'execution_generation': 1}))
     authority.runner, authority.sessions, authority._managed_workers = runner, {'s': live}, {}
 
     async def drain(_ref):
