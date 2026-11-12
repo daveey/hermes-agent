@@ -808,6 +808,11 @@ KANBAN_CREATE_SCHEMA = _schema(
                     "machine picks up this board; then use placement='<name>'."},
         "placement": _prop("string", (
                 "Where the card runs. 'auto' uses configured worker pools for portable work, queueing without hub overflow. "
+                "Before pinning a helper to the hub, check the workers' attested capabilities: hub log/DB reads, "
+                "remote Mac access, GitHub work and shipping may already run there. Pin only for a concrete "
+                "hub-local write, unavailable runtime access or unpublished input; name that operation or path "
+                "in the body. A hub name in evidence is not a locality requirement. Read access does not grant "
+                "foreign-card or registry write authority. "
                 "Without a pool, kanban.placement routes (e.g. MacBook -> hub; hermes-hub aliases hub) create "
                 "portable cards on that gateway, linked to this chat. 'local' pins it here "
                 "(use it when the work needs this machine: its Chrome, "
