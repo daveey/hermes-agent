@@ -220,7 +220,14 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
                 contract_ok = row[4] == 'local-only'
             legacy = bool(legacy and contract_ok)
             verified = legacy
-    payload = {k: v for k, v in task.items() if k != 'origin_observation'}
+    payload = {k: v for k, v in task.items()
+               if k not in ('origin_observation', 'withdrawal_notice', 'withdrawal_recipients')}
+    from hermes_cli.kanban_withdrawal_notice import publish
+    withdrawal = publish(conn, task)
+    if withdrawal is not None:
+        from hermes_cli.kanban_withdrawal_recipients import published
+        payload['withdrawal_notice'] = withdrawal
+        payload['withdrawal_recipients'] = published(conn, withdrawal['event_id'])
     if row[0] == 'blocked':
         from hermes_cli.kanban_block_notice import blocked_actor_fields
         payload.update(blocked_actor_fields(conn, task['id']))

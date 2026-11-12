@@ -5,6 +5,8 @@ import contextlib
 import json
 import threading
 from pathlib import Path
+from hermes_cli.kanban_withdrawal_notice import envelope as _withdrawal
+from tui_gateway.kanban_remote_notice_state import state as _notice_state
 
 _lock = threading.Lock()
 _memo: dict[tuple, tuple] = {}
@@ -42,7 +44,7 @@ def _snapshot(replica: Path, previous=None) -> tuple[bool, list[tuple] | None, t
             for owner, key, _seq, raw in _canonical(_task_rows(conn, meta.get("gateway"))):
                 with contextlib.suppress(TypeError, ValueError):
                     task = json.loads(raw)
-                    if isinstance(task, dict) and task.get("status") in _TERMINAL:
+                    if isinstance(task, dict) and (task.get("status") in _TERMINAL or _withdrawal(task) is not None):
                         cards.append((owner, key, task))
             return ready, cards, signature
         cards = _changed_rows_cards(conn, replica, meta.get("gateway"))
@@ -58,7 +60,12 @@ _decoded_files: dict[str, tuple | None] = {}  # replica -> file identity its _de
 
 
 def _summary(task) -> dict | None:
-    if not isinstance(task, dict) or task.get("status") not in _terminal_states():
+    if not isinstance(task, dict):
+        return None
+    withdrawal = _withdrawal(task)
+    if withdrawal is not None:
+        return {"status": task["status"], "withdrawal_notice": withdrawal}
+    if task.get("status") not in _terminal_states():
         return None
     run = task.get("run")
     run = run if isinstance(run, dict) else {}
@@ -103,7 +110,7 @@ def _changed_rows_cards(conn, replica: Path, me) -> list[tuple]:
 
 def _persist(source: str, cards: list[tuple], ledger, now: float) -> dict[tuple, float | None]:
     """Seed retained history once; later current-key states receive one local window."""
-    from tui_gateway.kanban_remote_notices import FRESH_S, _fresh_at, _ledger, _terminal_at
+    from tui_gateway.kanban_remote_notices import FRESH_S, _fresh_at, _ledger
 
     with contextlib.closing(_ledger(ledger)) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS observation_sources (source TEXT PRIMARY KEY)")
@@ -118,8 +125,7 @@ def _persist(source: str, cards: list[tuple], ledger, now: float) -> dict[tuple,
             fresh = {}
             for owner, key, task in cards:
                 at = _fresh_at(task)
-                terminal = _terminal_at(task)
-                state = f"{task['status']}@{int(terminal) if terminal else 0}"
+                state = _notice_state(task)
                 ref = f"{owner}/{key}"
                 # Unknown ages and frozen legacy keys cannot establish local freshness.
                 seen = now if at is not None and key.count('/') >= 2 and (not initial or now - at <= FRESH_S) else None

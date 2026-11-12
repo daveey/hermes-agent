@@ -34,6 +34,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Optional
+from hermes_cli.kanban_withdrawal_notice import envelope as _withdrawal
+from tui_gateway.kanban_remote_notice_state import state as _notice_state
 
 FRESH_S = 6 * 3600.0
 # ``notices.delivered``: 0 = in flight (or an old silent record), DELIVERED = the notice is in the chat transcript,
@@ -83,6 +85,9 @@ def _terminal_at(task: dict) -> Optional[float]:
 def _fresh_at(task: dict) -> Optional[float]:
     """When the card reached its terminal state, for the freshness bound. Falls back to the owner's published
     ``completion_notice.created_at`` (records without ``completed_at``). Not part of the ledger identity."""
+    withdrawal = _withdrawal(task)
+    if withdrawal is not None:
+        return float(withdrawal["created_at"])
     at = _terminal_at(task)
     if at is not None:
         return at
@@ -150,8 +155,21 @@ def _linked_chats(task: dict, me: str) -> list[tuple[str, str]]:
     done notice at all, so it never summarised the finished work and its outcome stayed ``unresolved{no_summary}``
     (hub card t_a989e5e0 -> MacBook chat 20261026_110445_20914b, 2026-10-31: the notice reached five unrelated
     shepherd transcripts and not the chat that asked for the work)."""
+    if _withdrawal(task) is not None and "withdrawal_recipients" in task:
+        # Archive captures eligibility before cleanup releases links/removes subs.
+        # Never recover a destination from the mutable current binding projection.
+        recipients = task["withdrawal_recipients"]
+        return list(dict.fromkeys(
+            (link["profile"], link["session"])
+            for link in recipients if isinstance(link, dict) and link.get("gw") == me
+            and all(isinstance(link.get(key), str) and link[key] for key in ("profile", "session"))
+            and not _released(link)
+        )) if isinstance(recipients, list) else []
     out: list[tuple[str, str]] = []
     links = task.get("sessions")
+    released = {(str(link.get("profile") or "default"), str(link["session"]))
+                for link in links if isinstance(link, dict) and link.get("gw") == me
+                and link.get("session") and _released(link)} if isinstance(links, list) else set()
     for link in links if isinstance(links, list) else ():
         if (isinstance(link, dict) and link.get("gw") == me and link.get("rel") in LINK_RELS
                 and link.get("session") and not _released(link)):
@@ -161,7 +179,7 @@ def _linked_chats(task: dict, me: str) -> list[tuple[str, str]]:
         origin = binding.get("origin") if isinstance(binding, dict) else None
         if isinstance(origin, dict) and origin.get("gateway") == me and origin.get("session"):
             out.append((str(origin.get("profile") or "default"), str(origin["session"])))
-    return list(dict.fromkeys(out))  # one notice per chat even when a chat is both origin and shepherd
+    return [chat for chat in dict.fromkeys(out) if chat not in released]
 
 
 def _released(link: dict) -> bool:
@@ -200,6 +218,11 @@ def format_notice(gw: str, key: str, task: dict) -> str:
     who = task.get("assignee") or ""
     run = task.get("run") if isinstance(task.get("run"), dict) else {}
     prefix = f"[{gw}:{board}] " + (f"@{who} " if who else "")
+    if _withdrawal(task) is not None:
+        from tui_gateway import server
+        return server._format_kanban_event_text(
+            {"task_id": tid}, SimpleNamespace(**task),
+            SimpleNamespace(kind="request_withdrawn", payload={}), board)
     if task.get("status") == "done":
         handoff = _first_line(run.get("summary") or task.get("result"), 200)
         return f"✔ {prefix}Kanban {tid} done — {title}{handoff}\n(ran on {gw}; read it with cross_task @task:{board}@{gw}/{tid})"
@@ -215,6 +238,9 @@ def _event_key(owner: str, key: str, notice: dict) -> str:
 
 def _notice_id(owner: str, key: str, task: dict, profile: str, sid: str) -> str:
     """The sweeper's per-chat ``notice_id`` (its ``swept`` and memo identity) for this card state."""
+    withdrawal = _withdrawal(task)
+    if withdrawal is not None:
+        return f"{_event_key(owner, key, withdrawal)}:{profile}:{sid}"
     notice = task.get("completion_notice")
     if task.get("status") == "done" and isinstance(notice, dict) and "event_id" in notice:
         return f"remote:{owner}:{key}:{notice['event_id']}:{profile}:{sid}"
@@ -224,6 +250,9 @@ def _notice_id(owner: str, key: str, task: dict, profile: str, sid: str) -> str:
 def _shared_key(owner: str, key: str, task: dict, profile: str, sid: str) -> str:
     """The ``kanban_event_keys`` value both paths record. Done uses :func:`_event_key`; blocked has no
     completion event, so the terminal state plus the destination is the identity."""
+    withdrawal = _withdrawal(task)
+    if withdrawal is not None:
+        return _event_key(owner, key, withdrawal)
     notice = task.get("completion_notice")
     if task.get("status") == "done" and isinstance(notice, dict) and "event_id" in notice:
         return _event_key(owner, key, notice)
@@ -333,15 +362,14 @@ def remote_blocked_on_human(task: dict) -> bool:
 
 def _notice_item(card: dict, session_key: str, me: str, profile: str) -> dict:
     task = card["task"]
-    at = _terminal_at(task)
     sid = card.get("sid") or session_key
     text = _completion_text(card["gw"], card["key"], task, me, profile, sid)
     item = {"text": text or format_notice(card["gw"], card["key"], task), "session": session_key,
-            "ref": f"{card['gw']}/{card['key']}", "state": f"{task['status']}@{int(at) if at else 0}",
+            "ref": f"{card['gw']}/{card['key']}", "state": _notice_state(task),
             "blocked_on_human": remote_blocked_on_human(task)}
     if text:
         item["event_key"] = _event_key(card["gw"], card["key"], task["completion_notice"])
-    elif task.get("status") == "blocked":
+    elif task.get("status") == "blocked" or _withdrawal(task) is not None:
         item["event_key"] = _shared_key(card["gw"], card["key"], task, profile, sid)
     return item
 
@@ -359,8 +387,7 @@ def _reconcile_legacy(conn, session_key: str, cards: list, now: float, transcrip
     by_state = {}
     for card in cards:
         task = card["task"]
-        at = _terminal_at(task)
-        by_state[(f"{card['gw']}/{card['key']}", f"{task['status']}@{int(at) if at else 0}")] = card
+        by_state[(f"{card['gw']}/{card['key']}", _notice_state(task))] = card
     pid, start = _my_holder()
     stale = 0
     out = []
@@ -515,8 +542,7 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
                     break
                 task = card["task"]
                 ref = f"{card['gw']}/{card['key']}"
-                at = _terminal_at(task)
-                state = f"{task['status']}@{int(at) if at else 0}"
+                state = _notice_state(task)
                 if (ref, state) in offered:
                     continue
                 at_fresh = fresh_times.get((card["gw"], card["key"], state), _fresh_at(task))
@@ -733,8 +759,7 @@ def _current_states(rows: list[tuple]) -> dict:
             continue
         if not isinstance(task, dict) or not task.get("status"):
             continue
-        at = _terminal_at(task) if task.get("status") in _TERMINAL else None
-        out[f"{owner}/{key}"] = (f"{task['status']}@{int(at) if at else 0}", task)
+        out[f"{owner}/{key}"] = (_notice_state(task), task)
     return out
 
 
@@ -746,7 +771,7 @@ def _stale_notice_id(row, task: dict) -> tuple[str, str]:
     if not profile and key.endswith(f":{sid}"):
         profile = key[:-len(sid) - 1].rsplit(":", 1)[-1]
     profile = profile or "default"
-    if str(row["state"]).startswith("done@") and key and not key.endswith(f":{profile}:{sid}"):
+    if str(row["state"]).startswith(("done@", "request_withdrawn@")) and key and not key.endswith(f":{profile}:{sid}"):
         return profile, f"{key}:{profile}:{sid}"
     return profile, key or f"remote:{row['ref']}:{row['state']}:{profile}:{sid}"
 
@@ -802,6 +827,15 @@ def _settle_stale_claims(states: dict, path, ledger) -> int:
 
 def _sweep_payload(owner: str, key: str, task: dict, me: str, profile: str, sid: str) -> tuple:
     """``(event_key, metadata, text)`` of one swept notice, keyed like ``collect``'s."""
+    withdrawal = _withdrawal(task)
+    if withdrawal is not None:
+        event_key = _event_key(owner, key, withdrawal)
+        metadata = {"notice_id": _notice_id(owner, key, task, profile, sid),
+                    "board": task.get("board", "default"), "task_id": task["id"],
+                    "gateway": owner, "event_ids": [withdrawal["event_id"]],
+                    "kanban_event_keys": [event_key], "blocked_on_human": False,
+                    "event_kind": "request_withdrawn"}
+        return event_key, metadata, format_notice(owner, key, task)
     notice = task.get("completion_notice")
     if task.get("status") == "done":
         event_id = notice["event_id"]
@@ -827,7 +861,7 @@ def _sweep_cards(rows: list[tuple], me: str):
             continue
         notice = task.get("completion_notice") if isinstance(task, dict) else None
         done = task.get("status") == "done" and isinstance(notice, dict) and "event_id" in notice
-        if not done and task.get("status") != "blocked":
+        if not done and task.get("status") != "blocked" and _withdrawal(task) is None:
             continue
         links = [{"profile": profile, "session": sid} for profile, sid in _linked_chats(task, me)]
         if not links:
@@ -887,7 +921,8 @@ def _persist_claimed(session_db, profile: str, sid: str, text: str, metadata: di
     from hermes_state_errors import SessionTurnLeaseLostError
     try:
         with session_db(profile, sid) as (db, tip):
-            if db is None:
+            from tui_gateway.notice_fanout import chat_skip_reason
+            if db is None or chat_skip_reason(db, sid) is not None:
                 release(claim, ledger=ledger)
                 return False
             db.append_kanban_notice(tip, text, metadata)
@@ -1007,8 +1042,7 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
 def _deliver_fresh(cards, fresh_times, me, now, path, live, session_db, ledger, settled, delivered, swept,
                    counts, waker=None) -> None:
     for owner, key, task, links in cards:
-        at = _terminal_at(task)
-        ref, state = f"{owner}/{key}", f"{task['status']}@{int(at) if at else 0}"
+        ref, state = f"{owner}/{key}", _notice_state(task)
         observed_at = fresh_times.get((owner, key, state), _fresh_at(task))
         if observed_at is None or now - observed_at > FRESH_S:
             counts["stale"] = counts.get("stale", 0) + 1

@@ -64,7 +64,8 @@ def snapshot(conn, identity, me):
             except (TypeError, ValueError):
                 task = None
             chats = []
-            if isinstance(task, dict) and task.get("status") in remote._TERMINAL and task.get("id"):
+            if (isinstance(task, dict) and task.get("id")
+                    and (task.get("status") in remote._TERMINAL or remote._withdrawal(task) is not None)):
                 chats = remote._linked_chats(task, me)
             hit = (seq, chats, {"gw": str(owner), "key": str(key), "task": task})
         updated[(owner, key)] = hit
