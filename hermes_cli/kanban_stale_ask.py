@@ -38,12 +38,14 @@ def _field(*marks: str) -> str:
 _ASK = re.compile(
     r"(?P<head>blocked — actor: [^\n]*\n)Next action for the user: (?P<action>" + _field("\nWhy only the user: ") + r")\n"
     r"Why only the user: " + _field("\nScope: ") + r"\n"
-    r"(?P<rest>Scope: (?P<scope>" + _field("\nOpen task: ") + r")\nOpen task: @task:(?P<board>[^/@\s]+)(?:@(?P<gw>[^/\s]+))?/(?P<tid>[A-Za-z0-9_-]+))"
+    r"(?P<rest>Scope: (?P<scope>" + _field("\nOpen task: ") + r")\nOpen task: @task:(?P<board>[^/@\s]+)(?:@(?P<gw>[^/\s]+))?/(?P<tid>[A-Za-z0-9_-]+)(?![A-Za-z0-9_-]))"
+    # (The tid guard makes a shorter tid fail at once, so a long token cannot backtrack: review F4.)
     r"(?P<hint>" + re.escape(TERMINAL_HINT) + r")?"
-    # A second "Open task:" line before the next notice's actor line (or the end of the text) means a
-    # field quoted one, so the matched Open task may be a quote: ambiguous, leave it. The scan does not
-    # stop at a blank line, since a human_request field may contain one (review F1/F2).
-    r"(?!(?:(?!blocked — actor: ).)*\nOpen task: )",
+    # A second "Open task:" line before the next notice's head (its actor line followed by the ask mark)
+    # or the end of the text means a field quoted one, so the matched Open task may be a quote:
+    # ambiguous, leave it. The scan stops neither at a blank line nor at a bare "blocked — actor: "
+    # substring, since a human_request field may contain either (review F1/F2/F3).
+    r"(?!(?:(?!blocked — actor: [^\n]*\nNext action for the user: ).)*\nOpen task: )",
     re.DOTALL)
 logger = logging.getLogger(__name__)
 _PT = "America/Los_Angeles"

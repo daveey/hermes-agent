@@ -221,6 +221,30 @@ def test_scope_copied_from_a_done_cards_notice_keeps_the_ask(tmp_path, monkeypat
         assert refresh_stale_ask(text) == text, tail
 
 
+def test_copied_scope_with_an_actor_substring_in_its_tail_keeps_the_ask(tmp_path, monkeypatch):
+    """Review F3: a "blocked — actor: " substring in the copied scope's tail must not end the
+    second-Open-task scan early; only a real notice head (actor line + ask mark) does."""
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    copied, _task = _card_with_scope("Only this card.")
+    _finish(copied)
+    for tail in ("\nblocked — actor: user\nmore", " (see blocked — actor: user)", "\n\nblocked — actor: x"):
+        tid, task = _card_with_scope(f"Only this card.\nOpen task: @task:default/{copied}{tail}")
+        text = _wake_text(tid, task)
+        assert refresh_stale_ask(text) == text, tail
+
+
+def test_long_task_token_does_not_backtrack(tmp_path, monkeypatch):
+    """Review F4: a long task token followed by a later Open task line must not cost seconds."""
+    import time
+    from hermes_cli.kanban_stale_ask import _ASK
+    text = ("blocked — actor: user\nNext action for the user: Choose.\nWhy only the user: y\nScope: z\n"
+            "Open task: @task:default/" + "a" * 8000 + "\nOpen task: @task:default/t_x")
+    start = time.monotonic()
+    assert _ASK.search(text) is None
+    assert time.monotonic() - start < 0.5
+
+
 def test_open_task_line_inside_scope_of_a_done_card_is_left_alone(tmp_path, monkeypatch):
     """Ambiguous notice (two Open task lines): unchanged, never guessed."""
     from hermes_cli.kanban_stale_ask import refresh_stale_ask
