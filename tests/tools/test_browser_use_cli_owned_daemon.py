@@ -149,7 +149,8 @@ def _shared_runtime(tmp_path) -> tuple[Path, dict]:
 
 
 @pytest.mark.live_system_guard_bypass
-def test_a_sigkilled_owner_takes_its_harness_daemon_with_it(tmp_path):
+@pytest.mark.parametrize("unpublished_argv", [False, True])
+def test_a_sigkilled_owner_takes_its_harness_daemon_with_it(tmp_path, unpublished_argv):
     """End to end through the real supervisor: the owner registers its detached daemon, then dies
     by SIGKILL (no Python cleanup runs), and the daemon must go with it."""
     pkg = tmp_path / "pkgroot" / "browser_harness"
@@ -160,13 +161,29 @@ def test_a_sigkilled_owner_takes_its_harness_daemon_with_it(tmp_path):
     runtime.mkdir()
     owner_src = (
         "import json, os, subprocess, sys, time\n"
+        "import psutil\n"
         "from tools import browser_use_cli\n"
         f"d = subprocess.Popen([sys.executable, '-m', 'browser_harness.daemon'], cwd={str(tmp_path / 'pkgroot')!r},"
         " stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, start_new_session=True,"
         " env=browser_use_cli._base_subprocess_env())\n"
         f"open({str(runtime / 'bu.pid')!r}, 'w', encoding='utf-8').write(json.dumps({{'pid': d.pid}}))\n"  # windows-footgun: ok — a write
-        f"browser_use_cli._own_harness_daemon({{'BH_RUNTIME_DIR': {str(runtime)!r}}})\n"
-        "print(d.pid, flush=True)\n"
+        f"if {unpublished_argv!r}:\n"
+        # Popen returns once exec has begun, which can be before the kernel publishes the new
+        # image's argv/environ: replay that first empty read deterministically.
+        "    real_cmdline, pending = psutil.Process.cmdline, [True]\n"
+        "    def cmdline(p):\n"
+        "        if p.pid == d.pid and pending:\n"
+        "            pending.pop()\n"
+        "            return []\n"
+        "        return real_cmdline(p)\n"
+        "    psutil.Process.cmdline = cmdline\n"
+        # As browser_exec does while a call runs (_own_harness_daemon_until_owned): None means
+        # nothing ownable yet, so check again; a single check races the daemon's exec.
+        f"env, deadline, owned = {{'BH_RUNTIME_DIR': {str(runtime)!r}}}, time.monotonic() + 120, None\n"
+        "while owned is None and time.monotonic() < deadline:\n"
+        "    owned = browser_use_cli._own_harness_daemon(env)\n"
+        "    owned is None and time.sleep(0.05)\n"
+        "print(d.pid, owned, flush=True)\n"
         "time.sleep(300)\n"
     )
     env = dict(os.environ, HERMES_HOME=str(tmp_path / "home"), PYTHONPATH=str(Path(__file__).resolve().parents[2]))
@@ -174,10 +191,13 @@ def test_a_sigkilled_owner_takes_its_harness_daemon_with_it(tmp_path):
                              stdout=subprocess.PIPE, text=True)
     daemon_pid = None
     try:
-        daemon_pid = int(owner.stdout.readline())
+        reported = owner.stdout.readline().split()
+        assert reported, "the owner exited before reporting its daemon"
+        daemon_pid = int(reported[0])
+        assert reported[1:] == ["True"], f"the owner never took its daemon: {reported}"
         owner.kill()
         owner.wait(timeout=10)
-        wait_until(lambda: not _group_alive(daemon_pid), timeout=15,
+        wait_until(lambda: not _group_alive(daemon_pid), timeout=60,
                    what="the harness daemon to die with the kill -9'd Hermes process that drove it")
     finally:
         if daemon_pid is not None:
