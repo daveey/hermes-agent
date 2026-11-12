@@ -9,9 +9,9 @@ error, malformed line, counter decrease (reboot/reset), non-positive total, or a
 [1000, 2000] ms yields ``None`` (unknown), which every caller treats as "refuse", never as idle.
 
 Two callers sample:
-- the sync loop's advisory sampler thread (``machine_cpu_sampler``), every 5 s and only while the
-  installation-root config sets ``kanban.admission.cpu_busy_below_pct``; it feeds the lock-free advisory file and
-  the metrics report (the Board uses the reported triple for hub overflow), and
+- the sync loop's advisory sampler thread (``machine_cpu_sampler``), one rolling snapshot per second and only while
+  the installation-root config sets ``kanban.admission.cpu_busy_below_pct``; it feeds the lock-free advisory file
+  and the metrics report (the Board uses the reported triple for hub overflow), and
 - the final claim gate in ``kanban_admission.claim_transaction``, with an independent full sample taken while
   ``admission.lock`` is held.
 
@@ -86,7 +86,14 @@ def sample(window_s: float = WINDOW_S, *, read: Callable[[], str] = _read_proc_s
         end_ms = int(wall() * 1000)
     except (OSError, UnicodeError, ValueError):
         return None
-    window_ms = (t1 - t0) * 1000.0
+    return between(first, second, (t1 - t0) * 1000.0, end_ms)
+
+
+def between(first: Optional[tuple[int, int]], second: Optional[tuple[int, int]], window_ms: float,
+            end_ms: int) -> Optional[dict[str, Any]]:
+    """The triple for two parsed snapshots *window_ms* apart (monotonic), ending at wall *end_ms*; ``None`` when the
+    window is outside [MIN_WINDOW_MS, MAX_WINDOW_MS] or the delta is invalid. Shared by :func:`sample` and the
+    advisory sampler's rolling snapshots (``machine_cpu_sampler``)."""
     if not math.isfinite(window_ms) or not MIN_WINDOW_MS <= round(window_ms, 6) <= MAX_WINDOW_MS:
         return None
     pct = busy_pct(first, second)

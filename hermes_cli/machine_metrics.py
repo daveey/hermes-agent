@@ -8,7 +8,8 @@ local run. Cards without ``placement_policy`` are still placed without it.
 
 Hub overflow: on a host whose installation-root config sets ``kanban.admission.cpu_busy_below_pct`` the reporter
 also attaches the complete triple ``cpu_busy_pct``/``cpu_busy_window_ms``/``cpu_busy_sample_end_ms`` measured by the
-sync loop's advisory sampler thread (``machine_cpu_sampler``: a ~1 s window every 5 s, off the loop thread).
+sync loop's advisory sampler thread (``machine_cpu_sampler``: rolling ~1 s windows, off the loop thread; a triple
+ends at most 1.5 s before the report takes it, inside the Board's 2 s window).
 ``collect()`` itself never samples CPU busy. A CPU-bearing report has a hard 2 s total transport budget and is never
 replayed: each sample is reported at most once, and a failed round drops it.
 """
