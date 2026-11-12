@@ -124,6 +124,12 @@ def _worker_build(authority, db, ref, monkeypatch, execution_id):
     from gateway.session_managed_worker import _bootstrap
     from hermes_state_runtime import mutate_worker_execution, register_worker_execution
     import run_agent
+    # A real turn's prepared mutation advances the generation before its worker spawns; a turn's
+    # Fence (hermes_scope) refuses generation 0, so a construction before any turn advances it too
+    # (never during a running turn, whose generation it would make stale).
+    if not db.get_session(ref.session_id)['runtime_generation']:
+        db._execute_write(lambda conn: conn.execute(
+            'UPDATE sessions SET runtime_generation=runtime_generation+1 WHERE id=?', (ref.session_id,)))
     generation = db.get_session(ref.session_id)['runtime_generation']
     scope = {'profile_id': authority.profile_id, 'session_id': ref.session_id, 'execution_id': execution_id,
              'generation': generation, 'pid': 0, 'birth': 0, 'secret': 's', 'epoch': authority.epoch}

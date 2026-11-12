@@ -452,7 +452,9 @@ def get_read_block_error(path: str) -> Optional[str]:
                     break
             if reason:
                 break
-        if reason is None:
+        # A hosted (sandbox) path never names this host's home: resolving the host homes here would
+        # look the host up for a path that lives elsewhere (sandbox_conformance). [daveey]
+        if reason is None and lexical is None:
             for home in _guard_homes(path):
                 for rel in HOME_READ_DENIED_DIRS:
                     blocked_dir = Path(os.path.realpath(os.path.join(home, *rel.split("/"))))
