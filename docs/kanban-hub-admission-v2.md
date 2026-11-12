@@ -17,10 +17,18 @@ order marked candidates first within each lane, retaining effective priority
 within each group. Composed ready/review dispatcher tests now reach real final
 claims at 70% CPU with seven regular runs, including an opposite normal lane,
 critical/elevated memory and a hard per-board `max_spawn` ceiling. Workers retain
-plain priority. These isolated tests do not establish Board or live acceptance.
+plain priority. These isolated tests do not establish live acceptance.
 
-Still pending: queue notes, Board and
-courier receiver compatibility, full malformed-config/receipt tests, sync replay
+The companion Board branch implements admission metadata migration/postimage
+validation, operator policy and authenticated runtime telemetry, and a shared
+two-pool grant evaluator for direct claims and worker-first overflow/review.
+Board-owned immutable lease receipts are distinct from core's local run receipts.
+Core now reports the policy and both pool counts from one root configuration
+snapshot and one census, rechecks configuration after CPU sampling, and removes
+the entire new tuple on an old Board's atomic 400 compatibility retry.
+
+Still pending: queue notes, complete Board adversarial coverage and delivery,
+composed courier receiver compatibility, full malformed-config/receipt tests, sync replay
 coverage, guard mutations, scoring, reporting and live activation. Do not enable
 this incomplete implementation. `priority_slots` is currently opt-in (absent = 0)
 until the full Board-compatible rollout is ready; the enabled-hub target is 3.
@@ -96,10 +104,20 @@ The dispatcher budget and pre-lease advisory must use the same pool policy so
 neither an early seven-slot cap nor the 50% advisory prevents eligible priority
 work from reaching final admission. Advisory snapshots never grant authority.
 
-The Board service is a separate integration boundary. Its lease cap and
-worker-first overflow/review gates currently use a scalar machine cap and CPU
-ceiling. They must understand the new eligibility policy before enabling the
-extension. A Board lease is a reservation, not proof an interpreter started.
+The Board service is a separate integration boundary. Operator-owned machine
+`hub_admission` is `{version:1, priority_slots:3,
+regular_cpu_busy_below_pct:50, priority_cpu_busy_below_pct:85}`; `max_card_runs`
+remains the regular cap. The opted-in policy supersedes the overflow CPU threshold
+for both pools. Legacy machines retain the old scalar/overflow behavior.
+An opted-in machine refuses all new grants unless fresh runtime telemetry names
+exactly the same policy and a consistent pool census. Each pool is floored by its
+retained Board leases, with other tasks' tentative reservations counted and the
+candidate's own reservation excluded. Old leases without receipts count regular;
+unknown receipt values refuse. Claim-time class and origin do not change on renewal,
+replay or task edits. All opted-in grant paths consume the existing single-use CPU
+sample receipt, including direct pins and review with overflow disabled. This is
+deliberately conservative: approximately one Board grant per fresh CPU sample.
+A Board lease is a reservation, not proof an interpreter started.
 Board Durable Objects serialize per board, not across boards; they do not replace
 the local host lock. Preserve existing total-cap behavior for unenabled machines.
 Task metadata must round-trip through Board migrations/field allowlists; local
