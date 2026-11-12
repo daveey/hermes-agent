@@ -44,7 +44,7 @@ def tick(directory: Path, *, now: float, load_per_core: float | None, evidence: 
     with (directory / 'observer.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
-            state = json.loads((directory / 'observer.json').read_text(encoding='utf-8'))
+            state = json.loads((directory / 'observer.json').read_text(encoding='utf-8-sig'))
         except FileNotFoundError:
             state = dict(version=1, last=None, high_since=None, pending=None, published_id=None, armed=True)
         if not isinstance(state, dict) or state.get('version') != 1:

@@ -294,6 +294,7 @@ from tests._fixtures.offline_cli_catalogs import _offline_cli_catalog_transport
 from tests._fixtures.platform_gating import _platforms_gate_reason, _reject_contradictory_platform_marks
 from tests._fixtures.session_context_reset import _reset_session_context_vars
 from tests._fixtures.state_monkeypatch import _state_aware_monkeypatch
+from scripts.worker_test_budget import cap_xdist_workers as _cap_xdist_workers
 from tests._fixtures import required_extras as _required_extras
 
 # HERMES_TEST_REQUIRE_EXTRAS (set by the CI lanes that install the extras): a listed optional
@@ -1507,22 +1508,6 @@ def _take_host_test_slot(config) -> None:
         if worker:
             raise pytest.UsageError(f'worker host test slot unavailable: {exc}') from exc
         sys.stderr.write(f"(host test slot unavailable: {exc})\n")
-
-
-def _cap_xdist_workers(config, budget: int) -> None:
-    """[daveey] One slot holder runs at most ``budget`` xdist workers (``-n 8`` / ``-n auto`` included).
-
-    xdist turns ``-n`` into ``config.option.tx`` in its tryfirst ``pytest_cmdline_main`` and only reads
-    ``tx`` when ``DSession`` starts its nodes at session start, so trimming it here (pytest_configure)
-    caps the worker count."""
-    option = getattr(config, "option", None)
-    tx = getattr(option, "tx", None)
-    if not tx or len(tx) <= budget or any(spec != "popen" for spec in tx):
-        return
-    sys.stderr.write(f"(host test slots: capping xdist workers {len(tx)} -> {budget}; "
-                     f"HERMES_TEST_XDIST_MAX overrides)\n")
-    option.tx = list(tx[:budget])
-    option.numprocesses = budget
 
 
 def _release_host_test_slot(config) -> None:

@@ -21,7 +21,7 @@ def effective_cores() -> float:
     """
     import os
     cpus = set()
-    for span in (CGROUP_ROOT / 'cpuset.cpus.effective').read_text(encoding='utf-8').strip().split(','):
+    for span in (CGROUP_ROOT / 'cpuset.cpus.effective').read_text(encoding='utf-8-sig').strip().split(','):
         bounds = span.split('-')
         low, high = int(bounds[0]), int(bounds[-1])
         if len(bounds) > 2 or low < 0 or high < low or high > 1048576:
@@ -34,7 +34,7 @@ def effective_cores() -> float:
     quota_file = CGROUP_ROOT / 'cpu.max'
     # The real cgroup-v2 root has no cpu.max; a delegated mount may have one.
     if quota_file.exists():
-        raw, period = quota_file.read_text(encoding='utf-8').split()
+        raw, period = quota_file.read_text(encoding='utf-8-sig').split()
         if int(period) <= 0:
             raise ValueError('invalid host CPU period')
         if raw != 'max':
@@ -108,7 +108,7 @@ def occupied_owners(root: Path, owners: dict[str, Owner], active: set[Owner], *,
         # Resolve against this sample's identity, never an earlier name census.
         if owner is None and legacy_resolver is not None:
             owner = legacy_resolver(root, child.name)
-        events = dict(line.split() for line in (child / 'cgroup.events').read_text(encoding='utf-8').splitlines())
+        events = dict(line.split() for line in (child / 'cgroup.events').read_text(encoding='utf-8-sig').splitlines())
         try:
             after = child.lstat()
         except FileNotFoundError as exc:
@@ -125,7 +125,7 @@ def occupied_owners(root: Path, owners: dict[str, Owner], active: set[Owner], *,
 
 def pool_path() -> Path:
     import os
-    uid = os.getuid()
+    uid = os.getuid()  # windows-footgun: ok (Linux cgroup-v2 only)
     return CGROUP_ROOT / 'user.slice' / f'user-{uid}.slice' / f'user@{uid}.service' / 'hermes.slice' / 'hermes-kanban.slice'
 
 
@@ -167,10 +167,10 @@ def configure_card(board: str, task: str) -> str:
     if env is None:
         raise RestartSafeScopeUnavailable('Worker compute budget requires the user bus')
     cores = effective_cores()
-    base = CGROUP_ROOT / 'user.slice' / f'user-{os.getuid()}.slice'
+    base = CGROUP_ROOT / 'user.slice' / f'user-{os.getuid()}.slice'  # windows-footgun: ok (Linux cgroup-v2 only)
     _verify_quota(base, cores * .875)
     name = owner_slice(board, task)
-    manager = base / f'user@{os.getuid()}.service'
+    manager = base / f'user@{os.getuid()}.service'  # windows-footgun: ok (Linux cgroup-v2 only)
     pool = manager / 'hermes.slice' / 'hermes-kanban.slice'
     for unit, quota, path in [('hermes-kanban.slice', cores * .75, pool), (name, 2, pool / name)]:
         for arguments in [('set-property', '--runtime', unit, f'CPUQuota={quota * 100:g}%', 'CPUWeight=10'),
@@ -178,7 +178,7 @@ def configure_card(board: str, task: str) -> str:
             subprocess.run(['systemctl', '--user', *arguments], env=env, check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10)
         _verify_quota(path, quota)
-        if not 1 <= int((path / 'cpu.weight').read_text(encoding='utf-8')) <= 10:
+        if not 1 <= int((path / 'cpu.weight').read_text(encoding='utf-8-sig')) <= 10:
             raise ValueError(f'Worker CPU weight is missing or too high: {unit}')
     directory = policy_root() / 'worker-resources' / 'owners'
     directory.mkdir(parents=True, exist_ok=True)
@@ -197,6 +197,6 @@ def configure_card(board: str, task: str) -> str:
 
 
 def _verify_quota(path: Path, maximum: float) -> None:
-    raw, period = (path / 'cpu.max').read_text(encoding='utf-8').split()
+    raw, period = (path / 'cpu.max').read_text(encoding='utf-8-sig').split()
     if raw == 'max' or int(period) <= 0 or int(raw) <= 0 or int(raw) / int(period) > maximum:
         raise ValueError(f'Worker CPU quota is missing or too wide: {path.name}')

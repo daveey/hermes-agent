@@ -41,7 +41,7 @@ def _pressure(directory: Path) -> bool:
         _lock_pressure(lock)
         path = directory / 'pressure.json'
         try:
-            state = json.loads(path.read_text(encoding='utf-8'))
+            state = json.loads(path.read_text(encoding='utf-8-sig'))
         except FileNotFoundError:
             state = {'held': False}
         if not isinstance(state, dict) or type(state.get('held')) is not bool:
@@ -69,7 +69,7 @@ def pool_occupancy(pool: Path, owners, active, *, legacy_resolver=None):
     try:
         pool.stat()
     except FileNotFoundError:
-        events = dict(line.split() for line in (pool.parent.parent / 'cgroup.events').read_text(encoding='utf-8').splitlines())
+        events = dict(line.split() for line in (pool.parent.parent / 'cgroup.events').read_text(encoding='utf-8-sig').splitlines())
         if events.get('populated') not in {'0', '1'}:
             raise ValueError('invalid user manager observation')
         try:
@@ -93,7 +93,7 @@ def occupied_count_for_host(echo=None, *, claimant=None) -> int | None:
         for path in owner_dir.iterdir():
             if path.suffix != '.json':
                 continue
-            owner = json.loads(path.read_text(encoding='utf-8'))
+            owner = json.loads(path.read_text(encoding='utf-8-sig'))
             if (not isinstance(owner, list) or len(owner) != 2
                     or not all(isinstance(value, str) and value for value in owner)
                     or capacity.owner_slice(*owner) != path.stem):

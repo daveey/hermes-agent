@@ -32,7 +32,7 @@ def register(conn) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / (hashlib.sha256(str(path).encode()).hexdigest() + '.json')
     if destination.exists():
-        if json.loads(destination.read_text(encoding='utf-8')) != str(path):
+        if json.loads(destination.read_text(encoding='utf-8-sig')) != str(path):
             raise ValueError('invalid registered board')
         return
     with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=directory, delete=False) as handle:
@@ -78,7 +78,7 @@ def removing(path: Path):
             for root in roots:
                 stack.enter_context(admission_lock(root, timeout=0))
             registered = record.exists()
-            if registered and json.loads(record.read_text(encoding='utf-8')) != str(path):
+            if registered and json.loads(record.read_text(encoding='utf-8-sig')) != str(path):
                 raise ValueError('invalid registered board')
             verify = registered or (capacity.worker_enabled() and path.exists())
             if verify:
@@ -127,7 +127,7 @@ def paths() -> list[Path]:
         for record in directory.iterdir():
             if record.suffix != '.json':
                 continue
-            raw = json.loads(record.read_text(encoding='utf-8'))
+            raw = json.loads(record.read_text(encoding='utf-8-sig'))
             if not isinstance(raw, str) or not Path(raw).is_absolute():
                 raise ValueError('invalid registered board path')
             if record.stem != hashlib.sha256(raw.encode()).hexdigest():

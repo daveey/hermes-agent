@@ -20,12 +20,12 @@ def _processes(proc: Path) -> dict:
         if not path.name.isdecimal():
             continue
         try:
-            raw = (path / 'stat').read_text(encoding='utf-8')
+            raw = (path / 'stat').read_text(encoding='utf-8-sig')
             opening, closing = raw.index('('), raw.rindex(')')
             fields = raw[closing + 2:].split()
             # Fields after comm start at stat field 3; starttime is field 22.
             ticks, birth = int(fields[11]) + int(fields[12]), int(fields[19])
-            cgroup = (path / 'cgroup').read_text(encoding='utf-8')
+            cgroup = (path / 'cgroup').read_text(encoding='utf-8-sig')
             unified = next(line[3:] for line in cgroup.splitlines() if line.startswith('0::'))
             result[int(path.name)] = dict(birth=birth, ticks=ticks, comm=_text(raw[opening + 1:closing]),
                                           group=unified, uid=path.stat().st_uid)
@@ -46,7 +46,7 @@ def snapshot(*, proc: Path = Path('/proc'), interval: float = 0.2) -> dict:
     if directory.exists():
         for path in directory.glob('*.json'):
             try:
-                owner = json.loads(path.read_text(encoding='utf-8'))
+                owner = json.loads(path.read_text(encoding='utf-8-sig'))
                 if (not isinstance(owner, list) or len(owner) != 2
                         or not all(isinstance(value, str) and value for value in owner)
                         or capacity.owner_slice(*owner) != path.stem):
@@ -80,7 +80,7 @@ def snapshot(*, proc: Path = Path('/proc'), interval: float = 0.2) -> dict:
         contained = 'hermes-kanban.slice' in parts
         rows.append(dict(pid=pid, comm=current['comm'], cpu_percent=round(100 * delta / hz / elapsed, 2),
                          card=owned or 'unknown', contained=contained,
-                         uncontained_same_uid=current['uid'] == os.getuid() and not contained))
+                         uncontained_same_uid=current['uid'] == os.getuid() and not contained))  # windows-footgun: ok (Linux /proc only)
     rows.sort(key=lambda row: (-row['cpu_percent'], row['pid']))
     return dict(cpu_basis='interval; 100% = one core', sample_seconds=round(elapsed, 3),
                 process_inventory='partial' if unknown else 'observed', unknown_processes=unknown,

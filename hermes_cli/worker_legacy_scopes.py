@@ -31,7 +31,7 @@ _MANAGED = re.compile(r'hermes-kanban-[0-9a-f]{64}\.slice\Z')
 
 
 def boot_id() -> str:
-    value = BOOT_ID_PATH.read_text(encoding='utf-8').strip()
+    value = BOOT_ID_PATH.read_text(encoding='utf-8-sig').strip()
     if not value:
         raise ValueError('empty boot id')
     return value
@@ -76,7 +76,7 @@ def lookup(pool: Path, name: str):
     if not valid_scope_name(name):
         return None
     try:
-        text = _record_path(name).read_text(encoding='utf-8')
+        text = _record_path(name).read_text(encoding='utf-8-sig')
     except FileNotFoundError:
         return None
     record = _parse(json.loads(text), name)
@@ -106,7 +106,7 @@ def owners_for_pool(pool: Path) -> dict[str, tuple[str, str]]:
 
 
 def _populated(path: Path) -> bool:
-    events = dict(line.split() for line in (path / 'cgroup.events').read_text(encoding='utf-8').splitlines())
+    events = dict(line.split() for line in (path / 'cgroup.events').read_text(encoding='utf-8-sig').splitlines())
     if events.get('populated') not in {'0', '1'}:
         raise ValueError('invalid populated observation')
     return events['populated'] == '1'
@@ -146,13 +146,13 @@ def register(scope: str, database, task: str, *, pool: Path | None = None, timeo
         if not _populated(path):
             raise ValueError('legacy scope is not populated')
         capacity._verify_quota(path, MAX_CORES)
-        if not 1 <= int((path / 'cpu.weight').read_text(encoding='utf-8')) <= MAX_WEIGHT:
+        if not 1 <= int((path / 'cpu.weight').read_text(encoding='utf-8-sig')) <= MAX_WEIGHT:
             raise ValueError('legacy scope CPU weight is missing or too high')
         record = {'version': 1, 'scope': scope, 'owner': list(owner), 'boot_id': boot_id(),
                   'dev': dev, 'ino': ino}
         existing = None
         with contextlib.suppress(FileNotFoundError):
-            existing = _parse(json.loads(_record_path(scope).read_text(encoding='utf-8')), scope)
+            existing = _parse(json.loads(_record_path(scope).read_text(encoding='utf-8-sig')), scope)
         if existing is not None and existing != record and lookup(pool, scope) is not None:
             raise ValueError('legacy scope is already registered to another owner')
         if _identity(path) != (dev, ino):

@@ -77,14 +77,14 @@ def recover(path: Path) -> None:
     with admission_lock(root, timeout=0):
         if path.exists():
             raise ValueError('source exists; use normal board removal')
-        raw = json.loads(intent.read_text(encoding='utf-8'))
+        raw = json.loads(intent.read_text(encoding='utf-8-sig'))
         if (not isinstance(raw, dict) or raw.get('version') != 1
                 or raw.get('path') != str(path) or raw.get('idle') is not True
                 or type(raw.get('device')) is not int
                 or type(raw.get('inode')) is not int or raw['inode'] <= 0):
             raise ValueError('invalid board retirement proof')
         if record.exists():
-            if json.loads(record.read_text(encoding='utf-8')) != str(path):
+            if json.loads(record.read_text(encoding='utf-8-sig')) != str(path):
                 raise ValueError('registered identity differs from retirement proof')
             discard(record)
         discard(intent)

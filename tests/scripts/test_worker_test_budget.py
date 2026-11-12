@@ -125,3 +125,13 @@ print('child receipt verified')
                                 text=True, encoding='utf-8', timeout=30, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'child receipt verified' in result.stdout
+
+
+@pytest.mark.parametrize(('enabled', 'inherited', 'expected'),
+                         [(False, False, 16), (True, False, 4), (True, True, 1)])
+def test_runner_jobs_capped_to_worker_budget(monkeypatch, enabled, inherited, expected):
+    from scripts import run_tests_parallel as runner
+    monkeypatch.setattr(capacity, 'worker_enabled', lambda: enabled)
+    monkeypatch.setattr(runner, 'inherited_slot', lambda: inherited)
+    monkeypatch.setattr(runner, 'host_slot_count', lambda: 4)
+    assert runner._worker_job_cap('16') == expected

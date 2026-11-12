@@ -17,7 +17,7 @@ THREAD_VARS = ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
 
 
 def _stat(pid: int) -> tuple[int, int]:
-    parts = Path(f'/proc/{pid}/stat').read_text(encoding='utf-8').rsplit(')', 1)[1].split()
+    parts = Path(f'/proc/{pid}/stat').read_text(encoding='utf-8-sig').rsplit(')', 1)[1].split()
     return int(parts[1]), int(parts[19])
 
 
@@ -49,13 +49,13 @@ def inherited_slot() -> bool:
         held = os.stat(f'/proc/{pid}/fd/{fd}')
         if (st.st_dev, st.st_ino) != (held.st_dev, held.st_ino):
             return False
-        record = json.loads(expected.read_text(encoding='utf-8'))
+        record = json.loads(expected.read_text(encoding='utf-8-sig'))
         if (not isinstance(record, dict) or not isinstance(rec.get('nonce'), str) or not rec['nonce'] or
                 record.get('nonce') != rec['nonce'] or record.get('pid') != pid or
                 record.get('start') != birth):
             return False
         identity = f'{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}'
-        for line in Path(f'/proc/{pid}/fdinfo/{fd}').read_text(encoding='utf-8').splitlines():
+        for line in Path(f'/proc/{pid}/fdinfo/{fd}').read_text(encoding='utf-8-sig').splitlines():
             fields = line.split()
             if (len(fields) == 9 and fields[0] == 'lock:' and
                     fields[2:6] == ['FLOCK', 'ADVISORY', 'WRITE', str(pid)] and
@@ -64,6 +64,23 @@ def inherited_slot() -> bool:
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         return False
     return False
+
+
+def cap_xdist_workers(config, budget: int) -> None:
+    """[daveey] One slot holder runs at most ``budget`` xdist workers (``-n 8`` / ``-n auto`` included).
+
+    xdist turns ``-n`` into ``config.option.tx`` in its tryfirst ``pytest_cmdline_main`` and only reads
+    ``tx`` when ``DSession`` starts its nodes at session start, so trimming it in pytest_configure
+    (tests/conftest.py) caps the worker count."""
+    import sys
+    option = getattr(config, "option", None)
+    tx = getattr(option, "tx", None)
+    if not tx or len(tx) <= budget or any(spec != "popen" for spec in tx):
+        return
+    sys.stderr.write(f"(host test slots: capping xdist workers {len(tx)} -> {budget}; "
+                     f"HERMES_TEST_XDIST_MAX overrides)\n")
+    option.tx = list(tx[:budget])
+    option.numprocesses = budget
 
 
 def child_environment(env: MutableMapping[str, str], fd: int | None) -> None:

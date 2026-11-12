@@ -804,6 +804,15 @@ def _run_one_file_once(
         return _run_one_file_attempt(file, pytest_args, repo_root, file_timeout, targets, slot_fd=slot_fd)
 
 
+def _worker_job_cap(text: str) -> int:
+    """argparse type for -j: a worker host caps file parallelism to its fixed test budget."""
+    jobs = int(text)
+    from hermes_cli.worker_compute_capacity import worker_enabled
+    if worker_enabled():
+        return 1 if inherited_slot() else min(jobs, host_slot_count())
+    return jobs
+
+
 def _run_one_file_attempt(
     file: Path,
     pytest_args: list[str],
@@ -1464,8 +1473,8 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("-j", "--jobs", type=int,
-                        default=int(os.environ.get("HERMES_TEST_WORKERS") or (os.cpu_count() or 4)),
+    parser.add_argument("-j", "--jobs", type=_worker_job_cap,  # string default: the cap applies to it too
+                        default=os.environ.get("HERMES_TEST_WORKERS") or str(os.cpu_count() or 4),
                         help="Parallel worker count (default: $HERMES_TEST_WORKERS or cpu_count)")
     parser.add_argument(
         "--paths",
@@ -1857,9 +1866,6 @@ def main() -> int:
         sys.path.insert(0, str(repo_root))
     _sweep_killed_run_roots(_runner_scratch_root())
 
-    from hermes_cli.worker_compute_capacity import worker_enabled
-    if worker_enabled():
-        args.jobs = 1 if inherited_slot() else min(args.jobs, host_slot_count())
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         # Duration cache for the timeout scaler: known-slow files get
         # proportional headroom instead of a false timeout-kill under
