@@ -171,6 +171,20 @@ def test_urgent_claim_uses_extra_pool_with_regular_pool_full(board, monkeypatch,
     assert claim(conn, candidate, review) is not None
     receipt = conn.execute("SELECT admission_pool FROM task_runs WHERE task_id=?", (candidate,)).fetchone()
     assert receipt[0] == "priority"
+    event = next(event for event in kb.list_events(conn, candidate) if event.kind == "claimed")
+    assert event.payload["hub_admission"]["pool"] == "priority"
+    assert event.payload["hub_admission"]["pools"] == {"regular": 7, "priority": 0}
+    assert event.payload["hub_cpu"]["limit_pct"] == 85
+
+
+@pytest.mark.parametrize("bad", ["", "unrecognized"])
+def test_unknown_pool_receipt_invalidates_census(board, bad):
+    conn, _home = board
+    task_id = task(conn)
+    assert kb.claim_task(conn, task_id)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_runs SET admission_pool=? WHERE task_id=?", (bad, task_id))
+    assert mm.active_card_runs(detail={"pools": {"regular": 0, "priority": 0}}) is None
 
 
 def test_capacity_class_and_frees_claim_survive_task_readback(board):

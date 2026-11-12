@@ -25,7 +25,7 @@ def board_pools(conn, *, own=None, excluded=()):
     ):
         if run_id in excluded:
             continue
-        pool = pool or "regular"
+        pool = "regular" if pool is None else pool
         if pool not in counts:
             raise ValueError("unknown admission pool receipt")
         counts[pool] += 1
@@ -73,6 +73,9 @@ def candidate_pool(conn, task_id, regular_cap, *, echo=None):
     active = machine_metrics.active_card_runs(exclude=echo, detail=detail)
     if row is None or active is None:
         return None, ceiling, detail
+    detail.update(active_before=active + detail.get("excluded", 0), active_after=active)
+    if echo is not None and detail.get("excluded"):
+        detail["excluded_run_uid"] = echo.run_uid
     counts = detail["pools"]
     pool = select_pool(row[0], **counts, regular_cap=regular_cap, priority_cap=slots)
     return pool, ceiling, detail

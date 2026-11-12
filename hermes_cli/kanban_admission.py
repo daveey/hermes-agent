@@ -167,6 +167,8 @@ def _final_hub_gate(gate, started=None, *, conn=None, task_id=None):
     counts = getattr(_decision, "counts", None) or {}
     admission = {k: counts[k] for k in ("active_before", "active_after", "excluded_run_uid")} \
         if counts.get("excluded_run_uid") else None
+    if "pools" in counts:
+        admission = {**(admission or {}), "pool": _decision.pool, "pools": counts["pools"]}
     return None, {**{k: measured[k] for k in cpu.FIELDS}, "limit_pct": limit,
                   **({"hub_admission": admission} if admission else {})}
 
