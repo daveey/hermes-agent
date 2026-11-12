@@ -48,7 +48,6 @@ def _run(stop: str | None, *, applied: bool = False, code: int = 1, user_action:
     *[(name, {}, (name, "failed")) for name in sorted(contract.UPDATE_STOP_CLASSES - {"lock_held", "managed_install"})],
     ("not_a_class: /home/alice", {}, ("aborted_before_apply", "failed")),  # only closed tokens pass
     (None, {}, ("aborted_before_apply", "failed")),  # the fallback stays for an exit with no reason
-    ("up_to_refused", {}, ("up_to_refused", "failed")),  # an --up-to refusal reads its own class
     ("fetch_failed", {"applied": True}, ("deps_failed", "failed")),  # a reason never outlives the apply
     (None, {"applied": True, "code": 1, "user_action": True}, ("local_changes_parked", "partial")),
 ])
@@ -122,6 +121,29 @@ def test_exits_before_the_receipt_opens_count_once_and_leave_the_holders_receipt
         ("lock_held", "refused", "none"), ("git_in_progress", "failed", "other")]
     assert all(contract.counter_dimensions_are_valid(contract.UPDATE_RUN_METRIC, r) for r in rows.runs())
     assert (rows.home / "logs/update_receipts/latest.json").read_bytes() == holders
+
+
+def test_up_to_refusal_before_receipt_keeps_its_class_and_validates_v4(rows):
+    """A malformed --up-to or incompatible flag refuses before opening a receipt."""
+    from pathlib import Path
+
+    from jsonschema import Draft202012Validator
+
+    assert update_receipt._current.get() is None
+    update_receipt.record_stop_without_receipt("up_to_refused", "refused")
+
+    (run,) = rows.runs()
+    assert (run["failure_class"], run["outcome"], run["failed_stage"]) == ("up_to_refused", "refused", "none")
+    assert contract.counter_dimensions_are_valid(contract.UPDATE_RUN_METRIC, run)
+    assert update_receipt._current.get() is None
+    assert not (rows.home / "logs/update_receipts").exists()
+    schema_path = Path(contract.__file__).parent / "schemas/hermes.shared_metrics.v4.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    run_schema = next(definition for definition in schema["$defs"].values()
+                      if definition.get("properties", {}).get("name", {}).get("const") == contract.UPDATE_RUN_METRIC)
+    Draft202012Validator({**run_schema, "$defs": schema["$defs"]}).validate({
+        "name": contract.UPDATE_RUN_METRIC, "type": "counter", "dimensions": run, "value": 1,
+    })
 
 
 def _marker(home, *lines: str) -> None:
