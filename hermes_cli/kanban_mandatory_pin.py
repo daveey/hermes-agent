@@ -83,6 +83,59 @@ def carry(labels: list[str], item: Mapping[str, Any], *, me: str = "") -> list[s
     return sorted(set(labels) | need)
 
 
+def mark_refusal(conn: Any, task_id: str) -> Optional[str]:
+    """Why ``task_id`` may not be marked mandatory now, or None. A worker-first card's ``runs_on`` is Board-owned
+    (its pool lease never checks :data:`LABEL`), so marking it would let an old core run it on another model."""
+    from hermes_cli import kanban_db_sync as sync
+    if "placement_policy" not in sync.table_columns(conn, "tasks"):
+        return None
+    row = conn.execute("SELECT placement_policy FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None or not row[0]:
+        return None
+    return (f"{task_id} is placed worker-first ({row[0]}): {WORKER_FIRST_REASON}. Move it to the worker queue "
+            f"(`hermes kanban move {task_id} --pool --reason ...`) first, or recreate it with the mark")
+
+
+def mark(conn: Any, task_id: str) -> bool:
+    """Set ``model_pin_mandatory`` on a placed card and union :data:`LABEL` into its ``runs_on`` in the same write
+    (``hermes kanban set-model <id> --mandatory``), so a later mark is fenced like a create-time one (review
+    5879416189 on #1622). Raises ValueError for a card without a model pin or a worker-first card
+    (:func:`mark_refusal`), RuntimeError for an archived one. False when the card does not exist."""
+    import json
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli.kanban_db_connect import write_txn
+    synced = "runs_on" in sync.table_columns(conn, "tasks") and sync.board_mode(conn) == "primary"
+    me = str(sync._state(conn)["gateway_id"] or "") if synced else ""
+    fields: tuple[str, ...] = ("model_pin_mandatory",)
+    with write_txn(conn):
+        row = conn.execute("SELECT status, model_override, " + ("runs_on" if synced else "NULL") +
+                           " FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            return False
+        if row[0] == "archived":
+            raise RuntimeError(f"cannot change the model pin on archived task {task_id}")
+        if not _str(row[1]):
+            raise ValueError("--mandatory needs a model pin: set a model first")
+        if (why := mark_refusal(conn, task_id)) is not None:
+            raise ValueError(why)
+        conn.execute("UPDATE tasks SET model_pin_mandatory = 1 WHERE id = ?", (task_id,))
+        payload: dict[str, Any] = {"mandatory": True}
+        try:
+            labels = json.loads(row[2]) if row[2] else []
+        except ValueError:
+            labels = []
+        if isinstance(labels, list) and labels:
+            new = carry(labels, {"model_override": row[1], "model_pin_mandatory": 1}, me=me)
+            if new != labels:
+                conn.execute("UPDATE tasks SET runs_on = ? WHERE id = ?", (json.dumps(new), task_id))
+                payload.update(runs_on=new, previous_runs_on=labels)
+                fields = ("model_pin_mandatory", "runs_on")
+        kb._append_event(conn, task_id, "model_pin_mandatory_set", payload)
+    kb.notify_task_updated(conn, task_id, fields)
+    return True
+
+
 def refusal(card: Mapping[str, Any], *, me: str = "") -> Optional[str]:
     """None when this machine can run ``card``'s mandatory pin exactly (or it has none), else why not.
 

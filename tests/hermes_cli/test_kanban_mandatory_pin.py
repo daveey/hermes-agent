@@ -299,3 +299,68 @@ def test_carry_leaves_a_pin_to_this_machine_alone():
     assert mp.carry([f"machine:{HUB}"], card, me=HUB) == [f"machine:{HUB}"]  # this core refuses what it can't serve
     assert mp.carry([f"machine:{WORKER}"], card, me=HUB) == [mp.LABEL, f"machine:{WORKER}"]
     assert mp.carry([POOL], {"model_override": "x"}, me=HUB) == [POOL]
+
+
+# --- review 5879416189: a later mark is fenced like a create-time one -------------------------------------------
+# `hermes kanban set-model <id> --mandatory` (the quota-reroute comment advertises it) used to set only the column:
+# a placed [pool:worker] card kept runs_on without the label, and a worker-first card kept its Board-owned lease.
+
+def _placed(hub, *, model="claude-opus-5-5"):
+    hub.enter()
+    tid = kb.create_task(hub.conn, title="review", assignee="default", model_override=model,
+                         provider_override="anthropic" if model else None)
+    with kb.write_txn(hub.conn):
+        wn.set_runs_on(hub.conn, tid, [POOL])
+    return tid
+
+
+@pytest.mark.parametrize("raw_model", [None, "claude-opus-5-5"])
+def test_marking_a_placed_card_mandatory_adds_the_label(gws, raw_model):
+    from hermes_cli import kanban_pin_reroute as pr
+    hub, _ = gws
+    tid = _placed(hub)
+    found, _ = pr.set_model_cli(hub.conn, tid, raw_model, raw_model, "anthropic" if raw_model else None, True)
+    assert found
+    assert kb.get_task(hub.conn, tid).model_pin_mandatory == 1
+    assert _runs_on(hub.conn, tid) == sorted([POOL, mp.LABEL])
+    [ev] = [json.loads(p) for (p,) in hub.conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'model_pin_mandatory_set'", (tid,))]
+    assert ev == {"mandatory": True, "runs_on": sorted([POOL, mp.LABEL]), "previous_runs_on": [POOL]}
+    # Unmarking leaves the label (harmless: every attesting worker also serves plain pins); a home card has none.
+    assert pr.set_pin_mandatory(hub.conn, tid, False)
+    assert kb.get_task(hub.conn, tid).model_pin_mandatory is None
+    home = kb.create_task(hub.conn, title="home", assignee="default", model_override="claude-opus-5-5",
+                          provider_override="anthropic")
+    assert pr.set_pin_mandatory(hub.conn, home, True) and _runs_on(hub.conn, home) is None
+
+
+@pytest.mark.parametrize("raw_model", [None, "claude-sonnet-5"])
+def test_marking_a_worker_first_card_mandatory_is_refused_and_changes_nothing(gws, raw_model):
+    from hermes_cli import kanban_pin_reroute as pr
+    hub, _ = gws
+    tid = _placed(hub)
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET placement_policy = 'worker-first-v1' WHERE id = ?", (tid,))
+    with pytest.raises(ValueError, match="worker-first"):
+        pr.set_model_cli(hub.conn, tid, raw_model, raw_model, "anthropic" if raw_model else None, True)
+    task = kb.get_task(hub.conn, tid)
+    assert (task.model_override, task.model_pin_mandatory) == ("claude-opus-5-5", None)
+    assert _runs_on(hub.conn, tid) == [POOL]
+    # Without the mark the same card still takes a new plain pin.
+    assert pr.set_model_cli(hub.conn, tid, "claude-sonnet-5", "claude-sonnet-5", "anthropic", None) == (True, True)
+
+
+def test_marking_needs_a_pin_and_a_live_card(gws):
+    from hermes_cli import kanban_pin_reroute as pr
+    hub, _ = gws
+    tid = _placed(hub, model=None)
+    with pytest.raises(ValueError, match="needs a model pin"):
+        pr.set_pin_mandatory(hub.conn, tid, True)
+    assert _runs_on(hub.conn, tid) == [POOL]
+    assert pr.set_pin_mandatory(hub.conn, "t_missing", True) is False
+    from hermes_cli.kanban_db_archive import archive_task
+    gone = _placed(hub)
+    archive_task(hub.conn, gone)
+    with pytest.raises(RuntimeError, match="archived"):
+        pr.set_pin_mandatory(hub.conn, gone, True)
+    assert kb.get_task(hub.conn, gone).model_pin_mandatory is None
