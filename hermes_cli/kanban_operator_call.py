@@ -40,6 +40,7 @@ REQUEST_KIND = "operator_call_requested"
 RESULT_KIND = "operator_call_result"
 REFUSED_KIND = "operator_call_refused"
 COMMENT_MARK = "operator_call_commented"
+MOVE_MARK = "operator_call_moved"
 PHASE = "awaiting_home"
 DEADLINE_S = 24 * 3600
 MAX_TEXT = 8000
@@ -80,7 +81,7 @@ _SCHEMA = (
     "CREATE INDEX IF NOT EXISTS idx_operator_calls_caller ON operator_calls(caller_task_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_operator_calls_target ON operator_calls(target_task_id, created_at)",
     "CREATE TABLE IF NOT EXISTS operator_call_scan (board TEXT PRIMARY KEY, last_id INTEGER NOT NULL, "
-    "replica_ino INTEGER)",
+    "last_uid TEXT)",
 )
 
 
@@ -391,24 +392,54 @@ def awaiting(conn: sqlite3.Connection) -> list:
         "NULL AND json_valid(result_json) AND json_extract(result_json, '$.phase')=? ORDER BY id", (PHASE,)).fetchall()
 
 
-def _result_for(conn: sqlite3.Connection, target: str, uid: str) -> Optional[dict]:
-    def scan(c):
+_RETRY = object()  # the Board could not vouch for a result yet: look again next tick
+
+
+def _result_for(conn: sqlite3.Connection, target: str, uid: str, home: Optional[str], board: str) -> Any:
+    """The home's answer to request ``uid``, else None or :data:`_RETRY`.
+
+    ``request_uid`` is public (it rides on the caller's card), so a result counts only when it names the home as
+    executor AND the Board says the home gateway wrote that event (``origin_gateway``). Any other copy is ignored
+    and logged, so a forged result neither finishes the call nor hides the real answer.
+    """
+    def candidates(c):
         if c is None:
-            return None
-        for (raw,) in c.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ? ORDER BY id DESC",
-                                (target, RESULT_KIND)).fetchall():
+            return []
+        out = []
+        for euid, raw in c.execute("SELECT uid, payload FROM task_events WHERE task_id = ? AND kind = ? "
+                                   "ORDER BY id DESC", (target, RESULT_KIND)).fetchall():
             try:
                 p = json.loads(raw or "{}")
             except ValueError:
                 continue
             if p.get("request_uid") == uid:
-                return p
-        return None
-    found = scan(conn)  # a pickup copy of the target on this gateway gets the event from the feed
-    if found is None:
-        with _replica(conn) as rep:
-            found = scan(rep)
-    return found
+                out.append((euid, p))
+        return out
+    found = candidates(conn)  # a pickup copy of the target on this gateway gets the event from the feed
+    with _replica(conn) as rep:
+        found += candidates(rep)
+    seen, retry = set(), False
+    for euid, p in found:
+        if not euid or euid in seen:
+            continue
+        seen.add(euid)
+        if not home or p.get("executor_gateway") != home:
+            _log.warning("kanban: ignoring operator_call_result %s for %s: executor %r is not the home %r",
+                         euid, uid, p.get("executor_gateway"), home)
+            continue
+        try:
+            ev = _evidence(board, euid)
+        except Exception as exc:  # health: allow BLE001 -- unreachable Board: look again next tick
+            _log.info("kanban: operator call result evidence for %s unavailable (%s); retrying", euid, exc)
+            retry = True
+            continue
+        row = ev.get("row") if isinstance(ev, dict) else None
+        if not isinstance(row, dict) or row.get("origin_gateway") != home or row.get("task_id") not in (None, target):
+            _log.warning("kanban: ignoring operator_call_result %s for %s: the Board says %r wrote it, not %r",
+                         euid, uid, (row or {}).get("origin_gateway"), home)
+            continue
+        return p
+    return _RETRY if retry else None
 
 
 _STATUS = {"applied": "done", "already_applied": "done", "refused": "rejected", "failed": "failed"}
@@ -428,7 +459,9 @@ def poll(conn: sqlite3.Connection, executor: str, *, now: Optional[int] = None) 
         if req is None:
             continue
         state, op = req["result"], req["ops"][0]
-        res = _result_for(conn, op["task_id"], state["request_uid"])
+        res = _result_for(conn, op["task_id"], state["request_uid"], state.get("home"), _board_slug(conn))
+        if res is _RETRY:
+            res = None
         if res is None and now < int(state.get("deadline") or 0):
             continue
         if res is None:
@@ -534,8 +567,13 @@ def _agent_block(conn: sqlite3.Connection, target: str) -> Optional[str]:
         payload = json.loads(ev[0] or "{}") if ev else {}
     except ValueError:
         payload = {}
-    if str(payload.get("actor") or "").strip() == "user":  # kanban_cli_actor: a human shell's block
-        return f"{target} was blocked by hand (a human hold); only its owner or a human releases it"
+    # Positive provenance: only the card's OWN worker run's block counts (kanban_block from that run records actor
+    # ``agent (task <target>)``, kanban_cli_actor.tool_actor). A block from a human shell (actor ``user``), the
+    # Desktop or dashboard (no actor), a chat agent or the breaker (no blocked event) is a hold placed by hand or
+    # by policy, and only its owner or a human releases it.
+    if str(payload.get("actor") or "").strip() != f"agent (task {target})":
+        return (f"{target} was not blocked by its own agent run (a hand, Desktop or policy hold); only its owner "
+                "or a human releases it")
     return None
 
 
@@ -574,35 +612,52 @@ def _apply(conn: sqlite3.Connection, payload: dict, own: str) -> tuple[str, Opti
                              event_extra=extra, precondition=lambda c: _agent_block(c, target))
         return ("applied", None) if ok else ("refused", f"cannot unblock {target} (state changed)")
     if action == "move":
-        if _marker(conn, target, km.MOVED_EVENT, uid):
+        if _marker(conn, target, km.MOVED_EVENT, uid) or _marker(conn, target, MOVE_MARK, uid):
             return "already_applied", None
         out = km.move_queued(conn, target, runs_on=args.get("runs_on") or [], reason=str(args.get("reason") or ""),
                              event_extra=extra)
         if out.get("ok"):
+            if not _marker(conn, target, km.MOVED_EVENT, uid):
+                # The worker-first Board repin path writes its own event without ``event_extra``: record the
+                # operator provenance (and the replay marker) beside it.
+                with kb.write_txn(conn):
+                    kb._append_event(conn, target, MOVE_MARK, {**extra, "runs_on": out.get("runs_on"),
+                                                              "repinned": bool(out.get("repinned"))})
             return "applied", f"runs_on={out.get('runs_on')}"
         return "refused", f"{out.get('reason_code')}: {out.get('error')}"
     return "refused", f"operator_action_refused: {action}"
 
 
-def _replica_id(rep: sqlite3.Connection) -> int:
-    """The replica file's inode: a retention rebuild unlinks and recreates it, restarting its event ids."""
-    path = _db_path(rep)
-    try:
-        return os.stat(path).st_ino if path else 0
-    except OSError:
-        return 0
+def _uid_at(rep: sqlite3.Connection, eid: int) -> Optional[str]:
+    """The Board uid of replica event ``eid``: names the replica a watermark was taken on."""
+    if eid <= 0:
+        return None
+    row = rep.execute("SELECT uid FROM task_events WHERE id = ?", (eid,)).fetchone()
+    return row[0] if row else None
+
+
+def _anchor(rep: sqlite3.Connection, eid: int) -> tuple[int, Optional[str]]:
+    """``(id, uid)`` of the newest event at or below ``eid`` that has a Board uid (0 when none)."""
+    row = rep.execute("SELECT id, uid FROM task_events WHERE id <= ? AND uid IS NOT NULL ORDER BY id DESC LIMIT 1",
+                      (int(eid),)).fetchone()
+    return (int(row[0]), row[1]) if row else (0, None)
 
 
 def _scan_start(conn: sqlite3.Connection, board: str, rep: sqlite3.Connection) -> int:
-    row = conn.execute("SELECT last_id, replica_ino FROM operator_call_scan WHERE board = ?", (board,)).fetchone()
-    ino = _replica_id(rep)
+    """Resume after the watermark only while the replica still holds the same event at it.
+
+    A retention rebuild recreates the replica and restarts its ids (and a filesystem may reuse the inode, so the
+    file is no identity). A watermark whose event uid moved or vanished rescans from 0; the log dedupes.
+    """
+    row = conn.execute("SELECT last_id, last_uid FROM operator_call_scan WHERE board = ?", (board,)).fetchone()
+    candidates = [(int(row[0]), row[1])] if row else []
     mem = _MARK.get((_db_path(conn), board))
-    candidates = [int(row[0])] if row and int(row[1] or 0) == ino else []
-    if mem and mem[1] == ino:
-        candidates.append(mem[0])
-    last = max(candidates, default=0)
-    top = rep.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0]
-    return 0 if last > int(top or 0) else last  # a rebuilt replica restarts its ids: rescan (the log dedupes)
+    if mem:
+        candidates.append(mem)
+    for last, uid in sorted(candidates, key=lambda c: c[0], reverse=True):
+        if last > 0 and uid and _uid_at(rep, last) == uid:
+            return last
+    return 0
 
 
 def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
@@ -648,19 +703,19 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
                 break
             outcome, _detail = _execute_one(conn, payload, own, refusal)
             done.append((uid, outcome))
-        stored = conn.execute("SELECT last_id, replica_ino FROM operator_call_scan WHERE board = ?",
+        stored = conn.execute("SELECT last_id, last_uid FROM operator_call_scan WHERE board = ?",
                               (board,)).fetchone()
-        new = max(int(hi), last)
-        key, ino = (_db_path(conn), board), _replica_id(rep)
-        _MARK[key] = (new, ino)
+        new, anchor = _anchor(rep, max(int(hi), last))
+        key = (_db_path(conn), board)
+        _MARK[key] = (new, anchor)
         # The watermark lives in memory between ticks; it is persisted when a call was handled or every 10 min,
         # so an idle board costs no write per tick (a restart rescans at most that window; the log dedupes).
-        if stored is None or ((int(stored[0]), int(stored[1] or 0)) != (new, ino)
+        if stored is None or ((int(stored[0]), stored[1]) != (new, anchor)
                               and (done or time.time() - _PERSISTED.get(key, 0) > 600)):
             with kb.write_txn(conn):
-                conn.execute("INSERT INTO operator_call_scan (board, last_id, replica_ino) VALUES (?, ?, ?) "
+                conn.execute("INSERT INTO operator_call_scan (board, last_id, last_uid) VALUES (?, ?, ?) "
                              "ON CONFLICT(board) DO UPDATE SET last_id = excluded.last_id, "
-                             "replica_ino = excluded.replica_ino", (board, new, ino))
+                             "last_uid = excluded.last_uid", (board, new, anchor))
             _PERSISTED[key] = time.time()
     return done
 

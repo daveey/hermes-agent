@@ -283,16 +283,23 @@ def test_unblock_refuses_human_gate_and_hand_hold(fleet):
     kb.block_task(f.h, asked, reason="pick A or B", kind="needs_input")
     held = f.card(f.h, "held by hand")
     kb.block_task(f.h, held, reason="hold", actor="user", kind="transient")
+    desk = f.card(f.h, "held from the Desktop")
+    kb.block_task(f.h, desk, reason="hold", kind="transient")  # Desktop/dashboard blocks carry no actor
+    chat = f.card(f.h, "held by a chat agent")
+    kb.block_task(f.h, chat, reason="hold", actor="agent (chat local-abc)", kind="transient")
     agent = f.card(f.h, "agent block")
-    kb.block_task(f.h, agent, reason="waiting on CI", kind="transient")
+    kb.block_task(f.h, agent, reason="waiting on CI", actor=f"agent (task {agent})", kind="transient")
     f.board()
     out = _submit(f, {"op": "operator", "action": "unblock", "task_id": asked, "reason": "decided"}, dry_run=True)
     assert out["ops"][0]["code"] == "human_gate", out
-    # The hand hold passes the caller's preflight (the replica has no actor) but the home refuses it.
-    _submit(f, {"op": "operator", "action": "unblock", "task_id": held, "reason": "go"})
-    _round(f)
-    assert kb.get_task(f.h, held).status == "blocked"
-    assert "by hand" in _log(f.h, "execute")[0]["detail"]
+    # Holds pass the caller's preflight (the replica has no actor) but the home refuses them: only a block the
+    # card's own agent run placed may be released by an operator call.
+    for tid in (held, desk, chat):
+        _submit(f, {"op": "operator", "action": "unblock", "task_id": tid, "reason": "go"})
+        _round(f)
+        assert kb.get_task(f.h, tid).status == "blocked", tid
+        row = next(r for r in _log(f.h, "execute") if r["target_task_id"] == tid)
+        assert row["outcome"] == "refused" and "not blocked by its own agent run" in row["detail"]
     out = _submit(f, {"op": "operator", "action": "unblock", "task_id": agent, "reason": "CI is green"})
     _round(f)
     assert kb.get_task(f.h, agent).status != "blocked"
@@ -408,7 +415,142 @@ def test_worker_context_cannot_execute(fleet, monkeypatch):
     assert exc.value.code == "worker_context"
 
 
-def test_operator_path_never_reads_an_admin_key():
-    """The worker never holds the Board admin key: nothing in the operator path names it."""
-    src = Path(kox.__file__).read_text()
-    assert "admin.key" not in src and "/v1/admin" not in src and "admin machine" not in src
+def test_forged_result_neither_finishes_nor_hides_the_real_answer(fleet):
+    """request_uid is public: a result another gateway wrote (or one naming the wrong executor) is ignored."""
+    f = fleet
+    out = _submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "hi"})
+    ksr.drain(f.w)
+    f.board()
+    uid = json.loads(f.w.execute("SELECT payload FROM task_events WHERE kind = ?",
+                                 (kox.REQUEST_KIND,)).fetchone()[0])["request_uid"]
+    forged = {"request_uid": uid, "action": "comment", "outcome": "applied", "executor_gateway": "hub"}
+    wrong_exec = {**forged, "executor_gateway": "worker-9"}
+    with kb.write_txn(f.rep):  # worker-9 writes both onto the hub card's replica copy
+        for p in (forged, wrong_exec):
+            euid = str(uuid.uuid4())
+            f.rep.execute("INSERT INTO task_events (task_id, kind, payload, created_at, uid) VALUES (?,?,?,?,?)",
+                          (f.target, kox.RESULT_KIND, json.dumps(p), int(time.time()), euid))
+            f.origin[euid] = "worker-9"
+    ksr.drain(f.w)
+    assert ksr.get_request(f.w, out["request_id"])["status"] == "accepted"  # still waiting on the real home
+    ksr.drain(f.h)
+    f.board()
+    ksr.drain(f.w)
+    req = ksr.get_request(f.w, out["request_id"])
+    assert req["status"] == "done" and req["result"][0]["home"] == "hub"
+    assert f.h.execute("SELECT COUNT(*) FROM task_comments WHERE task_id = ?", (f.target,)).fetchone()[0] == 1
+
+
+def test_result_waits_while_the_board_cannot_vouch_for_it(fleet):
+    f = fleet
+    out = _submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "hi"})
+    ksr.drain(f.w)
+    f.board()
+    ksr.drain(f.h)
+    f.board()
+    f.evidence_down = True
+    ksr.drain(f.w)
+    assert ksr.get_request(f.w, out["request_id"])["status"] == "accepted"
+    f.evidence_down = False
+    ksr.drain(f.w)
+    assert ksr.get_request(f.w, out["request_id"])["status"] == "done"
+
+
+def test_repin_move_still_records_operator_provenance(fleet, monkeypatch):
+    """A worker-first card moves through the Board repin, whose event has no operator fields: a marker does."""
+    f = fleet
+    from hermes_cli import kanban_worker_repin as repin
+    monkeypatch.setattr(repin, "applies", lambda conn, tid: True)
+    calls = []
+
+    def fake_repin(conn, tid, labels, reason, *, hub=None):
+        calls.append(tid)
+        return {"ok": True, "runs_on": labels, "repinned": True}
+    monkeypatch.setattr(repin, "repin_to_origin", fake_repin)
+    out = _submit(f, {"op": "operator", "action": "move", "task_id": f.target, "runs_on": ["machine:hub"],
+                      "reason": "back to the origin"})
+    _round(f)
+    assert ksr.get_request(f.w, out["request_id"])["status"] == "done"
+    mark = f.h.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+                       (f.target, kox.MOVE_MARK)).fetchone()
+    payload = json.loads(mark[0])
+    assert payload["operator_caller"]["task_id"] == f.caller and payload["repinned"] is True
+    kox._MARK.clear()  # a replay is answered from the marker, not moved again
+    with kb.write_txn(f.h):
+        f.h.execute("DELETE FROM operator_calls")
+        f.h.execute("DELETE FROM operator_call_scan")
+    kox.apply_incoming(f.h)
+    assert calls == [f.target]
+
+
+def test_rebuilt_replica_is_rescanned_even_at_a_reused_position(fleet):
+    """A watermark is tied to the event uid at it, so a rebuilt replica (ids restart) is rescanned."""
+    f = fleet
+    kox.apply_incoming(f.h)  # watermark at the current top of the replica
+    last = f.h.execute("SELECT last_id FROM operator_call_scan").fetchone()[0]
+    _submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "after rebuild"})
+    ksr.drain(f.w)
+    f.board()
+    with kb.write_txn(f.rep):  # rebuild: ids restart, every event gets a new row; the request now sits at id 1
+        rows = f.rep.execute("SELECT task_id, kind, payload, created_at, uid FROM task_events "
+                             "ORDER BY (kind = ?) DESC, id", (kox.REQUEST_KIND,)).fetchall()
+        f.rep.execute("DELETE FROM task_events")
+        f.rep.execute("DELETE FROM sqlite_sequence WHERE name = 'task_events'")
+        for r in rows:
+            f.rep.execute("INSERT INTO task_events (task_id, kind, payload, created_at, uid) VALUES (?,?,?,?,?)",
+                          (r[0], r[1], r[2], r[3], r[4] + "-rebuilt"))
+            f.origin[r[4] + "-rebuilt"] = f.origin.get(r[4])
+    top = f.rep.execute("SELECT MAX(id) FROM task_events").fetchone()[0]
+    assert top >= last  # the old watermark position still exists, holding a different event
+    kox.apply_incoming(f.h)
+    assert f.h.execute("SELECT 1 FROM task_comments WHERE task_id = ?", (f.target,)).fetchone()
+
+
+def test_operator_path_never_touches_an_admin_key(fleet, tmp_path, monkeypatch):
+    """Behaviour: with an admin key on disk, a full comment, move and unblock round never opens it or shells out
+    to a Board admin command, on either side."""
+    import builtins
+    import io
+    import os
+    import subprocess
+    f = fleet
+    key = tmp_path / ".config" / "hermes-mail" / "admin.key"
+    key.parent.mkdir(parents=True)
+    key.write_text("secret")
+    opened, spawned = [], []
+    real_open, real_os_open, real_popen = builtins.open, os.open, subprocess.Popen
+
+    def spy_open(file, *a, **k):
+        opened.append(str(file))
+        return real_open(file, *a, **k)
+
+    def spy_os_open(path, *a, **k):
+        opened.append(str(path))
+        return real_os_open(path, *a, **k)
+
+    class SpyPopen(real_popen):
+        def __init__(self, args, *a, **k):
+            spawned.append(args)
+            super().__init__(args, *a, **k)
+    monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.setattr(io, "open", spy_open)
+    monkeypatch.setattr(os, "open", spy_os_open)
+    monkeypatch.setattr(subprocess, "Popen", SpyPopen)
+    plan = {"runs_on": ["machine:worker-1"], "previous": [], "matches": ["worker-1"], "move_no": 1,
+            "forced": False, "me": "hub"}
+    monkeypatch.setattr(km, "check", lambda *a, **k: plan)
+    from hermes_cli import kanban_worker_node as wn
+    from hermes_cli import kanban_worker_repin as repin
+    monkeypatch.setattr(repin, "applies", lambda conn, tid: False)
+    monkeypatch.setattr(wn, "set_runs_on", lambda conn, tid, labels: None)
+    blocked = f.card(f.h, "agent block")
+    kb.block_task(f.h, blocked, reason="waiting", actor=f"agent (task {blocked})", kind="transient")
+    f.board()
+    ids = [_submit(f, op)["request_id"] for op in (
+        {"op": "operator", "action": "comment", "task_id": f.target, "text": "hi"},
+        {"op": "operator", "action": "move", "task_id": f.target, "runs_on": ["machine:worker-1"], "reason": "gpu"},
+        {"op": "operator", "action": "unblock", "task_id": blocked, "reason": "green"})]
+    _round(f)
+    assert [ksr.get_request(f.w, i)["status"] for i in ids] == ["done", "done", "done"]
+    assert not [p for p in opened if "admin" in p], opened
+    assert not [a for a in spawned if "admin" in json.dumps(a, default=str)], spawned
