@@ -133,8 +133,6 @@ def _gha_path_glob(pattern):
             out, i = out + '.*', i + 2
         elif pattern[i] == '*':
             out, i = out + '[^/]*', i + 1
-        elif pattern[i] == '?':
-            out, i = out + '[^/]', i + 1
         else:
             out, i = out + re.escape(pattern[i]), i + 1
     return re.compile(out + r'\Z')
@@ -143,6 +141,9 @@ def _gha_path_glob(pattern):
 @functools.cache
 def _main_push_path_patterns():
     on_push = workflow('hermes-state-macos.yml')['on']['push']
+    # The emulator models only * and **; GitHub gives ? + [] and a leading ! other meanings.
+    for p in on_push['paths']:
+        assert not set('?+[]') & set(p) and not p.startswith('!'), p
     return tuple(_gha_path_glob(p) for p in on_push['paths'])
 
 

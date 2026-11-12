@@ -20,8 +20,9 @@ name: hermes_state (macOS)
 # paths list equal to it). Running it on every main push (~1 in 12 touches that
 # surface) kept the single mini runner busy with main and queued required PR jobs
 # 90+ min. The 4-hourly schedule tests main HEAD anyway: a change outside the
-# surface that still breaks the suite (or a >300-file push, whose paths filter
-# GitHub truncates) surfaces within 4 h instead of on its own push.
+# surface that still breaks the suite (or a push whose diff GitHub cannot fully
+# evaluate: past 3,000 changed files a match beyond them is missed) surfaces
+# within 4 h instead of on its own push.
 #
 # HERMES_HOME points at a throwaway temp dir so the lane can never touch the
 # live ~/.hermes of anything else running on the mini.
