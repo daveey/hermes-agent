@@ -20,6 +20,8 @@ def portability(args: dict, cfg=None) -> tuple[str | None, str | None]:
         return reason, None
     reqs = args.get("requires") or []
     reqs = [reqs] if isinstance(reqs, str) else list(reqs)
+    if refusal := coordination.board_refusal(reqs):
+        return refusal, None
     title = args.get("title") or ""
     body = p.without_evidence(p.without_placement_note(args.get("body") or ""))
     if hit := p._local_marker(title, body, args.get("skills"), c):

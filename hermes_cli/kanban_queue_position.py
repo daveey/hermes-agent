@@ -188,7 +188,31 @@ def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Opt
     skip = skips.latest(conn, task.id)
     if skip:  # why the last tick passed it over (kanban-dd62aef001): no longer a bare slot wait [daveey]
         place["skip"] = skip
+    pool = _pool_could_run(conn, task.id)
+    if pool:
+        place["pool_could_run"], place["task_id"] = pool, task.id
     return place
+
+
+def _pool_could_run(conn: sqlite3.Connection, task_id: str) -> Optional[list[str]]:
+    """Pool workers that could run this home-waiting card now (``kanban_placement_coordination.stranded``).
+
+    [daveey] kanban-1663abf6ab: one held pool member made every access-label card home-only; 15 sat behind a
+    full hub for up to 37 h while five workers carried the labels, and the note only said "waiting for a slot"."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_placement as placement
+    from hermes_cli import kanban_placement_coordination as coordination
+    try:
+        ev = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'created' "
+                          "ORDER BY id LIMIT 1", (task_id,)).fetchone()
+        reason = kb._json_dict(ev["payload"]).get("portable_reason") if ev is not None else None
+        if reason != coordination.REASON:
+            return None
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return (coordination.stranded(dict(row), placement.config(), reason) or None) if row is not None else None
+    except Exception:  # health: allow BLE001 -- advisory; an unreadable registry or config is no verdict
+        _log.debug("kanban queue position: pool check unavailable for %s", task_id, exc_info=True)
+        return None
 
 
 def ahead_words(place: dict[str, Any], template: str) -> str:
@@ -282,6 +306,13 @@ def local_words(place: dict[str, Any]) -> str:
         words += f", {place['running']}/{place['limit']} running"
     elif place.get("limit") is not None and "running" in place:
         words += f", running count unknown (cap {place['limit']})"
+    pool = place.get("pool_could_run")
+    if pool:
+        from hermes_cli.kanban_placement_coordination import REASON
+        return (words + f". Home-only by a stale creation verdict ({REASON}): pool worker(s) "
+                f"{', '.join(pool)} now carry its access labels and have free slots. Re-place it "
+                f"(`hermes kanban move {place.get('task_id') or '<id>'} --runs-on machine:{pool[0]} --reason \"pool attests its labels\"`) "
+                "instead of waiting for a local slot; do not run its work outside the dispatcher")
     if not skip:
         return words + ". " + _NOT_STUCK
     words = f"last dispatcher skip of this ready episode: {skips.words(skip)} ({words})"
