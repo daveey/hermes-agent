@@ -85,6 +85,21 @@ async def rpc(ws, method, **params):
                 return reply
 
 
+async def settled_receipt(ws, sid, admission_id, timeout=RPC_DEADLINE):
+    """``prompt.receipt`` (with its committed result) once the receipt itself reads settled.
+
+    A ``terminal`` row in ``session_admissions`` is not enough: until the owner publishes the
+    completion frame (``live.settling``) the receipt still reads as the started claim and carries
+    no result. Poll the receipt, never the database row, for the result."""
+    async def read():
+        reply = await rpc(ws, 'prompt.receipt', session_id=sid, admission_id=admission_id, include_result=True)
+        assert 'result' in reply, reply
+        return reply if reply['result']['status'] in ('terminal', 'unknown') else None
+    settled = await async_wait_until(read, timeout=timeout, interval=.05, what=f'receipt {admission_id} settled')
+    assert settled is not None
+    return settled
+
+
 def websocket(home, desc, **kw):
     # These probes test RPC behavior, not heartbeat responsiveness. A CPU-starved
     # daemon can miss the library's 20s pong deadline before RPC_DEADLINE expires.
