@@ -182,14 +182,48 @@ def _machine_links(args: argparse.Namespace) -> int:
     return 0
 
 
+def _refill_history(args: argparse.Namespace) -> int:
+    """Refill the event prefix a pre-full-history pickup cut off local copies of other gateways' cards, from this
+    board's replica (``kanban_pickup_history``). Exit 1 when a named card could not be refilled completely."""
+    from hermes_cli import kanban_worker_node as wn
+    from hermes_cli.kanban_pickup_history import refill
+    slug = _board(args)
+    conn = kbc.connect(_path(slug))
+    try:
+        if sync.board_mode(conn) == "off":
+            print(f"kanban sync: {slug} does not sync to the Board service; nothing to refill")
+            return 2
+        replica = wn.open_replica(conn)
+        if replica is None:
+            print(f"kanban sync: {slug} has no replica yet (run `hermes kanban sync run` first)")
+            return 2
+        try:
+            report = refill(conn, replica, wn._own(conn), args.task_ids or None)
+        finally:
+            replica.close()
+    finally:
+        conn.close()
+    if args.json:
+        print(json.dumps(report, indent=2))
+    elif not report:
+        print(f"kanban sync: {slug}: every open copied card already holds its full history")
+    else:
+        for tid, r in report.items():
+            print(f"{tid}: filled={r['filled']} unresolved={r['unresolved']}"
+                  + (f" ({r['reason']})" if r.get("reason") else ""))
+    return 1 if any(r["unresolved"] or r.get("reason") for r in report.values()) else 0
+
+
 _ACTIONS = {"status": _status, "attach": _attach, "import": _import, "diff": _diff, "run": _run,
-            "links": _links, "links-diff": _links_diff, "reconcile": _reconcile, "machine-links": _machine_links}
+            "links": _links, "links-diff": _links_diff, "reconcile": _reconcile, "machine-links": _machine_links,
+            "refill-history": _refill_history}
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
     action = getattr(args, "sync_action", None)
     if action not in _ACTIONS:
-        print("usage: hermes kanban sync {status,attach,import,diff,run,links,links-diff,reconcile} [--board B]")
+        print("usage: hermes kanban sync {status,attach,import,diff,run,links,links-diff,reconcile,machine-links,"
+              "refill-history} [--board B]")
         return 2
     try:
         return _ACTIONS[action](args)

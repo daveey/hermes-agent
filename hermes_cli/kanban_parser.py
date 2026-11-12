@@ -646,6 +646,10 @@ _SPECS = [
         _cmd("reconcile", [_json_flag()],
              help="After the board file lost rows (a recovery): upload rows the service lacks, restore this "
                   "gateway's rows the file lost from the service snapshot, then diff (exit 1 if not clean)"),
+        _cmd("refill-history", [_json_flag(), _arg("task_ids", nargs="*", metavar="TASK_ID",
+                                                   help="Cards to refill (default: every open copied card)")],
+             help="Refill events an older pickup cut off local copies of other gateways' cards, from the replica "
+                  "(by uid; never invents rows; safe on running cards)"),
     ]), help="Central Kanban sync (kanban.sync.*): attach, import, status, diff"),
     _cmd("recover", [
         _json_flag(help="Emit the recovery report as JSON"),

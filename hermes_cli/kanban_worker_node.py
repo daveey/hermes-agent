@@ -43,6 +43,8 @@ REGISTRY_RETRY_S = 5
 # Copy at most this many cards per tick when the dispatcher has no cap.
 DEFAULT_PICKUP_BATCH = 4
 # Import runs before events so portable run UIDs resolve to the copied runs.
+# [daveey] Copies truncated by the old newest-200 event tail (t_01a1ccf95e85a6f1 lost its early ``owner_admitted``
+# rows, so ship's land gate refused) are refilled by kanban_pickup_history.
 _CHILD_TABLES = ("task_runs", "task_comments", "task_attachments", "task_events")
 
 _REGISTRY: dict[str, Any] = {"at": None, "value": None, "retry": False}
@@ -534,6 +536,7 @@ def pickup(conn: sqlite3.Connection, *, budget: Optional[int],
     if sync.board_mode(conn) != "primary" or mode is None:
         return []
     evict(conn)
+    _refill_copies(conn)
     limit = DEFAULT_PICKUP_BATCH if budget is None else budget
     if limit <= 0:
         note_capped(conn, profile_exists)
@@ -552,6 +555,24 @@ def pickup(conn: sqlite3.Connection, *, budget: Optional[int],
     if imported:
         _log.info("kanban worker node: picked up %d card(s) from other gateways: %s", len(imported), imported)
     return imported
+
+
+def _refill_copies(conn: sqlite3.Connection) -> None:
+    """Refill the event prefix a pre-full-history pickup cut off each local copy (``kanban_pickup_history``)."""
+    try:
+        replica = open_replica(conn)
+        if replica is None:
+            return
+        try:
+            from hermes_cli.kanban_pickup_history import refill
+            filled = {t: r for t, r in refill(conn, replica, _own(conn)).items() if r["filled"]}
+        finally:
+            replica.close()
+    except Exception:  # health: allow BLE001 -- a history repair must never stop a pickup
+        _log.warning("kanban worker node: could not refill copied card history", exc_info=True)
+        return
+    if filled:
+        _log.info("kanban worker node: refilled truncated history from the replica: %s", filled)
 
 
 def _record_skips(conn: sqlite3.Connection, skips: dict[str, tuple[str, Optional[str]]]) -> None:
