@@ -58,6 +58,13 @@ Lanes:
   harness and the dependency manifests. An empty diff, a ``.github/`` change or
   a list at the compare API's 300-file cap runs it. ci.yaml's ``detect`` turns
   it off on a non-release main push: the standalone workflow already runs main.
+* ``native_memory`` — the Darwin memory reader's ABI and no-fork tests on the
+  real macOS mini (native-memory-macos.yml). Those tests are
+  ``platforms("macos")`` and skip on every Linux lane, so a PR that touches one
+  of :data:`NATIVE_MEMORY_PATHS` must run them before it can land. Only those
+  exact paths, an empty diff or a capped list start it: unlike the other lanes,
+  a generic ``.github/`` change does not. ci.yaml's ``detect`` turns it off on a
+  non-release main push: the standalone workflow already runs main.
 
 ``docker``, ``nix`` and the E2E lanes take most of the larger-runner minutes.
 An ordinary product change does not start them on a pull request. Every push
@@ -274,6 +281,17 @@ _PY_TEST_HARNESS = (
 # hermes_state.py and every hermes_state_* sibling, their tests, the shared pytest harness
 # that runs them, and the dependency manifests they import through.
 _HERMES_STATE_PATHS = ("hermes_state", "tests/hermes_state/", *_PY_TEST_HARNESS, *_DEP_MANIFESTS)
+# The native memory lane (native-memory-macos.yml): the Darwin memory reader, its one
+# caller, their macOS-only tests and the lane's own wiring. Exact files, kept equal to the
+# standalone workflow's ``push.paths`` by tests/ci/test_native_memory_gate.py.
+NATIVE_MEMORY_PATHS = (
+    "hermes_cli/machine_memory_darwin.py",
+    "hermes_cli/machine_metrics.py",
+    "tests/hermes_cli/test_machine_memory_darwin.py",
+    "tests/hermes_cli/test_machine_memory_nofork.py",
+    ".github/workflows/native-memory-macos.yml",
+    "tests/ci/test_native_memory_workflow.py",
+)
 # The bootstrap lane's own inputs beyond the installer it guards: the scripts its
 # steps run, its pytest suite and the helper that suite imports, and the shared
 # pytest harness. That suite runs in a bare interpreter (four packages, none of
@@ -725,6 +743,9 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
         # A capped list may omit the state files, so it runs the lane.
         "hermes_state": len(files) >= COMPARE_FILE_CAP
         or any(f.startswith(_HERMES_STATE_PATHS) for f in files),
+        # Exact paths only: an empty diff or a capped list may hide them, so those run it.
+        "native_memory": not files or len(files) >= COMPARE_FILE_CAP
+        or any(f in NATIVE_MEMORY_PATHS for f in files),
         **{lane: run_e2e or on for lane, on in _slow_lanes(files).items()},
     }
     consumers = [c for f in files for c in _SHARED_FIXTURE_CONSUMERS.get(f, ())]
