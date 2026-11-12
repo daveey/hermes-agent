@@ -105,6 +105,35 @@ def test_buffered_block_notice_for_a_finished_card_drops_the_ask(gate, sdb):
     assert original.split(ASK)[0] in submitted, "the notice itself stays"
 
 
+def test_unkeyed_buffered_block_notice_for_a_finished_card_drops_the_ask(gate, monkeypatch):
+    """No session store for the chat: ``_kb_persist_batch`` returns ``unkeyed`` and writes no row, so the
+    submitted text comes from ``batch_text`` itself, which must still re-read the card (mutant M6 of
+    t_01a1d00515fc7eea: a raw join of the buffered texts survived the ``written``-only tests)."""
+    @contextlib.contextmanager
+    def _no_store(session):
+        yield None
+
+    monkeypatch.setattr(server, "_session_db", _no_store)
+    tid = _blocked_card()
+    busy = _session(running=True)
+    server._notif_poll_kanban_scoped("ui", busy)
+    assert gate["submitted"] == []
+    buffered = next(t for t in busy["_kanban_pending"] if ASK in t)
+    assert f"Open task: @task:default/{tid}" in buffered
+    _finish(tid)
+    busy["_kanban_refused_until"] = float("inf")
+    with busy["history_lock"]:
+        busy["running"] = False
+    assert server._kb_persist_batch(busy, list(busy["_kanban_pending"]), False)[0] == "unkeyed"
+    server._notif_poll_kanban_scoped("ui", busy)
+    assert len(gate["submitted"]) == 1, "the buffered batch runs as one turn once the chat is idle"
+    submitted = gate["submitted"][0]
+    assert ASK not in submitted, "the card finished while the notice waited: no decision is left to ask for"
+    assert "Why only the user" not in submitted
+    assert "Since then: unblocked" in submitted and "No action needed." in submitted
+    assert "Scope: Only the standalone Docker integration acceptance." in submitted
+
+
 def test_buffered_block_notice_for_a_still_blocked_card_is_byte_identical(gate, sdb):
     original, row, submitted = _buffer_then_deliver(gate, sdb, lambda tid: None)
     assert submitted == original

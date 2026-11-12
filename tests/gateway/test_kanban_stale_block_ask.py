@@ -4,6 +4,7 @@ The wake text is rendered when the card blocks, then waits behind the running tu
 notice for t_01a1cd4dbbc27e50 (blocked 19:26, unblocked 20:08, done 20:25 PST) reached its Desktop
 chat at 22:14 still saying "Next action for the user: Reply ...".
 """
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -398,6 +399,40 @@ def test_gave_up_into_triage_without_a_new_ask_says_it_no_longer_applies(tmp_pat
     assert "Next action for the user" not in out
     assert "replaced by a newer one" not in out
     assert "This ask no longer applies" in out and "now triage" in out
+
+
+def test_still_blocked_card_whose_live_ask_was_cleared_keeps_the_ask(tmp_path, monkeypatch):
+    """Still blocked with no transition since the notice's block, but the live ``tasks.human_request`` no
+    longer renders to this ask (cleared here), so the live-ask guard in ``_stale_line`` cannot keep it:
+    ``since_line``'s own still-blocked guard must (mutant M3 of t_01a1d00515fc7eea)."""
+    from hermes_cli.kanban_db_connect import connect_closing
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    for status in ("blocked", "triage"):
+        tid, task = _blocked_card()
+        text = _wake_text(tid, task)
+        with connect_closing() as conn:
+            conn.execute("UPDATE tasks SET status=?, human_request=NULL WHERE id=?", (status, tid))
+            conn.commit()
+        assert refresh_stale_ask(text) == text, status
+
+
+def test_live_ask_equal_to_the_notice_keeps_it_past_a_reblock_event_without_a_request(tmp_path, monkeypatch):
+    """Review F8 guard on its own: unblocked, then re-blocked by an event that carries no human_request
+    while the card's live ask is still this very ask. ``since_line`` alone would call it replaced; the
+    live-ask guard keeps the notice byte-identical (mutant M3b of t_01a1d00515fc7eea)."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect_closing
+    from hermes_cli.kanban_stale_ask import refresh_stale_ask
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    tid, task = _blocked_card()
+    text = _wake_text(tid, task)
+    with connect_closing() as conn:
+        assert kb.unblock_task(conn, tid)
+        kb._append_event(conn, tid, "blocked", {"reason": "Choose coverage"})
+        conn.execute("UPDATE tasks SET status='blocked', human_request=? WHERE id=?", (json.dumps(REQUEST), tid))
+        conn.commit()
+    assert refresh_stale_ask(text) == text
 
 
 def test_many_ask_marks_on_one_long_line_are_fast(tmp_path, monkeypatch):
