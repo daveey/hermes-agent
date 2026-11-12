@@ -165,6 +165,8 @@ def describe(verdict):
         return ""
     if verdict.get("forced"):
         return f"hub admission: forced by operator (session {verdict.get('session') or '?'})"
+    if verdict.get("skipped"):
+        return f"hub admission: not judged ({(verdict.get('why') or verdict['skipped'])[:160]})"
     if verdict.get("admit"):
         return f"hub admission: admitted, {verdict.get('need')}: \"{(verdict.get('evidence') or '')[:120]}\""
     return f"hub admission: denied ({(verdict.get('why') or '')[:160]})"
@@ -352,6 +354,10 @@ def apply(args, decision, gateway, cfg, *, origin_intent=None, queue=True, machi
         # at the origin only explicit hub pins are, so non-hub origins make zero model calls.
         elif not local_hub and not (explicit and is_hub(destination, cfg)):
             return decision
+    routed = _decision_shortcut(args, decision, gateway, cfg, labels=labels, machine_hub=machine_hub, pin=pin,
+                                queue=queue, machine_ok=machine_ok)
+    if routed is not None:
+        return routed
     if structural_reason({**args, "runs_on": None}, cfg):
         explicit = True  # a host workspace, other board or uncarried option cannot go to the pool
     if args.get("force_hub"):
@@ -368,7 +374,7 @@ def apply(args, decision, gateway, cfg, *, origin_intent=None, queue=True, machi
     if verdict.admit:
         return {**decision, "hub_admission": audit}
     if explicit:
-        return {"where": "refuse", "why": verdict.why, "hub_admission": audit, "pin": "hub"}
+        return _refusal(args, verdict, audit, cfg, on_hub=on_hub, machine_hub=machine_hub, pin=pin, labels=labels)
     requires = args.get("requires") or []
     requires = [requires] if isinstance(requires, str) else list(requires)
     # Board contract (hermes-hub #90): requires hub:write -> capability:hub-write at reservation and
@@ -385,6 +391,76 @@ def apply(args, decision, gateway, cfg, *, origin_intent=None, queue=True, machi
         return {"where": "refuse", "why": "hub admission denied; no worker pool configured",
                 "hub_admission": audit}
     return out
+
+
+def _decision_shortcut(args, decision, gateway, cfg, *, labels, machine_hub, pin, queue, machine_ok):
+    """:func:`decision_card_route` for a hub-candidate decision card the caller did not pin to the hub, else None."""
+    if machine_hub or labels is not None or is_hub(pin, cfg) or args.get("force_hub") or not is_decision_card(args):
+        return None
+    return decision_card_route(args, decision, gateway, cfg, queue=queue, machine_ok=machine_ok)
+
+
+def _refusal(args, verdict, audit, cfg, *, on_hub, machine_hub, pin, labels):
+    """A denied explicit hub card; a hub-origin stay-here refusal carries alternatives that work on the hub."""
+    from hermes_cli.kanban_placement import structural_reason
+    out = {"where": "refuse", "why": verdict.why, "hub_admission": audit, "pin": "hub"}
+    if on_hub and not machine_hub and not is_hub(pin, cfg):
+        out["remedy"] = hub_stay_remedy(structural_reason({**args, "runs_on": None}, cfg), labels)
+    return out
+
+
+DECISION_CARD = "blocked_decision_card"
+DECISION_WHY = ("blocked decision card (initial_status='blocked' + human_request): it holds no slot while it "
+                "waits for the answer, so the hub admission judge is not consulted; once unblocked it runs {where}")
+
+
+def is_decision_card(args):
+    """A card created blocked on a ``human_request``: it waits for David and holds no slot meanwhile."""
+    ask = args.get("human_request")
+    return (str(args.get("initial_status") or "").strip().lower() == "blocked"
+            and isinstance(ask, dict) and bool(ask))
+
+
+def decision_card_route(args, decision, gateway, cfg, *, queue=True, machine_ok=None):
+    """Placement for a hub decision card, made with no judge call; ``None`` when it must still be judged.
+
+    The ask itself takes no slot. Its work, after unblock, goes where a denied card goes (the worker queue or
+    worker-first), so skipping the judge never puts unjudged work on a hub slot. A card with a structural
+    keep-local beyond the ask itself (host workspace, other board, ...) would run on the hub after unblock, so it
+    is still judged. With no worker pool the card is created here, as every hub card was before admission.
+    t_01a1cf9334ff49bc: a hub chat could not file a decision card at all. [daveey]
+    """
+    from hermes_cli.kanban_placement import portable_reason, structural_reason
+    view = {k: v for k, v in args.items() if k not in ("initial_status", "human_request")}
+    if structural_reason({**view, "runs_on": None}, cfg):
+        return None
+    requires = args.get("requires") or []
+    requires = [requires] if isinstance(requires, str) else list(requires)
+    if portable_reason(view, cfg):
+        requires = list(dict.fromkeys([*requires, "hub:write"]))  # hub-state wording: the pool needs hub-admin
+    elif not args.get("requires"):
+        requires = None
+    audit = {"admit": False, "need": None, "evidence": "", "skipped": DECISION_CARD,
+             "why": DECISION_WHY.format(where="in the worker pool")}
+    out = pool_route(view, cfg, gateway, audit, requires, queue=queue, machine_ok=machine_ok)
+    if out.get("runs_on") is None and gateway not in (cfg.get("worker_pools") or {}):
+        why = DECISION_WHY.format(where="here (no worker pool is configured)")
+        return {**decision, "why": why, "hub_admission": {**audit, "why": why}}
+    return out
+
+
+def hub_stay_remedy(structural, labels):
+    """Refusal text for a hub-origin card the judge denied: alternatives that work here, never ``placement='local'``."""
+    if labels is not None:
+        first = "drop runs_on (or name labels a pool worker carries) so the card joins the worker pool"
+    elif structural:
+        first = (f"remove what keeps it on this host ({structural}) and omit placement so the card joins the "
+                 "worker pool")
+    else:
+        first = "omit placement (or pass placement='auto') so the card joins the worker pool"
+    return (f"On the hub, placement='local' is a hub slot and needs an admit. Instead: {first}; or pass "
+            "hub_reason quoting what only the hub can do; or, for a question to David, create it with "
+            "initial_status='blocked' and a human_request (it takes no slot and is never judged).")
 
 
 def pool_route(args, cfg, gateway, audit, requires, *, queue=True, machine_ok=None):

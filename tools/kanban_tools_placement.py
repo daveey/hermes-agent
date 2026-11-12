@@ -89,12 +89,17 @@ def _placement_origin(conn, creator_task_id: Optional[str], session_id: Optional
     return {"session_id": session_id, "origin_profile": None}
 
 
-def _placement_refused(pin: str, why: str, *, hub_admission=None) -> str:
-    """[daveey] A caller-pinned gateway cannot be honoured: say so instead of creating the card here."""
+def _placement_refused(pin: str, why: str, *, hub_admission=None, remedy=None) -> str:
+    """[daveey] A caller-pinned gateway cannot be honoured: say so instead of creating the card here.
+
+    ``remedy`` replaces the generic alternatives when they cannot work: on the hub a denied stay-here card was
+    told to "use placement='local'", which is what it had passed (t_01a1cf9334ff49bc)."""
+    alternatives = remedy or (
+        "Use placement='local' (or omit it) to create the card on this "
+        "gateway, or create it on the target with `hermes-hub create-task <gateway> ...`.")
     return tool_error(
         f"placement={pin!r} was not honoured and no card was created: {why}. A pinned gateway is never "
-        "silently replaced by a local card. Use placement='local' (or omit it) to create the card on this "
-        "gateway, or create it on the target with `hermes-hub create-task <gateway> ...`.",
+        f"silently replaced by a local card. {alternatives}",
         code="placement_unavailable", placement=pin, created=False,
         **({"hub_admission": hub_admission} if hub_admission else {}))
 
@@ -107,7 +112,8 @@ def _admission_refused(marker_placement) -> None:
         return
     from tools.kanban_tools import _Reject
     raise _Reject("", payload=_placement_refused(marker_placement.get("pin", "hub"), marker_placement.get("why", ""),
-                                                 hub_admission=marker_placement.get("hub_admission")))
+                                                 hub_admission=marker_placement.get("hub_admission"),
+                                                 remedy=marker_placement.get("remedy")))
 
 
 def _effective_requires(marker_placement, args: dict):

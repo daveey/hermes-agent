@@ -1488,7 +1488,8 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         target = decision["where"]
         if target == "refuse":
             return _placement_refused(decision.get("pin", "hub"), decision.get("why", ""),
-                                      hub_admission=decision.get("hub_admission")), None
+                                      hub_admission=decision.get("hub_admission"),
+                                      remedy=decision.get("remedy")), None
         if target == "local":
             local = _local_placement(kp, view, decision, machine_ok=machine_ok, note_local_pin=note_local_pin)
             stranded = _runstate.stranded_create((local or {}).get("runs_on"))
