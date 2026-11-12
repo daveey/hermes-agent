@@ -546,9 +546,7 @@ _ATTACHMENT_FIELDS = tuple(
     "id filename content_type size uploaded_by stored_path created_at".split())
 
 
-def _fields(obj: Any, names: tuple[str, ...]) -> dict[str, Any]:
-    """``{name: getattr(obj, name)}``; every value None when ``obj`` is None."""
-    return {n: getattr(obj, n) if obj is not None else None for n in names}
+from tools.kanban_show import fields as _fields
 
 
 def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
@@ -1578,6 +1576,7 @@ def _handle_create(args: dict, **kw) -> str:
     model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     max_retries = _ca.max_retries_arg(args)
+    _ca.validate_admission(args)
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
     # [daveey] Validate the origin binding BEFORE the card exists: a binding the origin gateway can never
     # read back is the silent "cards exist but the chat shows none" failure.
@@ -1666,6 +1665,7 @@ def _handle_create(args: dict, **kw) -> str:
                 parents=tuple(parents), tenant=(args.get("tenant") if origin_intent is not None
                                                else args.get("tenant") or os.environ.get("HERMES_TENANT")),
                 priority=_opt_int(args.get("priority"), 0),
+                admission_class=args.get("admission_class", "normal"), admission_frees=args.get("admission_frees"),
                 workspace_kind=workspace_kind, workspace_path=workspace_path, project_id=project_id,
                 # Board-project inheritance must read the board this call opened, not the
                 # session's current board.

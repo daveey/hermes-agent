@@ -17,6 +17,7 @@ from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_queue_reason as queue
 from hermes_cli import machine_cpu_metrics as cm
 from hermes_cli import machine_metrics as mm
+from tests.tools import test_kanban_tools as tool_helpers
 
 pytestmark = pytest.mark.platforms("posix")
 
@@ -67,6 +68,109 @@ def fake_sample(pct, calls=None, check=None):
             return None
         return {"cpu_busy_pct": pct, "cpu_busy_window_ms": 1000, "cpu_busy_sample_end_ms": int(time.time() * 1000)}
     return sample
+
+
+tool_worker_env = tool_helpers.worker_env
+
+
+def test_tool_create_preserves_admission_metadata(tool_worker_env):
+    from tools import kanban_tools as kt
+    result = json.loads(kt._handle_create({
+        "title": "Restore runner headroom", "assignee": "peer",
+        "admission_class": "capacity", "admission_frees": "frees: runner slots",
+    }))
+    assert result.get("ok"), result
+    with closing(kbc.connect()) as conn:
+        stored = kb.get_task(conn, result["task_id"])
+        assert stored is not None
+        assert stored.admission_class == "capacity"
+        assert stored.admission_frees == "frees: runner slots"
+    assert result["admission_class"] == "capacity"
+    assert result["admission_frees"] == "frees: runner slots"
+
+
+
+def test_tool_invalid_capacity_refuses_before_placement(tool_worker_env, monkeypatch):
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kt, "_place_remote", lambda *a, **kw: pytest.fail("invalid metadata reached placement"))
+    result = json.loads(kt._handle_create({
+        "title": "Missing claim", "assignee": "peer", "admission_class": "capacity",
+    }))
+    assert result["rejection"] == "invalid_args"
+    assert result["error"] == "capacity requires a one-line frees: claim"
+
+
+def test_admission_metadata_survives_remote_option_encoding():
+    from hermes_cli import kanban_placement as placement
+    args = {"admission_class": "capacity", "admission_frees": "frees: worker slots"}
+    assert placement.carried_options(args) == args
+
+
+def test_claim_persists_immutable_regular_receipt(board):
+    conn, home = board
+    configure(home, limit=None)
+    task_id = task(conn)
+    kb.edit_task(conn, task_id, admission_class="capacity", admission_frees="frees: worker slots")
+    assert kb.claim_task(conn, task_id)
+    run = conn.execute("SELECT admission_pool, admission_class FROM task_runs WHERE task_id=?", (task_id,)).fetchone()
+    assert tuple(run) == ("regular", "capacity")
+    kb.edit_task(conn, task_id, admission_class="normal")
+    assert tuple(conn.execute("SELECT admission_pool, admission_class FROM task_runs WHERE task_id=?",
+                              (task_id,)).fetchone()) == ("regular", "capacity")
+
+
+def test_pool_receipt_is_local_only():
+    fields = {"admission_pool", "admission_class"}
+    assert fields <= sync.LOCAL_COLUMNS["task_runs"]
+    assert not fields & sync.SYNCED_COLUMNS["task_runs"]
+
+
+@pytest.mark.parametrize("admission_class,regular,priority,expected", [
+    ("capacity", 7, 0, "priority"),
+    ("urgent", 7, 2, "priority"),
+    ("capacity", 6, 3, "regular"),
+    ("capacity", 7, 3, None),
+    ("normal", 7, 0, None),
+    ("normal", 6, 0, "regular"),
+])
+def test_pool_selection_preserves_separate_caps(admission_class, regular, priority, expected):
+    from hermes_cli import kanban_admission_pools as pools
+    assert pools.select_pool(admission_class, regular=regular, priority=priority,
+                             regular_cap=7, priority_cap=3) == expected
+
+
+def test_whole_host_pool_count_uses_receipts_not_current_class(board):
+    conn, _home = board
+    marked = task(conn, title="marked")
+    regular = task(conn, title="regular")
+    assert kb.claim_task(conn, marked)
+    assert kb.claim_task(conn, regular)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_runs SET admission_pool='priority', admission_class='capacity' WHERE task_id=?",
+                     (marked,))
+    kb.edit_task(conn, marked, admission_class="normal")
+    detail = {"pools": {"regular": 0, "priority": 0}}
+    assert mm.active_card_runs(detail=detail) == 2
+    assert detail["pools"] == {"regular": 1, "priority": 1}
+
+
+@pytest.mark.parametrize("review", [False, True])
+def test_urgent_claim_uses_extra_pool_with_regular_pool_full(board, monkeypatch, review):
+    conn, home = board
+    configure(home, cap=7)
+    with (home / "config.yaml").open("a") as config:
+        config.write("    priority_slots: 3\n    priority_cpu_busy_below_pct: 85\n")
+    for index in range(7):
+        tid = task(conn, title=f"legacy regular {index}")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (tid,))
+    candidate = task(conn, review=review, title="Incident recovery")
+    kb.edit_task(conn, candidate, admission_class="urgent")
+    advisory(home, pct=70)
+    monkeypatch.setattr(cm, "sample", fake_sample(70))
+    assert claim(conn, candidate, review) is not None
+    receipt = conn.execute("SELECT admission_pool FROM task_runs WHERE task_id=?", (candidate,)).fetchone()
+    assert receipt[0] == "priority"
 
 
 def test_capacity_class_and_frees_claim_survive_task_readback(board):

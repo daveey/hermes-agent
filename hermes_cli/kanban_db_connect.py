@@ -1109,6 +1109,8 @@ _NOTIFY_SUB_COLUMNS = (
 )
 
 _TASK_RUN_COLUMNS = (
+    ("admission_pool", "admission_pool TEXT"),
+    ("admission_class", "admission_class TEXT"),
     # Spawn-time start fingerprint of the run's worker_pid (PID-reuse guard for the
     # terminal-worker reaper; NULL = legacy row, never signalled).
     ("worker_started_at", "worker_started_at INTEGER"),

@@ -105,6 +105,7 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[in
             db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
             try:
                 cols = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
+                own, matched = None, []
                 if "lease_holder" in cols:
                     own = db.execute("SELECT gateway_id FROM kanban_sync_state LIMIT 1").fetchone()
                     if own is None or not own[0]:
@@ -121,12 +122,17 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[in
                         excluded += len(matched)
                 else:
                     total += db.execute("SELECT count(*) FROM tasks WHERE status='running'").fetchone()[0]
+                if detail is not None and "pools" in detail:
+                    from hermes_cli.kanban_admission_pools import board_pools
+                    counts = board_pools(db, own=own[0] if own else None, excluded=matched)
+                    for pool, count in counts.items():
+                        detail["pools"][pool] += count
             finally:
                 db.close()
         if detail is not None:
             detail["excluded"] = excluded
         return total
-    except (OSError, sqlite3.Error):
+    except (OSError, sqlite3.Error, ValueError):
         return None
 
 

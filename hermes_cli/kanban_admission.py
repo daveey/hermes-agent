@@ -29,7 +29,7 @@ def _defer(task_id, reason):
     sync._CLAIM_DEFERRALS[task_id] = reason
 
 
-def hub_cpu_advisory(task_id=None):
+def hub_cpu_advisory(task_id=None, *, conn=None):
     """Lock-free pre-check before a Board lease (review ruling 5). Returns a refusal reason or None.
 
     Off unless the root limit is set. Uses the advisory sampler's latest complete sample: missing, stale (>15 s),
@@ -42,6 +42,13 @@ def hub_cpu_advisory(task_id=None):
         return None
     reason = "hub_cpu_unknown"
     if state == cpu.ON:
+        if conn is not None:
+            from hermes_cli.kanban_admission_pools import advisory_limit
+            try:
+                limit = advisory_limit(conn, task_id, limit)
+            except (OSError, ValueError, TypeError):
+                _defer(task_id, reason)
+                return reason
         last = machine_metrics.read_hub_cpu_sample() or {}
         end = last.get("cpu_busy_sample_end_ms")
         age = _now() * 1000 - end if type(end) in (int, float) else None
@@ -79,12 +86,24 @@ def _expired(gate):
     return gate is not None and getattr(gate, "expires", None) is not None and gate.expires <= int(_now())
 
 
-def _cap_full(echo=None):
+def _cap_full(echo=None, *, conn=None, task_id=None):
     """Whole-host cap check. ``echo`` (:func:`kanban_grant_echo.own_grant_echo`, proven under this claim's write
     txn) excludes only that one row: this claim's own unused Board grant echoed before the txn (review F5)."""
     from hermes_cli import machine_metrics
 
     ok, cap = _root_max_in_progress()
+    _decision.pool, _decision.pool_limit = "regular", None
+    if conn is not None and ok:
+        from hermes_cli.kanban_admission_pools import candidate_pool
+        try:
+            pool, ceiling, census = candidate_pool(conn, task_id, cap, echo=echo)
+        except (OSError, ValueError, TypeError):
+            return True
+        if census is not None:
+            _decision.counts = census
+            _decision.pool = pool
+            _decision.pool_limit = ceiling if pool == "priority" else None
+            return pool is None
     detail = {}
     active = machine_metrics.active_card_runs(exclude=echo, detail=detail) if echo else machine_metrics.active_card_runs()
     _decision.counts = {"active_before": active + detail.get("excluded", 0) if type(active) is int else None,
@@ -105,7 +124,7 @@ def _over_budget(started, needed_s=0.0):
     return started is not None and time.monotonic() - started + needed_s > _hold_budget_s()
 
 
-def _final_hub_gate(gate, started=None):
+def _final_hub_gate(gate, started=None, *, conn=None, task_id=None):
     """Under admission.lock: ``(reason, evidence)``; reason None admits. Never touches the network.
 
     Cheap checks (whole-host cap, lease deadline) run BEFORE the ~1 s sample so a claim that must be refused anyway
@@ -122,8 +141,9 @@ def _final_hub_gate(gate, started=None):
         return None, None
     if state != cpu.ON:
         return "hub_cpu_unknown", None
-    if _cap_full(echo):
+    if _cap_full(echo, conn=conn, task_id=task_id):
         return "hub_capacity_full", None
+    selected_limit = getattr(_decision, "pool_limit", None) or limit
     if _expired(gate):
         return "hub_cpu_unknown", None
     if _over_budget(started, cpu.WINDOW_S):
@@ -133,12 +153,15 @@ def _final_hub_gate(gate, started=None):
         return "hub_cpu_unknown", None
     if not cpu.MIN_WINDOW_MS <= measured["cpu_busy_window_ms"] <= cpu.MAX_WINDOW_MS:
         return "hub_cpu_unknown", None
-    if not cpu.below(measured["cpu_busy_pct"], limit):
+    if not cpu.below(measured["cpu_busy_pct"], selected_limit):
         return "hub_cpu_at_or_above_limit", None
     if _expired(gate):
         return "hub_cpu_unknown", None  # the claim/lease deadline passed while sampling: never start
-    if _cap_full(echo):  # the spec's recount immediately before commit
+    if _cap_full(echo, conn=conn, task_id=task_id):  # recount immediately before commit
         return "hub_capacity_full", None
+    limit = getattr(_decision, "pool_limit", None) or limit
+    if not cpu.below(measured["cpu_busy_pct"], limit):
+        return "hub_cpu_at_or_above_limit", None
     if _over_budget(started):
         return "hub_cpu_unknown", None  # the hold overran its budget: refuse rather than outlast waiting turns
     counts = getattr(_decision, "counts", None) or {}
@@ -211,6 +234,11 @@ def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, even
         )
         run_id = run_cur.lastrowid
     conn.execute("UPDATE tasks SET current_run_id = ? WHERE id = ?", (run_id, task_id))
+    conn.execute(
+        "UPDATE task_runs SET admission_pool=?, "
+        "admission_class=(SELECT admission_class FROM tasks WHERE id=?) WHERE id=?",
+        (getattr(_decision, "pool", None) or "regular", task_id, run_id),
+    )
     hub_cpu = dict(consumed_hub_cpu() or {})
     admission = hub_cpu.pop("hub_admission", None)
     kb._append_event(
@@ -321,7 +349,8 @@ def claim_transaction(conn, *, task_id=None, gate=None):
             # claim commits before the lock is released, so a concurrent claimer sees this run in its recount.
             _bind_echo(conn, task_id, gate)
             _decision.counts = None
-            reason, evidence = _final_hub_gate(gate, started)
+            _decision.pool = "regular"
+            reason, evidence = _final_hub_gate(gate, started, conn=conn, task_id=task_id)
             if reason is not None:
                 logging.getLogger(__name__).info("Hub admission refused Kanban claim %s: %s %s", task_id, reason,
                                                  getattr(_decision, "counts", None) or {})

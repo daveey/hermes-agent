@@ -212,7 +212,7 @@ UNCARRIED_OPTIONS = ("initial_status", "human_request", "workspace_path", "proje
 # (hermes-hub also allows reasoning_effort, but kanban_create has no such parameter.)
 CARRIED_OPTIONS = ("skills", "max_runtime_seconds", "priority", "model", "provider", "goal_mode",
                    "goal_max_turns", "completion_contract", "idempotency_key", "requires", "triage",
-                   "distinct_from", "distinct_reason")
+                   "distinct_from", "distinct_reason", "admission_class", "admission_frees")
 IDENTITY_OPTIONS = ("idempotency_key", "distinct_from", "distinct_reason")
 # Of those, the ones an older client (no --option) cannot express at all: the card stays local.
 LEGACY_UNCARRIED = ("model", "provider", "goal_mode", "triage", *IDENTITY_OPTIONS)

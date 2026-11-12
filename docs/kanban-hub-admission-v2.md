@@ -4,12 +4,20 @@ Status: approved design, implementation in progress. This document describes the
 full contract, not a claim that the current branch implements it all.
 
 Implemented so far: DB create/readback metadata and transactional postimage
-validation on edit; CLI create/edit `--class` and `--frees`. Admission metadata
-edits may be combined with ordinary title/body/priority edits, but not operator
-fields or completion-contract edits (those currently use separate transactions).
-Tool create/forwarding, Board compatibility, pool accounting/admission, scoring,
-reporting and live activation are still pending. No scheduler behavior is enabled
-by this metadata foundation.
+validation on edit; CLI create/edit `--class` and `--frees`; create tool schema,
+pre-placement validation, persistence/readback and remote option encoding.
+Admission metadata edits may be combined with ordinary title/body/priority edits,
+but not operator fields or completion-contract edits (separate transactions).
+Local run pool/class receipts now survive task class edits. The whole-host census
+can count those receipts, and opt-in pre-lease/final CPU gates select the separate
+priority pool. Ready and review claim tests admit urgent work at 70% CPU with seven
+regular slots full. These are claim-path tests, not dispatcher or live proof.
+
+Still pending: origin receipts/cap, dispatcher budget and queue notes, Board and
+courier receiver compatibility, full malformed-config/receipt tests, sync replay
+coverage, guard mutations, scoring, reporting and live activation. Do not enable
+this incomplete implementation. `priority_slots` is currently opt-in (absent = 0)
+until the full Board-compatible rollout is ready; the enabled-hub target is 3.
 
 ## Policy and rollout
 
