@@ -216,10 +216,10 @@ def test_owner_only_ops_are_refused(fleet, action):
     assert exc.value.code == "operator_action_refused"
 
 
-def test_label_publish_is_not_offered_yet(fleet):
+def test_label_publish_needs_machine_labels_and_proof(fleet):
     with pytest.raises(ksr.SupervisorRequestError) as exc:
         _submit(fleet, {"op": "operator", "action": "label_publish", "task_id": fleet.target})
-    assert exc.value.code == "operator_action_refused"
+    assert exc.value.code == "invalid_ops"
 
 
 def test_only_one_named_card_per_call(fleet):

@@ -1060,7 +1060,11 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
         "created (the ones kanban_comment/kanban_move/kanban_unblock refuse as foreign_card): action "
         "comment {text}, move {runs_on, reason} (not while it runs) or unblock {reason} (an agent's block "
         "only, never one waiting on a human). That card's home gateway executes it; complete/archive/link/"
-        "unlink of a foreign card are refused (its owner's), one op per request, every call logged."
+        "unlink of a foreign card are refused (its owner's), one op per request, every call logged. "
+        "Action label_publish {machine, labels, proof: {kind: 'hub_probe'}} (no task_id) asks the hub to ADD "
+        "skill:/capability: labels to one machine's Board registry entry (never machine:*, never a removal): the "
+        "hub re-runs its own probe of that machine and publishes only what it proves, as one atomic add on the Board; "
+        "the answer lands on this card."
     ),
     {
         "ops": {
@@ -1072,11 +1076,16 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
                 "properties": {
                     "op": {"type": "string", "enum": ["link", "unlink", "reconcile_notify", "resume", "retry_limit",
                                                          "archive", "operator"]},
-                    "action": {"type": "string", "enum": ["comment", "move", "unblock"],
-                               "description": "operator: what to do on the foreign card."},
+                    "action": {"type": "string", "enum": ["comment", "move", "unblock", "label_publish"],
+                               "description": "operator: what to do on the foreign card (label_publish: on a "
+                                              "machine's registry labels)."},
                     "text": {"type": "string", "description": "operator comment: the comment body."},
                     "runs_on": {"type": "array", "items": {"type": "string"},
                                 "description": "operator move: the new machine labels."},
+                    "machine": {"type": "string", "description": "operator label_publish: the Board machine."},
+                    "labels": {"type": "array", "items": {"type": "string"},
+                               "description": "operator label_publish: skill:/capability: labels to add."},
+                    "proof": {"type": "object", "description": "operator label_publish: {kind: 'hub_probe'}."},
                     "reason": {"type": "string", "description": "operator move/unblock: why (required)."},
                     "parent_id": {"type": "string"},
                     "child_id": {"type": "string"},
