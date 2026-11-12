@@ -50,6 +50,7 @@ from hermes_cli.kanban_ops import (
 from hermes_cli.kanban_parser import build_parser, cmd_resume as _cmd_resume, cmd_quota_release as _cmd_quota_release
 from hermes_cli.kanban_sync_cli import cmd_sync as _cmd_sync
 from hermes_cli.kanban_admission_explain import cmd_queue as _cmd_queue
+from hermes_cli.kanban_assignees_cli import cmd_assignees as _cmd_assignees  # moved; re-exported for callers
 from hermes_cli.kanban_archive_scope import (  # moved here from this module; re-exported for callers
     _capability_owner_waiting_card, _creator_task_id, _is_stranded_runs_on_copy,
     _worker_may_archive_capability_owner, _worker_may_archive_own,
@@ -353,21 +354,6 @@ def _cmd_heartbeat(args: argparse.Namespace) -> int:
                                  expected_run_id=_worker_run_id_for(args.task_id))
     return _ok_or_err(ok, f"cannot heartbeat {args.task_id} (not running?)",
                       f"Heartbeat recorded for {args.task_id}")
-
-
-def _cmd_assignees(args: argparse.Namespace) -> int:
-    with kbc.connect_closing() as conn:
-        data = kb.known_assignees(conn)
-    if _json_out(args, data):
-        return 0
-    if not data:
-        print("(no assignees — create a profile with `hermes -p <name> setup`)")
-        return 0
-    print(f"{'NAME':20s}  {'ON DISK':8s}  COUNTS")
-    for entry in data:
-        on_disk = "yes" if entry["on_disk"] else "no"
-        print(f"{entry['name']:20s}  {on_disk:8s}  {_fmt_counts(entry['counts'] or {}, '(idle)')}")
-    return 0
 
 
 def _print_overlap_refusal(args: argparse.Namespace, refused: str) -> int:
