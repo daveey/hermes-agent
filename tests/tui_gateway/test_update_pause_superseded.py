@@ -45,6 +45,10 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_hermes_home", tmp_path)
     monkeypatch.setattr(server, "_load_cfg", lambda: CFG)
     monkeypatch.setattr(server.threading, "Thread", _InlineThread)
+    # This fixture runs turn threads inline, not process-lifetime ledger daemons.
+    # Outcome derivation may read warm links; projection refresh is tested separately.
+    from hermes_cli import kanban_session_activity as activity
+    monkeypatch.setattr(activity, "_refresh_links_in_background", lambda scope: None)
     monkeypatch.setattr(server, "_emit", lambda *a, **k: None)
     monkeypatch.setattr(server, "_wire_callbacks", lambda sid: None)
     monkeypatch.setattr(server, "_sync_agent_model_with_config", lambda sid, session: None)

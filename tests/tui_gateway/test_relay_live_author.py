@@ -50,6 +50,9 @@ class _InlineThread:
 @pytest.fixture()
 def turn_env(monkeypatch, tmp_path):
     monkeypatch.setattr(srv.threading, "Thread", _InlineThread)
+    # Inline turn execution must not inline the process-lifetime ledger daemon.
+    from hermes_cli import kanban_session_activity as activity
+    monkeypatch.setattr(activity, "_refresh_links_in_background", lambda scope: None)
     for name in ("_emit", "_wire_callbacks", "_sync_agent_model_with_config", "_register_session_cwd",
                  "_tts_stream_begin", "_sync_session_key_after_compress"):
         monkeypatch.setattr(srv, name, lambda *a, **k: None)

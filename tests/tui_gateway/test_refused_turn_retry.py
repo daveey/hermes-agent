@@ -31,6 +31,9 @@ def marker_home(monkeypatch, tmp_path):
 @pytest.fixture()
 def turn_env(monkeypatch, tmp_path, marker_home):
     monkeypatch.setattr(server.threading, "Thread", _InlineThread)
+    # Inline turn execution must not inline the process-lifetime ledger daemon.
+    from hermes_cli import kanban_session_activity as activity
+    monkeypatch.setattr(activity, "_refresh_links_in_background", lambda scope: None)
     monkeypatch.setattr(server, "_wire_callbacks", lambda sid: None)
     monkeypatch.setattr(server, "_sync_agent_model_with_config", lambda sid, session: None)
     monkeypatch.setattr(server, "_session_cwd", lambda session: str(tmp_path))

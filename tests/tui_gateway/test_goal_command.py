@@ -117,6 +117,9 @@ def turn_env(server, monkeypatch, tmp_path):
     """Neutralize side paths unrelated to post-turn goal continuation."""
     emitted = []
     monkeypatch.setattr(server.threading, "Thread", _InlineThread)
+    # Inline turn execution must not inline the process-lifetime ledger daemon.
+    from hermes_cli import kanban_session_activity as activity
+    monkeypatch.setattr(activity, "_refresh_links_in_background", lambda scope: None)
     monkeypatch.setattr(
         server,
         "_emit",
