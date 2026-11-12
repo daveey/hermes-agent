@@ -455,6 +455,10 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     merge is resumed by that unblock to ship/verify THAT PR. So does an orderly park AFTER the
     PR comment (``continued`` checkpoint or ``scheduled`` timed wait): the owner parked knowing
     its PR, and the wake resumes it from that checkpoint, not a context-free respawn.
+    The parking run's own note written just after that park, restating PRs this card
+    already named, belongs to the park and does not post-date it
+    (:mod:`hermes_cli.kanban_pr_park_note`); any other run's note, a new PR or unreadable
+    provenance keeps the hold.
     So does a supported operator reopen of the done card (``reopened``, strictly after): the
     rerun resumes THAT PR; its ``REOPENED:`` note carries chat provenance, so it is FYI here.
     An ordering ``dependency_wait`` strictly after the newest PR comment also permits
@@ -504,15 +508,22 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
     # Own/unknown candidates only: drop another live card's contract pull and pulls named
     # only as not blocking this card; only comments that keep a pull order the watermark.
     holding = holding_urls(conn, task_id, [(u, body) for _, _, body, urls in candidates for u in urls])
+    kept_by_comment = [(t, comment_id, [u for u in urls if norm_pr(u) in holding])
+                       for t, comment_id, _body, urls in candidates]
+    kept_by_comment = [c for c in kept_by_comment if c[2]]
+    # The parked run's own post-park note restating known PRs is part of its park. [daveey]
+    from hermes_cli.kanban_pr_park_note import restated_after_park
+    restated, parked_at = restated_after_park(conn, task_id, kept_by_comment)
     pr_times: list[int] = []
     pr_urls: list[str] = []
     latest_pr_comment_id = 0
-    for t, comment_id, _body, urls in candidates:
-        kept = [u for u in urls if norm_pr(u) in holding]
-        if kept:
-            latest_pr_comment_id = max(latest_pr_comment_id, comment_id)
-            pr_times.append(t)
-            pr_urls.extend(kept)
+    for t, comment_id, kept in kept_by_comment:
+        pr_urls.extend(kept)
+        if comment_id in restated:
+            pr_times.append(parked_at - 1)  # ordered before the park it belongs to
+            continue
+        latest_pr_comment_id = max(latest_pr_comment_id, comment_id)
+        pr_times.append(t)
     if not pr_times:
         # Foreign handoffs may still carry queue-rejection repair instructions,
         # but cannot create a duplicate-publication hold.
