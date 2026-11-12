@@ -9,6 +9,7 @@ import contextlib
 import json
 import os
 import select
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -221,6 +222,37 @@ def _release_ready(context):
         pass
 
 
+def _stop_own_unit(context):
+    """[daveey] Queue a stop of this observer's own unit, so a retire is final on any unit.
+
+    Transient units keep the properties they were submitted with: one armed before
+    ``RestartPreventExitStatus`` existed restarts a deterministic retire forever.
+    A pending stop job cancels the manager's auto-restart. Only a
+    ``hermes-failed-result-*.service`` named by the context AND holding this process
+    (``/proc/self/cgroup``) is touched. Best effort: never changes the exit status.
+    """
+    try:
+        unit = context.get('observer_unit')
+        if not (isinstance(unit, str) and unit.startswith('hermes-failed-result-') and unit.endswith('.service')):
+            return
+        cgroup = Path('/proc/self/cgroup').read_text(encoding='utf-8')
+        if not any(line.rsplit('/', 1)[-1] == unit for line in cgroup.splitlines()):
+            return
+        systemctl = shutil.which('systemctl')
+        if systemctl:
+            subprocess.run([systemctl, '--user', '--no-block', 'stop', unit], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+    except (AttributeError, OSError, ValueError, subprocess.SubprocessError):
+        pass
+
+
+def _retire(context):
+    if isinstance(context, dict):
+        _release_ready(context)
+        _stop_own_unit(context)
+    return STARTUP_FAILURE_EXIT
+
+
 def main(argv):
     """Run one observation; returns the process exit status.
 
@@ -229,7 +261,8 @@ def main(argv):
     forever. Exit ``STARTUP_FAILURE_EXIT``, which the service lists in
     ``RestartPreventExitStatus``, so the manager retires the unit instead.
     A missing or malformed context argument is equally deterministic.
-    Retiring releases the readiness tempdir, as success does.
+    Retiring releases the readiness tempdir, as success does, and queues a stop of
+    its own unit (``_stop_own_unit``) for units armed without that exit status.
     """
     context = None
     try:
@@ -238,15 +271,12 @@ def main(argv):
             raise ValueError(f'context lacks {CONTEXT_KEYS}')
     except (IndexError, TypeError, ValueError) as exc:
         print(f'failed-result observer has no usable context, retiring: {exc!r}', file=sys.stderr)
-        if isinstance(context, dict):
-            _release_ready(context)
-        return STARTUP_FAILURE_EXIT
+        return _retire(context)
     try:
         observe(context)
     except ImportError as exc:
         print(f'failed-result observer cannot import its code, retiring: {exc!r}', file=sys.stderr)
-        _release_ready(context)
-        return STARTUP_FAILURE_EXIT
+        return _retire(context)
     # Unexpected errors exit nonzero for manager restart; the unit's ExecStopPost
     # releases the tempdir after each stop and the restart recreates it.
     _release_ready(context)
