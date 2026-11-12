@@ -16,9 +16,10 @@ returns None and every board ticks as before.
 
 Starvation guard (deliberate per-board minimum): priorities are set per board by different owners, so pure
 priority would let one board's flood of high numbers hold another board's cards forever. A board whose top card
-has been ready :data:`STARVE_SECONDS` or longer takes the first pick (oldest wait first), so no board waits much
-longer than that plus one worker turnover. Ranking is advisory: guards and refusals decided at claim time are not
-modelled, and the host cap check in each board's tick stays authoritative.
+has been ready :data:`STARVE_SECONDS` or longer, while the board started no card, takes the first pick (oldest wait
+first), so no board waits much longer than that plus one worker turnover, and a head that can never start wins
+its board at most one starvation pick per window. Ranking is advisory: guards and refusals decided at claim time
+are not modelled, and the host cap check in each board's tick stays authoritative.
 """
 from __future__ import annotations
 
@@ -63,10 +64,19 @@ def candidates(conn, limit: int) -> list[Candidate]:
                   for r in rows if r["id"] not in refused]
     found = sorted(found, key=Candidate.rank)[:limit]
     if found:  # only the head's wait decides starvation; one event scan per board
-        from hermes_cli.kanban_parent_unclaimed import ready_since
-        head = found[0]
-        found[0] = head._replace(ready_since=float(ready_since(conn, head.task_id, int(head.created_at))))
+        found[0] = found[0]._replace(ready_since=_starve_clock(conn, found[0]))
     return found
+
+
+def _starve_clock(conn, head: Candidate) -> float:
+    """When the board's starvation wait began: the head's last entry into ready, or the board's latest worker
+    start if later. A board that starts any card is served, so a head the claim loop keeps skipping (dispatch
+    guard, per-profile cap, claim deferral, no assignee) earns its board at most one first pick per
+    :data:`STARVE_SECONDS` instead of the first pick on every tick."""
+    from hermes_cli.kanban_parent_unclaimed import ready_since
+    since = float(ready_since(conn, head.task_id, int(head.created_at)))
+    row = conn.execute("SELECT MAX(started_at) FROM task_runs").fetchone()
+    return max(since, float(row[0] or 0)) if row is not None else since
 
 
 def _starved(cands: list[Candidate], now: float) -> bool:

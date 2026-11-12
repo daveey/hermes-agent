@@ -97,6 +97,50 @@ def test_flooded_board_cannot_starve_another_board_forever(home, monkeypatch):
     assert spawned == [("hermes", starved)], spawned
 
 
+def test_a_guarded_starved_head_does_not_win_its_board_every_first_pick(home, monkeypatch):
+    """Reviewer probe (PR #1238): hermes' starved head is dispatch-guarded and never starts. Once hermes has been
+    served (a worker started after the head became ready) it is not starved, so default's p1000 card takes the
+    only slot, not hermes' p0 filler; the queue count no longer lists the guarded head either."""
+    from hermes_cli import kanban_board_share as share
+    from hermes_cli import kanban_model_assignment as kma
+    from hermes_cli import kanban_queue_position as kqp
+    old = time.time() - share.STARVE_SECONDS - 60
+    guarded = _card("hermes", "hermes p500, guarded, starved", 500, ready_since=old)
+    filler = _card("hermes", "hermes p0 filler", 0)
+    top = _card("default", "default p1000 card", 1000)
+    with kbc.connect_closing(board="hermes") as conn:  # hermes started a worker after the head became ready
+        conn.execute("INSERT INTO task_runs (task_id, status, started_at) VALUES (?, 'done', ?)",
+                     (filler, int(time.time() - 600)))
+        conn.commit()
+    real_guard = kma.dispatch_guard
+    monkeypatch.setattr(kma, "dispatch_guard", lambda conn, task_id, **kw: (
+        "test guard" if task_id == guarded else real_guard(conn, task_id, **kw)))
+    spawned = []
+    dispatcher = _dispatcher(monkeypatch, spawned, start_board="hermes")
+
+    dispatcher.tick_once()
+
+    assert spawned == [("default", top)], spawned
+    with kbc.connect_closing(board="hermes") as conn:
+        assert kb.get_task(conn, filler).status == "ready"
+    mine = _card("default", "default p900 card", 900)
+    monkeypatch.setattr(kbd, "count_running_tasks_other_boards", lambda board=None: 1)
+    with kbc.connect_closing(board="default") as conn:
+        place = kqp.position(conn, kb.get_task(conn, mine), "default")
+    assert place is not None and "ahead_other_boards" not in place, place
+
+
+def test_board_started_nothing_keeps_the_starvation_pick(home):
+    from hermes_cli import kanban_board_share as share
+    old = time.time() - share.STARVE_SECONDS - 60
+    head = _card("hermes", "hermes p0, starved", 0, ready_since=old)
+    with kbc.connect_closing(board="hermes") as conn:  # a start BEFORE the head became ready does not count
+        conn.execute("INSERT INTO task_runs (task_id, status, started_at) VALUES (?, 'done', ?)",
+                     (head, int(old - 60)))
+        conn.commit()
+        assert share._starved(share.candidates(conn, 5), time.time())
+
+
 def test_queue_text_counts_higher_ranked_cards_on_other_boards(home, monkeypatch):
     from hermes_cli import kanban_parent_unclaimed as pu
     from hermes_cli import kanban_queue_position as kqp
