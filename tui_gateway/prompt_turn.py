@@ -1421,6 +1421,7 @@ def _run_admitted_prompt(
         automation_replay.install_failure_copy(st, text)
         st.literal_text = bool((display_metadata or {}).get("producer_admission"))
         goal_followup = None
+        concluding = None
         try:
             prepared = _prepare_turn_input(sid, session, st, text, images)
             if prepared is None:
@@ -1456,8 +1457,8 @@ def _run_admitted_prompt(
                 if paused_for_update:
                     update_pause.start_in_place_watcher(sid, session, st.marker_key)
             from tui_gateway.turn_outcome import concluding_turn_identity
-            _schedule_refused_turn_retry(sid, session, st.marker_key,
-                                         concluding_turn_identity(st.agent, st.own_marker))
+            concluding = concluding_turn_identity(st.agent, st.own_marker)
+            _schedule_refused_turn_retry(sid, session, st.marker_key, concluding)
             if status == "complete":
                 # [daveey] This turn's context carried any failed delivery already in the transcript.
                 automation_replay.cancel_carried(st.marker_key, str(session.get("session_key") or ""))
@@ -1475,6 +1476,11 @@ def _run_admitted_prompt(
             automation_replay.plan_for_turn(st, {"error": f"{type(e).__name__}: {e}"})
             automation_replay.schedule_for_turn(session, st)
         finally:
+            # Capture before admission reopens: the reused agent may then hold the next turn's lease.
+            from tui_gateway.turn_outcome import concluding_turn_identity
+            if concluding is None:
+                concluding = concluding_turn_identity(st.agent, st.own_marker)
+            outcome_sid = str(getattr(st.agent, "session_id", "") or session.get("session_key") or "")
             automation_replay.remove_failure_copy(st)
             _release_turn_scopes(sid, session, st)
             try:  # a raising settle step must not skip the trim / HERMES_HOME reset
@@ -1500,12 +1506,12 @@ def _run_admitted_prompt(
                 logger.info(
                     "tui turn finished: ui_session=%s session_key=%s agent_session_id=%s status=%s "
                     "error_retained=%s duration=%.1fs%s",
-                    sid, session.get("session_key") or "", getattr(st.agent, "session_id", "") or "",
+                    sid, session.get("session_key") or "", outcome_sid,
                     status, st.error_retained, time.monotonic() - _turn_started_monotonic,
                     st.error_detail)
                 # Backstop for turns that never reached a terminal frame.
                 if st.receipt_committed:
-                    _retire_turn_marker(session, st.marker_key)
+                    _retire_turn_marker(session, st.marker_key, concluding_turn=concluding)
                     with session["history_lock"]:
                         if session.get("_active_turn_marker_key") == st.marker_key:
                             session.pop("_active_turn_marker_key", None)
@@ -1519,9 +1525,8 @@ def _run_admitted_prompt(
                 _emit_settled_session_info(sid, session, st.agent)
             finally:
                 try:
-                    from tui_gateway.turn_outcome import (  # [daveey] every conclusion, before the profile
-                        concluding_turn_identity, refresh_turn_outcome)  # scope resets; only its own evidence
-                    refresh_turn_outcome(session, st.agent, concluding_turn_identity(st.agent, st.own_marker))
+                    from tui_gateway.turn_outcome import refresh_turn_outcome
+                    refresh_turn_outcome(session, concluding_turn=concluding, session_id=outcome_sid)
                     _post_turn_housekeeping(sid, session, st)
                 finally:
                     _rearm_carried_pause_watcher(sid, session, st)

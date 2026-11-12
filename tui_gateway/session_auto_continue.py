@@ -74,7 +74,7 @@ def _session_home(session: dict) -> Path:
     return Path(session.get("profile_home") or _hermes_home)
 
 
-def _retire_turn_marker(session: dict, *keys: str) -> None:
+def _retire_turn_marker(session: dict, *keys: str, concluding_turn: frozenset | None = None) -> None:
     """Drop the crash marker right before the terminal frame (not at turn-thread end: post-turn work outlives the
     client's answer, and quitting in that window would leave a marker that re-runs a finished turn). Extra ``keys``
     cover a session_key that compression rotated mid-turn. A turn stopped by backend shutdown keeps its marker
@@ -87,7 +87,10 @@ def _retire_turn_marker(session: dict, *keys: str) -> None:
     home = _session_home(session)
     for key in dict.fromkeys((*keys, str(session.get("session_key") or ""))):
         if key:
-            clear_turn_marker(home, key)
+            if concluding_turn is None:
+                clear_turn_marker(home, key)
+            else:
+                clear_turn_marker(home, key, concluding_turn=concluding_turn)
 
 
 def _hold_refused_turn(session: dict, marker_key: str, display_kind, error_surface) -> None:

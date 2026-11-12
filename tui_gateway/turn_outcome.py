@@ -47,10 +47,11 @@ def concluding_turn_identity(agent=None, marker: Optional[dict] = None) -> froze
         return frozenset()
 
 
-def refresh_turn_outcome(session: dict, agent=None, concluding_turn: Optional[frozenset] = None) -> None:
+def refresh_turn_outcome(session: dict, agent=None, concluding_turn: Optional[frozenset] = None,
+                         *, session_id: Optional[str] = None) -> None:
     """Refresh the outcome of the row this turn wrote (the agent's compression tip, else the session key).
     ``concluding_turn``: the turn's own evidence (``concluding_turn_identity``); omitted = nothing discounted."""
-    sid = _turn_sid(session, agent)
+    sid = _turn_sid(session, agent) if session_id is None else session_id
     if not sid:
         return
     try:
