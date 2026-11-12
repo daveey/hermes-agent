@@ -340,7 +340,8 @@ def _build_child_agent(
     _apply_child_cache_ttl(child)
     if child_session_db is not None:
         child._owns_session_db = True  # released by the child's close(), never by the parent
-    child._session_init_model_config.update(provenance)
+    if getattr(child, "_session_init_model_config", None) is not None:
+        child._session_init_model_config.update(provenance)
     _reserve_child_transcript(child)
     # Ownership transfer for the dedicated handle: the child's close() must release it (nothing else holds a
     # reference), and no parent teardown can close it out from under a background child (#81267).

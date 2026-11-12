@@ -407,19 +407,22 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
             self.journal = candidate
             return self.retry_pending()[0]
 
-    def reissue_pending_without(self, operation, keys):
-        """Re-send the one refused pending ``operation`` without payload ``keys``, once (same sequence: the owner
-        committed nothing for a refusal). Anything else pending is refused, and the owner's answer propagates."""
-        with self.lock:
-            pending = self.journal['pending']
-            if len(pending) != 1 or pending[0]['operation'] != operation:
-                raise WorkerPersistenceError(self.failure or 'pending_receipt')
-            entry = dict(pending[0], payload={k: v for k, v in pending[0]['payload'].items() if k not in keys})
-            candidate = dict(self.journal, pending=[entry])
-            self._save(candidate)
-            self.journal = candidate
-            self.failure = None
-            return self.retry_pending()[0]
+    def _strip_refused_child_provenance(self, entry, error):
+        """Version skew fallback at the actual refused receipt, shared by live writes and replay.
+
+        An old owner accepts only {'secret'}. Retain the sequence (nothing committed), and
+        durably remove provenance before re-sending; its absence bounds fallback across crashes.
+        Sticky failures from a later caller never reach this boundary or reissue another secret.
+        """
+        if (entry['operation'] != 'child.reserve' or entry['payload'].get('model_provenance') is None
+                or str(error) != 'invalid_params' or (getattr(error, 'data', None) or {}).get('field')):
+            return False
+        stripped = dict(entry, payload={k: v for k, v in entry['payload'].items() if k != 'model_provenance'})
+        candidate = dict(self.journal, pending=[stripped, *self.journal['pending'][1:]])
+        self._save(candidate)
+        self.journal = candidate
+        logger.warning('%s: provenance dropped because the owner refused it', entry['operation'])
+        return True
 
     def _persist(self, entry):
         return self.rpc('worker.persist', **self.scope, **entry)
@@ -461,6 +464,8 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
                     try:
                         result = self._persist(entry)
                     except WorkerPersistenceError as exc:
+                        if self._strip_refused_child_provenance(entry, exc):
+                            continue
                         if not self._resend_gap(exc, entry):
                             raise
                         continue  # the gap is committed now; send this entry again

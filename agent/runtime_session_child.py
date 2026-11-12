@@ -8,7 +8,7 @@ child persists through the ordinary ``worker.persist`` path under its own claim.
 import secrets
 from functools import partial
 
-from agent.runtime_session_store import RuntimeSessionStore, WorkerPersistenceError, call_off_event_loop
+from agent.runtime_session_store import RuntimeSessionStore, call_off_event_loop
 
 _REFUSALS = {
     'delegation_capacity': 'the gateway owner refused another subagent: this execution already runs '
@@ -48,15 +48,7 @@ def reserve_child_store(parent, *, model_provenance=None):
     payload = {'secret': secret}
     if model_provenance is not None:
         payload['model_provenance'] = model_provenance
-    try:
-        result = call_off_event_loop(parent._apply, 'child.reserve', payload)
-    except WorkerPersistenceError as exc:
-        # Version skew: an owner older than this worker accepts only {'secret'} and answers a bare
-        # ``invalid_params`` (no field). Spawn the child unrecorded rather than fail every delegation, once;
-        # any other refusal, and a second refusal, propagate unchanged.
-        if model_provenance is None or str(exc) != 'invalid_params' or (getattr(exc, 'data', None) or {}).get('field'):
-            raise
-        result = call_off_event_loop(parent.reissue_pending_without, 'child.reserve', ('model_provenance',))
+    result = call_off_event_loop(parent._apply, 'child.reserve', payload)
     if 'refused' in result:
         raise ValueError(_REFUSALS.get(result['refused'], 'the gateway owner refused a subagent: ' + result['refused']))
     child = result['child']
