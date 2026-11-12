@@ -366,6 +366,19 @@ def _drain_stderr_capped(pipe, chunks: list[bytes], omitted: list[int]) -> None:
         kept += len(raw)
 
 
+def _kept_stderr_text(chunks: list[bytes], omitted: int, killed: bool) -> str:
+    """Kept stderr as newline-terminated lines, ready to prepend to stdout. rg writes one
+    diagnostic in several write() calls, so killing it at the bound can cut the last line
+    short; that fragment is dropped (it names nothing reliably), and any other unterminated
+    tail gets a newline, so it never fuses with the first stdout line and hides a match."""
+    if chunks and not chunks[-1].endswith(b"\n"):
+        chunks = chunks[:-1] if killed else chunks[:-1] + [chunks[-1] + b"\n"]
+    text = b"".join(chunks).decode("utf-8", errors="replace")
+    if omitted:
+        text += _omitted_diagnostics_line(omitted) + "\n"
+    return text
+
+
 def _parse_search_context_line(line: str) -> tuple[str, int, str] | None:
     """Parse a ``path-line-content`` context line using the RIGHTMOST numeric
     separator (filenames may contain ``-<digits>-`` segments):
@@ -659,7 +672,8 @@ class SearchMixin:
             if time.monotonic() > deadline:
                 exit_code = 124
                 break
-        if proc.poll() is None:
+        killed = proc.poll() is None
+        if killed:
             _kill_process_group_posix(proc)  # native lane is POSIX-only (gate above)
         proc.wait()
         drainer.join()
@@ -669,10 +683,7 @@ class SearchMixin:
             err_drainer.join()
             if proc.stderr is not None:
                 proc.stderr.close()
-            err_text = b"".join(err_chunks).decode("utf-8", errors="replace")
-            if err_omitted[0]:
-                err_text = err_text.rstrip("\n") + "\n" + _omitted_diagnostics_line(err_omitted[0]) + "\n"
-            stdout = err_text + stdout
+            stdout = _kept_stderr_text(err_chunks, err_omitted[0], killed) + stdout
         if exit_code == 124:
             return ExecuteResult(stdout=stdout + f"\n[Command timed out after {timeout}s]", exit_code=124)
         if exit_code == 130:
