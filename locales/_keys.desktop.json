@@ -272,6 +272,8 @@
     "assistant.thread.errorCodes.provider_policy_blocked.title",
     "assistant.thread.errorCodes.rate_limit.body",
     "assistant.thread.errorCodes.rate_limit.title",
+    "assistant.thread.errorCodes.route_refused.body",
+    "assistant.thread.errorCodes.route_refused.title",
     "assistant.thread.errorCodes.server_error.body",
     "assistant.thread.errorCodes.server_error.title",
     "assistant.thread.errorCodes.session_read_only.body",

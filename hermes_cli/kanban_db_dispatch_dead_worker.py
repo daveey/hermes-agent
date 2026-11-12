@@ -28,6 +28,7 @@ class _DeadWorker:
     owner_unavailable: bool = False  # the profile owner never answered the claim: no failure counted [daveey]
     owner_restart: bool = False  # the profile owner restarted under the attempt: requeued uncounted [daveey]
     owner_down: bool = False  # the profile owner's service is failed/masked/disabled: requeued uncounted [daveey]
+    run_id: int | None = None  # captured under the reclaim transaction, never inferred after it
 
     @property
     def run_outcome(self) -> str:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import urllib.parse
 import zipfile
 from typing import Any
 
@@ -48,6 +49,7 @@ class FakeGitHub:
 
     def __init__(self) -> None:
         self.runs: list[dict[str, Any]] = []
+        self.other_runs: list[dict[str, Any]] = []   # not completed: only the per-workflow listing shows them
         self.jobs: dict[tuple[int, int], list[dict[str, Any]]] = {}
         self.artifacts: dict[int, list[dict[str, Any]]] = {}
         self.zips: dict[int, bytes | Exception] = {}
@@ -79,6 +81,12 @@ class FakeGitHub:
         window = slice((page - 1) * per_page, page * per_page)
         if base == f"{API}/actions/runs":
             return {"workflow_runs": sorted(self.runs, key=lambda r: -r["id"])[window]}
+        if base.startswith(f"{API}/actions/workflows/") and base.endswith("/runs"):
+            workflow = int(base.removeprefix(f"{API}/actions/workflows/").removesuffix("/runs"))
+            branch = urllib.parse.unquote(params.get("branch", ""))
+            listed = [r for r in self.runs + self.other_runs
+                      if r.get("workflow_id") == workflow and r.get("head_branch") == branch]
+            return {"workflow_runs": sorted(listed, key=lambda r: -r["id"])[window]}
         parts = base.removeprefix(f"{API}/actions/runs/").split("/")
         if parts[1:2] == ["attempts"] and parts[-1] == "jobs":
             return {"jobs": self.jobs.get((int(parts[0]), int(parts[2])), [])[window]}

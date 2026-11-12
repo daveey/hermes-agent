@@ -54,8 +54,8 @@ def test_api_get_retries_http_read_failures(monkeypatch, kind):
 
 @pytest.mark.parametrize("kind", ["partial", "protocol"])
 @pytest.mark.parametrize("stage,receipt", [("runs", "FAILED runs_unavailable"),
-                                           ("jobs", "FAILED run=5/1 code=jobs_unavailable"),
-                                           ("artifacts", "FAILED run=5/1 code=artifacts_unavailable")])
+                                           ("jobs", "WAITING run=5/1 code=jobs_unavailable polls=1"),
+                                           ("artifacts", "WAITING run=5/1 code=artifacts_unavailable polls=1")])
 def test_exhausted_http_reads_have_fixed_receipts_and_persist_retryable_state(tmp_path, monkeypatch, capsys,
                                                                            kind, stage, receipt):
     fake = FakeGitHub()
@@ -80,11 +80,17 @@ def test_exhausted_http_reads_have_fixed_receipts_and_persist_retryable_state(tm
     path = tmp_path / "state.json"
     initial = {"cards": {"tests/old.py": {"card": "t_old", "generation": 0}}, "runs": ["4/1"]}
     fk.save_state(path, initial)
-    assert fk.main(["--from-github", "--repo", "o/r", "--state", str(path)]) == 1
+    # A run-listing failure is red at once; an unreadable run waits one poll, then turns red if it persists.
+    assert fk.main(["--from-github", "--repo", "o/r", "--state", str(path)]) == (1 if stage == "runs" else 0)
     out = capsys.readouterr()
     assert receipt in out.out and SECRET.decode() not in out.out + out.err
     assert len(failures) == 4
-    assert fk.load_state(path) == initial
+    after = fk.load_state(path)
+    assert (after["cards"], after["runs"]) == (initial["cards"], initial["runs"])
+    if stage != "runs":
+        assert fk.main(["--from-github", "--repo", "o/r", "--state", str(path)]) == 1
+        assert receipt.replace("WAITING", "FAILED").replace("polls=1", "polls=2") in capsys.readouterr().out
+        assert fk.load_state(path)["runs"] == initial["runs"]
 
 
 @pytest.mark.parametrize("kind", ["partial", "protocol"])

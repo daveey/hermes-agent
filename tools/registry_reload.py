@@ -16,6 +16,7 @@ waited on. The wait is bounded: past the bound the caller proceeds on what the r
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -93,6 +94,18 @@ def wait_for_reload(scope: Optional[str] = None, timeout: Optional[float] = None
             waited = True
             _cond.wait(remaining)
     return waited
+
+
+def wait_for_reload_off_loop(scope: Optional[str] = None, timeout: Optional[float] = None) -> bool:
+    """:func:`wait_for_reload` for a caller that may run on an asyncio event-loop thread (a tool-list
+    build reached from an ``async def`` handler, e.g. the gateway's ``/reload-mcp`` refresh of cached
+    agents): there it returns False at once, since blocking the loop for up to the wait bound would
+    stall every connection it serves."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return wait_for_reload(scope, timeout)
+    return False
 
 
 def settle_reload_since(epoch: int, scope: Optional[str] = None, timeout: Optional[float] = None) -> bool:

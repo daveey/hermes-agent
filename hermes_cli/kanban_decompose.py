@@ -178,13 +178,18 @@ def _build_roster() -> tuple[list[dict], set[str]]:
     return roster, {p.name for p in all_profiles}
 
 
-def _format_roster(roster: list[dict]) -> str:
+def _format_roster(roster: list[dict], card_names: Optional[set[str]] = None) -> str:
+    """``card_names`` (None = all): profiles that may own the card itself; the others are marked children-only."""
     if not roster:
         return "  (no profiles installed — decomposer cannot route work)"
     return "\n".join(
-        f"  - {entry['name']}{'' if entry['has_description'] else ' ⚠ undescribed'}: {entry['description']}"
+        f"  - {entry['name']}{'' if entry['has_description'] else ' ⚠ undescribed'}"
+        f"{'' if card_names is None or entry['name'] in card_names else _CHILD_ONLY}: {entry['description']}"
         for entry in roster
     )
+
+
+_CHILD_ONLY = " ⚠ no pool worker runs it: fanout children only, never this task itself"
 
 
 def _normalize_assignee_choice(assignee: object, *, default_assignee: str, valid_names: set[str]) -> str:
@@ -205,9 +210,22 @@ class _Routing:
     auto_promote: bool
     roster: list[dict]
     valid_names: set[str]
+    # Profiles that may own the card ITSELF (single-task assignee, root after fan-out). Its placement is fixed
+    # at creation, so an enrolled worker-first card keeps only profiles a pool worker runs; ``card_default``
+    # is None when default_assignee is not one of them (keep the card's assignee). Fan-out children are inserted
+    # unenrolled and run on this gateway, so they keep the whole roster. [daveey]
+    card_names: Optional[set[str]] = None
+    card_default: Optional[str] = None
+    card_root: Optional[str] = None  # the root's owner after fan-out: orchestrator, else card_default
+
+    def __post_init__(self) -> None:
+        if self.card_names is None:  # built without a card: every profile may own it
+            self.card_names = set(self.valid_names)
+            self.card_default = self.default_assignee
+            self.card_root = self.orchestrator
 
 
-def _load_routing(*, root_assignee: Optional[str] = None) -> _Routing:
+def _load_routing(*, root_assignee: Optional[str] = None, task: object = None) -> _Routing:
     from hermes_cli.config import load_config_readonly
     try:
         cfg = load_config_readonly()
@@ -215,13 +233,31 @@ def _load_routing(*, root_assignee: Optional[str] = None) -> _Routing:
         cfg = {}
     kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
     roster, valid_names = _build_roster()
-    return _Routing(
+    routing = _Routing(
         orchestrator=_resolve_profile_from_cfg(cfg, "orchestrator_profile", fallback=root_assignee),
         default_assignee=_resolve_profile_from_cfg(cfg, "default_assignee", fallback=root_assignee),
         auto_promote=bool(kanban_cfg.get("auto_promote_children", True)),
         roster=roster,
         valid_names=valid_names,
     )
+    from hermes_cli.kanban_profile_runnable import runnable_for
+    routing.card_names = {n for n in valid_names if runnable_for(n, task)}
+    routing.card_default = routing.default_assignee if runnable_for(routing.default_assignee, task) else None
+    routing.card_root = routing.orchestrator if runnable_for(routing.orchestrator, task) else routing.card_default
+    return routing
+
+
+def _card_assignee(task_id: str, choice: object, routing: _Routing) -> Optional[str]:
+    """The card's own new assignee: ``choice`` when it may own the card, else ``card_default``
+    (None = leave the card's assignee unchanged)."""
+    chosen = _normalize_assignee_choice(
+        choice, default_assignee=routing.card_default or "", valid_names=routing.card_names or set(),
+    )
+    picked = choice.strip() if isinstance(choice, str) else ""
+    if picked in routing.valid_names and picked not in (routing.card_names or set()):
+        logger.info("decompose: task %s: no pool worker runs %r; assignee %r instead",
+                    task_id, picked, chosen or "(unchanged)")
+    return chosen or None
 
 
 def _apply_single(task: kb.Task, parsed: dict, routing: _Routing, author: str) -> DecomposeOutcome:
@@ -229,9 +265,7 @@ def _apply_single(task: kb.Task, parsed: dict, routing: _Routing, author: str) -
     title_val, body_val = _title_body(parsed)
     assignee_val = None
     if not task.assignee:
-        assignee_val = _normalize_assignee_choice(
-            parsed.get("assignee"), default_assignee=routing.default_assignee, valid_names=routing.valid_names,
-        )
+        assignee_val = _card_assignee(task.id, parsed.get("assignee"), routing)
     if title_val is None and body_val is None:
         return DecomposeOutcome(task.id, False, "decomposer returned fanout=false with no title/body")
     try:
@@ -294,7 +328,7 @@ def _apply_fanout(task_id: str, parsed: dict, routing: _Routing, author: str) ->
             child_ids = decompose_triage_task(
                 conn,
                 task_id,
-                root_assignee=routing.orchestrator,
+                root_assignee=routing.card_root,
                 children=children,
                 author=author,
                 auto_promote=routing.auto_promote,
@@ -334,10 +368,10 @@ def decompose_task(
         if refusal:
             return DecomposeOutcome(task_id, False, refusal)
 
-    routing = _load_routing(root_assignee=task.assignee)
+    routing = _load_routing(root_assignee=task.assignee, task=task)
     user_prompt = _USER_TEMPLATE.format(
         **_task_prompt_fields(task),
-        roster=_format_roster(routing.roster),
+        roster=_format_roster(routing.roster, routing.card_names),
         default_assignee=routing.default_assignee,
     )
     audit_author = author or _profile_author()

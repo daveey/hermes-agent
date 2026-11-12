@@ -104,10 +104,11 @@ def partition_gateway_pids_by_scope(pids, scope: set[Path] | None = None) -> tup
     return owned, foreign
 
 
-def systemd_unit_hermes_home(scope_cmd: list, svc_name: str) -> str | None:
+def systemd_unit_hermes_home(scope_cmd: list, svc_name: str, *, allow_default: bool = True) -> str | None:
     """Home the systemd unit *svc_name* runs on: its live MainPID's environment first, then the
     unit's declared ``Environment=HERMES_HOME``; for a user-scope unit that declares none, the
-    user's own default home. ``None`` when nothing readable names a home."""
+    user's own default home when *allow_default* is true. Strict pre-swap callers disable
+    that inference: unreadable live ownership must not authorize a foreign-home exclusion."""
     from hermes_cli.update_cmd_fleet import _systemctl, _unit_main_pid
 
     pid = _unit_main_pid(scope_cmd, svc_name)
@@ -131,7 +132,7 @@ def systemd_unit_hermes_home(scope_cmd: list, svc_name: str) -> str | None:
         key, sep, value = token.partition("=")
         if sep and key == "HERMES_HOME" and value.strip():
             return value.strip()
-    if "--user" in scope_cmd:
+    if allow_default and "--user" in scope_cmd:
         return str(Path.home() / ".hermes")
     return None
 

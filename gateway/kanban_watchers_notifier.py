@@ -53,12 +53,13 @@ def _pin_first():
 TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "quota_episode_notice", "worker_repin_notice", "dependency_parent_unclaimed", "chat_wait_unclaimed", "request_withdrawn")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
-_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected", "dependency_parent_unclaimed", "chat_wait_unclaimed", "request_withdrawn")
+_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected", "dependency_parent_unclaimed", "chat_wait_unclaimed", "request_withdrawn", "failure_finalized")
+TERMINAL_KINDS = (*TERMINAL_KINDS, "failure_finalized")
 
 
 def diagnostic_event(ev) -> bool:
     """Infrastructure attention is distinct from an explicit owner decision."""
-    if ev.kind in {"crashed", "timed_out", "gave_up", "quota_episode_notice"}:
+    if ev.kind in {"failure_finalized", "crashed", "timed_out", "gave_up", "quota_episode_notice"}:
         return True
     if ev.kind in {"blocked", "block_loop_detected"}:
         return (ev.payload or {}).get("kind") != "needs_input"
@@ -565,6 +566,7 @@ _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
     "request_withdrawn": _fmt_request_withdrawn,
     "completed": _fmt_completed,
     "blocked": _fmt_blocked,
+    "failure_finalized": _fmt_failure("failure_finalized"),
     "gave_up": _fmt_failure("gave_up"),
     "crashed": _fmt_failure("crashed"),
     "timed_out": _fmt_timed_out,
@@ -664,6 +666,9 @@ class _KanbanNotification:
 
     def format_event(self, ev: Any) -> Optional[str]:
         """Render one event; accumulates wake handoff/review detail. None → silent kind."""
+        from hermes_cli.kanban_failure_notice import provisional_failure
+        if provisional_failure(ev):
+            return None
         formatter = _EVENT_FORMATTERS.get(ev.kind)
         if formatter is None:
             return None
@@ -677,7 +682,9 @@ class _KanbanNotification:
     def build_wake_text(self) -> None:
         """Set ``wake_kinds`` / ``session_key`` / ``synth`` for the wake paths."""
         task, sub = self.task, self.sub
-        self.wake_kinds = {ev.kind for ev in self.d["events"] if ev.kind in _WAKE_KINDS} if self.wake_agent else set()
+        from hermes_cli.kanban_failure_notice import provisional_failure
+        self.wake_kinds = {ev.kind for ev in self.d["events"] if ev.kind in _WAKE_KINDS
+                           and not provisional_failure(ev)} if self.wake_agent else set()
         self.wake_diagnostic = all(diagnostic_event(ev) for ev in self.d["events"] if ev.kind in self.wake_kinds)
         if not self.wake_kinds:
             return
@@ -689,7 +696,11 @@ class _KanbanNotification:
             # for child tasks; use it only for legacy rows.
             self.session_key = sub["chat_id"] or getattr(task, "session_id", None) or ""
         # i18n keys: gateway.kanban.wake.<kind> for each _WAKE_KINDS entry.
-        _parts = [t(f"gateway.kanban.wake.{k}") for k in _WAKE_KINDS if k in self.wake_kinds]
+        _parts = [t(f"gateway.kanban.wake.{k}") for k in _WAKE_KINDS
+                  if k in self.wake_kinds and k != "failure_finalized"]
+        from hermes_cli.kanban_failure_summary import describe_failure
+        _parts.extend(describe_failure(ev.kind, self.title, ev.payload or {})
+                      for ev in self.d["events"] if ev.kind == "failure_finalized")
         _status = t("gateway.kanban.wake.status_joiner").join(_parts) or t("gateway.kanban.wake.status_default")
         synth = t(
             "gateway.kanban.wake.message",
@@ -811,6 +822,12 @@ class _KanbanNotification:
                 logger.debug("kanban notifier: artifact delivery for %s failed: %s", self.task_id, art_exc)
         return True
 
+    async def failure_receipts(self, lane, run_uids=()):
+        return await _to_thread_process_service(partial(
+            self.runner._kanban_sub_op, self.board_slug, "notify_failure_receipts", self.sub,
+            lane=lane, run_uids=run_uids,
+        ))
+
     async def _send_pings(self) -> bool:
         """Send every text ping; False when a send failed (claim already rewound/dropped)."""
         for ev in self.d["events"]:
@@ -833,8 +850,14 @@ class _KanbanNotification:
             if ev.id <= self.sub.get("last_ping_event_id", 0):
                 continue
             try:
+                from hermes_cli.kanban_failure_notice import failure_uid
+                uid = failure_uid(ev)
+                if uid and uid in await self.failure_receipts("ping"):
+                    continue
                 if await self._send_event(ev, msg) is False:
                     continue
+                if uid:
+                    await self.failure_receipts("ping", [uid])
                 await _to_thread_process_service(partial(
                     self.runner._kanban_sub_op, self.board_slug, "record_notify_ping", self.sub,
                     event_id=ev.id,
@@ -881,11 +904,15 @@ class _KanbanNotification:
                 return
             # All text pings delivered (or skipped for non-push / wake-only).
             original_events = self.d["events"]
+            from hermes_cli.kanban_failure_notice import failure_uid, fresh_events
+            wake_events = original_events
+            if any(failure_uid(ev) for ev in original_events):
+                wake_events = fresh_events(original_events, await self.failure_receipts("wake"))
             from gateway.warning_notifications import warning_notifications_enabled
             split = not warning_notifications_enabled(self.platform_str)
-            wake_groups = ([original_events] if not split else [
-                [ev for ev in original_events if diagnostic_event(ev)],
-                [ev for ev in original_events if not diagnostic_event(ev)],
+            wake_groups = ([wake_events] if not split else [
+                [ev for ev in wake_events if diagnostic_event(ev)],
+                [ev for ev in wake_events if not diagnostic_event(ev)],
             ])
             wake_payloads = []
             for events in wake_groups:
@@ -897,7 +924,8 @@ class _KanbanNotification:
                     self.format_event(ev)
                 self.build_wake_text()
                 if self.wake_kinds:
-                    wake_payloads.append((self.synth, self.wake_diagnostic, self.wake_kinds))
+                    wake_payloads.append((self.synth, self.wake_diagnostic, self.wake_kinds,
+                                          [failure_uid(ev) for ev in events if failure_uid(ev)]))
             self.d = {**self.d, "events": original_events}
         is_push = self.is_push_adapter
         from gateway.wake import WakeNotAccepted
@@ -905,8 +933,10 @@ class _KanbanNotification:
         # A requested wake is required even when its passive ping already landed.
         if wake_payloads:
             try:
-                for self.synth, self.wake_diagnostic, self.wake_kinds in wake_payloads:
+                for self.synth, self.wake_diagnostic, self.wake_kinds, run_uids in wake_payloads:
                     await self.wake()
+                    if run_uids:
+                        await self.failure_receipts("wake", run_uids)
                 self.clear_failures()
             except WakeNotAccepted:
                 # Startup / full queue is not a dead destination. Keep the durable

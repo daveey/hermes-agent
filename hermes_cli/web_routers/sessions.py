@@ -24,6 +24,7 @@ from hermes_cli.session_listing import stamp_automated, subagent_listing_scope
 from hermes_cli.session_list_flight import SESSION_LIST_CACHE, data_stamp
 from hermes_cli.web_deps import late
 from hermes_cli.web_read_coalescing import coalesced_read
+from hermes_cli.web_json_response import encoded_in_thread, native_json_response, per_request_response
 from hermes_cli.kanban_session_activity import annotate_kanban_activity, session_tasks as session_kanban_tasks
 from hermes_cli.cron_session_activity import annotate_cron_activity
 from hermes_cli.goal_session_activity import annotate_goal_activity
@@ -232,7 +233,9 @@ def get_sessions(
 
 
 # Queue expensive list contenders before consuming the shared HTTP worker pool.
-_sessions_admitted = coalesced_read(get_sessions, admission_key=lambda args: args["profile"], max_concurrent=2)
+# The body is JSON-encoded in the worker thread (web_json_response), never on the loop. [daveey]
+_sessions_admitted = coalesced_read(
+    encoded_in_thread(get_sessions), admission_key=lambda args: args["profile"], max_concurrent=2)
 
 
 def _peek_sessions(arguments):
@@ -243,15 +246,20 @@ def _peek_sessions(arguments):
     return SESSION_LIST_CACHE.peek((str(db_path), *arguments.values()), data_stamp(db_path))
 
 
+def _peek_sessions_encoded(arguments):
+    hit, value = _peek_sessions(arguments)
+    return hit, (native_json_response(value) if hit else value)
+
+
 @functools.wraps(_sessions_admitted)
 async def _sessions_http(*args, **kwargs):
     from starlette.concurrency import run_in_threadpool
     bound = inspect.signature(get_sessions).bind(*args, **kwargs)
     bound.apply_defaults()
-    hit, value = await run_in_threadpool(_peek_sessions, bound.arguments)
+    hit, value = await run_in_threadpool(_peek_sessions_encoded, bound.arguments)
     if hit:
-        return value
-    return await _sessions_admitted(*args, **kwargs)
+        return per_request_response(value)
+    return per_request_response(await _sessions_admitted(*args, **kwargs))
 
 
 list_router.add_api_route("/api/sessions", _sessions_http, methods=["GET"])

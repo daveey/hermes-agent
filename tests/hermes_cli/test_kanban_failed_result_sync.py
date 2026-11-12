@@ -46,7 +46,11 @@ def test_failed_result_closure_survives_real_sync_echo(live, kanban_home, svc, m
                           'observer_unit': 'fixture.service'})
     else:
         dispatch.detect_crashed_workers(live)
-    assert live.execute('SELECT status FROM task_runs WHERE uid=?', (uid,)).fetchone()[0] == 'crashed'
+    # A Board-primary failure is released to the Board, never closed in the
+    # local mirror first (a competing local close is what charged one run twice).
+    from hermes_cli.kanban_failure_release import queued
+    assert live.execute('SELECT status FROM task_runs WHERE uid=?', (uid,)).fetchone()[0] == 'running'
+    assert queued(live, task.current_run_id)
     for _ in range(3):
         transport._round(kanban_home, svc)
         dispatch.detect_crashed_workers(live)

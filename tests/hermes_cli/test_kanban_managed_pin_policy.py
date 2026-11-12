@@ -203,3 +203,62 @@ def test_pin_policy_rejection_is_typed_and_keeps_its_message():
     assert isinstance(info.value, ModelRoutingError)
     assert 'Managed subscription policy rejects unregistered or ambiguous concrete pin' in str(info.value)
     assert info.value.allowed == ['claude-opus-5-5', 'claude-sonnet-5-5', 'gpt-6.1-sol']
+
+
+FABLE = 'claude-fable-5-2'
+
+
+def _hand_off_for_review(conn, metadata, *, pin=None):
+    """Implementer run spawned through dispatch (so its run_route receipt exists), then a review handoff."""
+    from hermes_cli.kanban_db_dispatch import dispatch_once
+    tid = kb.create_task(conn, title='Browser build', assignee='worker', model_override=pin,
+                         provider_override='anthropic' if pin else None)
+    dispatch_once(conn, spawn_fn=lambda *args: None, max_spawn=1)
+    assert kb.get_task(conn, tid).status == 'running'
+    assert kb.request_review(conn, tid, summary=f'reviewer-model: wanted {FABLE}, set-model refused: '
+                             'model_pin_not_in_routing_registry', metadata=metadata)
+    return tid
+
+
+def test_refused_review_override_falls_back_to_registered_independent_reviewer(board):
+    """t_01a1ce48c929f055 (2026-11-12): handoff metadata review_model=claude-fable-5-2, which only the hub
+    registers. Pool-worker review spawns died with ManagedPinRejectedError until the card gave up."""
+    from hermes_cli.kanban_db_dispatch import dispatch_once
+    conn, _ = board
+    tid = _hand_off_for_review(conn, {'review_model': FABLE, 'review_provider': 'anthropic'})
+    seen = []
+    dispatch_once(conn, spawn_fn=lambda item, *args: seen.append((item.model_override, item.provider_override)),
+                  max_spawn=1)
+    assert seen == [('claude-opus-5-5', 'anthropic')]
+    tier = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]
+    assert tier['reason'] == 'review_override_refused' and tier['lane'] == 'review'
+    assert tier['model'] == 'claude-opus-5-5'
+    assert tier['requested']['model'] == FABLE
+    assert tier['requested']['code'] == 'model_pin_not_in_routing_registry'
+    assert 'claude-opus-5-5' in tier['requested']['allowed']
+    assert kb.get_task(conn, tid).consecutive_failures == 0
+
+
+def test_refused_review_override_without_independent_reviewer_never_spawns(board):
+    from hermes_cli.kanban_db_dispatch import dispatch_once
+    conn, _ = board
+    # The implementer ran on the only registered deep model: no distinct registered reviewer exists.
+    tid = _hand_off_for_review(conn, {'review_model': FABLE}, pin='claude-opus-5-5')
+    seen = []
+    dispatch_once(conn, spawn_fn=lambda *args: seen.append(args), max_spawn=1)
+    assert seen == []
+    task = kb.get_task(conn, tid)
+    assert task.status == 'review' and task.consecutive_failures == 0 and task.claim_lock is None
+    failed = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'spawn_failed'][-1]
+    assert failed['infrastructure'] is True
+    assert FABLE in failed['error'] and 'model_pin_not_in_routing_registry' in failed['error']
+
+
+def test_registered_review_override_is_kept(board):
+    from hermes_cli.kanban_db_dispatch import dispatch_once
+    conn, _ = board
+    tid = _hand_off_for_review(conn, {'review_model': 'claude-opus-5-5'})
+    seen = []
+    dispatch_once(conn, spawn_fn=lambda item, *args: seen.append(item.model_override), max_spawn=1)
+    assert seen == ['claude-opus-5-5']
+    assert [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]['reason'] == 'review_override'

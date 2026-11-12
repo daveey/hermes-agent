@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -36,9 +37,40 @@ def _sync_installed(tmp_path):
     (tmp_path / 'config.yaml').write_text('kanban:\n  sync:\n    enabled: true\n')
 
 
+class _FailureService(FakeService):
+    """Model the Board's run-scoped release command, not a speculative local crash."""
+
+    def row_op(self, b, op, gw):
+        board, gateway = b, gw
+        if op['op'] != 'release':
+            return super().row_op(board, op, gateway)
+        assert op['outcome'] == 'crashed' and not op['force_trip'] and not op['infrastructure']
+        tid, run_uid = op['task'], op['run_uid']
+        task = board['rows']['tasks'][tid]
+        run = board['rows']['task_runs'][run_uid]
+        assert run['task_id'] == tid and run['ended_at'] is None
+        assert task['current_run_uid'] == run_uid
+        assert board['leases'][tid]['run_uid'] == run_uid
+        failures = int(task.get('consecutive_failures') or 0) + 1
+        assert failures < (task.get('max_retries') or op['failure_limit'])
+        stamp, op_id = task['hlc'], op['client_op_id']
+        self._put(board, 'task_runs', run_uid,
+                  {'status': 'crashed', 'outcome': 'crashed', 'ended_at': int(time.time()),
+                   'error': op['error'], 'metadata': json.dumps(op['extra'])}, gateway, op_id, stamp)
+        self._put(board, 'task_events', f'ev-crash-{run_uid}',
+                  {'task_id': tid, 'run_uid': run_uid, 'kind': 'crashed',
+                   'payload': json.dumps({'error': op['error'], 'failure_notice': 'canonical', **op['extra']}),
+                   'created_at': int(time.time())}, gateway, op_id, stamp)
+        board['leases'].pop(tid)
+        row = self._put(board, 'tasks', tid,
+                        {'status': 'ready', 'current_run_uid': None, 'lease_holder': None, 'lease_expires': None,
+                         'consecutive_failures': failures, 'last_failure_error': op['error']}, gateway, op_id, stamp)
+        return {'status': 'applied', 'row': row}
+
+
 @pytest.fixture
 def svc():
-    service = FakeService(lease_runs=True)
+    service = _FailureService(lease_runs=True)
     previous = sync.set_lease_client(ksc.HubLeaseClient(service.hub(ME)))
     ksc.reset_board_watch()
     try:
@@ -249,9 +281,41 @@ def test_execution_or_admission_evidence_on_a_grant_blocks_the_resume(env, svc, 
     assert _candidate(tid) is None
 
 
+def _crash_run(env, svc, tid):
+    run_id, outcome = base._lose_run(tid, code=1, state_db=env.db.db_path, pid=81002,
+                                     monkeypatch=env.monkeypatch)
+    # A primary queues the command but cannot close the run or reclaim locally.
+    assert outcome is None
+    with base._connect() as conn:
+        run_uid = sync.run_uid(conn, run_id)
+        commands = list(conn.execute("SELECT fields FROM kanban_sync_outbox WHERE op='release'"))
+        assert len(commands) == 1 and json.loads(commands[0][0])['run_uid'] == run_uid
+        assert conn.execute('SELECT status FROM tasks WHERE id=?', (tid,)).fetchone()[0] == 'running'
+        assert conn.execute('SELECT ended_at FROM task_runs WHERE id=?', (run_id,)).fetchone()[0] is None
+    _round(svc)  # push the command (a sync round pulls before it pushes)
+    _round(svc)  # import the authoritative task/run/event feed
+    with base._connect() as conn:
+        task = conn.execute('SELECT status, lease_holder, lease_expires FROM tasks WHERE id=?', (tid,)).fetchone()
+        run = conn.execute('SELECT status, outcome, ended_at FROM task_runs WHERE id=?', (run_id,)).fetchone()
+        assert tuple(task) == ('ready', None, None)
+        assert tuple(run[:2]) == ('crashed', 'crashed') and run['ended_at'] is not None
+        assert conn.execute("SELECT COUNT(*) FROM task_events WHERE run_id=? AND kind='crashed'",
+                            (run_id,)).fetchone()[0] == 1
+        assert not list(conn.execute("SELECT 1 FROM kanban_sync_outbox WHERE op='release'"))
+        # Feed rows deliberately preserve host-local claim columns. The next dispatcher
+        # sweep clears the dead claim before admission; do not bypass it with SQL.
+        from hermes_cli import kanban_db_dispatch_claims as claims
+        after_grace = time.time() + claims.ORPHAN_CLAIM_GRACE_SECONDS + 1
+        with env.monkeypatch.context() as patch:
+            patch.setattr(claims, 'time', SimpleNamespace(time=lambda: after_grace))
+            assert claims.release_leftover_local_claims(conn) == [tid]
+    assert tid not in svc.board(BOARD)['leases']
+    return run_id
+
+
 def test_an_executed_run_between_two_unused_grants_blocks_the_resume(env, svc):
     tid, _prior, _ = _lost_then_grants(env, svc, 1)
-    base._lose_run(tid, code=1, state_db=env.db.db_path, pid=81002, monkeypatch=env.monkeypatch)
+    _crash_run(env, svc, tid)
     with base._connect() as conn:
         kb.recompute_ready(conn)
     _unused_grant(svc, tid)
@@ -264,7 +328,7 @@ def test_an_executed_run_between_two_unused_grants_blocks_the_resume(env, svc):
 def test_a_real_run_after_the_grants_blocks_the_resume(env, svc, kind):
     tid, _prior, _ = _lost_then_grants(env, svc, 2)
     if kind == 'crash':
-        base._lose_run(tid, code=1, state_db=env.db.db_path, pid=81002, monkeypatch=env.monkeypatch)
+        _crash_run(env, svc, tid)
     elif kind == 'ordinary_release':
         _unused_grant(svc, tid, release_as_unused=False)  # released through the real wire, not as unused
     else:

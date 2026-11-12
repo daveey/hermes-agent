@@ -60,6 +60,10 @@ PARTIAL_FAILED_TURN_NOTICE = (
     "This turn did not complete. Some actions may already have run; verify their effects "
     "before resending."
 )
+# [daveey] The router refused the chat's own route before anything ran (a pinned subscription wall): a
+# resend repeats the refusal until the reset, so the boundary drops the "Send it again" advice. The
+# error card beside it carries the reset and the way out (/model).
+ROUTE_REFUSED_TURN_NOTICE = "Your request was not processed."
 # [daveey] A backend restart (``backend_exit``) stopped the turn before any tool ran: restart recovery
 # continues it (auto-continue / the boot sweep), and a For-you decision has no button left to press, so
 # "Send it again" would be wrong advice (self-heal desktop-3a6213ce74).

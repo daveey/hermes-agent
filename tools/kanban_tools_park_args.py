@@ -1,4 +1,4 @@
-"""Argument validators for park calls (kanban_block / kanban_schedule / kanban_continue). [daveey]
+"""Argument validators and result helpers for park calls. [daveey]
 
 Split out of tools/kanban_tools.py to keep that facade under its size cap; behaviour unchanged.
 """
@@ -76,3 +76,15 @@ def _wake_check_args(args: dict) -> tuple[Optional[str], Optional[int], bool]:
 def _wake_check_echo(wake: tuple) -> dict:
     """Result fields echoing the park's probe (none when it has no probe)."""
     return {"wake_check": wake[0], "check_every": wake[1]} if wake[0] else {}
+
+
+def _escalated(kb, conn, tid: str) -> Optional[str]:
+    """The result for a park that escalated to an owner card instead (``kanban_awaiting``). [daveey]"""
+    from hermes_cli import kanban_awaiting as kaw
+    from tools.kanban_tools import _ok_landed
+
+    owner = kaw.escalated_owner(conn, tid)
+    if owner is None:
+        return None
+    return _ok_landed(kb, conn, tid, "todo", code="repark_escalated", owner_task_id=owner,
+                      next=kaw.escalation_message(tid, owner, kaw.escalated_fired(conn, tid)))

@@ -19,13 +19,18 @@ logger = logging.getLogger(__name__)
 MAX_BACKOFF_SECONDS = 7200
 
 
-def episode(conn, task_id):
+def episode(conn, task_id, *, run_id=None):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_quota_receipt import receipt_deadline, receipt_route, valid_deadline
     runs = []
+    bound = conn.execute("SELECT ended_at,id FROM task_runs WHERE task_id=? AND id=? AND ended_at IS NOT NULL",
+                         (task_id, run_id)).fetchone() if run_id is not None else None
+    if run_id is not None and bound is None:
+        return None
     for row in conn.execute(
         "SELECT id, outcome, ended_at FROM task_runs WHERE task_id=? AND ended_at IS NOT NULL "
-        "ORDER BY ended_at DESC, id DESC", (task_id,)):
+        "AND (? IS NULL OR (ended_at,id)<=(?,?)) ORDER BY ended_at DESC, id DESC",
+        (task_id, run_id, bound['ended_at'] if bound else None, run_id)):
         if row['outcome'] != 'rate_limited':
             break
         runs.append(row)
@@ -199,7 +204,7 @@ def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
     except Exception:
         logger.warning('kanban quota: route resolve failed for %s; holding', task.id, exc_info=True)
         return held, None
-    if lane == 'review' or base[2] in ('review_unpinned', 'review_override') or unknown:
+    if lane == 'review' or base[2] in ('review_unpinned', 'review_override', 'review_override_refused') or unknown:
         # An unrecorded wall may be any provider: no route can be proven to avoid it.
         return held, None
     try:
@@ -251,13 +256,13 @@ def notice_text(payload):
     return f' quota wall: {count} consecutive requeues; {action}. No failure budget consumed.'
 
 
-def record_episode(conn, task_id, run_id):
+def record_episode(conn, task_id, run_id, *, captured=False):
     """Called inside the reaper transaction; event and notice are atomic/idempotent.
 
     Database errors propagate (the reaper's transaction owns them); a failure while choosing
     the notice's wording falls back to the bare wait, so it can never leave a card running."""
     from hermes_cli import kanban_db as kb
-    state = episode(conn, task_id)
+    state = episode(conn, task_id, run_id=run_id if captured else None)
     if not state or state['run_id'] != run_id:
         return
     exists = conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND run_id=? AND kind='quota_episode'",

@@ -42,6 +42,7 @@ class ResponseCheckVerdict:
     _preflight_compression_blocked: Any
     _last_preflight_pressure: Any
     api_duration: Any
+    conversation_history: Any
     result: Optional[dict[str, Any]] = None
 
 
@@ -97,7 +98,7 @@ def check_api_response(
     max_compression_attempts: Any, length_continue_retries: Any, truncated_response_parts: Any,
     truncated_tool_call_retries: Any, current_turn_user_idx: Any, api_call_count: Any,
     api_request_id: Any, api_start_time: Any, effective_task_id: Any, turn_id: Any,
-    _preflight_compression_blocked: Any, _last_preflight_pressure: Any,
+    _preflight_compression_blocked: Any, _last_preflight_pressure: Any, system_message: Any = None,
 ) -> ResponseCheckVerdict:
     """Verify ``response`` in the original order. The retry buffer is NOT cleared on success
     (bytes back != usable content); ``_preflight_compression_blocked``/``_last_preflight_pressure``
@@ -114,6 +115,7 @@ def check_api_response(
             truncated_tool_call_retries=truncated_tool_call_retries,
             _preflight_compression_blocked=_preflight_compression_blocked,
             _last_preflight_pressure=_last_preflight_pressure, api_duration=api_duration,
+            conversation_history=conversation_history,
             result=result,
         )
 
@@ -172,11 +174,15 @@ def check_api_response(
             api_call_count=api_call_count, effective_task_id=effective_task_id, turn_id=turn_id,
             api_request_id=api_request_id, api_start_time=api_start_time, retry_count=retry_count,
             max_retries=max_retries, current_turn_user_idx=current_turn_user_idx,
+            system_message=system_message,
         )
         thinking_spinner = None
         active_system_prompt = _rv.active_system_prompt
         if _rv.action == "return":
             return _verdict("return", _rv.result)
+        if _rv.messages is not None:
+            # History-triggered refusal: compacted history armed restart_with_compressed_messages.
+            messages, conversation_history = _rv.messages, _rv.conversation_history
         retry_count = 0
         compression_attempts = 0
         return _verdict("break")

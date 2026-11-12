@@ -123,10 +123,12 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None) -> Optional[in
 
 
 def collect(disk_path: Optional[Path] = None) -> dict[str, Any]:
-    """``{cpu_load1, cpus, mem_used_pct, disk_free_gb, disk_total_gb}``; a value that cannot be read is left out."""
+    """``{cpu_load1, cpus, mem_used_pct, disk_free_gb, disk_total_gb}`` plus the throughput counters
+    (``machine_throughput_metrics``); a value that cannot be read is left out."""
     out: dict[str, Any] = {"active_card_runs": active_card_runs()}
-    from hermes_cli import machine_drain_metrics
+    from hermes_cli import machine_drain_metrics, machine_throughput_metrics
     out.update(machine_drain_metrics.collect())
+    out.update(machine_throughput_metrics.cached_counters())
     try:
         out["cpu_load1"] = round(os.getloadavg()[0], 2)
     except (OSError, AttributeError):
@@ -192,6 +194,7 @@ class Reporter:
         # the sampler's own thread, never on the loop, so a slow round cannot void it. None reports no CPU triple.
         self.cpu_take_fn = cpu_take_fn
         self.next_at = 0.0
+        self.counters_off_until = 0.0  # a Board without throughput counters 400s them: skip until then
 
     def _sample(self, sample: dict, measured: Optional[dict]) -> dict:
         from hermes_cli import kanban_sync_timing as timing
@@ -219,8 +222,14 @@ class Reporter:
                 with timing.span("cpu"):  # nonblocking: the sampler's newest unreported sample
                     measured = self.cpu_take_fn(limit)
             sample = self._sample(sample, measured)
+            if now < self.counters_off_until:  # this Board rejected them lately: the normal report only
+                from hermes_cli.machine_throughput_metrics import FIELDS
+                sample = {k: v for k, v in sample.items() if k not in FIELDS}
+
+            def counters_rejected() -> None:
+                self.counters_off_until = now + UNSUPPORTED_RETRY_S
             with timing.span("send"):  # preserve the transport's existing hard 2 s budget
-                send_compatible(self.send, sample)
+                send_compatible(self.send, sample, counters_rejected)
             return True
         except Exception as exc:  # health: allow BLE001 -- load reporting must never stop kanban sync
             status = getattr(exc, "status", None)

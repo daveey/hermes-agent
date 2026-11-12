@@ -33,5 +33,14 @@ def heartbeat_claim(
         )
         if cur.rowcount != 1:
             return False
-        _kb._extend_run_claim(conn, task_id, expires)
+        _extend_run_claim(conn, task_id, expires)
         return True
+
+
+def _extend_run_claim(conn: sqlite3.Connection, task_id: str, expires: int) -> Optional[int]:
+    """Mirror a task claim extension onto its active run row; returns that run id."""
+    from hermes_cli import kanban_db as kb
+    run_id = kb._current_run_id(conn, task_id)
+    if run_id is not None:
+        conn.execute("UPDATE task_runs SET claim_expires = ? WHERE id = ?", (expires, run_id))
+    return run_id

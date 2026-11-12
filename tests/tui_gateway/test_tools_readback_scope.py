@@ -79,3 +79,10 @@ def test_tools_show_sections_follow_the_sessions_pin(two_homes):
     work, launch = _sections("work"), _sections("launch")
     assert "file" in work and "terminal" not in work, sorted(work)
     assert "terminal" in launch and "file" not in launch, sorted(launch)
+
+
+def test_tools_show_runs_on_the_rpc_pool():
+    """It reads the tool list, which waits out a plugin force-reload: never on the RPC reader."""
+    from tui_gateway import server
+
+    assert "tools.show" in server._LONG_HANDLERS

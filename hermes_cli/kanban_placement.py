@@ -87,24 +87,50 @@ MACOS_MARKER = r"(?<![\w/.-])mac ?os(?![\w/-]|\.\w)"
 # checked out on the hub and its devices are reached over ssh:mini, so a body that loads a BB skill
 # (e.g. a metta disk check) is not Mac work. Mac-only BB work still hits xcode/simulator/codesign.
 BABYBEAR_MARKER = r"(?<![\w/.~-])baby ?bear(?![\w/-]|\.\w)"
+# The Desktop app named as a product surface ("Desktop chats are slow", "the Desktop backend"). In the TITLE
+# (see TITLE_ONLY_LOCAL_MARKERS) it says the work is on the app; in the body it is usually the symptom or the
+# users affected. A core fix whose body said "Desktop chat turns are held" stayed on a full hub although it
+# was a repo change landed by push. Work that reads the live app still hits "desktop dom", cdp or hermes.app.
+HERMES_DESKTOP_MARKER = r"\bhermes desktop\b"
+DESKTOP_SURFACE_MARKER = r"\bdesktop (app|backend|backends|renderer|window|chat|chats|sidebar|ui)\b"
+# A chat or window the card itself opens or drives in the live app ("a throwaway Desktop chat runs the CLI"):
+# that is work on the machine with the app, wherever in the card it is said. No "desktop session": main never
+# pinned it ("Each new Desktop session re-reads config.yaml" is a loader fix).
+LIVE_DESKTOP_MARKER = (r"\b(throwaway|scratch|disposable|hidden|fixture|fresh|new|real|live) "
+                       r"(hermes )?desktop (chat|chats|window)\b")
+# The same need said as an instruction: an operate verb and a Desktop surface in one sentence (no ".", ";" or
+# newline between them, at most 80 characters apart), in either order: "Open Hermes Desktop and send one
+# prompt", "In the Desktop app, open Settings". Deliberately not verbs: start, type, check, read, run, show;
+# symptom text uses them ("turns are held at their start and end"). Every surface here also matches
+# HERMES_DESKTOP_MARKER or DESKTOP_SURFACE_MARKER, so this pins nothing main left unpinned.
+_DESKTOP_OPERATE_VERB = (r"\b(?:open(?:s|ing|ed)?|(?:re)?launch(?:es|ing|ed)?|restart(?:s|ing|ed)?|"
+                         r"quit(?:s|ting)?|focus(?:es|ing|ed)?|click(?:s|ing|ed)?|send(?:s|ing)?|"
+                         r"reload(?:s|ing|ed)?|driv(?:e|es|ing)|toggl(?:e|es|ing|ed)|verif(?:y|ies|ying|ied)|"
+                         r"reproduc(?:e|es|ing|ed)|watch(?:es|ing|ed)?|confirm(?:s|ing|ed)?|us(?:e|es|ing|ed))\b")
+_DESKTOP_OPERATE_SURFACE = (r"\b(?:hermes desktop|"
+                            r"desktop (?:app|backend|backends|renderer|window|chat|chats|sidebar|ui))\b")
+_DESKTOP_SAME_SENTENCE = r"[^.;\n]{0,80}?"
+DESKTOP_ACTION_MARKER = (_DESKTOP_OPERATE_VERB + _DESKTOP_SAME_SENTENCE + _DESKTOP_OPERATE_SURFACE + "|"
+                         + _DESKTOP_OPERATE_SURFACE + _DESKTOP_SAME_SENTENCE + _DESKTOP_OPERATE_VERB)
 # Phrases that mean the work needs this machine (a Mac the user works on). Case-insensitive.
 DEFAULT_LOCAL_MARKERS = (
     r"\bchrome\b", r"\bcdp\b", r"\bkeychain\b", r"\bcodesign", r"\bnotari[sz]", r"\btcc\b",
     r"\bosascript\b", r"\bapple ?script\b", r"\bapple (photos|notes|reminders|contacts|calendar|music)\b",
     r"\bphotos\.app\b", r"\bimessage\b", r"\bfind ?my\b", r"\bremindctl\b", r"\bshortcuts? app\b",
     r"\blaunchd\b", r"\blaunchctl\b", r"launchagents", r"~/library/", r"\bhermes\.app\b",
-    r"\bhermes desktop\b", r"\bdesktop (app|backend|backends|renderer|window|chat|chats|sidebar|ui)\b",
+    HERMES_DESKTOP_MARKER, DESKTOP_SURFACE_MARKER, LIVE_DESKTOP_MARKER, DESKTOP_ACTION_MARKER,
     r"\bdesktop\s+dom\b",
     r"\bmacbook\b", MACOS_MARKER, r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b",
     BABYBEAR_MARKER, r"\bxcode\b", r"\bsimulator\b", r"\bwhatsapp\b", r"\bscreen ?shot",
     r"\bsoftmax-org\b", r"\bdavid-bloomin-sso\b", r"--profile softmax",
 )
-# Host names that mean "the work is on that machine" only when they are the subject of the
+# Host and Desktop-surface names that mean "the work is on that machine" only when they are the subject of the
 # title. A body mention is a repro or a verification step ("verify live on the hub and the
 # MacBook"), which is not a reason to keep a core-code card on the laptop. A caller who replaces
 # ``local_markers`` owns the list and every pattern scans the whole text.
 TITLE_ONLY_LOCAL_MARKERS = frozenset({
     r"\bmacbook\b", r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b", BABYBEAR_MARKER,
+    HERMES_DESKTOP_MARKER, DESKTOP_SURFACE_MARKER,
 })
 # Product names (not hosts, not Apple tech): a product with Linux parts (BB pods, their CI on
 # self-hosted Linux runners) is not an Apple/local need by name alone. With the built-in list, a
@@ -417,57 +443,8 @@ def portable_reason(args: dict, cfg: Optional[dict] = None) -> Optional[str]:
     Keep the conservative legacy routeless-heavy boundary, excluding only its heavy-marker
     requirement. Worker profile/tool/skill attestations and capacity are Board admission checks.
     """
-    c = _Cfg(config() if cfg is None else cfg)
-    if args.get("needs"):
-        return "gateway-scoped need"
-    if (args.get("workspace_kind") or "scratch") != "scratch":
-        return "host workspace"
-    board = args.get("board")
-    if board and board != "default":
-        return "non-default board"
-    if (args.get("assignee") or "default") not in c.assignees():
-        return "assignee not allowlisted"
-    # Explicit tool defaults are equivalent to omission, as on the CLI path.
-    # A blocked initial status still needs origin-side human-request handling.
-    if any(args.get(k) not in (None, "", [], False)
-           for k in UNCARRIED_OPTIONS if not (k == "initial_status" and args.get(k) == "running")):
-        return "uncarried option"
-    reqs = args.get("requires") or []
-    reqs = [reqs] if isinstance(reqs, str) else list(reqs)
-    from hermes_cli import kanban_placement_coordination as coordination
-    ordinary = [r for r in reqs if r not in coordination.ACCESS_LABELS]
-    if any(reg.is_gateway_need(r) for r in ordinary):
-        return "gateway-scoped requirement"
-    if any(str(r) not in c.carried_requires() for r in ordinary):
-        return "uncarried requirement"
-    title, body = args.get("title") or "", without_evidence(without_placement_note(args.get("body") or ""))
-    if _local_marker(title, body, args.get("skills"), c):
-        return "local marker"
-    from hermes_cli import kanban_placement_coordination as coordination
-    from hermes_cli.kanban_carried_evidence import without_carried_inputs
-    from hermes_cli.kanban_published_worktree import without_published_worktrees
-
-    full = without_carried_inputs(f"{title}\n{body}", c.raw)
-    if refusal := coordination.check(full, c.raw, skills=args.get("skills"), requires=reqs):
-        return refusal
-    marker_full = coordination.access_text(coordination.marker_text(full), c.raw, requires=reqs)
-    extra = c.raw.get("extra_home_markers")
-    exemptible = (HUB_CLI_COMMAND, r"\btoken-broker\b", r"\bssh\b", r"\bon the hub\b", r"\bthe hub's\b",
-                  r"\bjournalctl\b", r"\bkanban\.db\b")  # coordination.check() proved the worker attests each
-    pats = [(p, marker_full if p in exemptible else full)
-            for p in HOME_GATEWAY_MARKERS if p != HOST_WORKTREE_PATH]
-    pats += [(p, full) for p in extra] if isinstance(extra, list) else []
-    for p, text in pats:
-        try:
-            if re.search(p, text, re.IGNORECASE):
-                return "home gateway marker"
-        except re.error:
-            continue
-    # Avoid filesystem/network probes when a cheap marker already pins the card.
-    if re.search(HOST_WORKTREE_PATH, full, re.IGNORECASE):
-        if re.search(HOST_WORKTREE_PATH, without_published_worktrees(full), re.IGNORECASE):
-            return "home gateway marker"
-    return None
+    from hermes_cli.kanban_placement_diagnostics import portability
+    return portability(args, cfg)[0]
 
 
 def _routeless_heavy(args: dict, c: _Cfg, self_gw: Optional[str],
@@ -749,8 +726,9 @@ def _decide(args: dict, *, origin_intent=None, now: Optional[float] = None, cfg:
             target = pin
         if not target:
             # A gateway with no ``route`` entry (the hub) can still send portable heavy work to a worker node.
+            from hermes_cli.kanban_placement_diagnostics import routeless_why
             return (_routeless_heavy(args, c, self_gw, machine_ok, skip=explicit or origin_intent is not None)
-                    or {"where": "local", "why": "no placement route for this gateway"})
+                    or {"where": "local", "why": routeless_why(args, c.raw, origin_intent)})
         if origin_intent is not None:
             return {"where": "local", "why": "courier creation for another gateway"}
         # Parents are local links, so the card is created here; with ``defer_parents`` (default on) it

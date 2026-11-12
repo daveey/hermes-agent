@@ -308,12 +308,15 @@ def evict(conn: sqlite3.Connection) -> list[str]:
     gone: list[str] = []
     if not rows:
         return gone
+    held = _guard_held(conn, [tid for (tid,) in rows])
     present = {t for t in (*_CHILD_TABLES, "task_chat_links")
                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)).fetchone()}
     from hermes_cli.kanban_db_connect import write_txn
     with write_txn(conn):
         conn.execute("UPDATE kanban_sync_state SET applying = 1")
         for (tid,) in rows:
+            if tid in held:
+                continue
             if not conn.execute(
                     "SELECT 1 FROM tasks WHERE id=? AND created_on IS NOT NULL AND created_on != ? "
                     "AND claim_lock IS NULL AND status != 'running'" + keep, (tid, own)).fetchone():
@@ -341,6 +344,32 @@ def evict(conn: sqlite3.Connection) -> list[str]:
             gone.append(tid)
         conn.execute("UPDATE kanban_sync_state SET applying = 0")
     return gone
+
+
+def _guard_held(conn: sqlite3.Connection, ids: list[str]) -> set[str]:
+    """[daveey] Copies the local dispatcher holds in its ready/review lane (respawn guard: ``active_pr``, cooldowns,
+    ...): a recorded ``respawn_guarded`` hold that the guard still confirms. Eviction keeps them. Dropping one
+    re-imported it the next tick, where it took the pickup budget again and was held again: on worker-3 at 9/10
+    in progress (budget 1) a held ``active_pr`` card took the only slot for ~8 min, 77 imports, while two cards
+    pinned to the machine waited ``budget_exhausted`` (t_01a1ced8ec470e59). A kept copy is already here, so pickup
+    spends no budget on it. It holds no lease: the Board still lets any machine lease it, and the feed keeps the
+    copy current, so it is evicted once it ends, blocks or parks, and its home owns hold maintenance
+    (``foreign_copy``). Computed outside the eviction write: the guard may read PR state."""
+    from hermes_cli import kanban_db_dispatch as dispatch
+    from hermes_cli.kanban_db_dispatch_guard_notice import guard_hold_reason
+    held: set[str] = set()
+    for tid in ids:
+        try:
+            row = conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()
+            if row is None or row["status"] not in ("ready", "review"):
+                continue
+            if guard_hold_reason(conn, tid, include_replies=False) is None:
+                continue  # the local dispatcher never held it (or a later event broke the hold)
+            if dispatch.check_respawn_guard(conn, tid, lane=row["status"]) is not None:
+                held.add(tid)
+        except Exception:  # health: allow BLE001 -- a failed check evicts as before; the lease still decides
+            _log.warning("kanban worker node: guard check for copy %s failed", tid, exc_info=True)
+    return held
 
 
 def dispatch_refusals(conn: sqlite3.Connection, status: str) -> dict[str, str]:

@@ -216,9 +216,10 @@ def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: s
 
 def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: str, checkpoint: str = "", force: bool = False,
                 machines: Optional[Mapping[str, Mapping[str, Any]]] = None, me: Optional[str] = None,
-                cfg: Optional[dict] = None, hub: Any = None) -> dict[str, Any]:
+                cfg: Optional[dict] = None, hub: Any = None, event_extra: Optional[dict] = None) -> dict[str, Any]:
     """Move a card that is NOT running (ready/todo/scheduled/blocked/triage): same guards, no run to end.
-    A worker-first policy card instead takes the explicit Board repin path (``hub`` is for tests)."""
+    A worker-first policy card instead takes the explicit Board repin path (``hub`` is for tests).
+    ``event_extra`` is merged into the ``moved`` event (audit provenance, e.g. an operator call's uid)."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_worker_node as wn
     reason = (reason or "").strip()
@@ -247,7 +248,7 @@ def move_queued(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason:
         kb._append_event(conn, task_id, MOVED_EVENT, {
             "from_machine": plan["me"], "runs_on": plan["runs_on"], "previous_runs_on": plan["previous"],
             "reason": reason[:500], "move_no": plan["move_no"], "forced": plan["forced"],
-            "matches": plan["matches"], "queued": True, "checkpoint": checkpoint.strip()})
+            "matches": plan["matches"], "queued": True, "checkpoint": checkpoint.strip(), **(event_extra or {})})
         if checkpoint.strip():
             kb.add_comment(conn, task_id, "kanban-operator", f"Move checkpoint:\n\n{checkpoint.strip()}")
     return {"ok": True, "runs_on": plan["runs_on"], "matches": plan["matches"], "move_no": plan["move_no"],

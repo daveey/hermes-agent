@@ -2230,14 +2230,6 @@ def goal_run_status(
     return task.status
 
 
-def _extend_run_claim(conn: sqlite3.Connection, task_id: str, expires: int) -> Optional[int]:
-    """Mirror a task claim extension onto its active run row; returns that run id."""
-    run_id = _current_run_id(conn, task_id)
-    if run_id is not None:
-        conn.execute("UPDATE task_runs SET claim_expires = ? WHERE id = ?", (expires, run_id))
-    return run_id
-
-
 def release_stale_claims(
     conn: sqlite3.Connection, *, signal_fn=None, failure_limit: Optional[int] = None,
 ) -> int:
@@ -2309,6 +2301,11 @@ def release_stale_claims(
                 reason="ttl_expired_worker_alive",
             )
             continue
+        # [daveey] Expired primary leases are finalized by the Board alarm.
+        # Local termination is still necessary, but publishing a competing
+        # reclaim/counter would overwrite that authoritative result after sleep.
+        if _sync.board_mode(conn) == "primary":
+            continue
         with write_txn(conn):
             # Again under the write lock: an interpreter that bound since the check above
             # changes neither claim_lock nor worker_pid, so the CAS below cannot see it.
@@ -2321,8 +2318,8 @@ def release_stale_claims(
                 "WHERE id = ? AND status = 'running' AND claim_lock IS ? "
                 "AND claim_expires IS NOT NULL AND claim_expires < ? "
                 # A worker that registered its own pid since the SELECT keeps its claim.
-                "AND worker_pid IS ?",
-                (retry_status, row["id"], row["claim_lock"], now, row["worker_pid"]),
+                "AND worker_pid IS ? AND current_run_id IS ?",
+                (retry_status, row["id"], row["claim_lock"], now, row["worker_pid"], row["current_run_id"]),
             )
             if cur.rowcount != 1:
                 continue
@@ -2339,18 +2336,16 @@ def release_stale_claims(
                     "heartbeat_stale": bool(heartbeat_stale),
                     "heartbeat_awake_age": _opt_int(hb_awake_age),  # [daveey]
                     "retry_status": retry_status,
+                    "failure_notice": "canonical",
                 },
             )
+            _record_task_failure(
+                conn, row["id"], error, run_id=run_id,
+                outcome="reclaimed", failure_limit=failure_limit,
+                release_claim=False, end_run=False, allow_nested=True,
+                event_payload_extra={"worker_pid": _opt_int(row["worker_pid"]), "retry_status": retry_status},
+            )
             reclaimed += 1
-        # Own txn, after the reclaim commit (same shape as ``enforce_max_runtime``):
-        # the run ended without a verdict, so it counts toward the breaker and a
-        # trip flips the task to ``blocked`` + ``gave_up`` on top of ``reclaimed``.
-        _record_task_failure(
-            conn, row["id"], error,
-            outcome="reclaimed", failure_limit=failure_limit,
-            release_claim=False, end_run=False,
-            event_payload_extra={"worker_pid": _opt_int(row["worker_pid"]), "retry_status": retry_status},
-        )
         # Post-commit observer; every non-reclaim branch ``continue``d above.
         if _kanban_observer_consumed("on_kanban_worker_stale_claim"):
             _fire_kanban_lifecycle_hook(

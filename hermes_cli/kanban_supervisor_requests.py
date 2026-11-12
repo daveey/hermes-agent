@@ -139,6 +139,13 @@ def normalize_ops(ops: Any) -> list[dict]:
             from hermes_cli import kanban_archive_exec as ax
             out.append(ax.normalize_op(i, op))
             continue
+        if kind == "operator":
+            from hermes_cli import kanban_operator_call as kox
+            if len(ops) != 1:
+                raise SupervisorRequestError("invalid_ops", "an operator call names exactly one card: one op per "
+                                                            "request")
+            out.append(kox.normalize_op(i, op))
+            continue
         parent = str(op.get("parent_id") or "").strip()
         child = str(op.get("child_id") or "").strip()
         if kind not in OPS:
@@ -153,7 +160,7 @@ def normalize_ops(ops: Any) -> list[dict]:
     return out
 
 
-_OWN_FAMILIES = ("reconcile_notify", "resume", "retry_limit", "archive")
+_OWN_FAMILIES = ("reconcile_notify", "resume", "retry_limit", "archive", "operator")
 
 
 def _family(op: dict) -> str:
@@ -176,7 +183,14 @@ def _is_reconcile(ops: list[dict]) -> bool:
     return bool(ops) and ops[0].get("op") == "reconcile_notify"
 
 
+def _is_operator(ops: list[dict]) -> bool:
+    return bool(ops) and ops[0].get("op") == "operator"
+
+
 def op_label(op: dict) -> str:
+    if op.get("op") == "operator":
+        from hermes_cli import kanban_operator_call as kox
+        return kox.label(op)
     if op.get("op") == "resume":
         from hermes_cli import kanban_resume_exec as rx
         return rx.label(op)
@@ -268,6 +282,9 @@ def preflight(conn: sqlite3.Connection, requester: str, ops: list[dict]) -> list
     if _is_archive(ops):
         from hermes_cli import kanban_archive_exec as ax
         return [ax.preflight_op(conn, requester, op) for op in ops]
+    if _is_operator(ops):
+        from hermes_cli import kanban_operator_call as kox
+        return [kox.preflight_op(conn, requester, op) for op in ops]
     edges = _edges(conn)
     verdicts = []
     for op in ops:
@@ -359,7 +376,20 @@ def list_requests(conn: sqlite3.Connection, *, requester: Optional[str] = None,
 
 def submit(conn: sqlite3.Connection, *, env_task: Optional[str], env_run: Optional[str], ops: Any,
            reason: Optional[str] = None, dry_run: bool = False) -> dict:
-    """File (or, with ``dry_run``, only preflight) a request. Duplicates return the existing row."""
+    """File (or, with ``dry_run``, only preflight) a request. Duplicates return the existing row.
+    A refused operator call (``kanban_operator_call``) is logged before the refusal is raised."""
+    try:
+        return _submit(conn, env_task=env_task, env_run=env_run, ops=ops, reason=reason, dry_run=dry_run)
+    except SupervisorRequestError as exc:
+        from hermes_cli import kanban_operator_call as kox
+        if not dry_run and kox.is_operator(ops):
+            kox.log_submit_refusal(conn, env_task=env_task, env_run=env_run, raw_ops=ops, code=exc.code,
+                                   message=str(exc))
+        raise
+
+
+def _submit(conn: sqlite3.Connection, *, env_task: Optional[str], env_run: Optional[str], ops: Any,
+            reason: Optional[str] = None, dry_run: bool = False) -> dict:
     from hermes_cli import kanban_db as kb
 
     norm = normalize_ops(ops)
@@ -496,8 +526,9 @@ def _accept_next(conn: sqlite3.Connection, executor: str, now: int,
 
 
 def _awaiting_owner(raw: Optional[str]) -> bool:
+    """Waiting on another gateway: reconcile_notify (``awaiting_owner``) or an operator call (``awaiting_home``)."""
     try:
-        return isinstance(raw, str) and json.loads(raw).get("phase") == "awaiting_owner"
+        return isinstance(raw, str) and json.loads(raw).get("phase") in ("awaiting_owner", "awaiting_home")
     except (ValueError, AttributeError):
         return False
 
@@ -582,6 +613,9 @@ def _execute(conn: sqlite3.Connection, req: dict, executor: str, board: Optional
     if _is_archive(ops):
         from hermes_cli import kanban_archive_exec as ax
         return ax.execute(conn, req, executor)
+    if _is_operator(ops):
+        from hermes_cli import kanban_operator_call as kox
+        return kox.start(conn, req, executor)
     # Scope is re-checked against the board as it is now, not as it was at submit time.
     gone = requester_refusal(conn, requester)
     verdicts = preflight(conn, requester, ops)
@@ -654,6 +688,12 @@ def drain(conn: sqlite3.Connection, *, board: Optional[str] = None, role: str = 
         processed.append((req["id"], status))
     from hermes_cli import kanban_notify_reconcile_exec as nrx
     processed += nrx.poll(conn, executor, now=now)
+    from hermes_cli import kanban_operator_call as kox
+    processed += kox.poll(conn, executor, now=now)
+    try:  # home side: calls other gateways' workers made on this gateway's cards
+        kox.apply_incoming(conn)
+    except Exception:  # health: allow BLE001 -- the requests stay in the replica and are retried next drain
+        _log.warning("kanban: applying incoming operator calls failed", exc_info=True)
     return {"executor": executor, "processed": processed}
 
 
@@ -709,12 +749,23 @@ def cli_command(args) -> int:
             from hermes_cli.kanban_priority_cli import run
             return run(conn, args)
         processed = None
+        if getattr(args, "settled", False):
+            req = get_request(conn, args.id) if getattr(args, "id", None) else None
+            if req is None:
+                return _err("--settled needs --id of an existing request")
+            return 0 if req["status"] in TERMINAL else 1
+        if getattr(args, "operator_log", False):
+            from hermes_cli import kanban_operator_call as kox
+            print(json.dumps(kox.list_calls(conn, task=args.task), indent=2))
+            return 0
         if args.drain:
             try:
                 processed = drain(conn, board=os.environ.get("HERMES_KANBAN_BOARD") or None, role="cli")
             except SupervisorRequestError as exc:
                 return _err(str(exc))
         rows = list_requests(conn, requester=args.task, status=args.status)
+        if getattr(args, "id", None):
+            rows = [r for r in rows if r["id"] == args.id]
     if args.json:
         print(json.dumps({"drained": processed, "requests": rows}, indent=2))
         return 0

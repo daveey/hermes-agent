@@ -25,5 +25,9 @@ export const esErrorCodes: Partial<ThreadCopy['errorCodes']> = {
     body: 'El servidor de modelos local aún no está en ejecución: puede que todavía se esté iniciando. Reintenta en un momento o cambia a otro modelo.',
     bodyNoRetry:
       'El servidor de modelos local está apagado. Inícialo desde la app de escritorio de Hermes o con `hermes model` en una terminal, o cambia a otro modelo.'
+  },
+  route_refused: {
+    title: 'El modelo de este chat no está disponible',
+    body: 'El modelo fijado para este chat no acepta solicitudes ahora mismo, así que tu mensaje no se envió. Elige otro modelo o vuelve a enviarlo cuando esté disponible.'
   }
 }

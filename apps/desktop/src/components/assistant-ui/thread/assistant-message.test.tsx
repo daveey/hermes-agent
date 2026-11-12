@@ -508,6 +508,35 @@ describe('code-keyed error card copy and actions', () => {
     expect(screen.getByText(/HTTP 400/).closest('[data-slot="aui_error-details"]')).not.toBeNull()
   })
 
+  it('shows a pinned route wall with its reset and Choose a model, not "internal problem"', async () => {
+    // agent/error_surface.py stamps the held reply as `message` on a route_refused descriptor.
+    const held =
+      '⚠️ openai-codex/gpt-6-astra subscription quota is out until Tue 11-17 21:59 PT. ' +
+      'This chat is pinned to it; use /model to switch, or resend after the reset.'
+
+    render(
+      <Harness
+        assistant={failedMessage(
+          { code: 'route_refused', layer: 'gateway', message: held, retryable: false },
+          'Subscription quota unavailable for openai-codex/gpt-6-astra; resets at 1794981540.0'
+        )}
+      />
+    )
+
+    expect(await screen.findByText(held)).toBeTruthy()
+    expect(screen.getByText(copy(codes.route_refused.title))).toBeTruthy()
+    expect(screen.queryByText(en.assistant.thread.errorLayerBodies.gateway)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Choose a model' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+  })
+
+  it('keeps the generic gateway card for a genuine runtime failure', async () => {
+    render(<Harness assistant={failedMessage({ code: 'host_error', layer: 'gateway', retryable: false })} />)
+
+    expect(await screen.findByText(en.assistant.thread.errorLayerBodies.gateway)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Choose a model' })).toBeNull()
+  })
+
   it('offers Compress conversation and Start new session for a context overflow', async () => {
     render(<Harness assistant={failedMessage({ code: 'context_overflow', layer: 'provider', retryable: true })} />)
 

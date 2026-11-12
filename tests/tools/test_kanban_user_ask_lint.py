@@ -46,6 +46,238 @@ def _task(tid):
         conn.close()
 
 
+@pytest.mark.parametrize("action,scope,interaction,choices,warns", [
+    ("Choose fixture timing", "code fixtures", "reply", True, True),
+    ("Approve a spend cap of $50", "code fixtures", "reply", True, False),
+    ("Grant permission", "code fixtures", "approval", True, False),
+    ("Give consent", "code fixtures", "reply", True, False),
+    ("Choose fixture timing", "code fixtures", "physical", True, False),
+    ("Choose fixture timing", "code fixtures", "reply", False, False),
+    ("Choose fixture timing", "privacy consent", "reply", True, False),
+    ("Ask the reviewer", "code fixtures", "reply", True, False),
+    ("Delete the data", "code fixtures", "reply", True, False),
+])
+def test_recommended_decision_warning_is_nonfatal(worker_env, action, scope, interaction, choices, warns):
+    from tools import kanban_tools as kt
+    request = {**CLEAR, "action": action + ". Unblock = proceed; archive = skip.",
+               "scope": scope, "interaction": interaction,
+               "why_human": "the worker asked instead of applying its pick", "evidence": "fixture timing notes",
+               "choices": [{"label": "Postmerge (recommended)" if choices else "Postmerge", "value": "post"},
+                           {"label": "Premerge", "value": "pre"}]}
+    result = json.loads(kt._handle_block({"reason": "Fixture timing", "kind": "needs_input",
+                                       "human_request": request}))
+    assert result.get("ok") is True, result
+    assert _task(worker_env).status == "blocked"
+    assert ("apply the recommended option" in result.get("warning", "")) is warns
+
+
+@pytest.mark.parametrize("hr", [None, [], {}, {"interaction": "reply"},
+    {"interaction": "reply", "choices": "recommended"},
+    {"interaction": "reply", "choices": ({"label": "A (recommended)"},)},
+    {"interaction": "reply", "choices": [None, {"label": "ordinary"}]}])
+def test_recommendation_warning_ignores_missing_or_malformed_choices(hr):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    assert recommended_choice_warning(hr) == {}
+
+
+@pytest.mark.parametrize("field,text", [
+    ("why_human", "This exceeds the approved budget"),
+    ("evidence", "The option requires permission"),
+    ("label", "Grant admin access (recommended)"),
+    ("value", "privacy-consent"),
+])
+def test_recommendation_boundary_in_explanations_and_choices(field, text):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    request = {"interaction": "reply", "action": "Choose A or B", "scope": "code fixtures",
+               "choices": [{"label": "A (recommended)", "value": "a"}]}
+    if field in {"label", "value"}:
+        request["choices"][0][field] = text
+    else:
+        request[field] = text
+    assert recommended_choice_warning(request) == {}
+
+
+@pytest.mark.parametrize("label,warns", [
+    ("A (not recommended)", False), ("A [Recommended]", True),
+    ("A (RECOMMENDED)", True), ("A is not recommended", False),
+])
+def test_recommendation_requires_explicit_positive_marker(label, warns):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    result = recommended_choice_warning({"interaction": "reply", "action": "Choose the poller retry backoff",
+                                         "choices": [{"label": label}]})
+    assert bool(result) is warns
+    if warns:
+        assert "reversible" in result["warning"]
+        assert "existing review and landing gates" in result["warning"]
+        assert "this run still ends" in result["warning"]
+        # Post-block reality: David is already asked, so the worker comments its pick; it must not apply it now.
+        assert "do not apply the option now" in result["warning"]
+        assert "comment your recommended pick and how to reverse it" in result["warning"]
+
+
+# Asks that really need David which a denylist nudged anyway: PR1220 reviews t_01a1ce72aa3e4cb0 (round 1)
+# and t_01a1ce964f2521ad (round 2, the 35 recorded misses). Each must stay quiet both on the fail-safe path
+# (neutral scope) and on the veto path (an in-gate scope, which never qualifies an ask on its own). [daveey]
+_DAVID_ONLY_ASKS = [
+    "Choose the billing plan for the new GPU pod", "Rent an H100 for 48 hours",
+    "Upgrade the subscription to Pro tier", "Charge the card on file",
+    "Pick which API key to rotate", "Log in to the App Store Connect account", "Revoke the GitHub app",
+    "Send the email to the landlord", "Post the draft publicly on X", "Post the draft on X",
+    "Publish the App Store release",
+    "Tell David's wife about the schedule", "Ask Alice to review",
+    "Remove the old backups from S3", "Wipe the hub database and reseed", "Drop the users table",
+    "Force-push main to drop the bad commit", "Merge the PR now without CI",
+    "Buy the softmax.ai domain", "Register the new domain name", "Order a replacement Hue bridge",
+    "Book the flight to SF", "Upgrade to the paid plan", "Cancel the AWS reservation",
+    "Terminate the old EC2 instances", "Tear down the staging cluster for good", "Decommission the hub server",
+    "Accept the new terms of service", "Agree to the Apple developer agreement", "Share the doc with Bob",
+    "Reply to the recruiter", "Reply to Bob's PR comment", "Submit the build for App Store review",
+    "Make the repo visible to everyone", "Unlock the front door", "Open the garage door",
+    "Turn off the nursery camera", "Disable the baby monitor", "Disable branch protection on main",
+    "Power-cycle the mini", "Spin up 8 A100s on Lambda", "Renew the domain for 5 years",
+    "Donate to the campaign", "Merge without waiting for checks", "Rewrite main history", "Archive the repo",
+    "Downgrade the database plan", "Restore the database from yesterday's snapshot", "Clear the prod cache",
+    "Turn the thermostat down to 60", "Upgrade the Claude Max plan", "Kill the 3-day training run",
+    "Approve the Discord bot install",
+    # plan-review extras: mixed in-gate + boundary, lowercase names, handles
+    "Disable the feature flag in prod", "Rename the helper and buy the paid plan",
+    "Fix the test, then deploy to production", "Ask david about the port", "Open a PR and then force-push main",
+    "Ping @sam about the retry backoff",
+    # held-out probe (written after the round-3 design; 1 of 27 nudged before this term landed)
+    "Choose whether to merge the PR with failing required checks",
+]
+
+
+@pytest.mark.parametrize("scope", ["this card", "code in this card's PR"])
+@pytest.mark.parametrize("action", _DAVID_ONLY_ASKS)
+def test_recommendation_nudge_stays_quiet_for_david_only_asks(action, scope):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    request = {"interaction": "reply", "action": action, "scope": scope,
+               "choices": [{"label": "A (recommended)", "value": "a"}, {"label": "B", "value": "b"}]}
+    assert recommended_choice_warning(request) == {}
+
+
+@pytest.mark.parametrize("request_patch", [
+    # neither list: no in-gate signal and no boundary term
+    {"action": "Choose a number"}, {"action": "Pick option A or B"},
+    # in-gate scope alone never qualifies
+    {"action": "Choose a number", "scope": "code in this card's PR"},
+    # substring traps: report/support/export/Portland are not PR/port signals
+    {"action": "Report the support export to Portland"},
+    # a boundary term in a non-recommended choice or in the explanation still vetoes
+    {"action": "Pick the retry backoff", "extra_choice": "Email the vendor instead"},
+    {"action": "Increase the timeout", "why_human": "David owns the AWS bill"},
+])
+def test_recommendation_nudge_is_fail_safe(request_patch):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    patch = dict(request_patch)
+    choices = [{"label": "A (recommended)", "value": "a"}, {"label": "B", "value": "b"}]
+    if "extra_choice" in patch:
+        choices.append({"label": patch.pop("extra_choice"), "value": "c"})
+    request = {"interaction": "reply", "scope": "this card", "choices": choices, **patch}
+    assert recommended_choice_warning(request) == {}
+
+
+# In-gate code decisions from the red-sweep evidence (and similar) still get the nudge.
+@pytest.mark.parametrize("action", [
+    "Choose fixture timing: premerge or postmerge",
+    "Pick the coworld-terraform module layout: D1 c and D2 a",
+    "Use worker Chrome :9333 instead of toggling remote debugging",
+    "Pick the retry backoff for the poller",
+    "Rename the helper module and keep a shim",
+    "Pick the lint rule severity: error or warn",
+    "Choose the regex for the parser: strict or lenient",
+    "Use a worktree per task instead of a shared checkout",
+])
+def test_recommendation_nudge_still_fires_for_in_gate_code_decisions(action):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    request = {"interaction": "reply", "action": action, "scope": "code in this card's PR",
+               "choices": [{"label": "A (recommended)", "value": "a"}, {"label": "B", "value": "b"}]}
+    assert "apply the recommended option" in recommended_choice_warning(request).get("warning", "")
+
+
+# The kanban_block schema's own ask template must not veto an in-gate ask (review t_01a1cea8ae43e248:
+# "reply" and "drop" vetoed 17/17), but nothing is stripped before the veto, so any boundary word in
+# the ask, the template's unblock/archive clauses included, still vetoes (t_01a1cebce8757c5a). [daveey]
+@pytest.mark.parametrize("action,warns", [
+    ("Pick the retry backoff for the poller. Reply A or B in this chat. Unblock = build the pick; "
+     "archive = drop it.", True),
+    ("Choose fixture timing. Reply with A in this chat. Unblock = proceed; archive = close the card.", True),
+    ("Choose fixture timing. Reply with A in this chat. Unblock = proceed; archive = delete the branch.", False),
+    ("Pick the retry backoff. Reply A or B in this chat. Unblock = drop the users table; archive = skip.", False),
+    ("Reply to the recruiter about the PR in this chat. Unblock = proceed; archive = skip.", False),
+    ("Pick the retry backoff. Reply A, B or C in this chat. Unblock = build the pick; archive = drop it.", True),
+    # Review t_01a1cebce8757c5a: a boundary between the choice token and "in this chat", or after an
+    # archive clause's comma, is not template and must still veto. [daveey]
+    ("Reply A to Bob's PR test in this chat.", False),
+    ("Reply A to spend $40 on the test runner in this chat.", False),
+    ("Reply y to deploy the PR to prod in this chat.", False),
+    ("Pick the PR fix. Archive = keep it, unblock = deploy to prod.", False),
+    ("Pick the PR fix. Unblock = build; archive = cancel the $40 subscription.", False),
+])
+def test_recommendation_nudge_ignores_the_canonical_ask_template(action, warns):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    request = {"interaction": "reply", "action": action, "scope": "this card",
+               "choices": [{"label": "A (recommended)", "value": "a"}, {"label": "B", "value": "b"}]}
+    assert bool(recommended_choice_warning(request)) is warns
+
+
+# Fixture: review t_01a1cebce8757c5a's probe (reviewer_template_strip_probe_t_01a1cebce8757c5a.py). Its
+# criterion: a wrong warning must be harmless and no boundary word is removed before the veto. A note
+# on a David-only ask the coarse veto cannot name (e.g. a bare person's name) is tolerated, so the
+# Bob probes are not pinned here. [daveey]
+_PROBE_TEMPLATE = "Reply A or B in this chat. Unblock = build the pick; archive = drop it."
+_PROBE_CASES = {
+    "a_code_template": ("Pick the test timeout for tests/foo.py. " + _PROBE_TEMPLATE, "reply", None, True),
+    "a_code_plain": ("Pick the test timeout for tests/foo.py.", "reply", None, True),
+    "b_spend": ("Raise the GPU spend cap for the test to $200. " + _PROBE_TEMPLATE, "reply", None, False),
+    "c_perm": ("Grant the bot admin permission for the PR. " + _PROBE_TEMPLATE, "reply", None, False),
+    "c_consent": ("Consent to recording test fixtures from the nursery camera. " + _PROBE_TEMPLATE,
+                  "reply", None, False),
+    "d_physical": ("Press the button on the hub for the test", "physical", None, False),
+    "e_norec": ("Pick the test timeout. " + _PROBE_TEMPLATE, "reply", ("A", "B"), False),
+    "replyA_spend": ("Reply A to spend $40 on the test runner in this chat.", "reply",
+                     ("A: test fix (recommended)", "B"), False),
+    "replyY_deploy": ("Reply y to deploy the PR to prod in this chat.", "reply",
+                      ("y: PR fix (recommended)", "n"), False),
+    "archive_then_unblock_comma": ("Pick the PR fix. Archive = keep it, unblock = deploy to prod.", "reply",
+                                   ("A: PR fix (recommended)", "B"), False),
+    "archive_cost": ("Pick the PR fix. Unblock = build; archive = cancel the $40 subscription.", "reply",
+                     ("A: PR fix (recommended)", "B"), False),
+    "unblock_boundary": ("Pick the PR test. Reply A or B in this chat. Unblock = deploy the pick; "
+                         "archive = drop it.", "reply", None, False),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_PROBE_CASES))
+def test_recommendation_nudge_reviewer_template_probe(name):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    action, interaction, labels, warns = _PROBE_CASES[name]
+    labels = labels or ("Option A: raise test timeout to 30s (recommended)", "Option B: keep 10s")
+    request = {"action": action, "scope": "Card t_x scope", "why_human": "toss-up", "evidence": "see comment",
+               "interaction": interaction, "choices": [{"label": l, "value": f"v{i}"} for i, l in enumerate(labels)]}
+    assert bool(recommended_choice_warning(request)) is warns
+
+
+def test_recommendation_warning_is_conditional_not_a_verdict():
+    """No regex can classify David-only asks, so a misfire must be harmless: the note never claims the
+    ask was in-gate and names every boundary as a reason to ignore it."""
+    from hermes_cli.kanban_block_policy import RECOMMENDATION_WARNING as text
+    assert "looks like" not in text and "could have applied" not in text
+    assert "If any of these applies, ignore this note" in text and "does not judge this ask" in text
+    for boundary in ("spend", "permissions or credentials", "other people or outward communication",
+                     "safety or privacy consent", "production systems or devices", "hard-to-reverse",
+                     "toss-up", "grants no permission"):
+        assert boundary in text
+
+
+def test_worker_guidance_applies_recommendation_with_boundaries():
+    from agent.prompt_builder import KANBAN_GUIDANCE
+    for phrase in ("Comment the pick and how to reverse it", "permissions or credentials",
+                   "safety or privacy consent", "hard-to-reverse", "toss-up"):
+        assert phrase in KANBAN_GUIDANCE
+
+
 def test_block_with_vague_ask_is_refused(worker_env):
     from tools import kanban_tools as kt
     d = json.loads(kt._handle_block({"reason": "Waiting on the design pick", "kind": "needs_input",

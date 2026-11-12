@@ -691,6 +691,30 @@ describe('toChatMessages', () => {
     expect(chatMessageText(messages[2])).toBe('Your request was not processed.')
   })
 
+  it('redraws a pinned route wall from the boundary row with its own sentence', () => {
+    // gateway/session_settlement_recovery.py gateway_refusal_boundary: the route refusal's card rides
+    // the boundary, whose own copy drops the "Send it again" advice.
+    const held = '⚠️ openai-codex/gpt-6-astra subscription quota is out until Tue 11-17 21:59 PT. Use /model to switch.'
+
+    const messages = toChatMessages([
+      { role: 'user', content: 'whats left', timestamp: 1 },
+      {
+        role: 'assistant',
+        content: 'Your request was not processed.',
+        display_kind: 'failed_turn',
+        display_metadata: {
+          error: 'Subscription quota unavailable for openai-codex/gpt-6-astra; resets at 1794981540.0',
+          error_surface: { code: 'route_refused', layer: 'gateway', message: held, retryable: false }
+        },
+        timestamp: 2
+      }
+    ])
+
+    expect(messages.map(message => message.role)).toEqual(['user', 'assistant', 'system'])
+    expect(messages[1].errorSurface).toMatchObject({ code: 'route_refused', message: held, retryable: false })
+    expect(chatMessageText(messages[2])).toBe('Your request was not processed.')
+  })
+
   it('shows only the notice for a boundary row without a usable error surface', () => {
     const messages = toChatMessages([
       { role: 'user', content: 'do the thing', timestamp: 1 },

@@ -101,7 +101,10 @@ def _completed_review_run(conn, parent_id, parked_at, owner_run_id):
                 and mirrored.get("outcome") == "completed"
                 and (kb._to_epoch(mirrored.get("ended_at")) or 0) >= parked_at):
             return mirrored
-        return None
+        # A parent created and run on another gateway: its run lives only in the
+        # Board replica. Same claimed-completion-after-park rule, Board data only.
+        from hermes_cli.kanban_dependency_history import replica_review_run
+        return replica_review_run(conn, parent_id, parked_at)
     if (not row["was_claimed"] or row["outcome"] != "completed"
             or row["id"] == owner_run_id
             or (kb._to_epoch(row["ended_at"]) or 0) < parked_at):
@@ -373,10 +376,17 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     reviewed = set().union(*(_reviewed_prs(conn, p, parked_at, row["id"], captured_set) for p in parents))
     if urls.issubset(reviewed):
         return True
-    # Without repair evidence, every awaited parent must approve. One approval does not cover a
-    # sibling that never reviewed, and a named unrelated PR does not cover
-    # the checkpoint set.
-    return all(
-        urls.issubset(_approval_prs(conn, p, parked_at, row["id"], captured_set))
-        for p in parents
-    )
+    # Without repair evidence, every awaited parent must approve a checkpointed PR. One approval
+    # does not cover a sibling that never reviewed, and a named unrelated PR approves nothing.
+    # A split review (one card per PR of a multi-repo change, each naming its own reviewed_pr)
+    # is covered by the union, but only among parents the checkpoint itself named as awaited.
+    # A parent that is here only because its history could not be proven finished before the
+    # park (legacy checkpoint, reopened or replica-unverified) must approve every holding PR on
+    # its own: its pre-park approval of another PR is not evidence for this one.
+    approvals = {p: _approval_prs(conn, p, parked_at, row["id"], captured_set) for p in parents}
+    if not all(approvals.values()):
+        return False
+    named = evidence.get("awaited") if isinstance(evidence.get("awaited"), list) else ()
+    if not all(urls.issubset(a) for p, a in approvals.items() if p not in named):
+        return False
+    return urls.issubset(set().union(*approvals.values()))

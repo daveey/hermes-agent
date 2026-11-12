@@ -6,7 +6,7 @@ import { translateNow } from '@/i18n'
 import { type GatewayEventPayload, markQueuedPromptStarted } from '@/lib/chat-messages'
 import { coerceGatewayText, coerceThinkingText } from '@/lib/chat-runtime'
 import { playCompletionSound } from '@/lib/completion-sound'
-import { parseErrorSurface } from '@/lib/error-surface'
+import { parseErrorSurface, withRefusalSentence } from '@/lib/error-surface'
 import { triggerHaptic } from '@/lib/haptics'
 import { isSessionBusyRefusal } from '@/lib/session-busy-refusal'
 import { billingCtaLabel, clearBillingBlock, runBillingRecovery, setBillingBlock } from '@/store/billing-block'
@@ -92,7 +92,8 @@ function turnFailure(payload: GatewayEventPayload | undefined, finalText: string
   return {
     error: coerceGatewayText(payload.error).trim() || finalText || 'Hermes reported an error',
     partial: Boolean(payload.partial),
-    surface: parseErrorSurface(payload.error_surface)
+    // A pre-turn refusal's text is the backend's sentence (model, reset, /model): the card body.
+    surface: withRefusalSentence(parseErrorSurface(payload.error_surface), finalText)
   }
 }
 

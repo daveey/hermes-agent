@@ -330,6 +330,11 @@ class GatewayTurnPersistenceMixin:
             # the typed result fields, the same notice the owner retains for display.
             from agent.turn_failure_copy import refused_turn_display_notice
             return refused_turn_display_notice(agent_result)
+        if agent_result.get("failure_reason") == "route_refused":
+            # [daveey] Refused before anything ran, and a resend repeats it until the reset: the reply
+            # already names the reset and /model, so the boundary gives no "Send it again" advice.
+            from agent.turn_failure_copy import ROUTE_REFUSED_TURN_NOTICE
+            return ROUTE_REFUSED_TURN_NOTICE
         from gateway.media_repair import _current_turn_messages
         # Compression during the failed turn can move the slice boundary; the shared helper falls
         # back to the last user row so tool evidence is not silently dropped.

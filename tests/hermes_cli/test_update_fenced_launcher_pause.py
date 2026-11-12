@@ -151,7 +151,8 @@ def test_pause_discovery_leaves_restart_custody_with_fence(parked, monkeypatch, 
     assert token['posix_units'] == ([ordinary] if mixed else [])
     if mixed:
         write.assert_called_once()
-        stop.assert_called_once_with(token, [ordinary], fence_checked=True)
+        stop.assert_called_once_with(
+            token, [ordinary], parked.now[0] + pause._PRE_SWAP_DRAIN_WAIT_S, fence_checked=True)
     else:
         write.assert_not_called()
         stop.assert_not_called()

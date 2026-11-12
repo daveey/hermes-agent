@@ -16,8 +16,10 @@ and a later run re-decides. Cards keep the profile's model when:
 those review/retry/keep-pattern cards run on instead of the profile's model; unset keeps the old behaviour.
 
 Unset ``kanban.default_model`` retains profile routing except for explicit review pins/overrides.
-Review handoff metadata ``review_model`` (optional ``review_provider``) wins; otherwise concrete author pins
-choose a distinct strong/deep model. Ready/retry pins and unpinned out-of-scope profiles are unchanged.
+Review handoff metadata ``review_model`` (optional ``review_provider``) wins unless this host's routing registry
+refuses it (``review_override_refused``: a registered reviewer distinct from the implementer, the request kept in
+the receipt); otherwise concrete author pins choose a distinct strong/deep model.
+Ready/retry pins and unpinned out-of-scope profiles are unchanged.
 Each decision is recorded as a ``model_tier`` event, with ``implementer_model`` on review decisions.
 """
 
@@ -411,6 +413,12 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
                        "lane": lane}
             if is_review:
                 payload["implementer_model"] = implementer_model
+                if reason == "review_override_refused":
+                    # The receipt names what the handoff asked for and why this host substituted. [daveey]
+                    from hermes_cli.kanban_review_model import refused_override
+                    payload["requested"] = refused_override(conn, task)
+                    logger.warning("kanban review %s: review_model %s refused by this host's routing registry; "
+                                   "reviewing on %s", task.id, (payload["requested"] or {}).get("model"), model)
             with _kb.write_txn(conn):
                 _kb._append_event(conn, task.id, "model_tier", payload, run_id=getattr(task, "current_run_id", None))
                 if repinned:

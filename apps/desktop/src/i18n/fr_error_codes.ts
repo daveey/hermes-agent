@@ -25,5 +25,9 @@ export const frErrorCodes: Partial<ThreadCopy['errorCodes']> = {
     body: 'Le serveur de modèles local ne tourne pas encore : il est peut-être encore en train de démarrer. Réessayez dans un instant, ou passez à un autre modèle.',
     bodyNoRetry:
       'Le serveur de modèles local est arrêté. Démarrez-le depuis l’application de bureau Hermes ou avec `hermes model` dans un terminal, ou passez à un autre modèle.'
+  },
+  route_refused: {
+    title: 'Le modèle de ce chat est indisponible',
+    body: 'Le modèle auquel ce chat est fixé n’accepte pas de requêtes pour le moment, votre message n’a donc pas été envoyé. Choisissez un autre modèle, ou renvoyez-le quand il sera de retour.'
   }
 }

@@ -1958,3 +1958,6 @@ def register(server) -> None:
     from . import methods_tools_plugin_commands  # the plugin-command stage's helpers, same namespace
 
     methods_tools_plugin_commands.register(server)
+    # [daveey] tools.show reads the tool list, which waits out a plugin force-reload (up to
+    # tools.registry_reload.RELOAD_WAIT_SECONDS): on the pool, never the RPC reader.
+    server._LONG_HANDLERS = server._LONG_HANDLERS | {"tools.show"}

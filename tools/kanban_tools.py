@@ -28,7 +28,7 @@ from tools.kanban_tools_placement import (_local_placement, _machine_placement, 
                                           _effective_board_args, _origin_enrollment, _pinned_note)
 from tools.kanban_tools_db_hint import generic_tool_error
 from tools.kanban_tools_park_args import (_blocker_id_arg, _clear_blocker_arg, _blocker_scope_args, _park_guard,
-                                          _wake_check_args, _wake_check_echo)
+                                          _wake_check_args, _wake_check_echo, _escalated)
 from hermes_cli.kanban_ask_resolved import ask_checks, create_ask_check, filing_context
 from tools import kanban_tools_completion as _kc, kanban_tools_create_args as _ca
 from tools.kanban_tools_schemas import (
@@ -450,16 +450,6 @@ def _ok_landed(kb, conn, tid: str, default_status: str, **extra: Any) -> str:
     return _ok(task_id=tid, run_id=run.id if run else None,
                status=landed.status if landed else default_status, **extra)
 
-
-def _escalated(kb, conn, tid: str) -> Optional[str]:
-    """The result for a park that escalated to an owner card instead (``kanban_awaiting``). [daveey]"""
-    from hermes_cli import kanban_awaiting as kaw
-
-    owner = kaw.escalated_owner(conn, tid)
-    if owner is None:
-        return None
-    return _ok_landed(kb, conn, tid, "todo", code="repark_escalated", owner_task_id=owner,
-                      next=kaw.escalation_message(tid, owner))
 
 
 def _redact(value: Any) -> str:
@@ -1149,7 +1139,10 @@ def _handle_block(args: dict, **kw) -> str:
                 "so this was recorded as needs_input (sticky until a human unblocks) "
                 "instead of parking in todo where the dispatcher would respawn it."
             )
-        return _ok_landed(kb, conn, tid, "blocked", **extra)
+        from hermes_cli.kanban_block_policy import recommended_choice_warning
+
+        return _ok_landed(kb, conn, tid, "blocked", **extra,
+                          **recommended_choice_warning(args.get("human_request")))
 
 
 @_kanban_handler("kanban_schedule")

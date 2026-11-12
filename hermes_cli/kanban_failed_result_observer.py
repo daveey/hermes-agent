@@ -177,6 +177,11 @@ def observe(context):
             if (row is None or row['status'] != 'running' or row['current_run_id'] != context['run_id']
                     or row['claim_lock'] != context['claim_lock']):
                 return
+            from hermes_cli.kanban_failure_release import queued
+            if queued(conn, context['run_id']):
+                # A Board-primary release is durably queued: the feed, not this
+                # observer, closes the run, so waiting here would outlive sync.
+                return
             result = conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND run_id=? "
                                   "AND kind='worker_result' LIMIT 1",
                                   (context['task_id'], context['run_id'])).fetchone()

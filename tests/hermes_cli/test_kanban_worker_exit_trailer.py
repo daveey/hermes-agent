@@ -63,7 +63,8 @@ def test_fresh_process_sweep_books_the_logged_exit_code(kanban_home, rc, event, 
         # The booking event; a 75 is followed by the per-card ``quota_episode`` bookkeeping
         # row (kanban_quota_episode), which is asserted separately below.
         ev = conn.execute(
-            "SELECT kind FROM task_events WHERE task_id=? AND kind != 'quota_episode' "
+            "SELECT kind FROM task_events WHERE task_id=? "
+            "AND kind NOT IN ('quota_episode', 'failure_finalized') "
             "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
         episodes = conn.execute(
             "SELECT count(*) FROM task_events WHERE task_id=? AND kind='quota_episode'", (tid,)).fetchone()[0]
@@ -73,6 +74,14 @@ def test_fresh_process_sweep_books_the_logged_exit_code(kanban_home, rc, event, 
             (tid,)).fetchone()
         task = kb.get_task(conn, tid)
         assert ev["kind"] == event
+        finals = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='failure_finalized'", (tid,),
+        ).fetchall()
+        assert len(finals) == (1 if rc == 0 else 0)
+        if finals:
+            payload = kb._json_dict(finals[0]["payload"])
+            assert payload["final_status"] == "ready"
+            assert payload["failures"] == 0
         assert "not alive" not in (run["error"] or "")
         assert task.status == "ready"
         assert task.consecutive_failures == (1 if failure_counted else 0)

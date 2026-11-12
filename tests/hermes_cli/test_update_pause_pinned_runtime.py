@@ -137,6 +137,23 @@ def test_update_proceeds_past_a_pinned_unit_that_cannot_idle_pause(host, capsys,
     assert not deferrals.state_path().exists(), "a pause that went through left a deferral streak"
 
 
+def test_opted_in_busy_stop_leaves_a_pinned_unit_alone_and_does_not_refuse(host, monkeypatch, capsys):
+    """``HERMES_UPDATE_PRESWAP_STOP_BUSY=1`` refuses on any gateway it cannot stop; a pinned unit is
+    not such a gateway (the move cannot reach its code): it is neither stopped nor a refusal."""
+    monkeypatch.setenv(pause.STOP_BUSY_ENV, "1")
+    monkeypatch.setattr(pause, "_is_linux", lambda: True)
+    _run_pinned(host, status_record=True)
+
+    verdict = pause._pause(pause._empty_token())
+
+    out = capsys.readouterr().out
+    assert verdict is None, f"the opted-in update refused on a gateway it cannot affect: {verdict}"
+    assert host["asked"] == [], "the pinned gateway was asked to drain"
+    assert host["writes"] == [] and host["repairs"] == [], "the pinned unit was touched through systemd"
+    assert "running its own checkout" in out, out
+    assert host["procs"][0].poll() is None, "the opted-in stop killed the pinned gateway"
+
+
 def test_two_pinned_units_are_both_left_running_through_pause_and_restart(host, monkeypatch, capsys):
     """Skipping the builder must continue to the reviewer, not break the unit loop."""
     builder = _run_pinned(host, status_record=True)

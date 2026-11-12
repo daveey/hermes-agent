@@ -168,3 +168,19 @@ def test_conflicting_shared_slot_readings_are_unknown():
     result = idle_coverage([interval(), interval("two", admissible_slots=4)])
     assert result["unknown_seconds"] == 10
     assert result["unexplained_idle_slot_seconds"] == 0
+
+
+def test_submitter_spawn_receipt_is_never_process_start_even_with_binding_fields():
+    events = [event(1, "promoted", 10), event(2, "claimed", 12, 7, lock="host:1"),
+              event(3, "spawned", 13, 7, pid=111, claim_lock="host:1", started_at="birth|1")]
+    out = attempts(events, board="one", task_id="t", now=20)[0]
+    assert out["process_start_at"] is None and out["process_pid"] is None
+    assert out["claim_to_process_start_s"] is None and out["censored"] is True
+
+
+def test_telemetry_gap_between_observations_is_unknown_not_dropped():
+    result = idle_coverage([interval(start=10, end=20),
+                            interval(start=30, end=40, observed_at=30, valid_until=40)])
+    assert result["unknown_seconds"] == 10
+    assert result["observed_seconds"] == 20
+    assert result["unexplained_idle_slot_seconds"] == 40

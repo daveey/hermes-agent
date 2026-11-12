@@ -38,6 +38,7 @@ on (the hub's board).
 from __future__ import annotations
 
 import argparse
+import calendar
 import hashlib
 import http.client
 import json
@@ -564,34 +565,79 @@ def _filing(result: Any, run: dict[str, Any], repo: str, board: Board, state: di
 
 
 def _poll_run(repo: str, token: str, run: dict[str, Any], board: Board, state: dict[str, Any],
-              relay: HubRelay | None) -> tuple[str, list[str]]:
-    """``(outcome, log lines)``; outcome is complete|empty|not_applicable|unavailable (unavailable = retry later)."""
+              relay: HubRelay | None) -> tuple[str, list[str], str | None]:
+    """``(outcome, log lines, unavailable code)``; outcome is complete|empty|not_applicable|unavailable
+    (unavailable = retry later). The code is set when the run's data could not be read (``fap.Unavailable``);
+    ``poll_github`` turns it into a RETRY/WAITING/FAILED line by how long it has persisted."""
     key = f"{run['id']}/{run.get('run_attempt', 1)}"
     try:
         result = fap.assess_run(repo, run, lambda url: _gh(url, token), token)
     except fap.Unavailable as exc:
-        return "unavailable", [f"FAILED run={key} code={exc.code}"]
+        return "unavailable", [], exc.code
     if result.kind == "not_applicable":
         state["runs"].append(key)
-        return "not_applicable", []
+        return "not_applicable", [], None
     lines = _filing(result, run, repo, board, state, relay)
     if any(line.startswith("FAILED") for line in lines):
-        return "unavailable", lines
+        return "unavailable", lines, None
     state["runs"].append(key)
-    return ("complete" if any(entries for _, entries in result.jobs) else "empty"), lines
+    return ("complete" if any(entries for _, entries in result.jobs) else "empty"), lines, None
+
+
+GRACE_SECONDS = 15 * 60     # artifacts are listed before their job even completes; 15 min is ample margin
+MAX_TRACKED = 1000
+
+
+def _age(run: dict[str, Any], now: float) -> float | None:
+    """Seconds since the run (attempt) completed, from its ``updated_at``; None when unreadable."""
+    stamp = run.get("updated_at")
+    if not (isinstance(stamp, str) and fap._STAMP.fullmatch(stamp)):
+        return None
+    try:
+        return now - calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return None
+
+
+def _unavailable_line(key: str, code: str, run: dict[str, Any], tracked: dict[str, Any], seq: int,
+                      now: float, grace: float) -> str:
+    """Fresh ``missing`` (completed under ``grace`` ago) is ``RETRY``; an attempt unavailable in this and the
+    previous poll and completed at least ``grace`` ago is ``FAILED`` (the cron goes red); else ``WAITING``."""
+    prev = tracked.get(key)
+    before = prev.get("polls") if isinstance(prev, dict) and prev.get("seq") == seq - 1 else 0
+    polls = (before if isinstance(before, int) and not isinstance(before, bool) and before > 0 else 0) + 1
+    tracked[key] = {"seq": seq, "polls": polls}
+    age = _age(run, now)
+    if code == "missing" and age is not None and age < grace:
+        return f"RETRY run={key} code={code} age={int(age)}s"
+    if polls >= 2 and not (age is not None and age < grace):
+        return f"FAILED run={key} code={code} polls={polls}"
+    return f"WAITING run={key} code={code} polls={polls}"
 
 
 def poll_github(repo: str, token: str, board: Board, state: dict[str, Any], *,
                 lookback_hours: float = 6.0, relay: HubRelay | None = None,
-                deadline: float | None = None, checkpoint: Callable[[], None] | None = None) -> list[str]:
+                deadline: float | None = None, checkpoint: Callable[[], None] | None = None,
+                grace: float = GRACE_SECONDS) -> list[str]:
     """File cards from the metadata artifacts of recently completed runs not seen before.
 
     ``lookback_hours`` must outlast the slowest workflow plus any cron outage, and stay
     well under ``save_state``'s 1000-run dedupe memory (the repo sees ~50 runs/hour).
     A run whose artifacts are unavailable, or whose card filing failed, stays unprocessed
-    (``FAILED`` line) so the next poll retries it; filed ids are not filed twice.
-    Cancelled/timed-out jobs and incomplete reports also remain unavailable and unprocessed.
-    Every
+    so the next poll retries it; filed ids are not filed twice. A card filing failure is a
+    ``FAILED`` line at once. Unreadable data (``fap.Unavailable``) is logged by persistence
+    (``state["unavailable"]``: attempt -> poll sequence and consecutive unavailable polls,
+    pruned to attempts still listed and unprocessed, so it stays bounded):
+
+    * ``RETRY run=<k> code=missing age=<s>s``: completed under ``grace`` ago; the artifact may
+      not be listed yet.
+    * ``WAITING run=<k> code=<c> polls=<n>``: unavailable for the first poll in a row, or still
+      inside ``grace``.
+    * ``FAILED run=<k> code=<c> polls=<n>``: unavailable in this and the previous poll and
+      completed at least ``grace`` ago. Only this one turns the cron red.
+
+    Cancelled/timed-out jobs and incomplete reports remain unavailable and unprocessed, except a
+    cancelled run superseded by a newer run of its workflow and branch (``not_applicable``). Every
     expected slice must supply a valid artifact before any card is touched. When a run was newly
     observed the log ends with ``POLL complete=<n> empty=<n> unavailable=<n> not_applicable=<n>``
     (``complete`` counts every run with readable data, ``empty`` the subset with no flakes).
@@ -612,17 +658,33 @@ def poll_github(repo: str, token: str, board: Board, state: dict[str, Any], *,
         return ["FAILED runs_unavailable"]
     log: list[str] = []
     counts = {"complete": 0, "empty": 0, "unavailable": 0, "not_applicable": 0}
+    now = time.time()
+    prior_seq = state.get("poll_seq")
+    seq = state["poll_seq"] = (prior_seq if isinstance(prior_seq, int) else 0) + 1
+    prior = state.get("unavailable")
+    tracked: dict[str, Any] = prior if isinstance(prior, dict) else {}
+    keys = [f"{r['id']}/{r.get('run_attempt', 1)}" for r in runs]
     fresh = [r for r in sorted(runs, key=lambda r: r["id"]) if f"{r['id']}/{r.get('run_attempt', 1)}" not in done]
+    # Bounded: only attempts still listed and unprocessed are remembered.
+    state["unavailable"] = tracked = {k: tracked[k] for k in keys if k in tracked and k not in done}
     for index, run in enumerate(fresh):
         if deadline is not None and time.monotonic() >= deadline:
             log.append(f"FAILED poll_budget deferred={len(fresh) - index}")
             break
-        outcome, lines = _poll_run(repo, token, run, board, state, relay)
+        key = f"{run['id']}/{run.get('run_attempt', 1)}"
+        outcome, lines, code = _poll_run(repo, token, run, board, state, relay)
+        if code is not None:
+            lines = [_unavailable_line(key, code, run, tracked, seq, now, grace)]
+        else:
+            tracked.pop(key, None)
         log += lines
         counts[outcome] += 1
         counts["complete"] += outcome == "empty"    # an empty result is a complete one
         if checkpoint is not None:
             checkpoint()
+    if len(tracked) > MAX_TRACKED:
+        newest = sorted(tracked, key=lambda k: int(k.split("/")[0]))[-MAX_TRACKED:]
+        state["unavailable"] = {k: tracked[k] for k in newest}
     if fresh:
         log.append("POLL " + " ".join(f"{k}={v}" for k, v in counts.items()))
     return log
@@ -644,6 +706,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--hub-wait", type=float, default=90.0, help="seconds to wait for a cross-gateway comment")
     ap.add_argument("--budget", type=float, default=420.0,
                     help="--from-github: seconds after which no further run is started (the cron kills it at 600)")
+    ap.add_argument("--grace-minutes", type=float, default=GRACE_SECONDS / 60,
+                    help="--from-github: a run completed this recently may still be listing its artifacts")
     args = ap.parse_args(argv)
 
     if args.annotate:
@@ -666,7 +730,7 @@ def main(argv: list[str] | None = None) -> int:
             print("flaky_kanban: GH_TOKEN/GITHUB_TOKEN not set", file=sys.stderr)
             return 2
         log = poll_github(args.repo, token, board, state, relay=relay,
-                          deadline=time.monotonic() + args.budget,
+                          deadline=time.monotonic() + args.budget, grace=args.grace_minutes * 60,
                           checkpoint=lambda: save_state(args.state, state))
     else:
         entries: list[dict[str, str]] = []
@@ -676,7 +740,8 @@ def main(argv: list[str] | None = None) -> int:
     save_state(args.state, state)
     for line in log:  # silent when nothing flaked (no-agent cron delivers stdout)
         print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {line}")
-    # A flake that was not filed must not look like a good run: the cron's status goes non-ok.
+    # A flake that was not filed, or data that stayed unreadable across polls, must not look like a good run:
+    # the cron's status goes non-ok. RETRY/WAITING lines (not yet persistent) do not.
     return 1 if any(line.startswith("FAILED") for line in log) else 0
 
 

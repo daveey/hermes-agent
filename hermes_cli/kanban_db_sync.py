@@ -1276,7 +1276,7 @@ def _without_unacked_fields(conn: sqlite3.Connection, ch: RemoteChange) -> Mappi
     9821, 2026-10-29)."""
     pending: set[str] = set()
     for (fields,) in conn.execute("SELECT fields FROM kanban_sync_outbox WHERE table_name = 'tasks' AND row_uid = ? "
-                                  "AND state != 'rejected'", (ch.uid,)):
+                                  "AND state != 'rejected' AND op IN ('upsert', 'import')", (ch.uid,)):
         try:
             pending.update(json.loads(fields or "{}"))
         except ValueError:
@@ -1360,6 +1360,13 @@ def _local_row_is_newer(conn: sqlite3.Connection, table: str, ch: RemoteChange, 
     acknowledged (``task_runs.sync_version``). Without this, our own earlier push of a run (its outbox row already
     gone) or the Board's lease-grant copy, pulled after the run ended here, reopened it as ``running`` and the next
     push sent that back to the Board."""
+    if table == "task_runs" and ch.fields.get("ended_at") is not None and board_mode(conn) == "primary":
+        local = conn.execute("SELECT ended_at, sync_version FROM task_runs WHERE id = ?", (row_id,)).fetchone()
+        if local["ended_at"] is None and ch.version > (local["sync_version"] or 0):
+            # A Board lease can expire before the local run's initial insert is
+            # pushed. That pending startup is not newer than an authoritative
+            # end. The push reserializes the now-ended row, retaining its end.
+            return False
     if conn.execute("SELECT 1 FROM kanban_sync_outbox WHERE table_name = ? AND row_uid = ? AND state = 'pending' "
                     "AND op != 'restore' LIMIT 1", (table, ch.uid)).fetchone():
         return True

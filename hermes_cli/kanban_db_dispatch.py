@@ -39,6 +39,7 @@ from hermes_cli import kanban_worker_scope as _worker_scope, kanban_aggregate_sc
 from hermes_cli import kanban_host_reboot as _host_reboot, kanban_owner_unavailable as _ou  # [daveey]
 from hermes_cli import kanban_owner_death as _owner_death, kanban_parent_unclaimed as _parent_unclaimed  # [daveey]
 from hermes_cli.kanban_db_dispatch_crash_accounting import _account_crashes  # [daveey]
+from hermes_cli.kanban_failure_accounting import _record_task_failure
 from hermes_cli.kanban_db_dispatch_dead_worker import _DeadWorker
 from hermes_cli.kanban_db_dispatch_queries import lane_rows, skip_reap
 from hermes_cli.kanban_db_dispatch_clock import record_clock_hold as _record_clock_hold
@@ -755,7 +756,10 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         "  AND t.worker_pid IS NOT NULL"
     ).fetchall()
     from hermes_cli.kanban_owner_recovery import owner_reclaim_blocked, owner_reclaim_blocked_after_kill, terminate_modern_bindings
+    from hermes_cli.kanban_failure_release import queued
     for row in rows:
+        if queued(conn, row["current_run_id"]):
+            continue  # Await authoritative feed; never signal an already-released attempt again.
         if owner_reclaim_blocked(conn, row["id"], for_termination=True, selected=row):
             continue
         lock = row["claim_lock"] or ""
@@ -797,6 +801,21 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
             if owner_reclaim_blocked_after_kill(conn, tid, signalled=True):
                 continue
             retry_status = _kb._retry_status_for_run(conn, tid)
+            # [daveey] Fence the captured attempt after the kill wait. A new run
+            # can reuse the dispatcher lock (and even PID), but not its run id.
+            current = conn.execute(
+                "SELECT 1 FROM tasks WHERE id=? AND status='running' AND worker_pid=? "
+                "AND claim_lock IS ? AND current_run_id IS ?",
+                (tid, pid, row["claim_lock"], row["current_run_id"]),
+            ).fetchone()
+            if current is None:
+                continue
+            from hermes_cli.kanban_failure_release import queue
+            if queue(conn, tid, row["current_run_id"], outcome="timed_out", error=error,
+                     failure_limit=DEFAULT_FAILURE_LIMIT,
+                     extra={"pid": pid, "sigkill": killed, "retry_status": retry_status}):
+                timed_out.append(tid)
+                continue
             cur = conn.execute(
                 "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
@@ -817,20 +836,13 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
                     conn, tid, outcome="timed_out", status="timed_out",
                     error=error, metadata=payload,
                 )
+                payload["failure_notice"] = "canonical"
                 _kb._append_event(conn, tid, "timed_out", payload, run_id=run_id)
+                _record_task_failure(
+                    conn, tid, error=error, run_id=run_id, outcome="timed_out", allow_nested=True,
+                    event_payload_extra={"pid": pid, "sigkill": killed, "retry_status": retry_status},
+                )
                 timed_out.append(tid)
-        # Outside the write_txn above because ``_record_task_failure`` opens its
-        # own. If the breaker trips this flips the task to ``blocked`` and emits
-        # ``gave_up`` on top of the ``timed_out`` already emitted.
-        if cur.rowcount == 1:
-            _record_task_failure(
-                conn, tid,
-                error=error,
-                outcome="timed_out",
-                release_claim=False,
-                end_run=False,
-                event_payload_extra={"pid": pid, "sigkill": killed, "retry_status": retry_status},
-            )
     return timed_out
 
 
@@ -1290,19 +1302,24 @@ class _CrashSweep:
     host_rebooted: list[str] = field(default_factory=list)  # reboot bystanders, requeued uncounted [daveey]
     owner_unavailable: list[str] = field(default_factory=list)  # owner never answered, requeued uncounted [daveey]
     owner_restarted: list[str] = field(default_factory=list)  # lost to an owner restart, requeued uncounted [daveey]
-    # ``(task_id, pid, claimer, dead_worker)``: accounted after the txn via
-    # ``_record_task_failure`` (needs its own write_txn).
+    # ``(task_id, pid, claimer, dead_worker)``: accounted in the reclaim txn.
     crash_details: list[tuple[str, int, str, _DeadWorker]] = field(default_factory=list)
+    auto_blocked: list[str] = field(default_factory=list)
     # Worker-exit observer payloads, fired only after every reclaim/accounting
     # txn has committed.
     exited_hook_payloads: list[dict] = field(default_factory=list)
-    auto_blocked: list[str] = field(default_factory=list)
 
 
 def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None,
                           *, failed_results_only: bool = False) -> _CrashSweep:
     """Release every host-local ``running`` task whose worker PID is dead."""
     sweep = _CrashSweep()
+    from hermes_cli.kanban_neutral_release import drain
+    sweep.exited_hook_payloads.extend(drain(conn))
+    for hook in sweep.exited_hook_payloads:
+        target = {"rate_limited": sweep.rate_limited, "reclaimed": sweep.owner_restarted, "host_reboot": sweep.host_rebooted,
+                  "owner_down": sweep.owner_unavailable, "owner_unavailable": sweep.owner_unavailable}
+        target[hook["outcome"]].append(hook["task_id"])
     with _kb.write_txn(conn):
         rows = conn.execute(
             "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee, current_run_id, "
@@ -1316,6 +1333,9 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None,
         for row in rows:
             lock = row["claim_lock"] or ""
             if not _kb._claim_is_local(lock, host_prefix):
+                continue
+            from hermes_cli.kanban_failure_release import queued
+            if queued(conn, row["current_run_id"]):
                 continue
             # Launch-window grace so a freshly-spawned worker isn't reclaimed
             # before its PID is visible on /proc.
@@ -1344,6 +1364,11 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None,
                 dead.event_payload['reconciled_at'] = int(time.time())
                 dead.event_payload['reconciled_by'] = 'observer' if failed_results_only else 'dispatcher'
             _owner_death.note(dead, conn, row["id"], row["current_run_id"])  # owner died under it [daveey]
+            dead.run_id = row["current_run_id"]
+            dead.event_payload["retry_status"] = _kb._retry_status_for_run(conn, row["id"])
+            from hermes_cli.kanban_failure_release import route_dead_worker
+            if route_dead_worker(conn, row, dead, sweep, pid):
+                continue
             from hermes_cli.kanban_run_finalizer import close_dead_run
             closed = close_dead_run(conn, row, dead)
             if closed is None:
@@ -1413,13 +1438,12 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     """
     sweep = _reclaim_dead_workers(conn, board=board, failed_results_only=failed_results_only)
     # Closure and accounting committed together; only external observers remain.
-    auto_blocked = sweep.auto_blocked
     for _, _, _, dead in sweep.crash_details:
         _worker_scope.release_failure(dead.event_payload)
     # Side-channel attributes keep the public ``list[str]`` return stable;
     # ``dispatch_once`` reads them to populate ``DispatchResult``. Rate-limited
     # requeues did NOT count a failure and are NOT crashes.
-    detect_crashed_workers._last_auto_blocked = auto_blocked  # type: ignore[attr-defined]
+    detect_crashed_workers._last_auto_blocked = sweep.auto_blocked  # type: ignore[attr-defined]
     detect_crashed_workers._last_rate_limited = sweep.rate_limited  # type: ignore[attr-defined]
     detect_crashed_workers._last_host_rebooted = sweep.host_rebooted  # type: ignore[attr-defined]
     detect_crashed_workers._last_owner_restarted = sweep.owner_restarted  # type: ignore[attr-defined]
@@ -1437,132 +1461,6 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
                 **hook_fields,
             )
     return sweep.crashed
-
-
-def _record_task_failure(
-    conn: sqlite3.Connection,
-    task_id: str,
-    error: str,
-    *,
-    outcome: str,
-    failure_limit: int | None = None,
-    force_trip: bool = False,
-    release_claim: bool = False,
-    end_run: bool = False,
-    event_payload_extra: Optional[dict] = None,
-    infrastructure: bool = False, block_kind: str = "transient",
-    allow_nested: bool = False,
-) -> bool:
-    """Record a non-success outcome and maybe trip the circuit breaker; every
-    non-success path funnels through here so ``consecutive_failures`` stays
-    consistent. Returns True when the task was auto-blocked.
-
-    ``release_claim=True, end_run=True``: spawn-failure path (task still
-    running with an open run — restore source phase or ``blocked``, release
-    claim, close run). Both False: timeout/crash path (caller already restored
-    the phase and closed the run; only the counter moves, a trip flips to
-    ``blocked`` + ``gave_up``). Threshold: per-task ``max_retries`` >
-    ``failure_limit`` > ``DEFAULT_FAILURE_LIMIT``. ``force_trip`` trips
-    unconditionally (caller applied its own bounded-retry policy).
-
-    ``infrastructure=True``: the host refused the spawn (no restart-safe scope,
-    #114720) — nothing about the card ran, so the run and event are recorded
-    with ``infrastructure: true`` but ``consecutive_failures`` is left alone and
-    the breaker never trips; the card stays retryable and
-    :func:`check_respawn_guard` spaces the retries.
-    """
-    if failure_limit is None:
-        failure_limit = DEFAULT_FAILURE_LIMIT
-    error = error[:500]
-    with _kb.write_txn(conn, allow_nested=allow_nested):
-        row = conn.execute(
-            "SELECT consecutive_failures, status, max_retries, current_run_id "
-            "FROM tasks WHERE id = ?", (task_id,),
-        ).fetchone()
-        if row is None:
-            return False
-        retry_status = (
-            _kb._retry_status_for_run(conn, task_id, row["current_run_id"])
-            if release_claim
-            else ("review" if row["status"] == "review" else "ready")
-        )
-        failures = int(row["consecutive_failures"]) + (0 if infrastructure else 1)
-
-        # Per-task override wins over caller-supplied and default thresholds.
-        task_override = _kb._row_get(row, "max_retries")
-        if task_override is not None:
-            effective_limit, limit_source = int(task_override), "task"
-        else:
-            effective_limit, limit_source = int(failure_limit), "dispatcher"
-
-        if infrastructure or not (force_trip or failures >= effective_limit):
-            if release_claim:
-                # Spawn path: restore the claimed source phase + clear claim.
-                conn.execute(
-                    "UPDATE tasks SET status = ?, claim_lock = NULL, "
-                    "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
-                    "consecutive_failures = ?, last_failure_error = ? "
-                    "WHERE id = ? AND status = 'running'",
-                    (retry_status, failures, error, task_id),
-                )
-            else:
-                conn.execute(
-                    "UPDATE tasks SET consecutive_failures = ?, "
-                    "last_failure_error = ? WHERE id = ?",
-                    (failures, error, task_id),
-                )
-            # Timeout/crash path's caller already emitted its own event.
-            if end_run:
-                detail = {"failures": failures, "retry_status": retry_status}
-                if infrastructure:
-                    detail["infrastructure"] = True
-                run_id = _kb._end_run(
-                    conn, task_id, outcome=outcome, status=outcome, error=error, metadata=detail,
-                )
-                _kb._append_event(conn, task_id, outcome, {"error": error, **detail}, run_id=run_id)
-            return False
-
-        # Spawn path (release_claim) is still running and also clears claim
-        # state; the timeout/crash path already did.
-        conn.execute(
-            "UPDATE tasks SET status = 'triage', block_kind = ?, human_request = NULL, "
-            + ("claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
-               if release_claim else "")
-            + "consecutive_failures = ?, last_failure_error = ? "
-            "WHERE id = ? AND status IN ('running', 'ready', 'review')",
-            (block_kind, failures, error, task_id),
-        )
-        payload = {
-            "kind": block_kind,
-            "reason_code": "worker_failures_exhausted",
-            "failures": failures,
-            "effective_limit": effective_limit,
-            "limit_source": limit_source,
-            "error": error,
-            "trigger_outcome": outcome,
-            "retry_status": retry_status,
-        }
-        run_id = None
-        if end_run:
-            # Only the spawn path has an open run to close.
-            run_id = _kb._end_run(
-                conn, task_id, outcome="gave_up", status="gave_up", error=error,
-                metadata={
-                    "failures": failures,
-                    "trigger_outcome": outcome,
-                    "effective_limit": effective_limit,
-                    "limit_source": limit_source,
-                    "retry_status": retry_status,
-                },
-            )
-        if force_trip:
-            # The caller applied its own bounded policy, so the counter cannot
-            # judge this block: ``recompute_ready`` holds it for an operator.
-            payload["sticky"] = True
-        if event_payload_extra:
-            payload.update(event_payload_extra)
-        _kb._append_event(conn, task_id, "gave_up", payload, run_id=run_id)
-        return True
 
 
 def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int, *, run_id=None, claim_lock=None) -> None:
@@ -1668,6 +1566,9 @@ def check_respawn_guard(
     if row is None:
         return None
 
+    from hermes_cli.kanban_quota_release import pending_task
+    if pending_task(conn, task_id):
+        return "rate_limit_cooldown"
     now = int(time.time())
     from hermes_cli.kanban_quota_episode import decision, episode
     if episode(conn, task_id):
@@ -2201,10 +2102,14 @@ def _run_reclaim_phase(
         result.released_leftover_claims = release_leftover_local_claims(conn)  # not gated: not running [daveey]
     if has_running:
         result.stale = detect_stale_running(conn, stale_timeout_seconds=stale_timeout_seconds)
+    # An ended primary run can still owe post-feed effects even with no running tasks.
+    from hermes_cli.kanban_neutral_release import pending
+    if has_running or pending(conn):
         result.crashed = detect_crashed_workers(conn, board=board)
         result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
         result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
         result.reclaimed += len(getattr(detect_crashed_workers, "_last_owner_restarted", []))
+    if has_running:
         result.timed_out = enforce_max_runtime(conn)
     from hermes_cli.kanban_supervisor_requests import dispatcher_drain  # [daveey] non-worker executor
     result.supervisor_requests = [] if dry_run else dispatcher_drain(conn, board=board)

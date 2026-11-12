@@ -151,12 +151,15 @@ def owner_stop_notice(captured, outcome, row=None):
 
 def gateway_refusal_boundary(captured, outcome):
     """``(notice, display_metadata)`` for a failed turn the gateway itself refused with a renderable
-    descriptor (``result.error_surface``: ``session_cron.execute``, ``session_policy.refused_turn_result``), else None."""
+    descriptor (``result.error_surface``: ``session_cron.execute``, ``session_policy.refused_turn_result``), else None.
+    The boundary copy is ``result.refusal_notice`` when the error card already carries the sentence (a route
+    refusal: ``run_turn_runner._resolution_failure_result``), else the error itself."""
     value = (captured or {}).get('result') or {}
     surface, error = value.get('error_surface'), value.get('error')
     if outcome != 'failed' or not isinstance(surface, dict) or not isinstance(error, str) or not error:
         return None
-    return error, {'error': error, 'error_surface': dict(surface)}
+    notice = value.get('refusal_notice')
+    return (notice if isinstance(notice, str) and notice else error), {'error': error, 'error_surface': dict(surface)}
 
 
 def _release_media(authority, admission_id):

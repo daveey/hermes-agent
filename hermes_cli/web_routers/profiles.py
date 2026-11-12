@@ -14,6 +14,7 @@ import contextlib
 import copy
 import functools
 from hermes_cli.web_read_coalescing import coalesced_read
+from hermes_cli.web_json_response import encoded_in_thread, native_json_response, per_request_response
 import inspect
 import json
 import logging
@@ -382,7 +383,12 @@ def _sidebar_singleflight_cache(func):
                     cache.popitem(last=False)
             return result
 
-    admitted = coalesced_read(wrapped, thread_runner=lambda func: run_in_threadpool(func))
+    # The HTTP path JSON-encodes in the worker thread (web_json_response), never on the loop.
+    admitted = coalesced_read(encoded_in_thread(wrapped), thread_runner=lambda func: run_in_threadpool(func))
+
+    def _lookup_encoded(key):
+        cached = _lookup(key)
+        return cached if cached is miss else native_json_response(cached)
 
     @functools.wraps(admitted)
     async def http_endpoint(*args, **kwargs):
@@ -390,10 +396,10 @@ def _sidebar_singleflight_cache(func):
         if _SIDEBAR_CACHE_TTL_SECONDS > 0:
             bound = signature.bind(*args, **kwargs)
             bound.apply_defaults()
-            cached = await run_in_threadpool(_lookup, tuple(bound.arguments.items()))
+            cached = await run_in_threadpool(_lookup_encoded, tuple(bound.arguments.items()))
             if cached is not miss:
-                return cached
-        return await admitted(*args, **kwargs)
+                return per_request_response(cached)
+        return per_request_response(await admitted(*args, **kwargs))
 
     wrapped.http_endpoint = http_endpoint
     return wrapped
@@ -502,11 +508,19 @@ _SESSION_STAMP_COLUMNS = ("cwd", "git_branch", "git_repo_root", "outcome", "mute
 
 # Admit scan contenders on the event loop, before they consume AnyIO slots.
 # Keep the synchronous entry point and cross-loop DB lock for direct callers.
-sessions_router.add_api_route(
-    "/api/profiles/sessions",
-    coalesced_read(get_profiles_sessions, thread_runner=lambda func: run_in_threadpool(func)),
-    methods=["GET"],
-)
+# The body is JSON-encoded once per coalesced read, in the worker thread: FastAPI's
+# jsonable_encoder walk of a 200-row page on the loop was most of this route's CPU. [daveey]
+_profiles_sessions_admitted = coalesced_read(
+    encoded_in_thread(get_profiles_sessions), thread_runner=lambda func: run_in_threadpool(func))
+
+
+@functools.wraps(_profiles_sessions_admitted)
+async def _profiles_sessions_http(*args, **kwargs):
+    # Joined requests share the rendered body; each sends its own Response object.
+    return per_request_response(await _profiles_sessions_admitted(*args, **kwargs))
+
+
+sessions_router.add_api_route("/api/profiles/sessions", _profiles_sessions_http, methods=["GET"])
 
 
 @sessions_router.get("/api/profiles/sessions/stamps")
