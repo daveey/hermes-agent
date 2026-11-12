@@ -1254,6 +1254,8 @@ def _upsert_task(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: A
         conn.execute(f"INSERT INTO tasks ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
                      (ch.uid, *cols.values(), ch.version))
         changed = set(cols)
+        from hermes_cli.kanban_restore_chat_subs import note_restored_task
+        note_restored_task(conn, ch.uid, cols.get("created_on"), own)  # our own card back from the Board
     else:
         changed = {c for c, v in cols.items() if old[c] != v}
         assignments = ", ".join(f"{c} = ?" for c in cols)
@@ -1355,6 +1357,9 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
                  (ch.uid, *cols.values()))
     if table == "task_events" and ch.fields.get("kind") in ("archive_requested", "capability_owner_archive_requested"):
         result.wake_dispatcher = True  # a stop request (kanban_remote_stop) or forwarded owner archive to apply
+    if table == "task_chat_links":
+        from hermes_cli.kanban_restore_chat_subs import restore_link_sub
+        restore_link_sub(conn, cols, own)  # a restored card's hub delivery (kanban_notify_subs does not sync)
     return True
 
 
