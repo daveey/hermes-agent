@@ -115,3 +115,28 @@ def test_compaction_rebuild_boundary_survives_deleted_process_cwd(deleted_cwd, t
         rebuilt = _rebuild_system_prompt_at_boundary(agent, "")
     assert "KANBAN-WORKSPACE-RULES" in rebuilt
     assert agent._cached_system_prompt == rebuilt
+
+
+def test_goal_gate_workspace_never_falls_back_to_another_tree(deleted_cwd, tmp_path, monkeypatch):
+    """Goal gates must run in the project or nowhere: a deleted launch dir with no configured cwd
+    yields (None, None) as before, never $HOME or the Kanban workspace (which could pass a failing goal)."""
+    from hermes_cli.goals import _gate_workspace
+
+    ws = _project(tmp_path, "ws", "W")
+    home = _project(tmp_path, "home", "H")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(ws))
+    assert _gate_workspace() == (None, None)
+    term = _project(tmp_path, "term", "T")
+    monkeypatch.setenv("TERMINAL_CWD", str(term))
+    assert _gate_workspace() == (str(term), None)
+
+
+def test_init_never_retargets_home_for_deleted_launch_dir(deleted_cwd, tmp_path, monkeypatch):
+    from hermes_cli import init_command
+
+    home = _project(tmp_path, "home", "H")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("tools.terminal_tool.get_session_cwd", lambda _key: None, raising=False)
+    with pytest.raises(FileNotFoundError):
+        init_command._resolve_session_cwd("")

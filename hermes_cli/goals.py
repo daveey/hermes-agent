@@ -388,7 +388,7 @@ def _gate_workspace() -> tuple[Optional[str], Optional[str]]:
     relative gate run anywhere else would check a different project and could pass a failing goal,
     and no agent turn can fix it, so the caller pauses instead of retrying.
     No declared workspace keeps the classic resolution (TERMINAL_CWD, else the launch directory)."""
-    from agent.runtime_cwd import resolve_agent_cwd, scoped_session_cwd
+    from agent.runtime_cwd import resolve_agent_cwd_strict, scoped_session_cwd
 
     declared = scoped_session_cwd()
     if declared:
@@ -397,10 +397,10 @@ def _gate_workspace() -> tuple[Optional[str], Optional[str]]:
             return str(path), None
         return None, (f"the session workspace {declared} is not a directory on this host, "
                       "and running gates anywhere else would check a different project")
-    try:
-        return str(resolve_agent_cwd()), None
-    except OSError:
-        return None, None  # deleted launch directory: subprocess reports it per gate
+    resolved = resolve_agent_cwd_strict()
+    if resolved is None:
+        return None, None  # deleted launch directory: subprocess reports it per gate, never $HOME
+    return str(resolved), None
 
 
 def run_gate(gate: GoalGate, *, cwd: Optional[str] = None) -> tuple[bool, int, str]:

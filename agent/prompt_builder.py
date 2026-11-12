@@ -1047,7 +1047,7 @@ def _local_host_hints() -> list[str]:
     host_lines = [f"Host: {host}", f"User home directory: {os.path.expanduser('~')}"]
     try:
         host_lines.append(f"Current working directory: {resolve_agent_cwd()}")
-    except OSError:
+    except OSError:  # unreadable cwd; a deleted one already falls back inside resolve_agent_cwd
         pass
     # The model reaches for the system temp dir by reflex (tmpfs on most Linux hosts, fills RAM);
     # naming Hermes' scratch dir here is what makes the TMPDIR export a habit rather than a hidden default.

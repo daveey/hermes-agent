@@ -141,8 +141,22 @@ def process_cwd_or_fallback() -> str:
 
 
 def resolve_agent_cwd() -> Path:
-    """Configured cwd, else the launch dir; a deleted launch dir falls back via ``process_cwd_or_fallback``."""
+    """Configured cwd, else the launch dir; a deleted launch dir falls back via ``process_cwd_or_fallback``.
+
+    Callers that must act IN the project (goal gates, /init writing AGENTS.md) use
+    :func:`resolve_agent_cwd_strict` instead: a fallback directory is a different project there."""
     return _resolve_configured_cwd(override_is_final=False) or Path(process_cwd_or_fallback())
+
+
+def resolve_agent_cwd_strict() -> Path | None:
+    """Configured cwd, else the launch dir, else ``None`` when the launch dir is gone. Never substitutes
+    the Kanban workspace or $HOME for a deleted launch dir (TERMINAL_CWD is already the configured cwd
+    above), so callers that run or write project files can refuse instead of using another tree."""
+    configured = _resolve_configured_cwd(override_is_final=False)
+    if configured is not None:
+        return configured
+    cwd = process_cwd()
+    return Path(cwd) if cwd else None
 
 
 def resolve_context_cwd(*, include_session_override: bool = True) -> Path | None:

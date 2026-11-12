@@ -620,7 +620,7 @@ def _workspace_pin_key() -> str:
     (TUI ``/compress``) are one workspace, not two."""
     try:
         return str(resolve_context_cwd() or resolve_agent_cwd())
-    except OSError:  # deleted cwd
+    except OSError:  # unreadable cwd; a deleted one already falls back inside resolve_agent_cwd
         return ""
 
 
