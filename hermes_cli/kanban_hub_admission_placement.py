@@ -399,7 +399,7 @@ def pool_route(args, cfg, gateway, audit, requires, *, queue=True, machine_ok=No
     from hermes_cli.kanban_worker_placement import POLICY, QUEUED_WHY, WAITING
 
     label = kp._Cfg(cfg).queue_label(gateway) if queue else None
-    extra = coordination.required_labels({**args, "requires": requires}) if label else None
+    extra = coordination.required_labels({**args, "requires": requires}, cfg) if label else None
     if label and extra is not None and (machine_ok or kp._machine_picks_up)(label):
         out = {"where": "local", "runs_on": [label, *sorted(extra - {label})],
                "why": QUEUED_WHY.format(label=label), "hub_admission": audit}

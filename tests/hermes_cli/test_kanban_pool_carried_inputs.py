@@ -120,3 +120,34 @@ def test_legacy_heavy_route_reads_the_same_text(carried):
     d = kp.decide(args, cfg={"heavy_route": {"hub": "worker-1"}}, self_gw="hub")
     assert d["where"] == "local" and d["runs_on"] == ["machine:worker-1"], d
     assert coord.legacy_refusal(args, {}) is True  # uncovered: the path's tool name still counts
+
+
+# --- rebase onto hub-admission worker_queue (abec81ec81): no sync identity, and the denied-card queue path -------
+
+def _no_identity():
+    from hermes_cli import kanban_sync_client as ksc
+    raise ksc.SyncUnavailable("no sync identity")
+
+
+def test_registry_without_sync_identity_fails_closed(carried, monkeypatch):
+    """``registry()`` raises ``SyncUnavailable`` before its fetch try on a gateway with no sync identity."""
+    wn.set_registry_fetch(None)
+    monkeypatch.setattr("hermes_cli.kanban_sync_client.load_identity", _no_identity)
+    assert ce.without_carried_inputs(carried["body"], {"worker_queue": {"hub": POOL}}) == carried["body"]
+
+
+def test_text_without_carried_path_never_reads_the_registry(monkeypatch):
+    calls = []
+    monkeypatch.setattr(wn, "registry", lambda: calls.append(1))  # counted, since _label_members swallows raises
+    body = "Implement the approved plan."
+    assert ce.without_carried_inputs(body, {"worker_queue": {"hub": POOL}}) == body
+    assert kp.portable_reason({"title": "Implement plan", "body": body}, {"worker_queue": {"hub": POOL}}) is None
+    assert calls == []
+
+
+def test_denied_card_queue_labels_skip_a_verified_carried_path(carried):
+    from hermes_cli import kanban_hub_admission_placement as hap
+    cfg = {"worker_queue": {"hub": POOL}, "worker_pools": {"hub": ["worker-1", "worker-2"]}}
+    args = {"title": "Implement plan", "body": carried["body"], "assignee": "default"}
+    out = hap.pool_route(args, cfg, "hub", {}, None, machine_ok=lambda _: True)
+    assert out["runs_on"] == [POOL], out

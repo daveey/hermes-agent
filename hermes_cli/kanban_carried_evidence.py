@@ -21,7 +21,10 @@ PATH_TOKEN = re.compile(r"(?<![\w/])(?:/home/[^/\s`\"']+|~)/\.hermes/kanban/(?:e
 def _label_members(labels: set[str]) -> set[str] | None:
     """Every registry machine carrying any of ``labels``; None (fail closed) when unreadable or a label is empty."""
     from hermes_cli import kanban_worker_node as wn
-    snapshot = wn.registry()
+    try:
+        snapshot = wn.registry()
+    except Exception:  # health: allow BLE001 -- no sync identity (SyncUnavailable) or broken registry: fail closed
+        return None
     machines = snapshot.get("machines") if isinstance(snapshot, dict) else None
     if not isinstance(machines, dict):
         return None
@@ -43,6 +46,8 @@ def without_carried_inputs(text: str, cfg: dict) -> str:
     worker cannot silently make the exemption apply to an unprovisioned host.
     The card must itself pin the matching SHA256. Other markers stay visible.
     """
+    if not PATH_TOKEN.search(text):
+        return text  # nothing to exempt, so never resolve destinations (the registry) for it
     pools = cfg.get("worker_pools") or {}
     routes = cfg.get("heavy_route") or {}
     if not isinstance(pools, dict) or not isinstance(routes, dict):
