@@ -458,6 +458,38 @@ def restore_undelivered_completions(target_queue) -> int:
         return _replay_pending(conn, rows, target_queue, now, startup=True)
 
 
+def unclaimed_pending_completions(*, min_age_s: float, now: Optional[float] = None) -> list[dict[str, Any]]:
+    """[daveey] This home's terminal completions still pending delivery, not under a live claim, and at least
+    ``min_age_s`` past completion: ``[{"delegation_id", "event"}]``, oldest first. Expired rows are dropped first
+    (as the replay does). For the unloaded-parent waker (``tui_gateway.delegation_unloaded``), which claims each
+    row with ``claim_completion_delivery`` before acting, so a stale read here can never deliver twice. Never
+    creates a ledger; a quiet one (no pending or live rows) is answered without a write."""
+    from agent.runtime_session_store import is_worker_process
+    if is_worker_process() or not _db_path().exists():
+        return []
+    from tools.async_delegation_idle import ledger_quiet
+    if ledger_quiet(_db_path()):
+        return []
+    recover_abandoned_delegations()  # an owner that died while no poller ran here: classify it first
+    now = time.time() if now is None else now
+    with _DB_LOCK, _transaction() as conn:
+        _expire_pending_completions(conn, now)
+        rows = conn.execute("""SELECT delegation_id, event_json FROM async_delegations
+               WHERE state NOT IN ('running','finalizing') AND delivery_state='pending' AND event_json IS NOT NULL
+                 AND (delivery_claim IS NULL OR delivery_claimed_at < ?)
+                 AND COALESCE(NULLIF(completed_at, 0), dispatched_at) < ?
+               ORDER BY completed_at, delegation_id""", (now - _CLAIM_LEASE_S, now - min_age_s)).fetchall()
+    out = []
+    for delegation_id, payload in rows:
+        try:
+            evt = json.loads(payload)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(evt, dict):
+            out.append({"delegation_id": delegation_id, "event": redact_completion_event(evt)})
+    return out
+
+
 def _expire_pending_completions(conn, now: float) -> None:
     """Resolve expired terminal rows even if their copies are queued or held; never steal a live claim."""
     rows = conn.execute("""SELECT delegation_id, delivery_attempts,

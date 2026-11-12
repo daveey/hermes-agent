@@ -622,6 +622,13 @@ def _loop(stop: threading.Event) -> None:
             sweep_once(live_session_ids(), grace_s=grace)
         except Exception:
             logger.warning("kanban unloaded sweep failed", exc_info=True)
+        # [daveey] Async-delegation results no live poller delivers (parent unloaded, loaded headless, or held by
+        # another backend than the copy's): one turn in the parent, ledger-claimed (delegation_unloaded).
+        try:
+            from tui_gateway.delegation_unloaded import sweep_once as delegation_sweep_once
+            delegation_sweep_once()
+        except Exception:
+            logger.warning("async delegation unloaded sweep failed", exc_info=True)
         # [daveey] Session outcome: refresh chats whose cards moved, then make sure no notice ends a chat unanswered.
         from tui_gateway.notice_fanout import card_change_pass
         from tui_gateway.notice_guarantee import guarantee_pass
