@@ -1129,6 +1129,11 @@ class ToolRegistry:
         results normalized, every exception returned as ``{"error": ...}``."""
         entry = self.get_entry(name, scope=scope)
         if not entry:
+            # [daveey] A miss while this home's plugins reload is not authoritative: wait, read again.
+            from tools.registry_reload import wait_for_reload
+            if wait_for_reload(scope):
+                entry = self.get_entry(name, scope=scope)
+        if not entry:
             return tool_error(f"Unknown tool: {name}")
         try:
             # Plugin contract (plugins/AGENTS.md): optional context kwargs (task_id, session_id, user_task,
