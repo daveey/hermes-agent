@@ -1,6 +1,9 @@
 """Exercise Darwin ABI refusal with injected native-call failures."""
 import ctypes
+import os
+import platform
 import struct
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -34,13 +37,31 @@ def abi(monkeypatch):
         return state.listed
 
     libc = SimpleNamespace(fstat=Function(fstat), proc_pidinfo=Function(pidinfo))
-    monkeypatch.setattr(darwin.platform, "machine", lambda: "arm64")
-    monkeypatch.setattr(ctypes, "PyDLL", lambda _: libc)
-    monkeypatch.setattr(darwin.os, "open", lambda *args: 42)
-    monkeypatch.setattr(darwin.os, "close", state.closes.append)
-    monkeypatch.setattr(darwin.os, "fstat", lambda fd: SimpleNamespace(st_dev=state.stat_dev, st_ino=123))
+    # Patch only the module's own seams: the shared os/platform/ctypes functions
+    # serve the whole process (pytest >= 9.2's fd capture reads os.fstat().st_size).
+    monkeypatch.setattr(darwin, "_machine", lambda: "arm64")
+    monkeypatch.setattr(darwin, "_load_libc", lambda: libc)
+    monkeypatch.setattr(darwin, "_open", lambda *args: 42)
+    monkeypatch.setattr(darwin, "_close", state.closes.append)
+    monkeypatch.setattr(darwin, "_fstat", lambda fd: SimpleNamespace(st_dev=state.stat_dev, st_ino=123))
     state.libc = libc
     return state
+
+
+def _shared():
+    return (os.open, os.close, os.fstat, platform.machine, ctypes.PyDLL)
+
+
+def test_fakes_leave_shared_stdlib_untouched(request):
+    # Regression: patching os.fstat itself broke every other caller in the
+    # process (pytest 9.2's FDCapture.snap errored on .st_size at setup).
+    before = _shared()
+    abi = request.getfixturevalue("abi")
+    assert _shared() == before
+    assert os.fstat(sys.stderr.fileno()).st_size >= 0
+    native, _descriptors = darwin.build()
+    assert native(42) == (-7, 123)
+    assert abi.closes == [42]
 
 
 @pytest.mark.parametrize("unsigned", [False, True])
@@ -76,7 +97,7 @@ def test_nonnegative_sentinel_learns_conversion_at_runtime(abi, monkeypatch, uns
     def fail(fd):
         raise AssertionError("conversion is learned; no Python fstat handoff")
 
-    monkeypatch.setattr(darwin.os, "fstat", fail)
+    monkeypatch.setattr(darwin, "_fstat", fail)
     assert native(42) == (abi.stat_dev, 123)
     assert descriptors() == [42]
 
@@ -118,7 +139,7 @@ def test_runtime_fstat_failure_before_learning_reports_closed(abi, monkeypatch):
     def closed(fd):
         raise OSError(9, "closed")
 
-    monkeypatch.setattr(darwin.os, "fstat", closed)
+    monkeypatch.setattr(darwin, "_fstat", closed)
     assert native(42) is None
 
 
@@ -136,12 +157,12 @@ def test_missing_symbol_disarms(abi):
 
 
 def test_unsupported_architecture_disarms(abi, monkeypatch):
-    monkeypatch.setattr(darwin.platform, "machine", lambda: "unknown")
+    monkeypatch.setattr(darwin, "_machine", lambda: "unknown")
     assert darwin.build() is None
     assert abi.closes == []
 
 
 def test_probe_not_listed_disarms(abi, monkeypatch):
-    monkeypatch.setattr(darwin.os, "open", lambda *args: 43)
+    monkeypatch.setattr(darwin, "_open", lambda *args: 43)
     assert darwin.build() is None
     assert abi.closes == [43]

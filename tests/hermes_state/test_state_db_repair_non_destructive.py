@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import itertools
 import multiprocessing
 import os
 import shutil
@@ -739,11 +740,19 @@ def test_interrupted_snapshot_rolls_back_destination(tmp_path, monkeypatch):
         conn.execute("INSERT INTO marker VALUES ('original')")
         conn.commit()
 
-    ticks = iter((0.0, hermes_state._REPAIR_LOCK_TIMEOUT_SECONDS + 1.0))
-    monkeypatch.setattr(hermes_state.time, "monotonic", lambda: next(ticks))
+    # The fake clock is the repair module's own seam (never the shared time
+    # module, which teardown and other callers read) and never runs dry: after
+    # the start tick it stays past the deadline for any number of reads.
+    expired = hermes_state._REPAIR_LOCK_TIMEOUT_SECONDS + 1.0
+    ticks = itertools.chain((0.0,), itertools.repeat(expired))
+    monkeypatch.setattr(hermes_state_repair, "_monotonic", lambda: next(ticks))
+    real_monotonic = time.monotonic
 
     with pytest.raises(TimeoutError):
         hermes_state_repair._copy_database_snapshot(source, destination)
+
+    assert time.monotonic is real_monotonic
+    assert [hermes_state_repair._monotonic() for _ in range(5)] == [expired] * 5
 
     with sqlite3.connect(str(destination)) as conn:
         assert conn.execute("SELECT value FROM marker").fetchall() == [("original",)]
