@@ -53,6 +53,11 @@ def _is_tree(path: Path) -> bool:
     return (path / ".git").exists()
 
 
+def _trees_home() -> Path:
+    """Root of the card worktree globs (a seam: tests point it away from the developer's real ``~/code/_wt``)."""
+    return Path.home()
+
+
 def _owner(tree: Path) -> Optional[str]:
     """``task_id`` from the worktree-owner marker in a linked worktree's gitdir, else None."""
     try:
@@ -69,9 +74,11 @@ def _owner(tree: Path) -> Optional[str]:
 
 
 def card_trees(task_id: Optional[str], path: Optional[str], text: Optional[str] = "",
-               extra: Iterable[str] = ()) -> list[str]:
+               extra: Iterable[str] = (), *, linked_text_only: bool = False) -> list[str]:
     """Git trees on this host that hold the card's work: the workspace and its direct children, linked worktrees
-    whose worktree-owner marker names the card, trees the park text names (``~/code/_wt/<slug>``), and ``extra``."""
+    whose worktree-owner marker names the card, trees the park text names (``~/code/_wt/<slug>``), and ``extra``.
+    ``linked_text_only`` keeps only linked worktrees (a ``.git`` file) among the text-named trees: a shared main
+    checkout a card body merely mentions (``~/code/babybear``) is not the card's work."""
     found: list[Path] = []
     root = Path(path).expanduser() if path else None
     if root is not None and root.is_dir():
@@ -81,12 +88,12 @@ def card_trees(task_id: Optional[str], path: Optional[str], text: Optional[str] 
         except OSError:
             pass
     if task_id:
-        home = Path.home()
+        home = _trees_home()
         for pattern in _WORKTREE_GLOBS:
             found += [p for p in sorted(home.glob(pattern)) if p.is_dir() and _owner(p) == task_id]
     for raw in [*_PATH.findall(text or ""), *extra]:
         p = Path(raw.rstrip(".,;:)]'\"")).expanduser()
-        if p.is_dir() and _is_tree(p):
+        if p.is_dir() and _is_tree(p) and not (linked_text_only and (p / ".git").is_dir()):
             found.append(p)
     out: list[str] = []
     for p in found:
@@ -157,9 +164,9 @@ def tree_state(trees: Iterable[str]) -> Optional[str]:
 
 
 def card_trees_state(task_id: Optional[str], path: Optional[str], text: Optional[str] = "",
-                     extra: Iterable[str] = ()) -> tuple[list[str], Optional[str]]:
+                     extra: Iterable[str] = (), *, linked_text_only: bool = False) -> tuple[list[str], Optional[str]]:
     """``(trees found, unpushed state or None)`` for the card on this host."""
-    trees = card_trees(task_id, path, text, extra)
+    trees = card_trees(task_id, path, text, extra, linked_text_only=linked_text_only)
     return trees, tree_state(trees)
 
 

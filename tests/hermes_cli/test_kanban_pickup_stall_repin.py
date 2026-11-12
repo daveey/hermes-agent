@@ -353,6 +353,33 @@ def test_the_alarms_pool_move_keeps_a_mandatory_pins_label(held, monkeypatch):
     assert place._pin(hub.conn, a) == sorted([POOL, mp.LABEL])
 
 
+def test_the_alarms_run_leaves_a_card_whose_unpushed_tree_is_on_this_host(held, tmp_path, monkeypatch):
+    """agent-e575f77d7d: the re-place is an ordinary queued move, so ``unpushed_state_here`` refuses it; the card
+    stays pinned and the alarm's run goes on (a refusal, not an error that loops)."""
+    import subprocess
+    from pathlib import Path
+    hub, _worker_gw, alarm, (a, b), _unlisted = held
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    tree = tmp_path / "home" / "code" / "_wt" / "stalled"
+    git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+    main = tmp_path / "stalled-main"
+    subprocess.run([*git, "init", "-q", str(main)], check=True, capture_output=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "base"], cwd=main, check=True, capture_output=True)
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "wt/stalled", str(tree)], cwd=main, check=True,
+                   capture_output=True)
+    gitdir = (tree / ".git").read_text().split(":", 1)[1].strip()
+    (Path(gitdir) / "hermes-owner.json").write_text(json.dumps({"task_id": a}))
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "wip"], cwd=tree, check=True, capture_output=True)
+    out = _move(a, [f"machine:{X}"])
+    # The tool error carries move_queued's message, not its reason_code.
+    assert out.get("ok") is not True and "unpushed commits in" in out["error"], out
+    assert "another machine cannot resume it" in out["error"], out
+    assert place._pin(hub.conn, a) == [f"machine:{M}"]
+    assert not hub.conn.execute("SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'moved'", (a,)).fetchone()
+    assert _move(b, [f"machine:{X}"]).get("ok") is True  # a card with no tree here still moves
+    assert kb.get_task(hub.conn, alarm).status == "running"
+
+
 def test_the_hold_alarm_text_names_the_supported_command():
     assert "kanban_move command below" in kps._HOST_GROUPS["hold"][2]
     text = rp.howto(M)

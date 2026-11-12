@@ -24,6 +24,12 @@ Guards:
   in addition to satisfying the assignee's existing profile-tool check.
 * a reason claiming ship/landing custody needs ``host_reason`` (``ship_custody_portable``): ship lands from every
   machine (:mod:`hermes_cli.kanban_move_ship`).
+* a card leaving this host (no match is this host) while a tree of it here is dirty or has commits on no remote is
+  refused ``unpushed_state_here`` unless ``force`` (then the event carries ``left_unpushed_state``). Its trees are
+  :func:`hermes_cli.kanban_move_pool.card_trees`: the workspace, owner-marked linked worktrees (``~/code/_wt/<slug>``)
+  and linked worktrees named in the body, the newest comment or the newest checkpoint. On 11-11 a hub card whose
+  ``~/code/_wt`` trees held unpushed commits was moved to worker-2, which could not reach them and moved it back.
+  Limitation: only the host holding the trees can see them, so a move issued from another host is blind to them.
 
 Every move is a ``moved`` event ``{from_machine, runs_on, previous_runs_on, reason, move_no, forced}``: the audit log.
 """
@@ -35,6 +41,7 @@ from typing import Any, Mapping, Optional
 
 DEFAULT_MAX_MOVES = 3
 MOVED_EVENT = "moved"
+UNPUSHED_HERE = "unpushed_state_here"
 
 
 class MoveRefused(ValueError):
@@ -183,8 +190,41 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
     back = [m for m in matches if m in left]
     if back and len(back) == len(matches) and not force:
         raise MoveRefused("ping_pong", f"the card already left {', '.join(back)}; pass force to move it back")
+    if me not in matches:  # git reads: check() runs before every caller's write transaction
+        _trees, state = kmp.card_trees_state(task_id, row["workspace_path"], _card_text(conn, task_id),
+                                             linked_text_only=True)
+        if state and not force:
+            raise MoveRefused(UNPUSHED_HERE, (
+                f"{state} on {me}: another machine cannot resume it. Push the branch (or let the card's run publish "
+                "it) and move again, or pass force to leave it"))
+        if state:
+            host = {**host, "left_unpushed_state": state}
     return {"runs_on": labels, "previous": wn._parse(row["runs_on"]), "matches": matches, "move_no": len(past) + 1,
             "forced": bool(back and force), "me": me, "host": host}
+
+
+def _card_text(conn: sqlite3.Connection, task_id: str) -> str:
+    """Body, newest comment and newest checkpoint: where a card names its ``~/code/_wt/<slug>`` trees."""
+    parts = []
+    for sql in ("SELECT body FROM tasks WHERE id = ?",
+                "SELECT body FROM task_comments WHERE task_id = ? ORDER BY id DESC LIMIT 1"):
+        try:
+            row = conn.execute(sql, (task_id,)).fetchone()
+        except sqlite3.Error:
+            row = None
+        parts.append(str(row[0] or "") if row else "")
+    try:
+        row = conn.execute("SELECT metadata, summary FROM task_runs WHERE task_id = ? AND outcome = 'continued' "
+                           "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+    except sqlite3.Error:
+        row = None
+    if row:
+        try:
+            meta = json.loads(row[0]) if row[0] else {}
+        except ValueError:
+            meta = {}
+        parts.append(str((meta.get("checkpoint") if isinstance(meta, dict) else None) or row[1] or ""))
+    return "\n".join(parts)
 
 
 def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: str, checkpoint: str,
