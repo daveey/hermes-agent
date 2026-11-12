@@ -19,10 +19,14 @@ PATH_TOKEN = re.compile(r"(?<![\w/])(?:/home/[^/\s`\"']+|~)/\.hermes/kanban/(?:e
 
 
 def _label_members(labels: set[str]) -> set[str] | None:
-    """Every registry machine carrying any of ``labels``; None (fail closed) when unreadable or a label is empty."""
+    """Every registry machine carrying any of ``labels``; None (fail closed) when unreadable, stale or a label is empty.
+
+    Stale = no successful registry fetch within two TTLs: a membership frozen by an outage would miss a machine
+    labelled since, so its receipt could appear to cover every destination. [daveey]
+    """
     from hermes_cli import kanban_worker_node as wn
     try:
-        snapshot = wn.registry()
+        snapshot = wn.registry_fresh(2 * wn.REGISTRY_TTL_S)
     except Exception:  # health: allow BLE001 -- no sync identity (SyncUnavailable) or broken registry: fail closed
         return None
     machines = snapshot.get("machines") if isinstance(snapshot, dict) else None

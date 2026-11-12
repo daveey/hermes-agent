@@ -47,7 +47,7 @@ DEFAULT_PICKUP_BATCH = 4
 # rows, so ship's land gate refused) are refilled by kanban_pickup_history.
 _CHILD_TABLES = ("task_runs", "task_comments", "task_attachments", "task_events")
 
-_REGISTRY: dict[str, Any] = {"at": None, "value": None, "retry": False}
+_REGISTRY: dict[str, Any] = {"at": None, "value": None, "retry": False, "ok_at": None}
 _REGISTRY_LOCK = threading.Lock()
 _FETCH: Optional[Callable[[], Mapping[str, Any]]] = None
 
@@ -211,7 +211,7 @@ def set_registry_fetch(fn: Optional[Callable[[], Mapping[str, Any]]]) -> None:
     global _FETCH
     with _REGISTRY_LOCK:
         _FETCH = fn
-        _REGISTRY.update(at=None, value=None, retry=False)
+        _REGISTRY.update(at=None, value=None, retry=False, ok_at=None)
 
 
 def registry() -> Optional[Mapping[str, Any]]:
@@ -221,6 +221,21 @@ def registry() -> Optional[Mapping[str, Any]]:
     # into another HTTP request. The Board still authorizes every actual lease.
     with _REGISTRY_LOCK:
         return _registry_locked()
+
+
+def registry_fresh(max_age_s: float) -> Optional[Mapping[str, Any]]:
+    """:func:`registry`, but None unless its last successful fetch is within ``max_age_s``.
+
+    ``registry()`` keeps the last good snapshot through an outage (the Board still
+    authorizes every lease). A caller that must not act on a frozen membership,
+    such as the carried-input exemption, reads this instead and fails closed. [daveey]
+    """
+    with _REGISTRY_LOCK:
+        value = _registry_locked()
+        ok_at = _REGISTRY.get("ok_at")
+    if ok_at is None or time.monotonic() - ok_at > max_age_s:
+        return None
+    return value
 
 
 def _registry_locked() -> Optional[Mapping[str, Any]]:
@@ -240,7 +255,8 @@ def _registry_locked() -> Optional[Mapping[str, Any]]:
         _log.info("kanban worker node: machine registry unavailable (%s: %s)", type(exc).__name__, exc)
         return _REGISTRY["value"]
     value = {"me": raw.get("me"), "machines": {m["name"]: m for m in raw.get("machines") or [] if m.get("name")}}
-    _REGISTRY.update(at=time.monotonic(), value=value, retry=False)
+    now = time.monotonic()
+    _REGISTRY.update(at=now, value=value, retry=False, ok_at=now)
     return value
 
 

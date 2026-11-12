@@ -139,6 +139,7 @@ def test_registry_without_sync_identity_fails_closed(carried, monkeypatch):
 def test_text_without_carried_path_never_reads_the_registry(monkeypatch):
     calls = []
     monkeypatch.setattr(wn, "registry", lambda: calls.append(1))  # counted, since _label_members swallows raises
+    monkeypatch.setattr(wn, "registry_fresh", lambda *_: calls.append(1), raising=False)
     body = "Implement the approved plan."
     assert ce.without_carried_inputs(body, {"worker_queue": {"hub": POOL}}) == body
     assert kp.portable_reason({"title": "Implement plan", "body": body}, {"worker_queue": {"hub": POOL}}) is None
@@ -151,3 +152,55 @@ def test_denied_card_queue_labels_skip_a_verified_carried_path(carried):
     args = {"title": "Implement plan", "body": carried["body"], "assignee": "default"}
     out = hap.pool_route(args, cfg, "hub", {}, None, machine_ok=lambda _: True)
     assert out["runs_on"] == [POOL], out
+
+
+# --- PR 1384 review note 3: a stale registry snapshot fails closed -----------------------------------------------
+
+class _Clock:
+    """``wn.time`` stand-in: a hand-moved ``monotonic``, everything else from :mod:`time`."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+@pytest.fixture
+def stale(carried, monkeypatch):
+    """One good fetch (``pool:worker`` = {worker-2}, covered by the receipt), then every fetch fails."""
+    clock = _Clock()
+    monkeypatch.setattr(wn, "time", clock)
+    machines = [_machine("hub", ["linux"]), _machine("worker-2", ["linux", POOL])]
+    state = {"up": True}
+
+    def fetch():
+        if not state["up"]:
+            raise OSError("board unreachable")
+        return {"me": "hub", "machines": machines}
+
+    wn.set_registry_fetch(fetch)
+    cfg = {"worker_queue": {"hub": POOL}}
+    assert NAME not in ce.without_carried_inputs(carried["body"], cfg)  # fresh: exempt
+    state["up"] = False
+    return {**carried, "clock": clock, "cfg": cfg, "machines": machines}
+
+
+def test_stale_registry_snapshot_fails_closed(stale):
+    # A worker-3 labelled pool:worker during the outage would be invisible to a frozen snapshot.
+    stale["clock"].now += 2 * wn.REGISTRY_TTL_S + 1
+    assert ce.without_carried_inputs(stale["body"], stale["cfg"]) == stale["body"]
+
+
+def test_short_registry_blip_keeps_the_exemption(stale):
+    stale["clock"].now += wn.REGISTRY_TTL_S + 1  # the refetch is due and fails, but the last success is recent
+    assert NAME not in ce.without_carried_inputs(stale["body"], stale["cfg"])
+
+
+def test_dispatcher_registry_keeps_last_known_good(stale):
+    stale["clock"].now += 10 * wn.REGISTRY_TTL_S
+    snapshot = wn.registry()
+    assert snapshot is not None and set(snapshot["machines"]) == {"hub", "worker-2"}
