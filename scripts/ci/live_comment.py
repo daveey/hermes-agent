@@ -396,6 +396,16 @@ def _list_artifacts(token: str, repo: str, run_id: str) -> list[dict]:
     )
 
 
+# Why the last ``_download_artifact`` call returned None ("" after a success). The strict snapshot error names it:
+# the targeted refresh for PR1661 (run 43279407344, 2026-11-12) logged only "download failed", with no cause.
+last_download_error = ""
+
+
+def _download_failed(why: str) -> None:
+    global last_download_error
+    last_download_error = why
+
+
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Redirect handler that never follows — used to capture the Location."""
 
@@ -411,10 +421,12 @@ def _download_artifact(
     Returns the path to ``review-status.json`` inside the extracted dir,
     or ``None`` if the download or extraction failed.
     """
+    global last_download_error
+    last_download_error = ""
     _owner, _repo_name = repo.split("/")
     archive_download_url = artifact.get("archive_download_url", "")
     if not archive_download_url:
-        return None
+        return _download_failed("no archive_download_url")
 
     # The archive_download_url is an API URL that 302s to a signed blob
     # URL. Hop 1 authenticates to the API; hop 2 follows the redirect
@@ -422,6 +434,7 @@ def _download_artifact(
     # carries both a SAS token and an Authorization header (401).
     opener = urllib.request.build_opener(_NoRedirectHandler)
     location = ""
+    why = "no redirect from the archive API"
     try:
         opener.open(urllib.request.Request(archive_download_url, headers={
             "Authorization": f"Bearer {token}",
@@ -431,10 +444,12 @@ def _download_artifact(
         }), timeout=30)
     except urllib.error.HTTPError as e:
         location = e.headers.get("Location", "") if e.code == 302 else ""
-    except Exception:
+        why = f"archive API HTTP {e.code}"
+    except Exception as e:  # health: allow BLE001 -- retry boundary: any failure is recorded and retried by the caller
         location = ""
+        why = f"archive API {type(e).__name__}: {e}"[:200]
     if not location:
-        return None
+        return _download_failed(why)
 
     zip_path = dest_dir / f"{artifact['name']}.zip"
     try:
@@ -444,21 +459,21 @@ def _download_artifact(
             timeout=60,
         ) as resp:
             zip_path.write_bytes(resp.read())
-    except Exception:
-        return None
+    except Exception as e:  # health: allow BLE001 -- retry boundary: any failure is recorded and retried by the caller
+        return _download_failed(f"blob download {type(e).__name__}: {e}"[:200])
 
     extract_dir = dest_dir / artifact["name"]
     extract_dir.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(zip_path) as zf:
             if any(".." in name or name.startswith("/") for name in zf.namelist()):
-                return None
+                return _download_failed("unsafe path in archive")
             zf.extractall(extract_dir)
-    except Exception:
-        return None
+    except Exception as e:  # health: allow BLE001 -- retry boundary: any failure is recorded and retried by the caller
+        return _download_failed(f"unzip {type(e).__name__}: {e}"[:200])
 
     status_file = extract_dir / "review-status.json"
-    return status_file if status_file.exists() else None
+    return status_file if status_file.exists() else _download_failed("no review-status.json in archive")
 
 
 def _parse_status_file(status_file: Path) -> list[dict]:
@@ -476,6 +491,7 @@ def _parse_status_file(status_file: Path) -> list[dict]:
 
 def fetch_all_review_statuses(
     token: str, repo: str, run_id: str, *, strict: bool = False,
+    retry_delays: tuple[float, ...] = (), sleep=time.sleep,
 ) -> list[dict]:
     """Fetch and merge all review-status artifacts from the run.
 
@@ -488,7 +504,13 @@ def fetch_all_review_statuses(
     Returns the merged list of ``{source, results: [...]}`` objects.
     In strict snapshot mode, collection errors refuse publication instead of
     erasing prior review sections. Artifacts not uploaded yet remain absent.
+
+    ``retry_delays``: a failed download is retried after each delay in turn (seconds; one budget shared by the whole
+    call, not per artifact), so one transient archive/blob error does not lose the snapshot. Why: the targeted
+    refresh for PR1661 (2026-11-12 18:24Z) failed once on an artifact uploaded 26 s earlier, and its "running on"
+    comment stood for 45 min.
     """
+    delays = list(retry_delays)
     all_statuses: list[dict] = []
     temp_base = Path(tempfile.gettempdir()) / "review-status-artifacts"
 
@@ -513,10 +535,20 @@ def fetch_all_review_statuses(
     run_dl_dir.mkdir(parents=True, exist_ok=True)
 
     for artifact in rs_artifacts:
+        attempts = 1
         status_file = _download_artifact(token, repo, artifact, run_dl_dir)
+        while status_file is None and delays:
+            wait = delays.pop(0)
+            print(f"  review-status artifact {artifact.get('name', '?')}: download failed "
+                  f"({last_download_error or 'unknown'}); retry in {wait:g}s", file=sys.stderr)
+            sleep(wait)
+            attempts += 1
+            status_file = _download_artifact(token, repo, artifact, run_dl_dir)
         if status_file is None:
             if strict:
-                raise RuntimeError("review-status artifact download failed")
+                raise RuntimeError(
+                    f"review-status artifact download failed ({artifact.get('name', '?')}: "
+                    f"{last_download_error or 'unknown'}; {attempts} attempt(s))")
             continue
         if strict:
             content = status_file.read_text(encoding="utf-8-sig").strip().removeprefix("review_status=")
