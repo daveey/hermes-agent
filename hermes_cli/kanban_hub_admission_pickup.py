@@ -129,6 +129,8 @@ def screen(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, ids:
             skips[tid] = ("other", f"hub admission denied: {str(prior.get('why') or '')[:150]}")
             continue
         if down or conn.in_transaction:
+            if not down:
+                _log.warning("hub admission: pickup of %s deferred, the board connection is in a transaction", tid)
             skips[tid] = ("other", UNAVAILABLE)
             continue
         fields = _fields(card, board)

@@ -1,15 +1,18 @@
 """Evidence-checked hub admission, using an exact subscription-only judge."""
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import hashlib
 import json
+import logging
 import sqlite3
 import threading
 import time
 from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 
+_log = logging.getLogger(__name__)
 MODEL = "claude-sonnet-5-5"
 PROVIDER = "anthropic"
 TIMEOUT = 30
@@ -88,7 +91,7 @@ def _cache(key, verdict=None):
 
 
 def admit(card_fields, *, hub_reason=None) -> Verdict:
-    """Deny if the managed subscription pool, rubric or judge is unavailable."""
+    """Deny if the managed subscription pool, rubric or judge is unavailable (each branch logs why)."""
     sha = ""
     try:
         from hermes_cli import kanban_comment_relay
@@ -98,6 +101,7 @@ def admit(card_fields, *, hub_reason=None) -> Verdict:
         from agent import auxiliary_client as aux
         from agent.model_routing_managed import managed_config
         if managed_config() is None:
+            _log.warning("hub admission unavailable: managed subscription routing is off")
             return Verdict()
         body, sha = _skill()
         key = hashlib.sha256(json.dumps([card_fields.get("title") or "", card_fields.get("body") or "",
@@ -108,17 +112,45 @@ def admit(card_fields, *, hub_reason=None) -> Verdict:
             return replace(_parse(json.dumps(payload), card_fields, hub_reason, sha), cached=True)
         route = {}
         deadline = time.monotonic() + TIMEOUT
-        response = _bounded(lambda: _ask(aux, body, card_fields, hub_reason, route, deadline), deadline)
+        with _owner_scope():
+            response = _bounded(lambda: _ask(aux, body, card_fields, hub_reason, route, deadline), deadline)
         if response is None:
+            _log.warning("hub admission unavailable: the judge did not answer within %ss", TIMEOUT)
             return Verdict(skill_sha=sha)
         if (route.get("provider"), route.get("model"), route.get("billing_group")) != (
                 PROVIDER, MODEL, "subscription"):
+            _log.warning("hub admission unavailable: route %s/%s/%s is not the subscription judge",
+                         route.get("provider"), route.get("model"), route.get("billing_group"))
             return Verdict(skill_sha=sha)
         verdict = _parse(response.choices[0].message.content, card_fields, hub_reason, sha)
         _cache(key, verdict)
         return verdict
-    except Exception:  # health: allow BLE001 -- a judge outage must deny placement, never fall back
+    except Exception as exc:  # health: allow BLE001 -- a judge outage must deny placement, never fall back
+        _log.warning("hub admission unavailable: %s: %s", type(exc).__name__, str(exc)[:300])
         return Verdict(skill_sha=sha)
+
+
+@contextlib.contextmanager
+def _owner_scope():
+    """Bind the launch profile's secret scope for a judge call made outside any turn. [daveey]
+
+    The gateway dispatcher ticks in an empty Context, so hub pickup's judge ran unscoped and, on a
+    multiplexing gateway, its first credential read raised ``UnscopedSecretError``: every cache-miss
+    card was "unavailable" (t_01a1cff283f89392). The auto-decomposer binds the same scope. A bound
+    scope (a creating turn's) is kept; the judge thread inherits it via ``copy_context``.
+    """
+    from agent.secret_scope import current_secret_scope, is_multiplex_active, reset_secret_scope, set_secret_scope
+    if not is_multiplex_active() or current_secret_scope() is not None:
+        yield
+        return
+    from hermes_constants import get_hermes_home
+    from tui_gateway.launch_profile_policy import owner_secret_scope
+    home = get_hermes_home()
+    token = set_secret_scope(owner_secret_scope(home), profile_home=str(home))
+    try:
+        yield
+    finally:
+        reset_secret_scope(token)
 
 
 def _ask(aux, body, card_fields, hub_reason, route, deadline):
