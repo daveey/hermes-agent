@@ -8,6 +8,7 @@ import asyncio
 from functools import partial
 from pathlib import Path
 import sys
+import time
 
 from gateway.session_busy_controls import authorize
 from hermes_state_runtime import RuntimeStoreError
@@ -592,9 +593,19 @@ def _compression_lineage(db, session_id):
 def subagent_row(record):
     """One ``subagent.list`` row; ``child_session_id`` is the child's own stored session, the one
     ``session.transcript`` reads for its ``subagent_id``."""
+    from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, local_scope
+    from hermes_cli.turn_process_execution_observations import registry_subagent
+
     child = getattr(record.get('agent'), 'session_id', None)
-    return {**{key: record.get(key) for key in _SUBAGENT_FIELDS},
-            'child_session_id': child if isinstance(child, str) and child else None}
+    row = {**{key: record.get(key) for key in _SUBAGENT_FIELDS},
+           'child_session_id': child if isinstance(child, str) and child else None}
+    try:
+        gateway, profile = local_scope()
+        row['execution_observations'] = [registry_subagent(record, gateway=gateway, profile=profile, now=time.time())]
+    except ADAPTER_ERRORS:
+        # Optional evidence never changes roster discovery or control authority.
+        row['execution_observations'] = []
+    return row
 
 
 def subagent_tail(records, subagent_id):
