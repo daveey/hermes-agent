@@ -779,11 +779,13 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
                          "claimed_mono": time.monotonic()}
                 claims.append(claim)
             task = _kb.get_task(conn, sub["task_id"])
+            from gateway.kanban_wake_sibling import tui_formatter
             from gateway.kanban_watchers_notifier import coalesce_superseded_blocks, diagnostic_event
             from gateway.warning_notifications import DiagnosticText
             sub_texts = []
+            fmt = tui_formatter(conn, sub, _format_kanban_event_text)  # a waking local row's turn carries some [daveey]
             for ev in coalesce_superseded_blocks(events):  # a block superseded by a drop in this batch renders once
-                text = _format_kanban_event_text(sub, task, ev, slug)
+                text = fmt(sub, task, ev, slug)
                 if text:
                     text = DiagnosticText(text) if diagnostic_event(ev) else _KanbanText(text)
                     from hermes_cli.kanban_failure_notice import event_key

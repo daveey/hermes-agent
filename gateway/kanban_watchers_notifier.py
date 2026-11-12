@@ -337,7 +337,9 @@ class _Collector:
         task = self.kb.get_task(conn, sub["task_id"])
         logger.debug("kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                      len(events), sub["task_id"], slug, old_cursor, cursor)
-        return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug}
+        from gateway.kanban_wake_sibling import has_tui_sibling
+        return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug,
+                "tui_notice": has_tui_sibling(conn, sub)}
 
     def collect_board(self, slug: str) -> None:
         """Claim events on one board, appending delivery dicts to ``deliveries``."""
@@ -707,6 +709,11 @@ class _KanbanNotification:
             synth += "\n" + t("gateway.kanban.wake.handoff", summary=self.wake_handoff)
         if self.wake_review_detail:
             synth += "\n" + t("gateway.kanban.wake.review_detail", reason=self.wake_review_detail)
+        if self.d.get("tui_notice"):
+            # The chat's tui row stays silent for these events (kanban_wake_sibling): this turn shows its notice.
+            from gateway.kanban_wake_sibling import notice_lines
+            if lines := notice_lines(sub, task, self.d["events"], self.board_slug):
+                synth += "\n" + "\n".join(lines)
         self.synth = synth + "\n\n" + t("gateway.kanban.wake.guidance")
         # What a later wake for the same chat folds from while this one still waits (kanban_wake_fold).
         self.wake_card = {"task_id": sub["task_id"], "board": self.board_slug or "",
