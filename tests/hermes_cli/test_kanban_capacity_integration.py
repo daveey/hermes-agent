@@ -88,6 +88,44 @@ def test_tool_cli_rest_read_actual_persisted_evidence(capacity_board, monkeypatc
     assert "capacity.dependency" in capsys.readouterr().out
 
 
+def test_provider_phase_visible_through_tool_cli_and_rest(capacity_board, monkeypatch, capsys):
+    import json
+    from argparse import Namespace
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from hermes_cli import kanban as cli
+    from tools.kanban_show import show
+    from tests.plugins.test_kanban_foreign_card_api import _load_plugin_router
+
+    conn, ids, _ = capacity_board
+    monkeypatch.setattr(queue, "_running_and_limit", lambda *a: (0, 4))
+    app = FastAPI()
+    app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
+    with TestClient(app) as client:
+        for tid, started in zip(ids[:2], (False, True), strict=True):
+            kb.claim_task(conn, tid)
+            task = kb.get_task(conn, tid)
+            if started:
+                with kb.write_txn(conn):
+                    kb._append_event(conn, tid, "worker_bound", {
+                        "pid": 222, "started_at": "fixture|birth", "claim_lock": task.claim_lock,
+                    }, run_id=task.current_run_id)
+            with kb.write_txn(conn):
+                kb._append_event(conn, tid, "rate_limited", {"exit_code": 75}, run_id=task.current_run_id)
+            evidence.record(conn, dispatch.DispatchResult(rate_limited=[tid]), board="default", machine="m")
+            tool = json.loads(show({"task_id": tid}))
+            assert cli._cmd_show(Namespace(task_id=tid, json=True, board=None)) == 0
+            command = json.loads(capsys.readouterr().out)
+            response = client.get(f"/api/plugins/kanban/tasks/{tid}")
+            assert response.status_code == 200
+            phase = "post_start" if started else "post_claim"
+            for payload in (tool, command, response.json()):
+                reason = payload["capacity_evidence"]["reasons"][0]
+                assert reason["code"] == "capacity.provider_limit" and reason["phase"] == phase
+            assert cli._cmd_show(Namespace(task_id=tid, json=False, board=None)) == 0
+            assert phase in capsys.readouterr().out
+
+
 def test_unmapped_restriction_remains_explicit(capacity_board):
     conn, ids, _ = capacity_board
     evidence.record(conn, dispatch.DispatchResult(at_capacity="max_in_progress"), board="default", machine="m")

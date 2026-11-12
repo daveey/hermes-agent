@@ -106,6 +106,25 @@ def test_restrictions_and_no_backlog_are_not_unexplained_idle():
         assert result["explained_seconds"] == 10
 
 
+@pytest.mark.parametrize("kind", ["released", "reclaimed", "owner_unavailable", "crashed", "rate_limited",
+                                  "timed_out", "stale", "reconciled", "owner_restart_lost",
+                                  "protocol_violation", "oom_killed", "signaled"])
+def test_explicit_retry_ready_receipt_is_required(kind):
+    for payload, expected in (({}, None), ({"retry_status": "review"}, None),
+                              ({"retry_status": "ready"}, 2)):
+        rows = attempts([event(1, kind, 10, 7, **payload), event(2, "claimed", 12, 8, lock="h")],
+                        board="one", task_id="t", now=20)
+        assert rows[0]["ready_to_claim_s"] == expected
+
+
+def test_summary_receipt_resolution_and_percentile_minima():
+    rows = attempts(history(), board="one", task_id="t", now=20)
+    assert summarize(rows)["receipt_resolution_seconds"] == 1
+    assert summarize(rows * 2)["ready_to_claim_s"]["p50"] == 2
+    assert summarize(rows * 19)["ready_to_claim_s"]["p95"] is None
+    assert summarize(rows * 20)["ready_to_claim_s"]["p95"] == 2
+
+
 def test_conflicting_shared_slot_readings_are_unknown():
     result = idle_coverage([interval(), interval("two", admissible_slots=4)])
     assert result["unknown_seconds"] == 10
