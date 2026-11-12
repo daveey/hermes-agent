@@ -202,3 +202,22 @@ def test_tool_placement_hub_from_another_gateway(on_gateway, monkeypatch, admit)
     else:
         assert sent == [] and not result.get("ok")
         assert result["hub_admission"]["admit"] is False
+
+
+def test_tool_non_pool_assignee_refusal_names_the_pool_route(on_gateway):
+    """t_01a1d09e42e2c4fd (sweep slug profile-not-in-pool, evidence t_01a1cde9714608c4): a hub chat filed
+    Mac-only tailnet_exec work as assignee mac-ops, a profile no pool worker runs, so the card sat in the
+    hub's own queue. Admission now refuses it; the refusal must name the assignee as the pin and the pool
+    route (a pool profile plus runs_on capability:tailnet-exec), not just "assignee not allowlisted"."""
+    judge = on_gateway("hub")
+    judge.admit_next = False
+    result = json.loads(kt._handle_create({
+        "title": "Mini disk: durable headroom so the governor disk hold releases", "assignee": "mac-ops",
+        "requires": [], "body": "Do, via tailnet_exec host=mini: audit the CI runner work dir and free space."}))
+    assert not result.get("ok") and result.get("created") is False, result
+    assert len(judge.calls) == 1
+    text = result["error"]
+    assert "'mac-ops'" in text and "pool profiles: default" in text, text
+    assert "assignee='default'" in text and "capability:tailnet-exec" in text, text
+    with kbc.connect() as conn:
+        assert kb.list_tasks(conn) == []
