@@ -98,11 +98,9 @@ def _assignment_routes(task) -> bool:
         return False
 
 
-# Conservative advisory only, not an authorization classifier. The nudge is fail-safe: it fires only on a
-# positive in-gate signal (_RECOMMENDATION_IN_GATE in the action or the recommended choice) and the
-# boundary/person patterns below only veto it. A denylist alone failed open twice in review (PR1220:
-# t_01a1ce72aa3e4cb0 missed 17/17, t_01a1ce964f2521ad 39/52), because the space of David-only asks is
-# open-ended; a missed nudge costs one red-sweep unblock, a wrong one teaches a worker to act. [daveey]
+# Noise filter only, not an authorization classifier: no regex can tell which asks need David (PR1220
+# reviews missed 17/17, 39/52, then 30/38). The safety comes from RECOMMENDATION_WARNING being
+# conditional; these patterns just keep it off asks with no code signal or an obvious boundary. [daveey]
 _RECOMMENDATION_IN_GATE = re.compile(
     r"\b(?:prs?|pull[ -]requests?|commits?|tests?|testing|unit[ -]tests?|fixtures?|modules?|helpers?|shims?|"
     r"renam\w*|refactor\w*|timeouts?|retr(?:y|ies)|backoff|configs?|configuration|(?:feature[ -])?flags?|"
@@ -177,18 +175,28 @@ def recommended_choice_warning(human_request) -> dict:
     text = " ".join(str(human_request.get(key) or "")
                     for key in ("action", "scope", "why_human", "evidence"))
     text += " " + " ".join(str(choice.get(key) or "") for choice in choices for key in ("label", "value"))
+    # The documented ask template ("Reply A or B in this chat ... archive = drop it.") is not a boundary.
+    text = _ASK_TEMPLATE.sub(" ", text)
     if _RECOMMENDATION_BOUNDARY.search(text) or _RECOMMENDATION_NAMED_PERSON.search(text):
         return {}
-    # The block has already landed and David has been asked, so the advice is for this card's comment
-    # and for next time, never "apply it now": a worker can't unblock itself, and David may pick the
-    # other option. [daveey]
-    return {"warning": "this looks like a decision you could have applied yourself under David's "
-            "standing rule: in scope, reversible, and within existing review and landing gates, with no "
-            "spend beyond standing limits, permissions, credentials, other people, safety or privacy "
-            "consent, hard-to-reverse effects, or toss-up. This block stands and this run still ends, so "
-            "do not apply the option now: comment your recommended pick and how to reverse it so David "
-            "can just unblock. Next time, apply the recommended option and comment the pick instead of "
-            "blocking, unless it is a toss-up. This warning grants no permission."}
+    return {"warning": RECOMMENDATION_WARNING}
+
+
+# Conditional and non-affirming: it never says this ask was in-gate, so a misfire on an ask that really
+# needs David teaches nothing wrong (PR1220 review t_01a1cea8ae43e248). The block has landed and David
+# is asked, so the advice is for this card's comment and for next time, never "apply it now". [daveey]
+RECOMMENDATION_WARNING = (
+    "You marked a recommended option. Under David's standing rule a decision is yours to apply, not "
+    "ask, only when it is in scope, reversible, and within the existing review and landing gates, and "
+    "crosses none of: spend beyond standing limits, permissions or credentials, other people or outward "
+    "communication, safety or privacy consent, production systems or devices, hard-to-reverse effects, "
+    "or a real toss-up. If any of these applies, ignore this note; it does not judge this ask and grants "
+    "no permission. Otherwise: this block stands and this run still ends, so do not apply the option "
+    "now; comment your recommended pick and how to reverse it so David can just unblock, and next time "
+    "apply the recommended option and comment the pick instead of blocking.")
+_ASK_TEMPLATE = re.compile(
+    r"\breply\s+(?:with\s+)?(?:[a-z0-9]|one|your)\b[^.;]{0,40}?\bin\s+this\s+chat\b|\barchiv\w*\s*=\s*[^.;]*",
+    re.IGNORECASE)
 
 
 ASK_LINT_CODE = "user_ask_incomplete"

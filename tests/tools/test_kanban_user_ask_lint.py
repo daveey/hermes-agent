@@ -196,6 +196,34 @@ def test_recommendation_nudge_still_fires_for_in_gate_code_decisions(action):
     assert "apply the recommended option" in recommended_choice_warning(request).get("warning", "")
 
 
+# The kanban_block schema's own ask template must not veto an in-gate ask (review t_01a1cea8ae43e248:
+# "reply" and "drop" vetoed 17/17), while a boundary outside the template still does. [daveey]
+@pytest.mark.parametrize("action,warns", [
+    ("Pick the retry backoff for the poller. Reply A or B in this chat. Unblock = build the pick; "
+     "archive = drop it.", True),
+    ("Choose fixture timing. Reply with A in this chat. Unblock = proceed; archive = delete the branch.", True),
+    ("Pick the retry backoff. Reply A or B in this chat. Unblock = drop the users table; archive = skip.", False),
+    ("Reply to the recruiter about the PR in this chat. Unblock = proceed; archive = skip.", False),
+])
+def test_recommendation_nudge_ignores_the_canonical_ask_template(action, warns):
+    from hermes_cli.kanban_block_policy import recommended_choice_warning
+    request = {"interaction": "reply", "action": action, "scope": "this card",
+               "choices": [{"label": "A (recommended)", "value": "a"}, {"label": "B", "value": "b"}]}
+    assert bool(recommended_choice_warning(request)) is warns
+
+
+def test_recommendation_warning_is_conditional_not_a_verdict():
+    """No regex can classify David-only asks, so a misfire must be harmless: the note never claims the
+    ask was in-gate and names every boundary as a reason to ignore it."""
+    from hermes_cli.kanban_block_policy import RECOMMENDATION_WARNING as text
+    assert "looks like" not in text and "could have applied" not in text
+    assert "If any of these applies, ignore this note" in text and "does not judge this ask" in text
+    for boundary in ("spend", "permissions or credentials", "other people or outward communication",
+                     "safety or privacy consent", "production systems or devices", "hard-to-reverse",
+                     "toss-up", "grants no permission"):
+        assert boundary in text
+
+
 def test_worker_guidance_applies_recommendation_with_boundaries():
     from agent.prompt_builder import KANBAN_GUIDANCE
     for phrase in ("Comment the pick and how to reverse it", "permissions or credentials",
