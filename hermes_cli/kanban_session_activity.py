@@ -36,6 +36,7 @@ from hermes_cli.kanban_session_activity_attention import AttentionCache as _Atte
 from hermes_cli.kanban_session_activity_attention import run_checks as _run_done_checks
 from hermes_cli.kanban_session_activity_card_details import _add_card_details
 from hermes_cli.kanban_watch import not_watch_sql as _not_watch
+from hermes_cli.kanban_links_refresh import ScopeRefresher
 import contextlib
 import json
 import logging
@@ -948,7 +949,8 @@ def _without_local_open_duplicates(rows: list[dict[str, Any]], *, gateway: str,
 _links_lock = threading.Lock()
 # (expires, scope, fingerprint, cards, origin rows): origin rows are the ledger ``project()`` rows the cards came
 # from, released ones included (``remote_links_and_origin_rows``).
-_links_cache: tuple[float, tuple, tuple, list[dict[str, Any]], list[dict[str, Any]]] | None = None
+_LINKS_SCOPE_CAP = 16
+_links_cache: dict[tuple, tuple] = {}
 _origin_rows_sink = threading.local()  # .rows: set by _project_remote_links for _store_links
 
 
@@ -1011,20 +1013,20 @@ def _links_entry(stale_ok: bool, *, with_rows: bool = False):
 
 
 def _links_lookup(scope: tuple, stale_ok: bool) -> tuple:
+    hit = _links_cache.get(scope)
+    # Even revision/fingerprint reads can wait on Python locks. A matching warm
+    # stale read must precede ALL of that work; an evicted/cold scope still waits.
+    if stale_ok and hit is not None:
+        _refresh_links_in_background(scope)
+        return hit
     fingerprint = _links_fingerprint()
-    hit = _links_cache
-    if hit is not None and hit[1] == scope:
-        fresh = hit[2] == fingerprint and time.monotonic() < hit[0]
-        if fresh:
-            return hit
-        if stale_ok:
-            _refresh_links_in_background(scope)
-            return hit
+    if hit is not None and hit[2] == fingerprint and time.monotonic() < hit[0]:
+        return hit
     with _links_lock:
-        hit = _links_cache
-        if hit is not None and hit[1] == scope and hit[2] == fingerprint and time.monotonic() < hit[0]:
+        hit = _links_cache.get(scope)
+        if hit is not None and hit[2] == fingerprint and time.monotonic() < hit[0]:
             return hit
-        if stale_ok and hit is not None and hit[1] == scope:
+        if stale_ok and hit is not None:
             return hit
         return _store_links(scope, fingerprint)
 
@@ -1039,36 +1041,34 @@ def _store_links(scope: tuple, fingerprint: tuple) -> tuple:
         rows = _origin_rows_sink.rows
     finally:
         _origin_rows_sink.rows = None
-    _links_cache = (time.monotonic() + _LINKS_MAX_AGE_S, scope, fingerprint, cards, rows)
-    return _links_cache
-
-
-_links_refreshing = False
-_links_refresh_guard = threading.Lock()
+    entry = (time.monotonic() + _LINKS_MAX_AGE_S, scope, fingerprint, cards, rows)
+    # Copy-on-publish keeps lock-free readers from seeing an intermediate eviction.
+    updated = dict(_links_cache)
+    updated.pop(scope, None)
+    updated[scope] = entry
+    while len(updated) > _LINKS_SCOPE_CAP:
+        del updated[next(iter(updated))]
+    _links_cache = updated
+    return entry
 
 
 def _refresh_links_in_background(scope: tuple) -> None:
-    """At most one background rebuild at a time; readers keep the previous projection meanwhile."""
-    global _links_refreshing
-    with _links_refresh_guard:
-        if _links_refreshing:
+    _links_refresher.submit(scope)
+
+
+def _refresh_links_scope(scope: tuple) -> None:
+    with _links_lock:
+        # ContextVars carry profile/home/board overrides. Process environment may have
+        # changed meanwhile: never publish another origin's projection under this key.
+        if _origin_scope() != scope:
             return
-        _links_refreshing = True
+        fingerprint = _links_fingerprint()
+        hit = _links_cache.get(scope)
+        if hit is None or hit[2] != fingerprint or time.monotonic() >= hit[0]:
+            _store_links(scope, fingerprint)
 
-    def run() -> None:
-        global _links_refreshing
-        try:
-            with _links_lock:
-                fingerprint = _links_fingerprint()
-                if _origin_scope() == scope:
-                    _store_links(scope, fingerprint)
-        except Exception:  # health: allow BLE001 -- a failed rebuild keeps the previous projection; readers must not fail
-            _log.warning("kanban remote links: background rebuild failed; serving the previous projection", exc_info=True)
-        finally:
-            with _links_refresh_guard:
-                _links_refreshing = False
 
-    threading.Thread(target=run, daemon=True, name="kanban-remote-links").start()
+_links_refresher = ScopeRefresher(lambda scope: _refresh_links_scope(scope), _LINKS_SCOPE_CAP)
 
 
 def _project_remote_links() -> list[dict[str, Any]]:
@@ -1940,7 +1940,7 @@ def _reset_cache_for_tests(keep_remote: bool = False) -> None:
         _board_memo.clear()
     _busy.reset()
     with _links_lock:
-        _links_cache = None
+        _links_cache.clear()
     with _cache_lock:
         _cache = None
         _count_scopes.reset_locked()

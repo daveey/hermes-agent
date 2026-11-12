@@ -379,14 +379,15 @@ def _owner_of(known: list[tuple[str, str, str, bool]], owner: Optional[str],
     return (owner if owner is not None else gateways[0] if len(gateways) == 1 else None), "default"
 
 
-def _ledger_fallback(board: str, gateway: str, profile: str, statuses: tuple[str, ...]) -> list[dict[str, Any]]:
+def _ledger_fallback(board: str, gateway: str, profile: str, statuses: tuple[str, ...], *,
+                     stale_ok: bool = False) -> list[dict[str, Any]]:
     """Cold start with an unreadable replica: the ledger's rows for that board, all stale (never "no cards")."""
     from hermes_cli.kanban_session_activity import _remote_links
     try:
-        cards = _remote_links()
-    except Exception as exc:  # health: allow BLE001 -- both sources unreadable: nothing to show, logged
+        cards = _remote_links(stale_ok=True) if stale_ok else _remote_links()
+    except Exception as exc:  # health: allow BLE001 -- log both-source failure, then preserve the failed-read contract
         _log.warning("kanban chat links: replica and ledger both unreadable for %s (%s)", board, exc)
-        return []
+        raise
     out = []
     for c in cards:
         if (c.get("board") != board or c.get("origin_gateway") not in (None, gateway)
@@ -443,7 +444,7 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
             _log.info("kanban chat links: replica %s unreadable (%s); %s", path, exc,
                       "keeping its last rows as stale" if hit else "falling back to the ledger, stale")
             if hit is None:
-                for c in _ledger_fallback(board, gateway, profile, statuses):
+                for c in _ledger_fallback(board, gateway, profile, statuses, stale_ok=stale_ok):
                     if ids is None or c["session"] in ids:
                         out.setdefault((c["session"], c["key"]), c)
                 continue

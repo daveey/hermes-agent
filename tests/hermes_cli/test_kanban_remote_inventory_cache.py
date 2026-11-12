@@ -90,7 +90,7 @@ def test_stale_ok_readers_never_wait_for_a_rebuild(projection):
         assert calls['n'] == 2
     finally:
         gate.set()
-    wait_until(lambda: not activity._links_refreshing, what='the rebuild finished')
+    wait_until(lambda: not activity._links_refresher.busy, what='the rebuild finished')
 
 
 def test_concurrent_readers_wait_for_one_projection(projection):

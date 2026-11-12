@@ -37,6 +37,32 @@ def live(kanban_home):
         ksa._reset_cache_for_tests()
 
 
+@pytest.mark.parametrize('stale_ok', [True, False])
+def test_unreadable_replica_fallback_preserves_stale_policy(tmp_path, monkeypatch, stale_ok):
+    from hermes_cli import profiles
+
+    calls = []
+
+    def remote_links(stale_ok=False):
+        calls.append(stale_ok)
+        return [_ledger_row('t_prior', 's1')]
+
+    monkeypatch.setattr(profiles, 'get_active_profile_name', lambda: 'default')
+    monkeypatch.setattr(ksa, '_remote_links', remote_links)
+    rows = links.replica_cards(['s1'], ME, replicas=[('default', tmp_path / 'absent.db')], stale_ok=stale_ok)
+    assert calls == [stale_ok]
+    assert [(r['id'], r['stale'], r['source']) for r in rows] == [('t_prior', True, 'ledger-fallback')]
+
+
+def test_unreadable_replica_and_cold_ledger_failure_is_not_empty(tmp_path, monkeypatch):
+    def fail(stale_ok=False):
+        raise sqlite3.OperationalError('ledger unreadable')
+
+    monkeypatch.setattr(ksa, '_remote_links', fail)
+    with pytest.raises(sqlite3.OperationalError, match='ledger unreadable'):
+        links.replica_cards(['s1'], ME, replicas=[('default', tmp_path / 'absent.db')], stale_ok=True)
+
+
 def _links(conn):
     return {(r[0], r[1], r[2], r[3]) for r in conn.execute(
         "SELECT task_id, chat_session, kind, released FROM task_chat_links ORDER BY task_id")}
