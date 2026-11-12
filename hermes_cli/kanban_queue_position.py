@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from typing import Any, Optional
 
 _log = logging.getLogger(__name__)
@@ -33,13 +34,14 @@ def _ahead(conn: sqlite3.Connection, task) -> int:
 
 
 def _running_and_limit(conn: sqlite3.Connection, board: Optional[str]) -> tuple[Optional[int], Optional[int]]:
-    """The host's running workers (every board) and its ``max_in_progress`` cap, as the dispatcher counts them."""
+    """The host's running workers (every board) and its ``max_in_progress`` cap, as the dispatcher counts them.
+
+    The board to exclude from the other-board sum is the one ``conn`` is attached to (``kanban_host_counts``),
+    never the process's current board; ``board`` only labels a connection that matches no active board. An
+    unreadable count is unknown (None), not zero or a partial sum."""
     from hermes_cli import kanban_db_dispatch as kbd
-    try:
-        running = kbd.count_running_tasks(conn) + kbd.count_running_tasks_other_boards(board)
-    except Exception:  # health: allow BLE001 -- an unreadable count is unknown, not zero
-        _log.debug("kanban queue position: running count unavailable", exc_info=True)
-        running = None
+    from hermes_cli import kanban_host_counts as khc
+    running = khc.running_on_host(conn)["running"]
     try:
         limit = kbd.resolve_max_in_progress(kbd.configured_max_in_progress())
     except Exception:  # health: allow BLE001 -- an unreadable cap is unknown
@@ -170,6 +172,7 @@ def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Opt
     placed = placement(conn, task.id)
     if placed is not None:
         return placed
+    from hermes_cli import kanban_host_counts as khc
     running, limit = _running_and_limit(conn, board)
     from hermes_cli import kanban_board_share as share
     try:
@@ -177,7 +180,8 @@ def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Opt
     except Exception:  # health: allow BLE001 -- other boards are advisory; an unreadable count is unknown
         _log.debug("kanban queue position: other boards unavailable", exc_info=True)
         elsewhere = None
-    place = {"lane": "local", "ahead": _ahead(conn, task), "running": running, "limit": limit, "approximate": True}
+    place = {"lane": "local", "ahead": _ahead(conn, task), "running": running, "limit": limit, "approximate": True,
+             "board": khc.board_of(conn) or board, "observed_at": int(time.time())}
     if elsewhere:  # only when other boards' cards rank ahead: the single-board payload keeps its shape
         place["ahead_other_boards"] = elsewhere
     return place
@@ -265,6 +269,8 @@ def describe(place: Optional[dict[str, Any]]) -> Optional[str]:
              else "waiting for a local slot")
     if place.get("running") is not None and place.get("limit") is not None:
         words += f", {place['running']}/{place['limit']} running"
+    elif place.get("limit") is not None and "running" in place:
+        words += f", running count unknown (cap {place['limit']})"
     return words + ". " + _NOT_STUCK
 
 

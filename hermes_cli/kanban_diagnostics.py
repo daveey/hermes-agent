@@ -723,8 +723,18 @@ def _last_run_end_ts(runs: Iterable[Any]) -> int:
 
 def _last_ready_entry_ts(events: Iterable[Any], runs: Iterable[Any] = ()) -> int:
     """Latest ready-entry floor; a ``continued`` checkpoint counts only when it resumed straight to ready.
-    The latest run's end bounds it too, whatever event (if any) the requeue left."""
-    events = list(events)
+    The latest run's end bounds it too, whatever event (if any) the requeue left.
+
+    A Board grant returned unused (``kanban_unused_grant``) is a reservation, not execution: its ``claimed``
+    event and its run's end never reset the clock, so a card whose grants keep bouncing keeps its real age
+    (default/t_01a1c6c56a99c3e1, 2026-11-10: ready@1794369068 hid a wait since 1794351914). Actual execution,
+    loss and ready transitions still count. [daveey]"""
+    from hermes_cli.kanban_unused_grant import unused_grant_run_ids
+    events, runs = list(events), list(runs)
+    unused = unused_grant_run_ids(runs, events)
+    if unused:
+        events = [ev for ev in events if _task_field(ev, "run_id", None) not in unused]
+        runs = [r for r in runs if _task_field(r, "id", None) not in unused]
     continued_ready = [_event_ts(ev) for ev in events
                        if _event_kind(ev) == "continued" and _parse_payload(ev).get("status") == "ready"]
     return max([_latest_event_ts(events, _READY_WAIT_FLOOR_KINDS), *continued_ready, _last_run_end_ts(runs)])

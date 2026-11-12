@@ -33,8 +33,8 @@ def ready_since(conn, task_id: str, created_at: Optional[int] = None) -> int:
     included), else its creation."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_diagnostics import _last_ready_entry_ts
-    ended = conn.execute("SELECT MAX(ended_at) AS ended_at FROM task_runs WHERE task_id = ?", (task_id,)).fetchall()
-    since = _last_ready_entry_ts(kb.list_events(conn, task_id), [dict(r) for r in ended])
+    runs = conn.execute("SELECT * FROM task_runs WHERE task_id = ?", (task_id,)).fetchall()
+    since = _last_ready_entry_ts(kb.list_events(conn, task_id), [dict(r) for r in runs])
     return int(since or created_at or 0)
 
 
@@ -61,7 +61,20 @@ def _queue_words(place: dict[str, Any]) -> str:
     words = ahead_words(place, "{n} card(s) ahead of it") if ahead is not None else "queue place unknown"
     if place.get("running") is not None and place.get("limit") is not None:
         words += f", {place['running']}/{place['limit']} worker slots busy"
+    elif place.get("limit") is not None and "running" in place:
+        words += f", running count unknown (cap {place['limit']})"
     return words
+
+
+def _observation(payload: dict[str, Any]) -> str:
+    """``board <b>, observed <HH:MM:SSZ>, admission reason <r | unknown>`` for the notice text (empty on an old
+    payload without those fields)."""
+    if "observed_at" not in payload:
+        return ""
+    stamp = time.strftime("%H:%M:%SZ", time.gmtime(int(payload["observed_at"])))
+    admission = payload.get("admission") if isinstance(payload.get("admission"), dict) else {}
+    reason = admission.get("reason") or "unknown"
+    return f" [board {payload.get('board') or 'unknown'}, observed {stamp}, admission reason {reason}]"
 
 
 def _options(parent_id: str, evidence: Optional[dict[str, Any]] = None) -> str:
@@ -78,8 +91,8 @@ def notice_text(payload: Any) -> str:
     advice = ("Check the current dispatcher verdict and resolve the recorded guard; priority changes do not clear it"
               if payload.get("respawn_guard") else _options(parent, payload.get("priority_evidence")))
     return (f"Waiting {payload.get('wait_minutes', '?')} min on parent {named}, which has been ready "
-            f"{payload.get('ready_minutes', '?')} min with no worker ({payload.get('queue') or 'queue place unknown'}). "
-            + advice + ".")
+            f"{payload.get('ready_minutes', '?')} min with no worker ({payload.get('queue') or 'queue place unknown'})"
+            + _observation(payload) + ". " + advice + ".")
 
 
 def ready_hint(conn, task, *, now: Optional[float] = None) -> Optional[str]:
@@ -153,8 +166,12 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
     wait (``kanban_chat_wait``), where ``waiting_on`` is ``task_id`` itself; ``extra`` adds payload fields (its
     clock hold). Returns True when it posted."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_host_counts as khc
     from hermes_cli import kanban_queue_position as kqp
     place = _place(conn, waiting_on)
+    observed = {"board": place.get("board") or khc.board_of(conn), "observed_at": place.get("observed_at") or int(time.time()),
+                "admission": ({"reason": "core_update_hold", "status": "held"} if (extra or {}).get("core_update_hold")
+                              else {"reason": None, "status": "unknown"})}
     guard = place.get("reason") if place.get("lane") == "respawn_guard" else None
     with kb.write_txn(conn):
         if any(kb._json_dict(p).get("wait_event_id") == wait_key and kb._json_dict(p).get("parent") == waiting_on
@@ -168,7 +185,7 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
         kb._append_event(conn, task_id, kind, {
             "parent": waiting_on, "parent_title": parent_title, "wait_event_id": wait_key,
             "wait_minutes": _minutes(waited_seconds), "ready_minutes": _minutes(ready_seconds),
-            "queue": kqp.describe(place) if guard else _queue_words(place), **(extra or {}),
+            "queue": kqp.describe(place) if guard else _queue_words(place), **observed, **(extra or {}),
             "respawn_guard": guard,
             "priority_evidence": lane_evidence(conn, waiting_on),
         })
