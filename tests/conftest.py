@@ -1473,10 +1473,20 @@ def _take_host_test_slot(config) -> None:
     scripts/run_tests.sh) holds one host-wide test slot for the whole session, like each per-file
     process of the runner does. Runner children inherit HERMES_TEST_SLOT_HELD=1 and skip this; so
     does anything this run spawns. xdist workers skip it (the controller holds the slot)."""
-    if hasattr(config, "workerinput"):
-        return
+    worker = True  # A policy-read failure must not silently disable containment.
     try:
+        from hermes_cli.worker_compute_capacity import worker_enabled
+        from scripts.worker_test_budget import child_environment, THREAD_VARS
+        worker = worker_enabled()
         slots = _host_slots_module()
+        if worker:
+            os.environ.update(dict.fromkeys(THREAD_VARS, '1'))
+            tx = getattr(getattr(config, 'option', None), 'tx', None)
+            if tx and any(spec != 'popen' for spec in tx):
+                raise ValueError('worker test budget requires local popen xdist')
+            _cap_xdist_workers(config, slots.xdist_worker_budget())
+        if hasattr(config, "workerinput") and not worker:
+            return
         if not slots.host_slots_enabled():
             return
 
@@ -1487,8 +1497,10 @@ def _take_host_test_slot(config) -> None:
 
         _cap_xdist_workers(config, slots.xdist_worker_budget())
         config._hermes_host_slot_fd = slots.acquire_host_slot(on_wait=note)
-        os.environ[slots.HELD_ENV] = "1"
+        child_environment(os.environ, config._hermes_host_slot_fd)
     except Exception as exc:  # the cap is advisory; never fail a run on it
+        if worker:
+            raise pytest.UsageError(f'worker host test slot unavailable: {exc}') from exc
         sys.stderr.write(f"(host test slot unavailable: {exc})\n")
 
 
