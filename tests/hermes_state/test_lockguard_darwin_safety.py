@@ -63,7 +63,48 @@ def test_invalid_enumeration_disarms_at_probe_and_runtime(abi, size):
     assert abi.closes == [42, 42]
 
 
-@pytest.mark.parametrize("dev,stat_dev,ino", [(7, 7, 123), (-7, 99, 123), (-7, -7, 999)])
+@pytest.mark.parametrize("unsigned", [False, True])
+def test_nonnegative_sentinel_learns_conversion_at_runtime(abi, monkeypatch, unsigned):
+    # devfs numbering is host-specific: a positive /dev/null device must not disarm.
+    abi.dev = abi.stat_dev = 7
+    native, descriptors = darwin.build()
+    assert native(42) == (7, 123)
+    abi.dev = -7
+    abi.stat_dev = ((1 << 64) - 7) if unsigned else -7
+    assert native(42) == (abi.stat_dev, 123)
+
+    def fail(fd):
+        raise AssertionError("conversion is learned; no Python fstat handoff")
+
+    monkeypatch.setattr(darwin.os, "fstat", fail)
+    assert native(42) == (abi.stat_dev, 123)
+    assert descriptors() == [42]
+
+
+def test_unlearned_negative_device_defers_to_python(abi, monkeypatch):
+    abi.dev = abi.stat_dev = 7
+    native, _descriptors = darwin.build()
+    abi.dev, abi.stat_dev = -7, 99  # inconsistent: report Python's identity, learn nothing
+    assert native(42) == (99, 123)
+    abi.stat_dev = -7  # consistent signed answer: learned
+    assert native(42) == (-7, 123)
+    abi.dev, abi.stat_dev = -8, 12345  # ignored now; native signed conversion is used
+    assert native(42) == (-8, 123)
+
+
+def test_runtime_fstat_failure_before_learning_reports_closed(abi, monkeypatch):
+    abi.dev = abi.stat_dev = 7
+    native, _descriptors = darwin.build()
+    abi.dev = -7
+
+    def closed(fd):
+        raise OSError(9, "closed")
+
+    monkeypatch.setattr(darwin.os, "fstat", closed)
+    assert native(42) is None
+
+
+@pytest.mark.parametrize("dev,stat_dev,ino", [(7, 8, 123), (7, 7, 999), (-7, 99, 123), (-7, -7, 999)])
 def test_unproven_identity_disarms(abi, dev, stat_dev, ino):
     abi.dev, abi.stat_dev, abi.ino = dev, stat_dev, ino
     assert darwin.build() is None

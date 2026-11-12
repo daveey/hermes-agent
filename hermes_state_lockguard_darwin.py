@@ -29,15 +29,41 @@ def build():
     except (ImportError, OSError, AttributeError):
         return None
 
-    unsigned_dev = False
+    mask = (1 << 64) - 1
+    # CPython builds differ in how a negative int32 dev_t becomes st_dev
+    # (signed vs uint64). None = not yet proven on this interpreter.
+    unsigned_dev = [None]
 
-    def identity(fd):
+    def learn(fd, dev, ino):
+        # Until a negative device has been observed, ask Python itself (one
+        # GIL-releasing fstat) and learn its conversion only from a consistent
+        # answer. Python's own st_dev is always the authoritative identity.
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return None
+        if st.st_ino == ino and st.st_dev in (dev, dev & mask):
+            unsigned_dev[0] = st.st_dev != dev
+        return st.st_dev, st.st_ino
+
+    def raw(fd):
         # Per-call buffers also make independent diagnostic callers thread-safe.
         buf = ctypes.create_string_buffer(256)
         if fd < 0 or fd > 2147483647 or fstat(fd, buf) != 0:
             return None
         dev, _mode, _links, ino = struct.unpack_from("=iHHQ", buf)
-        return (dev & ((1 << 64) - 1) if unsigned_dev else dev), ino
+        return dev, ino
+
+    def identity(fd):
+        got = raw(fd)
+        if got is None:
+            return None
+        dev, ino = got
+        if dev >= 0:
+            return dev, ino
+        if unsigned_dev[0] is None:
+            return learn(fd, dev, ino)
+        return (dev & mask if unsigned_dev[0] else dev), ino
 
     def descriptors():
         buf = ctypes.create_string_buffer(MAX_FDS * 8)
@@ -52,13 +78,19 @@ def build():
         return None
     try:
         st = os.fstat(probe)
-        raw = identity(probe)
-        # CPython builds differ in signed dev_t conversion. Require a negative
-        # native device sentinel so the build's conversion is actually proven.
-        if raw is None or raw[0] >= 0:
-            return None
-        unsigned_dev = st.st_dev == (raw[0] & ((1 << 64) - 1))
+        # A negative /dev/null device proves the conversion now; a nonnegative
+        # one (devfs numbering varies by host) leaves it to learn() at runtime.
+        # Either way the native identity must match Python's exactly.
         if identity(probe) != (st.st_dev, st.st_ino) or identity(-1) is not None:
+            return None
+        if identity(probe) != (st.st_dev, st.st_ino):
+            return None
+        # The raw native device must itself agree with Python's st_dev, and a
+        # negative sentinel must have taught the conversion.
+        native_dev = raw(probe)[0]
+        if native_dev < 0 and unsigned_dev[0] is None:
+            return None
+        if native_dev >= 0 and native_dev != st.st_dev:
             return None
         listed = descriptors()
         if listed is None or probe not in listed:
