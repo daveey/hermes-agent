@@ -54,9 +54,11 @@ def _park_guard(conn, tid: str, op: str, wake: tuple, **plan: Any) -> None:
     _check(err is None, f"kanban_{op} {err}", "invalid_args")
 
 
-def _wake_check_args(args: dict) -> tuple[Optional[str], Optional[int], bool]:
-    """``(wake_check, check_every, clock_only)`` from a park call, validated. [daveey]"""
+def _wake_check_args(args: dict, *, conn=None, tid: Optional[str] = None) -> tuple[Optional[str], Optional[int], bool]:
+    """``(wake_check, check_every, clock_only)`` from a park call, validated. With ``conn``/``tid``, a probe the hub
+    runs for this card (``kanban_wake_check_hub_relay``) skips the dry run here: it would read this board. [daveey]"""
     from hermes_cli import kanban_wake_check as kwc
+    from hermes_cli.kanban_wake_check_hub_relay import relay_host
 
     raw_every = args.get("check_every")
     _check(raw_every is None or (isinstance(raw_every, (int, float)) and not isinstance(raw_every, bool)),
@@ -72,7 +74,7 @@ def _wake_check_args(args: dict) -> tuple[Optional[str], Optional[int], bool]:
     secret = _wake_check_secret_error(cmd) if cmd else None
     _check(secret is None, secret or "", WAKE_CHECK_SECRET)  # before the dry run executes it
     try:
-        err = kwc.dry_run_error(cmd, blocker_id=args.get("blocker_id"))
+        err = None if relay_host(conn, tid, cmd) else kwc.dry_run_error(cmd, blocker_id=args.get("blocker_id"))
         if err:
             raise ValueError(err)
     except ValueError as exc:

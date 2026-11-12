@@ -43,16 +43,19 @@ _REASON_FLAG_HINT = 'Pass a reason with --reason "..."'
 _REASON_WORDS_HINT = "The reason goes after the task id; --ids takes only task ids"
 
 
-def _cli_wake_check(args: argparse.Namespace):
-    """``(wake_check, check_every, clock_only)`` from ``--wake-check/--check-every/--clock-only``."""
+def _cli_wake_check(args: argparse.Namespace, *, conn=None, ids=()):
+    """``(wake_check, check_every, clock_only)`` from ``--wake-check/--check-every/--clock-only``. The dry run is
+    skipped only when the hub runs the probe for every card in ``ids`` (``kanban_wake_check_hub_relay``). [daveey]"""
     from hermes_cli import kanban_wake_check as kwc
+    from hermes_cli.kanban_wake_check_hub_relay import relay_host
 
     cmd = kwc.normalize_cmd(getattr(args, "wake_check", None))
     every = kwc.normalize_every(getattr(args, "check_every", None)) if cmd else None
     secret = secret_error(cmd) if cmd else None
     if secret:  # before the dry run executes it; the tool path refuses the same probe the same way
         raise ValueError(secret)
-    err = kwc.dry_run_error(cmd, blocker_id=getattr(args, "blocker_id", None) or None)
+    relayed = bool(ids) and all(relay_host(conn, tid, cmd) for tid in ids)
+    err = None if relayed else kwc.dry_run_error(cmd, blocker_id=getattr(args, "blocker_id", None) or None)
     if err:
         raise ValueError(err)
     return cmd, every, bool(getattr(args, "clock_only", False))

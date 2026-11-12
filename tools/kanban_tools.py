@@ -1101,7 +1101,7 @@ def _handle_block(args: dict, **kw) -> str:
                f"the completion judge will evaluate it.")
         blocker_id = _blocker_id_arg(args)
         clear_blocker = _clear_blocker_arg(args, blocker_id)
-        wake = _wake_check_args(args)
+        wake = _wake_check_args(args, conn=conn, tid=tid)
         awaiting, wake = _awaiting_arg(args, wake)
         from hermes_cli.kanban_block_policy import ERROR_CODE, block_policy_error
         _policy = block_policy_error(kind, human_request=args.get("human_request"), wake_check=wake[0],
@@ -1171,7 +1171,7 @@ def _handle_schedule(args: dict, **kw) -> str:
                "goal_mode tasks cannot be scheduled: for a wait on time or a cron use "
                "kanban_block with kind='time' (SCHEDULED_UNTIL=<ISO8601> in the reason sets "
                "the wake), or kanban_complete so the completion judge can evaluate it.")
-        wake = _wake_check_args(args)
+        wake = _wake_check_args(args, conn=conn, tid=tid)
         awaiting, wake = _awaiting_arg(args, wake)
         blocker_id = _blocker_id_arg(args)
         clear_blocker = _clear_blocker_arg(args, blocker_id)
@@ -1220,7 +1220,7 @@ def _handle_continue(args: dict, **kw) -> str:
         metadata = {**(metadata or {}), CLEAR_FLAG: True}
     from hermes_cli.kanban_continuation import continue_task
     with _board(args.get("board")) as (kb, conn):
-        wake = _wake_check_args(args)
+        wake = _wake_check_args(args, conn=conn, tid=tid)
         awaiting, wake = _awaiting_arg(args, wake)
         _park_guard(conn, tid, "continue", wake, resume_after=int(raw_after or 0))
         res = continue_task(conn, tid, checkpoint=checkpoint, resume_after_seconds=int(raw_after or 0),

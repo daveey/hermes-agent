@@ -1425,7 +1425,7 @@ def _cmd_block(args: argparse.Namespace) -> int:
             return f"Blocked {tid}{suffix}"
 
         try:
-            wake = _cli_wake_check(args)
+            wake = _cli_wake_check(args, conn=conn, ids=ids)
             awaiting, wake = _cli_awaiting(args, wake)
         except ValueError as exc:
             return _err(f"kanban block: {exc}", 2)
@@ -1460,7 +1460,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         if rc:
             return rc
         try:
-            wake = _cli_wake_check(args)
+            wake = _cli_wake_check(args, conn=conn, ids=ids)
             awaiting, wake = _cli_awaiting(args, wake)
         except ValueError as exc:
             return _err(f"kanban schedule: {exc}", 2)

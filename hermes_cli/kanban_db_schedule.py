@@ -93,10 +93,13 @@ def schedule_task(
             conn, task_id, outcome="scheduled", status="scheduled", summary=reason,
             metadata=meta or None, synthesize=bool(reason or meta),
         )
+        from hermes_cli.kanban_wake_check_hub_relay import relay_host
+        host = relay_host(conn, task_id, wake_check)  # [daveey] a hub card's board probe runs on the hub
         _kb._append_event(conn, task_id, "scheduled", {
-            **payload, **kwc.park_fields(wake_check, check_every, clock_only, conn=conn), "awaiting": record, **meta,
+            **payload, **kwc.park_fields(wake_check, check_every, clock_only, conn=conn, probe_host=host),
+            "awaiting": record, **meta,
         }, run_id=run_id)
-        kwc.set_check(conn, task_id, wake_check, check_every)
+        kwc.set_check(conn, task_id, wake_check, check_every, register_here=kwc.probe_here(conn, host))
         return noted.keep(True)
 
 

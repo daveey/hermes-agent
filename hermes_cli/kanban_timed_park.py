@@ -176,6 +176,8 @@ def park(
     wake_check = wake_check or kaw.card_probe(record)
     wake_check, check_every = kwc.validate_park(
         wake_at=wake_at, wake_check=wake_check, check_every=check_every, clock_only=clock_only)
+    from hermes_cli.kanban_wake_check_hub_relay import relay_host
+    probe_host = probe_host or relay_host(conn, task_id, wake_check)  # [daveey] a hub card's board probe
     sql = ("UPDATE tasks SET status = 'scheduled', human_request = NULL, claim_lock = NULL, claim_expires = NULL, "
            "consecutive_failures = CASE WHEN status = 'triage' THEN 0 ELSE consecutive_failures END, "
            "last_failure_error = CASE WHEN status = 'triage' THEN NULL ELSE last_failure_error END, "

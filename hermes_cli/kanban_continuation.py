@@ -211,12 +211,15 @@ def continue_task(
             payload["blocker_id"] = meta["blocker_id"]
             payload.update({key: meta[key] for key in FIELDS if key in meta})
         from hermes_cli import kanban_wake_check as kwc  # condition wake [daveey]
+        from hermes_cli.kanban_wake_check_hub_relay import relay_host
+        host = relay_host(conn, task_id, wake_check)  # a hub card's board probe runs on the hub
         if wake_at is not None:
             payload["wake_at"] = wake_at
-            payload.update(kwc.park_fields(wake_check, check_every, clock_only, conn=conn))
+            payload.update(kwc.park_fields(wake_check, check_every, clock_only, conn=conn, probe_host=host))
             payload["awaiting"] = record
         kb._append_event(conn, task_id, CONTINUED_OUTCOME, payload, run_id=run_id)
-        kwc.set_check(conn, task_id, wake_check if wake_at is not None else None, check_every, now=now)
+        kwc.set_check(conn, task_id, wake_check if wake_at is not None else None, check_every, now=now,
+                      register_here=kwc.probe_here(conn, host))
         if in_txn is not None:
             in_txn(conn, run_id)
     return {"ok": True, "status": new_status, "run_id": run_id,
