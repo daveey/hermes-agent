@@ -1,7 +1,7 @@
 name: CI review comment
 
 # Batched PR review summaries: an hourly sweep, plus one targeted refresh
-# whenever CI completes on a ship branch's PR head.
+# whenever CI or a watched sibling (Docker) completes on a ship branch's PR head.
 #
 # The scheduled run snapshots every open same-repo PR: the newest CI
 # ``pull_request`` run on the PR's exact head, one comment per PR. It replaces
@@ -12,15 +12,22 @@ name: CI review comment
 # this comment says "ran on <its head>", and every ship rebase makes a new
 # head; on the hourly sweep alone an approved, CI-green PR waited up to an hour
 # (or for a hand dispatch) after each rebase (PR1104, 2026-11-12). CI on PR
-# heads finishes after the sibling Docker run (60 of 60 wt/ heads sampled
-# 2026-11-12: Docker done 5-36 min earlier), so this one run posts the final
-# "ran on" comment. Only ``wt/**`` branches (what ship pushes), and only CI
-# runs that ended success/failure: main pushes and other branches start no run
-# here, and other PRs' comments are not rewritten.
+# heads usually finishes after the sibling Docker run (60 of 60 wt/ heads
+# sampled 2026-11-12: Docker done 5-36 min earlier), so the CI-triggered run
+# usually posts the final "ran on" comment. Docker is a trigger too, by its
+# exact ``name:`` (every WATCH_WORKFLOWS entry must be listed): when Docker
+# finishes after CI (a rerun, a slow build) the comment would otherwise show
+# it pending until the next sweep. A Docker completion while CI is still
+# running writes nothing (CI's completion refreshes). Only ``wt/**`` branches
+# (what ship pushes), and only runs that ended success/failure: main pushes
+# and other branches start no run here, and other PRs' comments are not
+# rewritten. Each write records its head and run start in the comment, and an
+# older run never overwrites a newer run's snapshot of the same head.
 #
 # It runs from the default branch only and never checks out or executes PR
 # code, which makes a write token safe here (workflow_run included: only the
-# head sha, a 40-hex string the script validates, crosses from the event).
+# head sha, a 40-hex string the script validates, and the triggering
+# workflow's name, compared for equality only, cross from the event).
 # Fork PRs are skipped.
 
 on:
@@ -28,7 +35,7 @@ on:
     - cron: "17 * * * *"
   workflow_dispatch:
   workflow_run:
-    workflows: [CI]
+    workflows: [CI, "Docker Build, Test, and Publish"]
     types: [completed]
     branches: ["wt/**"]
 
@@ -65,10 +72,14 @@ jobs:
       - name: Post batched review summaries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Empty on schedule/dispatch (every open PR); the completed CI run's
+          # Empty on schedule/dispatch (every open PR); the completed run's
           # head on workflow_run (only that PR).
           TARGET_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          # Which workflow completed (CI or a watched sibling); empty on
+          # schedule/dispatch. A sibling completing before CI writes nothing.
+          TRIGGER_WORKFLOW: ${{ github.event.workflow_run.name }}
           # Sibling workflows whose jobs join each comment, one name per line.
+          # Each must also be listed under on.workflow_run.workflows.
           WATCH_WORKFLOWS: |
             Docker Build, Test, and Publish
         run: python3 -u scripts/ci/batch_review_comments.py
