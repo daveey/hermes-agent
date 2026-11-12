@@ -254,6 +254,11 @@ class _Collector:
         # and again at delivery, rewinding if the route or adapter changed.
         self.active_platforms = _platform_names(runner.adapters).union(
             *(_platform_names(m) for m in self.profile_adapters.values()))
+        # Legacy Desktop ``tui`` rows of chats this gateway's LOCAL route now owns (gateway/kanban_tui_owner.py):
+        # only the ones the legacy backend must refuse are claimed; the rest stay with it. [daveey]
+        from gateway.kanban_tui_owner import TUI
+        self.claim_platforms = (self.active_platforms | {TUI}
+                                if "local" in _platform_names(runner.adapters) else self.active_platforms)
 
     def collect(self) -> list[dict]:
         if not self.active_platforms:
@@ -309,6 +314,9 @@ class _Collector:
         """Claim one subscription's unseen events; None when skipped or nothing new."""
         owner_profile = sub.get("notifier_profile") or None
         platform = (sub.get("platform") or "").lower()
+        from gateway import kanban_tui_owner
+        if platform == kanban_tui_owner.TUI and platform in self.claim_platforms:
+            return kanban_tui_owner.claim(self, conn, slug, sub)
         if platform not in self.active_platforms:
             logger.debug("kanban notifier: subscription for %s on %s skipped; adapter not connected",
                          sub.get("task_id"), platform or "<missing>")
@@ -350,7 +358,7 @@ class _Collector:
             # the first.
             subs = _kbn().list_notify_subs(
                 conn, notifier_profiles=self.notifier_profiles, include_unowned=self.include_unowned,
-                platforms=self.active_platforms, pending_only=True,
+                platforms=self.claim_platforms, pending_only=True,
             )
             if not subs:
                 logger.debug("kanban notifier: board %s has no subscriptions", slug)
@@ -822,6 +830,12 @@ class _KanbanNotification:
         return True
 
     async def deliver(self) -> None:
+        if self.d.get("tui_owner"):
+            # A legacy tui row this gateway claimed for its LOCAL route: FIFO wake or rewind, never
+            # Platform("tui") (no such member: the ValueError branch below would advance past it). [daveey]
+            from gateway.kanban_tui_owner import deliver as deliver_tui
+            await deliver_tui(self)
+            return
         try:
             self.plat = self.platform_cls(self.platform_str)
         except ValueError:
