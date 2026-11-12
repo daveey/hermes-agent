@@ -26,7 +26,7 @@ import os
 import shlex
 import subprocess
 import threading
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from pathlib import Path
 from typing import Any, Optional
 
@@ -259,19 +259,57 @@ class ProcessForegroundHoldMixin:
         with self._lock:
             return list(self._holds().values())
 
+    def _refuse_held_locked(self, session_id: str) -> bool:
+        """Detection at the adoption boundary (caller holds ``self._lock``): True, logged as an ERROR, when
+        something tries to track a still-held foreground command as a background job. That gives the call a
+        second owner whose reader reports a false lost/-1 completion (defect 989239fff3); a deliberate
+        handoff (``convert_foreground``) drops the hold first. [daveey]"""
+        if session_id not in self._holds():
+            return False
+        logger.error("Refusing to track %s as a background job: a foreground tool call still holds it", session_id)
+        return True
+
     def hold_foreground(self, session) -> None:
         with self._lock:
             self._holds()[session.id] = session
         self._write_checkpoint()
 
     def release_foreground(self, session_id: str) -> None:
-        with self._lock:
-            dropped = self._holds().pop(session_id, None)
+        """Drop the hold and its checkpoint entry in one step under the checkpoint file lock: recovery
+        holds that lock across its read-decide-write, so it sees either the held entry (ours, skipped) or
+        no entry, never an on-disk entry that no table of ours owns any more (it adopted that). [daveey]"""
+        with ExitStack() as stack:
+            self._enter_checkpoint_lock(stack)
+            with self._lock:
+                dropped = self._holds().pop(session_id, None)
+            if dropped is not None:
+                try:
+                    # drop_ids: the entry's child is still alive, so without it the merge keeps it as
+                    # another writer's live entry until drop_from_every_checkpoint, the same window.
+                    self._write_checkpoint_locked(drop_ids=frozenset({session_id}))
+                except Exception:
+                    logger.debug("Failed to write checkpoint file: %s", session_id, exc_info=True)
         if dropped is not None:
-            self._write_checkpoint(settled_id=session_id)
+            # Other profiles' checkpoints take their own locks, outside ours (see _write_checkpoint).
+            from tools.process_registry_profiles import drop_from_every_checkpoint
+            try:
+                drop_from_every_checkpoint([session_id])
+            except Exception:
+                logger.debug("Dropping %s from other checkpoints failed", session_id, exc_info=True)
 
     def convert_foreground(self, session) -> None:
-        """Track a held command as a running background job, tailing its log (the pipe is closed)."""
-        with self._lock:
-            self._holds().pop(session.id, None)
-        self._track_started(session, self._log_reader_loop, f"proc-log-reader-{session.id}")
+        """Track a held command as a running background job, tailing its log (the pipe is closed). The
+        hold moves to ``_running`` under the checkpoint file lock, so a concurrent recovery never finds
+        it in neither table."""
+        with ExitStack() as stack:
+            self._enter_checkpoint_lock(stack)
+            with self._lock:
+                self._holds().pop(session.id, None)
+            self._track_started(session, self._log_reader_loop, f"proc-log-reader-{session.id}")
+
+    def _enter_checkpoint_lock(self, stack: ExitStack) -> None:
+        """The processes.json lock when it can be had; a release or handoff never fails for want of it."""
+        try:
+            stack.enter_context(self._checkpoint_file_lock())
+        except Exception:
+            logger.debug("Checkpoint file lock unavailable; settling the hold without it", exc_info=True)

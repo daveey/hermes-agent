@@ -21,10 +21,17 @@ class ProcessCheckpointMixin:
     # Set by the multiplexed gateway: one registry serves every profile, so an ``agent:main:`` key names
     # the default profile rather than "whoever wrote it" (see tools.process_registry_profiles). [daveey]
     profile_scoped_checkpoints: bool = False
+    _lock: Any
+    _running: dict
 
     def _owned_here(self, session_key, scope=None) -> bool:
         from tools.process_registry_profiles import owned_here
         return owned_here(session_key, multiplexed=self.profile_scoped_checkpoints, scope=scope)
+
+    def _tracked_or_held_locked(self, session_id: Any) -> bool:
+        """Caller holds ``self._lock``: this registry already owns *session_id*, as a background job or as
+        a held survivable foreground command (process_registry_survivable). [daveey]"""
+        return session_id in self._running or session_id in vars(self).get("_foreground_holds", {})
 
     def _detached_host_fate(self, pid: Optional[int], expected_start: Optional[int]) -> str:
         """Subclass supplies the live PID decision. See ProcessRegistry."""
@@ -312,8 +319,11 @@ class ProcessCheckpointMixin:
                 continue
             # The registry is process-global, so every profile's checkpoint carries every live
             # process; a multiplexer recovering several homes must adopt each session once.
+            # A survivable foreground command the terminal tool still waits on is checkpointed too (so a
+            # crash mid-wait leaves it to the next owner), but while it is held here it is ours: adopting it
+            # made a second, background owner whose reader reported lost/-1 for a call that exited 0. [daveey]
             with self._lock:
-                already_tracked = entry.get("session_id") in self._running
+                already_tracked = self._tracked_or_held_locked(entry.get("session_id"))
             if already_tracked:
                 continue
             # Its exit was already observed (a result receipt exists in some profile): re-attaching would start

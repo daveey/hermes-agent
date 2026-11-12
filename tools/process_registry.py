@@ -1144,15 +1144,15 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
     def _track_started(self, session: ProcessSession, reader_target, reader_name: str, extra_args=(), *, ownership_scope=None) -> None:
         """Register before the reader can publish completion, even for an exited child."""
         from contextvars import copy_context
-
         # Reader completion must retain the producer's multiplex profile scope.
         reader = threading.Thread(target=copy_context().run, args=(reader_target, session, *extra_args),
                                   daemon=True, name=reader_name)
         session._reader_thread = reader
         with self._lock:
+            if self._refuse_held_locked(session.id):  # a foreground call still owns it (989239fff3) [daveey]
+                return
             self._prune_if_needed()
-            # Completion takes this lock too. Starting here also leaves no
-            # ghost entry if the interpreter cannot start another thread.
+            # Completion takes this lock too; starting here leaves no ghost entry if no thread can start.
             reader.start()
             self._running[session.id] = session
             if ownership_scope is not None:
