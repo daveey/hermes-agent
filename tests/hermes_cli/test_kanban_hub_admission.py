@@ -420,6 +420,33 @@ def test_dispatch_marked_candidate_precedes_normal_in_same_lane(
 
 
 @pytest.mark.parametrize("enabled", [False, True])
+def test_replica_waiter_ranking_cannot_undo_marked_lane_order(board, monkeypatch, all_assignees_spawnable, enabled):
+    """A remote waiter donating priority to a normal row reorders within a class, never across marked-first."""
+    from hermes_cli import kanban_db_dispatch as dispatch
+    from hermes_cli import kanban_dispatch_priority as donation
+    conn, home = board
+    configure(home, limit=50 if enabled else None, cap=7)
+    if enabled:
+        with (home / "config.yaml").open("a") as config:
+            config.write("    priority_slots: 3\n")
+        advisory(home)
+        monkeypatch.setattr(cm, "sample", fake_sample(10))
+    monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda: "normal")
+    marked = task(conn, title="restore capacity")
+    kb.edit_task(conn, marked, admission_class="urgent")
+    donated = task(conn, title="remote waiter donates")
+    monkeypatch.setattr(donation, "_order_with_remote_waiters",
+                        lambda c, rows: sorted(rows, key=lambda r: r["id"] != donated))
+    spawned = []
+
+    def spawn(candidate, workspace, board=None):
+        spawned.append(candidate.id)
+
+    dispatch.dispatch_once(conn, spawn_fn=spawn, max_spawn=1, max_in_progress=7)
+    assert spawned == ([marked] if enabled else [donated])
+
+
+@pytest.mark.parametrize("enabled", [False, True])
 def test_dispatch_pool_order_keeps_worker_priority(board, monkeypatch, all_assignees_spawnable, enabled):
     from hermes_cli import kanban_db_dispatch as dispatch
     conn, home = board

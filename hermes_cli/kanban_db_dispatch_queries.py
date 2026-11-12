@@ -34,12 +34,15 @@ def lane_rows(conn: sqlite3.Connection, status: str, *, marked_first: bool = Fal
     """Unclaimed rows of one lane in dispatch order; optional pool ordering keeps priority ties per class."""
     prefix = "admission_class IN ('capacity', 'urgent') DESC, " if marked_first else ""
     rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, admission_class FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         f"ORDER BY {prefix}{DISPATCH_ORDER}"
     ).fetchall()
     from hermes_cli.kanban_dispatch_priority import order_with_remote_waiters
-    return order_with_remote_waiters(conn, rows)
+    rows = order_with_remote_waiters(conn, rows)
+    if marked_first:  # replica donation reorders within a class, never across the pool partition
+        rows.sort(key=lambda row: row["admission_class"] not in ("capacity", "urgent"))
+    return rows
 
 
 def still_current_worker(conn: sqlite3.Connection, row, pid: int) -> bool:
