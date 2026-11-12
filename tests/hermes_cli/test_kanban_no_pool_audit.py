@@ -62,4 +62,4 @@ def test_audit_failure_is_visible_not_portable(monkeypatch):
     def broken(*args):
         raise ValueError("invalid classifier input")
     monkeypatch.setattr(placement, "portable_reason", broken)
-    assert worker.creation_audit({}, {}) == {"portable_reason": "audit failed"}
+    assert worker.creation_audit({}, {}) == {"portable_reason": "audit failed", "placement_intent": "auto"}

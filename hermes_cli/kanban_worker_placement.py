@@ -295,9 +295,11 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None):
         for row in rows:
             if row["placement_policy"] is not None:
                 last = row["id"]
-            if not recovery.unchanged_ready(conn, row):
-                continue
             mode = recovery.available_mode(conn, dict(row), cfg, hub, board, gateway)
+            # Recovery changes placement policy: revalidate its current inputs. Ordinary
+            # renewals retain the pre-loop snapshot used by picked_up after an in-loop pull.
+            if mode and not recovery.unchanged_ready(conn, row):
+                continue
             if row["placement_policy"] is None and mode is None:
                 continue
             key = (board, row["id"])
