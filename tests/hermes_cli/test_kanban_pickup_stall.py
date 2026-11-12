@@ -511,3 +511,72 @@ def test_a_card_whose_import_fails_is_recorded(gws, monkeypatch):
     assert wn.pickup(worker.conn, budget=4) == []
     from hermes_cli import kanban_pickup_stall as kps
     assert kps.latest(worker.conn, tid)["detail"] == "import failed"
+
+
+# --- the clock starts when the card was pinned here -------------------------------------------------------------
+# t_01a1cea82846df08 (2026-11-12): t_01a1ce97cef93c46 waited 10 min on the hub, worker-share-watch moved it to
+# worker-6 at 07:20:36Z, and worker-6 filed "Pickup queue full ... waiting 10 min" 9 s later.
+
+def _moved_onto(hub, worker, tid, ago, to=WORKER, kind="moved"):
+    """The hub re-pins ``tid`` to ``machine:<to>`` the way ``kanban_move`` records it; the event syncs to the
+    worker's replica, backdated ``ago`` seconds there."""
+    hub.enter()
+    with kb.write_txn(hub.conn):
+        wn.set_runs_on(hub.conn, tid, [f"machine:{to}"])
+        kb._append_event(hub.conn, tid, kind, {"from_machine": HUB, "runs_on": [f"machine:{to}"],
+                                               "previous_runs_on": [f"machine:{HUB}"], "reason": "test move"})
+    hub.round()
+    worker.round()
+    with sqlite3.connect(wn._replica_path(worker.conn)) as replica:
+        n = replica.execute("UPDATE task_events SET created_at = created_at - ? WHERE task_id = ? AND kind = ?",
+                            (ago, tid, kind)).rowcount
+    assert n == 1
+
+
+def _queue_full_repairs(worker):
+    worker.tick(max_spawn=0)  # the capped path records budget_exhausted
+    worker.tick(max_spawn=0)
+    return _repairs(worker.conn)
+
+
+@pytest.mark.parametrize("kind", ["moved", "placement_repinned"])
+def test_a_card_moved_here_after_waiting_elsewhere_is_not_stalled_yet(gws, kind):
+    hub, worker = gws
+    tid = _pinned(hub, to=HUB)
+    worker.round()
+    _age(worker, tid, 900)  # ready on the Board for 15 min, all of it pinned to the hub
+    _moved_onto(hub, worker, tid, 30, kind=kind)
+    assert not _queue_full_repairs(worker)
+
+
+def test_a_card_moved_here_stalls_from_the_move_and_reports_that_wait(gws):
+    hub, worker = gws
+    tid = _pinned(hub, to=HUB)
+    worker.round()
+    _age(worker, tid, 3000)  # 50 min ready, 11 of them pinned here
+    _moved_onto(hub, worker, tid, 700)
+    [card] = _queue_full_repairs(worker)
+    assert tid in card["title"] and "waiting 11 min" in card["title"]
+    assert f"- {tid} (pinned to the worker), ready 11 min" in card["body"]
+
+
+def test_a_move_older_than_ready_since_or_naming_another_machine_does_not_restart_the_clock(gws):
+    from hermes_cli import kanban_pickup_stall as kps
+    hub, worker = gws
+    tid = _pinned(hub, to=HUB)
+    worker.round()
+    _moved_onto(hub, worker, tid, 5000)  # pinned here long before it last became ready
+    _age(worker, tid, 700)
+    with sqlite3.connect(wn._replica_path(worker.conn)) as rw:  # newer events that are not a move onto WORKER
+        for kind, labels in (("moved", ["machine:worker-9"]), ("skipped_unplaceable", [f"machine:{WORKER}"])):
+            rw.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, "
+                       "CAST(strftime('%s','now') AS INTEGER))", (tid, kind, json.dumps({"runs_on": labels})))
+        rw.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'moved', 'not json', "
+                   "CAST(strftime('%s','now') AS INTEGER))", (tid,))
+    replica = wn.open_replica(worker.conn)
+    try:
+        [card] = kps.stalled(worker.conn, replica, WORKER)
+    finally:
+        replica.close()
+    waited = kps._now_ms() // 1000 - card["since_ms"] // 1000
+    assert card["id"] == tid and 690 <= waited <= 720  # ready_since: neither the old move nor the later events

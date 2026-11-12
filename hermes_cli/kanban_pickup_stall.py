@@ -11,7 +11,8 @@ read back: pickup kept no record of why a pass skipped a candidate.
   :data:`MAX_ROWS`. ``kanban_show`` of the card on this host returns the latest as ``pickup_skip``.
 * Detector (:func:`sweep`, every non-dry dispatcher tick before the spawn cap): a card ``ready`` in this host's full
   replica, pinned ``machine:<this host>``, created elsewhere, with no live lease and not imported here, whose
-  ``ready_since`` is older than ``kanban.sync.pickup_stall_seconds`` (default 600) gets ONE agent repair card filed
+  ``ready_since`` and newest move onto this host are older than ``kanban.sync.pickup_stall_seconds`` (default 600)
+  gets ONE agent repair card filed
   by this host (an open one, or one closed less than :data:`REPLACE_AFTER_SECONDS` ago, is reused). The repair is
   never pinned here (:func:`alarm_placement`): this host is the one taking no Board work, so the repair is pinned
   to another active, unheld machine that can run it now, or the hub operator lane, and an open unclaimed repair
@@ -151,15 +152,34 @@ def stall_seconds() -> int:
     return int(value)
 
 
+# Events that rewrite a card's ``runs_on`` and carry the new labels as ``payload.runs_on``.
+_PIN_EVENTS = ("moved", "placement_repinned", "pool_pinned", "pool_unpinned")
+
+
+def _pinned_here_since_ms(replica, task_id: str, own: str) -> Optional[int]:
+    """When the newest placement event naming ``machine:<own>`` was recorded (ms), or None.
+
+    t_01a1cea82846df08 (2026-11-12): a card ready on the hub for 10 min was moved to worker-6 and worker-6 raised
+    "waiting 10 min" 9 s later. Time pinned elsewhere is not this machine's stall."""
+    marks = ",".join("?" * len(_PIN_EVENTS))
+    row = replica.execute(
+        f"SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND kind IN ({marks}) AND json_valid(payload) "
+        "AND EXISTS (SELECT 1 FROM json_each(task_events.payload, '$.runs_on') WHERE value = ?)",
+        (task_id, *_PIN_EVENTS, f"machine:{own}")).fetchone()
+    return None if row is None or row[0] is None else int(row[0]) * 1000
+
+
 def stalled(conn, replica, own: str, *, now: Optional[float] = None) -> list[dict[str, Any]]:
     """Cards ready in ``replica``, pinned ``machine:<own>``, created elsewhere, unleased, not in the live file,
-    ready longer than :func:`stall_seconds`; oldest first."""
+    ready AND pinned here longer than :func:`stall_seconds`; oldest first. The clock starts at the later of
+    ``ready_since`` (else creation) and the newest placement event naming this machine."""
     from hermes_cli import kanban_worker_node as wn
     now_ms = _now_ms(now)
     limit_ms = stall_seconds() * 1000
     out = []
     for row in wn.pinned_rows(replica, own, now_ms=now_ms, statuses=("ready",)):
         since = row["ready_since"] if row["ready_since"] is not None else int(row["created_at"] or 0) * 1000
+        since = max(int(since), _pinned_here_since_ms(replica, row["id"], own) or 0)
         if now_ms - int(since) <= limit_ms:
             continue
         if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (row["id"],)).fetchone():
