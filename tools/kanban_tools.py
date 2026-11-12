@@ -1437,6 +1437,31 @@ def _handle_attachments(args: dict, **kw) -> str:
                 _fields(a, _ATTACHMENT_FIELDS) for a in kb.list_attachments(conn, tid)]})
 
 
+def _placed_rejection(kp, rid: str, target: str, fields: dict) -> Optional[str]:
+    """[daveey] The tool error for a placed create the target refused (terminal), None while it is not refused.
+
+    origin_idempotency_conflict: a live card on the target already holds the creator's idempotency_key. That
+    card is named as ``existing_task_id`` (kanban_create's key semantics: the key's card, not a new one); it
+    was not bound to this chat, so the creator uses it or picks another key."""
+    import re
+    why = kp.remote_rejection(rid)
+    if not why:
+        return None
+    code = why.get("code") or "placement_rejected"
+    error = why.get("error") or f"{target} {why.get('state') or 'rejected'} request {rid}"
+    extra: dict = {"created": False, **fields}
+    if code == "origin_idempotency_conflict" and (m := re.search(r"already names card (t_[A-Za-z0-9_]+)", error)):
+        extra["existing_task_id"] = m.group(1)
+        error = (f"No card was created: {m.group(1)} on {target} already holds this idempotency_key. Use that "
+                 f"card (cross_task @task:default@{target}/{m.group(1)}) or create with a different key. "
+                 f"({error})")
+    else:
+        error = f"No card was created: {target} refused request {rid}: {error}"
+    if why.get("matches"):
+        extra["matches"] = why["matches"]
+    return tool_error(error, code=code, **extra)
+
+
 def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, session_id, conn=None,
                   note_local_pin: bool = True, origin_profile=None) -> tuple[Optional[str], Optional[dict]]:
     """[daveey] Create the card on the gateway ``kanban.placement`` routes this one to.
@@ -1493,6 +1518,8 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                     f"`hermes-hub tasks --gw {target}`.")
             return _ok(task_id=tid, status=remote_status or "created", **fields, runs_where=target,
                        note=note), None
+        if not placed.get("queued_only") and (refused := _placed_rejection(kp, rid, target, fields)):
+            return refused, None  # the target refused it: no card, never "IS created" [daveey]
         note = (f"{retry}The card IS created: it is queued on {target} as request {rid} and {target} makes the "
                 f"card from it (it runs there, not here: {decision['why']}). Do NOT call kanban_create again "
                 "for this card: an identical call returns this same request. Changed calls with an explicit "
