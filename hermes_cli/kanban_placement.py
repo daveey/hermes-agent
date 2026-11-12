@@ -87,24 +87,35 @@ MACOS_MARKER = r"(?<![\w/.-])mac ?os(?![\w/-]|\.\w)"
 # checked out on the hub and its devices are reached over ssh:mini, so a body that loads a BB skill
 # (e.g. a metta disk check) is not Mac work. Mac-only BB work still hits xcode/simulator/codesign.
 BABYBEAR_MARKER = r"(?<![\w/.~-])baby ?bear(?![\w/-]|\.\w)"
+# The Desktop app named as a product surface ("Desktop chats are slow", "the Desktop backend"). In the TITLE
+# (see TITLE_ONLY_LOCAL_MARKERS) it says the work is on the app; in the body it is usually the symptom or the
+# users affected. A core fix whose body said "Desktop chat turns are held" stayed on a full hub although it
+# was a repo change landed by push. Work that reads the live app still hits "desktop dom", cdp or hermes.app.
+HERMES_DESKTOP_MARKER = r"\bhermes desktop\b"
+DESKTOP_SURFACE_MARKER = r"\bdesktop (app|backend|backends|renderer|window|chat|chats|sidebar|ui)\b"
+# A chat or window the card itself opens or drives in the live app ("a throwaway Desktop chat runs the CLI"):
+# that is work on the machine with the app, wherever in the card it is said.
+LIVE_DESKTOP_MARKER = (r"\b(throwaway|scratch|disposable|hidden|fixture|fresh|new|real|live) "
+                       r"desktop (chat|chats|session|sessions|window)\b")
 # Phrases that mean the work needs this machine (a Mac the user works on). Case-insensitive.
 DEFAULT_LOCAL_MARKERS = (
     r"\bchrome\b", r"\bcdp\b", r"\bkeychain\b", r"\bcodesign", r"\bnotari[sz]", r"\btcc\b",
     r"\bosascript\b", r"\bapple ?script\b", r"\bapple (photos|notes|reminders|contacts|calendar|music)\b",
     r"\bphotos\.app\b", r"\bimessage\b", r"\bfind ?my\b", r"\bremindctl\b", r"\bshortcuts? app\b",
     r"\blaunchd\b", r"\blaunchctl\b", r"launchagents", r"~/library/", r"\bhermes\.app\b",
-    r"\bhermes desktop\b", r"\bdesktop (app|backend|backends|renderer|window|chat|chats|sidebar|ui)\b",
+    HERMES_DESKTOP_MARKER, DESKTOP_SURFACE_MARKER, LIVE_DESKTOP_MARKER,
     r"\bdesktop\s+dom\b",
     r"\bmacbook\b", MACOS_MARKER, r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b",
     BABYBEAR_MARKER, r"\bxcode\b", r"\bsimulator\b", r"\bwhatsapp\b", r"\bscreen ?shot",
     r"\bsoftmax-org\b", r"\bdavid-bloomin-sso\b", r"--profile softmax",
 )
-# Host names that mean "the work is on that machine" only when they are the subject of the
+# Host and Desktop-surface names that mean "the work is on that machine" only when they are the subject of the
 # title. A body mention is a repro or a verification step ("verify live on the hub and the
 # MacBook"), which is not a reason to keep a core-code card on the laptop. A caller who replaces
 # ``local_markers`` owns the list and every pattern scans the whole text.
 TITLE_ONLY_LOCAL_MARKERS = frozenset({
     r"\bmacbook\b", r"\bmac ?mini\b", r"\bthe mini\b", r"\bdavids-mac-mini\b", BABYBEAR_MARKER,
+    HERMES_DESKTOP_MARKER, DESKTOP_SURFACE_MARKER,
 })
 # Product names (not hosts, not Apple tech): a product with Linux parts (BB pods, their CI on
 # self-hosted Linux runners) is not an Apple/local need by name alone. With the built-in list, a
