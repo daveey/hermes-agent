@@ -70,7 +70,7 @@ def _mem_used_pct() -> Optional[float]:
     return None
 
 
-def active_card_runs(exclude=None, detail: Optional[dict] = None, *, owner_output=None) -> Optional[int]:
+def active_card_runs(exclude=None, detail: Optional[dict] = None, *, owner_output=None, extra_paths=()) -> Optional[int]:
     """All profiles share the kanban root. Count its execution boards, not replicas.
 
     Unreadable/schema-unknown boards invalidate the whole sample. Conservative
@@ -86,7 +86,7 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None, *, owner_outpu
 
     try:
         default = kb.kanban_home() / "kanban.db"
-        paths = [default, *(p for _, p in named_board_db_files())]
+        paths = [default, *(p for _, p in named_board_db_files()), *extra_paths]
         total = excluded = 0
         owners = set()
         seen = set()

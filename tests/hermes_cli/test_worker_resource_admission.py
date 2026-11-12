@@ -130,3 +130,26 @@ def test_worker_brake_is_not_bypassed_by_disabled_hub(monkeypatch, tmp_path):
     assert admission._final_hub_gate(None)[0] == 'worker_load_pressure'
     state = tmp_path / 'worker-resources' / 'pressure.json'
     assert json.loads(state.read_text())['held'] is True
+
+
+@pytest.mark.parametrize('expired,slow', [(True, False), (False, True), (False, False)])
+def test_worker_only_final_deadline_and_budget(worker_rig, monkeypatch, expired, slow):
+    import time
+    from types import SimpleNamespace
+    from hermes_cli import machine_cpu_metrics as cpu
+    monkeypatch.setattr(cpu, 'root_limit', lambda: (cpu.OFF, None))
+    gate = SimpleNamespace(expires=time.time() + (-10 if expired else 60))
+    started = time.monotonic() - (10 if slow else 0)
+    reason, _ = admission._final_hub_gate(gate, started)
+    assert reason == ('worker_resources_unknown' if expired or slow else None)
+
+
+def test_policy_enabled_after_lock_selection_refuses(worker_rig, monkeypatch):
+    from hermes_cli import machine_cpu_metrics as cpu
+    rig, _ = worker_rig
+    monkeypatch.setattr(cpu, 'root_limit', lambda: (cpu.OFF, None))
+    observations = iter([False, True])
+    monkeypatch.setattr(capacity, 'worker_enabled', lambda: next(observations))
+    with admission.claim_transaction(rig.conn) as accepted:
+        assert not accepted
+

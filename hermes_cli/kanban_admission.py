@@ -141,8 +141,17 @@ def _final_hub_gate(gate, started=None, *, conn=None, task_id=None):
 
     echo = getattr(gate, "echo", None)
     from hermes_cli.worker_resource_admission import refusal
-    if reason := refusal(echo):
+    from hermes_cli.worker_compute_capacity import worker_enabled
+    try:
+        worker = worker_enabled()
+    except Exception:  # health: allow BLE001 -- malformed worker policy refuses admission
+        return "worker_resources_unknown", None
+    if worker and not getattr(_decision, "worker_fenced", True):
+        return "worker_resources_unknown", None
+    if reason := refusal(echo, enabled=worker):
         return reason, None
+    if worker and (_expired(gate) or _over_budget(started)):
+        return "worker_resources_unknown", None
     state, limit = cpu.root_limit()
     if state == cpu.OFF:
         return None, None
@@ -331,10 +340,25 @@ def claim_transaction(conn, *, task_id=None, gate=None):
     with contextlib.ExitStack() as stack:
         with write_txn(conn):
             try:
-                root = stack.enter_context(admission_lock(get_default_hermes_root(), timeout=0))
+                from hermes_cli import worker_compute_capacity as capacity
+                installation = Path(get_default_hermes_root()).resolve()
                 started = time.monotonic()
-                held = is_held(root)
-                waiting = not held and turns_waiting(root)
+                # Account policy must serialize different HERMES_HOME installs.
+                # Both locks are nonblocking while the DB writer is held; the
+                # stack retains them THROUGH commit/rollback. Preserve each
+                # installation's updater fence and avoid taking one lock twice.
+                roots = [installation]
+                worker = capacity.worker_enabled()
+                if worker:
+                    account = capacity.policy_root().resolve()
+                    if account != installation:
+                        roots.insert(0, account)
+                fences = [stack.enter_context(admission_lock(home, timeout=0)) for home in roots]
+                held = any(is_held(root) for root in fences)
+                waiting = not held and any(turns_waiting(root) for root in fences)
+                if not held and not waiting and worker:
+                    from hermes_cli.worker_account_boards import register
+                    register(conn)
             except AdmissionBusy:
                 # [daveey] Designed contention: another claimer (or hermes-sync) holds admission.lock
                 # through its commit. A normal defer, not a failure: no WARNING/traceback, which the
@@ -342,7 +366,7 @@ def claim_transaction(conn, *, task_id=None, gate=None):
                 logging.getLogger(__name__).info("Update admission lock busy; deferring Kanban claim to the next tick")
                 yield False
                 return
-            except (OSError, TimeoutError):
+            except Exception:  # health: allow BLE001 -- malformed account policy/inventory must fail closed
                 logging.getLogger(__name__).warning("Update admission unavailable; deferring Kanban claim", exc_info=True)
                 yield False
                 return
@@ -361,7 +385,12 @@ def claim_transaction(conn, *, task_id=None, gate=None):
             _bind_echo(conn, task_id, gate)
             _decision.counts = None
             _decision.pool = "regular"
-            reason, evidence = _final_hub_gate(gate, started, conn=conn, task_id=task_id)
+            previous_fenced = getattr(_decision, "worker_fenced", True)
+            _decision.worker_fenced = worker
+            try:
+                reason, evidence = _final_hub_gate(gate, started, conn=conn, task_id=task_id)
+            finally:
+                _decision.worker_fenced = previous_fenced
             if reason is not None:
                 logging.getLogger(__name__).info("Hub admission refused Kanban claim %s: %s %s", task_id, reason,
                                                  getattr(_decision, "counts", None) or {})

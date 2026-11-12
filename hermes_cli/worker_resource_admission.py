@@ -60,10 +60,10 @@ def pool_occupancy(pool: Path, owners, active):
     return capacity.occupied_owners(pool, owners, active)
 
 
-def refusal(echo=None) -> str | None:
+def refusal(echo=None, *, enabled=None) -> str | None:
     """Pre-lease and final-lock check. Unknown observations fail closed."""
     try:
-        if not capacity.worker_enabled():
+        if not (capacity.worker_enabled() if enabled is None else enabled):
             return None
         directory = capacity.policy_root() / 'worker-resources'
         if _pressure(directory):
@@ -71,7 +71,8 @@ def refusal(echo=None) -> str | None:
         from hermes_cli import machine_metrics
         from hermes_cli.kanban_admission import _root_max_in_progress
         active_owners = set()
-        active = machine_metrics.active_card_runs(exclude=echo, owner_output=active_owners)
+        from hermes_cli.worker_account_boards import paths
+        active = machine_metrics.active_card_runs(exclude=echo, owner_output=active_owners, extra_paths=paths())
         ok, cap = _root_max_in_progress(root=capacity.policy_root())
         if active is None or not ok or cap is None:
             return 'worker_resources_unknown'
@@ -88,7 +89,10 @@ def refusal(echo=None) -> str | None:
                     raise ValueError('invalid worker owner map')
                 owners[path.stem] = tuple(owner)
         occupied = pool_occupancy(capacity.pool_path(), owners, active_owners)
-        if len(occupied) >= cap:
+        # Distinct installations can contain copied board/task IDs. Until a
+        # cgroup supplies canonical custody, never collapse their running rows.
+        occupied_count = len(occupied) + max(0, active - len(active_owners))
+        if occupied_count >= cap:
             return 'worker_capacity_full'
         return None
     except Exception:  # health: allow BLE001 -- any unreadable policy/controller must refuse claims
