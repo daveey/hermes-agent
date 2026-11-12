@@ -126,7 +126,8 @@ def _runner_draining(adapter: Any) -> bool:
 
 async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source: Any = None,
                        notification_category: str = "result", profile: Optional[str] = None,
-                       kanban_card: Optional[dict] = None) -> None:
+                       kanban_card: Optional[dict] = None,
+                       core_update_notifier: bool = False) -> None:
     """Deliver a wake turn to the session behind ``adapter``. ``session_id`` is the RAW session id
     (``X-Hermes-Session-Id`` / state.db key) — required for non-push adapters. ``source`` is the
     ``SessionSource`` for the synthetic event — required for push-capable adapters. ``profile``
@@ -147,10 +148,12 @@ async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source:
             if kanban_card:
                 category["kanban_cards"] = [{**kanban_card, "text": str(kanban_card.get("text") or "")[:32000]}]
             try:
-                if await admit_route_wake(runner, adapter, source, text, "kanban-wake", category):
+                producer = "kanban-wake" if core_update_notifier else "background-wake"
+                if await admit_route_wake(runner, adapter, source, text, producer, category):
                     return  # committed to the session FIFO: never interrupts the admitted turn
             except RuntimeStoreError as exc:
                 raise WakeNotAccepted(str(exc), reason=exc.reason) from exc
+
         synth_event = MessageEvent(text=text, message_type=MessageType.TEXT, source=source, internal=True,
                                    metadata={"notification_category": notification_category})
         await admit_internal_event(adapter, synth_event)
@@ -158,12 +161,14 @@ async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source:
     if not session_id:
         raise ValueError("deliver_wake: non-push adapter (supports_async_delivery=False) "
                          "requires the raw session id to self-post the wake turn")
+
     extra: dict = {}
     if profile:
         extra["profile"] = profile
     if notification_category == "diagnostic":
         extra["notification_category"] = notification_category
     await _self_post_chat_completion(adapter, text=text, session_id=session_id, **extra)
+
 
 
 def _delegation_display_metadata(evt: dict) -> dict:

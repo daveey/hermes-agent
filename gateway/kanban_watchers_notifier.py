@@ -750,6 +750,7 @@ class _KanbanNotification:
             # unprefixed self-post would resume the session in the DEFAULT profile's store.
             async with self._owner_scope():
                 await deliver_wake(self.adapter, text=self.synth, session_id=self.session_key,
+                                   core_update_notifier=True,
                                    profile=self._served_wake_profile(),
                                    notification_category="diagnostic" if self.wake_diagnostic else "result")
             self._log_woke()
@@ -780,6 +781,7 @@ class _KanbanNotification:
                 raise RuntimeError(f"Kanban wake profile {self.sub_profile!r} no longer exists")
         async with _async_profile_runtime_scope(self.runner._resolve_profile_home_for_source(_source)):
             await deliver_wake(self.adapter, text=self.synth, session_id=self.session_key, source=_source,
+                               core_update_notifier=True,
                                notification_category="diagnostic" if self.wake_diagnostic else "result",
                                kanban_card=self.wake_card)
         self._log_woke()
@@ -898,6 +900,13 @@ class _KanbanNotification:
         # Pings, artifact uploads (media policy) and the wake text (display.language) all read the
         # SUBSCRIBER profile's config; the notifier thread itself runs in the launch profile's scope.
         async with self._owner_scope():
+            from gateway.session_notifier_drain import held
+            if self.wake_agent and held():
+                # Decide once before any delivery. Refusing a later chunk on a new
+                # hold would rewind and replay earlier accepted chunks. An admitted
+                # batch settles; the next tick waits with its cursor retained.
+                await self.rewind()
+                return
             if not await self._send_pings():
                 return
             # All text pings delivered (or skipped for non-push / wake-only).

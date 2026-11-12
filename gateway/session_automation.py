@@ -648,7 +648,7 @@ async def admit_automation(authority, adapter, event, identity, replaces=None, f
         then=admitted, ordered=True, after=partial(authority._schedule_admitted, ref))
 
 
-_ROUTE_WAKE_PRODUCERS = frozenset({'kanban-wake', 'loop-tick'})
+_ROUTE_WAKE_PRODUCERS = frozenset({'kanban-wake', 'background-wake', 'loop-tick'})
 
 
 def route_owner_lock(runner, session_id):

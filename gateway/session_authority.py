@@ -63,6 +63,7 @@ class LiveSession:
     # Set by ``_schedule`` while a drain is alive. The claim commits off-loop, so input admitted
     # after its transaction read the FIFO would otherwise be stranded by a drain that exits idle.
     rescan: bool = False
+    claim_changed: asyncio.Event = field(default_factory=asyncio.Event)
     # admission id -> its started claim, from the moment the settlement worker starts the terminal
     # write until the completion frame is published. The write runs outside ``event_stream.lock``
     # (a contended SQLite writer must not stall loop-side lock takers); readers holding that lock
@@ -490,6 +491,7 @@ class SessionAuthority:
         restore_retired(self, ref.session_id)
         live = self.sessions[ref.session_id]
         live.rescan = True
+        live.claim_changed.set()
         if live.task is None or live.task.done():
             live.task = asyncio.create_task(self._drain(ref))
             live.task.add_done_callback(_log_drain_failure)
@@ -1085,18 +1087,26 @@ class SessionAuthority:
                 raise RuntimeStoreError("invalid_params")
             return live.controls.respond(ref.session_id, generation, prompt_id, response, kind=kind)
 
-    async def _claim_next(self, ref, live):
+    async def _claim_next(self, ref, live, attempted=None):
         # False asks the pump to re-read after a queued head changed during preflight.
         async with live.claim_gate, live.mutation_lock:
             pending = list_session_admissions(self.db, session_id=ref.session_id)
+            live.claim_changed.clear()
             if any(row['status'] == 'unknown' for row in pending):
                 raise RuntimeStoreError('unknown_execution')
             from gateway.session_update_pause import checkpoint_head, update_held, UPDATE_PAUSED
+            from gateway.session_notifier_drain import eligible, queued_head
+            # A started update checkpoint precedes every queued row; only queued selection skips
+            # notifier wakes held by a core-update drain.
             checkpoint = checkpoint_head(self, ref)
             if checkpoint is not None and update_held(self):
                 return UPDATE_PAUSED, None
             first = (get_session_admission(self.db, admission_id=checkpoint['admission_id']) if checkpoint
-                     else next((row for row in pending if row['status'] == 'queued'), None))
+                     else queued_head(pending))
+            if attempted is not None:
+                attempted[:] = [first]
+            if checkpoint is None and first is None and any(row['status'] == 'queued' for row in pending):
+                return 'notifier_held', None
             expected_status = 'started' if checkpoint else 'queued'
             from gateway.config import Platform
             if live.source.platform == Platform.LOCAL:
@@ -1174,7 +1184,7 @@ class SessionAuthority:
                 from gateway.session_update_pause import resume_checkpoint
                 return await resume_checkpoint(self, ref, live, first), first
             row = await tracked_write(self, partial(claim_session_input, self.db, epoch=self.epoch,
-                                                    session_id=ref.session_id, _guard=self._admission_gate(),
+                                                    session_id=ref.session_id, _guard=self._admission_gate(), _eligible=eligible,
                                                     head=first['admission_id'] if first is not None else None),
                                       then=partial(self._stamp_claim, ref, live))
             # Input scheduled while this claim's transaction ran may postdate its read: re-read
@@ -1247,8 +1257,11 @@ class SessionAuthority:
                 # Remember the attempted FIFO identity, including a started checkpoint. A
                 # refusal must never select a queued follower behind unfinished work.
                 attempted = next(iter(list_session_admissions(self.db, session_id=ref.session_id)), None)
+                # The row the claim actually validated: a held notifier wake is skipped, so the
+                # queued FIFO front is not necessarily the attempted queued identity.
+                selected = []
                 try:
-                    row, first = await self._claim_next(ref, live)
+                    row, first = await self._claim_next(ref, live, selected)
                 except RuntimeStoreError as exc:
                     if (attempted is not None and attempted['status'] == 'started'
                             and exc.reason in {'admission_conflict', 'permission_denied', 'not_found',
@@ -1270,8 +1283,15 @@ class SessionAuthority:
                         # A verdict on the head alone (its route or binding moved under it) that every drain
                         # repeats: pausing behind it strands the FIFO for good. Refused only once the same
                         # head conflicted twice, read after each: never a successor a cancel advanced to.
-                        head = next((row['admission_id'] for row in list_session_admissions(
-                            self.db, session_id=ref.session_id) if row['status'] == 'queued'), None)
+                        candidate = selected[0] if selected else None
+                        current = (get_session_admission(self.db, admission_id=candidate['admission_id'])
+                                   if candidate is not None else None)
+                        if candidate is not None and (current is None or current['status'] != 'queued'):
+                            # A cancel settled the conflicted row while its check ran: re-read and
+                            # run whichever row is now eligible, never pause its successor.
+                            conflicted = None
+                            continue
+                        head = current['admission_id'] if current is not None else None
                         if head is not None and head != conflicted:
                             conflicted = head
                             continue
@@ -1305,6 +1325,14 @@ class SessionAuthority:
                 if self.runner._draining or self.retiring or self.sessions.get(ref.session_id) is not live:
                     return None
                 await asyncio.sleep(_CLAIM_RETRY_MIN_S)
+                continue
+            if row == 'notifier_held':
+                if self.runner._draining or self.retiring or self.sessions.get(ref.session_id) is not live:
+                    return None
+                try:
+                    await asyncio.wait_for(live.claim_changed.wait(), _CLAIM_RETRY_MIN_S)
+                except TimeoutError:
+                    pass  # the drain hold can expire without a new admission
                 continue
             if row != 'classic_busy':
                 return row, first
