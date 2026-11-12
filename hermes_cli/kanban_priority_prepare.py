@@ -11,6 +11,26 @@ from hermes_cli.kanban_priority_migration import plan_global, save_manifest
 
 
 def capture(hub, *, board_id: str, exceptions: list[str]) -> dict:
+    """Plan from raw canonical data without importing/clipping values."""
+    return validate(plan_global(_inventory(hub, board_id), board_id=board_id, exceptions=exceptions))
+
+
+def verify(hub, manifest: dict, *, undo: bool = False) -> dict:
+    """Read back all origins at a stable head; never write or import local state."""
+    validate(manifest)
+    rows = _inventory(hub, manifest["board_id"])
+    # Reuse capture's validation of IDs, ownership and integer priorities.
+    observed = validate(plan_global(rows, board_id=manifest["board_id"], exceptions=[]))
+    actual = {r["id"]: (r["origin"], r["old"]) for r in observed["rows"]}
+    target = "old" if undo else "new"
+    expected = {r["id"]: (r["origin"], r[target]) for r in manifest["rows"]}
+    if actual != expected:
+        raise ValueError("canonical ownership, membership or priorities differ from manifest")
+    return {"verified": len(expected), "board_id": manifest["board_id"],
+            "direction": "restore" if undo else "apply"}
+
+
+def _inventory(hub, board_id: str) -> list[dict]:
     """Read raw Board pages at one feed head, without importing/clipping values."""
     rows = []
     after = ""
@@ -45,7 +65,7 @@ def capture(hub, *, board_id: str, exceptions: list[str]) -> dict:
     final = hub.snapshot_page(board_id, "tasks", limit=1)
     if final.get("head") != head:
         raise ValueError("canonical inventory changed; capture a new manifest")
-    return validate(plan_global(rows, board_id=board_id, exceptions=exceptions))
+    return rows
 
 
 def stage(conn, manifest: dict, *, path: Path, task_id: str, writer: str,

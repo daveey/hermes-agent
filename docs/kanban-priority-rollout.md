@@ -93,9 +93,18 @@ commands in their own operator session. No automatic worker grant is introduced.
    Retain all originals and receipts. Either guarded-restore applied origins or
    deliberately capture and attach a new global plan from the new state.
 
-4. Let normal Board sync publish the outbox, inspect rejection/pending counts,
-   and read back canonical priorities against every manifest row. A local command
-   receipt is not publication proof. Only after all origins match may the rollout
+4. Let normal Board sync publish the outbox and inspect rejection/pending counts.
+   Then run the read-only canonical verifier with the original bytes and digest:
+
+   ```sh
+   hermes kanban --board default supervisor-requests --priority-operation verify \
+     --writer ORIGIN --manifest /absolute/fresh-original.json --digest SHA256
+   ```
+
+   It requires exact global open membership, ownership and target values at one
+   stable head; no local import or write occurs. Use `verify-restore` to compare
+   original values after rollback. A local command receipt is not publication
+   proof. Only after all origins match may the rollout
    owner install through the normal drain/update route. Verify no open stored
    priority exceeds 1000; reserve 901..1000 for deliberate escalation. Verify a
    genuinely eligible ready card's queue/claim under real capacity separately.

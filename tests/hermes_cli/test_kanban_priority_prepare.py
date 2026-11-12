@@ -70,3 +70,60 @@ def test_stage_refuses_worker_before_writing_file(conn, monkeypatch, tmp_path):
     with pytest.raises(PermissionError):
         prepare.stage(conn, {}, path=path, task_id=ids[0], writer=sync_helpers.ME)
     assert not path.exists()
+
+
+@pytest.mark.parametrize('patch', [
+    {'table': 'other'}, {'head': True}, {'rows': None}, {'more': 1},
+    {'rows': [None]}, {'rows': [{'id': 'a', 'status': 'unknown'}]},
+    {'rows': [{'id': 1, 'status': 'ready'}]},
+    {'rows': [{'id': '', 'status': 'ready'}]},
+    {'rows': [], 'more': True},
+])
+def test_capture_rejects_malformed_pages(patch):
+    from hermes_cli import kanban_priority_prepare as prepare
+    class Malformed:
+        def snapshot_page(self, *args, **kwargs):
+            return {'table': 'tasks', 'head': 1, 'rows': [], 'more': False, **patch}
+    with pytest.raises(ValueError):
+        prepare.capture(Malformed(), board_id='board', exceptions=[])
+
+
+def test_capture_rechecks_final_head():
+    from hermes_cli import kanban_priority_prepare as prepare
+    class Changed(Pages):
+        def snapshot_page(self, *args, **kwargs):
+            page = super().snapshot_page(*args, **kwargs)
+            if kwargs.get('limit') == 1:
+                page['head'] = 5
+            return page
+    with pytest.raises(ValueError, match='changed'):
+        prepare.capture(Changed(), board_id='board', exceptions=[])
+
+
+@pytest.mark.parametrize('case', ['shadow', 'writer', 'board', 'missing_owner', 'bytes', 'readback'])
+def test_stage_guard_failures_preserve_priorities(conn, tmp_path, monkeypatch, case):
+    from hermes_cli import kanban_priority_prepare as prepare
+    ids, _, _ = helpers.setup_plan(conn)
+    rows = [dict(r) for r in conn.execute('SELECT id,priority,created_on,status FROM tasks')]
+    plan = migration.plan_global(rows, board_id=sync_helpers.BOARD, exceptions=[])
+    writer, owner = sync_helpers.ME, ids[0]
+    data = None
+    if case == 'shadow':
+        conn.execute("UPDATE kanban_sync_state SET mode='shadow'")
+    if case == 'writer':
+        writer = 'foreign'
+    if case == 'board':
+        conn.execute("UPDATE kanban_sync_state SET board_id='foreign'")
+    if case == 'missing_owner':
+        owner = 'missing'
+    if case == 'bytes':
+        changed = dict(plan, board_id='different')
+        data = json.dumps(changed).encode()
+    if case == 'readback':
+        monkeypatch.setattr(kb, 'get_attachment', lambda *args: None)
+    conn.commit()
+    path = tmp_path / 'guarded.json'
+    with pytest.raises(ValueError):
+        prepare.stage(conn, plan, path=path, task_id=owner, writer=writer, original_bytes=data)
+    assert path.exists() == (case == 'readback')
+    assert helpers.helpers.priorities(conn, ids) == [10000, 10000, 50000]

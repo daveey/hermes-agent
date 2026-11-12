@@ -82,3 +82,52 @@ def test_prepare_cli_reads_enrolled_canonical_board(conn, monkeypatch, tmp_path,
     manifest = json.loads(path.read_bytes())
     assert manifest['rows'][0]['old'] == 10000
     assert manifest['exceptions'][0]['status'] == 'done'
+    verify_args = args('--priority-operation', 'verify-restore', '--writer', sync_helpers.ME,
+                       '--manifest', str(path), '--digest', receipt['manifest_sha256'])
+    assert cli.run(conn, verify_args) == 0
+    assert json.loads(capsys.readouterr().out)['verified'] == 1
+    verify_args.digest = 'wrong'
+    assert cli.run(conn, verify_args) != 0
+
+
+@pytest.mark.parametrize('words, message', [
+    (['--priority-operation', 'apply'], 'writer'),
+    (['--priority-operation', 'stage'], 'task'),
+    (['--priority-operation', 'stage', '--task', 'local', '--backup', 'unused'], 'manifest'),
+    (['--priority-operation', 'prepare', '--task', 'local', '--backup', 'unused', '--manifest', 'unused'], 'canonical'),
+    (['--priority-operation', 'apply', '--attachment-id', '1', '--digest', 'x', '--manifest', 'unused'], 'previously attached'),
+    (['--priority-operation', 'verify'], 'manifest'),
+    (['--priority-operation', 'verify', '--manifest', 'unused', '--digest', 'x', '--backup', 'unused'], 'only manifest'),
+])
+def test_cli_validation_precedes_io(conn, capsys, words, message):
+    from hermes_cli import kanban_priority_cli as cli
+    namespace = args(*words)
+    if message != 'writer':
+        namespace.writer = sync_helpers.ME
+    assert cli.run(conn, namespace) != 0
+    output = capsys.readouterr()
+    assert message in output.err + output.out
+
+
+@pytest.mark.parametrize('case', ['identity', 'local_writer', 'shadow', 'board'])
+def test_prepare_refuses_wrong_enrollment_before_fetch(conn, monkeypatch, tmp_path, capsys, case):
+    from hermes_cli import kanban_priority_cli as cli
+    from hermes_cli import kanban_sync_client as sync
+    ids, _, _ = helpers.setup_plan(conn)
+    gateway = 'foreign' if case == 'identity' else sync_helpers.ME
+    monkeypatch.setattr(sync, 'load_identity', lambda: sync.Identity('https://example.test', 'fixture', gateway))
+    def forbidden_hub(*args):
+        pytest.fail('invalid enrollment reached canonical fetch')
+    monkeypatch.setattr(sync, 'Hub', forbidden_hub)
+    sql = {'local_writer': "UPDATE kanban_sync_state SET gateway_id='foreign'",
+           'shadow': "UPDATE kanban_sync_state SET mode='shadow'",
+           'board': "UPDATE kanban_sync_state SET board_id=''"}
+    if case in sql:
+        conn.execute(sql[case])
+        conn.commit()
+    path = tmp_path / 'refused.json'
+    assert cli.run(conn, args('--priority-operation', 'prepare', '--writer', sync_helpers.ME,
+                             '--task', ids[0], '--backup', str(path))) != 0
+    assert not path.exists()
+    output = capsys.readouterr()
+    assert ('gateway' in output.out + output.err) or case in ('shadow', 'board')

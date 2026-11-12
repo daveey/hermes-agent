@@ -391,7 +391,7 @@ _SPECS = [
     _cmd("link", [_arg("parent_id"), _arg("child_id")], help="Add a parent->child dependency"),
     _cmd("unlink", [_arg("parent_id"), _arg("child_id")], help="Remove a parent->child dependency"),
     _cmd("supervisor-requests", [
-        _arg("--priority-operation", choices=["prepare", "stage", "apply", "restore"],
+        _arg("--priority-operation", choices=["prepare", "stage", "apply", "restore", "verify", "verify-restore"],
              help="Operator-only attached priority migration; never executable by workers"),
         _arg("--writer", help="Explicit local primary gateway identity"),
         _arg("--manifest", help="Original manifest input file for stage"),

@@ -44,6 +44,8 @@ def run(conn, args) -> int:
                 manifest = prepare.capture(sync.Hub(identity), board_id=state['board_id'], exceptions=args.exception)
             result = prepare.stage(conn, manifest, path=Path(args.backup), task_id=args.task,
                                    writer=args.writer, original_bytes=data)
+        elif action in ('verify', 'verify-restore'):
+            result = _verify(conn, args, undo=action == 'verify-restore')
         elif action in ('apply', 'restore'):
             if not args.attachment_id or not args.digest:
                 raise ValueError('--attachment-id and --digest required')
@@ -58,3 +60,25 @@ def run(conn, args) -> int:
         return _err(str(exc))
     print(json.dumps(result, sort_keys=True))
     return 0
+
+
+def _verify(conn, args, *, undo: bool) -> dict:
+    import hashlib
+    from hermes_cli import kanban_sync_client as sync
+    from hermes_cli.kanban_priority_manifest import validate
+
+    if not args.manifest or not args.digest:
+        raise ValueError('verify requires --manifest and --digest')
+    if args.backup or args.exception or args.attachment_id or args.allow_legacy_rollback or args.task:
+        raise ValueError('verify accepts only manifest, digest and writer')
+    data = Path(args.manifest).read_bytes()
+    if hashlib.sha256(data).hexdigest() != args.digest:
+        raise ValueError('manifest digest mismatch')
+    manifest = validate(json.loads(data))
+    identity = sync.load_identity()
+    state = sync_state(conn) or {}
+    if identity.gateway != args.writer or state.get('gateway_id') != args.writer:
+        raise ValueError('configured gateway differs from explicit writer')
+    if state.get('board_id') != manifest['board_id']:
+        raise ValueError('manifest belongs to a different board')
+    return prepare.verify(sync.Hub(identity), manifest, undo=undo)
