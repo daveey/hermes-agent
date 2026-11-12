@@ -5,7 +5,7 @@ export type SessionOutcomeKind = 'decision' | 'done' | 'muted' | 'running' | 'un
 
 /** [daveey] Why an outcome is `unresolved`. */
 export type SessionOutcomeReason =
-  'empty' | 'interrupted' | 'no_summary' | 'notice_tail' | 'subagent_killed' | 'turn_failed'
+  'empty' | 'interrupted' | 'no_summary' | 'notice_tail' | 'subagent_killed' | 'subagent_lost' | 'turn_failed'
 
 /** [daveey] One open question a `decision` outcome waits on the user for. */
 export interface SessionOutcomeItem {

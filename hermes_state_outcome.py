@@ -32,12 +32,17 @@ logger = logging.getLogger(__name__)
 OUTCOME_KINDS = ("done", "decision", "waiting", "running", "muted", "unresolved")
 DECLARABLE_KINDS = ("done", "decision", "waiting")
 WAIT_KINDS = ("card", "process", "cron", "time", "capacity", "subagent", "goal")
-UNRESOLVED_REASONS = ("notice_tail", "no_summary", "turn_failed", "interrupted", "subagent_killed", "empty")
+UNRESOLVED_REASONS = ("notice_tail", "no_summary", "turn_failed", "interrupted", "subagent_killed",
+                      "subagent_lost", "empty")
 TRIGGERS = ("turn_end", "notice", "card_change", "reap", "mute", "manual")
 SUMMARY_CHARS = 400
-# A delegate child with an open row but no activity for this long is a leak, not live work: the
-# orphan reap ends it on the next backend start.
+# A delegate child with an open row but no activity for this long is not live work. It is *lost*
+# (``unresolved{subagent_lost}``) until a declared outcome made after its last activity accounts for it:
+# it died with no terminal result, and the orphan reap may never end its row (a live backend's heartbeat
+# protects it). Dropping it silently let a closing-looking reply derive ``done`` (false green).
 SUBAGENT_LIVE_WINDOW_S = 6 * 3600.0
+# How far back an unaccounted lost child still counts: older leaks no longer describe the chat.
+SUBAGENT_LOST_BOUND_S = 7 * 86400.0
 # How far back the transcript is read: the tail classification needs only the last few rows.
 _TAIL_ROWS = 40
 _ERROR_FINISH_REASONS = frozenset({"error", "agent_error", "content_filter"})
@@ -370,15 +375,32 @@ def _goal_items(sid: str, ids: list[str]) -> list[dict]:
     return [{"kind": "goal", "id": sid, "label": "standing goal", "state": "running"}] if row.get("goal_active") else []
 
 
-def _subagent_items(db: Any, ids: list[str]) -> list[dict]:
+def _open_subagents_sql(ids: list[str]) -> str:
+    """``FROM ... WHERE`` selecting the unended delegate children of ``ids`` (bind ``ids`` first)."""
     from hermes_state_common import _placeholders, _sql_json_extract
 
+    return (f" FROM sessions WHERE parent_session_id IN ({_placeholders(ids)}) AND ended_at IS NULL"
+            f" AND (source = 'subagent' OR {_sql_json_extract('model_config', '$._delegate_from')} IS NOT NULL)")
+
+
+def _subagent_items(db: Any, ids: list[str]) -> list[dict]:
     rows = db._read_all(
-        f"SELECT id, title FROM sessions WHERE parent_session_id IN ({_placeholders(ids)}) AND ended_at IS NULL"
-        f" AND (source = 'subagent' OR {_sql_json_extract('model_config', '$._delegate_from')} IS NOT NULL)"
-        " AND COALESCE(last_activity_at, started_at) >= ?", (*ids, time.time() - SUBAGENT_LIVE_WINDOW_S))
+        "SELECT id, title" + _open_subagents_sql(ids) + " AND COALESCE(last_activity_at, started_at) >= ?",
+        (*ids, time.time() - SUBAGENT_LIVE_WINDOW_S))
     return [{"kind": "subagent", "id": str(r["id"]), "label": r["title"] or "subagent", "state": "running"}
             for r in rows]
+
+
+def _lost_subagent_items(db: Any, ids: list[str], accounted_at: Optional[float]) -> list[dict]:
+    """Unended delegate children silent past the live window, started within the bound, and active after
+    ``accounted_at`` (the chat's latest declared outcome): nothing the agent said covers them."""
+    now = time.time()
+    rows = db._read_all(
+        "SELECT id, title, COALESCE(last_activity_at, started_at) AS last" + _open_subagents_sql(ids)
+        + " AND COALESCE(last_activity_at, started_at) < ? AND started_at >= ?",
+        (*ids, now - SUBAGENT_LIVE_WINDOW_S, now - SUBAGENT_LOST_BOUND_S))
+    return [{"kind": "subagent", "id": str(r["id"]), "label": r["title"] or "subagent", "state": "lost"}
+            for r in rows if accounted_at is None or float(r["last"] or 0) > accounted_at]
 
 
 def _provider_items(sid: str) -> tuple[list[dict], list[dict]]:
@@ -582,10 +604,34 @@ def _live_work(db: Any, sid: str, ids: list[str]) -> tuple[list[dict], list[dict
     return prov_decisions + card_decisions, waits, card_read_failed
 
 
+def _accounted_at(stored: Optional[dict]) -> Optional[float]:
+    """When the agent last declared an outcome for this chat, or None: a stored declaration, one a derived
+    outcome still carries, or the ``last_declared_at`` a derived outcome kept after the declaration lapsed."""
+    if not stored:
+        return None
+    nested = stored.get("declared")
+    times = [stored.get("at") if stored.get("source") == "declared" else None,
+             nested.get("at") if isinstance(nested, dict) else None, stored.get("last_declared_at")]
+    times = [float(t) for t in times if isinstance(t, (int, float)) and not isinstance(t, bool)]
+    return max(times) if times else None
+
+
 def _derive(db: Any, sid: str, *, ignore_live_turn: bool = False,
             pending_reply: Optional[str] = None) -> dict[str, Any]:
+    stored = _parse((_row(db, sid) or {}).get("outcome_json"))
+    current = _derive_kept_receipt(db, sid, stored, ignore_live_turn=ignore_live_turn, pending_reply=pending_reply)
+    accounted = _accounted_at(stored)
+    if accounted is None or current.get("source") == "declared":
+        return current
+    # A newer user row drops a lapsed declaration from the stored outcome; keep when it was made, so a lost
+    # subagent it accounted for stays accounted for (``_lost_subagent_items``).
+    return {**current, "last_declared_at": accounted}
+
+
+def _derive_kept_receipt(db: Any, sid: str, stored: Optional[dict], *, ignore_live_turn: bool,
+                         pending_reply: Optional[str]) -> dict[str, Any]:
     from hermes_completion_receipt import historical_fields
-    historical = historical_fields(_parse((_row(db, sid) or {}).get("outcome_json")))
+    historical = historical_fields(stored)
     current = _derive_current(db, sid, ignore_live_turn=ignore_live_turn, pending_reply=pending_reply)
     if current.get("kind") == "done":
         # A declared done carries its own receipt (or none: unspecified). A derived
@@ -610,7 +656,8 @@ def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
         return _outcome("muted", now, **({"declared": _declared(stored)} if _declared(stored) else {}))
     if not ignore_live_turn and _live_turn(db, sid):
         return _outcome("running", now)
-    decisions, waits, card_read_failed = _live_work(db, sid, _lineage_ids(db, sid))
+    ids = _lineage_ids(db, sid)
+    decisions, waits, card_read_failed = _live_work(db, sid, ids)
     tail = _without_finished_notes(_tail(db, sid))
     if pending_reply is not None:  # the unsaved final reply is the last assistant message
         tail.insert(0, {"role": "assistant", "content": pending_reply, "timestamp": now})
@@ -624,7 +671,14 @@ def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
         return _outcome("unresolved", now, reason=lost, **carry)
     if waits:
         return _outcome("waiting", now, on=waits, **carry)
-    crons = _guarded("cron", sid, lambda: _cron_items(_lineage_ids(db, sid)), [])
+    # A lost subagent ranks like a killed one: never done, and never a wait that cannot end, so it outranks a
+    # declaration made before it went silent (``_lost_subagent_items`` drops those made after). A notice that
+    # already names the stopped subagent keeps its own reason.
+    lost_subagents = [] if tail and _tail_reason(tail) == "subagent_killed" else _guarded(
+        "lost subagents", sid, lambda: _lost_subagent_items(db, ids, _accounted_at(stored)), [])
+    if lost_subagents:
+        return _outcome("unresolved", now, reason="subagent_lost", on=lost_subagents, **carry)
+    crons = _guarded("cron", sid, lambda: _cron_items(ids), [])
     named = {"crons": crons} if crons else {}
     if holds and declared and declared.get("kind") == "waiting":
         return {k: v for k, v in declared.items() if k != "crons"}

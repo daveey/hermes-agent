@@ -7,6 +7,7 @@ const UNRESOLVED_REASONS: Readonly<Record<string, string>> = {
   no_summary: 'Unresolved: the last reply did not wrap the work up',
   notice_tail: 'Unresolved: a card update arrived and nothing answered it',
   subagent_killed: 'Unresolved: a subagent was stopped before it finished',
+  subagent_lost: 'Unresolved: a subagent went silent without finishing',
   turn_failed: 'Unresolved: the last turn failed'
 }
 
