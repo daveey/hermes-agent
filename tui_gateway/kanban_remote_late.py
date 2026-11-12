@@ -102,9 +102,8 @@ class SweepBatches:
         from tui_gateway import kanban_remote_notices as notices
 
         profile, sid = link["profile"], link["session"]
-        at = notices._terminal_at(task)
         claim = {"session": sid, "ref": f"{owner}/{key}",
-                 "state": f"{task['status']}@{int(at) if at else 0}",
+                 "state": notices._notice_state(task),  # the ledger row identity _deliver_link claimed
                  "event_key": notices._shared_key(owner, key, task, profile, sid),
                  "owner_at": notices._fresh_at(task)}
         claim["notice_key"] = claim["event_key"]

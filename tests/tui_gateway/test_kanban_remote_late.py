@@ -492,3 +492,32 @@ def test_six_day_old_owner_time_is_explicit(arrival, door):
     for card, age in zip(cards, ("144h 0m", "144h 1m")):
         stamp = datetime.fromtimestamp(krn._fresh_at(card["task"]), zone).strftime("%Y-%m-%d %H:%M %Z")
         assert f"- {stamp} ({age} ago; not delivered then)" in text
+
+
+@pytest.mark.parametrize("door", ["collect", "sweep"])
+def test_late_withdrawal_joins_the_group_under_its_own_ledger_state(arrival, door):
+    """A withdrawal receipt's ledger state is ``request_withdrawn@<event>``, not ``archived@0``: the batch claim
+    must carry that identity or its ack misses the row and the receipt is re-offered."""
+    replica, ledger, now, insert, db, opener = arrival
+    insert(2, "done", 6 * 86400)
+    card = _card("t_late_withdrawn", CHAT, status="done", at=now - 6 * 86400)
+    task = {**card["task"], "status": "archived",
+            "withdrawal_notice": {"kind": "request_withdrawn", "event_id": 42, "created_at": now - 6 * 86400}}
+    with sqlite3.connect(replica) as conn:
+        conn.execute("INSERT INTO replica VALUES ('hub','tasks',?,?,?)", (card["key"], json.dumps(task), 99))
+    if door == "collect":
+        group = krn.collect(CHAT, "default", now=now)[0]
+        db.append_kanban_notice(CHAT, group["text"], {"notice_id": group["event_keys"][0],
+                                                      "kanban_event_keys": group["event_keys"]})
+        assert krn.ack(group)
+    else:
+        krn.sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener, ledger=ledger, now=now)
+    with sqlite3.connect(ledger) as conn:
+        states = dict(conn.execute("SELECT ref, state || ':' || delivered FROM notices").fetchall())
+    assert states[f"hub/{card['key']}"] == "request_withdrawn@42:1"
+    assert len(states) == 3 and all(value.endswith(":1") for value in states.values())
+    assert len(db.get_messages(CHAT)) == 1 and "t_late_withdrawn" in db.get_messages(CHAT)[0]["content"]
+    krn._reset_for_tests()
+    assert krn.collect(CHAT, "default", now=now) == []
+    assert krn.sweep_remote_notices(replica_path=replica, gateway="macbook", session_db=opener,
+                                    ledger=ledger, now=now) == []
