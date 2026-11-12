@@ -1039,8 +1039,13 @@ def _pause(token: dict) -> str | None:
     except BaseException as exc:  # health: allow BLE001 -- interruption must settle before cmd_update releases its fence
         from hermes_cli.update_cmd_windows import _resume_windows_gateways_after_update
         print(f"  ↷ Update deferred: {exc or type(exc).__name__}; the checkout was not changed")
-        print("  ↻ Recovery (a separate phase after the stop deadline, not bounded by it): "
-              f"restarting {_describe(token) or 'the stopped gateways'} on the old code...")
+        # A gateway that refused the pause left the set (``mark_stop_refused``): it was never stopped and owes
+        # no restart. Say so instead of announcing a restart of nothing (hermes-hub 2026-11-12 18:11Z).
+        if token.get("posix_units") or token.get("unmapped") or token.get("profiles"):
+            print("  ↻ Recovery (a separate phase after the stop deadline, not bounded by it): "
+                  f"restarting {_describe(token) or 'the stopped gateways'} on the old code...")
+        else:
+            print("  ↻ No gateway was stopped (each refused or was never asked); nothing to restart")
         try:
             _resume_windows_gateways_after_update(token)
         except Exception as again:  # health: allow BLE001 -- still owed: completion restarts them after the deps
