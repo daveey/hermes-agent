@@ -420,11 +420,8 @@ def replica_task_resolution(ids: list[str], now: float | None = None) -> tuple[s
         try:
             offline = _meta_float(conn, "offline_since")
             synced = max(filter(None, (_meta_float(conn, "last_ok"), _meta_float(conn, "last_digest"))), default=None)
-            found = {
-                tid for tid in ids
-                if conn.execute("SELECT 1 FROM replica WHERE coll = 'tasks' AND substr(key, -?) = ? LIMIT 1",
-                                (len(tid) + 1, "/" + tid)).fetchone()
-            }
+            from hermes_cli.kanban_prose_refs import hub_replica_lookup
+            found = {tid for tid in ids if conn.execute(*hub_replica_lookup(tid)).fetchone()}
         finally:
             conn.close()
     except sqlite3.Error:

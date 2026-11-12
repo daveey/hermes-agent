@@ -100,6 +100,15 @@ def test_summary_naming_a_hub_card_only_the_board_replica_holds_is_not_flagged(w
     assert _diag_refs(conn, tid) == []
 
 
+def test_short_prefix_of_a_board_replica_card_is_not_flagged_but_an_orphan_prefix_is(worker_node):
+    """A summary citing a replica-only card by its 8-hex prefix resolves through the Board replica."""
+    conn, tid = worker_node
+    assert kb.complete_task(conn, tid, summary=f"follow-up of {HUB_CARD[:10]}; also t_feedf00d")
+    (flag,) = _events(conn, tid, "suspected_hallucinated_references")
+    assert flag["phantom_refs"] == ["t_feedf00d"]
+    assert _diag_refs(conn, tid) == [["t_feedf00d"]]
+
+
 def test_id_found_nowhere_is_still_flagged_and_still_refused(worker_node):
     conn, tid = worker_node
     with pytest.raises(kb.HallucinatedCardsError) as err:

@@ -49,10 +49,30 @@ def replica_tasks(ids: Iterable[str], parent: Optional[str] = None) -> tuple[dic
     return found, linked
 
 
+def replica_prefixes(refs: Iterable[str]) -> set[str]:
+    """The short-form ``refs`` (shorter than a full id) that prefix a card id in any Board replica."""
+    from hermes_cli.kanban_generation import open_ro
+    from hermes_cli.kanban_prose_refs import has_task_with_prefix, is_prefix_ref
+
+    want = [r for r in dict.fromkeys(refs) if is_prefix_ref(r)]
+    found: set[str] = set()
+    for path in _replica_paths() if want else ():
+        try:
+            conn = open_ro(path)
+            try:
+                found.update(r for r in want if r not in found and has_task_with_prefix(conn, r))
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            continue
+    return found
+
+
 def unresolved_after_replica(missing: list[str]) -> list[str]:
-    """``missing`` (not on the local board) minus ids a Board replica or the hub replica knows; [] when the hub
-    replica cannot say for the rest."""
-    missing = [p for p in missing if p not in replica_tasks(missing)[0]]
+    """``missing`` (not on the local board) minus ids a Board replica or the hub replica knows (a short-form ref by
+    prefix); [] when the hub replica cannot say for the rest."""
+    known = set(replica_tasks(missing)[0]) | replica_prefixes(missing)
+    missing = [p for p in missing if p not in known]
     try:
         from hermes_cli.kanban_session_activity import replica_task_resolution
         found, authoritative = replica_task_resolution(missing)

@@ -2438,19 +2438,7 @@ def _verify_created_cards(
     return verified, phantom
 
 
-# Matches ``kanban_create`` (12 hex) and ``_new_task_id`` (8 hex) ids; 8+ for forward compat.
-_TASK_ID_PROSE_RE = re.compile(r"\bt_[a-f0-9]{8,}\b")
-
-
-def _scan_prose_for_phantom_ids(conn: sqlite3.Connection, text: str) -> list[str]:
-    """``t_<hex>`` references in ``text`` that resolve neither to a local task nor to a card in the hermes-hub
-    replica of other gateways (deduped; advisory). An unreadable/stale replica leaves them unflagged."""
-    if not text:
-        return []
-    missing = _missing_task_ids(conn, dict.fromkeys(_TASK_ID_PROSE_RE.findall(text)))
-    return unresolved_after_replica(missing)
-
-
+from hermes_cli.kanban_prose_refs import _TASK_ID_PROSE_RE, _scan_prose_for_phantom_ids  # re-exported
 from hermes_cli.kanban_board_replica_refs import replica_tasks as _replica_tasks, unresolved_after_replica
 
 
