@@ -35,7 +35,28 @@ class ForeignCardError(Exception):
 
 def message(task_id: str, owner: Optional[str]) -> str:
     return (f"{task_id} was created on {owner or 'another gateway'} and lives there; this gateway has only a "
-            "replica copy. Its owner or the Board must write it.")
+            "replica copy. Its owner or the Board must write it." + comment_route(task_id, owner))
+
+
+# Gateway names a hub-owned card's ``created_on`` carries (the hub's own name and its alias).
+HUB_OWNERS = frozenset({"hub", "hermes-hub"})
+HUB_COMMENT = "hub-comment"
+
+
+def comment_route(task_id: str, owner: Optional[str]) -> str:
+    """The supported comment-only route onto ``owner``'s card from this machine, as a sentence, else "".
+
+    A pool worker carrying ``capability:hub-write`` has the ``hub-comment`` helper (state
+    ``hosts/hermes-workers/bin/hub-comment``): it adds one comment to a hub-owned card over the logged
+    ``hub-admin`` route, attributed ``<worker>/<card>``, and reads it back. Before it was named here, workers that
+    hit this refusal filed relay cards that queued on the hub only to post one comment (t_01a1ce48ffc89823).
+    Only a comment: completion, status, links and archive stay with the owner."""
+    import shutil
+    if (owner or "").strip().lower() not in HUB_OWNERS or not shutil.which(HUB_COMMENT):
+        return ""
+    return (f" To add a comment only (no other write), run `{HUB_COMMENT} {task_id} --text '...'` (or "
+            "`--file <path>`) from your card's terminal: it posts on the hub attributed to your card and prints "
+            "the comment id. Do not file a relay card for it.")
 
 
 def replica_path(db_path: Optional[str]) -> Optional[Path]:

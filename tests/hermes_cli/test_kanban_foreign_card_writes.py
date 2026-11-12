@@ -92,6 +92,40 @@ def test_tool_comment_names_owner(synced):
     assert OWNER_TEXT in out["error"]
 
 
+def _hub_comment_on_path(tmp_path, monkeypatch):
+    bindir = tmp_path / "hub-comment-bin"
+    bindir.mkdir()
+    helper = bindir / "hub-comment"
+    helper.write_text("#!/bin/sh\nexit 0\n")
+    helper.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
+
+
+def test_tool_comment_on_hub_card_names_the_hub_comment_route(home, monkeypatch, tmp_path):
+    """t_01a1ce48ffc89823: workers that hit foreign_card filed relay cards that queued on the hub just to post one
+    comment. On a machine with the hub-comment helper, the refusal names it (comment only)."""
+    from tools import kanban_tools as kt
+    tid = replica_card(home, owner="hub")
+    monkeypatch.setattr(sync, "sync_config", lambda: {"enabled": True, "boards": ["default"]})
+    _hub_comment_on_path(tmp_path, monkeypatch)
+    out = json.loads(kt._handle_comment({"task_id": tid, "body": "hello"}))
+    assert out.get("rejection") == "foreign_card", out
+    assert "was created on hub and lives there" in out["error"]
+    assert f"run `hub-comment {tid} --text '...'`" in out["error"]
+    assert "comment only (no other write)" in out["error"]
+
+
+def test_hub_comment_route_only_for_hub_cards_with_the_helper(home, monkeypatch, tmp_path):
+    from hermes_cli import kanban_foreign_card as kfc
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    assert "hub-comment" not in kfc.message("t_x", "hub")  # no helper on this machine
+    _hub_comment_on_path(tmp_path, monkeypatch)
+    assert "hub-comment t_x" in kfc.message("t_x", "hub")
+    assert "hub-comment t_x" in kfc.message("t_x", "hermes-hub")
+    for owner in ("worker-1", None, "macbook"):  # the helper only reaches hub-owned cards
+        assert "hub-comment" not in kfc.message("t_x", owner)
+
+
 def test_cli_complete_names_owner(synced, capsys):
     assert cli("complete", synced, "--summary", "done") == 1
     err = capsys.readouterr().err
