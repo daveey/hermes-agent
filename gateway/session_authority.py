@@ -1319,26 +1319,30 @@ class SessionAuthority:
                 await asyncio.sleep(backoff)
                 continue
             backoff = 0.0
-            if row == 'update_paused':
-                # Durable unfinished work, no active execution stamp. Keep the original waiters;
-                # shutdown leaves the receipt for the next owner rather than terminalizing it.
-                if self.runner._draining or self.retiring or self.sessions.get(ref.session_id) is not live:
-                    return None
-                await asyncio.sleep(_CLAIM_RETRY_MIN_S)
-                continue
-            if row == 'notifier_held':
-                if self.runner._draining or self.retiring or self.sessions.get(ref.session_id) is not live:
-                    return None
-                try:
-                    await asyncio.wait_for(live.claim_changed.wait(), _CLAIM_RETRY_MIN_S)
-                except TimeoutError:
-                    pass  # the drain hold can expire without a new admission
-                continue
-            if row != 'classic_busy':
+            if row not in ('update_paused', 'notifier_held', 'classic_busy'):
                 return row, first
-            if self._drain_stopping(ref, live):
+            if not await self._wait_claim_state(ref, live, row):
                 return None
+
+    async def _wait_claim_state(self, ref, live, row):
+        """Wait out a claim that found no runnable row: True to re-read, False when the drain must exit."""
+        if row == 'classic_busy':
+            if self._drain_stopping(ref, live):
+                return False
             await asyncio.sleep(_CLAIM_RETRY_MIN_S)
+            return True
+        # Durable unfinished work (update_paused) or only held notifier wakes (notifier_held). Keep the
+        # original waiters; shutdown leaves the receipt for the next owner rather than terminalizing it.
+        if self.runner._draining or self.retiring or self.sessions.get(ref.session_id) is not live:
+            return False
+        if row == 'update_paused':
+            await asyncio.sleep(_CLAIM_RETRY_MIN_S)
+            return True
+        try:
+            await asyncio.wait_for(live.claim_changed.wait(), _CLAIM_RETRY_MIN_S)
+        except TimeoutError:
+            pass  # the drain hold can expire without a new admission
+        return True
 
     async def _execute_claimed(self, ref, live, row):
         """Run the claimed admission: ``(response, outcome)``. The executing stamp clears the moment
