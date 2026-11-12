@@ -302,7 +302,7 @@ class Reporter:
             sample = self._sample(sample, measured)
             if now < self.counters_off_until:  # this Board rejected them lately: the normal report only
                 from hermes_cli.machine_throughput_metrics import FIELDS
-                sample = {k: v for k, v in sample.items() if k not in FIELDS}
+                sample = {k: v for k, v in sample.items() if k not in FIELDS and k != "tokens_by_model"}
 
             def counters_rejected() -> None:
                 self.counters_off_until = now + UNSUPPORTED_RETRY_S

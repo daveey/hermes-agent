@@ -8,14 +8,18 @@ Sources, per ``state.db`` (the installation root's and every ``profiles/*/state.
   (compression, titles, approval, coach, goal judge ...), about 12% of the hub's tokens, which ``sessions`` never
   counts. A database without the table (older schema) falls back to the ``sessions`` columns.
 - ``sessions_started_total`` / ``sessions_ended_total``: ``count(*)`` and ``count(ended_at)`` of ``sessions``.
+- ``tokens_by_model``: the same token columns grouped by model, merged across profiles,
+  normalized to 64-character names and bounded to 32 keys (overflow becomes ``other``).
+  Legacy schemas contribute their token totals under ``unknown``.
 
 Totals only grow while rows are kept; deleting sessions (prune) lowers them, which a consumer treats as a reset.
 Read-only URI connections with a 1 s busy timeout. The result (success or failure) is cached for :data:`CACHE_TTL_S`
-because ``collect()`` runs every 10 s. Any unreadable database omits all four fields: a partial sum would read as
+because ``collect()`` runs every 10 s. Any unreadable database omits all throughput fields: a partial sum would read as
 a drop, and 0 would read as a reset.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 import sqlite3
 import time
 from pathlib import Path
@@ -39,12 +43,47 @@ def state_db_paths(root: Optional[Path] = None) -> list[Path]:
     return [p for p in (root / "state.db", *sorted((root / "profiles").glob("*/state.db"))) if p.exists()]
 
 
-def _read(path: Path) -> tuple[int, int, int, int]:
+def _bounded_models(models: dict[str, list[int]]) -> dict[str, list[int]]:
+    """Normalize before ranking; reserve the last slot for the merged tail.
+
+    Saturate each host-wide token axis at the wire limit, assigning its budget in
+    rank order. Deriving the scalars from this same map preserves exact equality
+    even for corrupt negative counts or counters beyond the wire limit.
+    """
+    ranked = sorted(models.items(), key=lambda item: (-sum(item[1]), item[0]))
+    folded: dict[str, list[int]] = {}
+    for index, (model, values) in enumerate(ranked):
+        key = "other" if len(ranked) > 32 and index >= 31 else model
+        target = folded.setdefault(key, [0, 0])
+        for axis in range(2):
+            target[axis] += values[axis]
+    remaining = [10**15, 10**15]
+    for values in folded.values():
+        for axis in range(2):
+            values[axis] = min(remaining[axis], max(0, int(values[axis])))
+            remaining[axis] -= values[axis]
+    return folded
+
+
+def _read(path: Path, models: Optional[dict[str, list[int]]] = None) -> tuple[int, int, int, int]:
     db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
     try:
         has_usage = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_model_usage'"
                                ).fetchone()
-        io, cache = db.execute(_USAGE_SQL.format(table="session_model_usage" if has_usage else "sessions")).fetchone()
+        if has_usage:
+            rows = db.execute(_USAGE_SQL.replace("SELECT ", "SELECT model, ", 1).format(
+                table="session_model_usage") + " GROUP BY model").fetchall()
+        else:
+            # Older schemas cannot supply a ledger breakdown; preserve their totals.
+            rows = [("unknown", *db.execute(_USAGE_SQL.format(table="sessions")).fetchone())]
+        io = cache = 0
+        for model, model_io, model_cache in rows:
+            io += int(model_io)
+            cache += int(model_cache)
+            if models is not None:
+                target = models.setdefault(str(model or "unknown")[:64], [0, 0])
+                target[0] += int(model_io)
+                target[1] += int(model_cache)
         started, ended = db.execute(_SESSIONS_SQL).fetchone()
     finally:
         db.close()
@@ -52,8 +91,9 @@ def _read(path: Path) -> tuple[int, int, int, int]:
 
 
 def counters(root: Optional[Path] = None) -> dict:
-    """The four totals for this host, or ``{}`` when any ``state.db`` cannot be read (or none exists)."""
+    """Host totals and model breakdown, or ``{}`` if any database is unreadable (or absent)."""
     totals, seen = [0, 0, 0, 0], set()
+    models: dict[str, list[int]] = {}
     try:
         paths = state_db_paths(root)
         for path in paths:
@@ -62,23 +102,25 @@ def counters(root: Optional[Path] = None) -> dict:
             if identity in seen:
                 continue
             seen.add(identity)
-            for i, value in enumerate(_read(path)):
+            for i, value in enumerate(_read(path, models)):
                 totals[i] += value
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return {}
     if not seen:
         return {}
-    return dict(zip(FIELDS, totals))
+    bounded = _bounded_models(models)
+    totals[:2] = [sum(v[axis] for v in bounded.values()) for axis in range(2)]
+    return {**dict(zip(FIELDS, totals)), "tokens_by_model": bounded}
 
 
 def cached_counters(root: Optional[Path] = None, *, clock: Callable[[], float] = time.monotonic) -> dict:
     global _cache
     now, key = clock(), str(root)
     if _cache is not None and _cache[0] == key and 0 <= now - _cache[1] < CACHE_TTL_S:
-        return dict(_cache[2])
+        return deepcopy(_cache[2])
     value = counters(root)
     _cache = (key, now, value)
-    return dict(value)
+    return deepcopy(value)
 
 
 def reset_cache() -> None:

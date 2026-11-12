@@ -38,7 +38,7 @@ ADDITIVE_FIELDS = ("drain_active", "drain_until_ms", "cpu_busy_pct", "cpu_busy_w
 
 
 def send_compatible(send, sample, on_counters_rejected=None):
-    """Old Boards reject unknown metrics atomically; retry once with every additive field removed.
+    """Old Boards reject unknown metrics atomically; downgrade each optional generation once.
 
     Only a 400 on a sample that carried an additive field is retried; any other error (timeouts included) is raised
     and the sample is dropped. An unrelated validation error simply fails again on the retry and is raised.
@@ -46,7 +46,9 @@ def send_compatible(send, sample, on_counters_rejected=None):
     Throughput counters (``machine_throughput_metrics.FIELDS``) are newer still: a Board that predates them answers
     400 "unknown field(s): ...". That answer first drops just the counters (calling ``on_counters_rejected`` so the
     caller stops sending them for a while) and the CPU busy fields, keeping drain fields for a Board that accepts
-    those."""
+    those. The newest ``tokens_by_model`` map is dropped first on a 400, preserving
+    scalar counters for Boards that support them. Older counter/drain fallbacks
+    remain available if that downgraded request is also rejected."""
     from hermes_cli.kanban_sync_client import HubError
     from hermes_cli.machine_throughput_metrics import FIELDS as COUNTERS
 
@@ -55,6 +57,12 @@ def send_compatible(send, sample, on_counters_rejected=None):
     except HubError as exc:
         if exc.status != 400:
             raise
+        if "tokens_by_model" in sample:
+            # A scalar-capable Board may predate the model map. Keep its counters
+            # enabled, and never restamp the already attempted CPU sample.
+            from hermes_cli.machine_cpu_metrics import FIELDS as CPU
+            return send_compatible(send, {k: v for k, v in sample.items()
+                                          if k != "tokens_by_model" and k not in CPU}, on_counters_rejected)
         if any(k in sample for k in COUNTERS) and "unknown field" in str(exc):
             if on_counters_rejected is not None:
                 on_counters_rejected()
