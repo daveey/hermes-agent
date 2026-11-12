@@ -27,7 +27,14 @@ def capture_run_outcome(agent) -> None:
     owned = run_outcome.get()
     if owned is not None:
         owned["lease_holder"] = getattr(agent, "_last_session_turn_lease_holder", None)
-        owned["session_id"] = str(getattr(agent, "session_id", "") or owned["session_id"])
+        owned["session_id"] = str(getattr(agent, "session_id", "") or owned["session_id"] or "")
+
+
+def capture_pending_run_outcome(agent) -> None:
+    """Fill missing evidence on handler abandonment, retaining a finished worker's receipt."""
+    owned = run_outcome.get()
+    if owned is not None and "lease_holder" not in owned:
+        capture_run_outcome(agent)
 
 
 def concluding_turn_identity(runner, event=None, session_key: Optional[str] = None) -> frozenset:
@@ -70,7 +77,7 @@ def refresh_gateway_turn_outcome(runner, session_entry, event=None,
     """Start the refresh off the reply path; the started thread (None when there is nothing to refresh).
     The concluding turn's identity is taken here, before the thread is scheduled."""
     owned = run_outcome.get()
-    sid = str(owned["session_id"] if owned is not None else getattr(session_entry, "session_id", "") or "")
+    sid = str((owned["session_id"] if owned is not None else getattr(session_entry, "session_id", "")) or "")
     store = getattr(runner, "_session_db", None)
     db = getattr(store, "_db", store)
     if not sid or db is None:

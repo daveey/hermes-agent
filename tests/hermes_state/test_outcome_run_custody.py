@@ -98,7 +98,10 @@ async def test_displaced_handler_uses_worker_receipt_not_successor_slot(db, monk
     receipts = []
     async def run_agent(**kw):
         try:
-            return await asyncio.to_thread(worker._run_conversation_with_approval, agent, [], None, None, None)
+            from gateway.run import GatewayRunner
+            executor_runner = SimpleNamespace(_get_executor=lambda: None)
+            return await GatewayRunner._run_in_executor_with_context(
+                executor_runner, worker._run_conversation_with_approval, agent, [], None, None, None)
         finally:
             receipts.append(dict(gw.run_outcome.get()))
             # Both the cached object and shared entry now belong to another turn.
@@ -122,10 +125,74 @@ async def test_displaced_handler_uses_worker_receipt_not_successor_slot(db, monk
     assert so.get_outcome("chat", db=db)["kind"] == ("running" if newer else "waiting")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+@pytest.mark.parametrize("newer", [False, True])
+async def test_abandoned_worker_captures_own_live_lease(db, monkeypatch, cancelled, newer):
+    helpers._declare_then_reply(db)
+    if newer:
+        late._next_turn_starts(db)
+    assert db.try_acquire_session_turn_lease("chat", "turn-B" if newer else "turn-A", ttl_seconds=300)
+    agent = SimpleNamespace(session_id="chat", _last_session_turn_lease_holder="turn-A")
+    ctx = SimpleNamespace(agent_holder=[agent])
+    pending = asyncio.get_running_loop().create_future()
+    worker = SimpleNamespace(executor_task=pending, agent_timeout=1,
+                             timeout_fired=SimpleNamespace(is_set=lambda: True))
+    async def poll(*a, **kw):
+        if cancelled:
+            raise asyncio.CancelledError
+        return set(), {pending}
+    monkeypatch.setattr("gateway.run_turn.asyncio.wait", poll)
+    runner = SimpleNamespace(_session_db=db, _run_agent_timeout_result=lambda *a: {"failed": True},
+                             _session_state=lambda *a: pytest.fail("successor slot read"))
+    token = gw.run_outcome.set({"session_id": "chat"})
+    try:
+        call = GatewayTurnMixin._run_agent_await_turn_worker(runner, worker, ctx, None, None)
+        if cancelled:
+            with pytest.raises(asyncio.CancelledError):
+                await call
+        else:
+            assert await call == {"failed": True}
+        assert not pending.done()  # worker still owns its physical lease
+        event = SimpleNamespace(_gateway_active_turn_token="token-A")
+        assert gw.concluding_turn_identity(runner, event, "key") == {"lease:turn-A", "gateway:token-A"}
+        thread = gw.refresh_gateway_turn_outcome(runner, SimpleNamespace(session_id="new-chat"), event, "key")
+        thread.join(10)
+        assert not thread.is_alive()
+        assert so.get_outcome("chat", db=db)["kind"] == ("running" if newer else "waiting")
+    finally:
+        pending.cancel()
+        gw.run_outcome.reset(token)
+
+
+@pytest.mark.parametrize("holder", [None, "turn-A"])
+def test_pending_capture_preserves_finished_receipt(holder):
+    owned = {"session_id": "chat", "lease_holder": holder}
+    token = gw.run_outcome.set(owned.copy())
+    try:
+        gw.capture_pending_run_outcome(SimpleNamespace(session_id="new-chat", _last_session_turn_lease_holder="turn-B"))
+        assert gw.run_outcome.get() == owned
+    finally:
+        gw.run_outcome.reset(token)
+
+
+def test_null_sid_does_not_refresh(monkeypatch):
+    monkeypatch.setattr(gw, "_refresh", lambda *a: pytest.fail("null session refreshed"))
+    token = gw.run_outcome.set({"session_id": None})
+    try:
+        runner = SimpleNamespace(_session_db=object())
+        assert gw.refresh_gateway_turn_outcome(runner, None) is None
+        gw.capture_run_outcome(SimpleNamespace(session_id=None))
+        assert gw.run_outcome.get()["session_id"] == ""
+    finally:
+        gw.run_outcome.reset(token)
+
+
 def test_no_run_scope_never_names_successor():
     token = gw.run_outcome.set(None)
     try:
         gw.capture_run_outcome(SimpleNamespace(_last_session_turn_lease_holder="foreign"))
+        gw.capture_pending_run_outcome(SimpleNamespace(_last_session_turn_lease_holder="foreign"))
         runner = SimpleNamespace(_session_state=lambda key: pytest.fail("mutable slot read"))
         assert gw.concluding_turn_identity(runner, None, "key") == frozenset()
     finally:
