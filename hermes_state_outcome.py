@@ -616,12 +616,23 @@ def _accounted_at(stored: Optional[dict]) -> Optional[float]:
     return max(times) if times else None
 
 
+def _lineage_accounted_at(db: Any, ids: list[str]) -> Optional[float]:
+    """The latest ``_accounted_at`` over the whole compression lineage: a new tip starts with no outcome of its
+    own while ``_lost_subagent_items`` scans every ancestor's children, so the accounting spans it too."""
+    marks = ",".join("?" * len(ids))
+    rows = db._read_all(f"SELECT outcome_json FROM sessions WHERE id IN ({marks})", tuple(ids))
+    times = [t for t in (_accounted_at(_parse(r["outcome_json"])) for r in rows) if t is not None]
+    return max(times) if times else None
+
+
 def _derive(db: Any, sid: str, *, ignore_live_turn: bool = False,
             pending_reply: Optional[str] = None) -> dict[str, Any]:
     stored = _parse((_row(db, sid) or {}).get("outcome_json"))
     current = _derive_kept_receipt(db, sid, stored, ignore_live_turn=ignore_live_turn, pending_reply=pending_reply)
-    accounted = _accounted_at(stored)
-    if accounted is None or current.get("source") == "declared":
+    if current.get("source") == "declared":
+        return current
+    accounted = _lineage_accounted_at(db, _lineage_ids(db, sid))
+    if accounted is None:
         return current
     # A newer user row drops a lapsed declaration from the stored outcome; keep when it was made, so a lost
     # subagent it accounted for stays accounted for (``_lost_subagent_items``).
@@ -675,7 +686,7 @@ def _derive_current(db: Any, sid: str, *, ignore_live_turn: bool = False,
     # declaration made before it went silent (``_lost_subagent_items`` drops those made after). A notice that
     # already names the stopped subagent keeps its own reason.
     lost_subagents = [] if tail and _tail_reason(tail) == "subagent_killed" else _guarded(
-        "lost subagents", sid, lambda: _lost_subagent_items(db, ids, _accounted_at(stored)), [])
+        "lost subagents", sid, lambda: _lost_subagent_items(db, ids, _lineage_accounted_at(db, ids)), [])
     if lost_subagents:
         return _outcome("unresolved", now, reason="subagent_lost", on=lost_subagents, **carry)
     crons = _guarded("cron", sid, lambda: _cron_items(ids), [])

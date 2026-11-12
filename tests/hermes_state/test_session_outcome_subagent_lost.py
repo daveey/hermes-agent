@@ -185,3 +185,19 @@ def test_a_lost_subagent_of_a_compressed_ancestor_counts(db):
     db.append_message("tip", role="user", content="and now?")
     db.append_message("tip", role="assistant", content=CLOSING)
     assert so.derive_outcome("tip", db=db)["reason"] == "subagent_lost"
+
+
+def test_compression_keeps_the_accounting_of_an_ancestor(db):
+    """A declaration on the pre-compression row accounted for the lost child; the new tip must not forget it."""
+    child(db, started_ago=8 * HOUR, active_ago=7 * HOUR)
+    declare(db, {"kind": "done", "summary": "Gate F verified; the stuck subagent was replaced."}, ago=HOUR)
+    so.refresh_outcome("chat", "turn_end", db=db)
+    db.create_session("tip", source="desktop", parent_session_id="chat")
+    db._write_rowcount("UPDATE sessions SET end_reason = 'compression', ended_at = ? WHERE id = 'chat'",
+                       (time.time(),))
+    db.append_message("tip", role="user", content="and now?")
+    db.append_message("tip", role="assistant", content=CLOSING)
+    out = so.refresh_outcome("tip", "turn_end", db=db)
+    assert (out["kind"], out["summary"]) == ("done", CLOSING)
+    assert out["last_declared_at"] == pytest.approx(time.time() - HOUR, abs=60)
+    assert so.refresh_outcome("tip", "turn_end", db=db)["kind"] == "done"
