@@ -68,7 +68,9 @@ native retry events without an explicit ready status cannot establish readiness.
 Its summary preserves samples and censored attempts; p50 needs two samples and
 p95 needs twenty. `idle_coverage` unions shared machine/slot-pool intervals across
 boards. Only same-interval fresh complete backlog/slot/restriction coverage can
-produce unexplained idle slot-seconds. Unknown coverage is machine-seconds, not
+produce unexplained idle slot-seconds, capped at the lesser of eligible backlog
+and admissible slots. Backlog is a deduplicated whole-slot-pool count, never a
+per-board sum; disagreeing pool counts make coverage unknown. Unknown coverage is machine-seconds, not
 invented unknown slot-seconds. Current dispatch snapshots deliberately leave
 admissible slot counts unknown; configured limits are not measured free slots.
 

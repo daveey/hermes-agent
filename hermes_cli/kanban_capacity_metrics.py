@@ -29,7 +29,7 @@ def _payload(event):
 
 def _ready(event, payload):
     # Creation is not readiness. Only explicit ready transitions qualify.
-    if event.get("kind") == "promoted":
+    if event.get("kind") in {"promoted", "promoted_manual", "unblocked"}:
         return payload.get("status", "ready") == "ready"
     if event.get("kind") in {"released", "reclaimed", "owner_unavailable", "crashed", "rate_limited",
                               "timed_out", "stale", "reconciled", "owner_restart_lost",
@@ -85,7 +85,9 @@ def attempts(events, *, board, task_id, now):
                     and current["process_ref"] is None):
                 current.update(process_start_at=event.get("created_at"), process_ref=event.get("id"),
                                process_pid=payload["pid"])
-        elif kind in {"dependency_wait", "blocked", "scheduled", "completed", "archived", "changes_requested"}:
+        elif kind in {"dependency_wait", "blocked", "scheduled", "completed", "archived", "changes_requested",
+                      "status", "auto_blocked", "gave_up", "block_loop_detected", "agent_block_escalated",
+                      "supervisor_escalated", "continuation_exhausted", "unblocked"}:
             ready, current = None, None
     if ready is not None:
         rows.append(_attempt(board, task_id, ready))
@@ -131,7 +133,9 @@ def idle_coverage(intervals):
     """Integrate aligned complete observations, unioning shared host slots.
 
     ``slot_scope`` identifies the actual shared slot pool, NOT the candidate or
-    board. Incomplete/conflicting evidence contributes unknown machine-seconds,
+    board. ``eligible_backlog`` is the deduplicated count for that whole pool,
+    not a per-board count; disagreeing observations are unknown, never summed.
+    Incomplete/conflicting evidence contributes unknown machine-seconds,
     never fabricated unknown slot-seconds. Each input is an explicitly observed
     interval; point snapshots must not be extended to fill observation gaps.
     """
@@ -156,10 +160,12 @@ def idle_coverage(intervals):
             width = right - left
             out["observed_seconds"] += width
             if (not all(_valid_interval(r, left, right) for r in active)
-                    or len({r.get("admissible_slots") for r in active}) != 1):
+                    or len({r.get("admissible_slots") for r in active}) != 1
+                    or len({r.get("eligible_backlog") for r in active}) != 1):
                 out["unknown_seconds"] += width
             elif any(r["restrictions"] for r in active) or not any(r["eligible_backlog"] for r in active):
                 out["explained_seconds"] += width
             else:
-                out["unexplained_idle_slot_seconds"] += width * active[0]["admissible_slots"]
+                out["unexplained_idle_slot_seconds"] += width * min(
+                    active[0]["eligible_backlog"], active[0]["admissible_slots"])
     return out

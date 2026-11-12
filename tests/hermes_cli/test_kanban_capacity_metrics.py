@@ -85,7 +85,7 @@ def interval(board="one", **overrides):
 
 def test_idle_shared_slots_never_sum_across_boards():
     result = idle_coverage([interval(), interval("two")])
-    assert result["unexplained_idle_slot_seconds"] == 30
+    assert result["unexplained_idle_slot_seconds"] == 20
     assert result["unknown_seconds"] == 0
 
 
@@ -123,6 +123,35 @@ def test_summary_receipt_resolution_and_percentile_minima():
     assert summarize(rows * 2)["ready_to_claim_s"]["p50"] == 2
     assert summarize(rows * 19)["ready_to_claim_s"]["p95"] is None
     assert summarize(rows * 20)["ready_to_claim_s"]["p95"] == 2
+
+
+@pytest.mark.parametrize("kind", ["status", "auto_blocked", "gave_up", "block_loop_detected",
+                                  "agent_block_escalated", "supervisor_escalated", "continuation_exhausted"])
+def test_leaving_ready_invalidates_old_receipt(kind):
+    rows = attempts([event(1, "promoted", 1), event(2, kind, 2, status="triage"),
+                     event(3, "claimed", 52, 1, lock="h")], board="one", task_id="t", now=60)
+    assert rows[0]["ready_to_claim_s"] is None
+
+
+@pytest.mark.parametrize("kind", ["promoted_manual", "unblocked"])
+def test_native_manual_ready_receipts(kind):
+    ready = event(3, kind, 50)
+    if kind == "unblocked":
+        ready["payload"] = None
+    rows = attempts([event(1, "promoted", 1), event(2, "auto_blocked", 2), ready,
+                     event(4, "claimed", 52, 1, lock="h")], board="one", task_id="t", now=60)
+    assert rows[0]["ready_to_claim_s"] == 2
+
+
+def test_idle_is_capped_by_deduplicated_pool_backlog():
+    result = idle_coverage([interval(eligible_backlog=1, admissible_slots=5)] * 2)
+    assert result["unexplained_idle_slot_seconds"] == 10
+
+
+def test_conflicting_pool_backlog_is_unknown_not_summed():
+    result = idle_coverage([interval(), interval("two", eligible_backlog=1)])
+    assert result["unknown_seconds"] == 10
+    assert result["unexplained_idle_slot_seconds"] == 0
 
 
 def test_conflicting_shared_slot_readings_are_unknown():
